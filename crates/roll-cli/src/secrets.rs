@@ -5934,6 +5934,9 @@ fn print_verified(r: &Value, project: &str) {
     if !names(&r["left_out"]).is_empty() {
         println!("  registrations a backup doesn't carry: {}", names(&r["left_out"]));
     }
+    for x in r["machines"].as_array().into_iter().flatten() {
+        println!("  {}", s(x));
+    }
 }
 
 fn utc_ms(at: i64) -> String {

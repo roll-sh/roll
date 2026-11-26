@@ -764,8 +764,13 @@ unit's `Environment=` (and `roll run`'s, and every `roll secrets` command's: the
   `identity.machine.reused` and `identity.machine.revoke`; deleting, disabling or cutting off the
   identity revokes all its machines. `GET …/identities/{id}/machines` lists them (the chain, when
   its credential was last replaced, live or revoked), and `DELETE …/machines/{chain}` revokes one,
-  as the dashboard's identities page does. An identity has at most 1,000 bootstrap tokens (one per
-  machine; delete it and make it again past that), and a project makes at most 60 a minute. Its
+  as the dashboard's identities page does. An identity has at most 1,000 machines at once: chains
+  whose newest bootstrap token or machine credential hasn't ended yet, revoked or not (a spent one
+  is kept until then, so its reuse is still caught). A machine that's revoked, or that stopped
+  refreshing, frees its place when its last credential would have ended; roll forgets it a day
+  after, and `POST …/identities/{id}/machines/prune` (admin, audited `identity.machine.prune`, the
+  dashboard's Forget ended) forgets the ended ones at once. A project makes at most 60 bootstrap
+  tokens a minute. Its
   machines' credentials don't count toward the workload token caps that every project's logins
   share (docs/permissions.md); their logins' tokens do, as any identity's. The bootstrap tokens and credentials are roll-access grants (docs/permissions.md,
   "Bootstrap tokens and machine credentials"), looked up on every use, and open nothing but these
@@ -793,7 +798,9 @@ Tests: `crates/roll-cli/tests/secrets.rs` (`the_local_agent_answers_only_request
 identity login's renewal is `relogin_tests` in `crates/roll-cli/src/secrets.rs`, which the agent
 shares. Bootstrap tokens over HTTP:
 `a_bootstrap_token_is_exchanged_once_and_a_spent_credential_ends_its_machine` in
-`crates/rolld/tests/secrets.rs` (with the machines list and an admin's revoke); the dashboard's
+`crates/rolld/tests/secrets.rs` (with the machines list and an admin's revoke);
+`a_revoked_machine_holds_its_place_until_its_credential_would_have_ended` in
+`crates/roll-secrets/tests/api.rs` (the cap, then forgetting the ended ones); the dashboard's
 bootstrap token, shown once, in `apps/dashboard/src/components/secrets/secrets-bootstrap.test.tsx`; their chains in roll-access:
 `a_spent_bootstrap_token_or_machine_credential_ends_its_chain` in `crates/roll-access/tests/access.rs`.
 ## Customer-managed keys
@@ -4941,7 +4948,10 @@ opened archive; admin, audited `project.restore`), on this server or another. Ar
    roll secrets' policy as making it would. An admin enables or resumes each
    (`PATCH …/identities/{id}`, `PATCH …/syncs/{id}`) and becomes its maker then, so a restored
    workload acts only at the rights of a person who chose to turn it on. Enabling any identity runs
-   the same checks again, so one written before a rule existed stays off.
+   the same checks again, so one written before a rule existed stays off. A machine identity comes
+   back with no machines: their credentials are roll-access's, never in a backup, so each machine
+   needs a new bootstrap token. The restore's warnings name each machine identity and how many
+   machines were live at the backup.
 
 What can't be restored (a link to a resource that project doesn't have, an import of another
 project's folder, a registration that fails its check) comes back as a warning, by name, never a
@@ -4957,8 +4967,9 @@ secret key is, open the archive there, and write nothing:
   counts of environments, keys, registrations, identities and syncs; key names missing, changed
   (value or link compared by fingerprint, here and never answered) or added since;
   registrations missing or changed (key, certificate, credential); settings that differ; the
-  registrations a backup doesn't carry; and what a restore would leave out, and why (`refused`:
-  a registration or an identity that fails its checks). A sensitive key's value isn't in a backup,
+  registrations a backup doesn't carry; what a restore would leave out, and why (`refused`:
+  a registration or an identity that fails its checks); and the machine identities whose
+  machines need new bootstrap tokens after a restore (`machines`). A sensitive key's value isn't in a backup,
   so it's never compared. A token's verify answers counts only (`names: false`, each part's
   `counts`), compares registrations, encryption keys and syncs by name and count only (never
   by a key, a key's bytes or a sync's credential), and gets 10 a minute (as `/scan` limits a
@@ -5002,7 +5013,10 @@ To recover: restore the database, start rolld with the same key (or start it sea
 holders unseal it), and check `GET /v1/secrets/health` (`"key"`, `"resealed"`). Everything comes
 back as it was, including what a project backup leaves out (identities with their makers, syncs,
 sinks, AWS roles, gateways' registrations), because nothing moved: the project ids, the issuer's
-signing keys and every trust that names them are the same. A leaked deployment key with the
+signing keys and every trust that names them are the same. Machine identities' machines keep
+working only when roll-access's store (`<home>/access.db`, or the system database's `access`
+schema) comes back from the same moment: their credentials live there. Otherwise every machine
+needs a new bootstrap token. A leaked deployment key with the
 database is a leak of everything; rotate it as "Encryption" says.
 
 When only some projects are lost (deleted past their recovery window, or broken by hand), restore
@@ -7095,6 +7109,7 @@ isn't in the workspace is 404.
 | `POST /identities/{id}/bootstrap` | `{minutes?, allowed_ips?, credential_hours?}` | 201 `{identity, chain, secret, expires_at}` (admin; a person's; a `machine` identity's single-use `rlbt_…`, "On a VM") |
 | `GET /identities/{id}/machines` | | `MachineChain[]` newest first (admin): `{chain, state, credential_hours, created_at, created_by, refreshed_at, expires_at, revoked_at, revoked_why}`, `state` `waiting` (its bootstrap token not exchanged yet), `live`, `ended` or `revoked`; never a secret |
 | `DELETE /identities/{id}/machines/{chain}` | | 204 (admin, audited as `identity.machine.revoke`): the machine's credential and its logins' tokens revoked at once; it needs a new bootstrap token |
+| `POST /identities/{id}/machines/prune` | | `{pruned}` (admin, audited as `identity.machine.prune` when any): forgets the machines whose last credential has ended, revoked or not; one still within its credential's life stays (it holds its place in the 1,000) |
 | `POST /v1/secrets/login` | `{identity, token}`, `{identity, aws: {method, url, headers, body}}` or `{identity, machine}` | `{token, expires_at, project, identity}` (public; `aws`: a signed `GetCallerIdentity`, "AWS IAM"; `machine`: a machine credential) |
 | `POST /v1/secrets/login/bootstrap` | `{identity, token}` | `{identity, chain, secret, expires_at, refresh_at}` (public: a bootstrap token for a machine credential, `rlmc_…`; 401 for one used already, which revokes its machine) |
 | `POST /v1/secrets/login/refresh` | `{identity, credential}` | as `…/login/bootstrap` (public: the current machine credential for the next; the one presented is spent) |

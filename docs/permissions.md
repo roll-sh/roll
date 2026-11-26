@@ -1184,8 +1184,9 @@ MCP clients for themselves, as GitHub's fine-grained tokens act for the person w
     the chain at its next use. A login (`present_machine`) with a spent credential always ends it.
   - **Not in the workload caps.** They open nothing and live as long as their machine, so they'd
     fill the room every CI login shares: `MAX_WORKLOADS` and `OWNER_MAX_WORKLOADS` count only
-    workload grants with rules. Their caller caps them (roll secrets: 1,000 chains per identity,
-    counted in the write that records the chain, and 60 bootstrap tokens a minute per project).
+    workload grants with rules. Their caller caps them (roll secrets: 1,000 chains per identity
+    whose newest secret hasn't ended, revoked or not, counted in the write that records the chain,
+    and 60 bootstrap tokens a minute per project).
   - **Leaked**, either is revoked with its whole chain, as a token is (below).
   - `Access::revoke_chain(chain, why)` ends a chain (roll secrets: the identity deleted, disabled or
     cut off). Chains are listed with `?kind=workload`, and go a day after their last secret would
