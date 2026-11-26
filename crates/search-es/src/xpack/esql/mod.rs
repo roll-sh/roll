@@ -334,8 +334,8 @@ pub(super) fn enrich_allowed(cluster: &crate::Cluster, name: &str) -> EsResult<(
 }
 
 /// The checks on a query's sources once its views are spliced in ([`exec`]'s `expand_views`):
-/// roll's index-scoped principal reads no remote cluster (`cluster:index`), a `FROM` in a view
-/// included.
+/// roll's index-scoped principal reads no remote cluster (`cluster:index`; `index::selector` and
+/// date math are local, [`crate::remote::split_expression`]), a `FROM` in a view included.
 pub(super) fn check_sources(cmds: &[parser::Cmd]) -> EsResult<()> {
     if CALLER.try_with(|p| p.is_index_scoped()).unwrap_or(false) && names_remote(cmds) {
         return Err(EsError::security(403, "this request may not read remote clusters"));
@@ -343,11 +343,10 @@ pub(super) fn check_sources(cmds: &[parser::Cmd]) -> EsResult<()> {
     Ok(())
 }
 
-/// Whether `cmds` read a remote cluster's index (`cluster:index`; a date math name in `<…>`
-/// isn't one), in subqueries too.
+/// Whether `cmds` read a remote cluster's index, in subqueries too.
 fn names_remote(cmds: &[parser::Cmd]) -> bool {
     cmds.iter().any(|c| match c {
-        parser::Cmd::From { sources, .. } | parser::Cmd::Ts { sources, .. } => sources.iter().any(|s| !s.starts_with('<') && s.contains(':')),
+        parser::Cmd::From { sources, .. } | parser::Cmd::Ts { sources, .. } => sources.iter().any(|s| crate::remote::split_expression(s).is_some()),
         parser::Cmd::Fork { branches, .. } => branches.iter().any(|b| names_remote(b)),
         parser::Cmd::Union { branches, .. } => branches.iter().any(|b| names_remote(&b.cmds)),
         _ => false,

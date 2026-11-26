@@ -7199,6 +7199,9 @@ async fn esql_reads_only_the_indices_the_grant_reaches() {
     }
     let (s, v) = esql(json!({"query": "FROM tenant-a-*", "keep_on_completion": true})).await;
     assert_eq!(s, 400, "{v}");
+    // An index's selector (`::failures`) is local, never taken for a remote cluster.
+    let (_, v) = esql(json!({"query": "FROM \"tenant-a-1::failures\""})).await;
+    assert!(!v.to_string().contains("remote clusters"), "{v}");
     // The index form reads as the path's index only, whatever the query names.
     let on_index = |query: &str| {
         let (e, rules, body) = (&e, rules.clone(), json!({"query": query}));
