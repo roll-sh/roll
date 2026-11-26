@@ -69,6 +69,7 @@ impl CodeSource {
             branch: c.branch.clone(),
             head,
             open: matches!(c.state, ChangeState::Open | ChangeState::Queued | ChangeState::Conflict),
+            queued: c.state == ChangeState::Queued,
             draft: c.draft,
             labels: c.labels.clone(),
             trusted: c.trusted,

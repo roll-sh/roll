@@ -1158,6 +1158,11 @@ async fn remembered(a: &Arc<Access>, id: &str, remember: Option<&str>) -> crate:
     if found.scope_index.as_deref().is_some_and(|ix| !roll_auth::scope::rememberable_part(&found.product, ix)) {
         return Err(Error::BadRequest("this request names no single encryption key: approve it once".into()));
     }
+    // A folder's rule reaches every folder under it, so one at a secrets environment's root (or with
+    // no folder) is the whole environment, or more: remembered for 8 hours at most.
+    if found.product == "secrets" && found.scope_path.as_deref().is_none_or(|p| p == "/") && until.is_none_or(|u| u > code_sql::now_ms() + 8 * 3_600_000) {
+        return Err(Error::BadRequest("this reaches every folder of the environment: remember it for an hour or 8 hours at most, or approve it once".into()));
+    }
     let rule = rule_of(&found)?;
     // What the request named becomes a rule: it meets the rules' own checks (one line, sizes).
     if let Some(p) = roll_auth::scope::Scope(vec![rule.clone()]).problems().first() {
