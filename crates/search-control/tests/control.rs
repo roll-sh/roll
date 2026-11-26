@@ -3366,7 +3366,7 @@ impl FakeSecrets {
 
 fn refused(r: search_control::secret_refs::Refused) -> String {
     match r {
-        search_control::secret_refs::Refused::Forbidden(m) | search_control::secret_refs::Refused::Invalid(m) => m,
+        search_control::secret_refs::Refused::Forbidden(m) | search_control::secret_refs::Refused::Invalid(m) | search_control::secret_refs::Refused::Conflict(m) => m,
     }
 }
 
