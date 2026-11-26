@@ -1667,10 +1667,11 @@ deterministic (#396).
    Overview of a cluster with no indices or from the Indices tab, then three queries run in place
    with Open in Console, copy as curl, JavaScript or Python reading `$ELASTICSEARCH_API_KEY` as the
    guides do; a 30-day `data` key made in the panel goes into the copied code, shown once). Left:
-   no screen is named Discover. In review (`fix/search-shared-host-keys`): an API key's `encoded`
-   names its cluster (`<id>@<cluster>:<key>`, as the keys route's `api_key` does), so a copied
-   value works at the shared address too; only that cluster accepts the qualifier, and a cluster's
-   own host refuses another cluster's. Landed: a `semantic_text` field with no `inference_id` defaults to the E5 the node
+   no screen is named Discover. In review (`fix/search-shared-host-keys`): an API key made anywhere
+   but the cluster's own host (the shared address, the console) answers an `encoded` that names
+   its cluster (`<id>@<cluster>:<key>`, as the keys route's `api_key` does), so a copied value
+   works at the shared address too, while the cluster's own host keeps Elasticsearch's; only
+   that cluster accepts the qualifier, and a cluster's own host refuses another cluster's. Landed: a `semantic_text` field with no `inference_id` defaults to the E5 the node
    runs (#1093), a `data` key records click events (#1078), and a help-articles sample on E5 with
    semantic, hybrid and passage queries (#1081).
 13. **A web crawler for site search** (design in [crawler.md](crawler.md); Elastic Open Crawler,

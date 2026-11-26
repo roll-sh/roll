@@ -515,6 +515,9 @@ pub struct Lease {
     /// A linked remote cluster's request from roll itself ([`search_es::remote::links`]):
     /// the remote access it carries, the only copy search-es sees.
     link: Option<String>,
+    /// The client named the cluster by its own address (its host label, or a node that serves
+    /// only it): [`search_es::rest::EsRequest::own_address`].
+    own_address: bool,
     /// When it started waiting for its permits: its latency is measured from here.
     since: Option<Instant>,
     /// A browser key's request: its running slot ([`crate::browser`]), given back when the
@@ -653,7 +656,7 @@ impl Lease {
     /// answered, or, for an answer it streams, when the stream ends ([`Lease::hold`]).
     pub async fn serve(self, req: EsRequest) -> EsResponse {
         let kind = crate::metrics::Kind::of(&req.method, &req.uri);
-        let head = EsRequest { verified: None, method: req.method.clone(), uri: req.uri.clone(), headers: Vec::new(), body: bytes::Bytes::new() };
+        let head = EsRequest { verified: None, own_address: false, method: req.method.clone(), uri: req.uri.clone(), headers: Vec::new(), body: bytes::Bytes::new() };
         let since = self.since.unwrap_or_else(Instant::now);
         let resp = self.handle(req).await;
         if self.browser.is_some() && crate::browser::is_policy_refusal(resp.status, &resp.body) {
@@ -694,6 +697,7 @@ impl Lease {
         // Who authenticated is said only here, on the request in process (no header can say
         // it); only roll's own calls are a remote cluster's.
         req.verified = None;
+        req.own_address = self.own_address;
         req.headers.retain(|(k, _)| !k.eq_ignore_ascii_case(REMOTE_ACCESS_HEADER));
         if let Some(a) = &self.link {
             req.headers.push((REMOTE_ACCESS_HEADER.to_string(), a.clone()));
@@ -755,7 +759,7 @@ impl Lease {
             // Only reads of async results can change them; only those keep what an error
             // response needs (no copy on the search path).
             let err_req = reads_async_results(&req.uri)
-                .then(|| EsRequest { verified: None, method: req.method.clone(), uri: req.uri.clone(), headers: req.headers.clone(), body: bytes::Bytes::new() });
+                .then(|| EsRequest { verified: None, own_address: false, method: req.method.clone(), uri: req.uri.clone(), headers: req.headers.clone(), body: bytes::Bytes::new() });
             let resp = search_es::rest::handle_shared_admitted(&loaded.cluster, req, admitted).await;
             // A read that kept an async result longer (`keep_alive`) or opened a SQL cursor:
             // Elasticsearch answers once the new expiration is stored, so the read is
@@ -782,7 +786,7 @@ impl Lease {
             }
             return resp;
         }
-        let err_req = EsRequest { verified: None, method: req.method.clone(), uri: req.uri.clone(), headers: req.headers.clone(), body: bytes::Bytes::new() };
+        let err_req = EsRequest { verified: None, own_address: false, method: req.method.clone(), uri: req.uri.clone(), headers: req.headers.clone(), body: bytes::Bytes::new() };
         let resp = search_es::rest::handle_shared_admitted(&loaded.cluster, req, admitted).await;
         drop(self.fair.lock().take());
         // Async results the request stored go to `.async-search`, acknowledged with it.
@@ -2331,6 +2335,9 @@ impl Node {
             (None, Some(name)) => name.as_str(),
             (None, None) => return Err(failed().into()),
         };
+        // Its own address: a host label (a qualifier naming another cluster was refused in the
+        // claim) or a node serving only this cluster.
+        let own_address = host_cluster.is_some() || self.cfg.default_cluster.is_some();
         // Credentials that aren't the cluster's own may be a principal of the cluster's
         // security (native user, API key, access token): checked once the cluster is loaded.
         let native = claim.as_ref().and_then(|c| auth::native_authorization(&presented, c, host_cluster));
@@ -2386,6 +2393,7 @@ impl Node {
             }
             // Otherwise it is being unloaded: wake it again below.
             if let Ok(mut lease) = self.pin(loaded, spec.dialect) {
+                lease.own_address = own_address;
                 if via_native {
                     lease.native_auth = native.clone();
                     lease.derived = key_limit.as_ref().and_then(|b: &BrowserAuth| b.derived.clone());
@@ -2441,6 +2449,7 @@ impl Node {
             }
             match self.pin(loaded, dialect) {
                 Ok(mut lease) => {
+                    lease.own_address = own_address;
                     if via_native {
                         lease.native_auth = native.clone();
                         lease.derived = key_limit.as_ref().and_then(|b: &BrowserAuth| b.derived.clone());
@@ -2487,6 +2496,7 @@ impl Node {
             native_auth: None,
             derived: None,
             link: None,
+            own_address: false,
             since: None,
             browser: None,
         };

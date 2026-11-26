@@ -262,8 +262,9 @@ es POST /_security/api_key '{
 }'
 ```
 
-Its `encoded` value names the cluster, so it works at the cluster's own host and at a shared
-address such as `http://127.0.0.1:59200` alike.
+Use its `encoded` value. Made at the cluster's own host it's Elasticsearch's and works there; made
+at a shared address such as `http://127.0.0.1:59200` (or in roll's console) it names the cluster
+(`<id>@shop:<api_key>` in base64) and works at both.
 
 ## Next steps
 

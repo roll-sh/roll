@@ -1763,14 +1763,15 @@ async fn browser_keys_pay_per_item_and_leave_the_owner_permits() {
     assert_eq!(s, 409, "{v}");
 }
 
-/// An API key a cluster makes answers an `encoded` that names its cluster
-/// (`<id>@<cluster>:<secret>`), so a copied value works at the node's shared address as at the
-/// cluster's own host; no other cluster, and no other cluster's host, accepts it.
+/// An API key made anywhere but the cluster's own host (the shared address, roll's console)
+/// answers an `encoded` that names its cluster (`<id>@<cluster>:<secret>`), so a copied value
+/// works at the shared address as at the cluster's own host; made at its own host it's
+/// Elasticsearch's. No other cluster, and no other cluster's host, accepts it.
 #[tokio::test]
 async fn an_api_keys_encoded_works_at_the_shared_address_and_only_on_its_cluster() {
     use base64::Engine;
     let e = env_with(|c| c.domain = Some("search.example.test".into())).await;
-    e.post("/v1/search/clusters", json!({"name": "shop"})).await;
+    let (user, pw) = creds(&e.post("/v1/search/clusters", json!({"name": "shop"})).await);
     e.post("/v1/search/clusters", json!({"name": "other"})).await;
     let r = e.post("/v1/search/clusters/shop/request", json!({"method": "POST", "path": "/_security/api_key", "body": {"name": "app"}})).await;
     let k = body(&r);
@@ -1785,6 +1786,22 @@ async fn an_api_keys_encoded_works_at_the_shared_address_and_only_on_its_cluster
         async move { r.send().await.unwrap().status().as_u16() }
     };
     let (shop, other) = (Some("shop.search.example.test"), Some("other.search.example.test"));
+    // At the shared address and the cluster's own host, with the cluster's own credentials.
+    let made_at = |host: Option<&'static str>| {
+        let mut r = e.http.post(format!("{}/_security/api_key", e.es)).basic_auth(&user, Some(&pw)).json(&json!({"name": "copied"}));
+        if let Some(h) = host {
+            r = r.header("host", h);
+        }
+        async move {
+            let k: Value = r.send().await.unwrap().json().await.unwrap();
+            let (id, secret) = (k["id"].as_str().unwrap().to_string(), k["api_key"].as_str().unwrap().to_string());
+            (k["encoded"].as_str().unwrap().to_string(), id, secret)
+        }
+    };
+    let (shared, sid, ssecret) = made_at(None).await;
+    assert_eq!(shared, b64(format!("{sid}@shop:{ssecret}")));
+    let (own, oid, osecret) = made_at(shop).await;
+    assert_eq!(own, b64(format!("{oid}:{osecret}")));
     // The shared address: the qualified key only (a bare id names no cluster there).
     assert_eq!(auth(encoded.to_string(), None).await, 200);
     assert_eq!(auth(b64(format!("{id}:{secret}")), None).await, 401);

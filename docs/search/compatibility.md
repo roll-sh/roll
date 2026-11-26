@@ -488,13 +488,15 @@ only the clusters named in the node setting `roll.security.service_token_file.cl
 carry `restriction.workflows` runs only requests of those workflows (`search_application_query`:
 a search application's `_search`, with the searches it makes), anything else fails with
 `role_restriction_exception` ("access restricted by workflow"), `_authenticate` included.
-A new API key's `encoded` (create, grant and cross-cluster keys) is `base64(<id>@<cluster>:<api_key>)`
-where Elasticsearch's is `base64(<id>:<api_key>)`: roll's nodes route `<id>@<cluster>` to that
-cluster at any address, a shared one such as `http://127.0.0.1:59200` included, where a bare id
-names no cluster. `id` and `api_key` are Elasticsearch's, so a client that encodes them itself
-(`api_key=(id, api_key)`) works at the cluster's own host as before. A qualifier names one
-cluster: only that cluster accepts it, and a cluster's own host refuses another cluster's
-(`<id>@<other>`, and a Basic `<user>@<other>`) with a 401. A search with `ignore_unavailable`
+A new API key's `encoded` (create, grant and cross-cluster keys) is Elasticsearch's
+`base64(<id>:<api_key>)` when the request came to the cluster's own address (its host name, or a
+node serving only it, as the YAML suites' does), which is where a bare id works. Made anywhere
+else (a node's shared address such as `http://127.0.0.1:59200`, roll's console) it's
+`base64(<id>@<cluster>:<api_key>)`: roll's nodes route `<id>@<cluster>` to that cluster at any
+address, so the copied value works at the shared address and the cluster's own host alike. `id`
+and `api_key` are Elasticsearch's either way. A qualifier names one cluster: only that cluster
+accepts it, and a cluster's own host refuses another cluster's (`<id>@<other>`, and a Basic
+`<user>@<other>`) with a 401. A search with `ignore_unavailable`
 leaves out the explicitly named indices its user may not read (without it they are refused);
 ES|QL and SQL name their indices strictly either way.
 Background jobs run as the user or API key that set them up, and roll checks that user or key

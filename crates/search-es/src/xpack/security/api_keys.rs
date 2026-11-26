@@ -241,10 +241,15 @@ async fn store_key(ctx: &Ctx<'_>, owner: &Principal, k: NewKey) -> EsResult<Repl
     let key_id = id.clone();
     ctx.cluster.update(move |st| store::put(st, KEYS, &key_id, Value::Obj(doc), now)).await?;
     use base64::Engine;
-    // `<id>@<cluster>:<secret>`, not Elasticsearch's `<id>:<secret>`: roll's nodes route it to
-    // this cluster at any address (the shared host too), and only this cluster accepts it
-    // ([`presented_id`]). `id` and `api_key` stay as Elasticsearch answers them.
-    let encoded = base64::engine::general_purpose::STANDARD.encode(format!("{id}@{}:{secret}", ctx.cluster.name));
+    // At the cluster's own address, Elasticsearch's `<id>:<secret>`, which works there. Anywhere
+    // else (a shared address, roll's console), `<id>@<cluster>:<secret>`: roll's nodes route it
+    // to this cluster at any address, and only this cluster accepts it ([`presented_id`]), so a
+    // copied value works wherever roll hands the cluster out. `id` and `api_key` stay
+    // Elasticsearch's.
+    let encoded = match ctx.request.own_address {
+        true => base64::engine::general_purpose::STANDARD.encode(format!("{id}:{secret}")),
+        false => base64::engine::general_purpose::STANDARD.encode(format!("{id}@{}:{secret}", ctx.cluster.name)),
+    };
     let mut out = Map::new();
     out.insert("id".into(), id.into());
     out.insert("name".into(), k.name);
@@ -805,16 +810,26 @@ mod tests {
         assert!(cross_cluster_descriptor(&obj! {}).is_err());
     }
 
-    /// A node serving one cluster hands the header to it as sent: the `encoded` it answers
-    /// (`<id>@<its name>`) and the bare id work, another cluster's qualifier doesn't.
+    /// A new key's `encoded` is Elasticsearch's at the cluster's own address and names the
+    /// cluster anywhere else; the cluster takes the bare id and its own qualifier, not another's.
     #[tokio::test]
-    async fn encoded_names_its_cluster_and_only_it_accepts_it() {
+    async fn encoded_names_its_cluster_off_its_own_address_and_only_it_accepts_it() {
         use base64::Engine;
         let c = Cluster::open(crate::cluster::ClusterConfig::new("c"), std::sync::Arc::new(crate::cluster::MemoryStore::new())).await.unwrap();
-        let r = crate::rest::handle(&c, crate::EsRequest::json("POST", "/_security/api_key", r#"{"name":"k"}"#.to_string())).await;
-        let k = crate::json::parse(&r.body).ok().flatten().unwrap_or_default();
-        let (id, secret, encoded) = (k.get("id").unwrap().to_es_string(), k.get("api_key").unwrap().to_es_string(), k.get("encoded").unwrap().to_es_string());
+        let make = |own_address: bool| {
+            let mut req = crate::EsRequest::json("POST", "/_security/api_key", r#"{"name":"k"}"#.to_string());
+            req.own_address = own_address;
+            let c = &c;
+            async move {
+                let r = crate::rest::handle(c, req).await;
+                let k = crate::json::parse(&r.body).ok().flatten().unwrap_or_default();
+                (k.get("id").unwrap().to_es_string(), k.get("api_key").unwrap().to_es_string(), k.get("encoded").unwrap().to_es_string())
+            }
+        };
         let b64 = |s: String| base64::engine::general_purpose::STANDARD.encode(s);
+        let (id, secret, encoded) = make(true).await;
+        assert_eq!(encoded, b64(format!("{id}:{secret}")));
+        let (id, secret, encoded) = make(false).await;
         assert_eq!(encoded, b64(format!("{id}@c:{secret}")));
         assert!(authenticate(&c, &encoded).is_ok());
         assert!(authenticate(&c, &b64(format!("{id}:{secret}"))).is_ok());

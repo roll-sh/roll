@@ -35,6 +35,12 @@ pub struct EsRequest {
     /// Who the host verified the request as, in process ([`Verified`]): no header says it, so
     /// nothing a client sends can.
     pub verified: Option<Verified>,
+    /// The client reached the cluster at an address of its own (its host name, or a node that
+    /// serves only it), set in process by the host: there the bare `<id>:<key>` of Elasticsearch's
+    /// `encoded` works, so a new API key's `encoded` is Elasticsearch's. Anywhere else (a shared
+    /// address, roll's console, in-process calls) it names the cluster
+    /// ([`crate::xpack::security::api_keys`]).
+    pub own_address: bool,
 }
 
 /// Who `search-server` verified a request as before handing it to its cluster, set on the
@@ -51,7 +57,7 @@ pub enum Verified {
 
 impl EsRequest {
     pub fn new(method: &str, uri: &str) -> EsRequest {
-        EsRequest { method: method.to_string(), uri: uri.to_string(), headers: Vec::new(), body: Bytes::new(), verified: None }
+        EsRequest { method: method.to_string(), uri: uri.to_string(), headers: Vec::new(), body: Bytes::new(), verified: None, own_address: false }
     }
 
     pub fn json(method: &str, uri: &str, body: impl Into<Bytes>) -> EsRequest {
@@ -61,6 +67,7 @@ impl EsRequest {
             headers: vec![("content-type".into(), "application/json".into())],
             body: body.into(),
             verified: None,
+            own_address: false,
         }
     }
 
