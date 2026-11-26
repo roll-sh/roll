@@ -120,6 +120,29 @@ impl Cloudflare {
         }
         anyhow::bail!("Cloudflare: no zone for {name} (does the token see it?)")
     }
+
+    /// Make `name`'s `kind` record (`CNAME`, `TXT`) say `content`, unproxied (roll apps writing a
+    /// customer's domain records with their own token): the one there changed, else one made. A
+    /// CNAME's name may be its zone's apex (Cloudflare flattens it).
+    pub async fn put_record(&self, kind: &str, name: &str, content: &str, comment: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(matches!(kind, "CNAME" | "TXT"), "only CNAME and TXT records");
+        let zone = match self.zone_id(name).await? {
+            Some(z) => z,
+            None => self.zone_for(name).await?,
+        };
+        let base = format!("{}/zones/{zone}/dns_records", self.api);
+        // Names are DNS names (checked by the caller): nothing in them needs escaping.
+        let there: Vec<CfId> = self.call(self.http.get(format!("{base}?type={kind}&name={name}")), &format!("find {kind} {name}")).await?;
+        let mut body = serde_json::json!({ "type": kind, "name": name, "content": content, "ttl": 1, "comment": comment });
+        if kind == "CNAME" {
+            body["proxied"] = serde_json::json!(false);
+        }
+        let _: CfId = match there.first() {
+            Some(r) => self.call(self.http.put(format!("{base}/{}", r.id)).json(&body), &format!("update {kind} {name}")).await?,
+            None => self.call(self.http.post(base).json(&body), &format!("create {kind} {name}")).await?,
+        };
+        Ok(())
+    }
 }
 
 /// A response's body, refusing one longer than `max` whatever its `Content-Length` says.
