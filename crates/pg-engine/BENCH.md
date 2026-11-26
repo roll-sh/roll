@@ -671,6 +671,53 @@ The last against PGO, select-only at 8 clients, 3 alternating pairs: user instru
 31,777 -> 32,105 / 31,587 -> 34,607 / 34,026 -> 31,978, user cycles 69,268 -> 69,872 / 68,855 ->
 72,931 / 69,927 -> 68,111 (foreign 1.25-1.88): no direction, dropped.
 
+## Query memory, round 6: in-memory RANGE / GROUPS frame search, EXPLAIN ANALYZE of a nested loop's Materialize and of every plan's rows; grouping sets and user aggregates' narrower sorts dropped (2026-11-26, agent 338)
+
+HANDOFF "Query memory, round 6" has what changed. Plain dist builds (`tools/dist.sh`): **b0**
+agent 334's stack (`ab2690694`, landed as `2676ea37a`); **n1** b0 with grouping sets out of `run`,
+the frame search and user aggregates' column need; **n2** n1 with the EXPLAIN ANALYZE changes and
+another grouping-sets loop; **n3** the candidates' code on b0. PostgreSQL 18.6 by digest. Harness:
+agent 334's copied to `~/.cache/a338/bench` (lane C, `mem.sh` with `mem-q5.txt` / `mem-q5r.txt`,
+`fpair.sh` with `fv`, `agg` and `rng` added). Foreign load on lane C was 3.4-6.6 cores in every
+hold (1.9-3.8 in the perf windows): instruction counts only, walls are not compared.
+
+### Peak memory a query (MB of the server cgroup's anon+shmem over the level before; 1M rows, work_mem 4 MB)
+
+Result hashes in order and sorted equal PostgreSQL's in every cell but the EXPLAIN rows (their
+text differs).
+
+| query | base (b0) | new (n2) | PostgreSQL 18.6 | temp files: b0 / new / PostgreSQL |
+|---|---:|---:|---:|---|
+| EXPLAIN ANALYZE of `sum(id) OVER (ORDER BY a ROWS BETWEEN 5 PRECEDING AND 5 FOLLOWING)` | 58.2 | 21.3 | 10.1 | 1 / 1 / 1 |
+| EXPLAIN ANALYZE of a nested loop, 4 outer rows over a 1M-row Materialize | 162.7 | 22.3 | 8.2 | 0 / 1 / 1 |
+| `count(*)`, `last_value(s)` `OVER (ORDER BY a RANGE BETWEEN 50 PRECEDING AND 50 FOLLOWING EXCLUDE CURRENT ROW)`, work_mem 1 GB | not finished (agent 334: 30 min) | 428.5 (15.2 s) | 29.1 (12.0 s) | - / 0 / 0 |
+| (dropped) `GROUP BY GROUPING SETS ((a % 1000), (id % 7))`, `count(*)`, `max(s)` | 290.9 | 19.2 | 35.1 | 0 / 2 / 4 (parallel) |
+| (dropped) `GROUP BY GROUPING SETS ((a % 100), ())`, `count(*)`, `sum(id)` | 195.7 | 32.0 | 10.2 | 0 / 1 / 1 |
+| (dropped) `msum(a) OVER (ORDER BY a ROWS BETWEEN 5 PRECEDING AND CURRENT ROW)` | 14.1 (51.2 MB file) | 32.1 (12.05 MB) | 10.3 (12.05 MB) | 1 / 1 / 1 |
+
+### When the input fits (G user instructions, 40 runs, 20,000 rows; alternating pairs; results equal)
+
+| query | base (b0) | new | new / base |
+|---|---:|---:|---|
+| `count(*)`, `last_value(s)` over `RANGE BETWEEN 50 PRECEDING AND 50 FOLLOWING EXCLUDE CURRENT ROW`, 10 partitions | 399.87 | n1 11.459 | -97.13% |
+| the candidates (n3), two pairs: window: sum, lag, rank by `id % 10` (agent 320's) | 7.6524 / 7.6526 | 7.6421 / 7.6388 | -0.14%, -0.18% |
+| (n3) `sum(id)`, `last_value(s)` over `ROWS BETWEEN 5 PRECEDING AND 5 FOLLOWING` | 6.6717 / 6.6714 | 6.6556 / 6.6549 | -0.24%, -0.25% |
+| (n3) `first_value(id)`, `last_value(s)` over `ROWS BETWEEN 3 PRECEDING AND 3 FOLLOWING` (`frame_values`) | 7.4324 / 7.4323 | 7.4281 / 7.4248 | -0.06%, -0.10% |
+| (n3) `msum(a)` (CREATE AGGREGATE with msfunc / minvfunc) over 6 rows | 6.6520 / 6.6512 | 6.6450 / 6.6444 | -0.10%, -0.10% |
+| (n3) the RANGE +-50 query above | 399.8655 | 11.4576 | -97.13% |
+| n1 (with the dropped changes): window | 7.6524 / 7.6524 | 7.6386 / 7.6384 | -0.18%, -0.18% |
+| n1: sliding sum and last_value | 6.6717 / 6.6716 | n1 6.6529 / 6.6531 | -0.28%, -0.28% |
+| n1: first / last_value | 7.4324 / 7.4323 | n1 7.4254 / 7.4256 | -0.09%, -0.09% |
+| (dropped) two hashed grouping sets | 4.9769 / 4.9769 / 4.9772 | n1 4.9831 / 4.9826, n2 4.9848 | +0.12%, +0.11%, +0.15% |
+| (dropped) a hashed set and () | 3.6537 / 3.6563 / 3.6545 | n1 3.6602 / 3.6613, n2 3.6586 | +0.18%, +0.14%, +0.11% |
+| plain GROUP BY `a % 1000`: count, max(s), sum(id) (`run` without the grouping sets' code) | 1.8788 / 1.8793 / 1.8790 | n1 1.8802 / 1.8806, n2 1.8806 | +0.07%, +0.07%, +0.09% |
+| (dropped) `msum(a)` over 6 rows (the need change) | 6.6449 | n1 6.1242 | -7.84% |
+
+Foreign load in the perf windows 1.9-3.8 cores: user cycles are not compared (n3's first /
+last_value read +10.8 / +15.8% cycles at 3.65 / 3.73 foreign cores against 2.91 / 3.05). No
+TPC-H query has a window; the dropped grouping sets' `run` change wasn't taken to TPC-H (it failed
+the fitting gate first).
+
 ## Query memory, round 5: sliding window frames, EXPLAIN ANALYZE of a streamed window; grouping sets dropped (2026-11-26, agent 334)
 
 HANDOFF "Query memory, round 5" has what changed. Plain dist builds (`tools/dist.sh`): **b0**
