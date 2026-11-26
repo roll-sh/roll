@@ -156,7 +156,7 @@ fn indexed_shape(ctx: &QueryCtx, id: &str, index: Option<&str>, path: Option<&st
     let names = crate::meta::resolve::resolve(st, &[index.to_string()], &crate::meta::resolve::IndicesOptions::STRICT_EXPAND_OPEN, ctx.now_ms)?;
     let Some(idx) = names.first().and_then(|n| st.metadata.indices.get(n)).cloned() else { return Err(EsError::index_not_found(index)) };
     // Read as the request's reader may read it (its document and field level security).
-    let Some((_, src)) = super::lookup_source(ctx, &idx, id, routing)? else { return Err(EsError::resource_not_found(format!("Shape with ID [{id}] not found"))) };
+    let Some((_, src)) = super::lookup_source(ctx, super::LOOKUP_GET, Some(index), &idx, id, routing)? else { return Err(EsError::resource_not_found(format!("Shape with ID [{id}] not found"))) };
     let Some(Value::Obj(m)) = src else { return Err(EsError::illegal_state("no source")) };
     let mut vals = Vec::new();
     crate::engine::source::extract_values(&m, path, &mut vals);
@@ -565,7 +565,7 @@ pub fn more_like_this(ctx: &QueryCtx, m: &crate::query::specialized::MoreLikeThi
                 }
                 match like_item_index(ctx, item.index.as_deref()) {
                     // Read as the request's reader may read it, as a terms lookup is.
-                    Some(idx) => super::lookup_source(ctx, &idx, id, item.routing.as_deref())?.and_then(|(_, src)| src),
+                    Some(idx) => super::lookup_source(ctx, super::LOOKUP_TERM_VECTORS, item.index.as_deref(), &idx, id, item.routing.as_deref())?.and_then(|(_, src)| src),
                     None => None,
                 }
             }
@@ -605,7 +605,7 @@ pub fn more_like_this(ctx: &QueryCtx, m: &crate::query::specialized::MoreLikeThi
             (Some(d), _) => Some(d.clone()),
             (None, Some(id)) => {
                 match like_item_index(ctx, item.index.as_deref()) {
-                    Some(idx) => super::lookup_source(ctx, &idx, id, item.routing.as_deref())?.and_then(|(_, src)| src),
+                    Some(idx) => super::lookup_source(ctx, super::LOOKUP_TERM_VECTORS, item.index.as_deref(), &idx, id, item.routing.as_deref())?.and_then(|(_, src)| src),
                     None => None,
                 }
             }

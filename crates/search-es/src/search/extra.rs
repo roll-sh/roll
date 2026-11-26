@@ -1061,6 +1061,9 @@ pub fn terms_lookup(ctx: &QueryCtx, l: &crate::query::term_level::TermsLookup) -
     let Some(idx) = names.first().and_then(|n| st.metadata.indices.get(n)).cloned() else {
         return Err(EsError::index_not_found(&l.index));
     };
+    // Authorized before the cache: a document fetched for this request is still the reader's
+    // to read only if this lookup may read it.
+    ctx.security.read_lookup(ctx.st, ctx.now_ms, super::LOOKUP_GET, &l.index)?;
     let key = (idx.uuid.clone(), l.id.clone(), l.routing.clone());
     // Held across the fetch: shards whose query phases run in parallel fetch a document once.
     let shared = LOOKUPS.with(|c| c.borrow().clone());
@@ -1075,7 +1078,7 @@ pub fn terms_lookup(ctx: &QueryCtx, l: &crate::query::term_level::TermsLookup) -
             // Read as the request's reader may read it (`TermsQueryBuilder.fetch` runs as the
             // user): a document its document level security hides is missing, fields its field
             // level security hides are left out.
-            let doc = super::lookup_source(ctx, &idx, &l.id, l.routing.as_deref())?;
+            let doc = super::lookup_source(ctx, super::LOOKUP_GET, Some(&l.index), &idx, &l.id, l.routing.as_deref())?;
             // The lookup is a real get (`TermsQueryBuilder.fetch`): the shard's get stats count it.
             let c = &shard.counters;
             c.get_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
