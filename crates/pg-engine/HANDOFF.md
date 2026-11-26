@@ -23842,9 +23842,143 @@ commit.
 1. Past the model: n_tup_hot_upd / n_tup_newpage_upd / prunes (above): the old version's page
    from the scan that found the row, a fixed-size record a page under one budget for all tables;
    the patch has the decisions (`update_on`, `fsm_page`) and the probes.
+   Done by agent 331 ("pg_stat update counters past the model", below).
 2. The modelled heap's n_dead_tup by 1-3 after random updates (451 for 448, 170 for 169).
 3. CLUSTER's held rows go in at the commit through `put_index_entries`: an extension access
    method's index gets them as inserts then (its own build saw only the snapshot's rows).
+
+## pg_stat update counters past the model (agent 331, 2026-11-26)
+
+Item 1 of agent 324's "Left" above: n_tup_hot_upd, n_tup_newpage_upd and on-access prunes'
+reclaims (n_dead_tup falling) of a table too big to model read 0 / never happened; PostgreSQL
+18.6 has 385 HOT, 14 new-page and 21 dead for 399 sequential updates of a 20,000-row table.
+324's per-page record got the counts but cost TPC-B-like up to +3.0% and up to +64 MiB (a point
+lookup per UPDATE for the old version's TID, an allocation per page and row, bounded per table).
+
+### What changed
+
+- `sizing::estpages` (new): one `Record` per database (`Models::pages`, a mutex taken under the
+  table's shard lock, never the other way round), of fixed size, allocated by the first update
+  past the model: 16,384 page slots of 48 bytes (free bytes, line pointers and PD_PAGE_FULL,
+  unused and LP_DEAD line pointers, the dead versions not pruned yet as two groups, those before
+  the last update and the last one's, each by what a prune leaves of their line pointers, their
+  bytes and newest updater xid) and 32,768 row slots of 8 bytes (the page of an updated row's
+  newest version and whether it is heap-only), both in 4-way sets (a page puts out the set's
+  least recently updated one): 1 MiB for every table together. A page not in it is taken as
+  loaded (rows of the new version's size up to the fillfactor); nothing of it is kept across a
+  restart.
+- `Record::update_on` is heap_update after heap_page_prune_opt, 324's decisions on the fixed
+  slot: the prune when the page is marked full or has less than its fillfactor's room or a tenth
+  of a page free (each dead group whose newest updater is below the horizon), then the new
+  version stays when it fits and no indexed column changed (HOT), else it goes to the next page
+  the last VACUUM left room on (`fsm_page`, the record's pages with room for it and the
+  fillfactor's reserve, in page order), else where the estimate puts it (`add_in`): new-page.
+  What pgstat counts reclaimed is deleted tuples less new LP_DEAD items: a HOT chain's root
+  (redirect) and a heap-only member of a chain that goes on count, a version moved off the page
+  or whose indexed columns changed doesn't, nor a heap-only newest version whose row moves off
+  the page (its root becomes LP_DEAD: one deleted, one new LP_DEAD).
+- `Record::vacuumed` (lazy VACUUM past the model): the dead versions below the horizon and the
+  LP_DEAD line pointers freed on the kept pages, and those pages with room as the free space map.
+  `forget` on TRUNCATE, rewrites, DROP, and a table modelled or estimated afresh.
+- The old version's page without a lookup (`untracked_write`): the row record for a row updated
+  before, else the estimate's places (`moved`, `rowid_tid`), else the TID its stored version has
+  as the scan that found it read it: `sizing::scanned_for_change`, which the scan's `emit` sets
+  for an UPDATE / DELETE source's row (`with_key`) of a table that may be past the model (one
+  thread-local slot: table, key, TID), and the UPDATE executor for a row it re-read after a
+  concurrent update. The update compares the key; a row from elsewhere (a join's buffered rows,
+  MERGE, ON CONFLICT) falls back to the estimate's places, else no flags, as before.
+- Deletes don't feed the record (each deleted row's page would be a lookup a row on agent 321's
+  batched DELETE path).
+
+### Against PostgreSQL 18.6
+
+324's probes (`~/.cache/a324/scripts/`, `ROLL_MODEL_MAX_VERSIONS=5000`: the 20,000-row tables
+past the model, the 2,000-row ones modelled), PostgreSQL's outputs 324's (`pg-stats.txt`) and
+mine (`a331-pg`, the same image); roll a verify build of this candidate. Before it, every
+past-model HOT and new-page count read 0 and no prune reclaimed anything (324's
+`base-stats-past.txt`).
+
+| probe, 20,000 rows past the model | PostgreSQL 18.6 (HOT / new page / dead) | roll |
+|---|---|---|
+| 399 sequential updates | 385 / 14 / 21 | as PostgreSQL |
+| one row updated 3 and 10 times | 2 / 1 / 3, 9 / 1 / 2 | as PostgreSQL |
+| 600 random updates | 323 / 277 / 448 | 323 / 277 / **455** |
+| 300 updates of an indexed column | 0 / 192 / 300 | as PostgreSQL |
+| every 61st row, twice; VACUUM; the same rows again; the next ones (`probe-vac.py`) | 0/20/20, 20/20/40, 20/20/0, 39/21/14, 39/41/34, 59/41/54 | as PostgreSQL |
+| delete 100, insert 50, 200 random updates, ANALYZE, 100 more, VACUUM, 100 more (`mix`) | upd3 168 / 231 / 95 | upd3 **165 / 234** / 95, the steps before as PostgreSQL |
+| every tenth row; VACUUM; again (`bulk`) | updall2 27 / 3,973 / 2,000 | **21 / 3,979** / 2,000 |
+| 399 sequential, a clean restart, the same 399 (`probe-restart.py`, mine) | after it 783 / 15 / 29 (its second pass 398 HOT, 1 new-page) | after it 384 / 15 / 28: the second pass's **384 / 15**, the counts before the restart gone (below) |
+
+pgbench (scale 2, `ROLL_MODEL_MAX_VERSIONS=50000`: 200,000 accounts past the model, 4,000
+TPC-B-like transactions, one client): accounts 1,685 HOT / 2,315 new-page / 3,441 dead;
+PostgreSQL 18.6 1,673 / 2,327 / 3,447 (pgbench's random aids differ between the runs).
+
+Where it differs, and why:
+- **Random updates, 455 dead for 448**: the modelled heap reads 451 too (324's item 2). Likely
+  (not verified) PostgreSQL's index scan also fetching the old index entry of a row moved off
+  its page, which prunes the old page as well; the models prune the current one only.
+- **After a VACUUM, `mix` and `bulk`** (3 and 6 updates of 100 and 2,000 go to another page
+  where PostgreSQL's stay): deletes don't feed the record (their freed room isn't known), and a
+  page not in the record is taken as loaded where PostgreSQL's free space map has every page's
+  room (`bulk`'s first pass touched every tenth row of every page).
+- **After a restart** the record starts empty: a page is as loaded, its dead versions unknown,
+  so 14 of 399 updates whose old page PostgreSQL's prune makes room on go to another page.
+- Found on the way, not changed: **roll's pg_stat table counters start from 0 after a clean
+  restart**, modelled or not; PostgreSQL keeps them (pgstat's shutdown file): 783 / 15 / 29
+  after the restart probe, roll 384 / 15 / 28 (past the model) and 398 / 1 / 8 (modelled).
+- Past the record's size (more than 16,384 pages updated between their prunes, all tables
+  together) a page put out is as loaded again; on pgbench scale 32 (52,000 accounts pages) that
+  is most of them.
+
+### Measured
+
+pgbench scale 32 (324's harness, `~/.cache/a331/pgb/`: roll-engine in a container on lane A's
+server CPUs, `pgbench -i -I dtGvp -s 32`, a FIXED 400,000 transactions, 8 clients, `-M prepared`,
+the UPDATE alone `-f ua.sql -D scale=32`; perf stat user instructions of the server's cgroup per
+transaction; anon+shmem of the cgroup every 0.25 s, its peak). Plain dist builds, base the
+candidate's parent; one pair a hold of `tools/lane.sh a`; every hold read 5.6-7.2 foreign cores,
+so instruction counts only, no cycles or tps.
+
+| pair (first, second) | UPDATE accounts alone, instr/txn | TPC-B-like | peak anon+shmem MiB |
+|---|---|---|---|
+| base `fac5c7ed` -> `4d12e0d7` (before the rebase) | 202,987 -> 194,183 (-4.3%) | | 492.5 / 490.2 |
+| base `21443387` -> `55fb0f5d` | 201,954 -> 191,926 (-5.0%) | 496,883 -> 478,602 (-3.7%) | ua 492.9 / 494.3, tpcb 497.9 / 493.6 |
+| `55fb0f5d` -> base | 191,777 <- 201,994 (-5.1%) | 479,244 <- 497,787 (-3.7%) | ua 493.8 / 492.5, tpcb 492.8 / 482.3 |
+| base -> `55fb0f5d` | | 477,900 -> 478,181 (+0.06%) | 495.5 / 488.2 |
+| base -> **`cb7e61f1`** (the candidate) | 203,591 -> 192,771 (-5.3%) | | 495.8 / 492.7 |
+| `cb7e61f1` -> base | | 495,372 <- 490,496 (+1.0%) | 496.9 / 495.9 |
+| base -> `cb7e61f1` | | 495,142 -> 478,803 (-3.3%) | 493.9 / 477.5 |
+
+The UPDATE alone is 5% fewer instructions: its HOT updates no longer add the btree estimate's
+entries (`est_entries` skipped as on a modelled table, 324's -6 to -7%), less what the record
+costs. TPC-B-like at fixed counts is bimodal here (the spread agent 322 described): runs land at about
+478k or 490-498k instructions a transaction, both arms in both modes (the base 477.9, 490.5,
+495.1, 496.9, 497.8k; the candidate 478.2, 478.6, 478.8, 479.2, 495.4k). Five pairs: -3.7, -3.7,
++0.06, +1.0, -3.3%; the pair with both in the low mode +0.06%. So level, not a win: the change's
+work is on the accounts UPDATE only (which the UPDATE-alone pairs measure), and nothing here says
+it moves the mode. Peak memory: the UPDATE alone +1.3 / +1.4 / -3.1 MiB (the record is 1 MiB);
+TPC-B-like, medians 492.8 MiB against the base's 495.5, inside its own 482-498 spread.
+
+The pairs' base is `21443387`, the candidate's parent then; the rebase on `73efad1e8` added
+agent 327's range-read change only (storage, none of these paths). `55fb0f5d` is this candidate
+before its last change (a HOT chain moved off its page not counted
+reclaimed: a branch at prune time, no new work on the update path); the confirming pair is on
+the candidate itself.
+
+Checks on the candidate: `tools/quick-check.sh` with `QC_CHECKED=1 QC_TESTS=big_tables`
+(`cb7e61f17` on `214433872`, and again rebased, the same code on `73efad1e8`): clippy nothing
+new in a changed file, 152 tests in 11 binaries and
+again built `verify-checked`, regress 51,148 / 51,150 (0 newly differing), isolation 1,647 /
+1,648, pg_dump_tap 14,609 passed; `tools/crash-binary.py --seed 1` on its dist binary, alone and with
+`ROLL_MODEL_MAX_VERSIONS=2000` (the crash test's tables past the model): ok; the big_tables test
+`update_counts` (324's PostgreSQL counts) now runs past the model too.
+
+### Left
+1. Deletes into the record without a per-row lookup on the batched DELETE path (the batch's
+   rows carry no TID now); with them `mix`'s last step would read PostgreSQL's.
+2. pg_stat table counters across a clean restart (PostgreSQL's pgstat shutdown file).
+3. The random-update n_dead_tup by 7 (also the modelled heap by 3): the prune of a moved row's
+   old page by its old index entry, if that is what it is.
 
 ## Point selects: what the snapshot / DDL fixes cost, and the code a read runs through (agent 317, 2026-11-25)
 
