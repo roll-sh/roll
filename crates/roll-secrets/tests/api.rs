@@ -6271,7 +6271,7 @@ async fn a_project_backs_up_sealed_to_a_key_and_restores_into_another() {
     let (_, third) = api.call(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "from-a-token" }))).await;
     let at = |p: &str| format!("/v1/secrets/projects/{}{p}", third["id"].as_str().unwrap());
     api.ok(Method::POST, &at("/restore"), Some(theirs)).await;
-    let restored = api.ok(Method::GET, &at("/syncs"), None).await[0].clone();
+    let restored = api.ok(Method::GET, &at("/syncs"), None).await["syncs"][0].clone();
     assert!(restored["paused_why"].as_str().unwrap().contains("without its credential"), "{restored}");
     let (s, _) = api.call(Method::PATCH, &at(&format!("/syncs/{}", restored["id"].as_str().unwrap())), Some(json!({ "paused": false }))).await;
     assert_eq!(s, StatusCode::CONFLICT);
