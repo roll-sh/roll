@@ -846,12 +846,23 @@ fn payer(ctx: &Ctx, profile: &Profile) -> EsResult<Option<limits::Payer>> {
     Ok(Some(limits::Payer { key: k.id.clone(), user, policy: chat, browser: true }))
 }
 
-/// A caller that isn't a browser key, as its chat limits are kept: its API key, else its user and
-/// realm, else (no security, or roll's own calls as the owner) the owner.
+/// A caller that isn't a browser key, as its chat limits are kept: an API key by the user who
+/// made it (so minting a fresh key, as `manage_own_api_key` allows, buys no fresh budget), else
+/// its user and realm, else (no security, or roll's own calls as the owner) the owner. roll's
+/// index-scoped owner calls (`INDEX_SCOPE_KEY`, which has no key document) share one budget: no
+/// grant behind them reaches the cluster, and chat isn't one of the per-index routes that send
+/// them.
 fn caller_key(ctx: &Ctx) -> String {
     match ctx.principal.get() {
         Some(p) => match &p.kind {
-            security::AuthKind::ApiKey(k) => format!("caller:key:{}", k.id),
+            security::AuthKind::ApiKey(k) => {
+                let st = ctx.state();
+                let made_by = st.metadata.xpack.get(security::api_keys::KEYS, &k.id).and_then(|d| Some((d.get("realm")?.as_str()?.to_string(), d.get("username")?.as_str()?.to_string())));
+                match made_by {
+                    Some((realm, user)) => format!("caller:user:{realm}/{user}"),
+                    None => format!("caller:key:{}", k.id),
+                }
+            }
             _ => format!("caller:user:{}/{}", p.realm_name, p.username),
         },
         None => "caller:owner".into(),
