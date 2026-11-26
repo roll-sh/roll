@@ -19,6 +19,12 @@
 //! - **Cost.** While no index of the cluster has it on, a search pays one relaxed load
 //!   ([`Analytics::on`]). Buckets wait here until the node hands them on ([`Analytics::take`],
 //!   every metering pass), at most [`MAX_PENDING_HOURS`] per index.
+//! - **Experiments** (A/B tests on search applications, `crate::xpack::entsearch::experiments`)
+//!   are counted per variant whether or not an index has analytics on: counts only, never query
+//!   text. A *trial* is one user's query in an hour (searching it again, or paging, counts once),
+//!   and a click or conversion counts at most once per trial, only for a trial that identity made
+//!   ([`Analytics::record_variant_search`], [`Analytics::record_variant_event`]). The trials are
+//!   64-bit keys held here for two hours ([`MAX_TRIALS`] an hour), never handed on or stored.
 
 use crate::json::Value;
 use crate::meta::ClusterState;
@@ -41,6 +47,8 @@ pub const MAX_PENDING_HOURS: usize = 48;
 /// Bytes of query text a cluster keeps waiting, over all its indices: past it, a query not
 /// listed yet is counted only in the totals.
 pub const MAX_PENDING_BYTES: usize = 4 << 20;
+/// Variants a cluster keeps counts of between two passes.
+pub const MAX_PENDING_VARIANTS: usize = 1_024;
 
 /// What one query saw in a bucket.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -290,6 +298,62 @@ impl Bucket {
     }
 }
 
+/// One variant's counts: trials (a user's query in an hour), the trials with a click, those with
+/// a conversion, and the conversions' values summed.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct VariantStats {
+    pub searches: u64,
+    pub clicks: u64,
+    pub conversions: u64,
+    pub value: f64,
+}
+
+impl VariantStats {
+    pub fn add(&mut self, o: &VariantStats) {
+        self.searches += o.searches;
+        self.clicks += o.clicks;
+        self.conversions += o.conversions;
+        self.value += o.value;
+    }
+}
+
+/// A variant: (search application, experiment, variant).
+pub type VariantKey = (String, String, String);
+
+/// Trials kept per hour; past it, new trials (and their events) aren't counted.
+pub const MAX_TRIALS: usize = 200_000;
+
+/// What an experiment's event is.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Outcome {
+    Click,
+    /// A conversion, with its value (0 when it has none).
+    Conversion(f64),
+}
+
+const SEARCHED: u8 = 1;
+const CLICKED: u8 = 2;
+const CONVERTED: u8 = 4;
+
+#[derive(Default)]
+struct Experiments {
+    counts: HashMap<VariantKey, VariantStats>,
+    /// This hour's trials and the previous hour's, by key: what each did.
+    hour: u64,
+    trials: HashMap<u64, u8>,
+    previous: HashMap<u64, u8>,
+}
+
+impl Experiments {
+    fn roll(&mut self, hour: u64) {
+        if hour != self.hour {
+            self.previous = if hour == self.hour + 1 { std::mem::take(&mut self.trials) } else { HashMap::new() };
+            self.trials.clear();
+            self.hour = hour;
+        }
+    }
+}
+
 /// What a cluster's analytics hand on ([`Analytics::take`]).
 #[derive(Debug, Default)]
 pub struct Taken {
@@ -301,11 +365,13 @@ pub struct Taken {
     pub enabled: Option<Vec<String>>,
     /// (index, unix hour, bucket), oldest first per index.
     pub hours: Vec<(String, u64, Bucket)>,
+    /// Experiments' counts since the last take, by variant.
+    pub experiments: Vec<(VariantKey, VariantStats)>,
 }
 
 impl Taken {
     pub fn is_empty(&self) -> bool {
-        self.cleared.is_empty() && self.enabled.is_none() && self.hours.is_empty()
+        self.cleared.is_empty() && self.enabled.is_none() && self.hours.is_empty() && self.experiments.is_empty()
     }
 
     /// Adds `newer` (taken after this): its clears drop the older hours of those indices.
@@ -325,6 +391,7 @@ impl Taken {
             self.enabled = newer.enabled;
         }
         self.hours.extend(newer.hours);
+        self.experiments.extend(newer.experiments);
     }
 }
 
@@ -374,6 +441,7 @@ pub struct Analytics {
     /// [`Analytics::sync`] ran (the cluster opened).
     synced: AtomicBool,
     pending: Mutex<Pending>,
+    experiments: Mutex<Experiments>,
 }
 
 impl std::fmt::Debug for Analytics {
@@ -470,6 +538,69 @@ impl Analytics {
         b.click(query, position, bytes);
     }
 
+    /// Records a search of experiment variant `v` by trial `key` (a hash of the experiment, the
+    /// user and the query): a trial counts once.
+    pub fn record_variant_search(&self, v: &VariantKey, key: u64) {
+        let mut e = self.experiments.lock();
+        e.roll(unix_hour());
+        let seen = e.trials.get(&key).or_else(|| e.previous.get(&key)).copied().unwrap_or(0);
+        if seen & SEARCHED != 0 {
+            return;
+        }
+        if e.trials.len() >= MAX_TRIALS {
+            return;
+        }
+        e.trials.insert(key, seen | SEARCHED);
+        if !e.counts.contains_key(v) && e.counts.len() >= MAX_PENDING_VARIANTS {
+            return;
+        }
+        e.counts.entry(v.clone()).or_default().searches += 1;
+    }
+
+    /// Records a click or conversion of trial `key` of variant `v`: counted once per trial, and
+    /// only for a trial searched in this hour or the last (`false`: not counted).
+    pub fn record_variant_event(&self, v: &VariantKey, key: u64, outcome: Outcome) -> bool {
+        let mut e = self.experiments.lock();
+        e.roll(unix_hour());
+        let bit = match outcome {
+            Outcome::Click => CLICKED,
+            Outcome::Conversion(_) => CONVERTED,
+        };
+        let (map, seen) = match (e.trials.get(&key).copied(), e.previous.get(&key).copied()) {
+            (Some(f), _) => (0, f),
+            (None, Some(f)) => (1, f),
+            (None, None) => return false,
+        };
+        if seen & SEARCHED == 0 || seen & bit != 0 {
+            return false;
+        }
+        if map == 0 {
+            e.trials.insert(key, seen | bit);
+        } else {
+            e.previous.insert(key, seen | bit);
+        }
+        if !e.counts.contains_key(v) && e.counts.len() >= MAX_PENDING_VARIANTS {
+            return false;
+        }
+        let c = e.counts.entry(v.clone()).or_default();
+        match outcome {
+            Outcome::Click => c.clicks += 1,
+            Outcome::Conversion(value) => {
+                c.conversions += 1;
+                c.value += value;
+            }
+        }
+        true
+    }
+
+    /// Experiments' counts waiting, left in place (an API read between two passes).
+    pub fn peek_experiments(&self) -> Vec<(VariantKey, VariantStats)> {
+        let e = self.experiments.lock();
+        let mut v: Vec<(VariantKey, VariantStats)> = e.counts.iter().map(|(k, s)| (k.clone(), *s)).collect();
+        v.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        v
+    }
+
     /// Everything waiting, handed on once.
     pub fn take(&self) -> Taken {
         // `enabled` before `pending`, the order `sync` takes them in.
@@ -486,7 +617,13 @@ impl Analytics {
             }
         }
         hours.sort_unstable_by(|a, b| (&a.0, a.1).cmp(&(&b.0, b.1)));
-        Taken { cleared: std::mem::take(&mut p.cleared), enabled, hours }
+        let cleared = std::mem::take(&mut p.cleared);
+        drop(p);
+        // The counts start again from zero; the trials stay, so a click after the pass still
+        // finds its search.
+        let mut experiments: Vec<(VariantKey, VariantStats)> = std::mem::take(&mut self.experiments.lock().counts).into_iter().collect();
+        experiments.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        Taken { cleared, enabled, hours, experiments }
     }
 
     /// The buckets waiting, left in place (an API read between two passes).
@@ -631,6 +768,25 @@ fn from_retriever(r: &Value, depth: usize) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A trial counts once however often it's searched; a click or conversion counts once per
+    /// trial, only for a trial that was searched, and survives a take.
+    #[test]
+    fn experiment_trials_count_once_and_events_need_their_search() {
+        let a = Analytics::default();
+        let v: VariantKey = ("app".into(), "e1".into(), "b".into());
+        assert!(!a.record_variant_event(&v, 7, Outcome::Click), "a click for a search nobody made");
+        a.record_variant_search(&v, 7);
+        a.record_variant_search(&v, 7);
+        a.record_variant_search(&v, 8);
+        let first = a.take();
+        assert_eq!(first.experiments, vec![(v.clone(), VariantStats { searches: 2, ..Default::default() })]);
+        assert!(a.record_variant_event(&v, 7, Outcome::Click));
+        assert!(!a.record_variant_event(&v, 7, Outcome::Click), "one click per trial");
+        assert!(a.record_variant_event(&v, 7, Outcome::Conversion(12.5)));
+        assert!(!a.record_variant_event(&v, 7, Outcome::Conversion(12.5)));
+        assert_eq!(a.take().experiments, vec![(v, VariantStats { searches: 0, clicks: 1, conversions: 1, value: 12.5 })]);
+    }
 
     /// CPU time this thread has used (the cost test's rounds await, so they can't run inside
     /// `search_test_support::cpu_time`'s closure).

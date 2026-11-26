@@ -736,8 +736,14 @@ say "a restore point (roll preview points): saved, a table made after it, put ba
 # A restore point (roll preview points): a table made after it is gone once it's put back, on
 # the same DATABASE_URL (pg-control's reset from the point: same endpoint and role), and in the
 # NoSQL and Redis branches (their point-in-time restores in place, to the second the point was
-# cut at: the same database, URL and password).
+# cut at: the same database, URL and password), and in the stream (branched again from the
+# point: a new stream and key, its records as the point holds them).
 psql_app() { docker run --rm --name roll-previews-psqltest --network host postgres:18-alpine psql "$APP_DB" -Atc "$1" 2>&1 | head -1; }
+stream_ref() { api GET "/v1/previews/$PV" | jq_ "[r['ref'] for r in d['resources'] if r['kind']=='stream'][0]"; }
+srec() { api POST "/v1/streams/$1/topics/clicks/records" "{\"value\":\"$2\"}" | jq_ "'offsets' in d"; }
+sread() { api GET "/v1/streams/$1/topics/clicks/records?from=earliest&limit=1000" | jq_ "' '.join(w for w in ('before-the-point', 'after-the-point') if w in str(d))"; }
+POINT_STREAM=$(stream_ref)
+[ "$(srec "$POINT_STREAM" before-the-point)" = True ] || { echo "the preview's stream should take a record before the point"; exit 1; }
 POINT=$(api POST "/v1/previews/$PV/restore-points" '{"label":"before the live check"}' | jq_ "d['id']")
 case "$POINT" in rp_*) ;; *) echo "a restore point should be saved: $POINT"; exit 1;; esac
 ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview points "$PV" | has "$POINT" || { echo "roll preview points should list $POINT"; exit 1; }
@@ -745,6 +751,8 @@ psql_app "CREATE TABLE after_the_point (id int)" >/dev/null
 CQL "$BRANCH_NOSQL" "CREATE TABLE app.after_the_point (id int PRIMARY KEY)" >/dev/null
 POINT_REDIS_URL=$(api GET "/v1/redis/databases/$BRANCH_REDIS" | jq_ "d['redis_url']")
 [ "$(rcmd "$POINT_REDIS_URL" SET after:the:point 1)" = "+OK" ] || { echo "the Redis branch should take a key after the point"; exit 1; }
+srec "$POINT_STREAM" after-the-point >/dev/null
+[ "$(sread "$POINT_STREAM")" = "before-the-point after-the-point" ] || { echo "the preview's stream should hold both records before the point goes back: $(sread "$POINT_STREAM")"; exit 1; }
 [ "$(CQL "$BRANCH_NOSQL" "SELECT id FROM app.after_the_point" | jq_ "'rows' in d")" = True ] || { echo "the NoSQL branch should have the table made after the point"; exit 1; }
 TR0=$(now_ms)
 api POST "/v1/previews/$PV/restore-points/$POINT/restore" >/dev/null
@@ -753,7 +761,7 @@ api POST "/v1/previews/$PV/restore-points/$POINT/restore" >/dev/null
 # services slept for it; a visit wakes them).
 PUT_BACK=""
 for _ in $(seq 1 240); do
-  api GET "/v1/previews/$PV/activity" | jq_ "all(any(a['message'].startswith('put ' + k + ':') and 'back as restore point' in a['message'] for a in d) for k in ('postgres', 'nosql', 'redis'))" | has True && case "$(api GET "/v1/previews/$PV" | jq_ "d['state']")" in ready|sleeping) true;; *) false;; esac && PUT_BACK=yes && break
+  api GET "/v1/previews/$PV/activity" | jq_ "all(any(a['message'].startswith('put ' + k + ':') and 'back as restore point' in a['message'] for a in d) for k in ('postgres', 'nosql', 'redis', 'stream'))" | has True && case "$(api GET "/v1/previews/$PV" | jq_ "d['state']")" in ready|sleeping) true;; *) false;; esac && PUT_BACK=yes && break
   sleep 0.5
 done
 RESTORE_MS=$(( $(now_ms) - TR0 ))
@@ -764,6 +772,9 @@ NOSQL_AFTER=$(CQL "$BRANCH_NOSQL" "SELECT id FROM app.after_the_point" | jq_ "'r
 [ "$NOSQL_AFTER" = False ] || { echo "putting the point back should drop the NoSQL table made after it"; exit 1; }
 REDIS_AFTER="$(rcmd "$POINT_REDIS_URL" EXISTS after:the:point) $(rcmd "$POINT_REDIS_URL" EXISTS preview:999)"
 [ "$REDIS_AFTER" = ":0 :1" ] || { echo "putting the point back should drop the Redis key set after it, on the same URL, and keep the preview's own: $REDIS_AFTER"; exit 1; }
+BACK_STREAM=$(stream_ref)
+STREAM_AFTER="$([ "$BACK_STREAM" != "$POINT_STREAM" ] && echo new) $(sread "$BACK_STREAM")"
+[ "$STREAM_AFTER" = "new before-the-point" ] || { echo "putting the point back should give the preview a stream with the point's records and not the one after it: $STREAM_AFTER"; exit 1; }
 api DELETE "/v1/previews/$PV/restore-points/$POINT" >/dev/null
 # Its services slept while the data went back: a visit wakes them, on the same DATABASE_URL.
 for _ in $(seq 1 120); do

@@ -9005,7 +9005,7 @@ async fn a_leaks_renewals_count_toward_the_public_certificates_caps() {
     assert!(s == StatusCode::TOO_MANY_REQUESTS && e.to_string().contains("3 renewals"), "leaks count toward people's cap: {s} {e}");
 }
 
-/// docs/secrets.md, "Public certificates": a new DNS credential is the registration made anew, so
+/// docs/secrets.md, "Publicly trusted certificates": a new DNS credential is the registration made anew, so
 /// orders act at its replacer's rights from then on, never at the old maker's; a rename keeps the
 /// maker.
 #[tokio::test]
