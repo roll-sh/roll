@@ -1169,7 +1169,7 @@ MCP clients for themselves, as GitHub's fine-grained tokens act for the person w
   The login is the authentication, so no caller is gated. Workload tokens (`kind: "workload"`)
   stay out of the token list (`?kind=workload` lists the latest 500), the checkup, the expiry
   digest, new-network notices and the tokens' caps (10,000 live of their own, 1,000 per owner; bootstrap
-  tokens and machine credentials, below, aren't counted), and go a day after
+  tokens, machine credentials and their machines' logins, below, aren't counted), and go a day after
   they end. One is fixed: never edited, rotated or grown by a remembered approval (`409`), only
   revoked or left to end. It makes and changes no tokens (`403`): what it made would be a
   credential nobody set up. The product that minted it stops it with `Access::revoke_workload(id,
@@ -1207,9 +1207,11 @@ MCP clients for themselves, as GitHub's fine-grained tokens act for the person w
     the chain at its next use. A login (`present_machine`) with a spent credential always ends it.
   - **Not in the workload caps.** They open nothing and live as long as their machine, so they'd
     fill the room every CI login shares: `MAX_WORKLOADS` and `OWNER_MAX_WORKLOADS` count only
-    workload grants with rules. Their caller caps them (roll secrets: 1,000 chains per identity
+    workload grants outside a chain. Their caller caps them (roll secrets: 1,000 chains per identity
     whose newest secret hasn't ended, revoked or not, counted in the write that records the chain,
-    and 60 bootstrap tokens a minute per project).
+    and 60 bootstrap tokens a minute per project). A machine's logins (`mint_workload_via`) count
+    toward its own chain instead, at most `CHAIN_MAX_LOGINS` (5) live, in the write that mints
+    one (`409` past it), so a maker's fleet never refuses their own CI's logins.
   - **Leaked**, either is revoked with its whole chain, as a token is (below).
   - `Access::revoke_chain(chain, why)` ends a chain (roll secrets: the identity deleted, disabled or
     cut off). Chains are listed with `?kind=workload`, and go a day after their last secret would

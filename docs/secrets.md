@@ -621,8 +621,9 @@ server](secrets/platforms.md#a-vm-or-a-server).
   after, and `POST …/identities/{id}/machines/prune` (admin, audited `identity.machine.prune`, the
   dashboard's Forget ended) forgets the ended ones at once. A project makes at most 60 bootstrap
   tokens a minute. Its
-  machines' credentials don't count toward the workload token caps that every project's logins
-  share (docs/permissions.md); their logins' tokens do, as any identity's. The bootstrap tokens and credentials are roll-access grants (docs/permissions.md,
+  machines' credentials and their logins' tokens don't count toward the workload token caps that
+  every project's logins share (docs/permissions.md): a machine holds at most 5 live login tokens
+  of its own. The bootstrap tokens and credentials are roll-access grants (docs/permissions.md,
   "Bootstrap tokens and machine credentials"), looked up on every use, and open nothing but these
   logins. A unit that enrolls on its first start: [Bare metal and on
   premises](secrets/platforms.md#bare-metal-and-on-premises).
