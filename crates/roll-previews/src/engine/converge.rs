@@ -600,7 +600,19 @@ impl Engine {
             self.store.set_released(&r.id, r.build(), ms)?;
             self.store.log(&r.id, &format!("released in {:.1} s", ms as f64 / 1000.0))?;
         }
-        // 3c'. A rehearsal asked for at this head: the release again on the parents as they are now.
+        // 3c'. A rehearsal asked for at this head: the release again on the parents as they are
+        // now. Asked by roll when the change is queued to land, where the project wants it.
+        if s.rehearse_when_queued
+            && s.release.is_some()
+            && let Some(change) = r.change_id.as_deref()
+            && self.store.runtime_fact::<crate::Rehearsal>(&r.id, "rehearsal")?.is_none_or(|x| x.head != r.build())
+            && self.source.change(change).await.ok().flatten().is_some_and(|c| c.queued)
+            && self.store.resources(&r.id)?.iter().any(|x| x.kind == Kind::Postgres && x.r#ref.is_some())
+        {
+            let asked = crate::Rehearsal { head: r.build().to_string(), by: "roll".into(), at: self.store.now_ms()?, ok: None, ms: None, error: None };
+            self.store.set_runtime_fact(&r.id, "rehearsal", Some(&asked))?;
+            self.store.log(&r.id, "the change is queued to land: rehearsing its release on today's data")?;
+        }
         if let Some(release) = &s.release
             && let Some(asked) = self.store.runtime_fact::<crate::Rehearsal>(&r.id, "rehearsal")?.filter(|x| x.ok.is_none() && x.head == r.build())
         {
