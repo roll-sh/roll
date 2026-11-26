@@ -1638,6 +1638,15 @@ async fn a_deploy_that_fails_its_health_check_leaves_the_old_one_serving() {
     call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"pre_deploy": "exit 0"}}))).await;
     let (_, d4) = call(&w.api, "POST", &format!("{base}/deploys"), Some(json!({}))).await;
     assert_eq!(settled(&w, id, "production", d4["id"].as_str().unwrap()).await["status"], "active");
+    // A preview's teardown command (Heroku's pr-predestroy) runs once before it's deleted, in its
+    // live image; production's never does.
+    call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"pre_deploy": null, "teardown": "echo bye"}}))).await;
+    let pv = format!("/v1/apps/services/{id}/environments/pv-9");
+    call(&w.api, "PUT", &pv, Some(json!({"ephemeral": true}))).await;
+    let (_, d5) = call(&w.api, "POST", &format!("{pv}/deploys"), Some(json!({}))).await;
+    assert_eq!(settled(&w, id, "pv-9", d5["id"].as_str().unwrap()).await["status"], "active");
+    assert_eq!(call(&w.api, "DELETE", &pv, None).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(w.fake.commands_made.lock().iter().filter(|(c, _, _)| c == "echo bye").count(), 1, "{:?}", w.fake.commands_made.lock());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
