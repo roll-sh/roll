@@ -6403,7 +6403,11 @@ async fn pre_receive(api: &Api, project: &str, budget: std::time::Duration, fail
     }
     let breakglass = push_option("breakglass");
     let base = format!("/v1/secrets/projects/{}", enc(project));
-    let push = json!({ "breakglass": breakglass, "pusher": pusher(), "refs": refs });
+    let pusher = pusher();
+    if breakglass && pusher.is_none() {
+        eprintln!("roll secrets: this git server doesn't name pushers, so break glass is the project's list's `token:<id>` or `*`, and the audit row names no one");
+    }
+    let push = json!({ "breakglass": breakglass, "pusher": pusher, "refs": refs });
     let started = std::time::Instant::now();
     if breakglass {
         // Recorded, and allowed by the project, before anything is read: a scan that can't finish
@@ -6446,7 +6450,12 @@ async fn pre_receive(api: &Api, project: &str, budget: std::time::Duration, fail
     }
     if breakglass {
         let scanned = unfinished.as_deref().map(|why| format!("; not fully scanned: {why}")).unwrap_or_default();
-        eprintln!("roll secrets: let through with breakglass (roll recorded it{scanned}){}", if hits.is_empty() { String::new() } else { format!(": rotate {}", if hits.len() == 1 { "it" } else { "them" }) });
+        let leaked = match hits.len() {
+            0 => String::new(),
+            1 => ": the value is leaked now, and roll handles it as one (reported, and rotated where the project's leaks.rotate is managed); remove it from the commits".to_string(),
+            n => format!(": the {n} values are leaked now, and roll handles them as such (reported, and rotated where the project's leaks.rotate is managed); remove them from the commits"),
+        };
+        eprintln!("roll secrets: let through with breakglass (roll recorded it{scanned}){leaked}");
         return Ok(());
     }
     if !hits.is_empty() {
@@ -6464,10 +6473,11 @@ async fn pre_receive(api: &Api, project: &str, budget: std::time::Duration, fail
 }
 
 /// Who pushed, as the git server tells its hooks: GitHub Enterprise Server's `GITHUB_USER_LOGIN`,
-/// GitLab's `GL_USERNAME`, Gitea's and Forgejo's `GITEA_PUSHER_NAME`, the web server's
-/// `REMOTE_USER` (git over HTTP), or the account git runs as (`USER`, git over SSH).
+/// GitLab's `GL_USERNAME`, Gitea's and Forgejo's `GITEA_PUSHER_NAME`, or the web server's
+/// `REMOTE_USER` (git over HTTP). Never `USER`: over SSH that's the account git runs as (`git`),
+/// shared by every pusher, so a break-glass list naming it would let anyone through.
 fn pusher() -> Option<String> {
-    ["GITHUB_USER_LOGIN", "GL_USERNAME", "GITEA_PUSHER_NAME", "REMOTE_USER", "USER"]
+    ["GITHUB_USER_LOGIN", "GL_USERNAME", "GITEA_PUSHER_NAME", "REMOTE_USER"]
         .iter()
         .filter_map(|k| std::env::var(k).ok())
         .map(|v| v.chars().filter(|c| !c.is_control()).take(100).collect::<String>())
