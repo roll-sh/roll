@@ -1440,6 +1440,8 @@ fn story_shots<'a>(said: &str, pngs: impl Iterator<Item = &'a str>) -> (Vec<crat
         play: Option<crate::Play>,
         #[serde(default)]
         play_error: Option<String>,
+        #[serde(default)]
+        play_step: Option<String>,
     }
     #[derive(Default, serde::Deserialize)]
     struct Run {
@@ -1467,11 +1469,20 @@ fn story_shots<'a>(said: &str, pngs: impl Iterator<Item = &'a str>) -> (Vec<crat
         // Read as a page's is (the same bounds): compared with main's same story like a page's.
         // What it threw: one printable line, only beside a failed one (the preview's code's words).
         let play_error = s.play_error.filter(|_| s.play == Some(crate::Play::Failed)).map(|t| t.chars().filter(|c| !c.is_control()).take(300).collect::<String>()).filter(|t| !t.trim().is_empty());
-        let report = crate::PageReport { a11y: s.a11y.and_then(|a| crate::PageA11y::parse(&serde_json::json!({ "a11y": a }).to_string())), play: s.play, play_error, ..Default::default() };
+        let play_step = play_step_of(s.play_step, s.play);
+        let report = crate::PageReport { a11y: s.a11y.and_then(|a| crate::PageA11y::parse(&serde_json::json!({ "a11y": a }).to_string())), play: s.play, play_error, play_step, ..Default::default() };
         out.push(crate::ports::PageShot { path, png, errors: s.errors.min(10_000), report });
     }
     (out, skipped)
 }
+/// A failed interaction test's step as the run said it (`expect.toBeVisible`): names and dots
+/// only, 120 characters at most, and only beside a failed test (the preview's code's words).
+fn play_step_of(step: Option<String>, play: Option<crate::Play>) -> Option<String> {
+    step.filter(|_| play == Some(crate::Play::Failed))
+        .map(|t| t.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '$')).take(120).collect::<String>())
+        .filter(|t| !t.is_empty())
+}
+
 /// How many of a change's first stories the other browsers take (`story:<id>@<browser>`).
 pub const STORIES_IN_BROWSERS: usize = 5;
 
@@ -1505,6 +1516,8 @@ fn browser_story_shots(out: &str, ids: &[&String], browsers: &[&String]) -> Vec<
         play: Option<crate::Play>,
         #[serde(default)]
         play_error: Option<String>,
+        #[serde(default)]
+        play_step: Option<String>,
     }
     let mut shots: Vec<crate::ports::PageShot> = Vec::new();
     for l in out.lines().filter_map(|l| serde_json::from_str::<Line>(l).ok()) {
@@ -1516,7 +1529,8 @@ fn browser_story_shots(out: &str, ids: &[&String], browsers: &[&String]) -> Vec<
         if png.starts_with(b"\x89PNG") && png.len() <= STORY_MAX {
             // Its interaction test in that browser, as Chromium's run reads its own (one line).
             let play_error = l.play_error.filter(|_| l.play == Some(crate::Play::Failed)).map(|t| t.chars().filter(|c| !c.is_control()).take(300).collect::<String>()).filter(|t| !t.trim().is_empty());
-            let report = crate::PageReport { play: l.play, play_error, ..Default::default() };
+            let play_step = play_step_of(l.play_step, l.play);
+            let report = crate::PageReport { play: l.play, play_error, play_step, ..Default::default() };
             shots.push(crate::ports::PageShot { path, png, errors: l.errors.min(10_000), report });
         }
     }
@@ -2717,6 +2731,7 @@ fn page_shots<'a>(asked: &[&String], said: &str, pngs: impl Iterator<Item = &'a 
                 step_ms: s.step_ms.filter(|m| m.is_finite() && (0.0..=60_000.0).contains(m)).map(|m| m.round() as u32),
                 play: None,
                 play_error: None,
+                play_step: None,
             };
             out.push(crate::ports::PageShot { path: s.path, png, errors: s.errors.min(10_000), report });
         }
@@ -3465,7 +3480,7 @@ mod tests {
         use base64::Engine as _;
         let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
         let (png, junk, big) = (b64(b"\x89PNG\r\n\x1a\n..."), b64(b"not a png"), b64(&[b"\x89PNG".as_slice(), &vec![0u8; STORY_MAX]].concat()));
-        let said = r#"{"stories":[{"id":"button--primary","errors":2,"a11y":{"issues":[{"kind":"color-contrast","count":2,"first":"<button>","impact":"serious"}],"lang":true,"title":true},"play":"failed","play_error":"expected \"Pay\"\u0007 to be visible"},{"id":"../x--y"},{"id":"button--primary"},{"id":"card--empty"},{"id":"card--big"},{"id":"card--full"}],"left":12,"first_left":["button--danger","../evil"],"by_files":true}"#;
+        let said = r#"{"stories":[{"id":"button--primary","errors":2,"a11y":{"issues":[{"kind":"color-contrast","count":2,"first":"<button>","impact":"serious"}],"lang":true,"title":true},"play":"failed","play_error":"expected \"Pay\"\u0007 to be visible","play_step":"expect.toBeVisible<b>"},{"id":"../x--y"},{"id":"button--primary"},{"id":"card--empty"},{"id":"card--big"},{"id":"card--full"}],"left":12,"first_left":["button--danger","../evil"],"by_files":true}"#;
         let pngs = [&png, &png, &png, &junk, &big, &png];
         let (shots, left) = story_shots(said, pngs.iter().map(|s| s.as_str()));
         // A story's accessibility as a page's (axe's rules, its language and title), and its
@@ -3473,6 +3488,7 @@ mod tests {
         assert_eq!(shots[0].report.a11y.as_ref().map(|a| a.problems()), Some(2), "{:?}", shots[0].report.a11y);
         assert_eq!(shots[0].report.play, Some(crate::Play::Failed));
         assert_eq!(shots[0].report.play_error.as_deref(), Some("expected \"Pay\" to be visible"), "what it threw, one printable line");
+        assert_eq!(shots[0].report.play_step.as_deref(), Some("expect.toBeVisibleb"), "the step it stopped at, names and dots only");
         let passed = crate::PageReport { play: Some(crate::Play::Passed), ..Default::default() };
         assert!(shots[0].report.against(&passed).play_broke && !passed.against(&shots[0].report).play_broke);
         let got: Vec<(String, u32)> = shots.into_iter().map(|p| (p.path, p.errors)).collect();

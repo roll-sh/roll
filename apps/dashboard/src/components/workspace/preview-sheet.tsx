@@ -1098,7 +1098,14 @@ function PageChecks({ page, branch }: { page: PageCheck; branch: string }) {
       {page.step && <p className="break-words text-danger">Its steps stopped at {page.step}: taken as it was then.</p>}
       {page.play === "failed" && (
         <p className="break-words text-danger">
-          Its interaction test failed{page.against?.play_broke ? ", where main's passes" : ""}: {page.play_error ? <span className="font-mono text-[11px]">{page.play_error}</span> : "the story's play function, or its render, threw."}
+          Its interaction test failed{page.against?.play_broke ? ", where main's passes" : ""}
+          {page.play_step && (
+            <>
+              {" at "}
+              <span className="font-mono text-[11px]">{page.play_step}</span>
+            </>
+          )}
+          : {page.play_error ? <span className="font-mono text-[11px]">{page.play_error}</span> : "the story's play function, or its render, threw."}
         </p>
       )}
       {page.play === "passed" && <p className="text-soft">Its interaction test passed.</p>}
@@ -1912,7 +1919,7 @@ function Errors({ preview: p }: { preview: Preview }) {
 
 /** A look at a data branch (Neon's Tables): its tables as the branch's own role sees them, and a
  * table's first rows, read-only, cells as text (the branch's data, masked as the preview's is). */
-/** Restore points (Neon's snapshots): the preview's Postgres data saved now and put back later,
+/** Restore points (Neon's snapshots): the preview's Postgres, NoSQL and Redis data saved now and put back later,
  * after a test run or a demo changed it. Putting one back is the preview's next converge. */
 function RestorePoints({ previewId, busy, run }: { previewId: string; busy: string | null; run: (key: string, fn: () => Promise<Preview>) => Promise<boolean> }) {
   const [points, setPoints] = useState<{ points: RestorePoint[]; max: number } | null>(null);

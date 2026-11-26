@@ -257,6 +257,8 @@ export interface PageCheck {
   play?: "passed" | "failed" | null;
   /** What a failed one threw, as Storybook's frame showed it (one line, masked). */
   play_error?: string | null;
+  /** The interaction or assertion a failed one stopped at (`expect.toBeVisible`), from Storybook's interactions log. */
+  play_step?: string | null;
 }
 
 /** A page state (`github.states`): a page of the first service's, reached by its steps. */
