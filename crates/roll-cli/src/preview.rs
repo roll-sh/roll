@@ -210,6 +210,10 @@ pub enum Preview {
         #[arg(long, conflicts_with_all = ["save", "restore"])]
         delete: Option<String>,
     },
+    /// Rehearse the change's release (migrations) on its Postgres parents as they are now:
+    /// fresh branches, masked as the rules say, the release run on them, then deleted. Its next
+    /// converge does it; `show` says how it went.
+    Rehearse { preview: String },
     /// Re-branch its data from the parents (every resource, or the ones named).
     Reset {
         preview: String,
@@ -1250,6 +1254,7 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
             v
         }
         Preview::Reset { preview, resources } => api.post(&format!("/v1/previews/{preview}/reset"), json!({ "resources": resources })).await?,
+        Preview::Rehearse { preview } => api.post(&format!("/v1/previews/{preview}/rehearse"), json!({})).await?,
         Preview::Points { preview, save, restore, delete } => {
             let base = format!("/v1/previews/{preview}/restore-points");
             let (v, said) = match (save, restore, delete) {

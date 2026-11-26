@@ -3855,6 +3855,7 @@ impl Store {
         let url = services.first().map(|(s, _)| s.url.clone());
         let share_url = url.as_deref().map(share);
         let (schema_changes, schema_risks, release) = self.release_facts(&r.id)?;
+        let rehearsal = self.runtime_fact::<crate::Rehearsal>(&r.id, "rehearsal")?;
         let schema_overlaps = self.schema_overlaps(&r, schema_changes.as_deref())?;
         let kept_until = self.kept_until(&r.id)?;
         // Its page as a link only when it's `https://` (it's kept whole to tell its repository).
@@ -3995,6 +3996,7 @@ impl Store {
             schema_risks,
             schema_changes,
             schema_overlaps,
+            rehearsal,
             release,
             kept_until,
             pull,

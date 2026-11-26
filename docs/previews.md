@@ -336,6 +336,17 @@ state. A pass of the reconciler:
        parent's: a migration that's slow here holds its locks on production as long
        (PlanetScale's deploy requests show this before a merge). The time is the whole job's,
        container start included (live: the change carries it).
+       A preview's data is as old as its branch (days, on a long-lived change), so the release
+       can be rehearsed on today's: `POST …/rehearse` (`roll preview rehearse`, the sheet's
+       "Rehearse on today's data", 202) asks the next converge, at the change's head, to branch
+       each Postgres parent as it is now (`<preview>-r`), mask it by the project's rules before
+       anything connects, run the release once more with those branches' variables in place of
+       the preview's (the same names, by value: a branch's URL is its own role's), then delete
+       them whatever happened. `rehearsal` (`{head, by, at, ok, ms, error}`, `ok` null while it
+       waits) says how it went beside the release's time; a failure is said (masked, one line),
+       never the converge's, and it runs once a head. A linked name made from a field of the URL
+       (a separate password variable) still names the preview's branch
+       (`engine.rs::a_rehearsal_runs_the_release_on_a_fresh_masked_branch_then_drops_it`).
    4d. Once per head, the Postgres branches' schema is compared with their parents' (see
        "Schema changes").
    5. The secrets environment `pv-<preview id>` is ensured (base, overrides, resource URLs).
@@ -1999,6 +2010,7 @@ previews in it), the operator and admins see every project.
 | `POST /v1/previews/{id}/sleep` | | `Preview`: stop its services now |
 | `POST /v1/previews/{id}/wake` | | `Preview`: start its services now |
 | `POST /v1/previews/{id}/reset` | `{resources?: ["postgres:prj_…"]}` | `Preview`: re-branch from the parents |
+| `POST /v1/previews/{id}/rehearse` | | 202 `Preview`: its next converge rehearses the change's release on fresh, masked branches of its Postgres parents as they are now (`rehearsal`); 400 for a default branch's preview, 409 without a `release` or a Postgres branch |
 | `GET /v1/previews/{id}/restore-points` | | `{points: [{id, label, by, at, data}], max}`: oldest first, `data` the resources it holds (`postgres:prj_…`) |
 | `POST /v1/previews/{id}/restore-points` | `{label?}` (one line, 60 characters at most) | 201 `{id, label, by, at, data}`: its Postgres, NoSQL, Redis and stream data saved now; 409 while it isn't ready, past `max`, or with nothing to save |
 | `POST /v1/previews/{id}/restore-points/{point}/restore` | | `Preview`: the data put back as the point left it, on its next converge (no seed); `delete`, as a reset is |
@@ -2094,6 +2106,7 @@ type Preview = {
   baseline: boolean;                  // roll keeps it to compare the project's changes with (github.baseline)
   // Checks against main's preview (types as in apps/dashboard/src/lib/previews-api.ts):
   release?: { head: string; ms: number; before_ms: number | null } | null;
+  rehearsal?: { head: string; by: string; at: number; ok: boolean | null; ms: number | null; error: string | null } | null; // its release on today's data (POST …/rehearse)
   reaches?: "open" | "roll";
   visual_change?: { since: string; percent: number; phone_percent?: number | null } | null;
   phone_screenshot?: boolean;
@@ -2972,9 +2985,9 @@ services' stop, which products' restore points save, the CLI's commands).
 
 1. **More stories per run, in review** (Chromatic has no per-build cap): `github.story_runs`,
    up to 4 containers side by side, 160 stories.
-2. **A migration rehearsed on today's production** (PlanetScale's deploy requests; M): before
-   landing (or asked), branch fresh, run the release again and compare. Its other half, open
-   previews whose schema changes touch the same tables named on each other, in review.
+2. **A migration rehearsed on today's production, in review** (PlanetScale's deploy requests):
+   `POST …/rehearse`, the release once more on fresh, masked branches of the parents. Next:
+   asked by itself when the change is queued to land.
 3. **The feedback button for team-access visitors on roll apps previews** (S, with roll apps:
    `apps-control/src/public.rs` adds it for link and share visitors only).
 4. **This page on main, from the toolbar** (Vercel's deployment switcher; S): main's preview
