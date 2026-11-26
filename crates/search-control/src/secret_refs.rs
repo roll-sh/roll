@@ -57,6 +57,18 @@ pub enum Refused {
     /// It can't be used here at all: not a reference, no project standing for the cluster, no
     /// such key (HTTP 400).
     Invalid(String),
+    /// Not now: a key changed since it was read, or the write would wait for an approval (HTTP
+    /// 409).
+    Conflict(String),
+}
+
+impl Refused {
+    /// Why, whatever the kind.
+    pub fn message(&self) -> &str {
+        match self {
+            Refused::Forbidden(m) | Refused::Invalid(m) | Refused::Conflict(m) => m,
+        }
+    }
 }
 
 /// Where a cluster's admin password goes in roll secrets (`POST …/password` with `secret`): a

@@ -559,6 +559,9 @@ async fn rotate(State(c): State<AppState>, caller: Caller, Path(id): Path<String
         let d = c.rotate_password(&id).await?;
         return Ok(Json(view(&c, &caller, d, true).await?).into_response());
     };
+    // Keeping it where the caller may reveal it is answering it: the same check as the plain
+    // rotation, whether it rotates or stores the current one.
+    answers_credential(&ext, || format!("the admin password of cluster {id}, kept in roll secrets"))?;
     let who = crate::secret_refs::Who::of(&ext);
     let (d, version) = c.store_password(&id, &who, &to, body.rotate.unwrap_or(true)).await?;
     let cluster = view(&c, &caller, d, false).await?;

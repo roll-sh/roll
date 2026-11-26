@@ -1154,6 +1154,36 @@ impl Secrets {
         self.commit_with(project, env, items, &expect, via, &message, b.if_seq, false, caller)
     }
 
+    /// [`Self::batch`]'s checks, applying nothing: what the write would refuse (rights, names,
+    /// references, shared certificates, types, `if_version`s, a protected environment or a folder
+    /// policy that needs a change request), for a caller about to do something it can't take back
+    /// before writing (roll search rotates a cluster's password, then stores it). The write checks
+    /// it all again. Each op's slot's version now (0: none), in order: what its `if_version` would
+    /// be.
+    pub fn check_batch(&self, project: &str, env: &str, b: &Batch, caller: &Caller) -> Result<Vec<i64>> {
+        let path = names::path(b.path.as_deref().unwrap_or("/"))?;
+        caller.need(Action::Write, &Scope::at(project, env, &path))?;
+        names::message(b.message.as_deref().unwrap_or_default())?;
+        let items = items(&path, &b.ops, caller)?;
+        self.check_items(project, env, &items, caller)?;
+        self.check_shared_certs(project, env, &items, b.confirm.as_deref())?;
+        let expect = expectations(&b.ops)?;
+        self.check_types(project, &items)?;
+        self.db.read(|c| {
+            let e = envs::by_slug(c, project, env)?;
+            check_versions(c, &e.id, &items, &expect)?;
+            if e.needs_request() {
+                return Err(Error::Conflict("approval_required", format!("{} is protected: open a change request", e.slug)));
+            }
+            let paths: Vec<&str> = items.iter().map(|i| i.path.as_str()).collect();
+            if let Some(p) = crate::folder_policy::covering(c, &e.id, &paths)?.first() {
+                return Err(Error::Conflict("approval_required", format!("changes to {} in {} need approval: open a change request", p.path, e.slug)));
+            }
+            let now_at = currents(c, &e.id, items.iter())?;
+            Ok(items.iter().map(|i| now_at.get(&i.slot()).map_or(0, |c| c.version)).collect())
+        })
+    }
+
     /// Every key and environment linked to one public certificate gets the same certificate and
     /// private key. Linking one into an environment that isn't protected while a protected one has
     /// it (with its private key), or into a protected one while one that isn't holds its key,

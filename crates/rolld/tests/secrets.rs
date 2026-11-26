@@ -838,6 +838,20 @@ async fn a_search_clusters_password_is_kept_in_roll_secrets_and_shown_to_nobody(
     let again = r.post(&format!("/v1/search/clusters/{id}/password"), keep(false)).await;
     assert!(again["stored"]["version"].as_i64() >= v["stored"]["version"].as_i64(), "{again}");
     assert_eq!(p.value("SEARCH_PASSWORD").await, kept);
+    // A store roll secrets would refuse (a key name it doesn't take) is refused before the
+    // password rotates.
+    let a = r.http.post(format!("{}/v1/search/clusters/{id}/password", r.api)).bearer_auth(TOKEN).json(&json!({ "secret": { "environment": "production", "key": "bad key" } })).send().await.unwrap();
+    assert_eq!(a.status().as_u16(), 400, "{}", a.text().await.unwrap());
+    assert!(logs_in(kept.clone()).await, "a refused store rotated the password");
+    // Administering the cluster without revealing its password doesn't copy it into a secret the
+    // caller may reveal.
+    let rules = json!([
+        { "product": "search", "resources": "*", "actions": { "admin": "allow" } },
+        { "product": "secrets", "resources": "*", "actions": { "read": "allow", "write": "allow", "reveal": "allow" } },
+    ]);
+    let made = r.post("/v1/access/tokens", json!({ "name": "no-reveal", "rules": rules })).await;
+    let a = r.http.post(format!("{}/v1/search/clusters/{id}/password", r.api)).bearer_auth(made["token"].as_str().unwrap()).json(&keep(false)).send().await.unwrap();
+    assert_eq!(a.status().as_u16(), 403, "{}", a.text().await.unwrap());
 }
 
 /// Reach names the roll apps services that read a folder (rolld's `ReachHolders`): one deploying

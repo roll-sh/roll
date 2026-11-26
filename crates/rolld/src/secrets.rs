@@ -2089,9 +2089,11 @@ impl search_control::secret_refs::ResourceSecrets for ForSearch {
     }
 
     /// A cluster's admin password kept in its project (`POST …/password` with `secret`): the
-    /// project whose canvas holds the cluster and stands for it, a write the caller may make there
-    /// directly (an environment with approvals would turn it into a change request, so it's
-    /// refused before anything rotates), and the key's version now.
+    /// project whose canvas holds the cluster and stands for it, and the write checked as the
+    /// caller would make it (roll secrets' `check_batch`: rights, names, guardrails, types, a
+    /// protected environment or a folder policy that would turn it into a change request), so a
+    /// store that would be refused is refused before anything rotates. The key's shared slot's
+    /// version now, which the write is then made at.
     async fn store_target(&self, who: &search_control::secret_refs::Who, holder: &search_control::secret_refs::Holder, to: &search_control::secret_refs::StoreTo) -> Result<search_control::secret_refs::StoreTarget, search_control::secret_refs::Refused> {
         use search_control::secret_refs::Refused;
         let resource = Self::resource(holder);
@@ -2099,26 +2101,19 @@ impl search_control::secret_refs::ResourceSecrets for ForSearch {
         tokio::task::spawn_blocking(move || {
             let caller = secrets.caller_of(who.operator, who.user.as_ref(), who.grant.as_ref()).map_err(|e| Refused::Forbidden(e.to_string()))?;
             let project = secrets.project_for(&resource, to.project.as_deref()).map_err(|e| Refused::Invalid(e.to_string()))?;
-            if !caller.allows(roll_secrets::Action::Write, &roll_secrets::Scope::at(&project, &to.environment, &to.path)) {
-                return Err(Refused::Forbidden(format!("you can't write secrets in {}{} of the cluster's project", to.environment, to.path)));
-            }
-            let env = secrets.environment(&project, &to.environment, &caller).map_err(store_refusal)?;
-            if env.approvals > 0 {
-                return Err(Refused::Invalid(format!("{} takes approvals, so the password would wait in a change request: keep it in an environment without them", to.environment)));
-            }
-            let version = match secrets.secret(&project, &to.environment, &to.path, &to.key, None, &caller) {
-                Ok(s) => s.version,
-                Err(Error::NotFound(_)) => 0,
-                Err(e) => return Err(store_refusal(e)),
-            };
-            Ok(search_control::secret_refs::StoreTarget { project, version })
+            // A stand-in of the password's shape (roll's are 32 letters and digits): the checks
+            // read its references and type, never its value.
+            let batch = store_batch(&to, "x".repeat(32), None);
+            let versions = secrets.check_batch(&project, &to.environment, &batch, &caller).map_err(store_refusal)?;
+            Ok(search_control::secret_refs::StoreTarget { project, version: versions.first().copied().unwrap_or(0) })
         })
         .await
         .map_err(|e| Refused::Invalid(e.to_string()))?
     }
 
-    /// Writes it as the caller (`PUT …/secrets/{key}`'s own call: their rights, protection,
-    /// guardrails and the audit), if the key is still at the version [`Self::store_target`] read.
+    /// Writes it as the caller (`PUT …/secrets/{key}`'s own path: their rights, protection,
+    /// guardrails and the audit), if the key's shared slot is still at the version
+    /// [`Self::store_target`] read.
     async fn store(
         &self,
         who: &search_control::secret_refs::Who,
@@ -2131,29 +2126,31 @@ impl search_control::secret_refs::ResourceSecrets for ForSearch {
         let (secrets, who, to, target) = (self.0.clone(), who.clone(), to.clone(), target.clone());
         tokio::task::spawn_blocking(move || {
             let caller = secrets.caller_of(who.operator, who.user.as_ref(), who.grant.as_ref()).map_err(|e| Refused::Forbidden(e.to_string()))?;
-            let op = roll_secrets::Op::Set {
-                key: to.key.clone(),
-                value: Some(value.expose().to_string()),
-                comment: Some("the search cluster's admin password, kept here by roll search".into()),
-                tags: to.tags.clone(),
-                kind: None,
-                link: None,
-                path: None,
-                expires_at: None,
-                if_version: Some(target.version),
-            };
-            let w = secrets.set_secret_confirmed(&target.project, &to.environment, &to.path, &to.key, op, Some("roll search: a cluster's admin password".into()), None, &caller).map_err(store_refusal)?;
-            // Applied: the key exists, at or past the version checked (the same value again keeps
-            // its version). A change request can't stand in for it: `store_target` refused an
-            // environment that takes approvals.
-            match w.secret.map(|s| s.version) {
-                Some(v) if v >= target.version.max(1) => Ok(v),
-                _ => Err(Refused::Invalid(format!("{}{}{} wasn't written: roll secrets is waiting on a change request", to.environment, to.path, to.key))),
-            }
+            let batch = store_batch(&to, value.expose().to_string(), Some(target.version));
+            drop(value);
+            secrets.batch(&target.project, &to.environment, batch, &caller).map_err(store_refusal)?;
+            let read = secrets.secret(&target.project, &to.environment, &to.path, &to.key, Some(roll_secrets::SecretType::Shared), &caller).map_err(store_refusal)?;
+            Ok(read.version)
         })
         .await
         .map_err(|e| Refused::Invalid(e.to_string()))?
     }
+}
+
+/// The one-key change that keeps a cluster's password (`if_version`: the slot's version read).
+fn store_batch(to: &search_control::secret_refs::StoreTo, value: String, if_version: Option<i64>) -> roll_secrets::Batch {
+    let op = roll_secrets::Op::Set {
+        key: to.key.clone(),
+        value: Some(value),
+        comment: Some("the search cluster's admin password, kept here by roll search".into()),
+        tags: to.tags.clone(),
+        kind: Some(roll_secrets::SecretType::Shared),
+        link: None,
+        path: None,
+        expires_at: None,
+        if_version,
+    };
+    roll_secrets::Batch { path: Some(to.path.clone()), message: Some("roll search: a cluster's admin password".into()), ops: vec![op], if_seq: None, confirm: None }
 }
 
 /// A refusal of roll secrets as search says it: what the caller may not do is 403, the rest 400.
@@ -2161,6 +2158,7 @@ impl search_control::secret_refs::ResourceSecrets for ForSearch {
 fn store_refusal(e: Error) -> search_control::secret_refs::Refused {
     match e {
         Error::Forbidden(m) | Error::Unauthorized(m) => search_control::secret_refs::Refused::Forbidden(m),
+        Error::Conflict(_, m) => search_control::secret_refs::Refused::Conflict(m),
         e => search_control::secret_refs::Refused::Invalid(e.to_string()),
     }
 }

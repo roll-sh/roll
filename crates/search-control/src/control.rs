@@ -1562,6 +1562,7 @@ impl Control {
         let refused = |e: crate::secret_refs::Refused| match e {
             crate::secret_refs::Refused::Forbidden(m) => ControlError::Forbidden(m),
             crate::secret_refs::Refused::Invalid(m) => ControlError::Invalid(m),
+            crate::secret_refs::Refused::Conflict(m) => ControlError::Conflict(m),
         };
         let c = self.get(id).await?;
         if c.parent_id.is_some() {
@@ -1572,11 +1573,19 @@ impl Control {
         let c = if rotate { self.rotate_password(&c.id).await? } else { c };
         let value = crate::secret_refs::Revealed::new(c.password.clone());
         match secrets.store(who, &holder, to, &target, value).await {
-            Ok(version) => Ok((c, version)),
+            Ok(version) => {
+                // Another rotation (a plain one, or a second store) may have landed between this
+                // one and its store: then the secret holds a password that no longer works.
+                if self.get(&c.id).await?.password != c.password {
+                    return Err(ControlError::Conflict(format!(
+                        "{}'s password was rotated again while it was being stored: store it again without rotating (\"rotate\": false)",
+                        c.name
+                    )));
+                }
+                Ok((c, version))
+            }
             Err(e) if rotate => {
-                let why = match e {
-                    crate::secret_refs::Refused::Forbidden(m) | crate::secret_refs::Refused::Invalid(m) => m,
-                };
+                let why = e.message().to_string();
                 Err(ControlError::Conflict(format!(
                     "{}'s password was rotated, but storing it in roll secrets failed: {why}. Store it again without rotating: the same request with \"rotate\": false",
                     c.name
@@ -2163,6 +2172,7 @@ impl Control {
                 let by = secrets.may_write(who, &holder, r).await.map_err(|e| match e {
                     crate::secret_refs::Refused::Forbidden(m) => ControlError::Forbidden(format!("{r}: {m}")),
                     crate::secret_refs::Refused::Invalid(m) => ControlError::Invalid(format!("{r}: {m}")),
+                    crate::secret_refs::Refused::Conflict(m) => ControlError::Conflict(format!("{r}: {m}")),
                 })?;
                 maker = Some(by);
             }
