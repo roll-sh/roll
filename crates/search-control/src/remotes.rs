@@ -79,7 +79,8 @@ fn is_os_link(key_id: &str) -> bool {
 
 /// An OpenSearch-flavor link's ceiling, the one role of its user on the target, from the link's
 /// `access` (`{"search": [{"names": [...]}]}`, every non-hidden index when unset): reading and the
-/// shard lookups a scroll's part asks for, on those names only; no cluster or security
+/// shard lookups a scroll's part asks for, on those names only, and the read-only composite
+/// requests; no other cluster or security
 /// permission.
 fn os_ceiling(access: Option<&Value>, local: &str) -> Result<Value> {
     let bad = || ControlError::Invalid("access: an OpenSearch-flavor link takes {\"search\": [{\"names\": [...]}]}: index names or patterns, none hidden".into());
@@ -99,6 +100,9 @@ fn os_ceiling(access: Option<&Value>, local: &str) -> Result<Value> {
     }
     Ok(json!({
         "description": format!("roll: remote cluster link from {local}"),
+        // The read-only composite requests (`_msearch`, scrolls), whose items are then checked
+        // on their indices.
+        "cluster_permissions": ["cluster_composite_ops_ro"],
         "index_permissions": [{ "index_patterns": names, "allowed_actions": ["read", "indices:admin/shards/search_shards"] }],
     }))
 }

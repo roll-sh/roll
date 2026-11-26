@@ -124,7 +124,10 @@ fn protected(v: &Value, name: &str) -> Option<Reply> {
 /// endpoints without such a permission (`None`) only open to the first two).
 fn access(ctx: &Ctx, endpoint: Option<&str>) -> Option<Reply> {
     let p = principal(ctx);
-    if p.os().is_some_and(|id| id.owner) || p.roles.iter().any(|r| r == "all_access" || r == "security_rest_api_access") {
+    // A linked cluster's user never configures this one, whatever it's mapped to here: the
+    // link's ceiling has no security permission.
+    let linked = p.os().is_some_and(|id| id.link_ceiling.is_some());
+    if !linked && (p.os().is_some_and(|id| id.owner) || p.roles.iter().any(|r| r == "all_access" || r == "security_rest_api_access")) {
         return None;
     }
     let refused = || {

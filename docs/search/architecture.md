@@ -537,7 +537,8 @@ tenants don't hold, with a credential per link:
   own. That role is the link's ceiling: the link's `access` patterns (`search` names, default
   `*`, hidden and system indices left out as `cross_cluster` keys leave them) with `read` and
   `indices:admin/shards/search_shards` (a scroll, which doesn't minimize round trips, asks the
-  remote for it), and no cluster or security permission. The password is
+  remote for it), the read-only composite requests (`cluster_composite_ops_ro`: `_msearch`,
+  scrolls, their items checked on their indices), and no other cluster or security permission. The password is
   sealed in the local cluster's `search_remotes` row and bound to that row (cluster, alias,
   target), as a key is now. It's never returned or logged.
 - *A link user signs nothing in on its own*: its attributes name the local cluster's id
