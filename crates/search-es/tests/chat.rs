@@ -40,13 +40,8 @@ fn answer(path: &str, body: &Value) -> (u16, String, String) {
     (404, "application/json".into(), r#"{"error":{"message":"no such path"}}"#.into())
 }
 
-/// A one-request-per-connection HTTP/1.1 mock on a free loopback port, whose model answers
-/// [`ANSWER`].
-async fn mock() -> (String, Seen) {
-    mock_answering(&ANSWER).await
-}
-
-/// [`mock`] whose model answers `chunks`, one event each.
+/// A one-request-per-connection HTTP/1.1 mock on a free loopback port whose model answers
+/// `chunks`, one event each.
 async fn mock_answering(chunks: &[&str]) -> (String, Seen) {
     let chunks: Arc<Vec<String>> = Arc::new(chunks.iter().map(|c| c.to_string()).collect());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
