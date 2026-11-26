@@ -1353,8 +1353,10 @@ const MAX_INTERVAL: Duration = Duration::from_millis(60000);
 /// idle-stats-update timeout).
 #[derive(Clone, Debug, Default)]
 pub struct Unflushed {
-    pub tabs: HashMap<u32, TabCounts>,
-    pub funcs: HashMap<u32, FuncCounts>,
+    /// (Added to by every transaction's report: hashed without SipHash. Only summed into
+    /// the shared entries, in no order anything shows.)
+    pub tabs: super::fasthash::HashMap<u32, TabCounts>,
+    pub funcs: super::fasthash::HashMap<u32, FuncCounts>,
     sessions: i64,
     parallel_workers: (i64, i64),
     /// Temporary files removed and their bytes.
@@ -1685,11 +1687,13 @@ fn end_xact_counts(
 ) {
     flush_io(sess);
     let wal = xact.wal_records;
-    let counts = xact.end_xact(commit);
     {
         let mut p = sess.pgstat.borrow_mut();
-        for (rel, c) in counts {
-            add_pending(p.tab(rel), &c);
+        // (A transaction that changed no rows has no counts: no list of them made and copied.)
+        if !xact.levels.is_empty() || !xact.done.is_empty() {
+            for (rel, c) in xact.end_xact(commit) {
+                add_pending(p.tab(rel), &c);
+            }
         }
         match (count_xact, commit) {
             (false, _) => {}
