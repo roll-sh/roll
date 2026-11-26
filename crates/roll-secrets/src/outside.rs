@@ -15,6 +15,7 @@
 //! is the tenant's: rolld connects only to public addresses it resolved itself ([`OutsideDb`]).
 
 use crate::access::{Action, Caller, Scope};
+use crate::caller::{Registration, replace_registration_credential};
 use crate::crypto::Keyring;
 use crate::links::{Field, Issued, Link, LinkProvider, Mode};
 use crate::{Error, Result, Secrets, Value, audit, names};
@@ -412,7 +413,7 @@ impl Secrets {
         let id = names::new_id("odb", 16);
         let sealed = dek.seal(&aad(project, &id), &Value::new(n.url.clone()));
         let now = self.db.now_ms()?;
-        let d = OutsideDatabase { id: id.clone(), name: n.name, host, roles: n.roles, group, ca, gateway, created_at: now, created_by: caller.made_by().to_string() };
+        let d = OutsideDatabase { id: id.clone(), name: n.name, host, roles: n.roles, group, ca, gateway, created_at: now, created_by: self.maker_of(caller)? };
         self.db.write(|c| {
             if let Some(g) = &d.gateway
                 && c.query_row("SELECT 1 FROM gateways WHERE id = ? AND project_id = ?", [g, project], |_| Ok(())).optional()?.is_none()
@@ -462,6 +463,7 @@ impl Secrets {
             Some(c) => check_ca(Some(c))?,
             None => d.ca.clone(),
         };
+        let replacer = ch.url.as_ref().map(|_| self.replacer(caller)).transpose()?;
         let url = match ch.url.as_deref().map(str::trim) {
             Some(u) => {
                 let host = check_url(u)?;
@@ -481,6 +483,7 @@ impl Secrets {
         let mut changed: Vec<&str> = vec![];
         self.db.write(|c| {
             changed.clear();
+            let mut moved_maker = String::new();
             if let Some(n) = ch.name.as_ref().filter(|n| **n != d.name) {
                 if c.query_row("SELECT 1 FROM outside_dbs WHERE project_id = ? AND name = ?", [project, n.as_str()], |_| Ok(())).optional()?.is_some() {
                     return Err(Error::Conflict("exists", format!("a database named {n} exists")));
@@ -492,7 +495,7 @@ impl Secrets {
                 c.execute("UPDATE outside_dbs SET ca = ? WHERE id = ?", params![ca, id])?;
                 changed.push("CA");
             }
-            if let Some((host, sealed, moved)) = &url {
+            if let (Some((host, sealed, moved)), Some(by)) = (&url, &replacer) {
                 // A rotation in flight may still change the server's password: not under it.
                 if c.query_row("SELECT url_next IS NOT NULL FROM outside_dbs WHERE id = ?", [id], |r| r.get::<_, bool>(0))? {
                     return Err(Error::Conflict("conflict", format!("{} is being rotated: set its URL once that's done", d.name)));
@@ -502,11 +505,13 @@ impl Secrets {
                 if *moved && in_use(c, project, id)? > 0 {
                     return Err(Error::Conflict("in_use", format!("{} moves to another server only once no key links to it and no lease is live: its logins are on {}", d.name, d.host)));
                 }
-                c.execute("UPDATE outside_dbs SET url = ?, host = ? WHERE id = ?", params![sealed, host, id])?;
+                // A new admin URL is the registration made anew: it acts as its replacer from now on.
+                c.execute("UPDATE outside_dbs SET host = ? WHERE id = ?", params![host, id])?;
+                moved_maker = replace_registration_credential(c, Registration::OutsideUrl, id, sealed, by)?;
                 changed.push("admin URL");
             }
             if !changed.is_empty() {
-                audit::record(c, self.keys()?, project, caller, "outside_db.update", None, None, &[], &format!("changed database {}'s {}", d.name, changed.join(", ")), now)?;
+                audit::record(c, self.keys()?, project, caller, "outside_db.update", None, None, &[], &format!("changed database {}'s {}{moved_maker}", d.name, changed.join(", ")), now)?;
             }
             Ok(())
         })?;

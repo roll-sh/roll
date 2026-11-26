@@ -728,18 +728,26 @@ unit's `Environment=` (and `roll run`'s, and every `roll secrets` command's: the
      (`POST /v1/secrets/login/refresh {identity, credential}`): a new one is made, the old one is
      spent, and the file is written whole (a temporary file renamed over it). Replacing and logging
      in hold a lock on the file, so the agent and a `roll run` on one machine never present a spent
-     one. A replacement that gets no answer leaves the current credential in use while it lasts.
+     one. A replacement (or the first exchange) that gets no answer is asked again a few times;
+     still unanswered, the CLI doesn't log in with the old credential (rolld may have spent it and
+     lost the answer) and fails, and the next run within two minutes retries it.
 
   **A spent token or credential presented again revokes the machine.** A second exchange of the
   bootstrap token, or a replaced credential used again, is a 401, and every credential of that
   machine and every token its logins got is revoked at once: whoever copied it, the thief or the
-  machine, the next use of the copy ends both. The machine then needs a new bootstrap token. The
+  machine, the next use of the copy ends both. The machine then needs a new bootstrap token. One
+  exception is for an answer that was lost: the same exchange retried once within two minutes,
+  while the credential it made is still unused, gets a new credential, and the unanswered one is
+  spent instead (a third try, or the unanswered one used, ends the machine as above). The
   same token left in the environment isn't exchanged again (the file remembers its SHA-256); a new
   one there is, and replaces the file. A credential that wasn't replaced before it ended (the
   machine was off longer than `credential_hours`) needs a new bootstrap token too. The audit log has
   `identity.bootstrap`, `identity.bootstrap.exchange`, `identity.machine.refresh` and
   `identity.machine.reused`; deleting, disabling or cutting off the identity revokes all its
-  machines. The bootstrap tokens and credentials are roll-access grants (docs/permissions.md,
+  machines. An identity has at most 1,000 bootstrap tokens (one per machine; delete it and make it
+  again past that), and a project makes at most 60 a minute. Its machines' credentials don't count
+  toward the workload token caps that every project's logins share (docs/permissions.md); their
+  logins' tokens do, as any identity's. The bootstrap tokens and credentials are roll-access grants (docs/permissions.md,
   "Bootstrap tokens and machine credentials"), looked up on every use, and open nothing but these
   logins.
 
@@ -6996,7 +7004,7 @@ isn't in the workspace is 404.
 | `GET /outside-databases` | | `OutsideDatabase[]` (`read` on the project; never the URL) |
 | `POST /outside-databases` | `{name, url, roles?: [a, b], group?, ca?, gateway?}` | 201 `OutsideDatabase` (`admin`; connects and checks the roles first: 400 with the server's reason) |
 | `DELETE /outside-databases/{id}` | | 204; 409 while a key links to it or a retired password waits (`admin`) |
-| `PATCH /outside-databases/{id}` | `{name?, url?, ca?}` (`ca: ""` clears it) | `OutsideDatabase` (`admin`; a new URL is checked first: 400 with the server's reason) |
+| `PATCH /outside-databases/{id}` | `{name?, url?, ca?}` (`ca: ""` clears it) | `OutsideDatabase` (`admin`; a new URL is checked first: 400 with the server's reason; a new URL makes the caller the registration's `created_by`, as a SaaS credential does, and the audit row names both (a workload identity's login is a 400); a name or CA change keeps the maker) |
 | `POST /outside-databases/{id}/rotate-admin` | | `OutsideDatabase` (`admin`; 400 when the server refuses, 409 while another rotation runs, 502 when the new password was kept but doesn't log in) |
 | `GET /directories` | | `Directory[]` (`read` on the project; never the bind password) |
 | `POST /directories` | `{name, url, bind_dn, bind_password, flavor: "openldap" \| "active_directory", user_base_dn?, managed_accounts?: [dn, dn?], groups?: [dn], ca?, gateway?}` | 201 `Directory` (`admin`; binds once and finds the accounts, groups and base first: 400 with the server's reason) |

@@ -3780,6 +3780,32 @@ async fn a_saas_credential_replacement_moves_the_maker_to_whoever_replaced_it() 
     assert_eq!(api.values("production", "/").await["values"]["GITLAB_TOKEN"], issued, "the old value stands");
 }
 
+/// The 40th review's item 10: a new admin URL for a database outside roll (it carries the admin
+/// password) moves the registration to whoever set it, as a SaaS credential does.
+#[tokio::test]
+async fn an_outside_databases_new_admin_url_moves_the_maker_to_whoever_set_it() {
+    let api = Api::new().await;
+    let p = api.project.clone();
+    for (handle, email) in [("cat", "cat@example.com"), ("bob", "bob@example.com")] {
+        let (_, inv) = api.call(Method::POST, &format!("/v1/workspace/projects/{p}/invites"), Some(json!({ "email": email, "role": "admin" }))).await;
+        let token = inv["url"].as_str().unwrap().split("token=").nth(1).unwrap().to_string();
+        assert_eq!(api.signed_in(handle, false, Method::POST, &format!("/v1/workspace/invites/{token}/accept"), None).await.0, StatusCode::OK);
+    }
+    let new = json!({ "name": "billing", "url": "postgres://admin:hunter2@db.example:5432/app", "roles": ["app_blue", "app_green"] });
+    let (s, d) = api.signed_in("cat", false, Method::POST, &format!("/v1/secrets/projects/{p}/outside-databases"), Some(new)).await;
+    assert!(s == StatusCode::CREATED && d["created_by"] == "usr_cat", "{s} {d}");
+    api.ok(Method::PUT, "/environments/production/secrets/DB_PASSWORD", Some(json!({ "link": { "kind": "outside_database", "ref": d["id"], "field": "password", "mode": "managed" } }))).await;
+    let at = format!("/v1/secrets/projects/{p}/outside-databases/{}", d["id"].as_str().unwrap());
+    let (s, b) = api.signed_in("bob", false, Method::PATCH, &at, Some(json!({ "url": "postgres://admin:hunter2@db.example:5432/app?sslmode=require" }))).await;
+    assert!(s.is_success() && b["created_by"] == "usr_bob", "{s} {b}");
+    let audit = api.ok(Method::GET, "/audit", None).await.to_string();
+    assert!(audit.contains("maker moved from usr_cat to usr_bob") && !audit.contains("hunter2"), "{audit}");
+    // Bob leaves: the URL he set stops acting through roll at once, though Cat is still an admin.
+    assert_eq!(api.call(Method::DELETE, &format!("/v1/workspace/projects/{p}/members/usr_bob"), None).await.0, StatusCode::NO_CONTENT);
+    let (s, e) = api.call(Method::POST, "/environments/production/secrets/DB_PASSWORD/rotate", None).await;
+    assert!(!s.is_success() && e.to_string().contains("usr_bob"), "{s} {e}");
+}
+
 #[tokio::test]
 async fn openai_service_account_keys_rotate_and_a_leaked_one_is_revoked_at_once() {
     let api = Api::new().await;

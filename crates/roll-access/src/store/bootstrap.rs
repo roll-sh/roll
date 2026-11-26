@@ -12,6 +12,15 @@
 //! as `revoked_why = 'spent'` until it would have ended. Presenting one again means a copy exists
 //! somewhere: the whole chain is revoked, so a stolen credential dies with the machine's own as
 //! soon as either side uses a spent one.
+//!
+//! One exception, for an answer that was lost (a timeout after the commit, a proxy's 502, rolld
+//! restarting mid-answer): exchanged again once within [`RETRY_GRACE_MS`], while the credential it
+//! was spent for is still unused, a spent secret gets a new credential, and the unanswered one
+//! becomes a spent secret itself. So whichever side didn't get the newest one ends the chain as
+//! soon as it uses what it holds, and a third exchange of the same secret ends it at once.
+//!
+//! These grants don't count toward [`super::MAX_WORKLOADS`] or [`super::OWNER_MAX_WORKLOADS`]
+//! (they open nothing, and live as long as their machine): roll secrets caps them per identity.
 
 use super::{Store, parse_ip_allow};
 use crate::{Error, Result, hash, new_id, new_secret};
@@ -25,6 +34,11 @@ pub const BOOTSTRAP_MINUTES: std::ops::RangeInclusive<u32> = 1..=60;
 pub const MACHINE_HOURS: std::ops::RangeInclusive<u32> = 1..=720;
 /// Why a spent secret's grant ended: presenting it again revokes its chain.
 const SPENT: &str = "spent";
+/// A spent secret exchanged again within the grace, or the credential that exchange replaced
+/// unanswered: presenting either again revokes its chain, with no second grace.
+const RETRIED: &str = "spent, retried";
+/// How long after a spent secret's exchange it may be exchanged once more, its answer lost.
+pub const RETRY_GRACE_MS: i64 = 2 * 60 * 1000;
 
 /// Which of the two a presented secret must be.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -54,6 +68,8 @@ pub struct Issued {
     pub secret: String,
     pub issued_at: i64,
     pub expires_at: i64,
+    /// It answers a retried exchange (its first answer lost): the one that went unanswered is spent.
+    pub retried: bool,
 }
 
 /// What presenting a chain's secret came to (a refusal is an `Err`).
@@ -80,9 +96,19 @@ struct Found {
     name: String,
 }
 
+/// What a presented chain secret is, inside a write.
+enum Shown {
+    Live(Found),
+    /// Spent within [`RETRY_GRACE_MS`] and not exchanged again yet: when (its `revoked_at`).
+    Spent(Found, i64),
+    /// It was spent already: the chain is revoked now.
+    Reused(String),
+}
+
 impl Store {
     /// A bootstrap token for `minutes`, from `ip_allow` only (empty: anywhere), owned as a workload
-    /// grant is (`created_by`, `user`). Its id is the chain every credential from it carries.
+    /// grant is (`created_by`, `user`). Its id is the chain every credential from it carries. Not
+    /// counted toward the workload caps: its caller caps chains (roll secrets: per identity).
     pub fn create_bootstrap(&self, name: &str, minutes: u32, ip_allow: &[String], created_by: &str, user: Option<&str>) -> Result<Issued> {
         super::check_name(name)?;
         parse_ip_allow(ip_allow)?;
@@ -93,15 +119,8 @@ impl Store {
         let until = now + i64::from(minutes) * 60_000;
         let (id, secret) = (new_id("tok"), new_secret(BOOTSTRAP_PREFIX));
         let ip = serde_json::to_string(ip_allow).map_err(|e| Error::Internal(e.to_string()))?;
-        self.db.write(|c| {
-            let live: i64 = c.query_row("SELECT COUNT(*) FROM grants WHERE kind = 'workload' AND revoked_at IS NULL AND expires_at > ?", [now], |r| r.get(0))?;
-            if live as usize >= super::MAX_WORKLOADS {
-                return Err(Error::Conflict(format!("at most {} live workload tokens", super::MAX_WORKLOADS)));
-            }
-            insert(c, &id, name.trim(), until, &ip, created_by, user, &id, now, &secret, ChainSecret::Bootstrap)?;
-            Ok::<_, Error>(())
-        })?;
-        Ok(Issued { chain: id.clone(), grant: id, secret, issued_at: now, expires_at: until })
+        self.db.write(|c| insert(c, &id, name.trim(), until, &ip, created_by, user, &id, now, &secret, ChainSecret::Bootstrap))?;
+        Ok(Issued { chain: id.clone(), grant: id, secret, issued_at: now, expires_at: until, retried: false })
     }
 
     /// The chain a bootstrap token or machine credential belongs to, live or not (`None`: it isn't
@@ -116,7 +135,7 @@ impl Store {
 
     /// Spend a live `from` (a bootstrap token, or a machine credential that's being replaced) for a
     /// new machine credential of `hours`, bound to the same addresses. One that was spent already
-    /// revokes its chain.
+    /// revokes its chain, unless it's a retry of an exchange whose answer was lost (module docs).
     pub fn redeem(&self, secret: &str, from: ChainSecret, ip: Option<std::net::IpAddr>, hours: u32) -> Result<Presented<Issued>> {
         if !MACHINE_HOURS.contains(&hours) {
             return Err(Error::BadRequest(format!("a machine credential lives {} to {} hours", MACHINE_HOURS.start(), MACHINE_HOURS.end())));
@@ -125,28 +144,51 @@ impl Store {
         let until = now + i64::from(hours) * 3_600_000;
         let (id, next) = (new_id("tok"), new_secret(MACHINE_PREFIX));
         self.db.write(|c| {
-            let f = match present(c, secret, from, ip, now)? {
-                Presented::Live(f) => f,
-                Presented::Reused { chain } => return Ok(Presented::Reused { chain }),
+            let (f, retried) = match present(c, secret, from, ip, now)? {
+                Shown::Live(f) => {
+                    // Spent once: a request that raced this one to the same secret finds it spent.
+                    if c.execute("UPDATE grants SET revoked_at = ?, revoked_why = ? WHERE id = ? AND revoked_at IS NULL", params![now, SPENT, f.grant])? == 0 {
+                        revoke_chain(c, &f.chain, now)?;
+                        return Ok(Presented::Reused { chain: f.chain });
+                    }
+                    (f, false)
+                }
+                // The credential it was spent for (made in that write, at its `revoked_at`) still
+                // unused: its answer was lost. That one is spent now, and so is this, for good.
+                Shown::Spent(f, at) => {
+                    let unanswered = c.execute(
+                        "UPDATE grants SET revoked_at = ?, revoked_why = ? WHERE chain = ? AND rules = '[]' AND created_at = ? AND revoked_at IS NULL AND last_used_at IS NULL AND id <> ?",
+                        params![now, RETRIED, f.chain, at, f.grant],
+                    )?;
+                    if unanswered != 1 || c.execute("UPDATE grants SET revoked_why = ? WHERE id = ? AND revoked_why = ?", params![RETRIED, f.grant, SPENT])? != 1 {
+                        revoke_chain(c, &f.chain, now)?;
+                        return Ok(Presented::Reused { chain: f.chain });
+                    }
+                    (f, true)
+                }
+                Shown::Reused(chain) => return Ok(Presented::Reused { chain }),
             };
-            // Spent once: a request that raced this one to the same secret finds it spent.
-            if c.execute("UPDATE grants SET revoked_at = ?, revoked_why = ? WHERE id = ? AND revoked_at IS NULL", params![now, SPENT, f.grant])? == 0 {
-                revoke_chain(c, &f.chain, now)?;
-                return Ok(Presented::Reused { chain: f.chain });
-            }
             insert(c, &id, &f.name, until, &f.ip_allow, &f.created_by, f.user.as_deref(), &f.chain, now, &next, ChainSecret::Machine)?;
-            Ok::<_, Error>(Presented::Live(Issued { chain: f.chain.clone(), grant: id.clone(), secret: next.clone(), issued_at: now, expires_at: until }))
+            Ok::<_, Error>(Presented::Live(Issued { chain: f.chain.clone(), grant: id.clone(), secret: next.clone(), issued_at: now, expires_at: until, retried }))
         })
     }
 
-    /// A live machine credential, presented to log its machine in (nothing is spent). One that was
-    /// spent already revokes its chain.
+    /// A live machine credential, presented to log its machine in (nothing is spent, but it's
+    /// marked used: an exchange that made it can't be retried any more). One that was spent
+    /// already revokes its chain, within the retry grace too.
     pub fn machine(&self, secret: &str, ip: Option<std::net::IpAddr>) -> Result<Presented<Machine>> {
         let now = code_sql::now_ms();
         self.db.write(|c| {
             Ok::<_, Error>(match present(c, secret, ChainSecret::Machine, ip, now)? {
-                Presented::Live(f) => Presented::Live(Machine { grant: f.grant, chain: f.chain }),
-                Presented::Reused { chain } => Presented::Reused { chain },
+                Shown::Live(f) => {
+                    c.execute("UPDATE grants SET last_used_at = ? WHERE id = ? AND last_used_at IS NULL", params![now, f.grant])?;
+                    Presented::Live(Machine { grant: f.grant, chain: f.chain })
+                }
+                Shown::Spent(f, _) => {
+                    revoke_chain(c, &f.chain, now)?;
+                    Presented::Reused { chain: f.chain }
+                }
+                Shown::Reused(chain) => Presented::Reused { chain },
             })
         })
     }
@@ -171,8 +213,9 @@ fn insert(c: &code_sql::Conn<'_>, id: &str, name: &str, until: i64, ip: &str, cr
 }
 
 /// The live grant `secret` opens as a `want`, inside a write; a spent one revokes its chain
-/// (committed: `Reused` isn't an error). Refusals change nothing.
-fn present(c: &code_sql::Conn<'_>, secret: &str, want: ChainSecret, ip: Option<std::net::IpAddr>, now: i64) -> Result<Presented<Found>> {
+/// (committed: `Reused` isn't an error), unless it's within its retry grace (`Spent`: the caller
+/// decides). Refusals change nothing.
+fn present(c: &code_sql::Conn<'_>, secret: &str, want: ChainSecret, ip: Option<std::net::IpAddr>, now: i64) -> Result<Shown> {
     type Row = (String, Option<String>, String, Option<i64>, Option<String>, Option<i64>, String, String, Option<String>, String);
     let row: Option<Row> = c
         .query_row(
@@ -184,12 +227,17 @@ fn present(c: &code_sql::Conn<'_>, secret: &str, want: ChainSecret, ip: Option<s
     let unknown = || Error::Unauthorized(format!("that isn't a live {}", ChainSecret::named(want.kind())));
     let Some((grant, chain, kind, revoked_at, why, expires_at, ip_allow, created_by, user, name)) = row else { return Err(unknown()) };
     let Some(chain) = chain.filter(|_| kind == "bootstrap" || kind == "machine") else { return Err(unknown()) };
-    if revoked_at.is_some() {
-        if why.as_deref() == Some(SPENT) {
-            revoke_chain(c, &chain, now)?;
-            return Ok(Presented::Reused { chain });
+    // Spent within its grace, not retried yet: checked as a live one is before the caller decides.
+    let mut spent_at = None;
+    if let Some(at) = revoked_at {
+        match why.as_deref() {
+            Some(SPENT) if now - at < RETRY_GRACE_MS => spent_at = Some(at),
+            Some(SPENT | RETRIED) => {
+                revoke_chain(c, &chain, now)?;
+                return Ok(Shown::Reused(chain));
+            }
+            _ => return Err(Error::Unauthorized(format!("this {} was revoked", ChainSecret::named(&kind)))),
         }
-        return Err(Error::Unauthorized(format!("this {} was revoked", ChainSecret::named(&kind))));
     }
     if kind != want.kind() {
         return Err(unknown());
@@ -204,7 +252,11 @@ fn present(c: &code_sql::Conn<'_>, secret: &str, want: ChainSecret, ip: Option<s
     if !nets.is_empty() && !ip.is_some_and(|ip| nets.iter().any(|n| n.contains(&ip))) {
         return Err(Error::Forbidden(format!("this {} doesn't work from this address", ChainSecret::named(&kind))));
     }
-    Ok(Presented::Live(Found { grant, chain, ip_allow, created_by, user, name }))
+    let found = Found { grant, chain, ip_allow, created_by, user, name };
+    Ok(match spent_at {
+        Some(at) => Shown::Spent(found, at),
+        None => Shown::Live(found),
+    })
 }
 
 /// Every live grant of `chain` ended, inside a write: a spent secret came back.
