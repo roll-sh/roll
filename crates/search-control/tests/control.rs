@@ -5050,6 +5050,7 @@ async fn opensearch_flavor_clusters_link_with_the_remotes_own_mappings() {
     let loopback = |alias: &str, address: String| json!({"persistent": {format!("cluster.remote.{alias}.mode"): "proxy", format!("cluster.remote.{alias}.proxy_address"): address}});
     assert_eq!(es_as(&e, &near, Method::PUT, "/_cluster/settings", Some(loopback("loop", transport("os-near").await))).await.0, 200);
     assert_eq!(es_as(&e, &near, Method::PUT, "/secret-near/_doc/1?refresh=true", Some(json!({"x": 1}))).await.0, 201);
+    assert_eq!(es_as(&e, &near, Method::PUT, "/other-near/_doc/1?refresh=true", Some(json!({"x": 2}))).await.0, 201);
     assert!(es_as(&e, &near, Method::PUT, &format!("{api}/internalusers/nobody"), Some(json!({"password": "Zq7-Mountain-River-88"}))).await.0 < 300);
     for p in ["/loop:*/_search", "/loop:secret*/_count", "/loop:*/_field_caps?fields=x", "/_cat/indices/loop:*"] {
         let (s, v) = e.es("nobody@os-near", "Zq7-Mountain-River-88", Method::GET, p, None).await;
