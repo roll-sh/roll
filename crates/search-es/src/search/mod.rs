@@ -1992,18 +1992,16 @@ fn request_cache_key(req: &SearchRequest, t: &Target) -> String {
     // (`MappingLookup.cacheKey()`): an update to either busts the entries.
     let fls = t.security.as_ref().and_then(|s| s.fields(crate::xpack::security::dls::READ, &t.idx.name));
     let mut k = format!("{:?}|{:?}|{:?}|{}|{}.{}", req.source, t.filter, fls, req.typed_keys, t.idx.mapping_version, t.idx.settings_version);
-    // Terms lookups read other indices: key on every refresh anywhere.
-    if k.contains("Some(TermsLookup") {
+    if reads_other_documents(req, t) {
+        // What it read lives in other indices: key on every refresh anywhere.
         k.push_str(&format!("|{}", crate::engine::refresh_epoch()));
-    }
-    // A lookup is authorized as its reader where it runs, which a hit skips: an answer that read
-    // other documents is the reader's own (by who it is and what its roles grant now), as
-    // Elasticsearch keys the query its lookups were rewritten into as that user. Superusers
-    // (no reader restrictions at all) share theirs.
-    if let Some(s) = &t.security
-        && reads_other_documents(req, t)
-    {
-        k.push_str(&format!("|reader:{:x}", s.cache_identity()));
+        // A lookup is authorized as its reader where it runs, which a hit skips: an answer that
+        // read other documents is the reader's own (by who it is and what its roles grant now),
+        // as Elasticsearch keys the query its lookups were rewritten into as that user.
+        // Superusers (no reader restrictions at all) share theirs.
+        if let Some(s) = &t.security {
+            k.push_str(&format!("|reader:{}", s.cache_identity()));
+        }
     }
     k
 }
