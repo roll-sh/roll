@@ -871,6 +871,15 @@ until_head() { # until_head <change head>: the preview is for it
   done
   echo "the preview should follow the change to $1"; api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d[:8]]"; exit 1
 }
+# Settled first: the new rule may redeploy the head it runs, and a push in the middle of that
+# deploy leaves nothing to keep (the push before never finished deploying).
+SETTLED=""
+for _ in $(seq 1 120); do
+  ONE=$(api GET "/v1/previews/$PV" | jq_ "(d['state'], d['updated_at'])")
+  sleep 3
+  [ "$ONE" = "$(api GET "/v1/previews/$PV" | jq_ "(d['state'], d['updated_at'])")" ] && case "$ONE" in "('ready',"*|"('sleeping',"*) SETTLED=yes; break;; esac
+done
+[ -n "$SETTLED" ] || { echo "the preview should settle after the ignore_paths rule: $ONE"; exit 1; }
 BUILD=$(api GET "/v1/previews/$PV" | jq_ "d['head']")
 api POST "/v1/code/changes/$CHG/revise" '{"base":"main","message":"Docs","files":{"index.html":{"content":"preview of change 1, again"},"docs/setup.md":{"content":"how to run it"},'"$OPENAPI_CHG"'}}' >/dev/null
 DOCS_HEAD=$(api GET "/v1/code/changes/$CHG" | jq_ "d['head']")
