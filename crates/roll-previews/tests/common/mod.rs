@@ -779,6 +779,7 @@ pub fn change(id: &str, n: i64) -> ChangeInfo {
         branch: Some(format!("feat/{n}")),
         head: format!("cs_{n}a"),
         open: true,
+        queued: false,
         draft: false,
         labels: Vec::new(),
         trusted: true,

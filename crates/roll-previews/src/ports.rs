@@ -234,6 +234,8 @@ pub struct ChangeInfo {
     pub branch: Option<String>,
     pub head: String,
     pub open: bool,
+    /// In roll code's merge queue, waiting to land (`queued`).
+    pub queued: bool,
     pub draft: bool,
     /// Its labels (`preview` asks for one, `no-preview` skips it, as the title words do).
     pub labels: Vec<String>,

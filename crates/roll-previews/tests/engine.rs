@@ -438,6 +438,31 @@ async fn a_rehearsal_runs_the_release_on_a_fresh_masked_branch_then_drops_it() {
     assert_eq!(e.apps.seeds.lock().len(), ran + 1);
 }
 
+/// With `rehearse_when_queued`, a change queued to land has its release rehearsed on today's data
+/// by roll, once at that head; without it, nothing is asked.
+#[tokio::test]
+async fn a_change_queued_to_land_is_rehearsed_where_the_project_asks() {
+    let e = env(json!({ "enabled": true, "release": { "image": "node:22", "run": "npm run migrate" }, "rehearse_when_queued": true }));
+    e.code.open(ChangeInfo { queued: true, ..change("chg_rq", 1) });
+    e.code.open(change("chg_rn", 3));
+    e.engine.pass().await.unwrap();
+    let open = e.engine.store.row_by_change("chg_rn").unwrap().unwrap();
+    assert!(e.engine.store.preview(&open.id).unwrap().rehearsal.is_none(), "an open change that isn't queued isn't rehearsed");
+    let p = e.engine.store.row_by_change("chg_rq").unwrap().unwrap();
+    let r = e.engine.store.preview(&p.id).unwrap().rehearsal.expect("rehearsed");
+    assert_eq!((r.by.as_str(), r.ok), ("roll", Some(true)));
+    let ran = e.apps.seeds.lock().len();
+    e.engine.store.update(&p.id, |x| x.next_at = 0).unwrap();
+    e.engine.pass().await.unwrap();
+    assert_eq!(e.apps.seeds.lock().len(), ran, "once at that head");
+    // Not queued, or not asked for: none.
+    let quiet = env(json!({ "enabled": true, "release": { "image": "node:22", "run": "npm run migrate" } }));
+    quiet.code.open(ChangeInfo { queued: true, ..change("chg_rq2", 2) });
+    quiet.engine.pass().await.unwrap();
+    let q = quiet.engine.store.row_by_change("chg_rq2").unwrap().unwrap();
+    assert!(quiet.engine.store.preview(&q.id).unwrap().rehearsal.is_none());
+}
+
 /// A visual change refused (Chromatic's Deny): the review fails at that head, the change is told at
 /// once, an accept of the pages clears it, and a new head asks again.
 #[tokio::test]
