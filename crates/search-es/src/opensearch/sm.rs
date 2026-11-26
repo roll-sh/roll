@@ -240,7 +240,8 @@ fn body_of(ctx: &Ctx) -> EsResult<Map> {
             }
         }
         let reason = format!("{}\n at [Source: REDACTED (`StreamReadFeature.INCLUDE_SOURCE_IN_LOCATION` disabled); byte offset: #{}]", e.message, offset + e.column.saturating_sub(1));
-        return Err(EsError::new(400, "json_parse_exception", reason.clone()).caused_by(EsError::new(400, "stream_read_exception", reason)));
+        // Not an `OpenSearchException`: its own root cause.
+        return Err(EsError::java(400, "json_parse_exception", reason.clone()).caused_by(EsError::java(400, "stream_read_exception", reason)));
     }
     match ctx.body()? {
         None => Err(EsError::new(400, "parse_exception", "request body is required")),
