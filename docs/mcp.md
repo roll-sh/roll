@@ -1484,6 +1484,10 @@ previews are listed once those products are on.
 | `apps_visitors` | Who's signed in to a sign-in-gated environment now: each session's id, who, how, the entry that let them in. | `GET /v1/apps/services/{service}/environments/{env}/visitors` |
 | `apps_end_visit` | End one visitor's session in a sign-in-gated environment now. | `DELETE /v1/apps/services/{service}/environments/{env}/visitors/{visitor}` |
 | `apps_update_domain` | Redirect a domain to another hostname of the environment, or serve another port on it. | `PATCH /v1/apps/services/{service}/environments/{env}/domains/{host}` |
+| `apps_status_domain` | A status page's own domain: the name it answers on, its DNS state and TLS. | `GET /v1/apps/projects/{project}/status-page/domain` |
+| `apps_set_status_domain` | Put a project's status page on a domain of its own (answers the DNS record). | `POST /v1/apps/projects/{project}/status-page/domain` |
+| `apps_verify_status_domain` | Check a status page domain's DNS now. | `POST /v1/apps/projects/{project}/status-page/domain/verify` |
+| `apps_remove_status_domain` | Remove a status page's own domain. | `DELETE /v1/apps/projects/{project}/status-page/domain` |
 | `apps_preview_domain` | A project's preview domain: the wildcard its preview environments answer under. | `GET /v1/apps/projects/{project}/preview-domain` |
 | `apps_set_preview_domain` | Give a project's previews a wildcard of its own (answers the DNS record). | `POST /v1/apps/projects/{project}/preview-domain` |
 | `apps_verify_preview_domain` | Check a preview domain's DNS now. | `POST /v1/apps/projects/{project}/preview-domain/verify` |
