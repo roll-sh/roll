@@ -1285,11 +1285,13 @@ export function presetFor(scope: string | undefined, presets: Preset[]): Preset 
 }
 
 /** An error back to the client (the redirect was registered and the request came from it). */
-export function denyRedirect(redirect: string, state?: string): string {
+export function denyRedirect(redirect: string, state?: string, issuer?: string, why = "The user denied the request"): string {
   const u = new URL(redirect);
   u.searchParams.set("error", "access_denied");
-  u.searchParams.set("error_description", "The user denied the request");
+  u.searchParams.set("error_description", why);
   if (state) u.searchParams.set("state", state);
+  // RFC 9207: every authorization response names roll's issuer (its metadata says so), a denial too.
+  if (issuer) u.searchParams.set("iss", issuer.replace(/\/+$/, ""));
   return u.toString();
 }
 
