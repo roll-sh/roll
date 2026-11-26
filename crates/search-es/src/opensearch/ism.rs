@@ -672,15 +672,15 @@ pub(super) fn next_seq(st: &mut ClusterState) -> i64 {
     n
 }
 
-fn ensure_config_index(st: &mut ClusterState, now: i64) -> EsResult<()> {
+pub(super) fn ensure_config_index(st: &mut ClusterState, now: i64) -> EsResult<()> {
     store::ensure_index(st, CONFIG_INDEX, None, now)
 }
 
-fn config_exists(st: &ClusterState) -> bool {
+pub(super) fn config_exists(st: &ClusterState) -> bool {
     st.metadata.indices.contains_key(CONFIG_INDEX)
 }
 
-fn config_uuid(st: &ClusterState) -> String {
+pub(super) fn config_uuid(st: &ClusterState) -> String {
     st.metadata.indices.get(CONFIG_INDEX).map(|i| i.uuid.clone()).unwrap_or_else(|| "_na_".into())
 }
 
@@ -1188,7 +1188,12 @@ fn query_matches(q: &str, value: &str) -> bool {
 }
 
 /// The version a deleted policy's tombstone holds, while `index.gc_deletes` keeps it.
-fn tombstone(st: &ClusterState, id: &str, now: i64) -> Option<i64> {
+/// A config document deleted at `version`: its delete tombstone ([`tombstone`]).
+pub(super) fn remember_deleted(st: &mut ClusterState, id: &str, version: i64, now: i64) {
+    store::family_mut(st, META).insert(format!("tombstone:{id}"), obj! { "version" => version, "at" => now });
+}
+
+pub(super) fn tombstone(st: &ClusterState, id: &str, now: i64) -> Option<i64> {
     let t = st.metadata.xpack.get(META, &format!("tombstone:{id}"))?;
     let at = t.get("at").and_then(Value::as_i64)?;
     (now - at < 60_000).then(|| t.get("version").and_then(Value::as_i64)).flatten()
@@ -1206,7 +1211,7 @@ async fn delete_policy(ctx: &Ctx<'_>) -> EsResult<Reply> {
             }
             let Some(s) = stored(st, &pid) else { return Err(status(404, format!("Policy {pid} is not found"))) };
             store::remove(st, POLICIES, &pid);
-            store::family_mut(st, META).insert(format!("tombstone:{pid}"), obj! { "version" => s.version + 1, "at" => now });
+            remember_deleted(st, &pid, s.version + 1, now);
             Ok((next_seq(st), s.version + 1))
         })
         .await?;
