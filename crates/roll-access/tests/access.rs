@@ -1056,6 +1056,40 @@ async fn agents_ask_what_the_policy_says() {
     assert_ne!(d.call(&token, Method::DELETE, "/v1/projects/pb", None).await.0, StatusCode::FORBIDDEN, "the API itself: not an agent");
 }
 
+/// A product's own cap on the grants that reach it (rolld: roll secrets' `max_token_days`) binds
+/// every grant roll-access makes or widens, not only `/v1/access/tokens`: an MCP client's consent
+/// with no end gets the cap's (as the consent screen says), and an approval remembered for good on
+/// a token that never expires is remembered until then. Neither is refused.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_products_lifetime_cap_binds_consents_and_remembered_approvals() {
+    let d = Daemon::new(50);
+    let cap: roll_access::LifetimeCap = Box::new(|rules| rules.0.iter().any(|r| r.product == "secrets").then(|| (30, "roll secrets' policy: at most 30 days".to_string())));
+    let _ = d.access.lifetime_cap.set(cap);
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
+    let within = |t: &Value| t.as_i64().is_some_and(|t| t > now + 29 * 86_400_000 && t <= now + 31 * 86_400_000);
+    let (_, catalog) = d.call(OPERATOR, Method::GET, "/v1/access/catalog", None).await;
+    assert_eq!(catalog["lifetime_caps"], json!([{ "product": "secrets", "days": 30, "why": "roll secrets' policy: at most 30 days" }]));
+
+    let redirect = "http://127.0.0.1:43111/callback";
+    let (_, client) = d.call("", Method::POST, "/v1/access/oauth/register", Some(json!({ "client_name": "Claude Code", "redirect_uris": [redirect] }))).await;
+    let consent = json!({ "client_id": client["client_id"], "redirect_uri": redirect, "code_challenge": "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM", "code_challenge_method": "S256", "rules": [{ "product": "secrets", "resources": "*", "actions": { "read": "allow" } }] });
+    let (s, out) = d.call(OPERATOR, Method::POST, "/v1/access/oauth/authorize", Some(consent)).await;
+    assert_eq!(s, StatusCode::OK, "{out}");
+    let conn = d.access.store.list().unwrap().into_iter().find(|g| g.kind == "oauth").unwrap();
+    assert!(within(&json!(conn.expires_at)), "a connection with no end ends at the cap: {:?}", conn.expires_at);
+
+    // A token that never expires, with no secrets rule, asks for the rest: a secrets read
+    // remembered for good is remembered for the cap's 30 days, its rules unchanged.
+    let (token, id) = d.token(json!([{ "product": "workspace", "resources": "*", "actions": { "read": "allow" } }]), json!({ "ask_otherwise": true })).await;
+    let (_, pending) = d.call(&token, Method::GET, "/v1/secrets/projects/pa/environments/development/secrets", None).await;
+    let apr = pending["approval"].as_str().unwrap_or_else(|| panic!("{pending}")).to_string();
+    let (s, out) = d.call(OPERATOR, Method::POST, &format!("/v1/access/approvals/{apr}/approve"), Some(json!({ "remember": "always" }))).await;
+    assert_eq!(s, StatusCode::OK, "{out}");
+    let (_, g) = d.call(OPERATOR, Method::GET, &format!("/v1/access/tokens/{id}"), None).await;
+    assert_eq!((g["rules"].as_array().map(Vec::len), g["expires_at"].is_null()), (Some(1), true), "{g}");
+    assert!(within(&g["temporary"][0]["until"]), "{g}");
+}
+
 /// The policy's `oauth_clients`: a client it leaves out can't be consented to, sign a device in,
 /// refresh, or use the connection it already has (at once, nothing revoked), and it's back when
 /// the list allows it again.
@@ -2722,6 +2756,15 @@ async fn an_enterprise_idp_signs_a_person_in_to_an_app() {
     let (_, me) = d.call(&token, Method::GET, "/v1/access", None).await;
     assert_eq!((me["grant"]["user"].as_str(), me["grant"]["created_by"].as_str()), (Some("usr_alice"), Some(format!("enterprise:{okta}").as_str())), "it acts as alice: {me}");
     assert_eq!(d.call(&token, Method::POST, "/v1/workspace/projects", Some(json!({ "name": "from-claude" }))).await.0, StatusCode::CREATED);
+    // A policy that requires an end and names no length doesn't stop sign-ins: the connection is
+    // made again, ending in a day.
+    assert_eq!(d.call(OPERATOR, Method::PUT, "/v1/access/policy", Some(json!({ "require_expiry": true }))).await.0, StatusCode::OK);
+    let (s, again) = sign_in(idjag(claims("j60", "alice@acme.test", &api, &client_id)), secret.clone()).await;
+    assert_eq!(s, StatusCode::OK, "{again}");
+    let (_, me) = d.call(again["access_token"].as_str().unwrap(), Method::GET, "/v1/access", None).await;
+    let ends = me["grant"]["expires_at"].as_i64().unwrap_or(0) - std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
+    assert!(ends > 23 * 3_600_000 && ends <= 24 * 3_600_000, "{me}");
+    assert_eq!(d.call(OPERATOR, Method::PUT, "/v1/access/policy", Some(json!({}))).await.0, StatusCode::OK);
     // An assertion for roll's MCP server alone: its token works through that server, never on the
     // API directly (draft -06: the token is held to the assertion's resources).
     let mut for_mcp = claims("j40", "alice@acme.test", &api, &client_id);
@@ -3556,4 +3599,28 @@ async fn claude_sets_up_auto_connect_with_an_admins_consent() {
     let idp = e["idps"].as_array().unwrap().iter().find(|i| i["issuer"] == claude).unwrap_or_else(|| panic!("{e}"));
     assert_eq!((idp["domains"].clone(), idp["express"].clone()), (json!(["acme.test"]), json!(true)), "{e}");
     assert!(e["apps"].as_array().unwrap().iter().any(|a| a["metadata"][0] == client && a["rules"] == rules), "Claude registered: {e}");
+    // A mail service anyone can sign up at is never a domain it vouches for.
+    let mut public = consent(callback);
+    public["ema_domains"] = json!(["gmail.com"]);
+    assert_eq!(d.call(OPERATOR, Method::POST, "/v1/access/oauth/authorize", Some(public)).await.0, StatusCode::BAD_REQUEST);
+    // A provider the operator set up by hand stays; a second setup replaces the first's issuer and
+    // gives the existing Claude app the new consent's rules.
+    let mut idps = e["idps"].as_array().unwrap().clone();
+    idps.push(json!({ "issuer": "https://acme.okta.example", "jwks": json!({ "keys": [{ "kty": "EC", "crv": "P-256", "x": "f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU", "y": "x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0" }] }).to_string(), "domains": ["acme.test"] }));
+    assert_eq!(d.call(OPERATOR, Method::PUT, "/v1/access/enterprise/idps", Some(json!({ "idps": idps }))).await.0, StatusCode::OK);
+    let wider = json!([{ "product": "workspace", "resources": "*", "actions": { "read": "allow", "write": "allow" } }]);
+    let mut again = consent(callback);
+    again["rules"] = wider.clone();
+    let (_, out) = d.call(OPERATOR, Method::POST, "/v1/access/oauth/authorize", Some(again)).await;
+    let back = url::Url::parse(out["redirect"].as_str().unwrap_or_else(|| panic!("{out}"))).unwrap();
+    let code = back.query_pairs().find(|(k, _)| k == "code").unwrap().1.into_owned();
+    let (_, got) = exchange(code).await;
+    let second = "https://identity.anthropic.com/issuers/iss_91c0";
+    let (s, _) = d.call(got["access_token"].as_str().unwrap(), Method::PUT, &path, Some(json!({ "ema_issuer": second }))).await;
+    assert_eq!(s, StatusCode::OK);
+    let (_, e) = d.call(OPERATOR, Method::GET, "/v1/access/enterprise", None).await;
+    let issuers: Vec<&str> = e["idps"].as_array().unwrap().iter().filter_map(|i| i["issuer"].as_str()).collect();
+    assert_eq!(issuers, ["https://acme.okta.example", second], "{e}");
+    let claudes: Vec<&Value> = e["apps"].as_array().unwrap().iter().filter(|a| a["metadata"][0] == client).collect();
+    assert_eq!((claudes.len(), claudes[0]["rules"].clone()), (1, wider), "{e}");
 }

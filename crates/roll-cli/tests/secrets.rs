@@ -1015,12 +1015,13 @@ async fn a_pre_receive_hook_refuses_a_push_adding_a_production_value_with_a_scan
     assert_eq!(audit[0]["keys"], serde_json::json!(["API_KEY", "DATABASE_URL"]), "{audit}");
     let summary = audit[0]["summary"].as_str().unwrap_or_default();
     assert!(summary.contains("by alice to refs/heads/main"), "{audit}");
-    // What it let through is leaked: reported as such, and the managed key rotated.
+    // What it let through is leaked and reported as such. The hook's token may only scan, so it
+    // rotates nothing: the leak waits on Health for someone who may write there.
     let leaked: serde_json::Value = reqwest::get(format!("{api}/v1/secrets/projects/{prj}/audit?action=secrets.leaked")).await.unwrap().json().await.unwrap();
     assert_eq!(leaked[0]["keys"], serde_json::json!(["API_KEY", "DATABASE_URL"]), "{leaked}");
     assert!(leaked[0]["summary"].as_str().unwrap_or_default().contains("let through with break glass by alice"), "{leaked}");
     let now = ok(&api, &[], &["secrets", "-p", "shop", "-e", "production", "get", "API_KEY", "--raw"], None).await;
-    assert_ne!(now.trim(), managed, "rotated under leaks.rotate = managed");
+    assert_eq!(now.trim(), managed, "a scan-only hook's break glass rotates nothing, even under leaks.rotate = managed");
     assert!(!leaked.to_string().contains(value) && !leaked.to_string().contains(&managed), "never a value: {leaked}");
 }
 

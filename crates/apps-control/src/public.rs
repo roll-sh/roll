@@ -978,6 +978,9 @@ async fn check_access(apps: &Arc<Apps>, service: &str, env: &str, req: &mut Requ
             .trim_end_matches('.')
             .to_ascii_lowercase();
             let jwt = apps.visitor_jwt(service, env, &format!("{}://{host}", apps.cfg.scheme), &user, &who).await;
+            if user.starts_with("usr_") {
+                req.extensions_mut().insert(RollPerson);
+            }
             req.extensions_mut().insert(VisitorIs(who, jwt));
             return None;
         }
@@ -1143,6 +1146,11 @@ struct ShareGuest {
 /// email, or a roll person's user id, told to the app as `x-roll-visitor`.
 #[derive(Clone)]
 struct VisitorIs(String, Option<String>);
+
+/// A roll person let in by signing in to roll (`access.signed_in`; a `usr_…` visitor, never a
+/// provider's): on a preview's environment, one of its team, who gets roll previews' button.
+#[derive(Clone)]
+struct RollPerson;
 
 /// A visitor with no session of an environment that lets a provider sign people in
 /// (`access.sso`): a page load goes to roll's sign-in with that provider, which sends them back
@@ -1895,9 +1903,12 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
     }
     // roll previews' feedback button: its script from the preview's own host, and a page load
     // (a browser's document, else a GET asking for HTML) gets the tag.
-    // A share link's guest gets it when their link takes notes, and posts from the page.
+    // A share link's guest gets it when their link takes notes, and posts from the page; a team
+    // member signed in to roll (team access) gets it as a link visitor does (it opens roll, where
+    // they post). Nobody a password, an allow list or a provider's sign-in let in.
     let guest = req.extensions().get::<ShareGuest>().cloned();
-    let target = if via_link || guest.as_ref().is_some_and(|g| g.notes) { apps.feedback_target(service, env).await } else { None };
+    let team = env.starts_with("pv-") && req.extensions().get::<RollPerson>().is_some();
+    let target = if via_link || team || guest.as_ref().is_some_and(|g| g.notes) { apps.feedback_target(service, env).await } else { None };
     if let Some(t) = &target
         && req.uri().path() == crate::feedback::PATH
     {
