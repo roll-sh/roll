@@ -6642,13 +6642,15 @@ replaces it, and a floor left out has none:
   `d` days. roll-access makes and changes every grant, so it asks roll secrets
   (`Access::lifetime_cap`, through `Access::meets_policy` with its own `max_days`,
   docs/permissions.md) on every path that writes a grant's rules or lifetime or issues it a new
-  secret: a token's make, change and rotation, an MCP client's consent and step-up, a device's
-  sign-in, a machine client's make and rotation, and an approval remembered for good (the token
-  with the rule) or for a while (the rule until then). An enterprise app's connection, which asks
-  for no lifetime, lives `d` days and is made again at the next sign-in after (one made before the
-  policy is replaced at its next sign-in). A grant that never expires is refused under it, and so
-  is a gateway's long-lived token (log the gateway in through a workload identity instead).
-  roll-access's `tests/policy_callers.rs` fails on a new writer that doesn't ask. Workload identities' logins and bootstrap tokens last 60
+  secret. A token's make, change and rotation, and a machine client's make and rotation, are
+  refused past it (set `expires_at`). What a person allows a client ends within it instead: an
+  MCP client's consent (and a device's) gets an end `d` days away when it asked for none or a
+  later one, and a step-up brings the connection's end forward (both consent screens say so). An
+  approval remembered for good, or for longer, on a secrets rule is remembered for `d` days. An
+  enterprise app's connection lives `d` days and is made again at the next sign-in after (one made
+  before the policy is replaced then). A gateway's long-lived token is refused under it (log the
+  gateway in through a workload identity instead). roll-access's `tests/policy_callers.rs` fails
+  on a new writer that doesn't ask. Workload identities' logins and bootstrap tokens last 60
   minutes at most anyway. A machine identity's bootstrap token whose credentials would live longer
   is refused, and each
   machine credential issued after the policy (an exchange or a refresh) lives at most `d` days,

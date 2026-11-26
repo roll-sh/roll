@@ -1111,10 +1111,11 @@ MCP clients for themselves, as GitHub's fine-grained tokens act for the person w
   policy's `max_token_days` caps every grant with a `secrets` or `*` rule (docs/secrets.md,
   "Guardrails"), refused as a 403 naming that policy. Both are one check,
   `Access::meets_policy`, on every path that writes a grant's rules or lifetime or issues it a
-  secret: tokens, consents and step-ups, devices, machine clients, remembered approvals (for good:
-  the token with the rule; for a while: the rule until then) and enterprise apps' connections,
-  which live as long as the policy allows; `tests/policy_callers.rs` fails on a writer that
-  doesn't ask.
+  secret: tokens and machine clients (refused past it), consents, devices and step-ups (the
+  connection ends within a product's cap instead, `Access::within_cap`, and the consent screen
+  says so from the catalogue's `lifetime_caps`), remembered approvals (a capped rule is remembered
+  until the cap at most) and enterprise apps' connections, which live as long as the policy
+  allows; `tests/policy_callers.rs` fails on a writer that doesn't ask.
   `max_idle_days` stops a grant nobody has used for that long (since its last use, or since it was
   made): an unused credential is risk with nothing to show for it. The evaluator reads the policy at
   most every 10 seconds, so a change reaches every node within that.
