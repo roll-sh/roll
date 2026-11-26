@@ -1121,9 +1121,7 @@ thirty-fourth review found them in the clear.
       then the next one is made from the parent as it is then, so a preview's data is at most
       that old. New rules make a new base. One is made by one converge at a time (a claim, its
       branch found again by name after a crash); a branch that finds one being made waits for it
-      (2 minutes at most), and one that can't have it masks its own copy as before; a base that
-      couldn't be made lets go of its claim at once, so the next converge takes it over under
-      the same name (`engine.rs::a_masked_base_that_failed_holds_no_branch_up`). An old base (other rules, past its day, or one
+      (2 minutes at most), and one that can't have it masks its own copy as before. An old base (other rules, past its day, or one
       no project's rules want) is deleted once no branch comes from it (after a branch's
       deletion, and every 10 minutes on the leader); the base for the rules now stays a day for
       the next preview. Within one base the same input masks to the same output across its
