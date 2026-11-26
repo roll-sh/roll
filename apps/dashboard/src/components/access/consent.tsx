@@ -23,6 +23,7 @@ import {
   type StepUp,
   waitsForAdmin,
 } from "@/lib/access-api";
+import { accountsApi } from "@/lib/accounts-api";
 import { requestSignIn, subscribeToken } from "@/lib/code-token";
 import { SignIn } from "../code/sign-in";
 import { btn, Connecting, ErrorNote, input, primary } from "../ui";
@@ -66,6 +67,13 @@ function ExpressSetup({ req }: { req: AuthorizeRequest }) {
   const loaded = useSignedInLoad(() => Promise.resolve(null), []);
   const [domains, setDomains] = useState("");
   const [rules, setRules] = useState<Rule[] | null>(null);
+  // The domains a DNS record proved for roll's SSO connections, to start from (the admin changes them).
+  useEffect(() => {
+    accountsApi.ssoConnections().then(
+      (cs) => setDomains((d) => d || [...new Set(cs.flatMap((c) => c.verified))].join(", ")),
+      () => {},
+    );
+  }, []);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
