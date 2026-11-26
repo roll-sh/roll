@@ -497,9 +497,20 @@ pub struct Effective {
     /// Aliases over watch records (`.watcher-history-*`), with those indices: a grant of the
     /// alias reaches them only when one reaches the indices too ([`privileges::grant_names`]).
     pub history_aliases: std::collections::HashMap<String, Vec<String>>,
+    /// The cluster's dialect ([`Effective::restricted`]).
+    pub dialect: crate::cluster::Dialect,
 }
 
 impl Effective {
+    /// Whether `index` is restricted ([`privileges::is_restricted`]: a role must allow restricted
+    /// indices to reach it): on Elasticsearch `.tasks` too, the task results of every principal,
+    /// a hidden system index there ([`crate::api::tasks::hide_results_index`]). OpenSearch keeps
+    /// it as an ordinary index, which its roles name (`kibana_server`, `kibana_user`): the plugin
+    /// has no restricted indices.
+    pub fn restricted(&self, index: &str) -> bool {
+        privileges::is_restricted(index) || (self.dialect == crate::cluster::Dialect::Elasticsearch && index == crate::api::tasks::RESULTS_INDEX)
+    }
+
     fn allows(&self, f: impl Fn(&Permission) -> bool) -> bool {
         let own = self.own.iter().any(&f);
         let limited = match &self.limited_by {
@@ -514,15 +525,15 @@ impl Effective {
     }
 
     pub fn allows_index(&self, action: &str, index: &str) -> bool {
-        let restricted = privileges::is_restricted(index);
+        let restricted = self.restricted(index);
         let parent = self.parents.get(index);
         // Through an alias over watch records: the records themselves too.
         if let Some(behind) = self.history_aliases.get(index)
-            && !behind.iter().all(|i| self.allows(|p| p.allows_index(action, i, privileges::is_restricted(i))))
+            && !behind.iter().all(|i| self.allows(|p| p.allows_index(action, i, self.restricted(i))))
         {
             return false;
         }
-        self.allows(|p| p.allows_index(action, index, restricted) || parent.is_some_and(|ds| p.allows_index(action, ds, privileges::is_restricted(ds))))
+        self.allows(|p| p.allows_index(action, index, restricted) || parent.is_some_and(|ds| p.allows_index(action, ds, self.restricted(ds))))
     }
 
     /// Whether some role grants `action` on some index (`IndicesPermission.check(action)`):
@@ -668,7 +679,7 @@ pub fn effective(file: &FileRoles, st: &crate::meta::ClusterState, p: &Principal
             history_aliases.entry(alias.clone()).or_default().push(name.clone());
         }
     }
-    Effective { own, limited_by, also, parents, history_aliases }
+    Effective { own, limited_by, also, parents, history_aliases, dialect: st.metadata.dialect }
 }
 
 /// Read APIs whose wildcard index expressions Elasticsearch expands to the indices the user
@@ -714,13 +725,13 @@ const NARROWED: &[&str] = &[
 /// The read APIs the OpenSearch plugin checks over every index their wildcards reach, refusing
 /// the request when one isn't permitted ([`check_all`]; `do_not_fail_on_forbidden` is off by
 /// default). The rest of [`NARROWED`] takes the generic check for OpenSearch principals, as it
-/// did, but for `_cat/shards`, which lists hidden indices by default: narrowed, so it neither
-/// refuses a data user nor lists what the check never saw.
+/// did, but for `_cat/shards` and `_cat/aliases`, which list hidden indices by default:
+/// narrowed, so they neither refuse a data user nor list what the check never saw.
 const OS_WHOLE: &[&str] = &["search", "count", "field_caps", "async_search.submit", "eql.search", "search_template", "open_point_in_time", "knn_search", "indices.get", "cat.indices", "rank_eval"];
 
 /// Whether `api` narrows its wildcards for principal `p` ([`NARROWED`], [`OS_WHOLE`]).
 fn narrows(p: &Principal, api: &str) -> bool {
-    NARROWED.contains(&api) && (p.os().is_none() || api == "cat.shards")
+    NARROWED.contains(&api) && (p.os().is_none() || matches!(api, "cat.shards" | "cat.aliases"))
 }
 
 /// The indices options [`narrow`] expands an API's wildcards with (before its parameters).
@@ -1086,7 +1097,7 @@ pub fn check_mapping_update(ctx: &Ctx, idx: &crate::meta::IndexMeta) -> EsResult
         if in_data_stream {
             continue;
         }
-        let restricted = privileges::is_restricted(name);
+        let restricted = eff.restricted(name);
         if eff.allows(|perm| perm.allows_index(AUTO_PUT, name, restricted) || bwc(perm, name, restricted).is_some()) {
             let grant = eff.own.iter().chain(eff.limited_by.iter().flatten()).chain(eff.also.iter().flatten()).find_map(|perm| (!perm.allows_index(AUTO_PUT, name, restricted)).then(|| bwc(perm, name, restricted)).flatten());
             if let Some(g) = grant {
@@ -1562,14 +1573,13 @@ fn request_indices(ctx: &Ctx) -> Vec<String> {
     if api == "search_application.search" {
         exprs.extend(ctx.path_param("name").map(str::to_string));
     }
-    // Wildcards as the request expands them (`expand_wildcards=all` reaches hidden indices).
+    // Wildcards as the request expands them (`expand_wildcards=all` reaches hidden indices);
+    // no index is `_all`, dot-prefixed indices that aren't hidden included, as Elasticsearch
+    // resolves it (and [`check_all`]).
     let default = crate::meta::resolve::IndicesOptions::LENIENT_EXPAND_OPEN;
     let opts = ctx.indices_options(default).unwrap_or(default);
     if exprs.is_empty() {
-        if opts.expand_hidden {
-            return crate::meta::resolve::resolve(&st, &["_all".to_string()], &opts, ctx.now_ms).unwrap_or_default();
-        }
-        return st.metadata.indices.keys().filter(|k| !k.starts_with('.')).cloned().collect();
+        return crate::meta::resolve::resolve(&st, &["_all".to_string()], &opts, ctx.now_ms).unwrap_or_default();
     }
     let mut out = Vec::new();
     for e in exprs {

@@ -1378,6 +1378,11 @@ struct Gate {
     workloads: Mutex<std::collections::BTreeSet<String>>,
     /// Every grant's person, revoked ones too (roll-access keeps revoked rows).
     owners: Mutex<BTreeMap<String, Option<String>>>,
+    /// Machine chains (roll-access's bootstrap tokens, none exchanged here): when each ends, and
+    /// when it was revoked.
+    chains: Mutex<BTreeMap<String, (i64, Option<i64>)>>,
+    /// How long a bootstrap token lives, in ms, when set (a test's short one); its minutes otherwise.
+    chain_ms: std::sync::atomic::AtomicI64,
 }
 
 impl Gate {
@@ -1504,6 +1509,33 @@ impl roll_secrets::Workloads for Gate {
     }
     fn revoke_token(&self, id: &str, _: &str) -> roll_secrets::Result<()> {
         self.revoke(id)
+    }
+    fn bootstrap(&self, _: &str, _: Option<Vec<String>>, minutes: u32, _: Option<&str>) -> roll_secrets::Result<roll_secrets::Chained> {
+        let n = self.made.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
+        let ms = Some(self.chain_ms.load(std::sync::atomic::Ordering::SeqCst)).filter(|ms| *ms > 0).unwrap_or(minutes as i64 * 60_000);
+        let chain = format!("tok_chain{n}");
+        self.chains.lock().unwrap().insert(chain.clone(), (now + ms, None));
+        Ok(roll_secrets::Chained { chain, secret: format!("rlbt_fake{n}"), issued_at: now, expires_at: now + ms })
+    }
+    fn revoke_chain(&self, chain: &str, _: &str) -> roll_secrets::Result<()> {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
+        if let Some(c) = self.chains.lock().unwrap().get_mut(chain) {
+            c.1.get_or_insert(now);
+        }
+        Ok(())
+    }
+    fn chains(&self, chains: &[String]) -> roll_secrets::Result<Vec<roll_secrets::ChainState>> {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
+        let held = self.chains.lock().unwrap();
+        Ok(chains
+            .iter()
+            .filter_map(|c| held.get(c).map(|&(until, revoked)| (c, until, revoked)))
+            .map(|(c, until, revoked_at)| {
+                let state = if revoked_at.is_some() { "revoked" } else if until > now { "waiting" } else { "ended" };
+                roll_secrets::ChainState { chain: c.clone(), state, refreshed_at: None, expires_at: Some(until), revoked_at, revoked_why: revoked_at.map(|_| "an admin revoked the machine".into()) }
+            })
+            .collect())
     }
 }
 
@@ -6243,6 +6275,9 @@ async fn a_project_backs_up_sealed_to_a_key_and_restores_into_another() {
     api.ok(Method::POST, "/transit", Some(json!({ "name": "cards" }))).await;
     let sync = api.ok(Method::POST, "/syncs", Some(json!({ "environment": "staging", "kind": "fake", "target": { "name": "x", "token_key": "PLATFORM_TOKEN" } }))).await;
     let whsec = sync["signing_secret"].as_str().unwrap().to_string();
+    // A machine identity with one machine waiting: its credentials aren't the backup's.
+    let racks = api.ok(Method::POST, "/identities", Some(json!({ "name": "racks", "kind": "machine", "environments": ["staging"], "actions": ["read"] }))).await;
+    api.ok(Method::POST, &format!("/identities/{}/bootstrap", racks["id"].as_str().unwrap()), Some(json!({}))).await;
 
     let secret = [7u8; 32];
     // Only a caller who may manage and reveal the whole project takes it out or compares it: an
@@ -6275,6 +6310,7 @@ async fn a_project_backs_up_sealed_to_a_key_and_restores_into_another() {
     let v = api.ok(Method::POST, "/backup/verify", Some(archive.clone())).await;
     assert_eq!((v["keys"]["missing"].clone(), v["keys"]["changed"].clone(), v["registrations"]["missing"].clone()), (json!([]), json!(["staging:/API"]), json!([])), "{v}");
     assert!(!v.to_string().contains("sk_live_backup") && !v.to_string().contains("PRIVATE KEY"));
+    assert!(v["machines"][0].as_str().unwrap().contains("racks: its machines don't come back") && v["machines"][0].as_str().unwrap().contains("1 was live"), "{v}");
     let (s, e) = api.req(Method::POST, "/backup/verify", Some(archive.clone()), Some(&admin_only)).await;
     assert_eq!(s, StatusCode::FORBIDDEN, "{e}");
     // A token's verify counts, and names nothing.
@@ -6285,14 +6321,15 @@ async fn a_project_backs_up_sealed_to_a_key_and_restores_into_another() {
     // log in as is left out, never written to be enabled later.
     let mut archive = archive;
     let shared = json!({ "name": "any-repo", "issuer": "https://token.actions.githubusercontent.com", "audience": "roll", "subject": "repo:*", "claims": "{}", "actions": "[\"read\"]", "ttl_minutes": 15 });
-    archive["identities"] = json!([{ "kind": "identity", "id": "idn_shared", "columns": shared }]);
+    archive["identities"].as_array_mut().unwrap().push(json!({ "kind": "identity", "id": "idn_shared", "columns": shared }));
 
     let (_, other) = api.call(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "restored" }))).await;
     let to = |p: &str| format!("/v1/secrets/projects/{}{p}", other["id"].as_str().unwrap());
     let r = api.ok(Method::POST, &to("/restore"), Some(archive.clone())).await;
-    assert_eq!((r["secrets"].as_u64(), r["registrations"].as_u64(), r["identities"].as_u64(), r["syncs"].as_u64()), (Some(3), Some(1), Some(0), Some(1)), "{r}");
-    let warnings = r["warnings"].as_array().unwrap();
-    assert!(warnings.len() == 1 && warnings[0].as_str().unwrap().contains("any-repo") && warnings[0].as_str().unwrap().contains("signs for everyone"), "{r}");
+    assert_eq!((r["secrets"].as_u64(), r["registrations"].as_u64(), r["identities"].as_u64(), r["syncs"].as_u64()), (Some(3), Some(1), Some(1), Some(1)), "{r}");
+    let warnings: Vec<&str> = r["warnings"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
+    assert!(warnings.len() == 2 && warnings.iter().any(|w| w.contains("any-repo") && w.contains("signs for everyone")), "{r}");
+    assert!(warnings.iter().any(|w| w.contains("racks: its machines don't come back") && w.contains("new bootstrap token (1 was live at the backup)")), "{r}");
     // The CA came back with its key, under the restorer: a certificate issued after the restore
     // chains to the same CA certificate.
     let restored = api.ok(Method::GET, &to("/cas"), None).await[0].clone();
@@ -6316,6 +6353,32 @@ async fn a_project_backs_up_sealed_to_a_key_and_restores_into_another() {
     assert!(restored["paused_why"].as_str().unwrap().contains("without its credential"), "{restored}");
     let (s, _) = api.call(Method::PATCH, &at(&format!("/syncs/{}", restored["id"].as_str().unwrap())), Some(json!({ "paused": false }))).await;
     assert_eq!(s, StatusCode::CONFLICT);
+}
+
+/// The 41st review's item 5: an identity's cap counts the machines whose credentials haven't ended,
+/// so a revoked one holds its place until its last credential would have ended (its reuse is still
+/// caught until then), then frees it; an admin forgets the ended ones.
+#[tokio::test]
+async fn a_revoked_machine_holds_its_place_until_its_credential_would_have_ended() {
+    let api = Api::new().await;
+    api.secrets.set_machines_max(1);
+    api.gate.chain_ms.store(1_500, std::sync::atomic::Ordering::SeqCst);
+    let id = api.ok(Method::POST, "/identities", Some(json!({ "name": "racks", "kind": "machine", "environments": ["production"], "actions": ["read"] }))).await["id"].as_str().unwrap().to_string();
+    let at = format!("/identities/{id}/bootstrap");
+    let boot = || api.call(Method::POST, &at, Some(json!({})));
+    let (s, first) = boot().await;
+    assert_eq!(s, StatusCode::CREATED, "{first}");
+    let (s, e) = boot().await;
+    assert!(s == StatusCode::BAD_REQUEST && e.to_string().contains("haven't ended"), "{s} {e}");
+    api.call(Method::DELETE, &format!("/identities/{id}/machines/{}", first["chain"].as_str().unwrap()), None).await;
+    assert_eq!(boot().await.0, StatusCode::BAD_REQUEST, "revoked, it holds its place until it would have ended");
+    assert_eq!(api.ok(Method::POST, &format!("/identities/{id}/machines/prune"), None).await["pruned"], 0, "and isn't forgotten before then");
+    tokio::time::sleep(std::time::Duration::from_millis(1_600)).await;
+    let (s, second) = boot().await;
+    assert_eq!(s, StatusCode::CREATED, "{second}");
+    assert_eq!(api.ok(Method::POST, &format!("/identities/{id}/machines/prune"), None).await["pruned"], 1);
+    let machines = api.ok(Method::GET, &format!("/identities/{id}/machines"), None).await;
+    assert_eq!(machines.as_array().unwrap().iter().map(|m| m["chain"].clone()).collect::<Vec<_>>(), [second["chain"].clone()], "{machines}");
 }
 
 #[tokio::test]

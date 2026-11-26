@@ -623,6 +623,9 @@ impl Secrets {
         self.expire_value_requests()?;
         self.reseal_wrapped();
         self.sweep_identity_logins()?;
+        if let Err(e) = self.sweep_machine_chains() {
+            tracing::warn!("sweeping machine chains failed: {e}");
+        }
         self.sweep_retention()?;
         self.sweep_reminders()?;
         self.sweep_alerts()?;
