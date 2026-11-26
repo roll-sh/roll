@@ -1254,7 +1254,35 @@ static TOOLS: &[Tool] = &[
         &[req("cluster", "Cluster"), req("index", "Index"), P { name: "ndjson", ty: Ty::Str, at: At::RawNdjson, required: true, desc: "Action and document lines" }],
     ),
     t("search_delete_by_query", "Delete by query", "Delete every document of an index that matches a query.", "search", "POST", "/v1/search/clusters/{cluster}/indices/{index}/delete_by_query", &[req("cluster", "Cluster"), req("index", "Index"), breq("query", Ty::Obj, "Query DSL")]),
-    t("search_query", "Search", "Run an Elasticsearch _search body on an index.", "search", "POST", "/v1/search/clusters/{cluster}/indices/{index}/search", &[req("cluster", "Cluster id or name"), req("index", "Index"), b("query", Ty::Obj, "Query DSL"), b("size", Ty::Int, "Hits"), b("from", Ty::Int, "Offset"), b("sort", Ty::Arr, "Sort"), b("aggs", Ty::Obj, "Aggregations")]),
+    t("search_query", "Search", "Run an Elasticsearch _search body on an index: a query or a retriever (hybrid search is an rrf or linear retriever over a standard and a knn one), knn, aggregations, highlighting, paging with search_after.", "search", "POST", "/v1/search/clusters/{cluster}/indices/{index}/search", &[
+        req("cluster", "Cluster id or name"),
+        req("index", "Index"),
+        b("query", Ty::Obj, "Query DSL (a semantic_text field: {semantic: {field, query}})"),
+        b("retriever", Ty::Obj, "A retriever tree in place of query: standard, knn, rrf, linear, text_similarity_reranker, rule"),
+        b("knn", Ty::Any, "Approximate nearest neighbours on a dense_vector field: {field, query_vector or query_vector_builder, k, num_candidates, filter?}, or a list of them"),
+        b("size", Ty::Int, "Hits"),
+        b("from", Ty::Int, "Offset (past 10,000 hits, page with search_after)"),
+        b("sort", Ty::Arr, "Sort"),
+        b("search_after", Ty::Arr, "The sort values of the previous page's last hit"),
+        b("aggs", Ty::Obj, "Aggregations"),
+        b("post_filter", Ty::Obj, "A filter applied to hits after aggregations"),
+        b("highlight", Ty::Obj, "{fields: {name: {}}, …}: a semantic_text field highlights its best chunks"),
+        b("_source", Ty::Any, "Which source fields come back: false, a field or pattern, a list, or {includes, excludes}"),
+        b("fields", Ty::Arr, "Fields to return as the mapping reads them (patterns too)"),
+        b("collapse", Ty::Obj, "One hit per value of a field: {field, inner_hits?}"),
+        b("rescore", Ty::Any, "Rescore the top hits again: {window_size, query: {rescore_query}}, or a list"),
+        b("track_total_hits", Ty::Any, "true for an exact count, false for none, or a number to count up to"),
+        b("min_score", Ty::Num, "Leave out hits scoring below this"),
+        b("track_scores", Ty::Bool, "Score hits when sorting by a field"),
+        b("profile", Ty::Bool, "Where the time goes, per shard and per part of the query"),
+        b("explain", Ty::Bool, "How each hit's score was computed"),
+        b("timeout", Ty::Str, "e.g. 2s: answer with what's found by then"),
+        b("terminate_after", Ty::Int, "Stop each shard after this many hits"),
+        b("runtime_mappings", Ty::Obj, "Fields computed at search time, by name"),
+        b("script_fields", Ty::Obj, "Fields a script computes per hit, by name"),
+        b("suggest", Ty::Obj, "Suggesters (term, phrase, completion)"),
+        b("indices_boost", Ty::Arr, "Weights for hits from each index of the expression: [{index: weight}]"),
+    ]),
     t("search_get_document", "Get a document", "A document by id.", "search", "GET", "/v1/search/clusters/{cluster}/indices/{index}/docs/{doc}", &[req("cluster", "Cluster"), req("index", "Index"), req("doc", "Document id")]),
     t("search_index_document", "Index a document", "Create or replace a document.", "search", "PUT", "/v1/search/clusters/{cluster}/indices/{index}/docs/{doc}", &[req("cluster", "Cluster"), req("index", "Index"), req("doc", "Document id"), P { name: "document", ty: Ty::Str, at: At::RawJson, required: true, desc: "The document, as JSON text" }]),
     t("search_delete_document", "Delete a document", "Delete a document.", "search", "DELETE", "/v1/search/clusters/{cluster}/indices/{index}/docs/{doc}", &[req("cluster", "Cluster"), req("index", "Index"), req("doc", "Document id")]),
@@ -2061,6 +2089,49 @@ mod tests {
     }
 
     /// An argument described only as its values ("a, b or c") is a [`Ty::Choice`] with the route's
+    /// `search_query` sends what Elasticsearch's _search body takes: every key roll search parses
+    /// there (`SearchSource`) is an argument or left out here with why. With five arguments a
+    /// workflow asked for `profile` the tool refused, and hybrid search had no way in.
+    #[test]
+    fn a_search_takes_what_a_search_body_takes() {
+        const LEFT_OUT: &[(&str, &str)] = &[
+            ("aggregations", "aggs under its other name"),
+            ("stored_fields", "fields reads stored and doc-value fields too"),
+            ("docvalue_fields", "fields reads stored and doc-value fields too"),
+            ("version", "only for a conditional write, and no write tool takes one"),
+            ("seq_no_primary_term", "only for a conditional write, and no write tool takes one"),
+            ("pit", "a point in time is opened by a route with no tool; paging is search_after"),
+            ("slice", "splits a point in time's pages between workers"),
+            ("rank", "retriever's rrf replaces it in Elasticsearch"),
+            ("sub_searches", "retriever's rrf replaces it in Elasticsearch"),
+            ("stats", "groups for the indices stats API, which no tool reads"),
+            ("ext", "plugins' and search pipelines' sections; no tool names a pipeline"),
+            ("derived", "OpenSearch's own; runtime_mappings on Elasticsearch clusters"),
+            ("verbose_pipeline", "OpenSearch's trace of a search pipeline; no tool names a pipeline"),
+        ];
+        let src = include_str!("../../search-es/src/search_source.rs");
+        let start = src.find("fn value_key(").expect("SearchSource::value_key moved");
+        let arrays = start + src[start..].find("fn array_key(").expect("SearchSource::array_key moved");
+        let end = arrays + src[arrays..].find("\n    }\n").unwrap();
+        let mut keys = Vec::new();
+        for line in src[start..end].lines().filter(|l| l.starts_with("            \"") && l.contains("=>")) {
+            for k in line.split("=>").next().unwrap().split('|') {
+                if let Some(k) = k.trim().strip_prefix('"').and_then(|r| r.split('"').next()) {
+                    keys.push(k.to_string());
+                }
+            }
+        }
+        keys.sort();
+        keys.dedup();
+        assert!(keys.len() > 30, "read {} keys from SearchSource: the match moved", keys.len());
+        let tool = super::all().iter().find(|t| t.name == "search_query").unwrap();
+        let takes = |k: &str| tool.params.iter().any(|p| p.name == k);
+        let missing: Vec<&String> = keys.iter().filter(|k| !takes(k) && !LEFT_OUT.iter().any(|(n, _)| n == k)).collect();
+        assert!(missing.is_empty(), "search_query doesn't take {missing:?}: add each as an argument or to LEFT_OUT with why");
+        let stale: Vec<&str> = LEFT_OUT.iter().map(|(n, _)| *n).filter(|n| takes(n) || !keys.iter().any(|k| k == n)).collect();
+        assert!(stale.is_empty(), "LEFT_OUT names {stale:?}, which search_query takes or SearchSource no longer parses");
+    }
+
     /// own set: prose lists drifted from their routes (queues' exchange types named 5 of 9, apps'
     /// notification kinds 6 of 8). The ones left are sets a route widens or is changing.
     #[test]
