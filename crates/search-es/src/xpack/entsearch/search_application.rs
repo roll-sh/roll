@@ -123,7 +123,7 @@ pub async fn put(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let create = ctx.bool_param("create", false)?;
     let body = ctx.body_map()?.unwrap_or_default();
     for k in body.keys() {
-        if !matches!(k.as_str(), "indices" | "analytics_collection_name" | "template" | "updated_at_millis" | "name") {
+        if !matches!(k.as_str(), "indices" | "analytics_collection_name" | "template" | "updated_at_millis" | "name" | "experiments") {
             return Err(crate::xpack::unknown_field(ctx, "search_application", k));
         }
     }
@@ -153,6 +153,16 @@ pub async fn put(ctx: &Ctx<'_>) -> EsResult<Reply> {
             .with_meta("index", ".search-app-1"));
     }
     let previous: Vec<String> = st.metadata.indices.values().filter(|i| i.aliases.contains_key(&name)).map(|i| i.name.clone()).collect();
+    // A/B tests (roll's extension, `super::experiments`), checked against the dictionary and
+    // what's running now.
+    let experiments = match body.get("experiments") {
+        None | Some(Value::Null) => None,
+        Some(e) => {
+            let template = normalize_template(body.get("template"));
+            let stored = st.metadata.xpack.get(APPS, &name).map(super::experiments::of).unwrap_or_default();
+            Some(super::experiments::parse(e, template.get("dictionary"), &stored, ctx.now_ms, check)?)
+        }
+    };
     drop(st);
     let mut app = Map::new();
     app.insert("name".into(), name.clone().into());
@@ -162,6 +172,9 @@ pub async fn put(ctx: &Ctx<'_>) -> EsResult<Reply> {
     }
     app.insert("updated_at_millis".into(), ctx.now_ms.into());
     app.insert("template".into(), normalize_template(body.get("template")));
+    if let Some(e) = experiments {
+        app.insert("experiments".into(), e);
+    }
     // The alias named after the application points at exactly its indices.
     let mut actions: Vec<Value> = previous.iter().filter(|p| !indices.contains(p)).map(|p| obj! { "remove" => obj! { "index" => p.clone(), "alias" => name.clone() } }).collect();
     actions.push(obj! { "add" => obj! { "indices" => Value::Arr(indices.iter().map(|i| Value::from(i.as_str())).collect()), "alias" => name.clone() } });
@@ -426,13 +439,31 @@ pub fn render_query(ctx: &Ctx) -> EsResult<Reply> {
 pub async fn search(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let app = app_of(ctx)?;
     let req = ctx.body_map()?.unwrap_or_default();
-    let body = render(ctx, &app, &req, false)?;
     let name = ctx.path_param("name").unwrap_or_default();
+    // A running experiment picks the caller's variant ([`super::experiments`]).
+    let assigned = super::experiments::running(&app, ctx.now_ms).and_then(|e| super::experiments::identity(ctx, &e).map(|t| (e, t)));
+    let body = match &assigned {
+        Some((e, token)) => {
+            // The request's params, with the variant's over them, pass the dictionary.
+            let (app, req) = super::experiments::apply(&app, &req, e.assign(name, token));
+            render(ctx, &app, &req, false)?
+        }
+        None => render(ctx, &app, &req, false)?,
+    };
     let mut uri = format!("/{}/_search", enc(name));
     if ctx.bool_param("typed_keys", false)? {
         uri.push_str("?typed_keys=true");
     }
-    Reply::ok(internal::call(ctx.cluster, "POST", &uri, Some(&body)).await?)
+    let out = internal::call(ctx.cluster, "POST", &uri, Some(&body)).await?;
+    if let Some((e, token)) = &assigned {
+        let v = e.assign(name, token);
+        let query = crate::analytics::query_text(ctx.request.header(crate::analytics::QUERY_HEADER), None, Some(&body)).unwrap_or_default();
+        let key = (name.to_string(), e.id.clone(), v.name.clone());
+        ctx.cluster.analytics.record_variant_search(&key, super::experiments::trial_key(name, &e.id, token, &query));
+        ctx.add_header(super::experiments::EXPERIMENT_HEADER, e.id.clone());
+        ctx.add_header(super::experiments::VARIANT_HEADER, v.name.clone());
+    }
+    Reply::ok(out)
 }
 
 // --- behavioral analytics ----------------------------------------------------------------------
@@ -541,7 +572,7 @@ fn required_fields(event_type: &str) -> &'static [&'static str] {
     match event_type {
         "page_view" => &["session", "user", "page"],
         "search" => &["session", "user", "search"],
-        "search_click" => &["session", "user", "search"],
+        "search_click" | "roll_conversion" => &["session", "user", "search"],
         _ => &[],
     }
 }
@@ -551,14 +582,32 @@ pub async fn post_event(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let ty = ctx.path_param("event_type").unwrap_or_default().to_string();
     let debug = ctx.bool_param("debug", false)?;
     // `PostAnalyticsEventAction.Request.validate` runs before the collection is looked up.
-    if !matches!(ty.as_str(), "page_view" | "search" | "search_click") {
+    // `roll_conversion` is roll's (`super::experiments`).
+    if !matches!(ty.as_str(), "page_view" | "search" | "search_click" | "roll_conversion") {
         return Err(EsError::action_request_validation(&[format!("invalid event type: [{ty}]")]));
+    }
+    // A browser key's event (`limits.events`): its own, counted, never stored.
+    let browser = crate::xpack::security::browser::policy(ctx);
+    if let Some(p) = &browser {
+        if !p.events {
+            return Err(crate::xpack::security::browser::refused("posting analytics events (its limits.events is off)"));
+        }
+        if !matches!(ty.as_str(), "search_click" | "roll_conversion") {
+            return Err(crate::xpack::security::browser::refused(format!("a [{ty}] event (only search_click and roll_conversion)")));
+        }
+        if ctx.body.len() > crate::xpack::security::browser::MAX_EVENT_BYTES {
+            return Err(EsError::illegal_argument(format!("a browser key's event is at most [{}] bytes", crate::xpack::security::browser::MAX_EVENT_BYTES)));
+        }
     }
     if !ctx.state().metadata.data_streams.contains_key(&events_stream(&name)) {
         return Err(EsError::resource_not_found(format!("no such analytics collection [{name}]")));
     }
     let body = ctx.body_map()?.unwrap_or_default();
-    let optional: &[&str] = if ty == "search" { &[] } else { &["document", "page"] };
+    let optional: &[&str] = match ty.as_str() {
+        "search" => &[],
+        "roll_conversion" => &["document", "value", "currency"],
+        _ => &["document", "page"],
+    };
     if let Some(k) = body.keys().find(|k| !required_fields(&ty).contains(&k.as_str()) && !optional.contains(&k.as_str())) {
         return Err(crate::xpack::unknown_field(ctx, &format!("{ty}_event"), k));
     }
@@ -575,6 +624,32 @@ pub async fn post_event(ctx: &Ctx<'_>) -> EsResult<Reply> {
     }
     if ty == "search_click" && !body.contains_key("document") && !body.contains_key("page") {
         return Err(EsError::illegal_argument("Required one of fields [document, page], but none were specified."));
+    }
+    let value = match body.get("value") {
+        None | Some(Value::Null) => 0.0,
+        Some(v) => v.as_f64().filter(|n| n.is_finite() && (0.0..=1e12).contains(n)).ok_or_else(|| EsError::illegal_argument("[value] is a number from 0 to 1e12"))?,
+    };
+    if body.get("currency").is_some_and(|c| c.as_str().is_none_or(|c| c.is_empty() || c.len() > 8)) {
+        return Err(EsError::illegal_argument("[currency] is a code of 1 to 8 characters"));
+    }
+    if browser.is_some() {
+        // Only about what the key reaches: the document's index and the search application.
+        let reach = crate::xpack::security::may_read(ctx);
+        let doc_index = body.get("document").and_then(|d| d.get("index")).and_then(Value::as_str);
+        let app = body.get("search").and_then(|s| s.get("search_application")).and_then(Value::as_str);
+        // A document of an index the key reads, or one the application it reaches searches (its
+        // alias): a page on an application only ever sees the application's hits.
+        let st = ctx.state();
+        let through_app = |i: &str| app.is_some_and(|a| reach(a) && st.metadata.indices.get(i).is_some_and(|idx| idx.aliases.contains_key(a)));
+        if doc_index.is_some_and(|i| !reach(i) && !through_app(i)) || app.is_some_and(|a| !reach(a)) || (doc_index.is_none() && app.is_none()) {
+            return Err(crate::xpack::security::browser::refused("an event about an index or search application it doesn't reach"));
+        }
+        let outcome = if ty == "roll_conversion" { crate::analytics::Outcome::Conversion(value) } else { crate::analytics::Outcome::Click };
+        super::experiments::record_event(ctx, &body, outcome);
+        if ty == "search_click" {
+            record_click(ctx, &body);
+        }
+        return Ok(Reply::Body(202, obj! { "accepted" => true }));
     }
     let mut session = body.get("session").and_then(Value::as_object).cloned().unwrap_or_default();
     if let Some(ua) = ctx.request.header("user-agent") {
@@ -630,6 +705,10 @@ pub async fn post_event(ctx: &Ctx<'_>) -> EsResult<Reply> {
     internal::call_system(ctx.cluster, "POST", &format!("/{}/_doc?op_type=create&routing={}", enc(&events_stream(&name)), enc(&session_id)), Some(&ev)).await?;
     if ty == "search_click" {
         record_click(ctx, &body);
+        super::experiments::record_event(ctx, &body, crate::analytics::Outcome::Click);
+    }
+    if ty == "roll_conversion" {
+        super::experiments::record_event(ctx, &body, crate::analytics::Outcome::Conversion(value));
     }
     let mut out = Map::new();
     out.insert("accepted".into(), true.into());

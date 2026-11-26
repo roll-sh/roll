@@ -904,7 +904,9 @@ async fn create_deploy(State(apps): S, Path((id, env)): Path<(String, String)>, 
         let message = headers.get("x-roll-message").and_then(|v| v.to_str().ok()).map(|m| percent_encoding::percent_decode_str(m).decode_utf8_lossy().into_owned()).unwrap_or_default();
         let revision = headers.get("x-roll-revision").and_then(|v| v.to_str().ok()).filter(|r| (7..=64).contains(&r.len()) && r.bytes().all(|b| b.is_ascii_hexdigit()));
         let no_cache = headers.get("x-roll-no-cache").is_some_and(|v| v == "1");
-        apps.deploy(&id, &env, json!({ "message": message, "revision": revision, "no_cache": no_cache, "override": over }), By { trigger: Trigger::Upload, actor }, Some(b), key).await?
+        // Built and checked at its own URL, not put live (`roll up --no-traffic`).
+        let no_traffic = headers.get("x-roll-no-traffic").is_some_and(|v| v == "1");
+        apps.deploy(&id, &env, json!({ "message": message, "revision": revision, "no_cache": no_cache, "no_traffic": no_traffic, "override": over }), By { trigger: Trigger::Upload, actor }, Some(b), key).await?
     } else if ct.starts_with("application/x-docker-image") {
         // An image built elsewhere (`docker save`'s archive, `roll apps deploy --image-file`).
         let message = headers.get("x-roll-message").and_then(|v| v.to_str().ok()).map(|m| percent_encoding::percent_decode_str(m).decode_utf8_lossy().into_owned()).unwrap_or_default();

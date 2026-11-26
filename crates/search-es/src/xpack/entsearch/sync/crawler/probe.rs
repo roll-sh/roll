@@ -104,7 +104,7 @@ pub async fn test(cluster: &Cluster, connector: Option<&str>, url: &str) -> Resu
     let max = plan.limits.usize(L::ResponseSize);
     let (mut at, mut clean, mut hops) = (link.clone(), true, Vec::new());
     let resp = loop {
-        super::polite_turn(&at, floor, deadline.min(Instant::now() + super::TURN_WAIT)).await?;
+        super::polite_turn(&fetcher, &at, floor, deadline.min(Instant::now() + super::TURN_WAIT)).await?;
         let got = tokio::time::timeout_at(deadline.into(), fetcher.get(&at, clean, max, None)).await.map_err(|_| out_of_time())?;
         let r = match got {
             Ok(r) => r,
@@ -146,8 +146,10 @@ pub async fn test(cluster: &Cluster, connector: Option<&str>, url: &str) -> Resu
 
     // Parsed as a crawl parses it: off the async workers, against a deadline, charged.
     let mut held = crate::breaker::Reservation::new(cluster.breakers.request(cluster, &cluster.state()));
-    held.add(resp.body.len() as u64 * 2, "crawl-test page").map_err(|e| e.reason().to_string())?;
-    let text = String::from_utf8_lossy(&resp.body).into_owned();
+    held.add(resp.body.len() as u64, "crawl-test page").map_err(|e| e.reason().to_string())?;
+    let (text, encoding) = super::charset::decode(&resp.body, &resp.content_type, plan.limits.usize(L::ResponseSize));
+    held.add(text.capacity() as u64, "crawl-test page").map_err(|e| e.reason().to_string())?;
+    answer.insert("charset".into(), encoding.name().into());
     let tags = plan.domain(&at).map(|d| d.exclude_tags.clone()).unwrap_or_default();
     let extraction = plan.domain(&at).map(|d| d.extraction.clone()).unwrap_or_default();
     let (page_url, limits, full_html, docs) = (at.clone(), plan.limits.clone(), plan.full_html, plan.docs.clone());
@@ -289,7 +291,7 @@ impl Robotses<'_> {
             if self.fetcher.refused(&at) || super::is_blocked(&at, self.blocked) || super::hosts::site_of(&at) != site {
                 break;
             }
-            super::polite_turn(&at, self.floor, self.deadline.min(Instant::now() + super::TURN_WAIT)).await?;
+            super::polite_turn(self.fetcher, &at, self.floor, self.deadline.min(Instant::now() + super::TURN_WAIT)).await?;
             let got = tokio::time::timeout_at(self.deadline.into(), self.fetcher.get(&at, clean, super::robots::MAX_BYTES, None)).await.map_err(|_| out_of_time())?;
             let Ok(resp) = got else { break };
             if (300..400).contains(&resp.status) {

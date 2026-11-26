@@ -2533,6 +2533,27 @@ async fn a_scanner_never_confirms_a_weak_password_inside_text_it_knows() {
     assert_eq!((s, found.clone()), (StatusCode::OK, json!([{ "index": 1, "environment": "production" }])), "{found}");
 }
 
+/// A scanner's budget is its token's and pusher's: one pusher's spent minute is refused (429,
+/// naming the budget and when it has room), counting nothing, while another pusher's push through
+/// the same token goes on.
+#[tokio::test]
+async fn one_pusher_spending_a_scan_budget_leaves_other_pushers_theirs() {
+    let api = Api::new().await;
+    let token = api.token(json!({ "actions": ["scan"] }));
+    // All in one minute (the budget's window).
+    while std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() % 60_000 > 45_000 {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    let scan = |pusher: &str| json!({ "candidates": [], "pusher": pusher, "refs": ["refs/heads/main"] });
+    for _ in 0..roll_secrets::leaks::SCANS_PER_MINUTE {
+        assert_eq!(api.req(Method::POST, "/scan", Some(scan("alice")), Some(&token)).await.0, StatusCode::OK);
+    }
+    let (s, e) = api.req(Method::POST, "/scan", Some(scan("alice")), Some(&token)).await;
+    let said = e["error"].as_str().unwrap_or_default();
+    assert!(s == StatusCode::TOO_MANY_REQUESTS && said.contains("for pusher alice") && said.contains("room again in"), "{s} {e}");
+    assert_eq!(api.req(Method::POST, "/scan", Some(scan("bob")), Some(&token)).await.0, StatusCode::OK, "bob's push isn't alice's");
+}
+
 /// roll code's GitHub App checking a push to a repo on the project's canvas: a scanner of the
 /// project and nothing more (a weak password inside a URL it knows is never tried), audited as the
 /// installation with the pusher and ref, and a value it finds is a leak (`secrets.leaked`).
@@ -9011,7 +9032,7 @@ async fn a_leaks_renewals_count_toward_the_public_certificates_caps() {
     assert!(s == StatusCode::TOO_MANY_REQUESTS && e.to_string().contains("3 renewals"), "leaks count toward people's cap: {s} {e}");
 }
 
-/// docs/secrets.md, "Public certificates": a new DNS credential is the registration made anew, so
+/// docs/secrets.md, "Publicly trusted certificates": a new DNS credential is the registration made anew, so
 /// orders act at its replacer's rights from then on, never at the old maker's; a rename keeps the
 /// maker.
 #[tokio::test]

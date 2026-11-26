@@ -370,7 +370,7 @@ async fn check(State(a): S, ext: Extensions, Json(c): Json<Check>) -> crate::Res
     }
     let mut about: (&str, Option<String>) = (row.product, None);
     if let Some(l) = crate::evaluate::lend_outcome(&a, row, &params, c.body.as_ref(), &target, &scope, person).await
-        && crate::evaluate::rank(l.outcome) < crate::evaluate::rank(outcome)
+        && (crate::evaluate::rank(l.outcome) < crate::evaluate::rank(outcome) || (!l.grants.is_empty() && l.outcome == outcome))
     {
         (outcome, action) = (l.outcome, l.action);
         about = (l.product, Some(l.id));

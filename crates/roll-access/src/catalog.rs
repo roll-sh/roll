@@ -113,9 +113,9 @@ pub struct Lent {
     pub kind: String,
     pub r#ref: String,
     pub action: Action,
-    /// Kind `secret` only: the folder (environment, path) of a roll secret the route reads or
-    /// writes as the caller, whose `ref` is its workspace project ("" for the one the route's own
-    /// resource is on, as the route picks it).
+    /// Kind `secret` only: the folder (environment, path) of a roll secret the route writes as the
+    /// caller, whose `ref` is its workspace project ("" for the one the route's own resource is on,
+    /// as the route picks it). `None` on a `secret`: a folder roll secrets can't name, refused.
     pub folder: Option<(String, String)>,
 }
 
@@ -125,23 +125,30 @@ fn apps_links(b: &Value) -> Vec<Lent> {
     b.get("links").and_then(Value::as_array).into_iter().flatten().map(|l| Lent { kind: l["kind"].as_str().unwrap_or("").into(), r#ref: l["ref"].as_str().unwrap_or("").into(), action: Action::Reveal, folder: None }).collect()
 }
 
-/// A roll secret a search route uses as the caller, named by the body's
-/// `secret: {environment, key, path?, project?}`: an inference endpoint's key is read (reveal), a
-/// rotated admin password is written there (write). Its path as roll secrets keeps it: from the
-/// root, no trailing slash.
-fn search_secret(b: &Value, action: Action) -> Vec<Lent> {
-    let s = &b["secret"];
-    let Some(env) = s["environment"].as_str().filter(|e| !e.is_empty()) else { return Vec::new() };
-    let path = format!("/{}", s["path"].as_str().unwrap_or("").trim_matches('/'));
-    vec![Lent { kind: "secret".into(), r#ref: s["project"].as_str().unwrap_or("").into(), action, folder: Some((env.into(), path)) }]
-}
-
-fn search_secret_read(b: &Value) -> Vec<Lent> {
-    search_secret(b, Action::Reveal)
-}
-
+/// A roll secret a search route writes once as the caller, named by the body's
+/// `secret: {environment, key, path?, project?}` (a rotated admin password is stored there). Its
+/// environment and path as roll secrets takes them (`names::slug`, `names::path`): anything else,
+/// a pattern like `prod*` included, names no folder and is refused, since an approval of it would
+/// be remembered as a wildcard. Not for a secret a product keeps following (an inference
+/// endpoint's key, a `roll://` reference): that's re-checked as its maker at every use, so only a
+/// reveal allowed outright stands.
 fn search_secret_write(b: &Value) -> Vec<Lent> {
-    search_secret(b, Action::Write)
+    let s = &b["secret"];
+    let Some(env) = s["environment"].as_str() else { return Vec::new() };
+    let path = secret_path(s["path"].as_str().unwrap_or(""));
+    let folder = path.filter(|_| roll_secrets_ref::is_slug(env)).map(|p| (env.to_string(), p));
+    vec![Lent { kind: "secret".into(), r#ref: s["project"].as_str().unwrap_or("").into(), action: Action::Write, folder }]
+}
+
+/// A folder as roll secrets' `names::path` normalizes it, or `None` where it refuses it.
+fn secret_path(p: &str) -> Option<String> {
+    let p = if p.is_empty() { "/" } else { p };
+    let rest = p.strip_prefix('/').filter(|r| !r.starts_with('/'))?;
+    let rest = rest.strip_suffix('/').unwrap_or(rest);
+    if rest.is_empty() {
+        return Some("/".into());
+    }
+    rest.split('/').all(roll_secrets_ref::is_segment).then(|| format!("/{rest}"))
 }
 
 /// A worker's `run.scale.stream`: apps reads that stream group's lag for it (read on the stream).
@@ -1412,7 +1419,7 @@ static ROWS: &[Row] = &[
     // Inference endpoints keyed by a project's secret: making one changes the cluster as the
     // console does; roll secrets checks `reveal` on the secret itself, as the caller.
     row("GET", "/v1/search/clusters/{id}/inference/secrets", "search", R, one(PG, "cluster")),
-    row("POST", "/v1/search/clusters/{id}/inference/secrets", "search", ADMIN, one(PG, "cluster")).lends(Lend::Each(search_secret_read)),
+    row("POST", "/v1/search/clusters/{id}/inference/secrets", "search", ADMIN, one(PG, "cluster")),
     // Request metrics and the slow logs (queries' and documents' sources, cut): reads of the
     // cluster's data.
     row("GET", "/v1/search/clusters/{id}/metrics", "search", R, one(PG, "cluster")),
