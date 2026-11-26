@@ -2882,6 +2882,29 @@ impl Store {
     }
 
     /// No schema changes shown (the head they were read at stays, so they're read again).
+    /// The project's other open changes' previews whose schema changes touch a table `r`'s do
+    /// (PlanetScale flags deploy requests that conflict): each one's id, branch and those tables,
+    /// 5 previews and 5 tables each at most. A default branch's preview has none.
+    fn schema_overlaps(&self, r: &Row, mine: Option<&[String]>) -> Result<Vec<crate::SchemaOverlap>> {
+        let Some(mine) = mine.filter(|_| r.change_id.is_some()) else { return Ok(Vec::new()) };
+        let tables = crate::schema::tables_touched(mine);
+        if tables.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut out = Vec::new();
+        for o in self.rows(Some(&r.project_id))?.into_iter().filter(|o| o.id != r.id && o.change_id.is_some() && o.desired == crate::Desired::Active) {
+            let (theirs, _, _) = self.release_facts(&o.id)?;
+            let both: Vec<String> = crate::schema::tables_touched(theirs.as_deref().unwrap_or_default()).intersection(&tables).take(5).cloned().collect();
+            if !both.is_empty() {
+                out.push(crate::SchemaOverlap { preview: o.id.clone(), branch: o.branch.clone().unwrap_or_default(), tables: both });
+                if out.len() == 5 {
+                    break;
+                }
+            }
+        }
+        Ok(out)
+    }
+
     pub fn clear_schema_changes(&self, id: &str) -> Result<()> {
         self.db.write(|c| {
             c.execute("UPDATE previews SET schema_changes = NULL, schema_risks = NULL WHERE id = ? AND schema_changes IS NOT NULL", [id])?;
@@ -3832,6 +3855,7 @@ impl Store {
         let url = services.first().map(|(s, _)| s.url.clone());
         let share_url = url.as_deref().map(share);
         let (schema_changes, schema_risks, release) = self.release_facts(&r.id)?;
+        let schema_overlaps = self.schema_overlaps(&r, schema_changes.as_deref())?;
         let kept_until = self.kept_until(&r.id)?;
         // Its page as a link only when it's `https://` (it's kept whole to tell its repository).
         let pull = self.git_pull(&r.id)?.map(|mut g| {
@@ -3970,6 +3994,7 @@ impl Store {
             cost: cost.rounded(),
             schema_risks,
             schema_changes,
+            schema_overlaps,
             release,
             kept_until,
             pull,
