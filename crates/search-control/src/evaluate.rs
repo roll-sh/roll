@@ -38,7 +38,23 @@ pub struct Configuration {
     /// Parameters every query's rendering gets, under the query's own.
     pub params: Map<String, Value>,
     pub query_param: String,
+    /// A search application whose own template renders each query (`_render_query`: its
+    /// dictionary, its defaults), with an experiment's variant's params over them; `template` is
+    /// unused then.
+    pub application: Option<Application>,
 }
+
+/// A configuration that evaluates a search application, or one variant of its experiment.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Application {
+    pub name: String,
+    /// `(experiment, variant)`.
+    pub variant: Option<(String, String)>,
+}
+
+/// What an application's template calls the query unless the configuration says
+/// (Elasticsearch's default template's).
+pub const APPLICATION_QUERY_PARAM: &str = "query_string";
 
 /// A parsed `evaluate` body.
 #[derive(Clone, Debug, PartialEq)]
@@ -88,13 +104,36 @@ fn parse_judgment(v: &Value, i: usize) -> Result<Judgment, String> {
 
 fn parse_configuration(v: &Value, i: usize) -> Result<Configuration, String> {
     let Some(m) = v.as_object() else { return Err(bad(format!("[configurations][{i}] is an object {{name, request | template}}"))) };
-    only(m, &format!("[configurations][{i}]"), &["name", "request", "template", "query_param"])?;
+    only(m, &format!("[configurations][{i}]"), &["name", "request", "template", "application", "variant", "query_param"])?;
     let name = m.get("name").and_then(Value::as_str).filter(|n| !n.is_empty() && n.len() <= 64).ok_or_else(|| bad(format!("[configurations][{i}][name] is 1 to 64 characters")))?;
+    let application = match (m.get("application"), m.get("variant")) {
+        (None, None) => None,
+        (Some(Value::String(a)), v) if !a.is_empty() && a.len() <= 255 => {
+            let variant = match v {
+                None | Some(Value::Null) => None,
+                Some(Value::Object(o)) => match (o.get("experiment").and_then(Value::as_str), o.get("variant").and_then(Value::as_str), o.len()) {
+                    (Some(e), Some(v), 2) if !e.is_empty() && !v.is_empty() => Some((e.to_string(), v.to_string())),
+                    _ => return Err(bad(format!("[configurations][{i}][variant] is {{experiment, variant}}"))),
+                },
+                Some(_) => return Err(bad(format!("[configurations][{i}][variant] is {{experiment, variant}}"))),
+            };
+            if m.contains_key("request") || m.contains_key("template") {
+                return Err(bad(format!("[configurations][{i}] evaluates an [application] with its own template: no [request] or [template] beside it")));
+            }
+            Some(Application { name: a.clone(), variant })
+        }
+        (Some(_), _) => return Err(bad(format!("[configurations][{i}][application] is a search application's name"))),
+        (None, Some(_)) => return Err(bad(format!("[configurations][{i}][variant] needs the [application] it's a variant of"))),
+    };
     let query_param = match m.get("query_param") {
+        None | Some(Value::Null) if application.is_some() => APPLICATION_QUERY_PARAM.to_string(),
         None | Some(Value::Null) => QUERY_PARAM.to_string(),
         Some(Value::String(p)) if !p.is_empty() && p.len() <= 64 => p.clone(),
         Some(_) => return Err(bad(format!("[configurations][{i}][query_param] is a parameter name"))),
     };
+    if let Some(app) = application {
+        return Ok(Configuration { name: name.to_string(), template: Value::Null, params: Map::new(), query_param, application: Some(app) });
+    }
     let (template, params) = match (m.get("request"), m.get("template")) {
         (Some(Value::Object(r)), None) => (json!({ "source": Value::Object(r.clone()) }), Map::new()),
         (None, Some(Value::Object(t))) => {
@@ -113,7 +152,7 @@ fn parse_configuration(v: &Value, i: usize) -> Result<Configuration, String> {
         }
         _ => return Err(bad(format!("[configurations][{i}] gives a search body with {{{{query}}}} ([request]) or a search template ([template]), one of them"))),
     };
-    Ok(Configuration { name: name.to_string(), template, params, query_param })
+    Ok(Configuration { name: name.to_string(), template, params, query_param, application: None })
 }
 
 /// Parses an `evaluate` body: `{judgments: [{query, ratings: [{_id, rating, _index?}]}],
@@ -182,6 +221,44 @@ pub fn rank_eval_body(spec: &Spec, c: &Configuration, index: &str) -> Value {
         })
         .collect();
     json!({ "metric": spec.metric, "templates": [{ "id": "configuration", "template": c.template }], "requests": requests })
+}
+
+/// The `_rank_eval` body that scores already rendered searches (an application's configuration:
+/// `rendered[i]` is judged query `i` through the application's template), a rating without an
+/// `_index` about a document of `index`.
+pub fn rank_eval_rendered(spec: &Spec, rendered: Vec<Value>, index: &str) -> Value {
+    let requests: Vec<Value> = spec
+        .judgments
+        .iter()
+        .zip(rendered)
+        .enumerate()
+        .map(|(i, (j, body))| {
+            let ratings: Vec<Value> = j.ratings.iter().map(|(ix, id, r)| json!({ "_index": if ix.is_empty() { index } else { ix.as_str() }, "_id": id, "rating": r })).collect();
+            json!({ "id": format!("q{i}"), "request": body, "ratings": ratings })
+        })
+        .collect();
+    json!({ "metric": spec.metric, "requests": requests })
+}
+
+/// The params that render judged query `query` through application `app` (its configuration's
+/// `query_param`), with the variant's params over them: `Err` names what the stored application
+/// lacks (the experiment, the variant) or a variant that brings a template of its own, which
+/// evaluates as a `template` configuration.
+pub fn application_params(c: &Configuration, app: &Value, query: &str) -> Result<Map<String, Value>, String> {
+    let mut params = Map::new();
+    params.insert(c.query_param.clone(), Value::String(query.to_string()));
+    let Some(Application { name, variant: Some((exp, var)) }) = &c.application else { return Ok(params) };
+    let e = app["experiments"].as_array().and_then(|es| es.iter().find(|e| e["id"] == exp.as_str())).ok_or_else(|| bad(format!("[{name}] has no experiment [{exp}]")))?;
+    let v = e["variants"].as_array().and_then(|vs| vs.iter().find(|v| v["name"] == var.as_str())).ok_or_else(|| bad(format!("experiment [{exp}] has no variant [{var}]")))?;
+    if v.get("template").is_some_and(|t| !t.is_null()) {
+        return Err(bad(format!("variant [{var}] brings its own template: evaluate it as a [template] configuration")));
+    }
+    if let Some(p) = v["params"].as_object() {
+        for (k, x) in p {
+            params.insert(k.clone(), x.clone());
+        }
+    }
+    Ok(params)
 }
 
 fn round4(v: f64) -> f64 {
@@ -298,6 +375,25 @@ mod tests {
         assert_eq!((c["better"].as_u64(), c["worse"].as_u64(), c["unchanged"].as_u64()), (Some(1), Some(0), Some(0)));
         assert_eq!(c["better_queries"][0], json!({ "query": "red shoes", "baseline": 0.2, "candidate": 0.9, "difference": 0.7 }));
         assert_eq!(c["difference"], 0.1);
+    }
+
+    #[test]
+    fn an_application_variants_params_go_over_the_query() {
+        let s = parse(br#"{"judgments": [{"query": "x", "ratings": [{"_id": "1", "rating": 1}]}], "configurations": [{"name": "app"
+            , "application": "shop"}, {"name": "b", "application": "shop", "variant": {"experiment": "e1", "variant": "boosted"}}]}"#)
+        .unwrap();
+        assert_eq!(s.configurations[0].query_param, "query_string");
+        let app = json!({ "experiments": [{ "id": "e1", "variants": [{ "name": "boosted", "params": { "boost": 3 } }, { "name": "t", "template": { "script": { "source": "{}" } } }] }] });
+        assert_eq!(application_params(&s.configurations[0], &app, "red").unwrap(), json!({ "query_string": "red" }).as_object().unwrap().clone());
+        assert_eq!(application_params(&s.configurations[1], &app, "red").unwrap(), json!({ "query_string": "red", "boost": 3 }).as_object().unwrap().clone());
+        let mut t = s.configurations[1].clone();
+        t.application = Some(Application { name: "shop".into(), variant: Some(("e1".into(), "t".into())) });
+        assert!(application_params(&t, &app, "red").unwrap_err().contains("own template"));
+        t.application = Some(Application { name: "shop".into(), variant: Some(("e2".into(), "t".into())) });
+        assert!(application_params(&t, &app, "red").unwrap_err().contains("no experiment [e2]"));
+        let body = rank_eval_rendered(&s, vec![json!({ "query": { "match_all": {} } })], "shop");
+        assert_eq!(body["requests"][0]["request"], json!({ "query": { "match_all": {} } }));
+        assert!(parse(br#"{"judgments": [{"query": "x", "ratings": [{"_id": "1", "rating": 1}]}], "configurations": [{"name": "a", "application": "shop", "request": {}}]}"#).unwrap_err().contains("no [request]"));
     }
 
     #[test]
