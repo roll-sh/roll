@@ -4246,9 +4246,9 @@ impl ScanNode {
                         }
                     }
                     if hold {
-                        for _ in 0..rejected {
-                            self.count_row(ctx);
-                            ctx.filtered(self.key);
+                        self.count_rows(ctx, rejected);
+                        if rejected > 0 {
+                            ctx.count(self.key, |s| s.removed += rejected as u64);
                         }
                         // (Every row held: by TID, as the merge returns them; TIDs are distinct.
                         // The TIDs sorted with the rows' places, each row then moved once.)
@@ -6417,6 +6417,15 @@ impl ScanNode {
     /// What `next` returns for the stored row `bytes` under `key`: counted, read, checked
     /// against the filter and locked (None: skipped).
     /// A row handed out, counted as its scan counts it.
+    /// `count_row` of `n` rows.
+    fn count_rows(&self, ctx: &ExecCtx, n: u32) {
+        match self.stat {
+            StatTarget::Seq(t) if n > 0 => super::pgstat::count_returned(ctx, t, n as i64),
+            StatTarget::Seq(_) | StatTarget::Off => {}
+            _ => (0..n).for_each(|_| self.count_row(ctx)),
+        }
+    }
+
     fn count_row(&self, ctx: &ExecCtx) {
         match self.stat {
             StatTarget::Off => {}
