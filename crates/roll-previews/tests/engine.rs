@@ -1591,7 +1591,7 @@ async fn masked_branches_come_from_one_masked_base() {
     assert!(from_base(&e) >= 2, "both previews' branches come from it");
     for id in ["chg_mb1", "chg_mb2"] {
         let p = e.engine.store.row_by_change(id).unwrap().unwrap();
-        assert_eq!(e.engine.store.mask_digest(&p.id, Kind::Postgres, "prj_db").unwrap().filter(|d| !d.is_empty()).is_some(), true, "each recorded as masked by the rules");
+        assert!(e.engine.store.mask_digest(&p.id, Kind::Postgres, "prj_db").unwrap().is_some_and(|d| !d.is_empty()), "each recorded as masked by the rules");
     }
     // New rules: a new base, and the previews branch from it; the old base goes with its last branch.
     let mut s = e.engine.store.settings(&e.project).unwrap();
