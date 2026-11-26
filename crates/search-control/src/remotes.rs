@@ -360,8 +360,10 @@ impl Control {
         let replaced = self.store.put_remote(&row).await?;
         let mut settings = serde_json::Map::new();
         let prefix = format!("cluster.remote.{alias}");
+        // OpenSearch takes a transport address (`host:port`; its default port).
+        let address = if os { format!("{}:9300", t.name) } else { t.name.clone() };
         settings.insert(format!("{prefix}.mode"), json!("proxy"));
-        settings.insert(format!("{prefix}.proxy_address"), json!(t.name));
+        settings.insert(format!("{prefix}.proxy_address"), json!(address));
         settings.insert(format!("{prefix}.seeds"), Value::Null);
         if let Some(s) = skip_unavailable {
             settings.insert(format!("{prefix}.skip_unavailable"), json!(s.to_string()));
@@ -382,7 +384,7 @@ impl Control {
         if let Some(old) = replaced.filter(|o| o.minted && o.key_id != key_id) {
             let _ = self.revoke_remote_key(&old.target_id, &old.key_id).await;
         }
-        let mut out = json!({ "alias": alias, "cluster": t.name, "cluster_id": t.id, "mode": "proxy", "proxy_address": t.name, "key_id": key_id, "minted": minted });
+        let mut out = json!({ "alias": alias, "cluster": t.name, "cluster_id": t.id, "mode": "proxy", "proxy_address": address, "key_id": key_id, "minted": minted });
         if let Some(s) = skip_unavailable {
             out["skip_unavailable"] = json!(s);
         }

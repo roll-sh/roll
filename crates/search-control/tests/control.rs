@@ -4711,9 +4711,9 @@ async fn opensearch_flavor_clusters_link_with_the_remotes_own_mappings() {
     let api = "/_plugins/_security/api";
     let dls = json!({"index_permissions": [{"index_patterns": ["docs"], "dls": "{\"term\":{\"tenant\":\"${attr.internal.tenant}\"}}", "allowed_actions": ["read"]}]});
     for (c, p, body) in [
-        (&near, "internalusers/alice", json!({"password": "pass-word-alice-1"})),
-        (&near, "internalusers/bob", json!({"password": "pass-word-bob-12"})),
-        (&near, "internalusers/carol", json!({"password": "pass-word-carol-1", "attributes": {"tenant": "a"}})),
+        (&near, "internalusers/alice", json!({"password": "Zq7-Mountain-River-91"})),
+        (&near, "internalusers/bob", json!({"password": "Zq7-Mountain-River-92"})),
+        (&near, "internalusers/carol", json!({"password": "Zq7-Mountain-River-93", "attributes": {"tenant": "a"}})),
         (&near, "rolesmapping/readall", json!({"users": ["alice"]})),
         (&far, "rolesmapping/readall", json!({"users": ["bob"]})),
         (&far, "roles/tenant_docs", dls),
@@ -4740,16 +4740,16 @@ async fn opensearch_flavor_clusters_link_with_the_remotes_own_mappings() {
     let (_, info) = es_as(&e, &near, Method::GET, "/_remote/info", None).await;
     assert_eq!(info["r"]["connected"], true, "{info}");
     // Users: the remote's mappings decide, with the local user's attributes.
-    let (s, v) = e.es("alice@os-near", "pass-word-alice-1", Method::GET, "/r:docs/_search", None).await;
+    let (s, v) = e.es("alice@os-near", "Zq7-Mountain-River-91", Method::GET, "/r:docs/_search", None).await;
     assert_eq!(s, 403, "{v}");
     assert_eq!(v["error"]["reason"], "no permissions for [indices:data/read/search] and User [name=alice, backend_roles=[], requestedTenant=null]", "{v}");
-    let (s, v) = e.es("bob@os-near", "pass-word-bob-12", Method::GET, "/r:docs/_search", None).await;
+    let (s, v) = e.es("bob@os-near", "Zq7-Mountain-River-92", Method::GET, "/r:docs/_search", None).await;
     assert_eq!((s, v["hits"]["total"]["value"].as_i64()), (200, Some(2)), "{v}");
-    let (s, v) = e.es("carol@os-near", "pass-word-carol-1", Method::GET, "/r:docs/_search", None).await;
+    let (s, v) = e.es("carol@os-near", "Zq7-Mountain-River-93", Method::GET, "/r:docs/_search", None).await;
     assert_eq!((s, v["hits"]["hits"][0]["_source"]["tenant"].as_str(), v["hits"]["total"]["value"].as_i64()), (200, Some("a"), Some(1)), "{v}");
     // Skipped instead, once the remote may be.
     assert_eq!(es_as(&e, &near, Method::PUT, "/_cluster/settings", Some(json!({"persistent": {"cluster.remote.r.skip_unavailable": true}}))).await.0, 200);
-    let (s, v) = e.es("alice@os-near", "pass-word-alice-1", Method::GET, "/r:docs/_search", None).await;
+    let (s, v) = e.es("alice@os-near", "Zq7-Mountain-River-91", Method::GET, "/r:docs/_search", None).await;
     assert_eq!((s, &v["_clusters"]), (200, &json!({"total": 1, "successful": 0, "skipped": 1})), "{v}");
     let (s, v) = es_as(&e, &near, Method::POST, "/r:docs/_search/point_in_time?keep_alive=1m", None).await;
     assert_eq!((s, v["error"]["reason"].as_str()), (400, Some("invalid id: [null]")), "{v}");
