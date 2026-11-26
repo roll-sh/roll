@@ -963,15 +963,7 @@ fn authorize_action(ctx: &Ctx) -> EsResult<Option<String>> {
         if scope == Scope::Index && OS_WHOLE.contains(&ctx.api.name()) {
             let defaults = narrow_defaults(ctx.api.name());
             let opts = ctx.indices_options(defaults).unwrap_or(defaults);
-            // Linked remotes' expressions are the remote's to authorize, as OpenSearch's are
-            // (`crate::remote::links`): a user needs nothing here for them.
-            let all = crate::api::index_expressions(ctx);
-            let named = !all.is_empty();
-            let exprs: Vec<String> = all.into_iter().filter(|e| !crate::remote::links::names_link(ctx, e)).collect();
-            if named && exprs.is_empty() {
-                return Ok(None);
-            }
-            return check_all(ctx, p, &eff, &action, exprs, &opts).map(|_| None);
+            return check_all(ctx, p, &eff, &action, crate::api::index_expressions(ctx), &opts).map(|_| None);
         }
     }
     match scope {
@@ -1363,19 +1355,53 @@ pub fn authorize_search(ctx: &Ctx, exprs: &[String], opts: &crate::meta::resolve
 /// OpenSearch's check of an index request (`do_not_fail_on_forbidden` off): every index its
 /// expressions resolve to (or every index when it names none) must be permitted; nothing is
 /// narrowed to the permitted ones.
+///
+/// Remote expressions (`<alias>:<index>`): a linked remote's are the remote's to authorize, as
+/// OpenSearch's are (`crate::remote::links`), so a user needs nothing here for them; a loopback's
+/// read this cluster's own indices, so their index part is authorized as local names (and a
+/// linked cluster's user may not name one at all: it would read past the link's ceiling); any
+/// other remote's read nothing here (the search refuses or skips them). Resolving fails closed:
+/// an error is the request's, never an empty list that authorizes nothing.
 fn check_all(ctx: &Ctx, p: &Principal, eff: &Effective, action: &str, exprs: Vec<String>, opts: &crate::meta::resolve::IndicesOptions) -> EsResult<()> {
     let st = ctx.state();
+    let named = !exprs.is_empty();
+    let linked_user = p.os().is_some_and(|id| id.link.is_some());
+    let loopbacks: Vec<crate::remote::Remote> = crate::remote::remotes_in(ctx.cluster.dialect, &st).into_iter().filter(|r| r.is_loopback(ctx.cluster)).collect();
+    let mut local: Vec<String> = Vec::with_capacity(exprs.len());
+    for e in exprs {
+        let (neg, bare) = match e.strip_prefix('-') {
+            Some(b) => ("-", b),
+            None => ("", e.as_str()),
+        };
+        let Some((pattern, index)) = crate::remote::split_expression(bare) else {
+            local.push(e);
+            continue;
+        };
+        if crate::remote::links::names_link(ctx, bare) {
+            continue;
+        }
+        if loopbacks.iter().any(|r| crate::xcontent::filter::glob_match(pattern, &r.alias)) {
+            if linked_user {
+                return Err(denied(p, action, Some(std::slice::from_ref(&e))));
+            }
+            local.push(format!("{neg}{index}"));
+        }
+    }
+    if named && local.is_empty() {
+        return Ok(());
+    }
+    let exprs = local;
     let mut names: Vec<String> = Vec::new();
     // No index: every index the request reads, as its wildcard resolves (dot-prefixed ones too).
     if exprs.iter().all(|e| e.starts_with('-')) {
         let list: Vec<String> = std::iter::once("*".to_string()).chain(exprs.iter().cloned()).collect();
-        names.extend(crate::meta::resolve::resolve(&st, &list, opts, ctx.now_ms).unwrap_or_default());
+        names.extend(crate::meta::resolve::resolve(&st, &list, opts, ctx.now_ms)?);
     }
     for e in exprs.iter().filter(|e| !e.starts_with('-')) {
         if e.contains('*') || e == "_all" {
             let mut list = vec![e.clone()];
             list.extend(exprs.iter().filter(|x| x.starts_with('-')).cloned());
-            names.extend(crate::meta::resolve::resolve(&st, &list, opts, ctx.now_ms).unwrap_or_default());
+            names.extend(crate::meta::resolve::resolve(&st, &list, opts, ctx.now_ms)?);
         } else {
             names.push(e.clone());
         }
@@ -1640,8 +1666,13 @@ fn request_indices(ctx: &Ctx) -> Vec<String> {
     let mut out = Vec::new();
     for e in exprs {
         if e.contains('*') || e == "_all" {
-            if let Ok(names) = crate::meta::resolve::resolve(&st, std::slice::from_ref(&e), &opts, ctx.now_ms) {
-                out.extend(names);
+            match crate::meta::resolve::resolve(&st, std::slice::from_ref(&e), &opts, ctx.now_ms) {
+                Ok(names) => out.extend(names),
+                // Fails closed: a remote's expression (which never resolves here) is checked as
+                // the name it is, never dropped from what's authorized. A local one that doesn't
+                // resolve fails the request itself the same way.
+                Err(_) if crate::remote::split_expression(e.trim_start_matches('-')).is_some() => out.push(e.trim_start_matches('-').to_string()),
+                Err(_) => {}
             }
         } else {
             out.push(e.trim_start_matches('-').to_string());
