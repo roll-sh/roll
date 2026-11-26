@@ -4894,11 +4894,14 @@ pub(crate) fn lookup_source(ctx: &QueryCtx, action: &str, requested: Option<&str
         None => ctx.security.read_as()?,
     };
     // The read's own document and field level security: the role entries granting `action`
-    // (a role may grant gets alone, with a query of their own).
+    // (a role may grant gets alone, with a query of their own); for a read of the searched
+    // index, the search's, which is what was authorized (a role granting searches only would
+    // otherwise have no entry for `action`, and so no restriction at all).
+    let restricted_as = if requested.is_some() { action } else { crate::xpack::security::dls::READ };
     let engine = ctx.cluster.engine.index(ctx.cluster, ctx.st, idx)?;
     let shard = engine.shard(crate::meta::routing::shard_for(idx, id, routing));
     let Some(doc) = shard.shard.get(id.as_bytes(), true).map_err(crate::engine::convert::index_error)? else { return Ok(None) };
-    let fields = match sec.map(|s| s.documents(ctx.cluster, action, &idx.name)).transpose()?.flatten() {
+    let fields = match sec.map(|s| s.documents(ctx.cluster, restricted_as, &idx.name)).transpose()?.flatten() {
         None => doc.fields,
         // Under document level security the document is read from the searcher the filter is
         // checked on (a document not searchable yet isn't visible).
@@ -4912,7 +4915,7 @@ pub(crate) fn lookup_source(ctx: &QueryCtx, action: &str, requested: Option<&str
     };
     let Some(src) = crate::fetch::source_bytes(&fields) else { return Ok(Some((doc.version, None))) };
     let src = crate::fetch::parse_source(src)?;
-    Ok(Some((doc.version, Some(match sec.and_then(|s| s.fields(action, &idx.name)) {
+    Ok(Some((doc.version, Some(match sec.and_then(|s| s.fields(restricted_as, &idx.name)) {
         Some(f) => f.filter_source(src),
         None => src,
     }))))

@@ -1601,6 +1601,26 @@ async fn lookups_are_authorized_where_they_run() {
             refused("a terms lookup by query", s, &v);
             continue;
         }
+        // A `more_like_this` document of the searched index is read under the search's document
+        // level security, even for a role that grants searches alone: a hidden document lends
+        // no terms (`2` would make `1` match).
+        for (path, body) in [
+            ("/pub", json!({"mappings": {"properties": {"body": {"type": "text"}, "public": {"type": "boolean"}}}})),
+            ("/pub/_doc/1", json!({"public": true, "body": "alpha beta"})),
+            ("/pub/_doc/3?refresh=true", json!({"public": true, "body": "beta gamma"})),
+            ("/pub/_doc/2?refresh=true", json!({"public": false, "body": "alpha zeta"})),
+            ("/_security/role/searcher", json!({"indices": [{"names": ["pub"], "privileges": ["indices:data/read/search*"], "query": {"term": {"public": true}}}]})),
+            ("/_security/user/sam", json!({"password": "sam-password-1", "roles": ["searcher"]})),
+        ] {
+            let (s, v) = e.es(&admin, &pw, Method::PUT, path, Some(body)).await;
+            assert!(s == 200 || s == 201, "{path}: {v}");
+        }
+        let sam = format!("sam@{name}");
+        let like = |id: &str| json!({"query": {"more_like_this": {"fields": ["body"], "like": [{"_id": id}], "min_term_freq": 1, "min_doc_freq": 1}}});
+        let (s, v) = e.es(&sam, "sam-password-1", Method::POST, "/pub/_search", Some(like("1"))).await;
+        assert_eq!((s, v["hits"]["total"]["value"].as_i64()), (200, Some(1)), "a visible document's terms: {v}");
+        let (s, v) = e.es(&sam, "sam-password-1", Method::POST, "/pub/_search", Some(like("2"))).await;
+        assert_eq!((s, v["hits"]["total"]["value"].as_i64()), (200, Some(0)), "a hidden document lent its terms: {v}");
         // A lookup's name is checked as resolved: a failure store needs its own privilege, which
         // `read` on `mine-*` doesn't give.
         for (path, body) in [
