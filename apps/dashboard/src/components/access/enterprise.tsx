@@ -115,6 +115,7 @@ function Providers({ idps, audience, save }: { idps: EnterpriseIdp[]; audience: 
               {i.admins && <span className="text-accent">signs in admins</span>}
               {i.tenant && <span className="text-subtle">tenant <code className="font-mono">{i.tenant}</code></span>}
               {i.jwks && <span className="text-subtle">keys pinned</span>}
+              {i.express && <span className="text-subtle">added by Claude&apos;s express setup</span>}
               <span className="flex-1" />
               <button onClick={() => void save(idps.filter((x) => x !== i))} className="text-muted hover:text-danger">
                 Stop trusting

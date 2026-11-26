@@ -285,7 +285,19 @@ roll token acting as that person, with no consent screen and no roll sign-in.
     - **Who and where:** only for Claude's client (its public document or `/confidential_client`), returning only to `https://claude.ai/api/mcp/auth_callback`, and approved only by roll's admins.
     - **The consent screen** names what approving turns on and asks for the email domains Claude's issuer vouches for, plus the most Claude may do for a person (the app's rules).
     - **The code** (with RFC 9207's `iss` in the redirect, as every roll redirect has) trades for a five-minute, single-use token, with `ema_setup_endpoint` and no refresh token. The confidential client signs a client assertion with its document's keys there.
-    - **`PUT /v1/access/enterprise/ema-setup {ema_issuer}`** with that token (in front of the gate: the token is the credential) trusts the issuer, a Claude issuer only, for those domains with email matching, and registers Claude as an app if it isn't one. It replaces what an earlier express setup trusted and keeps a provider the operator set up by hand. Refusals are `{error, error_description}`: `invalid_token` for a spent or old token, `invalid_request` for an issuer that isn't Claude's. Audited as `express_setup`.
+    - **`PUT /v1/access/enterprise/ema-setup {ema_issuer}`** takes that token, in front of the gate (the token is the credential). In one write it:
+      - spends the token;
+      - trusts the issuer, a Claude issuer only, for those domains with email matching;
+      - replaces what an earlier express setup trusted, keeping a provider the operator set up by hand;
+      - gives Claude's app the consent's rules: it registers the app, or narrows or widens an existing one along with its people's connections, as an edit of the app does.
+    - **Refusals** are `{error, error_description}`:
+      - `invalid_token` for a spent or old token;
+      - `invalid_request` for an issuer that isn't Claude's;
+      - `access_denied` when the admin who approved isn't one any more;
+      - 409 when there are already too many providers or apps;
+      - a generic 500 otherwise.
+    - **Also refused:** at consent, a mail service anyone can sign up at (gmail.com and the like) as a domain; and roll's client allow-list (`oauth_clients`) without Claude on it.
+    - **Audited** as `express_setup`, with who approved (`by`).
 - **A leaked app secret** (an `rlc_` with its checksum, found by roll code's push scan or reported
   by GitHub's secret scanning) is revoked like any other: roll drops the secret, the one kept from
   before a rotation, and every token the app's people hold, in one write, and audits it. The
@@ -461,7 +473,7 @@ first, so they can't hide what runs, and anything that makes or changes credenti
 - A roll secret another product writes once as the caller is lent the same way:
   - **The route:** search's admin password rotated into one (`POST …/password` with `secret: {environment, path?, project?}`, `write`; the project left out is the one the cluster is on).
   - **What's checked:** `write` on that folder as roll secrets decides it, protected environments included. The environment and path are checked as roll secrets names them, so a pattern like `prod*` is refused rather than remembered as a wildcard.
-  - **An approval** names that folder, even when the route's own action asks too, and remembering it allows exactly that folder and environment.
+  - **An approval** names that folder, even when the route's own action asks too. Remembering it allows that folder and its subfolders in that environment (a folder's rule reaches every folder under it). `/`, the default, is the whole environment, so a secrets approval at the root (or naming no folder) is remembered for 8 hours at most, and the approval screen offers only that.
   - **The grant the product gets** carries one exact rule (that folder: `write`) for this request, plus `read` on that folder whenever the write passes, allowed outright or approved, since the product reads the version back. roll secrets checks the caller again inside, and nothing else in the project opens.
   - **A remembered approval** keeps to what it named. When the route's own action asked too (admin on the cluster), only the secret is remembered, and the next call asks about the route's own action again.
   - **A secret a product keeps following needs `reveal` allowed outright.** That covers an inference endpoint keyed by a secret (its sync) and a bound `roll://` reference: either is checked again as its maker at every use, so an approval can't stand in for it.
