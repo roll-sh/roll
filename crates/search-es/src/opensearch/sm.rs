@@ -620,8 +620,9 @@ fn to_delete(condition: &Value, snaps: &[(String, i64, String)], now: i64) -> Ve
 /// A step's failure: retried on the next ticks, then recorded `FAILED` and the workflow back
 /// at its start.
 fn failed(w: &mut Map, start_state: &str, at: i64, message: String, cause: String) {
+    // Each attempt's execution starts at its own tick.
     let left = w.get("retry").and_then(|r| num(r, "count")).unwrap_or(RETRIES + 1) - 1;
-    let start = w.get("latest_execution").and_then(|e| num(e, "start_time")).filter(|_| w.get("retry").is_some()).unwrap_or(at);
+    let start = at;
     if left > 0 {
         w.insert("latest_execution".into(), execution("RETRYING", start, None, message, Some(cause)));
         w.insert("retry".into(), obj! { "count" => left });
@@ -721,8 +722,11 @@ async fn creation(cluster: &Cluster, owner: &Option<crate::xpack::security::Prin
                     w.shift_remove("retry");
                 }
                 Err(e) => {
+                    // The trigger moves on once, when the condition is met; retries keep it.
+                    if state == "CREATION_START" {
+                        w.insert("trigger".into(), obj! { "time" => next_trigger(wf, tick).map_or(Value::Null, Value::from) });
+                    }
                     w.insert("current_state".into(), Value::from("CREATION_CONDITION_MET"));
-                    w.insert("trigger".into(), obj! { "time" => next_trigger(wf, tick).map_or(Value::Null, Value::from) });
                     let message = format!("{}: Caught exception while getting snapshots to decide if snapshot has been created in previous execution period.", stamp(tick));
                     failed(w, "CREATION_START", tick, message, format!("{}: {}", stamp(tick), e.reason()));
                 }
