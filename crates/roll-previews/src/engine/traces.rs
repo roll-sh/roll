@@ -474,6 +474,20 @@ impl Engine {
         Ok(self.main_of(&r.project_id, &r.repo).await?.filter(|b| b.id != r.id))
     }
 
+    /// The page a visitor is on, on main's preview (the toolbar's Main; Vercel's deployment
+    /// switcher): `path` (with its query) on the same service there, when main's preview runs it.
+    /// Only a path on that host: one that isn't (`//other.example`, a control character) is none.
+    pub async fn main_page_url(&self, id: &str, service: &str, path: &str) -> Result<Option<String>> {
+        let ok = path.starts_with('/') && !path.starts_with("//") && !path.starts_with("/\\") && path.len() <= 2000 && !path.chars().any(|c| c.is_control() || c.is_whitespace());
+        if !ok {
+            return Ok(None);
+        }
+        let r = self.store.row(id)?;
+        let Some(base) = self.main_preview(&r).await? else { return Ok(None) };
+        let view = self.store.view(base)?;
+        Ok(view.services.iter().find(|s| s.name == service).map(|s| format!("{}{path}", s.url.trim_end_matches('/'))))
+    }
+
     /// A project's preview of a repo's default branch, else its baseline (main's preview itself
     /// included: who asks may be it).
     pub(super) async fn main_of(&self, project: &str, repo: &str) -> Result<Option<crate::store::Row>> {

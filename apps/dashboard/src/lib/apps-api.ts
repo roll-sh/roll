@@ -1939,6 +1939,7 @@ export const appsApi = {
   domains: (id: string, e: string) => call<Domain[]>("GET", `${env(id, e)}/domains`),
   addDomain: (id: string, e: string, hostname: string) => call<Domain>("POST", `${env(id, e)}/domains`, { hostname }),
   verifyDomain: (id: string, e: string, host: string) => call<Domain>("POST", `${env(id, e)}/domains/${enc(host)}/verify`),
+  configureDomain: (id: string, e: string, host: string, cloudflareToken: string, replace = false) => call<Domain>("POST", `${env(id, e)}/domains/${enc(host)}/configure`, { cloudflare_token: cloudflareToken, ...(replace ? { replace: true } : {}) }),
   removeDomain: (id: string, e: string, host: string) => call<null>("DELETE", `${env(id, e)}/domains/${enc(host)}`),
   redirectDomain: (id: string, e: string, host: string, to: string | null) => call<Domain>("PATCH", `${env(id, e)}/domains/${enc(host)}`, { redirect_to: to }),
   /** Send a custom domain to another of the app's ports (null: the service's own). */
