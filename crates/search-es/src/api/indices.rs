@@ -417,6 +417,11 @@ fn create_index_unhooked(st: &mut ClusterState, provided_name: &str, name: &str,
         let tier = if backing.is_some() { "data_hot" } else { "data_content" };
         settings.set("index.routing.allocation.include._tier_preference", tier);
     }
+    if let Some(d) = &st.semantic_default
+        && !settings.contains("index.semantic_text.default_inference_id")
+    {
+        settings.set("index.semantic_text.default_inference_id", d.clone());
+    }
     settings.set("index.provided_name", provided_name);
     settings.set("index.creation_date", now_ms.to_string());
     settings.set("index.uuid", uuid.clone());

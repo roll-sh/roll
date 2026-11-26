@@ -624,7 +624,7 @@ impl Cluster {
             }
             None => ClusterState::new(&random_uuid()),
         };
-        let mut state = ClusterState { dialect: config.dialect, ..state };
+        let mut state = ClusterState { dialect: config.dialect, semantic_default: semantic_default(&config), ..state };
         state.metadata.dialect = config.dialect;
         // x-pack's stack templates (`logs-*-*` and friends); OpenSearch has none.
         if config.dialect == Dialect::Elasticsearch {
@@ -840,5 +840,20 @@ mod tests {
         let reopened = Cluster::open(ClusterConfig::new("c"), store).await.unwrap();
         assert_eq!(reopened.uuid(), uuid);
         assert_eq!(reopened.state().metadata.persistent.get("cluster.routing.allocation.enable"), Some("all"));
+    }
+}
+
+/// What a new index's `semantic_text` fields default to ([`ClusterState::semantic_default`]): the
+/// node setting `roll.semantic_text.default_inference_id` when set (empty: Elasticsearch's own
+/// default, ELSER), else E5 when the node runs it (`.multilingual-e5-small-elasticsearch`), on an
+/// Elasticsearch-flavor cluster. A field that names its endpoint, or an index that sets the
+/// setting, keeps its own.
+fn semantic_default(config: &ClusterConfig) -> Option<String> {
+    if config.dialect != Dialect::Elasticsearch {
+        return None;
+    }
+    match config.node_setting("roll.semantic_text.default_inference_id") {
+        Some(v) => (!v.trim().is_empty()).then(|| v.trim().to_string()),
+        None => config.embedder.as_ref().is_some_and(|e| e.available()).then(|| crate::xpack::inference::services::builtin::E5_ENDPOINT.to_string()),
     }
 }
