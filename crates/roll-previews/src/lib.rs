@@ -1173,6 +1173,9 @@ pub struct PageCheck {
     /// A story's interaction test (its `play` function), as Storybook ran it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub play: Option<Play>,
+    /// What a failed one threw (one line, masked).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub play_error: Option<String>,
     /// What its change against the baseline is ([`crate::visual::compare`]'s signature): pages
     /// with the same one changed the same way.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1198,6 +1201,9 @@ pub struct PageReport {
     /// A story's interaction test (its `play` function), as Storybook ran it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub play: Option<Play>,
+    /// What a failed one threw, as Storybook's frame showed it (one line, the preview's code's).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub play_error: Option<String>,
 }
 
 /// How a story's interaction test went (Chromatic's interaction tests): its `play` function ran
