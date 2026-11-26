@@ -1103,8 +1103,12 @@ fn count_store(st: &mut Stores, w: &Win, calls: &[WindowCall], rows: &[Row], res
                 super::workmem::minimal_tuple_len(&vals, &types, ctx)
             })
             .collect();
-        let frames: Vec<(usize, usize)> =
-            (0..m).map(|r| frame_of(&wc, r, m, peers, part, w.okeys, &offsets, ctx)).collect::<Result<_>>()?;
+        let frames: Vec<(usize, usize)> = if FrameSearch::takes(&wc) {
+            let mut fs = FrameSearch::new(&wc, part, peers, w.okeys, &offsets);
+            (0..m).map(|r| fs.at(r, ctx)).collect::<Result<_>>()?
+        } else {
+            (0..m).map(|r| frame_of(&wc, r, m, peers, part, w.okeys, &offsets, ctx)).collect::<Result<_>>()?
+        };
         // (update_frametailpos: what it spools for row r.)
         let tail_spool = |r: usize| match &f.end {
             FrameBound::UnboundedFollowing => m,
@@ -1541,6 +1545,113 @@ pub(super) fn range_stop(v: &Value, cur: &Value, off: &Value, preceding: bool, i
     })
 }
 
+/// A partition's frames for a RANGE or GROUPS frame with an offset bound, found as
+/// nodeWindowAgg.c's update_frameheadpos / update_frametailpos find them: each such bound a
+/// pointer moving forward as the current row does (RANGE: to where `range_stop` stops, from
+/// where the previous row's stopped; GROUPS: a peer group at a time), O(1) a row on average
+/// where `frame_of` looks from the partition's start. Rows are asked in order; the frames are
+/// `frame_of`'s (its bounds move forward as the current row does, the partition being sorted
+/// on the ORDER BY value that `in_range` compares).
+struct FrameSearch<'a> {
+    call: &'a WindowCall,
+    part: &'a [usize],
+    peers: &'a [(usize, usize)],
+    okeys: &'a [Vec<Value>],
+    offsets: &'a (Option<Value>, Option<Value>),
+    /// The current row's peer group: its number and the row it starts at.
+    group: (usize, usize),
+    /// The head's and the tail's pointers: a position (RANGE), or a peer group's number and
+    /// first row (GROUPS).
+    ptrs: [(usize, usize); 2],
+}
+
+impl<'a> FrameSearch<'a> {
+    /// A frame `frame_of` would look for from the partition's start each row.
+    fn takes(call: &WindowCall) -> bool {
+        let f = &call.frame;
+        let offset = |b: &FrameBound| matches!(b, FrameBound::Preceding(_) | FrameBound::Following(_));
+        match f.unit {
+            FrameUnit::Rows => false,
+            FrameUnit::Range => !call.order_by.is_empty() && (offset(&f.start) || offset(&f.end)),
+            FrameUnit::Groups => offset(&f.start) || offset(&f.end),
+        }
+    }
+
+    fn new(
+        call: &'a WindowCall,
+        part: &'a [usize],
+        peers: &'a [(usize, usize)],
+        okeys: &'a [Vec<Value>],
+        offsets: &'a (Option<Value>, Option<Value>),
+    ) -> Self {
+        FrameSearch { call, part, peers, okeys, offsets, group: (0, 0), ptrs: [(0, 0); 2] }
+    }
+
+    /// Row `i`'s frame [start, end), as `frame_of` gives it.
+    fn at(&mut self, i: usize, ctx: &ExecCtx) -> Result<(usize, usize)> {
+        let call = self.call;
+        let f = &call.frame;
+        if f.unit == FrameUnit::Groups {
+            // (The current row's peer group, counted on from the last row asked.)
+            while self.group.1 < self.peers[i].0 {
+                self.group = (self.group.0 + 1, self.peers[self.group.1].1);
+            }
+        }
+        let s = self.bound(0, &f.start, i, ctx)?;
+        let e = self.bound(1, &f.end, i, ctx)?;
+        Ok((s, e.max(s)))
+    }
+
+    fn bound(&mut self, which: usize, b: &FrameBound, i: usize, ctx: &ExecCtx) -> Result<usize> {
+        let m = self.part.len();
+        let is_start = which == 0;
+        Ok(match b {
+            FrameBound::UnboundedPreceding => 0,
+            FrameBound::UnboundedFollowing => m,
+            FrameBound::CurrentRow => {
+                if is_start {
+                    self.peers[i].0
+                } else {
+                    self.peers[i].1
+                }
+            }
+            FrameBound::Preceding(_) | FrameBound::Following(_) => {
+                let off = if is_start { &self.offsets.0 } else { &self.offsets.1 };
+                let off = off.as_ref().expect("an offset bound's value");
+                let preceding = matches!(b, FrameBound::Preceding(_));
+                if self.call.frame.unit == FrameUnit::Groups {
+                    let k = off.as_i64().unwrap_or(0).max(0) as usize;
+                    let g = self.group.0 as i128;
+                    let target = if preceding { g - k as i128 } else { g + k as i128 };
+                    if target < 0 {
+                        return Ok(0);
+                    }
+                    // (The pointer on to group `target`'s first row, or past the last.)
+                    let p = &mut self.ptrs[which];
+                    while (p.0 as i128) < target && p.1 < m {
+                        *p = (p.0 + 1, self.peers[p.1].1);
+                    }
+                    if p.1 >= m {
+                        m
+                    } else if is_start {
+                        p.1
+                    } else {
+                        self.peers[p.1].1
+                    }
+                } else {
+                    let key = &self.call.order_by[0];
+                    let cur = &self.okeys[self.part[i]][0];
+                    let p = &mut self.ptrs[which].0;
+                    while *p < m && !range_stop(&self.okeys[self.part[*p]][0], cur, off, preceding, is_start, key, ctx)? {
+                        *p += 1;
+                    }
+                    *p
+                }
+            }
+        })
+    }
+}
+
 fn excluded(call: &WindowCall, i: usize, p: usize, peers: &[(usize, usize)]) -> bool {
     match call.frame.exclude {
         FrameExclude::NoOthers => false,
@@ -1574,6 +1685,45 @@ fn compute_partition(
             _ => None,
         },
     );
+    if FrameSearch::takes(call) {
+        return searched_partition(call, rows, okeys, part, peers, &offsets, out, ctx);
+    }
+    let frame = |i: usize| frame_of(call, i, m, peers, part, okeys, &offsets, ctx);
+    partition_with(call, rows, part, peers, frame, out, ctx)
+}
+
+/// `compute_partition` for a RANGE or GROUPS frame with an offset bound: each row's frame from
+/// a `FrameSearch` (`frame_of` looks for those bounds from the partition's start each row:
+/// quadratic in the partition).
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn searched_partition(
+    call: &WindowCall,
+    rows: &[Row],
+    okeys: &[Vec<Value>],
+    part: &[usize],
+    peers: &[(usize, usize)],
+    offsets: &(Option<Value>, Option<Value>),
+    out: &mut [Value],
+    ctx: &ExecCtx,
+) -> Result<()> {
+    let mut fs = FrameSearch::new(call, part, peers, okeys, offsets);
+    partition_with(call, rows, part, peers, |i| fs.at(i, ctx), out, ctx)
+}
+
+/// `compute_partition`'s functions over a partition, row `i`'s frame from `frame` (asked in
+/// order of the rows, as nodeWindowAgg.c moves its frame pointers).
+#[inline(always)]
+fn partition_with(
+    call: &WindowCall,
+    rows: &[Row],
+    part: &[usize],
+    peers: &[(usize, usize)],
+    mut frame: impl FnMut(usize) -> Result<(usize, usize)>,
+    out: &mut [Value],
+    ctx: &ExecCtx,
+) -> Result<()> {
+    let m = part.len();
     match &call.func {
         WinFunc::Builtin(kind) => {
             let mut dense = 0i64;
@@ -1677,7 +1827,7 @@ fn compute_partition(
                         }
                     }
                     WinKind::FirstValue | WinKind::LastValue | WinKind::NthValue => {
-                        let (s, e) = frame_of(call, i, m, peers, part, okeys, &offsets, ctx)?;
+                        let (s, e) = frame(i)?;
                         let positions: Vec<usize> =
                             (s..e).filter(|p| !excluded(call, i, *p, peers)).collect();
                         let mut vals = Vec::new();
@@ -1720,7 +1870,7 @@ fn compute_partition(
                 && agg.user.as_ref().is_some_and(|u| u.moving.is_some()) =>
         {
             let mv = agg.user.as_ref().and_then(|u| u.moving.as_deref()).unwrap();
-            moving_aggregate(call, agg, mv, rows, part, peers, okeys, &offsets, out, ctx)?;
+            moving_aggregate(call, agg, mv, rows, part, peers, frame, out, ctx)?;
         }
         WinFunc::Agg(agg) => {
             let incremental = matches!(call.frame.start, FrameBound::UnboundedPreceding)
@@ -1732,7 +1882,7 @@ fn compute_partition(
                 let mut st = new_state(agg, direct.clone())?;
                 let mut fed = 0usize;
                 for i in 0..m {
-                    let (_, e) = frame_of(call, i, m, peers, part, okeys, &offsets, ctx)?;
+                    let (_, e) = frame(i)?;
                     while fed < e {
                         feed(agg, &mut st, &rows[part[fed]], ctx)?;
                         fed += 1;
@@ -1743,7 +1893,7 @@ fn compute_partition(
                 }
             } else {
                 for i in 0..m {
-                    let (s, e) = frame_of(call, i, m, peers, part, okeys, &offsets, ctx)?;
+                    let (s, e) = frame(i)?;
                     let mut st = new_state(agg, direct.clone())?;
                     for p in s..e {
                         if excluded(call, i, p, peers) {
@@ -1791,8 +1941,27 @@ fn frame_values(
         }
     };
     let offsets = (offset(&call.frame.start, true)?, offset(&call.frame.end, false)?);
+    if FrameSearch::takes(call) {
+        let mut fs = FrameSearch::new(call, part, peers, okeys, &offsets);
+        return frame_values_with(call, *kind, rows, part, |i| fs.at(i, ctx), out, ctx);
+    }
+    frame_values_with(call, *kind, rows, part, |i| frame_of(call, i, m, peers, part, okeys, &offsets, ctx), out, ctx)
+}
+
+/// `frame_values` with row `i`'s frame from `frame`.
+#[inline(always)]
+fn frame_values_with(
+    call: &WindowCall,
+    kind: WinKind,
+    rows: &[Row],
+    part: &[usize],
+    mut frame: impl FnMut(usize) -> Result<(usize, usize)>,
+    out: &mut [Value],
+    ctx: &ExecCtx,
+) -> Result<()> {
+    let m = part.len();
     for i in 0..m {
-        let (s, e) = frame_of(call, i, m, peers, part, okeys, &offsets, ctx)?;
+        let (s, e) = frame(i)?;
         let at = match kind {
             WinKind::FirstValue => (s < e).then_some(s),
             WinKind::LastValue => (s < e).then(|| e - 1),
@@ -1961,8 +2130,7 @@ fn moving_aggregate(
     rows: &[Row],
     part: &[usize],
     peers: &[(usize, usize)],
-    okeys: &[Vec<Value>],
-    offsets: &(Option<Value>, Option<Value>),
+    mut frame: impl FnMut(usize) -> Result<(usize, usize)>,
     out: &mut [Value],
     ctx: &ExecCtx,
 ) -> Result<()> {
@@ -1981,7 +2149,7 @@ fn moving_aggregate(
     let (mut base, mut upto) = (0usize, 0usize);
     let mut result = Value::Null;
     for i in 0..m {
-        let (head, tail) = frame_of(call, i, m, peers, part, okeys, offsets, ctx)?;
+        let (head, tail) = frame(i)?;
         // The frame is the previous row's: its result stands.
         if i > 0 && base == head && end_reuses && !exclusion && base <= i && upto > i {
             out[part[i]] = result.clone();

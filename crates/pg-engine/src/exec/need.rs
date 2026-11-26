@@ -50,13 +50,10 @@ pub fn keys(keys: &[SortKey]) -> impl Iterator<Item = &Expr> {
     keys.iter().map(|k| &k.expr)
 }
 
-/// Every expression an aggregate call evaluates over its input rows. None: one this can't
-/// see through (a user-defined aggregate's are evaluated over its state, not the row, but
-/// stay conservative).
+/// Every expression an aggregate call evaluates over its input rows: its arguments, FILTER and
+/// ORDER BY (a user-defined aggregate's transition, final and moving functions are evaluated
+/// over its state and the arguments' values, not the row).
 pub fn agg_exprs(a: &AggCall) -> Option<Vec<&Expr>> {
-    if a.user.is_some() {
-        return None;
-    }
     let mut v: Vec<&Expr> = a.args.iter().collect();
     v.extend(a.filter.iter());
     v.extend(keys(&a.order_by));
