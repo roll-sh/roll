@@ -58,6 +58,10 @@ pub struct Archive {
     /// The registrations the project had that a backup doesn't carry, by name ("AWS role deploy").
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub left_out: Vec<String>,
+    /// Each machine identity's machines live or waiting at the backup, by its name: a count only.
+    /// Their credentials are roll-access's and never in a backup, so a restored identity has none.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub machines: BTreeMap<String, usize>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -193,6 +197,9 @@ pub struct Verified {
     pub settings: Vec<String>,
     /// The registrations the archive says it doesn't carry.
     pub left_out: Vec<String>,
+    /// The archive's machine identities, each restored with no machines: every one of them needs a
+    /// new bootstrap token. Empty for a token's answer.
+    pub machines: Vec<String>,
     /// The keys the project has now: a restore goes only into a project with none.
     pub live_keys: usize,
 }
@@ -359,11 +366,26 @@ impl Secrets {
                 syncs,
                 settings: Some(settings),
                 left_out: backup_rows::left_out(c, project)?,
+                machines: BTreeMap::new(),
             })
         })?;
         let mut archive = archive;
         archive.encryption_keys = self.transit_export(project)?;
+        archive.machines = self.live_machines(project)?;
         Ok(archive)
+    }
+
+    /// Each machine identity's machines that are live or waiting now (roll-access's), by name.
+    fn live_machines(&self, project: &str) -> Result<BTreeMap<String, usize>> {
+        let rows: Vec<(String, String)> = self.db.read(|c| c.query("SELECT i.name, m.chain FROM machine_chains m JOIN identities i ON i.id = m.identity WHERE m.project_id = ?", [project], |r| Ok((r.get(0)?, r.get(1)?))))?;
+        let mut out = BTreeMap::new();
+        let Some(w) = self.workloads.as_ref().filter(|_| !rows.is_empty()) else { return Ok(out) };
+        let chains: Vec<String> = rows.iter().map(|r| r.1.clone()).collect();
+        let live: std::collections::BTreeSet<String> = w.chains(&chains)?.into_iter().filter(|s| matches!(s.state, "waiting" | "live")).map(|s| s.chain).collect();
+        for (name, chain) in rows {
+            *out.entry(name).or_insert(0) += usize::from(live.contains(&chain));
+        }
+        Ok(out)
     }
 
     /// Load `archive` into `project`, which has no secrets yet. Registrations come first (links
@@ -482,7 +504,7 @@ impl Secrets {
             }
         }
         warnings.extend(self.transit_import(project, archive.encryption_keys, caller)?);
-        let (identities, syncs) = self.restore_workloads(project, &archive.identities, &archive.syncs, &dek, caller, &mut warnings)?;
+        let (identities, syncs) = self.restore_workloads(project, &archive.identities, &archive.syncs, &archive.machines, &dek, caller, &mut warnings)?;
         let now = self.db.now_ms()?;
         let summary = format!(
             "restored {environments} environments, {secrets} keys, {registrations} registrations, {identities} identities (disabled) and {syncs} syncs (paused) from {}'s backup",
@@ -645,7 +667,8 @@ impl Secrets {
     /// paused) until an admin resumes it, who becomes its maker then. Each identity is checked
     /// first as making it is ([`Secrets::admit_archived_identity`]); one that fails, or needs what
     /// isn't here (an environment, a gateway), is a warning.
-    fn restore_workloads(&self, project: &str, identities: &[Row], syncs: &[Row], dek: &crate::crypto::Dek, caller: &Caller, warnings: &mut Vec<String>) -> Result<(usize, usize)> {
+    #[allow(clippy::too_many_arguments)]
+    fn restore_workloads(&self, project: &str, identities: &[Row], syncs: &[Row], machines: &BTreeMap<String, usize>, dek: &crate::crypto::Dek, caller: &Caller, warnings: &mut Vec<String>) -> Result<(usize, usize)> {
         if identities.is_empty() && syncs.is_empty() {
             return Ok((0, 0));
         }
@@ -682,6 +705,9 @@ impl Secrets {
                 backup_rows::import(c, &IDENTITIES, project, &id, "", now, r, dek, &extra)?;
                 count += 1;
                 made.0 += 1;
+                if let Some(note) = machines_note(machines, r) {
+                    skipped.push(note);
+                }
             }
             let mut count: i64 = c.query_row("SELECT COUNT(*) FROM syncs WHERE project_id = ?", [project], |r| r.get(0))?;
             let floors = crate::guardrails::read(c)?;
@@ -882,6 +908,7 @@ impl Secrets {
             refused,
             names,
             settings,
+            machines: if names { archive.identities.iter().filter_map(|r| machines_note(&archive.machines, r)).collect() } else { vec![] },
             left_out: archive.left_out,
             live_keys,
             project: archive.project,
@@ -989,6 +1016,17 @@ fn diff(archive: BTreeMap<String, [u8; 32]>, live: BTreeMap<String, [u8; 32]>, n
 
 fn key_label(env: &str, path: &str, key: &str) -> String {
     format!("{env}:{}{key}", if path == "/" { "/".to_string() } else { format!("{path}/") })
+}
+
+/// What a restore of a machine identity leaves behind: its machines (`None`: it isn't one).
+fn machines_note(machines: &BTreeMap<String, usize>, r: &Row) -> Option<String> {
+    let kind = crate::identities::IdentityKind::from_stored(r.columns.get("kind").and_then(Json::as_str));
+    if kind != Some(crate::identities::IdentityKind::Machine) {
+        return None;
+    }
+    let name = r.text("name");
+    let live = machines.get(name).map_or(String::new(), |n| format!(" ({n} {} live at the backup)", if *n == 1 { "was" } else { "were" }));
+    Some(format!("identity {name}: its machines don't come back with it (a backup holds no machine credential): each needs a new bootstrap token{live}"))
 }
 
 fn sync_label(r: &Row) -> String {

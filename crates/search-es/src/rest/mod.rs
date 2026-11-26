@@ -35,6 +35,13 @@ pub struct EsRequest {
     /// Who the host verified the request as, in process ([`Verified`]): no header says it, so
     /// nothing a client sends can.
     pub verified: Option<Verified>,
+    /// The client reached the cluster at an address of its own (its host label or SNI naming the
+    /// cluster it runs on, or a node that serves only it), set in process by the host from the
+    /// address it routed by: there the bare `<id>:<key>` of Elasticsearch's `encoded` works, so a
+    /// new API key's `encoded` is Elasticsearch's. Anywhere else (a shared address, roll's
+    /// console, in-process calls) it names the cluster ([`crate::xpack::security::api_keys`]).
+    /// A client influences it through `Host`; it only picks that output format.
+    pub own_address: bool,
 }
 
 /// Who `search-server` verified a request as before handing it to its cluster, set on the
@@ -51,7 +58,7 @@ pub enum Verified {
 
 impl EsRequest {
     pub fn new(method: &str, uri: &str) -> EsRequest {
-        EsRequest { method: method.to_string(), uri: uri.to_string(), headers: Vec::new(), body: Bytes::new(), verified: None }
+        EsRequest { method: method.to_string(), uri: uri.to_string(), headers: Vec::new(), body: Bytes::new(), verified: None, own_address: false }
     }
 
     pub fn json(method: &str, uri: &str, body: impl Into<Bytes>) -> EsRequest {
@@ -61,6 +68,7 @@ impl EsRequest {
             headers: vec![("content-type".into(), "application/json".into())],
             body: body.into(),
             verified: None,
+            own_address: false,
         }
     }
 
@@ -182,6 +190,8 @@ pub struct Ctx<'a> {
     /// The `compatible-with` version the response's content type carries.
     pub response_compat: Option<u8>,
     warnings: Mutex<Vec<String>>,
+    /// Headers a handler adds to its answer, success or error ([`Ctx::add_header`]).
+    headers: Mutex<Vec<(String, String)>>,
     pub now_ms: i64,
     pub human: bool,
     /// Time spent in ingest pipelines by this request's writes (nanoseconds + 1, so 0 means
@@ -261,6 +271,11 @@ impl<'a> Ctx<'a> {
         if !w.contains(&msg) {
             w.push(msg);
         }
+    }
+
+    /// Adds a header to the answer (a roll extension's, never one Elasticsearch sends).
+    pub fn add_header(&self, name: &str, value: impl Into<String>) {
+        self.headers.lock().push((name.to_string(), value.into()));
     }
 
     pub fn warn_all(&self, msgs: impl IntoIterator<Item = String>) {
@@ -645,6 +660,7 @@ async fn handle_inner(cluster: &Cluster, req: &EsRequest, admitted: Option<Admit
         compat: neg.compat,
         response_compat: compat_of(Some(&neg)),
         warnings: Mutex::new(Vec::new()),
+        headers: Mutex::new(Vec::new()),
         ingest_nanos: std::sync::atomic::AtomicU64::new(0),
         principal: std::sync::OnceLock::new(),
         read_security: std::sync::OnceLock::new(),
@@ -721,7 +737,8 @@ async fn handle_inner(cluster: &Cluster, req: &EsRequest, admitted: Option<Admit
     if let (Some(a), Ok(reply)) = (&audit, &result) {
         a.finished(&ctx, reply);
     }
-    let warnings = warning_headers(&ctx.warnings.lock(), cluster.dialect);
+    let mut warnings = warning_headers(&ctx.warnings.lock(), cluster.dialect);
+    warnings.append(&mut ctx.headers.lock());
     match result {
         // `GET /` prints pretty unless `pretty` is given (`RestMainAction`).
         Ok(reply) => {
@@ -827,6 +844,7 @@ pub(crate) fn with_ctx<R>(cluster: &Cluster, req: &EsRequest, f: impl FnOnce(&Ct
         compat: neg.compat,
         response_compat: compat_of(Some(&neg)),
         warnings: Mutex::new(Vec::new()),
+        headers: Mutex::new(Vec::new()),
         ingest_nanos: std::sync::atomic::AtomicU64::new(0),
         principal: std::sync::OnceLock::new(),
         read_security: std::sync::OnceLock::new(),

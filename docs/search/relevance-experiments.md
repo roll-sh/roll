@@ -1,6 +1,74 @@
 # Relevance evaluation, A/B tests and merchandising: design
 
-`## Next` item 15 in [README.md](README.md). Status: design, nothing built.
+`## Next` item 15 in [README.md](README.md). Status: two slices of section 3 (live A/B tests, with
+results and promotion) and of section 2 (conversion events, browser keys' events, conversions in
+the indices' analytics) are built: [First slice as built](#first-slice-as-built).
+The rest is design.
+
+## First slice as built
+
+Code: `crates/search-es/src/xpack/entsearch/experiments.rs` (configuration, assignment, events),
+`crates/search-es/src/analytics.rs` (the counts), `crates/search-control/src/analytics.rs` (the
+results and the z-test), the Relevance tab's Experiments (`components/search/analytics.tsx`).
+Where this design or the request left a choice open, the stricter one:
+
+- **Where an experiment lives.** On the search application itself, as roll's extension of its
+  `PUT`: `experiments: [{id, variants: [{name, weight, params? | template?}], ends_at?, allow_user_header?}]`
+  (in place of section 3's control route, so Elasticsearch's own API carries it and branches,
+  snapshots and restores keep it). At most 10 are kept, ended ones included, and at most one runs
+  (no `ends_at`, or one ahead, in unix milliseconds). A running experiment's variants, weights and
+  `allow_user_header` can't change (400): end it and start another, or its counts would mix two
+  tests. 2 to 8 variants, weights 1 to 10,000; a variant's `params` are checked by the
+  application's `dictionary` when it's put and win over the request's; a `template` replaces the
+  application's (its `dictionary` still checks requests).
+- **Who gets which.** A stable hash (SHA-256) of the experiment and the visitor's identity, split
+  by weight. The identity is a derived key's `user` (signed, so nothing a page sends overrides it),
+  else the `X-Roll-User` header only when the experiment sets `allow_user_header` (off by
+  default), else the client's address. Without any of them the application's own template runs and
+  nothing is counted. The identity is hashed and never stored. With `X-Roll-User` allowed, a
+  visitor can rotate identities to add trials to whichever arm their new names land in; each
+  needs a search of its own first, so the key's rate limits bound how many.
+- **The answer says which** in headers, `X-Roll-Experiment` and `X-Roll-Variant`, exposed to pages
+  by CORS: the body stays Elasticsearch's, so no client needs to ask (section 3's `roll.variant`).
+- **What's counted.** A *trial* is one visitor's query in an hour (searching it again or paging
+  counts once). A `search_click` or `roll_conversion` naming the application in
+  `search.search_application` counts at most once per trial, and only for a trial that same
+  identity made in this hour or the last: a visitor can add a click only to their own search, so
+  one can't buy a variant's numbers (in place of section 2's per-address cap). Trials are 64-bit
+  keys held in memory for two hours (200,000 an hour, then new ones aren't counted), never handed
+  on. The counts are per variant, since the experiment started, whatever the analytics range, and
+  counted whether or not an index has analytics on: they hold no query text.
+- **`roll_conversion`** takes `{session, user, search, document?, value?, currency?}`, `value`
+  0 to 1e12 and `currency` 1 to 8 characters. It isn't added to the indices' click analytics yet.
+- **Browser keys' `limits.events`** (off by default): `search_click` and `roll_conversion` only,
+  at most 4 KiB, about a document of an index the key reads or that its search application
+  searches, or the application itself; counted for the key's own visitor and never stored in the
+  collection's data stream. A key without it is refused (400). It needs no cluster privilege: the
+  event API joins the `search_application_query` workflow for the purpose.
+- **Results** (`GET …/analytics`'s `experiments`, the Relevance tab): per variant its trials,
+  clicks, conversions, their value, click-through and conversion rate, and against the baseline
+  (the variant named `control`, else the first by name) a two-sided two-proportion z-test with
+  the pooled standard error: `significant` below p 0.05, `not_yet_significant` above it, and
+  `not_enough_data` until both arms have 100 trials with five successes and five failures.
+- **Second slice** (also built):
+  - **Conversions in the indices' analytics.** A `roll_conversion` about a document of an index
+    with analytics on counts against the event's query in that index's hour, like a click, with
+    its value (in thousandths, summed as given): `conversions`, `conversion_rate` and `value` in
+    `GET …/analytics`'s totals and query rows. Like clicks there, every event counts; the
+    per-variant counts keep their once-per-trial rule.
+  - **Zero results and latency per variant.** A trial whose first search found nothing counts in
+    `no_hits` (`no_hit_rate`); every search of the variant is timed into a histogram of 16
+    buckets (under 1, 2, 4 … ms), so nodes and passes add up exactly, and `p95_latency_ms` is the
+    bound of the bucket holding the 95th percentile.
+  - **Promoting a winner.** `POST _application/search_application/{name}/_roll/experiments/{id}/_promote`
+    with `{"variant"}`, authorized as the application's `PUT`: the variant's params go over the
+    template's own params, or its template takes the application's place (the `dictionary`
+    stays); the experiment ends now if it still runs and records `promoted: {variant, at}`. Once
+    per experiment (409 again). An ended experiment can't be started again by a `PUT` (400): its
+    counts would mix two tests.
+- **Left:** confidence intervals beside the p-values, promoting from the Relevance tab, judgment
+  lists and evaluation (section 1), the `roll_` rule types (section 4) and dynamic re-ranking
+  (section 5).
 
 ## Why
 

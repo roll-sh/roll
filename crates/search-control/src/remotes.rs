@@ -61,7 +61,7 @@ pub fn target(address: &str, domain: Option<&str>) -> Option<String> {
         return None;
     }
     let host = host.to_ascii_lowercase();
-    let label = if host.contains('.') { search_server::auth::host_label(&host, domain)?.to_string() } else { host };
+    let label = if host.contains('.') { search_server::auth::host_label(&host, domain)? } else { host };
     crate::control::valid_name(&label).then_some(label)
 }
 

@@ -512,9 +512,20 @@ pub struct Effective {
     /// Aliases over watch records (`.watcher-history-*`), with those indices: a grant of the
     /// alias reaches them only when one reaches the indices too ([`privileges::grant_names`]).
     pub history_aliases: std::collections::HashMap<String, Vec<String>>,
+    /// The cluster's dialect ([`Effective::restricted`]).
+    pub dialect: crate::cluster::Dialect,
 }
 
 impl Effective {
+    /// Whether `index` is restricted ([`privileges::is_restricted`]: a role must allow restricted
+    /// indices to reach it): on Elasticsearch `.tasks` too, the task results of every principal,
+    /// a hidden system index there ([`crate::api::tasks::hide_results_index`]). OpenSearch keeps
+    /// it as an ordinary index, which its roles name (`kibana_server`, `kibana_user`): the plugin
+    /// has no restricted indices.
+    pub fn restricted(&self, index: &str) -> bool {
+        privileges::is_restricted(index) || (self.dialect == crate::cluster::Dialect::Elasticsearch && index == crate::api::tasks::RESULTS_INDEX)
+    }
+
     fn allows(&self, f: impl Fn(&Permission) -> bool) -> bool {
         let own = self.own.iter().any(&f);
         let limited = match &self.limited_by {
@@ -529,15 +540,20 @@ impl Effective {
     }
 
     pub fn allows_index(&self, action: &str, index: &str) -> bool {
-        let restricted = privileges::is_restricted(index);
+        let restricted = self.restricted(index);
         let parent = self.parents.get(index);
         // Through an alias over watch records: the records themselves too.
         if let Some(behind) = self.history_aliases.get(index)
-            && !behind.iter().all(|i| self.allows(|p| p.allows_index(action, i, privileges::is_restricted(i))))
+            && !behind.iter().all(|i| self.allows(|p| p.allows_index(action, i, self.restricted(i))))
         {
             return false;
         }
-        self.allows(|p| p.allows_index(action, index, restricted) || parent.is_some_and(|ds| p.allows_index(action, ds, privileges::is_restricted(ds))))
+        self.allows(|p| p.allows_index(action, index, restricted) || parent.is_some_and(|ds| p.allows_index(action, ds, self.restricted(ds))))
+    }
+
+    /// Whether the principal may read the failure store of `index` ([`Permission::reads_failure_store`]).
+    pub fn reads_failure_store(&self, index: &str) -> bool {
+        self.allows(|p| p.reads_failure_store(index))
     }
 
     /// Whether some role grants `action` on some index (`IndicesPermission.check(action)`):
@@ -684,7 +700,7 @@ pub fn effective(file: &FileRoles, st: &crate::meta::ClusterState, p: &Principal
             history_aliases.entry(alias.clone()).or_default().push(name.clone());
         }
     }
-    Effective { own, limited_by, also, parents, history_aliases }
+    Effective { own, limited_by, also, parents, history_aliases, dialect: st.metadata.dialect }
 }
 
 /// Read APIs whose wildcard index expressions Elasticsearch expands to the indices the user
@@ -730,13 +746,13 @@ const NARROWED: &[&str] = &[
 /// The read APIs the OpenSearch plugin checks over every index their wildcards reach, refusing
 /// the request when one isn't permitted ([`check_all`]; `do_not_fail_on_forbidden` is off by
 /// default). The rest of [`NARROWED`] takes the generic check for OpenSearch principals, as it
-/// did, but for `_cat/shards`, which lists hidden indices by default: narrowed, so it neither
-/// refuses a data user nor lists what the check never saw.
+/// did, but for `_cat/shards` and `_cat/aliases`, which list hidden indices by default:
+/// narrowed, so they neither refuse a data user nor list what the check never saw.
 const OS_WHOLE: &[&str] = &["search", "count", "field_caps", "async_search.submit", "eql.search", "search_template", "open_point_in_time", "knn_search", "indices.get", "cat.indices", "rank_eval"];
 
 /// Whether `api` narrows its wildcards for principal `p` ([`NARROWED`], [`OS_WHOLE`]).
 fn narrows(p: &Principal, api: &str) -> bool {
-    NARROWED.contains(&api) && (p.os().is_none() || api == "cat.shards")
+    NARROWED.contains(&api) && (p.os().is_none() || matches!(api, "cat.shards" | "cat.aliases"))
 }
 
 /// The indices options [`narrow`] expands an API's wildcards with (before its parameters).
@@ -771,6 +787,13 @@ pub fn authorized_names(ctx: &Ctx) -> impl Fn(&str) -> bool {
     move |n| check.as_ref().is_none_or(|(eff, action)| eff.allows_index(action, n))
 }
 
+/// Whether the request's principal may read (search) a name: an index, alias or pattern, or a
+/// search application's name (its alias).
+pub fn may_read(ctx: &Ctx) -> impl Fn(&str) -> bool {
+    let check = ctx.principal.get().filter(|p| !p.is_superuser()).map(|p| effective(&file_roles(ctx.cluster), &ctx.state(), p));
+    move |n| check.as_ref().is_none_or(|eff| eff.allows_index("indices:data/read/search", n))
+}
+
 tokio::task_local! {
     /// The workflow of the REST request being dispatched: its internal calls run in it too, as
     /// Elasticsearch keeps the workflow in the thread context.
@@ -780,7 +803,9 @@ tokio::task_local! {
 /// `Workflow`s: the workflow a REST API starts (`WorkflowResolver`).
 fn workflow_of(api: &str) -> Option<&'static str> {
     match api {
-        "search_application.search" => Some("search_application_query"),
+        // A page's analytics events about its application's searches (roll's: a browser key with
+        // `limits.events`, `browser::Policy::events`) belong to the same flow.
+        "search_application.search" | "search_application.post_behavioral_analytics_event" => Some("search_application_query"),
         _ => None,
     }
 }
@@ -840,13 +865,40 @@ pub fn check_lookups(ctx: &Ctx, rendered: Option<&Value>) -> EsResult<()> {
     if reads.is_empty() {
         return Ok(());
     }
-    let eff = effective(&file_roles(ctx.cluster), &ctx.state(), p);
-    let denied_lookups: Vec<(&'static str, String)> = reads.into_iter().filter(|(a, i)| !eff.allows_index(a, i)).collect();
+    let st = ctx.state();
+    let eff = effective(&file_roles(ctx.cluster), &st, p);
+    let mut denied_lookups: Vec<(&'static str, String)> = Vec::new();
+    for (a, i) in reads {
+        denied_lookups.extend(denied_lookup(&eff, &st, ctx.now_ms, a, &i)?.into_iter().map(|n| (a, n)));
+    }
     if let Some((a, _)) = denied_lookups.first() {
         let on: Vec<String> = denied_lookups.iter().filter(|(x, _)| x == a).map(|(_, i)| i.clone()).collect();
         return Err(denied(p, a, Some(&on)));
     }
     Ok(())
+}
+
+/// The names a lookup of `expr` by `action` may not read, as the principal of `eff`: the name
+/// [`crate::meta::resolve::authorization_name`] gives (date math resolved, the selector split
+/// off; a failure store needs its own privilege), a wildcard resolved against `st` as a lookup
+/// resolves it. An expression that doesn't resolve fails the check, never passes it.
+pub(crate) fn denied_lookup(eff: &Effective, st: &crate::meta::ClusterState, now_ms: i64, action: &str, expr: &str) -> EsResult<Vec<String>> {
+    use crate::meta::resolve::{IndicesOptions, Selector, authorization_name, is_wildcard, resolve};
+    let (name, selector) = authorization_name(expr, now_ms)?;
+    // `_all` resolves to every index as a wildcard does (a lookup reads the first): checked as
+    // what it resolves to, never as a name a grant's pattern could match.
+    let names = match is_wildcard(&name) || name == "_all" {
+        true => resolve(st, std::slice::from_ref(&name), &IndicesOptions::STRICT_EXPAND_OPEN, now_ms)?,
+        false => vec![name],
+    };
+    Ok(names
+        .into_iter()
+        .filter(|n| match selector {
+            Selector::Data => !eff.allows_index(action, n),
+            Selector::Failures => !eff.reads_failure_store(n),
+        })
+        .map(|n| if selector == Selector::Failures { format!("{n}::failures") } else { n })
+        .collect())
 }
 
 /// A write an ingest pipeline moved to `index` (`_index`, `reroute`): authorized there as an
@@ -865,6 +917,11 @@ fn authorize_action(ctx: &Ctx) -> EsResult<Option<String>> {
     let Some(p) = ctx.principal.get() else { return Ok(None) };
     check_workflow(ctx, p)?;
     if p.is_superuser() {
+        return Ok(None);
+    }
+    // A browser key with `limits.events` posts its page's events without a cluster privilege:
+    // the handler holds them to what the key reaches, counts them and stores none.
+    if ctx.api.name() == "search_application.post_behavioral_analytics_event" && browser::policy(ctx).is_some_and(|b| b.events) {
         return Ok(None);
     }
     let (scope, action) = privileges::action_of(ctx.api.name());
@@ -1096,7 +1153,7 @@ pub fn check_mapping_update(ctx: &Ctx, idx: &crate::meta::IndexMeta) -> EsResult
         if in_data_stream {
             continue;
         }
-        let restricted = privileges::is_restricted(name);
+        let restricted = eff.restricted(name);
         if eff.allows(|perm| perm.allows_index(AUTO_PUT, name, restricted) || bwc(perm, name, restricted).is_some()) {
             let grant = eff.own.iter().chain(eff.limited_by.iter().flatten()).chain(eff.also.iter().flatten()).find_map(|perm| (!perm.allows_index(AUTO_PUT, name, restricted)).then(|| bwc(perm, name, restricted)).flatten());
             if let Some(g) = grant {
@@ -1572,14 +1629,13 @@ fn request_indices(ctx: &Ctx) -> Vec<String> {
     if api == "search_application.search" {
         exprs.extend(ctx.path_param("name").map(str::to_string));
     }
-    // Wildcards as the request expands them (`expand_wildcards=all` reaches hidden indices).
+    // Wildcards as the request expands them (`expand_wildcards=all` reaches hidden indices);
+    // no index is `_all`, dot-prefixed indices that aren't hidden included, as Elasticsearch
+    // resolves it (and [`check_all`]).
     let default = crate::meta::resolve::IndicesOptions::LENIENT_EXPAND_OPEN;
     let opts = ctx.indices_options(default).unwrap_or(default);
     if exprs.is_empty() {
-        if opts.expand_hidden {
-            return crate::meta::resolve::resolve(&st, &["_all".to_string()], &opts, ctx.now_ms).unwrap_or_default();
-        }
-        return st.metadata.indices.keys().filter(|k| !k.starts_with('.')).cloned().collect();
+        return crate::meta::resolve::resolve(&st, &["_all".to_string()], &opts, ctx.now_ms).unwrap_or_default();
     }
     let mut out = Vec::new();
     for e in exprs {
@@ -1682,7 +1738,7 @@ fn lookup_walk(v: &Value, parent: Option<&str>, out: &mut Vec<(&'static str, Str
                 }
             }
             if matches!(parent, Some("like" | "unlike")) && let Some(i) = s("_index") {
-                out.push((GET, i.to_string()));
+                out.push((crate::search::LOOKUP_TERM_VECTORS, i.to_string()));
             }
             if s("type") == Some("lookup") && let Some(i) = s("target_index") {
                 out.push((SEARCH, i.to_string()));

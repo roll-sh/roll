@@ -197,20 +197,84 @@ pub struct Fetcher {
     egress: crate::egress::Egress,
     auth: Option<Auth>,
     ua: String,
+    /// The addresses [`Fetcher::server`] last resolved each name to: what the next connection to
+    /// that name uses, so the server a request was spaced for is the one it reaches.
+    pins: Pins,
+}
+
+type Pins = std::sync::Arc<parking_lot::Mutex<std::collections::HashMap<String, Vec<std::net::SocketAddr>>>>;
+
+/// Names pinned at most; past it the pins start again (a name then resolves through the egress
+/// check at connect, as before it was pinned).
+const MAX_PINS: usize = 4096;
+
+/// The crawler's resolver: a name [`Fetcher::server`] resolved goes to the addresses it found
+/// (already checked by the egress check); any other through the egress check's own resolver.
+struct Pinned {
+    egress: crate::egress::Egress,
+    pins: Pins,
+}
+
+impl reqwest::dns::Resolve for Pinned {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        match self.pins.lock().get(&name.as_str().to_ascii_lowercase()).cloned() {
+            Some(addrs) => Box::pin(async move { Ok(Box::new(addrs.into_iter()) as reqwest::dns::Addrs) }),
+            None => reqwest::dns::Resolve::resolve(&self.egress, name),
+        }
+    }
+}
+
+/// The server an address is: an IPv4 address itself, an IPv6 address by its /64 (one host's
+/// usual share), an IPv4-mapped IPv6 address as its IPv4 address.
+pub fn server_key(ip: std::net::IpAddr) -> String {
+    match ip {
+        std::net::IpAddr::V4(v4) => v4.to_string(),
+        std::net::IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => v4.to_string(),
+            None => {
+                let s = v6.segments();
+                format!("{:x}:{:x}:{:x}:{:x}::/64", s[0], s[1], s[2], s[3])
+            }
+        },
+    }
 }
 
 impl Fetcher {
     pub fn new(egress: crate::egress::Egress, auth: Option<Auth>) -> Result<Fetcher, String> {
+        let pins: Pins = Default::default();
         let http = reqwest::Client::builder()
             .connect_timeout(CONNECT_TIMEOUT)
             .read_timeout(SOCKET_TIMEOUT)
             .redirect(reqwest::redirect::Policy::none())
             .http1_max_headers(128)
             .no_proxy()
-            .dns_resolver(egress.resolver())
+            .dns_resolver(std::sync::Arc::new(Pinned { egress: egress.clone(), pins: pins.clone() }))
             .build()
             .map_err(|e| format!("the crawler's HTTP client: {e}"))?;
-        Ok(Fetcher { http, egress, auth, ua: user_agent() })
+        Ok(Fetcher { http, egress, auth, ua: user_agent(), pins })
+    }
+
+    /// The server `link` is on, for politeness (requests to one server are spaced across every
+    /// crawl on the node, whatever names lead there): its host resolved by the egress check (the
+    /// same resolution the request then connects with), keyed by [`server_key`] (the lowest IPv4
+    /// address it has, else the lowest IPv6 /64), so two names on one server share one key.
+    pub async fn server(&self, link: &Link) -> Result<String, Failure> {
+        let url = link.url();
+        let host = url.host_str().unwrap_or_default();
+        let addrs = self.egress.resolve(host, url.port_or_known_default().unwrap_or(0)).await.map_err(|r| match r {
+            crate::egress::Refused::Unresolved(_) => Failure::Network,
+            _ => Failure::Refused,
+        })?;
+        let key = |v4: bool| addrs.iter().filter(|a| a.is_ipv4() == v4).map(|a| server_key(a.ip())).min();
+        let server = key(true).or_else(|| key(false)).ok_or(Failure::Refused)?;
+        if host.parse::<std::net::IpAddr>().is_err() && !host.starts_with('[') {
+            let mut pins = self.pins.lock();
+            if pins.len() >= MAX_PINS {
+                pins.clear();
+            }
+            pins.insert(host.to_ascii_lowercase(), addrs);
+        }
+        Ok(server)
     }
 
     /// Whether `link` may get the credential: its origin is exactly the credential's, the chain

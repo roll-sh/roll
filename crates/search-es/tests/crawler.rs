@@ -28,6 +28,13 @@ type Log = Arc<Mutex<Vec<(String, Option<String>)>>>;
 /// Each request's target, `If-None-Match` and `If-Modified-Since`.
 type Conditional = Arc<Mutex<Vec<(String, Option<String>, Option<String>)>>>;
 
+/// Requests in flight on the sites sharing one: now, and the most at once.
+#[derive(Clone, Default)]
+struct Flight {
+    now: Arc<std::sync::atomic::AtomicUsize>,
+    max: Arc<std::sync::atomic::AtomicUsize>,
+}
+
 /// A site on loopback: routes by request target, and the requests it got.
 #[derive(Clone)]
 struct Site {
@@ -37,13 +44,21 @@ struct Site {
     /// Every request but robots.txt and the target itself redirects here (a login, maintenance).
     redirect_all: Arc<Mutex<Option<String>>>,
     conditional: Conditional,
+    /// How long each answer takes, and the requests in flight.
+    delay: Arc<Mutex<Duration>>,
+    flight: Flight,
 }
 
 impl Site {
     async fn start() -> Site {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        Site::start_on("127.0.0.1", Flight::default()).await
+    }
+
+    /// A site on loopback address `ip`, counting its requests in flight in `flight`.
+    async fn start_on(ip: &str, flight: Flight) -> Site {
+        let listener = tokio::net::TcpListener::bind(format!("{ip}:0")).await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
-        let site = Site { base, routes: Arc::default(), log: Arc::default(), redirect_all: Arc::default(), conditional: Arc::default() };
+        let site = Site { base, routes: Arc::default(), log: Arc::default(), redirect_all: Arc::default(), conditional: Arc::default(), delay: Arc::default(), flight };
         let s = site.clone();
         tokio::spawn(async move {
             loop {
@@ -75,6 +90,13 @@ impl Site {
                     if r.status == 200 && (has("etag", &inm) || (inm.is_none() && has("last-modified", &ims))) {
                         r = Resp { status: 304, headers: vec![], body: vec![] };
                     }
+                    use std::sync::atomic::Ordering::SeqCst;
+                    let now = s.flight.now.fetch_add(1, SeqCst) + 1;
+                    s.flight.max.fetch_max(now, SeqCst);
+                    let delay = *s.delay.lock().unwrap();
+                    if !delay.is_zero() {
+                        tokio::time::sleep(delay).await;
+                    }
                     let mut out = format!("HTTP/1.1 {} X\r\nContent-Length: {}\r\nConnection: close\r\n", r.status, r.body.len());
                     for (k, v) in &r.headers {
                         out.push_str(&format!("{k}: {v}\r\n"));
@@ -82,6 +104,7 @@ impl Site {
                     out.push_str("\r\n");
                     let _ = sock.write_all(out.as_bytes()).await;
                     let _ = sock.write_all(&r.body).await;
+                    s.flight.now.fetch_sub(1, SeqCst);
                 });
             }
         });
@@ -652,4 +675,55 @@ async fn the_docs_preset_makes_section_records() {
     // The query is JSON-escaped into the template, as Elasticsearch's mustache does.
     let (s, v, t) = call(&c, "POST", "/_render/template", Some(r#"{"id":"content-site-docs-search","params":{"query":"a \"b\" \\c"}}"#)).await;
     assert_eq!((s, at(&v, "template_output.query.multi_match.query").as_str()), (200, Some(r#"a "b" \c"#)), "{t}");
+}
+
+/// Pages in other charsets read as a browser reads them: a Shift_JIS page by its
+/// `<meta charset>`, an unlabeled windows-1252 page by the fallback.
+#[tokio::test]
+async fn pages_are_decoded_in_their_charset() {
+    let site = Site::start().await;
+    site.page("/", r#"<title>Home</title><a href="/ja">ja</a> <a href="/fr">fr</a>"#);
+    let ja = [b"<html><head><meta charset=\"Shift_JIS\"><title>".as_slice(), &[0x93, 0xFA, 0x96, 0x7B, 0x8C, 0xEA], b"</title></head><body><p>", &[0x93, 0xFA, 0x96, 0x7B], b"</p></body></html>"].concat();
+    site.set("/ja", 200, &[("Content-Type", "text/html")], ja);
+    let fr = [b"<title>Caf".as_slice(), &[0xE9], b"</title><p>", &[0x93], b"Bonjour", &[0x94], b"</p>"].concat();
+    site.set("/fr", 200, &[("Content-Type", "text/html")], fr);
+    let c = cluster(&[]).await;
+    crawler(&c, &format!(r#"{{"urls":"{}"}}"#, site.url("/")), None).await;
+    let job = crawl(&c).await;
+    assert_eq!((at(&job, "status").as_str(), num(&job, "indexed_document_count")), (Some("completed"), 3), "{job:?}");
+    let ja = doc(&c, &site.url("/ja")).await.unwrap();
+    assert_eq!((at(&ja, "title").as_str(), at(&ja, "body").as_str()), (Some("日本語"), Some("日本")), "{ja:?}");
+    let fr = doc(&c, &site.url("/fr")).await.unwrap();
+    assert_eq!((at(&fr, "title").as_str(), at(&fr, "body").as_str()), (Some("Café"), Some("“Bonjour”")), "{fr:?}");
+}
+
+/// Politeness is per server, not per name: two names on one address get one request at a time
+/// between them, however many URLs a crawl may fetch at once; two servers are fetched at once.
+#[tokio::test]
+async fn one_request_at_a_time_per_server() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let flight = Flight::default();
+    let pages = |s: &Site| {
+        for p in ["/", "/1", "/2", "/3"] {
+            s.page(p, &format!(r#"<title>{p}</title><p>x</p><a href="/1">1</a><a href="/2">2</a><a href="/3">3</a>"#));
+        }
+        *s.delay.lock().unwrap() = Duration::from_millis(100);
+    };
+    let a = Site::start_on("127.0.0.1", flight.clone()).await;
+    pages(&a);
+    let by_name = a.base.replace("127.0.0.1", "localhost");
+    let c = cluster(&[("roll.crawler.max_parallel_fetches", "4")]).await;
+    crawler(&c, &format!(r#"{{"urls":"{},{by_name}/"}}"#, a.url("/")), None).await;
+    let job = crawl(&c).await;
+    assert_eq!((at(&job, "status").as_str(), num(&job, "indexed_document_count")), (Some("completed"), 8), "{job:?}");
+    assert_eq!(flight.max.load(SeqCst), 1, "two names on one server: one request at a time");
+
+    let b = Site::start_on("127.0.0.2", flight.clone()).await;
+    pages(&b);
+    flight.max.store(0, SeqCst);
+    let (s, _, t) = call(&c, "PUT", "/_connector/site/_configuration", Some(&format!(r#"{{"values":{{"urls":"{},{}"}}}}"#, a.url("/"), b.url("/")))).await;
+    assert_eq!(s, 200, "{t}");
+    let job = crawl(&c).await;
+    assert_eq!(at(&job, "status").as_str(), Some("completed"), "{job:?}");
+    assert!(flight.max.load(SeqCst) >= 2, "two servers at once: {}", flight.max.load(SeqCst));
 }

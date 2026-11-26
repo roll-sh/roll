@@ -71,6 +71,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route("/v1/apps/projects/{project}/drains", get(drains).post(add_drain))
         .route("/v1/apps/projects/{project}/export", post(export_project))
         .route("/v1/apps/projects/{project}/status-page", get(status_page).put(put_status_page).delete(delete_status_page))
+        .route("/v1/apps/projects/{project}/board", get(board).put(put_board))
         .route("/v1/apps/projects/{project}/status-page/domain", get(status_domain).post(set_status_domain).delete(delete_status_domain))
         .route("/v1/apps/projects/{project}/status-page/domain/verify", post(verify_status_domain))
         .route("/v1/apps/projects/{project}/status-page/incidents", get(status_incidents).post(post_status_incident))
@@ -233,6 +234,14 @@ async fn preview_domain(State(apps): S, Path(project): Path<String>) -> R {
 
 async fn set_preview_domain(State(apps): S, Path(project): Path<String>, b: Bytes) -> R {
     Ok((StatusCode::CREATED, Json(apps.set_preview_domain(&project, body(&b)?).await?)).into_response())
+}
+
+async fn board(State(apps): S, Path(project): Path<String>) -> R {
+    ok(apps.board(&project).await?)
+}
+
+async fn put_board(State(apps): S, Path(project): Path<String>, b: Bytes) -> R {
+    ok(apps.put_board(&project, body(&b)?).await?)
 }
 
 async fn status_domain(State(apps): S, Path(project): Path<String>) -> R {
@@ -904,7 +913,9 @@ async fn create_deploy(State(apps): S, Path((id, env)): Path<(String, String)>, 
         let message = headers.get("x-roll-message").and_then(|v| v.to_str().ok()).map(|m| percent_encoding::percent_decode_str(m).decode_utf8_lossy().into_owned()).unwrap_or_default();
         let revision = headers.get("x-roll-revision").and_then(|v| v.to_str().ok()).filter(|r| (7..=64).contains(&r.len()) && r.bytes().all(|b| b.is_ascii_hexdigit()));
         let no_cache = headers.get("x-roll-no-cache").is_some_and(|v| v == "1");
-        apps.deploy(&id, &env, json!({ "message": message, "revision": revision, "no_cache": no_cache, "override": over }), By { trigger: Trigger::Upload, actor }, Some(b), key).await?
+        // Built and checked at its own URL, not put live (`roll up --no-traffic`).
+        let no_traffic = headers.get("x-roll-no-traffic").is_some_and(|v| v == "1");
+        apps.deploy(&id, &env, json!({ "message": message, "revision": revision, "no_cache": no_cache, "no_traffic": no_traffic, "override": over }), By { trigger: Trigger::Upload, actor }, Some(b), key).await?
     } else if ct.starts_with("application/x-docker-image") {
         // An image built elsewhere (`docker save`'s archive, `roll apps deploy --image-file`).
         let message = headers.get("x-roll-message").and_then(|v| v.to_str().ok()).map(|m| percent_encoding::percent_decode_str(m).decode_utf8_lossy().into_owned()).unwrap_or_default();

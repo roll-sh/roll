@@ -6,6 +6,7 @@ use reqwest::Method;
 use roll_previews::Kind;
 use roll_previews::Mode;
 use roll_previews::ports::{Branched, Brancher, Usage};
+use roll_previews::MASK_BASE_PREFIX;
 use serde_json::{Value, json};
 
 // ── Postgres: a branch of the project's main ──
@@ -76,6 +77,35 @@ impl Brancher for Postgres {
     /// earlier push's data, copy-on-write.
     async fn snapshot(&self, parent: &str, branch: &str, name: &str) -> anyhow::Result<Option<Branched>> {
         self.create_from(parent, Some(branch), name, Mode::Branch, None).await.map(Some)
+    }
+
+    fn branches_from_base(&self) -> bool {
+        true
+    }
+
+    /// A branch of `parent` with no role of its own: pg-control gives a branch's role the objects
+    /// the superuser owns, so a base with one would keep the tables, and its branches' roles none.
+    async fn make_base(&self, parent: &str, name: &str) -> anyhow::Result<Branched> {
+        let id = match self.find(parent, name).await? {
+            Some(b) => s(&b["id"]).unwrap_or_default(),
+            None => match self.0.post(&format!("/v1/projects/{}/branches", seg(parent)), json!({ "name": name, "app_role": false })).await {
+                Ok(v) => s(&v["branch"]["id"]).ok_or_else(|| anyhow::anyhow!("a branch without an id"))?,
+                Err(e) if conflict_is_ours(&e) => self.find(parent, name).await?.and_then(|b| s(&b["id"])).ok_or(e)?,
+                Err(e) => return Err(e),
+            },
+        };
+        Ok(Branched { r#ref: id, kept: None })
+    }
+
+    /// A branch of the project's branch `from` (pg-control's `parent`), with a role of its own.
+    async fn branch_from(&self, parent: &str, from: &str, name: &str, mode: Mode) -> anyhow::Result<Option<Branched>> {
+        self.create_from(parent, Some(from), name, mode, None).await.map(Some)
+    }
+
+    /// The project's branches whose parent is `branch`.
+    async fn children(&self, parent: &str, branch: &str) -> anyhow::Result<usize> {
+        let p = self.0.get(&format!("/v1/projects/{}", seg(parent))).await?;
+        Ok(p["branches"].as_array().map_or(0, |bs| bs.iter().filter(|b| b["parent_id"] == branch).count()))
     }
 
     fn restores(&self) -> bool {
@@ -178,7 +208,11 @@ impl Brancher for Postgres {
         let p = self.0.get(&format!("/v1/projects/{}", seg(parent))).await?;
         let branches = p["branches"].as_array().cloned().unwrap_or_default();
         let b = branches.iter().find(|b| b["id"] == branch).ok_or_else(|| anyhow::anyhow!("no Postgres branch {branch}"))?;
-        let from = branches.iter().find(|x| x["id"] == b["parent_id"]).ok_or_else(|| anyhow::anyhow!("Postgres branch {branch} has no parent"))?;
+        let mut from = branches.iter().find(|x| x["id"] == b["parent_id"]).ok_or_else(|| anyhow::anyhow!("Postgres branch {branch} has no parent"))?;
+        // A branch of a masked base is compared with the parent the base was made from, as it is now.
+        while from["name"].as_str().is_some_and(|n| n.starts_with(MASK_BASE_PREFIX)) {
+            from = branches.iter().find(|x| x["id"] == from["parent_id"]).ok_or_else(|| anyhow::anyhow!("Postgres branch {branch}'s masked base has no parent"))?;
+        }
         // pg-control names a branch's role after the branch.
         let role = b["app_connection_uri"].is_string().then(|| s(&b["id"])).flatten();
         Ok(Some((pg_schema_lines(&self.0, s(&from["endpoint"]["id"]), None).await?, pg_schema_lines(&self.0, s(&b["endpoint"]["id"]), role).await?)))
@@ -807,6 +841,22 @@ impl Brancher for Stream {
         self.delete(from, snapshot, name).await
     }
 
+    fn restores(&self) -> bool {
+        true
+    }
+
+    /// By branching the point again under the preview's stream's name: a stream can't go back in
+    /// place (its offsets only move forward), so the put-back stream has a new id and key, and
+    /// the services are deployed again with them. Nothing is copied (its chunk rows name the
+    /// point's objects), and the point stays, so it can be put back again, even after a reset.
+    /// Only one of the preview's own copies (named `<name>-…`).
+    async fn restore(&self, parent: &str, branch: &str, _kept: Option<&str>, point: &str, name: &str, _mode: Mode) -> anyhow::Result<Option<Branched>> {
+        let p = self.0.get(&format!("/v1/streams/{}", seg(point))).await?;
+        anyhow::ensure!(p["name"].as_str().is_some_and(|n| n.starts_with(&format!("{name}-"))), "restore point {point} isn't a copy of the preview's stream {name}");
+        self.delete(parent, branch, name).await?;
+        self.branch(point, name, Mode::Branch).await.map(Some)
+    }
+
     async fn delete(&self, parent: &str, branch: &str, name: &str) -> anyhow::Result<()> {
         let v = match self.0.get(&format!("/v1/streams/{}", seg(branch))).await {
             Ok(v) => v,
@@ -815,10 +865,19 @@ impl Brancher for Stream {
         };
         anyhow::ensure!(v["name"] == name && branch != parent, "refusing to delete stream {branch}: it isn't the preview's stream {name}");
         if let Some(of) = s(&v["branch_of"]["stream"]) {
-            match self.0.get(&format!("/v1/streams/{}", seg(parent))).await {
-                Ok(p) => anyhow::ensure!(p["id"] == of.as_str(), "refusing to delete stream {branch}: it's a branch of {of}, not of {parent}"),
-                Err(e) if is_404(&e) => {}
+            let of_parent = match self.0.get(&format!("/v1/streams/{}", seg(parent))).await {
+                Ok(p) => p["id"] == of.as_str(),
+                Err(e) if is_404(&e) => true,
                 Err(e) => return Err(e),
+            };
+            // Or put back from a restore point: a branch of the preview's own copy (`<name>-…`;
+            // unchecked once that's gone).
+            if !of_parent {
+                match self.0.get(&format!("/v1/streams/{}", seg(&of))).await {
+                    Ok(c) => anyhow::ensure!(c["name"].as_str().is_some_and(|n| n.starts_with(&format!("{name}-"))), "refusing to delete stream {branch}: it's a branch of {of}, not of {parent} or a copy of the preview's"),
+                    Err(e) if is_404(&e) => {}
+                    Err(e) => return Err(e),
+                }
             }
         }
         self.0.delete(&format!("/v1/streams/{}", seg(branch))).await
