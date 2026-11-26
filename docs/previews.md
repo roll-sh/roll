@@ -2898,10 +2898,10 @@ Chromatic's cross-browser and accessibility tests, Render's suspended services, 
    follow the same roles, checked live against a member's session.
 4. **A running settled preview's usage read alone too, in review**: as #1017 did for sleeping
    ones; a deploy, a reset, a refresh or a failing service still converges at once.
-5. **roll apps lookups that miss cost a list each**: `RollApps::find` lists every roll apps
-   service when a preview's service isn't one (a `roll.toml` service not started on this node),
-   every usage round; remember the miss for a while, never across a deploy that makes the
-   environment.
+5. **roll apps lookups that miss, in review**: a lookup that finds no `pv-` environment (a
+   `roll.toml` service, roll apps off) is remembered for 30 s, so its logs, metrics and usage
+   reads don't list every roll apps service each; a deploy here is seen at once, one from another
+   node within the 30 s.
 6. **The data step's Postgres compute start** (pg-control's; watch): with the health checks no
    longer waiting on a poll (#646), the live run's timeline is data 11.0 s · setup 4.4 s · deploy
    0.02 s · checks 6.1 s under load. Most of the data step is the Postgres branch's compute start

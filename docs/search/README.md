@@ -1679,10 +1679,13 @@ deterministic (#396).
    dashboard's "crawl a site" box in the Connectors tab, and every product's names blocked
    (`roll.crawler.fleet_names`); then (phase 3) extraction rules (Open Crawler's rulesets, CSS
    selectors matched in one pass on the arena DOM, carried over by the import) and a verification
-   token derived from the owner and the site (HMAC), so a published record outlives its rows.
-   Left: incremental crawls with `If-Modified-Since`, and the docs preset; charset detection
-   beyond UTF-8, fetching several
-   origins at once, and per-site politeness by address rather than name are open too.
+   token derived from the owner and the site (HMAC), so a published record outlives its rows;
+   then conditional requests (each page's `ETag` and `Last-Modified` kept in its document and sent
+   back, a 304 kept as it is and counted as seen) with `incremental` jobs that delete nothing, and
+   the docs preset (one record per section, `lvl0` to `lvl6` from the headings, the URL with its
+   `#anchor`, a mapping and a search-as-you-type template; `roll search crawler create --preset
+   docs` and the crawl box). Open: charset detection beyond UTF-8, fetching several origins at
+   once, and per-site politeness by address rather than name.
 14. **Semantic search on OpenSearch-flavor clusters** (design in
    [opensearch-neural.md](opensearch-neural.md); AWS OpenSearch neural search):
    `neural`, `neural_sparse` and `agentic` are names only (`meta/aliases.rs`); ML Commons
