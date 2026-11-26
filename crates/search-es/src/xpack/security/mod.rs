@@ -503,12 +503,12 @@ pub struct Effective {
 }
 
 impl Effective {
-    /// Whether the failure store privilege `action` needs is granted on `name`: reading it
-    /// ([`Permission::reads_failure_store`], the lookups' check too) or anything else
-    /// ([`Permission::manages_failure_store`]). `read`'s actions would cover the failure store's,
-    /// but Elasticsearch keeps it a component of its own.
+    /// `action` on the failure store of data stream `name` ([`Permission::grants_failure_store`]).
+    /// Rolling one over is also the data stream's own `indices:admin/rollover` (`manage` on the
+    /// data stream may, as on Elasticsearch 9.5).
     fn failure_store(&self, action: &str, name: &str) -> bool {
-        if action.starts_with("indices:data/read") { self.reads_failure_store(name) } else { self.allows(|p| p.manages_failure_store(name)) }
+        const ROLLOVER: &str = "indices:admin/rollover";
+        self.allows(|p| p.grants_failure_store(action, name)) || (action == ROLLOVER && self.allows(|p| p.allows_index(ROLLOVER, name, privileges::is_restricted(name))))
     }
 
     /// Whether every index action allowed on `wider` is allowed on `narrower` too: an alias or a

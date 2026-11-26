@@ -4135,6 +4135,8 @@ async fn names_are_authorized_as_resolved() {
         (Method::PUT, "/_security/role/raw", json!({"indices": [{"names": ["mine*", "secret"], "privileges": ["manage"]}, {"names": ["mine*"], "privileges": ["indices:data/read/search"]}]})),
         (Method::PUT, "/_security/user/raw", json!({"password": "raw-pass-1", "roles": ["raw"]})),
         (Method::PUT, "/mine/_settings", json!({"index.blocks.write": true})),
+        (Method::PUT, "/_security/role/fsm", json!({"indices": [{"names": ["logs-*"], "privileges": ["manage_failure_store"]}]})),
+        (Method::PUT, "/_security/user/fsm", json!({"password": "fsm-pass-1", "roles": ["fsm"]})),
     ] {
         let (s, v) = e.es(&u, &p, m, path, Some(body).filter(|b| !b.is_null())).await;
         assert!(s < 300, "{path}: {v}");
@@ -4171,6 +4173,16 @@ async fn names_are_authorized_as_resolved() {
         let (s, v) = rd(path).await;
         assert_eq!(s, 403, "{path}: {v}");
     }
+    // A failure store privilege grants only the actions of the privilege it narrows.
+    let fsm = |m: Method, path: &str, body: Option<Value>| {
+        let e = &e;
+        let path = path.to_string();
+        async move { e.es("fsm@rn", "fsm-pass-1", m, &path, body).await }
+    };
+    let (s, v) = fsm(Method::POST, "/logs-a::failures/_delete_by_query", Some(json!({"query": {"match_all": {}}}))).await;
+    assert_eq!(s, 403, "manage_failure_store writes nothing: {v}");
+    let (s, v) = fsm(Method::GET, "/logs-a::failures/_settings", None).await;
+    assert_ne!(s, 403, "{v}");
     // A multi get's and multi term vectors' items too.
     for path in ["/_mget", "/_mtermvectors"] {
         let (s, v) = e.es("rd@rn", "rd-pass-1", Method::POST, path, Some(json!({"docs": [{"_index": "<.async-search>", "_id": "x"}]}))).await;
