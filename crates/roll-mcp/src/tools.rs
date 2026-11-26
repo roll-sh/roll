@@ -1835,6 +1835,34 @@ static TOOLS: &[Tool] = &[
     t("previews_delete", "Delete a preview", "Tear a preview down with its branches.", "previews", "DELETE", "/v1/previews/{id}", &[req("id", "Preview id")]),
 ];
 
+/// Read-only tools whose answer is what customers stored or what their code and visitors wrote
+/// (rows, values, objects, documents, messages and payloads, logs and error samples, pages, mail and
+/// pictures of pages, visitors and what they sent or searched, source): a metadata-only connection
+/// (`?metadata=1`, PlanetScale's insights-only server) doesn't list or run them, so an agent tunes
+/// and explains without seeing a customer's data. roll code's (`code_*`, a fronted set) are in
+/// [`CODE_DATA`]. A test keeps every read-only tool whose name reads like data here or explained.
+pub const DATA: &[&str] = &[
+    "apps_check_screenshot", "apps_cron_run_logs", "apps_deploy_logs", "apps_deploy_output", "apps_deploy_source", "apps_errors", "apps_events", "apps_fetch",
+    "apps_form_submissions", "apps_get_trace", "apps_job_logs", "apps_logs", "apps_visitors", "apps_wait_cron_run",
+    "postgres_query",
+    "previews_errors", "previews_fetch", "previews_get_trace", "previews_list_mail", "previews_logs", "previews_note_crop", "previews_read_mail", "previews_screenshot",
+    "previews_tables", "previews_try_screenshot",
+    "queues_peek",
+    "search_analytics", "search_explain", "search_get_document", "search_query", "search_suggestions", "search_test_query_ruleset",
+    "secrets_get_values", "secrets_reveal", "secrets_scan", "secrets_totp", "secrets_version_value",
+    "storage_read_object",
+    "streams_read",
+    "tasks_get_event", "tasks_get_message", "tasks_get_run", "tasks_list_dead_letters", "tasks_list_events", "tasks_list_messages", "tasks_wait_run",
+];
+
+/// roll code's tools that answer a repo's content (files, diffs, matches, commit messages).
+pub const CODE_DATA: &[&str] = &["code_read_file", "code_search_code", "code_blame", "code_compare", "code_get_changeset", "code_log", "code_search", "code_fetch"];
+
+/// Whether a metadata-only connection keeps `name` from the model ([`DATA`], [`CODE_DATA`]).
+pub fn reads_data(name: &str) -> bool {
+    DATA.contains(&name) || CODE_DATA.contains(&name)
+}
+
 pub fn all() -> &'static [Tool] {
     TOOLS
 }
@@ -2569,5 +2597,40 @@ mod tests {
         for n in FORK_WORDS.iter().chain(NONE.iter().map(|(n, _)| n)) {
             assert!(previews.contains(n), "{n} isn't a previews tool any more");
         }
+    }
+
+    /// Every read-only tool whose name reads like it answers data is in [`DATA`] or says here why
+    /// it answers only metadata, so a new one decides; [`DATA`] names real read-only tools.
+    #[test]
+    fn a_metadata_connection_keeps_data_out() {
+        const DATA_WORDS: &[&str] = &[
+            "query", "read", "peek", "logs", "fetch", "mail", "tables", "value", "reveal", "document", "submission", "analytics", "message", "events", "event",
+            "screenshot", "crop", "totp", "scan", "source", "output", "run", "trace", "dead_letter", "suggestion", "visitor", "error", "explain", "sample",
+        ];
+        const METADATA: &[(&str, &str)] = &[
+            ("apps_list_cron_runs", "runs' times and states"),
+            ("apps_get_cron_run", "a run's state"),
+            ("apps_traces", "route names and timings"),
+            ("apps_wait_deploy", "a deploy's state"),
+            ("apps_list_environments", "names"),
+            ("previews_traces", "route names and timings"),
+            ("previews_requests", "paths and timings"),
+            ("postgres_explain", "a plan, not rows"),
+            ("search_analyze", "how text the agent sent is tokenized"),
+            ("search_slowlog", "slow searches' timings and shapes"),
+            ("secrets_list_value_requests", "who asked for which key, never a value"),
+            ("tasks_list_runs", "runs' states and times"),
+        ];
+        let ro = |t: &Tool| t.definition()["annotations"]["readOnlyHint"] == true;
+        for n in DATA {
+            assert!(all().iter().any(|t| t.name == *n && ro(t)), "{n} in DATA isn't a read-only tool");
+        }
+        let undecided: Vec<&str> = all()
+            .iter()
+            .filter(|t| ro(t) && !DATA.contains(&t.name) && !METADATA.iter().any(|(m, _)| *m == t.name))
+            .filter(|t| t.name.split('_').skip(1).any(|w| DATA_WORDS.iter().any(|d| w.starts_with(d))))
+            .map(|t| t.name)
+            .collect();
+        assert!(undecided.is_empty(), "say whether these answer stored data (DATA) or only metadata (METADATA, with why): {undecided:?}");
     }
 }
