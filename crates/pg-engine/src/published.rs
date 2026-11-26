@@ -53,6 +53,11 @@ impl<T: Send + Sync + 'static> Published<T> {
         }
     }
 
+    /// Moves on with every replacement: a value read after it was this one is the current one.
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
     /// The current value.
     pub fn load(&self) -> Arc<T> {
         self.with(Arc::clone)

@@ -867,6 +867,19 @@ pub(crate) fn long_identifiers(sql: &str, standard_strings: bool, stop: Option<u
     }
     let is_ident_start = |c: u8| c.is_ascii_alphabetic() || c == b'_' || c >= 0x80;
     let is_ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c == b'$' || c >= 0x80;
+    // Nor without a double quote or a run of more than MAX_IDENT identifier bytes: a quoted
+    // identifier has the one, an unquoted one is in one of the others. (Such a run covers a
+    // byte whose index is MAX_IDENT modulo MAX_IDENT + 1: only those are looked at, and the
+    // run around one that is an identifier's measured.)
+    let long_run = (MAX_IDENT..n).step_by(MAX_IDENT + 1).any(|p| {
+        is_ident(b[p])
+            && b[..p].iter().rev().take_while(|&&c| is_ident(c)).count()
+                + b[p..].iter().take_while(|&&c| is_ident(c)).count()
+                > MAX_IDENT
+    });
+    if !long_run && memchr::memchr(b'"', b).is_none() {
+        return out;
+    }
     // Skip a '...' literal whose quote is at `q` (backslash escapes with `esc`); returns the
     // index after it (n: unterminated).
     let skip_string = |q: usize, esc: bool| -> usize {
@@ -1082,7 +1095,7 @@ fn decode_uident(raw: &str, esc: char) -> Option<String> {
 pub(crate) fn param_junk(sql: &str, standard_strings: bool) -> Option<(usize, usize)> {
     let b = sql.as_bytes();
     let n = b.len();
-    if !b.windows(2).any(|w| w[0] == b'$' && w[1].is_ascii_digit()) {
+    if !memchr::memchr_iter(b'$', b).any(|i| b.get(i + 1).is_some_and(u8::is_ascii_digit)) {
         return None;
     }
     let is_ident_start = |c: u8| c.is_ascii_alphabetic() || c == b'_' || c >= 0x80;

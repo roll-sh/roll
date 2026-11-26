@@ -210,7 +210,10 @@ fn is_result_row(fixed: &[(String, u32, i32)], cols: &[OutCol]) -> bool {
 impl Drop for Prepared {
     fn drop(&mut self) {
         // A long statement's trees are as deep as it nests; their drops recurse that deep.
-        let trees = (self.stmt.take(), self.bound.get_mut().take());
+        // (The statement as it is: one read through a template whose tree nothing read has
+        // none to make.)
+        let stmt = std::mem::replace(&mut self.stmt, litplan::StmtTree::new(None));
+        let trees = (stmt, self.bound.get_mut().take());
         crate::stack::drop_deep(trees, self.sql.len());
     }
 }
@@ -1286,7 +1289,13 @@ impl Session {
         let parsed = crate::sql::parse::parse_live_lazy(sql);
         self.take_lex_warnings();
         let (text, stmts) = parsed?;
-        self.source = sql.to_string();
+        // (Into the last statement's buffer, unless a long one left it big.)
+        if self.source.capacity() <= 4096 {
+            self.source.clear();
+            self.source.push_str(sql);
+        } else {
+            self.source = sql.to_string();
+        }
         crate::sql::scs::set_source(match &text {
             std::borrow::Cow::Owned(t) => Some((t.clone(), sql.to_string())),
             _ => None,
@@ -3274,14 +3283,14 @@ impl Session {
     }
 
     fn execute_portal_here(&mut self, portal: &str, max_rows: usize) -> Result<(Outcome, bool)> {
-        if !self.portals.contains_key(portal) && self.state.cursors.borrow().contains_key(portal) {
-            let r = self.execute_cursor_portal(portal, max_rows);
-            if r.is_err() {
-                self.on_error();
-            }
-            return r;
-        }
         let Some(mut pt) = self.portals.remove(portal) else {
+            if self.state.cursors.borrow().contains_key(portal) {
+                let r = self.execute_cursor_portal(portal, max_rows);
+                if r.is_err() {
+                    self.on_error();
+                }
+                return r;
+            }
             let e = Error::new(
                 code::INVALID_CURSOR_NAME,
                 format!("portal \"{portal}\" does not exist"),

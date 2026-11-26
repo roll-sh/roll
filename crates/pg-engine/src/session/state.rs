@@ -450,6 +450,9 @@ pub struct SessionState {
     pub copy_progress: RefCell<Option<CopyProgress>>,
     /// Owners of the SECURITY DEFINER functions running (innermost last): the current user.
     pub definer: RefCell<Vec<u32>>,
+    /// `shared_search_path`'s last answer, with what decided it: the database's catalog
+    /// generation, the settings' generation and the innermost SECURITY DEFINER owner.
+    path_memo: RefCell<Option<(PathKey, crate::catalog::names::SearchPath)>>,
     /// Security-restricted operations running (REFRESH MATERIALIZED VIEW's query, ...):
     /// InSecurityRestrictedOperation.
     pub sro: Cell<u32>,
@@ -619,6 +622,7 @@ impl SessionState {
             copy_progress: RefCell::new(None),
             portal_seq: Cell::new(0),
             definer: RefCell::new(Vec::new()),
+            path_memo: RefCell::new(None),
             sro: Cell::new(0),
             frames: RefCell::new(Vec::new()),
             system_user: None,
@@ -911,14 +915,29 @@ impl SessionState {
     /// `search_path`, shared: the session's copy while its settings, user and role stay
     /// the same (each statement takes one).
     pub fn shared_search_path(&self) -> crate::catalog::names::SearchPath {
+        // (What it depends on: the catalog's roles, the settings' search_path, role and
+        // session_authorization, and the SECURITY DEFINER owner, which with those decide the
+        // current user. A statement asks a few times.)
+        let key = (
+            self.db.catalog_generation(),
+            self.settings.borrow().generation(),
+            self.definer.borrow().last().copied(),
+        );
+        if let Some((k, path)) = &*self.path_memo.borrow()
+            && *k == key
+        {
+            return path.clone();
+        }
         // `$user` is the current user (SET ROLE, a SECURITY DEFINER function's owner).
-        self.db.with_catalog(|cat| {
+        let path = self.db.with_catalog(|cat| {
             let oid = self.current_role(cat);
             let user = cat.roles.get(&oid).map_or(self.user.as_str(), |r| r.name.as_str());
             self.settings
                 .borrow()
                 .session_search_path(user, self.pid, || self.temp_schema())
-        })
+        });
+        *self.path_memo.borrow_mut() = Some((key, path.clone()));
+        path
     }
 
     /// Name of this session's schema for temporary tables: pg_temp_N for its proc array
@@ -961,6 +980,9 @@ impl Drop for SessionState {
         crate::exec::pgstat::session_ends(self);
     }
 }
+
+/// `SessionState::path_memo`'s key: (catalog generation, settings generation, definer).
+type PathKey = (u64, u64, Option<u32>);
 
 /// `SessionState::usable_path_memo`: (catalog version, role, database owner, path, usable part).
 pub type UsablePath = (u64, u32, u32, crate::catalog::names::SearchPath, crate::catalog::names::SearchPath);

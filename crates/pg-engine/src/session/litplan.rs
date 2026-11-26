@@ -136,7 +136,8 @@ impl LitStmt {
 /// lengths have other keys and one shape).
 #[derive(Default)]
 pub(crate) struct LitPlans {
-    map: HashMap<Box<str>, KeyPlans>,
+    /// (foldhash, not SipHash: every simple query read through a template looks its shape up.)
+    map: hashbrown::HashMap<Box<str>, KeyPlans>,
     /// Queries run with a kept plan (tests).
     uses: u64,
     /// Queries planned from their template's analysis (tests).
@@ -663,7 +664,7 @@ fn share_plan(shape: &str, env: SharedEnv, k: &Kept) {
 /// binding instead, counted and costed as the custom plan it is.
 #[derive(Default)]
 pub(crate) struct ParamPlans {
-    map: HashMap<Box<str>, Vec<ParamEntry>>,
+    map: hashbrown::HashMap<Box<str>, Vec<ParamEntry>>,
     /// Custom plans run with the generic binding (tests).
     uses: u64,
     /// Custom plans made from their Parse's analysis with the values put in (tests).

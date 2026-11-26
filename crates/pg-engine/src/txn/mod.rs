@@ -410,6 +410,11 @@ impl Database {
         self.catalog.with(f)
     }
 
+    /// Moves on whenever `catalog()` is replaced: equal generations, the same catalog.
+    pub fn catalog_generation(&self) -> u64 {
+        self.catalog.generation()
+    }
+
     /// The catalog a commit's DDL is checked against and merged onto (under the store's
     /// commit lock): the last one appended to the WAL, published or not.
     pub(crate) fn latest_catalog(&self) -> Arc<Catalog> {

@@ -439,6 +439,9 @@ pub struct Settings {
     /// The strings `start_transaction` set last time, back from `end_transaction`: the next
     /// transaction's values are written into them (no allocation per transaction).
     txn_spare: [String; 2],
+    /// Their names, as `end_transaction` took their entries out of `values` (when the session
+    /// had no value of its own): the keys the next transaction's entries go in with.
+    txn_keys: [Option<String>; 2],
     /// The configuration files' values as of the last reload this session took
     /// (`adopt_file_layer`): below role / database defaults and `config`, above the built-in
     /// defaults (PGC_S_FILE).
@@ -487,6 +490,7 @@ impl Default for Settings {
             stats_fetch: (1, 0),
             txn_start: None,
             txn_spare: Default::default(),
+            txn_keys: Default::default(),
             file: crate::sysconf::Loaded::empty(),
             argv: Vec::new(),
             pending: Vec::new(),
@@ -2111,17 +2115,19 @@ impl Settings {
         }
         // (What `set` does with these: user-context parameters, values in canonical form,
         // neither reported nor read by `Derived`.)
+        // (One probe each, into the strings the last transaction's end gave back.)
         let mut priors = [None, None];
-        for (((name, v), prior), spare) in TXN_START.iter().zip(values).zip(&mut priors).zip(&mut self.txn_spare) {
-            *prior = match self.values.get_mut(*name) {
-                Some(slot) => {
-                    let mut new = std::mem::take(spare);
-                    new.clear();
-                    new.push_str(v);
-                    Some(std::mem::replace(slot, new))
-                }
-                None => {
-                    self.values.insert(name.to_string(), v.to_string());
+        for ((((name, v), prior), spare), key) in
+            TXN_START.iter().zip(values).zip(&mut priors).zip(&mut self.txn_spare).zip(&mut self.txn_keys)
+        {
+            let mut new = std::mem::take(spare);
+            new.clear();
+            new.push_str(v);
+            let key = key.take().unwrap_or_else(|| name.to_string());
+            *prior = match self.values.entry(key) {
+                std::collections::hash_map::Entry::Occupied(mut e) => Some(e.insert(new)),
+                std::collections::hash_map::Entry::Vacant(e) => {
+                    e.insert(new);
                     None
                 }
             };
@@ -2439,7 +2445,9 @@ impl Settings {
             && let Some((_, priors)) = self.txn_start.take()
         {
             // Just `start_transaction`'s SET LOCALs: what `at_eoxact` does with their entries.
-            for ((name, prior), spare) in TXN_START.iter().zip(priors).zip(&mut self.txn_spare) {
+            for (((name, prior), spare), key) in
+                TXN_START.iter().zip(priors).zip(&mut self.txn_spare).zip(&mut self.txn_keys)
+            {
                 match prior {
                     Some(v) => {
                         if let Some(slot) = self.values.get_mut(*name) {
@@ -2449,7 +2457,9 @@ impl Settings {
                         }
                     }
                     None => {
-                        self.values.remove(*name);
+                        if let Some((k, v)) = self.values.remove_entry(*name) {
+                            (*key, *spare) = (Some(k), v);
+                        }
                     }
                 }
             }

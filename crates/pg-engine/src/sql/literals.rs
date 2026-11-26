@@ -125,6 +125,9 @@ pub fn scan(sql: &str) -> Option<Scan> {
     let mut shape = Vec::with_capacity(s.len());
     let mut lits = Vec::new();
     let mut ended = false;
+    // (The bytes from `copied` on go into the key and shape as they are, up to the next
+    // literal: in one copy, not one per token.)
+    let mut copied = 0;
     let mut i = 0;
     while i < s.len() {
         let b = s[i];
@@ -151,6 +154,9 @@ pub fn scan(sql: &str) -> Option<Scan> {
                 if quote_follows(s, i) {
                     return None;
                 }
+                key.extend_from_slice(&s[copied..start]);
+                shape.extend_from_slice(&s[copied..start]);
+                copied = i;
                 lits.push(Lit { start, end: i, kind: LitKind::Str });
                 key.resize(key.len() + (i - start), LitKind::Str.mark());
                 shape.push(LitKind::Str.mark());
@@ -199,6 +205,9 @@ pub fn scan(sql: &str) -> Option<Scan> {
                 if kind == LitKind::Int4 && sql[start..i].parse::<i32>().is_err() {
                     kind = if sql[start..i].parse::<i64>().is_ok() { LitKind::Int8 } else { LitKind::Numeric };
                 }
+                key.extend_from_slice(&s[copied..start]);
+                shape.extend_from_slice(&s[copied..start]);
+                copied = i;
                 lits.push(Lit { start, end: i, kind });
                 key.resize(key.len() + (i - start), kind.mark());
                 shape.push(kind.mark());
@@ -216,12 +225,12 @@ pub fn scan(sql: &str) -> Option<Scan> {
             }
             _ => i += 1,
         }
-        key.extend_from_slice(&s[start..i]);
-        shape.extend_from_slice(&s[start..i]);
     }
     if lits.is_empty() {
         return None;
     }
+    key.extend_from_slice(&s[copied..]);
+    shape.extend_from_slice(&s[copied..]);
     let text = |v: Vec<u8>| String::from_utf8(v).ok().map(String::into_boxed_str);
     Some(Scan { key: text(key)?, shape: text(shape)?, lits })
 }
