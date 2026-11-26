@@ -1684,8 +1684,9 @@ deterministic (#396).
    back, a 304 kept as it is and counted as seen) with `incremental` jobs that delete nothing, and
    the docs preset (one record per section, `lvl0` to `lvl6` from the headings, the URL with its
    `#anchor`, a mapping and a search-as-you-type template; `roll search crawler create --preset
-   docs` and the crawl box). Open: charset detection beyond UTF-8, fetching several origins at
-   once, and per-site politeness by address rather than name.
+   docs` and the crawl box); then pages decoded in their own charset (WHATWG sniffing,
+   `encoding_rs`), politeness per server (the address the egress check resolves, shared by every
+   name on it), and several servers fetched at once (`roll.crawler.max_parallel_fetches`).
 14. **Semantic search on OpenSearch-flavor clusters** (design in
    [opensearch-neural.md](opensearch-neural.md); AWS OpenSearch neural search):
    `neural`, `neural_sparse` and `agentic` are names only (`meta/aliases.rs`); ML Commons

@@ -8602,6 +8602,7 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "crc32fast",
+ "encoding_rs",
  "flate2",
  "foldhash 0.2.0",
  "futures",

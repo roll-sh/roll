@@ -1712,8 +1712,10 @@ taken over by roll's crawler. Where roll's differs ([crawler.md](crawler.md)):
   validation. A connector holds at most 1,000 crawl rules across its domains. Until domain
   verification lands every domain is unverified: at most 1,000 URLs a crawl, a second between
   requests to one site across every crawl on the node, and 4 crawls a day per connector and per
-  owner and site on the node. A crawl fetches one URL at a time (`threads_per_crawl` doesn't
-  apply).
+  owner and site on the node. Politeness is per server (the address a host resolves to), not per
+  site: one turn per server across every crawl on the node, and a crawl fetches up to
+  `roll.crawler.max_parallel_fetches` (4) URLs at once, each from another server and origin
+  (`threads_per_crawl` doesn't apply).
 - **Credentials** are the connector's sealed `auth_header` or basic auth, sent only to
   `auth_origin` over https, never after a redirect to another origin; one per connector.
   `http_auth_allowed`, proxies and `domains[].auth` in the snippet aren't taken (the CLI import
@@ -1736,8 +1738,10 @@ taken over by roll's crawler. Where roll's differs ([crawler.md](crawler.md)):
   a record per paragraph; roll makes one per section.
 - **Not yet**: XPath selectors, binary content extraction (only `text/html` and
   `application/xhtml+xml` are indexed), `data-elastic-name` and `meta.elastic` beyond 100 fields a
-  page, and `full_html` is the page as served, not Jsoup's re-serialisation. Pages are decoded as
-  UTF-8 (a page in another charset reads with replacement characters).
+  page, and `full_html` is the page as decoded, not Jsoup's re-serialisation.
+- **Charsets** are sniffed as browsers sniff them (WHATWG: BOM, `Content-Type`, a `<meta>` in the
+  first 1,024 bytes, else windows-1252), except that a body that is valid UTF-8 is read as UTF-8
+  before the windows-1252 fallback.
 - **URLs** are normalised with the WHATWG URL parser plus RFC 3986's percent-encoding rules, where
   Open Crawler uses Addressable's `normalize!`: IDNs, case, default ports, dot segments and
   percent-encoding agree; `links` and `url` hold the normalised URL rather than the link as written.
