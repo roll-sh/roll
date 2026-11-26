@@ -602,8 +602,8 @@ tenants don't hold, with a credential per link:
   index names and `*` patterns only: no `${…}` templates (they'd be filled from the identity the
   linking cluster sends) and no `/regex/`. A link's user runs no inference on the remote
   (`inference::refuse_over_link`): a link reads data, it never spends the remote's models or its
-  providers' keys (OpenSearch-flavor neural search isn't built yet; when it is, it refuses there
-  too). A loopback remote's indices are authorized as the cluster's own (`check_all`), and a
+  providers' keys. Today this flavor runs no inference for a query at all (`semantic` answers "not
+  supported yet"; neural search isn't built), so the guard is for when it does. A loopback remote's indices are authorized as the cluster's own (`check_all`), and a
   link's user can't name a loopback at all: it would read past the ceiling. A principal that
   isn't an OpenSearch user (the owner's per-index scope, a key) reaches no remote. DLS values
   substituted from a user's attributes are JSON-escaped.
