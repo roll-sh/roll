@@ -47,7 +47,8 @@ export function RuntimeLogs({
   const [slow, setSlow] = useState(0);
   // A search back through the stored days, or the lines before a time, shown instead of the
   // live tail until left.
-  const [found, setFound] = useState<{ q?: string; where?: string; before?: number; by?: string; lines: LogLine[]; truncated: boolean; error?: string } | null>(null);
+  // `since`/`until`: the window that search read, fixed when it was read.
+  const [found, setFound] = useState<{ q?: string; where?: string; before?: number; by?: string; since?: number; until?: number; lines: LogLine[]; truncated: boolean; error?: string } | null>(null);
   const [searching, setSearching] = useState(false);
   // How far back a search reads: up to what the environment keeps (its log retention).
   const [days, setDays] = useState(Math.min(initialDays ?? 7, Math.max(7, retentionDays)));
@@ -56,8 +57,12 @@ export function RuntimeLogs({
     setSearching(true);
     try {
       const narrow = requests ? { status: status || undefined, min_ms: slow || undefined } : {};
-      const got = await appsApi.readLogs(service, env, { ...q, ...narrow, since: Date.now() - days * 86_400_000, instance: instance || undefined, level: (!requests && level) || undefined, deployment: (!requests && deployment) || undefined, stream: (!requests && stream) || undefined, http: requests, tail: q.q || q.where ? 2000 : 500 });
-      setFound({ ...q, ...got });
+      const now = Date.now();
+      const since = now - days * 86_400_000;
+      const got = await appsApi.readLogs(service, env, { ...q, ...narrow, since, instance: instance || undefined, level: (!requests && level) || undefined, deployment: (!requests && deployment) || undefined, stream: (!requests && stream) || undefined, http: requests, tail: q.q || q.where ? 2000 : 500 });
+      // Cut short at its newest lines: the bars cover only what was read, from its oldest line.
+      const oldest = got.lines.reduce((m, l) => Math.min(m, l.t), Infinity);
+      setFound({ ...q, ...got, since: got.truncated && Number.isFinite(oldest) ? oldest : since, until: q.before ?? now });
     } catch (e) {
       setFound({ ...q, lines: [], truncated: false, error: e instanceof Error ? e.message : String(e) });
     } finally {
@@ -301,7 +306,7 @@ export function RuntimeLogs({
           </button>
         </p>
       )}
-      {found && (found.q || found.where) && found.lines.length > 0 && <Histogram lines={found.lines} since={Date.now() - days * 86_400_000} until={found.before ?? Date.now()} />}
+      {found && (found.q || found.where) && found.lines.length > 0 && <Histogram lines={found.lines} since={found.since ?? Date.now() - days * 86_400_000} until={found.until ?? Date.now()} />}
       {trace && (
         <div className="rise mb-2 rounded-lg border border-line bg-panel px-3 py-2">
           <div className="mb-2 flex items-center justify-between text-[11.5px] text-muted">

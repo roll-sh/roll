@@ -815,6 +815,75 @@ pub fn workspace_app(tree: &dyn Tree, dir: &str) -> Option<WorkspaceApp> {
     Some(WorkspaceApp { build, start, note: format!("{dir} is the package {name} of a {manager} workspace: built from the repo's root, installed once there") })
 }
 
+/// What a workspace package's build reads outside its own directory (Vercel's affected projects,
+/// `turbo-ignore`): the directories of the workspace's packages it depends on, transitively, as
+/// `<dir>/**`, and the root's manifests and lockfile. A push touching none of these nor the
+/// package's own directory can't change its build. Empty when `dir` isn't a workspace package.
+pub fn workspace_deps(tree: &dyn Tree, dir: &str) -> Vec<String> {
+    let dir = dir.trim_matches('/');
+    let Some(root) = tree.read("package.json").and_then(|b| serde_json::from_slice::<Value>(&b).ok()) else { return Vec::new() };
+    // The workspace's package globs: package.json's `workspaces` (a list, or `{packages}`), or
+    // pnpm-workspace.yaml's `packages`.
+    let mut globs: Vec<String> = match &root["workspaces"] {
+        Value::Array(a) => a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect(),
+        Value::Object(o) => o.get("packages").and_then(Value::as_array).map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default(),
+        _ => Vec::new(),
+    };
+    if let Some(y) = tree.read("pnpm-workspace.yaml").and_then(|b| serde_yaml_ng::from_slice::<serde_yaml_ng::Value>(&b).ok()) {
+        globs.extend(y["packages"].as_sequence().into_iter().flatten().filter_map(|v| v.as_str().map(str::to_string)));
+    }
+    // Each package by name, from the directories its globs name (`a/*`, `a/**` two levels down,
+    // or a directory itself; `!` excludes aren't followed: a package more is only watched more).
+    let mut dirs = Vec::new();
+    for g in globs.iter().filter(|g| !g.starts_with('!')) {
+        let g = g.trim_start_matches("./").trim_end_matches('/');
+        match g.split_once("/*") {
+            Some((base, rest)) if crate::tree::valid(base) => {
+                let mut level: Vec<String> = tree.list(base).into_iter().filter_map(|n| n.strip_suffix('/').map(|n| format!("{base}/{n}"))).collect();
+                if rest.starts_with('*') {
+                    let deeper: Vec<String> = level.iter().flat_map(|d| tree.list(d).into_iter().filter_map(move |n| n.strip_suffix('/').map(|n| format!("{d}/{n}")))).collect();
+                    level.extend(deeper);
+                }
+                dirs.extend(level);
+            }
+            None if crate::tree::valid(g) => dirs.push(g.to_string()),
+            _ => {}
+        }
+    }
+    let manifest = |d: &str| tree.read(&format!("{d}/package.json")).and_then(|b| serde_json::from_slice::<Value>(&b).ok());
+    let mut by_name = std::collections::HashMap::new();
+    for d in dirs.iter().take(2000) {
+        if let Some(name) = manifest(d).and_then(|m| m["name"].as_str().map(str::to_string)) {
+            by_name.entry(name).or_insert_with(|| d.clone());
+        }
+    }
+    if !by_name.values().any(|d| d == dir) {
+        return Vec::new();
+    }
+    // Its dependencies that are the workspace's packages, and theirs.
+    let (mut seen, mut queue) = (std::collections::BTreeSet::new(), vec![dir.to_string()]);
+    while let Some(d) = queue.pop() {
+        let Some(m) = manifest(&d) else { continue };
+        for k in ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"] {
+            for name in m[k].as_object().into_iter().flat_map(|o| o.keys()) {
+                if let Some(dep) = by_name.get(name)
+                    && dep != dir
+                    && seen.insert(dep.clone())
+                {
+                    queue.push(dep.clone());
+                }
+            }
+        }
+    }
+    let mut out: Vec<String> = seen.into_iter().map(|d| format!("{d}/**")).collect();
+    for f in ["package.json", "pnpm-workspace.yaml", "pnpm-lock.yaml", "package-lock.json", "yarn.lock", "bun.lock", "bun.lockb", "turbo.json", "nx.json", ".npmrc"] {
+        if tree.exists(f) {
+            out.push(f.to_string());
+        }
+    }
+    out
+}
+
 /// A client-side router in `package.json`'s dependencies (the app routes in the browser).
 pub(crate) fn client_router(tree: &dyn Tree) -> Option<&'static str> {
     let pkg: Value = serde_json::from_slice(&tree.read("package.json")?).ok()?;
