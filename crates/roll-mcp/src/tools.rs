@@ -1845,18 +1845,20 @@ pub const DATA: &[&str] = &[
     "apps_check_screenshot", "apps_cron_run_logs", "apps_deploy_logs", "apps_deploy_output", "apps_deploy_source", "apps_errors", "apps_events", "apps_fetch",
     "apps_form_submissions", "apps_get_trace", "apps_job_logs", "apps_logs", "apps_visitors", "apps_wait_cron_run",
     "postgres_query",
-    "previews_errors", "previews_fetch", "previews_get_trace", "previews_list_mail", "previews_logs", "previews_note_crop", "previews_read_mail", "previews_screenshot",
+    "previews_connect", "previews_env", "previews_errors", "previews_fetch", "previews_get_trace", "previews_list_mail", "previews_logs", "previews_note_crop", "previews_read_mail", "previews_screenshot",
     "previews_tables", "previews_try_screenshot",
     "queues_peek",
     "search_analytics", "search_explain", "search_get_document", "search_query", "search_suggestions", "search_test_query_ruleset",
     "secrets_get_values", "secrets_reveal", "secrets_scan", "secrets_totp", "secrets_version_value",
     "storage_read_object",
     "streams_read",
-    "tasks_get_event", "tasks_get_message", "tasks_get_run", "tasks_list_dead_letters", "tasks_list_events", "tasks_list_messages", "tasks_wait_run",
+    "tasks_get_event", "tasks_get_message", "tasks_get_run", "tasks_list_dead_letters", "tasks_list_events", "tasks_list_messages", "tasks_list_runs", "tasks_wait_run",
 ];
 
-/// roll code's tools that answer a repo's content (files, diffs, matches, commit messages).
-pub const CODE_DATA: &[&str] = &["code_read_file", "code_search_code", "code_blame", "code_compare", "code_get_changeset", "code_log", "code_search", "code_fetch"];
+/// roll code's tools that answer a repo's content (files, diffs, matches, commit messages), named as
+/// rolld fronts them (`search_code` is `code_search`; `search` and `fetch` keep their names for
+/// ChatGPT; rolld's `access.rs` test keeps these real).
+pub const CODE_DATA: &[&str] = &["code_read_file", "code_search", "code_blame", "code_compare", "code_get_changeset", "code_log", "search", "fetch"];
 
 /// Whether a metadata-only connection keeps `name` from the model ([`DATA`], [`CODE_DATA`]).
 pub fn reads_data(name: &str) -> bool {
@@ -2619,7 +2621,8 @@ mod tests {
             ("search_analyze", "how text the agent sent is tokenized"),
             ("search_slowlog", "slow searches' timings and shapes"),
             ("secrets_list_value_requests", "who asked for which key, never a value"),
-            ("tasks_list_runs", "runs' states and times"),
+            ("storage_list_objects", "keys and sizes, as a schema's table names are"),
+            ("previews_list_notes", "what reviewers wrote about a page, not what the app stores"),
             ("search_list_query_rulesets", "rules people set"),
             ("search_get_query_ruleset", "rules people set"),
             ("secrets_suggestions", "which keys a link would fill, never a value"),
@@ -2631,10 +2634,11 @@ mod tests {
         for n in DATA {
             assert!(all().iter().any(|t| t.name == *n && ro(t)), "{n} in DATA isn't a read-only tool");
         }
+        // A read-only tool that reveals (a value, a credential) is decided too, whatever its name.
         let undecided: Vec<&str> = all()
             .iter()
             .filter(|t| ro(t) && !DATA.contains(&t.name) && !METADATA.iter().any(|(m, _)| *m == t.name))
-            .filter(|t| t.name.split('_').skip(1).any(|w| DATA_WORDS.iter().any(|d| w.starts_with(d))))
+            .filter(|t| t.name.split('_').skip(1).any(|w| DATA_WORDS.iter().any(|d| w.starts_with(d))) || t.find_actions().contains(&Action::Reveal))
             .map(|t| t.name)
             .collect();
         assert!(undecided.is_empty(), "say whether these answer stored data (DATA) or only metadata (METADATA, with why): {undecided:?}");

@@ -2119,13 +2119,14 @@ impl Store {
             .collect())
     }
 
-    /// The MCP tools a grant ran since `since` (allowed, or run on an approval), most used first, at
+    /// The MCP tools a grant ran since `since` (allowed, or run on an approval; not roll's own labels
+    /// such as `events/poll:<feed>` or `roll_find:<tool>`), most used first, at
     /// most `limit`: search mode lists them beside its own (Atlassian's "primary" tools, from what
     /// this token does rather than a fixed list).
     pub fn tools_used(&self, grant: &str, since: i64, limit: usize) -> Result<Vec<String>> {
         Ok(self.db.read(|c| {
             c.query(
-                "SELECT tool FROM audit WHERE grant_id = ? AND at >= ? AND tool IS NOT NULL AND (decision = 'allow' OR (decision = 'ask' AND approval IS NOT NULL AND status <> 403)) GROUP BY tool ORDER BY COUNT(*) DESC, tool LIMIT ?",
+                "SELECT tool FROM audit WHERE grant_id = ? AND at >= ? AND tool IS NOT NULL AND tool NOT LIKE '%:%' AND tool NOT LIKE '%/%' AND (decision = 'allow' OR (decision = 'ask' AND approval IS NOT NULL AND status <> 403)) GROUP BY tool ORDER BY COUNT(*) DESC, tool LIMIT ?",
                 params![grant, since, limit as i64],
                 |r| r.get::<_, String>(0),
             )
