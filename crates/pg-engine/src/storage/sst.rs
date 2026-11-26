@@ -2108,15 +2108,15 @@ impl Block {
     /// come, and the stop is `ov`'s (its next entry; past them its limit, if
     /// any): rows pushed, versions older than a row taken passed, on both sides.
     #[inline]
-    pub fn run_rows(&self, pos: &mut BlockPos, ts: u64, max: usize, resolve: bool, batch: &mut super::batch::RowBatch, stop: Option<&[u8]>, ov: Option<&mut Overlay>) -> (usize, u64) {
+    pub(crate) fn run_rows<O: Ov>(&self, pos: &mut BlockPos, ts: u64, max: usize, resolve: bool, batch: &mut super::batch::RowBatch, stop: Option<&[u8]>, ov: Option<&mut O>) -> (usize, u64) {
         debug_assert!(!self.is_cols());
         // (Two loops: without a stop the one runs before it had, which inlines as that one did.)
         match (stop, ov) {
             // (No entry of the list in the block: none stops the run.)
-            (_, Some(o)) if o.stop().is_none_or(|s| self.last_key().is_some_and(|l| short_cmp(l, s).is_lt())) => self.run_rows_to::<false, false>(pos, ts, max, resolve, batch, &[], None, 0, None),
-            (_, Some(o)) => self.run_rows_to::<true, false>(pos, ts, max, resolve, batch, &[], Some(o), 0, None),
-            (None, None) => self.run_rows_to::<false, false>(pos, ts, max, resolve, batch, &[], None, 0, None),
-            (Some(s), None) => self.run_rows_to::<true, false>(pos, ts, max, resolve, batch, s, None, 0, None),
+            (_, Some(o)) if o.stop().is_none_or(|s| self.last_key().is_some_and(|l| short_cmp(l, s).is_lt())) => self.run_rows_to::<false, false, Overlay>(pos, ts, max, resolve, batch, &[], None, 0, None),
+            (_, Some(o)) => self.run_rows_to::<true, false, O>(pos, ts, max, resolve, batch, &[], Some(o), 0, None),
+            (None, None) => self.run_rows_to::<false, false, Overlay>(pos, ts, max, resolve, batch, &[], None, 0, None),
+            (Some(s), None) => self.run_rows_to::<true, false, Overlay>(pos, ts, max, resolve, batch, s, None, 0, None),
         }
     }
 
@@ -2124,7 +2124,7 @@ impl Block {
     /// of its buffer `cbuf` (`LazyRows::buf_of`). (Never out of line: none of its rows are.)
     pub fn run_rows_col(&self, pos: &mut BlockPos, ts: u64, max: usize, batch: &mut super::batch::RowBatch, cbuf: u32, lazy: &mut super::batch::LazyRows) -> (usize, u64) {
         debug_assert!(self.is_cols());
-        self.run_rows_to::<false, true>(pos, ts, max, false, batch, &[], None, cbuf, Some(lazy))
+        self.run_rows_to::<false, true, Overlay>(pos, ts, max, false, batch, &[], None, cbuf, Some(lazy))
     }
 
     /// Rows `rows` of a column block (in that order) onto `out`, each one's end pushed onto
@@ -2136,7 +2136,7 @@ impl Block {
 
     /// `run_rows`, with (`STOP`) or without a stop, of a column block's rows (`COL`) or not.
     #[allow(clippy::too_many_arguments)]
-    fn run_rows_to<const STOP: bool, const COL: bool>(
+    fn run_rows_to<const STOP: bool, const COL: bool, O: Ov>(
         &self,
         pos: &mut BlockPos,
         ts: u64,
@@ -2144,7 +2144,7 @@ impl Block {
         resolve: bool,
         batch: &mut super::batch::RowBatch,
         stop: &[u8],
-        mut ov: Option<&mut Overlay>,
+        mut ov: Option<&mut O>,
         cbuf: u32,
         lazy: Option<&mut super::batch::LazyRows>,
     ) -> (usize, u64) {
@@ -2334,14 +2334,174 @@ fn stop_in(w: &[u8; ZK], sl: usize, kb: &[u8; ZK], klen: Option<usize>) -> ([u8;
     (*w, sl, d.unwrap_or(usize::MAX))
 }
 
-/// What `Overlay::take` did at a run's stop.
-enum Took {
+/// What `Ov::take` did at a run's stop.
+pub(crate) enum Took {
     /// The run ends before the entry it is on.
     Stop,
     /// The entry is an older version of a row taken or passed: passed.
     Skip,
     /// The entry comes before the next stop: taken as a row.
     Row,
+}
+
+/// Where a run of the oldest source's block takes the other sources' entries from in its loop
+/// (`Block::run_rows`' `ov`): a list of them (`Overlay`), or another source's block read where its
+/// entries are (`Side`).
+pub(crate) trait Ov {
+    /// Where a run stops next (in a buffer, its length; None: nowhere in the block).
+    fn stop_w(&self) -> Option<(&[u8; ZK], usize)>;
+
+    /// `stop_w` as a key.
+    fn stop(&self) -> Option<&[u8]> {
+        self.stop_w().map(|(w, n)| &w[..n])
+    }
+
+    /// At a run's stop, the run on an entry (its user key `kb[..nk]`, its version `ever` as
+    /// stored) at or past it: the entries before that one taken (a version at or before the
+    /// snapshot of a key after the last row pushed: pushed, else passed), `n` counting rows up
+    /// to `max`, `stop` set to the next stop. `Skip`: the run's entry is an older version of the
+    /// row last taken or passed; `Row`: it comes first; `Stop`: neither (past the limit, an
+    /// entry a run doesn't take, or `max` rows).
+    #[allow(clippy::too_many_arguments)]
+    fn take(&mut self, kb: &[u8; ZK], nk: usize, ever: [u8; 8], batch: &mut super::batch::RowBatch, n: &mut usize, max: usize, rver: &mut [u8; 8], stop: &mut Option<([u8; ZK], usize, usize)>) -> Took;
+}
+
+impl Ov for Overlay {
+    #[inline]
+    fn stop_w(&self) -> Option<(&[u8; ZK], usize)> {
+        Overlay::stop_w(self)
+    }
+
+    #[inline(always)]
+    fn take(&mut self, kb: &[u8; ZK], nk: usize, ever: [u8; 8], batch: &mut super::batch::RowBatch, n: &mut usize, max: usize, rver: &mut [u8; 8], stop: &mut Option<([u8; ZK], usize, usize)>) -> Took {
+        Overlay::take(self, kb, nk, ever, batch, n, max, rver, stop)
+    }
+}
+
+/// Another source's block (a newer file's, its entries the newer versions of a few of the oldest
+/// source's rows) as a run of the oldest source's blocks takes its entries in its loop: each read
+/// where it is when the run comes to it (`ZipSide`), none copied into a list or read again after.
+/// Its entries at or past `end` (the scan's) aren't taken; past its block, the run stops at the
+/// block's last key when the source goes on after it (`more`), else at `end`, if any. At an entry
+/// a run doesn't take (a deletion, a derived value, an out-of-line value under `resolve`) the run
+/// stops, for the merge to read it.
+pub struct Side<'a> {
+    s: ZipSide<'a>,
+    ts: u64,
+    resolve: bool,
+    end: [u8; ZK],
+    end_len: usize,
+    ended_by: bool,
+    /// Where the run stops past the entries it can take: the block's last key or `end`.
+    limit: [u8; ZK],
+    limit_len: usize,
+    limited: bool,
+    /// Entries taken or passed.
+    pub taken: u32,
+}
+
+impl<'a> Side<'a> {
+    /// On `pos`'s entry of `blk` (`buf`: the batch's index of its bytes, `RowBatch::buf_index`),
+    /// for a scan at `ts` up to `end` (None: unbounded), the source going on past the block
+    /// (`more`) or not. None: a key too long for its buffers.
+    pub fn new(blk: &'a Block, pos: &BlockPos, buf: u32, ts: u64, resolve: bool, end: Option<&[u8]>, more: bool) -> Option<Side<'a>> {
+        let s = ZipSide::new(blk, pos, buf)?;
+        let (e, el) = match end {
+            Some(e) if e.len() > ZK => return None,
+            Some(e) => (key_buf(e), e.len()),
+            None => ([0u8; ZK], 0),
+        };
+        let last = blk.last_key()?;
+        if last.len() > ZK {
+            return None;
+        }
+        let (limit, limit_len, limited) = match (more, end) {
+            (true, Some(e)) if short_cmp(e, last).is_le() => (key_buf(e), e.len(), true),
+            (true, _) => (key_buf(last), last.len(), true),
+            (false, Some(e)) => (key_buf(e), e.len(), true),
+            (false, None) => ([0u8; ZK], 0, false),
+        };
+        Some(Side { s, ts, resolve, end: e, end_len: el, ended_by: end.is_some(), limit, limit_len, limited, taken: 0 })
+    }
+
+    /// `pos` on the entry it is on, as `Block::step` would have left it.
+    pub fn hand_back(&self, pos: &mut BlockPos) {
+        self.s.hand_back(pos);
+    }
+
+    /// On an entry of its block below `end`.
+    #[inline(always)]
+    fn live(&self) -> bool {
+        !self.s.ended() && !(self.ended_by && cmp_keys(&self.s.k, self.s.klen, &self.end, self.end_len).is_ge())
+    }
+}
+
+/// `k` in a key buffer (`ZK` bytes at most).
+#[inline(always)]
+fn key_buf(k: &[u8]) -> [u8; ZK] {
+    let mut w = [0u8; ZK];
+    w[..k.len()].copy_from_slice(k);
+    w
+}
+
+impl Ov for Side<'_> {
+    #[inline]
+    fn stop_w(&self) -> Option<(&[u8; ZK], usize)> {
+        match self.live() {
+            // (On a key too long for its buffer, the run stops at the entry before it, taken
+            // already: at a key past that one, `take` stops it.)
+            true => Some((&self.s.k, self.s.klen)),
+            false if self.s.stuck => Some((&self.s.k, self.s.klen)),
+            false => self.limited.then_some((&self.limit, self.limit_len)),
+        }
+    }
+
+    /// (`Overlay::take`'s, of the entry the block is on.)
+    #[inline(never)]
+    fn take(&mut self, kb: &[u8; ZK], nk: usize, ever: [u8; 8], batch: &mut super::batch::RowBatch, n: &mut usize, max: usize, rver: &mut [u8; 8], stop: &mut Option<([u8; ZK], usize, usize)>) -> Took {
+        loop {
+            if !self.live() {
+                return Took::Stop;
+            }
+            let s = &self.s;
+            let kl = s.klen;
+            let ul = kl - 8;
+            let ver: [u8; 8] = s.k[ul..kl].try_into().unwrap();
+            let same = nk == ul && cmp_words(kb, &s.k, nk).is_eq();
+            // (A newer version of the key than the entry's: the run's entry first.)
+            if same && ever < ver {
+                if let Some((_, _, d)) = stop {
+                    *d = usize::MAX;
+                }
+                return Took::Row;
+            }
+            let vis = !u64::from_be_bytes(ver) <= self.ts;
+            if vis {
+                if s.vlen == TOMBSTONE || s.vlen == DERIVED || (self.resolve && super::toast::has_external(&s.blk.data[s.vat..s.vat + s.vlen as usize])) {
+                    return Took::Stop;
+                }
+                if batch.last_key().is_none_or(|l| !short_eq(l, &s.k[..ul])) {
+                    if *n >= max {
+                        return Took::Stop;
+                    }
+                    batch.push_key::<KEY>(s.k[..KEY].try_into().unwrap(), ul, s.buf, s.vat, s.vlen as usize);
+                    *n += 1;
+                    *rver = ver;
+                }
+            }
+            self.s.step();
+            self.taken += 1;
+            *stop = self.stop_w().map(|(w, sl)| stop_in(w, sl, kb, None));
+            if vis && same {
+                return Took::Skip;
+            }
+            let Some((w, sl, d)) = stop else { return Took::Row };
+            if let Some(i) = below_at(kb, w, nk.min(*sl)) {
+                *d = i;
+                return Took::Row;
+            }
+        }
+    }
 }
 
 /// The other sources' entries the runs of the oldest source's blocks take in their loop

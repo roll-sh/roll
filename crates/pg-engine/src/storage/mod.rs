@@ -3558,7 +3558,7 @@ impl Cursor {
     /// is `ov`'s. `pushed` false: the head isn't pushed yet (the first entry of the block after
     /// a run's), and is taken as the entries after it are.
     #[allow(clippy::too_many_arguments)]
-    fn run_into<const C: bool>(
+    fn run_into<const C: bool, O: sst::Ov>(
         &mut self,
         ts: u64,
         bound: Option<&[u8]>,
@@ -3566,7 +3566,7 @@ impl Cursor {
         batch: &mut batch::RowBatch,
         max: usize,
         long: bool,
-        mut ov: Option<&mut sst::Overlay>,
+        mut ov: Option<&mut O>,
         pushed: bool,
         lazy: Option<&mut batch::LazyRows>,
     ) -> (usize, u64) {
@@ -4037,9 +4037,12 @@ pub struct Scan {
 const OV_MAX: usize = 128;
 const OV_SOURCES: usize = 64;
 
-/// Overlay entries runs took or passed (tests: that a read went that way).
+/// Overlay entries runs took or passed, and another file's entries runs took or passed from its
+/// block (`Scan::side`) (tests: that a read went that way).
 #[cfg(test)]
 static OV_TAKEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+#[cfg(test)]
+static SIDE_TAKEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// `Scan::zip` is tried while the rows go fewer than this many at a time from one source.
 const ZIP_RUN: usize = 8;
@@ -4533,6 +4536,11 @@ impl Scan {
                 c.advance();
                 continue;
             }
+            // (One other source, a file's block over `i`'s: its entries taken in the runs' loop
+            // where they are, no list made.)
+            if !C && self.side_ok(i) && self.side(i, resolve, batch, target)? {
+                continue;
+            }
             // (The other sources' entries ahead in the range, taken in the run's loop.)
             // (Format 4's only: a column block's run takes no list.)
             let gathered = !C && self.merge.bounded && self.gather(i, resolve, batch)?;
@@ -4543,7 +4551,7 @@ impl Scan {
                     true => self.ov.as_deref_mut().map(|o| &mut o.0),
                     false => None,
                 };
-                let (n, last) = self.merge.sources[i].run_into::<C>(self.ts, bound, resolve, batch, target - batch.len(), !self.zip_ok, ov, pushed, lazy.as_deref_mut());
+                let (n, last) = self.merge.sources[i].run_into::<C, sst::Overlay>(self.ts, bound, resolve, batch, target - batch.len(), !self.zip_ok, ov, pushed, lazy.as_deref_mut());
                 if pushed || n > 0 {
                     self.zip_ok = n < ZIP_RUN;
                 }
@@ -4695,6 +4703,96 @@ impl Scan {
         peeked.truncate(np);
         list.finish();
         Ok(!list.is_empty())
+    }
+
+    /// With two sources ranked, `i` first (the merge's oldest: the table in L1, or the oldest L0
+    /// file without L1) and its head pushed as `batch`'s last row, the other a file whose block's
+    /// next entry is in `i`'s block: that block's entries from there on taken in the loop of `i`'s
+    /// runs where they come (`sst::Side`), read where they are, no list made of them; the runs go
+    /// on into `i`'s next blocks while the other's block lasts. Then the other is past what was
+    /// taken or passed and the two are ranked again. False (nothing done): not so, as `gather`'s
+    /// conditions but for the other's kind (range deletions, a dead-range hint looked for, a block
+    /// of derived values, keys too long for a run's buffers).
+    #[inline(never)]
+    fn side(&mut self, i: usize, resolve: bool, batch: &mut batch::RowBatch, target: usize) -> Result<bool> {
+        let m = &mut self.merge;
+        let o = m.rank[1];
+        let (ts, end) = (self.ts, m.end.as_slice());
+        let (src, oth) = pair_mut(&mut m.sources, i, o);
+        let Cursor::Level { block: Some(b), .. } = &*src else { return Ok(false) };
+        if b.derived() || b.last_key().is_none_or(|l| sst::short_cmp(&m.bound, l).is_gt()) {
+            return Ok(false);
+        }
+        let Cursor::Level { ssts, file, block: Some(ob), block_idx, pos: opos, .. } = &*oth else { return Ok(false) };
+        if ob.derived() || opos.index() >= ob.len() {
+            return Ok(false);
+        }
+        // (Its block held apart from the cursor, which takes the position back after.)
+        let ob = ob.clone();
+        let more = *block_idx + 1 < ssts[*file].block_count() || *file + 1 < ssts.len();
+        let buf = batch.buf_index(ob.bytes());
+        let Some(mut side) = sst::Side::new(&ob, opos, buf, ts, resolve, (!end.is_empty()).then_some(end), more) else { return Ok(false) };
+        let mut pushed = true;
+        loop {
+            let (n, last) = src.run_into::<false, _>(ts, None, resolve, batch, target - batch.len(), true, Some(&mut side), pushed, None);
+            if pushed || n > 0 {
+                self.zip_ok = n < ZIP_RUN;
+            }
+            if n > 0 {
+                let d = self.decided.get_or_insert_with(Vec::new);
+                d.clear();
+                d.extend_from_slice(batch.last_key().expect("a row"));
+                self.decided_ts = last;
+            }
+            if batch.len() >= target || !src.block_done() {
+                break;
+            }
+            src.fill()?;
+            if src.head().is_none() {
+                break;
+            }
+            pushed = false;
+        }
+        #[cfg(test)]
+        SIDE_TAKEN.fetch_add(side.taken as u64, Ordering::Relaxed);
+        if let Cursor::Level { pos, .. } = oth {
+            side.hand_back(pos);
+        }
+        // (The two ranked again by their heads.)
+        src.fill()?;
+        oth.fill()?;
+        let (a, b) = (src.head().map(|(k, _)| k), oth.head().map(|(k, _)| k));
+        m.rank.clear();
+        m.bound.clear();
+        match (a, b) {
+            (Some(a), Some(b)) => {
+                let (first, second, bk) = if a < b { (i, o, b) } else { (o, i, a) };
+                m.bound.extend_from_slice(bk);
+                m.rank.extend([first, second]);
+            }
+            (Some(_), None) => m.rank.push(i),
+            (None, Some(_)) => m.rank.push(o),
+            (None, None) => {}
+        }
+        m.bounded = m.rank.len() > 1;
+        m.cur = m.rank.first().copied();
+        Ok(true)
+    }
+
+    /// `side`'s conditions of the merge's shape, checked where it is called: two sources ranked,
+    /// `i` first and the oldest, the other a file's block; no range deletions, no dead-range hint
+    /// looked for.
+    #[inline(always)]
+    fn side_ok(&self, i: usize) -> bool {
+        let m = &self.merge;
+        m.rank.len() == 2
+            && i + 1 == m.sources.len()
+            && m.cur == Some(i)
+            && m.rank[0] == i
+            && m.bounded
+            && self.rdels.is_empty()
+            && self.dead.is_none()
+            && matches!(&m.sources[m.rank[1]], Cursor::Level { block: Some(_), .. })
     }
 
     /// After a run with the overlay list (`gather`): each source past its entries the run took
@@ -6396,8 +6494,9 @@ mod tests {
     fn runs_take_newer_versions_in_their_loop() {
         // A table in L1, sparse newer versions over it in two L0 files and the memtable (some of
         // the same rows in two of them), read at snapshots that see none, some and all of them:
-        // runs of L1's blocks take them from the overlay list (`Scan::gather`), versions newer
-        // than the snapshot passed, and read as the model does.
+        // runs of L1's blocks take them from the overlay list (`Scan::gather`) or, where one file
+        // alone has entries ahead, from its block (`Scan::side`), versions newer than the
+        // snapshot passed, and read as the model does.
         let dir = tempfile::tempdir().unwrap();
         let s = Store::open(dir.path(), StoreOptions { background: false, memtable_bytes: 1 << 20, ..opts() }).unwrap();
         let mut model = Model::new();
@@ -6430,12 +6529,13 @@ mod tests {
         assert_eq!(s.view().l0.len(), 2);
         // (Pinned: a hot range's rows are kept trimmed to the gc horizon.)
         let pins: Vec<_> = [t0, t1, t2, t3 - 1].map(|t| s.pin(t)).into();
-        let before = OV_TAKEN.load(Ordering::Relaxed);
+        let before = (OV_TAKEN.load(Ordering::Relaxed), SIDE_TAKEN.load(Ordering::Relaxed));
         for (ts, what) in [(t0, "none seen"), (t1, "one file seen"), (t2, "files seen"), (t3 - 1, "memtable partly"), (t3, "all seen")] {
             check_at(&s, &model, ts, what);
         }
         drop(pins);
-        assert!(OV_TAKEN.load(Ordering::Relaxed) > before, "no run took an overlay entry");
+        assert!(OV_TAKEN.load(Ordering::Relaxed) > before.0, "no run took an overlay entry");
+        assert!(SIDE_TAKEN.load(Ordering::Relaxed) > before.1, "no run took a file's entry from its block");
     }
 
     /// Every version written: key -> [(ts, value)].
