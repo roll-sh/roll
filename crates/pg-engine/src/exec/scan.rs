@@ -2791,6 +2791,9 @@ const HELD_BYTES: usize = 256 << 10;
 pub static HEAP_ORDER_STREAMED: crate::counter::Counter = crate::counter::Counter::new();
 #[doc(hidden)]
 pub static HEAP_ORDER_HELD: crate::counter::Counter = crate::counter::Counter::new();
+/// Held passes over a kept hot range with the filter's rejects left there (`open_kept`).
+#[doc(hidden)]
+pub static HEAP_ORDER_KEPT: crate::counter::Counter = crate::counter::Counter::new();
 
 /// The index columns (table column, type, direction) a bitmap's quals can be checked on
 /// from the index entries alone: a btree's plain columns of the types `index_only_columns`
@@ -4653,6 +4656,7 @@ impl ScanNode {
         };
         self.iter = Some(StoreIter::Fwd(Box::new(it)));
         self.cur_range = 1;
+        HEAP_ORDER_KEPT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         true
     }
 

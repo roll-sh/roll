@@ -5,7 +5,7 @@
 //! A small table's rows are held from the first read and returned from there: the same.
 
 use pg_engine::engine::{Engine, EngineOptions};
-use pg_engine::exec::scan::{HEAP_ORDER_HELD, HEAP_ORDER_STREAMED};
+use pg_engine::exec::scan::{HEAP_ORDER_HELD, HEAP_ORDER_KEPT, HEAP_ORDER_STREAMED};
 use pg_engine::session::Session;
 use std::sync::atomic::Ordering::Relaxed;
 use std::time::Duration;
@@ -121,6 +121,7 @@ fn run() {
     s.query("PREPARE up(int, int) AS UPDATE u SET b = b + $2 WHERE a = $1 RETURNING a, b").unwrap();
     s.query("PREPARE sel(int) AS SELECT a FROM u WHERE b = $1").unwrap();
     s.query("SET plan_cache_mode = force_generic_plan").unwrap();
+    let kept = HEAP_ORDER_KEPT.load(Relaxed);
     for i in 1..=12 {
         let a = i * 23 % 300 + 1;
         let want = out(&mut s, &format!("SELECT a, b + {i} FROM u WHERE a = {a}"));
@@ -129,5 +130,10 @@ fn run() {
         assert_eq!(out(&mut s, &format!("EXECUTE sel({})", i % 11)), want, "generic SELECT of b = {}", i % 11);
     }
     s.query("RESET plan_cache_mode").unwrap();
+    assert!(HEAP_ORDER_KEPT.load(Relaxed) > kept, "the scans read its kept hot range");
     same_as_ctid_order_of(&mut s, "u", "small, after the prepared updates");
+    // (Its range kept hot by now: the rows the filter rejects over their stored values are
+    // left in the chains, and counted as before.)
+    let plan = out(&mut s, "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) SELECT a FROM u WHERE a = 5");
+    assert!(plan.iter().any(|l| l.contains("Rows Removed by Filter: 299")), "{plan:?}");
 }

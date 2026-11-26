@@ -5426,6 +5426,18 @@ mod tests {
             assert_eq!(merged, expect, "merging scan, {what}, ts {ts}");
             let hot: Vec<_> = store.scan(&rel, &end, ts).map(|r| r.unwrap()).collect();
             assert_eq!(hot, expect, "hot scan, {what}, ts {ts}");
+            // The kept range read with a filter: the rows it takes, each visible row asked once.
+            let mut asked = 0;
+            let mut keep = |v: &[u8]| {
+                asked += 1;
+                v.last().is_some_and(|b| b % 2 == 0)
+            };
+            if let Some(s) = store.scan_raw_kept(&rel, &end, ts, &mut keep) {
+                let kept: Vec<_> = s.map(|r| r.unwrap()).collect();
+                let want: Vec<_> = expect.iter().filter(|(_, v)| v.last().is_some_and(|b| b % 2 == 0)).cloned().collect();
+                assert_eq!(kept, want, "kept scan, {what}, ts {ts}");
+                assert_eq!(asked, expect.len(), "kept scan's rows asked, {what}, ts {ts}");
+            }
             let (a, b) = (key(3), key(7));
             let part: Vec<_> = store.scan(&a, &b, ts).map(|r| r.unwrap()).collect();
             let want: Vec<_> = expect.iter().filter(|(k, _)| *k >= a && *k < b).cloned().collect();
