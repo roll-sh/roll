@@ -91,6 +91,9 @@ pub struct Config {
     /// errors from their output (a read of their logs).
     pub routes_every: Duration,
     pub new_errors_every: Duration,
+    /// How long a masked base serves new branches before the next one is made from the parent as
+    /// it is then (`ROLL_PREVIEWS_MASK_BASE_HOURS`; zero: every masked branch masks its own copy).
+    pub mask_base_for: Duration,
 }
 
 impl Default for Config {
@@ -106,6 +109,7 @@ impl Default for Config {
             otlp: None,
             routes_every: Duration::from_secs(60),
             new_errors_every: Duration::from_secs(300),
+            mask_base_for: Duration::from_secs(24 * 3600),
         }
     }
 }
@@ -160,6 +164,9 @@ type ErrorCountsRead = HashMap<(String, i64), (i64, u64)>;
 /// Agents' runs' pictures, by run: (preview, when, PNG).
 type TriedPictures = HashMap<String, (String, i64, Vec<u8>)>;
 type OidcIssued = HashMap<(String, String, String), (i64, crate::OidcToken)>;
+
+/// How often the leader looks for masked bases to delete.
+const BASES_SWEPT_EVERY: Duration = Duration::from_secs(600);
 
 pub struct Engine {
     pub cfg: Config,
@@ -275,6 +282,8 @@ pub struct Engine {
     paths_seen: Mutex<HashMap<(String, String), HeadPaths>>,
     /// One pass at a time.
     passing: tokio::sync::Mutex<()>,
+    /// When old masked bases were last looked for (every [`BASES_SWEPT_EVERY`]).
+    bases_swept: parking_lot::Mutex<Option<std::time::Instant>>,
 }
 
 /// The variables a branch of `kind` is reached by (the first of a kind takes the plain names).
@@ -348,6 +357,7 @@ impl Engine {
             warm_wanted: Mutex::new(Vec::new()),
             deploying_since: Mutex::new(HashMap::new()),
             passing: tokio::sync::Mutex::new(()),
+            bases_swept: parking_lot::Mutex::new(None),
             drains: std::sync::OnceLock::new(),
             issuer: std::sync::OnceLock::new(),
             oidc_issued: Mutex::new(HashMap::new()),
@@ -445,6 +455,16 @@ impl Engine {
             for (project, settings) in &enabled {
                 if let Err(e) = self.discover(project, settings).await {
                     warn!(%project, error = %e, "previews: discovering");
+                }
+            }
+            // Masked bases no longer branched from, once nothing comes from them.
+            let sweep = { let mut at = self.bases_swept.lock(); let due = at.is_none_or(|t| t.elapsed() >= BASES_SWEPT_EVERY); if due { *at = Some(std::time::Instant::now()); } due };
+            if sweep {
+                for (kind, parent) in self.store.mask_base_parents()? {
+                    if let Ok(b) = self.brancher(kind) {
+                        let b = b.clone();
+                        self.drop_old_mask_bases(&b, kind, &parent).await;
+                    }
                 }
             }
             // Previews turned off: the project's previews go (never for rules that don't parse).

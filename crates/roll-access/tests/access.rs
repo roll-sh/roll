@@ -170,11 +170,12 @@ fn postgres() -> Router {
                 let body: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
                 let Some(project) = body["secret"]["project"].as_str().map(String::from) else { return axum::Json(json!({ "reveal": reveal })) };
                 let g = roll_auth::Grant::on(&ext).unwrap();
-                let at = |env: &str, path: &str| {
+                let at = |env: &str, path: &str, action: roll_auth::scope::Action| {
                     let r = roll_auth::scope::Resource { product: "secrets".into(), id: Some(project.clone()), project: Some(project.clone()), environment: Some(env.into()), path: Some(path.into()), ..Default::default() };
-                    g.allows(&r, roll_auth::scope::Action::Write) == roll_auth::scope::Outcome::Allow
+                    g.allows(&r, action) == roll_auth::scope::Outcome::Allow
                 };
-                axum::Json(json!({ "here": at("production", "/ai"), "below": at("production", "/ai/x"), "elsewhere": at("production", "/"), "staging": at("staging", "/ai") }))
+                use roll_auth::scope::Action::{Read, Write};
+                axum::Json(json!({ "here": at("production", "/ai", Write), "read": at("production", "/ai", Read), "below": at("production", "/ai/x", Write), "elsewhere": at("production", "/", Write), "staging": at("staging", "/ai", Write) }))
             }),
         )
         .route("/v1/search/clusters/{id}/keys", post(|ext: axum::http::Extensions| async move { axum::Json(seen(&ext)) }))
@@ -3332,16 +3333,35 @@ async fn a_secret_written_as_the_caller_is_asked_for_and_only_it_is_allowed() {
     let body = |env: &str| json!({ "secret": { "project": project, "environment": env, "path": "/ai", "key": "ADMIN_PASSWORD" } });
     let path = "/v1/search/clusters/cl_home/password";
     let search = |effect: &str| json!({ "product": "search", "resources": "*", "actions": { "admin": effect, "reveal": "allow" } });
-    let (asks, _) = d.token(json!([search("ask"), { "product": "secrets", "resources": [{ "project": project }], "actions": { "write": "ask" } }]), json!({})).await;
-    let (s, out) = d.call(&asks, Method::POST, path, Some(body("production"))).await;
-    assert_eq!((s, out["code"].as_str()), (StatusCode::FORBIDDEN, Some("approval_pending")), "{out}");
-    let id = out["approval"].as_str().unwrap().to_string();
-    let (_, asked) = d.call(OPERATOR, Method::GET, &format!("/v1/access/approvals/{id}"), None).await;
-    assert_eq!((asked["product"].as_str(), asked["action"].as_str(), asked["environment"].as_str()), (Some("secrets"), Some("write"), Some("production")), "{asked}");
-    assert_eq!(d.call(OPERATOR, Method::POST, &format!("/v1/access/approvals/{id}/approve"), None).await.0, StatusCode::OK);
+    let write_asks = json!({ "product": "secrets", "resources": [{ "project": project }], "actions": { "write": "ask" } });
+    let asked = |token: String| {
+        let (d, body) = (&d, body("production"));
+        async move {
+            let (s, out) = d.call(&token, Method::POST, path, Some(body)).await;
+            assert_eq!((s, out["code"].as_str()), (StatusCode::FORBIDDEN, Some("approval_pending")), "{out}");
+            let id = out["approval"].as_str().unwrap().to_string();
+            let (_, asked) = d.call(OPERATOR, Method::GET, &format!("/v1/access/approvals/{id}"), None).await;
+            assert_eq!((asked["product"].as_str(), asked["action"].as_str(), asked["environment"].as_str()), (Some("secrets"), Some("write"), Some("production")), "{asked}");
+            id
+        }
+    };
+    // The route's own action asks too: the approval still names the secret.
+    let (tie, _) = d.token(json!([search("ask"), write_asks]), json!({})).await;
+    asked(tie).await;
+    let (asks, _) = d.token(json!([search("allow"), write_asks]), json!({})).await;
+    let id = asked(asks.clone()).await;
+    assert_eq!(d.call(OPERATOR, Method::POST, &format!("/v1/access/approvals/{id}/approve"), Some(json!({ "remember": "1h" }))).await.0, StatusCode::OK);
     let (s, seen) = d.send(&asks, Method::POST, path, Some(body("production")), &[("x-roll-approval", &id)]).await;
     assert_eq!(s, StatusCode::OK, "{seen}");
-    assert_eq!(seen, json!({ "here": true, "below": true, "elsewhere": false, "staging": false }));
+    assert_eq!(seen, json!({ "here": true, "read": true, "below": true, "elsewhere": false, "staging": false }));
+    // Remembered, it allows that folder again with no approval (and reading it, which the product
+    // does), and nothing beside it: another folder asks again.
+    let (s, seen) = d.call(&asks, Method::POST, path, Some(body("production"))).await;
+    assert_eq!((s, seen["read"].as_bool(), seen["elsewhere"].as_bool()), (StatusCode::OK, Some(true), Some(false)), "{seen}");
+    let mut root = body("production");
+    root["secret"]["path"] = json!("/");
+    let (s, out) = d.call(&asks, Method::POST, path, Some(root)).await;
+    assert_eq!((s, out["code"].as_str()), (StatusCode::FORBIDDEN, Some("approval_pending")), "{out}");
     let (allows, _) = d.token(json!([search("allow"), { "product": "secrets", "resources": [{ "project": project }], "actions": { "write": "allow" } }]), json!({})).await;
     let (s, seen) = d.call(&allows, Method::POST, path, Some(body("production"))).await;
     assert_eq!((s, seen["here"].as_bool()), (StatusCode::OK, Some(true)), "{seen}");
@@ -3350,4 +3370,124 @@ async fn a_secret_written_as_the_caller_is_asked_for_and_only_it_is_allowed() {
     let (none, _) = d.token(json!([search("allow")]), json!({})).await;
     let (s, out) = d.call(&none, Method::POST, path, Some(body("production"))).await;
     assert_eq!((s, out["code"].as_str()), (StatusCode::FORBIDDEN, Some("forbidden")), "{out}");
+}
+
+/// Claude's auto-connect (its connector docs, "Enterprise Managed Auth"): Claude signs the
+/// identity assertion itself under its organization's issuer and presents its Client ID Metadata
+/// Document as the client, public or as `/confidential_client` with a client assertion signed by
+/// that document's keys. The app keeps an `ent_…` id of roll's (the URL is also people's own OAuth
+/// client). A member is found by their email with no `email_verified` (Claude's issuer, its keys
+/// fetched, only), within the operator's domains; the request's `resource` holds the token to
+/// roll's MCP server. Refused: a confidential client's id without its assertion, an assertion for
+/// the other client, a provider the app doesn't name, a look-alike issuer without
+/// `email_verified`, a public client's long-lived or replayed assertion, an email outside the
+/// domains, Claude's issuer misspelled, and rotating an app roll holds no credential of.
+#[tokio::test(flavor = "multi_thread")]
+async fn claude_signs_a_member_in_with_its_own_assertion() {
+    use base64::Engine;
+    use ring::signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair, KeyPair};
+    struct Docs(std::collections::HashMap<String, String>);
+    impl roll_oidc::Fetch for Docs {
+        fn get(&self, url: &str, _limit: usize) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+            self.0.get(url).map(|b| b.clone().into_bytes()).ok_or_else(|| format!("no {url}").into())
+        }
+    }
+    let d = Daemon::new(50);
+    d.people.add("usr_alice", "alice");
+    let rng = ring::rand::SystemRandom::new();
+    let b64 = |b: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b);
+    let key = |kid: &str| {
+        let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &rng).unwrap();
+        let point = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, pkcs8.as_ref(), &rng).unwrap().public_key().as_ref().to_vec();
+        (pkcs8, json!({ "keys": [{ "kty": "EC", "crv": "P-256", "kid": kid, "x": b64(&point[1..33]), "y": b64(&point[33..]) }] }).to_string())
+    };
+    let (issuer_key, issuer_jwks) = key("claude-iss");
+    let (client_key, client_jwks) = key("claude-client");
+    let public = "https://claude.ai/oauth/mcp-oauth-client-metadata";
+    let confidential = format!("{public}/confidential_client");
+    let docs = Docs(
+        [
+            (public.to_string(), json!({ "client_id": public, "token_endpoint_auth_method": "none", "redirect_uris": ["https://claude.ai/api/mcp/auth_callback"] }).to_string()),
+            (confidential.clone(), json!({ "client_id": confidential, "token_endpoint_auth_method": "private_key_jwt", "jwks_uri": "https://claude.ai/oauth/jwks.json" }).to_string()),
+            ("https://claude.ai/oauth/jwks.json".to_string(), client_jwks),
+            ("https://identity.anthropic.com/issuers/iss_8f2a/.well-known/openid-configuration".to_string(), json!({ "issuer": "https://identity.anthropic.com/issuers/iss_8f2a", "jwks_uri": "https://identity.anthropic.com/issuers/iss_8f2a/jwks" }).to_string()),
+            ("https://identity.anthropic.com/issuers/iss_8f2a/jwks".to_string(), issuer_jwks.clone()),
+        ]
+        .into_iter()
+        .collect(),
+    );
+    assert!(d.access.oidc_fetch.set(Arc::new(docs)).is_ok());
+    let claude = "https://identity.anthropic.com/issuers/iss_8f2a";
+    let lookalike = "https://identity.anthropic.com.example/issuers/iss_8f2a";
+    let okta = "https://acme.okta.example";
+    let slashed = json!({ "idps": [{ "issuer": format!("{claude}/"), "domains": ["acme.test"] }] });
+    assert_eq!(d.call(OPERATOR, Method::PUT, "/v1/access/enterprise/idps", Some(slashed)).await.0, StatusCode::BAD_REQUEST, "Claude's issuer as its setup shows it");
+    let idps = json!({ "idps": [{ "issuer": claude, "domains": ["acme.test"] }, { "issuer": lookalike, "jwks": issuer_jwks, "domains": ["acme.test"] }, { "issuer": okta, "jwks": issuer_jwks, "domains": ["acme.test"] }] });
+    assert_eq!(d.call(OPERATOR, Method::PUT, "/v1/access/enterprise/idps", Some(idps)).await.0, StatusCode::OK);
+    let rules = json!([{ "product": "workspace", "resources": "*", "actions": { "read": "allow" } }]);
+    // The look-alike is a provider the app names (as an identity provider running Claude's
+    // auto-connect would be); Okta, trusted for other apps, isn't.
+    let (s, app) = d.call(OPERATOR, Method::POST, "/v1/access/enterprise/apps", Some(json!({ "name": "Claude", "rules": rules, "metadata": [public, confidential], "issuers": [lookalike] }))).await;
+    assert_eq!((s, app["metadata"][0].as_str(), app.get("client_secret")), (StatusCode::CREATED, Some(public), None), "{app}");
+    let app_id = app["client_id"].as_str().unwrap().to_string();
+    assert!(app_id.starts_with("ent_"), "roll's own id, never the client's URL: {app}");
+    let (s, _) = d.call(OPERATOR, Method::POST, "/v1/access/enterprise/apps", Some(json!({ "name": "Again", "rules": rules, "metadata": [confidential] }))).await;
+    assert_eq!(s, StatusCode::CONFLICT, "one app per client");
+    let (s, _) = d.call(OPERATOR, Method::POST, &format!("/v1/access/enterprise/apps/{app_id}/rotate"), Some(json!({}))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "roll holds no credential of it");
+
+    let api = d.access.config.api_url.trim_end_matches('/').to_string();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+    let sign = |pkcs8: &[u8], kid: &str, typ: Option<&str>, claims: Value| {
+        let mut h = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::ES256);
+        h.kid = Some(kid.into());
+        h.typ = typ.map(String::from);
+        jsonwebtoken::encode(&h, &claims, &jsonwebtoken::EncodingKey::from_ec_der(pkcs8)).unwrap()
+    };
+    // As Claude signs it: no email_verified, `sub` opaque, a minute's life.
+    let claims = |iss: &str, client: &str, jti: &str| json!({ "iss": iss, "sub": "opaque-7", "email": "alice@acme.test", "aud": [api], "client_id": client, "iat": now, "nbf": now - 15, "exp": now + 45, "jti": jti });
+    let signed = |c: Value| sign(issuer_key.as_ref(), "claude-iss", Some("oauth-id-jag+jwt"), c);
+    let assertion = |iss: &str, client: &str, jti: &str| signed(claims(iss, client, jti));
+    let mcp = format!("{api}/v1/mcp");
+    let grant = "urn:ietf:params:oauth:grant-type:jwt-bearer";
+    let (s, got) = d.form("/v1/access/oauth/token", &[("grant_type", grant), ("assertion", &assertion(claude, public, "c1")), ("client_id", public), ("resource", &mcp)]).await;
+    assert_eq!((s, got.get("refresh_token")), (StatusCode::OK, None), "{got}");
+    let token = got["access_token"].as_str().unwrap().to_string();
+    assert_eq!(d.via_mcp(&token, Method::GET, "/v1/workspace/projects").await, StatusCode::OK);
+    assert_eq!(d.call(&token, Method::GET, "/v1/workspace/projects", None).await.0, StatusCode::UNAUTHORIZED, "the request's resource: roll's MCP server only");
+    // The confidential client signs its own assertion with its document's key.
+    let client_assertion = |jti: &str| sign(client_key.as_ref(), "claude-client", None, json!({ "iss": confidential, "sub": confidential, "aud": format!("{api}/v1/access/oauth/token"), "iat": now, "exp": now + 60, "jti": jti }));
+    let conf = |id_jag: String, client: Option<String>| {
+        let (d, confidential) = (&d, confidential.clone());
+        async move {
+            let mut f = vec![("grant_type", grant.to_string()), ("assertion", id_jag), ("client_id", confidential)];
+            if let Some(c) = client {
+                f.push(("client_assertion_type", "urn:ietf:params:oauth:client-assertion-type:jwt-bearer".into()));
+                f.push(("client_assertion", c));
+            }
+            let f: Vec<(&str, &str)> = f.iter().map(|(k, v)| (*k, v.as_str())).collect();
+            d.form("/v1/access/oauth/token", &f).await
+        }
+    };
+    let (s, got) = conf(assertion(claude, &confidential, "c2"), Some(client_assertion("k1"))).await;
+    assert_eq!(s, StatusCode::OK, "{got}");
+    // Refusals: the confidential client's id with no assertion of its own; an assertion for the
+    // other client; a look-alike of Claude's issuer, which needs email_verified like any provider.
+    assert_eq!(conf(assertion(claude, &confidential, "c3"), None).await.1["error"], "invalid_client");
+    let other = d.form("/v1/access/oauth/token", &[("grant_type", grant), ("assertion", &assertion(claude, &confidential, "c4")), ("client_id", public)]).await;
+    assert_eq!(other.1["error"], "invalid_grant", "{other:?}");
+    let look = d.form("/v1/access/oauth/token", &[("grant_type", grant), ("assertion", &assertion(lookalike, public, "c5")), ("client_id", public)]).await;
+    assert_eq!(look.1["error"], "access_denied", "{look:?}");
+    let public_with = |a: String| {
+        let d = &d;
+        async move { d.form("/v1/access/oauth/token", &[("grant_type", grant), ("assertion", &a), ("client_id", public)]).await.1["error"].clone() }
+    };
+    assert_eq!(public_with(assertion(okta, public, "c6")).await, "invalid_grant", "a provider the app doesn't name");
+    assert_eq!(public_with(assertion(claude, public, "c1")).await, "invalid_grant", "a replay");
+    let mut long = claims(claude, public, "c7");
+    long["exp"] = json!(now + 3600);
+    assert_eq!(public_with(signed(long)).await, "invalid_grant", "a bearer's assertion lives minutes");
+    let mut outside = claims(claude, public, "c8");
+    outside["email"] = json!("alice@elsewhere.test");
+    assert_eq!(public_with(signed(outside)).await, "access_denied", "the operator's domains bound Claude's issuer too");
 }

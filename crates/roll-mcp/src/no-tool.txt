@@ -67,6 +67,7 @@ POST /v1/previews/{id}/shell/sessions/{sh}/keys                                a
 POST /v1/previews/{id}/shell/sessions/{sh}/resize                              interactive (a shell, files, a forward): an admin's, live
 GET /v1/previews/{id}/shell/sessions/{sh}/screen                               interactive (a shell, files, a forward): an admin's, live
 POST /v1/previews/{id}/visual/accept                                           a person's call (approving, accepting, cutting off)
+POST /v1/previews/{id}/visual/refuse                                           a person's call (approving, accepting, cutting off)
 POST /v1/projects/{id}/branches/{branch}/app-role                              answers or sets a credential
 POST /v1/projects/{id}/branches/{branch}/evict                                 the operator's (health, migrations, process control)
 POST /v1/projects/{id}/decoy-roles                                             a person's call: decoys are planted by a person (#432)
@@ -157,8 +158,8 @@ DELETE /v1/secrets/projects/{project}/identities/{id}                          a
 PATCH /v1/secrets/projects/{project}/identities/{id}                           an outside integration's setup: an admin's, with its credentials
 PUT /v1/secrets/projects/{project}/identities/{id}/jwks                        an outside integration's setup: an admin's, with its credentials
 POST /v1/secrets/projects/{project}/identities/{id}/bootstrap                  answers or sets a credential (a machine's bootstrap token)
-GET /v1/secrets/projects/{project}/identities/{id}/machines                    an outside integration's setup: an admin's, with its credentials
 DELETE /v1/secrets/projects/{project}/identities/{id}/machines/{chain}         a person's call (approving, accepting, cutting off)
+POST /v1/secrets/projects/{project}/identities/{id}/machines/prune             the dashboard's (forgetting ended machines; the sweeper forgets them a day after)
 * /v1/secrets/projects/{project}/kms                                           an outside integration's setup: an admin's, with its credentials
 POST /v1/secrets/projects/{project}/kubernetes                                 an outside integration's setup: an admin's, with its credentials
 DELETE /v1/secrets/projects/{project}/kubernetes/{id}                          an outside integration's setup: an admin's, with its credentials

@@ -176,7 +176,7 @@ function Experiments({ list }: { list: ExperimentResult[] }) {
           <div className="pb-1 font-mono text-[12px] text-muted">
             {x.application} · {x.experiment}
           </div>
-          <table className="w-full min-w-[44rem] table-fixed text-[13px]">
+          <table className="w-full min-w-[52rem] table-fixed text-[13px]">
             <thead>
               <tr className="border-b border-line text-left text-[11px] text-subtle">
                 <th className="py-2 font-normal">Variant</th>
@@ -184,6 +184,8 @@ function Experiments({ list }: { list: ExperimentResult[] }) {
                 <th className="px-2 py-2 text-right font-normal">Click-through</th>
                 <th className="px-2 py-2 text-right font-normal">Conversion</th>
                 <th className="px-2 py-2 text-right font-normal">Value</th>
+                <th className="px-2 py-2 text-right font-normal">No results</th>
+                <th className="px-2 py-2 text-right font-normal">p95</th>
               </tr>
             </thead>
             <tbody>
@@ -203,6 +205,8 @@ function Experiments({ list }: { list: ExperimentResult[] }) {
                     {v.vs_baseline && <div className="text-[11px] text-subtle">{comparisonText(v.vs_baseline.conversion_rate)}</div>}
                   </td>
                   <td className="px-2 py-2 text-right font-mono text-[12px] tabular-nums text-muted">{v.value.toLocaleString("en-US")}</td>
+                  <td className="px-2 py-2 text-right font-mono text-[12px] tabular-nums text-muted">{percent(v.no_hit_rate)}</td>
+                  <td className="px-2 py-2 text-right font-mono text-[12px] tabular-nums text-muted">{v.p95_latency_ms == null ? "—" : `<${v.p95_latency_ms} ms`}</td>
                 </tr>
               ))}
             </tbody>
@@ -364,6 +368,7 @@ export function SearchAnalyticsPanel({ cluster, onAct }: { cluster: SearchCluste
         <Stat label="No results" value={percent(data.totals.no_hit_rate)} />
         <Stat label="Clicks" value={data.totals.clicks.toLocaleString("en-US")} />
         <Stat label="Click-through" value={data.totals.clicks ? percent(data.totals.ctr) : "—"} />
+        {(data.totals.conversions ?? 0) > 0 && <Stat label="Conversions" value={`${(data.totals.conversions ?? 0).toLocaleString("en-US")} · ${percent(data.totals.conversion_rate)}`} />}
       </div>
       <Volume a={data} />
       <div className="px-5 pt-5 pb-2">

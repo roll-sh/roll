@@ -3265,6 +3265,25 @@ async fn a_status_page_shows_the_projects_checks() {
     assert_eq!((at("/status.json").await, call(&w.api, "GET", &own, None).await.0), (StatusCode::NOT_FOUND, StatusCode::NOT_FOUND));
 }
 
+/// A project's board keeps the charts someone picked, in order: only the project's own services,
+/// and metrics there are.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_projects_board_keeps_its_panels() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "web", json!({"port": 80})).await;
+    let id = svc["id"].as_str().unwrap();
+    let board = format!("/v1/apps/projects/{}/board", w.project);
+    assert_eq!(call(&w.api, "GET", &board, None).await.1, json!({"panels": []}));
+    let panels = json!([{"service": id, "metric": "p95_ms"}, {"title": "Checkouts", "service": id, "environment": "staging", "metric": "app:checkouts_total"}]);
+    let (st, b) = call(&w.api, "PUT", &board, Some(json!({"panels": panels}))).await;
+    assert_eq!((st, b["panels"][0]["environment"].as_str(), b["panels"][1]["title"].as_str()), (StatusCode::OK, Some("production"), Some("Checkouts")), "{b}");
+    assert_eq!(call(&w.api, "GET", &board, None).await.1, b);
+    assert_eq!(call(&w.api, "PUT", &board, Some(json!({"panels": [{"service": id, "metric": "rm -rf"}]}))).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(call(&w.api, "PUT", &board, Some(json!({"panels": [{"service": "svc_notmine00000", "metric": "cpu"}]}))).await.0, StatusCode::BAD_REQUEST, "only the project's own");
+    assert_eq!(call(&w.api, "PUT", &board, Some(json!({"panels": []}))).await.1, json!({"panels": []}));
+    assert_eq!(call(&w.api, "GET", &board, None).await.1, json!({"panels": []}));
+}
+
 /// Traffic mirroring (Envoy's): a copy of a share of bodiless requests goes to another
 /// environment of the service, in its own access log, while the visitor gets production's answer;
 /// a POST is never copied.

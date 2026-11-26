@@ -125,6 +125,7 @@ impl CodeSource {
                 github: PreviewGithub { comment: s.github.comment, status: s.github.status, deployment: s.github.deployment },
                 head: Some(p.head.clone()),
                 schema_changes: p.schema_changes.clone(),
+                schema_overlaps: p.schema_overlaps.iter().map(|o| (o.branch.clone(), o.tables.clone())).collect(),
                 schema_risks: p.schema_risks.clone(),
                 release_ms: p.release.as_ref().map(|x| x.ms),
                 release_before_ms: p.release.as_ref().and_then(|x| x.before_ms),
@@ -173,6 +174,7 @@ impl CodeSource {
                         crate::VisualState::Unchanged => "unchanged",
                         crate::VisualState::Changed => "changed",
                         crate::VisualState::Accepted => "accepted",
+                        crate::VisualState::Refused => "refused",
                     }
                     .into(),
                     branch: v.branch.clone(),
@@ -182,6 +184,8 @@ impl CodeSource {
                     required: v.required,
                     head: Some(v.head.clone()).filter(|h| !h.is_empty()),
                     pages: v.pages.iter().map(|p| code_control::model::PreviewPageReview { path: p.path.clone(), percent: (p.percent * 10.0).round() / 10.0, by: p.by.clone(), unstable: p.unstable }).collect(),
+                    untaken: v.untaken,
+                    reason: v.reason.clone(),
                 }),
                 page_a11y: p.page_a11y.as_ref().map(|a| code_control::model::PreviewPageA11y {
                     issues: a.issues.iter().map(|i| code_control::model::PreviewA11yIssue { kind: i.kind.clone(), count: i.count, first: i.first.clone(), impact: i.impact.clone(), help: i.help.clone() }).collect(),

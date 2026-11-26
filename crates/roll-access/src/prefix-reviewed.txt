@@ -265,6 +265,7 @@ DELETE /v1/secrets/projects/{project}/identities/{id}
 PATCH /v1/secrets/projects/{project}/identities/{id}
 GET /v1/secrets/projects/{project}/identities/{id}/machines
 DELETE /v1/secrets/projects/{project}/identities/{id}/machines/{chain}
+POST /v1/secrets/projects/{project}/identities/{id}/machines/prune
 GET /v1/secrets/projects/{project}/leases
 DELETE /v1/secrets/projects/{project}/leases/{id}
 DELETE /v1/secrets/projects/{project}/notifications/{id}
