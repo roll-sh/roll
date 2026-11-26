@@ -7479,6 +7479,9 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
+ "aws-credential-types",
+ "aws-sigv4",
+ "aws-smithy-runtime-api",
  "axum",
  "base64 0.22.1",
  "bytes",

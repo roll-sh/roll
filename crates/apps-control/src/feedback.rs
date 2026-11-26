@@ -181,7 +181,9 @@ pub fn script(target: &str, guest: bool) -> Response {
     let js = SCRIPT
         .replace("__ROLL_TARGET__", &serde_json::to_string(target).unwrap_or_else(|_| "\"\"".into()))
         .replace("__ROLL_GUEST__", if guest { "true" } else { "false" })
-        .replace("__ROLL_FLAGS__", "[]");
+        .replace("__ROLL_FLAGS__", "[]")
+        // roll previews' Main (main's preview of the page) is answered by its own hosts only.
+        .replace("__ROLL_MAIN__", "false");
     ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8"), (header::CACHE_CONTROL, "private, max-age=300")], js).into_response()
 }
 

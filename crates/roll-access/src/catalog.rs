@@ -852,6 +852,19 @@ fn bulk_action(b: &[u8]) -> Action {
     Action::Write
 }
 
+/// Updating an index's documents by query: `delete` when the body has a `script` (one can set
+/// `ctx.op = 'delete'`, as a bulk update's script can) or isn't JSON (it fails closed); else
+/// `write`. Every key is read as it's parsed, duplicates included.
+fn update_by_query_action(b: &[u8]) -> Action {
+    if b.iter().all(u8::is_ascii_whitespace) {
+        return Action::Write;
+    }
+    let mut keys = Vec::new();
+    let mut de = serde_json::Deserializer::from_slice(b);
+    let read = serde::de::DeserializeSeed::deserialize(KeyPaths { prefix: String::new(), out: &mut keys }, &mut de).and_then(|()| de.end());
+    if read.is_err() || keys.iter().any(|k| k.split('.').next() == Some("script")) { Action::Delete } else { Action::Write }
+}
+
 /// Writing an index's settings: `delete` when the body names a lifecycle (ILM's
 /// `index.lifecycle.*`, OpenSearch ISM's `…index_state_management…`), whose policy can delete the
 /// index, which `write` can't; or when it isn't JSON (it fails closed); else `write`. Every key is
@@ -1442,6 +1455,11 @@ static ROWS: &[Row] = &[
     // Analyzing text with an index's analyzers reads the index.
     row("POST", "/v1/search/clusters/{id}/indices/{index}/analyze", "search", R, one(PG, "cluster")).index("index"),
     row("POST", "/v1/search/clusters/{id}/indices/{index}/delete_by_query", "search", D, one(PG, "cluster")).index("index"),
+    // Each document indexed again (embedding a field added since): write; a script can delete
+    // (`ctx.op = 'delete'`), so with one it's delete, as a bulk's script is.
+    row("POST", "/v1/search/clusters/{id}/indices/{index}/update_by_query", "search", Act::Raw(update_by_query_action), one(PG, "cluster")).index("index"),
+    // A task's status and result (an update by query's): a read of the cluster.
+    row("GET", "/v1/search/clusters/{id}/tasks/{task}", "search", R, one(PG, "cluster")),
     // A bulk can delete as well as index: its action lines decide.
     row("POST", "/v1/search/clusters/{id}/indices/{index}/bulk", "search", Act::Raw(bulk_action), one(PG, "cluster")).index("index"),
     // Query suggestions built from the index's search analytics: reading them (aggregated query
@@ -1927,6 +1945,7 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/previews/{id}/reset", "previews", D, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
     // Putting a restore point back replaces the data the preview has now, as a reset does.
     row("POST", "/v1/previews/{id}/restore-points/{point}/restore", "previews", D, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    row("POST", "/v1/previews/{id}/rehearse", "previews", D, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
     // A share link lets someone outside the team in, its token only in the answer: reveal, as the
     // bypass secret is. Listing (no tokens) is read and revoking one is delete, by the prefix.
     row("POST", "/v1/previews/{id}/shares", "previews", REVEAL, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
@@ -2183,6 +2202,13 @@ mod tests {
         // Comparing with values (a guess tested) is reveal too, not the POST prefix's write.
         let f = by_path("POST", "/v1/secrets/projects/x/environments/x/diff").unwrap();
         assert_eq!(f.row.action("POST", &[], None), Action::Reveal);
+        // Re-indexing by query is write; a script (which can delete), a duplicate one or a body
+        // that isn't JSON is delete.
+        assert_eq!(update_by_query_action(b""), Action::Write);
+        assert_eq!(update_by_query_action(br#"{"query": {"script": {"script": "doc['a'].size() > 0"}}, "max_docs": 5}"#), Action::Write);
+        assert_eq!(update_by_query_action(br#"{"script": {"source": "ctx.op = 'delete'"}}"#), Action::Delete);
+        assert_eq!(update_by_query_action(br#"{"max_docs": 1, "script": "x", "max_docs": 2}"#), Action::Delete);
+        assert_eq!(update_by_query_action(b"{"), Action::Delete);
         assert_eq!(apps_create_action(&serde_json::json!({ "source": { "kind": "repo", "repo": "acme/site" } })), Action::Deploy);
         assert_eq!(apps_create_action(&serde_json::json!({ "source": { "kind": "upload" } })), Action::Write);
         assert_eq!(apps_patch_action(&serde_json::json!({ "run": { "public": false } })), Action::Deploy);

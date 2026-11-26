@@ -281,7 +281,11 @@ roll token acting as that person, with no consent screen and no roll sign-in.
   - **Rotation:** roll holds no credential of such an app, so there's nothing to rotate.
   - **Trust the organization's issuer:** `https://identity.anthropic.com/issuers/<id>`, exactly as Claude's auto-connect setup shows it (anything else at that host is refused), as a provider with email matching and the domains its people use. Its keys are fetched, never pasted. Claude's issuer then vouches for its members' account emails, which it sends without `email_verified`. Any other issuer (a look-alike, or Claude's with pasted keys) still needs `email_verified: true`, and the domains bound both.
   - **The resource:** when the assertion names none, the token request's own `resource` holds the token. Claude names roll's MCP server, so its tokens are that server's only.
-  - **Not yet:** express admin setup (`ema_issuer:manage`), where Claude registers the issuer itself.
+  - **Express admin setup** (`ema_issuer:manage`, advertised in `scopes_supported`): Claude registers its issuer itself, so the admin doesn't copy it.
+    - **Who and where:** only for Claude's client (its public document or `/confidential_client`), returning only to `https://claude.ai/api/mcp/auth_callback`, and approved only by roll's admins.
+    - **The consent screen** names what approving turns on and asks for the email domains Claude's issuer vouches for, plus the most Claude may do for a person (the app's rules).
+    - **The code** (with RFC 9207's `iss` in the redirect, as every roll redirect has) trades for a five-minute, single-use token, with `ema_setup_endpoint` and no refresh token. The confidential client signs a client assertion with its document's keys there.
+    - **`PUT /v1/access/enterprise/ema-setup {ema_issuer}`** with that token (in front of the gate: the token is the credential) trusts the issuer, a Claude issuer only, for those domains with email matching, and registers Claude as an app if it isn't one. It replaces what an earlier express setup trusted and keeps a provider the operator set up by hand. Refusals are `{error, error_description}`: `invalid_token` for a spent or old token, `invalid_request` for an issuer that isn't Claude's. Audited as `express_setup`.
 - **A leaked app secret** (an `rlc_` with its checksum, found by roll code's push scan or reported
   by GitHub's secret scanning) is revoked like any other: roll drops the secret, the one kept from
   before a rotation, and every token the app's people hold, in one write, and audits it. The

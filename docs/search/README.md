@@ -982,6 +982,8 @@ origins (browser search), once they're on main.
 | GET, PUT, DELETE | `/v1/search/clusters/{id}/indices/{index}/docs/{doc}` | `/<index>/_doc/<id>` |
 | POST | `/v1/search/clusters/{id}/indices/{index}/bulk` | `POST /<index>/_bulk` (NDJSON) |
 | POST | `/v1/search/clusters/{id}/indices/{index}/delete_by_query` | `POST /<index>/_delete_by_query` |
+| POST | `/v1/search/clusters/{id}/indices/{index}/update_by_query` | `POST /<index>/_update_by_query` on one index named literally (no wildcard, list or date math): body `{query?, script?, max_docs?, conflicts?, slices?}` (`slices` a positive number or `auto`, moved to the URL; an unknown field is a 400), query `wait_for_completion`, `refresh`, `requests_per_second`, `scroll_size`, `timeout`. With no script each document is indexed again as it is, through the index's pipelines and inference: a `semantic_text` field added since (fed by `copy_to`) is embedded, its inference metered and limited as any write's. `wait_for_completion=false` answers 202 `{task}`. A write in roll's permissions, a delete with a `script` (which can delete) |
+| GET | `/v1/search/clusters/{id}/tasks/{task}` | `GET _tasks/<task>`: a task's status, and once it's done `completed: true` with its `response` or `error` (`wait_for_completion`, `timeout`); a read |
 
 The per-index routes are one Elasticsearch operation each, so the cluster, the index and the kind
 of access (read, write, delete) are in the route: roll's scoped tokens and MCP tools map onto
@@ -1196,9 +1198,12 @@ query-rule editors prefilled with it (`query, ` as a rule; an `exact` `query_str
   without `index`). A read for roll-access; a person sees only their own clusters' (404 otherwise).
   The answer adds what the cluster's owner recorded since the last pass. Its `experiments` list
   the A/B tests of the cluster's search applications ([relevance-experiments.md](relevance-experiments.md)):
-  `[{application, experiment, baseline, variants: [{name, searches, clicks, conversions, value, ctr, conversion_rate, no_hits, no_hit_rate, p95_latency_ms, vs_baseline?: {ctr, conversion_rate}}]}]`,
-  each comparison `{p_value, state}` with `state` one of `significant`, `not_yet_significant` or
-  `not_enough_data`; counted since each started, whatever `range` says. The totals, points and
+  `[{application, experiment, baseline, variants: [{name, searches, clicks, conversions, value, ctr, conversion_rate, ctr_interval, conversion_rate_interval, no_hits, no_hit_rate, p95_latency_ms, vs_baseline?: {ctr, conversion_rate}}]}]`,
+  each rate's interval its 95% Wilson interval `[low, high]` (null with no trials), each
+  comparison `{p_value, state, difference, interval}` with `state` one of `significant`,
+  `not_yet_significant` or `not_enough_data`, `difference` the variant's rate minus the
+  baseline's and `interval` its 95% interval (Newcombe's, from the two Wilson intervals); counted
+  since each started, whatever `range` says. The totals, points and
   query rows also count `roll_conversion` events (`conversions`, `conversion_rate`, `value`).
 
 **Privacy.** No `Authorization` header, credential, API key or document body is ever recorded:
@@ -1378,7 +1383,7 @@ in review (item 11's RAG phase 2, #1068 in its third round; item 30's read-only 
 its second; item 1's derived-key follow-ups, #1127 in its second; item 31's re-embed route,
 #1132, landing), then item 32 (resetting a branch from a copy for previews' restore points; in
 progress), item 33's second slice (saved searches, surrounding documents, a field's chart; in
-progress), item 15's confidence intervals and promoting from the Relevance tab (in progress),
+progress), item 15's confidence intervals and promoting from the Relevance tab (in review),
 then its judgment lists and offline evaluation (the top open item), item 14 (semantic search on OpenSearch-flavor
 clusters; resumes after #1111), item 16 (cold start at size; resumes after #1127), OpenSearch's
 `_plugins/_sm` (item 9; in progress), item 5's OpenSearch links (designed), and chat token
@@ -1750,10 +1755,11 @@ deterministic (#396).
    per-variant click-through and conversion with a two-proportion z-test in `GET …/analytics` and
    the Relevance tab. The second slice landed in #1126: conversions in the indices' analytics,
    zero-result rate and p95 latency per variant, and promoting a variant into the application
-   (`…/_roll/experiments/{id}/_promote`). Next: confidence intervals beside the p-values and
-   promoting from the Relevance tab (in progress), then judgment lists and offline evaluation
-   (phase 1: OpenSearch's Search Relevance Workbench and `_rank_eval` with lists, for CI). Left:
-   the `roll_` rule types and dynamic re-ranking.
+   (`…/_roll/experiments/{id}/_promote`). Then 95% intervals for each rate and for each
+   difference from the baseline, and promoting from the Relevance tab
+   (`feature/search-exp-ci`). Next: judgment lists and offline evaluation (phase 1: OpenSearch's
+   Search Relevance Workbench and `_rank_eval` with lists, for CI). Left: the `roll_` rule types
+   and dynamic re-ranking.
 16. **Cold start at size**: the 19.8 ms cold start is a 50k-document index from local cache;
    nothing measures the first query and p99 on a node with an empty cache for 1, 10 and 50 GB
    indices loaded from object storage, or on Graviton. Buyers comparing always-on Typesense or Algolia
@@ -2138,14 +2144,18 @@ deterministic (#396).
    `ENRICH`) authorized against the grant's scope as it plans, sync only, storing nothing; the
    `search_esql` tool and `roll search esql`. Queued (`feature/search-esql-route`) behind item 4's
    ENRICH fix, which it depends on.
-31. **Re-embedding an index's own documents** (asked by roll MCP, 2026-11-26): an index whose
-   `semantic_text` field came after its documents has no embeddings, and an agent's only way is
-   reading pages and writing them back. `POST /v1/search/clusters/{id}/indices/{index}/update_by_query`
-   (`{query?, script?, max_docs?, conflicts?, slices?}`; a write on the index): with no script
-   it re-indexes each document in place, so a new field fed by `copy_to` embeds;
-   `wait_for_completion=false` answers 202 `{task}`, with the tasks route catalogued as a read
-   (roll MCP's wait tool follows it). Each document's E5 time is charged and rate-limited as bulk
-   indexing is. roll MCP maps it as `search_update_by_query`. Landing in #1132.
+31. **Re-embedding an index's own documents** (landed in #1132;
+   asked by roll MCP, 2026-11-26): an index whose `semantic_text` field came after its documents
+   had no embeddings, and an agent's only way was reading pages and writing them back.
+   `POST /v1/search/clusters/{id}/indices/{index}/update_by_query` (`{query?, script?, max_docs?,
+   conflicts?, slices?}`, one index by its literal name, run as the index's routes run) with no
+   script indexes each document again in place, through the index's pipelines and inference, so a
+   new field fed by `copy_to` embeds, metered and limited as any write is (the cluster's own
+   `_update_by_query` task machinery, `slices` held to `index.max_slices_per_scroll`).
+   `wait_for_completion=false` answers 202 `{task}`, and `GET /v1/search/clusters/{id}/tasks/{task}`
+   follows it. In roll's permissions it's a write on the index (a delete with a `script`, which
+   can delete), the task a read of the cluster. No MCP tool yet: roll MCP maps them as
+   `search_update_by_query` and a wait tool.
 32. **Resetting a branch from a copy** (asked by roll previews, 2026-11-26, for search restore
    points): `POST /v1/search/clusters/{branch}/reset {"from": <copy>}` puts the branch's indices
    back to a copy's (previews' masked `Search::snapshot`, or another branch of the same parent

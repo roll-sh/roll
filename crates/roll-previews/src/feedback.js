@@ -11,6 +11,9 @@
   // The project's flags a reviewer sets for their own view (Vercel's Flags Explorer): kept in a
   // cookie of this browser's, which roll's proxy turns into the services' `x-roll-flags`.
   const FLAGS = __ROLL_FLAGS__;
+  // This page on main's preview (Vercel's deployment switcher): a team visitor's, where roll
+  // previews serves the page (`/__roll/main`); elsewhere (roll apps' hosts) the name is unset.
+  const MAIN = typeof __ROLL_MAIN__ !== "undefined" && __ROLL_MAIN__;
   // What went wrong on the page, sent with a note (the person sees it in roll before posting it):
   // uncaught errors since this script ran, and requests answered 400 or more, earlier ones too
   // (the browser's own resource timings, buffered). Paths only, never a query, each cut short.
@@ -98,7 +101,7 @@ textarea{min-height:72px;resize:vertical}
 <div class="box"></div>
 <div class="list" hidden role="list" aria-label="Feedback on this page"></div>
 <form class="list flags" hidden aria-label="Flags for your view"></form>
-<div class="bar"><button class="count flagbtn" type="button" hidden aria-label="Flags for your view">Flags</button><button class="count" type="button" hidden aria-label="Feedback on this page"></button><button class="btn" type="button" aria-label="Leave feedback on this page"><span class="dot"></span>Feedback</button></div>
+<div class="bar"><button class="count mainbtn" type="button" hidden aria-label="This page on main's preview">Main</button><button class="count flagbtn" type="button" hidden aria-label="Flags for your view">Flags</button><button class="count" type="button" hidden aria-label="Feedback on this page"></button><button class="btn" type="button" aria-label="Leave feedback on this page"><span class="dot"></span>Feedback</button></div>
 <form class="card" hidden>
   <div class="muted">On <code class="where"></code></div>
   <input class="name" placeholder="Your name" aria-label="Your name" maxlength="40" hidden>
@@ -107,7 +110,7 @@ textarea{min-height:72px;resize:vertical}
   <div class="row"><button type="button" class="cancel">Cancel</button><button type="submit" class="go">Post in roll</button></div>
 </form>`;
   const $ = (s) => root.querySelector(s);
-  const btn = $(".btn"), form = $("form.card"), box = $(".box"), note = $("textarea"), where = $(".where"), count = $(".count:not(.flagbtn)"), list = $("div.list");
+  const btn = $(".btn"), form = $("form.card"), box = $(".box"), note = $("textarea"), where = $(".where"), count = $(".count:not(.flagbtn):not(.mainbtn)"), list = $("div.list");
   let picking = false, picked = null;
   const name = $("input.name"), said = $(".said");
   if (GUEST) {
@@ -115,6 +118,22 @@ textarea{min-height:72px;resize:vertical}
     name.required = true;
     try { name.value = localStorage.getItem("roll_guest_name") || ""; } catch {}
     form.querySelector(".go").textContent = "Send";
+  }
+  const mainBtn = $(".mainbtn");
+  if (MAIN && !GUEST) {
+    mainBtn.hidden = false;
+    mainBtn.addEventListener("click", async () => {
+      mainBtn.disabled = true;
+      let url = null;
+      try {
+        const r = await fetch(`/__roll/main?path=${encodeURIComponent(location.pathname + location.search)}`, { credentials: "same-origin" });
+        const j = r.ok ? await r.json() : null;
+        if (j && typeof j.url === "string" && /^https?:\/\//.test(j.url)) url = j.url;
+      } catch {}
+      mainBtn.disabled = false;
+      if (url) window.open(url, "_blank", "noopener");
+      else mainBtn.textContent = "No main preview";
+    });
   }
   // Flags: each a select (the app's own choice, or one of its options); applied for this
   // browser only, by reloading with the cookie set.

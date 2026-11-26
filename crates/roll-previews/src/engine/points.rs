@@ -64,6 +64,32 @@ impl Engine {
         Ok(saved)
     }
 
+    /// Rehearse the change's release on its Postgres parents as they are now (its next converge
+    /// does, at its head): fresh branches, masked as the rules say, the release run on them, then
+    /// deleted. Only a change's preview whose project has a release.
+    pub fn rehearse(&self, id: &str, by: &str) -> Result<Preview> {
+        let r = self.store.row(id)?;
+        if r.change_id.is_none() || r.desired != Desired::Active {
+            return Err(Error::BadRequest("only an open change's preview rehearses its release".into()));
+        }
+        if self.store.settings(&r.project_id)?.release.is_none() {
+            return Err(Error::Conflict("the project has no release to rehearse (`release`)".into()));
+        }
+        if !self.store.resources(id)?.iter().any(|x| x.kind == crate::Kind::Postgres && x.r#ref.is_some()) {
+            return Err(Error::Conflict("the preview has no Postgres branch to rehearse its release on".into()));
+        }
+        let at = self.store.now_ms()?;
+        let asked = crate::Rehearsal { head: r.build().to_string(), by: by.to_string(), at, ok: None, ms: None, error: None };
+        self.store.set_runtime_fact(id, "rehearsal", Some(&asked))?;
+        self.store.update(id, |row| {
+            row.next_at = 0;
+            row.attempts = 0;
+        })?;
+        self.store.log(id, &format!("{by} asked to rehearse the release on today's data"))?;
+        self.kick();
+        self.store.view(self.store.row(id)?)
+    }
+
     /// Put the preview's data back as `point` left it (its next converge does).
     pub fn restore(&self, id: &str, point: &str, by: &str) -> Result<Preview> {
         if self.store.point_data(id, Some(point))?.is_empty() {

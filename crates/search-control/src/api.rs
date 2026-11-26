@@ -106,6 +106,8 @@ pub fn router(control: Arc<Control>) -> Router {
         .route("/v1/search/clusters/{id}/indices/{index}/docs/{doc}", get(doc_get).put(doc_put).delete(doc_delete))
         .route("/v1/search/clusters/{id}/indices/{index}/bulk", post(index_bulk))
         .route("/v1/search/clusters/{id}/indices/{index}/delete_by_query", post(index_delete_by_query))
+        .route("/v1/search/clusters/{id}/indices/{index}/update_by_query", post(index_update_by_query))
+        .route("/v1/search/clusters/{id}/tasks/{task}", get(cluster_task))
         .route("/v1/search/clusters/{id}/indices/{index}/suggestions", get(suggestions))
         .route("/v1/search/clusters/{id}/indices/{index}/suggestions/rebuild", post(rebuild_suggestions))
         .route("/v1/search/clusters/{id}/site-verifications", get(site_verifications).post(start_site_verification))
@@ -897,6 +899,98 @@ async fn esql_route(c: &Control, id: &str, method: Method, api_path: String, sco
     let (status, ct, body) = c.es(&cluster.id, "POST", &format!("/_query{q}"), scope.as_deref(), Some("application/json"), body).await?;
     let status = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
     Ok((status, [(axum::http::header::CONTENT_TYPE, ct)], body).into_response())
+}
+
+/// What `…/update_by_query`'s body may hold: `_update_by_query`'s own, plus `slices` (Elasticsearch
+/// takes it in the URL; it's moved there).
+const UPDATE_BY_QUERY_FIELDS: &[&str] = &["query", "script", "max_docs", "conflicts", "slices"];
+/// And its query string's: running it in the background, and pacing it.
+const UPDATE_BY_QUERY_PARAMS: &[&str] = &["wait_for_completion", "refresh", "requests_per_second", "scroll_size", "timeout", "slices"];
+
+/// A query string's pairs, decoded (`+` a space).
+fn query_pairs(q: Option<&str>) -> Vec<(String, String)> {
+    let decode = |t: &str| urlencoding::decode(&t.replace('+', " ")).map(|c| c.into_owned()).unwrap_or_else(|_| t.to_string());
+    q.unwrap_or_default().split('&').filter(|p| !p.is_empty()).map(|p| p.split_once('=').unwrap_or((p, ""))).map(|(k, v)| (decode(k), decode(v))).collect()
+}
+
+/// `…/update_by_query`'s body and query string as the cluster's `_update_by_query` takes them:
+/// the body's fields checked (an unknown one is a 400) and `slices` moved to the query string;
+/// the query string's parameters checked too. `slices` is a positive number or `auto`; how many
+/// an index allows (`index.max_slices_per_scroll`) is the engine's to refuse, as for any client.
+fn update_by_query_request(body: &[u8], query: Option<&str>) -> Result<(bytes::Bytes, String), ControlError> {
+    let mut params = query_pairs(query);
+    if let Some((k, _)) = params.iter().find(|(k, _)| !UPDATE_BY_QUERY_PARAMS.contains(&k.as_str())) {
+        return Err(ControlError::Invalid(format!("update_by_query takes no parameter [{k}] (it takes {})", UPDATE_BY_QUERY_PARAMS.join(", "))));
+    }
+    let mut doc = match body.iter().all(u8::is_ascii_whitespace) {
+        true => serde_json::Map::new(),
+        false => match serde_json::from_slice::<Value>(body) {
+            Ok(Value::Object(m)) => m,
+            _ => return Err(ControlError::Invalid("the body is a JSON object: query, script, max_docs, conflicts and slices, each optional".into())),
+        },
+    };
+    if let Some(k) = doc.keys().find(|k| !UPDATE_BY_QUERY_FIELDS.contains(&k.as_str())) {
+        return Err(ControlError::Invalid(format!("update_by_query's body has no field [{k}] (it takes {})", UPDATE_BY_QUERY_FIELDS.join(", "))));
+    }
+    if let Some(s) = doc.remove("slices") {
+        if params.iter().any(|(k, _)| k == "slices") {
+            return Err(ControlError::Invalid("[slices] is given twice: in the body and in the query string".into()));
+        }
+        let s = match &s {
+            Value::Number(n) if n.as_u64().is_some_and(|n| n >= 1) => n.to_string(),
+            Value::String(a) if a == "auto" => a.clone(),
+            other => return Err(ControlError::Invalid(format!("[slices] is a positive number or \"auto\", not {other}"))),
+        };
+        params.push(("slices".into(), s));
+    }
+    let query = params.iter().map(|(k, v)| format!("{}={}", urlencoding::encode(k), urlencoding::encode(v))).collect::<Vec<_>>().join("&");
+    let body = if doc.is_empty() { bytes::Bytes::new() } else { bytes::Bytes::from(serde_json::to_vec(&Value::Object(doc)).unwrap_or_default()) };
+    Ok((body, query))
+}
+
+/// `POST …/indices/{index}/update_by_query`: the cluster's `_update_by_query` on that one index, a
+/// literal name (no wildcard, list or date math), run as the index's routes run (the owner
+/// narrowed to the index). With no script each document is indexed again as it is, so a field
+/// added since (a `semantic_text` fed by `copy_to`) is filled and embedded, through the cluster's
+/// pipelines, inference and limits as any write. `wait_for_completion=false` answers 202 with the
+/// task, which `GET …/tasks/{task}` follows.
+async fn index_update_by_query(State(c): State<AppState>, Path((id, index)): Path<(String, String)>, method: Method, uri: axum::http::Uri, headers: HeaderMap, body: Body) -> Result<Response, ControlError> {
+    if index.contains(['<', '>']) || index.starts_with(['-', '+']) {
+        return Err(ControlError::Invalid(format!("invalid index name [{index}]: update_by_query takes one index by its name")));
+    }
+    let seg = index_segment(&index, false)?;
+    let cluster = c.get(&id).await?;
+    let mut held = Reservation::none();
+    let bytes = read_limited(body, (cluster.max_body_mb.max(1) as usize) << 20, declared(&headers), c.node.body_budget(), &mut held).await.map_err(|e| read_error(&cluster, e))?;
+    let (bytes, query) = update_by_query_request(&bytes, uri.query())?;
+    drop(held);
+    let background = query_pairs(Some(&query)).iter().any(|(k, v)| k == "wait_for_completion" && v == "false");
+    let mut headers = headers;
+    headers.remove(axum::http::header::CONTENT_LENGTH);
+    let q = (!query.is_empty()).then_some(query.as_str());
+    let mut resp = es_route(&c, &id, method, api_index_path(&id, &index, "/update_by_query"), "POST", format!("/{seg}/_update_by_query"), Some(index.as_str()), q, &headers, Body::from(bytes), EsBody::Json).await?;
+    // Started in the background: accepted, its task to follow.
+    if background && resp.status() == StatusCode::OK {
+        *resp.status_mut() = StatusCode::ACCEPTED;
+    }
+    Ok(resp)
+}
+
+/// `GET /v1/search/clusters/{id}/tasks/{task}`: `_tasks/{task}`, a task's status, and its result
+/// once it's done (`completed`, `response` or `error`). Its query string takes
+/// `wait_for_completion` and `timeout`.
+async fn cluster_task(State(c): State<AppState>, Path((id, task)): Path<(String, String)>, method: Method, uri: axum::http::Uri, headers: HeaderMap) -> Result<Response, ControlError> {
+    let valid = task.split_once(':').is_some_and(|(node, n)| !node.is_empty() && node.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b)) && !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+    if !valid {
+        return Err(ControlError::Invalid(format!("invalid task id [{task}]: it is <node>:<number>")));
+    }
+    for (k, _) in query_pairs(uri.query()) {
+        if !["wait_for_completion", "timeout"].contains(&k.as_str()) {
+            return Err(ControlError::Invalid(format!("a task's route takes no parameter [{k}] (it takes wait_for_completion and timeout)")));
+        }
+    }
+    let api_path = format!("/v1/search/clusters/{}/tasks/{}", urlencoding::encode(&id), urlencoding::encode(&task));
+    es_route(&c, &id, method, api_path, "GET", format!("/_tasks/{}", urlencoding::encode(&task)), None, uri.query(), &headers, Body::empty(), EsBody::None).await
 }
 
 /// One document's route: `…/indices/{index}/<rest>/{doc}` to `/{index}/<es_rest>/{doc}`.
