@@ -240,9 +240,8 @@ async fn read(code: &Code, r: &RepoRow, r#ref: &str, before: Option<&str>, head:
     let stops: Vec<ChangesetId> = before.into_iter().chain(main).collect();
     let mut read = Read::default();
     // The branch since its merge base first: what the check is about.
-    if let Some(mb) = if default { None } else { code.merge_base(r, &head)? }
-        && mb != head
-    {
+    let mb = if default { None } else { code.merge_base(r, &head)? };
+    if let Some(mb) = mb.filter(|mb| *mb != head) {
         read.branch = true;
         for d in code.store.compare(repo, &mb, &head)? {
             if let (Some(new), Some(mode)) = (d.new_oid, d.new_mode)
@@ -335,8 +334,6 @@ async fn ask(secrets: &dyn crate::SecretEnv, repo: &str, push: &crate::PushScan,
             let at = p.commit.as_deref().map(|c| format!(" in {c}")).unwrap_or_default();
             format!("- `{}:{}` {key} ({env}){at}", p.file, p.line)
         })
-        .collect::<BTreeSet<_>>()
-        .into_iter()
         .collect();
     let mut list = lines.iter().take(SHOWN).cloned().collect::<Vec<_>>().join("\n");
     if lines.len() > SHOWN {

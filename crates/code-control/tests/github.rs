@@ -1602,7 +1602,10 @@ async fn push_webhooks_for_branches_tags_and_echoes() {
 /// roll secrets for acme/app: STRIPE_KEY in production holds [`PUSHED`]. Records each push it
 /// was asked about and what it found (as roll secrets reports a leak).
 #[derive(Default)]
-struct PushSecrets(Mutex<Vec<(String, u64, Option<String>, String, Vec<String>)>>);
+struct PushSecrets(Mutex<Vec<Asked>>);
+
+/// (repo, installation, pusher, ref, keys found).
+type Asked = (String, u64, Option<String>, String, Vec<String>);
 
 const PUSHED: &str = "sk_live_51Hx9Q2pushedROLL";
 
