@@ -372,6 +372,26 @@ async fn pages_changed_the_same_way_are_accepted_together() {
     assert_eq!(waiting, ["/c"], "the three accepted at once; /c still waits");
 }
 
+/// Open changes whose schema changes touch the same tables name each other (PlanetScale's
+/// conflicting deploy requests); one that changes another table names none.
+#[tokio::test]
+async fn open_changes_that_change_the_same_tables_name_each_other() {
+    let e = env(json!({ "enabled": true }));
+    for (c, n) in [("chg_sa", 1), ("chg_sb", 2), ("chg_sc", 3)] {
+        e.code.open(change(c, n));
+    }
+    e.engine.pass().await.unwrap();
+    let id = |c: &str| e.engine.store.row_by_change(c).unwrap().unwrap().id;
+    let set = |c: &str, l: &str| e.engine.store.set_schema_changes(&id(c), "h", Some(&[l.to_string()]), &[]).unwrap();
+    set("chg_sa", "+ column public.users.nickname text");
+    set("chg_sb", "- constraint users_email_key on public.users UNIQUE (email)");
+    set("chg_sc", "+ table public.orders");
+    let overlaps = |c: &str| e.engine.store.preview(&id(c)).unwrap().schema_overlaps.into_iter().map(|o| (o.preview, o.tables)).collect::<Vec<_>>();
+    assert_eq!(overlaps("chg_sa"), [(id("chg_sb"), vec!["public.users".to_string()])]);
+    assert_eq!(overlaps("chg_sb"), [(id("chg_sa"), vec!["public.users".to_string()])]);
+    assert!(overlaps("chg_sc").is_empty(), "another table");
+}
+
 /// A visual change refused (Chromatic's Deny): the review fails at that head, the change is told at
 /// once, an accept of the pages clears it, and a new head asks again.
 #[tokio::test]

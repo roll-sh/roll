@@ -1859,6 +1859,9 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/apps/services/{id}/environments/{env}/wake", "apps", W, one(PG, "service")).env(EnvFrom::Param("env")),
     // Checking a domain changes nothing a person sees.
     row("POST", "/v1/apps/services/{id}/environments/{env}/domains/{host}/verify", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
+    // Writing a domain's records at the customer's Cloudflare with their token (a `roll://`
+    // reference roll secrets checks they may reveal): what pointing the domain here is.
+    row("POST", "/v1/apps/services/{id}/environments/{env}/domains/{host}/configure", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")),
     row("GET", "/v1/apps", "apps", R, Tgt::Product),
     // A plan or an import of a roll code repo reads it: read there too.
     row("POST", "/v1/apps/plan", "apps", R, Tgt::AnyGrant).lends(Lend::Each(apps_repo)),
