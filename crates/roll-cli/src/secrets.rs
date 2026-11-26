@@ -413,6 +413,12 @@ pub enum Secrets {
         /// Print the folders and keys it would import (never a value), and import nothing.
         #[arg(long, requires = "from")]
         dry_run: bool,
+        /// Check the copy after an import: read the source as an import would and compare it
+        /// with the environment by fingerprint, writing nothing. Prints, by name only, the keys
+        /// missing here, the ones whose value differs, and the ones only here; fails when a key
+        /// is missing or differs.
+        #[arg(long, requires = "from", conflicts_with_all = ["dry_run", "overwrite", "request", "sensitive", "create_environments"])]
+        check: bool,
         /// Tag what the source keeps secret `sensitive` (for good: no person or token reads it
         /// back): Parameter Store's SecureStrings, 1Password's concealed fields, every value of
         /// the other managers.
@@ -2667,10 +2673,11 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             write(&c, &env, ops, None, request, json_out).await?;
         }
         Secrets::Edit { request } => edit(&c, &env, request, json_out).await?,
-        Secrets::Import { file, from, source, map, all_environments, create_environments, recursive, overwrite, request, dry_run, sensitive } => {
+        Secrets::Import { file, from, source, map, all_environments, create_environments, recursive, overwrite, request, dry_run, check, sensitive } => {
             if let Some(from) = from {
                 let source = source.unwrap_or_default();
                 let o = ImportOpts { overwrite, request, sensitive, dry_run, message: format!("imported from {from} {}", source.chars().take(200).collect::<String>()) };
+                let mut copy = CopyCheck::default();
                 if let Some(vendor) = crate::import_tree::Vendor::parse(&from) {
                     anyhow::ensure!(!recursive || vendor == crate::import_tree::Vendor::Infisical, "--recursive reads Vault's and Infisical's folders");
                     let pairs = map.iter().map(|p| p.split_once('=').map(|(a, b)| (a.to_string(), b.to_string())).with_context(|| format!("{p}: --map is source=environment"))).collect::<anyhow::Result<Vec<_>>>()?;
@@ -2681,21 +2688,32 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                     };
                     let one = matches!(which, crate::import_tree::Which::One { .. });
                     let plan = crate::import_tree::read(&crate::import_tree::Request { vendor, source, which, recursive, into_path: c.at.path.clone() }).await?;
+                    if check {
+                        return check_plan(&c, &plan, one, &mut copy).await;
+                    }
                     return import_plan(&c, &plan, &o, create_environments, one, json_out).await;
                 }
                 anyhow::ensure!(!all_environments && !create_environments, "--all-environments and --create-environments read Doppler and Infisical projects");
                 anyhow::ensure!(!recursive || (from == "vault" && map.is_empty()), "--recursive reads a Vault KV v2 tree (--from vault --source mount/path) or Infisical's folders");
                 if map.is_empty() {
                     let folders = read_source(&from, &source, recursive).await?;
+                    if check {
+                        check_folders(&c, &env, &c.at.env, &folders, &mut copy).await?;
+                        return copy.done();
+                    }
                     return import_folders(&c, &env, &folders, &o, None, json_out).await;
                 }
                 let base = source.trim_end_matches('/');
                 for pair in &map {
                     let (src, dst) = pair.split_once('=').with_context(|| format!("{pair}: --map is source=environment"))?;
                     let folders = read_source(&from, &format!("{base}/{src}"), false).await.with_context(|| format!("reading {base}/{src}"))?;
-                    import_folders(&c, &c.env(dst), &folders, &o, Some(&format!("{src} → {dst}")), json_out).await?;
+                    if check {
+                        check_folders(&c, &c.env(dst), dst, &folders, &mut copy).await?;
+                    } else {
+                        import_folders(&c, &c.env(dst), &folders, &o, Some(&format!("{src} → {dst}")), json_out).await?;
+                    }
                 }
-                return Ok(());
+                return if check { copy.done() } else { Ok(()) };
             }
             let text = match file.as_deref() {
                 Some("-") => {
@@ -4978,6 +4996,80 @@ async fn import_folders(c: &Client<'_>, env: &str, folders: &crate::managers::Fo
         println!("Dry run: nothing imported ({keys} key{} in {} change{}).", plural(keys), folders.len(), plural(folders.len()));
     }
     Ok(())
+}
+
+/// What `import --check` found so far: keys the source has that are missing here or differ.
+#[derive(Default)]
+struct CopyCheck {
+    missing: usize,
+    changed: usize,
+    folders: usize,
+}
+
+impl CopyCheck {
+    fn done(self) -> anyhow::Result<()> {
+        let plural = |n: usize| if n == 1 { "" } else { "s" };
+        match self.missing + self.changed {
+            0 => {
+                eprintln!("The copy is complete: every key of the source is here with the same value ({} folder{}).", self.folders, plural(self.folders));
+                Ok(())
+            }
+            _ => bail!("the copy isn't complete: {} key{} missing and {} different here; import again (--overwrite replaces the different ones)", self.missing, plural(self.missing), self.changed),
+        }
+    }
+}
+
+/// `import --check`: what another manager gave, compared with `env` (its API base; `name` its
+/// slug) folder by folder through the same comparison as `diff --file` (by fingerprint, on the
+/// server). Names only, never a value, and nothing written.
+async fn check_folders(c: &Client<'_>, env: &str, name: &str, folders: &crate::managers::Folders, copy: &mut CopyCheck) -> anyhow::Result<()> {
+    for (folder, entries) in folders {
+        let path = under(&c.at.path, folder);
+        let items: Vec<Value> = entries.iter().map(|e| json!({ "key": e.key, "value": e.value })).collect();
+        let v = c.call(Method::POST, &format!("{env}/diff"), Some(json!({ "json": items, "path": path }))).await.map_err(approval_hint).with_context(|| format!("comparing {name}:{path}"))?;
+        let list = |k: &str| v[k].as_array().into_iter().flatten().map(|x| s(x).to_string()).collect::<Vec<_>>();
+        // A sensitive key the caller can't see is never compared (that would test a guess).
+        let seen: std::collections::HashSet<String> = ["added", "changed", "same", "references", "linked"].into_iter().flat_map(list).collect();
+        let unseen: Vec<String> = entries.iter().map(|e| e.key.clone()).filter(|k| !seen.contains(k)).collect();
+        println!("{name}:{path}");
+        for (names, mark, what) in [(list("added"), "-", "missing here"), (list("changed"), "~", "different here"), (list("missing"), "+", "only here"), (list("references"), "?", "has references here: not compared"), (list("linked"), "?", "linked here: not compared"), (unseen, "?", "sensitive: not compared")] {
+            for k in names {
+                println!("  {mark} {k:<32} {what}");
+            }
+        }
+        let same = list("same").len();
+        println!("  {same} the same");
+        copy.missing += list("added").len();
+        copy.changed += list("changed").len();
+        copy.folders += 1;
+    }
+    Ok(())
+}
+
+/// `import --check` for a Doppler or Infisical project read with its structure: each environment
+/// it maps to compared folder by folder (a missing environment counts all its keys as missing).
+async fn check_plan(c: &Client<'_>, plan: &crate::import_tree::Plan, one: bool, copy: &mut CopyCheck) -> anyhow::Result<()> {
+    let listed = c.call(Method::GET, &format!("{}/environments", c.base()), None).await?;
+    let have: Vec<&str> = listed.as_array().into_iter().flatten().filter_map(|e| e["slug"].as_str()).collect();
+    for e in &plan.environments {
+        if !one {
+            println!("{} → {}", e.source, e.target);
+        }
+        let folders: crate::managers::Folders = e
+            .folders
+            .iter()
+            .filter(|f| !f.keys.is_empty())
+            .map(|f| (f.folder.clone(), f.keys.iter().map(|k| crate::managers::Entry { key: k.key.clone(), value: k.value.clone(), secret: true, comment: String::new() }).collect()))
+            .collect();
+        if !have.contains(&e.target.as_str()) {
+            let keys: usize = folders.iter().map(|f| f.1.len()).sum();
+            println!("{}: not in this project ({keys} keys missing)", e.target);
+            copy.missing += keys;
+            continue;
+        }
+        check_folders(c, &c.env(&e.target), &e.target, &folders, copy).await?;
+    }
+    copy.done()
 }
 
 /// A Doppler or Infisical import read with its structure (import_tree.rs), written: missing roll

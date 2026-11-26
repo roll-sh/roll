@@ -10,8 +10,50 @@ The rules behind each step are in the reference, [docs/secrets.md](../secrets.md
 
 You need:
 
-- the address of your roll server. roll has no hosted address yet, so ask whoever runs yours.
+- the address of your roll server. roll has no hosted address yet, so ask whoever runs yours, or
+  start one on your laptop (next section).
 - an account on it, or a project someone has made you a member of.
+
+## 0. No server yet?
+
+To try roll secrets, run one rolld on your own machine. It keeps everything in SQLite in one
+directory, and it listens on `127.0.0.1` only, so nothing else can reach it.
+
+rolld isn't in the CLI's releases yet. Build it from a clone with a current stable Rust (the
+first build takes a while):
+
+```sh
+git clone https://github.com/roll-sh/roll && cd roll
+cargo build --release -p rolld -p roll-cli
+```
+
+Then start it with a key of its own:
+
+```sh
+mkdir -p ~/roll-eval && openssl rand -hex 32 > ~/roll-eval/secrets.key && chmod 600 ~/roll-eval/secrets.key
+ROLL_SECRET_KEY="$(cat ~/roll-eval/secrets.key)" ROLL_HOME=~/roll-eval/home ROLL_PRODUCTS=queues \
+  ./target/release/rolld --api 127.0.0.1:7070
+```
+
+- `ROLL_SECRET_KEY` encrypts every value. Keep the file: without it, the values can't be read
+  again.
+- roll secrets is always on. `ROLL_PRODUCTS` names one small product, so rolld starts nothing
+  else: no Postgres, no Docker, no other ports.
+- With no `ROLL_ADMIN_TOKEN` on `127.0.0.1`, the API is open to this machine only, and every
+  command runs as its operator.
+
+In another terminal, point the CLI at it:
+
+```sh
+export ROLL_API_URL=http://127.0.0.1:7070
+```
+
+That replaces `roll login` (step 2) on this node: `roll login` signs a person in through the
+dashboard, and this node has no accounts. Go on with step 3. To stop, press Ctrl-C in rolld's
+terminal; `rm -rf ~/roll-eval` deletes everything it made.
+
+For a server your team shares, with accounts, Postgres and several nodes, see ["Where it
+runs"](../secrets.md#where-it-runs).
 
 ## 1. Install the CLI
 

@@ -1,7 +1,8 @@
 # Moving to roll secrets from another manager
 
 This guide moves your secrets into roll secrets from Doppler, Infisical, Vault or OpenBao, AWS
-Secrets Manager, 1Password, or `.env` files, and then switches your apps over.
+Secrets Manager, 1Password, Kubernetes Secrets, SOPS files, CI variables or `.env` files, and then
+switches your apps over.
 
 The rules of every import (limits, key names, what's left out and why) are in the reference:
 ["Moving from another manager"](../secrets.md#moving-from-another-manager).
@@ -28,6 +29,8 @@ Every import works the same way:
 - **Secret for good, if you ask.** `--sensitive` tags what the old manager kept secret
   `sensitive`: no person or token can read it back, and the tag never comes off. See ["Sensitive
   keys"](../secrets.md#sensitive-keys).
+- **Check the copy.** After an import with `--from`, run the same command with `--check` instead.
+  See ["Check the copy"](#check-the-copy).
 
 ## Doppler
 
@@ -176,6 +179,82 @@ DB_PASSWORD=roll://production/MAIN_DB_PASSWORD
 
 See ["References in files"](../secrets.md#references-in-files).
 
+## Kubernetes Secrets
+
+A Secret's `data` holds base64. Decode it with `jq` before the import, or roll stores the base64
+text:
+
+```sh
+kubectl get secret shop -n prod -o json | jq '.data | map_values(@base64d)' \
+  | roll secrets import - -e production
+```
+
+- `-` reads the import from stdin. A JSON object of `KEY: value` is detected; there's no format flag.
+- A roll key is a letter or `_`, then letters, digits and `_`. Keys such as `tls.crt` or
+  `api-key` are refused, and nothing is written. Rename them in the same `jq`:
+  `jq '.data | map_values(@base64d) | with_entries(.key |= (ascii_upcase | gsub("[^A-Z0-9_]"; "_")))'`.
+- A value that isn't text (a keystore, a binary certificate) doesn't decode cleanly. Leave it out
+  with `del(.data["keystore.jks"])`, or keep it base64 under a key of its own.
+- Do one Secret at a time, into the folder it belongs in (`--path /api`).
+
+Then switch over: [Kubernetes](platforms.md#kubernetes) shows how pods get their values from roll.
+After every app reads from roll, delete the old Secrets.
+
+## SOPS files
+
+Decrypt with your own key (age, PGP, KMS) and pipe it into the import:
+
+```sh
+sops -d --output-type dotenv secrets.enc.yaml | roll secrets import - -e production
+```
+
+A file with nested keys has no dotenv form. Decrypt it to JSON, and pick one level of it with `jq`:
+
+```sh
+sops -d --output-type json secrets.enc.yaml | jq '.production' | roll secrets import - -e production
+```
+
+The decrypted text goes only through the pipe, never to the disk. Then compare and clean up as for
+[`.env` files](#env-files), and delete the encrypted file from the repository when nothing reads
+it.
+
+## CI variables
+
+GitHub Actions secrets and GitLab CI/CD variables can't be exported: their APIs never return a
+value. Choose one way:
+
+- **Enter them again.** `roll secrets set KEY=…`, or the dashboard. For a few keys, this is the
+  fastest way.
+- **Run a job once that imports them.** Make a token that can only write the one environment, and
+  pipe the variables from a job into the import:
+
+  ```sh
+  roll secrets tokens create ci-import --for-env staging --action read --action write --ttl-days 1
+  ```
+
+  ```yaml
+  # .github/workflows/move-to-roll.yml: run it once, then delete it and the token.
+  on: workflow_dispatch
+  jobs:
+    move:
+      runs-on: ubuntu-latest
+      steps:
+        - run: curl -fsSL https://roll.sh/install.sh | sh
+        - run: printf 'STRIPE_KEY=%s\nSENDGRID_KEY=%s\n' "$STRIPE_KEY" "$SENDGRID_KEY" | ~/.local/bin/roll secrets import - -p shop -e staging
+          env:
+            ROLL_API_URL: https://roll.example.com
+            ROLL_TOKEN: ${{ secrets.ROLL_IMPORT_TOKEN }}
+            STRIPE_KEY: ${{ secrets.STRIPE_KEY }}
+            SENDGRID_KEY: ${{ secrets.SENDGRID_KEY }}
+  ```
+
+  GitLab is the same: a manual job whose script pipes its variables into `roll secrets import -`.
+  The values go from the runner to roll and are never printed. Revoke the token after the job:
+  `roll secrets tokens ls` lists its id, and `roll secrets tokens revoke <id>` ends it.
+
+Then switch the pipelines to roll: [Platforms](platforms.md) shows a workload identity for each CI
+system, so no roll token is kept in its settings either.
+
 ## `.env` files
 
 Import each file into its environment:
@@ -207,9 +286,49 @@ The import also reads Bitwarden Secrets Manager (`--from bitwarden`), Google Sec
 gcp`), Azure Key Vault (`--from azure`) and Akeyless (`--from akeyless`), each through its own CLI.
 See the table in ["Moving from another manager"](../secrets.md#moving-from-another-manager).
 
+## Check the copy
+
+Run the import again with `--check`. It reads the source as the import does, and compares it with
+the environment by fingerprint. It writes nothing and never prints a value:
+
+```sh
+roll secrets import --from doppler --source shop/prd -e production --check
+```
+
+```
+production:/
+  - SENDGRID_KEY                     missing here
+  ~ STRIPE_KEY                       different here
+  + LOG_LEVEL                        only here
+  41 the same
+```
+
+- `-` is a key the source has and roll doesn't. `~` is a key whose value differs. `+` is a key only
+  roll has, such as one you added after the import.
+- It fails while a key is missing or different, so a script can wait for a clean check.
+- `--map`, `--all-environments` and `--recursive` check every environment and folder they import.
+- A value with references in roll, a linked key and a sensitive key you can't read are listed, not
+  compared.
+
+For a file, `roll secrets diff --file prod.json` does the same.
+
+## Switch over: move each app, then revoke
+
+roll doesn't sync back into Doppler, Infisical or Vault, so the two managers can't stay in step.
+Don't run them side by side. Move one app at a time instead:
+
+1. Import the values that app reads, and check the copy (`--check`).
+2. Change how the app starts (`roll run`, the [local agent](platforms.md#a-vm-or-a-server), its
+   CI's [workload identity](platforms.md)), and deploy it.
+3. Change values in roll only, from now on. A change made in the old manager after the import isn't
+   copied. Run `--check` again before the next app.
+4. When every app reads from roll, revoke the old manager's tokens, then delete its secrets.
+
+roll can still push values to platforms that read their own store: AWS, Google Cloud, Azure, GitHub
+Actions, Vercel and others. See [Syncs](../secrets.md#syncs).
+
 ## After the move
 
 - Give CI and services their values: [Platforms](platforms.md).
 - Push values to the platforms you deploy to: [Syncs](../secrets.md#syncs).
 - Protect production: [Getting started](getting-started.md), step 7.
-- When your apps read from roll, revoke the old manager's tokens and delete its secrets.
