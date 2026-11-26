@@ -6343,7 +6343,8 @@ async fn a_revoked_machine_holds_its_place_until_its_credential_would_have_ended
     api.secrets.set_machines_max(1);
     api.gate.chain_ms.store(1_500, std::sync::atomic::Ordering::SeqCst);
     let id = api.ok(Method::POST, "/identities", Some(json!({ "name": "racks", "kind": "machine", "environments": ["production"], "actions": ["read"] }))).await["id"].as_str().unwrap().to_string();
-    let boot = || api.call(Method::POST, &format!("/identities/{id}/bootstrap"), Some(json!({})));
+    let at = format!("/identities/{id}/bootstrap");
+    let boot = || api.call(Method::POST, &at, Some(json!({})));
     let (s, first) = boot().await;
     assert_eq!(s, StatusCode::CREATED, "{first}");
     let (s, e) = boot().await;
