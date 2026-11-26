@@ -1070,7 +1070,7 @@ async fn a_products_lifetime_cap_binds_consents_and_remembered_approvals() {
     // A token that never expires, with no secrets rule, asks for the rest: remembering a secrets
     // read for good would give it one past the cap; for an hour is within it.
     let (token, _) = d.token(json!([{ "product": "workspace", "resources": "*", "actions": { "read": "allow" } }]), json!({ "ask_otherwise": true })).await;
-    let (_, pending) = d.call(&token, Method::GET, "/v1/secrets/projects/pa/health", None).await;
+    let (_, pending) = d.call(&token, Method::GET, "/v1/secrets/projects/pa/environments/development/secrets", None).await;
     let apr = pending["approval"].as_str().unwrap_or_else(|| panic!("{pending}")).to_string();
     let approve = |remember: &'static str| {
         let (d, path) = (&d, format!("/v1/access/approvals/{apr}/approve"));
