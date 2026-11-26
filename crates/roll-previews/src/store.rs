@@ -239,6 +239,17 @@ CREATE TABLE IF NOT EXISTS visual_page_accepts (
     at INTEGER NOT NULL,
     PRIMARY KEY (preview_id, path)
 );
+-- A page someone refused at a head (Chromatic's Deny), with why: the review fails until a new
+-- head or an accept; an accept of the page clears it, as a refusal clears the page's accept.
+CREATE TABLE IF NOT EXISTS visual_page_refusals (
+    preview_id TEXT NOT NULL,
+    path TEXT NOT NULL,
+    head TEXT NOT NULL,
+    by TEXT NOT NULL,
+    at INTEGER NOT NULL,
+    reason TEXT NOT NULL,
+    PRIMARY KEY (preview_id, path)
+);
 CREATE TABLE IF NOT EXISTS resolved_notes (
     preview_id TEXT NOT NULL,
     review_id TEXT NOT NULL,
@@ -1494,7 +1505,7 @@ impl Store {
             if let Some((project, change, head)) = gone {
                 emit(c, now, "deleted", &project, id, change.as_deref(), &serde_json::json!({ "head": head }))?;
             }
-            for t in ["resources", "services", "pinned", "pinned_data", "restore_points", "shares", "guest_notes", "note_tells", "visit_tickets", "visit_sessions", "visits", "activity", "screenshots", "page_shots", "visual_page_accepts", "mail", "resolved_notes", "base_history", "leases", "note_crops", "git_pulls", "git_reports", "runtime_facts", "gone_pushes", "run_usage", "service_spend", "previews"] {
+            for t in ["resources", "services", "pinned", "pinned_data", "restore_points", "shares", "guest_notes", "note_tells", "visit_tickets", "visit_sessions", "visits", "activity", "screenshots", "page_shots", "visual_page_accepts", "visual_page_refusals", "mail", "resolved_notes", "base_history", "leases", "note_crops", "git_pulls", "git_reports", "runtime_facts", "gone_pushes", "run_usage", "service_spend", "previews"] {
                 let col = if t == "previews" { "id" } else { "preview_id" };
                 c.execute(&format!("DELETE FROM {t} WHERE {col} = ?"), [id])?;
             }
@@ -2357,6 +2368,18 @@ impl Store {
     /// `seen`: the head whose screenshots were looked at; refused (`Conflict`) when a newer one
     /// came in meanwhile, so nobody accepts pages they didn't see.
     pub fn accept_visual(&self, id: &str, by: &str, seen: Option<&str>, page: Option<&str>) -> Result<Option<String>> {
+        self.judge_visual(id, by, seen, page, None)
+    }
+
+    /// `by` refused how the preview's pages look at the latest screenshot's head (Chromatic's
+    /// Deny), as [`Store::accept_visual`] accepts them, with why (one line): the review fails
+    /// until a new head, or until someone accepts those pages.
+    pub fn refuse_visual(&self, id: &str, by: &str, seen: Option<&str>, page: Option<&str>, reason: &str) -> Result<Option<String>> {
+        self.judge_visual(id, by, seen, page, Some(reason))
+    }
+
+    /// An accept (`refused: None`) or a refusal of the pages `page` names, at the latest head.
+    fn judge_visual(&self, id: &str, by: &str, seen: Option<&str>, page: Option<&str>, refused: Option<&str>) -> Result<Option<String>> {
         let now = self.now_ms()?;
         // Read and written in one transaction: a screenshot landing in between can't be accepted.
         self.db.write(|c| {
@@ -2390,10 +2413,23 @@ impl Store {
                 Some(p) => return Err(Error::NotFound(format!("the preview has no screenshot of {p:?}"))),
             };
             for path in pages {
-                c.execute(
-                    "INSERT INTO visual_page_accepts (preview_id, path, head, by, at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (preview_id, path) DO UPDATE SET head = excluded.head, by = excluded.by, at = excluded.at",
-                    params![id, path, head, by, now],
-                )?;
+                // One verdict per page: an accept clears its refusal, a refusal its accept.
+                match refused {
+                    None => {
+                        c.execute(
+                            "INSERT INTO visual_page_accepts (preview_id, path, head, by, at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (preview_id, path) DO UPDATE SET head = excluded.head, by = excluded.by, at = excluded.at",
+                            params![id, path, head, by, now],
+                        )?;
+                        c.execute("DELETE FROM visual_page_refusals WHERE preview_id = ? AND path = ?", params![id, path])?;
+                    }
+                    Some(reason) => {
+                        c.execute(
+                            "INSERT INTO visual_page_refusals (preview_id, path, head, by, at, reason) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (preview_id, path) DO UPDATE SET head = excluded.head, by = excluded.by, at = excluded.at, reason = excluded.reason",
+                            params![id, path, head, by, now, reason],
+                        )?;
+                        c.execute("DELETE FROM visual_page_accepts WHERE preview_id = ? AND path = ?", params![id, path])?;
+                    }
+                }
             }
             Ok::<_, Error>(Some(head))
         })
@@ -2439,6 +2475,12 @@ impl Store {
         let Some(base) = base else { return Ok(None) };
         let accepts: Vec<(String, String, String, i64)> = self.db.read(|c| c.query("SELECT path, head, by, at FROM visual_page_accepts WHERE preview_id = ?", [&r.id], |x| Ok((x.get(0)?, x.get(1)?, x.get(2)?, x.get(3)?))))?;
         let accepted = |path: &str| accepts.iter().find(|(p, h, _, _)| p == path && shot.as_deref() == Some(h.as_str())).map(|(_, _, by, at)| (by.clone(), *at));
+        // Refusals at this head (a new head asks again).
+        let refusals: Vec<(String, String, String, i64, String)> =
+            self.db.read(|c| c.query("SELECT path, head, by, at, reason FROM visual_page_refusals WHERE preview_id = ?", [&r.id], |x| Ok((x.get(0)?, x.get(1)?, x.get(2)?, x.get(3)?, x.get(4)?))))?;
+        let refusal = |path: &str| {
+            refusals.iter().find(|(p, h, ..)| p == path && shot.as_deref() == Some(h.as_str())).map(|(_, _, by, at, reason)| crate::Refusal { by: by.clone(), at: *at, reason: reason.clone() })
+        };
         let first = base.percent.max(base.phone_percent.unwrap_or(0.0));
         // What each changed page's change is: the first page's from its row, the others' checks.
         let first_sig: Option<String> = self.db.read(|c| c.query_row("SELECT base_sig FROM screenshots WHERE preview_id = ?", [&r.id], |x| x.get(0)).optional())?.flatten();
@@ -2452,27 +2494,35 @@ impl Store {
                 let unstable = if path.is_empty() { first_unstable } else { pages.iter().any(|p| p.path == *path && p.unstable) };
                 // Its group, when another page under review shares it.
                 let group = sig_of(path).filter(|g| changed.iter().filter(|(q, _)| sig_of(q).as_ref() == Some(g)).count() > 1);
-                crate::PageReview { path: path.clone(), percent: *percent, by: a.as_ref().map(|(by, _)| by.clone()), at: a.map(|(_, at)| at), unstable, group }
+                crate::PageReview { path: path.clone(), percent: *percent, by: a.as_ref().map(|(by, _)| by.clone()), at: a.map(|(_, at)| at), unstable, group, refused: refusal(path) }
             })
             .collect();
         // The stories the change touched that this head's run didn't take: unseen, so under
         // review as one more entry (never carried to another head: each run leaves its own).
         if untaken > 0 {
             let a = accepted(crate::UNTAKEN_STORIES);
-            reviews.push(crate::PageReview { path: crate::UNTAKEN_STORIES.into(), percent: 0.0, by: a.as_ref().map(|(by, _)| by.clone()), at: a.map(|(_, at)| at), unstable: false, group: None });
+            reviews.push(crate::PageReview { path: crate::UNTAKEN_STORIES.into(), percent: 0.0, by: a.as_ref().map(|(by, _)| by.clone()), at: a.map(|(_, at)| at), unstable: false, group: None, refused: refusal(crate::UNTAKEN_STORIES) });
         }
         let percent = changed.iter().map(|(_, p)| *p).fold(0.0_f64, f64::max);
+        // One page refused is the change's: it fails, whoever accepted the rest.
+        let refused = reviews.iter().filter_map(|p| p.refused.clone()).max_by_key(|r| r.at);
         let state = if reviews.is_empty() {
             crate::VisualState::Unchanged
+        } else if refused.is_some() {
+            crate::VisualState::Refused
         } else if reviews.iter().all(|p| p.by.is_some()) {
             crate::VisualState::Accepted
         } else {
             crate::VisualState::Changed
         };
-        // Who accepted it: whoever accepted its last page.
+        // Who accepted it: whoever accepted its last page (refused: who last refused one).
         let last = reviews.iter().filter(|_| state == crate::VisualState::Accepted).max_by_key(|p| p.at);
-        let (by, at) = (last.and_then(|p| p.by.clone()), last.and_then(|p| p.at));
-        Ok(Some(crate::VisualReview { state, branch: base.branch.clone(), percent, by, at, required: rule == crate::settings::VisualReviewRule::Required, head: shot.unwrap_or_default(), pages: reviews, untaken }))
+        let (by, at) = match &refused {
+            Some(r) => (Some(r.by.clone()), Some(r.at)),
+            None => (last.and_then(|p| p.by.clone()), last.and_then(|p| p.at)),
+        };
+        let reason = refused.map(|r| r.reason);
+        Ok(Some(crate::VisualReview { state, branch: base.branch.clone(), percent, by, at, required: rule == crate::settings::VisualReviewRule::Required, head: shot.unwrap_or_default(), pages: reviews, untaken, reason }))
     }
 
     /// Another page's screenshot (`previous`: the one before it).

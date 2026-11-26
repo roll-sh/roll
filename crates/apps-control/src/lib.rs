@@ -4577,14 +4577,22 @@ impl Apps {
     /// them for this call only: nothing of it is kept.
     pub async fn configure_domain(self: &Arc<Self>, service: &str, env: &str, host: &str, body: Value, who: integrations::Asker<'_>) -> Result<Domain> {
         let o = body.as_object().cloned().unwrap_or_default();
-        if let Some(k) = o.keys().find(|k| k.as_str() != "cloudflare_token") {
+        if let Some(k) = o.keys().find(|k| !matches!(k.as_str(), "cloudflare_token" | "replace")) {
             return Err(Error::BadRequest(format!("unknown field {k}")));
         }
         let Some(reference) = o.get("cloudflare_token").and_then(Value::as_str) else {
             return Err(Error::BadRequest("cloudflare_token is a roll:// reference to a Cloudflare API token (Zone:DNS:Edit on the domain's zone)".into()));
         };
-        if !reference.starts_with("roll://") {
-            return Err(Error::BadRequest("cloudflare_token is a roll:// reference, never the token itself".into()));
+        let replace = match o.get("replace") {
+            None | Some(Value::Null) => false,
+            Some(Value::Bool(b)) => *b,
+            Some(_) => return Err(Error::BadRequest("replace is a boolean".into())),
+        };
+        // A reference by roll secrets' own rule (` roll://…` and `ROLL://…` are errors, not text).
+        match roll_secrets_ref::Reference::parse(reference) {
+            Ok(Some(_)) => {}
+            Ok(None) => return Err(Error::BadRequest("cloudflare_token is a roll:// reference, never the token itself".into())),
+            Err(e) => return Err(Error::BadRequest(format!("cloudflare_token: {e}"))),
         }
         let Some(writer) = self.dns_writer.get().cloned() else {
             return Err(Error::BadRequest("writing DNS records isn't set up on this node".into()));
@@ -4596,13 +4604,17 @@ impl Apps {
         }
         let (sid, e) = (service.to_string(), env.to_string());
         let svc = self.db(move |s| s.service(&sid)).await?;
-        let maker = self.deps.secrets.bind_ref(who, &svc.project, service, reference).await.map_err(|why| Error::Forbidden(format!("{reference}: {why:#}")))?;
+        let maker = self.deps.secrets.bind_ref(who, &svc.project, service, reference).await.map_err(|why| Error::Forbidden(format!("{reference}: {why:#} (it must be a key you may reveal, and not marked sensitive)")))?;
         let token = self.deps.secrets.resolve_as(&svc.project, &e, service, reference, &maker).await.map_err(|e| Error::BadRequest(format!("{reference}: {e:#}")))?;
-        // The CNAME to its target always (Cloudflare flattens one at a zone's apex, which plain
-        // DNS can't hold), and the TXT challenge where `record` asks for it.
-        writer.put_record(&token, "CNAME", &d.hostname, &d.target).await.map_err(|e| Error::BadRequest(format!("{e:#}")))?;
+        // The TXT challenge first where `record` asks for it (it proves the name, whatever the
+        // CNAME meets), then the CNAME to its target (Cloudflare flattens one at a zone's apex,
+        // which plain DNS can't hold).
         if d.record != "cname" {
-            writer.put_record(&token, "TXT", &crate::model::challenge_name(&d.hostname), &d.token).await.map_err(|e| Error::BadRequest(format!("{e:#}")))?;
+            writer.put_record(&token, "TXT", &crate::model::challenge_name(&d.hostname), &d.token, false).await.map_err(|e| Error::BadRequest(format!("{e:#}")))?;
+        }
+        let blocking = writer.put_record(&token, "CNAME", &d.hostname, &d.target, replace).await.map_err(|e| Error::BadRequest(format!("{e:#}")))?;
+        if !blocking.is_empty() {
+            return Err(Error::Conflict(format!("{} still points elsewhere ({}): send replace: true to swap those records for roll's CNAME", d.hostname, blocking.join(", "))));
         }
         drop(token);
         self.verify_domain(service, env, &h).await

@@ -3082,7 +3082,7 @@
     },
     "/v1/apps/services/{id}/environments/{env}/domains/{host}/configure": {
       "post": {
-        "description": "Answers `Domain`, checked: its CNAME (flattened at an apex) and, where `record` asks, its `_roll-challenge` TXT written there first (400 with Cloudflare's answer when it refuses; 400 for a wildcard, whose records are added by hand).",
+        "description": "Answers `Domain`, checked: where `record` asks, its `_roll-challenge` TXT, then its CNAME (flattened at an apex), written there first; 409 naming the name's A and AAAA records when it has some and `replace` isn't set (the TXT is written all the same) (400 with Cloudflare's answer when it refuses; 400 for a wildcard, whose records are added by hand).",
         "operationId": "postServicesIdEnvironmentsEnvDomainsHostConfigure",
         "parameters": [
           {
@@ -3118,11 +3118,11 @@
               }
             }
           },
-          "description": "`{ cloudflare_token: string /* a roll:// reference to a Cloudflare API token, Zone:DNS:Edit on the domain's zone; read as the caller (refused unless they may reveal it, and a sensitive key never), for this call only, never kept */ }`"
+          "description": "`{ cloudflare_token: string /* a roll:// reference to a Cloudflare API token, Zone:DNS:Edit on the domain's zone; read as the caller (refused unless they may reveal it, and a sensitive key never), for this call only, never kept */; replace?: boolean /* delete the name's A and AAAA records (its old host) for the CNAME */ }`"
         },
         "responses": {
           "200": {
-            "description": "`Domain`, checked: its CNAME (flattened at an apex) and, where `record` asks, its `_roll-challenge` TXT written there first (400 with Cloudflare's answer when it refuses; 400 for a wildcard, whose records are added by hand)"
+            "description": "`Domain`, checked: where `record` asks, its `_roll-challenge` TXT, then its CNAME (flattened at an apex), written there first; 409 naming the name's A and AAAA records when it has some and `replace` isn't set (the TXT is written all the same) (400 with Cloudflare's answer when it refuses; 400 for a wildcard, whose records are added by hand)"
           },
           "4XX": {
             "$ref": "#/components/responses/Error"
