@@ -555,6 +555,45 @@ The last against PGO, select-only at 8 clients, 3 alternating pairs: user instru
 31,777 -> 32,105 / 31,587 -> 34,607 / 34,026 -> 31,978, user cycles 69,268 -> 69,872 / 68,855 ->
 72,931 / 69,927 -> 68,111 (foreign 1.25-1.88): no direction, dropped.
 
+## Query memory, round 4: several windows, sorted set operations, count(DISTINCT) (2026-11-26, agent 330)
+
+HANDOFF "Query memory, round 4" has what changed. Plain dist builds (`tools/dist.sh`): **b0**
+`db93e4c33` (agent 326's stack, landed as `214433872`); **n1** the three changes on it with the
+first form of the set operation's switch; **n2** n1 with the set operation's checks moved to
+where they are needed (the candidates' code, rebased onto `214433872` without conflicts).
+PostgreSQL 18.6 by digest. Harness: agent 326's copied to `~/.cache/a330/bench` (`mem.sh` with
+`mem-q4.txt`, `fpair.sh`, `tpair.sh`). Foreign load on lane C was 4.5-7.2 cores in every hold:
+instruction counts only, walls are not compared.
+
+### Peak memory a query (MB of the server cgroup's anon+shmem over the level before; 1M rows)
+
+The tables of round 3. Result hashes in order and sorted equal PostgreSQL's in every cell. b0 and
+PostgreSQL: round 3's runs (same harness, same day), but the partitioned row's (run here).
+
+| query | b0 | n1 / n2 | PostgreSQL 18.6 | temp: new / PostgreSQL |
+|---|---:|---:|---:|---|
+| `row_number() OVER (ORDER BY a), rank() OVER (ORDER BY s)` | 429.0 | 17.4 | 14.5 | 2 / 105.3, 2 / 105.3 |
+| `sum(id) OVER (PARTITION BY id % 7 ORDER BY a), count(*) OVER (ORDER BY s)` | 573.3 | 19.8 | 30.4 | 2 / 121.4, 3 / 55.2 |
+| EXCEPT, enable_hashagg off | 298.3 | 50.0 / 64.3 | 53.2 | 2 / 55.6, 3 / 50.1 |
+| `count(DISTINCT s), count(DISTINCT a)` | 242.2 | 44.1 | 14.2 | 2 / 49.1, 2 / 62.2 |
+
+### When the input fits (G user instructions, 40 runs, alternating pairs; results equal)
+
+| query | b0 | new | new / b0 |
+|---|---:|---:|---|
+| window: sum, lag, rank by `id % 10` (agent 320's; n1) | 7.6454 / 7.6501 | 7.6447 / 7.6446 | -0.01%, -0.07% |
+| two windows, 20,000 rows (n1) | 8.5158 / 8.5155 | 8.5149 / 8.5149 | -0.01%, -0.01% |
+| `count(DISTINCT s), count(DISTINCT a)`, 20,000 rows (n1) | 2.9853 / 2.9856 | 2.9858 / 2.9856 | +0.02%, 0.00% |
+| EXCEPT, enable_hashagg off (n1, dropped form) | 5.8908 / 5.8905 | 5.9010 / 5.9002 | +0.17%, +0.16% |
+| INTERSECT ALL, enable_hashagg off (n1, dropped form) | 6.1316 / 6.1327 | 6.1406 / 6.1410 | +0.15%, +0.14% |
+| EXCEPT, enable_hashagg off (n2) | 5.8913 / 5.8917 | 5.8955 / 5.8947 | +0.07%, +0.05% |
+| INTERSECT ALL, enable_hashagg off (n2) | 6.1318 / 6.1315 | 6.1335 / 6.1336 | +0.03%, +0.03% |
+
+TPC-H SF1 (`tpair.sh`; the aggregations open the changed `Plan::Agg` arm; b0 against n1, two
+pairs; hashes equal): q01 7.3171 / 7.3171 -> 7.3172 / 7.3170 (0.00%), q13 4.1026 / 4.1028 ->
+4.1027 / 4.1025 (0.00%), q16 2.8775 / 2.8762 -> 2.8779 / 2.8766 (+0.01%), q18 15.5725 / 15.5740
+-> 15.5728 / 15.5746 (0.00%). No TPC-H query has a window or a set operation.
+
 ## Query memory, round 3: nested loop inner sides, Incremental Sort, sorted DISTINCT, in-memory first / last / nth_value (2026-11-26, agent 326)
 
 HANDOFF "Query memory, round 3" has what changed. Plain dist builds (`tools/dist.sh`): **b0**

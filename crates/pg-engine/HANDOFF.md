@@ -15046,6 +15046,80 @@ the loop. (2) The ring's per-block cost: three hash lookups a recycled block (`e
 looks the key up twice and then removes it). One `entry` would do. It is worth about 0.4% on
 scan-bound queries at small caches.
 
+## Query memory, round 4: several windows, sorted set operations, count(DISTINCT) (agent 330)
+
+BENCH.md "Query memory, round 4" has the tables. Plain dist builds: **b0** agent 326's stack
+(`db93e4c33`), **n1** / **n2** this round's code on it (n2: the candidates'). Three commits, each
+its own candidate, stacked in this order: `cand/a330` (windows), `cand/a330-2` (set operations),
+`cand/a330-3` (DISTINCT aggregates, with this section). Rule kept (agents 320 / 326): each
+spilling path is a node or function of its own, chosen when the plan is opened or when the input
+first passes work_mem; the in-memory functions' text is left alone.
+
+**What changed:**
+- **Several windows past work_mem** (`exec/window.rs`): one `WindowNode` computed every window
+  of a query over its whole input (`run_windows`: each window's sort in memory), 429 MB for two
+  windows of different orders over 1M rows. While the input is read it is sized as before
+  (`Big`); once past work_mem, when the calls have several windows, or one whose input isn't
+  sorted on its keys (over an index scan, a join, a subquery), `Big::resolve` says so (`chained`)
+  and `stream_rest` hands the rows read so far and the rest of the input to a `Chain`: the plan
+  PostgreSQL runs, a WindowAgg a window in select_active_windows's order (`active_windows`, the
+  same order `run_windows` computes), each over a Sort on its partition and order keys when its
+  input isn't sorted on them (`nodes::sort_all`, extsort's runs counted as tuplesort's; an
+  Incremental Sort, `nodes::incremental_sort`, when a prefix is), each a `WindowNode` of that
+  window's calls alone, which streams its partitions (`winstream`) where it can. Results are put
+  back in the calls' order. A window with a partition key under a nondeterministic collation
+  stays in memory. `run_windows` and `WindowNode::next` are unchanged (`stream_next` /
+  `stream_rest` are out of line; `Streamed` became an enum).
+- **Sorted INTERSECT / EXCEPT [ALL] past work_mem** (`exec/nodes.rs`): agent 326's
+  `SortedSetOpNode` (both inputs through extsort, merged a group at a time) was +6.7-9.8% on
+  inputs that fit. It now collects the first input sized as its Sort counts it (one tuple in
+  256, tuple + SortTuple) and, while within work_mem, hands the rows to the in-memory operation
+  (`SetOpNode::combine`, the part of `run` after the inputs are collected); past work_mem, when
+  EXPLAIN shows the SetOp sorted (`distinct_order`), it sorts and merges. A hashed SetOp past
+  work_mem is held in memory as before (PostgreSQL's doesn't spill either). Chosen at plan open
+  for INTERSECT / EXCEPT of columns whose equal values are identical.
+- **count / sum / avg (DISTINCT x)** (`exec/agg.rs`, `exec/nodes.rs`): `hash_distinct`'s hash set
+  of every value had no bound. When the plan is opened, a plain aggregation (no GROUP BY) over a
+  table scan whose pg_class.reltuples times a value's sort size (56 bytes) passes work_mem
+  (`agg::sorted_distinct`) gets its `hash_distinct` aggregates' arguments as their ORDER BY (the
+  same aggregate): each then sorts its values as PostgreSQL's per-aggregate tuplesort does
+  (`Buffered::Sort`, runs on disk past work_mem) and feeds one of each run of equal values. `feed`
+  is unchanged; the decision is a catalog lookup at open, only for plans with such an aggregate.
+
+**Measured** (lane C, 1M rows, work_mem 4 MB, peak anon+shmem over the level before, MB, b0 ->
+new (PostgreSQL 18.6)): two windows of different orders 429.0 -> 17.4 (14.5), its 2 temp files
+105,283,584 bytes as PostgreSQL's; two windows, one partitioned, 573.3 -> 19.8 (30.4); EXCEPT,
+enable_hashagg off, 298.3 -> 50.0-64.3 (53.2), 2 files of 55.6 MB (PostgreSQL 3, 50.1);
+count(DISTINCT s), count(DISTINCT a) 242.2 -> 44.1 (14.2), 2 files as PostgreSQL's (49.1 / 62.2
+MB). Every hash, in order and sorted, PostgreSQL's. When the input fits (user instructions, two
+alternating pairs, 3.0-3.8 foreign cores in the perf windows): window -0.01 / -0.07%, two windows
+-0.01 / -0.01%, count(DISTINCT) +0.02 / 0.00%, EXCEPT +0.07 / +0.05%, INTERSECT ALL +0.03 /
++0.03%; TPC-H q01 q13 q16 q18 (the aggregations) within 0.01%, hashes equal. Not gated on a PGO
+build: no hot function's inlining changed on purpose (the new paths are out of line;
+`SetOpNode::run`'s tail moved into `combine`, called once a SetOp). The point select pair wasn't
+run (it opens no changed node).
+
+**Dropped:** the set operation's first switch (n1): `SortedSetOpNode::of` found
+`distinct_order` and, for INTERSECT, `setop_shape` when the plan was opened, on top of the
+in-memory path's own calls: +0.14-0.17% on fitting EXCEPT / INTERSECT ALL (a per-query cost of the
+EXPLAIN model, not per row). n2 finds them where the in-memory path does. Patch of the move:
+`~/.cache/a330/patches/setop-n1-to-n2.diff`.
+
+**Verification:** see "quick-check" below.
+
+**Left** (largest first, MB over PostgreSQL's): sliding window frames (352.5 / 10.2: `winstream`
+streams only frames starting at the partition's start; a sliding frame needs a frame-head pointer
+and the moving aggregate the in-memory path uses, `moving_aggregate`, to keep results equal);
+grouping sets (267.8 / 34.7: input buffered whole); count(DISTINCT) still above PostgreSQL's
+(44.1 / 14.2: each aggregate sorts its own values, where PostgreSQL presorts the input for the
+aggregates sharing an argument and sorts the rest, so `sum(DISTINCT a), avg(DISTINCT a)` write 2
+files to PostgreSQL's 1; a DISTINCT aggregate under GROUP BY, or over anything but a table scan,
+or with reltuples unknown, keeps the hash set; held rows are `Value`s, several times PostgreSQL's
+tuple bytes); the partitioned window chain's temp bytes (121.4 MB in 2 files against PostgreSQL's
+55.2 in 3: its lower Sort holds every input column); a GroupAggregate over a Sort (36.4 / 10.3);
+hashed DISTINCT / UNION (no spill); Recursive Union (7.9 / 3.7); an Incremental Sort's single
+group past work_mem; EXPLAIN ANALYZE of the spilling nodes (it runs the in-memory paths).
+
 ## Query memory, round 3: nested loop inner sides, Incremental Sort, sorted DISTINCT, in-memory first / last / nth_value (agent 326)
 
 BENCH.md "Query memory, round 3" has the tables. Plain dist builds (`tools/dist.sh`): **b0**
