@@ -38,6 +38,9 @@
 //!   characters and charged as an item
 //!   ([`charge_work`]); a `text_similarity_reranker` within `max_rerank_window`, charged one
 //!   item per [`RERANK_DOCS_PER_ITEM`] documents.
+//! - **Events** (`limits.events`): `search_click` and `roll_conversion` events about the
+//!   indices and search applications the key reaches, at most [`MAX_EVENT_BYTES`]; counted for
+//!   the key's own identity (`crate::xpack::entsearch::experiments`), never stored.
 //! - **Items**: an `_msearch`'s searches and an `_mget`'s documents, as the engine parsed them,
 //!   are charged to the key's rate limits before they run ([`charge_items`]); more than
 //!   `max_items` is a 429.
@@ -72,6 +75,8 @@ pub const RERANK_DOCS_PER_ITEM: i64 = 10;
 const APIS: &[&str] = &[
     "search", "msearch", "count", "get", "get_source", "exists", "exists_source", "mget", "terms_enum",
     "search_application.search", "info", "ping", "security.authenticate",
+    // A page's clicks and conversions, with `limits.events` (refused by the handler otherwise).
+    "search_application.post_behavioral_analytics_event",
 ];
 
 /// The end customer a derived key's request is for ([`super::derived`]): its user and the rate
@@ -127,7 +132,13 @@ pub struct Policy {
     pub inference_endpoints: Vec<String>,
     pub allow_scripts: bool,
     pub allow_expensive_queries: bool,
+    /// It may post `search_click` and `roll_conversion` events about what it reaches
+    /// (`limits.events`): counted, never stored.
+    pub events: bool,
 }
+
+/// The largest analytics event a browser key may post.
+pub const MAX_EVENT_BYTES: usize = 4 * 1024;
 
 impl Default for Policy {
     fn default() -> Policy {
@@ -140,6 +151,7 @@ impl Default for Policy {
             inference_endpoints: Vec::new(),
             allow_scripts: false,
             allow_expensive_queries: false,
+            events: false,
         }
     }
 }
@@ -178,6 +190,7 @@ impl Policy {
             inference_endpoints: l.and_then(|l| l.get("inference_endpoints")).and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).map(str::to_owned).collect()).unwrap_or_default(),
             allow_scripts: b("allow_scripts"),
             allow_expensive_queries: b("allow_expensive_queries"),
+            events: b("events"),
         }
     }
 
