@@ -2,9 +2,9 @@
 //! certificates"): the ACME client is the edge's (`roll_edge::acme::order`, dns-01 through
 //! `roll_edge::acme::Cloudflare` or `roll_edge::acme::Route53`), talking to the CA through a
 //! guarded client: public addresses only (`roll_net::PublicOnly`, the literal-host check), no
-//! redirects, no proxy, a timeout and a bounded read. Route 53 is always its fixed public endpoint,
-//! through `PublicOnly` with no redirects. A deployment that allows private addresses (`ROLL_CODE_WEBHOOK_ALLOW_PRIVATE`,
-//! local development) reaches them, and `ROLL_SECRETS_ACME_CA_FILE` adds a root for a test CA's
+//! redirects, no proxy, a timeout and a bounded read. Route 53 is always its fixed public
+//! endpoint, through `PublicOnly` with no redirects. A deployment that allows private addresses
+//! (`ROLL_CODE_WEBHOOK_ALLOW_PRIVATE`, local development) reaches them, and `ROLL_SECRETS_ACME_CA_FILE` adds a root for a test CA's
 //! own HTTPS (Pebble's).
 
 use axum::http::{Request, Response};
