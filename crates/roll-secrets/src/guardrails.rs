@@ -44,6 +44,9 @@ pub struct Guardrails {
     /// The longest a roll-access token with a secrets rule may live, in days (1–3650).
     #[serde(default)]
     pub max_token_days: Option<u32>,
+    /// No project lets a push past its pre-receive hooks (`breakglass` stays empty).
+    #[serde(default)]
+    pub no_breakglass: bool,
 }
 
 /// `GET`/`PUT /v1/secrets/policy`'s answer.
@@ -112,6 +115,15 @@ impl Guardrails {
         Ok(())
     }
 
+    /// A project's `breakglass` list naming anyone, or a push asking to break glass: refused under
+    /// `no_breakglass`.
+    pub(crate) fn breakglass(&self) -> Result<()> {
+        if self.no_breakglass {
+            return Err(below("no project lets a push past its pre-receive hook (no_breakglass)"));
+        }
+        Ok(())
+    }
+
     /// A new sync of `kind` (made through roll secrets); `stored_cloud_key`: what it should use
     /// instead of the cloud key it would store, if it would.
     pub(crate) fn sync(&self, kind: &str, stored_cloud_key: Option<&str>) -> Result<()> {
@@ -157,6 +169,9 @@ impl Guardrails {
         }
         if let Some(d) = self.max_token_days {
             floors.push(format!("tokens at most {d} days"));
+        }
+        if self.no_breakglass {
+            floors.push("no break glass".into());
         }
         if floors.is_empty() { "roll secrets' policy: no floors".into() } else { format!("roll secrets' policy: {}", floors.join("; ")) }
     }

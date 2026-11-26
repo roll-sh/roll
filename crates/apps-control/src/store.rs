@@ -335,6 +335,13 @@ CREATE TABLE IF NOT EXISTS status_incidents (
     updates TEXT NOT NULL
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS status_incidents_project ON status_incidents (project, started_at);
+CREATE TABLE IF NOT EXISTS volume_hours (
+    service TEXT NOT NULL,
+    env TEXT NOT NULL,
+    hour INTEGER NOT NULL,
+    bytes INTEGER NOT NULL,
+    PRIMARY KEY (service, env, hour)
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS status_days (
     key TEXT NOT NULL,
     day INTEGER NOT NULL,
@@ -1387,7 +1394,7 @@ impl Store {
             c.execute("DELETE FROM deploy_overrides WHERE deployment IN (SELECT id FROM deployments WHERE service = ?)", [id])?;
             c.execute("DELETE FROM state WHERE key LIKE ?", [format!("%:{id}/%")])?;
             c.execute("DELETE FROM status_days WHERE key LIKE ?", [format!("%:{id}/%")])?;
-            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "variable_runtime_only", "visit_tickets", "visit_sessions", "variable_files", "error_groups", "variables", "links", "domains", "preview_hosts", "runs", "jobs", "metrics", "usage", "form_submissions", "deploy_scans", "env_data", "env_branches", "udp_ports", "env_unscheduled", "sandboxes", "env_peering"] {
+            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "variable_runtime_only", "visit_tickets", "visit_sessions", "variable_files", "error_groups", "variables", "links", "domains", "preview_hosts", "runs", "jobs", "metrics", "usage", "form_submissions", "deploy_scans", "env_data", "env_branches", "udp_ports", "env_unscheduled", "sandboxes", "env_peering", "volume_hours"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ?"), [id])?;
             }
             match c.execute("DELETE FROM services WHERE id = ?", [id])? {
@@ -3861,6 +3868,19 @@ impl Store {
 
     /// An environment's hourly rollups since `since_hour`, as rows whose `minute` is the hour's
     /// first.
+    /// A volume's measured size this hour (one a service's owner takes hourly), and those past
+    /// 90 days dropped.
+    pub fn put_volume_hour(&self, service: &str, env: &str, hour: i64, bytes: u64) -> Result<()> {
+        self.db.execute("INSERT INTO volume_hours (service, env, hour, bytes) VALUES (?, ?, ?, ?) ON CONFLICT (service, env, hour) DO UPDATE SET bytes = excluded.bytes", params![service, env, hour, bytes as i64])?;
+        self.db.execute("DELETE FROM volume_hours WHERE service = ? AND env = ? AND hour < ?", params![service, env, hour - 90 * 24])?;
+        Ok(())
+    }
+
+    /// A volume's sizes by the hour since `since_hour`, oldest first.
+    pub fn volume_hours(&self, service: &str, env: &str, since_hour: i64) -> Result<Vec<(i64, u64)>> {
+        Ok(self.db.query("SELECT hour, bytes FROM volume_hours WHERE service = ? AND env = ? AND hour >= ? ORDER BY hour", params![service, env, since_hour], |r| Ok((r.get(0)?, r.get::<_, i64>(1)? as u64)))?)
+    }
+
     pub fn hours(&self, service: &str, env: &str, since_hour: i64) -> Result<Vec<MinuteRow>> {
         Ok(self.db.query(
             "SELECT hour, requests, errors, p50_ms, p95_ms, p99_ms, cpu, memory_bytes, instances, cold_starts, cold_start_ms, egress_bytes, over_capacity FROM metrics_hourly WHERE service = ? AND env = ? AND hour >= ? ORDER BY hour",

@@ -257,6 +257,28 @@ resource "roll_search_snapshot_repository" "backups" {
   credentials = { access_key = var.aws_key_id, secret_key = var.aws_secret }
 }
 
+# Relevance as code: an index's synonym filter names the set (`synonyms_set = "products"`), and a
+# `rule` query or retriever names the ruleset.
+resource "roll_search_synonyms_set" "products" {
+  cluster = roll_search_cluster.shop.id
+  name    = "products"
+  rules = [
+    { id = "tv", synonyms = "tv, television" },
+    { id = "ipod", synonyms = "ipod => ipod, i-pod" },
+  ]
+}
+
+resource "roll_search_query_ruleset" "promos" {
+  cluster = roll_search_cluster.shop.id
+  name    = "promos"
+  rules = jsonencode([{
+    rule_id  = "sale"
+    type     = "pinned"
+    criteria = [{ type = "exact", metadata = "query", values = ["sale"] }]
+    actions  = { ids = ["sku-1", "sku-2"] }
+  }])
+}
+
 data "roll_search_cluster" "logs" {
   name = "logs"                  # or id = "srch_…": .endpoint, .flavor, .version
 }

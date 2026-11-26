@@ -826,6 +826,10 @@ type Metrics = {
     instance: string; deployment: string;
     minutes: number[]; cpu: number[] /* cores, average over the minute */; memory_bytes: number[] /* the minute's peak */;
   }[];
+  volume?: {                 // a service with a volume: its size by the hour (measured hourly on its owner, 90 days kept)
+    size_gb: number; points: { hour: number /* hours since 1970 */; bytes: number }[];
+    full_in_days: number | null /* at its last week's pace (a least-squares line; a day of points at least), null while it isn't growing */;
+  };
 };
 
 type Usage = {

@@ -242,6 +242,10 @@ impl Secrets {
             let detail = "roll secrets' policy keeps leaks.rotate managed; it's off, so a leaked managed key isn't rotated".to_string();
             out.push(Finding { issue: Issue::OffPolicy, environment: String::new(), path: "/".into(), key: String::new(), detail, owner: None, decoy: None });
         }
+        if floors.no_breakglass && caller.allows(Action::Read, &Scope::whole(project)) && !self.breakglass(project)?.is_empty() {
+            let detail = "roll secrets' policy allows no break glass; this project's breakglass list names someone (it's refused at the hook either way)".to_string();
+            out.push(Finding { issue: Issue::OffPolicy, environment: String::new(), path: "/".into(), key: String::new(), detail, owner: None, decoy: None });
+        }
         let mut have: HashSet<(String, String, String)> = HashSet::new();
         for (env_id, path, key, fp, link, refs, updated_at, expires_at, weak, public) in &rows {
             let Some(e) = slug.get(env_id.as_str()) else { continue };

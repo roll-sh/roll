@@ -96,6 +96,21 @@ export function deployMarks(deploys: Deployment[], minutes: number[], size: numb
   return marks.sort((a, b) => a.at - b.at);
 }
 
+/** The volume's hourly sizes on the charts' minutes (each minute the last size measured by
+ *  then), its size as the ceiling, and when it'd be full at its last week's pace. */
+export function volumeChart(minutes: number[], v: NonNullable<MetricsData["volume"]>) {
+  let at = 0;
+  let last = 0;
+  const values = minutes.map((m) => {
+    while (at < v.points.length && v.points[at]!.hour * 60 <= m) last = v.points[at++]!.bytes;
+    return last;
+  });
+  const size = v.size_gb * 1024 ** 3;
+  const used = v.points[v.points.length - 1]!.bytes;
+  const full = v.full_in_days === null ? "" : v.full_in_days < 1 ? "; full within a day at this pace" : `; full in about ${Math.round(v.full_in_days)} days at this pace`;
+  return { title: "Volume", agg: "peak" as Agg, series: [{ label: "used", values, color: "var(--soft)" }], format: (b: number) => formatBytes(b), summary: `${formatBytes(used)} of ${v.size_gb} GB${full}`, limit: size };
+}
+
 function Chart({
   title,
   minutes,
@@ -827,6 +842,7 @@ export function MetricsTab({
       },
       { title: `Cold starts / ${per}`, agg: "total" as Agg, series: [{ label: "cold starts", values: m.cold_starts, color: ink }], format: count, summary: `${sum(m.cold_starts)} in the ${range.label}` },
       { title: "Cold start time", agg: "peak" as Agg, series: [{ label: "cold start", values: m.cold_start_ms, color: ink }], format: formatMs, summary: `slowest ${formatMs(peak(m.cold_start_ms))}` },
+      ...(m.volume?.points.length ? [volumeChart(m.minutes, m.volume)] : []),
     ];
   }, [m, range, per, memoryMb, maxInstances, latencyTarget]);
 
