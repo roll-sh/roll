@@ -1572,6 +1572,41 @@ async fn masked_postgres_is_masked_before_it_serves_and_new_rules_reach_it() {
     assert_eq!(e.engine.store.row(&p.id).unwrap().state, State::Ready);
 }
 
+/// Masked branches come from one masked base per parent and rules (Neon's anonymized branches):
+/// the base is masked once and each preview branches from it, masked as it is; new rules make a
+/// new base, and the old one goes once no branch comes from it.
+#[tokio::test]
+async fn masked_branches_come_from_one_masked_base() {
+    let e = env_with_config(json!({ "enabled": true, "masking": { "postgres:prj_db": { "public.users.email": "email" } } }), |c| c.mask_base_for = std::time::Duration::from_secs(86_400));
+    let masked = || e.pg.masks.lock().iter().map(|(b, _)| b.clone()).collect::<Vec<_>>();
+    e.code.open(change("chg_mb1", 1));
+    e.engine.pass().await.unwrap();
+    let first = masked();
+    assert!(first.len() == 1 && first[0].starts_with("prj_db~pvbase-"), "the base is masked, not the preview's branch: {first:?}");
+    let base = first[0].clone();
+    e.code.open(change("chg_mb2", 2));
+    e.engine.pass().await.unwrap();
+    assert_eq!(masked(), first, "a second preview masks nothing: it branches from the base");
+    let from_base = |e: &Env| e.pg.from.lock().iter().filter(|(c, of)| **of == base && e.pg.branches.lock().contains(*c)).count();
+    assert!(from_base(&e) >= 2, "both previews' branches come from it");
+    for id in ["chg_mb1", "chg_mb2"] {
+        let p = e.engine.store.row_by_change(id).unwrap().unwrap();
+        assert_eq!(e.engine.store.mask_digest(&p.id, Kind::Postgres, "prj_db").unwrap().filter(|d| !d.is_empty()).is_some(), true, "each recorded as masked by the rules");
+    }
+    // New rules: a new base, and the previews branch from it; the old base goes with its last branch.
+    let mut s = e.engine.store.settings(&e.project).unwrap();
+    s.masking.insert("postgres:prj_db".into(), [("public.users.name".to_string(), "redact".to_string())].into_iter().collect());
+    e.engine.store.put_settings(&e.project, &s).unwrap();
+    for r in e.engine.store.rows(Some(&e.project)).unwrap() {
+        e.engine.store.update(&r.id, |x| x.next_at = 0).unwrap();
+    }
+    e.engine.pass().await.unwrap();
+    e.engine.pass().await.unwrap();
+    let now = masked();
+    assert!(now.len() >= 2 && now.iter().filter(|b| b.starts_with("prj_db~pvbase-")).count() >= 2, "a base for the new rules: {now:?}");
+    assert!(!e.pg.branches.lock().contains(&base), "the old base is deleted once nothing comes from it");
+}
+
 /// A restore point: the data saved (Postgres's and Redis's, the products that put a branch back
 /// in place), put back without seeding again, Redis's part gone once a reset makes it a new
 /// database, the point gone when the masking rules change, and with the preview.

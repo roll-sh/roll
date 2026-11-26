@@ -1092,6 +1092,23 @@ thirty-fourth review found them in the clear.
     another table and nothing fires outward. Then each masked table's `VACUUM (FULL, ANALYZE)`
     (maintenance runs as the table's owner with a safe `search_path`), every materialized view
     refreshed (as its owner), and a checkpoint.
+    - **Masked once, branched many** (Neon's anonymized branches): a masked Postgres branch comes
+      from its parent's masked base, a branch of the parent masked once by the rules (the rewrite
+      and `VACUUM (FULL)` above, once), which each preview's branch then branches copy-on-write,
+      masked as it is. One masked copy per parent and rules, not one per preview and reset, and
+      the data step skips the rewrite. The base serves new branches for a day
+      (`ROLL_PREVIEWS_MASK_BASE_HOURS`, 24, a week at most; 0 masks each branch's own copy),
+      then the next one is made from the parent as it is then, so a preview's data is at most
+      that old. New rules make a new base. One is made by one converge at a time (a claim, its
+      branch found again by name after a crash); a branch that finds one being made waits for it
+      (2 minutes at most), and one that can't have it masks its own copy as before. An old base (other rules, past its day, or one
+      no project's rules want) is deleted once no branch comes from it (after a branch's
+      deletion, and every 10 minutes on the leader); the base for the rules now stays a day for
+      the next preview. Within one base the same input masks to the same output across its
+      previews. Data as of a time (`data_at`) and structure-only branches don't use it. A
+      branch's schema changes are still read against the parent, past its base
+      (`engine.rs::masked_branches_come_from_one_masked_base`; live: the preview's activity says
+      it branched from it, still masked, and no older base outlives its branches).
     - A masked branch is never rewritten once the preview's code has run in it: a reset, or rules
       that change, branch it again (a new endpoint, masked before any service is pointed at it).
       So nothing still connected reads the unmasked rows, and nothing the preview's code left in
@@ -2940,32 +2957,27 @@ requests, Vercel's toolbar and per-push URLs, Jam's replays. Its fixes landed wi
 preview up` refuses an untracked file named like a secret, and the stale lines it found (frozen
 services' stop, which products' restore points save, the CLI's commands).
 
-1. **A visual change can be refused, in review** (Chromatic's Deny, Percy's Request changes,
-   Argos's Reject): `refused` holds the status, failing, with why, until a new head or an
-   accept.
-2. **Mask once, branch many** (Neon's anonymized branches; M): every preview branch and reset
-   rewrites each masked table and then `VACUUM (FULL)`s it, so a masked table is a full copy per
-   preview and minutes of the data step. A masked base per parent, masked again when the rules
-   or a schedule say, which previews branch copy-on-write.
-3. **More stories per run** (Chromatic has no per-build cap; L): runs sharded over several
+1. **Mask once, branch many, in review** (Neon's anonymized branches): a masked base per parent
+   and rules, made again daily, which previews branch copy-on-write.
+2. **More stories per run** (Chromatic has no per-build cap; L): runs sharded over several
    screenshot containers past 40 stories, each change's touched ones first.
-4. **A migration rehearsed on today's production** (PlanetScale's deploy requests; M): before
+3. **A migration rehearsed on today's production** (PlanetScale's deploy requests; M): before
    landing (or asked), branch fresh, run the release again and compare; open previews whose
    schema changes touch the same table are named on each other.
-5. **The feedback button for team-access visitors on roll apps previews** (S, with roll apps:
+4. **The feedback button for team-access visitors on roll apps previews** (S, with roll apps:
    `apps-control/src/public.rs` adds it for link and share visitors only).
-6. **This page on main, from the toolbar** (Vercel's deployment switcher; S): main's preview
+5. **This page on main, from the toolbar** (Vercel's deployment switcher; S): main's preview
    exists (`github.baseline`); the toolbar opens the same path there.
-7. **Older pushes past the last three, started on demand** (Vercel keeps every deployment's URL;
+6. **Older pushes past the last three, started on demand** (Vercel keeps every deployment's URL;
    S–M): kept as code only, on the preview's own data, started at the first visit.
-8. **What a note's reviewer saw, from their own browser** (Jam, Marker.io; M): an opt-in
+7. **What a note's reviewer saw, from their own browser** (Jam, Marker.io; M): an opt-in
    capture, labelled as theirs, and mentions of the team's members.
-9. **Restore points for search and buckets**: search's once roll search's `reset {from}` is in
+8. **Restore points for search and buckets**: search's once roll search's `reset {from}` is in
     (its Next 32); buckets need a put-back on roll storage's side.
-10. **Previews for the members thread's next products**: once roll apps' and roll search's routes
+9. **Previews for the members thread's next products**: once roll apps' and roll search's routes
     become member routes (docs/members.md, v1.1), a preview's roll apps services and search branch
     follow the same roles, checked live against a member's session.
-11. **Watches on pg-control**: the data step's Postgres compute start (most of the data step is
+10. **Watches on pg-control**: the data step's Postgres compute start (most of the data step is
     it and its masking); cheap branches on ext4 through overlay volumes over a frozen base
     (measured 2026-11-17: 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole
     table file); recovery to a time seconds old (unowned).
@@ -2974,8 +2986,8 @@ Not to build: more lab checks on the first page (the sheet has a dozen; each add
 pull request for less than the items above).
 
 Landed 2026-11-26, midday: restore points for streams (#1112), the TurboSnap test's race under
-load (#1114), the tenth review's fixes (#1119), and the visual review holding on stories a change
-touched that its run didn't take (#1120).
+load (#1114), the tenth review's fixes (#1119), the visual review holding on stories a change
+touched that its run didn't take (#1120), and a visual change refused (#1125).
 
 Landed 2026-11-26, morning: stories' interaction tests (#1087), what a failed one threw (#1091), both in the other browsers (#1100), the step a failed one stopped at (#1105), and restore points for Redis (#1109).
 
