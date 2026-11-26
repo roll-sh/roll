@@ -182,7 +182,11 @@ Reproduce the YAML numbers with `scripts/search-yaml-suites.sh roll` (set `ROLL_
   actions, a by-query `refresh=true` refused after its writes, a plain `Unauthorized` 401.
   Document and field level security and masked fields (BLAKE2b with
   `plugins.security.compliance.salt`, `::/regex/::replacement` and `::SHA-256`/`::SHA-512`
-  rules; the union over roles) by `os_security_dls.json` (16 steps). Differences: a DLS query
+  rules; the union over roles) by `os_security_dls.json` (16 steps). Where they restrict an
+  index, an update is refused (500 `security_exception` "Update is not supported when FLS or
+  DLS or Fieldmasking is activated"; in `_bulk`, every item of the shard request holding the
+  update), and an update by query writes back only what the user reads, as Elasticsearch's
+  does. Differences: a DLS query
   filters without adding OpenSearch's +1.0 to scores; masked fields are unmapped for queries
   and aggregations (OpenSearch aggregates and matches their hashes); mappings by `hosts` never
   match (roll doesn't see the client's address); `hash`es given by clients are bcrypt (as the
@@ -1136,7 +1140,17 @@ Checked against Elasticsearch 9.5.5 (captures in
   index), then its source searched as the caller (wildcards narrowed to what it may read, its
   document and field level security applied, so only what it sees is copied) and each write
   authorized as a bulk item at the index it goes to (a script's `_index` and `ctx.op = 'delete'`
-  too); a remote source is read with its own credentials. A
+  too); a remote source is read with its own credentials. An update reads the whole document
+  and writes it back, so where the caller's document or field level security restricts the
+  index, `_update` (an upsert too) answers 400 `security_exception` "Can't execute an update
+  request if field or document level security is enabled" and a bulk update item fails the
+  same way ("… a bulk item request with update requests embedded …", the error repeated as
+  `suppressed`, as Elasticsearch prints it), the request's other items unaffected. An update by
+  query reads as the caller, as Elasticsearch's scroll does: only the documents it sees, their
+  `_source` without the fields it can't see, and it writes them back so: those fields are
+  dropped from the documents (a script reading one gets `null`). Difference: Elasticsearch
+  refreshes a by-query `refresh=true` as the caller (403 without `maintenance`); roll refreshes
+  it as the cluster. A
   stored result (async search, ES|QL, EQL, SQL, and SQL cursors) is its opener's (the API key, or
   the user and realm): anyone else gets 404 for it, its status and its delete (a cursor: unknown),
   except that `cancel_task` may delete it. One stored before owners were recorded is the
@@ -1729,8 +1743,20 @@ taken over by roll's crawler. Where roll's differs ([crawler.md](crawler.md)):
 - **Extraction rules** are Open Crawler's rulesets; `html` selectors are CSS Selectors Level 3
   without `:has()`, states, pseudo-elements or escapes (each refused at validation), and a rule's
   text is gathered as the body's is, not Jsoup's `text()`.
-- **Not yet**: XPath selectors, incremental crawls
-  (an incremental job fails), binary content extraction (only `text/html` and
+- **Conditional requests and incremental crawls** are roll's: Open Crawler has neither. Each
+  document keeps its page's `ETag` and `Last-Modified` (`http_etag`, `http_last_modified`), the
+  link depth it was found at (`crawl_depth`) and a digest of the extraction configuration it was
+  made with (`crawl_fingerprint`), and every crawl asks for the page again with `If-None-Match` and
+  `If-Modified-Since` while the digest matches (a configuration change reads every page in full). A 304 leaves the document as it was (its
+  `last_crawled_at` is when it was last read) and counts as seen (`metadata.not_modified_count`);
+  the purge's re-check asks the same way and follows the links of a page that changed. An
+  `incremental` job crawls the same way and deletes nothing.
+- **The docs preset** (`preset: docs`) is roll's too, after Algolia DocSearch and Meilisearch's
+  docs-scraper: one record per section (`hierarchy.lvl0` to `lvl6`, `content`, `url` with the
+  heading's `#anchor`, `url_without_anchor`, `type`, `weight`), from CSS selectors on the page,
+  with its own mappings and a stored search template (`<index>-docs-search`). DocSearch also makes
+  a record per paragraph; roll makes one per section.
+- **Not yet**: XPath selectors, binary content extraction (only `text/html` and
   `application/xhtml+xml` are indexed), `data-elastic-name` and `meta.elastic` beyond 100 fields a
   page, and `full_html` is the page as served, not Jsoup's re-serialisation. Pages are decoded as
   UTF-8 (a page in another charset reads with replacement characters).

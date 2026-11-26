@@ -31,6 +31,9 @@ pub struct ProjectFile {
     pub databases: BTreeMap<String, DbEntry>,
 }
 
+/// The build settings a project file's app may set (`[apps.<name>.build]`).
+pub const BUILD_KEYS: [&str; 5] = ["dockerfile", "target", "install", "build", "start"];
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AppEntry {
@@ -61,6 +64,10 @@ pub struct AppEntry {
     /// Any other run setting, as `[app.run]` takes it (checked by the API).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run: Option<toml::Table>,
+    /// How it builds (Fly's `[build]`): [`BUILD_KEYS`] (`dockerfile`, `target` a stage of it,
+    /// `install`, `build`, `start`), as a service's `build` takes them (checked by the API).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build: Option<toml::Table>,
     /// Databases below, by name: their connection variables go in.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub links: Vec<String>,
@@ -171,6 +178,9 @@ pub fn parse_project(text: &str) -> Result<ProjectFile, ProjectError> {
         }
         ensure(a.branch.is_none() || a.repo.is_some() || a.git.is_some(), || format!("app {n}: branch is for a repo or git"))?;
         ensure(a.kind.as_deref().is_none_or(|k| ["web", "worker", "cron"].contains(&k)), || format!("app {n}: type is web, worker or cron"))?;
+        let bad = a.build.iter().flat_map(|b| b.keys()).find(|k| !BUILD_KEYS.contains(&k.as_str())).cloned();
+        ensure(bad.is_none(), || format!("app {n}: build.{} isn't a file's build setting ({})", bad.clone().unwrap_or_default(), BUILD_KEYS.join(", ")))?;
+        ensure(a.build.is_none() || a.image.is_none(), || format!("app {n}: an image is already built: build is for a root, repo or git"))?;
         // A database, or another app (Render's `fromService`: its private and public URLs).
         for l in &a.links {
             ensure(l != n, || format!("app {n} links itself"))?;
@@ -392,6 +402,15 @@ pub fn compose_to_toml(text: &str) -> Result<(String, Vec<String>), ProjectError
                 let ctx = str_of(b).or_else(|| b.get("context").and_then(str_of)).unwrap_or_else(|| ".".into());
                 let ctx = ctx.trim_start_matches("./").trim_end_matches('/');
                 out.push_str(&format!("root = {}\n", q(if ctx.is_empty() { "." } else { ctx })));
+                // Its Dockerfile and stage: a multi-stage Dockerfile.prod built whole is the wrong image.
+                let (file, target) = (b.get("dockerfile").and_then(str_of), b.get("target").and_then(str_of));
+                if file.is_some() || target.is_some() {
+                    let parts: Vec<String> = [file.map(|f| format!("dockerfile = {}", q(&f))), target.map(|t| format!("target = {}", q(&t)))].into_iter().flatten().collect();
+                    out.push_str(&format!("build = {{ {} }}\n", parts.join(", ")));
+                }
+                if b.get("args").is_some() {
+                    notes.push(format!("{k}: its build args aren't carried: set them as the service's variables (a build gets them)"));
+                }
             }
             (None, Some(img)) => out.push_str(&format!("image = {}\n", q(&img))),
             (None, None) => return Err(err(format!("service {k} has neither image nor build"))),
@@ -484,6 +503,11 @@ mod tests {
         assert!(notes.iter().any(|n| n.starts_with("web: not carried over: volumes")), "{notes:?}");
         assert!(!web.variables.contains_key("DATABASE_URL") && notes.iter().any(|n| n.contains("DATABASE_URL left out")), "the link sets it: {notes:?}");
         assert!(compose_to_toml("services:\n  web_1:\n    image: a\n  web-1:\n    image: b\n").is_err(), "two services, one name");
+        // A build's Dockerfile and stage are carried.
+        let (text, _) = compose_to_toml("services:\n  api:\n    build:\n      context: ./api\n      dockerfile: Dockerfile.prod\n      target: runtime\n").unwrap();
+        let b = parse_project(&text).unwrap_or_else(|e| panic!("{e}\n{text}")).apps["api"].build.clone().unwrap_or_default();
+        assert_eq!((b["dockerfile"].as_str(), b["target"].as_str()), (Some("Dockerfile.prod"), Some("runtime")), "{text}");
+        assert!(parse_project("[apps.web]\nroot = \".\"\nbuild = { cache = true }\n").is_err(), "a key a file can't set");
         // A few KB that aliases make gigabytes stops at the budget, before anything is built.
         let bomb = format!("x: &a [{}]\ny: [{}]\nservices: {{}}\n", vec!["1"; 2000].join(","), vec!["*a"; 2000].join(","));
         let e = compose_to_toml(&bomb).unwrap_err().to_string();

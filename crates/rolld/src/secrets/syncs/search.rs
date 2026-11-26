@@ -312,6 +312,22 @@ struct SecretRef {
     key: String,
 }
 
+/// `v` without `secret`: every string holding it has it replaced, and a `service_settings.api_key`
+/// anywhere is dropped (Elasticsearch never answers one, but a provider's error may quote it).
+fn redact(v: &mut Json, secret: &str) {
+    match v {
+        Json::String(s) if !secret.is_empty() && s.contains(secret) => *s = s.replace(secret, "[redacted]"),
+        Json::Array(a) => a.iter_mut().for_each(|x| redact(x, secret)),
+        Json::Object(m) => {
+            if let Some(Json::Object(settings)) = m.get_mut("service_settings") {
+                settings.remove("api_key");
+            }
+            m.values_mut().for_each(|x| redact(x, secret));
+        }
+        _ => {}
+    }
+}
+
 fn bad(m: impl Into<String>) -> Error {
     Error::BadRequest(m.into())
 }
@@ -351,14 +367,17 @@ async fn create(State(x): State<Ctx>, Path(id): Path<String>, parts: Parts, body
             return Err(bad(format!("{} is empty in {}:{path}", s.key, s.environment)));
         }
         settings.insert("api_key".into(), json!(value.expose()));
-        drop(value);
         let es_path = match &n.task_type {
             Some(t) => format!("/_inference/{}/{}", seg(t), seg(&n.inference_id)),
             None => format!("/_inference/{}", seg(&n.inference_id)),
         };
-        let (status, made) = es(&x.api, &cluster, "PUT", &es_path, Some(Json::Object(config)))?;
+        let (status, mut made) = es(&x.api, &cluster, "PUT", &es_path, Some(Json::Object(config)))?;
+        // Never the key in the answer, whatever the cluster or the provider quotes back: so the
+        // route answers no credential (an agent's tool may call it) and the value stays in roll
+        // secrets.
+        redact(&mut made, value.expose());
+        drop(value);
         if !(200..300).contains(&status) {
-            // The cluster's own answer: the caller may reveal the key it might quote.
             let status = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
             return Ok((status, Answer(made)).into_response());
         }
@@ -382,4 +401,17 @@ async fn create(State(x): State<Ctx>, Path(id): Path<String>, parts: Parts, body
         Ok((StatusCode::CREATED, Answer(json!({ "endpoint": made, "binding": binding(&project, &made_sync) }))).into_response())
     })
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_answer_never_holds_the_key() {
+        let mut v = json!({ "error": { "reason": "upstream said: invalid key sk-live-123 for model", "caused_by": [{ "reason": "sk-live-123" }] }, "service_settings": { "api_key": "sk-live-123", "model_id": "m" } });
+        redact(&mut v, "sk-live-123");
+        assert!(!v.to_string().contains("sk-live-123") && v["service_settings"]["model_id"] == "m", "{v}");
+        assert_eq!(v["error"]["reason"], "upstream said: invalid key [redacted] for model");
+    }
 }

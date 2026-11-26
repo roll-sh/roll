@@ -102,7 +102,11 @@ that use them.
 With every product on, a node lists about 500 tools (~56k tokens), past VS Code's
 and Cursor's limits. `/v1/mcp?tools=search` (or `X-MCP-Tools: search`) lists the access tools, `roll_find`
 (a resource by name or link, see [Finding a resource](#finding-a-resource)) and three tools instead, about 2k tokens whatever runs (the three are ~500, `roll_find` ~150). This is the pattern of Cloudflare's code mode and
-GitHub's dynamic toolsets, applied to a stateless server:
+GitHub's dynamic toolsets, applied to a stateless server. Beside them it lists the tools this token
+ran in the last two weeks (the 12 it ran most, from the audit log; each only if it may still use
+it), so an agent's everyday calls take no search first, as Atlassian's Rovo server lists its
+"primary" tools, but from what this token does rather than a fixed list. The operator's own
+connection has no grant, so it lists none:
 
 | Tool | What it does |
 | --- | --- |
@@ -146,6 +150,22 @@ widens: each call is still decided by the token's rules. It's on when the query 
 anything but `1`, `true`, `0` or `false`, or the key spelled another way (`read_only`), is a 400,
 so a typo never means "not read-only". The connect panel has a checkbox
 for it, and it goes with toolsets (`?toolsets=postgres&readonly=1`).
+
+### Metadata only
+
+`/v1/mcp?metadata=1` (or `X-MCP-Metadata: true`) is read-only and leaves out every tool whose answer
+is what customers stored or what their code and visitors wrote (`roll_mcp::tools::DATA`, and roll
+code's `CODE_DATA`): rows, values, objects, documents, messages and payloads, run outputs, logs and
+error samples, pages, mail and pictures of pages, visitors and what they sent or searched, source.
+What's left is plans, schemas, metrics, usage, slow queries and settings, as PlanetScale's
+insights-only server offers: an agent tunes and explains without seeing a customer's data. A call
+to a data tool is an error result that says so, the instructions tell the model, and resources and
+event feeds that hang on a data tool go with it. Query text in `postgres_activity` and the slow
+logs is what the database reports, so a literal in a statement can show there. A test keeps every
+read-only tool whose name reads like data, or that may reveal (a value, a credential), in `DATA` or
+explained (`a_metadata_connection_keeps_data_out`), and rolld's `metadata_mode_names_code_tools_that_exist`
+keeps `CODE_DATA` to the names roll code's tools are fronted by (`search` and `fetch` keep theirs).
+Like read-only, it narrows, never widens, and a typo is a 400.
 
 ### Finding a resource
 
@@ -428,6 +448,10 @@ How it works:
     activity (each line: it quotes the hosts its code tried to reach and a failed build's first
     line). A test makes every previews tool say whether its answer holds a fork's words or why
     not (`every_previews_tool_says_whether_it_holds_a_forks_words`), so a new one decides;
+  - roll code's agent automation runs for an issue someone who can't push opened (a GitHub
+    trigger that takes `anyone`'s): the run's event summary and the issue's title and body. What
+    that run's agent was told is in its thread, which lockdown doesn't reach: a trigger that
+    takes `anyone`'s issues hands their text to its agent by the owner's choice;
   - roll previews' notes and replies from a share link's guests (`by` `guest:…`, in
     `GET /v1/previews/{id}/notes`), and the reviews those notes are on the change (made with an
     outside origin, so roll code's review tools mark them too).
@@ -680,13 +704,17 @@ project, is theirs to make).
   - Approvals are Multi Round-Trip Requests (see Approvals).
   - `subscriptions/listen` (SEP-2575) is an open stream: first
     `notifications/subscriptions/acknowledged` with what roll will send of what was asked
-    (`toolsListChanged`, `promptsListChanged`), then `notifications/tools/list_changed` (and the
-    prompts one) whenever the connection's tools change: an access request approved, a rule
-    remembered, the token edited. Each carries `_meta["io.modelcontextprotocol/subscriptionId"]`.
+    (`toolsListChanged`, `promptsListChanged`, `eventsListChanged`), then
+    `notifications/tools/list_changed` (and the prompts one) whenever the connection's tools
+    change: an access request approved, a rule remembered, the token edited. With
+    `eventsListChanged` (SEP-3415; discovery says `listChanged: true` under the events extension)
+    it also hears `notifications/events/list_changed` when the event types it may poll change with
+    them (a feed is offered while its tool is), and calls `events/list` again. Each carries
+    `_meta["io.modelcontextprotocol/subscriptionId"]`.
     The grant is looked up again every 5 s, never cached; when it stops working, or after an hour,
     the stream answers the listen request (`result: {}`, the graceful end the spec added after
     SEP-2575) and closes, and the client listens again. At most 4 are open at once per token; a
-    listen asking for nothing roll sends is refused (`-32602`). A 2026-07-28 client hears list
+    listen asking for nothing roll sends (resource changes only) is refused (`-32602`). A 2026-07-28 client hears list
     changes only there; an older one hears `list_changed` on the call that approved an access
     request.
     Checked live with the official TypeScript SDK v2 (`live/sdk2/listen.mjs`): its `listChanged`
@@ -723,6 +751,16 @@ project, is theirs to make).
     with roll's approval page to open. A deploy or a job (`apps_get_deploy`, `apps_get_job` and their
     `apps_wait_*` twins) shows too: an object's own fields (status, commit) above its list (the
     steps).
+  - **Charts, and what the view shows told to the model** (as Grafana's server's views do): rows
+    that run over time (a time column, numeric ones, three points or more: metrics, usage,
+    activity by hour) get a chart above the table, up to four series each on its own scale (its
+    range in the legend), the first in the accent. Hovering shows the nearest point; a click holds
+    it and offers "Ask in chat", which sends the person's question as their message
+    (`ui/message`): the tool, the time and the numbers, never a row's text, so nothing a row holds
+    speaks as the person. Each new picture tells the model what the person sees for its next turn
+    (`ui/update-model-context`: rows, column names, each series' range and last value; sent only
+    when it changes). Column names leave the view only as identifiers. A test pins the methods the
+    view may send its host.
   - **Views that refresh themselves:** an answer that's still changing (a deploy building, a job
     or a tasks run running, a preview being made, a call waiting for a person) carries
     `_meta["roll/pending"]`, `{tool, arguments}`: the read that shows it again. A call waits for a
@@ -1506,17 +1544,25 @@ gaps are in how results read and how roll is distributed):
 From a 2026-11-24 gap review (every tool run as an agent would against a fresh rolld with
 `mcp-sweep.py --report`, 1,161 calls, plus probes with scoped tokens):
 
-1. **A review of #1009–#1038 (this PR).** It found two high issues. `Code::outside_at` counted
-   only the newest 100 untrusted changes' current heads, so a fork's earlier revisions, a queue tip
-   built on it, or anything past the cap read in the clear (and `fetch`, since #1038). A fork's
-   changesets are now recorded where they come in (each GitHub import's new commits, an untrusted
-   change's own writes, the queue's tips; old databases backfilled from every revision), and a read
-   is one indexed lookup instead of up to 101 history walks. A fork's commit signatures and a
-   tree's last messages sat in unmarked objects: an outside record's `author`, `committer` and
-   `last_change` are its own now. Also fixed: a compare with a fork's revision as its base, the
-   queue's batch and its checks, commit statuses at a fork's revision, previews' pictures failing
-   closed, five previews writes listed as answering the preview. Sent to roll apps: a preview
-   environment's check screenshot may be a fork's page.
+1. **A review of #1048–#1074 (this PR).** No high issue; fixed: metadata mode missed roll code's
+   `search` and `fetch` (fronted without a prefix) and the event feeds of data tools (`apps.event`
+   still polled), and `tasks_list_runs`, `previews_env` and `previews_connect` answer payloads,
+   values and credentials (now data; the guard also decides every read-only tool that may
+   reveal); search mode's recent tools let roll's own audit labels (`events/poll:…`) take their
+   slots; a listen built event types every 5 s though it never asked; an automation run quoted an
+   outsider's issue title through a writer's `@roll` comment, and an approved fork's pull request
+   through `review.requested` (`from_outside`); the chart's question named columns a stored
+   field could name (now line numbers; the names are in the view's context), drew an empty series
+   as "Infinity", and re-told the model on every refresh (now once it settles). Metadata only
+   landed (#1074).
+   Next from that review, roll MCP's own: SEP-2792 (a request's language) watched with SEP-2643 and SEP-2848. For product
+   threads: failed queries grouped by fingerprint and cost per query tag (PlanetScale; Postgres),
+   restores checked before they take over (Neon; Postgres), what was received but dropped
+   (Sentry's `find_dropped_events`; apps' drains, streams' quotas, search's ingest refusals),
+   Claude as the identity provider for enterprise-managed sign-in (roll-access's
+   `enterprise.rs`). Checked, not a gap: Copilot CLI cuts a call off after 5 minutes of
+   progress, but a call without tasks waits at most a minute for an approval before it answers
+   `approval_pending`.
    Watched, not followed yet (SEP status 2026-11-25): SEP-2643 (structured authorization denials) and SEP-2848
    (asynchronous approval for tool calls), both drafts sent back to the Authorization Interest
    Group on 2026-11-06; roll's refusals (`needs`, `widen`, `request`, the step-up challenge) and
@@ -1543,7 +1589,9 @@ From a 2026-11-24 gap review (every tool run as an agent would against a fresh r
    from roll-workspace's per-project log, #813), and fair shares on one clock (#760). Next as products add a
    readable log after a cursor: storage's notifications are a delivery outbox (rows exist only for
    a configured destination and go once delivered), so a feed needs a per-bucket log in storage
-   first; search's cluster health and previews' notes are their threads' routes to add.
+   first; search's cluster health and previews' notes are their threads' routes to add; roll
+   tasks' runs ("a background job failed") need a run-finished log in tasks' stores (each backend),
+   which no thread owns yet: `GET /v1/tasks/runs` pages newest first and can't be followed.
 6. **`search` and `fetch` (ChatGPT's deep research).** Changes, work items (#745) and files by
    content across repos (#755: each repo on its owner's index, `skipped` said; a killed owner's
    repos come back skipped in time, #758). Next: preview notes once previews has a
@@ -1574,10 +1622,12 @@ From a 2026-11-24 gap review (every tool run as an agent would against a fresh r
    beyond #501's; #627, #629, #596 and #504 add none. Not a tool: making a search browser key
    (#358's create answers the key; `limits.max_body_bytes` has no schema to join), nor rotating a
    derivable one's signing secret (its answer is the secret).
-12. **Suggested to other threads** (from the 2026-11-21 comparison of 11 MCP servers): fetching an
-   app environment's URL through its access gate (Vercel's `web_fetch_vercel_url`; apps, now that
-   apps has an SSO gate coming; previews' is `previews_fetch`, #859), Postgres logs, live metrics and migrations as records (Supabase, Neon, PlanetScale), a
-   read-only ES|QL route (search), log grouping and field values (apps).
+12. **Suggested to other threads** (from the 2026-11-21 comparison of 11 MCP servers; refreshed
+   2026-11-25): Postgres logs, live metrics and migrations as records (Supabase, Neon,
+   PlanetScale); a read-only ES|QL route (search: its engine runs ES|QL, but only the admin
+   console reaches it, so a read token can't); log grouping and field values (apps). Done:
+   fetching an app environment's page through its gate (`apps_fetch`; previews' is
+   `previews_fetch`).
 13. **Later:** an alert's own mail and chat where a person chose (people already get roll's mails for their tokens' decoys and revocations, so the feed is the new part); client ID metadata documents' 5 KB read limit and cache headers (draft -03; roll
    reads 64 KiB and re-fetches hourly) once real clients' documents are measured; the every-row SQL guard: computes run stock Postgres images, which have no
    safe-update setting (no pg-safeupdate), and an event trigger neither fires for `TRUNCATE` nor
@@ -1600,7 +1650,7 @@ From a 2026-11-24 gap review (every tool run as an agent would against a fresh r
    stateless and search mode (`?tools=search`) covers clients that can't take the list; "remember this browser"; a preset that reveals development's values without asking
    (#354); a connection-level `?project=` (only a token's rules bound a project; a default that
    some tools can't honour would look like a boundary).
-14. **Landed 2026-11-23 and 24:** `fetch` uses the fork-revision rule; the guide names `scan` (#1038); every roll code tool says whether it answers an outsider's words; a fork's queue entries and checks withheld (#1035); lockdown withholds roll code reads at a fork's revision (#1030); every previews tool says whether it answers a fork's words; a fork's requests and activity marked (#1026); lockdown withholds a fork preview's caught mail and data branch rows (#1018); lockdown withholds a fork's pictures (`x-roll-outside`), and `previews_note_crop` (#1013); `apps_check_screenshot`, a browser check's failure as an image; a person's session forwarded to another node is decided again by the owner (#1009); fixes from a review of #808's access changes: an index-limited token reaches its cluster, `check` holds a person's token within their session, an `append` key needs `write` (#1003); fixes from a review of #940–#987: `approval` judged on all a call can be, a panicked call isn't an unknown tool, an empty optional choice is left out (#996); `previews_try` names the `choose` step, and search in the sweep's member pass (#987); roll search on members (#808) in the docs and `within_session`'s comment (#984); a public certificate key shared across protection is a person's call: `confirm` left out of two secrets tools (#982); every choice read from its product, and roll-access refuses an unknown approvals state (#978); a test keeps 15 choices' sets their products' own (#973); `secrets_list_saas` names Salesforce, and a test keeps it naming every vendor (#972); an unknown tool is a tool error the model reads, on roll's server and roll code's (SEP-2145, #970); the `approval` argument only on tools whose call can wait for a person, the policy's `agents_ask` included (#968); open-world marks on `apps_plan` and the domain checks, and a test that keeps a tool taking an outside address marked or explained (#965); `secrets_list_saas` names SonarQube and Jenkins (#961); roll search #888 (site verification per cluster, crawl tests) mapped by its thread; `apps_wait_cron_run`, a cron run started now followed to its end; every route that answers 202 has a wait but a secrets environment delete that becomes a change request (#958); the sweep reads back every dashboard link it's answered (#951); the sweep checks choice forms live (15 tools), and a call's cost measured: 3.3 ms over its route and `tools/list` 141 ms for 517 tools in a debug build, 6.5 ms at p50 in release as "Toolsets" records, so nothing is cached (#946); lockdown withholds a fork page's console errors and header values (#944); fixes from a review of #907–#933: lockdown withholds a guest's path and name, `unknown` severity, empty optional choices, choice forms after ids (#940); `secrets_list_requests` pages (`limit`, `before`; roll secrets #927) and its `state` is a choice (#933); a deploy's and a change's answers link to their pages (#931); an answer about one resource links to its dashboard page (`resource_link`, #928); 24 more fixed sets as choices, and a test that keeps values out of prose (#920); a refused member hears the weakest role that may and who changes roles (#914); lockdown withholds guests' notes and the leak prompt says when a report rotates (#917); a missing required choice asked for in a form, as a missing id is (#912); tool arguments with a fixed set as JSON Schema `enum`, checked before the call; three proses were short of their route's set (#910); refusals that say why: search's error objects, token rules' resources, axum's body rejections; a cut answer naming its tool's filters; the sweep's `--report` (#907, from the 2026-11-24 gap review); `workspace.event` (#817); MCP Apps views that refresh themselves (#820); `roll_find`, any resource by name, part of its id or a pasted dashboard link (#821), its page table (#845) and search mode (#849); `ship_from_chat` (#826); review fixes for #814–#826 (#832: lookups held by `agents_ask`, the inspector on `roll_find`, approvals only from the gate); lists answered as tables (#838: 20+ rows about 40% smaller); the ship prompts quote first (#840); `secrets_list_saas`'s eleven vendors (#843); the field test reading named body types, 46 fields mapped or explained (#854), and object arguments naming every key (#862); `previews_fetch` on roll previews #852 (#859); review fixes for #838–#868 (#871); `roll_find` links matches (#864) and reads Postgres and streams links, which now carry their selection (#878); `previews_tables` (#883); a browser step's typed text redacted from the audit (#887); `previews_try` and `previews_try_screenshot`, an agent driving a preview's page (#892); `respond_to_leaked_secret` checks for a rotation roll already started (#891).
+14. **Landed 2026-11-23 and 24:** a metadata-only connection (#1074); a listen stream hears when the event types change (#1070); charts in the table view, a point asked about in the chat, and what the view shows told to the model (#1063); search mode lists the tools a token used lately (#1061); lockdown's instructions name what's withheld (#1053); an automation run for an issue anyone opened is an outsider's words (#1048); fixes from a review of #1009–#1038: a fork's changesets recorded where they enter, nested signatures, compare's base, the queue's batch, statuses (#1042); `fetch` uses the fork-revision rule; the guide names `scan` (#1038); every roll code tool says whether it answers an outsider's words; a fork's queue entries and checks withheld (#1035); lockdown withholds roll code reads at a fork's revision (#1030); every previews tool says whether it answers a fork's words; a fork's requests and activity marked (#1026); lockdown withholds a fork preview's caught mail and data branch rows (#1018); lockdown withholds a fork's pictures (`x-roll-outside`), and `previews_note_crop` (#1013); `apps_check_screenshot`, a browser check's failure as an image; a person's session forwarded to another node is decided again by the owner (#1009); fixes from a review of #808's access changes: an index-limited token reaches its cluster, `check` holds a person's token within their session, an `append` key needs `write` (#1003); fixes from a review of #940–#987: `approval` judged on all a call can be, a panicked call isn't an unknown tool, an empty optional choice is left out (#996); `previews_try` names the `choose` step, and search in the sweep's member pass (#987); roll search on members (#808) in the docs and `within_session`'s comment (#984); a public certificate key shared across protection is a person's call: `confirm` left out of two secrets tools (#982); every choice read from its product, and roll-access refuses an unknown approvals state (#978); a test keeps 15 choices' sets their products' own (#973); `secrets_list_saas` names Salesforce, and a test keeps it naming every vendor (#972); an unknown tool is a tool error the model reads, on roll's server and roll code's (SEP-2145, #970); the `approval` argument only on tools whose call can wait for a person, the policy's `agents_ask` included (#968); open-world marks on `apps_plan` and the domain checks, and a test that keeps a tool taking an outside address marked or explained (#965); `secrets_list_saas` names SonarQube and Jenkins (#961); roll search #888 (site verification per cluster, crawl tests) mapped by its thread; `apps_wait_cron_run`, a cron run started now followed to its end; every route that answers 202 has a wait but a secrets environment delete that becomes a change request (#958); the sweep reads back every dashboard link it's answered (#951); the sweep checks choice forms live (15 tools), and a call's cost measured: 3.3 ms over its route and `tools/list` 141 ms for 517 tools in a debug build, 6.5 ms at p50 in release as "Toolsets" records, so nothing is cached (#946); lockdown withholds a fork page's console errors and header values (#944); fixes from a review of #907–#933: lockdown withholds a guest's path and name, `unknown` severity, empty optional choices, choice forms after ids (#940); `secrets_list_requests` pages (`limit`, `before`; roll secrets #927) and its `state` is a choice (#933); a deploy's and a change's answers link to their pages (#931); an answer about one resource links to its dashboard page (`resource_link`, #928); 24 more fixed sets as choices, and a test that keeps values out of prose (#920); a refused member hears the weakest role that may and who changes roles (#914); lockdown withholds guests' notes and the leak prompt says when a report rotates (#917); a missing required choice asked for in a form, as a missing id is (#912); tool arguments with a fixed set as JSON Schema `enum`, checked before the call; three proses were short of their route's set (#910); refusals that say why: search's error objects, token rules' resources, axum's body rejections; a cut answer naming its tool's filters; the sweep's `--report` (#907, from the 2026-11-24 gap review); `workspace.event` (#817); MCP Apps views that refresh themselves (#820); `roll_find`, any resource by name, part of its id or a pasted dashboard link (#821), its page table (#845) and search mode (#849); `ship_from_chat` (#826); review fixes for #814–#826 (#832: lookups held by `agents_ask`, the inspector on `roll_find`, approvals only from the gate); lists answered as tables (#838: 20+ rows about 40% smaller); the ship prompts quote first (#840); `secrets_list_saas`'s eleven vendors (#843); the field test reading named body types, 46 fields mapped or explained (#854), and object arguments naming every key (#862); `previews_fetch` on roll previews #852 (#859); review fixes for #838–#868 (#871); `roll_find` links matches (#864) and reads Postgres and streams links, which now carry their selection (#878); `previews_tables` (#883); a browser step's typed text redacted from the audit (#887); `previews_try` and `previews_try_screenshot`, an agent driving a preview's page (#892); `respond_to_leaked_secret` checks for a rotation roll already started (#891).
 15. **Landed 2026-11-22 morning:** operator policy for agent connections: `agents_ask` and
    `mcp_lockdown` / `mcp_read_only` (#678), and `oauth_clients`, the OAuth clients that may connect,
    checked at consent, at every token and on every request, nothing revoked (#680). SQL sessions name who sent them (`application_name`: `roll tok_…`, so `postgres_activity` tells

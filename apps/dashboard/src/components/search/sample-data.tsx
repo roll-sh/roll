@@ -3,7 +3,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { esRaw, esReason, formatCount, searchApi, type NewSearchKey, type SearchCluster } from "@/lib/search-api";
 import { bulkFailures } from "@/lib/search-import";
 import { copyAs, KEY_ENV, type SnippetKey } from "@/lib/search-playground";
-import { bulkPages, esqlSnippet, pageLimit, sample, SAMPLES, SNIPPET_LANGUAGES, type SampleDataset, type SampleId, type SampleQuery } from "@/lib/search-samples";
+import { bulkPages, esqlSnippet, pageLimit, sample, samplesFor, SNIPPET_LANGUAGES, type SampleDataset, type SampleId, type SampleQuery } from "@/lib/search-samples";
 import { btn, Panel, primary, SecretField, useCopy } from "../ui";
 import { day } from "./api-keys";
 import { JsonText } from "./json-view";
@@ -44,7 +44,7 @@ export function SampleData({
 }) {
   const [job, setJob] = useState<Job | null>(null);
   const [key, setKey] = useState<MadeKey | null>(null);
-  const [selected, setSelected] = useState<SampleId | null>(() => SAMPLES.find((s) => present.has(s.id))?.id ?? null);
+  const [selected, setSelected] = useState<SampleId | null>(() => samplesFor(cluster.flavor).find((s) => present.has(s.id))?.id ?? null);
   // A load in flight stops when the panel goes (closed, or the page left).
   const alive = useRef(true);
   useEffect(() => {
@@ -123,7 +123,7 @@ export function SampleData({
       }
     >
       <div className="grid gap-3 px-5 py-4 sm:grid-cols-2">
-        {SAMPLES.map((s) => {
+        {samplesFor(cluster.flavor).map((s) => {
           const on = present.has(s.id);
           const mine = job?.id === s.id ? job : null;
           return (

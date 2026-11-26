@@ -247,7 +247,30 @@ fn limit(l: Option<i64>) -> Result<i64> {
 async fn owner_runs(State(code): S, caller: Caller, Path(owner): Path<String>, Q(q): Q<RunsQuery>) -> Result<Json<Value>> {
     let o = readable(&code, &caller, &owner)?;
     let runs = engine::runs(code.db.sql(), &o.id, q.automation.as_deref(), q.status, q.before.as_deref(), limit(q.limit)?)?;
-    Ok(Json(json!(runs)))
+    let mut v = json!(runs);
+    mark_outsiders(&code, &mut v);
+    Ok(Json(v))
+}
+
+/// An event someone who can't push started (an issue anyone opened, on a trigger that takes
+/// `anyone`'s: its data says `trusted_author: false`) is their words: each run for one is marked
+/// `outside` (its `event.summary` quotes the issue's title), which MCP's lockdown withholds.
+fn mark_outsiders(code: &Code, runs: &mut Value) {
+    let mut seen: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
+    for r in runs.as_array_mut().into_iter().flatten() {
+        let (Some(id), true) = (r["event"]["id"].as_str().map(str::to_string), r["event"]["source"] == "github") else { continue };
+        let theirs = *seen.entry(id.clone()).or_insert_with(|| engine::event_of(code.db.sql(), &id).map_or(true, |e| e.is_some_and(|e| outsiders(&e.data))));
+        if theirs {
+            r["event"]["outside"] = json!(true);
+        }
+    }
+}
+
+/// Whether an event's data came from someone who can't push: an issue anyone opened
+/// (`trusted_author: false`), or an issue's or a fork's pull request's words carried by a writer's
+/// event (`from_outside`).
+fn outsiders(data: &Value) -> bool {
+    data.get("trusted_author") == Some(&Value::Bool(false)) || data.get("from_outside") == Some(&Value::Bool(true))
 }
 
 #[derive(Deserialize)]
@@ -266,14 +289,23 @@ async fn automation_runs(State(code): S, caller: Caller, Path((owner, id)): Path
     let o = readable(&code, &caller, &owner)?;
     found(&code, &o, &id)?;
     let runs = engine::runs(code.db.sql(), &o.id, Some(&id), q.status, q.before.as_deref(), limit(q.limit)?)?;
-    Ok(Json(json!(runs)))
+    let mut v = json!(runs);
+    mark_outsiders(&code, &mut v);
+    Ok(Json(v))
 }
 
-async fn run_detail(State(code): S, caller: Caller, Path((owner, run)): Path<(String, String)>) -> Result<Json<RunDetail>> {
+async fn run_detail(State(code): S, caller: Caller, Path((owner, run)): Path<(String, String)>) -> Result<Json<Value>> {
     let o = readable(&code, &caller, &owner)?;
     let r = engine::run_of(code.db.sql(), &run)?.filter(|r| r.owner_id == o.id).ok_or_else(|| Error::NotFound(format!("run {run}")))?;
     let event = engine::event_of(code.db.sql(), &r.event_id)?.ok_or_else(|| Error::NotFound(format!("run {run}")))?;
-    Ok(Json(RunDetail { run: r.run, event }))
+    let theirs = outsiders(&event.data);
+    let mut v = json!(RunDetail { run: r.run, event });
+    // An outsider's issue: its title and body in the event, and the run's summary of it.
+    if theirs {
+        v["event"]["data"]["outside"] = json!(true);
+        v["run"]["event"]["outside"] = json!(true);
+    }
+    Ok(Json(v))
 }
 
 async fn cancel(State(code): S, caller: Caller, Path((owner, run)): Path<(String, String)>) -> Result<Json<Value>> {

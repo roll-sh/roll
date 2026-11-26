@@ -367,7 +367,8 @@ async fn import(State(apps): S, b: Bytes) -> R {
                 .iter()
                 .map(|(e, env)| (e.clone(), json!({ "branch": env.branch, "run": env.run.as_ref().map(|t| serde_json::to_value(t).unwrap_or_default()).unwrap_or_else(|| json!({})), "variables": env.variables })))
                 .collect();
-            (n.clone(), json!({ "environments": environments, "source": source, "branch": branch, "run": entry_run(a), "links": links, "variables": fixed, "generate": generate, "ask": ask }))
+            let build = a.build.as_ref().map(|t| serde_json::to_value(t).unwrap_or_default()).unwrap_or_else(|| json!({}));
+            (n.clone(), json!({ "environments": environments, "source": source, "branch": branch, "run": entry_run(a), "build": build, "links": links, "variables": fixed, "generate": generate, "ask": ask }))
         })
         .collect();
     ok(json!({ "roll_toml": toml_text, "notes": notes, "apps": apps, "databases": f.databases }))
@@ -692,9 +693,18 @@ async fn events(State(apps): S, Query(q): Query<EventsQuery>) -> R {
     }
     let after = q.after.unwrap_or(0);
     let limit = q.limit.unwrap_or(100);
-    let events = apps.db(move |s| s.events(after, limit)).await?;
+    let (events, envs) = apps.db(move |s| Ok((s.events(after, limit)?, s.all_environments()?))).await?;
     let next = events.last().map_or(after, |e| e.seq);
-    ok(json!({ "events": events, "next": next }))
+    // A preview's events can quote its app (a failed build's error): marked from outside, as
+    // its logs are; an environment that's gone counts as one (it fails closed).
+    let lasting: std::collections::HashSet<(String, String)> = envs.into_iter().filter(|e| !e.ephemeral).map(|e| (e.service, e.name)).collect();
+    let mut list = serde_json::to_value(&events).map_err(|e| Error::Internal(e.to_string()))?;
+    for (v, e) in list.as_array_mut().into_iter().flatten().zip(&events) {
+        if !lasting.contains(&(e.service.clone(), e.environment.clone())) {
+            mark_outside(v);
+        }
+    }
+    ok(json!({ "events": list, "next": next }))
 }
 
 /// `GET /v1/apps/services/{id}/changes`: server-sent `changed` events, one when something about
@@ -955,10 +965,50 @@ async fn deploy_provenance(State(apps): S, Path((id, env, dep)): Path<(String, S
     Ok(Json(apps.deploy_provenance(&id, &env, &dep).await?).into_response())
 }
 
+/// A preview environment's page may be a fork's code (roll previews deploys a pull request's
+/// head there): a picture of it is marked as from outside, so roll MCP's lockdown withholds it
+/// (`roll_auth::lockdown::OUTSIDE_HEADER`, as roll previews' own pictures are). An environment
+/// that can't be read counts as one.
+async fn outside(apps: &Arc<Apps>, id: &str, env: &str) -> bool {
+    apps.service_env(id, env).await.map(|(_, row)| row.ephemeral).unwrap_or(true)
+}
+
+/// An answer that carries a preview's app's own words (its logs, errors, traces, routes, page
+/// URLs) marked `outside: true` on it or, for a list, on each item: roll MCP's lockdown then
+/// withholds their text, as roll previews' `mark_outside` does for an untrusted preview.
+fn mark_outside(v: &mut Value) {
+    match v {
+        Value::Object(o) => {
+            o.insert("outside".into(), Value::Bool(true));
+        }
+        Value::Array(a) => {
+            for item in a.iter_mut() {
+                if let Value::Object(o) = item {
+                    o.insert("outside".into(), Value::Bool(true));
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// [`ok`], marked from outside for a preview environment ([`outside`]).
+async fn ok_marked<T: serde::Serialize>(apps: &Arc<Apps>, id: &str, env: &str, v: T) -> R {
+    let mut v = serde_json::to_value(v).map_err(|e| Error::Internal(e.to_string()))?;
+    if outside(apps, id, env).await {
+        mark_outside(&mut v);
+    }
+    ok(v)
+}
+
 /// `GET …/checks/{check}/screenshot`: a browser check's last failure, as the page looked.
 async fn check_screenshot(State(apps): S, Path((id, env, check)): Path<(String, String, String)>) -> R {
     let body = apps.check_failure_file(&id, &env, &check, crate::browser::SCREENSHOT).await?;
-    Ok(([(axum::http::header::CONTENT_TYPE, "image/png".to_string()), (axum::http::header::CACHE_CONTROL, "no-store".to_string())], body).into_response())
+    let mut r = ([(axum::http::header::CONTENT_TYPE, "image/png".to_string()), (axum::http::header::CACHE_CONTROL, "no-store".to_string())], body).into_response();
+    if outside(&apps, &id, &env).await {
+        r.headers_mut().insert(roll_auth::lockdown::OUTSIDE_HEADER, axum::http::HeaderValue::from_static("true"));
+    }
+    Ok(r)
 }
 
 /// `GET …/checks/{check}/trace`: a browser check's last failure's Playwright trace (open it in
@@ -966,7 +1016,12 @@ async fn check_screenshot(State(apps): S, Path((id, env, check)): Path<(String, 
 async fn check_trace(State(apps): S, Path((id, env, check)): Path<(String, String, String)>) -> R {
     let body = apps.check_failure_file(&id, &env, &check, crate::browser::TRACE).await?;
     let file = format!("attachment; filename=\"{check}-trace.zip\"");
-    Ok(([(axum::http::header::CONTENT_TYPE, "application/zip".to_string()), (axum::http::header::CONTENT_DISPOSITION, file)], body).into_response())
+    let mut r = ([(axum::http::header::CONTENT_TYPE, "application/zip".to_string()), (axum::http::header::CONTENT_DISPOSITION, file)], body).into_response();
+    // Its snapshots are the same page's.
+    if outside(&apps, &id, &env).await {
+        r.headers_mut().insert(roll_auth::lockdown::OUTSIDE_HEADER, axum::http::HeaderValue::from_static("true"));
+    }
+    Ok(r)
 }
 
 async fn deploy_vulnerabilities(State(apps): S, Path((id, env, dep)): Path<(String, String, String)>, Query(q): Query<VulnQuery>) -> R {
@@ -1194,12 +1249,28 @@ async fn deploy_logs(State(apps): S, Path((id, env, dep)): Path<(String, String,
 
 async fn env_logs(State(apps): S, Path((id, env)): Path<(String, String)>, Query(q): Query<LogQuery>) -> R {
     apps.environment(&id, &env).await?;
-    if truthy(&q.http) {
+    let r = if truthy(&q.http) {
         // The access log, filtered by status and duration when asked (read and followed).
         let keep: Keep = http_filter(&q)?.map(|f| Box::new(f) as Box<dyn Fn(&LogLine) -> bool + Send + Sync>);
-        return stream_log(&apps, format!("http:{id}/{env}"), q, None, keep).await;
+        stream_log(&apps, format!("http:{id}/{env}"), q, None, keep).await?
+    } else {
+        stream_log(&apps, format!("env:{id}/{env}"), q, None, None).await?
+    };
+    if !outside(&apps, &id, &env).await {
+        return Ok(r);
     }
-    stream_log(&apps, format!("env:{id}/{env}"), q, None, None).await
+    // A preview's lines are its app's own words: the header on every answer (a followed one
+    // too), and each line of a read marked.
+    let (mut parts, body) = r.into_parts();
+    parts.headers.insert(roll_auth::lockdown::OUTSIDE_HEADER, axum::http::HeaderValue::from_static("true"));
+    if !parts.headers.get(axum::http::header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).is_some_and(|t| t.starts_with("application/json")) {
+        return Ok(axum::response::Response::from_parts(parts, body));
+    }
+    let bytes = axum::body::to_bytes(body, 256 << 20).await.map_err(|e| Error::Internal(e.to_string()))?;
+    let mut v: Value = serde_json::from_slice(&bytes).map_err(|e| Error::Internal(e.to_string()))?;
+    mark_outside(&mut v);
+    parts.headers.remove(axum::http::header::CONTENT_LENGTH);
+    Ok(axum::response::Response::from_parts(parts, axum::body::Body::from(serde_json::to_vec(&v).map_err(|e| Error::Internal(e.to_string()))?)))
 }
 
 /// Who made a request, for the deployments it makes: what rolld's gate put in its extensions
@@ -1514,7 +1585,7 @@ struct TraceQuery {
 }
 
 async fn traces(State(apps): S, Path((id, env)): Path<(String, String)>, Query(q): Query<TraceQuery>) -> R {
-    ok(apps.traces(&id, &env, q.minutes.unwrap_or(60), q.min_ms.unwrap_or(0)).await?)
+    ok_marked(&apps, &id, &env, apps.traces(&id, &env, q.minutes.unwrap_or(60), q.min_ms.unwrap_or(0)).await?).await
 }
 
 #[derive(Deserialize)]
@@ -1530,7 +1601,7 @@ async fn error_state(State(apps): S, Path((id, env, fp)): Path<(String, String, 
 }
 
 async fn errors(State(apps): S, Path((id, env)): Path<(String, String)>, Query(q): Query<VitalsQuery>) -> R {
-    ok(apps.errors(&id, &env, q.minutes.unwrap_or(1440)).await?)
+    ok_marked(&apps, &id, &env, apps.errors(&id, &env, q.minutes.unwrap_or(1440)).await?).await
 }
 
 async fn forms(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {
@@ -1561,7 +1632,7 @@ async fn app_metrics(State(apps): S, Path((id, env)): Path<(String, String)>, Qu
 }
 
 async fn vitals(State(apps): S, Path((id, env)): Path<(String, String)>, Query(q): Query<VitalsQuery>) -> R {
-    ok(apps.vitals(&id, &env, q.minutes.unwrap_or(1440)).await?)
+    ok_marked(&apps, &id, &env, apps.vitals(&id, &env, q.minutes.unwrap_or(1440)).await?).await
 }
 
 #[derive(Deserialize)]
@@ -1611,7 +1682,7 @@ async fn advice(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {
 }
 
 async fn trace(State(apps): S, Path((id, env, trace)): Path<(String, String, String)>) -> R {
-    ok(apps.trace(&id, &env, &trace).await?)
+    ok_marked(&apps, &id, &env, apps.trace(&id, &env, &trace).await?).await
 }
 
 async fn analytics(State(apps): S, Path((id, env)): Path<(String, String)>, Query(w): Query<Window>) -> R {
@@ -1619,7 +1690,7 @@ async fn analytics(State(apps): S, Path((id, env)): Path<(String, String)>, Quer
 }
 
 async fn routes(State(apps): S, Path((id, env)): Path<(String, String)>, Query(w): Query<Window>) -> R {
-    ok(apps.routes(&id, &env, w.minutes.unwrap_or(60)).await?)
+    ok_marked(&apps, &id, &env, apps.routes(&id, &env, w.minutes.unwrap_or(60)).await?).await
 }
 
 async fn usage(State(apps): S, Path((id, env)): Path<(String, String)>, Query(w): Query<Window>) -> R {

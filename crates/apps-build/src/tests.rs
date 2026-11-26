@@ -816,6 +816,17 @@ fn scala_clojure_gleam_and_a_start_script_build_and_run() {
     assert_eq!((p.provider, p.build.as_deref(), p.start.as_deref()), (Provider::Gleam, Some("gleam export erlang-shipment"), Some("/app/entrypoint.sh run")));
     has(&p, &["COPY gleam.toml manifest.toml ./", "gleam deps download", "COPY --from=build --chown=app /src/build/erlang-shipment /app"]);
     assert!(plan(&tree(&[("gleam.toml", "name = \"x\"\ntarget = \"javascript\"\n")]), &Overrides::default()).is_err());
+    // Swift: the package's executable, Vapor's served on $PORT, on its tools version's image.
+    let vapor = "// swift-tools-version:6.1\nimport PackageDescription\nlet package = Package(name: \"shop\", dependencies: [.package(url: \"https://github.com/vapor/vapor.git\", from: \"4.0.0\")], targets: [.executableTarget(name: \"App\", dependencies: [.product(name: \"Vapor\", package: \"vapor\")])])\n";
+    let p = detect(&[("Package.swift", vapor), ("Package.resolved", "{}")]);
+    assert_eq!((p.provider, p.framework.as_deref(), p.start.as_deref()), (Provider::Swift, Some("vapor"), Some("/app/App serve --env production --hostname 0.0.0.0 --port $PORT")));
+    has(&p, &["FROM swift:6.1-bookworm AS build", "COPY Package.swift Package.resolved ./", "swift build -c release --static-swift-stdlib", "FROM debian:bookworm-slim"]);
+    assert!(plan(&tree(&[("Package.swift", "// swift-tools-version:6.0\nlet package = Package(name: \"lib\", targets: [.target(name: \"Lib\")])\n")]), &Overrides::default()).is_err(), "a library has nothing to run");
+    // Dart: bin/server.dart compiled to a native executable; a Flutter app isn't a server.
+    let p = detect(&[("pubspec.yaml", "name: api\nenvironment:\n  sdk: ^3.5.0\n"), ("bin/server.dart", "void main() {}")]);
+    assert_eq!((p.provider, p.build.as_deref(), p.start.as_deref()), (Provider::Dart, Some("dart compile exe bin/server.dart -o /out/server"), Some("/app/server")));
+    has(&p, &["FROM dart:3.13 AS build", "dart pub get", "COPY --from=build --chown=app /out/server /app/server"]);
+    assert!(plan(&tree(&[("pubspec.yaml", "name: app\nflutter:\n  uses-material-design: true\n"), ("bin/server.dart", "")]), &Overrides::default()).is_err());
     // A start.sh and nothing else: bash on Debian; with a package.json beside it, Node wins.
     let p = detect(&[("start.sh", "#!/bin/bash\nexec python3 -m http.server $PORT\n")]);
     assert_eq!((p.provider, p.start.as_deref()), (Provider::Shell, Some("bash /app/start.sh")));
@@ -833,8 +844,8 @@ fn scala_clojure_gleam_and_a_start_script_build_and_run() {
 
 #[test]
 fn nothing_detected_says_what_it_did_find() {
-    let err = plan(&tree(&[("pubspec.yaml", "name: shop")]), &Overrides::default()).unwrap_err();
-    assert!(err.to_string().contains("found pubspec.yaml: Dart"), "{err}");
+    let err = plan(&tree(&[("stack.yaml", "resolver: lts-22.0")]), &Overrides::default()).unwrap_err();
+    assert!(err.to_string().contains("found stack.yaml: Haskell"), "{err}");
     let err = plan(&tree(&[("Shop.sln", "")]), &Overrides::default()).unwrap_err();
     assert!(err.to_string().contains("Shop.sln: a .NET solution"), "{err}");
 }
@@ -925,4 +936,19 @@ fn every_code_starter_has_a_plan() {
         n += 1;
     }
     assert_eq!(n, want.len());
+}
+
+/// A framework's migrations and health route are suggested for a new service, never set: Rails'
+/// db:prepare and /up, Django's migrate, Laravel's migrate --force, Prisma's migrate deploy; a
+/// Procfile's own release wins.
+#[test]
+fn frameworks_suggest_their_migrations_and_health_route() {
+    let rails = detect(&[("Gemfile", "source 'https://rubygems.org'\ngem 'rails', '~> 8.0'\n"), ("Gemfile.lock", ""), ("config.ru", "run Rails.application"), ("bin/rails", ""), ("db/migrate/001_init.rb", ""), ("config/routes.rb", "get \"up\" => \"rails/health#show\"")]);
+    assert_eq!((rails.suggest.pre_deploy.as_deref(), rails.suggest.health_path.as_deref(), rails.release.as_deref()), (Some("bin/rails db:prepare"), Some("/up"), None));
+    let django = detect(&[("requirements.txt", "django==5.1\ngunicorn\n"), ("manage.py", ""), ("shop/settings.py", ""), ("shop/wsgi.py", "")]);
+    assert_eq!(django.suggest.pre_deploy.as_deref(), Some("python manage.py migrate --noinput"));
+    let prisma = detect(&[("package.json", r#"{"name":"api","scripts":{"start":"node index.js"},"dependencies":{"prisma":"6.0.0"}}"#), ("prisma/schema.prisma", ""), ("prisma/migrations/0001/migration.sql", "")]);
+    assert_eq!(prisma.suggest.pre_deploy.as_deref(), Some("npx prisma migrate deploy"));
+    let own = plan(&tree(&[("Gemfile", "gem 'rails'\n"), ("Gemfile.lock", ""), ("config.ru", ""), ("db/migrate/1.rb", ""), ("Procfile", "web: bin/rails server\nrelease: bin/rails db:migrate\n")]), &Overrides { process: Some("web".into()), ..Overrides::default() }).unwrap();
+    assert_eq!((own.release.as_deref(), own.suggest.pre_deploy.as_deref()), (Some("bin/rails db:migrate"), None), "a Procfile's release is its own");
 }

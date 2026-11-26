@@ -90,12 +90,19 @@ pub struct NewGateway {
     pub token: Option<bool>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub struct MadeGateway {
     pub gateway: Gateway,
     /// The token's secret, shown once.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
+}
+
+/// Never the gateway's token.
+impl std::fmt::Debug for MadeGateway {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MadeGateway").field("gateway", &self.gateway).field("token", &crate::crypto::redacted(&self.token)).finish()
+    }
 }
 
 /// Gateways' links, where they're held (rolld): re-check gateway `id`'s link now, closing it if

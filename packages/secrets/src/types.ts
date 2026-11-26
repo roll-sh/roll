@@ -60,7 +60,7 @@ export type NewEnvironment = {
 export type Deletion = { window_days: number; holds: string | null };
 /** What a leaked managed key does (docs/secrets.md, "When a value leaks"): `managed` rotates it at once, `off` only reports it. */
 export type LeakRotate = "managed" | "off";
-export type Overview = { project: string; environments: Environment[]; previews: number; history_days: number | null; validity_checks: "on" | "off"; leaks: { rotate: LeakRotate }; deletion: Deletion };
+export type Overview = { project: string; environments: Environment[]; previews: number; history_days: number | null; validity_checks: "on" | "off"; leaks: { rotate: LeakRotate }; breakglass: string[]; deletion: Deletion };
 /** A credential to check: a found value and, for an AWS access key id, the secret access key next to it. */
 export type ValidityProbe = { value: string; pair?: string | null };
 /** What a credential's provider said: never its value. `invalid` is revoked, deleted or never real. */
@@ -387,6 +387,12 @@ type IdentityScope = { name: string; environments?: string[]; paths?: string[]; 
  * neither: its machines log in with bootstrap tokens made for it (docs/secrets.md, "On a VM").
  */
 export type NewIdentity = IdentityScope & ({ kind?: "oidc"; issuer: string; audience: string; subject: string; claims?: Record<string, string>; jwks?: string } | { kind: "aws"; arn: string } | { kind: "machine" });
+/** A machine identity's bootstrap token (`POST …/identities/{id}/bootstrap`): `minutes` 1–60 (default 10) to be exchanged, from `allowed_ips` only if given; each machine credential it leads to lives `credential_hours` (1–720, default 24). */
+export type NewBootstrap = { minutes?: number; allowed_ips?: string[]; credential_hours?: number };
+/** A bootstrap token (`rlbt_…`, in the answer this once) and the machine's chain. */
+export type MadeBootstrap = { identity: string; chain: string; secret: string; expires_at: number };
+/** One of a machine identity's machines (`GET …/identities/{id}/machines`): `waiting` until its bootstrap token is exchanged, `live`, `ended` (not replaced before it ended) or `revoked`. Never a secret. */
+export type MachineChain = { chain: string; state: "waiting" | "live" | "ended" | "revoked"; credential_hours: number; created_at: number; created_by: string; refreshed_at: number | null; expires_at: number | null; revoked_at: number | null; revoked_why: string | null };
 export type NewToken = { name: string; environments?: string[]; paths?: string[]; actions: Action[]; expires_at?: number; ttl_days?: number; allowed_ips?: string[] };
 /** `approval`: the approval that let the request through roll-access's gate (an `ask` approved; `until` when a rule it remembered allowed it). */
 /** `seq` and `hash` place a row in its project's chain (absent on rows from before it); an `audit.digest` row's `digest` is roll's signed JWS of it. */
@@ -507,7 +513,9 @@ export type DeletedProject = { project: string; name: string; environment?: stri
 export type Recovered = { project: string; name: string; recovered_at: number; rotated: number; rotation_failed: string[] };
 export type Place = { project: string; project_name: string; environment: string; path: string; key: string; version: number; updated_at: number; linked: boolean };
 /** One thing to fix (`GET …/health`), worst first: where, never a value. */
-export type Finding = { issue: "decoy_used" | "production_unprotected" | "expired" | "rotation_failing" | "revoke_failing" | "missing" | "exposed" | "public" | "weak" | "unplaced" | "operator_made" | "stored_cloud_key" | "expiring" | "certificate_expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string; owner?: string; decoy?: Decoy };
+export type Finding = { issue: "decoy_used" | "production_unprotected" | "off_policy" | "expired" | "rotation_failing" | "revoke_failing" | "missing" | "exposed" | "public" | "weak" | "unplaced" | "operator_made" | "stored_cloud_key" | "expiring" | "certificate_expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string; owner?: string; decoy?: Decoy };
+/** roll secrets' policy (`GET`/`PUT /v1/secrets/policy`, the operator's or an admin account's): floors every project may only tighten; `null` is no floor. */
+export type Guardrails = { production_approvals: number | null; leaks_rotate: "managed" | null; sync_kinds: string[] | null; no_stored_cloud_keys: boolean; max_token_days: number | null; no_breakglass: boolean; updated_at: number | null; updated_by: string | null };
 /** One project's findings (`GET /v1/secrets/findings`). */
 export type ProjectFindings = { project: string; project_name: string; findings: Finding[] };
 /** A URL roll calls to issue and revoke a value that lives outside roll (`rotator` links). */

@@ -1670,8 +1670,8 @@ static TOOLS: &[Tool] = &[
     t("apps_status_page", "The project's public status page", "A project's public status page: its title, its public URL and what it shows (which services' checks and heartbeats, names and up or down only). 404 without one; making one is a person's choice, in the dashboard.", "apps", "GET", "/v1/apps/projects/{project}/status-page", &[req("project", "Workspace project")]),
     t("apps_remove_status_page", "Take down the status page", "Take a project's public status page down: its address answers nothing after, and its incidents go with it. Making or changing one stays a person's (it makes the project's service names public; admin, no tool).", "apps", "DELETE", "/v1/apps/projects/{project}/status-page", &[req("project", "Workspace project")]).destructive(),
     t("apps_list_incidents", "Status page incidents", "The last 90 days' incidents on a project's status page and the open ones, newest first: title, state, whether roll opened it, and its updates.", "apps", "GET", "/v1/apps/projects/{project}/status-page/incidents", &[req("project", "Workspace project")]),
-    t("apps_create_incident", "Post an incident on the status page", "Post an incident on a project's public status page: anyone can read its title and text, so write for the public and never put a credential, an internal address or a customer's data in it (roll refuses credentials). States: investigating (default), identified, monitoring, resolved.", "apps", "POST", "/v1/apps/projects/{project}/status-page/incidents", &[req("project", "Workspace project"), breq("title", Ty::Str, "1-120 characters, public"), breq("text", Ty::Str, "1-2000 characters, public"), b("state", Ty::Choice(&["investigating", "identified", "monitoring", "resolved"]), "Where it stands")]).published(),
-    t("apps_update_incident", "Update an incident on the status page", "Add a public update to a status page incident (resolved closes it). Anyone can read it.", "apps", "POST", "/v1/apps/projects/{project}/status-page/incidents/{incident}/updates", &[req("project", "Workspace project"), req("incident", "Incident id"), breq("state", Ty::Choice(&["investigating", "identified", "monitoring", "resolved"]), "Where it stands"), breq("text", Ty::Str, "1-2000 characters, public")]).published(),
+    t("apps_create_incident", "Post an incident on the status page", "Post an incident on a project's public status page: anyone can read its title and text, so write for the public and never put a credential, an internal address or a customer's data in it (roll refuses credentials). States: investigating (default), identified, monitoring, resolved, or scheduled for a maintenance window (starts_at and ends_at: roll begins and ends it).", "apps", "POST", "/v1/apps/projects/{project}/status-page/incidents", &[req("project", "Workspace project"), breq("title", Ty::Str, "1-120 characters, public"), breq("text", Ty::Str, "1-2000 characters, public"), b("state", Ty::Choice(&["investigating", "identified", "monitoring", "resolved", "scheduled"]), "Where it stands"), b("starts_at", Ty::Int, "A scheduled maintenance's start, unix ms, in the next 90 days"), b("ends_at", Ty::Int, "Its end, unix ms, at most a week after it starts")]).published(),
+    t("apps_update_incident", "Update an incident on the status page", "Add a public update to a status page incident (resolved closes it). Anyone can read it.", "apps", "POST", "/v1/apps/projects/{project}/status-page/incidents/{incident}/updates", &[req("project", "Workspace project"), req("incident", "Incident id"), breq("state", Ty::Choice(&["investigating", "identified", "monitoring", "maintenance", "resolved"]), "Where it stands"), breq("text", Ty::Str, "1-2000 characters, public")]).published(),
     t("apps_environment_slo", "SLO and error budget", "An environment's objective against its window: per indicator (availability, latency) the total, the failures, the share that met it and the error budget left (1 untouched, below 0 spent), and whether it's burning now.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/slo", &[SERVICE, ENV]),
     t("apps_list_forms", "List a site's forms", "A static site's forms with their submission counts and the last one's time (never what people sent; apps_form_submissions reads that).", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/forms", &[SERVICE, ENV]),
     t("apps_form_submissions", "Read form submissions", "What people sent through a site's form, newest first: each submission's id, time and fields. People's own data: every read is audited.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/forms/{form}/submissions", &[SERVICE, ENV, req("form", "Form name"), q("limit", Ty::Int, "At most (1-200, default 50)"), q("before", Ty::Str, "A submission's id: the page after it")]).outside(&["fields"]),
@@ -1835,6 +1835,36 @@ static TOOLS: &[Tool] = &[
     t("previews_delete", "Delete a preview", "Tear a preview down with its branches.", "previews", "DELETE", "/v1/previews/{id}", &[req("id", "Preview id")]),
 ];
 
+/// Read-only tools whose answer is what customers stored or what their code and visitors wrote
+/// (rows, values, objects, documents, messages and payloads, logs and error samples, pages, mail and
+/// pictures of pages, visitors and what they sent or searched, source): a metadata-only connection
+/// (`?metadata=1`, PlanetScale's insights-only server) doesn't list or run them, so an agent tunes
+/// and explains without seeing a customer's data. roll code's (`code_*`, a fronted set) are in
+/// [`CODE_DATA`]. A test keeps every read-only tool whose name reads like data here or explained.
+pub const DATA: &[&str] = &[
+    "apps_check_screenshot", "apps_cron_run_logs", "apps_deploy_logs", "apps_deploy_output", "apps_deploy_source", "apps_errors", "apps_events", "apps_fetch",
+    "apps_form_submissions", "apps_get_trace", "apps_job_logs", "apps_logs", "apps_visitors", "apps_wait_cron_run",
+    "postgres_query",
+    "previews_connect", "previews_env", "previews_errors", "previews_fetch", "previews_get_trace", "previews_list_mail", "previews_logs", "previews_note_crop", "previews_read_mail", "previews_screenshot",
+    "previews_tables", "previews_try_screenshot",
+    "queues_peek",
+    "search_analytics", "search_explain", "search_get_document", "search_query", "search_suggestions", "search_test_query_ruleset",
+    "secrets_get_values", "secrets_reveal", "secrets_scan", "secrets_totp", "secrets_version_value",
+    "storage_read_object",
+    "streams_read",
+    "tasks_get_event", "tasks_get_message", "tasks_get_run", "tasks_list_dead_letters", "tasks_list_events", "tasks_list_messages", "tasks_list_runs", "tasks_wait_run",
+];
+
+/// roll code's tools that answer a repo's content (files, diffs, matches, commit messages), named as
+/// rolld fronts them (`search_code` is `code_search`; `search` and `fetch` keep their names for
+/// ChatGPT; rolld's `access.rs` test keeps these real).
+pub const CODE_DATA: &[&str] = &["code_read_file", "code_search", "code_blame", "code_compare", "code_get_changeset", "code_log", "search", "fetch"];
+
+/// Whether a metadata-only connection keeps `name` from the model ([`DATA`], [`CODE_DATA`]).
+pub fn reads_data(name: &str) -> bool {
+    DATA.contains(&name) || CODE_DATA.contains(&name)
+}
+
 pub fn all() -> &'static [Tool] {
     TOOLS
 }
@@ -1946,7 +1976,8 @@ mod tests {
         let envs = after(between(include_str!("../../roll-secrets/src/envs.rs"), "impl Kind {", "\n}\n"), "=> \"");
         let destinations = after(between(include_str!("../../mq-control/src/api.rs"), "destination_type must be ", ", not"), "'").into_iter().step_by(2).collect::<Vec<_>>();
         let flavors = keys(between(include_str!("../../search-control/src/control.rs"), "pub fn dialect(flavor: &str)", "\n}\n"));
-        let incidents = list(between(include_str!("../../apps-control/src/status_page.rs"), "Some(s @ (", "))"));
+        let status_page = include_str!("../../apps-control/src/status_page.rs");
+        let (new_incident, incident_update) = (list(between(status_page, "const NEW_STATES", "];")), list(between(status_page, "const UPDATE_STATES", "];")));
         let more: Vec<(&str, &str, Vec<String>)> = vec![
             ("access_request_access", "for", keys(between(include_str!("../../roll-access/src/api.rs"), "fn request_duration(", "\n}\n"))),
             ("access_list_approvals", "state", roll_access::store::APPROVAL_STATES.iter().map(|s| s.to_string()).collect()),
@@ -1971,8 +2002,8 @@ mod tests {
             ("apps_rollout", "action", variants(between(include_str!("../../apps-control/src/model.rs"), "pub enum RolloutAction {", "}"))),
             ("apps_set_error_state", "state", variants(between(include_str!("../../apps-control/src/errors.rs"), "pub enum Lifecycle {", "}"))),
             ("apps_logs", "stream", variants(between(include_str!("../../apps-control/src/logs.rs"), "pub enum Stream {", "}"))),
-            ("apps_update_incident", "state", incidents.clone()),
-            ("apps_create_incident", "state", incidents),
+            ("apps_update_incident", "state", incident_update),
+            ("apps_create_incident", "state", new_incident),
             ("apps_set_private_network", "kind", after(between(include_str!("../../apps-control/src/peering.rs"), "let kind = match o.get(\"kind\")", "};"), "Some(\"")),
             ("apps_add_notification", "kind", notification_kinds),
             ("apps_add_notification", "region", after(notify, "(\"pagerduty\", \"")),
@@ -2568,5 +2599,48 @@ mod tests {
         for n in FORK_WORDS.iter().chain(NONE.iter().map(|(n, _)| n)) {
             assert!(previews.contains(n), "{n} isn't a previews tool any more");
         }
+    }
+
+    /// Every read-only tool whose name reads like it answers data is in [`DATA`] or says here why
+    /// it answers only metadata, so a new one decides; [`DATA`] names real read-only tools.
+    #[test]
+    fn a_metadata_connection_keeps_data_out() {
+        const DATA_WORDS: &[&str] = &[
+            "query", "read", "peek", "logs", "fetch", "mail", "tables", "value", "reveal", "document", "submission", "analytics", "message", "events", "event",
+            "screenshot", "crop", "totp", "scan", "source", "output", "run", "trace", "dead_letter", "suggestion", "visitor", "error", "explain", "sample",
+        ];
+        const METADATA: &[(&str, &str)] = &[
+            ("apps_list_cron_runs", "runs' times and states"),
+            ("apps_get_cron_run", "a run's state"),
+            ("apps_traces", "route names and timings"),
+            ("apps_wait_deploy", "a deploy's state"),
+            ("apps_list_environments", "names"),
+            ("previews_traces", "route names and timings"),
+            ("previews_requests", "paths and timings"),
+            ("postgres_explain", "a plan, not rows"),
+            ("search_analyze", "how text the agent sent is tokenized"),
+            ("search_slowlog", "slow searches' timings and shapes"),
+            ("secrets_list_value_requests", "who asked for which key, never a value"),
+            ("storage_list_objects", "keys and sizes, as a schema's table names are"),
+            ("previews_list_notes", "what reviewers wrote about a page, not what the app stores"),
+            ("search_list_query_rulesets", "rules people set"),
+            ("search_get_query_ruleset", "rules people set"),
+            ("secrets_suggestions", "which keys a link would fill, never a value"),
+            ("apps_analytics", "counts by page, referrer and country"),
+            ("previews_mask_suggestions", "column names to mask"),
+            ("previews_visitors", "roll team members who opened it, not the app's users"),
+        ];
+        let ro = |t: &Tool| t.definition()["annotations"]["readOnlyHint"] == true;
+        for n in DATA {
+            assert!(all().iter().any(|t| t.name == *n && ro(t)), "{n} in DATA isn't a read-only tool");
+        }
+        // A read-only tool that reveals (a value, a credential) is decided too, whatever its name.
+        let undecided: Vec<&str> = all()
+            .iter()
+            .filter(|t| ro(t) && !DATA.contains(&t.name) && !METADATA.iter().any(|(m, _)| *m == t.name))
+            .filter(|t| t.name.split('_').skip(1).any(|w| DATA_WORDS.iter().any(|d| w.starts_with(d))) || t.find_actions().contains(&Action::Reveal))
+            .map(|t| t.name)
+            .collect();
+        assert!(undecided.is_empty(), "say whether these answer stored data (DATA) or only metadata (METADATA, with why): {undecided:?}");
     }
 }

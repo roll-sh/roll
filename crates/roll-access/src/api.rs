@@ -633,6 +633,7 @@ impl Access {
             }
         };
         self.check_policy(new.expires_at)?;
+        self.check_lifetime_cap(&new.rules, new.expires_at)?;
         let made = blocking(self.clone(), move |a| a.store.create(&new, GrantKind::Token, &by, None, user.as_deref())).await?;
         self.tell_added(&made.0, Added::Token, ext);
         if let Some(handle) = asker {
@@ -794,6 +795,7 @@ async fn update(State(a): S, ext: Extensions, Path(id): Path<String>, body: axum
     // A token whose rules, lifetime or addresses change meets the policy as it is now.
     if change.rules.is_some() || change.expires_at.is_some() || change.ip_allow.is_some() {
         a.check_policy(change.expires_at.unwrap_or(target.expires_at))?;
+        a.check_lifetime_cap(change.rules.as_ref().unwrap_or(&target.rules), change.expires_at.unwrap_or(target.expires_at))?;
     }
     // A person widening their own token past what the policy has an admin approve: it waits again.
     let asker = match &who_handle {
@@ -945,6 +947,7 @@ async fn rotate(State(a): S, ext: Extensions, Path(id): Path<String>, body: axum
     }
     // A new secret is a new token: it meets the policy (set an expiry first if it must expire).
     a.check_policy(target.expires_at)?;
+    a.check_lifetime_cap(&target.rules, target.expires_at)?;
     let keep = body.keep_old_for_s.map(|s| s * 1000);
     let (grant, token) = blocking(a, move |a| a.store.rotate(&id, keep)).await?;
     Ok(Json(json!({ "grant": grant, "token": token })))
