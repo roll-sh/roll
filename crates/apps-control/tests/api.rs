@@ -3470,6 +3470,55 @@ async fn status_page_incidents_open_and_close() {
     assert_eq!(state(&w, page).await, (json!("resolved"), true));
 }
 
+/// A custom domain's records written at the customer's Cloudflare (Vercel's own DNS): the token a
+/// `roll://` reference the caller may reveal, read as them for the call; then it's verified.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_domains_records_are_written_with_the_customers_token() {
+    struct Cf;
+    #[async_trait]
+    impl apps_control::integrations::SecretSource for Cf {
+        fn name(&self) -> &'static str {
+            "fake"
+        }
+        async fn resolve(&self, _: &str, _: &str, _: &str) -> anyhow::Result<Vec<apps_control::integrations::SecretVar>> {
+            Ok(vec![])
+        }
+        async fn bind_ref(&self, _: apps_control::integrations::Asker<'_>, _: &str, _: &str, reference: &str) -> anyhow::Result<String> {
+            anyhow::ensure!(reference == "roll://production/CF_TOKEN", "you may not reveal {reference}");
+            Ok("usr_ada".into())
+        }
+        async fn resolve_as(&self, _: &str, _: &str, _: &str, reference: &str, maker: &str) -> anyhow::Result<String> {
+            assert_eq!((reference, maker), ("roll://production/CF_TOKEN", "usr_ada"));
+            Ok("cf-secret".into())
+        }
+    }
+    struct Writer(Arc<apps_control::integrations::StaticDns>, Mutex<Vec<(String, String)>>);
+    #[async_trait]
+    impl apps_control::integrations::DnsWriter for Writer {
+        async fn put_record(&self, token: &str, kind: &str, name: &str, content: &str) -> anyhow::Result<()> {
+            assert_eq!(token, "cf-secret");
+            self.1.lock().push((kind.to_string(), name.to_string()));
+            self.0.add(name, if kind == "TXT" { "TXT" } else { "CNAME" }, content);
+            Ok(())
+        }
+    }
+    let w = world_full(|_| {}, false, |d| d.secrets = Arc::new(Cf)).await;
+    let writer = Arc::new(Writer(w.dns.clone(), Mutex::new(Vec::new())));
+    w.apps.set_dns_writer(writer.clone());
+    let (svc, _) = image_service(&w, "web", json!({"port": 80})).await;
+    let base = format!("/v1/apps/services/{}/environments/production/domains", svc["id"].as_str().unwrap());
+    let (st, d) = call(&w.api, "POST", &base, Some(json!({"hostname": "acme.dev"}))).await;
+    assert_eq!((st, d["status"].as_str()), (StatusCode::CREATED, Some("pending")), "{d}");
+    let configure = format!("{base}/acme.dev/configure");
+    assert_eq!(call(&w.api, "POST", &configure, Some(json!({"cloudflare_token": "cf-secret"}))).await.0, StatusCode::BAD_REQUEST, "a reference, never the token");
+    assert_eq!(call(&w.api, "POST", &configure, Some(json!({"cloudflare_token": "roll://production/OTHER"}))).await.0, StatusCode::FORBIDDEN);
+    let (st, v) = call(&w.api, "POST", &configure, Some(json!({"cloudflare_token": "roll://production/CF_TOKEN"}))).await;
+    assert_eq!((st, v["status"].as_str()), (StatusCode::OK, Some("active")), "{v}");
+    // An apex: its CNAME (Cloudflare flattens it) and the challenge.
+    assert_eq!(*writer.1.lock(), [("CNAME".to_string(), "acme.dev".to_string()), ("TXT".to_string(), "_roll-challenge.acme.dev".to_string())]);
+    assert!(!v.to_string().contains("cf-secret"));
+}
+
 /// An instance the kernel killed for its memory says so: in the log and in why it crashed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_instance_killed_for_its_memory_says_so() {

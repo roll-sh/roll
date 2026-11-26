@@ -285,6 +285,8 @@ pub struct Apps {
     shares: std::sync::OnceLock<Arc<dyn integrations::PreviewShares>>,
     /// Where a name under a project's preview domain no environment holds goes (roll previews).
     preview_router: std::sync::OnceLock<Arc<dyn integrations::PreviewRouter>>,
+    /// What writes a customer's DNS records with their token (`…/domains/{host}/configure`).
+    dns_writer: std::sync::OnceLock<Arc<dyn integrations::DnsWriter>>,
     /// roll previews' branch pushes ([`Apps::set_git_pushes`]).
     pub(crate) pushes: std::sync::OnceLock<Arc<dyn integrations::GitPushes>>,
     /// roll's GitHub App ([`Apps::set_github_app`]).
@@ -700,6 +702,7 @@ impl Apps {
             notes: std::sync::OnceLock::new(),
             shares: std::sync::OnceLock::new(),
             preview_router: std::sync::OnceLock::new(),
+            dns_writer: std::sync::OnceLock::new(),
             pushes: std::sync::OnceLock::new(),
             github: std::sync::OnceLock::new(),
             mail: std::sync::OnceLock::new(),
@@ -4564,6 +4567,47 @@ impl Apps {
 
     /// Where names under a project's preview domain that no environment holds go (roll previews'
     /// router, for its previews on roll's own runtime). Set once.
+    pub fn set_dns_writer(&self, w: Arc<dyn integrations::DnsWriter>) {
+        let _ = self.dns_writer.set(w);
+    }
+
+    /// `POST …/domains/{host}/configure {cloudflare_token}` (Vercel's and Netlify's own DNS): the
+    /// domain's records written at Cloudflare with the customer's token, then checked. The token
+    /// is a `roll://` reference, bound to the caller (who must be able to reveal it) and read as
+    /// them for this call only: nothing of it is kept.
+    pub async fn configure_domain(self: &Arc<Self>, service: &str, env: &str, host: &str, body: Value, who: integrations::Asker<'_>) -> Result<Domain> {
+        let o = body.as_object().cloned().unwrap_or_default();
+        if let Some(k) = o.keys().find(|k| k.as_str() != "cloudflare_token") {
+            return Err(Error::BadRequest(format!("unknown field {k}")));
+        }
+        let Some(reference) = o.get("cloudflare_token").and_then(Value::as_str) else {
+            return Err(Error::BadRequest("cloudflare_token is a roll:// reference to a Cloudflare API token (Zone:DNS:Edit on the domain's zone)".into()));
+        };
+        if !reference.starts_with("roll://") {
+            return Err(Error::BadRequest("cloudflare_token is a roll:// reference, never the token itself".into()));
+        }
+        let Some(writer) = self.dns_writer.get().cloned() else {
+            return Err(Error::BadRequest("writing DNS records isn't set up on this node".into()));
+        };
+        let h = host.to_ascii_lowercase();
+        let d = self.domains(service, env).await?.into_iter().find(|d| d.hostname == h && d.kind == DomainKind::Custom).ok_or_else(|| Error::NotFound(format!("{h} isn't a domain of {service} in {env}")))?;
+        if d.hostname.starts_with("*.") {
+            return Err(Error::BadRequest("a wildcard's records are added by hand".into()));
+        }
+        let (sid, e) = (service.to_string(), env.to_string());
+        let svc = self.db(move |s| s.service(&sid)).await?;
+        let maker = self.deps.secrets.bind_ref(who, &svc.project, service, reference).await.map_err(|why| Error::Forbidden(format!("{reference}: {why:#}")))?;
+        let token = self.deps.secrets.resolve_as(&svc.project, &e, service, reference, &maker).await.map_err(|e| Error::BadRequest(format!("{reference}: {e:#}")))?;
+        // The CNAME to its target always (Cloudflare flattens one at a zone's apex, which plain
+        // DNS can't hold), and the TXT challenge where `record` asks for it.
+        writer.put_record(&token, "CNAME", &d.hostname, &d.target).await.map_err(|e| Error::BadRequest(format!("{e:#}")))?;
+        if d.record != "cname" {
+            writer.put_record(&token, "TXT", &crate::model::challenge_name(&d.hostname), &d.token).await.map_err(|e| Error::BadRequest(format!("{e:#}")))?;
+        }
+        drop(token);
+        self.verify_domain(service, env, &h).await
+    }
+
     pub fn set_preview_router(&self, router: Arc<dyn integrations::PreviewRouter>) {
         let _ = self.preview_router.set(router);
     }
