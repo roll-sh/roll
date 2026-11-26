@@ -15918,6 +15918,85 @@ failed: all passed.
 Not this round's: roll's `VACUUM (VERBOSE)` sends none of PostgreSQL's INFO lines (agent 205's
 note, still open).
 
+## Range reads: a newer file's entries taken from its block in the runs' loop (agent 327)
+
+BENCH "Range reads: a newer file's entries from its block" has the counts. One change kept (cand/a327,
+`storage/mod.rs`, `storage/sst.rs`); the L0 merge not gated again (below).
+
+**What changed.** A range read over a table in L1 with one newer file in its range (an L0 file of an
+UPDATE's newer versions or an INSERT's rows; no memtable entries there) took that file's entries
+through the overlay list (round 18, agent 313): `gather` read them into a list of 56-byte keys, the
+runs of L1's blocks took them at their stops, `ungather` stepped the file again past each one taken
+and ranked the sources again. Now, when the merge has two sources ranked, the oldest first with a block
+of rows at hand and the other a file's block (`Scan::side_ok`, checked inline), the run takes the
+file's entries from its block where they are (`Scan::side`, `sst::Side`, a `ZipSide` decoding the
+block's entries into a key buffer as the zip does): no list, nothing read twice; at the end the file's
+cursor takes the position back (`ZipSide::hand_back`) and the two are ranked once. The run loop is
+generic over where the entries come from (`sst::Ov`: `Overlay`, `Side`); the list's instance is the
+same code as before. What the run doesn't take stops it for `position`, as with the list: a deletion,
+a derived value, an out-of-line value under `resolve`, a version newer than the snapshot is passed,
+a key too long for the buffers stops the run at the entry before it; past the file's block (when its
+source goes on) the run stops at that block's last key, and at the scan's end. Rows, their order, the
+versions read and the merge's state after are as before (hashes equal in every probe case; test
+`runs_take_newer_versions_in_their_loop` now also asserts that runs took a file's entries this way).
+
+**Measured** (in process, 306's / 322's probe as a local test, verify builds, two alternating pairs
+against the head, user instructions a read): 1,000-row ranges with 0 / 10 / 30 newer versions in an L0
+file 221.7k level / 242.0k -> 239.0k (-1.2%) / 267.9k -> 257.8k (-3.8%); 100-row with 0 / 1 / 3 / 10
+level / level / 42.8k -> 41.0k (-4.2%) / 50.3k -> 46.5k (-7.5%); in the memtable, or in an L0 file and
+the memtable, level (the list as before); 100 rows all newer (the zip's case) +0.3%.
+At the server (plain dist builds `tools/dist.sh`: the head `98bc2e3b6` and this change on it; `b09f1408b`,
+the head it is rebased on, changed no storage file;
+`~/.cache/a327/bench/l0probe.sh`, lane B, two alternating pairs at 3.6 foreign cores: instructions only):
+30 of every 1,000 rows of 64 fixed 1,000-row ranges and 3 of every 100 of 64 100-row ranges updated, the
+memtable rotated by another table's rows and written to one L0 file: the 1,000-row read 2,178,111 ->
+2,173,009 and 2,179,004 -> 2,172,976 (-0.23%, -0.28%), the 100-row 332,596 -> 331,534 and 332,647 ->
+331,509 (-0.32%, -0.34%); with no newer versions -0.08..-0.26% (within the pairs' spread). The newer
+versions add 63-64k to a 1,000-row read there; this takes 3.3-4.5k of it (5-7%), less than in process
+(the run loop's share of a server read is smaller, and the dist build's stop-checking loop is cheaper).
+TPC-H SF1 (lane C, `~/.cache/a327/tbench`, one data directory, two alternating pairs of the 22): all 22
+-0.00% / -0.04% user instructions, every query within +-0.26%, hashes equal, peak memory equal.
+Verification: `tools/quick-check.sh` with `QC_CHECKED=1` and `QC_TESTS="crash_bulk storage_linked_gc
+crash_ctids big_tables parallel_scan heap_order_scan pk_clustered stored_filters"` on `d3b15868d` (this
+change on `214433872`, the code as committed): 28 test binaries, clippy 16 warnings, none new in a changed
+file, 442 tests in 24 binaries (the lib's unit tests, crash_bulk, storage_linked_gc, big_tables, golden,
+wire among them), the same 442 built `--profile verify-checked`, `crash_random` seeds 1-3 x 2 rounds and
+`power_cut_at_every_point`, regress 51,148 / 51,150 (0 newly differing), isolation 1,647 / 1,648,
+pg_dump_tap 14,609. A run before it stopped at `wire_waits`: one line, the client reading the connection
+`transaction_timeout` closed as "error communicating with the server", not "connection closed", at a load
+of 101; the binary passed alone three times, and in the run above;
+`tools/crash-binary.py` against the plain dist build of this change: seeds 1-3 ok (8 kill rounds and a
+clean shutdown each), `--power drop` seed 1 ok. Not gated on a PGO build (the read paths that existed keep
+their function boundaries; the new code is functions of its own).
+
+**Tried and dropped** (patches in `~/.cache/a327/patches/`):
+- A loop around the run in `Scan` (`stride-reentry.patch`, `stride-lean-wip.patch`): the run ends at the
+  other source's head, the entry is pushed and the run set up again. 1,000-row with 10 / 30 newer
+  268.6k / 343.5k first, 249.7k / 301.1k with each head read once (the list: 242.0k / 268.0k): a run's
+  setting up, `run_into`, `Block::read` and the cursors' `fill` / `head` per entry cost more than the
+  list.
+- Stop-free runs up to the entry the next stop is at, found by a seek (`side-indexed-dropped.patch`):
+  +2.9% / +9.0% at 10 / 30, 100-row with 10 +20%: a seek and a new run per entry cost far more than the
+  stop-checking loop's ~20 instructions a row it saves.
+- Several other sources at once, memtables' buffers among them (`sides-multi-source-dropped.patch`,
+  `sst::Sides`): the L0 and memtable case -0.5%, but one file -2.9% (not -3.8%) and the memtable alone
+  +0.3..+1.2%: the general merge's pick and bounds per entry, and reading a memtable's buffer costs the
+  same as the list does.
+
+**The L0 merge: not gated again.** What it costs a range read is the newer versions a 1,000-row read
+meets in a write cycle (322: about 19 more, +38.4k at the server). In that cycle the memtable holds a
+few of the big table's updates in nearly every 1,000-row range (a flush every ~9k transactions of a
+3.2M-row table), so the read has three or more sources ranked and runs the list as before: this change
+doesn't reach those reads. In process it saves 0.3-0.5k of a newer version's 1.6-2.3k where it does.
+The merge's +1.5-1.6% would stand; not measured again (the short-measuring rule).
+
+**What is left.** A newer version still costs 1.2-1.9k in process (a row ~220): ~20 instructions a row
+for every row of a block that holds one (the stop-checking loop instance: its loop keeps the stop, the
+snapshot and version checks on the stack in this build; `Side::take` ~270 an entry). For the merge, the
+reads with the memtable among their sources: a memtable's entries in range read without copying 256
+keys into a buffer (the buffer is the cost there, list or not), then several sources merged at about
+this path's cost.
+
 ## Short write transactions, round 19: the TPC-B-like standing at fixed counts; the L0 merge left out, its read cost itemized (agent 322)
 
 BENCH "Short write transactions, round 19" has the tables. No engine code changed: what was tried is in

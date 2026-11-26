@@ -310,6 +310,58 @@ pairs, lane A at 5.4-6.2 foreign cores): user instructions a transaction base 60
 candidate 777,733 / 762,461: the same binary moves 27% between runs, the ~1% the session saves
 here doesn't show.
 
+## Range reads: a newer file's entries from its block (2026-11-26, agent 327)
+
+HANDOFF "Range reads: a newer file's entries taken from its block in the runs' loop" has what changed.
+**b0** = the head's storage code (`98bc2e3b6`; `b09f1408b` changed no storage file), **c1** = this change
+on it.
+
+### In process (306's / 322's probe, a local test; verify builds; user instructions a read)
+
+A table of 400,000 rows in L1, a sparse L0 file of other rows' new versions (every 97th row, none in the
+probed ranges), then n rows of each of 64 probed ranges updated, evenly spread, in an L0 file (l0), the
+memtable (mem) or both; 2,000 raw range reads through `fill_batch`. Two alternating pairs, hashes of keys
+and values equal in every cell.
+
+| case | b0 | c1 | |
+|---|---:|---:|---:|
+| 1,000-row, 0 newer | 221,656 / 221,657 | 221,722 / 221,722 | +0.0% |
+| 1,000-row, 10 newer (l0) | 241,990 / 242,048 | 238,990 / 238,990 | -1.2%, -1.3% |
+| 1,000-row, 30 newer (l0) | 267,968 / 267,784 | 257,797 / 257,796 | -3.8%, -3.7% |
+| 100-row, 0 newer | 34,148 / 34,148 | 34,159 / 34,159 | +0.0% |
+| 100-row, 1 newer (l0) | 36,958 / 36,958 | 36,979 / 36,979 | +0.1% |
+| 100-row, 3 newer (l0) | 42,772 / 42,862 | 40,981 / 41,071 | -4.2% |
+| 100-row, 10 newer (l0) | 50,327 / 50,326 | 46,462 / 46,646 | -7.7%, -7.3% |
+| 1,000-row, 10 newer (mem) | 247,017 / 247,159 | 247,059 / 247,143 | level |
+| 1,000-row, 10 newer (l0 and mem) | 248,719 / 248,741 | 248,760 / 248,763 | level |
+| 100-row, 10 newer (mem) | 55,926 / 55,530 | 55,670 / 55,915 | -0.5%, +0.7% |
+| 100-row, every row newer (l0: the zip) | 216,812 / 216,812 | 217,395 / 217,485 | +0.3% |
+
+Dropped, same probe: the run loop in `Scan` set up again at each newer entry 268.6k / 343.5k, then 249.7k /
+301.1k (1,000-row, 10 / 30); runs stop-free up to a sought entry +2.9% / +9.0% (100-row with 10 +20%);
+several sources merged in the loop (`sst::Sides`) 1,000-row 30 newer -2.9%, l0 and mem -0.5%, mem 100-row
++1.2%.
+
+### Server (`~/.cache/a327/bench/l0probe.sh`, lane B, plain dist, two alternating pairs)
+
+pgbench -i -s 32, CHECKPOINT; 64 fixed 1,000-row ranges (fx1k) and 64 fixed 100-row ranges (fx100) at 8
+clients, 3 s each; then 30 of every 1,000 rows of the fx1k ranges and 3 of every 100 of the fx100 ranges
+updated, 200,000 rows of another table inserted (the memtable rotated once) and CHECKPOINT (one L0 file, no
+compaction). Server cgroup user instructions a read. 3.6 foreign cores in both holds (cycles not counted).
+
+| read | b0 | c1 | |
+|---|---:|---:|---:|
+| fx1k, no newer | 2,115,098 / 2,114,883 | 2,113,278 / 2,113,388 | -0.09%, -0.07% |
+| fx1k, 30 newer in L0 | 2,178,111 / 2,179,004 | 2,173,009 / 2,172,976 | -0.23%, -0.28% |
+| fx100, no newer | 322,988 / 323,350 | 322,479 / 322,511 | -0.16%, -0.26% |
+| fx100, 3 newer in L0 | 332,596 / 332,647 | 331,534 / 331,509 | -0.32%, -0.34% |
+
+### TPC-H SF1 (lane C, one data directory, two alternating pairs b0 -> c1, c1 -> b0)
+
+All 22 queries' user instructions -0.00% / -0.04%; per query within +-0.26% (q03 +0.18 / -0.26, q02 +0.13
+/ -0.15, q16 -0.10 / -0.13, the rest within 0.1%); hashes equal; peak anon+shmem 1,620.9 / 1,620.3 MB
+against 1,616.0 / 1,615.6. Foreign load 0.8-2.5 cores (wall times not compared).
+
 ## Short write transactions, round 19: the TPC-B-like standing at fixed counts on the shipped build; the L0 merge's read cost itemized (2026-11-26, agent 322)
 
 HANDOFF "Short write transactions, round 19" has what it means. Builds: **roll PGO** = `tools/dist-pgo.sh --out` of
