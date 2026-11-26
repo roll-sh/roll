@@ -857,7 +857,11 @@ fn caller_key(ctx: &Ctx) -> String {
         Some(p) => match &p.kind {
             security::AuthKind::ApiKey(k) => {
                 let st = ctx.state();
-                let made_by = st.metadata.xpack.get(security::api_keys::KEYS, &k.id).and_then(|d| Some((d.get("realm")?.as_str()?.to_string(), d.get("username")?.as_str()?.to_string())));
+                // A key an API key made pays from its person's budget too (`PAYER_REALM`).
+                let made_by = st.metadata.xpack.get(security::api_keys::KEYS, &k.id).and_then(|d| {
+                    let realm = d.get(security::api_keys::PAYER_REALM).or_else(|| d.get("realm"))?.as_str()?;
+                    Some((realm.to_string(), d.get("username")?.as_str()?.to_string()))
+                });
                 match made_by {
                     Some((realm, user)) => format!("caller:user:{realm}/{user}"),
                     None => format!("caller:key:{}", k.id),

@@ -55,19 +55,29 @@ what the best of the four products does:
   send what they may read to the attacker. Every answer, JSON or streamed, native or OpenAI's, is
   sanitized on the server without following CommonMark's line or container rules (a definition
   counts inside a block quote or list item, its label may span lines or hold `\]`): every `](`
-  becomes `]\(` and its URL a code span, every `]:` becomes `]\:` (so no reference definition
-  exists for `![x][a]` to use), `\r` and `\r\n` become `\n`, a `<` starting a tag or autolink
-  becomes `&lt;` (a backslash the model writes can't cancel it), and a bare URL, protocol-relative
-  `//host…` too, becomes a code span. Nothing is removed, so the reader still sees the text. While
-  streaming, text that may still become one of these is held back until it settles, at most
-  2 KiB; past that it's released with a last `]`, `<` or `\` as its entity. The tests read the
-  output as GitHub-flavored markdown (comrak) and fail on any link, image or HTML node.
+  becomes `]\(` and its URL a code span, and the link's label goes through the same rules (a tag
+  or a URL inside it too); every `]:` becomes `]\:` (so no reference definition exists for
+  `![x][a]` to use); `\r` and `\r\n` become `\n`; a `<` starting a tag or autolink becomes `&lt;`
+  (a backslash the model writes can't cancel it); a bare URL, protocol-relative `//host…` too, a
+  bare email address and a `mailto:` or `xmpp:` one become code spans (an address is a link a
+  click away, its local part room for data), with any backslashes the model wrote before one as
+  `&#92;`; and every backtick the model writes becomes `&#96;`, so the only code spans are the
+  sanitizer's. Nothing is removed, so the reader still sees the text. While streaming, text that
+  may still become one of these is held back until it settles, at most 2 KiB; past that it's
+  released by force, and the word the bound cut goes out as a code span, then the rest of that
+  word up to the next whitespace as another, so no half of a URL can join the other. The tests
+  read the output as GitHub-flavored markdown (comrak) and fail on any link, image or HTML node.
   `allow_links: true` keeps inline links (never images) whose URL is exactly one in the given
-  sources' fields, and such a bare URL only when whitespace or the answer's end follows it
-  (GFM's autolinks run to the next space). What this leaves to the renderer: kept links carry no
-  `rel` or `referrerpolicy`; code the model writes in a fence is escaped like any text (the cost
-  of escaping whatever the context); and a renderer that links bare domains (markdown-it's fuzzy
-  linkify) can still link `example.com`.
+  sources' fields, and such a bare URL only when ASCII whitespace or the answer's end follows it
+  (GFM's autolinks run to the next space, and through U+00A0). Any field of a given source may
+  offer the URL, a planted document's too: that document can offer its own fixed URLs, as a
+  click, never one carrying another source's text (it must match exactly), and naming one field
+  wouldn't help, as a planted document can fill any field. What this leaves to the renderer:
+  kept links carry no `rel` or `referrerpolicy`; code the model writes in a fence is escaped like
+  any text (the cost of escaping whatever the context); a renderer that links bare domains
+  (markdown-it's fuzzy linkify) can still link `example.com`; and a renderer must decode
+  entities once, as markdown does: one that decodes the answer before rendering it, or decodes the
+  HTML markdown made again, turns the sanitizer's `&lt;` back into a tag.
 - **The OpenAI route** drops a client's `system` and `developer` messages (chat UIs send their
   own): the profile's instructions are the only ones the model gets. `tools`, `functions`,
   `n` > 1, logprobs, `response_format` and non-text content are 400s; sampling settings are
@@ -98,7 +108,8 @@ what the best of the four products does:
   and MCP tool call it as the cluster's owner, and a separate privilege would be a roll-only name
   in roles Elasticsearch clients write. The cost is bounded instead: a caller that isn't a browser
   key is held to the profile's `per_caller` limits (turns, prompt and output tokens a minute,
-  answers at once) by the user who made its API key (a fresh key buys no fresh budget), or its
+  answers at once) by the user who made its API key (a fresh key buys no fresh budget; a key made
+  with another key counts as that key's person, although its `realm` reads `_es_api_key`), or its
   user and realm (the owner's own calls share one; so do roll's index-scoped owner calls, which
   carry no grant to tell apart and never reach chat), and
   each side together to the profile's `max_tokens_per_day`, 1M unless the owner says otherwise:
