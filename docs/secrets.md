@@ -711,10 +711,10 @@ unit's `Environment=` (and `roll run`'s, and every `roll secrets` command's: the
   Akeyless' Universal Identity does:
   1. A **machine identity** (`POST …/identities {name, kind: "machine", environments, actions,
      ttl_minutes?, allowed_ips?}`, `roll secrets identities add racks --machine --for-env
-     production`): the scope its machines' logins get.
+     production`, or the dashboard's New identity → Machine): the scope its machines' logins get.
   2. A **bootstrap token** per machine (`POST …/identities/{id}/bootstrap {minutes?,
-     allowed_ips?, credential_hours?}`, `roll secrets identities bootstrap idn_…`; admin, made by a
-     person): `rlbt_…`, shown once, single-use, valid for `minutes` (1–60, default 10), and from
+     allowed_ips?, credential_hours?}`, `roll secrets identities bootstrap idn_…`, or the
+     dashboard's Access → Workload identities → Machines; admin, made by a person): `rlbt_…`, shown once, single-use, valid for `minutes` (1–60, default 10), and from
      `allowed_ips` only if given. Hand it to the machine's provisioning (cloud-init, Ansible,
      a USB stick), never to a repository.
   3. On the machine, `ROLL_IDENTITY=idn_…` with `ROLL_BOOTSTRAP_TOKEN` (or
@@ -743,12 +743,14 @@ unit's `Environment=` (and `roll run`'s, and every `roll secrets` command's: the
   same token left in the environment isn't exchanged again (the file remembers its SHA-256); a new
   one there is, and replaces the file. A credential that wasn't replaced before it ended (the
   machine was off longer than `credential_hours`) needs a new bootstrap token too. The audit log has
-  `identity.bootstrap`, `identity.bootstrap.exchange`, `identity.machine.refresh` and
-  `identity.machine.reused`; deleting, disabling or cutting off the identity revokes all its
-  machines. An identity has at most 1,000 bootstrap tokens (one per machine; delete it and make it
-  again past that), and a project makes at most 60 a minute. Its machines' credentials don't count
-  toward the workload token caps that every project's logins share (docs/permissions.md); their
-  logins' tokens do, as any identity's. The bootstrap tokens and credentials are roll-access grants (docs/permissions.md,
+  `identity.bootstrap`, `identity.bootstrap.exchange`, `identity.machine.refresh`,
+  `identity.machine.reused` and `identity.machine.revoke`; deleting, disabling or cutting off the
+  identity revokes all its machines. `GET …/identities/{id}/machines` lists them (the chain, when
+  its credential was last replaced, live or revoked), and `DELETE …/machines/{chain}` revokes one,
+  as the dashboard's identities page does. An identity has at most 1,000 bootstrap tokens (one per
+  machine; delete it and make it again past that), and a project makes at most 60 a minute. Its
+  machines' credentials don't count toward the workload token caps that every project's logins
+  share (docs/permissions.md); their logins' tokens do, as any identity's. The bootstrap tokens and credentials are roll-access grants (docs/permissions.md,
   "Bootstrap tokens and machine credentials"), looked up on every use, and open nothing but these
   logins.
 
@@ -774,7 +776,8 @@ Tests: `crates/roll-cli/tests/secrets.rs` (`the_local_agent_answers_only_request
 identity login's renewal is `relogin_tests` in `crates/roll-cli/src/secrets.rs`, which the agent
 shares. Bootstrap tokens over HTTP:
 `a_bootstrap_token_is_exchanged_once_and_a_spent_credential_ends_its_machine` in
-`crates/rolld/tests/secrets.rs`; their chains in roll-access:
+`crates/rolld/tests/secrets.rs` (with the machines list and an admin's revoke); the dashboard's
+bootstrap token, shown once, in `apps/dashboard/src/components/secrets/secrets-bootstrap.test.tsx`; their chains in roll-access:
 `a_spent_bootstrap_token_or_machine_credential_ends_its_chain` in `crates/roll-access/tests/access.rs`.
 ## Customer-managed keys
 A project's data key can be wrapped once more by a KMS key in the customer's own AWS account, as
@@ -1424,7 +1427,11 @@ in one run, for an operator's maintenance window, and fails if one does), `missi
 imports and base), `exposed` (a protected value also in an unprotected environment, or a public
 certificate linked into a protected environment whose private key is also linked into one that
 isn't: "public certificate web's private key is also linked into development"), `public`,
-`weak`, `unplaced` (a key bound to hosts without a `header` or `query`, from before a placement
+`weak`, `backup_left` (someone who may no longer back the project up took a backup in its history,
+`history_days` or else 90 days, that carried registrations' keys: `key` the person, the detail what
+it carried and what to do, re-issue a CA, rotate a credential; only for its admins; offboarding
+writes a `backup.left` audit row saying the same, and that a schedule they set up stops),
+`unplaced` (a key bound to hosts without a `header` or `query`, from before a placement
 was required: a trusted reader's placeholder may ride in any header, and an untrusted consumer's
 doesn't swap; see "Using a key without seeing it"), `expiring` (within two weeks: a key's
 `expires_at`, so a vendor's key roll hasn't rotated in time, or a SaaS rotator's
@@ -3275,10 +3282,15 @@ the names with dns-01, renews them, and keys link to the result.
     certificate.
   - **Renewals asked for are capped**, per registration: one an hour and three a week, a 429
     `rate_limited` saying when the next may come. Each renewal spends the CA's limit for the exact
-    set of names (Let's Encrypt issues 5 a week), so a script or an agent retrying in a loop could
-    otherwise use it up and block the renewal a leak needs. A leak's renewal (below) is exempt from
-    the weekly count but not repeatable within the hour; a person's renewal just before it doesn't
-    hold it up. Scheduled renewals and new domains or credentials aren't counted.
+    set of names (Let's Encrypt issues 5 a week, across every account, and revoking doesn't give
+    one back), so a script or an agent retrying in a loop could otherwise use it up and leave the
+    names with only revoked certificates. A leak's renewal (below) counts toward the same caps: the
+    week's first comes at once whatever was asked before it (a leaked key must be replaced), and
+    later ones are held like any other. A held leak revokes nothing: its `secret.leaked` event says
+    `rotating: false` with `reason: "already rotated"` and when the next may come (audited), so a
+    writer who reveals each new key and reports it again can't spend the limit. An admin's
+    `…/revoke` is never held, but counts. Scheduled renewals and new domains or credentials aren't
+    counted.
 - **A leaked private key is revoked at the CA, then replaced.** A leak of a key linked to a public
   certificate (roll code's landing check, `POST …/leaks` with `leaked: true` by someone who may
   write there, under `leaks.rotate = managed`) rotates it as any managed key's leak does, claimed
@@ -3980,7 +3992,9 @@ webhook design do.
   rotation was found by, and a key sharing the credential counts too. A leak of its new value
   within the hour is recorded with `rotating: false` and `reason: "rotated within the hour"`, each
   time it's reported, and rotates nothing. So revealing each new value and reporting it again
-  can't churn the key against the vendor.
+  can't churn the key against the vendor. A key linked to a public certificate is held longer,
+  by its registration's renewal cap ("Publicly trusted certificates"): `reason: "already rotated"`,
+  and nothing is revoked.
 - **Where approvals are needed.** A leak never rotates a key in an environment, or a folder, that
   needs approvals (a protected environment with `approvals` ≥ 1, or a folder policy). Instead it
   opens a change request for the rotation (`action: "rotate"`, its one item the key, `rotated`),
@@ -4282,7 +4296,8 @@ refuses any push whose new commits add a value of the project, whoever pushes it
   budget gone), the push is refused: break glass never passes unrecorded. Only
   `--breakglass-unrecorded` on the hook's command line lets such a push through, saying it went
   unrecorded; set it only where the git server's own log names pushers.
-- **Its token.** `roll secrets -p <project> tokens create pre-receive --scan-only` makes a token
+- **Its token.** `roll secrets -p <project> tokens create pre-receive --scan-only` (or the
+  dashboard's Access → New token → Scan-only, which labels such tokens `scan-only`) makes a token
   that has only `scan`, in every environment unless `--for-env` names some. It can't read a name
   or reveal a value. Give the hook `ROLL_API_URL`, `ROLL_TOKEN` and `ROLL_PROJECT` (the project's
   `prj_…` id: a scan-only token can't look a name up).
@@ -4812,7 +4827,12 @@ printed); `roll secrets backup --to <public key> --out shop.backup` writes the w
 The archive is sealed to that key (`roll-seal-v1`, associated data
 `roll-secrets-backup:<project>`), so the file is safe at rest anywhere and only the key's holder
 opens it: nothing in it is in the clear, and only it carries registrations' keys out of roll.
-`POST …/backup {recipient}` (admin and reveal over the whole project, audited `project.backup`) is the call. Linked keys carry their
+`POST …/backup {recipient}` (admin and reveal over the whole project, audited `project.backup`,
+whose row names the registrations it carried) is the call. Registrations' keys and credentials
+(CAs', SSH CAs' and GitHub Apps' private keys, SaaS and DNS credentials, ACME accounts, rotators'
+and outside databases' URLs) leave only in a person's backup (signed in) or the operator's, never
+a token's: no route answers them to a token either. A token's backup holds the registrations by
+name only, in `left_out`, and its answer's `warnings` names them. Linked keys carry their
 link and no value: a restore issues its own credentials, from the restored registrations.
 Personal values, history, leases and tokens aren't in it, and neither are registrations whose
 trust names the project they were made in or that hold a token of the server's own: AWS roles and
@@ -4834,17 +4854,27 @@ opened archive; admin, audited `project.restore`), on this server or another. Ar
 1. **Registrations**, in one write, each made by the restorer (recorded as anything else they make
    is: their person, or their token), with a new id; links move to it. Each is checked first as
    registering it would be, without asking its service (that happens at its first use): a name
-   roll takes, a CA's policy, a rotator's URL, a database's URL and CA, a GitHub App's API and
-   ceiling, a public certificate's CA (one this server orders from). One this project already has
+   roll takes, a rotator's URL, a database's URL and CA, a GitHub App's API and ceiling, a public
+   certificate's CA (one this server orders from). A CA's policy, and its private key matching its
+   CSR (pending) or its certificate: a root's self-signed, a CA's, valid now and name-constrained
+   to its domains; an intermediate's certificate and chain checked as installing them is (the path
+   to a root, validity, name constraints within its domains unless `unconstrained`, the policy
+   narrowed). An SSH CA's policy as making one checks it, and its private key its public key's.
+   One that fails is left out with a warning, never written unchecked. One this project already has
    by that name is kept as it is; a database reached through a gateway isn't restored (a backup
    carries no gateway). A restored CA signs with the same key, so every client that trusts it keeps
    trusting what it issues.
 2. **Environments and keys.** Values are written before any environment is protected, so a restore
    isn't a change request; managed links issue fresh credentials from the restored registrations.
 3. **Identities and syncs**, in one write, with no maker: identities come back disabled and syncs
-   paused, with the reason `restored from a backup`. An admin enables or resumes each
+   paused, with the reason `restored from a backup`. Each identity is checked first as making it
+   is: its TTL, an AWS one's role pattern, a machine one's empty fields, an OIDC one's issuer URL
+   (or pinned keys), audience, subject and the shared-issuer rule (a GitHub identity for `repo:*`
+   is refused), its address list, and a scope within what the restorer may grant; a sync passes
+   roll secrets' policy as making it would. An admin enables or resumes each
    (`PATCH …/identities/{id}`, `PATCH …/syncs/{id}`) and becomes its maker then, so a restored
-   workload acts only at the rights of a person who chose to turn it on.
+   workload acts only at the rights of a person who chose to turn it on. Enabling any identity runs
+   the same checks again, so one written before a rule existed stays off.
 
 What can't be restored (a link to a resource that project doesn't have, an import of another
 project's folder, a registration that fails its check) comes back as a warning, by name, never a
@@ -4859,9 +4889,13 @@ secret key is, open the archive there, and write nothing:
   compares it with the live project (`POST …/backup/verify`, admin and reveal over the whole project, audited `backup.verify`):
   counts of environments, keys, registrations, identities and syncs; key names missing, changed
   (value or link compared by fingerprint, here and never answered) or added since;
-  registrations missing or changed (key, certificate, credential); settings that differ; and the
-  registrations a backup doesn't carry. A sensitive key's value isn't in a backup, so it's never
-  compared.
+  registrations missing or changed (key, certificate, credential); settings that differ; the
+  registrations a backup doesn't carry; and what a restore would leave out, and why (`refused`:
+  a registration or an identity that fails its checks). A sensitive key's value isn't in a backup,
+  so it's never compared. A token's verify answers counts only (`names: false`, each part's
+  `counts`), compares registrations without their keys, and gets 10 a minute (as `/scan` limits a
+  scanner): names of what differs, and anything about a key it can't take out, are a person's or
+  the operator's.
 - `roll secrets restore shop.backup --key … --dry-run` asks the same of the project it would load
   into: what it would bring back, whether that project has registrations already (one by the same
   name is kept as it is), and whether it still has keys (then it fails, as the restore would).
@@ -4873,8 +4907,12 @@ buckets, as `roll-secrets/backups/<project>/<time>.json`, the first one at once.
 and compared before it counts, and the oldest beyond `keep` are deleted (only roll's own
 `<time>.json` files there: nothing else in the bucket is touched). roll never holds the key
 that opens them: the recipient's secret key restores one as above. One node runs each (a schedule
-is claimed by moving its next time on); what a person set up runs only while they can still reach
-the project, and only into a bucket the project still has. `GET …/backup/schedule` says when the
+is claimed by moving its next time on). Setting one up asks what a backup asks (admin and reveal
+over the whole project) and records its maker (the person behind a session or their own token); it
+runs only while they may still manage and reveal the whole project, as they are then, and only into
+a bucket the project still has. A token's schedule carries registrations by name only
+(`registrations: false`). An incident's cut-off pauses it (`paused_at`, `paused_why`); setting it
+up again lifts that. `GET …/backup/schedule` says when the
 last one landed, its key, and why the last attempt failed; `DELETE` stops it (what's in the bucket
 stays). Drill one now and then: `roll secrets backup verify --latest-from-bucket --key …`.
 
@@ -5936,8 +5974,15 @@ credentials as the tokens list does. Names and metadata only, never a value:
 - **Sandboxes** (`sandboxes`): live agents sandboxes holding a copy of its values, `{id, name,
   owner, by, from, keys}` (with `key`, only that key).
 - **Who knew** (`knew`): people who read its values in the last 30 days and may no longer reveal
-  them, `{user, last_at, reads, why}` (`why`: `left` the project, their `role` no longer reveals
-  it, or their account is `gone`). They still know what they read: rotate it.
+  them, `{user, last_at, reads, why, via, registrations}` (`why`: `left` the project, their `role`
+  no longer reveals it, or their account is `gone`). They still know what they read: rotate it. A
+  backup or a backup verify reads every folder: `via: "backup"`, and `registrations` names what
+  their backups carried out with their keys, and what to do about each (rotate a credential,
+  re-issue a CA). A scheduled backup counts for whoever set the schedule up.
+- **Backups** (`backups`): the project's backup schedule, `{bucket, recipient, created_by,
+  registrations, last_at, paused_at, stopped}`. Every value leaves in each backup, and only the
+  holder of `recipient`'s secret key opens them; `stopped` says its maker may no longer back the
+  project up, so it backs nothing up.
 
 roll secrets knows no product: rolld answers which services and sandboxes hold a project's
 secrets (`reach::Holders`, from roll apps' and roll code's stores; names and references only:
@@ -6011,6 +6056,10 @@ reach as the caller sees it (the list the confirmation showed), then:
   (`paused_at`, `paused_why`): nothing is pushed, and running one answers 409 `paused`, until an
   admin resumes it (`PATCH …/syncs/{id}` with `{paused: false}`). What changed meanwhile goes out
   on the next pass.
+- **Backups**: the project's backup schedule is paused (`backups`): every value leaves in each
+  backup. Backups already taken can't be called back: `rotate` lists, for each person in `knew`
+  who took one, what it carried out and what to do about it. Setting the schedule up again
+  (`PUT …/backup/schedule`) resumes it.
 - **Freeze** (off by default): reads of the folder's values answer 423 `frozen`, the shape of
   `kms_denied`, to everyone but its admins, also through a folder that imports it, an environment
   based on it, a reference, or the history. Admins still read and write, so they can rotate.
@@ -6025,7 +6074,8 @@ reach as the caller sees it (the list the confirmation showed), then:
 What's roll secrets' own (identities, shares, exports, syncs, the freeze) changes in one
 transaction; revocations happen outside it. One audit row (`reach.cut_off`) names what was cut and
 why, beside the rows the revocations write themselves. The answer lists what was cut (`tokens`,
-`identities`, `logins`, `leases`, `shares`, `projects`, `syncs`, `frozen`), what was left to the
+`identities`, `logins`, `leases`, `shares`, `projects`, `syncs`, `backups`, `frozen`), what to
+rotate that left in backups (`rotate`), what was left to the
 operator (`skipped`), and what couldn't be, each with why (`failed`), without stopping the rest. It's idempotent: a second call cuts what's
 left (a bulk revoke that failed, a lease its product refused).
 
@@ -6700,7 +6750,7 @@ roll-workspace's records, not secrets' audit rows: they're the workspace's own f
 | --- | --- | --- |
 | `secret.changed` | a change added, changed, linked or rotated stored values (a change that only edits comments, tags or expiry isn't one) | `via`, `change` (its number in the history), `version` (one key) or `versions` (`{key: version}`), `keys` when the row names more (the change's other keys only had their metadata edited or were deleted), `deleted` (keys the same change deleted), `folders` (a change across folders) |
 | `secret.deleted` | a change only deleted keys (a folder's delete too) | `via`, `change`, `version` or `versions` (the delete's), `folders` (a change across folders) |
-| `secret.leaked` | a stored value turned up in a roll code repository (a change's added lines or a scan) or in text reported published (`POST …/leaks` with `leaked: true`), in the project holding the value, once a day for the same keys and place and whenever a rotation of them starts ("When a value leaks"); or GitHub's secret scanning found a placeholder (`secrets.placeholders.end`) | `repo` (and `project`, the repo's, when the value came from another's shared folder) or `reported: true`, with `rotatable` (roll can rotate one of the keys), `rotating` (the keys `leaks.rotate = managed` rotates now; `false` with `reason: "rotated within the hour"` when the keys rotated for a leak within the hour) and `requests` (the change requests opened for their rotation where approvals are needed), `revoking` (the serials of public certificates whose leaked key roll revokes at the CA first, `keyCompromise`); or `placeholder`, `consumer`, `reason` |
+| `secret.leaked` | a stored value turned up in a roll code repository (a change's added lines or a scan) or in text reported published (`POST …/leaks` with `leaked: true`), in the project holding the value, once a day for the same keys and place and whenever a rotation of them starts ("When a value leaks"); or GitHub's secret scanning found a placeholder (`secrets.placeholders.end`) | `repo` (and `project`, the repo's, when the value came from another's shared folder) or `reported: true`, with `rotatable` (roll can rotate one of the keys), `rotating` (the keys `leaks.rotate = managed` rotates now; `false` with `reason: "rotated within the hour"` when the keys rotated for a leak within the hour, or `reason: "already rotated"` when a public certificate's renewal cap holds the leak's renewal) and `requests` (the change requests opened for their rotation where approvals are needed), `revoking` (the serials of public certificates whose leaked key roll revokes at the CA first, `keyCompromise`); or `placeholder`, `consumer`, `reason` |
 | `scan.finding` | `roll secrets scan` or roll MCP's credential guard (`POST …/leaks`), or a pre-receive hook (`POST …/scan`), matched values: a row per folder | `candidates`, `matched`, `guard`, and `breakglass` from a hook |
 | `rotation.failed` | a managed key's scheduled rotation failed: once as a failing run starts (health's `rotation_failing` until one works); a leaked key's rotation failed | `reason`, `via: "leak"` (a leak's) |
 | `rotation.succeeded` | a rotation worked, scheduled, `--now` or for a leak: a managed key's new credential (the row right after its `secret.changed` via `rotation`, in the same transaction), or a live link's resource credential reset | `mode` (`managed` or `live`), `scheduled`, `version` and `change` (managed), `sharing` (the keys holding the same credential, when more than one), `via: "leak"` and `grace_minutes: 0` (a leak's: the leaked credential revoked at once), `revoked: <serial>` (a public certificate's key moving off a certificate roll revoked at the CA) |
@@ -6916,11 +6966,11 @@ isn't in the workspace is 404.
 | `GET /environments/{env}/imports?path=` | | `Import[]` |
 | `PUT /environments/{env}/imports?path=` | `Import[]` | `Import[]` |
 | `GET /environments/{env}/exports?path=` | | `Export[]` |
-| `POST /backup` | `{recipient}` | `{sealed, context}`: the whole project, sealed to `recipient` (admin and reveal over the whole project: `admin` alone is a 403; archive version 2) |
-| `POST /backup/verify` | `Archive` (an opened backup) | `{project, at, v, environments, keys, registrations, identities, syncs, settings, left_out, live_keys}` (admin and reveal over the whole project; nothing written): each part `{archive, live, missing, extra, changed}`, by name |
+| `POST /backup` | `{recipient}` | `{sealed, context, warnings}`: the whole project, sealed to `recipient` (admin and reveal over the whole project: `admin` alone is a 403; archive version 2; a token's carries registrations by name only, `warnings` naming them) |
+| `POST /backup/verify` | `Archive` (an opened backup) | `{project, at, v, environments, keys, registrations, identities, syncs, refused, names, settings, left_out, live_keys}` (admin and reveal over the whole project; nothing written; 10 a minute for anyone but the operator, then 429): each part `{archive, live, missing, extra, changed, counts}`, by name; a token's has `names: false`, counts only and no `refused` |
 | `GET /backup/latest` | | `{sealed, context, key}`: the schedule's newest backup, still sealed (admin; 404 with no schedule or none landed yet) |
-| `GET /backup/schedule` | | `BackupSchedule` or null (admin): bucket, recipient, `every_hours`, `keep`, `next_at`, `last_at`, `last_key`, `last_error` |
-| `PUT /backup/schedule` | `{bucket, recipient, every_hours?, keep?}` | `BackupSchedule` (admin; one of the project's roll buckets; the first backup at once) |
+| `GET /backup/schedule` | | `BackupSchedule` or null (admin): bucket, recipient, `every_hours`, `keep`, `next_at`, `last_at`, `last_key`, `last_error`, `created_by`, `registrations`, `paused_at`, `paused_why` |
+| `PUT /backup/schedule` | `{bucket, recipient, every_hours?, keep?}` | `BackupSchedule` (admin and reveal over the whole project; one of the project's roll buckets; the first backup at once; lifts a cut-off's pause) |
 | `DELETE /backup/schedule` | | 204 (admin; the backups made stay) |
 | `POST /restore` | `Archive` (an opened backup, version 1 or 2) | `{environments, secrets, registrations, identities, syncs, warnings}` (admin; an empty project; identities disabled and syncs paused until an admin resumes them) |
 | `GET /suggestions` | | `Suggestion[]`: canvas resources linked nowhere yet, with their usual keys and where they'd go |
@@ -6943,7 +6993,7 @@ isn't in the workspace is 404.
 | `POST /environments/{env}/values/delta?path=&dynamic=` | `{digest?, basis?, stamps?: {KEY: stamp}}` (what the watcher holds; `{}` for none; at most 4 MiB, else a 413) | `ValuesDelta` (`reveal`, as `…/values`; see "Delta reads"): `delta: true` with only the keys whose stamp differs from the one held (and every live link's, read again), the names held that the folder no longer answers in `removed`, the changed keys' `stamps`, and every list as the whole folder's; or `delta: false`, the full set as `…/values?digest=1` answers it with every key's stamp, whenever the delta can't be proven exact (nothing held, another `basis`, a dynamic credential a read would issue, stamps that couldn't be worked out). Audited as `secrets.export` naming the keys returned; nothing changed is a `secrets.revalidate` row a day, as a 304. A held key or stamp of the wrong shape is a 400 |
 | `GET /environments/{env}/insights?path=` | | `Insights` (read) |
 | `GET /environments/{env}/reach?path=&key=` | | `Reach` (a project admin's): tokens and identities that reach it, syncs, live leases and attributed shares, projects it's shared with, folders that import it, readers in 30 days, `frozen` |
-| `POST /environments/{env}/reach/cut-off?path=&key=` | `{why, tokens?, identities?, leases?, placeholders?, shares?, syncs?, freeze?}` | `CutOff`: what was cut, what was left to the operator (`skipped`: tokens reaching beyond the project) and what failed, with why (a project admin's; idempotent) |
+| `POST /environments/{env}/reach/cut-off?path=&key=` | `{why, tokens?, identities?, leases?, placeholders?, shares?, syncs?, backups?, freeze?}` | `CutOff`: what was cut, what was left to the operator (`skipped`: tokens reaching beyond the project) and what failed, with why (a project admin's; idempotent) |
 | `DELETE /environments/{env}/reach/cut-off?path=` | | 204: the folder's freeze lifted (a project admin's; 404 when it isn't frozen) |
 | `GET /environments/{env}/digest?path=&since=&wait=` | | `{digest}` (read: changes when the values would; a live link counts its value's keyed fingerprint as the product answers, read at most every 10 s, and at once when roll rotates it or the product's own password, reset or restore route changes it). With `since` (a digest the caller has) and `wait` (seconds, at most 25), a long poll: it answers as soon as the digest differs, else with the same one when `wait` runs out (at most 32 held per principal and 4096 per node; past that it answers at once); `roll run --watch`, `roll secrets render --watch` and the TS, Go and Python watches use it (and roll apps' redeploys in process, through `SecretSource::wait_digest`: one held poll per environment), so a change to the project's own values reaches them in a second or two (a live link's product-side change, or another project's shared folder, within about 10 s) |
 | `POST /environments/{env}/resolve` | `{path?, consumer, seal_to?, untrusted?, dynamic?, codes?, placeholders?, placeholder_minutes?, maker?}` | `Values` or `{sealed, context, problems, leases, dynamic, linked, followed, placeholders}` (`placeholders: true`: each key bound to hosts is an `rlph_…` placeholder in `values`, named in `placeholders`, for 1 to 43,200 minutes (default 1,440); refused for a workload identity's login; `maker`: who made the consumer, who must reveal here; not a sensitive key's for a reader that couldn't read it unless its binding has `untrusted`; not a key holding a reference, which is left out as a problem; `dynamic: false`: a consumer that can't renew leases, such as a preview's service, gets no dynamic credential; those keys are left out, named in `dynamic`; a key linked to a resource the ephemeral environment branched is left out and named in `followed`, in the clear beside a sealed box: names only) |
@@ -6975,6 +7025,8 @@ isn't in the workspace is 404.
 | `PATCH /identities/{id}` | `{disabled}` | `Identity` (admin; a person's): `false` enables one a cut-off disabled, `true` disables it and revokes its live logins |
 | `PUT /identities/{id}/jwks` | `{jwks}` | `Identity` (admin; a person's): its pinned keys replaced, its id kept (400 for an `aws` or `machine` one) |
 | `POST /identities/{id}/bootstrap` | `{minutes?, allowed_ips?, credential_hours?}` | 201 `{identity, chain, secret, expires_at}` (admin; a person's; a `machine` identity's single-use `rlbt_…`, "On a VM") |
+| `GET /identities/{id}/machines` | | `MachineChain[]` newest first (admin): `{chain, state, credential_hours, created_at, created_by, refreshed_at, expires_at, revoked_at, revoked_why}`, `state` `waiting` (its bootstrap token not exchanged yet), `live`, `ended` or `revoked`; never a secret |
+| `DELETE /identities/{id}/machines/{chain}` | | 204 (admin, audited as `identity.machine.revoke`): the machine's credential and its logins' tokens revoked at once; it needs a new bootstrap token |
 | `POST /v1/secrets/login` | `{identity, token}`, `{identity, aws: {method, url, headers, body}}` or `{identity, machine}` | `{token, expires_at, project, identity}` (public; `aws`: a signed `GetCallerIdentity`, "AWS IAM"; `machine`: a machine credential) |
 | `POST /v1/secrets/login/bootstrap` | `{identity, token}` | `{identity, chain, secret, expires_at, refresh_at}` (public: a bootstrap token for a machine credential, `rlmc_…`; 401 for one used already, which revokes its machine) |
 | `POST /v1/secrets/login/refresh` | `{identity, credential}` | as `…/login/bootstrap` (public: the current machine credential for the next; the one presented is spent) |

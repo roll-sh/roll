@@ -2939,7 +2939,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                     return print(&r);
                 }
                 let names = |k: &str| r[k].as_array().map(|a| a.iter().map(|x| s(&x["name"])).collect::<Vec<_>>()).unwrap_or_default();
-                for (title, k) in [("revoked token", "tokens"), ("disabled identity", "identities"), ("ended lease", "leases"), ("expired share", "shares"), ("paused sync", "syncs")] {
+                for (title, k) in [("revoked token", "tokens"), ("disabled identity", "identities"), ("ended lease", "leases"), ("expired share", "shares"), ("paused sync", "syncs"), ("paused backups", "backups")] {
                     for n in names(k) {
                         println!("{title:<18} {n}");
                     }
@@ -2955,6 +2955,9 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 }
                 if r["frozen"] == true {
                     println!("{:<18} {}:{}", "frozen", c.at.env, c.at.path);
+                }
+                for x in r["rotate"].as_array().into_iter().flatten() {
+                    println!("{:<18} {}", "left in a backup", s(x));
                 }
                 if r["batches"].as_u64().unwrap_or(0) > 1 {
                     eprintln!("Tokens were revoked in {} calls of at most 500.", r["batches"]);
@@ -3012,7 +3015,15 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 println!("  read       by {:<32} {} reads, last {}", s(&r["actor"]), r["reads"], ago(r["last_at"].as_i64().unwrap_or_default()));
             }
             for k in v["knew"].as_array().into_iter().flatten() {
-                println!("  knew       {:<32} {} reads, last {} (may no longer reveal it: {})", s(&k["user"]), k["reads"], ago(k["last_at"].as_i64().unwrap_or_default()), s(&k["why"]));
+                let via = if k["via"] == "backup" { " (took a backup: it holds every folder)" } else { "" };
+                println!("  knew       {:<32} {} reads, last {} (may no longer reveal it: {}){via}", s(&k["user"]), k["reads"], ago(k["last_at"].as_i64().unwrap_or_default()), s(&k["why"]));
+                for r in k["registrations"].as_array().into_iter().flatten() {
+                    println!("             {}", s(r));
+                }
+            }
+            for b in v["backups"].as_array().into_iter().flatten() {
+                let state = if !b["paused_at"].is_null() { " (paused)" } else if b["stopped"] == true { " (stopped: its maker may no longer back the project up)" } else { "" };
+                println!("  backups    to bucket {:<22} sealed to {} (only its secret key's holder opens them), set up by {}{state}", s(&b["bucket"]), s(&b["recipient"]), s(&b["created_by"]));
             }
             eprintln!("Not counted: {}.", s(&v["uncounted"]));
         }
@@ -3927,6 +3938,9 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
         Secrets::Backup { to, out, .. } => {
             let to = to.ok_or_else(|| anyhow::anyhow!("backup --to <public key> (`roll secrets keygen` makes one), or `backup verify`"))?;
             let v = c.call(Method::POST, &format!("{}/backup", c.base()), Some(json!({ "recipient": to }))).await?;
+            for w in v["warnings"].as_array().into_iter().flatten() {
+                eprintln!("warning: {}", s(w));
+            }
             let text = serde_json::to_string_pretty(&v)?;
             match out {
                 Some(path) => {
@@ -4523,6 +4537,7 @@ fn cut_off_plan(v: &Value, freeze: bool) -> Vec<String> {
     line("share(s) expired", list("shares", &|x| s(&x["id"])));
     line("project(s) no longer sharing it", list("projects", &s));
     line("sync(s) paused", v["syncs"].as_array().map(|a| a.iter().filter(|x| x["paused_at"].is_null()).map(|x| s(&x["kind"])).collect()).unwrap_or_default());
+    line("backup schedule(s) paused", v["backups"].as_array().map(|a| a.iter().filter(|x| x["paused_at"].is_null()).map(|x| format!("to bucket {}", s(&x["bucket"]))).collect()).unwrap_or_default());
     if freeze {
         out.push("the folder frozen: reads answer 423 to all but its admins".into());
     }
@@ -5895,9 +5910,14 @@ fn open_backup(key: &std::path::Path, v: &Value) -> anyhow::Result<Value> {
 fn print_verified(r: &Value, project: &str) {
     println!("A backup of {} from {} (archive v{}), against {project}:", s(&r["project"]), utc_ms(r["at"].as_i64().unwrap_or(0)), r["v"]);
     let names = |v: &Value| v.as_array().into_iter().flatten().map(s).collect::<Vec<_>>().join(", ");
+    if r["names"] == false {
+        println!("  (counts only: a token's verify doesn't name what differs)");
+    }
     for part in ["environments", "keys", "registrations", "identities", "syncs"] {
         let d = &r[part];
-        println!("  {part}: {} in the backup, {} here", d["archive"], d["live"]);
+        let n = &d["counts"];
+        let counts = if r["names"] == false { format!(": {} missing here, {} changed since, {} not in the backup", n["missing"], n["changed"], n["extra"]) } else { String::new() };
+        println!("  {part}: {} in the backup, {} here{counts}", d["archive"], d["live"]);
         for (what, field) in [("missing here", "missing"), ("changed since", "changed"), ("not in the backup", "extra")] {
             let list = names(&d[field]);
             if !list.is_empty() {
@@ -5907,6 +5927,9 @@ fn print_verified(r: &Value, project: &str) {
     }
     if !names(&r["settings"]).is_empty() {
         println!("  settings that differ: {}", names(&r["settings"]));
+    }
+    for x in r["refused"].as_array().into_iter().flatten() {
+        println!("  a restore would leave out {}", s(x));
     }
     if !names(&r["left_out"]).is_empty() {
         println!("  registrations a backup doesn't carry: {}", names(&r["left_out"]));

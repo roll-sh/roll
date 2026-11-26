@@ -1092,10 +1092,12 @@ function PageChecks({ page, branch }: { page: PageCheck; branch: string }) {
   const seo = page.a11y?.seo ? seoWords(page.a11y.seo) : [];
   const broken = page.links?.broken ?? [];
   const slow = stepSlower(page.step_ms, page.against?.step_ms);
-  if (!page.step && !slow && !a11y.length && !seo.length && !broken.length && !page.against?.text?.added_n && !page.against?.text?.removed_n) return null;
+  if (!page.step && !page.play && !slow && !a11y.length && !seo.length && !broken.length && !page.against?.text?.added_n && !page.against?.text?.removed_n) return null;
   return (
     <div className="mb-1.5 space-y-0.5 text-[11.5px]">
       {page.step && <p className="break-words text-danger">Its steps stopped at {page.step}: taken as it was then.</p>}
+      {page.play === "failed" && <p className="text-danger">Its interaction test failed{page.against?.play_broke ? ", where main's passes" : ""}: the story's play function, or its render, threw.</p>}
+      {page.play === "passed" && <p className="text-soft">Its interaction test passed.</p>}
       {slow && (
         <p className="text-soft" title="Its slowest click or typing, to the next paint (Interaction to Next Paint, in roll's browser)">
           {slow}

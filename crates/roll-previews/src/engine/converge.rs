@@ -916,8 +916,9 @@ impl Engine {
             self.warm_wanted.lock().extend(deployed.into_iter().map(|svc| (r.id.clone(), svc)));
         }
         // 6. A screenshot of the first service, once per head (best effort; it wakes the service):
-        // taken after the pass, never in a converge slot.
-        if ready && s.github.screenshot && self.store.screenshot_head(&r.id)?.as_deref() != Some(r.build()) {
+        // taken after the pass, never in a converge slot. A default branch's again at its head
+        // for the stories the open changes took and it hasn't.
+        if ready && s.github.screenshot && (self.store.screenshot_head(&r.id)?.as_deref() != Some(r.build()) || self.stories_due(r).await) {
             self.shots_wanted.lock().insert(r.id.clone());
         }
         Ok(())
@@ -1105,7 +1106,11 @@ impl Engine {
             let _ = self.store.log(&r.id, &format!("screenshots taken signed out: {why}"));
         }
         let signs_in = login.is_some();
-        let opts = crate::ports::ShotOptions { pages: first_paths, hide: hide.clone(), openapi, endpoints, states, browsers, crops, stories, modes, login, changed };
+        // A default branch's preview takes first the stories the open changes took and it hasn't
+        // (whichever of its services serves the Storybook; recorded once its run is kept).
+        let asked_first = if storybook.is_some() && r.change_id.is_none() { self.stories_wanted(r) } else { Vec::new() };
+        let stories_first = if stories.is_some() { asked_first.clone() } else { Vec::new() };
+        let opts = crate::ports::ShotOptions { pages: first_paths, hide: hide.clone(), openapi, endpoints, states, browsers, crops, stories, modes, login, changed, stories_first };
         let started = std::time::Instant::now();
         // The page's words are its code's: what it was given is masked before they're kept (and
         // reach the pull request's comment); a run whose masks can't be read fails as a run.
@@ -1145,7 +1150,7 @@ impl Engine {
                 // `<first>:/` is the screenshot itself (which service is first isn't the person's to know).
                 if let Some(e) = entries.iter().find(|e| crate::settings::page_entry(e) == Some((Some(first.name.as_str()), "/"))) {
                     let errors = shot.health.as_ref().map_or(0, |h| h.errors + h.failed);
-                    let report = crate::PageReport { a11y: shot.a11y.clone(), links: shot.links.clone(), text: shot.text.clone(), unstable: shot.health.as_ref().is_some_and(|h| h.unstable), step: None, step_ms: None };
+                    let report = crate::PageReport { a11y: shot.a11y.clone(), links: shot.links.clone(), text: shot.text.clone(), unstable: shot.health.as_ref().is_some_and(|h| h.unstable), step: None, step_ms: None, play: None };
                     pages.push(crate::ports::PageShot { path: e.clone(), png: shot.png.clone(), errors, report });
                 }
                 pages.extend(self.other_services_pages(r, &first.name, &entries, &hide, storybook.as_ref()).await);
@@ -1171,11 +1176,23 @@ impl Engine {
                 .unwrap_or(false);
                 if kept && r.change_id.is_some() {
                     self.compare_with_default_branch(r).await;
+                    // Stories main's preview hasn't: it takes them (once per set at its head).
+                    if let Some(base) = self.default_branch_preview(r).await
+                        && self.stories_due(&base).await
+                    {
+                        self.shots_wanted.lock().insert(base.id.clone());
+                    }
                     let threshold = self.store.settings(&r.project_id).map_or(0.0, |s| s.github.visual_threshold);
                     if self.store.carry_acceptance(&r.id, threshold).unwrap_or(false) {
                         let _ = self.store.log(&r.id, "its pages look exactly as when they were accepted: the acceptance carries over");
                     }
                 } else if kept {
+                    if !asked_first.is_empty() {
+                        // Everything asked for at this head so far, this run's with it.
+                        let mut ids = self.store.runtime_fact::<StoriesWanted>(&r.id, "stories_wanted").ok().flatten().filter(|f| f.head == r.build()).map(|f| f.ids).unwrap_or_default();
+                        ids.extend(asked_first.iter().filter(|i| !ids.contains(i)).cloned().collect::<Vec<_>>());
+                        let _ = self.store.set_runtime_fact(&r.id, "stories_wanted", Some(&StoriesWanted { head: r.build().to_string(), ids }));
+                    }
                     // A branch's preview may be a baseline: its screenshots are kept by head.
                     if let Err(e) = self.store.keep_base_history(&r.id, r.build()) {
                         warn!(preview = %r.id, error = %e, "previews: keeping the screenshot's history");
@@ -1254,7 +1271,14 @@ impl Engine {
             // Its stories, when it serves the Storybook: where, in the key too (turning them on
             // takes them at once).
             let stories = stories_of.filter(|(s, _)| s == svc).map(|(_, at)| at.clone());
-            let key = service.deployed.as_ref().map(|rev| format!("{rev}:{}:{}:{}", self.store.service_config(&r.id, svc).ok().flatten().unwrap_or_default(), r.last_reset_at.unwrap_or(0), stories.as_deref().unwrap_or("")));
+            // As the first service's: the change's paths when it's the change's own repo, and a
+            // default branch's the open changes' stories first (in the key too, so they're taken).
+            let changed = match (&stories, service.repo == r.repo, r.change_id.is_some()) {
+                (Some(_), true, true) => self.source.paths(&r.repo, r.build()).await.ok().flatten().unwrap_or_default(),
+                _ => Vec::new(),
+            };
+            let stories_first = if stories.is_some() && r.change_id.is_none() { self.stories_wanted(r) } else { Vec::new() };
+            let key = service.deployed.as_ref().map(|rev| format!("{rev}:{}:{}:{}:{}", self.store.service_config(&r.id, svc).ok().flatten().unwrap_or_default(), r.last_reset_at.unwrap_or(0), stories.as_deref().unwrap_or(""), stories_first.join(",")));
             if let Some(key) = &key
                 && self.store.service_shot_key(&r.id, svc).ok().flatten().as_deref() == Some(key.as_str())
                 && let Some(kept) = paths.iter().map(|p| self.store.kept_page(&r.id, &format!("{svc}:{p}")).ok().flatten()).collect::<Option<Vec<_>>>()
@@ -1265,7 +1289,7 @@ impl Engine {
                 out.extend(kept_stories);
                 continue;
             }
-            let opts = crate::ports::ShotOptions { pages: paths.iter().filter(|p| **p != "/").map(|p| p.to_string()).collect(), hide: hide.to_vec(), stories, ..Default::default() };
+            let opts = crate::ports::ShotOptions { pages: paths.iter().filter(|p| **p != "/").map(|p| p.to_string()).collect(), hide: hide.to_vec(), stories, changed, stories_first, ..Default::default() };
             match self.apps.screenshot(&r.id, svc, &opts).await {
                 Ok(Some(mut shot)) => {
                     let _ = self.store.add_run_usage(&r.id, crate::runtime::BROWSER_GIB, shot.container_ms as i64);
@@ -1278,7 +1302,7 @@ impl Engine {
                     }
                     if paths.contains(&"/") {
                         let errors = shot.health.as_ref().map_or(0, |h| h.errors + h.failed);
-                        let report = crate::PageReport { a11y: shot.a11y.clone(), links: shot.links.clone(), text: shot.text.clone(), unstable: shot.health.as_ref().is_some_and(|h| h.unstable), step: None, step_ms: None };
+                        let report = crate::PageReport { a11y: shot.a11y.clone(), links: shot.links.clone(), text: shot.text.clone(), unstable: shot.health.as_ref().is_some_and(|h| h.unstable), step: None, step_ms: None, play: None };
                         out.push(crate::ports::PageShot { path: format!("{svc}:/"), png: shot.png.clone(), errors, report });
                     }
                     // A story is a story whichever service serves it (`story:<id>`).
@@ -1295,6 +1319,52 @@ impl Engine {
 
     /// A change's screenshot against the project's preview of its repo's default branch, when it
     /// has one with a screenshot (best effort).
+    /// The preview a change's pages are compared with: its repo's default branch's, else the
+    /// project's baseline (of another of its repos).
+    async fn default_branch_preview(&self, r: &Row) -> Option<Row> {
+        let default = self.source.default_branch(&r.repo).await.ok().flatten()?;
+        let rows: Vec<Row> = self.store.rows(Some(&r.project_id)).ok()?.into_iter().filter(|x| x.change_id.is_none() && x.desired == Desired::Active).collect();
+        let own = rows.iter().find(|x| x.repo == r.repo && x.branch.as_deref() == Some(default.as_str())).cloned();
+        own.or_else(|| rows.into_iter().find(|x| x.is_baseline()))
+    }
+
+    /// The stories the project's open changes keep that `base` (a default branch's preview)
+    /// doesn't, in Chromium or another browser, by id, at most [`crate::settings::MAX_STORIES`]:
+    /// what its next run takes first, so each change's has main's to be compared with (a baseline
+    /// on demand: main's own run takes its first in the index's order).
+    pub(super) fn stories_wanted(&self, base: &Row) -> Vec<String> {
+        let Ok(rows) = self.store.rows(Some(&base.project_id)) else { return Vec::new() };
+        let have: std::collections::HashSet<String> = self.store.story_keys(&base.id).unwrap_or_default().into_iter().collect();
+        let mut want = std::collections::BTreeSet::new();
+        for r in rows.iter().filter(|x| x.change_id.is_some() && x.desired == Desired::Active) {
+            for key in self.store.story_keys(&r.id).unwrap_or_default() {
+                if have.contains(&key) {
+                    continue;
+                }
+                if let Some(id) = key.strip_prefix("story:").and_then(|k| k.split('@').next()).filter(|id| crate::settings::story_id_ok(id)) {
+                    want.insert(id.to_string());
+                }
+            }
+        }
+        want.into_iter().take(crate::settings::MAX_STORIES).collect()
+    }
+
+    /// Whether `r`, a default branch's or the baseline's preview, takes its stories again at its
+    /// head: the open changes keep ones it hasn't, and one of them it hasn't been asked for at it
+    /// (a story main's Storybook doesn't have, one the change added, is asked for once).
+    pub(super) async fn stories_due(&self, r: &Row) -> bool {
+        if r.change_id.is_some() {
+            return false;
+        }
+        let default = self.source.default_branch(&r.repo).await.ok().flatten();
+        if !(r.is_baseline() || (default.is_some() && r.branch == default)) {
+            return false;
+        }
+        let want = self.stories_wanted(r);
+        let asked = self.store.runtime_fact::<StoriesWanted>(&r.id, "stories_wanted").ok().flatten().filter(|f| f.head == r.build()).map(|f| f.ids).unwrap_or_default();
+        want.iter().any(|id| !asked.contains(id))
+    }
+
     async fn compare_with_default_branch(&self, r: &Row) {
         let Ok(Some(default)) = self.source.default_branch(&r.repo).await else { return };
         let Ok(rows) = self.store.rows(Some(&r.project_id)) else { return };
@@ -1855,4 +1925,12 @@ fn pull_repo(url: &str) -> Option<String> {
     let mut parts = path.split('/');
     let (owner, name, kind) = (parts.next()?, parts.next()?, parts.next()?);
     (kind == "pull" && !owner.is_empty() && !name.is_empty()).then(|| format!("{owner}/{name}"))
+}
+
+/// The stories a default branch's preview last ran for at a head (`stories_wanted`), so it takes
+/// them once per set.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct StoriesWanted {
+    pub head: String,
+    pub ids: Vec<String>,
 }

@@ -130,7 +130,10 @@ ids = ["s%02d--one" % i for i in range(1, 41)] + ["deep--one"]
 path = lambda i: "./stories/%s.stories.js" % i.split("--")[0]
 index = {"v": 5, "entries": {i: {"id": i, "type": "story", "title": i, "name": "One", "importPath": path(i)} for i in ids}}
 stats = {"modules": [{"name": "./lib/deep.js", "reasons": [{"moduleName": "./stories/Deep.js"}]}, {"name": "./stories/Deep.js", "reasons": [{"moduleName": "./stories/deep.stories.js"}]}]}
-frame = '<!doctype html><html lang="en"><title>story</title><div id="storybook-root"><button>a story</button></div>'
+# Storybook's own preview as its frame exposes it (`__STORYBOOK_PREVIEW__.storyRenders`): Deep's
+# play function threw (phase `errored`), the first one's ran to its end, the rest have none.
+play = '<script>const id = new URLSearchParams(location.search).get("id"); globalThis.__STORYBOOK_PREVIEW__ = { storyRenders: [{ id, phase: id === "deep--one" ? "errored" : "finished", story: id === "deep--one" || id === "s01--one" ? { playFunction() {} } : {} }] };</script>'
+frame = '<!doctype html><html lang="en"><title>story</title><div id="storybook-root"><button>a story</button></div>' + play
 files = {"storybook/index.json": json.dumps(index), "storybook/preview-stats.json": json.dumps(stats), "storybook/iframe.html": frame}
 print(json.dumps({"message": "storybook", "files": {k: {"content": v} for k, v in files.items()}}))
 PY2
@@ -663,6 +666,9 @@ LEFT=$(api GET "/v1/previews/$PV" | jq_ "(lambda k: '%s %s' % (k.get('stories'),
 # Each story checked with axe as a page is (Chromatic's accessibility tests): its record says so.
 STORY_A11Y=$(api GET "/v1/previews/$PV" | jq_ "[(x.get('a11y') or {}).get('lang') for x in d['pages'] if x['path'] == 'story:deep--one']")
 [ "$STORY_A11Y" = "[True]" ] || { echo "a story's page should carry its accessibility, as a page's does: $STORY_A11Y"; exit 1; }
+# Their interaction tests as Storybook ran them (Chromatic's): Deep's failed, the first's passed.
+PLAYS=$(api GET "/v1/previews/$PV" | jq_ "sorted('%s %s' % (x['path'], x.get('play')) for x in d['pages'] if x['path'] in ('story:deep--one', 'story:s01--one', 'story:s02--one'))")
+[ "$PLAYS" = "['story:deep--one failed', 'story:s01--one passed', 'story:s02--one None']" ] || { echo "a story's interaction test should be read as Storybook ran it: $PLAYS"; exit 1; }
 # The change's first stories in the other browsers asked for too (Chromatic's cross-browser
 # stories): Deep's, taken first, in Firefox and WebKit at a phone's size.
 STORY_BROWSERS=$(api GET "/v1/previews/$PV" | jq_ "sorted(x['path'] for x in d['pages'] if x['path'].startswith('story:deep--one@'))")
@@ -719,11 +725,12 @@ CQL "$BRANCH_NOSQL" "CREATE TABLE app.after_the_point (id int PRIMARY KEY)" >/de
 [ "$(CQL "$BRANCH_NOSQL" "SELECT id FROM app.after_the_point" | jq_ "'rows' in d")" = True ] || { echo "the NoSQL branch should have the table made after the point"; exit 1; }
 TR0=$(now_ms)
 api POST "/v1/previews/$PV/restore-points/$POINT/restore" >/dev/null
-# Put back: the line is looked for in the whole activity (the services' lines come after it),
-# and the preview settled, ready or asleep (its services slept for it; a visit wakes them).
+# Put back: each product's line is looked for in the whole activity (the services' lines come
+# after them; NoSQL's may come before Postgres'), and the preview settled, ready or asleep (its
+# services slept for it; a visit wakes them).
 PUT_BACK=""
 for _ in $(seq 1 240); do
-  api GET "/v1/previews/$PV/activity" | jq_ "any('back as restore point' in a['message'] for a in d)" | has True && case "$(api GET "/v1/previews/$PV" | jq_ "d['state']")" in ready|sleeping) true;; *) false;; esac && PUT_BACK=yes && break
+  api GET "/v1/previews/$PV/activity" | jq_ "all(any(a['message'].startswith('put ' + k + ':') and 'back as restore point' in a['message'] for a in d) for k in ('postgres', 'nosql'))" | has True && case "$(api GET "/v1/previews/$PV" | jq_ "d['state']")" in ready|sleeping) true;; *) false;; esac && PUT_BACK=yes && break
   sleep 0.5
 done
 RESTORE_MS=$(( $(now_ms) - TR0 ))

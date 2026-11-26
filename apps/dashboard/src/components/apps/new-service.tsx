@@ -30,6 +30,9 @@ const FROM: { value: From; label: string; Icon: typeof GitBranch }[] = [
 const field = "h-8 w-full rounded-lg border border-line-2 bg-canvas px-2.5 font-mono text-[12px] outline-none placeholder:text-subtle focus:border-accent/60";
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
+/** A folder's service name: its last segment, as a name may be (`apps/web` → `web`). */
+export const folderName = (root: string) =>
+  (root.split("/").filter(Boolean).pop() ?? "app").toLowerCase().replace(/[^a-z0-9-]+/g, "-").slice(0, 32).replace(/^-+|-+$/g, "") || "app";
 
 /** A word for `sh`: as is when it's plain, else in single quotes. */
 const shellQuote = (w: string) => (/^[A-Za-z0-9_./-]+$/.test(w) ? w : `'${w.replace(/'/g, `'\\''`)}'`);
@@ -71,6 +74,8 @@ export function NewServiceSheet({
   const [repoBranch, setRepoBranch] = useState("");
   const [migrate, setMigrate] = useState(true);
   const [root, setRoot] = useState("");
+  // A monorepo's folders picked at once (Railway's monorepo import): one service each.
+  const [pickedRoots, setPickedRoots] = useState<string[]>([]);
   const [image, setImage] = useState("");
   const [regUser, setRegUser] = useState("");
   const [regPassword, setRegPassword] = useState("");
@@ -275,7 +280,36 @@ export function NewServiceSheet({
       ];
       const picked = source.kind === "git" ? gitBranch.trim() : source.kind === "repo" ? repoBranch.trim() : "";
       const branch = picked ? { branch: picked } : {};
-      const s = await appsApi.create({ project: project.id, name, source, ...branch, ...(run ? { run } : {}), ...variables, ...registry, ...(chosen.length ? { links: chosen } : {}), ...spot });
+      const common = { project: project.id, ...branch, ...variables, ...registry, ...(chosen.length ? { links: chosen } : {}) };
+      // Several folders: a service each, side by side, each watching its own folder.
+      if (pickedRoots.length > 1 && (source.kind === "repo" || source.kind === "git")) {
+        // What was typed only: the plan (its port, its framework's migrations and health route)
+        // is the first folder's, and another folder's framework may be another.
+        const typed = { ...(portN ? { port: portN } : {}), ...(health.trim() ? { health_path: health.trim() } : {}) };
+        const own = kind === "web" ? (Object.keys(typed).length ? { run: typed } : {}) : run ? { run } : {};
+        const taken = new Set([...ws.inventory.values()].map((v) => v.name));
+        const made: Service[] = [];
+        for (const [i, r] of pickedRoots.entries()) {
+          let n = folderName(r);
+          for (let k = 2; taken.has(n); k++) n = `${folderName(r).slice(0, 29).replace(/-+$/, "")}-${k}`;
+          taken.add(n);
+          setStep(`Making ${n}…`);
+          try {
+            made.push(await appsApi.create({ ...common, ...own, name: n, source: { ...source, root: r }, build: { watch: [`${r}/**`] }, x: spot.x + i * 300, y: spot.y }));
+          } catch (e) {
+            // Those made stay (on the canvas once it's read again); a retry takes the rest.
+            if (made.length) {
+              void refreshInventory();
+              setPickedRoots(pickedRoots.slice(i));
+              throw new Error(`made ${made.map((m) => m.name).join(", ")}; ${n} wasn't: ${message(e)}`);
+            }
+            throw e;
+          }
+        }
+        onCreated(made[made.length - 1]!);
+        return;
+      }
+      const s = await appsApi.create({ ...common, ...(run ? { run } : {}), name, source, ...spot });
       onCreated(s);
     } catch (e) {
       setError(message(e));
@@ -382,22 +416,41 @@ export function NewServiceSheet({
             <Label>
               Root directory <span className="font-normal">optional</span>
             </Label>
-            <input value={root} onChange={(e) => setRoot(e.target.value)} placeholder="apps/web" className={field} spellCheck={false} />
+            <input
+              value={root}
+              onChange={(e) => {
+                setRoot(e.target.value);
+                setPickedRoots([]);
+              }}
+              placeholder="apps/web"
+              className={field}
+              spellCheck={false}
+            />
             {roots?.key === rootsKey && roots.list.length > 0 && (
               <div className="mt-1.5 flex flex-wrap gap-1" aria-label="Folders that build">
                 {roots.list.map((c) => (
                   <button
                     key={c.root}
                     type="button"
-                    onClick={() => setRoot(root === c.root ? "" : c.root)}
-                    aria-pressed={root === c.root}
-                    className={`h-6 rounded-md border px-1.5 font-mono text-[11px] transition-colors ${root === c.root ? "border-accent/60 text-fg" : "border-line-2 text-muted hover:text-fg"}`}
+                    onClick={() => {
+                      const was = pickedRoots.length ? pickedRoots : root ? [root] : [];
+                      const next = was.includes(c.root) ? was.filter((r) => r !== c.root) : [...was, c.root];
+                      setPickedRoots(next);
+                      setRoot(next[0] ?? "");
+                    }}
+                    aria-pressed={(pickedRoots.length ? pickedRoots : [root]).includes(c.root)}
+                    className={`h-6 rounded-md border px-1.5 font-mono text-[11px] transition-colors ${(pickedRoots.length ? pickedRoots : [root]).includes(c.root) ? "border-accent/60 text-fg" : "border-line-2 text-muted hover:text-fg"}`}
                     title={`${c.framework ?? c.provider} builds there`}
                   >
                     {c.root}
                   </button>
                 ))}
               </div>
+            )}
+            {pickedRoots.length > 1 && (
+              <p className="mt-1.5 text-[11px] leading-relaxed text-subtle">
+                {pickedRoots.length} services, one per folder: each named after its folder and deployed only by changes in it (Settings → Watch paths adds a shared one).
+              </p>
             )}
           </>
         )}

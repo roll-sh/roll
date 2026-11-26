@@ -271,7 +271,7 @@ export function ImportPane({ project, spot, onDone, repo, git, template }: { pro
                   : { kind: "upload" };
           const variables = variablesFor(a, answers[name] ?? {});
           const sealed = sealedFor(a, variables);
-          const s = await appsApi.create({ project: project.id, name, source, ...(Object.keys(a.run).length ? { run: a.run } : {}), ...(Object.keys(variables).length ? { variables } : {}), ...(sealed.length ? { sealed } : {}), ...(links.length ? { links } : {}), ...(a.branch ? { branch: a.branch } : {}), ...at });
+          const s = await appsApi.create({ project: project.id, name, source, ...(Object.keys(a.run).length ? { run: a.run } : {}), ...(a.build && Object.keys(a.build).length ? { build: a.build } : {}), ...(Object.keys(variables).length ? { variables } : {}), ...(sealed.length ? { sealed } : {}), ...(links.length ? { links } : {}), ...(a.branch ? { branch: a.branch } : {}), ...at });
           workspace.added(project.id, serviceView(s), at.x, at.y);
           made.push(s);
           ids.set(name, s.id);
