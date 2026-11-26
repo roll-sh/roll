@@ -4922,8 +4922,8 @@ that opens them: the recipient's secret key restores one as above. One node runs
 is claimed by moving its next time on). Setting one up asks what a backup asks (admin and reveal
 over the whole project) and records its maker (the person behind a session or their own token); it
 runs only while they may still manage and reveal the whole project, as they are then, and only into
-a bucket the project still has. A token's schedule carries registrations by name only
-(`registrations: false`). An incident's cut-off pauses it (`paused_at`, `paused_why`); setting it
+a bucket the project still has. A token's schedule carries what a token's backup does: registrations and encryption
+keys by name only, syncs without their credentials (`registrations: false`). An incident's cut-off pauses it (`paused_at`, `paused_why`); setting it
 up again lifts that. `GET …/backup/schedule` says when the
 last one landed, its key, and why the last attempt failed; `DELETE` stops it (what's in the bucket
 stays). Drill one now and then: `roll secrets backup verify --latest-from-bucket --key …`.
