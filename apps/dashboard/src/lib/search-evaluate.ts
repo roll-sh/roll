@@ -17,6 +17,9 @@ export interface EvalConfiguration {
   name: string;
   request?: Record<string, unknown>;
   template?: { id?: string; source?: unknown; params?: Record<string, unknown> };
+  /** A search application's own template (on the index named as the application). */
+  application?: string;
+  variant?: { experiment: string; variant: string };
   query_param?: string;
 }
 
@@ -109,7 +112,7 @@ export function parseConfiguration(name: string, text: string): EvalConfiguratio
   if (!v || typeof v !== "object" || Array.isArray(v)) throw new Error(`${name} is an object: {request} or {template}.`);
   const o = v as Record<string, unknown>;
   // A bare search body is the common paste: take it as the request.
-  if (!("request" in o) && !("template" in o)) return { name, request: o };
+  if (!("request" in o) && !("template" in o) && !("application" in o)) return { name, request: o };
   return { ...(o as Omit<EvalConfiguration, "name">), name };
 }
 
