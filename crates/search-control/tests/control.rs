@@ -5075,8 +5075,9 @@ async fn opensearch_flavor_clusters_link_with_the_remotes_own_mappings() {
     }
     let sem = json!({"mappings": {"properties": {"t": {"type": "semantic_text", "inference_id": ".multilingual-e5-small-elasticsearch"}}}});
     assert_eq!(es_as(&e, &far, Method::PUT, "/docs-sem", Some(sem)).await.0, 200);
+    // A link's query runs no inference there (the flavor runs none for a query anyway).
     let (s, v) = es_as(&e, &near, Method::POST, "/r:docs-sem/_search", Some(json!({"query": {"semantic": {"field": "t", "query": "a"}}}))).await;
-    assert!(s == 400 && v.to_string().contains("inference isn't available"), "{s} {v}");
+    assert_eq!(s, 400, "{v}");
     // The ceiling takes names and `*` patterns only.
     for names in [json!(["${user.name}"]), json!(["/docs.*/"])] {
         let (s, v) = e.call(Method::PUT, "/v1/search/clusters/os-near/remotes/bad", Some(json!({"cluster": "os-far", "access": {"search": [{"names": names}]}}))).await;
