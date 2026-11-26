@@ -514,6 +514,8 @@ export interface Allowed {
 export interface Consent extends Allowed {
   /** Step-up: the step-up roll recorded (`stp_…`); its one rule joins its connection, nothing else changes. */
   step_up?: string;
+  /** Claude's express admin setup (`scope=ema_issuer:manage`): the email domains its issuer vouches for; `rules` are the most Claude may do for a person. */
+  ema_domains?: string[];
   client_id: string;
   redirect_uri: string;
   code_challenge: string;

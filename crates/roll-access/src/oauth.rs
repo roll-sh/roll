@@ -34,6 +34,8 @@ pub fn public_router(access: Arc<Access>) -> Router {
         .route("/v1/access/oauth/token", post(token))
         .route("/v1/access/oauth/revoke", post(revoke))
         .route("/v1/access/oauth/device_authorization", post(device_authorization))
+        // Claude's express setup: its own short token, not a roll grant (so in front of the gate).
+        .route("/v1/access/enterprise/ema-setup", axum::routing::put(crate::enterprise::ema_setup))
         // GitHub's secret scanning reports: their signature is the credential.
         .route("/v1/access/leaks/github", post(crate::leaks::github))
         .with_state(access)
@@ -79,7 +81,8 @@ async fn server_metadata(State(a): S) -> Json<Value> {
         "token_endpoint_auth_methods_supported": ["none", "client_secret_basic", "client_secret_post", "private_key_jwt"],
         "token_endpoint_auth_signing_alg_values_supported": crate::client_credentials::ALGS,
         "revocation_endpoint_auth_methods_supported": ["none"],
-        "scopes_supported": SCOPES,
+        // Claude's express admin setup's scope too (an admin's consent; Claude's client only).
+        "scopes_supported": SCOPES.iter().copied().chain([crate::enterprise::EMA_SCOPE]).collect::<Vec<_>>(),
         "authorization_response_iss_parameter_supported": true,
         "client_id_metadata_document_supported": true,
         // Identity Assertion JWT Authorization Grants (ID-JAG, draft-ietf-oauth-identity-assertion-
@@ -223,6 +226,10 @@ pub struct Consent {
     pub state: Option<String>,
     #[serde(default)]
     pub resource: Option<String>,
+    /// Claude's express admin setup (`scope=ema_issuer:manage`): the email domains its issuer
+    /// vouches for, as the admin confirmed them; `rules` are the most Claude may do for a person.
+    #[serde(default)]
+    pub ema_domains: Option<Vec<String>>,
     /// Step-up: the id (`stp_…`) of the step-up roll recorded when this client's connection was
     /// refused (its `insufficient_scope` challenge). Its one rule joins that connection; the
     /// consent's other fields aren't used.
@@ -317,6 +324,9 @@ pub async fn authorize(State(a): S, ext: Extensions, body: axum::body::Bytes) ->
         && r.trim_end_matches('/') != resource(&a)
     {
         return Err(Error::BadRequest(format!("resource must be {}", resource(&a))));
+    }
+    if let Some(domains) = c.ema_domains.clone() {
+        return crate::enterprise::ema_consent(&a, &ext, &c, domains).await;
     }
     let client = known_client(&a, &c.client_id).await?.ok_or_else(|| Error::BadRequest("unknown client_id".into()))?;
     if !redirect_registered(&client.redirect_uris, &c.redirect_uri) {
@@ -618,6 +628,9 @@ async fn token(State(a): S, req: axum::extract::Request) -> Response {
             let (Some(code), Some(redirect), Some(verifier)) = (get("code"), get("redirect_uri"), get("code_verifier")) else {
                 return Error::OAuth("invalid_request", "code, redirect_uri and code_verifier are required".into()).into_response();
             };
+            if let Some(answer) = crate::enterprise::ema_token(&a, &f, &code, &client_id, &redirect, &verifier).await {
+                return answer;
+            }
             let resource = get("resource");
             // RFC 8707: the only resource roll's codes are for is its MCP server.
             if resource.as_deref().is_some_and(|r| r.trim_end_matches('/') != crate::oauth::resource(&a)) {

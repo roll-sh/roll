@@ -49,6 +49,10 @@ export interface SearchAnalytics {
 export interface Comparison {
   p_value: number | null;
   state: "significant" | "not_yet_significant" | "not_enough_data";
+  /** The variant's rate minus the baseline's; null: an arm has no trials. */
+  difference?: number | null;
+  /** The difference's 95% interval (Newcombe's, from the two Wilson intervals). */
+  interval?: [number, number] | null;
 }
 
 export interface VariantResult {
@@ -60,6 +64,9 @@ export interface VariantResult {
   value: number;
   ctr: number | null;
   conversion_rate: number | null;
+  /** The rates' 95% Wilson intervals; null: no trials. */
+  ctr_interval?: [number, number] | null;
+  conversion_rate_interval?: [number, number] | null;
   /** Trials whose first search found nothing. */
   no_hits?: number;
   no_hit_rate?: number | null;
@@ -83,6 +90,46 @@ export function comparisonText(c: Comparison | undefined): string {
   if (c.state === "not_enough_data") return "not enough data";
   const p = c.p_value == null ? "" : `p ${c.p_value < 0.001 ? "<0.001" : c.p_value.toFixed(3)}, `;
   return `${p}${c.state === "significant" ? "significant" : "not yet significant"}`;
+}
+
+/** A share in percentage points with its sign, to one decimal: "+2.4", "−0.8", "0.0". */
+function points(v: number): string {
+  const p = Math.round(v * 1000) / 10;
+  if (p === 0) return "0.0";
+  return `${p > 0 ? "+" : "\u2212"}${Math.abs(p).toFixed(1)}`;
+}
+
+/** A rate's interval: "9.1–14.6%"; "" without one. */
+export function intervalText(i: [number, number] | null | undefined): string {
+  if (!i) return "";
+  return `${(i[0] * 100).toFixed(1)}\u2013${(i[1] * 100).toFixed(1)}%`;
+}
+
+/** A difference against the baseline with its interval: "+2.4 pts (−0.3 to +5.1)"; "" without one. */
+export function differenceText(c: Comparison | undefined): string {
+  if (!c || c.difference == null) return "";
+  const i = c.interval ? ` (${points(c.interval[0])} to ${points(c.interval[1])})` : "";
+  return `${points(c.difference)} pts${i}`;
+}
+
+/** An experiment as its application keeps it (`GET _application/search_application/{name}`). */
+export interface StoredExperiment {
+  id: string;
+  ends_at?: number;
+  promoted?: { variant: string; at: number };
+}
+
+/** Where an experiment stands: promoted (which variant), ended, or running. */
+export function experimentStatus(e: StoredExperiment | undefined, now: number): { kind: "promoted"; variant: string } | { kind: "ended" } | { kind: "running" } | { kind: "unknown" } {
+  if (!e) return { kind: "unknown" };
+  if (e.promoted) return { kind: "promoted", variant: e.promoted.variant };
+  if (e.ends_at != null && e.ends_at <= now) return { kind: "ended" };
+  return { kind: "running" };
+}
+
+/** The promote route of one experiment (roll's: relevance-experiments.md, "Promoting a winner"). */
+export function promotePath(application: string, experiment: string): string {
+  return `/_application/search_application/${encodeURIComponent(application)}/_roll/experiments/${encodeURIComponent(experiment)}/_promote`;
 }
 
 export type AnalyticsList = "top" | "no_results" | "low_ctr";

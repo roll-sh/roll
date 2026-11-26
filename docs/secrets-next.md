@@ -80,8 +80,7 @@ In flight:
 Left:
 - item 6's other vendors (Salesforce, Paddle, Palo Alto);
 - Health's "public repo with `leaks.rotate` off" (needs a repo-visibility port);
-- Route 53 and other DNS providers for ACME;
-- a dashboard panel and CLI for public certificates.
+- DNS providers for ACME beyond Cloudflare and Route 53.
 
 **State, 2026-11-24 06:10.** The thirty-sixth review is done: #830 (99cb3b05e; Cloudflare, Databricks, Confluent) and #825 (the fresh-project production test) landed.
 

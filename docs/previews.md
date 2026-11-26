@@ -1825,6 +1825,14 @@ land on the change.
   service across a project's previews (`roll-previews:<project>:*:<service>` as a condition) is the
   customer's call, and roll writes no such trust. `oidc_audiences` is a person's rule (roll MCP
   doesn't set it). `a_previews_service_gets_roll_s_word_for_a_named_cloud_only`.
+- The toolbar's **Main** opens the page the reviewer is on (its path and query) on main's preview
+  of the same service, in a new tab (Vercel's deployment switcher), to see how it looks there:
+  `GET /__roll/main?path=` on the preview's own host answers `{url}`, for a team visitor only (a
+  share link's guest has no main to see), or 404 when main's preview doesn't run that service (the
+  button then says "No main preview"); a path that isn't one on that host (`//…`) is none. The
+  script reads whether it's served by roll previews (`__ROLL_MAIN__`, unset on roll apps' hosts,
+  whose pages keep the button hidden and never send it to the app)
+  (`engine.rs::the_toolbars_main_is_the_same_page_on_mains_preview`).
 - A reviewer sets the project's feature flags for their own view (Vercel's Flags Explorer): with
   `flags` (`[{name, options}]`, at most 20, each name and option 1-60 letters, digits, `-`, `_` or
   `.`), the page's toolbar gets "Flags": each flag a choice (the app's own, or one of its
@@ -2970,25 +2978,23 @@ requests, Vercel's toolbar and per-push URLs, Jam's replays. Its fixes landed wi
 preview up` refuses an untracked file named like a secret, and the stale lines it found (frozen
 services' stop, which products' restore points save, the CLI's commands).
 
-1. **More stories per run, in review** (Chromatic has no per-build cap): `github.story_runs`,
-   up to 4 containers side by side, 160 stories.
-2. **A migration rehearsed on today's production** (PlanetScale's deploy requests; M): before
+1. **A migration rehearsed on today's production** (PlanetScale's deploy requests; M): before
    landing (or asked), branch fresh, run the release again and compare. Its other half, open
    previews whose schema changes touch the same tables named on each other, in review.
-3. **The feedback button for team-access visitors on roll apps previews** (S, with roll apps:
+2. **The feedback button for team-access visitors on roll apps previews** (S, with roll apps:
    `apps-control/src/public.rs` adds it for link and share visitors only).
-4. **This page on main, from the toolbar** (Vercel's deployment switcher; S): main's preview
-   exists (`github.baseline`); the toolbar opens the same path there.
-5. **Older pushes past the last three, started on demand** (Vercel keeps every deployment's URL;
+3. **This page on main, from the toolbar, in review** (Vercel's deployment switcher): the
+   toolbar's Main.
+4. **Older pushes past the last three, started on demand** (Vercel keeps every deployment's URL;
    S–M): kept as code only, on the preview's own data, started at the first visit.
-6. **What a note's reviewer saw, from their own browser** (Jam, Marker.io; M): an opt-in
+5. **What a note's reviewer saw, from their own browser** (Jam, Marker.io; M): an opt-in
    capture, labelled as theirs, and mentions of the team's members.
-7. **Restore points for search and buckets**: search's once roll search's `reset {from}` is in
+6. **Restore points for search and buckets**: search's once roll search's `reset {from}` is in
     (its Next 32); buckets need a put-back on roll storage's side.
-8. **Previews for the members thread's next products**: once roll apps' and roll search's routes
+7. **Previews for the members thread's next products**: once roll apps' and roll search's routes
     become member routes (docs/members.md, v1.1), a preview's roll apps services and search branch
     follow the same roles, checked live against a member's session.
-9. **Watches on pg-control**: the data step's Postgres compute start (most of the data step is
+8. **Watches on pg-control**: the data step's Postgres compute start (most of the data step is
     it and its masking); cheap branches on ext4 through overlay volumes over a frozen base
     (measured 2026-11-17: 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole
     table file); recovery to a time seconds old (unowned).
@@ -2998,7 +3004,8 @@ pull request for less than the items above).
 
 Landed 2026-11-26, midday: restore points for streams (#1112), the TurboSnap test's race under
 load (#1114), the tenth review's fixes (#1119), the visual review holding on stories a change
-touched that its run didn't take (#1120), a visual change refused (#1125), and masked bases (#1130).
+touched that its run didn't take (#1120), a visual change refused (#1125), masked bases (#1130), more stories per run (#1135), and open
+changes that change the same tables named on each other (#1136).
 
 Landed 2026-11-26, morning: stories' interaction tests (#1087), what a failed one threw (#1091), both in the other browsers (#1100), the step a failed one stopped at (#1105), and restore points for Redis (#1109).
 

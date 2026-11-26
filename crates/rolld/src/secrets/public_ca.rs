@@ -1,18 +1,19 @@
 //! roll secrets' publicly trusted certificates (docs/secrets.md, "Publicly trusted
 //! certificates"): the ACME client is the edge's (`roll_edge::acme::order`, dns-01 through
-//! `roll_edge::acme::Cloudflare`), talking to the CA through a guarded client: public addresses
-//! only (`roll_net::PublicOnly`, the literal-host check), no redirects, no proxy, a timeout and a
-//! bounded read. A deployment that allows private addresses (`ROLL_CODE_WEBHOOK_ALLOW_PRIVATE`,
-//! local development) reaches them, and `ROLL_SECRETS_ACME_CA_FILE` adds a root for a test CA's
-//! own HTTPS (Pebble's).
+//! `roll_edge::acme::Cloudflare` or `roll_edge::acme::Route53`), talking to the CA through a
+//! guarded client: public addresses only (`roll_net::PublicOnly`, the literal-host check), no
+//! redirects, no proxy, a timeout and a bounded read. Route 53 is always its fixed public
+//! endpoint, through `PublicOnly` with no redirects. A deployment that allows private addresses
+//! (`ROLL_CODE_WEBHOOK_ALLOW_PRIVATE`, local development) reaches them, and
+//! `ROLL_SECRETS_ACME_CA_FILE` adds a root for a test CA's own HTTPS (Pebble's).
 
 use axum::http::{Request, Response};
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use instant_acme::{Account, AccountCredentials, BodyWrapper, BytesResponse, ExternalAccountKey, HttpClient, NewAccount, RevocationReason};
-use roll_edge::acme::{Cloudflare, Solver, Timing};
+use roll_edge::acme::{AwsKeys, Cloudflare, DnsProvider, Route53, Solver, Timing};
 use roll_secrets::Value;
-use roll_secrets::public_certs::{DnsProvider, Order, Ordered, PUBLIC_CAS, PublicCa, Revoke, RevokeReason};
+use roll_secrets::public_certs::{DnsCredential, Order, Ordered, PUBLIC_CAS, PublicCa, Revoke, RevokeReason};
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -60,9 +61,22 @@ impl RollPublicCa {
         Ok(Guarded { http: b.build().map_err(|e| e.to_string())?, allow_private: self.allow_private })
     }
 
-    fn solver(&self, dns: DnsProvider, credential: &Value) -> Result<Arc<Cloudflare>, String> {
+    fn solver(&self, dns: &DnsCredential) -> Result<Dns, String> {
         match dns {
-            DnsProvider::Cloudflare => Cloudflare::new(credential.expose(), &self.cloudflare_api).map(Arc::new).map_err(|e| e.to_string()),
+            DnsCredential::Cloudflare(token) => Cloudflare::new(token.expose(), &self.cloudflare_api).map(|c| Dns::Cloudflare(Arc::new(c))).map_err(|e| e.to_string()),
+            DnsCredential::Route53 { access_key_id, secret_access_key, session_token } => {
+                let http = reqwest::Client::builder()
+                    .timeout(Duration::from_secs(30))
+                    .connect_timeout(Duration::from_secs(10))
+                    .redirect(reqwest::redirect::Policy::none())
+                    .user_agent("roll-secrets-acme")
+                    .dns_resolver(roll_net::PublicOnly)
+                    .no_proxy()
+                    .build()
+                    .map_err(|e| e.to_string())?;
+                let keys = AwsKeys { access_key_id: access_key_id.clone(), secret_access_key: secret_access_key.expose().to_string(), session_token: session_token.as_ref().map(|t| t.expose().to_string()) };
+                Route53::new(keys, Route53::API, http).map(|r| Dns::Route53(Arc::new(r))).map_err(|e| e.to_string())
+            }
         }
     }
 
@@ -94,7 +108,7 @@ impl RollPublicCa {
                 (account, Some(Value::new(serde_json::to_string(&creds).map_err(|e| e.to_string())?)))
             }
         };
-        let solver = Solver::Dns01(self.solver(o.dns, o.credential)?);
+        let solver = Solver::Dns01(self.solver(o.dns)?.provider());
         let cert = roll_edge::acme::order(&account, &solver, o.names, self.timing).await.map_err(|e| format!("{e:#}"))?;
         Ok(Ordered { chain: Value::new(cert.chain), private_key: Value::new(cert.key), account: created })
     }
@@ -112,6 +126,21 @@ impl RollPublicCa {
                 Ok(RevokeReason::Unspecified)
             }
             Err(e) => Err(problem(e)),
+        }
+    }
+}
+
+/// A DNS provider's client, for one check or order.
+enum Dns {
+    Cloudflare(Arc<Cloudflare>),
+    Route53(Arc<Route53>),
+}
+
+impl Dns {
+    fn provider(self) -> Arc<dyn DnsProvider> {
+        match self {
+            Dns::Cloudflare(c) => c,
+            Dns::Route53(r) => r,
         }
     }
 }
@@ -139,12 +168,17 @@ impl PublicCa for RollPublicCa {
         PUBLIC_CAS.contains(&directory) || self.allow.iter().any(|d| d == directory)
     }
 
-    fn check(&self, dns: DnsProvider, credential: &Value, names: &[String]) -> Result<(), String> {
-        let cf = self.solver(dns, credential)?;
+    fn check(&self, dns: &DnsCredential, names: &[String]) -> Result<(), String> {
+        let dns = self.solver(dns)?;
         Self::block(async {
             // The zone the order's TXT record goes in (an apex name's zone is the name itself).
             for n in names {
-                cf.zone_for(&format!("_acme-challenge.{}", n.trim_start_matches("*."))).await.map_err(|e| format!("{e:#}"))?;
+                let record = format!("_acme-challenge.{}", n.trim_start_matches("*."));
+                match &dns {
+                    Dns::Cloudflare(cf) => cf.zone_for(&record).await.map(drop),
+                    Dns::Route53(r53) => r53.zone_for(&record).await.map(drop),
+                }
+                .map_err(|e| format!("{e:#}"))?;
             }
             Ok(())
         })

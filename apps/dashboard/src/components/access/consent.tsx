@@ -44,9 +44,97 @@ export function Consent({ search }: { search: Record<string, unknown> }) {
           <HorizonMark size={18} />
           <SignIn />
         </header>
-        <main className="mx-auto w-full max-w-3xl flex-1 px-4 py-10">{"error" in req ? <Problem text={req.error} /> : <Ask req={req} />}</main>
+        <main className="mx-auto w-full max-w-3xl flex-1 px-4 py-10">
+          {"error" in req ? <Problem text={req.error} /> : req.scope?.split(" ").includes(EMA_SCOPE) ? <ExpressSetup req={req} /> : <Ask req={req} />}
+        </main>
       </div>
     </LucideProvider>
+  );
+}
+
+/** Claude's express admin setup (Claude's connector docs): its scope, its two clients, its callback. */
+const EMA_SCOPE = "ema_issuer:manage";
+const CLAUDE_CLIENTS = ["https://claude.ai/oauth/mcp-oauth-client-metadata", "https://claude.ai/oauth/mcp-oauth-client-metadata/confidential_client"];
+const CLAUDE_CALLBACK = "https://claude.ai/api/mcp/auth_callback";
+
+/**
+ * Claude asks to set up auto-connect: an admin of roll names the email domains Claude's issuer
+ * vouches for (its organization's members are found by their account's email, only in these) and
+ * the most Claude may do for a person. Claude then sends its issuer, and roll trusts it.
+ */
+function ExpressSetup({ req }: { req: AuthorizeRequest }) {
+  const loaded = useSignedInLoad(() => Promise.resolve(null), []);
+  const [domains, setDomains] = useState("");
+  const [rules, setRules] = useState<Rule[] | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    if (loaded.state === "ready" && rules === null) {
+      const start = loaded.catalog.presets.find((p) => p.id === "read-only") ?? loaded.catalog.presets[0];
+      setRules(start ? presetRules(start) : []);
+    }
+  }, [loaded, rules]);
+  if (loaded.state !== "ready") return <LoadState loaded={loaded} what="set up Claude's auto-connect" />;
+  if (!CLAUDE_CLIENTS.includes(req.client_id) || req.redirect_uri !== CLAUDE_CALLBACK) return <Problem text="Only Claude asks for this, returning to claude.ai." />;
+  if (loaded.me.kind !== "operator")
+    return <Problem title="An admin of roll approves this" text="Claude's auto-connect makes roll trust your Claude organization for everyone in the domains you name." next="Ask an admin of roll to click Connect in Claude's auto-connect setup." />;
+  const list = domains
+    .split(/[\s,]+/)
+    .map((d) => d.trim().replace(/^@/, "").toLowerCase())
+    .filter(Boolean);
+  const problems = [...(list.length ? [] : ["Name at least one email domain"]), ...(rules?.length ? [] : ["Allow at least one action"])];
+  const allow = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const { redirect } = await accessApi.authorize({
+        rules: rules ?? [],
+        ema_domains: list,
+        client_id: req.client_id,
+        redirect_uri: req.redirect_uri,
+        code_challenge: req.code_challenge,
+        code_challenge_method: req.code_challenge_method,
+        state: req.state,
+        resource: req.resource,
+      });
+      window.location.assign(redirect);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setBusy(false);
+    }
+  };
+  return (
+    <section className="rise space-y-5">
+      <div className="flex items-start gap-4">
+        <HorizonMark state={busy ? "thinking" : "idle"} size={36} interactive />
+        <div className="min-w-0">
+          <h1 className="text-xl font-semibold tracking-[-0.04em]">Claude wants to set up auto-connect</h1>
+          <p className="mt-1 text-[13px] text-muted">
+            Approving lets Claude register your Claude organization&apos;s issuer with roll. From then on, its members connect to roll without a
+            consent screen, each as their own roll account (found by their Claude account&apos;s email), and only in the domains below. You can
+            remove it any time under MCP &amp; access, Enterprise sign-in.
+          </p>
+        </div>
+      </div>
+      <label className="block space-y-1.5">
+        <span className="block text-[12px] text-subtle">Email domains it vouches for (your company&apos;s, never a public one)</span>
+        <input autoFocus value={domains} onChange={(e) => setDomains(e.target.value)} placeholder="acme.com" className={`${input} w-full sm:w-1/2`} />
+      </label>
+      <div className="space-y-1.5">
+        <p className="text-[12px] text-subtle">The most Claude may do for a person (never more than their own account reaches)</p>
+        {rules && <Builder catalog={loaded.catalog} rules={rules} onChange={setRules} />}
+      </div>
+      <ErrorNote error={error} />
+      <div className="flex items-center gap-3">
+        <button onClick={allow} disabled={busy || problems.length > 0} className={primary}>
+          {busy ? <span className="shimmer">Setting up…</span> : "Approve"}
+        </button>
+        <button onClick={() => window.location.assign(denyRedirect(req.redirect_uri, req.state))} className={btn}>
+          Deny
+        </button>
+        {problems.length > 0 && <span className="text-[12px] text-subtle">{problems[0]}</span>}
+      </div>
+    </section>
   );
 }
 
