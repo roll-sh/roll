@@ -296,32 +296,20 @@ fn body_time_zone(ctx: &Ctx, m: &Map) -> EsResult<Option<String>> {
     }
 }
 
-/// Whether this cluster resolves an `ENRICH` policy of `cmds` (in a `FORK` branch or a `FROM`
-/// subquery or view too): a `_coordinator` one, or one not `_remote` in a query that reads rows
-/// here. A `_remote` policy, or any over remote rows only, is resolved on each remote.
-fn enrich_resolved_here(cmds: &[parser::Cmd]) -> bool {
-    fn modes<'c>(cmds: &'c [parser::Cmd], out: &mut Vec<&'c str>) {
-        for c in cmds {
-            match c {
-                parser::Cmd::Enrich { policy, .. } => out.push(parser::split_policy(policy).0),
-                parser::Cmd::Fork { branches, .. } => branches.iter().for_each(|b| modes(b, out)),
-                parser::Cmd::Union { branches, .. } => branches.iter().for_each(|b| modes(&b.cmds, out)),
-                _ => {}
-            }
-        }
-    }
-    let mut found = Vec::new();
-    modes(cmds, &mut found);
-    found.iter().any(|m| *m == "_coordinator" || (*m != "_remote" && reads_here(cmds)))
+tokio::task_local! {
+    /// Whom the running ES|QL query reads as ([`enrich_allowed`]).
+    static CALLER: crate::xpack::security::Principal;
 }
 
-/// Whether `cmds`' rows include this cluster's: a source command other than a `FROM` (or `TS`)
-/// naming only remote indices (`cluster:index`; a date math name in `<…>` is local).
-fn reads_here(cmds: &[parser::Cmd]) -> bool {
-    match cmds.first() {
-        Some(parser::Cmd::From { sources, .. } | parser::Cmd::Ts { sources, .. }) => sources.iter().any(|s| s.starts_with('<') || !s.contains(':')),
-        Some(parser::Cmd::Union { branches, .. }) => branches.iter().any(|b| reads_here(&b.cmds)),
-        _ => true,
+/// Whether the running query's caller may use `ENRICH` policy `name`, checked where its table is
+/// loaded (after views are spliced in, for every source a policy is read for here): an `ENRICH`
+/// resolves its policy as the caller (`EnrichPolicyResolver`), `monitor_enrich` here, as a
+/// remote's part needs it there ([`ccs::admit_part`]). Outside a query nothing loads one.
+pub(super) fn enrich_allowed(cluster: &crate::Cluster, name: &str) -> EsResult<()> {
+    let _ = name;
+    match CALLER.try_with(|p| crate::xpack::security::check_cluster_action_of(cluster, p, ccs::RESOLVE_POLICY)) {
+        Ok(r) => r,
+        Err(_) => Err(EsError::illegal_state("an ENRICH policy loaded outside an ES|QL query")),
     }
 }
 
@@ -397,12 +385,6 @@ async fn run_query(ctx: &Ctx<'_>, req: &Request, mem: &memory::Memory) -> EsResu
             return Err(e);
         }
     };
-    // An `ENRICH` this cluster resolves resolves its policy as the caller
-    // (`EnrichPolicyResolver`): `monitor_enrich` here, as a remote's part needs it there
-    // ([`ccs::admit_part`]), before the policy's table, which the system reads, is loaded.
-    if enrich_resolved_here(&q.cmds) {
-        crate::xpack::security::check_cluster_action(ctx, ccs::RESOLVE_POLICY)?;
-    }
     q.locale = req.locale.clone();
     // `settings.column_metadata` in the body, like `SET column_metadata`.
     if req.column_metadata {
@@ -422,7 +404,10 @@ async fn run_query(ctx: &Ctx<'_>, req: &Request, mem: &memory::Memory) -> EsResu
     let used = telemetry::Used::of(&q, &ctx.state());
     let column_metadata = q.settings.column_metadata;
     let approximation = q.settings.approximation || req.approximation;
-    let result = exec::execute(ctx.cluster, q, req.filter.clone(), &mut w, mem).await;
+    // Its `ENRICH` policies are loaded as it runs (views spliced in first): each is checked
+    // there as this caller ([`enrich_allowed`]).
+    let caller = crate::xpack::security::principal(ctx).clone();
+    let result = CALLER.scope(caller, exec::execute(ctx.cluster, q, req.filter.clone(), &mut w, mem)).await;
     telemetry.record(kibana, Some(&used), result.is_err(), started.elapsed().as_millis() as i64);
     // Warnings recorded before a failure (the implicit limit's, added while analyzing) go out
     // with the error, as Elasticsearch's do.
