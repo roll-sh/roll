@@ -113,17 +113,40 @@ pub struct Lent {
     pub kind: String,
     pub r#ref: String,
     pub action: Action,
+    /// Kind `secret` only: the folder (environment, path) of a roll secret the route reads or
+    /// writes as the caller, whose `ref` is its workspace project ("" for the one the route's own
+    /// resource is on, as the route picks it).
+    pub folder: Option<(String, String)>,
 }
 
 /// Apps' `links: [{kind, ref}]`: each linked resource's credentials go to the service (reveal).
 /// An entry that isn't `{kind, ref}` names a kind roll doesn't know, so it's refused.
 fn apps_links(b: &Value) -> Vec<Lent> {
-    b.get("links").and_then(Value::as_array).into_iter().flatten().map(|l| Lent { kind: l["kind"].as_str().unwrap_or("").into(), r#ref: l["ref"].as_str().unwrap_or("").into(), action: Action::Reveal }).collect()
+    b.get("links").and_then(Value::as_array).into_iter().flatten().map(|l| Lent { kind: l["kind"].as_str().unwrap_or("").into(), r#ref: l["ref"].as_str().unwrap_or("").into(), action: Action::Reveal, folder: None }).collect()
+}
+
+/// A roll secret a search route uses as the caller, named by the body's
+/// `secret: {environment, key, path?, project?}`: an inference endpoint's key is read (reveal), a
+/// rotated admin password is written there (write). Its path as roll secrets keeps it: from the
+/// root, no trailing slash.
+fn search_secret(b: &Value, action: Action) -> Vec<Lent> {
+    let s = &b["secret"];
+    let Some(env) = s["environment"].as_str().filter(|e| !e.is_empty()) else { return Vec::new() };
+    let path = format!("/{}", s["path"].as_str().unwrap_or("").trim_matches('/'));
+    vec![Lent { kind: "secret".into(), r#ref: s["project"].as_str().unwrap_or("").into(), action, folder: Some((env.into(), path)) }]
+}
+
+fn search_secret_read(b: &Value) -> Vec<Lent> {
+    search_secret(b, Action::Reveal)
+}
+
+fn search_secret_write(b: &Value) -> Vec<Lent> {
+    search_secret(b, Action::Write)
 }
 
 /// A worker's `run.scale.stream`: apps reads that stream group's lag for it (read on the stream).
 fn apps_scale(b: &Value) -> Vec<Lent> {
-    b.pointer("/run/scale/stream").and_then(Value::as_str).map(|s| Lent { kind: "stream".into(), r#ref: s.into(), action: Action::Read }).into_iter().collect()
+    b.pointer("/run/scale/stream").and_then(Value::as_str).map(|s| Lent { kind: "stream".into(), r#ref: s.into(), action: Action::Read, folder: None }).into_iter().collect()
 }
 
 /// A web service's `run.push`: apps reads each stream for it as a consumer group (read on it), and
@@ -135,14 +158,14 @@ fn apps_push(b: &Value) -> Vec<Lent> {
         .filter_map(|r| {
             let s = r.get("stream").and_then(Value::as_str)?;
             let action = if r.get("dead_letter").is_some_and(|d| !d.is_null()) { Action::Write } else { Action::Read };
-            Some(Lent { kind: "stream".into(), r#ref: s.into(), action })
+            Some(Lent { kind: "stream".into(), r#ref: s.into(), action, folder: None })
         })
         .collect()
 }
 
 /// A drain into a roll storage bucket (`bucket`): apps mints a key that writes there for it.
 fn apps_drain_bucket(b: &Value) -> Vec<Lent> {
-    b.get("bucket").and_then(Value::as_str).map(|r| Lent { kind: "bucket".into(), r#ref: r.into(), action: Action::Write }).into_iter().collect()
+    b.get("bucket").and_then(Value::as_str).map(|r| Lent { kind: "bucket".into(), r#ref: r.into(), action: Action::Write, folder: None }).into_iter().collect()
 }
 
 /// The roll code repos the body names, which apps reads for the caller (`repo` for a plan or an
@@ -152,7 +175,7 @@ fn apps_drain_bucket(b: &Value) -> Vec<Lent> {
 fn apps_repo(b: &Value) -> Vec<Lent> {
     let from_source = (b.pointer("/source/kind").and_then(Value::as_str) == Some("repo")).then(|| b.pointer("/source/repo").and_then(Value::as_str)).flatten();
     let subs = b.pointer("/build/submodule_repos").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str);
-    b.get("repo").and_then(Value::as_str).or(from_source).into_iter().chain(subs).map(|r| Lent { kind: "repo".into(), r#ref: r.into(), action: Action::Read }).collect()
+    b.get("repo").and_then(Value::as_str).or(from_source).into_iter().chain(subs).map(|r| Lent { kind: "repo".into(), r#ref: r.into(), action: Action::Read, folder: None }).collect()
 }
 
 /// A new service: its links, its scaling and pushed streams and the repo it's built from.
@@ -175,7 +198,7 @@ fn apps_patch_lends(b: &Value) -> Vec<Lent> {
 /// A search cluster made as a branch of `parent` (a body field, unlike `…/{id}/branches`): it
 /// copies the parent's indices, so it needs what branching there does, `write` on the parent.
 fn search_parent(b: &Value) -> Vec<Lent> {
-    b.get("parent").and_then(Value::as_str).map(|p| Lent { kind: "search".into(), r#ref: p.into(), action: Action::Write }).into_iter().collect()
+    b.get("parent").and_then(Value::as_str).map(|p| Lent { kind: "search".into(), r#ref: p.into(), action: Action::Write, folder: None }).into_iter().collect()
 }
 
 /// A search API key's action, by what the key may do: `reveal` for a `read` key; `write` for an
@@ -194,7 +217,7 @@ fn search_key_action(b: &Value) -> Action {
 /// A search cluster linked as another's remote (`cluster`): roll issues a cross-cluster API key
 /// of it, so the link needs `admin` on it too, as making its keys does.
 fn search_remote(b: &Value) -> Vec<Lent> {
-    b.get("cluster").and_then(Value::as_str).map(|p| Lent { kind: "search".into(), r#ref: p.into(), action: Action::Admin }).into_iter().collect()
+    b.get("cluster").and_then(Value::as_str).map(|p| Lent { kind: "search".into(), r#ref: p.into(), action: Action::Admin, folder: None }).into_iter().collect()
 }
 
 /// What an apps link's kind is, as a rule names it: its product and the resource kind its ids are.
@@ -1342,7 +1365,7 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/search/clusters/{id}/branches", "search", W, one(PG, "cluster")).reveals(SEARCH_SECRETS),
     // A new admin password: managing the cluster (every client using the old one stops), and the
     // new one is in the answer, so search refuses it to a grant that can't reveal too (`capable`).
-    row("POST", "/v1/search/clusters/{id}/password", "search", ADMIN, one(PG, "cluster")).capable(&[Action::Reveal]),
+    row("POST", "/v1/search/clusters/{id}/password", "search", ADMIN, one(PG, "cluster")).capable(&[Action::Reveal]).lends(Lend::Each(search_secret_write)),
     // A deleted cluster back (its id still resolves while it is kept): a write, like a create.
     row("POST", "/v1/search/clusters/{id}/restore", "search", W, one(PG, "cluster")),
     // Any request as the cluster's owner. One that answers or sets a credential (decided by
@@ -1365,6 +1388,12 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/search/clusters/{id}/browser-keys/{key}/usage", "search", R, one(PG, "cluster")),
     // A derivable browser key's new signing secret: a credential, in the answer.
     row("POST", "/v1/search/clusters/{id}/browser-keys/{key}/rotate", "search", REVEAL, one(PG, "cluster")),
+    // A branch's own browser keys after its parent's (roll previews): it revokes the ones it made
+    // before (admin, as a revoke is), and the keys and secrets are in the answer (search asks
+    // reveal too, the row's `capable`).
+    row("POST", "/v1/search/clusters/{id}/browser-keys/from-parent", "search", ADMIN, one(PG, "cluster")).capable(&[Action::Reveal]),
+    // Revokes the copies that stand for no parent key any longer: admin, as a revoke is.
+    row("POST", "/v1/search/clusters/{id}/browser-keys/from-parent/prune", "search", ADMIN, one(PG, "cluster")),
     // A snapshot repository, the only way its credentials can be roll secrets references: it
     // changes the cluster as the console does; roll secrets checks `reveal` on each reference
     // itself (search_control::secret_refs).
@@ -1382,7 +1411,7 @@ static ROWS: &[Row] = &[
     // Inference endpoints keyed by a project's secret: making one changes the cluster as the
     // console does; roll secrets checks `reveal` on the secret itself, as the caller.
     row("GET", "/v1/search/clusters/{id}/inference/secrets", "search", R, one(PG, "cluster")),
-    row("POST", "/v1/search/clusters/{id}/inference/secrets", "search", ADMIN, one(PG, "cluster")),
+    row("POST", "/v1/search/clusters/{id}/inference/secrets", "search", ADMIN, one(PG, "cluster")).lends(Lend::Each(search_secret_read)),
     // Request metrics and the slow logs (queries' and documents' sources, cut): reads of the
     // cluster's data.
     row("GET", "/v1/search/clusters/{id}/metrics", "search", R, one(PG, "cluster")),
@@ -1716,6 +1745,10 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/apps/projects/{project}/status-page/incidents", "apps", R, one(&["project"], "project")),
     row("POST", "/v1/apps/projects/{project}/status-page/incidents", "apps", W, one(&["project"], "project")),
     row("POST", "/v1/apps/projects/{project}/status-page/incidents/{iid}/updates", "apps", W, one(&["project"], "project")),
+    row("GET", "/v1/apps/projects/{project}/status-page/domain", "apps", R, one(&["project"], "project")),
+    row("POST", "/v1/apps/projects/{project}/status-page/domain", "apps", W, one(&["project"], "project")),
+    row("DELETE", "/v1/apps/projects/{project}/status-page/domain", "apps", D, one(&["project"], "project")),
+    row("POST", "/v1/apps/projects/{project}/status-page/domain/verify", "apps", W, one(&["project"], "project")),
     row("GET", "/v1/apps/projects/{project}/preview-domain", "apps", R, one(&["project"], "project")),
     row("POST", "/v1/apps/projects/{project}/preview-domain", "apps", W, one(&["project"], "project")),
     row("DELETE", "/v1/apps/projects/{project}/preview-domain", "apps", D, one(&["project"], "project")),
@@ -2188,7 +2221,7 @@ mod tests {
         // Without `admin`, pg-control runs it as the database's owner role, never the superuser.
         assert_eq!(by_path("POST", "/v1/endpoints/ep_x/query").map(|f| f.row.capable), Some(&[Action::Admin, Action::Delete][..]));
         // A repo apps reads for the caller needs read on it: a plan's, an import's, a source's.
-        let repo = |r: &str| vec![Lent { kind: "repo".into(), r#ref: r.into(), action: Action::Read }];
+        let repo = |r: &str| vec![Lent { kind: "repo".into(), r#ref: r.into(), action: Action::Read, folder: None }];
         assert_eq!(apps_repo(&serde_json::json!({ "repo": "acme/web", "revision": "main" })), repo("acme/web"));
         assert_eq!(apps_repo(&serde_json::json!({ "build": { "submodule_repos": ["acme/lib"] } })), repo("acme/lib"));
         assert_eq!(apps_repo(&serde_json::json!({ "source": { "kind": "repo", "repo": "acme/api" } })), repo("acme/api"));

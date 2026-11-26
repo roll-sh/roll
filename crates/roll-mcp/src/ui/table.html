@@ -110,7 +110,9 @@
     const nums = keys.filter((k) => k !== t && !/(^id$|_id$|_at$|^ts$)/.test(k) && safeName(k) && sample.every((r) => blank(r[k]) || typeof r[k] === "number") && sample.some((r) => typeof r[k] === "number")).slice(0, 4);
     if (!nums.length) return null;
     const points = rows.slice(0, 2000).map((r) => ({ at: msOf(r[t]), r })).filter((p) => p.at !== null).sort((a, b) => a.at - b.at);
-    return points.length >= 3 ? { t, nums, points } : null;
+    // A series with no number in a timed row has nothing to draw.
+    const drawn = nums.filter((k) => points.some((p) => typeof p.r[k] === "number"));
+    return points.length >= 3 && drawn.length ? { t, nums: drawn, points } : null;
   }
   const mono = (k, v) => typeof v === "number" || /(^id$|_id$|^ts$|_at$|hash|sha|offset)/.test(k);
   // The content's own size: the document's can't be smaller than the frame it's in.
@@ -168,7 +170,7 @@
       }
       const s = series(rows);
       if (s) view.append(chart(s));
-      context(rows.length, cols, s);
+      if (!(result && result._meta && result._meta["roll/pending"])) context(rows.length, cols, s);
       const wrap = el("div", undefined, "wrap"); wrap.append(table); view.append(wrap);
       document.getElementById("count").textContent = rows.length > 500 ? `first 500 of ${rows.length}` : `${rows.length} ${rows.length === 1 ? "row" : "rows"}`;
     } else if (data && typeof data === "object") {
@@ -231,10 +233,12 @@
   }
 
   // The person's question about a point, as their message in the chat (ui/message): the tool, the
-  // time and the numbers only, never a row's text, so nothing a row holds speaks as the person.
+  // time and the numbers in the chart's order only, never a row's text nor a column's name (a name
+  // can come from what's stored), so nothing a row holds speaks as the person. The model has the
+  // names from the view's context.
   function ask(p, nums, button) {
-    const values = nums.filter((k) => typeof p.r[k] === "number").map((k) => `${k} = ${fmt(p.r[k])}`).join(", ");
-    const text = `In ${safeName(tool) || "this"} chart, at ${stamp(p.at)}: ${values}. What was going on then?`;
+    const values = nums.map((k, i) => typeof p.r[k] === "number" ? `line ${i + 1}: ${fmt(p.r[k])}` : null).filter(Boolean).join(", ");
+    const text = `In the ${safeName(tool) || "tool"} chart, at ${stamp(p.at)}: ${values}. What was going on then?`;
     request("ui/message", { role: "user", content: { type: "text", text } })
       .then(() => { button.textContent = "Asked"; button.disabled = true; })
       .catch(() => { button.textContent = "The host didn't take it"; button.disabled = true; });
@@ -250,7 +254,7 @@
       from: stamp(s.points[0].at), to: stamp(s.points[s.points.length - 1].at),
       series: s.nums.map((k) => { const v = s.points.map((p) => p.r[k]).filter((x) => typeof x === "number"); return { name: k, min: Math.min(...v), max: Math.max(...v), last: v[v.length - 1] }; }),
     };
-    const structured = { view: "roll table", tool: safeName(tool), rows: n, columns, chart: chartOf || undefined };
+    const structured = { view: "roll table", tool: safeName(tool), rows: n, columns, chart: chartOf || undefined, lines: chartOf ? chartOf.series.map((x, i) => `line ${i + 1}: ${x.name}`) : undefined };
     const key = JSON.stringify(structured);
     if (key === told) return;
     told = key;

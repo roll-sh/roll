@@ -1022,12 +1022,23 @@ impl Apps {
                     log.line(n);
                 }
                 let mut run = if env.ephemeral { run } else { svc.run.clone() };
-                // No port set: the one the image exposes (Fly's), not 8080 for an nginx on 80.
-                if run.port.is_none()
-                    && let Some(p) = exposed_port(&self.deps.runtime.image_ports(&pinned).await)
-                {
-                    log.line(format!("the image exposes port {p}: it's served there (set a port to choose another)"));
-                    run.port = Some(p);
+                // No port set: a web service's first deploy takes the one the image exposes
+                // (Fly's), not 8080 for an nginx on 80; later deploys keep what the live one was
+                // served on, so a service that worked on 8080 isn't moved by a new image.
+                if run.port.is_none() && run.kind == RunType::Web {
+                    let live = match env.active.clone() {
+                        Some(a) => self.db(move |s| s.deployment(&a)).await.ok().map(|d| d.run.port),
+                        None => None,
+                    };
+                    match live {
+                        Some(kept) => run.port = kept,
+                        None => {
+                            if let Some(p) = exposed_port(&self.deps.runtime.image_ports(&pinned).await) {
+                                log.line(format!("the image exposes port {p}: it's served there (set a port to choose another)"));
+                                run.port = Some(p);
+                            }
+                        }
+                    }
                 }
                 let bytes = self.deps.runtime.image_bytes(&pinned).await;
                 if let Some(b) = bytes.filter(|b| *b >= 1 << 30) {
@@ -3680,6 +3691,7 @@ impl Apps {
                     let _ = self.verify_domain(&svc, &env, &d.hostname).await;
                 }
             }
+            self.check_status_domains().await;
         }
     }
 

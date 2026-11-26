@@ -340,6 +340,8 @@ export interface ProjectImport {
       source: { kind: "repo"; repo: string; root: string | null } | { kind: "git"; url: string; root: string | null } | { kind: "image"; image: string } | { kind: "upload"; root: string };
       branch: string | null;
       run: Partial<Run>;
+      /** Its `[apps.<name>.build]`: dockerfile, target (a stage), install, build, start. */
+      build?: Partial<Pick<Build, "dockerfile" | "target" | "install" | "build" | "start">>;
       /** A database's kind, or `service`: another app of the file, by its name. */
       links: { kind: "postgres" | "redis" | "bucket" | "stream" | "nosql" | "search" | "service"; name: string }[];
       /** What it's set to as it is. */
@@ -1398,6 +1400,8 @@ export interface Metrics {
   over_capacity: number[];
   /** Each instance's own last hour by minute (those it has now), whatever the range. */
   by_instance?: InstanceSeries[];
+  /** Its volume's size by the hour (measured hourly), and when it'd be full at its last week's pace. */
+  volume?: { size_gb: number; points: { hour: number; bytes: number }[]; full_in_days: number | null };
 }
 
 /** One instance's last hour (Railway's per replica): cores in use on average each minute, and
@@ -1676,6 +1680,10 @@ export const appsApi = {
   incidents: (project: string) => call<{ incidents: Incident[] }>("GET", `/v1/apps/projects/${enc(project)}/status-page/incidents`).then((r) => r.incidents),
   updateIncident: (project: string, incident: string, body: { state: IncidentState; text: string }) => call<null>("POST", `/v1/apps/projects/${enc(project)}/status-page/incidents/${enc(incident)}/updates`, body),
   deleteStatusPage: (project: string) => call<void>("DELETE", `/v1/apps/projects/${enc(project)}/status-page`),
+  statusDomain: (project: string) => call<Domain>("GET", `/v1/apps/projects/${enc(project)}/status-page/domain`),
+  setStatusDomain: (project: string, hostname: string) => call<Domain>("POST", `/v1/apps/projects/${enc(project)}/status-page/domain`, { hostname }),
+  verifyStatusDomain: (project: string) => call<Domain>("POST", `/v1/apps/projects/${enc(project)}/status-page/domain/verify`),
+  removeStatusDomain: (project: string) => call<null>("DELETE", `/v1/apps/projects/${enc(project)}/status-page/domain`),
   previewDomain: (project: string) => call<Domain>("GET", `/v1/apps/projects/${enc(project)}/preview-domain`),
   setPreviewDomain: (project: string, hostname: string) => call<Domain>("POST", `/v1/apps/projects/${enc(project)}/preview-domain`, { hostname }),
   verifyPreviewDomain: (project: string) => call<Domain>("POST", `/v1/apps/projects/${enc(project)}/preview-domain/verify`),

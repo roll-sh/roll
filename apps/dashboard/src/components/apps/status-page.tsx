@@ -1,7 +1,8 @@
-import { ExternalLink } from "lucide-react";
+import { ExternalLink, Globe, RefreshCw } from "lucide-react";
 import { useEffect, useState } from "react";
-import { appsApi, type Incident, type IncidentState, type StatusPage } from "@/lib/apps-api";
-import { btn, input, Panel, primary } from "../ui";
+import { appsApi, type Domain, type Incident, type IncidentState, type StatusPage } from "@/lib/apps-api";
+import { btn, input, Panel, primary, useCopy } from "../ui";
+import { Record } from "./domains";
 import { since, SureButton, type Runner } from "./shared";
 
 const STATES: IncidentState[] = ["investigating", "identified", "monitoring", "maintenance", "resolved"];
@@ -62,6 +63,68 @@ function Incidents({ project, incidents, runner, reload }: { project: string; in
   );
 }
 
+/** The page on a domain of its own (status.acme.dev): the record to add, verified as a custom
+ *  domain is (and checked every minute), then served there with its own certificate. */
+function OwnDomain({ project, runner }: { project: string; runner: Runner }) {
+  const [d, setD] = useState<Domain | null | undefined>(undefined);
+  const [host, setHost] = useState("");
+  const { copied, copy } = useCopy();
+  useEffect(() => {
+    appsApi.statusDomain(project).then(setD, () => setD(null));
+  }, [project]);
+  const busy = runner.busy !== null;
+  if (d === undefined) return null;
+  if (d === null)
+    return (
+      <form
+        className="flex flex-wrap items-center gap-2 border-t border-line px-5 py-4"
+        onSubmit={(e) => {
+          e.preventDefault();
+          void runner.run("status-domain", () => appsApi.setStatusDomain(project, host.trim())).then((x) => x && (setD(x), setHost("")));
+        }}
+      >
+        <input value={host} onChange={(e) => setHost(e.target.value)} placeholder="status.acme.dev" aria-label="Status page domain" spellCheck={false} className={`${input} min-w-56 flex-1 font-mono text-[12px]`} />
+        <button type="submit" className={btn} disabled={busy || !host.trim() || host.includes("*")}>
+          <Globe className="size-3.5" /> Use a domain of its own
+        </button>
+      </form>
+    );
+  return (
+    <div className="space-y-2 border-t border-line px-5 py-4 text-[12.5px]">
+      <div className="flex flex-wrap items-center gap-2">
+        {d.status === "active" ? (
+          <a href={`${d.tls === "issued" ? "https" : "http"}://${d.hostname}`} target="_blank" rel="noreferrer" className="min-w-0 flex-1 truncate font-mono text-[12px] text-accent hover:underline">
+            {d.hostname}
+          </a>
+        ) : (
+          <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-fg">{d.hostname}</span>
+        )}
+        <span className="text-[12px] text-muted">{d.status === "active" ? (d.tls === "issued" || d.tls === "none" ? "verified" : `certificate ${d.tls}`) : "waiting for its DNS"}</span>
+        {d.status !== "active" && (
+          <button type="button" className={btn} disabled={busy} onClick={() => void runner.run("status-domain", () => appsApi.verifyStatusDomain(project)).then((x) => x && setD(x))}>
+            <RefreshCw className="size-3.5" /> Verify
+          </button>
+        )}
+        <SureButton className="text-[12px] text-muted hover:text-fg" sure="Sure? The page stops answering there" disabled={busy} onSure={() => runner.run("status-domain", async () => { await appsApi.removeStatusDomain(project); setD(null); })}>
+          Remove
+        </SureButton>
+      </div>
+      {d.status !== "active" && (
+        <>
+          <table className="w-full overflow-hidden rounded-lg border border-line font-mono text-[12px]">
+            <tbody>
+              {d.record !== "txt" && <Record type="CNAME" name={d.hostname} value={d.target} copied={copied} copy={copy} />}
+              {d.record !== "cname" && <Record type="TXT" name={`_roll-challenge.${d.hostname}`} value={d.token} copied={copied} copy={copy} />}
+            </tbody>
+          </table>
+          {d.error && <p className="text-[12px] text-danger">{d.error}</p>}
+        </>
+      )}
+      {d.tls_error && <p className="text-[12px] text-danger">{d.tls_error}</p>}
+    </div>
+  );
+}
+
 /**
  * A project's status page (Better Stack's, Instatus'): its uptime checks and heartbeats, up or
  * down and their last 90 days, on a public address of its own. Names only, never a path or an
@@ -97,6 +160,7 @@ export function StatusPagePanel({ project, projectName, runner }: { project: str
           </SureButton>
         </div>
       ) : null}
+      {page && <OwnDomain project={project} runner={runner} />}
       {page && (
         <form
           className="flex flex-wrap items-center gap-2 border-t border-line px-5 py-4"

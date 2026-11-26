@@ -64,7 +64,7 @@ func (f *fakeRolld) secretsPolicy(r *http.Request, write func(int, any)) {
 		}
 		f.guardrails = b
 	}
-	out := map[string]any{"production_approvals": nil, "leaks_rotate": nil, "sync_kinds": nil, "no_stored_cloud_keys": false, "max_token_days": nil, "updated_at": nil, "updated_by": nil}
+	out := map[string]any{"production_approvals": nil, "leaks_rotate": nil, "sync_kinds": nil, "no_stored_cloud_keys": false, "max_token_days": nil, "no_breakglass": false, "updated_at": nil, "updated_by": nil}
 	for k, v := range f.guardrails {
 		out[k] = v
 	}

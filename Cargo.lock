@@ -8647,6 +8647,7 @@ dependencies = [
  "tokio-postgres-rustls",
  "tokio-rustls 0.26.6",
  "unicode-segmentation",
+ "xxhash-rust",
  "zeroize",
  "zxcvbn",
 ]

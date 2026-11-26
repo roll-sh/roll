@@ -13,7 +13,7 @@ use base64::engine::general_purpose::STANDARD;
 use code_sql::{Conn, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 struct StoredOp {
     path: String,
     key: String,
@@ -26,6 +26,23 @@ struct StoredOp {
     link: Option<Option<Link>>,
     #[serde(default)]
     expires_at: Option<Option<i64>>,
+}
+
+/// Never the value an op carries.
+impl std::fmt::Debug for StoredOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StoredOp")
+            .field("path", &self.path)
+            .field("key", &self.key)
+            .field("owner", &self.owner)
+            .field("delete", &self.delete)
+            .field("value", &crate::crypto::redacted(&self.value))
+            .field("comment", &self.comment)
+            .field("tags", &self.tags)
+            .field("link", &self.link)
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]

@@ -149,3 +149,39 @@ async fn semantic_text_sends_the_node_model_batches_of_ten_with_no_deadline() {
     assert_eq!(sizes, [5, 10, 10]);
     assert!(fake.calls.lock().unwrap().iter().all(|(_, t)| *t == search_es::xpack::inference::NO_DEADLINE));
 }
+
+/// A `semantic_text` field that names no endpoint embeds with the model the node runs (E5),
+/// recorded in its mapping and in the index's `index.semantic_text.default_inference_id`, so a
+/// mapping copied from Elasticsearch's docs works with no ML node. An index that sets the
+/// setting, a field that names its endpoint, and a node without the model keep Elasticsearch's.
+#[tokio::test]
+async fn semantic_text_defaults_to_the_model_the_node_runs() {
+    async fn get(c: &Cluster, path: &str) -> Value {
+        search_es::handle(c, EsRequest::new("GET", path)).await.body_json()
+    }
+    let fake = Arc::new(Fake::default());
+    let mut cfg = ClusterConfig::new("c");
+    cfg.embedder = Some(fake.clone());
+    let c = Cluster::open(cfg, Arc::new(MemoryStore::new())).await.unwrap();
+    let plain = r#"{"mappings":{"properties":{"body":{"type":"semantic_text"}}}}"#;
+    assert_eq!(search_es::handle(&c, EsRequest::json("PUT", "/docs", plain.to_string())).await.status, 200);
+    let m = get(&c, "/docs/_mapping").await;
+    assert_eq!(m.pointer(&["docs", "mappings", "properties", "body", "inference_id"]).and_then(Value::as_str), Some(".multilingual-e5-small-elasticsearch"), "{m}");
+    let s = get(&c, "/docs/_settings").await;
+    assert_eq!(s.pointer(&["docs", "settings", "index", "semantic_text", "default_inference_id"]).and_then(Value::as_str), Some(".multilingual-e5-small-elasticsearch"), "{s}");
+    let r = search_es::handle(&c, EsRequest::json("PUT", "/docs/_doc/1?refresh=true", r#"{"body":"a mapping copied from the docs"}"#.to_string())).await;
+    assert_eq!(r.status, 201, "{}", String::from_utf8_lossy(&r.body));
+    assert!(!fake.calls.lock().unwrap().is_empty(), "the node's model embedded it");
+    // The index's own choice, and a field's, stand.
+    let own = r#"{"settings":{"index.semantic_text.default_inference_id":".elser-2-elasticsearch"},"mappings":{"properties":{"a":{"type":"semantic_text"},"b":{"type":"semantic_text","inference_id":".elser-2-elasticsearch"}}}}"#;
+    assert_eq!(search_es::handle(&c, EsRequest::json("PUT", "/own", own.to_string())).await.status, 200);
+    let m = get(&c, "/own/_mapping").await;
+    for f in ["a", "b"] {
+        assert_eq!(m.pointer(&["own", "mappings", "properties", f, "inference_id"]).and_then(Value::as_str), Some(".elser-2-elasticsearch"), "{m}");
+    }
+    // Without the model, Elasticsearch's default.
+    let bare = Cluster::open(ClusterConfig::new("d"), Arc::new(MemoryStore::new())).await.unwrap();
+    assert_eq!(search_es::handle(&bare, EsRequest::json("PUT", "/docs", plain.to_string())).await.status, 200);
+    let m = get(&bare, "/docs/_mapping").await;
+    assert_eq!(m.pointer(&["docs", "mappings", "properties", "body", "inference_id"]).and_then(Value::as_str), Some(".elser-2-elasticsearch"), "{m}");
+}

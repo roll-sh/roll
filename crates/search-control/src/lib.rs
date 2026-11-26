@@ -44,6 +44,9 @@ pub use search_es::xpack::entsearch::sync::ALLOW_PRIVATE as CONNECTORS_ALLOW_PRI
 /// Node setting that lets inference endpoints reach private addresses (local development, tests).
 pub use search_es::xpack::inference::http::ALLOW_PRIVATE as INFERENCE_ALLOW_PRIVATE;
 pub use search_es::xpack::inference::semantic::UNEMBEDDED_HEADER;
+/// The settings an inference service marks sensitive (its credentials), for rolld's endpoints whose
+/// key is a roll secret.
+pub use search_es::xpack::inference::services::sensitive_settings as inference_sensitive_settings;
 pub use search_es::api::remote::ALLOW_PRIVATE as REINDEX_ALLOW_PRIVATE;
 pub use search_es::api::remote::MAX_DURATION as REINDEX_MAX_DURATION;
 /// Node setting: the URL roll calls for every Algolia application (tests; an operator's proxy).
