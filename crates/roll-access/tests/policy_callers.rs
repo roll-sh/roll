@@ -43,6 +43,7 @@ const EXPLAINED: &[(&str, &str, &str)] = &[
     ("roll-access/src/bootstrap.rs", "mint_bootstrap", "a machine credential's chain: roll secrets checks its hours (guardrails' machine_hours)"),
     ("roll-access/src/bootstrap.rs", "redeem", "a machine credential's chain: capped as it's issued (guardrails' cap_hours)"),
     ("roll-access/src/enterprise.rs", "update_app", "each connection's next sign-in meets the policy (`connect` replaces one that doesn't)"),
+    ("roll-access/src/enterprise.rs", "ema_apply", "Claude's app's rules, as `update_app` sets them: each connection's next sign-in meets the policy"),
     ("rolld/src/secrets.rs", "a_cut_off_revokes_tokens_through_roll_access_500_at_a_time", "a test's tokens"),
 ];
 

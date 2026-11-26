@@ -285,7 +285,19 @@ roll token acting as that person, with no consent screen and no roll sign-in.
     - **Who and where:** only for Claude's client (its public document or `/confidential_client`), returning only to `https://claude.ai/api/mcp/auth_callback`, and approved only by roll's admins.
     - **The consent screen** names what approving turns on and asks for the email domains Claude's issuer vouches for, plus the most Claude may do for a person (the app's rules).
     - **The code** (with RFC 9207's `iss` in the redirect, as every roll redirect has) trades for a five-minute, single-use token, with `ema_setup_endpoint` and no refresh token. The confidential client signs a client assertion with its document's keys there.
-    - **`PUT /v1/access/enterprise/ema-setup {ema_issuer}`** with that token (in front of the gate: the token is the credential) trusts the issuer, a Claude issuer only, for those domains with email matching, and registers Claude as an app if it isn't one. It replaces what an earlier express setup trusted and keeps a provider the operator set up by hand. Refusals are `{error, error_description}`: `invalid_token` for a spent or old token, `invalid_request` for an issuer that isn't Claude's. Audited as `express_setup`.
+    - **`PUT /v1/access/enterprise/ema-setup {ema_issuer}`** takes that token, in front of the gate (the token is the credential). In one write it:
+      - spends the token;
+      - trusts the issuer, a Claude issuer only, for those domains with email matching;
+      - replaces what an earlier express setup trusted, keeping a provider the operator set up by hand;
+      - gives Claude's app the consent's rules: it registers the app, or narrows or widens an existing one along with its people's connections, as an edit of the app does.
+    - **Refusals** are `{error, error_description}`:
+      - `invalid_token` for a spent or old token;
+      - `invalid_request` for an issuer that isn't Claude's;
+      - `access_denied` when the admin who approved isn't one any more;
+      - 409 when there are already too many providers or apps;
+      - a generic 500 otherwise.
+    - **Also refused:** at consent, a mail service anyone can sign up at (gmail.com and the like) as a domain; and roll's client allow-list (`oauth_clients`) without Claude on it.
+    - **Audited** as `express_setup`, with who approved (`by`).
 - **A leaked app secret** (an `rlc_` with its checksum, found by roll code's push scan or reported
   by GitHub's secret scanning) is revoked like any other: roll drops the secret, the one kept from
   before a rotation, and every token the app's people hold, in one write, and audits it. The
