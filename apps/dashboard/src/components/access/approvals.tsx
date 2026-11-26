@@ -1,6 +1,6 @@
 import { Bell, Hand } from "lucide-react";
 import { useEffect, useState } from "react";
-import { accessApi, accessRequest, approversText, parseApprovers, approvalWhere, deciderName, forLabel, gateProgress, productName, REMEMBER, RISKY, rememberable, type Approval, type ChatTarget, type Remember } from "@/lib/access-api";
+import { accessApi, accessRequest, approversText, parseApprovers, approvalWhere, deciderName, forLabel, gateProgress, productName, rememberChoices, RISKY, rememberable, wholeEnvironment, type Approval, type ChatTarget, type Remember } from "@/lib/access-api";
 import { createIntegrationsApi, type ChatInstall } from "@/lib/integrations-api";
 import { call } from "@/lib/roll-api";
 import { useShownOwner } from "../agents/use-connection";
@@ -132,9 +132,9 @@ function Pending({ a, focused, refresh, viewer }: { a: Approval; focused: boolea
               onChange={(e) => setRemember(e.target.value as Remember)}
               className={input}
               aria-label="How long this approval also allows the same action on this resource"
-              title={`Also allow ${a.action} on ${a.resource}${approvalWhere(a) ? ` (${approvalWhere(a)})` : ""} without asking`}
+              title={`Also allow ${a.action} on ${a.resource}${approvalWhere(a) ? ` (${approvalWhere(a)})` : ""}${wholeEnvironment(a) ? ", every folder of the environment," : " and every folder under it"} without asking`}
             >
-              {REMEMBER.map((r) => (
+              {rememberChoices(a).map((r) => (
                 <option key={r.value} value={r.value}>
                   {r.label}
                 </option>

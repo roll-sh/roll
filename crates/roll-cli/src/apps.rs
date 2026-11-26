@@ -328,6 +328,9 @@ pub enum AppsCmd {
         /// Run once per deploy before the switch (a migration); a failure stops the deploy.
         #[arg(long)]
         pre_deploy: Option<String>,
+        /// A preview environment's teardown command, run once before it's deleted (`none` clears it).
+        #[arg(long)]
+        teardown: Option<String>,
         /// The path checked at each deploy and every 10 s while running; `none`: the port
         /// accepting.
         #[arg(long)]
@@ -3568,7 +3571,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Set { target, name, repo, root, image, upload, builder, dockerfile, stage, install, build_command, output, build_start, health_timeout, health_every, health_failures, health_command, alert_memory, alert_errors, alert_p95, alert_log, alert_log_count, alert_cpu, alert_metric, alert_anomaly, min, max, cpu, memory, port, start, pre_deploy, health, schedule, timezone, kind, concurrency, suspend_after, sleep_after, timeout, retries, volume, watch, packages, build_timeout, build_size, submodules, submodule_repos, lfs, otel, rollout, rollout_step, rollout_errors, rollout_manual, rollout_checks, overlap, h2c, health_grpc, scale, public, drain, cpu_target, busy_cpu, memory_target, latency_target, oidc_audience, push, restart, restart_tries, affinity, tcp, udp, rollback_on_crash, rebuild_on_base, block_on, queue, alert_capacity, alert_route, skew_protection, rollout_slo_burn, rollout_p95, floor, floor_timezone, set } => {
+        AppsCmd::Set { target, name, repo, root, image, upload, builder, dockerfile, stage, install, build_command, output, build_start, health_timeout, health_every, health_failures, health_command, alert_memory, alert_errors, alert_p95, alert_log, alert_log_count, alert_cpu, alert_metric, alert_anomaly, min, max, cpu, memory, port, start, pre_deploy, teardown, health, schedule, timezone, kind, concurrency, suspend_after, sleep_after, timeout, retries, volume, watch, packages, build_timeout, build_size, submodules, submodule_repos, lfs, otel, rollout, rollout_step, rollout_errors, rollout_manual, rollout_checks, overlap, h2c, health_grpc, scale, public, drain, cpu_target, busy_cpu, memory_target, latency_target, oidc_audience, push, restart, restart_tries, affinity, tcp, udp, rollback_on_crash, rebuild_on_base, block_on, queue, alert_capacity, alert_route, skew_protection, rollout_slo_burn, rollout_p95, floor, floor_timezone, set } => {
             let svc = service(api, &target).await?;
             // The service's rollout with what was given replaced (the API takes it whole).
             let rollout = if rollout.is_some() || rollout_step.is_some() || rollout_errors.is_some() || rollout_manual.is_some() || rollout_checks.is_some() || overlap.is_some() || rollout_slo_burn.is_some() || rollout_p95.is_some() {
@@ -3741,6 +3744,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 ("port", port.map(Value::from)),
                 ("start", text(start)),
                 ("pre_deploy", text(pre_deploy)),
+                ("teardown", text(teardown)),
                 ("health_path", text(health)),
                 ("health_timeout_s", health_timeout.map(Value::from)),
                 ("health_every_s", health_every.map(|n| if n == 0 { Value::Null } else { Value::from(n) })),
