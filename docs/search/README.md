@@ -1197,9 +1197,12 @@ query-rule editors prefilled with it (`query, ` as a rule; an `exact` `query_str
   without `index`). A read for roll-access; a person sees only their own clusters' (404 otherwise).
   The answer adds what the cluster's owner recorded since the last pass. Its `experiments` list
   the A/B tests of the cluster's search applications ([relevance-experiments.md](relevance-experiments.md)):
-  `[{application, experiment, baseline, variants: [{name, searches, clicks, conversions, value, ctr, conversion_rate, no_hits, no_hit_rate, p95_latency_ms, vs_baseline?: {ctr, conversion_rate}}]}]`,
-  each comparison `{p_value, state}` with `state` one of `significant`, `not_yet_significant` or
-  `not_enough_data`; counted since each started, whatever `range` says. The totals, points and
+  `[{application, experiment, baseline, variants: [{name, searches, clicks, conversions, value, ctr, conversion_rate, ctr_interval, conversion_rate_interval, no_hits, no_hit_rate, p95_latency_ms, vs_baseline?: {ctr, conversion_rate}}]}]`,
+  each rate's interval its 95% Wilson interval `[low, high]` (null with no trials), each
+  comparison `{p_value, state, difference, interval}` with `state` one of `significant`,
+  `not_yet_significant` or `not_enough_data`, `difference` the variant's rate minus the
+  baseline's and `interval` its 95% interval (Newcombe's, from the two Wilson intervals); counted
+  since each started, whatever `range` says. The totals, points and
   query rows also count `roll_conversion` events (`conversions`, `conversion_rate`, `value`).
 
 **Privacy.** No `Authorization` header, credential, API key or document body is ever recorded:
@@ -1379,7 +1382,7 @@ in review (item 11's RAG phase 2, #1068 in its third round; item 30's read-only 
 its second; item 1's derived-key follow-ups, #1127 in its second; item 31's re-embed route,
 #1132, landing), then item 32 (resetting a branch from a copy for previews' restore points; in
 progress), item 33's second slice (saved searches, surrounding documents, a field's chart; in
-progress), item 15's confidence intervals and promoting from the Relevance tab (in progress),
+progress), item 15's confidence intervals and promoting from the Relevance tab (in review),
 then its judgment lists and offline evaluation (the top open item), item 14 (semantic search on OpenSearch-flavor
 clusters; resumes after #1111), item 16 (cold start at size; resumes after #1127), OpenSearch's
 `_plugins/_sm` (item 9; in progress), item 5's OpenSearch links (designed), and chat token
@@ -1751,10 +1754,11 @@ deterministic (#396).
    per-variant click-through and conversion with a two-proportion z-test in `GET …/analytics` and
    the Relevance tab. The second slice landed in #1126: conversions in the indices' analytics,
    zero-result rate and p95 latency per variant, and promoting a variant into the application
-   (`…/_roll/experiments/{id}/_promote`). Next: confidence intervals beside the p-values and
-   promoting from the Relevance tab (in progress), then judgment lists and offline evaluation
-   (phase 1: OpenSearch's Search Relevance Workbench and `_rank_eval` with lists, for CI). Left:
-   the `roll_` rule types and dynamic re-ranking.
+   (`…/_roll/experiments/{id}/_promote`). Then 95% intervals for each rate and for each
+   difference from the baseline, and promoting from the Relevance tab
+   (`feature/search-exp-ci`). Next: judgment lists and offline evaluation (phase 1: OpenSearch's
+   Search Relevance Workbench and `_rank_eval` with lists, for CI). Left: the `roll_` rule types
+   and dynamic re-ranking.
 16. **Cold start at size**: the 19.8 ms cold start is a 50k-document index from local cache;
    nothing measures the first query and p99 on a node with an empty cache for 1, 10 and 50 GB
    indices loaded from object storage, or on Graviton. Buyers comparing always-on Typesense or Algolia
