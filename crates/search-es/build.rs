@@ -1,6 +1,7 @@
 //! Generates the route tables from the vendored REST API specs: Elasticsearch's
 //! (`spec/api/*.json`) and OpenSearch's (`spec/opensearch/api/*.json`, plus the bundled
-//! plugins' APIs in `spec/opensearch/plugins/*.json`).
+//! plugins' APIs in `spec/opensearch/plugins/*.json`), and roll's own extensions in both
+//! (`spec/roll/*.json`).
 //!
 //! The output (`$OUT_DIR/spec.rs`) is an `Api` enum with one variant per API of either spec and
 //! one static `ApiSpec` array per dialect indexed by it (an API a dialect lacks has an empty,
@@ -33,7 +34,7 @@ fn main() {
     let root = Path::new(&std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("spec");
     println!("cargo:rerun-if-changed=spec/api");
     println!("cargo:rerun-if-changed=spec/opensearch/api");
-    let (es, es_common) = load(&root.join("api"));
+    let (mut es, es_common) = load(&root.join("api"));
     let (mut os, os_common) = load(&root.join("opensearch/api"));
     // The bundled plugins' APIs (roll's own files in the spec's format, see
     // spec/opensearch/ROLL.md). `"params_from": "<api>"` copies another API's parameters.
@@ -56,6 +57,12 @@ fn main() {
             api["params"] = serde_json::Value::Object(params);
         }
         assert!(os.insert(name.clone(), api).is_none(), "plugin API {name} shadows a core API");
+    }
+    // roll's own extensions (`spec/roll/*.json`, under `/_roll/`), served in both dialects.
+    println!("cargo:rerun-if-changed=spec/roll");
+    let (roll, _) = load(&root.join("roll"));
+    for (name, api) in roll {
+        assert!(es.insert(name.clone(), api.clone()).is_none() && os.insert(name.clone(), api).is_none(), "roll API {name} shadows a core API");
     }
     let names: BTreeSet<&String> = es.keys().chain(os.keys()).collect();
 

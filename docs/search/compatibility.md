@@ -1702,6 +1702,8 @@ APIs ([relevance-experiments.md](relevance-experiments.md), "First slice as buil
   (`page_view`, `search` and `search_click` as Elasticsearch has them).
 - A browser key with `limits.events` may post `search_click` and `roll_conversion` events, which
   are counted and not stored.
+- `POST _application/search_application/{name}/_roll/experiments/{id}/_promote` writes a
+  variant into the application and ends the experiment (roll's own route, under `_roll`).
 
 ## Connectors (`_connector`)
 
