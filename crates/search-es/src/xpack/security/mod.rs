@@ -755,6 +755,13 @@ pub fn authorized_names(ctx: &Ctx) -> impl Fn(&str) -> bool {
     move |n| check.as_ref().is_none_or(|(eff, action)| eff.allows_index(action, n))
 }
 
+/// Whether the request's principal may read (search) a name: an index, alias or pattern, or a
+/// search application's name (its alias).
+pub fn may_read(ctx: &Ctx) -> impl Fn(&str) -> bool {
+    let check = ctx.principal.get().filter(|p| !p.is_superuser()).map(|p| effective(&file_roles(ctx.cluster), &ctx.state(), p));
+    move |n| check.as_ref().is_none_or(|eff| eff.allows_index("indices:data/read/search", n))
+}
+
 tokio::task_local! {
     /// The workflow of the REST request being dispatched: its internal calls run in it too, as
     /// Elasticsearch keeps the workflow in the thread context.
@@ -764,7 +771,9 @@ tokio::task_local! {
 /// `Workflow`s: the workflow a REST API starts (`WorkflowResolver`).
 fn workflow_of(api: &str) -> Option<&'static str> {
     match api {
-        "search_application.search" => Some("search_application_query"),
+        // A page's analytics events about its application's searches (roll's: a browser key with
+        // `limits.events`, `browser::Policy::events`) belong to the same flow.
+        "search_application.search" | "search_application.post_behavioral_analytics_event" => Some("search_application_query"),
         _ => None,
     }
 }
@@ -857,6 +866,11 @@ fn authorize_action(ctx: &Ctx) -> EsResult<Option<String>> {
     let Some(p) = ctx.principal.get() else { return Ok(None) };
     check_workflow(ctx, p)?;
     if p.is_superuser() {
+        return Ok(None);
+    }
+    // A browser key with `limits.events` posts its page's events without a cluster privilege:
+    // the handler holds them to what the key reaches, counts them and stores none.
+    if ctx.api.name() == "search_application.post_behavioral_analytics_event" && browser::policy(ctx).is_some_and(|b| b.events) {
         return Ok(None);
     }
     let (scope, action) = privileges::action_of(ctx.api.name());
@@ -1510,8 +1524,13 @@ pub(crate) fn who(p: &Principal) -> String {
 
 /// Whether the request's principal may run cluster action `action`, else Elasticsearch's 403.
 pub fn check_cluster_action(ctx: &Ctx, action: &str) -> EsResult<()> {
-    let p = principal(ctx);
-    if p.is_superuser() || effective(&file_roles(ctx.cluster), &ctx.state(), p).allows_cluster(action) {
+    check_cluster_action_of(ctx.cluster, principal(ctx), action)
+}
+
+/// [`check_cluster_action`] for principal `p` (work a request hands on, such as an ES|QL query's
+/// resource loading).
+pub fn check_cluster_action_of(cluster: &crate::Cluster, p: &Principal, action: &str) -> EsResult<()> {
+    if p.is_superuser() || effective(&file_roles(cluster), &cluster.state(), p).allows_cluster(action) {
         return Ok(());
     }
     Err(denied(p, action, None))
@@ -1585,11 +1604,15 @@ fn request_indices(ctx: &Ctx) -> Vec<String> {
     // Wildcards as the API expands them: its handler's defaults, then the request's parameters
     // (`expand_wildcards=all` reaches hidden indices).
     let opts = handler_expansion(ctx);
+    // Naming none, the API acts on `_all` as its handler expands it (`PUT /_settings` reaches
+    // closed and non-hidden dot indices too): every one of them is authorized, and every
+    // non-dot index as before.
     if exprs.is_empty() {
-        if opts.expand_hidden {
-            return crate::meta::resolve::resolve(&st, &["_all".to_string()], &opts, ctx.now_ms).unwrap_or_default();
-        }
-        return st.metadata.indices.keys().filter(|k| !k.starts_with('.')).cloned().collect();
+        let mut out: Vec<String> = crate::meta::resolve::resolve(&st, &["_all".to_string()], &opts, ctx.now_ms).unwrap_or_default();
+        out.extend(st.metadata.indices.keys().filter(|k| !k.starts_with('.')).cloned());
+        out.sort();
+        out.dedup();
+        return out;
     }
     let mut out = Vec::new();
     for e in exprs {
@@ -1619,7 +1642,7 @@ fn handler_expansion(ctx: &Ctx) -> crate::meta::resolve::IndicesOptions {
         // `/{index}/_settings/index.uuid?expand_wildcards=open,closed,hidden` (`ilm::resolve`).
         "ilm.remove_policy" | "ilm.retry" | "ilm.explain_lifecycle" => return IndicesOptions { expand_closed: true, expand_hidden: true, ..lenient },
         "indices.open" => IndicesOptions { expand_open: false, expand_closed: true, ..lenient },
-        "indices.put_settings" | "indices.put_mapping" | "indices.delete" | "indices.shard_stores" => IndicesOptions { expand_closed: true, ..lenient },
+        "indices.put_settings" | "indices.put_mapping" | "indices.delete" | "indices.shard_stores" | "indices.delete_alias" => IndicesOptions { expand_closed: true, ..lenient },
         _ => lenient,
     };
     ctx.indices_options(defaults).unwrap_or(defaults)

@@ -82,6 +82,8 @@ pub fn router(control: Arc<Control>) -> Router {
         .route("/v1/search/clusters/{id}/browser-keys", get(browser_keys).post(create_browser_key))
         .route("/v1/search/clusters/{id}/browser-keys/{key}", axum::routing::delete(revoke_browser_key))
         .route("/v1/search/clusters/{id}/browser-keys/{key}/rotate", post(rotate_browser_key_secret))
+        .route("/v1/search/clusters/{id}/browser-keys/from-parent", post(copy_parent_browser_keys))
+        .route("/v1/search/clusters/{id}/browser-keys/from-parent/prune", post(prune_parent_browser_keys))
         .route("/v1/search/clusters/{id}/browser-keys/{key}/usage", get(browser_key_usage))
         .route("/v1/search/clusters/{id}/remotes", get(remotes))
         .route("/v1/search/clusters/{id}/remotes/{alias}", axum::routing::put(link_remote).delete(unlink_remote))
@@ -1035,6 +1037,22 @@ async fn browser_key_usage(State(c): State<AppState>, Path((id, key)): Path<(Str
 /// application or named indices, an optional filter, expiry and rate limit); shown once.
 async fn create_browser_key(State(c): State<AppState>, Path(id): Path<String>, Json(k): Json<crate::control::NewBrowserKey>) -> ApiResult<Value> {
     Ok(Json(c.create_browser_key(&id, k).await?))
+}
+
+/// `POST /v1/search/clusters/{id}/browser-keys/from-parent`: a branch's own browser keys, one for
+/// each of its parent's (same reach, filter and limits; a derivable one with a secret of the
+/// branch's own), in this answer only; the ones it made before are revoked. roll previews asks
+/// for its search branches. It revokes as well as answers credentials: `admin`, and `reveal` too.
+async fn copy_parent_browser_keys(State(c): State<AppState>, Path(id): Path<String>, ext: Extensions) -> ApiResult<Value> {
+    answers_credential(&ext, || format!("browser keys of cluster {id}"))?;
+    Ok(Json(c.copy_parent_browser_keys(&id).await?))
+}
+
+/// `POST /v1/search/clusters/{id}/browser-keys/from-parent/prune`: revokes a branch's copies of
+/// its parent's browser keys that stand for none any longer (revoked, expired, or a rotated
+/// secret): the ids revoked. roll previews asks as it serves a preview.
+async fn prune_parent_browser_keys(State(c): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
+    Ok(Json(c.prune_parent_browser_keys(&id).await?))
 }
 
 /// `POST /v1/search/clusters/{id}/browser-keys/{key}/rotate`: a derivable browser key's new

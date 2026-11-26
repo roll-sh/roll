@@ -1488,8 +1488,9 @@ async fn masked_postgres_is_masked_before_it_serves_and_new_rules_reach_it() {
     assert_eq!(e.engine.store.row(&p.id).unwrap().state, State::Ready);
 }
 
-/// A restore point: the data saved (Postgres's, the product that puts a branch back in place),
-/// put back without seeding again, gone when the masking rules change, and with the preview.
+/// A restore point: the data saved (Postgres's and Redis's, the products that put a branch back
+/// in place), put back without seeding again, Redis's part gone once a reset makes it a new
+/// database, the point gone when the masking rules change, and with the preview.
 #[tokio::test]
 async fn a_restore_point_puts_the_data_back_without_seeding_again() {
     let e = env(json!({ "enabled": true, "seed": { "image": "node:22", "run": "node seed.js" }, "masking": { "postgres:prj_db": { "public.users.email": "email" } } }));
@@ -1498,7 +1499,7 @@ async fn a_restore_point_puts_the_data_back_without_seeding_again() {
     let p = e.engine.store.row_by_change("chg_rp").unwrap().unwrap();
     assert_eq!(p.state, State::Ready);
     let point = e.engine.save_point(&p.id, "before the test run", "ana").await.unwrap();
-    assert_eq!((point.label.as_str(), point.data.clone()), ("before the test run", vec!["postgres:prj_db".to_string()]));
+    assert_eq!((point.label.as_str(), point.data.clone()), ("before the test run", vec!["postgres:prj_db".to_string(), "redis:rdb_cache".to_string()]));
     let (live, copy) = (format!("prj_db~pv-{}", &p.id[3..]), format!("prj_db~pv-{}-{}", &p.id[3..], &point.id[3..]));
     assert!(e.pg.branches.lock().contains(&copy), "a copy of the preview's branch");
     let seeds = e.apps.seeds.lock().len();
@@ -1508,6 +1509,16 @@ async fn a_restore_point_puts_the_data_back_without_seeding_again() {
     assert_eq!(*e.pg.restored.lock(), [(live, copy.clone())], "the preview's branch put back in place");
     assert_eq!(e.apps.seeds.lock().len(), seeds, "the point holds what the seed made: it isn't run again");
     assert_eq!(e.engine.store.row(&p.id).unwrap().state, State::Ready);
+    // A Redis reset is a new database: the point's Redis part, put back from the old one's
+    // history, goes (its Postgres part stays: pg-control resets a branch from any copy).
+    let redis_copy = format!("rdb_cache~pv-{}-{}", &p.id[3..], &point.id[3..]);
+    assert!(e.redis.branches.lock().contains(&redis_copy));
+    e.redis.renames_on_reset.store(1, std::sync::atomic::Ordering::SeqCst);
+    e.engine.reset(&p.id, vec!["redis:rdb_cache".into()]).unwrap();
+    e.engine.pass().await.unwrap();
+    let kept: Vec<Vec<String>> = e.engine.restore_points(&p.id).unwrap().into_iter().map(|p| p.data).collect();
+    assert_eq!(kept, [vec!["postgres:prj_db".to_string()]], "only the point's Postgres part is left");
+    assert!(!e.redis.branches.lock().contains(&redis_copy), "the Redis copy is deleted");
     // Other masking rules: the point, masked by the old ones, goes.
     let mut s = e.engine.store.settings(&e.project).unwrap();
     s.masking.insert("postgres:prj_db".into(), [("public.users.name".to_string(), "redact".to_string())].into_iter().collect());
@@ -2270,8 +2281,15 @@ async fn a_service_that_didnt_change_keeps_its_pages() {
     e.code.open(c);
     e.engine.pass().await.unwrap();
     let p = e.engine.store.row_by_change("chg_ts").unwrap().unwrap();
-    // The change's run takes api's page, then web's.
+    // The change's run takes api's page, then web's, and records them (web's kept page and what
+    // it ran) before the next push: a push while it's still storing them takes web again.
     taken(&e.apps, "web", 1).await;
+    for _ in 0..3000 {
+        if e.engine.store.kept_page(&p.id, "web:/").unwrap().is_some() && e.engine.store.service_shot_key(&p.id, "web").unwrap().is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
     let web_before = runs("web");
     assert!(web_before >= 1, "web's page taken at first");
     let api_before = runs("api");

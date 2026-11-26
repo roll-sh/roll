@@ -775,12 +775,19 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
     // Handing another resource's credentials to this one (apps' links) is revealing them: when
     // that decides, the request (and its approval) is about the linked resource.
     let mut lent: Option<(&'static str, String)> = None;
-    if let Some(l) = lend_outcome(&access, row, &params, json_body.as_ref(), &scope, as_user).await {
+    // A lent secret's folder, when one decided (an approval keeps to it), and the exact rules the
+    // grant handed to the product gets for the lent secrets its own rules don't allow: the request
+    // gets this far only allowed or approved, and roll secrets checks the caller again inside.
+    let mut lent_folder: Option<(String, String)> = None;
+    let mut lent_rules: Vec<roll_auth::scope::Rule> = Vec::new();
+    if let Some(l) = lend_outcome(&access, row, &params, json_body.as_ref(), &target, &scope, as_user).await {
         seconds.extend(l.all.into_iter().map(|(p, a, r)| (p, a, Some(r))));
+        lent_rules = l.grants;
         if rank(l.outcome) < rank(outcome) {
             (outcome, action) = (l.outcome, l.action);
             (asked_env, asked_path) = (None, None);
             lent = Some((l.product, l.id));
+            lent_folder = l.folder;
         }
     }
     // A person's token on a member product reaches only what their session does too, creates
@@ -803,7 +810,7 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
     // reach too. One it doesn't answers as missing, as a stranger's resource does.
     if let Some(w) = &within
         && roll_auth::roles::MEMBER_PRODUCTS.contains(&row.product)
-        && let Some(l) = lend_outcome(&access, row, &params, json_body.as_ref(), &w.scope, true).await
+        && let Some(l) = lend_outcome(&access, row, &params, json_body.as_ref(), &target, &w.scope, true).await
         && l.outcome != Outcome::Allow
     {
         ctx.audit(Some(row), Some(l.action), Some(l.id.clone()), "deny", None, StatusCode::NOT_FOUND);
@@ -952,7 +959,7 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
             let (environment, scope_path, scope_index) = match &target {
                 // When a copy's source decided, the approval is about that folder: remembering it
                 // allows exactly that.
-                _ if lent.is_some() => (None, None, None),
+                _ if lent.is_some() => (lent_folder.as_ref().map(|f| f.0.clone()), lent_folder.as_ref().map(|f| f.1.clone()), None),
                 Target::One(r) => (asked_env.clone().or_else(|| r.environment.clone()), asked_path.clone().or_else(|| r.path.clone()), r.index.clone()),
                 _ => (None, None, None),
             };
@@ -1021,7 +1028,7 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
         id: ctx.grant.id.as_str().into(),
         name: ctx.grant.name.as_str().into(),
         kind: ctx.grant.kind(),
-        scope: scope.clone(),
+        scope: if lent_rules.is_empty() { scope.clone() } else { std::sync::Arc::new(Scope(scope.0.iter().cloned().chain(lent_rules).collect())) },
         user: ctx.grant.user.as_deref().map(Into::into),
         ask_otherwise: ctx.grant.ask_otherwise,
     });
@@ -1178,13 +1185,13 @@ pub(crate) async fn copy_outcome(
 /// What handing other resources' credentials to this one needs ([`catalog::Lend`]): `reveal` on
 /// each, as a rule places it. The weakest decides; a kind roll doesn't know is refused.
 #[allow(clippy::type_complexity)]
-pub(crate) async fn lend_outcome(access: &Arc<Access>, row: &'static Row, params: &[(String, String)], body: Option<&Value>, scope: &Scope, person: bool) -> Option<Lending> {
+pub(crate) async fn lend_outcome(access: &Arc<Access>, row: &'static Row, params: &[(String, String)], body: Option<&Value>, target: &Target, scope: &Scope, person: bool) -> Option<Lending> {
     let param = |n: &str| params.iter().find(|(k, _)| k == n).map(|(_, v)| v.clone());
     let lent: Vec<catalog::Lent> = match row.lends? {
         // A route that names them otherwise than its row is refused, never let through.
         catalog::Lend::Path(k, r) => match (param(k), param(r)) {
-            (Some(kind), Some(r#ref)) => vec![catalog::Lent { kind, r#ref, action: Action::Reveal }],
-            _ => return Some(Lending { outcome: Outcome::Deny, product: row.product, action: Action::Reveal, id: "a link this route doesn't name".into(), all: Vec::new() }),
+            (Some(kind), Some(r#ref)) => vec![catalog::Lent { kind, r#ref, action: Action::Reveal, folder: None }],
+            _ => return Some(Lending { outcome: Outcome::Deny, product: row.product, action: Action::Reveal, id: "a link this route doesn't name".into(), all: Vec::new(), folder: None, grants: Vec::new() }),
         },
         catalog::Lend::Each(f) => f(body?),
     };
@@ -1195,7 +1202,51 @@ pub(crate) async fn lend_outcome(access: &Arc<Access>, row: &'static Row, params
     // Every one not allowed outright is named (approving once hands over all of them).
     let mut short: Vec<String> = Vec::new();
     let mut all: Vec<(&'static str, Action, String)> = Vec::new();
+    let mut weakest_folder: Option<(String, String)> = None;
+    let mut grants: Vec<roll_auth::scope::Rule> = Vec::new();
     for l in lent {
+        // A roll secret's folder, as roll secrets asks the caller about it inside.
+        if let (true, Some((env, path))) = (l.kind == "secret", l.folder.clone()) {
+            let on = match target {
+                Target::One(r) if r.also_in.is_empty() => r.project.clone(),
+                _ => None,
+            };
+            // No one project to name: the route refuses it itself, reading nothing.
+            let Some(project) = Some(l.r#ref.clone()).filter(|p| !p.is_empty()).or(on) else { continue };
+            let (a, e2, p2) = (access.clone(), env.clone(), path.clone());
+            let resolved = tokio::task::spawn_blocking(move || {
+                let mut r = a.resource_as(person, "secrets", "project", &project);
+                let id = r.id.clone().unwrap_or(project);
+                r.protected = a.resolvers.protected("secrets", &id, &e2);
+                r.environment = Some(a.resolvers.environment("secrets", &id, &e2));
+                r.path = Some(p2);
+                r
+            })
+            .await;
+            // A lookup that fails decides nothing in the request's favour.
+            let Ok(res) = resolved else { return Some(Lending { outcome: Outcome::Deny, product: "secrets", action: l.action, id: l.r#ref, all, folder: Some((env, path)), grants: Vec::new() }) };
+            let outcome = scope.outcome(&Target::One(res.clone()), l.action);
+            let id = res.id.clone().unwrap_or_default();
+            let named = format!("{id}:{env}:{path}");
+            if outcome != Outcome::Allow {
+                short.push(named.clone());
+                // Exactly that folder in that environment, for this one action.
+                grants.push(roll_auth::scope::Rule {
+                    product: "secrets".into(),
+                    resources: Resources::Some(vec![roll_auth::scope::Selector::Id { id: id.clone(), index: None }]),
+                    environments: res.environment.clone().map(|e| vec![e]),
+                    paths: res.path.clone().map(|p| vec![p]),
+                    unprotected: false,
+                    actions: [(l.action, roll_auth::scope::Effect::Allow)].into_iter().collect(),
+                });
+            }
+            all.push(("secrets", l.action, named));
+            if weakest.as_ref().is_none_or(|(w, ..)| rank(outcome) < rank(*w)) {
+                weakest = Some((outcome, "secrets", l.action, id));
+                weakest_folder = res.environment.clone().zip(res.path.clone());
+            }
+            continue;
+        }
         let found = match catalog::link_target(&l.kind) {
             None => (Outcome::Deny, row.product, l.action, format!("{}/{}", l.kind, l.r#ref)),
             Some((product, rkind)) => {
@@ -1213,9 +1264,10 @@ pub(crate) async fn lend_outcome(access: &Arc<Access>, row: &'static Row, params
         all.push((found.1, found.2, found.3.clone()));
         if weakest.as_ref().is_none_or(|(w, ..)| rank(found.0) < rank(*w)) {
             weakest = Some(found);
+            weakest_folder = None;
         }
     }
-    weakest.map(|(outcome, product, action, id)| Lending { outcome, product, action, id: if short.len() > 1 { short.join(", ") } else { id }, all })
+    weakest.map(|(outcome, product, action, id)| Lending { outcome, product, action, id: if short.len() > 1 { short.join(", ") } else { id }, all, folder: weakest_folder, grants })
 }
 
 /// What handing other resources to this one decides ([`lend_outcome`]): the weakest outcome, the
@@ -1226,6 +1278,11 @@ pub(crate) struct Lending {
     pub action: Action,
     pub id: String,
     pub all: Vec<(&'static str, Action, String)>,
+    /// A lent secret's folder (environment, path), when one decides: its approval keeps to it.
+    pub folder: Option<(String, String)>,
+    /// The exact rules for each lent secret the scope doesn't allow, which the grant handed to the
+    /// product carries once the request is allowed or approved.
+    pub grants: Vec<roll_auth::scope::Rule>,
 }
 
 /// Outcomes from weakest to strongest.

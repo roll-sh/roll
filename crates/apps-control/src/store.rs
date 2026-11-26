@@ -2243,15 +2243,16 @@ impl Store {
         )?)
     }
 
-    /// The page and its incidents, together.
-    pub fn delete_status_page(&self, project: &str) -> Result<()> {
+    /// The page, its incidents and its own domain, together: the domain's hostname returned.
+    pub fn delete_status_page(&self, project: &str) -> Result<Option<String>> {
         self.db.write(|c| {
             if c.execute("DELETE FROM status_pages WHERE project = ?", [project])? == 0 {
                 return Err(Error::NotFound(format!("{project} has no status page")));
             }
             c.execute("DELETE FROM status_incidents WHERE project = ?", [project])?;
+            let host: Option<String> = c.query_row("SELECT hostname FROM status_domains WHERE project = ?", [project], |r| r.get(0)).optional()?;
             c.execute("DELETE FROM status_domains WHERE project = ?", [project])?;
-            Ok(())
+            Ok(host)
         })
     }
 
@@ -2790,29 +2791,27 @@ impl Store {
 
     /// A status page's own domain (a new one replaces it, pending, with a new token): refused
     /// when a service's domain, an environment's name or another page has it.
-    pub fn set_status_domain(&self, project: &str, host: &str, tls: TlsStatus) -> Result<()> {
+    /// Returns the hostname it replaced, if another (for its certificate's provider to let go).
+    pub fn set_status_domain(&self, project: &str, host: &str, tls: TlsStatus) -> Result<Option<String>> {
         let (now, token) = (self.now()?, random(24));
         self.db.write(|c| {
             let other: Option<String> = c.query_row("SELECT project FROM status_domains WHERE hostname = ?", [host], |r| r.get(0)).optional()?;
             if other.is_some_and(|p| p != project) || c.query_row("SELECT 1 FROM domains WHERE hostname = ?", [host], |_| Ok(())).optional()?.is_some() || c.query_row("SELECT 1 FROM preview_domains WHERE hostname = ?", [host], |_| Ok(())).optional()?.is_some() {
                 return Err(Error::Conflict(format!("{host} is already a domain of roll apps")));
             }
+            let was: Option<String> = c.query_row("SELECT hostname FROM status_domains WHERE project = ?", [project], |r| r.get(0)).optional()?;
             c.execute(
                 "INSERT INTO status_domains (project, hostname, status, token, error, tls, tls_error, created_at) VALUES (?, ?, 'pending', ?, NULL, ?, NULL, ?) \
                  ON CONFLICT (project) DO UPDATE SET hostname = excluded.hostname, status = 'pending', token = excluded.token, error = NULL, tls = excluded.tls, tls_error = NULL, created_at = excluded.created_at",
                 params![project, host, token, tls.as_str(), now],
             )?;
-            Ok(())
+            Ok(was.filter(|w| w != host))
         })
     }
 
     pub fn set_status_domain_status(&self, project: &str, status: DomainStatus, error: Option<&str>) -> Result<()> {
         self.db.execute("UPDATE status_domains SET status = ?, error = ? WHERE project = ?", params![status.as_str(), error, project])?;
         Ok(())
-    }
-
-    pub fn set_status_domain_tls(&self, host: &str, tls: TlsStatus, error: Option<&str>) -> Result<bool> {
-        Ok(self.db.execute("UPDATE status_domains SET tls = ?, tls_error = ? WHERE hostname = ?", params![tls.as_str(), error, host])? > 0)
     }
 
     pub fn delete_status_domain(&self, project: &str) -> Result<Option<String>> {
@@ -2823,15 +2822,27 @@ impl Store {
         })
     }
 
-    /// The project whose status page answers on `host`, once its domain checked out.
-    pub fn status_domain_project(&self, host: &str) -> Result<Option<String>> {
-        Ok(self.db.query_row("SELECT project FROM status_domains WHERE hostname = ? AND status = 'active'", [host], |r| r.get(0)).optional()?)
+    /// Remove the status page domains still unverified since before `cutoff` (ms): a claim nobody
+    /// proves frees the hostname for its real owner, as a custom domain's does. Returns them.
+    pub fn expire_status_domains(&self, cutoff: i64) -> Result<Vec<String>> {
+        self.db.write(|c| {
+            let hosts: Vec<String> = c.query("SELECT hostname FROM status_domains WHERE status <> 'active' AND created_at < ?", [cutoff], |r| r.get(0))?;
+            c.execute("DELETE FROM status_domains WHERE status <> 'active' AND created_at < ?", [cutoff])?;
+            Ok(hosts)
+        })
     }
 
-    /// Every status page domain to look at: (project, hostname, status).
-    pub fn status_domains(&self) -> Result<Vec<(String, String, DomainStatus)>> {
-        Ok(self.db.query("SELECT project, hostname, status FROM status_domains", (), |r| Ok((r.get(0)?, r.get(1)?, DomainStatus::parse(&r.get::<_, String>(2)?))))?)
+    /// Every active status page domain, by hostname: the project whose page answers there.
+    pub fn active_status_domains(&self) -> Result<Vec<(String, String)>> {
+        Ok(self.db.query("SELECT hostname, project FROM status_domains WHERE status = 'active'", (), |r| Ok((r.get(0)?, r.get(1)?)))?)
     }
+
+    /// The status page domains the minute's pass looks at: unverified ones, and verified ones
+    /// whose certificate is still coming (project, hostname, status).
+    pub fn status_domains_to_check(&self) -> Result<Vec<(String, String, DomainStatus)>> {
+        Ok(self.db.query("SELECT project, hostname, status FROM status_domains WHERE status <> 'active' OR tls = 'pending'", (), |r| Ok((r.get(0)?, r.get(1)?, DomainStatus::parse(&r.get::<_, String>(2)?))))?)
+    }
+
 
     /// `tls`: where a new domain's certificate starts (`pending`, or `none` where nothing issues).
     pub fn add_domain(&self, service: &str, env: &str, host: &str, tls: TlsStatus) -> Result<Domain> {

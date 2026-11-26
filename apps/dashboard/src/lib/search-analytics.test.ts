@@ -1,7 +1,7 @@
 // Tests of search analytics' dashboard logic: enabled indices, the series and the prefills (vitest).
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { analyticsQuery, enabledIndices, fillPoints, percent, rulePrefill, ruleIdFor, synonymPrefill } from "./search-analytics";
+import { comparisonText, analyticsQuery, enabledIndices, fillPoints, percent, rulePrefill, ruleIdFor, synonymPrefill } from "./search-analytics";
 import { draftToRule } from "./search-relevance";
 
 test("the indices with analytics on come from their flat settings", () => {
@@ -40,4 +40,11 @@ test("a query's actions prefill a synonym and an exact query rule", () => {
   const rule = draftToRule({ ...rulePrefill("red shoes"), ids: "doc-1" });
   assert.deepEqual(rule.criteria, [{ type: "exact", metadata: "query_string", values: ["red shoes"] }]);
   assert.equal(rule.rule_id, "query-red-shoes");
+});
+
+test("an experiment's comparison says whether it's called yet", () => {
+  assert.equal(comparisonText(undefined), "baseline");
+  assert.equal(comparisonText({ p_value: 0.0004, state: "significant" }), "p <0.001, significant");
+  assert.equal(comparisonText({ p_value: 0.153, state: "not_yet_significant" }), "p 0.153, not yet significant");
+  assert.equal(comparisonText({ p_value: 0.01, state: "not_enough_data" }), "not enough data");
 });

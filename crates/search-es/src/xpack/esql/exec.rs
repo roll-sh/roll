@@ -4804,6 +4804,8 @@ pub(super) async fn load_resources(cluster: &Cluster, text: &str, cmds: &[Cmd], 
                     continue;
                 }
                 let Some(fields_in_order) = policy_fields(&cluster.state(), &name) else { continue };
+                // Its table is read here, as the system: the caller must be allowed it first.
+                super::enrich_allowed(cluster, &name)?;
                 if !warmed {
                     crate::xpack::enrich::warm(cluster).await;
                     warmed = true;

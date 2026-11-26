@@ -13,6 +13,21 @@ versions, point-in-time recovery, personal overrides, rotation, dynamic secrets,
 connection strings, rotation and short-lived credentials issued by the product, and preview
 environments that inherit from a base environment instead of copying it.
 
+## Start here
+
+This file is roll secrets' reference and design: the concepts, every feature's rules, the HTTP API,
+its tables and its metrics. To get something done, start with a guide:
+
+- [Getting started](secrets/getting-started.md): install the CLI on Linux, macOS or Windows, log
+  in, set up a first project, run a command with its values, and find your way in the dashboard.
+- [Moving from another manager](secrets/moving-from.md): Doppler, Infisical, Vault and OpenBao, AWS
+  Secrets Manager, 1Password, and `.env` files.
+- [Platforms](secrets/platforms.md): CI (GitHub Actions, GitLab, Azure Pipelines), Kubernetes (the
+  operator, the CSI provider, External Secrets Operator), VMs (EC2, Compute Engine, Azure, bare
+  metal), Windows, AWS Lambda, and local development.
+
+The guides show the steps and link here for the rules.
+
 - Code: `crates/roll-secrets` (store, crypto, references, router), mounted by
   `crates/rolld/src/secrets.rs`, which also implements the link providers; the sync kinds are
   `crates/rolld/src/secrets/syncs.rs`.
@@ -26,197 +41,116 @@ environments that inherit from a base environment instead of copying it.
   `apps/dashboard/src/lib/secrets-*.test.ts`. `pnpm test:secrets` runs them (`--docker`: on
   Postgres, and the Postgres link).
 
-## Getting started
+## Clients
 
-Everything below works the same from the dashboard (a project's **Secrets**) and the CLI.
+A service reads its environment from code with `@roll/secrets` (`packages/secrets`) and the same
+token `roll run` uses (a roll token, or a workload identity's login). `resolve` with `sealTo`
+returns the values sealed to a key only that process holds, and `watch` follows the digest and
+renews dynamic credentials' leases, as `roll run --watch` does:
 
-1. **Install the CLI and sign it in** to your roll. `roll login` opens the browser (or shows a code
-   to enter there, over SSH), and later commands go to that roll without `ROLL_API_URL` (with
-   several logins, to the one you signed in to last; `ROLL_API_URL` always wins). roll has no hosted
-   address yet, so give yours:
+```ts
+import { createClient, generateKeyPair, loginWithIdentity } from "@roll/secrets";
 
-   ```
-   curl -fsSL https://roll.sh/install.sh | sh
-   roll login https://roll.example.com
-   ```
+const secrets = createClient({ api: process.env.ROLL_API_URL!, token: process.env.ROLL_TOKEN! });
+const { values } = await secrets.values("staging");
+const keys = generateKeyPair();
+const env = secrets.open(await secrets.resolve("staging", { consumer: "app:web", sealTo: keys.publicKey }), keys.secretKey);
+const stop = secrets.watch("staging", { onChange: (v) => reconfigure(v.values) });
 
-   On Windows, in PowerShell: `irm https://roll.sh/install.ps1 | iex` (or winget and Scoop, "On
-   Windows" below).
+// A process that reads values per request keeps them a while: within the TTL from memory,
+// then a conditional read that costs a 304 (nothing read, issued or audited) while unchanged.
+const cached = createClient({ api: process.env.ROLL_API_URL!, token: process.env.ROLL_TOKEN!, cacheTtlMs: 30_000 });
 
-   The consent screen starts from the `development` preset, where revealing a value asks you first:
-   the first `roll run` prints where to approve it and waits.
-2. **Pick a project and its environments.** A workspace project has `development`, `staging` and
-   `production` the first time you open its secrets. `production` is protected from the start: you
-   still write it directly, but developers see it only when you name it for them, and checks,
-   sandboxes and untrusted previews never get it. Add your own environments (`roll secrets envs
-   add qa`) and remember the project for this directory. A project that doesn't exist yet is offered
-   to you to create (in a script, `--create` makes it; in the dashboard, Projects → New project):
+// A reader that can't renew a lease (a playbook, a one-off script): no dynamic credential is
+// issued, those keys are left out and named in `dynamic`, and the answer can be kept.
+const { values: plain, dynamic } = await secrets.values("staging", { dynamic: false });
 
-   ```
-   roll secrets setup -p shop -e development
-   ```
+// One key's writes (`PUT`/`DELETE …/secrets/{key}`). A set replaces a link the key had; a
+// delete of a key that isn't there is `{deleted: false}`. A protected environment, or a folder
+// that needs approval, throws `SecretsError` with the code `approval_required` (open a change
+// request instead). Errors never hold the value, and both drop the client's cached reads.
+await secrets.set("staging", "FEATURE_FLAGS", "beta", { path: "/api", comment: "rollout" });
+const { deleted } = await secrets.delete("staging", "OLD_KEY", { path: "/api" });
 
-   A repo can carry this for its teammates in `roll.toml` (never a URL, a token or a value):
+// One key's reads, for a tool that writes only what differs (a playbook's check mode). `secret`
+// is the key's record without its value (`GET …/secrets/{key}`: `version`, `comment`, the
+// link's `link_kind` only, and `source`: own, base or import), null when the folder has no such
+// key. `storedValue` is the value as stored, references unresolved (`…/value?resolve=false`):
+// a reveal, audited and never cached, and no error holds it.
+const record = await secrets.secret("staging", "FEATURE_FLAGS", { path: "/api" });
+const stored = await secrets.storedValue("staging", "FEATURE_FLAGS", { path: "/api" });
 
-   ```toml
-   [secrets]
-   project = "shop"
-   environment = "development"
-   branches = { "release/*" = "staging" }
-   ```
+// A workload identity's login with the workload's own OIDC token: `tokenSource` is called for a
+// fresh one at each login (the first, then before the roll token ends and when it's refused).
+const ci = await loginWithIdentity({ api: process.env.ROLL_API_URL!, identity: "idn_…", tokenSource: () => readFile(tokenFile, "utf8") });
 
-   It's only a suggestion: a teammate runs `roll secrets setup` once, sees the table and approves it
-   (`--approve` in a script), and a changed table asks again. It never chooses a protected
-   environment, even approved: that takes `-e`, `ROLL_ENV` or your own setup. With no flags and no
-   table, `setup` in a terminal lists the projects and environments you can see.
-3. **Add values**, one by one or from a `.env` file (one change, which you can roll back):
+// An encryption key (below, "Encryption keys"): the key stays in roll.
+const cards = secrets.transit("cards");
+const ct = await cards.encrypt(cardNumber, `order:${id}`);
+const index = await cards.hmac(email); // a lookup column over encrypted emails
+```
 
-   ```
-   roll secrets set STRIPE_KEY=sk_test_… LOG_LEVEL=debug
-   roll secrets import .env
-   roll secrets set DATABASE_URL='postgres://app:${PASSWORD}@${staging.DB_HOST}/shop'   # references
-   ```
-4. **Link roll resources** instead of pasting their credentials. A linked value follows the
-   resource: a rotated password, a new key. In the dashboard, **Link a resource**: a Postgres
-   branch's URL, a Redis URL, a bucket's own access key, a stream's API key, a search API key.
-5. **Run with them.** Nothing is written to disk; `--watch` restarts on a change:
+The Go and Python clients name these `Values(…, secrets.WithoutDynamic())`, `Set`, `Delete`,
+`Secret` (a `*SecretInfo`, nil when missing), `StoredValue` and
+`secrets.LoginWithIdentity(ctx, api, identity, tokenSource)`, and `values(…, dynamic=False)`,
+`set`, `delete`, `secret` (a `SecretInfo`, None when missing), `stored_value` and
+`roll_secrets.login_with_identity(api, identity, token_source)`. All three export the OIDC
+token source their `fromEnv`/`FromEnv`/`from_env` uses (`oidcTokenFromEnv`, `OIDCTokenFromEnv`,
+`oidc_token_from_env`): `ROLL_OIDC_TOKEN`, the file `ROLL_OIDC_TOKEN_FILE` names, or GitHub
+Actions' token for `ROLL_OIDC_AUDIENCE` (the API's URL by default). In TypeScript,
+`await fromEnv()` reads `ROLL_API_URL`, `ROLL_TOKEN` or `ROLL_IDENTITY`, and `ROLL_PROJECT`.
 
-   ```
-   roll run -- npm run dev
-   roll run -e production --watch -- ./server
-   ```
-6. **Promote** what changed from one environment to the next, and **protect** production so writes
-   become change requests someone else approves:
+In Go, `sdk/go/secrets` has the same surface, and `FromEnv` logs a workload identity in with
+its own OIDC token as `roll run` does (`ROLL_IDENTITY`). It logs in again before the login's
+token ends, and when the server refuses it, reading the OIDC token afresh each time, so a
+long-running watch keeps working:
 
-   ```
-   roll secrets diff --from development --to staging
-   roll secrets promote --from staging --to production STRIPE_KEY
-   roll secrets envs protect production --approvals 1
-   ```
-7. **CI and services** get a roll token (roll-access's, docs/permissions.md) with one rule on the
-   project: some environments, some folders and only the actions they need, with an expiry. By
-   default a token reads and reveals one environment for 90 days: the one `--for-env` names, else
-   the directory's own unless it's protected (a protected one only by name). Everywhere
-   (`--all-environments`) and never expiring (`--no-expiry`, with a warning) are asked for:
+```go
+c, err := secrets.FromEnv(ctx)
+err = c.Watch(ctx, "staging", secrets.Watch{OnChange: func(v *secrets.Values) error { return reload(v.Values) }})
+```
 
-   ```
-   roll secrets tokens create ci --for-env staging
-   ROLL_TOKEN=rlt_… roll run -e staging -- make test
-   ```
+In Python, `sdk/python/roll_secrets` (`roll-secrets`, the standard library but for sealed
+resolves, which need the `seal` extra):
 
-   Or push an environment out with a **sync** (GitHub Actions secrets, a sealed webhook, a deploy
-   notification). roll's own checks (`secrets = "development"` on a `[checks.<name>]` table in `roll.toml`), previews, apps and
-   sandboxes read their environment directly.
-8. **From code**, a service reads its environment with `@roll/secrets` (`packages/secrets`) and the
-   same token. `resolve` with `sealTo` returns the values sealed to a key only that process holds,
-   and `watch` follows the digest and renews dynamic credentials' leases, as `roll run --watch` does:
+```python
+c = roll_secrets.from_env()
+c.watch("staging", lambda v: reload(v.values))
+```
 
-   ```ts
-   import { createClient, generateKeyPair, loginWithIdentity } from "@roll/secrets";
+In Java, `sdk/java/secrets` (`sh.roll:roll-secrets`, Java 17 and the JDK only):
 
-   const secrets = createClient({ api: process.env.ROLL_API_URL!, token: process.env.ROLL_TOKEN! });
-   const { values } = await secrets.values("staging");
-   const keys = generateKeyPair();
-   const env = secrets.open(await secrets.resolve("staging", { consumer: "app:web", sealTo: keys.publicKey }), keys.secretKey);
-   const stop = secrets.watch("staging", { onChange: (v) => reconfigure(v.values) });
+```java
+RollSecrets c = RollSecrets.builder().build(); // ROLL_API_URL, ROLL_TOKEN or ROLL_IDENTITY, ROLL_PROJECT
+Watch w = c.watch("staging", WatchOptions.of(v -> reload(v.values())));
+```
 
-   // A process that reads values per request keeps them a while: within the TTL from memory,
-   // then a conditional read that costs a 304 (nothing read, issued or audited) while unchanged.
-   const cached = createClient({ api: process.env.ROLL_API_URL!, token: process.env.ROLL_TOKEN!, cacheTtlMs: 30_000 });
+A Spring Boot app imports a folder into its `Environment` with `sdk/java/secrets-spring`
+(`sh.roll:roll-secrets-spring`, Spring Boot 3): `spring.config.import=roll-secrets:production/api`
+in `application.properties` (`optional:roll-secrets:…` starts without it when roll can't answer
+or refuses), the `roll.secrets.*` settings or the variables above, dynamic keys left out unless
+`roll.secrets.include-dynamic`, and with `roll.secrets.refresh=true` the watch swaps new values
+in and publishes a `RollSecretsRefreshedEvent`.
 
-   // A reader that can't renew a lease (a playbook, a one-off script): no dynamic credential is
-   // issued, those keys are left out and named in `dynamic`, and the answer can be kept.
-   const { values: plain, dynamic } = await secrets.values("staging", { dynamic: false });
+In .NET, `sdk/dotnet/secrets` (`Roll.Secrets`, .NET 8 and the base class library only, X25519
+its own), with `AddRollSecrets` for `IConfiguration` in `Roll.Secrets.Configuration`:
 
-   // One key's writes (`PUT`/`DELETE …/secrets/{key}`). A set replaces a link the key had; a
-   // delete of a key that isn't there is `{deleted: false}`. A protected environment, or a folder
-   // that needs approval, throws `SecretsError` with the code `approval_required` (open a change
-   // request instead). Errors never hold the value, and both drop the client's cached reads.
-   await secrets.set("staging", "FEATURE_FLAGS", "beta", { path: "/api", comment: "rollout" });
-   const { deleted } = await secrets.delete("staging", "OLD_KEY", { path: "/api" });
+```csharp
+using var c = new RollSecretsClient(); // ROLL_API_URL, ROLL_TOKEN or ROLL_IDENTITY, ROLL_PROJECT
+await using var w = c.Watch("staging", new WatchOptions { OnChange = v => Reload(v.Values) });
+builder.Configuration.AddRollSecrets("staging", s => s.ReloadOnChange = true);
+var ct = await c.Transit("cards").EncryptAsync(cardNumber, $"order:{id}");
+```
 
-   // One key's reads, for a tool that writes only what differs (a playbook's check mode). `secret`
-   // is the key's record without its value (`GET …/secrets/{key}`: `version`, `comment`, the
-   // link's `link_kind` only, and `source`: own, base or import), null when the folder has no such
-   // key. `storedValue` is the value as stored, references unresolved (`…/value?resolve=false`):
-   // a reveal, audited and never cached, and no error holds it.
-   const record = await secrets.secret("staging", "FEATURE_FLAGS", { path: "/api" });
-   const stored = await secrets.storedValue("staging", "FEATURE_FLAGS", { path: "/api" });
+In Ruby, `sdk/ruby/roll_secrets` (`roll_secrets`, the standard library only, sealed resolves
+included; its README loads values into a Rails app at boot):
 
-   // A workload identity's login with the workload's own OIDC token: `tokenSource` is called for a
-   // fresh one at each login (the first, then before the roll token ends and when it's refused).
-   const ci = await loginWithIdentity({ api: process.env.ROLL_API_URL!, identity: "idn_…", tokenSource: () => readFile(tokenFile, "utf8") });
+```ruby
+c = RollSecrets.from_env
+c.watch("staging") { |v| reload(v.values) }
+```
 
-   // An encryption key (below, "Encryption keys"): the key stays in roll.
-   const cards = secrets.transit("cards");
-   const ct = await cards.encrypt(cardNumber, `order:${id}`);
-   const index = await cards.hmac(email); // a lookup column over encrypted emails
-   ```
-
-   The Go and Python clients name these `Values(…, secrets.WithoutDynamic())`, `Set`, `Delete`,
-   `Secret` (a `*SecretInfo`, nil when missing), `StoredValue` and
-   `secrets.LoginWithIdentity(ctx, api, identity, tokenSource)`, and `values(…, dynamic=False)`,
-   `set`, `delete`, `secret` (a `SecretInfo`, None when missing), `stored_value` and
-   `roll_secrets.login_with_identity(api, identity, token_source)`. All three export the OIDC
-   token source their `fromEnv`/`FromEnv`/`from_env` uses (`oidcTokenFromEnv`, `OIDCTokenFromEnv`,
-   `oidc_token_from_env`): `ROLL_OIDC_TOKEN`, the file `ROLL_OIDC_TOKEN_FILE` names, or GitHub
-   Actions' token for `ROLL_OIDC_AUDIENCE` (the API's URL by default). In TypeScript,
-   `await fromEnv()` reads `ROLL_API_URL`, `ROLL_TOKEN` or `ROLL_IDENTITY`, and `ROLL_PROJECT`.
-
-   In Go, `sdk/go/secrets` has the same surface, and `FromEnv` logs a workload identity in with
-   its own OIDC token as `roll run` does (`ROLL_IDENTITY`). It logs in again before the login's
-   token ends, and when the server refuses it, reading the OIDC token afresh each time, so a
-   long-running watch keeps working:
-
-   ```go
-   c, err := secrets.FromEnv(ctx)
-   err = c.Watch(ctx, "staging", secrets.Watch{OnChange: func(v *secrets.Values) error { return reload(v.Values) }})
-   ```
-
-   In Python, `sdk/python/roll_secrets` (`roll-secrets`, the standard library but for sealed
-   resolves, which need the `seal` extra):
-
-   ```python
-   c = roll_secrets.from_env()
-   c.watch("staging", lambda v: reload(v.values))
-   ```
-
-   In Java, `sdk/java/secrets` (`sh.roll:roll-secrets`, Java 17 and the JDK only):
-
-   ```java
-   RollSecrets c = RollSecrets.builder().build(); // ROLL_API_URL, ROLL_TOKEN or ROLL_IDENTITY, ROLL_PROJECT
-   Watch w = c.watch("staging", WatchOptions.of(v -> reload(v.values())));
-   ```
-
-   A Spring Boot app imports a folder into its `Environment` with `sdk/java/secrets-spring`
-   (`sh.roll:roll-secrets-spring`, Spring Boot 3): `spring.config.import=roll-secrets:production/api`
-   in `application.properties` (`optional:roll-secrets:…` starts without it when roll can't answer
-   or refuses), the `roll.secrets.*` settings or the variables above, dynamic keys left out unless
-   `roll.secrets.include-dynamic`, and with `roll.secrets.refresh=true` the watch swaps new values
-   in and publishes a `RollSecretsRefreshedEvent`.
-
-   In .NET, `sdk/dotnet/secrets` (`Roll.Secrets`, .NET 8 and the base class library only, X25519
-   its own), with `AddRollSecrets` for `IConfiguration` in `Roll.Secrets.Configuration`:
-
-   ```csharp
-   using var c = new RollSecretsClient(); // ROLL_API_URL, ROLL_TOKEN or ROLL_IDENTITY, ROLL_PROJECT
-   await using var w = c.Watch("staging", new WatchOptions { OnChange = v => Reload(v.Values) });
-   builder.Configuration.AddRollSecrets("staging", s => s.ReloadOnChange = true);
-   var ct = await c.Transit("cards").EncryptAsync(cardNumber, $"order:{id}");
-   ```
-
-   In Ruby, `sdk/ruby/roll_secrets` (`roll_secrets`, the standard library only, sealed resolves
-   included; its README loads values into a Rails app at boot):
-
-   ```ruby
-   c = RollSecrets.from_env
-   c.watch("staging") { |v| reload(v.values) }
-   ```
-9. **When something goes wrong**: `roll secrets history`, `roll secrets rollback --at 2h`, the
-   audit log (`roll secrets audit`, or streamed to your SIEM), and `roll secrets share KEY` to hand
-   one value to someone outside roll through a link that works once.
-
-### On Windows
+## On Windows
 
 `roll` builds for Windows on x86_64 and ARM64 (`x86_64-pc-windows-msvc`,
 `aarch64-pc-windows-msvc`; `.github/workflows/release-cli.yml` publishes their zips next to the
@@ -375,18 +309,10 @@ the SDK from it. `sdk/pulumi/sdk.sh` generates the SDKs outside a project. Where
 
 `sdk/pulumi/e2e.sh` runs `pulumi up` and `pulumi destroy` against the provider's fake rolld.
 ## GitHub Actions
-`sdk/github-action` puts an environment into a job, as Doppler's and Infisical's actions do:
-```yaml
-permissions:
-  id-token: write
-steps:
-  - uses: roll-sh/roll/sdk/github-action@main
-    with:
-      api-url: https://api.roll.example
-      identity: idn_…          # a workload identity for this repo (roll secrets identities add ci --github owner/repo --for-env staging)
-      environment: staging
-  - run: make test            # DATABASE_URL and the rest are in the environment
-```
+`sdk/github-action` puts an environment into a job, as Doppler's and Infisical's actions do. It
+takes `api-url`, `identity` (a workload identity for the repository: `roll secrets identities add
+ci --github owner/repo --for-env staging`) or `token`, and `environment`, and needs `permissions:
+id-token: write`. A job using it: [GitHub Actions](secrets/platforms.md#github-actions).
 - The job logs in with its own OIDC token (audience: the API's URL), so no token sits in the
   repository's settings; `token` takes a roll token instead.
 - Every line of every value, the OIDC token and the roll token are masked (`::add-mask::`) before
@@ -429,26 +355,13 @@ A pipeline logs in with its own OIDC token, as GitHub Actions' jobs do: nothing 
 variables. Azure DevOps signs a pipeline's token as its organization
 (`iss` `https://vstoken.dev.azure.com/<organization id>`, the GUID in `$(System.CollectionId)`),
 for Azure's audience (`aud` `api://AzureADTokenExchange`; a pipeline can't ask for another), with
-the pipeline as its subject (`sub` `p://<organization>/<project>/<pipeline>`):
-
-```sh
-roll secrets identities add deploy --for-env production --audience api://AzureADTokenExchange \
-  --issuer https://vstoken.dev.azure.com/<organization id> --subject p://acme/shop/deploy
-```
-
-```yaml
-variables:
-  ROLL_API_URL: https://roll.example.com
-  ROLL_IDENTITY: idn_…
-steps:
-  - script: roll run --env production -- ./deploy.sh
-    env:
-      SYSTEM_ACCESSTOKEN: $(System.AccessToken)   # a secret: a script sees it only when mapped
-```
+the pipeline as its subject (`sub` `p://<organization>/<project>/<pipeline>`). The identity's
+command and a pipeline using it: [Azure Pipelines](secrets/platforms.md#azure-pipelines).
 
 With `ROLL_IDENTITY` set and no `ROLL_TOKEN`, roll asks Azure for the token itself
-(`POST $(System.OidcRequestUri)?api-version=7.1` with the job's access token; the answer's
-`oidcToken`) and logs in. Elsewhere, put the token in `ROLL_OIDC_TOKEN` yourself. The dashboard's
+(`POST $(System.OidcRequestUri)?api-version=7.1` with the job's access token, which a script sees
+only when its step maps `SYSTEM_ACCESSTOKEN: $(System.AccessToken)`; the answer's `oidcToken`) and
+logs in. Elsewhere, put the token in `ROLL_OIDC_TOKEN` yourself. The dashboard's
 New identity has an Azure Pipelines choice that fills in the issuer and audience.
 
 - The audience is Azure's, not roll's, so a token the pipeline got for Azure itself would also
@@ -464,7 +377,8 @@ New identity has an Azure Pipelines choice that fills in the issuer and audience
   than one pipeline or connection is refused.
 
 ## Kubernetes
-Three ways, as the best products offer:
+Three ways, as the best products offer (the steps for each, and a sidecar agent:
+[Kubernetes](secrets/platforms.md#kubernetes)):
 - **Mounted (`sdk/csi-provider`)**: a provider for the [Secrets Store CSI
   Driver](https://secrets-store-csi-driver.sigs.k8s.io), as Vault's, AWS', Azure's, GCP's and
   Infisical's: a pod's volume gets an environment's values as files when it starts, and no
@@ -526,6 +440,7 @@ dynamic credential is kept only within its lease. It logs in as a workload ident
 signs for the function's own role (`GetWebIdentityToken`, IAM's outbound identity federation: the
 account's own issuer, `sub` the role's ARN), so neither the function nor its configuration holds a
 roll token; `ROLL_TOKEN` otherwise. Not yet run against a real account (its README, "Gaps").
+Setting it up: [AWS Lambda](secrets/platforms.md#aws-lambda).
 ## A local agent
 `roll secrets agent` is the Lambda extension's surface for every other machine (EC2, ECS, a
 Kubernetes pod's sidecar, a VM, a laptop), as AWS's Secrets Manager Agent is for Secrets Manager.
@@ -581,64 +496,11 @@ to install. An app moves between it and the Lambda extension unchanged:
   1ms`), folders that changed, lease ids and roll's error messages, never a value.
 
 The token file is 0600, so the agent runs as the app's own user (or both get one `ROLL_AGENT_TOKEN`).
-A systemd unit, with the token file under `/run/roll`:
-
-```ini
-[Unit]
-Description=roll secrets agent
-After=network-online.target
-
-[Service]
-Environment=ROLL_API_URL=https://api.roll.example ROLL_IDENTITY=idn_… ROLL_OIDC_TOKEN_FILE=/run/roll/oidc-token
-ExecStart=/usr/local/bin/roll secrets -p shop -e production agent --token-file /run/roll/agent-token --prefetch production:/
-User=shop
-RuntimeDirectory=roll
-Restart=always
-
-[Install]
-WantedBy=multi-user.target
-```
-
-A Kubernetes sidecar (the identity is the pod's service account, `system:serviceaccount:shop:web`,
-made as in "Workload identities"; the token file sits in a volume only the pod's two containers
-share, and both run as one user so the app can read it). The kubelet's `httpGet` probes come from
-the node and can't reach the pod's 127.0.0.1: probe with `exec` if the image has a client.
-
-```yaml
-spec:
-  serviceAccountName: web
-  securityContext: { runAsUser: 10001, runAsGroup: 10001 }
-  volumes:
-    - name: roll-oidc
-      projected:
-        sources:
-          - serviceAccountToken: { audience: roll, expirationSeconds: 3600, path: token }
-    - name: roll-agent
-      emptyDir: { medium: Memory }
-  initContainers:
-    - name: roll-secrets-agent
-      image: ghcr.io/roll-sh/roll:latest       # any image with the roll binary
-      restartPolicy: Always                    # a native sidecar: up before the app starts
-      args: [secrets, -p, shop, -e, production, agent, --token-file, /run/roll/agent-token, --prefetch, "production:/"]
-      env:
-        - { name: ROLL_API_URL, value: https://api.roll.example }
-        - { name: ROLL_IDENTITY, value: idn_… }
-        - { name: ROLL_OIDC_TOKEN_FILE, value: /var/run/secrets/roll/token }
-      volumeMounts:
-        - { name: roll-oidc, mountPath: /var/run/secrets/roll, readOnly: true }
-        - { name: roll-agent, mountPath: /run/roll }
-  containers:
-    - name: web
-      image: shop/web
-      volumeMounts:
-        - { name: roll-agent, mountPath: /run/roll, readOnly: true }
-```
-
-The app reads as on Lambda, with the header from the file:
-
-```sh
-curl -sH "X-Roll-Token: $(cat /run/roll/agent-token)" http://127.0.0.1:2773/secrets/DATABASE_URL
-```
+As a Kubernetes sidecar, the token file sits in a volume only the pod's two containers share, and
+both run as one user so the app can read it; the kubelet's `httpGet` probes come from the node and
+can't reach the pod's 127.0.0.1, so probe with `exec` if the image has a client. A systemd unit, a
+sidecar's manifest and an app's read: [A VM or a server](secrets/platforms.md#a-vm-or-a-server) and
+[A sidecar](secrets/platforms.md#a-sidecar).
 
 **On Windows**, `roll secrets agent --install-service`, from an administrator's terminal, installs
 the agent as a service that starts with the machine and is restarted 5 s after a failure, as the
@@ -647,8 +509,10 @@ LocalSystem; `--service-name` picks another name) with the flags given, and its 
 `%ProgramData%\roll\agent`, which only the Administrators and the service may open:
 
 - `agent-token`, the request token, readable by the service and the accounts `--token-reader`
-  names (the app's: `--token-reader "IIS AppPool\shop"`), never by every user. An existing one is
-  kept and its access list set again.
+  names (the app's: `--token-reader "IIS AppPool\shop"`), never by every user. An existing one an
+  administrator made (owned by the Administrators, SYSTEM or you) is kept and its access list set
+  again; one someone else made is replaced by a new token, which the command says on stderr (never
+  the value), since whoever made it knows it.
 - `<name>.login`, the login this command was run with: `ROLL_TOKEN`, or a workload identity's
   `ROLL_IDENTITY` and what it logs in with ("On a VM" below: `ROLL_IDENTITY_KIND=azure` and
   `ROLL_OIDC_AUDIENCE` on an Azure VM, a bootstrap token on bare metal; a `ROLL_OIDC_TOKEN_FILE`
@@ -657,23 +521,35 @@ LocalSystem; `--service-name` picks another name) with the flags given, and its 
   credential is kept next to it (`<name>.machine.json`).
 - `<name>.log`, the agent's stderr (which never holds a value).
 
-```powershell
-$env:ROLL_TOKEN = "rlt_…"   # roll secrets tokens create agent --for-env production
-roll --api https://api.roll.example secrets -p shop -e production agent --install-service --prefetch production:/ --token-reader "IIS AppPool\shop"
-sc.exe query roll-secrets-agent
-roll secrets agent --uninstall-service      # stops it and deletes its login; the token file stays
-```
+By default every user may create folders in `%ProgramData%`, and owns what they make there, so a
+local user could make `roll\agent` first and plant a token. Before writing anything, the command
+opens `%ProgramData%\roll`, `%ProgramData%\roll\agent`, and the directories of a `--token-file`
+and of the login's `ROLL_MACHINE_CREDENTIAL_FILE` (each a full path), without following a link or
+junction (`trusted_dir` in `crates/roll-cli/src/sys.rs`). Any one that doesn't exist is made, owned
+by the Administrators, with an access list of the Administrators and SYSTEM only (plus the service
+on its own directories) and `OWNER RIGHTS` given nothing, so no owner keeps the right to change it.
+Any one that exists is refused if it's a link or junction, if its owner isn't the Administrators,
+SYSTEM or you, or if anyone else may add to it, remove from it, or change its owner or access
+list (services' own accounts aside): "someone else made C:\ProgramData\roll\agent (…): remove it
+as an administrator and run this again". Your own logins' directory, `%APPDATA%\roll`, is refused
+when someone else owns it.
+
+Installing and querying it: [Windows](secrets/platforms.md#windows). `roll secrets agent
+--uninstall-service` stops it and deletes its login; the token file stays.
 
 The service runs `roll.exe` from where it is, so install roll for the machine first (`install.ps1
 -System`, `winget install --scope machine`, `scoop install -g`): a `roll.exe` in your profile is
 refused, since the service's account can't read it (`crates/roll-cli/src/secrets/service.rs`; its
 command line's quoting is `a_windows_service_command_line_keeps_each_argument_whole` in `sys.rs`,
-and `release-cli.yml`'s `windows-check` builds it).
+and `release-cli.yml`'s `windows-check` builds it and runs
+`a_directory_someone_else_owns_or_may_change_isnt_trusted_for_the_machine`, the directory checks,
+on Windows; Linux CI can't).
 
 ### On a VM
 A VM logs in as itself, with no long-lived token on its disk. Each platform's way, in the agent's
 unit's `Environment=` (and `roll run`'s, and every `roll secrets` command's: they share the login,
-`crates/roll-cli/src/secrets/vm_login.rs`):
+`crates/roll-cli/src/secrets/vm_login.rs`). The commands for each: [A VM or a
+server](secrets/platforms.md#a-vm-or-a-server).
 
 - **AWS EC2.** `ROLL_IDENTITY=idn_…` of an AWS identity for the instance profile's role ("AWS IAM"
   below): the CLI signs a `GetCallerIdentity` with the instance's credentials from IMDSv2. Nothing
@@ -687,10 +563,6 @@ unit's `Environment=` (and `roll run`'s, and every `roll secrets` command's: the
   service-accounts describe web@acme.iam.gserviceaccount.com --format='value(uniqueId)'`). Narrow
   further with `--claim email=web@acme.iam.gserviceaccount.com`, or a `/google/compute_engine/…`
   claim (`format=full` adds the project, zone and instance).
-
-  ```sh
-  roll secrets identities add web --issuer https://accounts.google.com --subject 104…1 --for-env production
-  ```
 - **Azure VM.** `ROLL_IDENTITY=idn_…` and `ROLL_IDENTITY_KIND=azure`. Each login asks the instance
   metadata service for the VM's managed identity token
   (`http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=…`, with
@@ -701,11 +573,6 @@ unit's `Environment=` (and `roll run`'s, and every `roll secrets` command's: the
   `https://login.microsoftonline.com/<tenant id>/v2.0` when the application asks for v2 tokens), and
   every identity in the tenant shares it, so the subject is the managed identity's object id,
   exactly.
-
-  ```sh
-  roll secrets identities add web --issuer https://sts.windows.net/<tenant id>/ \
-    --subject <object id> --audience api://roll-secrets --for-env production
-  ```
 - **Bare metal and on premises: a bootstrap token.** No platform vouches for the machine, so an
   admin does, once per machine, and the machine then keeps its own short-lived credential, as
   Akeyless' Universal Identity does:
@@ -752,18 +619,8 @@ unit's `Environment=` (and `roll run`'s, and every `roll secrets` command's: the
   machines' credentials don't count toward the workload token caps that every project's logins
   share (docs/permissions.md); their logins' tokens do, as any identity's. The bootstrap tokens and credentials are roll-access grants (docs/permissions.md,
   "Bootstrap tokens and machine credentials"), looked up on every use, and open nothing but these
-  logins.
-
-  ```ini
-  [Service]
-  Environment=ROLL_API_URL=https://api.roll.example ROLL_IDENTITY=idn_…
-  # Only for the first start; a new token re-enrolls the machine.
-  EnvironmentFile=-/etc/roll/bootstrap.env
-  ExecStart=/usr/local/bin/roll secrets -p shop -e production agent --token-file /run/roll/agent-token
-  User=shop
-  StateDirectory=roll
-  RuntimeDirectory=roll
-  ```
+  logins. A unit that enrolls on its first start: [Bare metal and on
+  premises](secrets/platforms.md#bare-metal-and-on-premises).
 
 The Go and Python clients log in with OIDC tokens and AWS only, not yet with `gcp`, `azure` or a
 machine credential.
@@ -3531,6 +3388,11 @@ roll ssh [-p project] [-e production] [--cert SSH_CERT] [--identity SSH_KEY] -- 
 roll completions bash|zsh|fish|powershell
 ```
 
+- **Signing in.** `roll login <url>` opens the browser (or, over SSH, shows a code to enter in a
+  browser elsewhere), and later commands go to that roll without `ROLL_API_URL`: with several
+  logins, to the one signed in to last; `ROLL_API_URL` always wins. Its consent screen starts from
+  the `development` preset, where revealing a value asks first: the first `roll run` prints where to
+  approve it and waits. Installing: [Getting started](secrets/getting-started.md).
 - The project is `-p`/`ROLL_PROJECT` (a name or id), the environment `-e`/`ROLL_ENV`, the path
   `--path`/`ROLL_SECRETS_PATH`. Without them, `roll secrets setup -p shop -e staging [--path /api]`
   remembers them for the current directory and the ones under it, in the user's own
@@ -4685,8 +4547,9 @@ audited (`secrets.compare`).
 ### Moving from another manager
 
 `roll secrets import` takes a `.env` file or JSON: an object of `KEY: value` (numbers and booleans
-as their text) or an array of `{key, value, comment?}`. Export from the old manager, then import
-into each environment:
+as their text) or an array of `{key, value, comment?}`, so a manager's own export imports as it is.
+The steps for each manager, with its export command: [Moving from another
+manager](secrets/moving-from.md).
 
 Or straight from its API, with your own token in its usual variable, read on your machine (never
 through roll's server) and imported as one change:
@@ -4810,12 +4673,6 @@ Doppler and Infisical come in with their structure, not only their values:
   current value and why, each folder import, and what's left out. Names only, never a value. It
   writes nothing and creates no environment.
 
-```
-infisical export --env=prod --format=json > prod.json   &&  roll secrets import prod.json -e production
-doppler secrets download --no-file --format json > prod.json  &&  roll secrets import prod.json -e production
-vercel env pull .env.production --environment=production  &&  roll secrets import .env.production -e production
-```
-
 ### VS Code
 
 `apps/vscode` is roll secrets for VS Code (as Doppler's, Infisical's and 1Password's extensions):
@@ -4871,7 +4728,18 @@ whose row names the registrations it carried) is the call. Registrations' keys a
 (CAs', SSH CAs' and GitHub Apps' private keys, SaaS and DNS credentials, ACME accounts, rotators'
 and outside databases' URLs) leave only in a person's backup (signed in) or the operator's, never
 a token's: no route answers them to a token either. A token's backup holds the registrations by
-name only, in `left_out`, and its answer's `warnings` names them. Linked keys carry their
+name only, in `left_out`, and its answer's `warnings` names them. It leaves out two more things
+the same way, naming them in `warnings`:
+
+- **Syncs' credentials.** Each sync comes with its configuration but without its signing secret,
+  and with its target's URLs by host only (a deploy hook's URL is often a credential itself, and
+  no route shows it either). A restore brings it back paused with the reason `restored without
+  its credential: set it again`, and resuming it is refused (409): make the sync again.
+- **Encryption keys' bytes.** Each key is in the archive by name only, and named in `left_out`. A
+  restore doesn't make it, and **data encrypted under it can't be decrypted after a restore from
+  such a backup**: back the project up signed in, or as the operator, to keep it.
+
+Linked keys carry their
 link and no value: a restore issues its own credentials, from the restored registrations.
 Personal values, history, leases and tokens aren't in it, and neither are registrations whose
 trust names the project they were made in or that hold a token of the server's own: AWS roles and
@@ -4932,7 +4800,8 @@ secret key is, open the archive there, and write nothing:
   registrations a backup doesn't carry; and what a restore would leave out, and why (`refused`:
   a registration or an identity that fails its checks). A sensitive key's value isn't in a backup,
   so it's never compared. A token's verify answers counts only (`names: false`, each part's
-  `counts`), compares registrations without their keys, and gets 10 a minute (as `/scan` limits a
+  `counts`), compares registrations, encryption keys and syncs by name and count only (never
+  by a key, a key's bytes or a sync's credential), and gets 10 a minute (as `/scan` limits a
   scanner): names of what differs, and anything about a key it can't take out, are a person's or
   the operator's.
 - `roll secrets restore shop.backup --key … --dry-run` asks the same of the project it would load
@@ -4949,8 +4818,8 @@ that opens them: the recipient's secret key restores one as above. One node runs
 is claimed by moving its next time on). Setting one up asks what a backup asks (admin and reveal
 over the whole project) and records its maker (the person behind a session or their own token); it
 runs only while they may still manage and reveal the whole project, as they are then, and only into
-a bucket the project still has. A token's schedule carries registrations by name only
-(`registrations: false`). An incident's cut-off pauses it (`paused_at`, `paused_why`); setting it
+a bucket the project still has. A token's schedule carries what a token's backup does: registrations and encryption
+keys by name only, syncs without their credentials (`registrations: false`). An incident's cut-off pauses it (`paused_at`, `paused_why`); setting it
 up again lifts that. `GET …/backup/schedule` says when the
 last one landed, its key, and why the last attempt failed; `DELETE` stops it (what's in the bucket
 stays). Drill one now and then: `roll secrets backup verify --latest-from-bucket --key …`.
@@ -6398,28 +6267,9 @@ minutes.
   volumeMounts: [{ name: roll-token, mountPath: /var/run/secrets/roll }]
   # volumes: [{ name: roll-token, projected: { sources: [{ serviceAccountToken: { audience: roll, path: token, expirationSeconds: 3600 } }] } }]
   ```
-- **A CI job, end to end.** No stored secret: the job logs in with its own OIDC token as an
-  identity limited to staging, then checks before it tests. Each step only sees staging, since
-  check, scan and health answer what the caller may read:
-
-  ```sh
-  roll secrets identities add ci --github acme/web --claim ref=refs/heads/* --for-env staging
-  ```
-
-  ```yaml
-  jobs:
-    test:
-      runs-on: ubuntu-latest
-      permissions: { id-token: write, contents: read }
-      env: { ROLL_API_URL: https://roll.example.com, ROLL_IDENTITY: idn_…, ROLL_ENV: staging }
-      steps:
-        - uses: actions/checkout@v4
-        # roll on the runner's PATH; then:
-        - run: roll secrets check .env.example   # every key the code reads is set in staging
-        - run: roll secrets scan .               # no stored value was committed
-        - run: roll secrets health               # nothing expired, missing, exposed or in the browser
-        - run: roll run -- npm test              # the tests get staging's values, never on disk
-  ```
+- **A CI job, end to end** (no stored secret: the job logs in as an identity limited to staging,
+  then checks the environment and the repository before it tests): [GitHub
+  Actions](secrets/platforms.md#github-actions).
 
 ### AWS IAM
 
@@ -7005,7 +6855,7 @@ isn't in the workspace is 404.
 | `GET /environments/{env}/imports?path=` | | `Import[]` |
 | `PUT /environments/{env}/imports?path=` | `Import[]` | `Import[]` |
 | `GET /environments/{env}/exports?path=` | | `Export[]` |
-| `POST /backup` | `{recipient}` | `{sealed, context, warnings}`: the whole project, sealed to `recipient` (admin and reveal over the whole project: `admin` alone is a 403; archive version 2; a token's carries registrations by name only, `warnings` naming them) |
+| `POST /backup` | `{recipient}` | `{sealed, context, warnings}`: the whole project, sealed to `recipient` (admin and reveal over the whole project: `admin` alone is a 403; archive version 2; a token's carries registrations and encryption keys by name only and syncs without their credentials, `warnings` naming them) |
 | `POST /backup/verify` | `Archive` (an opened backup) | `{project, at, v, environments, keys, registrations, identities, syncs, refused, names, settings, left_out, live_keys}` (admin and reveal over the whole project; nothing written; 10 a minute for anyone but the operator, then 429): each part `{archive, live, missing, extra, changed, counts}`, by name; a token's has `names: false`, counts only and no `refused` |
 | `GET /backup/latest` | | `{sealed, context, key}`: the schedule's newest backup, still sealed (admin; 404 with no schedule or none landed yet) |
 | `GET /backup/schedule` | | `BackupSchedule` or null (admin): bucket, recipient, `every_hours`, `keep`, `next_at`, `last_at`, `last_key`, `last_error`, `created_by`, `registrations`, `paused_at`, `paused_why` |

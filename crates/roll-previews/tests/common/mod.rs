@@ -158,6 +158,8 @@ pub struct FakeData {
     pub columns: Mutex<std::collections::HashMap<String, Result<Vec<roll_previews::mask::Column>, roll_previews::ports::Asleep>>>,
     /// Branches put back to a restore point: (the branch, the point's copy).
     pub restored: Mutex<Vec<(String, String)>>,
+    /// A reset makes a new branch with a new id (Redis's), the nth `<parent>~<name>~r<n>`.
+    pub renames_on_reset: AtomicUsize,
 }
 
 impl FakeData {
@@ -177,6 +179,7 @@ impl FakeData {
             columns: Mutex::new(Default::default()),
             branch_now: Mutex::new(None),
             restored: Mutex::new(Vec::new()),
+            renames_on_reset: AtomicUsize::new(0),
         })
     }
 }
@@ -219,7 +222,10 @@ impl Brancher for FakeData {
         Ok(Some(Branched::plain(id)))
     }
     fn restores(&self) -> bool {
-        self.kind == Kind::Postgres
+        matches!(self.kind, Kind::Postgres | Kind::Redis)
+    }
+    fn points_need_their_branch(&self) -> bool {
+        self.kind == Kind::Redis
     }
     async fn restore(&self, _parent: &str, branch: &str, _kept: Option<&str>, point: &str, _name: &str, _mode: Mode) -> anyhow::Result<Option<Branched>> {
         anyhow::ensure!(self.branches.lock().contains(point), "no restore point {point}");
@@ -266,10 +272,16 @@ impl Brancher for FakeData {
     }
     async fn reset(&self, parent: &str, branch: &str, _kept: Option<&str>, name: &str, mode: Mode) -> anyhow::Result<Branched> {
         self.delete(parent, branch, name).await?;
+        if self.renames_on_reset.load(Ordering::SeqCst) > 0 {
+            let id = format!("{parent}~{name}~r{}", self.renames_on_reset.fetch_add(1, Ordering::SeqCst));
+            self.branches.lock().insert(id.clone());
+            return Ok(Branched::plain(id));
+        }
         self.branch(parent, name, mode).await
     }
     async fn delete(&self, parent: &str, branch: &str, name: &str) -> anyhow::Result<()> {
-        anyhow::ensure!(branch == format!("{parent}~{name}"), "refusing to delete {branch}: not {parent}'s branch {name}");
+        let own = format!("{parent}~{name}");
+        anyhow::ensure!(branch == own || branch.strip_prefix(&own).is_some_and(|r| r.starts_with("~r")), "refusing to delete {branch}: not {parent}'s branch {name}");
         self.branches.lock().remove(branch);
         Ok(())
     }
