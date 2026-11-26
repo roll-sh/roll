@@ -415,3 +415,43 @@ fn windows_stream() {
     drop(s);
     eng.shutdown();
 }
+
+/// A nested loop's inner side past work_mem (PostgreSQL's Materialize: a tuplestore): its
+/// rows go to a temporary file read again for each outer row; the join's rows are those it
+/// gives in memory.
+#[test]
+fn nested_loop_inner_spills() {
+    std::thread::Builder::new().stack_size(64 << 20).spawn(nested_loop_inner).unwrap().join().unwrap();
+}
+
+fn nested_loop_inner() {
+    let dir = tempfile::tempdir().unwrap();
+    let eng = open(dir.path());
+    let mut s = eng.connect(1, "postgres", "postgres", "postgres").unwrap();
+    for sql in [
+        "CREATE TABLE nsmall (a int)",
+        "INSERT INTO nsmall SELECT g FROM generate_series(1, 60) g",
+        "CREATE TABLE nbig (a int, t text)",
+        "INSERT INTO nbig SELECT g, md5(g::text) FROM generate_series(1, 20000) g",
+        "ANALYZE nsmall",
+        "ANALYZE nbig",
+        "SET work_mem = '256MB'",
+    ] {
+        q(&mut s, sql).unwrap();
+    }
+    let sql = "SELECT count(*), md5(string_agg(x::text, ',' ORDER BY x::text)) FROM \
+               (SELECT nsmall.a, nbig.a b, nbig.t FROM nsmall LEFT JOIN nbig ON nbig.a > nsmall.a * 330 AND nbig.a < nsmall.a * 333) x";
+    let plan = q(&mut s, &format!("EXPLAIN {sql}")).unwrap();
+    assert!(format!("{plan:?}").contains("Materialize"), "{plan:?}");
+    let want = q(&mut s, sql).unwrap();
+    q(&mut s, "SET work_mem = '64kB'").unwrap();
+    q(&mut s, "SELECT pg_stat_force_next_flush()").unwrap();
+    let f0 = int(&mut s, "SELECT temp_files FROM pg_stat_database WHERE datname = current_database()");
+    assert_eq!(q(&mut s, sql).unwrap(), want);
+    assert_eq!(temp_files(dir.path()), 0);
+    q(&mut s, "SELECT pg_stat_force_next_flush()").unwrap();
+    let f1 = int(&mut s, "SELECT temp_files FROM pg_stat_database WHERE datname = current_database()");
+    assert_eq!(f1 - f0, 2, "the Materialize's file and the Sort's above");
+    drop(s);
+    eng.shutdown();
+}

@@ -4852,7 +4852,8 @@ struct NestLoopNode {
     /// The outer row, its inner rows (with the next one's place) and whether one matched.
     cur: Option<(Row, InnerRows, bool)>,
     /// A parameterized inner side kept open across outer rows and rescanned for each
-    /// (`streams`), once opened.
+    /// (`streams`), once opened; an unparameterized one's Material node past work_mem
+    /// (`held_right`).
     inner: Option<BoxNode>,
     unmatched_right: Option<usize>,
     memo: Option<Memoize>,
@@ -4885,6 +4886,55 @@ struct NestLoopNode {
 enum InnerRows {
     Rows(Rc<Vec<Row>>, usize),
     Stream(Rc<Row>),
+}
+
+/// An unparameterized inner side's rows: in memory, or in a Material node past work_mem.
+enum Held {
+    Mem(Vec<Row>),
+    Material(BoxNode),
+}
+
+/// A nested loop's unparameterized inner side past work_mem, as PostgreSQL's Materialize
+/// over it holds it: a tuplestore (on disk when its count of the tuples passes work_mem),
+/// read from its first row again on each rescan (ExecReScanMaterial).
+struct MaterialNode {
+    store: super::tuplestore::Tuplestore,
+    slot: usize,
+}
+
+impl MaterialNode {
+    /// The side's rows read so far (`rows`, then `r`) and the rest of `node`'s, stored.
+    fn fill(rows: Vec<Row>, r: Row, mut node: BoxNode, types: Vec<crate::types::DataType>, cols: Option<Vec<bool>>, ctx: &ExecCtx) -> Result<Held> {
+        let mut store = super::tuplestore::Tuplestore::new(types, false, ctx).with_cols(cols);
+        for r in rows {
+            store.put(r, None, ctx)?;
+        }
+        store.put(r, None, ctx)?;
+        while let Some(r) = node.next(ctx)? {
+            store.put(r, None, ctx)?;
+        }
+        if let Some(rows) = store.take_rows() {
+            return Ok(Held::Mem(rows));
+        }
+        let slot = store.reader();
+        Ok(Held::Material(Box::new(MaterialNode { store, slot })))
+    }
+}
+
+impl Node for MaterialNode {
+    fn next(&mut self, ctx: &ExecCtx) -> Result<Option<Row>> {
+        self.store.read(self.slot, ctx)
+    }
+
+    fn rescan(&mut self, _ctx: &ExecCtx) -> Result<bool> {
+        self.store.close_reader(self.slot);
+        self.slot = self.store.reader();
+        Ok(true)
+    }
+
+    fn can_rescan(&self) -> bool {
+        true
+    }
 }
 
 /// Snapshot only work owned by this inner input. Lazy InitPlans and enclosing CTE
@@ -5148,7 +5198,7 @@ impl NestLoopNode {
         Ok(rows)
     }
 
-    fn right_rows(&mut self, left: &[Value], ctx: &ExecCtx) -> Result<Rc<Vec<Row>>> {
+    fn right_rows(&mut self, left: &[Value], ctx: &ExecCtx) -> Result<InnerRows> {
         if self.fixed {
             if self.right.is_none() {
                 let p = eval_all(&self.params, &[], ctx)?;
@@ -5156,7 +5206,7 @@ impl NestLoopNode {
                 self.right_matched = vec![false; rows.len()];
                 self.right = Some(Rc::new(rows));
             }
-            return Ok(self.right.clone().unwrap());
+            return Ok(InnerRows::Rows(self.right.clone().unwrap(), 0));
         }
         if !self.params.is_empty() {
             let memo_key = match &self.memo {
@@ -5191,7 +5241,7 @@ impl NestLoopNode {
                     st.rows += n;
                     st.cache_hits += 1;
                 });
-                return Ok(rows.clone());
+                return Ok(InnerRows::Rows(rows.clone(), 0));
             }
             let p = eval_all(&self.params, left, ctx)?;
             let rows = ctx.with_outer(Rc::new(p), || self.collect_right(ctx))?;
@@ -5226,22 +5276,82 @@ impl NestLoopNode {
                 m.lru.insert(m.stamp, k.clone());
                 m.cache.insert(k, (rows.clone(), m.stamp, bytes));
             }
-            return Ok(rows);
+            return Ok(InnerRows::Rows(rows, 0));
         }
         if self.right.is_none() {
-            let instr = ctx.instr.borrow().clone().filter(|_| self.report_rescans);
-            let before = instr.as_ref().map(|i| rescan_snapshot(&self.right_plan, i, !ctx.outer.borrow().is_empty()));
-            let rows = self.collect_right(ctx)?;
-            if let (Some(instr), Some(before)) = (instr, before) {
-                self.right_stats = instr.rescan_delta(&before);
+            if let Some(material) = self.held_right(ctx)? {
+                return Ok(material);
             }
-            self.material_stats(&rows, ctx);
-            self.right_matched = vec![false; rows.len()];
-            self.right = Some(Rc::new(rows));
         } else if let Some(instr) = ctx.instr.borrow().as_ref() {
             instr.repeat_rescan(&self.right_stats);
         }
-        Ok(self.right.clone().unwrap())
+        Ok(InnerRows::Rows(self.right.clone().unwrap(), 0))
+    }
+
+    /// An unparameterized inner side's rows: collected for the first outer row (`right`),
+    /// or, past work_mem, held in a Material node (`inner`, `collect_held`) that each outer
+    /// row reads from its start, as the join reads a parameterized side (`InnerRows::Stream`).
+    #[inline(never)]
+    fn held_right(&mut self, ctx: &ExecCtx) -> Result<Option<InnerRows>> {
+        if let Some(n) = self.inner.as_mut() {
+            n.rescan(ctx)?;
+            return Ok(Some(InnerRows::Stream(Rc::default())));
+        }
+        let instr = ctx.instr.borrow().clone().filter(|_| self.report_rescans);
+        let before = instr.as_ref().map(|i| rescan_snapshot(&self.right_plan, i, !ctx.outer.borrow().is_empty()));
+        let rows = match self.collect_held(ctx)? {
+            Held::Mem(rows) => rows,
+            Held::Material(n) => {
+                self.inner = Some(n);
+                return Ok(Some(InnerRows::Stream(Rc::default())));
+            }
+        };
+        if let (Some(instr), Some(before)) = (instr, before) {
+            self.right_stats = instr.rescan_delta(&before);
+        }
+        self.material_stats(&rows, ctx);
+        self.right_matched = vec![false; rows.len()];
+        self.right = Some(Rc::new(rows));
+        Ok(None)
+    }
+
+    /// `collect_right` for an unparameterized side, its rows sized as PostgreSQL's
+    /// Materialize counts its tuplestore's tuples (the columns the join reads): past work_mem
+    /// they go to a tuplestore that writes its file where PostgreSQL's does, read by a
+    /// `MaterialNode`. A RIGHT / FULL join (its unmatched inner rows are kept by number), a
+    /// side kept for rescans and EXPLAIN ANALYZE (`material_stats` counts the store) keep
+    /// them in memory.
+    fn collect_held(&mut self, ctx: &ExecCtx) -> Result<Held> {
+        if matches!(self.kind, JoinKind::Right | JoinKind::Full) || self.rescans > 0 || ctx.instrumented() {
+            return self.collect_right(ctx).map(Held::Mem);
+        }
+        self.right_node = None;
+        let need: Option<Vec<bool>> =
+            self.keep.as_ref().map(|k| (self.nleft..self.nleft + self.nright).map(|i| k.get(i).copied().unwrap_or(false)).collect());
+        let plan = self.right_plan.clone();
+        ctx.temp_cleanup.run(|| {
+            ctx.statement(|| {
+                let mut node = open_need(&plan, need.clone(), ctx)?;
+                let types = crate::sql::paths::analyzejoins::col_types(&plan);
+                let allowed = super::workmem::work_mem(ctx);
+                // (One row's tuple in every `SAMPLE`, times `SAMPLE`; near work_mem the store
+                // counts each.)
+                const SAMPLE: usize = 256;
+                let mut est = 0i64;
+                let mut rows = Vec::new();
+                while let Some(r) = node.next(ctx)? {
+                    if (rows.len() + 1).is_multiple_of(SAMPLE) {
+                        let t = super::workmem::minimal_tuple_len_cols(&r, &types, need.as_deref(), ctx);
+                        est += SAMPLE as i64 * (super::workmem::maxalign(t) + 16);
+                        if est > allowed {
+                            return MaterialNode::fill(rows, r, node, types, need, ctx);
+                        }
+                    }
+                    rows.push(r);
+                }
+                Ok(Held::Mem(rows))
+            })
+        })
     }
 
     /// EXPLAIN ANALYZE: what a Materialize over the inner side would have held, its
@@ -5322,7 +5432,7 @@ impl NestLoopNode {
                     }
                     Some(l) => {
                         let rows = self.right_rows(&l, ctx)?;
-                        self.cur = Some((l, InnerRows::Rows(rows, 0), false));
+                        self.cur = Some((l, rows, false));
                     }
                     None => {
                         self.flush(ctx);
@@ -5442,6 +5552,7 @@ impl Node for NestLoopNode {
         self.cur = None;
         if self.params.is_empty() {
             self.right = None;
+            self.inner = None;
         }
         self.right_matched.clear();
         self.rescans += 1;

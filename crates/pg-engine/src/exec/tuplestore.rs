@@ -4,7 +4,7 @@
 //! What EXPLAIN ANALYZE's "Storage" line shows of it is `stats`.
 
 use super::spill::{RowReader, TempAcct, TempCleanup, TempFile, put_row};
-use super::workmem::{BLCKSZ, MINIMAL_TUPLE_DATA_OFFSET, StoreMem, minimal_tuple_len, work_mem};
+use super::workmem::{BLCKSZ, MINIMAL_TUPLE_DATA_OFFSET, StoreMem, minimal_tuple_len, minimal_tuple_len_cols, work_mem};
 use super::{ExecCtx, Row};
 use crate::error::Result;
 use crate::types::DataType;
@@ -29,6 +29,8 @@ fn tape_len(tlen: i64, backward: bool) -> u64 {
 pub struct Tuplestore {
     mem: StoreMem,
     types: Vec<DataType>,
+    /// The columns its tuples have (None: all; `with_cols`).
+    cols: Option<Vec<bool>>,
     /// Trailing length words on tape (randomAccess / EXEC_FLAG_BACKWARD).
     backward: bool,
     /// The rows, while in memory.
@@ -51,6 +53,7 @@ impl Tuplestore {
         Tuplestore {
             mem: StoreMem::new(work_mem(ctx), backward),
             types,
+            cols: None,
             backward,
             rows: Vec::new(),
             file: None,
@@ -61,6 +64,30 @@ impl Tuplestore {
             places: Vec::new(),
             buf: Vec::new(),
         }
+    }
+
+    /// Its tuples have only the columns `cols` marks (a node's target list: the others are
+    /// NULL in its rows), as PostgreSQL's would be sized.
+    pub fn with_cols(mut self, cols: Option<Vec<bool>>) -> Tuplestore {
+        self.cols = cols;
+        self
+    }
+
+    /// The t_len of `row`'s tuple.
+    fn tlen(&self, row: &[crate::types::Value], ctx: &ExecCtx) -> i64 {
+        match &self.cols {
+            None => minimal_tuple_len(row, &self.types, ctx),
+            Some(c) => minimal_tuple_len_cols(row, &self.types, Some(c), ctx),
+        }
+    }
+
+    /// The rows, when they stayed in memory (the store is then empty).
+    pub fn take_rows(&mut self) -> Option<Vec<Row>> {
+        if self.file.is_some() {
+            return None;
+        }
+        self.len = 0;
+        Some(std::mem::take(&mut self.rows))
     }
 
     /// A reader from the first row (tuplestore_alloc_read_pointer): its slot.
@@ -86,7 +113,7 @@ impl Tuplestore {
     /// Store `row` (tuplestore_puttuple); the reader `at`, if any, read it as it came (it is
     /// past it).
     pub fn put(&mut self, row: Row, at: Option<usize>, ctx: &ExecCtx) -> Result<()> {
-        let tlen = minimal_tuple_len(&row, &self.types, ctx);
+        let tlen = self.tlen(&row, ctx);
         let to_disk = self.mem.put(tlen);
         if self.file.is_none() && !to_disk {
             self.rows.push(row);
@@ -133,7 +160,7 @@ impl Tuplestore {
             for p in self.places.iter_mut().flatten().filter(|p| p.row == i) {
                 (p.off, p.pg_off) = (pos, self.pg_bytes);
             }
-            let tlen = minimal_tuple_len(r, &self.types, ctx);
+            let tlen = self.tlen(r, ctx);
             self.mem.dumped(tlen);
             self.write(r, tape_len(tlen, self.backward))?;
         }
@@ -161,7 +188,11 @@ impl Tuplestore {
                 p.row += 1;
                 p.off = rd.offset();
                 let blocks = p.pg_off / BLCKSZ as u64;
-                p.pg_off += tape_len(minimal_tuple_len(&r, &self.types, ctx), self.backward);
+                let tlen = match &self.cols {
+                    None => minimal_tuple_len(&r, &self.types, ctx),
+                    Some(c) => minimal_tuple_len_cols(&r, &self.types, Some(c), ctx),
+                };
+                p.pg_off += tape_len(tlen, self.backward);
                 if let Some(a) = &self.acct {
                     a.pg_read((p.pg_off / BLCKSZ as u64 - blocks) * BLCKSZ as u64);
                 }
