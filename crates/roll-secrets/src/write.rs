@@ -83,6 +83,9 @@ pub struct Batch {
     pub confirm: Option<String>,
 }
 
+/// Each op's `if_version`, by its item's index ([`expectations`]).
+type Expect = Vec<(usize, i64)>;
+
 /// A key's slot as [`Secrets::check_batch`] found it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SlotNow {
@@ -1157,7 +1160,7 @@ impl Secrets {
     /// What [`Self::batch`] and [`Self::check_batch`] both check before the write's transaction,
     /// in one place so they can't drift: a check added here refuses a dry run too. The items and
     /// their `if_version`s.
-    fn batch_checks(&self, project: &str, env: &str, b: &Batch, caller: &Caller) -> Result<(Vec<Item>, Vec<(usize, i64)>)> {
+    fn batch_checks(&self, project: &str, env: &str, b: &Batch, caller: &Caller) -> Result<(Vec<Item>, Expect)> {
         let path = names::path(b.path.as_deref().unwrap_or("/"))?;
         caller.need(Action::Write, &Scope::at(project, env, &path))?;
         names::message(b.message.as_deref().unwrap_or_default())?;
