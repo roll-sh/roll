@@ -494,6 +494,7 @@ fn some(names: &BTreeSet<String>) -> String {
     }
 }
 
+impl Secrets {
     /// How far `project` is from roll secrets' policy, as `caller` may read it (`off_policy`
     /// findings): each project's Health and the operator's report across projects
     /// ([`Secrets::policy_report`]) both come from here. `envs`: the project's standard ones.
@@ -541,7 +542,6 @@ fn some(names: &BTreeSet<String>) -> String {
         Ok(out)
     }
 
-impl Secrets {
     /// What reaches an unprotected `production`, as a finding's detail: members by role (owners and
     /// admins everywhere, developers who name it), and the checks and sandboxes that read it in the
     /// last 90 days (its audit log: what can be told without reading any repository).
