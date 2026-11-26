@@ -5031,12 +5031,6 @@ async fn opensearch_flavor_clusters_link_with_the_remotes_own_mappings() {
     let (s, v) = es_as(&e, &near, Method::POST, "/r:docs/_search/point_in_time?keep_alive=1m", None).await;
     assert_eq!((s, v["error"]["reason"].as_str()), (400, Some("invalid id: [null]")), "{v}");
 
-    // The link's user signs in only on roll's own link requests, whatever its password.
-    let bound = json!({"password": "Zq7-Mountain-River-90", "opendistro_security_roles": [user], "attributes": {"roll_remote_link": link["cluster_id"]}});
-    let (s, v) = es_as(&e, &far, Method::PUT, &format!("{api}/internalusers/{user}"), Some(bound)).await;
-    assert!(s < 300, "{v}");
-    assert_eq!(e.es(&format!("{user}@os-far"), "Zq7-Mountain-River-90", Method::GET, "/docs/_search", None).await.0, 401);
-
     // A loopback reads this cluster's own indices: authorized as them, in every API that plans
     // remotes. A user with no index permission is refused; the owner reads.
     let transport = |c: &'static str| {
@@ -5087,6 +5081,12 @@ async fn opensearch_flavor_clusters_link_with_the_remotes_own_mappings() {
         let (s, v) = e.call(Method::PUT, "/v1/search/clusters/os-near/remotes/bad", Some(json!({"cluster": "os-far", "access": {"search": [{"names": names}]}}))).await;
         assert_eq!(s, 400, "{v}");
     }
+
+    // The link's user signs in only on roll's own link requests, whatever its password.
+    let bound = json!({"password": "Zq7-Mountain-River-90", "opendistro_security_roles": [user], "attributes": {"roll_remote_link": link["cluster_id"]}});
+    let (s, v) = es_as(&e, &far, Method::PUT, &format!("{api}/internalusers/{user}"), Some(bound)).await;
+    assert!(s < 300, "{v}");
+    assert_eq!(e.es(&format!("{user}@os-far"), "Zq7-Mountain-River-90", Method::GET, "/docs/_search", None).await.0, 401);
 
     // Unlinked: the user is gone on the remote.
     assert_eq!(e.call(Method::DELETE, "/v1/search/clusters/os-near/remotes/r", None).await.0, 204);
