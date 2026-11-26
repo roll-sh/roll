@@ -848,11 +848,13 @@ fn retrieval(ctx: &Ctx, profile: &Profile, ask: &Ask) -> EsResult<(String, Value
         let opts = if sem.contains(f) { obj! { "number_of_fragments" => 2 } } else { obj! { "fragment_size" => 600, "number_of_fragments" => 2, "no_match_size" => 600 } };
         hl.insert(f.clone(), opts);
     }
-    let includes: Vec<String> = profile.fields.iter().chain(passages.iter()).cloned().collect();
+    // Passages come from highlights alone (`no_match_size` gives a text field's start, and the
+    // semantic highlighter a field's first chunks): fetching the whole fields would read far
+    // more than `max_source_bytes`.
+    let includes: Vec<String> = profile.fields.clone();
     let b = body.as_object_mut().ok_or_else(|| EsError::illegal_argument("the search application's template didn't render an object"))?;
     b.insert("size".into(), (profile.max_sources as i64).into());
     b.shift_remove("from");
-    // A hit without a highlight gives the model the start of its passage fields instead.
     b.insert("_source".into(), obj! { "includes" => strs(&includes) });
     if hl.is_empty() {
         b.shift_remove("highlight");
@@ -895,13 +897,15 @@ fn sources_of(profile: &Profile, resp: &Value) -> Vec<Source> {
         }
         let mut left = profile.max_source_bytes as usize;
         let mut passages = Vec::new();
-        let highlighted: Vec<&Value> = h.get("highlight").and_then(Value::as_object).into_iter().flat_map(|m| m.values()).collect();
-        let candidates: Vec<String> = if highlighted.is_empty() {
-            // No highlight: the start of each passage field the search returned.
-            src.as_object().map(|m| m.iter().filter(|(k, _)| !profile.fields.contains(k)).map(|(_, v)| prompt::text_of(v)).collect()).unwrap_or_default()
-        } else {
-            highlighted.iter().flat_map(|v| v.as_array().into_iter().flatten()).filter_map(Value::as_str).map(str::to_owned).collect()
-        };
+        let candidates: Vec<String> = h
+            .get("highlight")
+            .and_then(Value::as_object)
+            .into_iter()
+            .flat_map(|m| m.values())
+            .flat_map(|v| v.as_array().into_iter().flatten())
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect();
         for p in candidates {
             if left == 0 {
                 break;

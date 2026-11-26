@@ -20,7 +20,10 @@ what the best of the four products does:
   index's `semantic_text` and text fields (`query_fields` to choose), or BM25 alone when it has
   no `semantic_text`. A profile over a search application runs its template with the question
   as `query_param`, as designed. Either way roll sets `size`, `_source` and the highlight, and
-  drops aggregations, suggesters, `explain` and `profile` from the rendered body.
+  drops aggregations, suggesters, `explain` and `profile` from the rendered body. `_source` holds
+  only `context.fields`: passages come from the highlight alone (`no_match_size` gives a text
+  field's start, the semantic highlighter a field's first chunks), so no whole document is read
+  for the `max_source_bytes` the model gets.
 - **Profile fields:** `index` or `search_application`, `inference_id`, `instructions` (8 KiB),
   `query_param`, `query_fields`, `context` (`fields`, `passages`, `max_sources` 1-20 (5),
   `max_source_bytes` 256-16,384 (4,096), `max_context_tokens` (6,000), `max_history_tokens`
