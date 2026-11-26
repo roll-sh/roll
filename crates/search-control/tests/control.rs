@@ -5073,8 +5073,9 @@ async fn opensearch_flavor_clusters_link_with_the_remotes_own_mappings() {
         let (s, v) = es_as(&e, &near, Method::GET, p, None).await;
         assert_eq!(s, 403, "{p}: {v}");
     }
-    let sparse = json!({"query": {"sparse_vector": {"field": "tenant", "inference_id": ".elser-2-elasticsearch", "query": "a"}}});
-    let (s, v) = es_as(&e, &near, Method::POST, "/r:docs/_search", Some(sparse)).await;
+    let sem = json!({"mappings": {"properties": {"t": {"type": "semantic_text", "inference_id": ".multilingual-e5-small-elasticsearch"}}}});
+    assert_eq!(es_as(&e, &far, Method::PUT, "/docs-sem", Some(sem)).await.0, 200);
+    let (s, v) = es_as(&e, &near, Method::POST, "/r:docs-sem/_search", Some(json!({"query": {"semantic": {"field": "t", "query": "a"}}}))).await;
     assert!(s == 400 && v.to_string().contains("inference isn't available"), "{s} {v}");
     // The ceiling takes names and `*` patterns only.
     for names in [json!(["${user.name}"]), json!(["/docs.*/"])] {
