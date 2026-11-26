@@ -1983,8 +1983,9 @@ fn reads_other_documents(req: &SearchRequest, t: &Target) -> bool {
     json.into_iter().any(crate::query::reads::reads_elsewhere)
 }
 
-/// How the parsed queries that read other documents print ([`reads_other_documents`]).
-const READS_OTHER_DOCUMENTS: &[&str] = &["Some(TermsLookup", "Indexed {", "Percolate {", "MltItem {"];
+/// How the parsed queries that read other documents print ([`reads_other_documents`]). A
+/// `wrapper`'s query is only bytes here, so any wrapper counts.
+const READS_OTHER_DOCUMENTS: &[&str] = &["Some(TermsLookup", "Indexed {", "Percolate {", "MltItem {", "Wrapper {"];
 
 fn request_cache_key(req: &SearchRequest, t: &Target) -> String {
     // The mapping and analysis settings decide how the request's queries are built

@@ -605,6 +605,7 @@ pub(super) fn verify_role_query(v: &Value) -> EsResult<()> {
         DocumentRead::MoreLikeThisDocuments => "more_like_this query with documents",
         DocumentRead::HasChild => "has_child query",
         DocumentRead::HasParent => "has_parent query",
+        DocumentRead::Opaque => "wrapper query that doesn't decode",
     };
     Err(EsError::illegal_argument(format!("{what} isn't supported as part of a role query")))
 }

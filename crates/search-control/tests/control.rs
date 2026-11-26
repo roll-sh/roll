@@ -1580,6 +1580,12 @@ async fn lookups_are_authorized_where_they_run() {
         assert_eq!((s, v["aggregations"]["params"]["doc_count"].as_i64()), (200, Some(1)), "{name}: {v}");
         let (s, v) = e.es(&ann, ann_pw, Method::POST, "/mine/_search?request_cache=true", Some(cached)).await;
         refused("the owner's cached lookup", s, &v);
+        // Nor through a `wrapper`, whose base64 query hides the lookup from the request's text.
+        let wrapped = json!({"size": 0, "query": {"wrapper": {"query": base64::engine::general_purpose::STANDARD.encode(lookup("secret").to_string())}}});
+        let (s, v) = e.es(&admin, &pw, Method::POST, "/mine/_search?request_cache=true", Some(wrapped.clone())).await;
+        assert_eq!((s, v["hits"]["total"]["value"].as_i64()), (200, Some(1)), "{name}: {v}");
+        let (s, v) = e.es(&ann, ann_pw, Method::POST, "/mine/_search?request_cache=true", Some(wrapped)).await;
+        refused("the owner's cached wrapped lookup", s, &v);
         for agg in ["document", "params"] {
             let (s, v) = search(json!({"size": 0, "aggs": {agg: {"filter": lookup("secret")}}})).await;
             refused(&format!("an aggregation named {agg}"), s, &v);
