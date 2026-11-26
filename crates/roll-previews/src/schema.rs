@@ -246,6 +246,7 @@ fn type_of(spec: &str) -> &str {
 mod tests {
     #[test]
     fn a_diffs_tables_are_those_its_lines_touch() {
+        use super::tables_touched;
         let lines: Vec<String> = [
             "+ column public.users.nickname text",
             "- constraint users_email_key on public.users UNIQUE (email)",
