@@ -415,6 +415,13 @@ pub(super) async fn handle_push(code: &Arc<Code>, hub: &Hub, r: &RepoRow, link: 
         }
         return Ok(());
     }
+    apply_push(code, hub, r, link, p, is_default).await?;
+    // Its commits are in roll now: roll secrets' check of what it adds, on the repo's owner.
+    super::push_scan::queue(code, r, p).await
+}
+
+/// A push from someone else than roll, brought into roll.
+async fn apply_push(code: &Arc<Code>, hub: &Hub, r: &RepoRow, link: &Link, p: &PushDraft, is_default: bool) -> Result<()> {
     if is_default {
         mirror::observed(code, &r.id, p.after.clone());
         let Some(after) = &p.after else { return Ok(()) };

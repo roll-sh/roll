@@ -132,7 +132,8 @@ index = {"v": 5, "entries": {i: {"id": i, "type": "story", "title": i, "name": "
 stats = {"modules": [{"name": "./lib/deep.js", "reasons": [{"moduleName": "./stories/Deep.js"}]}, {"name": "./stories/Deep.js", "reasons": [{"moduleName": "./stories/deep.stories.js"}]}]}
 # Storybook's own preview as its frame exposes it (`__STORYBOOK_PREVIEW__.storyRenders`): Deep's
 # play function threw (phase `errored`), the first one's ran to its end, the rest have none.
-play = '<script>const id = new URLSearchParams(location.search).get("id"); globalThis.__STORYBOOK_PREVIEW__ = { storyRenders: [{ id, phase: id === "deep--one" ? "errored" : "finished", story: id === "deep--one" || id === "s01--one" ? { playFunction() {} } : {} }] };</script>'
+# Its error display says what Deep's threw, as Storybook's frame does (`#error-message`).
+play = '<div id="error-message"></div><script>const id = new URLSearchParams(location.search).get("id"); globalThis.__STORYBOOK_PREVIEW__ = { storyRenders: [{ id, phase: id === "deep--one" ? "errored" : "finished", story: id === "deep--one" || id === "s01--one" ? { playFunction() {} } : {} }] }; if (id === "deep--one") document.getElementById("error-message").textContent = "expected Pay to be visible";</script>'
 frame = '<!doctype html><html lang="en"><title>story</title><div id="storybook-root"><button>a story</button></div>' + play
 files = {"storybook/index.json": json.dumps(index), "storybook/preview-stats.json": json.dumps(stats), "storybook/iframe.html": frame}
 print(json.dumps({"message": "storybook", "files": {k: {"content": v} for k, v in files.items()}}))
@@ -669,6 +670,8 @@ STORY_A11Y=$(api GET "/v1/previews/$PV" | jq_ "[(x.get('a11y') or {}).get('lang'
 # Their interaction tests as Storybook ran them (Chromatic's): Deep's failed, the first's passed.
 PLAYS=$(api GET "/v1/previews/$PV" | jq_ "sorted('%s %s' % (x['path'], x.get('play')) for x in d['pages'] if x['path'] in ('story:deep--one', 'story:s01--one', 'story:s02--one'))")
 [ "$PLAYS" = "['story:deep--one failed', 'story:s01--one passed', 'story:s02--one None']" ] || { echo "a story's interaction test should be read as Storybook ran it: $PLAYS"; exit 1; }
+PLAY_ERROR=$(api GET "/v1/previews/$PV" | jq_ "[x.get('play_error') for x in d['pages'] if x['path'] == 'story:deep--one']")
+[ "$PLAY_ERROR" = "['expected Pay to be visible']" ] || { echo "a failed interaction test should say what it threw: $PLAY_ERROR"; exit 1; }
 # The change's first stories in the other browsers asked for too (Chromatic's cross-browser
 # stories): Deep's, taken first, in Firefox and WebKit at a phone's size.
 STORY_BROWSERS=$(api GET "/v1/previews/$PV" | jq_ "sorted(x['path'] for x in d['pages'] if x['path'].startswith('story:deep--one@'))")

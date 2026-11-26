@@ -4,6 +4,33 @@ The ranked work list and the log of roll secrets' review rounds. It's internal: 
 
 ## Next
 
+**State, 2026-11-26 08:40.** The thirty-ninth and fortieth reviews are done. Landed since 2026-11-25 15:00, each with main's CI green and after a check of the merged tree wherever main had moved under it:
+- #1019 (dd7420791): the thirty-ninth's item 6. `roll secrets scan --pre-receive`, and a match-only `scan` right for scanner tokens.
+- #1036 (226bc65f8): item 11, part 1. `roll secrets --help` grouped under six headings, and an address list that can't be read refuses.
+- #1037 (04ea6a51e): item 2, a Windows build. `roll run`, scan, render, login and the local agent as a service; install.ps1, winget and Scoop.
+- #1006 (6ef229ce5): item 8, guardrails. A policy of floors every project may only tighten.
+
+The fortieth product review (2026-11-25, cold, read only) found one live bug of the bypass kind, medium: a token with `admin` but not `reveal` could take every value, and since #1001 every registration's key, through `POST …/backup` sealed to its own key. Landed:
+- #1049 (5ef394d78): item 1, the live fix. A backup and a backup verify need admin and reveal over the whole project.
+- #1057 (deded187f): items 4, 6 and 10. Machine credentials are capped per project, a refresh whose answer was lost is retried safely, and an outside database's admin URL replacement moves the maker.
+- #1056 (4e005025c): items 3, 5 and 7. Scan matches whole values only, the pre-receive hook fails closed on what it can't read, and break glass is named and allowed (guardrails' `no_breakglass`).
+- #1077 (9b37145a4): items 9 and 12. A leak's renewals count toward the public certificate's caps, and the dashboard makes bootstrap and scan-only tokens and lists a machine's chains.
+- #1073 (d2ed08d20): item 1's follow-ups, and items 2 and 8. A token's backup carries no registration keys, and its verify answers counts only (rate-limited). Schedules need admin and reveal. Reach, cut-off, offboarding and Health see backups. A restore runs the checks that making each identity and CA runs.
+- #1094 (747fb4360): item 11. Pushes to GitHub repos are scanned by roll code's App, and a value found is reported, rotated and fails the commit's check.
+- #1080 (fb15cbaf0): from roll search's review of its password store. No value or credential appears in a `Debug` (eight types).
+
+With other threads:
+- roll search stores a cluster's rotated admin password straight into a project secret, as the caller, through `caller_of` and `set_secret_confirmed`, with `Secrets::check_batch` (one prelude shared with `batch`) before rotating;
+- roll MCP fixed roll-workspace's "everything" fixture after `scan` joined `Action::ALL` (#1038).
+
+In flight:
+- a token's backup without sync credentials or encryption key bytes (`fix/secrets-backup-token-syncs-transit`);
+- the forty-first review.
+
+Left:
+- the thirty-ninth's item 11, part 3: split docs/secrets.md's guide (getting started, moving from another manager, per platform) from the reference;
+- Paddle's model (keys that can only rotate themselves).
+
 **State, 2026-11-25 15:00.** The thirty-eighth review is done, and most of the thirty-ninth (2026-11-25, cold, read only) has landed. Landed since 00:10, each with main's CI green, and after a check of the merged tree wherever main had moved under it:
 - #959 (62ba416bb): the thirty-eighth's item 8. A mounted `.env`'s readers each get a whole copy, and a read roll doesn't answer says why.
 - #971 (53d78cb3e): its item 6, part 2, Salesforce rotation. Paddle isn't added: its API can't create or revoke a key, only rotate the one it's called with.

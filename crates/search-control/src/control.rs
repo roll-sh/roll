@@ -854,6 +854,10 @@ pub struct Control {
     /// Serializes changes of a cluster's description with applying it to the node, so the node
     /// never ends up with an older one than the catalog's.
     specs: tokio::sync::Mutex<()>,
+    /// Held across a password change, a store into roll secrets included (read, check, rotate,
+    /// write, re-read), so one can't land inside another and leave a secret holding a dead
+    /// password. Rare, so one for the node.
+    passwords: tokio::sync::Mutex<()>,
     /// Loaded clusters whose new settings need a reload (dialect, the
     /// `destructive_requires_name` default): unloaded once no request runs.
     reloads: Mutex<HashSet<String>>,
@@ -980,6 +984,7 @@ impl Control {
             wakes,
             suggest_locks: Mutex::new(HashMap::new()),
             specs: tokio::sync::Mutex::new(()),
+            passwords: tokio::sync::Mutex::new(()),
             reloads: Mutex::new(HashSet::new()),
             reloader: AtomicBool::new(false),
             me: OnceLock::new(),
@@ -1541,10 +1546,21 @@ impl Control {
     /// A new password. Requests with the old one fail from now on, loaded, waking or not (on a
     /// fleet this runs on the cluster's owner).
     pub async fn rotate_password(&self, id: &str) -> Result<SearchCluster> {
+        let _p = self.passwords.lock().await;
+        self.rotate_password_to(id, None, random_string(32)).await
+    }
+
+    /// Sets the cluster's admin password to `password`, only if it's still `expect` (when given):
+    /// a store into roll secrets rotates to the password it checked, and a rotation that landed
+    /// since it read the cluster is a conflict, never overwritten.
+    async fn rotate_password_to(&self, id: &str, expect: Option<&str>, password: String) -> Result<SearchCluster> {
         let c = {
             let _g = self.specs.lock().await;
             let mut c = self.get(id).await?;
-            c.password = random_string(32);
+            if expect.is_some_and(|e| e != c.password) {
+                return Err(ControlError::Conflict(format!("{}'s password was rotated meanwhile: nothing was changed; try again", c.name)));
+            }
+            c.password = password;
             c.password_rotated_at = Some(now());
             self.save(&c, Caps::NONE).await?;
             self.apply_spec(&c.name).await;
@@ -1552,6 +1568,52 @@ impl Control {
         };
         self.settle(&c.name).await;
         Ok(c)
+    }
+
+    /// `POST …/password` with `secret`: the cluster's admin password kept in roll secrets, as
+    /// `who` writes it there, and shown to nobody. Checked first, so a store roll secrets would
+    /// refuse (or turn into a change request) rotates nothing; then rotated (unless `rotate` is
+    /// false: the retry of a store that failed after its rotation), then written at the version
+    /// the check read. A write that fails after the rotation keeps the new password (search
+    /// holds it sealed) and says how to store it again without rotating.
+    pub async fn store_password(&self, id: &str, who: &crate::secret_refs::Who, to: &crate::secret_refs::StoreTo, rotate: bool) -> Result<(SearchCluster, i64)> {
+        let refused = |e: crate::secret_refs::Refused| match e {
+            crate::secret_refs::Refused::Forbidden(m) => ControlError::Forbidden(m),
+            crate::secret_refs::Refused::Invalid(m) => ControlError::Invalid(m),
+            crate::secret_refs::Refused::Conflict(m) => ControlError::Conflict(m),
+        };
+        let _p = self.passwords.lock().await;
+        let c = self.get(id).await?;
+        if c.parent_id.is_some() {
+            return Err(ControlError::Invalid(format!("{} is a branch: its password isn't kept in roll secrets (keep its parent's)", c.name)));
+        }
+        let (holder, secrets) = self.secret_refs.holder(&c.id, "").await.map_err(ControlError::Invalid)?;
+        // The password to keep, checked by roll secrets as it is (its rules judge the real value).
+        let value = if rotate { random_string(32) } else { c.password.clone() };
+        let target = secrets.store_target(who, &holder, to, &crate::secret_refs::Revealed::new(value.clone())).await.map_err(refused)?;
+        let c = if rotate { self.rotate_password_to(&c.id, Some(&c.password), value).await? } else { c };
+        let value = crate::secret_refs::Revealed::new(c.password.clone());
+        match secrets.store(who, &holder, to, &target, value).await {
+            Ok(version) => {
+                // Another rotation (a plain one, or a second store) may have landed between this
+                // one and its store: then the secret holds a password that no longer works.
+                if self.get(&c.id).await?.password != c.password {
+                    return Err(ControlError::Conflict(format!(
+                        "{}'s password was rotated again while it was being stored: store it again without rotating (\"rotate\": false)",
+                        c.name
+                    )));
+                }
+                Ok((c, version))
+            }
+            Err(e) if rotate => {
+                let why = e.message().to_string();
+                Err(ControlError::Conflict(format!(
+                    "{}'s password was rotated, but storing it in roll secrets failed: {why}. Store it again without rotating: the same request with \"rotate\": false",
+                    c.name
+                )))
+            }
+            Err(e) => Err(refused(e)),
+        }
     }
 
     /// Applies the catalog's description of `name` to its loaded instance, if any. Call with
@@ -2131,6 +2193,7 @@ impl Control {
                 let by = secrets.may_write(who, &holder, r).await.map_err(|e| match e {
                     crate::secret_refs::Refused::Forbidden(m) => ControlError::Forbidden(format!("{r}: {m}")),
                     crate::secret_refs::Refused::Invalid(m) => ControlError::Invalid(format!("{r}: {m}")),
+                    crate::secret_refs::Refused::Conflict(m) => ControlError::Conflict(format!("{r}: {m}")),
                 })?;
                 maker = Some(by);
             }

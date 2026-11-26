@@ -2350,8 +2350,11 @@ type Settings = {
     to 5 s for it to end before the picture. It's the one read from the page's own JavaScript
     (every other check runs in an isolated world the page's code can't reach): what it answers is
     the story's word about its own test, so a forged "passed" only hides its own failure; each
-    read is bounded to 2 s and taken as one of two words. `play` on the story's page is `failed` when it threw
-    (or the story's render did: phase `errored`), `passed` when a play function ran to its end;
+    read is bounded to 2 s and taken as one of two words. `play` on the story's page is `failed`
+    when it threw (or the story's render did: phase `errored`), with `play_error` what it threw as
+    Storybook's frame shows it (its error display, `#error-message`, read in the isolated world: one
+    line of 300 characters at most, masked like the page's other words), and `passed` when a play
+    function ran to its end;
     against main's same story, one that fails where main's passes is `against.play_broke`. The
     sheet says which. Live: the fixture's preview object has Deep's play throw and the first
     story's pass. With `github.browsers`, the change's first 5 stories (as the run

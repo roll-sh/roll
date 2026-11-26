@@ -1096,7 +1096,11 @@ function PageChecks({ page, branch }: { page: PageCheck; branch: string }) {
   return (
     <div className="mb-1.5 space-y-0.5 text-[11.5px]">
       {page.step && <p className="break-words text-danger">Its steps stopped at {page.step}: taken as it was then.</p>}
-      {page.play === "failed" && <p className="text-danger">Its interaction test failed{page.against?.play_broke ? ", where main's passes" : ""}: the story's play function, or its render, threw.</p>}
+      {page.play === "failed" && (
+        <p className="break-words text-danger">
+          Its interaction test failed{page.against?.play_broke ? ", where main's passes" : ""}: {page.play_error ? <span className="font-mono text-[11px]">{page.play_error}</span> : "the story's play function, or its render, threw."}
+        </p>
+      )}
       {page.play === "passed" && <p className="text-soft">Its interaction test passed.</p>}
       {slow && (
         <p className="text-soft" title="Its slowest click or typing, to the next paint (Interaction to Next Paint, in roll's browser)">

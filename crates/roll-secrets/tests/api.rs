@@ -2533,6 +2533,26 @@ async fn a_scanner_never_confirms_a_weak_password_inside_text_it_knows() {
     assert_eq!((s, found.clone()), (StatusCode::OK, json!([{ "index": 1, "environment": "production" }])), "{found}");
 }
 
+/// roll code's GitHub App checking a push to a repo on the project's canvas: a scanner of the
+/// project and nothing more (a weak password inside a URL it knows is never tried), audited as the
+/// installation with the pusher and ref, and a value it finds is a leak (`secrets.leaked`).
+#[tokio::test]
+async fn a_github_push_is_checked_by_a_scanner_and_a_value_found_is_a_leak() {
+    let api = Api::new().await;
+    let url = "postgres://app:hunter2@db.internal.example.com:5432/shop";
+    let random = "Zq7vR2mXk9LpT4wB8nC1sD6fG3hJ5yUe";
+    api.set("production", "DB_URL", url).await;
+    api.set("production", "API_KEY", random).await;
+    let push = roll_secrets::leaks::Push { breakglass: false, pusher: Some("octo".into()), refs: vec!["refs/heads/pay".into()] };
+    let found = api.secrets.scan_pushed(&api.project, "acme/app", "github:7:acme/app", &[url.to_string(), random.to_string()], &push).unwrap();
+    assert_eq!(found, [(1, roll_secrets::Leak { key: "API_KEY".into(), environment: "production".into(), path: "/".into() }, false)]);
+    let scans = api.ok(Method::GET, "/audit?action=secrets.scan", None).await;
+    assert_eq!(scans[0]["actor"], "github:7:acme/app");
+    assert!(scans[0]["summary"].as_str().unwrap().contains("by octo to refs/heads/pay"), "{scans}");
+    let leaked = api.ok(Method::GET, "/audit?action=secrets.leaked", None).await;
+    assert_eq!(leaked[0]["keys"], json!(["API_KEY"]), "{leaked}");
+}
+
 #[tokio::test]
 async fn validity_checks_ask_each_provider_once_and_only_when_an_admin_turned_them_on() {
     let api = Api::new().await;
