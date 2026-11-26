@@ -524,17 +524,25 @@ fn review_line(v: &crate::model::PreviewVisualReview, dashboard: Option<&str>) -
     let branch = branch_name(&v.branch);
     let by: String = v.by.as_deref().unwrap_or("someone").chars().filter(|c| c.is_ascii_alphanumeric() || "-_.".contains(*c)).take(40).collect();
     let link = dashboard.filter(|u| (u.starts_with("https://") || u.starts_with("http://")) && !u.contains([')', ' ', '\n'])).map(|u| format!(" [Review it in roll]({u})")).unwrap_or_default();
+    let required = if v.required { ", and it can't land until someone accepts them" } else { "" };
     match v.state.as_str() {
+        "changed" if !v.pages_waiting() && v.untaken_waiting().is_some() => v.untaken_waiting().map(|n| {
+            format!("**Visual review:** {} this change touched {} taken (past the run's 40, or out of its time), so nobody has seen {}{required}.{link}\n\n", stories(n), if n == 1 { "wasn't" } else { "weren't" }, if n == 1 { "it" } else { "them" })
+        }),
         "changed" => Some(format!(
-            "**Visual review:** its pages differ from `{branch}` by {:.1}%{}{}.{link}\n\n{}",
+            "**Visual review:** its pages differ from `{branch}` by {:.1}%{}{required}.{}{link}\n\n{}",
             v.percent.max(0.1),
             v.partly().map(|(done, all)| format!(" ({done} of {all} accepted)")).unwrap_or_default(),
-            if v.required { ", and it can't land until someone accepts them" } else { "" },
+            v.untaken_waiting().map(|n| format!(" {} it touched {} taken either.", stories(n), if n == 1 { "wasn't" } else { "weren't" })).unwrap_or_default(),
             unstable_line(v),
         )),
         "accepted" => Some(format!("Visual review: accepted by {by}.\n\n")),
         _ => None,
     }
+}
+
+fn stories(n: u32) -> String {
+    if n == 1 { "1 story".into() } else { format!("{n} stories") }
 }
 
 /// The pages under review that move by themselves (Argos's flaky screenshots): their difference
@@ -588,6 +596,10 @@ fn visual_status(v: &crate::model::PreviewVisualReview) -> (&'static str, String
     let by: String = v.by.as_deref().unwrap_or("someone").chars().filter(|c| c.is_ascii_alphanumeric() || "-_.".contains(*c)).take(40).collect();
     match v.state.as_str() {
         "accepted" => ("success", format!("Accepted by {by}: differs from {branch} by {:.1}%", v.percent.max(0.1))),
+        "changed" if !v.pages_waiting() && v.untaken_waiting().is_some() => {
+            let n = v.untaken_waiting().unwrap_or(0);
+            ("pending", format!("{} the change touched {} taken: accept {} as not taken in roll", stories(n), if n == 1 { "wasn't" } else { "weren't" }, if n == 1 { "it" } else { "them" }))
+        }
         "changed" => match v.partly() {
             Some((done, all)) => ("pending", format!("Differs from {branch} by {:.1}%: {done} of {all} pages accepted, accept the rest in roll", v.percent.max(0.1))),
             None => ("pending", format!("Differs from {branch} by {:.1}%: accept it in roll", v.percent.max(0.1))),
@@ -1334,8 +1346,14 @@ mod preview_tests {
             step: None,
         };
         e.pages = vec![page("/pricing", Some(40.0), Some(2.0), 1), page("/about", Some(0.0), None, 0)];
-        let review = |state: &str, by: Option<&str>| crate::model::PreviewVisualReview { state: state.into(), branch: "main".into(), percent: 8.04, by: by.map(Into::into), required: false, head: None, pages: Vec::new() };
+        let review = |state: &str, by: Option<&str>| crate::model::PreviewVisualReview { state: state.into(), branch: "main".into(), percent: 8.04, by: by.map(Into::into), required: false, head: None, pages: Vec::new(), untaken: 0 };
         assert_eq!(visual_status(&review("changed", None)), ("pending", "Differs from main by 8.0%: accept it in roll".into()));
+        // Only stories the change touched that its run didn't take: said as that, not as a difference.
+        let mut untaken = review("changed", None);
+        untaken.untaken = 3;
+        untaken.pages = vec![crate::model::PreviewPageReview { path: crate::model::UNTAKEN_STORIES.into(), percent: 0.0, by: None, unstable: false }];
+        assert_eq!(visual_status(&untaken), ("pending", "3 stories the change touched weren't taken: accept them as not taken in roll".into()));
+        assert!(review_line(&untaken, None).is_some_and(|l| l.contains("3 stories this change touched weren't taken")), "{:?}", review_line(&untaken, None));
         let mut partly = review("changed", None);
         partly.pages = [("", Some("ada")), ("/pricing", None)].map(|(path, by)| crate::model::PreviewPageReview { path: path.into(), percent: 8.0, by: by.map(Into::into), unstable: path == "/pricing" }).to_vec();
         assert_eq!(visual_status(&partly), ("pending", "Differs from main by 8.0%: 1 of 2 pages accepted, accept the rest in roll".into()));
