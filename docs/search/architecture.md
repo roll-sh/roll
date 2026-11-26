@@ -515,6 +515,64 @@ a link that still holds points at.
 On a fleet, a call about one cluster still runs on the cluster's owner node. The forward carries
 the person's own credentials, and the owner node's gate decides again.
 
+## Cross-cluster search
+
+Links between Elasticsearch-flavor clusters landed in #347 and #389 (README.md, "Cross-cluster
+search"): the remote issues a `cross_cluster` API key, the local cluster keeps it sealed in the
+catalog (`search_remotes`), and each remote part goes to the remote's owner in process or signed,
+with the local user's role descriptors in `x-roll-remote-access` (`Lease::handle` drops the header
+from every request roll didn't make). The remote grants what the user's `remote_indices` allow and
+the key's `access` allows, as Elasticsearch 9's API key based model does.
+
+**OpenSearch-flavor links (design; not built).** OpenSearch has no `cross_cluster` keys and no
+`remote_indices`. Its clusters trust each other's transport layer (node certificates), the
+coordinating cluster sends the user (name, backend roles, attributes), and the remote authorizes
+that user by **its own** role mappings: a user mapped on the local cluster only is refused there.
+roll keeps that behaviour where clients can see it, and replaces the node certificates, which
+tenants don't hold, with a credential per link:
+
+- *The credential*: an internal user on the remote, `roll-remote-<random>` (`Control::os_user`,
+  the same path as `roll-key-` and `roll-link-` users), with a random password and a role of its
+  own. That role is the link's ceiling: the link's `access` patterns (`search` names, default
+  `*`, hidden and system indices left out as `cross_cluster` keys leave them) with the read and
+  search actions a remote part needs, and no cluster or security permission. The password is
+  sealed in the local cluster's `search_remotes` row and bound to that row (cluster, alias,
+  target), as a key is now. It's never returned or logged.
+- *A link user signs nothing in on its own*: its attributes name the local cluster's id
+  (`roll.remote_link`), and the remote authenticates it only on a link request (internal origin,
+  with `x-roll-remote-access`). As plain Basic auth it's refused, as Elasticsearch refuses a
+  `cross_cluster` key from a REST client. A branch or restore of the remote holds a copy of the
+  user, so the user is bound to the remote's cluster id, as browser keys are
+  (`stored_browser_key_cluster`).
+- *Who the part runs as*: `x-roll-remote-access` carries the OpenSearch identity (user name,
+  backend roles, attributes; bounded by `MAX_REMOTE_ACCESS`). The remote resolves it through its
+  own role mappings (`opensearch::mapped_roles`), so its DLS, FLS, masked fields and `${attr…}`
+  variables are the remote's. The result is limited by the link user's role
+  (`Effective::limited_by`). The local `admin` has backend role `admin`, which OpenSearch's
+  default mapping gives `all_access` on both clusters, so the owner gets the ceiling. Any other
+  user gets what the remote maps them to, within the ceiling.
+- *What follows from trusting the local cluster's word*: anyone who can manage the local
+  cluster's security (its owner, or a user given the security API) can assert any backend role,
+  and reach the whole ceiling. That's OpenSearch's own trust model between clusters. The ceiling
+  is what the link's maker chose for it, and a maker administers both clusters.
+- *Lifecycle*: as now. Only a person who may administer both clusters links through
+  `PUT …/remotes/{alias}`, and `link_holds` is asked on every use. Unlinking, or deleting either
+  cluster, deletes the user and its role (`revoke_remote_keys_of`; `roll-remote-` joins
+  `KEY_USER_PREFIXES`). `linkable` becomes same flavor on both sides: Elasticsearch and OpenSearch
+  can't link to each other, as they can't outside roll. A row remembers the flavor its credential
+  was made for, and a cluster that switched flavor can't use a credential of the other kind.
+- *What clients see*: `cluster.remote.<alias>.seeds` and OpenSearch 3.9's `_remote/info`,
+  `cluster.remote.*` answers and `skip_unavailable`, as they're already answered. A search
+  `<alias>:<index>` merges as the Elasticsearch flavor's does. To check on OpenSearch 3.9 (two
+  containers, demo certificates) before building: the remote part's 403 for an unmapped user,
+  and with `skip_unavailable`; whether custom attributes reach the remote's DLS variables;
+  `_remote/info` for a connected link; and which of ES|QL's and PPL's remote forms OpenSearch
+  has at all (only those are answered).
+- *Tests*: one flow in search-control's tests. It covers: the owner's search across two
+  OpenSearch-flavor clusters, a user mapped only locally refused on the remote part, a mapped user
+  limited to the ceiling, the link user refused as Basic, and unlinking cutting it at once. The
+  cluster's in-process fleet test gets a remote part on another owner.
+
 ## Client addresses and IP allowlists
 
 A cluster can have an IP allowlist (`ip_allowlist`: at most 64 CIDRs, IPv4 or IPv6, each with an
