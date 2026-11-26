@@ -48,7 +48,7 @@ use serde::{Deserialize, Serialize};
 
 pub use caches::{LAYERS_ARG, isolate_caches};
 pub use tree::{DirTree, MapTree, SubTree, Tree};
-pub use node::{WorkspaceApp, workspace_app};
+pub use node::{WorkspaceApp, workspace_app, workspace_deps};
 pub use uses::{Datastore, uses};
 /// A plan's start when it serves files from `/site` (busybox httpd): a static site.
 pub const STATIC_START: &str = static_site::START;
