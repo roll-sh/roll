@@ -113,6 +113,41 @@ impl Inflate {
     }
 }
 
+/// A page's validators (RFC 9110 section 8.8): the `ETag` and `Last-Modified` its last full
+/// response carried, kept in its document and sent back as `If-None-Match` and
+/// `If-Modified-Since` on the next request for that same URL, so an unchanged page answers 304.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Validators {
+    pub etag: Option<String>,
+    pub last_modified: Option<String>,
+}
+
+/// The longest validator kept: anything longer is a server's mistake, not a validator.
+const MAX_VALIDATOR: usize = 256;
+
+impl Validators {
+    pub fn is_empty(&self) -> bool {
+        self.etag.is_none() && self.last_modified.is_none()
+    }
+
+    /// A header's value, kept only when it can be sent back as it came (visible ASCII, short).
+    fn kept(v: Option<&str>) -> Option<String> {
+        let v = v?.trim();
+        (!v.is_empty() && v.len() <= MAX_VALIDATOR && v.bytes().all(|b| (0x20..0x7f).contains(&b))).then(|| v.to_string())
+    }
+
+    fn of(headers: &reqwest::header::HeaderMap) -> Validators {
+        let text = |k: &str| headers.get(k).and_then(|v| v.to_str().ok());
+        Validators { etag: Self::kept(text("etag")), last_modified: Self::kept(text("last-modified")) }
+    }
+
+    /// The validators a document holds ([`super::FIELD_ETAG`], [`super::FIELD_LAST_MODIFIED`]).
+    pub fn of_document(source: &crate::json::Value) -> Validators {
+        let text = |k: &str| source.get(k).and_then(crate::json::Value::as_str);
+        Validators { etag: Self::kept(text(super::FIELD_ETAG)), last_modified: Self::kept(text(super::FIELD_LAST_MODIFIED)) }
+    }
+}
+
 /// Why a request failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Failure {
@@ -150,6 +185,8 @@ pub struct Response {
     pub content_type: String,
     pub location: Option<String>,
     pub retry_after: Option<String>,
+    /// The response's `ETag` and `Last-Modified`.
+    pub validators: Validators,
     pub body: Vec<u8>,
     /// Bytes received (headers and the body as sent): what the rate counts.
     pub wire_bytes: u64,
@@ -195,19 +232,22 @@ impl Fetcher {
     }
 
     /// One request, no redirect followed, within [`REQUEST_TIMEOUT`]. `clean`: every hop
-    /// before this one was at the credential's origin.
-    pub async fn get(&self, link: &Link, clean: bool, max: usize) -> Result<Response, Failure> {
+    /// before this one was at the credential's origin. `cond`: the validators of `link`'s own
+    /// document, sent as `If-None-Match` and `If-Modified-Since` (the caller sends them only on
+    /// the request for that URL, never after a redirect); they're sent with no other change, so
+    /// the credential still goes only where [`Fetcher::credential_for`] allows.
+    pub async fn get(&self, link: &Link, clean: bool, max: usize, cond: Option<&Validators>) -> Result<Response, Failure> {
         // Checked again with the node's names resolved afresh, failing closed until they are.
         if self.egress.check_url_now(link.url()).await.is_err() {
             return Err(Failure::Refused);
         }
-        match tokio::time::timeout(REQUEST_TIMEOUT, self.request(link, clean, max)).await {
+        match tokio::time::timeout(REQUEST_TIMEOUT, self.request(link, clean, max, cond)).await {
             Ok(r) => r,
             Err(_) => Err(Failure::Timeout),
         }
     }
 
-    async fn request(&self, link: &Link, clean: bool, max: usize) -> Result<Response, Failure> {
+    async fn request(&self, link: &Link, clean: bool, max: usize, cond: Option<&Validators>) -> Result<Response, Failure> {
         let mut req = self
             .http
             .get(link.url().clone())
@@ -216,6 +256,14 @@ impl Fetcher {
             .header("Accept-Encoding", "gzip, deflate");
         if let Some(h) = self.credential_for(link, clean) {
             req = req.header("Authorization", h);
+        }
+        if let Some(v) = cond {
+            if let Some(e) = &v.etag {
+                req = req.header("If-None-Match", e);
+            }
+            if let Some(m) = &v.last_modified {
+                req = req.header("If-Modified-Since", m);
+            }
         }
         let mut resp = req.send().await.map_err(|e| if e.is_timeout() { Failure::Timeout } else { Failure::Network })?;
         let headers = resp.headers();
@@ -227,6 +275,7 @@ impl Fetcher {
         let status = resp.status().as_u16();
         let content_type = text("content-type").unwrap_or_default().to_ascii_lowercase();
         let (location, retry_after) = (text("location"), text("retry-after"));
+        let validators = Validators::of(headers);
         let mut inflate = match text("content-encoding").map(|e| e.trim().to_ascii_lowercase()).as_deref() {
             None | Some("" | "identity") => Inflate::plain(max),
             Some("gzip" | "x-gzip") => Inflate::gzip(max),
@@ -251,7 +300,7 @@ impl Fetcher {
             inflate.write(&chunk).map_err(|e| if e.contains("larger") { Failure::TooLarge } else { Failure::Refused })?;
         }
         let body = if (200..300).contains(&status) { inflate.finish().map_err(|e| if e.contains("larger") { Failure::TooLarge } else { Failure::Refused })? } else { Vec::new() };
-        Ok(Response { status, content_type, location, retry_after, body, wire_bytes: wire })
+        Ok(Response { status, content_type, location, retry_after, validators, body, wire_bytes: wire })
     }
 }
 

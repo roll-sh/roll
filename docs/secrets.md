@@ -312,7 +312,8 @@ do. It speaks the same HTTP API as the CLI and the clients, with a roll token or
     written, and destroying it leaves them as they are.
 - **`roll_secrets_policy`** is roll secrets' policy ("Guardrails"; `PUT /v1/secrets/policy`, the
   operator's token or an admin's), one per server, imported by `policy`: `production_approvals`,
-  `leaks_rotate` (`managed`), `sync_kinds`, `no_stored_cloud_keys` and `max_token_days`. It owns
+  `leaks_rotate` (`managed`), `sync_kinds`, `no_stored_cloud_keys`, `max_token_days` and
+  `no_breakglass`. It owns
   the whole policy, so a floor left out has none, and destroying it removes every floor.
 - **Without values in the state** (Terraform 1.10 and 1.11+), as Vault's and AWS' providers allow:
   - **`ephemeral "roll_secrets_values"`** reads an environment for one run, never into the plan or
@@ -1406,7 +1407,8 @@ right folder: `decoy_used` (a decoy key's credential was used; only the project'
 the operator, see Decoys), `off_policy` (the project is below roll secrets' policy, "Guardrails": its `production`
 (`key` empty), its `leaks.rotate` (`environment` and `key` empty), or a sync of a kind the policy
 leaves out or storing a cloud key under `no_stored_cloud_keys` (`key` the sync's id; such a sync
-isn't also `stored_cloud_key`); the detail says the floor and how far it is), `production_unprotected` (the project's `production` has no protection
+isn't also `stored_cloud_key`), or a `breakglass` list naming someone under `no_breakglass`
+(`environment` and `key` empty); the detail says the floor and how far it is), `production_unprotected` (the project's `production` has no protection
 policy, as projects made before new ones started with it protected: checks, sandboxes and
 untrusted previews may read it and nothing there needs approval; the detail names what reaches it,
 owners, admins and developers who name it by handle, and the checks and sandboxes that resolved it
@@ -3482,7 +3484,8 @@ roll secrets doctor                                            # this machine's 
 roll secrets check   [.env.example] [--strict]                # keys a template names that the environment lacks
 roll secrets scan    [PATH…] | --staged [--allow-unstored]    # this project's values and credentials it doesn't hold: where, never what
 roll secrets scan    --store [KEY=]FILE:LINE                   # move one such credential in; prints what to write instead
-roll secrets scan    --pre-receive [--budget 4s] [--fail-open]  # a git server's hook: refuse a push that adds a value (a scan-only token is enough)
+roll secrets scan    --pre-receive [--budget 4s] [--fail-open] [--breakglass-unrecorded]  # a git server's hook: refuse a push that adds a value (a scan-only token is enough)
+roll secrets breakglass [off | LOGIN… | token:ID… | *]         # who may push past the hook with `git push -o breakglass` (default: no one)
 roll secrets render  config.tpl [--out config.yml [--watch --exec CMD]]   # ${KEY} filled in
 roll secrets export  [--format dotenv|json|shell|yaml|docker|kubernetes] [--name N --namespace NS]
 roll secrets mount   .env [--format dotenv|json]               # a named pipe each read of which gets the current values ("A local .env")
@@ -4252,23 +4255,43 @@ refuses any push whose new commits add a value of the project, whoever pushes it
 
 - **What it reads.** git's `old new ref` lines on stdin. The pushed objects are still in git's
   quarantine (`GIT_QUARANTINE_PATH`, `GIT_OBJECT_DIRECTORY`, `GIT_ALTERNATE_OBJECT_DIRECTORIES`),
-  and the git the hook runs reads them from there. Only commits no existing ref reaches are read
-  (`git log -p --cc -U0 <new…> --not --all`): a new branch's own commits, an update's new ones,
-  nothing for a deletion. A merge's lines count only when they're new against every parent; a
-  side's lines were checked in that side's commits.
+  and the git the hook runs reads them from there. Only commits no branch or tag reaches are read
+  (`git log -p --cc -U0 <new…> --not --branches --tags`): a new branch's own commits, an update's
+  new ones, nothing for a deletion. Only branches and tags count as checked, because only pushes
+  make them: a fork's pull request at `refs/pull/<n>/head` (GitHub Enterprise Server), a merge
+  request at `refs/merge-requests/<n>/head` (GitLab) or `refs/keep-around/*` never went through
+  the hook, so merging one (the web UI's merge runs pre-receive too) reads its commits. Branches
+  and tags from before the hook was installed weren't checked either: scan them once with
+  `roll secrets scan` in a clone. A merge's lines count only when they're new against every
+  parent; a side's lines were checked in that side's commits.
 - **What it asks.** Each added line's candidates, cut as `roll secrets scan` cuts them, of 16
-  characters or more, go to `POST …/scan` (below), 20,000 at a time. Lines over 4 KiB are skipped;
-  it reads at most 256 MiB of patches and keeps at most 32 MiB of candidates.
-- **What it says.** Each value found as `file:line  KEY (environment) in <commit>`, never the
+  characters or more, go to `POST …/scan` (below), 20,000 at a time, with the pusher and the refs
+  (below). Lines are read whole up to 8 MiB (a minified bundle with a key inlined is one line); a
+  longer one makes the scan incomplete, as reading more than 256 MiB of patches or keeping more
+  than 32 MiB of candidates does.
+- **What it says.** Each value found as `file:line  a value of <environment> in <commit>` (with
+  the key's name, `KEY (environment)`, only for a token that may also `read` there), never the
   value, and it exits 1, so the push is refused.
 - **A time budget.** `--budget` (default `4s`, inside GitHub Enterprise Server's 5 s). A scan that
   can't finish (the budget runs out, the push is bigger than it reads, roll doesn't answer) fails
   closed: the push is refused and the hook says why. `--fail-open` lets such a push through with
   a warning instead. A value it found is refused either way.
+- **Who pushed.** Each call names the pusher as the git server tells its hooks:
+  `GITHUB_USER_LOGIN` (GitHub Enterprise Server), `GL_USERNAME` (GitLab), `GITEA_PUSHER_NAME`
+  (Gitea, Forgejo), `REMOTE_USER` (git over HTTP), or else `USER` (git over SSH, the account git
+  runs as), and the refs pushed. Both go in the audit row as text (`… by alice to
+  refs/heads/main`); a pusher counts for nothing but the break-glass list below.
 - **Break glass.** `git push -o breakglass` (the repo needs `receive.advertisePushOptions true`)
-  lets the push through. It's still scanned, and roll records it as `secrets.scan.breakglass`,
-  with the keys it found, in the project's audit log. When roll can't be reached, the push still
-  goes through and the hook says roll couldn't record it.
+  lets the push through when the project allows it: `roll secrets breakglass alice bob` (pushers'
+  logins), `token:<id>` (every push through that hook's token) or `*` (anyone), `off` for no one,
+  which is the default (`PATCH …` `breakglass`, audited as `scan.breakglass`; roll secrets' policy
+  can rule it out everywhere with `no_breakglass`, "Guardrails"). The hook asks roll
+  first: roll refuses a pusher the list doesn't name (403, audited), and records the push as
+  `secrets.scan.breakglass` with the pusher and refs before anything is read. It's still scanned,
+  and the keys it found go in the same log. When roll can't be reached (no answer, a 5xx, the
+  budget gone), the push is refused: break glass never passes unrecorded. Only
+  `--breakglass-unrecorded` on the hook's command line lets such a push through, saying it went
+  unrecorded; set it only where the git server's own log names pushers.
 - **Its token.** `roll secrets -p <project> tokens create pre-receive --scan-only` (or the
   dashboard's Access → New token → Scan-only, which labels such tokens `scan-only`) makes a token
   that has only `scan`, in every environment unless `--for-env` names some. It can't read a name
@@ -4302,15 +4325,25 @@ GitHub.com and GitLab.com don't run custom pre-receive hooks: there, the GitHub 
 value at landing. A check run through roll code's GitHub App for mirrored repos isn't built.
 
 **The `scan` right.** `POST …/scan` answers whether whole candidates are values of the project,
-and where (`{index, key, environment, path}`), never a value and never a near miss. It's its own
+and in which environment (`{index, environment}`; the key and folder too, `{index, key,
+environment, path}`, only where the token may also `read`), never a value and never a near miss. It's its own
 action in roll's permission model (docs/permissions.md), apart from `read` and `reveal`, so the
 server's token can't read production even if it leaks. What stops it from being an oracle:
 
 - only candidates of at least 16 characters, with two kinds of character and 3 bits of entropy a
   character, are tried; anything shorter or plainer never matches, so a guess at a PIN, a word or
   a short password isn't confirmed;
+- the same floor holds for each part of a candidate that someone who knows its shape wouldn't
+  know: a URL's password (or its user, with no password), its query's secret-named values
+  (`key`, `token`, `sig`…) or else its last path segment, the values of a `k=v;k=v` list, the
+  right side of `user:…` or `name=…`, and each word of text with spaces. A match is a candidate
+  equal to a whole value, so this is the value's own floor: `postgres://app:hunter2@db:5432/shop`
+  is never tried, however long the text around the password, and a guess wrapped in a known
+  connection string isn't confirmed. Such a value is still found by `roll secrets scan`, by a
+  token that may read it, and by roll code;
 - sensitive keys and personal values never match (as with `POST …/leaks`);
-- at most 60 calls and 100,000 candidates a minute per token (429 after that), counted in the
+- at most 60 calls and 20,000 candidates tried a minute per token, and 20,000 a minute and
+  200,000 an hour per project, whichever tokens ask (429 after that, audited), counted in the
   database every node shares;
 - every call is audited (`secrets.scan`, the number of candidates and the keys found, never a
   candidate), and a finding is the feed's `scan.finding`.
@@ -6508,6 +6541,9 @@ replaces it, and a floor left out has none:
   is refused, and each
   machine credential issued after the policy (an exchange or a refresh) lives at most `d` days,
   whatever its chain was made with.
+- `no_breakglass: true`: no project lets a push past its pre-receive hooks ("On the git server: a
+  pre-receive hook"). Setting a project's `breakglass` list to anyone is refused, and so is every
+  `git push -o breakglass` (audited), whatever a list made before the policy says.
 
 Each write the policy covers reads it in its own transaction, on the request as parsed. A write
 that would go, or stay, below a floor answers 403 naming the policy and the floor: `roll secrets'
@@ -6518,7 +6554,8 @@ may only tighten it`.
   `production_approvals` approvals, and their `leaks.rotate` is `managed` when the policy says so.
   A `production` environment made later is born the same way.
 - **A restore comes back within the policy.** A backup's lower `production` comes back at the
-  floor and its `leaks.rotate` as `managed`, each with a warning. A sync the policy rules out
+  floor, its `leaks.rotate` as `managed` and its `breakglass` list as no one under
+  `no_breakglass`, each with a warning. A sync the policy rules out
   (its kind, or a stored cloud key) isn't restored, and the warning says which floor stopped it.
 - **Existing projects aren't rewritten.** Each project's Health lists how far it is from the
   policy (`off_policy`), and the next write to each setting must meet it.
@@ -6867,8 +6904,8 @@ isn't in the workspace is 404.
 | --- | --- | --- |
 | `GET /v1/secrets/health` | | `{ok, key: "env"\|"kms"\|"file"\|"shares"\|"missing", resealed: "all"\|number\|null, customer_managed, issuer_pulled: {kid, pulled_at, detail}[], links: string[], syncs: string[]}` (`links`, `syncs`: the kinds registered; `issuer_pulled`: issuer keys an emergency rotation pulled in the last 30 days) |
 | `GET`, `POST /v1/secrets/unseal` | `{share}` (`POST`) | `{sealed, have?, need?, error?}`: a sealed node's progress (public; see "Starting sealed"); 429 with `Retry-After` past the limits |
-| `GET` | | `{project, environments: Environment[], previews: number, history_days: number \| null, validity_checks: "on" \| "off", leaks: {rotate: "managed" \| "off"}, deletion: {window_days, holds: string \| null}}` (`deletion`: what deleting the workspace project takes with it, as its refusal says it, and how many days it stays recoverable; `leaks.rotate`: "When a value leaks") |
-| `PATCH` | `{history_days?, validity_checks?: "on" \| "off", leaks?: {rotate: "managed" \| "off"}}` | what changed, as given (`admin`; validity checks audited as `validity.checks`, leak rotation as `leaks.rotate`) |
+| `GET` | | `{project, environments: Environment[], previews: number, history_days: number \| null, validity_checks: "on" \| "off", leaks: {rotate: "managed" \| "off"}, breakglass: string[], deletion: {window_days, holds: string \| null}}` (`deletion`: what deleting the workspace project takes with it, as its refusal says it, and how many days it stays recoverable; `leaks.rotate`: "When a value leaks") |
+| `PATCH` | `{history_days?, validity_checks?: "on" \| "off", leaks?: {rotate: "managed" \| "off"}, breakglass?: string[]}` (`breakglass`: who may push past a pre-receive hook, at most 100 of pushers' logins, `token:<id>` and `*`; `[]` no one) | what changed, as given (`admin`; validity checks audited as `validity.checks`, leak rotation as `leaks.rotate`, break glass as `scan.breakglass`) |
 | `GET /grid?path=` | | `Grid` |
 | `GET /environments` | | `Environment[]` in order |
 | `POST /environments` | `NewEnvironment` | 201 `Environment` |
@@ -6984,7 +7021,7 @@ isn't in the workspace is 404.
 | `GET /v1/secrets/findings` | | `{project, project_name, findings: Finding[]}[]`: every project's findings the caller may read, projects with none left out |
 | `GET /health?code=` | | `Finding[]`, worst first: every standard environment's findings the caller may read (`read` on the project) |
 | `POST /leaks` | `{candidates: string[], leaked?: boolean}` (at most 20,000; `leaked`: the text was published, so what it matches is a leak, answered as in "When a value leaks": it rotates a managed key only where the caller may `write`; 400 with the guard header); header `X-Roll-Guard: 1` from a credential guard (roll MCP's check of what a tool call would write), audited as `secrets.guard` instead of `secrets.scan`; rolld keeps the header only on a request roll MCP's guard tool makes in process, and removes anyone else's | `{index, key, environment, path}[]`: candidates that are values the caller may reveal (`read` on the project) |
-| `POST /scan` | `{candidates: string[], breakglass?: boolean}` (at most 20,000; `breakglass`: the push it checks goes through anyway, audited as `secrets.scan.breakglass`) | `{index, key, environment, path}[]`: candidates that are values, in the environments and folders the caller may `scan` ("On the git server: a pre-receive hook"); only candidates of 16 characters or more with fair entropy are tried, never sensitive or personal values; 429 past 60 calls or 100,000 candidates a minute per caller |
+| `POST /scan` | `{candidates: string[], breakglass?: boolean, pusher?: string, refs?: string[]}` (at most 20,000 candidates and 100 refs; `breakglass`: the push it checks goes through anyway, audited as `secrets.scan.breakglass`, 403 unless the project's `breakglass` list names the token or `pusher`; `pusher` and `refs` go in the audit row as text) | `{index, environment, key?, path?}[]`: candidates that are values, in the environments and folders the caller may `scan`, with `key` and `path` only where it may also `read` ("On the git server: a pre-receive hook"); only candidates of 16 characters or more with fair entropy, in each part someone who knows the value's shape wouldn't know, are tried, never sensitive or personal values; 429 past 60 calls or 20,000 tried candidates a minute per caller, or 20,000 a minute or 200,000 an hour per project |
 | `POST /validity` | `{credentials: {value, pair?}[]}` (at most 200; `pair`: an AWS access key id's secret access key) | `{validity_checks: "on" \| "off", results: Checked[]}`, one per credential in order (`write` on the project); while checks are off, `results` is empty and nothing is asked. `Checked` is `{fingerprint, kind, result: "live" \| "invalid" \| "unknown", account?, checked_at?, why?, rotator?: "aws-iam" \| "github-app"}` ("Is it live?") |
 | `GET /unstored/{fingerprint}` | | `Checked`: a credential's last check (`read`; 404 when it hasn't been checked) |
 | `GET /kms` | | `{key: string \| null}`: the customer-managed key wrapping the project's data key (admin) |
@@ -7043,8 +7080,8 @@ isn't in the workspace is 404.
 | `DELETE /github-apps/{id}` | | 204; 409 while a key links to it or a lease holds a token (`admin`) |
 | `GET /v1/secrets/oidc/.well-known/openid-configuration` | | roll's issuer's discovery document (public) |
 | `GET /v1/secrets/oidc/jwks` | | roll's issuer's public keys (public; served without clouds too, for the audit log's legacy digests): the key signing, the next one before it signs, the one it replaced until that one's tokens expire |
-| `GET /v1/secrets/policy` | | `Guardrails` (the operator's, or an admin account's): `{production_approvals: number \| null, leaks_rotate: "managed" \| null, sync_kinds: string[] \| null, no_stored_cloud_keys: boolean, max_token_days: number \| null, updated_at: number \| null, updated_by: string \| null}` ("Guardrails") |
-| `PUT /v1/secrets/policy` | `{production_approvals?, leaks_rotate?, sync_kinds?, no_stored_cloud_keys?, max_token_days?}` | `Guardrails` (the operator's, or an admin account's): replaces the policy, a field left out having no floor; 400 for an unknown sync kind or a number out of range; audited in every project as `policy.set`. A write below a floor anywhere else answers 403 naming it |
+| `GET /v1/secrets/policy` | | `Guardrails` (the operator's, or an admin account's): `{production_approvals: number \| null, leaks_rotate: "managed" \| null, sync_kinds: string[] \| null, no_stored_cloud_keys: boolean, max_token_days: number \| null, no_breakglass: boolean, updated_at: number \| null, updated_by: string \| null}` ("Guardrails") |
+| `PUT /v1/secrets/policy` | `{production_approvals?, leaks_rotate?, sync_kinds?, no_stored_cloud_keys?, max_token_days?, no_breakglass?}` | `Guardrails` (the operator's, or an admin account's): replaces the policy, a field left out having no floor; 400 for an unknown sync kind or a number out of range; audited in every project as `policy.set`. A write below a floor anywhere else answers 403 naming it |
 | `POST /v1/secrets/issuer/rotate` | `{now?, retire?}` | `{kid, signs_from, pulled}` (the operator's): the next issuer key, published now, signing two days later; the one already waiting, if any. `{now: true, retire: kid}` (both or neither): a new key signs now and `kid` leaves the JWKS at once (`pulled`), and the digest keys' `legacy` list; 404 for a kid not in it |
 | `GET /v1/secrets/audit/jwks` | | `{keys, legacy, pulled}` (public): the audit log's digest keys (Ed25519 JWKs, retired ones too, never pulled ones), the issuer keys whose legacy digests count (RSA JWKs), and `[{kid, pulled_at}]` for keys pulled in an emergency, either kind. What `audit verify --file` takes |
 | `POST /v1/secrets/audit/key/rotate` | `{now?, retire?}` | `{kid, pulled, signed}` (the operator's): a new digest key signs now and the previous one retires. `{now: true, retire: kid}` (both or neither): `kid` is pulled too, and every project's chain is signed under the new key before the answer (`signed`, how many); 404 for a kid not roll's or pulled already |

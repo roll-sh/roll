@@ -756,6 +756,12 @@ type Plan = {
    *  the service sets none. Absent without one, and for a tree's own Dockerfile. A Procfile's `web:`
    *  (`worker:` for a worker) is `start` when the service names none. */
   release?: string;
+  /** What its framework suggests a new service sets, offered by New service, never applied on
+   *  its own: `pre_deploy` its migrations (Rails' db:prepare with db/migrate, Django's migrate,
+   *  Laravel's migrate --force with database/migrations, Prisma's migrate deploy with
+   *  prisma/migrations; none beside a Procfile's release), `health_path` the health route its
+   *  routes declare (Rails' and Laravel's /up). */
+  suggest?: { pre_deploy?: string; health_path?: string };
   /** roll's Next.js adapter is in the image (a Next 16 server, not its own Dockerfile): its
    *  instances share ISR, fetch and "use cache" entries (README, "Next.js across instances"). */
   next_cache?: boolean;
@@ -820,6 +826,10 @@ type Metrics = {
     instance: string; deployment: string;
     minutes: number[]; cpu: number[] /* cores, average over the minute */; memory_bytes: number[] /* the minute's peak */;
   }[];
+  volume?: {                 // a service with a volume: its size by the hour (measured hourly on its owner, 90 days kept)
+    size_gb: number; points: { hour: number /* hours since 1970 */; bytes: number }[];
+    full_in_days: number | null /* at its last week's pace (a least-squares line; a day of points at least), null while it isn't growing */;
+  };
 };
 
 type Usage = {

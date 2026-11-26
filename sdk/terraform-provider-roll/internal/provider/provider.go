@@ -71,7 +71,7 @@ func (p *rollProvider) Resources(context.Context) []func() resource.Resource {
 		newRotatorResource, newSaasRotatorResource, newFolderPolicyResource, newAuditSinkResource, newGitHubAppResource, newAwsRoleResource, newAwsUserResource, newCloudAccountResource, newRequiredKeysResource, newKmsKeyResource, newProjectResource, newSecretsPolicyResource,
 		newAppServiceResource, newAppVariableResource, newAppDomainResource, newAppEnvironmentResource, newAppLinkResource, newAppNotificationResource,
 		newMachineClientResource,
-		newSearchClusterResource, newSearchKeyResource, newSearchRepoResource}
+		newSearchClusterResource, newSearchKeyResource, newSearchRepoResource, newSearchSynonymsResource, newSearchRulesetResource}
 }
 
 func (p *rollProvider) DataSources(context.Context) []func() datasource.DataSource {

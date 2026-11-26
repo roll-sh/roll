@@ -937,6 +937,8 @@ export interface Plan {
   uses?: ("postgres" | "redis")[];
   /** The variables its `.env.example` (or `.env.sample`, `.env.template`, `.env.dist`, `example.env`) names: asked for before the first deploy. */
   variables?: string[];
+  /** What its framework suggests a new service sets (its migrations, its health route): offered, never applied on its own. */
+  suggest?: { pre_deploy?: string; health_path?: string };
   /** A static site's function directories (`netlify/functions`, `api`) the `functions` builder runs. */
   functions?: string[];
   /** A static site's edge functions: run before its files on their paths by its `-fn` service. */
@@ -1396,6 +1398,8 @@ export interface Metrics {
   over_capacity: number[];
   /** Each instance's own last hour by minute (those it has now), whatever the range. */
   by_instance?: InstanceSeries[];
+  /** Its volume's size by the hour (measured hourly), and when it'd be full at its last week's pace. */
+  volume?: { size_gb: number; points: { hour: number; bytes: number }[]; full_in_days: number | null };
 }
 
 /** One instance's last hour (Railway's per replica): cores in use on average each minute, and
