@@ -1229,7 +1229,7 @@ static TOOLS: &[Tool] = &[
         b("date_detection", Ty::Bool, "Whether new strings that look like dates map as dates"),
         b("numeric_detection", Ty::Bool, "Whether new strings that look like numbers map as numbers"),
         b("dynamic_date_formats", Ty::Arr, "The date formats date detection tries"),
-        b("_meta", Ty::Obj, "The application's notes about the mapping, replacing the old ones whole (keep roll_import: an imported index's record)"),
+        b("_meta", Ty::Obj, "The application's notes about the mapping, replacing the old ones whole (keep what's there: an imported index's record is in it)"),
     ]),
     t("search_get_mapping", "Get a mapping", "An index's field mappings (Elasticsearch's GET /<index>/_mapping).", "search", "GET", "/v1/search/clusters/{cluster}/indices/{index}/mapping", &[req("cluster", "Cluster"), req("index", "Index")]),
     t("search_index_settings", "Index settings", "An index's settings (Elasticsearch's GET /<index>/_settings).", "search", "GET", "/v1/search/clusters/{cluster}/indices/{index}/settings", &[req("cluster", "Cluster"), req("index", "Index")]),
