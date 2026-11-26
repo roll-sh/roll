@@ -1917,7 +1917,7 @@ deterministic (#396).
    on `logs-roll.apps-*`), and previews giving a branch only its data credential (#607). Not yet
    built: only a
    unit test covers previews' search branch. The MCP sweep (`pnpm test:mcp-sweep`) runs a
-   developer's own flow: a person signed in, with a token scoped to search, makes a cluster in the
+   person's own flow: a project admin signed in, with a token scoped to search, makes a cluster in the
    project, bulk-indexes and finds the document through `/v1/mcp`, and their read-only token is
    refused the bulk. Project members landed in #808
    (`feature/search-members`): search is a member product, so a member's role in a cluster's project
