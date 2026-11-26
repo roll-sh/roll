@@ -6926,13 +6926,13 @@ async fn enrich_connectors_and_show_tables_take_the_callers_privileges() {
         (Method::PUT, "/tenant-a-1/_doc/1?refresh=true", json!({"t": "x"})),
         (Method::PUT, "/tenant-b-src/_doc/1?refresh=true", json!({"t": "x", "secret": "s-of-b"})),
         (Method::PUT, "/_enrich/policy/p", json!({"match": {"indices": "tenant-b-src", "match_field": "t", "enrich_fields": ["secret"]}})),
-        (Method::POST, "/_enrich/policy/p/_execute", json!({})),
+        (Method::POST, "/_enrich/policy/p/_execute", Value::Null),
         (Method::PUT, "/content-b/_doc/1?refresh=true", json!({"t": "keep"})),
         (Method::PUT, "/_connector/c1", json!({"index_name": "content-a", "service_type": "postgresql"})),
         (Method::PUT, "/_security/role/r", json!({"cluster": ["manage_connector"], "indices": [{"names": ["tenant-a-*", "content-a"], "privileges": ["all"]}]})),
         (Method::PUT, "/_security/user/u", json!({"password": "u-password-1", "roles": ["r"]})),
     ] {
-        let (s, v) = e.es(&owner, &pw, m.clone(), path, Some(body)).await;
+        let (s, v) = e.es(&owner, &pw, m.clone(), path, Some(body).filter(|b| !b.is_null())).await;
         assert!(s < 300, "{m} {path}: {s} {v}");
     }
     let user = "u@indirect";
