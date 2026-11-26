@@ -487,7 +487,7 @@ const ROOT_BOX = `JSON.stringify((() => {
 // the rest in the index's order. `changed` are paths in the repo; a story's `importPath` and a
 // module's name are its project's (`./src/Button.stories.tsx`), so a path matches by its end.
 // The graph is the preview's code's: it only orders, and its walk is bounded.
-const touchedFirst = (listed, changed, stats) => {
+const touchedFirst = (listed, changed, stats, first = []) => {
   const norm = (p) => String(p || "").replace(/ \+ \d+ modules?$/, "").replace(/[?#].*$/, "").replace(/^\.\//, "").replace(/^\/+/, "");
   const ends = (path, tail) => !!tail && (path === tail || path.endsWith("/" + tail));
   const dir = (p) => (p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : "");
@@ -511,6 +511,8 @@ const touchedFirst = (listed, changed, stats) => {
     }
   }
   const score = (e) => {
+    // Asked for first (a default branch's preview: the stories the open changes took).
+    if (first.includes(e.id)) return 4;
     const own = norm(e.importPath);
     if (!own) return 0;
     if (touched(own)) return 3;
@@ -521,6 +523,16 @@ const touchedFirst = (listed, changed, stats) => {
   return listed.map((e, i) => [score(e), i, e]).sort((a, b) => b[0] - a[0] || a[1] - b[1]).map((x) => x[2]);
 };
 // touched-first: end
+// The stories to take before the rest ($STORIES_FIRST, roll's: a default branch's preview takes
+// those the open changes took and it hasn't, so each has main's to be compared with).
+const FIRST = (() => {
+  try {
+    const f = JSON.parse(process.env.STORIES_FIRST || "[]");
+    return Array.isArray(f) ? f.filter((i) => typeof i === "string" && STORY_ID.test(i)).slice(0, 40) : [];
+  } catch {
+    return [];
+  }
+})();
 // The paths the change touched ($STORIES_CHANGED, roll's: the repo's, since the default branch).
 const CHANGED = (() => {
   try {
@@ -553,7 +565,7 @@ const stories = async (sessionId) => {
     } catch {}
   }
   // The ones the change touched first, so the 40 a run takes are those that matter.
-  const listed = touchedFirst(entries.filter((e) => e && typeof e.id === "string" && STORY_ID.test(e.id) && (e.type == null || e.type === "story")), CHANGED, stats);
+  const listed = touchedFirst(entries.filter((e) => e && typeof e.id === "string" && STORY_ID.test(e.id) && (e.type == null || e.type === "story")), CHANGED, stats, FIRST);
   const picked = listed.slice(0, 40);
   const out = [];
   const until = Date.now() + 100000;

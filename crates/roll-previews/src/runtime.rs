@@ -2139,7 +2139,7 @@ impl Runtime {
             let started = std::time::Instant::now();
             let r = match opts.stories.as_deref().filter(|p| crate::settings::page_path_ok(p) && p.ends_with('/')) {
                 Some(at) => {
-                    let mut r = self.stories_in(name, port, at, &opts.changed).await;
+                    let mut r = self.stories_in(name, port, at, &opts.changed, &opts.stories_first).await;
                     // Then the first of them in the other browsers asked for, once Chromium's run
                     // knows which the change touched first. Best effort: Chromium's stand alone.
                     if let Ok((shots, _)) = &mut r
@@ -2238,7 +2238,7 @@ impl Runtime {
     /// A service's Storybook stories (`github.storybook`; Chromatic's stories), served at `at`: a
     /// run of their own in its network, locked down as the screenshot's is, each story a page
     /// (`story:<id>`).
-    async fn stories_in(&self, name: &str, port: u16, at: &str, changed: &[String]) -> anyhow::Result<(Vec<crate::ports::PageShot>, crate::Skipped)> {
+    async fn stories_in(&self, name: &str, port: u16, at: &str, changed: &[String], first: &[String]) -> anyhow::Result<(Vec<crate::ports::PageShot>, crate::Skipped)> {
         let shot = format!("roll-previews-story-{}", name.trim_start_matches("roll-previews-"));
         let mut args = shot_args(&shot, name, port);
         // axe-core for each story's accessibility, on stdin as the page run's is.
@@ -2255,6 +2255,10 @@ impl Runtime {
         }
         if !fit.is_empty() {
             args.extend(["--env".into(), format!("STORIES_CHANGED={}", serde_json::to_string(&fit)?)]);
+        }
+        let first: Vec<&String> = first.iter().filter(|i| crate::settings::story_id_ok(i)).take(crate::settings::MAX_STORIES).collect();
+        if !first.is_empty() {
+            args.extend(["--env".into(), format!("STORIES_FIRST={}", serde_json::to_string(&first)?)]);
         }
         args.extend([
             self.cfg.screenshot_image.clone(),
@@ -3433,6 +3437,9 @@ mod tests {
         };
         assert_eq!(order(stats), "c--1,e--1,b--1,a--1,d--1");
         assert_eq!(order("null"), "c--1,b--1,a--1,d--1,e--1", "without a graph, by files alone");
+        // A default branch's preview: the stories asked for first, before the rest.
+        let out = std::process::Command::new("node").arg("-e").arg(format!("{src}\nconsole.log(touchedFirst({entries}, [], null, [\"d--1\"]).map((e) => e.id).join(','))")).output().expect("node");
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "d--1,a--1,b--1,c--1,e--1");
     }
 
     /// A stories run's report is the preview's code's: each story once, by an id Storybook would

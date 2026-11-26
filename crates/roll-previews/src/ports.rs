@@ -420,6 +420,9 @@ pub struct ShotOptions {
     /// The paths the change touched since the default branch, for its stories (`stories`): the
     /// ones it touched are taken first.
     #[serde(default)]
+    /// Story ids to take before the rest (a default branch's preview: those the project's open
+    /// changes took and it hasn't, so each has a main to be compared with).
+    pub stories_first: Vec<String>,
     pub changed: Vec<String>,
     /// The app's sign-in before the pages (`github.login`, a trusted preview's), its typed
     /// variables resolved.
