@@ -1725,6 +1725,11 @@ contexts of x-pack's version allowlist), `EsObj::Version`, `contexts::version_al
 | POST   | `/v1/search/clusters/{id}/unload`                | put it to sleep now |
 | GET    | `/v1/search/clusters/{id}/indices`               | indices with docs, size, health |
 | POST   | `/v1/search/clusters/{id}/request`               | run one REST request (dashboard console) |
+| GET    | `/v1/search/clusters/{id}/saved-searches`        | Discover's saved searches, by name |
+| POST   | `/v1/search/clusters/{id}/saved-searches`        | save the view `{name, search}` (201; 409 on a name taken) |
+| GET    | `/v1/search/clusters/{id}/saved-searches/{search}` | one saved search |
+| PUT    | `/v1/search/clusters/{id}/saved-searches/{search}` | rename or replace its view `{name?, search?}` |
+| DELETE | `/v1/search/clusters/{id}/saved-searches/{search}` | (204) |
 | GET    | `/v1/search/clusters/{id}/usage`                 | metering, cost vs Elastic Cloud / Amazon OpenSearch Service |
 | GET    | `/v1/search/clusters/{id}/metrics`               | request rate, latency percentiles, errors and rejections by kind (`?range=1h\|24h\|14d`) |
 | GET    | `/v1/search/clusters/{id}/slowlog`               | the search and indexing slow logs, newest first (at most 500) |
