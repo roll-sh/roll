@@ -29,8 +29,10 @@ pub const METHODS: [&str; 9] = ["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD
 pub const DEFAULT_HEADERS: [&str; 7] = ["Authorization", "X-Elastic-Client-Meta", "X-Requested-With", "Accept", "User-Agent", "Content-Length", "Content-Type"];
 /// `http.cors.max-age`' default: 20 days, in seconds.
 pub const DEFAULT_MAX_AGE: i64 = 1_728_000;
-/// `http.cors.exposed-headers`' default.
-pub const EXPOSED_HEADERS: &str = "X-elastic-product";
+/// `http.cors.exposed-headers`' default, plus the variant headers of roll's A/B tests on search
+/// applications (`search_es::xpack::entsearch::experiments`), so a page can read which variant
+/// answered.
+pub const EXPOSED_HEADERS: &str = "X-elastic-product,X-Roll-Experiment,X-Roll-Variant";
 /// The most origins a cluster may allow.
 pub const MAX_ORIGINS: usize = 32;
 /// The most headers a cluster may allow.

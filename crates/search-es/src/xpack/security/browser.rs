@@ -39,6 +39,9 @@
 //!   characters and charged as an item
 //!   ([`charge_work`]); a `text_similarity_reranker` within `max_rerank_window`, charged one
 //!   item per [`RERANK_DOCS_PER_ITEM`] documents.
+//! - **Events** (`limits.events`): `search_click` and `roll_conversion` events about the
+//!   indices and search applications the key reaches, at most [`MAX_EVENT_BYTES`]; counted for
+//!   the key's own identity (`crate::xpack::entsearch::experiments`), never stored.
 //! - **Items**: an `_msearch`'s searches and an `_mget`'s documents, as the engine parsed them,
 //!   are charged to the key's rate limits before they run ([`charge_items`]); more than
 //!   `max_items` is a 429.
@@ -81,6 +84,8 @@ const APIS: &[&str] = &[
     // Chat, under its own policy entry (`limits.chat`, `crate::xpack::chat::limits`): refused
     // by the handler to a key whose entry doesn't name the profile.
     "roll.chat.answer", "roll.chat.completions", "roll.chat.models",
+    // A page's clicks and conversions, with `limits.events` (refused by the handler otherwise).
+    "search_application.post_behavioral_analytics_event",
 ];
 
 /// The end customer a derived key's request is for ([`super::derived`]): its user and the rate
@@ -138,7 +143,13 @@ pub struct Policy {
     pub allow_expensive_queries: bool,
     /// What it may chat with (`limits.chat`; `None`: no chat at all).
     pub chat: Option<crate::xpack::chat::limits::ChatPolicy>,
+    /// It may post `search_click` and `roll_conversion` events about what it reaches
+    /// (`limits.events`): counted, never stored.
+    pub events: bool,
 }
+
+/// The largest analytics event a browser key may post.
+pub const MAX_EVENT_BYTES: usize = 4 * 1024;
 
 impl Default for Policy {
     fn default() -> Policy {
@@ -152,6 +163,7 @@ impl Default for Policy {
             allow_scripts: false,
             allow_expensive_queries: false,
             chat: None,
+            events: false,
         }
     }
 }
@@ -191,6 +203,7 @@ impl Policy {
             allow_scripts: b("allow_scripts"),
             allow_expensive_queries: b("allow_expensive_queries"),
             chat: crate::xpack::chat::limits::ChatPolicy::of(l),
+            events: b("events"),
         }
     }
 

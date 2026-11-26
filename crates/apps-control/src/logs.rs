@@ -818,7 +818,8 @@ impl Search {
             if negate {
                 chars.next();
             }
-            let word: String = if chars.peek() == Some(&'"') {
+            let quoted = chars.peek() == Some(&'"');
+            let word: String = if quoted {
                 chars.next();
                 chars.by_ref().take_while(|c| *c != '"').collect()
             } else {
@@ -831,7 +832,8 @@ impl Search {
             };
             match word.as_str() {
                 "" => {}
-                "OR" if !negate => any.push(std::mem::take(&mut terms)),
+                // `"OR"` in quotes is the word.
+                "OR" if !negate && !quoted => any.push(std::mem::take(&mut terms)),
                 w => terms.push((w.to_lowercase(), negate)),
             }
         }
@@ -858,6 +860,7 @@ mod search_tests {
         assert!(s("error -health", "error saving") && !s("error -health", "error in /health"));
         assert!(s("--verbose", "ran with --verbose") && s("-1", "exit -1"), "a flag or a number is a word");
         assert!(s("timeout OR refused", "connection refused") && s("timeout OR refused", "read timeout") && !s("timeout OR refused", "ok"));
+        assert!(s("\"OR\"", "a OR b") && !s("\"OR\"", "a b"), "quoted, OR is a word");
         assert_eq!(Search::parse("   "), None);
     }
 }

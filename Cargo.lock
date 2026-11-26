@@ -7293,6 +7293,7 @@ dependencies = [
  "roll-cluster",
  "roll-net",
  "roll-oidc",
+ "roll-secrets-ref",
  "roll-workspace",
  "serde",
  "serde_json",
