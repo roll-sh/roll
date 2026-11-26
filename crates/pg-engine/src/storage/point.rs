@@ -114,23 +114,34 @@ impl PointReader {
     }
 
 
-    /// `get_raw` in a store writing column blocks (storage format 5): a row of a column block
-    /// found in its key column, made of the columns `cols` marks alone (None: all), the others
-    /// NULL.
+    /// `get_raw` in a store writing column blocks (storage format 5), for a reader that decodes
+    /// rows itself: a column block's row found in its key column given as its block and row
+    /// (`Found::Col`), not made; any other version's value as stored.
     #[inline(never)]
-    pub fn get_raw_cols(&mut self, key: &[u8], cols: Option<&[bool]>) -> Result<Option<Version>> {
+    pub fn get_raw_found(&mut self, key: &[u8]) -> Result<Option<(u64, Option<Found>)>> {
         self.room();
+        let ts = self.ts;
         let b = &mut self.bufs;
         b.seek.clear();
         b.seek.extend_from_slice(key);
-        b.seek.extend_from_slice(&(!self.ts).to_be_bytes());
+        b.seek.extend_from_slice(&(!ts).to_be_bytes());
         let view = &self.view;
-        let hit = match newest_above_l1(view, key, &b.seek, &mut b.held, &mut b.pos)? {
-            Some(h) => Some(h),
-            None if view.l1.is_empty() => None,
-            None => l1_get_cols(&view.l1, self.bloom_last, b.held.get_mut(view.imm.len() + view.l0.len()), key, &b.seek, &mut b.pos, cols)?,
-        };
-        Ok(deleted_by_range(view, key, hit, self.ts))
+        let bytes = |h: Option<Version>| deleted_by_range(view, key, h, ts).map(|(t, v)| (t, v.map(Found::Bytes)));
+        if let Some(h) = newest_above_l1(view, key, &b.seek, &mut b.held, &mut b.pos)? {
+            return Ok(bytes(Some(h)));
+        }
+        if view.l1.is_empty() {
+            return Ok(None);
+        }
+        let slot = view.imm.len() + view.l0.len();
+        match l1_find_col(&view.l1, b.held.get_mut(slot), key, &b.seek, &mut b.pos)? {
+            Some(Some((blk, row, vts))) => match view.rdels.is_empty() {
+                false if let Some(r) = view.rdels.covering(key, vts, ts) => Ok(Some((r.ts, None))),
+                _ => Ok(Some((vts, Some(Found::Col(blk, row))))),
+            },
+            Some(None) => Ok(None),
+            None => Ok(bytes(file_get(&view.l1, self.bloom_last, b.held.get_mut(slot), key, &b.seek, &mut b.pos)?)),
+        }
     }
 
     /// The newest version of `key` visible at the reader's snapshot, range deletions applied;
@@ -532,28 +543,29 @@ fn make_col_rows(colrows: &[(usize, usize, u32)], blocks: &[(usize, usize, Arc<s
     }
 }
 
-/// A read of `key` (seek key `seek`) in a column block's key column: its version (None: none
-/// at or before the seek key's), the row made of the columns `cols` marks alone (None: all),
-/// `pos` left at no entry. None: not found there (seek the entries).
-fn key_get_cols(block: &super::sst::Block, key: &[u8], seek: &[u8], pos: &mut BlockPos, cols: Option<&[bool]>) -> Option<Option<Version>> {
-    let (row, same, vts) = block.key_seek(seek)?;
-    debug_assert!(!same || key.len() + 8 == seek.len());
-    pos.unset();
-    Some(same.then(|| (vts, Some(block.col_row_at(row, cols)))))
+/// A row a read found (`PointReader::get_raw_found`): its stored bytes, or a column block's
+/// row left unmade (the reader decodes its columns from the block).
+pub enum Found {
+    Bytes(Bytes),
+    Col(Arc<super::sst::Block>, u32),
 }
 
-/// `file_get` of L1 in a store writing column blocks (storage format 5): a column block's row
-/// found in its key column (the held block's, then the file's block's), made of the columns
-/// `cols` marks alone (None: all); else as `file_get` reads it.
-fn l1_get_cols(ssts: &[Arc<SstReader>], bloom: bool, mut held: Option<&mut Held>, key: &[u8], seek: &[u8], pos: &mut BlockPos, cols: Option<&[bool]>) -> Result<Option<Version>> {
-    if let Some((block, hpos)) = held.as_deref_mut().and_then(|h| h.holding(seek))
-        && block.has_keys()
-        && let Some(hit) = key_get_cols(block, key, seek, hpos, cols)
+/// `key` (seek key `seek`) in L1 through a column block's key column (the held block's, then the
+/// file's block's): Some(Some((block, row, its commit ts))), Some(None) none at or before the seek
+/// key's; None: not answered so (read it as `file_get` does). `pos` left at no entry; the
+/// file's block held. (No bloom filter: the key column finds a key that isn't there.)
+fn l1_find_col(ssts: &[Arc<SstReader>], mut held: Option<&mut Held>, key: &[u8], seek: &[u8], pos: &mut BlockPos) -> Result<Option<Option<(Arc<super::sst::Block>, u32, u64)>>> {
+    if let Some(h) = held.as_deref_mut()
+        && let Some(blk) = h.block.as_ref()
+        && h.from.as_slice() <= seek
+        && blk.last_key().is_some_and(|l| seek <= l)
+        && blk.has_keys()
+        && let Some((row, same, vts)) = blk.key_seek(seek)
     {
-        return Ok(hit);
+        h.pos.unset();
+        return Ok(Some(same.then(|| (blk.clone(), row, vts))));
     }
     let f = ssts.partition_point(|s| user_key(&s.meta.last_key) < key);
-    // (No bloom filter: the key column finds a key that isn't there; `file_get` checks it.)
     if let Some(sst) = ssts.get(f)
         && key >= user_key(&sst.meta.first_key)
     {
@@ -561,16 +573,18 @@ fn l1_get_cols(ssts: &[Arc<SstReader>], bloom: bool, mut held: Option<&mut Held>
         if b < sst.block_count() {
             let block = sst.block(b)?;
             if block.has_keys()
-                && let Some(hit) = key_get_cols(&block, key, seek, pos, cols)
+                && let Some((row, same, vts)) = block.key_seek(seek)
             {
-                if let Some(slot) = held.as_deref_mut() {
-                    slot.keep(block, seek, pos);
+                debug_assert!(!same || key.len() + 8 == seek.len());
+                pos.unset();
+                if let Some(slot) = held {
+                    slot.keep(block.clone(), seek, pos);
                 }
-                return Ok(hit);
+                return Ok(Some(same.then_some((block, row, vts))));
             }
         }
     }
-    file_get(ssts, bloom, held, key, seek, pos)
+    Ok(None)
 }
 
 /// `get_sorted_cols`' plan for a key in a column block with a key column (`Block::key_seek`).

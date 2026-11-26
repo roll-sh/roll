@@ -1539,17 +1539,19 @@ impl Store {
         }
     }
 
-    /// `get_with`, a row of a column block (storage format 5) made of the columns `cols` marks
-    /// alone, the others NULL (`PointReader::get_raw_cols`).
-    pub fn get_cols_with(&self, r: &mut point::PointReader, key: &[u8], cols: &[bool]) -> Result<Option<(u64, Option<Bytes>)>> {
+    /// `get_with` (out-of-line values put back) in a store writing column blocks (storage format
+    /// 5), for a reader that decodes rows itself: a column block's row as its block and row
+    /// (`PointReader::get_raw_found`).
+    pub fn get_found_with(&self, r: &mut point::PointReader, key: &[u8]) -> Result<Option<point::Found>> {
         let ts = r.ts();
         let hit = match self.hot.get(key, ts) {
-            Some(hit) => hit,
-            None => r.get_raw_cols(key, Some(cols))?,
+            Some(hit) => hit.map(|(t, v)| (t, v.map(point::Found::Bytes))),
+            None => r.get_raw_found(key)?,
         };
         match hit {
-            Some((vts, Some(v))) if toast::has_external(&v) => Ok(Some((vts, Some(toast::resolve(r.view(), key, v, ts)?)))),
-            other => Ok(other),
+            Some((_, Some(point::Found::Bytes(v)))) if toast::has_external(&v) => Ok(Some(point::Found::Bytes(toast::resolve(r.view(), key, v, ts)?))),
+            Some((_, v)) => Ok(v),
+            None => Ok(None),
         }
     }
 

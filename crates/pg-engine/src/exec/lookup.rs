@@ -13,6 +13,7 @@
 //! change (not modelled, or every page all-visible); the scans' statistics are counted on
 //! the executor's thread as the stage ends (`flush`).
 
+use crate::storage::point::Found;
 use super::Row;
 use super::kernel::{K, StoredCmps, compile};
 use super::parscan::Decode;
@@ -41,6 +42,10 @@ pub fn note_started() {
 /// Keys a worker keeps the rows of (a small table's: `Lookup::cache`).
 const CACHE_KEYS: usize = 1 << 16;
 
+/// A kept table's rows in `LookupScratch::cache_cols`.
+#[derive(Clone)]
+struct ColRows(std::rc::Rc<Vec<Value>>);
+
 /// A worker's scans of one stage: the scans made and rows fetched since its counts were
 /// last taken, and the rows of the keys it looked up (a small table's), read at the same
 /// snapshot (a cache only saves reading them again: the counts are the scans').
@@ -48,6 +53,9 @@ const CACHE_KEYS: usize = 1 << 16;
 pub struct LookupScratch {
     /// A kept table's rows by index key (`Lookup::cache`).
     cache: super::fasthash::HashMap<Vec<u8>, std::rc::Rc<Vec<Value>>>,
+    /// `cache` in a store writing column blocks (`Lookup::rows_cols`): a map of its own type, so
+    /// format 4's map code keeps its one caller (inlined there).
+    cache_cols: super::fasthash::HashMap<Vec<u8>, ColRows>,
     loops: u64,
     fetched: u64,
     /// The worker's reader of the rows' keys, kept from lookup to lookup: the blocks the
@@ -189,8 +197,8 @@ pub struct Lookup {
     /// A row of a column block (storage format 5) is made of these alone, the others NULL
     /// (`PointReader::get_sorted_cols`).
     reads: Option<Arc<[bool]>>,
-    /// `reads` for its single rows too: its store writes column blocks (storage format 5),
-    /// whose rows are made of those columns alone (`Store::get_cols_with`).
+    /// Its store writes column blocks (storage format 5): its single rows are decoded from
+    /// their blocks' columns (`rows_cols`).
     cols: Option<Arc<[bool]>>,
 }
 
@@ -420,18 +428,28 @@ impl Lookup {
         // does: the rows after it aren't fetched.)
         let first = matches!(self.kind, JoinKind::Semi | JoinKind::Anti);
         if first && !self.cache {
-            return self.first_row::<C>(l, start, out, sc);
+            return if C { self.first_row_cols(l, start, out, sc) } else { self.first_row(l, start, out, sc) };
         }
-        let found = match sc.cache.get(start.as_slice()) {
+        // (A store writing column blocks keeps its own memo, `cache_cols`: its instance of this
+        // body calling format 4's map too took format 4's inlined copy of it, TPC-H q09 +0.12%.)
+        let hit = if C { sc.cache_cols.get(start.as_slice()).map(|r| &r.0) } else { sc.cache.get(start.as_slice()) };
+        let found = match hit {
             Some(rows) => rows.clone(),
             None => {
-                let Some(rows) = self.fetch::<C>(start, sc) else { return false };
+                let Some(rows) = (if C { self.fetch_cols(start, sc) } else { self.fetch(start, sc) }) else { return false };
                 let rows = std::rc::Rc::new(rows);
                 if self.cache {
-                    if sc.cache.len() >= CACHE_KEYS {
-                        sc.cache.clear();
+                    if C {
+                        if sc.cache_cols.len() >= CACHE_KEYS {
+                            sc.cache_cols.clear();
+                        }
+                        sc.cache_cols.insert(start.clone(), ColRows(rows.clone()));
+                    } else {
+                        if sc.cache.len() >= CACHE_KEYS {
+                            sc.cache.clear();
+                        }
+                        sc.cache.insert(start.clone(), rows.clone());
                     }
-                    sc.cache.insert(start.clone(), rows.clone());
                 }
                 rows
             }
@@ -472,13 +490,203 @@ impl Lookup {
         entry_keys(&self.store, self.ts, self.unique, start, sc)
     }
 
-    /// Row `d` at the snapshot, through the worker's reader (None inside: not visible). `C`: a
-    /// store writing column blocks (`rows_cols`), the row of the columns read alone.
-    fn get<const C: bool>(&self, d: &[u8], reader: &mut Option<crate::storage::point::PointReader>) -> Option<Option<bytes::Bytes>> {
-        match (C, &self.cols) {
-            (true, Some(c)) => row_at_cols(&self.store, self.ts, d, reader, c),
-            _ => row_at(&self.store, self.ts, d, reader),
+    /// Row `d` at the snapshot, through the worker's reader (None inside: not visible).
+    fn get(&self, d: &[u8], reader: &mut Option<crate::storage::point::PointReader>) -> Option<Option<bytes::Bytes>> {
+        row_at(&self.store, self.ts, d, reader)
+    }
+
+    /// `decode_into` of row `row` of column block `blk` (`Found::Col`): the columns needed
+    /// decoded from the block's columns (`ColDir::value`, then as a stored value), the others
+    /// NULL, those added since the rows were stored their values. `buf`: scratch.
+    fn decode_col_into(&self, blk: &crate::storage::sst::Block, row: u32, out: &mut Vec<Value>, buf: &mut Vec<u8>) -> crate::error::Result<()> {
+        use super::pipe::put;
+        let dir = blk.col_dir().expect("a column block");
+        let d = &blk.data()[..];
+        let base = out.len();
+        super::pipe::nulls(out, self.width);
+        let r = (|| {
+            let row_out = &mut out[base..];
+            let n = dir.ncols as usize;
+            let need = self.decode.need.as_deref();
+            for i in 0..self.last.min(n) {
+                if need.is_none_or(|nd| nd[i]) {
+                    buf.clear();
+                    dir.value(d, i, row as usize, buf);
+                    put(row_out, i, crate::storage::row::decode_value(buf, &mut 0)?);
+                }
+            }
+            for i in n.min(self.width)..self.width {
+                if let Some(v) = self.decode.missing[i].as_ref().filter(|_| need.is_none_or(|nd| nd[i])) {
+                    put(row_out, i, v.clone());
+                }
+            }
+            Ok(())
+        })();
+        if r.is_err() {
+            truncate_row(out, base);
         }
+        r
+    }
+
+    /// `decode_into` of a row `get_found_with` found.
+    fn decode_found(&self, f: &Found, out: &mut Vec<Value>, buf: &mut Vec<u8>) -> crate::error::Result<()> {
+        match f {
+            Found::Bytes(b) => self.decode_into(b, out),
+            Found::Col(blk, row) => self.decode_col_into(blk, *row, out, buf),
+        }
+    }
+
+    /// `add` of a row `get_found_with` found: a column block's row decoded from its columns,
+    /// then the filter and the join condition. With comparisons over stored values
+    /// (`stored`), which pass most rows over before they're decoded, its row is made of the
+    /// columns read (`reads`) and taken as `add` takes a stored row.
+    fn add_found(&self, l: &[Value], f: &Found, out: &mut Vec<Value>, buf: &mut Vec<u8>) -> Add {
+        let (blk, row) = match f {
+            Found::Bytes(b) => return self.add(l, b, out),
+            Found::Col(blk, row) => (blk, *row),
+        };
+        if self.stored.is_some() {
+            buf.clear();
+            blk.rows_into(&[row], self.reads.as_deref(), buf, &mut Vec::with_capacity(1));
+            return self.add(l, buf, out);
+        }
+        let base = out.len();
+        if self.decode_col_into(blk, row, out, buf).is_err() {
+            return Add::Bad;
+        }
+        let view = Joined::Pair { l, r: super::pipe::Inner::plain(&out[base..]), keep: None };
+        let mut got = Add::Kept;
+        for k in [self.filter.as_ref(), self.cond.as_ref()].into_iter().flatten() {
+            match k.passes(&view) {
+                Some(true) => {}
+                Some(false) => {
+                    got = Add::Out;
+                    break;
+                }
+                None => {
+                    got = Add::Left;
+                    break;
+                }
+            }
+        }
+        if !matches!(got, Add::Kept) {
+            truncate_row(out, base);
+        }
+        got
+    }
+
+    /// `fetch` in a store writing column blocks (`rows_cols`): rows of column blocks decoded
+    /// from their columns.
+    fn fetch_cols(&self, start: &[u8], sc: &mut LookupScratch) -> Option<Vec<Value>> {
+        self.entries(start, sc)?;
+        let dkeys = std::mem::take(&mut sc.dkeys);
+        let out = (|| {
+            let (mut rows, mut buf) = (Vec::new(), Vec::new());
+            // (Fetched in key order; the rows then taken in the entries' order.)
+            let mut sorted: Vec<&[u8]> = dkeys.iter().map(Vec::as_slice).collect();
+            sorted.sort_unstable();
+            sorted.dedup();
+            let mut found: Vec<(&[u8], Found)> = Vec::with_capacity(sorted.len());
+            for k in sorted {
+                if let Some(f) = row_found(&self.store, self.ts, k, &mut sc.reader)? {
+                    found.push((k, f));
+                }
+            }
+            rows.reserve(dkeys.len() * self.width);
+            for d in &dkeys {
+                if let Ok(i) = found.binary_search_by(|(k, _)| (*k).cmp(d.as_slice())) {
+                    self.decode_found(&found[i].1, &mut rows, &mut buf).ok()?;
+                }
+            }
+            Some(rows)
+        })();
+        sc.dkeys = dkeys;
+        out
+    }
+
+    /// `first_row` in a store writing column blocks (`rows_cols`).
+    fn first_row_cols(&self, l: &[Value], start: &[u8], out: &mut Vec<Value>, sc: &mut LookupScratch) -> bool {
+        if !self.unique {
+            return self.first_row_scanned_cols(l, start, out, sc);
+        }
+        if self.entries(start, sc).is_none() {
+            return false;
+        }
+        let dkeys = std::mem::take(&mut sc.dkeys);
+        let mut buf = Vec::new();
+        let r = (|| {
+            let mut read = 0u64;
+            for (n, d) in dkeys.iter().enumerate() {
+                let Some(f) = row_found(&self.store, self.ts, d, &mut sc.reader)? else { continue };
+                match self.add_found(l, &f, out, &mut buf) {
+                    Add::Kept => {
+                        read += 1;
+                        break;
+                    }
+                    Add::Out => read += 1,
+                    Add::Bad => return None,
+                    Add::Left => {
+                        read += 1;
+                        for d in &dkeys[n + 1..] {
+                            if let Some(Some(_)) = row_found(&self.store, self.ts, d, &mut sc.reader) {
+                                read += 1;
+                            }
+                        }
+                        sc.fetched += read;
+                        return Some(false);
+                    }
+                }
+            }
+            sc.fetched += read;
+            Some(true)
+        })();
+        sc.dkeys = dkeys;
+        match r {
+            Some(done) => {
+                sc.loops += 1;
+                done
+            }
+            None => false,
+        }
+    }
+
+    /// `first_row_scanned` in a store writing column blocks (`rows_cols`).
+    fn first_row_scanned_cols(&self, l: &[Value], start: &[u8], out: &mut Vec<Value>, sc: &mut LookupScratch) -> bool {
+        let LookupScratch { reader, entries, end, fetched, loops, .. } = sc;
+        prefix_end_into(start, end);
+        if !entries.as_mut().is_some_and(|s| s.reseek(start, end, self.ts)) {
+            *entries = Some(self.store.scan(start, end, self.ts));
+        }
+        let it = entries.as_mut().expect("made above");
+        let (mut read, mut buf) = (0u64, Vec::new());
+        while let Some(e) = it.next_value(|d| row_found(&self.store, self.ts, d, reader)) {
+            let Ok(Some(f)) = e else { return false };
+            let Some(f) = f else { continue };
+            match self.add_found(l, &f, out, &mut buf) {
+                Add::Kept => {
+                    read += 1;
+                    break;
+                }
+                Add::Out => read += 1,
+                Add::Bad => return false,
+                Add::Left => {
+                    read += 1;
+                    while let Some(e) = it.next_value(|d| row_found(&self.store, self.ts, d, reader)) {
+                        match e {
+                            Ok(Some(Some(_))) => read += 1,
+                            Ok(Some(None)) => {}
+                            _ => return false,
+                        }
+                    }
+                    *fetched += read;
+                    *loops += 1;
+                    return false;
+                }
+            }
+        }
+        *fetched += read;
+        *loops += 1;
+        true
     }
 
     /// Stored row `bytes` appended to `out` as `Decode::row` makes it: the table's columns,
@@ -573,14 +781,14 @@ impl Lookup {
 
     /// The rows of the index entries under key `start`, in index order, `width` values a
     /// row (None: a read failed, or a row didn't decode).
-    fn fetch<const C: bool>(&self, start: &[u8], sc: &mut LookupScratch) -> Option<Vec<Value>> {
+    fn fetch(&self, start: &[u8], sc: &mut LookupScratch) -> Option<Vec<Value>> {
         self.entries(start, sc)?;
         let dkeys = std::mem::take(&mut sc.dkeys);
         let out = (|| {
             let mut rows = Vec::new();
             if dkeys.len() <= 1 {
                 if let Some(d) = dkeys.first()
-                    && let Some(b) = self.get::<C>(d, &mut sc.reader)?
+                    && let Some(b) = self.get(d, &mut sc.reader)?
                 {
                     self.decode_into(&b, &mut rows).ok()?;
                 }
@@ -592,7 +800,7 @@ impl Lookup {
             sorted.dedup();
             let mut found: Vec<(&[u8], bytes::Bytes)> = Vec::with_capacity(sorted.len());
             for k in sorted {
-                if let Some(b) = self.get::<C>(k, &mut sc.reader)? {
+                if let Some(b) = self.get(k, &mut sc.reader)? {
                     found.push((k, b));
                 }
             }
@@ -610,9 +818,9 @@ impl Lookup {
 
     /// `rows` of a semi or anti join: the index entries' rows fetched one at a time in
     /// index order up to the first that passes the filter and the join condition.
-    fn first_row<const C: bool>(&self, l: &[Value], start: &[u8], out: &mut Vec<Value>, sc: &mut LookupScratch) -> bool {
+    fn first_row(&self, l: &[Value], start: &[u8], out: &mut Vec<Value>, sc: &mut LookupScratch) -> bool {
         if !self.unique {
-            return self.first_row_scanned::<C>(l, start, out, sc);
+            return self.first_row_scanned(l, start, out, sc);
         }
         if self.entries(start, sc).is_none() {
             return false;
@@ -621,7 +829,7 @@ impl Lookup {
         let r = (|| {
             let mut read = 0u64;
             for (n, d) in dkeys.iter().enumerate() {
-                let Some(b) = self.get::<C>(d, &mut sc.reader)? else { continue };
+                let Some(b) = self.get(d, &mut sc.reader)? else { continue };
                 match self.add(l, &b, out) {
                     Add::Kept => {
                         read += 1;
@@ -634,7 +842,7 @@ impl Lookup {
                         // whole fetch counts them.)
                         read += 1;
                         for d in &dkeys[n + 1..] {
-                            if let Some(Some(_)) = self.get::<C>(d, &mut sc.reader) {
+                            if let Some(Some(_)) = self.get(d, &mut sc.reader) {
                                 read += 1;
                             }
                         }
@@ -658,7 +866,7 @@ impl Lookup {
 
     /// `first_row` of a key not unique: its entries read from the index scan one at a time,
     /// none past the first whose row passes (no list of the entries' row keys made first).
-    fn first_row_scanned<const C: bool>(&self, l: &[Value], start: &[u8], out: &mut Vec<Value>, sc: &mut LookupScratch) -> bool {
+    fn first_row_scanned(&self, l: &[Value], start: &[u8], out: &mut Vec<Value>, sc: &mut LookupScratch) -> bool {
         let LookupScratch { reader, entries, end, fetched, loops, .. } = sc;
         prefix_end_into(start, end);
         if !entries.as_mut().is_some_and(|s| s.reseek(start, end, self.ts)) {
@@ -666,7 +874,7 @@ impl Lookup {
         }
         let it = entries.as_mut().expect("made above");
         let mut read = 0u64;
-        while let Some(e) = it.next_value(|d| self.get::<C>(d, reader)) {
+        while let Some(e) = it.next_value(|d| self.get(d, reader)) {
             let Ok(Some(b)) = e else { return false };
             let Some(b) = b else { continue };
             match self.add(l, &b, out) {
@@ -680,7 +888,7 @@ impl Lookup {
                     // (Left to the executor's thread: every visible row counted, as a
                     // whole fetch counts them.)
                     read += 1;
-                    while let Some(e) = it.next_value(|d| self.get::<C>(d, reader)) {
+                    while let Some(e) = it.next_value(|d| self.get(d, reader)) {
                         match e {
                             Ok(Some(Some(_))) => read += 1,
                             Ok(Some(None)) => {}
@@ -1050,14 +1258,12 @@ fn row_at(store: &Store, ts: u64, d: &[u8], reader: &mut Option<crate::storage::
     }
 }
 
-/// `row_at`, a row of a column block made of the columns `cols` marks alone.
+/// `row_at` in a store writing column blocks: a column block's row as its block and row
+/// (`Store::get_found_with`), decoded by `decode_col_into`.
 #[inline(never)]
-fn row_at_cols(store: &Store, ts: u64, d: &[u8], reader: &mut Option<crate::storage::point::PointReader>, cols: &[bool]) -> Option<Option<bytes::Bytes>> {
+fn row_found(store: &Store, ts: u64, d: &[u8], reader: &mut Option<crate::storage::point::PointReader>) -> Option<Option<Found>> {
     let r = reader.get_or_insert_with(|| store.point_reader(ts, false));
-    match store.get_cols_with(r, d, cols).ok()? {
-        Some((_, Some(b))) => Some(Some(b)),
-        _ => Some(None),
-    }
+    store.get_found_with(r, d).ok()
 }
 
 /// A plain btree index scan by equality that does nothing per row on the executor's

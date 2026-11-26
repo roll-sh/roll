@@ -1980,16 +1980,6 @@ impl Block {
         }
     }
 
-    /// Row `r` of a column block (`key_seek`'s), made of its columns (with `mask`, those it
-    /// marks alone, the others NULL).
-    #[inline(never)]
-    pub fn col_row_at(&self, r: u32, mask: Option<&[bool]>) -> Bytes {
-        let c = self.cols.as_ref().expect("a column block's row");
-        let mut v = Vec::new();
-        c.dir.rows_into(&self.data, &[r], mask, &mut v, &mut Vec::with_capacity(1));
-        Bytes::from(v)
-    }
-
     /// A column block's rows' bytes, made from its columns once (kept while the block lives:
     /// a compaction's or a one-pass reader's block), and where its value offsets start.
     #[cold]

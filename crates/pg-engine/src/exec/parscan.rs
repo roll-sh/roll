@@ -971,6 +971,26 @@ impl<'a> Pre<'a> {
     /// row aggregated into `pa` (or queued in `serial`, `joined_to`), as the row path's
     /// `run_stages` gives them. False, nothing done: a column that doesn't make a value here
     /// (the row path raises its error in place).
+    /// Whether row `r` of the run goes on as columns through the probe (`joined` takes it):
+    /// `joined`'s tests, nothing done. (A column's value failing to decode, invalid UTF-8 in a
+    /// stored row, fails `joined` after this said yes: the row path would fail it too.)
+    fn joins(&self, r: usize) -> bool {
+        use super::vector::Tri;
+        use crate::storage::cols::ColData;
+        let (Some(_), Some(p), Some(kc)) = (&self.join, self.probe, self.plan.probe) else { return false };
+        if self.odd[r] || self.tri[r] != Tri::T {
+            return false;
+        }
+        let Some(key) = self.cols.cols.get(kc).and_then(Option::as_ref) else { return false };
+        let x = match &key.data {
+            _ if key.nulls[r] => return false,
+            ColData::I32(v) => v[r] as i64,
+            ColData::I64(v) => v[r],
+            _ => return false,
+        };
+        p.built.int_span(x).is_some()
+    }
+
     fn joined(&mut self, r: usize, pa: &mut super::partial::Partials, serial: &mut Vec<(Row, u8, bool)>) -> bool {
         use crate::storage::cols::ColData;
         let (Some((cols, row)), Some(p), Some(kc)) = (&mut self.join, self.probe, self.plan.probe) else { return false };
@@ -2586,12 +2606,13 @@ fn partial_chunk<'d>(
             }
             pre.eval_nums();
             pre.fates(&mut fates);
-            // (The rows of column blocks the row path reads made, of this run.)
+            // (The rows of column blocks the row path reads made, of this run: not those the probe
+            // takes as columns, `Pre::joins`.)
             if let Some(l) = &mut scan.lazy
                 && !l.is_empty()
             {
                 let r = run.clone();
-                l.make_cols(scan.batch, r.start, &|i| i < r.end && fates[i - r.start] != DROP, scan.mask.as_deref());
+                l.make_cols(scan.batch, r.start, &|i| i < r.end && fates[i - r.start] != DROP && !pre.joins(i - r.start), scan.mask.as_deref());
             }
             let mut taken = 0;
             for (r, i) in run.enumerate() {
