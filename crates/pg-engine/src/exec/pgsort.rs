@@ -351,202 +351,212 @@ pub fn incremental_sort<T: Clone>(
     same: &mut dyn FnMut(&T, &T) -> bool,
     stats: &mut IncrStats,
 ) -> Vec<T> {
-    #[derive(PartialEq)]
-    enum St {
-        LoadFull,
-        ReadFull,
-        LoadPrefix,
-        ReadPrefix,
-    }
     let mut input = input.into_iter();
+    let mut sorter = IncrSort::new(bound);
     let mut out: Vec<T> = Vec::new();
-    let mut st = St::LoadFull;
-    let mut pivot: Option<T> = None;
-    let mut transfer: Option<T> = None;
-    let mut remaining = 0usize;
-    let mut outer_done = false;
-    let mut bound_done = 0usize;
-    let mut fullsorted: std::vec::IntoIter<T> = Vec::new().into_iter();
-    let mut prefix: Vec<T> = Vec::new();
-    let mut prefixsorted: std::vec::IntoIter<T> = Vec::new().into_iter();
-    // tuplesort with an optional bound: (rows, whether the bounded heap was used), counted
-    // as a full sort's group (0) or a prefix sort's (1).
-    let sort = |rows: Vec<T>, b: Option<usize>, c: &mut Cmp<T>, st: &mut IncrStats, g: usize| -> (Vec<T>, bool) {
-        let used = b.is_some_and(|b| rows.len() > b.saturating_mul(2));
-        let kept = (if used { b.unwrap_or(0).min(rows.len()) } else { rows.len() }) as u64;
-        st.groups[g] += 1;
-        st.methods[g] |= if used { 1 } else { 2 };
-        st.kept_total[g] += kept;
-        st.kept_max[g] = st.kept_max[g].max(kept);
-        (tuplesort(rows, b, c), used)
-    };
-    // switchToPresortedPrefixMode.
-    let switch = |fullsorted: &mut std::vec::IntoIter<T>,
-                  pivot: &mut Option<T>,
-                  transfer: &mut Option<T>,
-                  remaining: &mut usize,
-                  prefix: &mut Vec<T>,
-                  prefixsorted: &mut std::vec::IntoIter<T>,
-                  bound_done: &mut usize,
-                  suffix: &mut Cmp<T>,
-                  same: &mut dyn FnMut(&T, &T) -> bool,
-                  stats: &mut IncrStats|
-     -> St {
-        prefix.clear();
+    while let Some(batch) = sorter.next_batch(&mut input, full, suffix, same, stats) {
+        out.extend(batch);
+    }
+    out
+}
+
+#[derive(PartialEq)]
+enum IncrSt {
+    LoadFull,
+    ReadFull,
+    LoadPrefix,
+    ReadPrefix,
+}
+
+/// `incremental_sort`'s state between its sorted batches (ExecIncrementalSort's), so that
+/// an Incremental Sort node gives out one batch at a time.
+pub struct IncrSort<T> {
+    bound: Option<usize>,
+    st: IncrSt,
+    pivot: Option<T>,
+    transfer: Option<T>,
+    remaining: usize,
+    outer_done: bool,
+    bound_done: usize,
+    fullsorted: std::vec::IntoIter<T>,
+    prefix: Vec<T>,
+    prefixsorted: std::vec::IntoIter<T>,
+    /// Rows given out, and whether the last batch was.
+    emitted: usize,
+    done: bool,
+}
+
+/// tuplesort with an optional bound: (rows, whether the bounded heap was used), counted as a
+/// full sort's group (0) or a prefix sort's (1).
+fn incr_group_sort<T: Clone>(rows: Vec<T>, b: Option<usize>, c: &mut Cmp<T>, st: &mut IncrStats, g: usize) -> (Vec<T>, bool) {
+    let used = b.is_some_and(|b| rows.len() > b.saturating_mul(2));
+    let kept = (if used { b.unwrap_or(0).min(rows.len()) } else { rows.len() }) as u64;
+    st.groups[g] += 1;
+    st.methods[g] |= if used { 1 } else { 2 };
+    st.kept_total[g] += kept;
+    st.kept_max[g] = st.kept_max[g].max(kept);
+    (tuplesort(rows, b, c), used)
+}
+
+impl<T: Clone> IncrSort<T> {
+    pub fn new(bound: Option<usize>) -> Self {
+        IncrSort {
+            bound,
+            st: IncrSt::LoadFull,
+            pivot: None,
+            transfer: None,
+            remaining: 0,
+            outer_done: false,
+            bound_done: 0,
+            fullsorted: Vec::new().into_iter(),
+            prefix: Vec::new(),
+            prefixsorted: Vec::new().into_iter(),
+            emitted: 0,
+            done: false,
+        }
+    }
+
+    /// switchToPresortedPrefixMode.
+    fn switch(&mut self, suffix: &mut Cmp<T>, same: &mut dyn FnMut(&T, &T) -> bool, stats: &mut IncrStats) -> IncrSt {
+        self.prefix.clear();
         let mut n = 0;
-        while n < *remaining {
-            if n == 0 && transfer.is_some() {
-                let t = transfer.clone().unwrap();
-                prefix.push(t.clone());
-                *pivot = Some(t);
+        while n < self.remaining {
+            if n == 0 && self.transfer.is_some() {
+                let t = self.transfer.clone().unwrap();
+                self.prefix.push(t.clone());
+                self.pivot = Some(t);
             } else {
-                let Some(t) = fullsorted.next() else { break };
-                *transfer = Some(t.clone());
-                if pivot.is_none() {
-                    *pivot = Some(t.clone());
+                let Some(t) = self.fullsorted.next() else { break };
+                self.transfer = Some(t.clone());
+                if self.pivot.is_none() {
+                    self.pivot = Some(t.clone());
                 }
-                if same(pivot.as_ref().unwrap(), &t) {
-                    prefix.push(t);
+                if same(self.pivot.as_ref().unwrap(), &t) {
+                    self.prefix.push(t);
                 } else {
-                    *pivot = None;
+                    self.pivot = None;
                     break;
                 }
             }
             n += 1;
         }
-        *remaining -= n;
-        if *remaining == 0 {
-            *pivot = transfer.take();
-            St::LoadPrefix
+        self.remaining -= n;
+        if self.remaining == 0 {
+            self.pivot = self.transfer.take();
+            IncrSt::LoadPrefix
         } else {
-            let b = bound.map(|b| b.saturating_sub(*bound_done));
-            let (rows, _) = sort(std::mem::take(prefix), b, suffix, stats, 1);
-            *prefixsorted = rows.into_iter();
-            if let Some(bd) = bound {
-                *bound_done = bd.min(*bound_done + n);
+            let b = self.bound.map(|b| b.saturating_sub(self.bound_done));
+            let (rows, _) = incr_group_sort(std::mem::take(&mut self.prefix), b, suffix, stats, 1);
+            self.prefixsorted = rows.into_iter();
+            if let Some(bd) = self.bound {
+                self.bound_done = bd.min(self.bound_done + n);
             }
-            St::ReadPrefix
+            IncrSt::ReadPrefix
         }
-    };
-    loop {
-        if bound.is_some_and(|b| out.len() >= b) {
-            out.truncate(bound.unwrap());
-            return out;
-        }
-        match st {
-            St::LoadFull => {
-                let cur_bound = bound.map(|b| b.saturating_sub(bound_done));
-                let min_group = cur_bound.map_or(MIN_GROUP, |c| c.min(MIN_GROUP));
-                let set_bound = cur_bound.filter(|c| *c < MIN_GROUP);
-                let mut batch: Vec<T> = Vec::new();
-                if let Some(p) = pivot.take() {
-                    batch.push(p.clone());
-                    if batch.len() == min_group {
-                        pivot = Some(p);
-                    }
-                }
-                loop {
-                    let Some(t) = input.next() else {
-                        outer_done = true;
-                        let (rows, _) = sort(std::mem::take(&mut batch), set_bound, full, stats, 0);
-                        fullsorted = rows.into_iter();
-                        st = St::ReadFull;
-                        break;
-                    };
-                    if batch.len() < min_group {
-                        batch.push(t.clone());
+    }
+
+    /// The next sorted batch of the output (None after the last), reading `input` only as
+    /// far as it takes.
+    pub fn next_batch(
+        &mut self,
+        input: &mut dyn Iterator<Item = T>,
+        full: &mut Cmp<T>,
+        suffix: &mut Cmp<T>,
+        same: &mut dyn FnMut(&T, &T) -> bool,
+        stats: &mut IncrStats,
+    ) -> Option<Vec<T>> {
+        let bound = self.bound;
+        loop {
+            if self.done || bound.is_some_and(|b| self.emitted >= b) {
+                self.done = true;
+                return None;
+            }
+            match self.st {
+                IncrSt::LoadFull => {
+                    let cur_bound = bound.map(|b| b.saturating_sub(self.bound_done));
+                    let min_group = cur_bound.map_or(MIN_GROUP, |c| c.min(MIN_GROUP));
+                    let set_bound = cur_bound.filter(|c| *c < MIN_GROUP);
+                    let mut batch: Vec<T> = Vec::new();
+                    if let Some(p) = self.pivot.take() {
+                        batch.push(p.clone());
                         if batch.len() == min_group {
-                            pivot = Some(t);
+                            self.pivot = Some(p);
                         }
-                    } else if pivot.as_ref().is_some_and(|p| same(p, &t)) {
-                        batch.push(t);
-                    } else {
-                        pivot = Some(t);
-                        if let Some(b) = bound {
-                            bound_done = b.min(bound_done + batch.len());
-                        }
-                        let (rows, _) = sort(std::mem::take(&mut batch), set_bound, full, stats, 0);
-                        fullsorted = rows.into_iter();
-                        st = St::ReadFull;
-                        break;
                     }
-                    if batch.len() > MAX_FULL_SORT_GROUP {
-                        pivot = None;
-                        let n = batch.len();
-                        let (rows, used) = sort(std::mem::take(&mut batch), set_bound, full, stats, 0);
-                        fullsorted = rows.into_iter();
-                        remaining = if used {
-                            cur_bound.map_or(n, |c| c.min(n))
-                        } else {
-                            n
+                    loop {
+                        let Some(t) = input.next() else {
+                            self.outer_done = true;
+                            let (rows, _) = incr_group_sort(std::mem::take(&mut batch), set_bound, full, stats, 0);
+                            self.fullsorted = rows.into_iter();
+                            self.st = IncrSt::ReadFull;
+                            break;
                         };
-                        st = switch(
-                            &mut fullsorted,
-                            &mut pivot,
-                            &mut transfer,
-                            &mut remaining,
-                            &mut prefix,
-                            &mut prefixsorted,
-                            &mut bound_done,
-                            suffix,
-                            same,
-                            stats,
-                        );
-                        break;
+                        if batch.len() < min_group {
+                            batch.push(t.clone());
+                            if batch.len() == min_group {
+                                self.pivot = Some(t);
+                            }
+                        } else if self.pivot.as_ref().is_some_and(|p| same(p, &t)) {
+                            batch.push(t);
+                        } else {
+                            self.pivot = Some(t);
+                            if let Some(b) = bound {
+                                self.bound_done = b.min(self.bound_done + batch.len());
+                            }
+                            let (rows, _) = incr_group_sort(std::mem::take(&mut batch), set_bound, full, stats, 0);
+                            self.fullsorted = rows.into_iter();
+                            self.st = IncrSt::ReadFull;
+                            break;
+                        }
+                        if batch.len() > MAX_FULL_SORT_GROUP {
+                            self.pivot = None;
+                            let n = batch.len();
+                            let (rows, used) = incr_group_sort(std::mem::take(&mut batch), set_bound, full, stats, 0);
+                            self.fullsorted = rows.into_iter();
+                            self.remaining = if used { cur_bound.map_or(n, |c| c.min(n)) } else { n };
+                            self.st = self.switch(suffix, same, stats);
+                            break;
+                        }
                     }
                 }
-            }
-            St::ReadFull | St::ReadPrefix => {
-                let src = if st == St::ReadFull {
-                    &mut fullsorted
-                } else {
-                    &mut prefixsorted
-                };
-                out.extend(src.by_ref());
-                if outer_done {
-                    if let Some(b) = bound {
-                        out.truncate(b);
-                    }
-                    return out;
-                }
-                st = if remaining > 0 {
-                    switch(
-                        &mut fullsorted,
-                        &mut pivot,
-                        &mut transfer,
-                        &mut remaining,
-                        &mut prefix,
-                        &mut prefixsorted,
-                        &mut bound_done,
-                        suffix,
-                        same,
-                        stats,
-                    )
-                } else {
-                    St::LoadFull
-                };
-            }
-            St::LoadPrefix => {
-                let mut n = 0;
-                loop {
-                    let Some(t) = input.next() else {
-                        outer_done = true;
-                        break;
-                    };
-                    if pivot.as_ref().is_some_and(|p| same(p, &t)) {
-                        prefix.push(t);
-                        n += 1;
+                IncrSt::ReadFull | IncrSt::ReadPrefix => {
+                    let src = if self.st == IncrSt::ReadFull { &mut self.fullsorted } else { &mut self.prefixsorted };
+                    let mut out: Vec<T> = src.by_ref().collect();
+                    if self.outer_done {
+                        self.done = true;
                     } else {
-                        pivot = Some(t);
-                        break;
+                        self.st = if self.remaining > 0 { self.switch(suffix, same, stats) } else { IncrSt::LoadFull };
+                    }
+                    if let Some(b) = bound {
+                        out.truncate(b - self.emitted);
+                    }
+                    self.emitted += out.len();
+                    if !out.is_empty() {
+                        return Some(out);
                     }
                 }
-                let b = bound.map(|b| b.saturating_sub(bound_done));
-                let (rows, _) = sort(std::mem::take(&mut prefix), b, suffix, stats, 1);
-                prefixsorted = rows.into_iter();
-                st = St::ReadPrefix;
-                if let Some(bd) = bound {
-                    bound_done = bd.min(bound_done + n);
+                IncrSt::LoadPrefix => {
+                    let mut n = 0;
+                    loop {
+                        let Some(t) = input.next() else {
+                            self.outer_done = true;
+                            break;
+                        };
+                        if self.pivot.as_ref().is_some_and(|p| same(p, &t)) {
+                            self.prefix.push(t);
+                            n += 1;
+                        } else {
+                            self.pivot = Some(t);
+                            break;
+                        }
+                    }
+                    let b = bound.map(|b| b.saturating_sub(self.bound_done));
+                    let (rows, _) = incr_group_sort(std::mem::take(&mut self.prefix), b, suffix, stats, 1);
+                    self.prefixsorted = rows.into_iter();
+                    self.st = IncrSt::ReadPrefix;
+                    if let Some(bd) = bound {
+                        self.bound_done = bd.min(self.bound_done + n);
+                    }
                 }
             }
         }
