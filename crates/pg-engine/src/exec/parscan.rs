@@ -349,11 +349,13 @@ pub struct DisplacedFill<F> {
     /// The next of `skip` and of `put`.
     at: (usize, usize),
     done: bool,
+    /// `batch`'s rows of column blocks left unmade (storage format 5: `fill_lazy`).
+    lz: LazyRows,
 }
 
 impl<F> DisplacedFill<F> {
     pub fn new(inner: F) -> Self {
-        DisplacedFill { inner, skip: Vec::new(), put: Vec::new(), batch: RowBatch::default(), at: (0, 0), done: false }
+        DisplacedFill { inner, skip: Vec::new(), put: Vec::new(), batch: RowBatch::default(), at: (0, 0), done: false, lz: LazyRows::default() }
     }
 
     /// Its lists in order.
@@ -364,7 +366,98 @@ impl<F> DisplacedFill<F> {
     }
 }
 
+impl<F: FillRows> DisplacedFill<F> {
+    /// `fill` of a source leaving rows of column blocks unmade (storage format 5): a row of
+    /// one goes into `b` unmade too (noted in `lazy`), the displaced rows put in as made.
+    #[cold]
+    #[inline(never)]
+    fn fill_displaced_lazy(&mut self, b: &mut RowBatch, lazy: &mut LazyRows, max: usize) -> Result<()> {
+        let DisplacedFill { inner, skip, put, batch, at, done, lz } = self;
+        let target = b.len() + max;
+        // (The run of `lz` the next row is in, or the first after it.)
+        let mut ri = 0usize;
+        while b.len() < target {
+            if batch.remaining() == 0 && !*done {
+                batch.clear();
+                lz.clear();
+                inner.fill_lazy(batch, lz, max)?;
+                *done = batch.is_empty();
+                ri = 0;
+            }
+            // (A stretch of one column block's run below the next key passed over and the next
+            // displaced row's anchor: into `b` unmade at once, one run noted.)
+            if !*done {
+                let i = batch.pos();
+                let runs = lz.runs();
+                while runs.get(ri).is_some_and(|r| (r.at + r.n) as usize <= i) {
+                    ri += 1;
+                }
+                if let Some(r) = runs.get(ri).filter(|r| r.at as usize <= i) {
+                    let end = ((r.at + r.n) as usize).min(i + (target - b.len()));
+                    let (sk, an) = (skip.get(at.0).map(Vec::as_slice), put.get(at.1).and_then(|p| p.1.as_deref()));
+                    let goes = |k: &[u8]| sk.is_none_or(|s| k < s) && an.is_none_or(|a| k < a);
+                    if goes(batch.key(i)) {
+                        let buf = lazy.buf_of(b, lz.block(r.buf));
+                        let mut j = i;
+                        while j < end && goes(batch.key(j)) {
+                            b.push_unmade(batch.key(j), buf, batch.value_len(j));
+                            j += 1;
+                        }
+                        lazy.note(b, j - i, r.row + (i as u32 - r.at));
+                        batch.set_pos(j);
+                        continue;
+                    }
+                }
+            }
+            if *done {
+                let Some((_, _, k, v)) = put.get(at.1) else { break };
+                b.push(k, v.clone());
+                at.1 += 1;
+                DISPLACED_ROWS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                continue;
+            }
+            let i = batch.pos();
+            let k = batch.key(i);
+            if let Some((_, Some(a), dk, dv)) = put.get(at.1)
+                && a.as_slice() <= k
+            {
+                b.push(dk, dv.clone());
+                at.1 += 1;
+                DISPLACED_ROWS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                continue;
+            }
+            while skip.get(at.0).is_some_and(|s| s.as_slice() < k) {
+                at.0 += 1;
+            }
+            if skip.get(at.0).is_some_and(|s| s.as_slice() == k) {
+                at.0 += 1;
+            } else {
+                match lz.row_of(i) {
+                    Some((blk, row)) => {
+                        let buf = lazy.buf_of(b, blk);
+                        lazy.push(b, k, buf, batch.value_len(i), row);
+                    }
+                    None => match batch.value_in(i) {
+                        (v, Some((buf, off))) => b.push_in(k, buf, off, v.len()),
+                        (v, None) => b.push_copy(k, v),
+                    },
+                }
+            }
+            batch.advance();
+        }
+        Ok(())
+    }
+}
+
 impl<F: FillRows> FillRows for DisplacedFill<F> {
+    fn lazy(&self) -> bool {
+        self.inner.lazy()
+    }
+
+    fn fill_lazy(&mut self, b: &mut RowBatch, lazy: &mut LazyRows, max: usize) -> Result<()> {
+        self.fill_displaced_lazy(b, lazy, max)
+    }
+
     fn fill(&mut self, b: &mut RowBatch, max: usize) -> Result<()> {
         let target = b.len() + max;
         while b.len() < target {
@@ -1296,6 +1389,16 @@ fn fill_lazy(f: &mut Box<dyn FillRows>, batch: &mut RowBatch, lazy: &mut LazyRow
     r
 }
 
+/// A lazy reader's columns told to its fill (`FillRows::read_cols`: an index chunk's fetches
+/// make rows of those). (Out of line: `Reader::for_decode` stays inlined in the workers' loop.)
+#[cold]
+#[inline(never)]
+fn fill_reads(src: &mut Source, mask: &Option<Arc<[bool]>>) {
+    if let Source::Fill(f) = src {
+        f.read_cols(mask.clone());
+    }
+}
+
 /// After `Pre::mark` of the rows from `from` on: those it doesn't drop made (all of them
 /// when it turned itself off, `off`: the row path reads every row after).
 #[cold]
@@ -1318,6 +1421,7 @@ impl<'c> Reader<'c> {
     fn for_decode(mut self, d: &Decode) -> Self {
         if self.lazy.is_some() {
             self.mask = d.need.clone();
+            fill_reads(self.src, &self.mask);
         }
         self
     }
@@ -1452,6 +1556,11 @@ pub struct IndexChunk {
     /// The fetch's scratch: the entries, a dense range's rows.
     ents: RowBatch,
     rows: RowBatch,
+    /// `rows`' rows of column blocks left unmade (storage format 5: `fill_lazy`).
+    lz: LazyRows,
+    /// The columns the reader reads (`FillRows::read_cols`): rows fetched by key are made of
+    /// those alone.
+    mask: Option<Arc<[bool]>>,
 }
 
 /// Where a chunk's entries come from.
@@ -1476,12 +1585,19 @@ impl IndexChunk {
     }
 
     fn with(entries: Entries, fetch: Option<(Arc<crate::storage::Store>, u64)>) -> IndexChunk {
-        IndexChunk { entries, fetch, err: None, done: false, ents: RowBatch::default(), rows: RowBatch::default() }
+        IndexChunk { entries, fetch, err: None, done: false, ents: RowBatch::default(), rows: RowBatch::default(), lz: LazyRows::default(), mask: None }
     }
 
     /// The rows of the next `FETCH` entries into `b`, in the entries' order.
     fn fetch_into(&mut self, b: &mut RowBatch) -> Result<()> {
-        let IndexChunk { entries, fetch, err, done, ents, rows } = self;
+        self.fetch_in::<false>(b, None)
+    }
+
+    /// `fetch_into`; `L` (with `lazy`): a dense range's rows of column blocks (storage format 5)
+    /// into `b` unmade, noted in `lazy`.
+    #[inline(always)]
+    fn fetch_in<const L: bool>(&mut self, b: &mut RowBatch, mut lazy: Option<&mut LazyRows>) -> Result<()> {
+        let IndexChunk { entries, fetch, err, done, ents, rows, lz, mask } = self;
         ents.clear();
         // (Each entry's data key, in the entries' order.)
         let ds: Vec<&[u8]> = match entries {
@@ -1529,7 +1645,14 @@ impl IndexChunk {
                 }
                 let place = |e: usize, d: &[u8]| if sorted { Ok(e) } else { keys.binary_search(&d) };
                 rows.clear();
-                match dense_rows(store, &keys, *ts, rows) {
+                let dense = match L {
+                    false => dense_rows(store, &keys, *ts, rows, |it, rows, n| it.fill_batch(rows, n)),
+                    true => {
+                        lz.clear();
+                        dense_rows(store, &keys, *ts, rows, |it, rows, n| it.fill_batch_lazy(rows, n, None, lz))
+                    }
+                };
+                match dense {
                     Err(e) => {
                         *done = true;
                         return Err(e);
@@ -1539,10 +1662,29 @@ impl IndexChunk {
                             if let Ok(j) = place(e, d)
                                 && let Some(i) = at[j]
                             {
+                                if L
+                                    && let Some(lazy) = lazy.as_deref_mut()
+                                    && let Some((blk, row)) = lz.row_of(i as usize)
+                                {
+                                    let buf = lazy.buf_of(b, blk);
+                                    lazy.push(b, d, buf, rows.value_len(i as usize), row);
+                                    continue;
+                                }
                                 match rows.value_in(i as usize) {
                                     (v, Some((buf, off))) => b.push_in(d, buf, off, v.len()),
                                     (v, None) => b.push_copy(d, v),
                                 }
+                            }
+                        }
+                    }
+                    // (Rows of column blocks made of the reader's columns alone.)
+                    Ok(None) if L && let Some(m) = mask.as_deref() => {
+                        let got = store.get_sorted_cols(&keys, *ts, true, m).inspect_err(|_| *done = true)?;
+                        for (e, d) in ds.iter().enumerate() {
+                            if let Ok(j) = place(e, d)
+                                && let Some(v) = &got[j]
+                            {
+                                b.push(d, v.clone());
                             }
                         }
                     }
@@ -1579,6 +1721,37 @@ impl FillRows for IndexChunk {
         }
         Ok(())
     }
+
+    fn lazy(&self) -> bool {
+        self.fetch.as_ref().is_some_and(|(s, _)| s.colblocks())
+    }
+
+    fn fill_lazy(&mut self, b: &mut RowBatch, lazy: &mut LazyRows, _max: usize) -> Result<()> {
+        self.fill_index_lazy(b, lazy)
+    }
+
+    fn read_cols(&mut self, mask: Option<Arc<[bool]>>) {
+        self.mask = mask;
+    }
+}
+
+impl IndexChunk {
+    /// `fill` leaving a dense range's rows of column blocks unmade (storage format 5).
+    #[cold]
+    #[inline(never)]
+    fn fill_index_lazy(&mut self, b: &mut RowBatch, lazy: &mut LazyRows) -> Result<()> {
+        let n = b.len();
+        while b.len() == n {
+            if let Some(e) = self.err.take() {
+                return Err(e);
+            }
+            if self.done {
+                break;
+            }
+            self.fetch_in::<true>(b, Some(lazy))?;
+        }
+        Ok(())
+    }
 }
 
 /// `Store::get_versions` of ascending `keys` of one integer key column close together (an
@@ -1586,7 +1759,7 @@ impl FillRows for IndexChunk {
 /// read as the range they span, a batch of rows at a time by reference, instead of a lookup
 /// each: the rows read into `rows`, and per key its row's place there (None: no row). None:
 /// not such keys.
-fn dense_rows(store: &crate::storage::Store, keys: &[&[u8]], ts: u64, rows: &mut RowBatch) -> Result<Option<Vec<Option<u32>>>> {
+fn dense_rows(store: &crate::storage::Store, keys: &[&[u8]], ts: u64, rows: &mut RowBatch, mut fill: impl FnMut(&mut crate::storage::Scan, &mut RowBatch, usize) -> Result<()>) -> Result<Option<Vec<Option<u32>>>> {
     if !super::scan::dense_keys(keys.len(), |i| keys[i], false) {
         return Ok(None);
     }
@@ -1596,12 +1769,13 @@ fn dense_rows(store: &crate::storage::Store, keys: &[&[u8]], ts: u64, rows: &mut
     let mut want = keys.iter().peekable();
     let mut from = rows.len();
     while want.peek().is_some() {
-        it.fill_batch(rows, keys.len() - out.len())?;
+        fill(&mut it, rows, keys.len() - out.len())?;
         if rows.len() == from {
             break;
         }
         for i in from..rows.len() {
-            let k = rows.get(i).0;
+            // (Its key alone: a row of a column block may be left unmade, `fill_lazy`.)
+            let k = rows.key(i);
             while want.next_if(|w| **w < k).is_some() {
                 out.push(None);
             }

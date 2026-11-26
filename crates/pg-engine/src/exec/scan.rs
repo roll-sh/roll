@@ -716,6 +716,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             fscan: None,
             fetch_calls: 0,
             dscan: None,
+            fmask: None,
             erow: Vec::new(),
             epos: 0,
             owned: false,
@@ -822,6 +823,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             fscan: None,
             fetch_calls: 0,
             dscan: None,
+            fmask: None,
             erow: Vec::new(),
             epos: 0,
             owned: false,
@@ -918,6 +920,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             fscan: None,
             fetch_calls: 0,
             dscan: None,
+            fmask: None,
             erow: Vec::new(),
             epos: 0,
             owned: false,
@@ -1085,6 +1088,7 @@ fn open_scan_as(
         fscan: None,
         fetch_calls: 0,
         dscan: None,
+        fmask: None,
         erow: Vec::new(),
         epos: 0,
         owned: false,
@@ -2209,6 +2213,7 @@ fn dense_bitmap_scan(
         fscan: None,
         fetch_calls: 0,
         dscan: None,
+        fmask: None,
         erow: Vec::new(),
         epos: 0,
         owned: false,
@@ -2610,11 +2615,11 @@ fn skip_entries(ix: &Index, scan: &crate::sql::plan::SkipScan, start: &[u8], end
     Ok(out)
 }
 
-/// The table columns a heap fetch's rows are read for: those decoded (`need`), the
-/// projection's (`pick` offers them as stored) and the filter's. A column block's rows
-/// (storage format 5) are made of these alone, the others NULL. None (whole rows): a row
-/// lock or DML's rows, a table whose rows go out whole (`sizing::tracked`, `emit`), no
-/// projection or `need` known.
+/// The table columns a heap fetch's rows are read for: those decoded (`need`, which the
+/// nodes above name: no scan of theirs reads others), a projection's (`pick` offers them as
+/// stored) and the filter's. A column block's rows (storage format 5) are made of these
+/// alone, the others NULL. None (whole rows): a row lock or DML's rows, a table whose rows go
+/// out whole (`sizing::tracked`, `emit`), no `need` known.
 #[cold]
 #[inline(never)]
 fn read_mask(p: &ScanPlan, need: Option<&[bool]>, proj: Option<&[u32]>, other: bool) -> Option<Arc<[bool]>> {
@@ -2623,7 +2628,7 @@ fn read_mask(p: &ScanPlan, need: Option<&[bool]>, proj: Option<&[u32]>, other: b
     }
     let mut mask = need?.to_vec();
     mask.resize(p.table.columns.len(), false);
-    for &c in proj? {
+    for &c in proj.unwrap_or_default() {
         *mask.get_mut(c as usize)? = true;
     }
     if let Some(f) = &p.filter
@@ -2736,6 +2741,8 @@ struct ScanNode {
     fetch_calls: u32,
     /// Dense fetches' raw scan of the table's rows, kept from batch to batch (`fetch_dense`).
     dscan: Option<Box<TxnScan>>,
+    /// `fetch_mask`, once worked out.
+    fmask: Option<Option<Arc<[bool]>>>,
     /// A secondary scan's rows for the entries in `erb` (`next_secondary_ref`): where in
     /// `rb` each entry's row is (`NO_ROW`: none visible), and the next entry to hand out.
     erow: Vec<u32>,
@@ -2969,6 +2976,20 @@ pub(super) fn fetch_rows(keys: &[Vec<u8>], ctx: &ExecCtx) -> Result<Vec<Option<b
     let txn = ctx.txn.borrow();
     match ctx.snapshot().as_deref() {
         Some(s) => get_sorted(&txn, keys, s, true),
+        None => keys.iter().map(|k| txn.get(k)).collect(),
+    }
+}
+
+/// `fetch_rows` for a reader of the columns `cols` marks alone: rows of column blocks (storage
+/// format 5) are made of those, the others NULL (`Txn::get_sorted_snap_cols`).
+fn fetch_rows_cols(keys: &[Vec<u8>], cols: &[bool], ctx: &ExecCtx) -> Result<Vec<Option<bytes::Bytes>>> {
+    if let Some(rows) = fetch_dense(keys, false, None, ctx)? {
+        return Ok(rows);
+    }
+    let txn = ctx.txn.borrow();
+    match ctx.snapshot().as_deref() {
+        Some(s) if keys.windows(2).all(|w| w[0] < w[1]) => txn.get_sorted_snap_cols(keys, s, cols),
+        Some(s) => txn.get_many_snap(keys, s),
         None => keys.iter().map(|k| txn.get(k)).collect(),
     }
 }
@@ -4407,12 +4428,27 @@ impl ScanNode {
             {
                 return Ok(rows);
             }
-            return fetch_rows(keys, ctx);
+            return match self.fetch_mask(ctx) {
+                Some(m) => fetch_rows_cols(keys, &m, ctx),
+                None => fetch_rows(keys, ctx),
+            };
         };
         if !self.toast_ready(&snap, ctx) {
             return fetch_rows(keys, ctx);
         }
         get_sorted(&ctx.txn.borrow(), keys, &snap, false)
+    }
+
+    /// The columns its rows fetched by key are read for, in a store writing column blocks
+    /// (storage format 5: their rows are made of those alone, `read_mask`). None: every column,
+    /// or a store without them. Worked out at the first fetch.
+    fn fetch_mask(&mut self, ctx: &ExecCtx) -> Option<Arc<[bool]>> {
+        self.fmask
+            .get_or_insert_with(|| {
+                let other = self.am.is_some() || self.ios_cols.is_some();
+                ctx.sess.db.store.colblocks().then(|| read_mask(&self.plan, self.need.as_deref(), self.proj.as_deref(), other)).flatten()
+            })
+            .clone()
     }
 
     /// The scan's reader of its rows' out-of-line values (`toast`), made as a scan of the
@@ -6153,6 +6189,7 @@ impl Node for ScanNode {
             fscan,
             fetch_calls,
             dscan,
+            fmask: _,
             erow,
             epos,
             owned,
@@ -7464,6 +7501,7 @@ fn keyed_scan(s: &ScanPlan, plan: ScanPlan, ix: &Index, keys: Keys, ctx: &ExecCt
         fscan: None,
         fetch_calls: 0,
         dscan: None,
+        fmask: None,
         erow: Vec::new(),
         epos: 0,
         owned: false,

@@ -1496,6 +1496,18 @@ impl Store {
         self.point_reader(ts, false).get_sorted(keys, resolve)
     }
 
+    /// `get_sorted`, rows of column blocks made of the columns `cols` marks alone, the others
+    /// NULL (`PointReader::get_sorted_cols`).
+    pub fn get_sorted_cols<K: AsRef<[u8]>>(&self, keys: &[K], ts: u64, resolve: bool, cols: &[bool]) -> Result<Vec<Option<Bytes>>> {
+        self.point_reader(ts, false).get_sorted_cols(keys, resolve, Some(cols))
+    }
+
+    /// Whether its files' blocks of rows are written as column blocks (`StoreOptions::
+    /// colblocks`): readers of some columns then ask for those alone.
+    pub fn colblocks(&self) -> bool {
+        self.opts.colblocks
+    }
+
     fn get_versions_with(&self, keys: &[&[u8]], ts: u64, resolve: bool) -> Result<Vec<Option<(u64, Option<Bytes>)>>> {
         debug_assert!(keys.windows(2).all(|w| w[0] < w[1]));
         // (The keys are rows an index or a bitmap named: the last level holds the ones no
@@ -1508,7 +1520,7 @@ impl Store {
     /// over the sources as they are now: made once the snapshot's commits are visible.
     /// `bloom_last`: keys that may not exist (the last level's bloom filters checked too).
     pub fn point_reader(&self, ts: u64, bloom_last: bool) -> point::PointReader {
-        point::PointReader::new(self.view(), ts, bloom_last)
+        point::PointReader::new(self.view(), ts, bloom_last, self.opts.colblocks)
     }
 
     /// `get_version` of `key` through `r` (at its snapshot), the hot ranges first; with a
@@ -1523,6 +1535,20 @@ impl Store {
             Some((vts, Some(v))) if resolve && toast::has_external(&v) => {
                 Ok(Some((vts, Some(toast::resolve(r.view(), key, v, ts)?))))
             }
+            other => Ok(other),
+        }
+    }
+
+    /// `get_with`, a row of a column block (storage format 5) made of the columns `cols` marks
+    /// alone, the others NULL (`PointReader::get_raw_cols`).
+    pub fn get_cols_with(&self, r: &mut point::PointReader, key: &[u8], cols: &[bool]) -> Result<Option<(u64, Option<Bytes>)>> {
+        let ts = r.ts();
+        let hit = match self.hot.get(key, ts) {
+            Some(hit) => hit,
+            None => r.get_raw_cols(key, Some(cols))?,
+        };
+        match hit {
+            Some((vts, Some(v))) if toast::has_external(&v) => Ok(Some((vts, Some(toast::resolve(r.view(), key, v, ts)?)))),
             other => Ok(other),
         }
     }
@@ -7215,7 +7241,16 @@ mod tests {
                 for i in (0..n + 3).step_by(17) {
                     out.push(format!("g {:?}", s.get(&key(i), ts).unwrap()));
                 }
-                let keys: Vec<Vec<u8>> = (0..n).step_by(5).map(key).collect();
+                // (Sorted multi-gets: in a column block's key column, keys there and not (deleted,
+                // past the end), and keys of another length, which it doesn't hold.)
+                let mut keys: Vec<Vec<u8>> = (0..n + 3).step_by(5).map(key).collect();
+                keys.extend((0..n).step_by(7).map(|i| {
+                    let mut k = key(i);
+                    k.push(0);
+                    k
+                }));
+                keys.sort();
+                keys.dedup();
                 let mut pr = s.point_reader(ts, false);
                 out.push(format!("m {:?}", pr.get_sorted(&keys, true).unwrap()));
                 for i in (0..n).step_by(97) {
@@ -7231,6 +7266,7 @@ mod tests {
             let m: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.path().join("MANIFEST")).unwrap()).unwrap();
             assert_eq!(m["format"], if on { sst::FORMAT_COLS } else { sst::FORMAT_DICT }, "colblocks {on}");
             assert_eq!(s.view().l1.iter().any(|f| f.meta.cols), on);
+            assert_eq!(s.view().l1.iter().any(|f| (0..f.block_count()).any(|b| f.block(b).unwrap().has_keys())), on, "key columns");
             assert_eq!(lazy_seen, on, "rows left unmade");
             assert_eq!(masked_nulls, on, "columns left out of rows made");
             seen.push(out);

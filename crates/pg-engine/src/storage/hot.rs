@@ -224,6 +224,8 @@ impl Hot {
     /// `get_version` of `key` at `ts` when a kept range holds a version of it (Some: the
     /// answer); None: the store answers (a key the range holds no version of at `ts` may
     /// be a deletion every snapshot sees that the chain dropped).
+    /// (Inlined: `Store::get_with` kept it in its body before `get_cols_with` called it too.)
+    #[inline(always)]
     pub(super) fn get(&self, key: &[u8], ts: u64) -> Option<Option<(u64, Option<Bytes>)>> {
         if !self.any.load(Ordering::Acquire) {
             return None;
