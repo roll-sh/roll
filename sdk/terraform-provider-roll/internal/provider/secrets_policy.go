@@ -27,6 +27,7 @@ type secretsPolicyModel struct {
 	SyncKinds           types.Set    `tfsdk:"sync_kinds"`
 	NoStoredCloudKeys   types.Bool   `tfsdk:"no_stored_cloud_keys"`
 	MaxTokenDays        types.Int64  `tfsdk:"max_token_days"`
+	NoBreakglass        types.Bool   `tfsdk:"no_breakglass"`
 }
 
 const secretsPolicyPath = "/v1/secrets/policy"
@@ -49,6 +50,7 @@ func (r *secretsPolicyResource) Schema(_ context.Context, _ resource.SchemaReque
 			"sync_kinds":           schema.SetAttribute{Optional: true, ElementType: types.StringType, Description: "The only sync kinds a project may make through roll secrets (empty: none)."},
 			"no_stored_cloud_keys": schema.BoolAttribute{Optional: true, Computed: true, Default: booldefault.StaticBool(false), Description: "No sync stores a cloud key for AWS, Google or Azure where it could sign in without one (identities and workload identity instead)."},
 			"max_token_days":       schema.Int64Attribute{Optional: true, Validators: []validator.Int64{int64validator.Between(1, 3650)}, Description: "The longest a roll token with a secrets rule may live, in days."},
+			"no_breakglass":        schema.BoolAttribute{Optional: true, Computed: true, Default: booldefault.StaticBool(false), Description: "No project lets a push past its pre-receive hooks (git push -o breakglass is refused everywhere)."},
 		},
 	}
 }
@@ -60,7 +62,7 @@ func (r *secretsPolicyResource) Configure(_ context.Context, req resource.Config
 }
 
 func (m *secretsPolicyModel) body(ctx context.Context, d *diag.Diagnostics) map[string]any {
-	b := map[string]any{"no_stored_cloud_keys": m.NoStoredCloudKeys.ValueBool()}
+	b := map[string]any{"no_stored_cloud_keys": m.NoStoredCloudKeys.ValueBool(), "no_breakglass": m.NoBreakglass.ValueBool()}
 	if !m.ProductionApprovals.IsNull() {
 		b["production_approvals"] = m.ProductionApprovals.ValueInt64()
 	}
@@ -84,6 +86,7 @@ func (m *secretsPolicyModel) fill(v map[string]any) {
 	m.LeaksRotate = jStr(v, "leaks_rotate")
 	m.NoStoredCloudKeys = jBool(v, "no_stored_cloud_keys")
 	m.MaxTokenDays = jInt(v, "max_token_days")
+	m.NoBreakglass = jBool(v, "no_breakglass")
 	if xs, ok := v["sync_kinds"].([]any); ok {
 		kinds := make([]attr.Value, 0, len(xs))
 		for _, x := range xs {

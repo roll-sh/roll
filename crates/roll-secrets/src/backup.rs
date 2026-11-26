@@ -73,6 +73,9 @@ pub struct Settings {
     pub validity_checks: bool,
     /// `leaks.rotate`: `managed` or `off`.
     pub leak_rotate: Option<String>,
+    /// Who may push past a pre-receive hook (`breakglass`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub breakglass: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -323,8 +326,9 @@ impl Secrets {
                 let env = s.columns.remove("env_id").and_then(|id| id.as_str().and_then(|id| slugs.get(id)).cloned()).unwrap_or_default();
                 s.columns.insert("environment".into(), Json::String(env));
             }
-            let settings = c.query_row("SELECT history_days, validity_checks, leak_rotate FROM projects WHERE project_id = ?", [project], |r| {
-                Ok(Settings { history_days: r.get(0)?, validity_checks: r.get::<_, Option<i64>>(1)? == Some(1), leak_rotate: r.get(2)? })
+            let settings = c.query_row("SELECT history_days, validity_checks, leak_rotate, breakglass FROM projects WHERE project_id = ?", [project], |r| {
+                let breakglass = r.get::<_, Option<String>>(3)?.map(|b| crate::from_json(&b)).unwrap_or_default();
+                Ok(Settings { history_days: r.get(0)?, validity_checks: r.get::<_, Option<i64>>(1)? == Some(1), leak_rotate: r.get(2)?, breakglass })
             })?;
             Ok::<_, Error>(Archive {
                 v: V,
@@ -493,7 +497,7 @@ impl Secrets {
             }
         }
         let settings = archive.settings.clone().filter(|s| {
-            let ok = s.history_days.is_none_or(|d| (1..=3650).contains(&d)) && s.leak_rotate.as_deref().is_none_or(|r| crate::leaks::LeakRotate::parse(r).is_some());
+            let ok = s.history_days.is_none_or(|d| (1..=3650).contains(&d)) && s.leak_rotate.as_deref().is_none_or(|r| crate::leaks::LeakRotate::parse(r).is_some()) && crate::leaks::breakglass_ok(&s.breakglass);
             if !ok {
                 warnings.push("the project's settings aren't ones roll takes: not restored".into());
             }
@@ -527,7 +531,15 @@ impl Secrets {
                     leak_rotate = Some("managed".into());
                     kept.push("leaks.rotate: roll secrets' policy keeps it managed, so it's restored as managed".into());
                 }
-                c.execute("UPDATE projects SET history_days = ?, validity_checks = ?, leak_rotate = ? WHERE project_id = ?", params![s.history_days, s.validity_checks as i64, leak_rotate, project])?;
+                let breakglass = if s.breakglass.is_empty() {
+                    None
+                } else if crate::guardrails::read(c)?.no_breakglass {
+                    kept.push("breakglass: roll secrets' policy allows no break glass, so it's restored as no one".into());
+                    None
+                } else {
+                    Some(serde_json::json!(s.breakglass).to_string())
+                };
+                c.execute("UPDATE projects SET history_days = ?, validity_checks = ?, leak_rotate = ?, breakglass = ? WHERE project_id = ?", params![s.history_days, s.validity_checks as i64, leak_rotate, breakglass, project])?;
             }
             Ok::<_, Error>((moved, kept))
         })?;
@@ -825,6 +837,9 @@ impl Secrets {
             }
             if a.leak_rotate.as_deref().unwrap_or("off") != l.leak_rotate.as_deref().unwrap_or("off") {
                 settings.push("leaks.rotate".into());
+            }
+            if a.breakglass != l.breakglass {
+                settings.push("breakglass".into());
             }
         }
         let v = Verified {

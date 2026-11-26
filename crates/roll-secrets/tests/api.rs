@@ -2521,6 +2521,19 @@ async fn a_stored_value_is_found_by_fingerprint_and_short_values_never_are() {
 }
 
 #[tokio::test]
+async fn a_scanner_never_confirms_a_weak_password_inside_text_it_knows() {
+    let api = Api::new().await;
+    let url = "postgres://app:hunter2@db.internal.example.com:5432/shop";
+    let random = "Zq7vR2mXk9LpT4wB8nC1sD6fG3hJ5yUe";
+    api.set("production", "DB_URL", url).await;
+    api.set("production", "API_KEY", random).await;
+    let token = api.token(json!({ "actions": ["scan"] }));
+    let (s, found) = api.req(Method::POST, "/scan", Some(json!({ "candidates": [url, random] })), Some(&token)).await;
+    // The URL is long, but its password is a word: never tried. A scan-only token isn't told the key.
+    assert_eq!((s, found.clone()), (StatusCode::OK, json!([{ "index": 1, "environment": "production" }])), "{found}");
+}
+
+#[tokio::test]
 async fn validity_checks_ask_each_provider_once_and_only_when_an_admin_turned_them_on() {
     let api = Api::new().await;
     let c = creds();
@@ -7680,18 +7693,21 @@ async fn a_policy_floor_holds_against_a_project_admin_and_new_projects_are_born_
 }
 
 /// A restore comes back within roll secrets' policy: a sync of a kind it rules out isn't restored,
-/// and `leaks.rotate` comes back at its floor.
+/// and `leaks.rotate` and `breakglass` come back at their floors.
 #[tokio::test]
 async fn a_restore_brings_back_nothing_below_the_policy() {
     let api = Api::new().await;
     api.set("staging", "PLATFORM_TOKEN", "fake-platform-token").await;
     api.ok(Method::POST, "/syncs", Some(json!({ "environment": "staging", "kind": "fake", "target": { "name": "x", "token_key": "PLATFORM_TOKEN" } }))).await;
+    api.ok(Method::PATCH, "", Some(json!({ "breakglass": ["alice"] }))).await;
     let secret = [9u8; 32];
     let b = api.ok(Method::POST, "/backup", Some(json!({ "recipient": roll_secrets::crypto::public_key(&secret) }))).await;
     let sealed: roll_secrets::crypto::Sealed = serde_json::from_value(b["sealed"].clone()).unwrap();
     let archive: Value = serde_json::from_slice(&roll_secrets::crypto::open_sealed(&secret, b["context"].as_str().unwrap(), &sealed).unwrap()).unwrap();
 
-    api.ok(Method::PUT, "/v1/secrets/policy", Some(json!({ "sync_kinds": [], "leaks_rotate": "managed" }))).await;
+    api.ok(Method::PUT, "/v1/secrets/policy", Some(json!({ "sync_kinds": [], "leaks_rotate": "managed", "no_breakglass": true }))).await;
+    let (s, e) = api.call(Method::PATCH, "", Some(json!({ "breakglass": ["bob"] }))).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{e}");
     let (s, e) = api.call(Method::POST, "/syncs", Some(json!({ "environment": "staging", "kind": "fake", "target": { "name": "y", "token_key": "PLATFORM_TOKEN" } }))).await;
     assert_eq!(s, StatusCode::FORBIDDEN, "{e}");
     let (_, other) = api.call(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "restored" }))).await;
@@ -7699,7 +7715,8 @@ async fn a_restore_brings_back_nothing_below_the_policy() {
     let r = api.ok(Method::POST, &to("/restore"), Some(archive)).await;
     assert_eq!(r["syncs"].as_u64(), Some(0), "{r}");
     assert!(r["warnings"].as_array().unwrap().iter().any(|w| w.as_str().unwrap().contains("fake sync") && w.as_str().unwrap().contains("roll secrets' policy")), "{r}");
-    assert_eq!(api.ok(Method::GET, &to(""), None).await["leaks"]["rotate"], "managed");
+    let restored = api.ok(Method::GET, &to(""), None).await;
+    assert_eq!((&restored["leaks"]["rotate"], &restored["breakglass"]), (&json!("managed"), &json!([])), "{restored}");
 }
 
 /// A project as it's made, nothing protected by hand (#688): a developer on the default role works
