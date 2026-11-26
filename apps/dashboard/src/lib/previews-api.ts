@@ -410,8 +410,16 @@ export const endpointSlower = (e: EndpointTime) => e.slower ?? (e.main_ms != nul
 export const pageGroup = (path: string): "Pages" | "Views" | "States" | "Stories" =>
   /^@\d+$/.test(path) || path.startsWith("browser:") || path.startsWith("mode:") ? "Views" : path.startsWith("state:") ? "States" : path.startsWith("story:") ? "Stories" : "Pages";
 
+const BROWSER_NAMES: Record<string, string> = { firefox: "Firefox", webkit: "WebKit", "webkit-phone": "WebKit, phone" };
+
+/** `button--primary` → `button / primary`; `button--primary@firefox` (taken in another browser) → `button / primary · Firefox`. */
+function storyLabel(id: string): string {
+  const [story, browser] = id.split("@");
+  return `${story.replace("--", " / ")}${browser ? ` · ${BROWSER_NAMES[browser] ?? browser}` : ""}`;
+}
+
 export const pageLabel = (path: string) =>
-  /^@\d+$/.test(path) ? `${path.slice(1)} px` : path.startsWith("mode:") ? `${path.slice(5)} mode` : path.startsWith("story:") ? path.slice(6).replace("--", " / ") : path === "browser:firefox" ? "Firefox" : path === "browser:webkit" ? "WebKit" : path === "browser:webkit-phone" ? "WebKit, phone" : path || "/";
+  /^@\d+$/.test(path) ? `${path.slice(1)} px` : path.startsWith("mode:") ? `${path.slice(5)} mode` : path.startsWith("story:") ? storyLabel(path.slice(6)) : path === "browser:firefox" ? "Firefox" : path === "browser:webkit" ? "WebKit" : path === "browser:webkit-phone" ? "WebKit, phone" : path || "/";
 
 /** "1.2 s" or "380 ms". */
 export const duration = (ms: number) => (ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(1)} s`);

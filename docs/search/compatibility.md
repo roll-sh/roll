@@ -1721,8 +1721,20 @@ taken over by roll's crawler. Where roll's differs ([crawler.md](crawler.md)):
 - **Extraction rules** are Open Crawler's rulesets; `html` selectors are CSS Selectors Level 3
   without `:has()`, states, pseudo-elements or escapes (each refused at validation), and a rule's
   text is gathered as the body's is, not Jsoup's `text()`.
-- **Not yet**: XPath selectors, incremental crawls
-  (an incremental job fails), binary content extraction (only `text/html` and
+- **Conditional requests and incremental crawls** are roll's: Open Crawler has neither. Each
+  document keeps its page's `ETag` and `Last-Modified` (`http_etag`, `http_last_modified`), the
+  link depth it was found at (`crawl_depth`) and a digest of the extraction configuration it was
+  made with (`crawl_fingerprint`), and every crawl asks for the page again with `If-None-Match` and
+  `If-Modified-Since` while the digest matches (a configuration change reads every page in full). A 304 leaves the document as it was (its
+  `last_crawled_at` is when it was last read) and counts as seen (`metadata.not_modified_count`);
+  the purge's re-check asks the same way and follows the links of a page that changed. An
+  `incremental` job crawls the same way and deletes nothing.
+- **The docs preset** (`preset: docs`) is roll's too, after Algolia DocSearch and Meilisearch's
+  docs-scraper: one record per section (`hierarchy.lvl0` to `lvl6`, `content`, `url` with the
+  heading's `#anchor`, `url_without_anchor`, `type`, `weight`), from CSS selectors on the page,
+  with its own mappings and a stored search template (`<index>-docs-search`). DocSearch also makes
+  a record per paragraph; roll makes one per section.
+- **Not yet**: XPath selectors, binary content extraction (only `text/html` and
   `application/xhtml+xml` are indexed), `data-elastic-name` and `meta.elastic` beyond 100 fields a
   page, and `full_html` is the page as served, not Jsoup's re-serialisation. Pages are decoded as
   UTF-8 (a page in another charset reads with replacement characters).
