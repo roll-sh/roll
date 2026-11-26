@@ -383,7 +383,8 @@ const PROMPTS: &[Prompt] = &[
             Arg { name: "index", description: "Index", required: true },
             Arg { name: "field", description: "The text field to search by meaning, if you know which", required: false },
         ],
-        needs: &["search_get_mapping", "search_put_mapping", "search_query", "search_list_inference_secrets", "search_create_inference_endpoint"],
+        // A provider's endpoint needs admin on the cluster: without it, roll's own model.
+        needs: &["search_get_mapping", "search_put_mapping", "search_query", "search_list_indices", "search_bulk"],
         text: |a| {
             format!(
                 "Set up semantic search on index {index} of search cluster {cluster}; the field is {field} (empty: \
@@ -391,16 +392,23 @@ const PROMPTS: &[Prompt] = &[
                  the text people search by meaning: titles, bodies, descriptions, not ids or codes. For the \
                  embeddings, roll's own model needs no key: inference_id .multilingual-e5-small-elasticsearch (384 \
                  dimensions, 100+ languages, billed by the CPU it takes). Use it unless I ask for a provider. For a \
-                 provider, search_list_inference_secrets shows endpoints already keyed by a roll secret: reuse one \
-                 that fits, or ask me which provider and model and which roll secret holds its key (environment \
-                 and key), then search_create_inference_endpoint with task_type text_embedding. Never ask me for \
-                 the key itself, and never put one in a call. Then search_put_mapping: a new field \
-                 <field>_semantic {{type: semantic_text, inference_id}}, and copy_to it on the source field (its \
-                 type and settings as they are). Documents written from then on are embedded as they're \
-                 indexed; the ones already there aren't. Say how many there are (search_list_indices) and, \
-                 for a few thousand or fewer, offer to write them again (search_query with _source and \
-                 search_after, pages of 500, each page back through search_bulk under its own id); for more, tell \
-                 me it needs a reindex and stop there. Ask me before writing. Then check it: for three queries I'd \
+                 provider, if you have them: search_list_inference_secrets shows endpoints already keyed by a roll \
+                 secret; reuse one that fits, or ask me which provider and model and which roll secret holds its \
+                 key (environment and key), then search_create_inference_endpoint with task_type text_embedding \
+                 (it needs admin on the cluster and reveal on the secret). Never ask me for the key itself, and \
+                 never put one in a call. Then show me the mapping change and make it with search_put_mapping \
+                 once I say (a field can't be taken out again, and every later write is embedded; offer to try it \
+                 on a branch first with search_branch_cluster, if you have it): a new field <field>_semantic \
+                 {{type: semantic_text, inference_id}}, and copy_to it on the source field, its type, settings and \
+                 any copy_to targets it has kept (copy_to is replaced, not added to). Documents written from then \
+                 on are embedded as they're indexed; the ones already there aren't until they're written again. \
+                 Say how many there are (search_list_indices). If I want them embedded now, there are a few \
+                 thousand or fewer, and they have a unique keyword or numeric field: read them in pages of 500 \
+                 with search_query (sort on that field, search_after, _source, seq_no_primary_term: true), \
+                 stopping at that count, and write each page back through search_bulk as index actions under \
+                 each document's _id with its if_seq_no and if_primary_term, so a document changed meanwhile \
+                 is skipped (a conflict), never overwritten; tell me how many were skipped. Otherwise tell me \
+                 it needs a reindex and stop there. Then check it: for three queries I'd \
                  type, run search_query with {{semantic: {{field, query}}}} on the new field, a match query on the \
                  old one, and a hybrid rrf retriever over both (standard retrievers, one each), with highlight on \
                  the semantic field, and show me the top five of each side by side. Recommend the hybrid one \

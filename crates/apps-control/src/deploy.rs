@@ -3691,6 +3691,7 @@ impl Apps {
                     let _ = self.verify_domain(&svc, &env, &d.hostname).await;
                 }
             }
+            self.check_status_domains().await;
         }
     }
 
