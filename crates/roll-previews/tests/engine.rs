@@ -1351,23 +1351,28 @@ async fn a_delete_during_a_converge_and_an_unrecorded_branch_leave_nothing_behin
     assert!(e.pg.branches.lock().is_empty(), "{:?}", e.pg.branches.lock());
 }
 
-/// A sleeping preview between its whole converges only has its usage read (Render and Vercel
-/// meter idle previews without waking them): roll secrets isn't asked again; past its size cap it
-/// converges and stays asleep over it.
+/// A settled preview, running or asleep, between its whole converges only has its usage read
+/// (Render and Vercel meter previews without touching them): roll secrets isn't asked again; past
+/// its size cap it converges and stays asleep over it.
 #[tokio::test]
-async fn a_sleeping_previews_usage_is_read_without_a_whole_converge() {
+async fn a_settled_previews_usage_is_read_without_a_whole_converge() {
     let e = env_with_config(json!({ "enabled": true }), |c| c.usage_every = std::time::Duration::ZERO);
     e.code.open(change("chg_zz", 1));
     e.engine.pass().await.unwrap();
     let p = e.engine.store.row_by_change("chg_zz").unwrap().unwrap();
-    e.engine.sleep(&p.id).await.unwrap();
-    e.engine.pass().await.unwrap();
-    let (asked, read) = (e.secrets.ensured.lock().len(), e.pg.usage_reads.load(Ordering::SeqCst));
-    for _ in 0..3 {
+    // Running, then asleep: neither converges whole between its hourly ones.
+    for asleep in [false, true] {
+        if asleep {
+            e.engine.sleep(&p.id).await.unwrap();
+        }
         e.engine.pass().await.unwrap();
+        let (asked, read) = (e.secrets.ensured.lock().len(), e.pg.usage_reads.load(Ordering::SeqCst));
+        for _ in 0..3 {
+            e.engine.pass().await.unwrap();
+        }
+        assert_eq!(e.secrets.ensured.lock().len(), asked, "no whole converge between its hourly ones (asleep: {asleep})");
+        assert!(e.pg.usage_reads.load(Ordering::SeqCst) >= read + 3, "its usage read every pass (asleep: {asleep})");
     }
-    assert_eq!(e.secrets.ensured.lock().len(), asked, "no whole converge between its hourly ones");
-    assert!(e.pg.usage_reads.load(Ordering::SeqCst) >= read + 3, "its usage read every pass");
     // Over its size cap (two 1 MiB branches), it converges to say so and sleeps there.
     e.engine.store.put_settings(&e.project, &roll_previews::Settings { enabled: true, max_bytes: 1 << 20, ..Default::default() }).unwrap();
     e.engine.pass().await.unwrap();
