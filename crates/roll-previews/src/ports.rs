@@ -471,6 +471,9 @@ pub struct ShotOptions {
     /// Story ids to take before the rest (a default branch's preview: those the project's open
     /// changes took and it hasn't, so each has a main to be compared with).
     pub stories_first: Vec<String>,
+    /// How many containers take the stories side by side (`github.story_runs`; 0 is 1).
+    #[serde(default)]
+    pub story_runs: usize,
     pub changed: Vec<String>,
     /// The app's sign-in before the pages (`github.login`, a trusted preview's), its typed
     /// variables resolved.

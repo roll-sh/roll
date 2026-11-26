@@ -3375,10 +3375,13 @@ async fn a_secret_written_as_the_caller_is_asked_for_and_only_it_is_allowed() {
 /// Claude's auto-connect (its connector docs, "Enterprise Managed Auth"): Claude signs the
 /// identity assertion itself under its organization's issuer and presents its Client ID Metadata
 /// Document as the client, public or as `/confidential_client` with a client assertion signed by
-/// that document's keys. A member is found by their email with no `email_verified` (Claude's issuer
-/// only, never a look-alike), within the operator's domains; the request's `resource` holds the
-/// token to roll's MCP server. A confidential client's id without its assertion, an assertion for
-/// the other client, and a rotation of an app roll holds no credential of are refused.
+/// that document's keys. The app keeps an `ent_…` id of roll's (the URL is also people's own OAuth
+/// client). A member is found by their email with no `email_verified` (Claude's issuer, its keys
+/// fetched, only), within the operator's domains; the request's `resource` holds the token to
+/// roll's MCP server. Refused: a confidential client's id without its assertion, an assertion for
+/// the other client, a provider the app doesn't name, a look-alike issuer without
+/// `email_verified`, a public client's long-lived or replayed assertion, an email outside the
+/// domains, Claude's issuer misspelled, and rotating an app roll holds no credential of.
 #[tokio::test(flavor = "multi_thread")]
 async fn claude_signs_a_member_in_with_its_own_assertion() {
     use base64::Engine;
@@ -3407,6 +3410,8 @@ async fn claude_signs_a_member_in_with_its_own_assertion() {
             (public.to_string(), json!({ "client_id": public, "token_endpoint_auth_method": "none", "redirect_uris": ["https://claude.ai/api/mcp/auth_callback"] }).to_string()),
             (confidential.clone(), json!({ "client_id": confidential, "token_endpoint_auth_method": "private_key_jwt", "jwks_uri": "https://claude.ai/oauth/jwks.json" }).to_string()),
             ("https://claude.ai/oauth/jwks.json".to_string(), client_jwks),
+            ("https://identity.anthropic.com/issuers/iss_8f2a/.well-known/openid-configuration".to_string(), json!({ "issuer": "https://identity.anthropic.com/issuers/iss_8f2a", "jwks_uri": "https://identity.anthropic.com/issuers/iss_8f2a/jwks" }).to_string()),
+            ("https://identity.anthropic.com/issuers/iss_8f2a/jwks".to_string(), issuer_jwks.clone()),
         ]
         .into_iter()
         .collect(),
@@ -3414,14 +3419,21 @@ async fn claude_signs_a_member_in_with_its_own_assertion() {
     assert!(d.access.oidc_fetch.set(Arc::new(docs)).is_ok());
     let claude = "https://identity.anthropic.com/issuers/iss_8f2a";
     let lookalike = "https://identity.anthropic.com.example/issuers/iss_8f2a";
-    let idps = json!({ "idps": [{ "issuer": claude, "jwks": issuer_jwks, "domains": ["acme.test"] }, { "issuer": lookalike, "jwks": issuer_jwks, "domains": ["acme.test"] }] });
+    let okta = "https://acme.okta.example";
+    let slashed = json!({ "idps": [{ "issuer": format!("{claude}/"), "domains": ["acme.test"] }] });
+    assert_eq!(d.call(OPERATOR, Method::PUT, "/v1/access/enterprise/idps", Some(slashed)).await.0, StatusCode::BAD_REQUEST, "Claude's issuer as its setup shows it");
+    let idps = json!({ "idps": [{ "issuer": claude, "domains": ["acme.test"] }, { "issuer": lookalike, "jwks": issuer_jwks, "domains": ["acme.test"] }, { "issuer": okta, "jwks": issuer_jwks, "domains": ["acme.test"] }] });
     assert_eq!(d.call(OPERATOR, Method::PUT, "/v1/access/enterprise/idps", Some(idps)).await.0, StatusCode::OK);
     let rules = json!([{ "product": "workspace", "resources": "*", "actions": { "read": "allow" } }]);
-    let (s, app) = d.call(OPERATOR, Method::POST, "/v1/access/enterprise/apps", Some(json!({ "name": "Claude", "rules": rules, "metadata": [public, confidential] }))).await;
-    assert_eq!((s, app["client_id"].as_str(), app.get("client_secret")), (StatusCode::CREATED, Some(public), None), "{app}");
+    // The look-alike is a provider the app names (as an identity provider running Claude's
+    // auto-connect would be); Okta, trusted for other apps, isn't.
+    let (s, app) = d.call(OPERATOR, Method::POST, "/v1/access/enterprise/apps", Some(json!({ "name": "Claude", "rules": rules, "metadata": [public, confidential], "issuers": [lookalike] }))).await;
+    assert_eq!((s, app["metadata"][0].as_str(), app.get("client_secret")), (StatusCode::CREATED, Some(public), None), "{app}");
+    let app_id = app["client_id"].as_str().unwrap().to_string();
+    assert!(app_id.starts_with("ent_"), "roll's own id, never the client's URL: {app}");
     let (s, _) = d.call(OPERATOR, Method::POST, "/v1/access/enterprise/apps", Some(json!({ "name": "Again", "rules": rules, "metadata": [confidential] }))).await;
     assert_eq!(s, StatusCode::CONFLICT, "one app per client");
-    let (s, _) = d.call(OPERATOR, Method::POST, &format!("/v1/access/enterprise/apps/{}/rotate", url::form_urlencoded::byte_serialize(public.as_bytes()).collect::<String>()), Some(json!({}))).await;
+    let (s, _) = d.call(OPERATOR, Method::POST, &format!("/v1/access/enterprise/apps/{app_id}/rotate"), Some(json!({}))).await;
     assert_eq!(s, StatusCode::BAD_REQUEST, "roll holds no credential of it");
 
     let api = d.access.config.api_url.trim_end_matches('/').to_string();
@@ -3433,7 +3445,9 @@ async fn claude_signs_a_member_in_with_its_own_assertion() {
         jsonwebtoken::encode(&h, &claims, &jsonwebtoken::EncodingKey::from_ec_der(pkcs8)).unwrap()
     };
     // As Claude signs it: no email_verified, `sub` opaque, a minute's life.
-    let assertion = |iss: &str, client: &str, jti: &str| sign(issuer_key.as_ref(), "claude-iss", Some("oauth-id-jag+jwt"), json!({ "iss": iss, "sub": "opaque-7", "email": "alice@acme.test", "aud": [api], "client_id": client, "iat": now, "nbf": now - 15, "exp": now + 45, "jti": jti }));
+    let claims = |iss: &str, client: &str, jti: &str| json!({ "iss": iss, "sub": "opaque-7", "email": "alice@acme.test", "aud": [api], "client_id": client, "iat": now, "nbf": now - 15, "exp": now + 45, "jti": jti });
+    let signed = |c: Value| sign(issuer_key.as_ref(), "claude-iss", Some("oauth-id-jag+jwt"), c);
+    let assertion = |iss: &str, client: &str, jti: &str| signed(claims(iss, client, jti));
     let mcp = format!("{api}/v1/mcp");
     let grant = "urn:ietf:params:oauth:grant-type:jwt-bearer";
     let (s, got) = d.form("/v1/access/oauth/token", &[("grant_type", grant), ("assertion", &assertion(claude, public, "c1")), ("client_id", public), ("resource", &mcp)]).await;
@@ -3464,4 +3478,16 @@ async fn claude_signs_a_member_in_with_its_own_assertion() {
     assert_eq!(other.1["error"], "invalid_grant", "{other:?}");
     let look = d.form("/v1/access/oauth/token", &[("grant_type", grant), ("assertion", &assertion(lookalike, public, "c5")), ("client_id", public)]).await;
     assert_eq!(look.1["error"], "access_denied", "{look:?}");
+    let public_with = |a: String| {
+        let d = &d;
+        async move { d.form("/v1/access/oauth/token", &[("grant_type", grant), ("assertion", &a), ("client_id", public)]).await.1["error"].clone() }
+    };
+    assert_eq!(public_with(assertion(okta, public, "c6")).await, "invalid_grant", "a provider the app doesn't name");
+    assert_eq!(public_with(assertion(claude, public, "c1")).await, "invalid_grant", "a replay");
+    let mut long = claims(claude, public, "c7");
+    long["exp"] = json!(now + 3600);
+    assert_eq!(public_with(signed(long)).await, "invalid_grant", "a bearer's assertion lives minutes");
+    let mut outside = claims(claude, public, "c8");
+    outside["email"] = json!("alice@elsewhere.test");
+    assert_eq!(public_with(signed(outside)).await, "access_denied", "the operator's domains bound Claude's issuer too");
 }
