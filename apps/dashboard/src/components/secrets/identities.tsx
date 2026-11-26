@@ -15,7 +15,7 @@ const AWS_ARN = /^arn:aws(-cn|-us-gov)?:(iam::\d{12}:(role|user)\/([\w+=,.@-]+\/
 
 /** What an identity takes, in a few words: `acme/web · refs/heads/main`. */
 function identitySummary(i: Pick<Identity, "kind" | "issuer" | "subject" | "claims">): string {
-  if (i.kind === "machine") return "machines with bootstrap tokens";
+  if (i.kind === "machine") return "bootstrap tokens";
   const repo = i.issuer === GITHUB ? /^repo:([^:]+):/.exec(i.subject)?.[1] : i.issuer === GITLAB ? /^project_path:([^:]+):/.exec(i.subject)?.[1] : i.issuer.startsWith(AZURE) ? i.subject.replace(/^p:\/\//, "") : undefined;
   const claims = Object.entries(i.claims).map(([k, v]) => (k === "ref" ? v : `${k}=${v}`));
   return [repo ?? i.subject, ...claims].join(" · ");
@@ -167,17 +167,19 @@ export function Identities() {
                   <span className="ml-auto truncate text-right font-mono text-[10.5px] text-subtle" title={i.last_subject ?? undefined}>
                     {i.last_used_at ? `logged in ${ago(i.last_used_at)}` : "never used"} · {i.id}
                   </span>
-                  {i.disabled_at && (
-                    <button className={button} onClick={() => api.setIdentityDisabled(i.id, false).then(identities.reload, (e) => setError(errorText(e)))} title={`Disabled ${ago(i.disabled_at)} by a cut-off${i.disabled_why ? `: ${i.disabled_why}` : ""}`}>
-                      Enable
-                    </button>
-                  )}
-                  {i.kind === "machine" && (
-                    <button className={ghost} aria-expanded={open.has(i.id)} onClick={() => setOpen((o) => (o.has(i.id) ? new Set([...o].filter((x) => x !== i.id)) : new Set(o).add(i.id)))}>
-                      Machines <ChevronDown className={`size-3.5 transition-transform duration-200 motion-reduce:transition-none ${open.has(i.id) ? "rotate-180" : ""}`} />
-                    </button>
-                  )}
-                  <Delete onDelete={() => api.deleteIdentity(i.id).then(identities.reload, (e) => setError(errorText(e)))} />
+                  <span className="ml-auto flex items-center gap-1">
+                    {i.disabled_at && (
+                      <button className={button} onClick={() => api.setIdentityDisabled(i.id, false).then(identities.reload, (e) => setError(errorText(e)))} title={`Disabled ${ago(i.disabled_at)} by a cut-off${i.disabled_why ? `: ${i.disabled_why}` : ""}`}>
+                        Enable
+                      </button>
+                    )}
+                    {i.kind === "machine" && (
+                      <button className={ghost} aria-expanded={open.has(i.id)} onClick={() => setOpen((o) => (o.has(i.id) ? new Set([...o].filter((x) => x !== i.id)) : new Set(o).add(i.id)))}>
+                        Machines <ChevronDown className={`size-3.5 transition-transform duration-200 motion-reduce:transition-none ${open.has(i.id) ? "rotate-180" : ""}`} />
+                      </button>
+                    )}
+                    <Delete onDelete={() => api.deleteIdentity(i.id).then(identities.reload, (e) => setError(errorText(e)))} />
+                  </span>
                 </div>
                 {i.kind === "machine" && open.has(i.id) && <Machines identity={i} env={i.environments?.[0] ?? "production"} />}
               </div>
@@ -417,7 +419,7 @@ function NewIdentityForm({ envs, onCreate, onCancel }: { envs: string[]; onCreat
       </div>
       <label className="block">
         <span className={label}>Allowed addresses (CIDRs; empty for any)</span>
-        <input value={ips} onChange={(e) => setIps(e.target.value)} placeholder="the runners' egress ranges, e.g. 203.0.113.0/24" className={`${field} font-mono`} />
+        <input value={ips} onChange={(e) => setIps(e.target.value)} placeholder={provider === "machine" ? "the machines' addresses, e.g. 198.51.100.0/24" : "the runners' egress ranges, e.g. 203.0.113.0/24"} className={`${field} font-mono`} />
       </label>
       <div className="flex justify-end gap-2">
         <button type="button" className={ghost} onClick={onCancel}>

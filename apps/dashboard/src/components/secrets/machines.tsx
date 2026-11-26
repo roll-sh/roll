@@ -53,7 +53,7 @@ export function BootstrapMaker({ identity, env, onMade, open: initiallyOpen = fa
             Done
           </button>
         </div>
-        <p className="mt-2 font-mono text-[11px] break-all text-subtle">{setupLine(identity, env)}</p>
+        <p className="mt-2 font-mono text-[11px] break-words text-subtle">{setupLine(identity, env)}</p>
       </div>
     );
   }
