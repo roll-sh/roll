@@ -385,11 +385,30 @@ pub trait Workloads: Send + Sync {
         let _ = (name, rule, ip_allow, minutes, owner, via);
         Err(crate::Error::Unauthorized("machine credentials aren't on this server".into()))
     }
-    /// End every credential and token of a chain (its identity deleted or disabled). Blocking.
+    /// End every credential and token of a chain (its identity deleted or disabled, or an admin
+    /// revoked the machine). Blocking.
     fn revoke_chain(&self, chain: &str, why: &str) -> crate::Result<()> {
         let _ = (chain, why);
         Ok(())
     }
+    /// Where each of `chains` stands (a machine identity's machines); one the store no longer
+    /// holds is left out. Blocking.
+    fn chains(&self, chains: &[String]) -> crate::Result<Vec<ChainState>> {
+        let _ = chains;
+        Ok(vec![])
+    }
+}
+
+/// Where a machine's chain stands: its newest bootstrap token or machine credential (no secret).
+pub struct ChainState {
+    pub chain: String,
+    /// `waiting` (its bootstrap token not exchanged yet), `live`, `ended` or `revoked`.
+    pub state: &'static str,
+    /// When its newest machine credential was made (the exchange, or the last replacement).
+    pub refreshed_at: Option<i64>,
+    pub expires_at: Option<i64>,
+    pub revoked_at: Option<i64>,
+    pub revoked_why: Option<String>,
 }
 
 /// A bootstrap token or machine credential (shown once), its chain and when it was made and ends
