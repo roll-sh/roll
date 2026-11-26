@@ -279,8 +279,10 @@ in one call. So roll adds a route.
   - **Per profile:** `max_tokens_per_day`, counted per cluster on its node (a cluster runs on one
     node at a time, as compatibility.md notes for `rate_limit`), after which `_answer` answers 429.
   - **Metering (built):** provider tokens are counted per cluster, input and output apart
-    (`xpack/inference/tokens.rs`), for `_inference/completion` (answered or streamed),
-    `_inference/chat_completion`'s streams and chat answers. Each call counts the provider's own
+    (`xpack/inference/tokens.rs`), for `_inference/completion` (answered or streamed) and
+    `_inference/chat_completion`'s streams; `_answer` adds each answer's `usage` (the provider's
+    count, else its estimate) to the same counter, a call that comes with the chat engine. Each
+    call counts the provider's own
     figures when its answer carries them (OpenAI's `usage` and the services shaped like it,
     Anthropic's, Bedrock's, Cohere's `billed_units`, Google's `usageMetadata`), else roll's
     estimate of the text, figure by figure. A stream counts when it ends, also when its client
