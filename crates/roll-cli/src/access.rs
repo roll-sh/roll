@@ -272,13 +272,21 @@ pub enum EnterpriseCmd {
 pub enum EnterpriseAppCmd {
     /// Register an app (its client id is what the provider puts in an assertion): with
     /// --public-key it signs its client assertions; without, roll makes a secret, shown once.
+    /// With --claude (or --metadata) it's a client that names itself by its Client ID Metadata
+    /// Documents and signs with their keys (Claude's auto-connect): roll holds no credential of it.
     Create {
         name: String,
         #[command(flatten)]
         rules: RuleArgs,
         /// Its public key: a PEM file (Ed25519 or P-256) or a JWK.
-        #[arg(long)]
+        #[arg(long, conflicts_with_all = ["metadata", "claude"])]
         public_key: Option<std::path::PathBuf>,
+        /// A Client ID Metadata Document URL it presents as its client id (repeatable).
+        #[arg(long)]
+        metadata: Vec<String>,
+        /// Claude's: its public client and its `/confidential_client`.
+        #[arg(long)]
+        claude: bool,
     },
     /// Change an app's name or rules: its people's connections take the new rules at once.
     Update {
@@ -864,12 +872,16 @@ async fn enterprise(api: &Api, json_out: bool, cmd: Option<EnterpriseCmd>) -> an
             api.call(reqwest::Method::PUT, "/v1/access/enterprise/idps", Some(json!({ "idps": list }))).await?;
             api.get("/v1/access/enterprise").await?
         }
-        Some(EnterpriseCmd::App(EnterpriseAppCmd::Create { name, rules: r, public_key })) => {
+        Some(EnterpriseCmd::App(EnterpriseAppCmd::Create { name, rules: r, public_key, mut metadata, claude })) => {
             let jwk = match &public_key {
                 Some(path) => Some(public_jwk(&std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?)?),
                 None => None,
             };
-            let made = api.post("/v1/access/enterprise/apps", json!({ "name": name, "rules": rules(api, &r).await?, "public_jwk": jwk })).await?;
+            if claude {
+                const CLAUDE: &str = "https://claude.ai/oauth/mcp-oauth-client-metadata";
+                metadata.splice(0..0, [CLAUDE.to_string(), format!("{CLAUDE}/confidential_client")]);
+            }
+            let made = api.post("/v1/access/enterprise/apps", json!({ "name": name, "rules": rules(api, &r).await?, "public_jwk": jwk, "metadata": metadata })).await?;
             if !json_out {
                 println!("client_id: {}", s(&made["client_id"]));
                 if let Some(secret) = made["client_secret"].as_str() {
