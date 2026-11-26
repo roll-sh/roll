@@ -3,6 +3,7 @@ import { appsApi, formatMs, PRODUCTION, type Metrics, type Service } from "@/lib
 import type { WorkspaceProject } from "@/lib/workspace-api";
 import { input, panel } from "../ui";
 import { Link } from "@/components/link";
+import { ProjectBoard } from "./project-board";
 
 const RANGES = [
   { label: "Last hour", minutes: 60 },
@@ -99,6 +100,7 @@ export function ProjectMetrics({ project }: { project: WorkspaceProject }) {
         </select>
         <span className="text-[12px] text-subtle">its web services, the worst first</span>
       </div>
+      {services !== null && <ProjectBoard project={project.id} services={services} minutes={range.minutes} />}
       <section className={`${panel} overflow-hidden`} aria-label="Services">
         {rows === null ? (
           <p className="px-4 py-3 text-[13px] text-muted">{services === null ? "Reading its services…" : "Reading their metrics…"}</p>

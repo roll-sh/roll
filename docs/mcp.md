@@ -1442,6 +1442,8 @@ previews are listed once those products are on.
 | `apps_visitors` | Who's signed in to a sign-in-gated environment now: each session's id, who, how, the entry that let them in. | `GET /v1/apps/services/{service}/environments/{env}/visitors` |
 | `apps_end_visit` | End one visitor's session in a sign-in-gated environment now. | `DELETE /v1/apps/services/{service}/environments/{env}/visitors/{visitor}` |
 | `apps_update_domain` | Redirect a domain to another hostname of the environment, or serve another port on it. | `PATCH /v1/apps/services/{service}/environments/{env}/domains/{host}` |
+| `apps_board` | A project's board: the charts it shows, each a service's metric in one environment. | `GET /v1/apps/projects/{project}/board` |
+| `apps_set_board` | Replace a project's board (at most 24 panels). | `PUT /v1/apps/projects/{project}/board` |
 | `apps_status_domain` | A status page's own domain: the name it answers on, its DNS state and TLS. | `GET /v1/apps/projects/{project}/status-page/domain` |
 | `apps_set_status_domain` | Put a project's status page on a domain of its own (answers the DNS record). | `POST /v1/apps/projects/{project}/status-page/domain` |
 | `apps_verify_status_domain` | Check a status page domain's DNS now. | `POST /v1/apps/projects/{project}/status-page/domain/verify` |

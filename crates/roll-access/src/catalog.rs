@@ -1714,6 +1714,8 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/apps/projects/{project}/status-page/incidents", "apps", R, one(&["project"], "project")),
     row("POST", "/v1/apps/projects/{project}/status-page/incidents", "apps", W, one(&["project"], "project")),
     row("POST", "/v1/apps/projects/{project}/status-page/incidents/{iid}/updates", "apps", W, one(&["project"], "project")),
+    row("GET", "/v1/apps/projects/{project}/board", "apps", R, one(&["project"], "project")),
+    row("PUT", "/v1/apps/projects/{project}/board", "apps", W, one(&["project"], "project")),
     row("GET", "/v1/apps/projects/{project}/status-page/domain", "apps", R, one(&["project"], "project")),
     row("POST", "/v1/apps/projects/{project}/status-page/domain", "apps", W, one(&["project"], "project")),
     row("DELETE", "/v1/apps/projects/{project}/status-page/domain", "apps", D, one(&["project"], "project")),
