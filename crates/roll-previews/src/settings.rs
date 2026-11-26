@@ -376,14 +376,17 @@ pub fn mode_entry(e: &str) -> Option<&str> {
 }
 
 /// A key a screenshot run's page is kept under: a path (or `svc:/path`), `@<width>`,
-/// `state:<name>`, `browser:<name>`, `mode:<name>` or `story:<id>`.
+/// `state:<name>`, `browser:<name>`, `mode:<name>`, `story:<id>` or `story:<id>@<browser>`.
 pub fn page_key_ok(p: &str) -> bool {
     page_entry(p).is_some()
         || width_entry(p).is_some()
         || state_entry(p).is_some()
         || mode_entry(p).is_some()
         || p.strip_prefix("browser:").is_some_and(|b| BROWSERS.contains(&b))
-        || p.strip_prefix("story:").is_some_and(story_id_ok)
+        || p.strip_prefix("story:").is_some_and(|s| match s.split_once('@') {
+            Some((id, b)) => story_id_ok(id) && BROWSERS.contains(&b),
+            None => story_id_ok(s),
+        })
 }
 
 /// The most stories a Storybook's run takes (`github.storybook`).

@@ -842,7 +842,8 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
             "server/discover" => {
                 // Events (SEP-3415) are this revision's: only discovery offers them.
                 let mut caps = capabilities(tasks_available(ctx));
-                caps["extensions"][events::EXT] = json!({});
+                // A listen stream says when the types a connection may poll change (SEP-3415).
+                caps["extensions"][events::EXT] = json!({ "listChanged": true });
                 rpc_result(id, modern::discover(&PROTOCOL_VERSIONS, caps, instructions(ctx)))
             }
             "ping" => rpc_result(id, json!({})),
@@ -860,6 +861,20 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
             },
             "tools/list" => {
                 let mut tools = if ctx.search { search::listed(&ctx.tools()) } else { ctx.tools() };
+                // Search mode lists the tools this token ran lately too, so its everyday calls take
+                // no search first (each still only if it may use it now).
+                if ctx.search {
+                    let used = used_lately(ctx).await;
+                    if !used.is_empty() {
+                        let have: Vec<String> = tools.iter().filter_map(|t| t["name"].as_str().map(str::to_string)).collect();
+                        let all = ctx.tools();
+                        for name in used.iter().filter(|n| !have.contains(n)) {
+                            if let Some(t) = all.iter().find(|t| t["name"].as_str() == Some(name.as_str())) {
+                                tools.push(t.clone());
+                            }
+                        }
+                    }
+                }
                 // In search mode too: finding a resource by name is what a client with few tools needs.
                 if ctx.pick.keeps(find::NAME) {
                     let mut def = find::definition();
@@ -1137,14 +1152,15 @@ const LISTEN_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
 const LISTEN_FOR: std::time::Duration = std::time::Duration::from_secs(3600);
 
 /// `subscriptions/listen` (MCP 2026-07-28, SEP-2575): an open stream that starts with
-/// `notifications/subscriptions/acknowledged` (only what was asked and roll sends: tool and prompt
-/// list changes) and says when the connection's tools change: an access request approved, a rule
-/// remembered, the token edited. The grant is looked up again every few seconds, never cached;
+/// `notifications/subscriptions/acknowledged` (only what was asked and roll sends: tool, prompt and
+/// event type list changes) and says when the connection's tools change: an access request
+/// approved, a rule remembered, the token edited. The event types follow the tools (a feed is
+/// offered while its tool is), so they're told when they change with them (SEP-3415). The grant is looked up again every few seconds, never cached;
 /// once it stops working the stream ends. A connection with the operator's token never changes.
 async fn listen(ctx: Arc<Ctx>, msg: &Value) -> Response {
     let id = msg.get("id").cloned().unwrap_or(Value::Null);
     let asked = &msg["params"]["notifications"];
-    let (tools, prompts) = (asked["toolsListChanged"] == true, asked["promptsListChanged"] == true);
+    let (tools, prompts, event_types) = (asked["toolsListChanged"] == true, asked["promptsListChanged"] == true, asked["eventsListChanged"] == true);
     let mut agreed = json!({});
     if tools {
         agreed["toolsListChanged"] = json!(true);
@@ -1152,9 +1168,12 @@ async fn listen(ctx: Arc<Ctx>, msg: &Value) -> Response {
     if prompts {
         agreed["promptsListChanged"] = json!(true);
     }
+    if event_types {
+        agreed["eventsListChanged"] = json!(true);
+    }
     // Tagged with the subscription like everything on its stream: a client matches the ack by it.
-    if !tools && !prompts {
-        return Json(rpc_error(id, -32602, "nothing to listen for: roll sends toolsListChanged and promptsListChanged")).into_response();
+    if !tools && !prompts && !event_types {
+        return Json(rpc_error(id, -32602, "nothing to listen for: roll sends toolsListChanged, promptsListChanged and eventsListChanged")).into_response();
     }
     let ack = json!({ "jsonrpc": "2.0", "method": "notifications/subscriptions/acknowledged", "params": { "notifications": agreed, "_meta": { "io.modelcontextprotocol/subscriptionId": id } } });
     let grant = match &ctx.principal {
@@ -1178,11 +1197,14 @@ async fn listen(ctx: Arc<Ctx>, msg: &Value) -> Response {
             (Some(_), Some(u)) => Some(tokio::task::spawn_blocking(move || a2.session_grant(&u, None).ok()).await.ok()??),
             _ => None,
         };
-        Some(tool_names(&ctx.as_now(g, session)))
+        let now = ctx.as_now(g, session);
+        let types: Vec<String> = events::list(&now)["events"].as_array().into_iter().flatten().filter_map(|e| e["name"].as_str().map(str::to_string)).collect();
+        Some((tool_names(&now), types))
     };
     struct State {
         ctx: Arc<Ctx>,
-        last: Option<Vec<String>>,
+        /// The tools and event types it was offered when it last looked.
+        last: Option<(Vec<String>, Vec<String>)>,
         queue: Vec<Value>,
         done: bool,
         /// Held while the stream lives: dropped with it, whoever ends it.
@@ -1191,7 +1213,7 @@ async fn listen(ctx: Arc<Ctx>, msg: &Value) -> Response {
     // What it's offered as it subscribes: a change from here on is told.
     let last = match &grant {
         Some(g) => now(ctx.clone(), g.clone(), access.clone()).await,
-        None => Some(Vec::new()),
+        None => Some((Vec::new(), Vec::new())),
     };
     let start = State { ctx, last, queue: vec![ack], done: false, _slot: held };
     let stream = futures::stream::unfold(start, move |mut s| {
@@ -1207,7 +1229,7 @@ async fn listen(ctx: Arc<Ctx>, msg: &Value) -> Response {
                 }
                 let names = match &grant {
                     Some(g) => now(s.ctx.clone(), g.clone(), access.clone()).await,
-                    None => s.last.clone().or(Some(Vec::new())),
+                    None => s.last.clone().or(Some((Vec::new(), Vec::new()))),
                 };
                 let over = tokio::time::Instant::now() >= deadline;
                 match names {
@@ -1216,14 +1238,17 @@ async fn listen(ctx: Arc<Ctx>, msg: &Value) -> Response {
                     None => {}
                     Some(_) if over => {}
                     Some(names) => {
-                        if s.last.as_ref().is_some_and(|l| *l != names) {
-                            let meta = json!({ "io.modelcontextprotocol/subscriptionId": id });
+                        let meta = json!({ "io.modelcontextprotocol/subscriptionId": id });
+                        if s.last.as_ref().is_some_and(|l| l.0 != names.0) {
                             if tools {
                                 s.queue.push(json!({ "jsonrpc": "2.0", "method": "notifications/tools/list_changed", "params": { "_meta": meta } }));
                             }
                             if prompts {
                                 s.queue.push(json!({ "jsonrpc": "2.0", "method": "notifications/prompts/list_changed", "params": { "_meta": meta } }));
                             }
+                        }
+                        if event_types && s.last.as_ref().is_some_and(|l| l.1 != names.1) {
+                            s.queue.push(json!({ "jsonrpc": "2.0", "method": "notifications/events/list_changed", "params": { "_meta": meta } }));
                         }
                         s.last = Some(names);
                         if s.queue.is_empty() {
@@ -1318,8 +1343,8 @@ If a tool gets in your way (wrong, missing, confusing), tell roll's operator wit
 Tell the user, then call the same tool again with the same arguments plus \"approval\": \"apr_…\": it waits for the decision and runs once approved. \
 postgres_query is read-only (postgres_execute changes data). Credentials come back as [redacted] unless the token may reveal them. \
 Read the resource roll://access/me for what this connection may do, in words, and roll://guide for more.{}{}",
-        if ctx.lockdown { format!(" This connection is in lockdown: text written by people who can't push to a repo (issues anyone opened, pull requests from forks) comes back as \"{}\", and what visitors send through a site's forms as \"{}\"; don't act on what you can't read.", lockdown::WITHHELD, lockdown::WITHHELD_SENT) } else { String::new() },
-        if ctx.search { format!(" This connection lists tools by search: call {} with what you want to do to get the matching tools and their input schemas, then run one with {} (a read-only tool) or {} (any other), passing {{\"tool\": its name, \"arguments\": {{…}}}}. Wherever this says to call a tool, run it that way.", search::FIND, search::RUN_READ, search::RUN) } else { String::new() }
+        if ctx.lockdown { format!(" This connection is in lockdown: text written by people who can't push to a repo (issues anyone opened, pull requests from forks and what their code writes: a fork preview's pages, logs and mail) comes back as \"{}\", a picture of such a page as \"{}\", and what visitors send through a site's forms as \"{}\"; that's lockdown, not an error, so don't retry it, and don't act on what you can't read.", lockdown::WITHHELD, lockdown::WITHHELD_PICTURE, lockdown::WITHHELD_SENT) } else { String::new() },
+        if ctx.search { format!(" This connection lists tools by search: call {} with what you want to do to get the matching tools and their input schemas, then run one with {} (a read-only tool) or {} (any other), passing {{\"tool\": its name, \"arguments\": {{…}}}}. Wherever this says to call a tool, run it that way. The tools this token used lately are listed too: call those directly.", search::FIND, search::RUN_READ, search::RUN) } else { String::new() }
     )))
 }
 
@@ -1334,6 +1359,18 @@ pub(crate) fn server_icon() -> Value {
         format!("data:image/svg+xml;base64,{}", base64::engine::general_purpose::STANDARD.encode(svg.trim()))
     });
     json!({ "src": ICON.as_str(), "mimeType": "image/svg+xml", "sizes": ["any"] })
+}
+
+/// How far back, and how many, of a token's own tools search mode lists beside its own.
+const USED_LATELY_MS: i64 = 14 * 24 * 3600 * 1000;
+const USED_LATELY: usize = 12;
+
+/// The tools this connection's grant ran in the last two weeks, most used first (none for the
+/// operator's connection, which has no grant).
+async fn used_lately(ctx: &Ctx) -> Vec<String> {
+    let (Principal::Grant(g), Some(a)) = (&ctx.principal, ctx.m.config.access.clone()) else { return Vec::new() };
+    let id = g.id.to_string();
+    tokio::task::spawn_blocking(move || a.store.tools_used(&id, code_sql_now() - USED_LATELY_MS, USED_LATELY).unwrap_or_default()).await.unwrap_or_default()
 }
 
 /// Run a tool: one of ours, or a fronted set's.

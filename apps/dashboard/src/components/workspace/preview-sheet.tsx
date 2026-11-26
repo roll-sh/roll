@@ -1,3 +1,4 @@
+import { HorizonMark } from "@roll/brand";
 import { Boxes, Check, Copy, Database, ExternalLink, Eye, Inbox, ListChecks, Moon, Package, Pin, RefreshCw, RotateCcw, Search, Smartphone, SquareTerminal, Sun, Trash2, Waves, X, Zap, type LucideIcon } from "lucide-react";
 import { type ReactNode, useEffect, useState } from "react";
 import { appsApi, followShell as followAppsShell } from "@/lib/apps-api";
@@ -263,6 +264,7 @@ export function PreviewSheet({
                   .filter(Boolean)
                   .join("; ")}
                 .
+                {p.skipped.by_files && " Its stories were chosen by the change's files alone: build Storybook with --stats-json so a story that imports a changed file is taken first."}
               </p>
             )}
             {!!p.browser_checks?.length && (
@@ -2421,6 +2423,44 @@ function TimelineLine({ p }: { p: Preview }) {
     <div className="mb-3 flex flex-wrap items-baseline gap-x-1.5 text-[11.5px] text-muted" title={`How ${t.head.replace(/^cs_/, "").slice(0, 10)} came up, step by step`}>
       <span>{ready ? `Up in ${duration(ready.at - t.started_at)}:` : "So far:"}</span>
       <Dotted className="font-mono text-[11px] text-subtle tabular-nums" items={items} />
+    </div>
+  );
+}
+
+/** A note's Reply or Resolve from the preview's page in a small window of its own (Vercel's
+ * comment threads answer in place): the preview read, the note's thread alone, and the window
+ * closed once it's resolved. */
+export function ThreadPopup({ preview, review, close = () => window.close() }: { preview?: string; review: string; close?: () => void }) {
+  const [p, setP] = useState<Preview | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    if (!preview) return;
+    let live = true;
+    previewsApi
+      .get(preview)
+      .then((x) => live && setP(x))
+      .catch((e: unknown) => live && setError(errorText(e)));
+    return () => {
+      live = false;
+    };
+  }, [preview]);
+  return (
+    <div className="mx-auto w-full max-w-md space-y-3 px-4 py-5">
+      <div className="flex items-center gap-2 text-[13px] font-semibold tracking-[-0.04em]">
+        <HorizonMark size={16} interactive={false} />
+        <span className="truncate">{p ? `Note on ${p.title || p.slug}` : "Note"}</span>
+      </div>
+      {!preview ? (
+        <p className="text-[12.5px] text-muted">This link doesn't name a preview.</p>
+      ) : error ? (
+        <p className="text-[12.5px] text-danger">{error}</p>
+      ) : !p ? (
+        <p className="shimmer text-[12.5px] text-muted">Opening the preview…</p>
+      ) : !p.change ? (
+        <p className="text-[12.5px] text-muted">Notes go on a change; this preview is a branch's.</p>
+      ) : (
+        <NoteThread previewId={p.id} change={p.change} review={review} where={p} onDone={() => setTimeout(close, 900)} />
+      )}
     </div>
   );
 }

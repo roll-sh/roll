@@ -362,9 +362,13 @@ applications). A web page calls a cluster directly, with no backend of its own i
     expands terms (`prefix`, `wildcard`, the prefix match queries, `simple_query_string`,
     `fuzziness`, `max_expansions`) unless the parent's `limits.allow_expensive_queries`, since
     its expansions aren't capped as a browser key's own queries' are; nor, without it, a
-    `range` on a field an index the key reaches maps as text or a keyword (its terms are walked,
-    as Elasticsearch's `search.allow_expensive_queries: false` refuses), read from the mappings on
-    each request), a `range` on numbers and dates staying allowed, a `user` (an end
+    `range` on a field an index the key reaches maps as text or a keyword, a `flattened` field's
+    keyed subfields included (its terms are walked, as Elasticsearch's
+    `search.allow_expensive_queries: false` refuses), a `range` on numbers and dates staying
+    allowed; and never a query on a runtime field, which runs its script for every document.
+    The indices a key reaches are those its names match, by name or alias, and the backing
+    indices of the data streams (and data stream aliases) they name, their mappings read on each
+    request), a `user` (an end
     customer, Algolia's `userToken`),
     `origins` and `rate_limit: {"per_minute": n}` (the user's). Unknown fields, duplicate keys and
     trailing bytes are refused. It goes wherever a browser key goes (`Authorization: ApiKey
@@ -1335,6 +1339,14 @@ filtered listing; and the auth matrix's probe of storage's nested route (also br
 
 Ranked; the top item is in progress. Updated as work lands (the watchdog reads this list).
 
+Working order (2026-11-26, after the 2026-11-25 category review): the fourth sweep's fixes first
+(item 4: #1059, `fix/search-resolved-names`, `fix/search-indirect-meds`, each a HIGH or MED on
+main), then the work in review or in progress (item 1's previews, #1054; item 11's RAG phase 2;
+item 13's crawler, #1060 and politeness), then item 12's frictions (the first thing a new user
+hits, and where Algolia, Meilisearch and Typesense are fastest: nobody else is on it, so it's the
+top open item), item 30 (read-only ES|QL for agents, after item 4's ENRICH fix), and item 15
+(Algolia's strongest ground: A/B tests, conversion analytics, merchandising rules).
+
 Landed 2026-11-17: per-person cluster caps (#162: 50 clusters and 2 always-on per person,
 rolld flags, 409 past a cap, counted in the write's own transaction); the search playground (#159); the Relevance tab for
 synonym sets and query rules (#170, with an updateable synonym analyzer refused at index time as
@@ -1479,12 +1491,15 @@ deterministic (#396).
    Fourth pass (2026-11-25, on main): what a request reads on the caller's behalf (lookups,
    templates, multi-item APIs, ingest, connectors, cross-cluster calls). `_mtermvectors` never
    authorized its items' indices, so a key limited to some indices read another's indexed terms,
-   and `_rank_eval` rendered templates without the lookup checks a search gets (in progress,
-   `fix/search-mtermvectors-rank-eval`: each item authorized as `indices:data/read/tv` under DLS
-   and FLS, rendered queries checked as a search body is). The same pass found lookups (terms,
+   and `_rank_eval` rendered templates without the lookup checks a search gets (fixed in #1045:
+   each item authorized as `indices:data/read/mtv[shard]` under DLS and FLS, each rated request's
+   lookups checked as it runs); `_update`, bulk updates and `_update_by_query` ignored DLS and FLS
+   (fixed in #1041, refused as Elasticsearch and OpenSearch refuse them). The same pass found lookups (terms,
    `percolate`, `more_like_this`, lookup runtime fields) authorized only by a scan of the body that
    skipped keys named `document` or `params` and never saw templated role queries or alias filters
-   (in progress, `fix/search-lookups-at-run`: each lookup authorized where it runs, as the reader);
+   (in review, #1059: each lookup authorized where it runs, as the reader; its re-check found
+   OpenSearch's `query` lookups and role queries on gets reading unchecked, both in its second
+   round);
    and names authorized before they're resolved: `PUT {index}/_alias` taking its index from the
    body, date math (`<.async-search>`) and `::failures` selectors checked as written, and resize
    targets never checked (in progress, `fix/search-resolved-names`, with Elasticsearch's alias and
@@ -2054,3 +2069,9 @@ deterministic (#396).
    that name exists. That is accepted: names are host labels (`<name>.search.…`), global like S3
    bucket names, and the 409 shows nothing else about the cluster. Left, low: a person's
    `GET …/{id}` shows the node id their cluster is loaded on (`status.node`).
+30. **Read-only ES|QL for agents** (asked by roll MCP, 2026-11-25: Supabase's and Neon's MCP
+   servers lead with read-only SQL, and ES|QL is search's): `POST /v1/search/clusters/{id}/esql`
+   (and per index), `read` in the catalogue, every index the query reads (`FROM`, `LOOKUP JOIN`,
+   `ENRICH`) authorized against the grant's scope as it plans, sync only, storing nothing; the
+   `search_esql` tool and `roll search esql`. Queued (`feature/search-esql-route`) behind item 4's
+   ENRICH fix, which it depends on.

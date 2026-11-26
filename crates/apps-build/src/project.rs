@@ -392,6 +392,16 @@ pub fn compose_to_toml(text: &str) -> Result<(String, Vec<String>), ProjectError
                 let ctx = str_of(b).or_else(|| b.get("context").and_then(str_of)).unwrap_or_else(|| ".".into());
                 let ctx = ctx.trim_start_matches("./").trim_end_matches('/');
                 out.push_str(&format!("root = {}\n", q(if ctx.is_empty() { "." } else { ctx })));
+                // What a project file can't say yet, said with the setting that does it, never
+                // dropped quietly: a multi-stage Dockerfile.prod built whole is the wrong image.
+                let (file, target) = (b.get("dockerfile").and_then(str_of), b.get("target").and_then(str_of));
+                if file.is_some() || target.is_some() {
+                    let flags = [file.as_ref().map(|f| format!("--dockerfile {f}")), target.as_ref().map(|t| format!("--stage {t}"))].into_iter().flatten().collect::<Vec<_>>().join(" ");
+                    notes.push(format!("{k}: its build's {} isn't carried: set it on the service once it's made (Settings → Build, `roll apps set -s {name} {flags}`)", [file.map(|f| format!("dockerfile {f}")), target.map(|t| format!("target {t}"))].into_iter().flatten().collect::<Vec<_>>().join(" and ")));
+                }
+                if b.get("args").is_some() {
+                    notes.push(format!("{k}: its build args aren't carried: set them as the service's variables (a build gets them)"));
+                }
             }
             (None, Some(img)) => out.push_str(&format!("image = {}\n", q(&img))),
             (None, None) => return Err(err(format!("service {k} has neither image nor build"))),
@@ -484,6 +494,9 @@ mod tests {
         assert!(notes.iter().any(|n| n.starts_with("web: not carried over: volumes")), "{notes:?}");
         assert!(!web.variables.contains_key("DATABASE_URL") && notes.iter().any(|n| n.contains("DATABASE_URL left out")), "the link sets it: {notes:?}");
         assert!(compose_to_toml("services:\n  web_1:\n    image: a\n  web-1:\n    image: b\n").is_err(), "two services, one name");
+        // A build's Dockerfile and target are named with the setting that does it, never dropped quietly.
+        let (_, notes) = compose_to_toml("services:\n  api:\n    build:\n      context: ./api\n      dockerfile: Dockerfile.prod\n      target: runtime\n").unwrap();
+        assert!(notes.iter().any(|n| n.contains("dockerfile Dockerfile.prod and target runtime") && n.contains("--dockerfile Dockerfile.prod --stage runtime")), "{notes:?}");
         // A few KB that aliases make gigabytes stops at the budget, before anything is built.
         let bomb = format!("x: &a [{}]\ny: [{}]\nservices: {{}}\n", vec!["1"; 2000].join(","), vec!["*a"; 2000].join(","));
         let e = compose_to_toml(&bomb).unwrap_err().to_string();
