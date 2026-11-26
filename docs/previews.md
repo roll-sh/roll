@@ -760,6 +760,14 @@ lands on production while the preview is open isn't read as this one dropping it
 lines or the risks. A branch made before bases were kept, or whose base couldn't be read (said in
 its activity), is compared with its parent alone.
 
+Other open changes whose previews' schema changes touch the same tables are named under them
+(`schema_overlaps`, PlanetScale's conflicting deploy requests: a table added or dropped, a
+column, a constraint or an index on it, `roll_previews::schema::tables_touched`; 5 changes and 5
+tables each at most), on the sheet and in the pull request comment ("**Also changing these
+tables:** `feat/b` (`public.users`). Whichever lands second migrates a table the first one
+changed"), since the second to land migrates a table the first already changed
+(`engine.rs::open_changes_that_change_the_same_tables_name_each_other`).
+
 What in those lines would hurt production when the change lands is named above them
 (`schema_risks`, `roll_previews::schema::risks`; PlanetScale's deploy request warnings, Atlas's
 migration lint): a table that goes ("production's rows go with it"), a column that goes, a
@@ -1092,6 +1100,24 @@ thirty-fourth review found them in the clear.
     another table and nothing fires outward. Then each masked table's `VACUUM (FULL, ANALYZE)`
     (maintenance runs as the table's owner with a safe `search_path`), every materialized view
     refreshed (as its owner), and a checkpoint.
+    - **Masked once, branched many** (Neon's anonymized branches): a masked Postgres branch comes
+      from its parent's masked base, a branch of the parent masked once by the rules (the rewrite
+      and `VACUUM (FULL)` above, once; with no role of its own, which would take the tables, so
+      each branch's role gets them as from the parent), which each preview's branch then branches copy-on-write,
+      masked as it is. One masked copy per parent and rules, not one per preview and reset, and
+      the data step skips the rewrite. The base serves new branches for a day
+      (`ROLL_PREVIEWS_MASK_BASE_HOURS`, 24, a week at most; 0 masks each branch's own copy),
+      then the next one is made from the parent as it is then, so a preview's data is at most
+      that old. New rules make a new base. One is made by one converge at a time (a claim, its
+      branch found again by name after a crash); a branch that finds one being made waits for it
+      (2 minutes at most), and one that can't have it masks its own copy as before. An old base (other rules, past its day, or one
+      no project's rules want) is deleted once no branch comes from it (after a branch's
+      deletion, and every 10 minutes on the leader); the base for the rules now stays a day for
+      the next preview. Within one base the same input masks to the same output across its
+      previews. Data as of a time (`data_at`) and structure-only branches don't use it. A
+      branch's schema changes are still read against the parent, past its base
+      (`engine.rs::masked_branches_come_from_one_masked_base`; live: the preview's activity says
+      it branched from it, still masked, and no older base outlives its branches).
     - A masked branch is never rewritten once the preview's code has run in it: a reset, or rules
       that change, branch it again (a new endpoint, masked before any service is pointed at it).
       So nothing still connected reads the unmasked rows, and nothing the preview's code left in
@@ -2058,6 +2084,7 @@ type Preview = {
   cost: { sleeping_usd_month: number; active_usd_hour: number; month_to_date_usd: number; runs_usd: number; bytes: number }; // runs_usd: of month_to_date, its browsers' and jobs' containers
   schema_changes: string[] | null;    // "+ …"/"- …" against the parents, once read at `head`; null: not known
   schema_risks?: string[];            // what in them would hurt production when it lands (dropped tables and columns, type changes, NOT NULL)
+  schema_overlaps?: { preview: string; branch: string; tables: string[] }[]; // other open changes whose schema changes touch the same tables
   kept_until: number | null;          // kept past its TTL until then (POST …/keep)
   pull?: { number: number; url: string; fork: boolean; approved_head: string | null; approved_by: string | null };
                                       // a Git URL service's pull request (roll apps' push hook); a fork's runs only at approved_head
@@ -2115,7 +2142,7 @@ type Settings = {
   max_usd_month: number;              // 0: no cap; once the month's cost reaches it, new previews wait
   secrets: { base: string; allow_production: boolean };      // "development", false
   env: Record<string, string>;        // overrides every service gets
-  github: { comment: boolean; status: boolean; deployment: boolean; screenshot: boolean; baseline: boolean; pages: string[]; hide: string[]; budget: { load_ms: number; bytes: number }; openapi?: string; endpoints?: string[]; states?: {name, page, steps}[]; login?: {page, steps} /* a type step's text may be "$NAME" */; modes?: {name: string; color_scheme?: "dark" | "light"; locale?: string; timezone?: string}[]; storybook?: string /* "web" or "web:/storybook/" */; browsers?: ("firefox" | "webkit" | "webkit-phone")[] };   // all true but screenshot; pages, hide: []; budget 0s (none); openapi: the first service's OpenAPI JSON path, compared with main's; endpoints: up to 5 GET paths timed against main's
+  github: { comment: boolean; status: boolean; deployment: boolean; screenshot: boolean; baseline: boolean; pages: string[]; hide: string[]; budget: { load_ms: number; bytes: number }; openapi?: string; endpoints?: string[]; states?: {name, page, steps}[]; login?: {page, steps} /* a type step's text may be "$NAME" */; modes?: {name: string; color_scheme?: "dark" | "light"; locale?: string; timezone?: string}[]; storybook?: string /* "web" or "web:/storybook/" */; story_runs?: number /* 1 to 4 containers side by side, 40 stories each (1) */; browsers?: ("firefox" | "webkit" | "webkit-phone")[] };   // all true but screenshot; pages, hide: []; budget 0s (none); openapi: the first service's OpenAPI JSON path, compared with main's; endpoints: up to 5 GET paths timed against main's
   access: "link" | "team" | "public"; // "link": a preview's URLs need its link; "team": a person signed in to roll who may open the project
   visual_review: "off" | "check" | "required";   // the roll/visual review; required also blocks landing in roll ("off")
   feedback: boolean;                  // a feedback button on its pages for people who came in through roll (true)
@@ -2349,7 +2376,10 @@ type Settings = {
     Its Storybook's stories too (Chromatic's stories): with `github.storybook` (`web`, or
     `web:/storybook/` when the service serves it under a path: a static build or `storybook
     dev`), that service's run reads Storybook's index (`index.json`, Storybook 7 and later;
-    `stories.json` before), and takes 40 stories, those the change touched first (Chromatic's
+    `stories.json` before), and takes 40 stories (with `github.story_runs`, 1 to 4 screenshot
+    containers side by side, 40 each: every k-th of the order below, so each takes its share of
+    the ones that matter first, merged back in that order; each billed as a browser run, their
+    times added; `STORIES_SHARD`), those the change touched first (Chromatic's
     TurboSnap: a story whose own file the change changed since the default branch, then one that
     imports a changed file from anywhere, then one beside a file it changed, its component or its
     styles, then the rest in the index's order; a repo's path matches a story's `importPath` and a
@@ -2940,32 +2970,25 @@ requests, Vercel's toolbar and per-push URLs, Jam's replays. Its fixes landed wi
 preview up` refuses an untracked file named like a secret, and the stale lines it found (frozen
 services' stop, which products' restore points save, the CLI's commands).
 
-1. **A visual change can be refused, in review** (Chromatic's Deny, Percy's Request changes,
-   Argos's Reject): `refused` holds the status, failing, with why, until a new head or an
-   accept.
-2. **Mask once, branch many** (Neon's anonymized branches; M): every preview branch and reset
-   rewrites each masked table and then `VACUUM (FULL)`s it, so a masked table is a full copy per
-   preview and minutes of the data step. A masked base per parent, masked again when the rules
-   or a schedule say, which previews branch copy-on-write.
-3. **More stories per run** (Chromatic has no per-build cap; L): runs sharded over several
-   screenshot containers past 40 stories, each change's touched ones first.
-4. **A migration rehearsed on today's production** (PlanetScale's deploy requests; M): before
-   landing (or asked), branch fresh, run the release again and compare; open previews whose
-   schema changes touch the same table are named on each other.
-5. **The feedback button for team-access visitors on roll apps previews** (S, with roll apps:
+1. **More stories per run, in review** (Chromatic has no per-build cap): `github.story_runs`,
+   up to 4 containers side by side, 160 stories.
+2. **A migration rehearsed on today's production** (PlanetScale's deploy requests; M): before
+   landing (or asked), branch fresh, run the release again and compare. Its other half, open
+   previews whose schema changes touch the same tables named on each other, in review.
+3. **The feedback button for team-access visitors on roll apps previews** (S, with roll apps:
    `apps-control/src/public.rs` adds it for link and share visitors only).
-6. **This page on main, from the toolbar** (Vercel's deployment switcher; S): main's preview
+4. **This page on main, from the toolbar** (Vercel's deployment switcher; S): main's preview
    exists (`github.baseline`); the toolbar opens the same path there.
-7. **Older pushes past the last three, started on demand** (Vercel keeps every deployment's URL;
+5. **Older pushes past the last three, started on demand** (Vercel keeps every deployment's URL;
    S–M): kept as code only, on the preview's own data, started at the first visit.
-8. **What a note's reviewer saw, from their own browser** (Jam, Marker.io; M): an opt-in
+6. **What a note's reviewer saw, from their own browser** (Jam, Marker.io; M): an opt-in
    capture, labelled as theirs, and mentions of the team's members.
-9. **Restore points for search and buckets**: search's once roll search's `reset {from}` is in
+7. **Restore points for search and buckets**: search's once roll search's `reset {from}` is in
     (its Next 32); buckets need a put-back on roll storage's side.
-10. **Previews for the members thread's next products**: once roll apps' and roll search's routes
+8. **Previews for the members thread's next products**: once roll apps' and roll search's routes
     become member routes (docs/members.md, v1.1), a preview's roll apps services and search branch
     follow the same roles, checked live against a member's session.
-11. **Watches on pg-control**: the data step's Postgres compute start (most of the data step is
+9. **Watches on pg-control**: the data step's Postgres compute start (most of the data step is
     it and its masking); cheap branches on ext4 through overlay volumes over a frozen base
     (measured 2026-11-17: 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole
     table file); recovery to a time seconds old (unowned).
@@ -2974,8 +2997,8 @@ Not to build: more lab checks on the first page (the sheet has a dozen; each add
 pull request for less than the items above).
 
 Landed 2026-11-26, midday: restore points for streams (#1112), the TurboSnap test's race under
-load (#1114), the tenth review's fixes (#1119), and the visual review holding on stories a change
-touched that its run didn't take (#1120).
+load (#1114), the tenth review's fixes (#1119), the visual review holding on stories a change
+touched that its run didn't take (#1120), a visual change refused (#1125), and masked bases (#1130).
 
 Landed 2026-11-26, morning: stories' interaction tests (#1087), what a failed one threw (#1091), both in the other browsers (#1100), the step a failed one stopped at (#1105), and restore points for Redis (#1109).
 

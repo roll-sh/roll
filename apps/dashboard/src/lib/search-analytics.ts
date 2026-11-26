@@ -24,6 +24,10 @@ export interface QueryRow {
   ctr?: number | null;
   /** 1-based, over the clicks that said where. */
   avg_position?: number | null;
+  /** `roll_conversion` events for the query, per search, and their value. */
+  conversions?: number;
+  conversion_rate?: number | null;
+  value?: number;
 }
 
 export interface SearchAnalytics {
@@ -33,7 +37,7 @@ export interface SearchAnalytics {
   step_s: number;
   indices: string[];
   points: { at: number; searches: number; no_hits: number; clicks: number }[];
-  totals: { searches: number; no_hits: number; no_hit_rate: number | null; clicks: number; ctr: number | null };
+  totals: { searches: number; no_hits: number; no_hit_rate: number | null; clicks: number; ctr: number | null; conversions?: number; conversion_rate?: number | null; value?: number };
   top: QueryRow[];
   no_results: QueryRow[];
   low_ctr: QueryRow[];
@@ -56,6 +60,11 @@ export interface VariantResult {
   value: number;
   ctr: number | null;
   conversion_rate: number | null;
+  /** Trials whose first search found nothing. */
+  no_hits?: number;
+  no_hit_rate?: number | null;
+  /** The searches' 95th percentile, as a bucket's bound (under 1, 2, 4… ms); null: none timed. */
+  p95_latency_ms?: number | null;
   /** Absent on the baseline itself. */
   vs_baseline?: { ctr: Comparison; conversion_rate: Comparison };
 }

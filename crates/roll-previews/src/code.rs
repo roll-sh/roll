@@ -125,6 +125,7 @@ impl CodeSource {
                 github: PreviewGithub { comment: s.github.comment, status: s.github.status, deployment: s.github.deployment },
                 head: Some(p.head.clone()),
                 schema_changes: p.schema_changes.clone(),
+                schema_overlaps: p.schema_overlaps.iter().map(|o| (o.branch.clone(), o.tables.clone())).collect(),
                 schema_risks: p.schema_risks.clone(),
                 release_ms: p.release.as_ref().map(|x| x.ms),
                 release_before_ms: p.release.as_ref().and_then(|x| x.before_ms),

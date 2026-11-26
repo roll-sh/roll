@@ -1491,6 +1491,30 @@ fn play_step_of(step: Option<String>, play: Option<crate::Play>) -> Option<Strin
         .filter(|t| !t.is_empty())
 }
 
+/// Shards' stories back in the touched-first order they were dealt from (one each in turn: the
+/// i-th of every shard, then the next), and what they left together.
+fn merge_story_shards(shards: Vec<(Vec<crate::ports::PageShot>, crate::Skipped)>) -> (Vec<crate::ports::PageShot>, crate::Skipped) {
+    let mut skipped = crate::Skipped::default();
+    let mut firsts: Vec<std::vec::IntoIter<String>> = Vec::new();
+    let mut lists: Vec<std::vec::IntoIter<crate::ports::PageShot>> = Vec::new();
+    for (shots, left) in shards {
+        skipped.stories += left.stories;
+        skipped.touched_stories += left.touched_stories;
+        skipped.by_files |= left.by_files;
+        firsts.push(left.first_stories.into_iter());
+        lists.push(shots.into_iter());
+    }
+    let mut shots = Vec::new();
+    while lists.iter().any(|l| !l.as_slice().is_empty()) {
+        shots.extend(lists.iter_mut().filter_map(Iterator::next));
+    }
+    while skipped.first_stories.len() < 10 && firsts.iter().any(|l| !l.as_slice().is_empty()) {
+        skipped.first_stories.extend(firsts.iter_mut().filter_map(Iterator::next));
+    }
+    skipped.first_stories.truncate(10);
+    (shots, skipped)
+}
+
 /// How many of a change's first stories the other browsers take (`story:<id>@<browser>`).
 pub const STORIES_IN_BROWSERS: usize = 5;
 
@@ -2171,26 +2195,30 @@ impl Runtime {
         };
         // Its Storybook's stories, in a run of their own alongside (`github.storybook`).
         let stories_run = async {
-            let started = std::time::Instant::now();
+            let mut took = 0;
             let r = match opts.stories.as_deref().filter(|p| crate::settings::page_path_ok(p) && p.ends_with('/')) {
                 Some(at) => {
-                    let mut r = self.stories_in(name, port, at, &opts.changed, &opts.stories_first).await;
+                    let (mut r, ms) = self.stories_in(name, port, at, &opts.changed, &opts.stories_first, opts.story_runs).await;
+                    took += ms;
                     // Then the first of them in the other browsers asked for, once Chromium's run
                     // knows which the change touched first. Best effort: Chromium's stand alone.
                     if let Ok((shots, _)) = &mut r
                         && !opts.browsers.is_empty()
                     {
                         let ids: Vec<String> = shots.iter().filter_map(|p| p.path.strip_prefix("story:").map(str::to_string)).take(STORIES_IN_BROWSERS).collect();
+                        let started = std::time::Instant::now();
                         match self.browser_stories(name, port, at, &ids, &opts.browsers).await {
                             Ok(more) => shots.extend(more),
                             Err(e) => warn!(service = %name, error = %e, "previews: the stories in the other browsers"),
                         }
+                        took += started.elapsed().as_millis() as u64;
                     }
                     Some(r)
                 }
                 None => None,
             };
-            (r, started.elapsed().as_millis() as u64)
+            // Each of its containers' time (the shards run side by side).
+            (r, took)
         };
         // Each container's own time (they run side by side): what the run costs.
         let chromium_run = async {
@@ -2274,11 +2302,46 @@ impl Runtime {
     /// A service's Storybook stories (`github.storybook`; Chromatic's stories), served at `at`: a
     /// run of their own in its network, locked down as the screenshot's is, each story a page
     /// (`story:<id>`).
-    async fn stories_in(&self, name: &str, port: u16, at: &str, changed: &[String], first: &[String]) -> anyhow::Result<(Vec<crate::ports::PageShot>, crate::Skipped)> {
-        let shot = format!("roll-previews-story-{}", name.trim_start_matches("roll-previews-"));
+    /// The stories in `runs` containers side by side (`github.story_runs`), each its share of the
+    /// touched-first order, merged back into that order: the shots, what was left, and the
+    /// containers' time together (what it costs). One that fails leaves the others' stand; all
+    /// failing is the first's error.
+    async fn stories_in(&self, name: &str, port: u16, at: &str, changed: &[String], first: &[String], runs: usize) -> (anyhow::Result<(Vec<crate::ports::PageShot>, crate::Skipped)>, u64) {
+        let runs = runs.clamp(1, crate::settings::MAX_STORY_RUNS);
+        let shards = (0..runs).map(|i| async move {
+            let started = std::time::Instant::now();
+            let r = self.stories_shard(name, port, at, changed, first, (i, runs)).await;
+            (r, started.elapsed().as_millis() as u64)
+        });
+        let done = futures::future::join_all(shards).await;
+        let ms = done.iter().map(|(_, ms)| *ms).sum();
+        let (mut oks, mut first_err) = (Vec::new(), None);
+        for (r, _) in done {
+            match r {
+                Ok(ok) => oks.push(ok),
+                Err(e) => {
+                    warn!(service = %name, error = %e, "previews: a share of Storybook's stories");
+                    first_err.get_or_insert(e);
+                }
+            }
+        }
+        match (oks.is_empty(), first_err) {
+            (true, Some(e)) => (Err(e), ms),
+            _ => (Ok(merge_story_shards(oks)), ms),
+        }
+    }
+
+    /// One container's share of the stories (`shard`: `(i, k)`, every k-th from the i-th).
+    async fn stories_shard(&self, name: &str, port: u16, at: &str, changed: &[String], first: &[String], shard: (usize, usize)) -> anyhow::Result<(Vec<crate::ports::PageShot>, crate::Skipped)> {
+        let (i, runs) = shard;
+        let base = format!("roll-previews-story-{}", name.trim_start_matches("roll-previews-"));
+        let shot = if runs > 1 { format!("{base}-{i}") } else { base };
         let mut args = shot_args(&shot, name, port);
         // axe-core for each story's accessibility, on stdin as the page run's is.
         args.extend(["--env".into(), format!("STORIES={at}"), "--env".into(), "AXE=/tmp/axe.js".into()]);
+        if runs > 1 {
+            args.extend(["--env".into(), format!("STORIES_SHARD={i}/{runs}")]);
+        }
         // What the change touched, so its stories go first: as many paths as fit in 64 KiB.
         let mut fit = Vec::new();
         let mut size = 0;
@@ -2292,7 +2355,7 @@ impl Runtime {
         if !fit.is_empty() {
             args.extend(["--env".into(), format!("STORIES_CHANGED={}", serde_json::to_string(&fit)?)]);
         }
-        let first: Vec<&String> = first.iter().filter(|i| crate::settings::story_id_ok(i)).take(crate::settings::MAX_STORIES).collect();
+        let first: Vec<&String> = first.iter().filter(|i| crate::settings::story_id_ok(i)).take(crate::settings::MAX_STORIES * runs).collect();
         if !first.is_empty() {
             args.extend(["--env".into(), format!("STORIES_FIRST={}", serde_json::to_string(&first)?)]);
         }
@@ -3479,6 +3542,18 @@ mod tests {
         // A default branch's preview: the stories asked for first, before the rest.
         let out = std::process::Command::new("node").arg("-e").arg(format!("{src}\nconsole.log(touchedFirst({entries}, [], null, [\"d--1\"]).map((e) => e.id).join(','))")).output().expect("node");
         assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "d--1,a--1,b--1,c--1,e--1");
+    }
+
+    /// Stories taken by several containers side by side come back in the order they were dealt
+    /// (the i-th of each in turn), with what they left added up and the first of it in that order.
+    #[test]
+    fn shards_stories_come_back_in_the_order_they_were_dealt() {
+        let shot = |id: &str| crate::ports::PageShot { path: format!("story:{id}"), png: Vec::new(), errors: 0, report: Default::default() };
+        let left = |n: u32, first: &[&str], touched: u32| crate::Skipped { stories: n, first_stories: first.iter().map(|s| s.to_string()).collect(), touched_stories: touched, ..Default::default() };
+        // Dealt a, b, c, d, e over two: a, c, e and b, d.
+        let (shots, skipped) = merge_story_shards(vec![(vec![shot("a"), shot("c"), shot("e")], left(2, &["g", "i"], 1)), (vec![shot("b"), shot("d")], left(1, &["h"], 1))]);
+        assert_eq!(shots.iter().map(|p| p.path.as_str()).collect::<Vec<_>>(), ["story:a", "story:b", "story:c", "story:d", "story:e"]);
+        assert_eq!((skipped.stories, skipped.touched_stories, skipped.first_stories), (3, 2, vec!["g".to_string(), "h".to_string(), "i".to_string()]));
     }
 
     /// A stories run's report is the preview's code's: each story once, by an id Storybook would

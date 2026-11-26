@@ -372,6 +372,26 @@ async fn pages_changed_the_same_way_are_accepted_together() {
     assert_eq!(waiting, ["/c"], "the three accepted at once; /c still waits");
 }
 
+/// Open changes whose schema changes touch the same tables name each other (PlanetScale's
+/// conflicting deploy requests); one that changes another table names none.
+#[tokio::test]
+async fn open_changes_that_change_the_same_tables_name_each_other() {
+    let e = env(json!({ "enabled": true }));
+    for (c, n) in [("chg_sa", 1), ("chg_sb", 2), ("chg_sc", 3)] {
+        e.code.open(change(c, n));
+    }
+    e.engine.pass().await.unwrap();
+    let id = |c: &str| e.engine.store.row_by_change(c).unwrap().unwrap().id;
+    let set = |c: &str, l: &str| e.engine.store.set_schema_changes(&id(c), "h", Some(&[l.to_string()]), &[]).unwrap();
+    set("chg_sa", "+ column public.users.nickname text");
+    set("chg_sb", "- constraint users_email_key on public.users UNIQUE (email)");
+    set("chg_sc", "+ table public.orders");
+    let overlaps = |c: &str| e.engine.store.preview(&id(c)).unwrap().schema_overlaps.into_iter().map(|o| (o.preview, o.tables)).collect::<Vec<_>>();
+    assert_eq!(overlaps("chg_sa"), [(id("chg_sb"), vec!["public.users".to_string()])]);
+    assert_eq!(overlaps("chg_sb"), [(id("chg_sa"), vec!["public.users".to_string()])]);
+    assert!(overlaps("chg_sc").is_empty(), "another table");
+}
+
 /// A visual change refused (Chromatic's Deny): the review fails at that head, the change is told at
 /// once, an accept of the pages clears it, and a new head asks again.
 #[tokio::test]
@@ -1570,6 +1590,41 @@ async fn masked_postgres_is_masked_before_it_serves_and_new_rules_reach_it() {
     assert_eq!(e.pg.made.load(Ordering::SeqCst), made + 2);
     assert_eq!(e.pg.masks.lock().len(), 3);
     assert_eq!(e.engine.store.row(&p.id).unwrap().state, State::Ready);
+}
+
+/// Masked branches come from one masked base per parent and rules (Neon's anonymized branches):
+/// the base is masked once and each preview branches from it, masked as it is; new rules make a
+/// new base, and the old one goes once no branch comes from it.
+#[tokio::test]
+async fn masked_branches_come_from_one_masked_base() {
+    let e = env_with_config(json!({ "enabled": true, "masking": { "postgres:prj_db": { "public.users.email": "email" } } }), |c| c.mask_base_for = std::time::Duration::from_secs(86_400));
+    let masked = || e.pg.masks.lock().iter().map(|(b, _)| b.clone()).collect::<Vec<_>>();
+    e.code.open(change("chg_mb1", 1));
+    e.engine.pass().await.unwrap();
+    let first = masked();
+    assert!(first.len() == 1 && first[0].starts_with("prj_db~pvbase-"), "the base is masked, not the preview's branch: {first:?}");
+    let base = first[0].clone();
+    e.code.open(change("chg_mb2", 2));
+    e.engine.pass().await.unwrap();
+    assert_eq!(masked(), first, "a second preview masks nothing: it branches from the base");
+    let from_base = |e: &Env| e.pg.from.lock().iter().filter(|(c, of)| **of == base && e.pg.branches.lock().contains(*c)).count();
+    assert!(from_base(&e) >= 2, "both previews' branches come from it");
+    for id in ["chg_mb1", "chg_mb2"] {
+        let p = e.engine.store.row_by_change(id).unwrap().unwrap();
+        assert!(e.engine.store.mask_digest(&p.id, Kind::Postgres, "prj_db").unwrap().is_some_and(|d| !d.is_empty()), "each recorded as masked by the rules");
+    }
+    // New rules: a new base, and the previews branch from it; the old base goes with its last branch.
+    let mut s = e.engine.store.settings(&e.project).unwrap();
+    s.masking.insert("postgres:prj_db".into(), [("public.users.name".to_string(), "redact".to_string())].into_iter().collect());
+    e.engine.store.put_settings(&e.project, &s).unwrap();
+    for r in e.engine.store.rows(Some(&e.project)).unwrap() {
+        e.engine.store.update(&r.id, |x| x.next_at = 0).unwrap();
+    }
+    e.engine.pass().await.unwrap();
+    e.engine.pass().await.unwrap();
+    let now = masked();
+    assert!(now.len() >= 2 && now.iter().filter(|b| b.starts_with("prj_db~pvbase-")).count() >= 2, "a base for the new rules: {now:?}");
+    assert!(!e.pg.branches.lock().contains(&base), "the old base is deleted once nothing comes from it");
 }
 
 /// A restore point: the data saved (Postgres's and Redis's, the products that put a branch back

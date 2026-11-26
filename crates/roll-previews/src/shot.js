@@ -601,7 +601,13 @@ const stories = async (sessionId) => {
   }
   // The ones the change touched first, so the 40 a run takes are those that matter.
   const ranked = scored(entries.filter((e) => e && typeof e.id === "string" && STORY_ID.test(e.id) && (e.type == null || e.type === "story")), CHANGED, stats, FIRST);
-  const listed = ranked.map((x) => x[2]);
+  // This container's share when several take them (`$STORIES_SHARD`, `i/k`: every k-th from the
+  // i-th), so each takes its part of the ones that matter first.
+  const [shard, shards] = (() => {
+    const m = /^([0-3])\/([1-4])$/.exec(process.env.STORIES_SHARD || "");
+    return m && +m[1] < +m[2] ? [+m[1], +m[2]] : [0, 1];
+  })();
+  const listed = ranked.map((x) => x[2]).filter((_, n) => n % shards === shard);
   const touched = new Set(ranked.filter(([score]) => touchedBy(score, stats)).map((x) => x[2].id));
   const picked = listed.slice(0, 40);
   const out = [];

@@ -113,6 +113,8 @@ export interface Preview {
   schema_changes?: string[] | null;
   /** What in `schema_changes` would hurt production when it lands (a dropped table or column, a type change, a column made NOT NULL). */
   schema_risks?: string[];
+  /** Other open changes whose previews' schema changes touch the same tables: whichever lands second migrates a table the first changed. */
+  schema_overlaps?: { preview: string; branch: string; tables: string[] }[];
   /** The project's release (migrations) at its last head: how long it took on this preview's data, and the run before's. */
   release?: { head: string; ms: number; before_ms: number | null } | null;
   /** Kept past its TTL until then (epoch ms). */
@@ -465,7 +467,7 @@ export interface PreviewSettings {
   secrets: { base: string; allow_production: boolean };
   /** A patch replaces the whole map. */
   env: Record<string, string>;
-  github: { comment: boolean; status: boolean; deployment: boolean; screenshot?: boolean; baseline?: boolean; pages?: string[]; hide?: string[]; budget?: SpeedBudget; visual_threshold?: number; widths?: number[]; openapi?: string | null; endpoints?: string[]; states?: PageState[]; browsers?: ("firefox" | "webkit" | "webkit-phone")[]; storybook?: string | null; modes?: { name: string; color_scheme?: "dark" | "light"; locale?: string; timezone?: string }[] };
+  github: { comment: boolean; status: boolean; deployment: boolean; screenshot?: boolean; baseline?: boolean; pages?: string[]; hide?: string[]; budget?: SpeedBudget; visual_threshold?: number; widths?: number[]; openapi?: string | null; endpoints?: string[]; states?: PageState[]; browsers?: ("firefox" | "webkit" | "webkit-phone")[]; storybook?: string | null; /** How many containers take the stories side by side, each up to 40 (1 to 4). */ story_runs?: number; modes?: { name: string; color_scheme?: "dark" | "light"; locale?: string; timezone?: string }[] };
   /** "link": a preview's URLs need its link (its access token once, then a cookie). "team": only people signed in to roll who may open the project (they sign in on the way; the link's token lets nobody in). */
   access: "link" | "team" | "public";
   /** Chromatic's UI Review: `check` posts `roll/visual`; `required` also keeps a change waiting for one from landing in roll. */
