@@ -7422,3 +7422,45 @@ async fn update_by_query_re_embeds_an_indexs_documents() {
     let (s, v) = e.es(&u, &p, Method::POST, "/docs/_search", Some(json!({"query": {"semantic": {"field": "body", "query": "a seat"}}}))).await;
     assert_eq!((s, &v["hits"]["total"]["value"]), (200, &json!(3)), "{v}");
 }
+
+/// `…/indices/{index}/evaluate` scores two configurations against judged queries with the
+/// cluster's `_rank_eval` and compares them query by query; a configuration the cluster refuses
+/// answers the cluster's error, and the body takes only its own fields.
+#[tokio::test]
+async fn evaluate_compares_two_configurations_on_judged_queries() {
+    use reqwest::Method;
+    let e = env().await;
+    let c = e.post("/v1/search/clusters", json!({"name": "judged"})).await;
+    let (u, p) = creds(&c);
+    let id = c["id"].as_str().unwrap().to_string();
+    // The title says one thing, the description another: matching on the description finds
+    // what the judgments call relevant.
+    for (i, (title, desc)) in [("sofa", "a red couch"), ("couch", "a blue chair"), ("lamp", "a green light")].iter().enumerate() {
+        assert_eq!(e.es(&u, &p, Method::PUT, &format!("/goods/_doc/{i}?refresh=true"), Some(json!({"title": title, "desc": desc}))).await.0, 201);
+    }
+    let judgments = json!([
+        {"query": "couch", "ratings": [{"_id": "0", "rating": 3}, {"_id": "1", "rating": 0}]},
+        {"query": "lamp", "ratings": [{"_id": "2", "rating": 3}]},
+    ]);
+    let configs = json!([
+        {"name": "title", "request": {"query": {"match": {"title": "{{query}}"}}}},
+        {"name": "desc", "request": {"query": {"match": {"desc": "{{query}}"}}}},
+    ]);
+    let path = format!("/v1/search/clusters/{id}/indices/goods/evaluate");
+    let (s, v) = e.call(Method::POST, &path, Some(json!({"judgments": judgments, "configurations": configs}))).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["metric"], json!({"dcg": {"k": 10, "normalize": true}}));
+    let cmp = &v["comparison"];
+    assert_eq!((&cmp["baseline"], &cmp["candidate"]), (&json!("title"), &json!("desc")), "{v}");
+    // "couch": the title finds the chair (rated 0), the description the sofa (rated 3);
+    // "lamp": the title finds it, the description doesn't.
+    assert_eq!(cmp["better_queries"][0]["query"], "couch", "{v}");
+    assert_eq!(cmp["worse_queries"][0]["query"], "lamp", "{v}");
+    assert_eq!((cmp["better"].as_u64(), cmp["worse"].as_u64()), (Some(1), Some(1)), "{v}");
+    assert_eq!(v["configurations"][0]["queries"][1]["score"], 1.0, "{v}");
+
+    let (s, v) = e.call(Method::POST, &path, Some(json!({"judgments": judgments, "configurations": [{"name": "x", "request": {"query": {"nope": {}}}}]}))).await;
+    assert_eq!(s, 400, "the cluster's own refusal: {v}");
+    let (s, v) = e.call(Method::POST, &path, Some(json!({"judgments": judgments, "configurations": configs, "size": 3}))).await;
+    assert!(s == 400 && v.to_string().contains("no field [size]"), "{s} {v}");
+}
