@@ -329,7 +329,7 @@ pub fn authenticate(ctx: &Ctx) -> EsResult<()> {
     }
     let p = match &req.verified {
         Some(crate::rest::Verified::Derived(k)) => Some(derived::verified(ctx.cluster, k)?),
-        Some(crate::rest::Verified::ClusterUser(_)) => req.header(INDEX_SCOPE_HEADER).map(Principal::owner_scoped),
+        Some(crate::rest::Verified::ClusterUser(_)) => req.header(INDEX_SCOPE_HEADER).map(|s| Principal::owner_scoped(&scope_names(ctx, s))),
         None => match req.header("authorization") {
             Some(h) => Some(authenticate_header(ctx.cluster, h, &req.uri)?),
             None => None,
@@ -1534,6 +1534,20 @@ pub fn check_cluster_action_of(cluster: &crate::Cluster, p: &Principal, action: 
         return Ok(());
     }
     Err(denied(p, action, None))
+}
+
+/// An index scope's names as a role grants them: as given, unless it excludes some
+/// (`logs-*,-logs-secret`), which a role's names can't say. Then the concrete indices the
+/// expression names now (open, closed and hidden), so the exclusion holds.
+fn scope_names(ctx: &Ctx, scope: &str) -> String {
+    let exprs = crate::meta::resolve::split_expressions(scope);
+    if !exprs.iter().any(|e| e.starts_with('-')) {
+        return scope.to_string();
+    }
+    let opts = crate::meta::resolve::IndicesOptions { expand_closed: true, expand_hidden: true, ..crate::meta::resolve::IndicesOptions::LENIENT_EXPAND_OPEN };
+    let names = crate::meta::resolve::resolve(&ctx.state(), &exprs, &opts, ctx.now_ms).unwrap_or_default();
+    // Nothing matches: a name no index has, so the scope still reaches none.
+    if names.is_empty() { "\u{0}".to_string() } else { names.join(",") }
 }
 
 /// Whether the request runs as roll's own index-scoped principal ([`Principal::owner_scoped`]).

@@ -7203,16 +7203,19 @@ async fn esql_reads_only_the_indices_the_grant_reaches() {
     let (_, v) = esql(json!({"query": "FROM \"tenant-a-1::failures\""})).await;
     assert!(!v.to_string().contains("remote clusters"), "{v}");
     // The index form reads as the path's index only, whatever the query names.
-    let on_index = |query: &str| {
-        let (e, rules, body) = (&e, rules.clone(), json!({"query": query}));
+    let on_index = |index: &str, query: &str| {
+        let (e, rules, body, index) = (&e, rules.clone(), json!({"query": query}), index.to_string());
         async move {
-            let r = e.http.post(format!("{}/v1/search/clusters/esql/indices/tenant-a-1/esql", e.api)).header("x-test-grant", rules).json(&body).send().await.unwrap();
+            let r = e.http.post(format!("{}/v1/search/clusters/esql/indices/{index}/esql", e.api)).header("x-test-grant", rules).json(&body).send().await.unwrap();
             let s = r.status().as_u16();
             (s, r.text().await.unwrap())
         }
     };
-    let (s, v) = on_index("FROM tenant-a-1 | KEEP n").await;
+    let (s, v) = on_index("tenant-a-1", "FROM tenant-a-1 | KEEP n").await;
     assert_eq!(s, 200, "{v}");
-    let (s, v) = on_index("FROM tenant-b").await;
+    let (s, v) = on_index("tenant-a-1", "FROM tenant-b").await;
     assert!((s == 400 || s == 403) && !v.contains("s-of-b"), "{s} {v}");
+    // The path's exclusion holds too.
+    let (s, v) = on_index("tenant-*,-tenant-b", "FROM tenant-b").await;
+    assert!((s == 400 || s == 403) && !v.contains("s-of-b"), "an excluded index: {s} {v}");
 }
