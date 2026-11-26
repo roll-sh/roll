@@ -255,6 +255,8 @@ export interface PageCheck {
   step_ms?: number | null;
   /** A story's interaction test (its `play` function) as Storybook ran it: `failed` when it, or the story's render, threw. */
   play?: "passed" | "failed" | null;
+  /** What a failed one threw, as Storybook's frame showed it (one line, masked). */
+  play_error?: string | null;
 }
 
 /** A page state (`github.states`): a page of the first service's, reached by its steps. */
