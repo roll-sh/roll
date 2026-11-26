@@ -4,7 +4,6 @@ use super::cursor::Cursor;
 use super::{Outcome, Prepared, QueryResult, Session, TxnStatus, warning};
 use crate::catalog::quote_ident;
 use crate::error::{Error, Result, code};
-use crate::exec::collect;
 use crate::sql::binder::ast::{const_str, inner};
 use crate::sql::binder::{Binder, Clause, resolve_type_name};
 use crate::sql::expr::eval;
@@ -991,7 +990,7 @@ impl Session {
                         crate::session::ddl::execute_with_params(ctx, node, &ctas_types).map(|_| ())
                     }
                     Some(node) => crate::session::ddl::execute(ctx, node, "").map(|_| ()),
-                    None => collect(&plan.0, ctx, None).map(|_| ()),
+                    None => crate::exec::run_discard(&plan.0, ctx),
                 };
                 *ctx.instr.borrow_mut() = None;
                 r?;

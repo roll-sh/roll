@@ -546,6 +546,18 @@ fn nested_loop_inner() {
     q(&mut s, "SELECT pg_stat_force_next_flush()").unwrap();
     let f1 = int(&mut s, "SELECT temp_files FROM pg_stat_database WHERE datname = current_database()");
     assert_eq!(f1 - f0, 2, "the Materialize's file and the Sort's above");
+    // EXPLAIN ANALYZE runs the Materialize on disk too, its Storage line PostgreSQL 18.6's.
+    let plan = q(
+        &mut s,
+        "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, BUFFERS OFF, SUMMARY OFF) SELECT nsmall.a, nbig.a b, nbig.t FROM nsmall \
+         LEFT JOIN nbig ON nbig.a > nsmall.a * 330 AND nbig.a < nsmall.a * 333",
+    )
+    .unwrap();
+    let text: Vec<String> = plan.iter().map(|r| format!("{:?}", r[0])).collect();
+    for l in ["Nested Loop Left Join (actual rows=5430.00 loops=1)", "Materialize (actual rows=20000.00 loops=60)", "Storage: Disk  Maximum Storage: 918kB", "Seq Scan on nbig (actual rows=20000.00 loops=1)"] {
+        assert!(text.iter().any(|t| t.contains(l)), "{l} in {text:#?}");
+    }
+    assert_no_spill_files(dir.path());
     drop(s);
     eng.shutdown();
 }

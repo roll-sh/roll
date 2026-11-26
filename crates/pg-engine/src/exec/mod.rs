@@ -2110,6 +2110,22 @@ pub fn collect(plan: &Arc<Plan>, ctx: &ExecCtx, limit: Option<usize>) -> Result<
     }
 }
 
+/// `collect` with each row dropped as it comes, none kept: EXPLAIN ANALYZE's run (its
+/// DestNone receiver; holding the rows, a million-row window's held 55 MB more than its plain
+/// run).
+pub fn run_discard(plan: &Arc<Plan>, ctx: &ExecCtx) -> Result<()> {
+    let run = || ctx.statement(|| {
+        let mut node = nodes::open_bounded(plan, None, ctx)?;
+        while node.next(ctx)?.is_some() {}
+        Ok(())
+    });
+    if let crate::sql::plan::Plan::Context { frame, .. } = plan.as_ref() {
+        ctx.temp_cleanup.statement_framed(ctx, frame.clone(), run)
+    } else {
+        ctx.temp_cleanup.run(run)
+    }
+}
+
 /// `collect` (every row) of a prepared statement's plan over `kept`, the tree an earlier
 /// execution of the plan ran to its end, restarted rather than opened again when it can be
 /// (`Session::kept_tree`). Returns the tree too, run to its end and parked, for the next
