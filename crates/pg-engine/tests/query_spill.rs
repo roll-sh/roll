@@ -493,3 +493,45 @@ fn sorted_distinct() {
     drop(s);
     eng.shutdown();
 }
+
+/// Sorted EXCEPT and INTERSECT ALL (enable_hashagg off) past work_mem: each input's Sort goes
+/// to a temporary file, two as PostgreSQL's; the rows are those they give in memory, in the
+/// same order.
+#[test]
+fn sorted_setops_spill() {
+    std::thread::Builder::new().stack_size(64 << 20).spawn(sorted_setops).unwrap().join().unwrap();
+}
+
+fn sorted_setops() {
+    let dir = tempfile::tempdir().unwrap();
+    let eng = open(dir.path());
+    let mut s = eng.connect(1, "postgres", "postgres", "postgres").unwrap();
+    for sql in [
+        "CREATE TABLE so (a int, t text)",
+        "INSERT INTO so SELECT g % 9000, md5((g % 9000)::text) FROM generate_series(1, 20000) g",
+        "ANALYZE so",
+        "SET enable_hashagg = off",
+    ] {
+        q(&mut s, sql).unwrap();
+    }
+    for (sql, rows) in [
+        ("SELECT t, a FROM so EXCEPT SELECT t, a FROM so WHERE a % 3 = 0", 6000),
+        ("SELECT t, a FROM so INTERSECT ALL SELECT t, a FROM so WHERE a % 3 = 0", 6666),
+    ] {
+        q(&mut s, "SET work_mem = '256MB'").unwrap();
+        let plan = q(&mut s, &format!("EXPLAIN {sql}")).unwrap();
+        assert!(format!("{plan:?}").contains("SetOp"), "{plan:?}");
+        let want = q(&mut s, sql).unwrap();
+        assert_eq!(want.len(), rows);
+        q(&mut s, "SET work_mem = '64kB'").unwrap();
+        q(&mut s, "SELECT pg_stat_force_next_flush()").unwrap();
+        let f0 = int(&mut s, "SELECT temp_files FROM pg_stat_database WHERE datname = current_database()");
+        assert_eq!(q(&mut s, sql).unwrap(), want, "{sql}");
+        assert_eq!(temp_files(dir.path()), 0);
+        q(&mut s, "SELECT pg_stat_force_next_flush()").unwrap();
+        let f1 = int(&mut s, "SELECT temp_files FROM pg_stat_database WHERE datname = current_database()");
+        assert_eq!(f1 - f0, 2, "{sql}: the two Sorts' files");
+    }
+    drop(s);
+    eng.shutdown();
+}
