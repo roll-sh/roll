@@ -285,6 +285,7 @@ impl Meter {
         self.store.record_slowlog(&c.id, &entries).await?;
         let a = &o.analytics;
         self.store.record_analytics(&c.id, &a.cleared, a.enabled.as_deref(), &a.hours).await?;
+        self.store.record_experiments(&c.id, &a.experiments).await?;
         self.store.record_browser_usage(&c.id, &o.browser, crate::control::now()).await
     }
 

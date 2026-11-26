@@ -782,12 +782,15 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
     let mut lent_rules: Vec<roll_auth::scope::Rule> = Vec::new();
     if let Some(l) = lend_outcome(&access, row, &params, json_body.as_ref(), &target, &scope, as_user).await {
         seconds.extend(l.all.into_iter().map(|(p, a, r)| (p, a, Some(r))));
-        lent_rules = l.grants;
-        if rank(l.outcome) < rank(outcome) {
+        // A lend with secrets to hand over decides a tie too: an approval then names the secret,
+        // never only the route's own resource while handing the secret over. Its rules go to the
+        // product only when it decided (what was asked about is what's allowed).
+        if rank(l.outcome) < rank(outcome) || (!l.grants.is_empty() && rank(l.outcome) == rank(outcome)) {
             (outcome, action) = (l.outcome, l.action);
             (asked_env, asked_path) = (None, None);
             lent = Some((l.product, l.id));
             lent_folder = l.folder;
+            lent_rules = l.grants;
         }
     }
     // A person's token on a member product reaches only what their session does too, creates
@@ -1219,14 +1222,15 @@ pub(crate) async fn lend_outcome(access: &Arc<Access>, row: &'static Row, params
             let named = format!("{id}:{env}:{path}");
             if outcome != Outcome::Allow {
                 short.push(named.clone());
-                // Exactly that folder in that environment, for this one action.
+                // Exactly that folder in that environment, for this one action (and reading it, which
+                // the product does to find the secret: less than the action itself).
                 grants.push(roll_auth::scope::Rule {
                     product: "secrets".into(),
                     resources: Resources::Some(vec![roll_auth::scope::Selector::Id { id: id.clone(), index: None }]),
                     environments: res.environment.clone().map(|e| vec![e]),
                     paths: res.path.clone().map(|p| vec![p]),
                     unprotected: false,
-                    actions: [(l.action, roll_auth::scope::Effect::Allow)].into_iter().collect(),
+                    actions: [(l.action, roll_auth::scope::Effect::Allow), (Action::Read, roll_auth::scope::Effect::Allow)].into_iter().collect(),
                 });
             }
             all.push(("secrets", l.action, named));
