@@ -271,6 +271,7 @@ fn main() -> anyhow::Result<()> {
     let engine = Engine::open(EngineOptions {
         data_dir: a.data,
         cache_bytes: profile.cache_bytes,
+        memtable_bytes: profile.memtable_bytes,
         sync: !a.no_sync,
         idle_close: profile.idle_close,
         superuser: a.user,
@@ -287,7 +288,6 @@ fn main() -> anyhow::Result<()> {
             hba_lines: a.hba_lines,
             ident_file: a.ident_file,
         },
-        ..EngineOptions::default()
     })?;
     if a.downgrade_catalog {
         for name in engine.downgrade_catalogs()? {
