@@ -22825,71 +22825,175 @@ blocks (format 4), one with `ROLL_COLBLOCKS=1` (format 5), each TPC-H SF1 loaded
 and closed cleanly; user instructions of the engine's cgroup, one run of each form on lane C (A
 and B for point and range reads), 3 runs a query after a warm-up of the 22 (`~/.cache/a311/
 ftable.sh`, `ftsum.py`). The switch is off by default and stays so until every row here is level
-or better. Now (step 2, first piece, on `def0eaf98`; 319's round 16 made format 4's q20 -35% and
-q02 -13%):
+or better. Now (step 2, second piece: binary `r8`, the candidate's code on `0037841bd2`; the keyed fetch
+measured by `~/.cache/a311/keyed/keyed.sh`, q02's form; point and range reads in four pairs):
 
 | | format 4 | format 5 | |
 |---|---|---|---|
-| TPC-H q01 (G) | 7.317 | 5.238 | -28.4% |
-| TPC-H q02 (G) | 2.280 | 2.772 | +21.6% |
-| TPC-H q03 (G) | 4.118 | 4.643 | +12.7% |
-| TPC-H q04 (G) | 1.350 | 1.774 | +31.5% |
-| TPC-H q05 (G) | 2.816 | 3.416 | +21.3% |
-| TPC-H q06 (G) | 3.381 | 3.473 | +2.7% |
-| TPC-H q07 (G) | 3.528 | 4.274 | +21.1% |
-| TPC-H q08 (G) | 1.450 | 1.959 | +35.1% |
-| TPC-H q09 (G) | 7.839 | 8.857 | +13.0% |
-| TPC-H q10 (G) | 5.554 | 5.850 | +5.3% |
-| TPC-H q11 (G) | 0.836 | 0.920 | +10.1% |
-| TPC-H q12 (G) | 5.879 | 3.993 | -32.1% |
-| TPC-H q13 (G) | 4.103 | 4.575 | +11.5% |
-| TPC-H q14 (G) | 1.389 | 1.751 | +26.1% |
-| TPC-H q15 (G) | 2.299 | 2.421 | +5.3% |
-| TPC-H q16 (G) | 2.884 | 2.883 | -0.0% |
-| TPC-H q17 (G) | 2.867 | 2.819 | -1.6% |
-| TPC-H q18 (G) | 15.574 | 25.493 | +63.7% |
-| TPC-H q19 (G) | 0.474 | 0.781 | +64.9% |
-| TPC-H q20 (G) | 0.890 | 1.355 | +52.2% |
-| TPC-H q21 (G) | 5.256 | 6.018 | +14.5% |
-| TPC-H q22 (G) | 0.623 | 1.017 | +63.1% |
-| TPC-H, the 22 (G) | 82.71 | 96.28 | +16.4% |
-| VmHWM over the 22 (MB) | 1,643 | 1,396 | -15.0% |
-| TPC-H SF1 load (user G) | 697.8 | 739.1 | +5.9% |
-| load VmHWM (MB) | 1,365 | 1,389 | +1.7% |
-| store on disk (MB) | 584.0 | 543.3 | -7.0% |
+| TPC-H q01 (G) | 7.317 | 5.228 | -28.6% |
+| TPC-H q02 (G) | 2.280 | 2.221 | -2.6% |
+| TPC-H q03 (G) | 4.115 | 4.456 | +8.3% |
+| TPC-H q04 (G) | 1.349 | 1.511 | +12.0% |
+| TPC-H q05 (G) | 2.815 | 3.239 | +15.1% |
+| TPC-H q06 (G) | 3.381 | 3.454 | +2.2% |
+| TPC-H q07 (G) | 3.526 | 3.782 | +7.3% |
+| TPC-H q08 (G) | 1.451 | 1.445 | -0.4% |
+| TPC-H q09 (G) | 7.858 | 7.764 | -1.2% |
+| TPC-H q10 (G) | 5.549 | 5.636 | +1.6% |
+| TPC-H q11 (G) | 0.835 | 0.817 | -2.2% |
+| TPC-H q12 (G) | 5.878 | 3.936 | -33.0% |
+| TPC-H q13 (G) | 4.102 | 4.522 | +10.3% |
+| TPC-H q14 (G) | 1.384 | 1.510 | +9.1% |
+| TPC-H q15 (G) | 2.299 | 2.411 | +4.9% |
+| TPC-H q16 (G) | 2.870 | 2.874 | +0.1% |
+| TPC-H q17 (G) | 2.867 | 2.778 | -3.1% |
+| TPC-H q18 (G) | 15.486 | 15.972 | +3.1% |
+| TPC-H q19 (G) | 0.474 | 0.444 | -6.3% |
+| TPC-H q20 (G) | 0.891 | 0.901 | +1.0% |
+| TPC-H q21 (G) | 5.261 | 5.336 | +1.4% |
+| TPC-H q22 (G) | 0.623 | 0.623 | -0.0% |
+| TPC-H, the 22 (G) | 82.61 | 80.86 | -2.1% |
+| VmHWM over the 22 (MB) | 1,641 | 1,416 | -13.7% |
+| TPC-H SF1 load (user G) | 701.7 | 767.0 | +9.3% |
+| load VmHWM (MB) | 1,357 | 1,363 | +0.4% |
+| store on disk (MB) | 583.8 | 552.5 | -5.4% |
 | bulk copy_in (G) | 6.406 | 6.407 | +0.0% |
-| bulk create_index (G) | 3.732 | 3.734 | +0.1% |
-| bulk create_unique_index (G) | 2.670 | 2.675 | +0.2% |
+| bulk create_index (G) | 3.737 | 3.731 | -0.2% |
+| bulk create_unique_index (G) | 2.671 | 2.676 | +0.2% |
 | bulk copy_out (G) | 2.359 | 2.359 | +0.0% |
-| bulk insert_select (G) | 4.434 | 4.454 | +0.5% |
-| bulk update_half (G) | 11.608 | 11.606 | -0.0% |
-| bulk delete_quarter (G) | 7.788 | 8.730 | +12.1% |
-| bulk vacuum (G) | 1.720 | 1.862 | +8.3% |
-| bulk analyze (G) | 0.473 | 0.665 | +40.7% |
-| bulk count_after (G) | 0.360 | 0.295 | -18.3% |
-| bulk seq_count (G) | 0.175 | 0.177 | +1.1% |
-| bulk seq_sum (G) | 0.324 | 0.274 | -15.4% |
+| bulk insert_select (G) | 4.434 | 4.457 | +0.5% |
+| bulk update_half (G) | 11.606 | 11.603 | -0.0% |
+| bulk delete_quarter (G) | 6.738 | 7.956 | +18.1% |
+| bulk vacuum (G) | 1.720 | 1.882 | +9.4% |
+| bulk analyze (G) | 0.473 | 0.677 | +43.2% |
+| bulk count_after (G) | 0.361 | 0.294 | -18.4% |
+| bulk seq_count (G) | 0.175 | 0.177 | +1.2% |
+| bulk seq_sum (G) | 0.324 | 0.274 | -15.5% |
 | bulk count_star (G) | 0.175 | 0.177 | +1.2% |
 | bulk sum_a (G) | 0.324 | 0.274 | -15.5% |
-| range read, 100 rows (instructions / read) | 572,082 | 629,484 | +10.0% |
-| point select (instructions / select) | 63,256 | 65,244 | +3.1% |
+| range read, 100 rows (instructions / read; 4 pairs) | 568,030 | 629,105 | +10.8% |
+| point select (instructions / select; 4 pairs) | 61,753 | 63,226 | +2.4% |
+| keyed fetch, q02's form (instructions / key) | 2,697 | 2,287 | -15.2% |
 
-What is left, by cause (profiles of format 5's worst queries):
-- **Rows made for consumers that read rows.** q18's +64%: parscan's row path (rows of a run the
-  batch kernels can't aggregate go to `partial_row`, which decodes them again from bytes) is 28%
-  of its samples in `ColDir::rows_into`. q20's +52%, q19, q22, q02, q08: the serial executor's
-  row-at-a-time scans (`ScanNode::next_heap_ordered`, `next_raw_ref`, `emit`, nested loops'
-  inner scans) make whole rows (`Scan::next` -> `Block::col_rows`). Format 4 hands those
-  consumers the stored bytes for nothing. The way out is consumers that take columns: the serial
-  path 319 is reworking (batches from the scan, only the plan's columns), then the row path
-  reading `Pre`'s columns; format 5 plugs into the same column sets (`need`, the projection).
-- **Keyed fetches** (319's 2.4k instructions a key, q02 / q11 / q14 / q20): a column block keeps
-  format 4's entries and restarts, so its seek costs what format 4's does; only the row made after
-  it differs (made of the columns read where the caller says which: `Lookup::reads`,
-  `read_cols`). A key column searched directly (a fixed-width array of a block's row keys,
-  binary-searched by words, no varint decode) would make the seek itself cheaper: not built yet.
-- **Maintenance**: DELETE +12%, VACUUM +8.3%, ANALYZE +41% (their scans make rows), the load
-  +5.9% (the encoder and its check): step 3.
+**Against the coordinator's rule for this piece** (continue to step 3 if the 22 are at or under
+format 4's total and no query is more than ~10% worse): the 22 are **2.1% under** format 4's total,
+with peak memory -13.7% and the store -5.4%; **three queries are still more than 10% worse**
+(q05 +15.1%, q04 +12.0%, q13 +10.3%; q14 +9.1%, q03 +8.3% after them), and point selects +2.4%,
+range reads +10.8%, the load +9.3%. A keyed fetch is now 15% cheaper than format 4's. (The
+coordinator's call: format 5 continues; those three are the next piece.)
+
+What is left, by cause (profiles of format 5 on `r7`, children's shares; `r8` takes the same paths):
+- **Rows made for consumers that read columns or decode the rows again.** q13: an aggregating
+  chunk's run has its rows made before its loop (`make_cols` 18.8%), though the join takes nearly
+  all of them as columns (`Pre::joined`); which rows its row path reads is known only in the loop,
+  and deciding it there moved format 4's registers (above). A lookup join's inner rows are made as
+  row bytes (q04: `col_row_at` 7.9%; q05: `make_col_rows` 6.3%) and decoded again (`decode_into`,
+  `decode_value`: q04 5.5%, q05 15%). The way out is decoding a lookup's and the row path's
+  columns from the block (`ColBatch`, as `Pre` does), and a pure test before the loop of which rows
+  the join takes.
+- **A point select and a range read make their rows** from columns (the entry seek then the row
+  made; a range read's rows of the columns read) where format 4 hands out the stored bytes: +2.4% /
+  +10.8%. The same way out: the scan's consumers reading columns, or a short read not paying for
+  the layout (next piece).
+- **Maintenance and the load**: DELETE +18%, VACUUM +9%, ANALYZE +43% (their scans make rows), the
+  load +9.3% (the encoder and its checks, the key column's too): step 3.
+
+## Storage format 5: column blocks, step 2, second piece: a key column, rows of the columns read on more paths (agent 311)
+
+The coordinator's question for this piece: can format 5 beat format 4 on the 22 at all? Two parts,
+in this order: keyed fetches through a key column, then consumers that take columns. Format 5 only;
+format 4's paths as they were (switch off below). The table above ("where the default flip
+stands") has format 5 against format 4 after it.
+
+**Keyed fetches, measured first** (`~/.cache/a311/keyed/keyed.sh`: a nested loop of 500 suppliers'
+80 partsupp rows each by `ps_suppkey`, q02's form, 40,000 fetches; the index scan's user
+instructions less the same entries' index-only count, divided by the rows). On step 2's first piece
+(`s11`): format 4 **2,685** a key (319's ~2.4k), format 5 4,001. A profile of format 4's (period
+20,011, 3,108 samples): the walk of a restart's entries inlined in `get_sorted_snap` (each entry's
+three varints, the shared-prefix test) 14% of the query, about 980 instructions a key, and
+`Block::read` 260: the seek proper is 1.2-1.3k of the 2.7k. The rest is the multi-get's per-key work
+(seek keys, the newer sources, the file and block search, `find_block`, the block cache), which a key
+column doesn't touch. So a key column can make a keyed fetch at most ~1.1k cheaper: 4-8% of q02,
+q11, q14 and q20, not the 16% the 22 were behind.
+
+- **The key column** (`colblock::KeyCol`, written when a column block's keys are of one length and
+  share all but at most 8 bytes before their 8 of version: every table row key): the prefix once,
+  then per row the user key's other bytes as a big-endian number and the version, each an `Ints`
+  (base and width). `ColDir::key_seek` finds the first row at or after a seek key by a binary
+  search of those numbers; the row is then made of the columns read. Flag bit 1 of the section's
+  flags byte (bit 0 is TIDs); sections without it read as before, so format 5 directories written
+  by step 1 or step 2's first piece still open (their blocks are searched through the entries).
+  The writer keeps each entry's key only when `colblocks` is on (`Block2::keys`); the encoder checks
+  every key is found at its row before it writes the block so.
+- **Where it is searched**: the sorted multi-get (`PointReader::get_sorted_cols`: a block's keys
+  planned `KEYS`, its rows found in the column and made after every seek, a block's run at a time)
+  and a lookup join's single rows (`Lookup::rows_cols`, `Store::get_cols_with`, `get_raw_cols`,
+  `l1_get_cols`: the held block's, then the file's block's). Format 4's code is untouched: the
+  reader has a flag (`PointReader::cols`, the store's `colblocks`) and a store writing column blocks
+  takes instances of its own (`get_sorted_keyed`; a lookup's row path `rows_under::<true>`, chosen
+  once per outer row); format 4's `get_sorted_cols` instance is the base's body, `file_get` and
+  `Store::get_with` their text. The executor's single reads (a point select) still seek the
+  entries: a dispatch in `get_with` or `get_raw` cost format 4's lookups (below).
+- Measured on one binary (`n2`), format 5 with and without key columns (the same SF1 data loaded
+  by step 2's first piece, then by `n2`): keyed fetch **4,071 -> 3,062 instructions a key** (format 4
+  2,750), q02 -6.4%, q11 -7.1%, q20 -4.8%, q19 -3.2%, q14 -2.5%, q22 -1.2%; the load +1.4%, the store
+  +2% (554 against 543 MB).
+
+**Rows of the columns read on more paths, and rows left unmade through 319's chunks.** Profiles of
+format 5's worst queries on `s11` found most of the gap was not the serial executor but 319's new
+parallel paths, which had no lazy fill and made every column of every row before the filter:
+- `DisplacedFill` (a reordered heap's chunks: q02, q19, q20, q22's filter-only scans) passes rows of
+  column blocks through unmade (`fill_lazy`, a block's run at a time below the next passed-over key
+  and displaced row): format 5 on `n1` against `s11`, q19 -33.6%, q22 -30.6%, q20 -17.7%, q02 -8.9%.
+- `IndexChunk` (parallel index and bitmap chunks): a dense range's rows unmade (`fill_lazy`, q18),
+  the other fetches of the reader's columns alone (`FillRows::read_cols`, `get_sorted_cols`: q14).
+- An index scan's fetches (`ScanNode::fetch_mask`, `fetch_rows_cols`): `read_mask` no longer needs
+  a projection (the nodes above name the columns they read in `need`).
+- `ColDir::rows_into`: runs of columns not read written at once, and one row alone (a keyed fetch's,
+  often alone in its block) written as it goes (`row_one`), with no pass for the lengths first: on
+  `r6` a keyed fetch's masked single row was ~1.5k instructions (`make_col_rows` 20% of the keyed
+  query); `r7` against `r6`, format 5: keyed fetch 3,056 -> **2,287 instructions a key** (format 4
+  2,697-2,711), q02 2.333 -> 2.222 G, q11 0.859 -> 0.817, q20 0.948 -> 0.904, q09 8.275 -> 7.789,
+  q08 1.535 -> 1.448, the 22 82.14 -> 80.90 G.
+- Found and fixed on the way: `dense_rows` read each row's value to match its key, which a row left
+  unmade doesn't have (q18 panicked in a worker): it reads the key alone. The switch-on
+  quick-check runs `parallel_scan::parallel_fetches_match_serial` over column blocks, which takes
+  that path.
+
+Tried and dropped: making an aggregating chunk's rows from the first its row path reads
+(`partial_chunk`): it moved the base loop's registers (q13 +0.8% switch off); the run's rows are
+made before the loop as before. Format 4's code had to stay out of every shared body: the
+multi-get with the key column in it (q09 +0.9%, then q02 / q11 / q20 +0.5% while
+`get_sorted_cols` was a call), `file_get` with it (no longer inlined: q04 +0.6%, q21 +0.5%), a
+dispatch in `get_raw` (outlined it), then in `Store::get_with` and `Lookup::get` (q04 +0.31%, q21
++0.3%, the same in unpadded builds: not placement); each now takes format 5's instance of its own.
+
+**Switch off** (plain dist on `0037841bd2`: **h9** that commit, **r8** the candidate's code on it, the
+same patch-id; two alternating pairs, lane C 2.9-3.2 foreign cores; BENCH has every cell): the 22
+-0.12 / -0.12%; every query within ±0.15% but q09 +0.20 / +0.22% and q10 +0.14 / -0.01%, q16 -0.49 /
+-0.47% and q18 -0.59 / -0.55% (`dense_rows` reads keys alone), q14 -0.29 / -0.21%; the bulk steps
+-0.30 to +0.30% (VACUUM and ANALYZE flip between pairs, as before), range reads -0.14 / +0.08%, point
+selects +1.1 / -0.1% (they move 1-2% between runs of one binary). **No-padding control** (the same
+two commits built without `-x86-branches-within-32B-boundaries`, two pairs): q09 +0.10 / +0.15%,
+q02 / q04 / q11 / q21 -0.17 to 0.00%, q14 -0.12 / -0.43%: q09's residue is half placement, ~+0.12%
+code: `Lookup::rows`' format 4 instance (now a branch to `rows_cols` before it) is the one function
+on its path whose code still differs; `#[inline(always)]` on `rows_under` is the next thing to try
+if that is to be 0. (`r7`, with the dispatch in `Store::get_with` and `Lookup::get`: q04 +0.31 /
++0.32%, q21 +0.26 / +0.31%, the same unpadded, +0.30 / +0.24%: code, fixed in `r8`.)
+
+**Quick-check** (`QC_CHECKED=1`) on the candidate rebased onto `4c322b3d8c`, switch off: tests 453
+passed in 25 binaries (`query_spill`, `parallel_scan` among them), the checked build's 453, crash
+seeds 1-3 x 2 and the power cut, regress 51,148 / 51,150 0 newly differing, isolation 1,647 /
+1,648, pg_dump 14,609. With `ROLL_COLBLOCKS=1 ROLL_MEMTABLE_BYTES=1048576` (the diagnostic commit
+on top): the same counts; regress's engine wrote **6,422 column blocks** (of 20,623, 211
+compactions); the parallel index chunks' dense ranges over column blocks (`dense_rows`, which
+failed q18 on `n2`) run in `parallel_scan::parallel_fetches_match_serial`. Tests:
+`column_blocks_read_as_rows` also checks key columns are written exactly with the switch, and
+sorted multi-gets of keys there, deleted, past the end and of another length; the encoder checks
+every key column it writes.
+
+What is left for format 5 to be level on every query is in the table's section above ("What is
+left, by cause").
 
 ## Storage format 5: column blocks, step 2, first piece: rows made a column at a time, of the columns read (agent 311)
 
