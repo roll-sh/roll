@@ -858,7 +858,9 @@ pub fn check_lookups(ctx: &Ctx, rendered: Option<&Value>) -> EsResult<()> {
 pub(crate) fn denied_lookup(eff: &Effective, st: &crate::meta::ClusterState, now_ms: i64, action: &str, expr: &str) -> EsResult<Vec<String>> {
     use crate::meta::resolve::{IndicesOptions, Selector, authorization_name, is_wildcard, resolve};
     let (name, selector) = authorization_name(expr, now_ms)?;
-    let names = match is_wildcard(&name) {
+    // `_all` resolves to every index as a wildcard does (a lookup reads the first): checked as
+    // what it resolves to, never as a name a grant's pattern could match.
+    let names = match is_wildcard(&name) || name == "_all" {
         true => resolve(st, std::slice::from_ref(&name), &IndicesOptions::STRICT_EXPAND_OPEN, now_ms)?,
         false => vec![name],
     };

@@ -1573,6 +1573,8 @@ async fn lookups_are_authorized_where_they_run() {
 
         let (s, v) = search(json!({"query": lookup("mine")})).await;
         assert_eq!((s, v["hits"]["total"]["value"].as_i64()), (200, Some(1)), "{name}: a lookup into the reader's own index: {v}");
+        let (s, v) = search(json!({"query": lookup("_all")})).await;
+        refused("a lookup into _all", s, &v);
         // The request cache holds no lookup's answer: the owner's cached aggregation isn't
         // served to a reader who may not make its lookup.
         let cached = json!({"size": 0, "aggs": {"params": {"filter": lookup("secret")}}});
