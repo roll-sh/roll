@@ -1130,7 +1130,7 @@ pub async fn run(api: &Api, as_json: bool, cmd: Search) -> anyhow::Result<()> {
         },
         Search::Esql { cluster, query, index } => {
             let c = find(api, &cluster).await?;
-            let id = urlencoding::encode(s(&c["id"])).into_owned();
+            let id = urlencoding::encode(&s(&c["id"])).into_owned();
             let path = match &index {
                 Some(i) => format!("/v1/search/clusters/{id}/indices/{}/esql", urlencoding::encode(i)),
                 None => format!("/v1/search/clusters/{id}/esql"),
