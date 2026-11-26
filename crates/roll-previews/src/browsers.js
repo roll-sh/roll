@@ -116,11 +116,54 @@ const crop = async (c) => {
     if (browser) await browser.close().catch(() => null);
   }
 };
+// The change's first stories in each browser ($STORIES: where the service serves Storybook,
+// $STORY_IDS: the ids Chromium's run took first, at most 5; Chromatic's cross-browser stories):
+// each loaded alone and captured clipped to its root, a `{story, browser, errors, png}` line each.
+const stories = async (names) => {
+  let ids = [];
+  try {
+    ids = JSON.parse(process.env.STORY_IDS || "[]").filter((i) => typeof i === "string" && /^[a-z0-9][a-z0-9-]{0,99}--[a-z0-9][a-z0-9-]{0,99}$/.test(i)).slice(0, 5);
+  } catch {}
+  const base = new URL(process.env.STORIES || "/", process.env.URL);
+  for (const name of names) {
+    let browser = null;
+    try {
+      const phone = name === "webkit-phone";
+      browser = await pw[phone ? "webkit" : name].launch();
+      const page = await browser.newPage(phone ? { viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, isMobile: true, hasTouch: true } : { viewport: { width: 1280, height: 800 } });
+      let errors = 0;
+      page.on("pageerror", () => errors++);
+      page.on("console", (m) => m.type() === "error" && errors++);
+      page.on("requestfailed", () => errors++);
+      for (const id of ids) {
+        const before = errors;
+        try {
+          await page.goto(new URL(`iframe.html?id=${id}&viewMode=story`, base).href, { waitUntil: "load", timeout: 20000 });
+          const root = page.locator("#storybook-root, #root").first();
+          // A story renders after the load: until its root holds something, 3 s at most.
+          await root.locator(":scope > *").first().waitFor({ timeout: 3000 }).catch(() => null);
+          await page.addStyleTag({ content: STILL }).catch(() => null);
+          await sleep(150);
+          const png = await root.screenshot({ timeout: 5000 });
+          if (png.length > 256 * 1024) continue;
+          process.stdout.write(JSON.stringify({ story: id, browser: name, errors: Math.min(errors - before, 10000), png: png.toString("base64") }) + "\n");
+        } catch (e) {
+          console.error(`${name} ${id}: ${e.message}`);
+        }
+      }
+    } catch (e) {
+      console.error(`${name}: ${e.message}`);
+    } finally {
+      if (browser) await browser.close().catch(() => null);
+    }
+  }
+};
 (async () => {
   let browsers = [];
   try {
     browsers = JSON.parse(process.env.BROWSERS || "[]").filter((b) => b === "firefox" || b === "webkit" || b === "webkit-phone");
   } catch {}
+  if (process.env.STORY_IDS) return stories(browsers);
   for (const name of browsers) {
     let browser = null;
     try {
