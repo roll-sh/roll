@@ -23853,6 +23853,107 @@ entry / contains_key / len / clear). Nothing else in the plan cache changed.
 - Merging the ~60 per-statement session functions into fewer was not tried: the trace showed
   repeated work, not call overhead, and function boundaries need a PGO gate (two more builds).
 
+## Point selects, outside the session: lock keys, portals and pgstat (agent 329, 2026-11-26)
+
+Base `214433872` (agent 323's round and agent 324's CLUSTER snapshot landed). Harness
+`~/.cache/a329/inproc/`: agent 323's Intel PT scripts, plus `unk.py`, which splits the code
+without symbols (`[unknown]`: libc and the vDSO) by the address it is entered at and the function
+that enters it. Builds plain dist (`tools/dist.sh --example bench`). Lane A read 5-8 foreign cores
+the whole round: the gate is exact instructions.
+
+### What the libc share was
+
+323 left about 4,000 instructions a select in `[unknown]`. Over 400 extended selects (base): 3,977 in
+libc, 54 in the vDSO. By entry point and caller, most of it was `memcpy`, and most of that was
+moves of the `Portal` struct: Execute takes the portal out of `Session::portals` and puts it back,
+Bind inserts it, Sync's close removes it. `Portal` held a `cursor::Lazy` (a suspended SELECT's
+executor, with its `Kept` maps) inline, about 1 kB: 13 copies a select of ~110 instructions each,
+1,500 in all. Next: `run_query` 7 copies (389), `end_xact_counts` 3 (225: the per-table count
+list a read-only transaction builds empty), `bind_scan` 5 (175), `begin_in` 1 (159: the new
+`TxnState` written into its box), `PointReader`'s drop 4 (112). `memcmp` and `free` the rest.
+
+Allocations: 29 a select. The lock path's: `FastHold` kept each fast-path hold's key in a `Vec`
+(one allocation and one free per relation lock and per transaction lock), and `TxnState::lock`
+cloned its `SmallVec` key for the journal (smallvec's `Clone` goes through `iter().cloned()`: 174
+instructions a key, 522 a select).
+
+Clock reads: in process, 4 a select in the engine (`ensure_txn`'s and `run_query`'s statement
+time and `finish_txn`'s `Database::touch` read the clock only because the bench calls the session
+API without `message_starts`; `pgstat::report`'s flush-interval check). Over the wire the
+server reads at Bind and at Execute (`message_starts`, statement_timestamp as PostgreSQL sets it
+at both), at the Sync's change to idle (pg_stat_activity's state_change, only when the state
+changes) and in `pgstat::report`: 4. PostgreSQL 18 reads about 6 for the same cycle
+(SetCurrentStatementStartTimestamp and pgstat_report_activity at Bind and at Execute, the idle
+report, GetCurrentTransactionStopTimestamp for pgstat_report_stat). Nothing to remove there.
+
+### What changed (no behaviour change)
+
+- `FastHold::key` is a `LockKey` (inline up to 24 bytes): a fast-path hold allocates nothing.
+  `move_slot` copies it into the main table's `Vec` key (the rare path).
+- `TxnState::lock` makes the journal's and the held map's keys with `LockKey::from_slice` each,
+  not one `clone` of the other.
+- `release_fast_owner` doesn't hash the owner into `FastHolds::moved` when nothing was moved.
+- `Portal::lazy` and `Session::suspended` box the executor: a portal is about 300 bytes.
+- Execute lends the portal's parameters to the run (`mem::take` and back) instead of cloning them.
+- pgstat: `Unflushed::tabs` / `funcs` use the executor's hasher, not SipHash (only summed into the
+  shared entries, in no order anything shows); `end_xact_counts` skips `XactStats::end_xact` when
+  the transaction has no table counts (no levels, nothing done): nothing would be added.
+
+### Measured
+
+Exact instructions per op, in process, 1 client (Intel PT, client thread; 400 selects, 100 range
+reads, short_txn per `Session::query_copy`, two a transaction), plain dist, base `214433872`:
+
+| case | base | candidate | |
+|---|---|---|---|
+| point select, extended | 35,251 | 32,375 | -8.2% |
+| point select, simple protocol | 37,055 | 35,418 | -4.4% |
+| range_scan_100 | 392,053 | 390,416 | -0.4% |
+| short_txn (per query_copy) | 100,886 | 96,285 | -4.6% (see below) |
+
+Extended, by function: libc -1,658 (4,033 -> 2,375), SmallVec clones -522, `end_xact_counts` -132,
+the allocator -330 (mallocs 29 -> 24 a select), SipHash -182 (`release_locks` and
+`pgstat::report`), `execute_portal_here` -44, `release_locks` -32; `TxnState::lock` +49 (the two
+inlined key copies). (The bench client's own SipHash moved -85 too.) short_txn moves with the
+data's state both ways (`Block::seek` -2,967, the btree model's splits +2,000 in this pair); its
+own part is the clones (-1,004 a query) and libc; on the old base the same change read -0.3% in
+total. TPC-H SF 0.1 in process (lane C, the 22 once, process `instructions:u`): 17.1315 G base,
+17.1296 G candidate (level); every query's rows and hash equal.
+
+Checks: on the code commit (on `214433872`), `tools/quick-check.sh` with `QC_CHECKED=1` and
+`QC_TESTS=kept_plans`: clippy 16 warnings, none new in a changed file; 461 tests in 26 binaries
+(`wire`, `wire_waits`, `golden`, `kept_plans`, `twophase`, `compact_locks` among them), and again
+built `verify-checked`; crash seeds 1-3 x 2 and power_cut_at_every_point; regress 51,148 / 51,150,
+0 newly differing; isolation 1,647 / 1,648; pg_dump_tap 14,609 passed.
+`tools/crash-binary.py` against the candidate's roll-engine (plain dist): `--seed 1` 7 rounds ok,
+`--seed 1 --power drop` 10 rounds ok.
+
+### Left
+
+- The lock path is still about 2,500 instructions a select, in pieces: `TxnState::lock` 732 (four
+  calls: Bind's binding locks the table and its index, Execute's `lock_some` finds them held), the
+  held map's insert 330 and lookup 224 (a new lock's key is hashed twice: hashbrown's `entry_ref`
+  needs `From<&HeldKey>` for the key, a tuple, so a `HeldLock` newtype through the journal's users),
+  `release_locks` 239, `catalog_version` 224 (seven calls: `lock_some` compares it before and after
+  every lock past the named ones, the index's too), `accept_catalog` 201, `hold_own_xact_lock` 190.
+- Portals boxed in `Session::portals` (`~/.cache/a329/patches/portals-boxed.patch`, on this
+  candidate): -152 a select (-0.47%, exact): the copies go (-198 in libc), but hashbrown's insert
+  and remove cost the same with a pointer for a value, and the box's allocation takes some back.
+  Not handed in on its own (a quick-check for 0.5%); worth carrying with the next change there.
+- Execute's second binding lookup (`bound_as` from `planned_as`, after Describe's at Bind: about
+  400 with `current_role` and the search path) runs inside the custom-plan choice, agent 328's.
+- `ExecCtx::with_search_path` 513 and its drop 158 (about 50 fields set and dropped a statement;
+  `live_notices` allocates an `Rc` each), `txn_settings` 484 and `Settings::end_transaction` 428
+  (session/settings), `pgstat::report` 408 (each transaction's counts move into the backend's
+  slot so readers can flush an idle backend; PostgreSQL keeps them local until a flush).
+- libc 2,375 a select: `memcmp` in storage's point reads, `bind_scan`'s 5 copies (175), the new
+  `TxnState` written into its box (`begin_in`, 159: built on the stack first), `PointReader`'s drop
+  (112).
+- In process the session reads the clock for the statement and transaction times and
+  `Database::touch` (`stmt_start` is 0 without `message_starts`): 3 reads a select a server does not
+  make. An embedding caller sees statement_timestamp() and transaction_timestamp() of its first
+  statement from two reads, where PostgreSQL has one.
+
 ## Power cuts of the shipped binary, and a release script (agent 325, 2026-11-26)
 
 **Three durability bugs, found by power cuts of the shipped binary and fixed.** None of them is in
