@@ -95,3 +95,33 @@ export function matchesTerms(terms: Term[], text: string): boolean {
     return hit !== t.not;
   });
 }
+
+/** The filter's words as the server's search reads them (`logs::Search`): every word, any case;
+ *  `"a phrase"` as written; `-word` absent (not `-1` or `--flag`, which are words); `OR` between
+ *  alternatives. No words: everything matches. */
+export function wordsMatch(words: string, text: string): boolean {
+  const groups: { w: string; not: boolean }[][] = [[]];
+  let i = 0;
+  while (i < words.length) {
+    if (/\s/.test(words[i]!)) {
+      i++;
+      continue;
+    }
+    const not = words[i] === "-" && /[\p{L}"]/u.test(words[i + 1] ?? "");
+    if (not) i++;
+    let w = "";
+    if (words[i] === '"') {
+      const end = words.indexOf('"', i + 1);
+      w = words.slice(i + 1, end < 0 ? undefined : end);
+      i = end < 0 ? words.length : end + 1;
+    } else {
+      while (i < words.length && !/\s/.test(words[i]!)) w += words[i++];
+    }
+    if (w === "OR" && !not) groups.push([]);
+    else if (w) groups[groups.length - 1]!.push({ w: w.toLowerCase(), not });
+  }
+  const alts = groups.filter((g) => g.length);
+  if (!alts.length) return true;
+  const t = text.toLowerCase();
+  return alts.some((g) => g.every(({ w, not }) => t.includes(w) !== not));
+}

@@ -1101,10 +1101,12 @@ type Keep = Option<Box<dyn Fn(&LogLine) -> bool + Send + Sync>>;
 
 async fn stream_log(apps: &Arc<Apps>, key: String, q: LogQuery, done: Option<tokio::sync::watch::Receiver<bool>>, keep: Keep) -> R {
     let tail = q.tail.unwrap_or(500).min(crate::logs::RING);
-    let text = q.q.as_deref().map(str::trim).filter(|t| !t.is_empty()).map(str::to_lowercase);
-    if text.as_ref().is_some_and(|t| t.len() > 200) {
+    let raw = q.q.as_deref().map(str::trim).filter(|t| !t.is_empty());
+    if raw.is_some_and(|t| t.len() > 200) {
         return Err(Error::BadRequest("q is at most 200 characters".into()));
     }
+    // Words, "phrases", -exclusions and OR ([`crate::logs::Search`]).
+    let text = raw.and_then(crate::logs::Search::parse);
     let stream = match q.stream.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         None => None,
         Some(s) => Some(serde_json::from_value::<crate::logs::Stream>(json!(s)).map_err(|_| Error::BadRequest("stream is stdout, stderr, system, http or build".into()))?),
@@ -1134,7 +1136,7 @@ async fn stream_log(apps: &Arc<Apps>, key: String, q: LogQuery, done: Option<tok
     });
     // Read back (a search, a time window, or filtered): memory, then the stored chunks.
     if text.is_some() || q.before.is_some() || (keep.is_some() && !truthy(&q.follow)) {
-        let (lines, cut) = apps.logs.read(&key, |l| keep.as_ref().is_none_or(|k| k(l)) && text.as_ref().is_none_or(|t| l.text.to_lowercase().contains(t)), q.since, q.before, tail).await;
+        let (lines, cut) = apps.logs.read(&key, |l| keep.as_ref().is_none_or(|k| k(l)) && text.as_ref().is_none_or(|t| t.matches(&l.text)), q.since, q.before, tail).await;
         let mut r = Json(lines).into_response();
         if cut {
             r.headers_mut().insert("x-roll-search-truncated", axum::http::HeaderValue::from_static("1"));
