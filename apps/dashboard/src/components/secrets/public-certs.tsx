@@ -21,9 +21,9 @@ const REASONS: RevokeReason[] = ["unspecified", "keyCompromise", "superseded", "
 const caName = (url: string) => CAS.find((c) => c.url === url)?.name ?? url;
 const day = (ms: number) => new Date(ms).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 
-/** Where its renewals stand: the next one due, and the caps on asking (one an hour, three a week). */
+/** Where its renewals stand: the next one due (none before its first certificate: the status says it's on its way), and the caps on asking (one an hour, three a week). */
 function renewal(c: PublicCert, now = Date.now()) {
-  const next = c.renews_at === 0 ? "renewing now" : c.renews_at ? `renews ${until(c.renews_at, now).replace("expired", "now")}` : c.status === "failing" ? "retried hourly" : "ordering";
+  const next = c.renews_at === 0 ? "renewing now" : c.renews_at ? `renews ${until(c.renews_at, now).replace("expired", "now")}` : c.status === "failing" ? "retried hourly" : "";
   const caps = c.renew_after ? `renewals held ${until(c.renew_after, now)}` : `${c.renewals_asked} of 3 renewals this week`;
   return { next, caps };
 }
@@ -228,7 +228,7 @@ export function PublicCerts() {
                     <span>{caName(c.directory_url)}</span>
                     <span>{c.aws_role ? `Route 53 as AWS role ${c.aws_role}` : DNS[c.dns_provider]}</span>
                     {c.not_after && <span className="font-mono">until {day(c.not_after)}</span>}
-                    <span>{r.next}</span>
+                    {r.next && <span>{r.next}</span>}
                     <span className={c.renew_after ? "text-fg" : ""}>{r.caps}</span>
                     <span className="ml-auto">
                       <ActorMark who={c.created_by} />
