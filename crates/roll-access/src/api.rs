@@ -366,7 +366,7 @@ async fn check(State(a): S, ext: Extensions, Json(c): Json<Check>) -> crate::Res
         (outcome, action) = (copied, Action::Reveal);
     }
     let mut about: (&str, Option<String>) = (row.product, None);
-    if let Some(l) = crate::evaluate::lend_outcome(&a, row, &params, c.body.as_ref(), &scope, person).await
+    if let Some(l) = crate::evaluate::lend_outcome(&a, row, &params, c.body.as_ref(), &target, &scope, person).await
         && crate::evaluate::rank(l.outcome) < crate::evaluate::rank(outcome)
     {
         (outcome, action) = (l.outcome, l.action);
@@ -388,7 +388,7 @@ async fn check(State(a): S, ext: Extensions, Json(c): Json<Check>) -> crate::Res
         .await?;
         let own_create = matches!(target, Target::Create { project: None, .. }) && catalog::PERSON_OWN_UNPLACED.iter().any(|(m, r)| *m == method && *r == row.route);
         let reaches = matches!(row.target, catalog::Tgt::AnyGrant | catalog::Tgt::List { .. } | catalog::Tgt::Product) || own_create || session.outcome(&target, asked) == Outcome::Allow;
-        let lends = crate::evaluate::lend_outcome(&a, row, &params, c.body.as_ref(), &session, true).await.is_none_or(|l| l.outcome == Outcome::Allow);
+        let lends = crate::evaluate::lend_outcome(&a, row, &params, c.body.as_ref(), &target, &session, true).await.is_none_or(|l| l.outcome == Outcome::Allow);
         if !reaches || !lends {
             return Ok(Json(json!({ "decision": "deny", "why": "the token's person can't do this themselves: a person's token reaches only what their projects and their own resources let them do", "product": row.product, "action": asked, "route": format!("{} {}", row.method, row.route) })));
         }

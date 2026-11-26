@@ -505,6 +505,10 @@ Setting up the App is described in [github-app.md](github-app.md); the code is i
     `not_planned`). Nothing goes back for state that came from GitHub.
   - Checks on a PR's change become check runs on its head commit; reviews and threads made in
     roll are posted to the PR.
+  - A branch pushed on GitHub to a repo on a roll secrets project gets a `roll secrets` check
+    run (`github/push_scan.rs`): its new commits and the branch since its merge base are read
+    for the project's values after the push, a value found is a leak, and the check fails
+    (docs/secrets.md, "On GitHub.com: roll code's GitHub App").
   - All of it goes through the one delivery queue webhooks and review apps use
     (`review_deliveries`, target `gh_<repo id>`, `github/outbox.rs`), queued with the event:
     `Code::emit` queues it before it returns, and the state changes that promise their event

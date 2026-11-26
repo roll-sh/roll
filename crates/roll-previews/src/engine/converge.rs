@@ -52,6 +52,15 @@ impl Engine {
         }
     }
 
+    /// A product's error as a preview may show it: masked as its logs are (its branches'
+    /// credentials, its secrets); when what to mask can't be read, without its details.
+    async fn masked_error(&self, id: &str, e: &anyhow::Error) -> String {
+        match self.masks(id).await {
+            Ok(hide) => code_preview::runner::mask(&format!("{e:#}"), &hide),
+            Err(_) => "(its details are hidden: what to mask in them couldn't be read)".into(),
+        }
+    }
+
     pub(super) fn brancher(&self, kind: Kind) -> anyhow::Result<&Arc<dyn Brancher>> {
         self.branchers.get(&kind).ok_or_else(|| anyhow::anyhow!("roll {} isn't on this node, so it can't be branched", kind.as_str()))
     }
@@ -225,6 +234,11 @@ impl Engine {
                     x.error = None;
                     x.bytes = 0;
                 })?;
+                // Restore points put back from the old branch's own history (Redis's reset is a
+                // new database) can't go into this one: they go.
+                if fresh.r#ref != *branch && b.points_need_their_branch() {
+                    self.drop_points(&r.id, |d| d.kind == res.kind && d.parent == res.parent).await?;
+                }
                 self.store.set_base_schema(&r.id, res.kind, &res.parent, None)?;
                 self.store.log(&r.id, &format!("reset {key} from its parent"))?;
                 self.store.set_seed_needed(&r.id, true)?;
@@ -845,6 +859,25 @@ impl Engine {
                 self.store.log(&r.id, &format!("removed service {}", svc.name))?;
             }
         }
+        // 4a. Where its pages are served from, for the branches that answer browsers themselves
+        // (roll search: a page that searches from the browser). Best effort: a branch that
+        // couldn't be told is a problem on the preview, the pass goes on.
+        let pinned = self.store.pinned(&r.id)?;
+        let urls: Vec<String> = self.store.services(&r.id)?.into_iter().map(|s| s.url).chain(pinned.iter().map(|p| p.url.clone())).collect();
+        for res in self.store.resources(&r.id)? {
+            let (Some(branch), Ok(b)) = (&res.r#ref, self.brancher(res.kind)) else { continue };
+            if let Err(e) = b.serve(&res.parent, branch, res.kept.as_deref(), &urls).await {
+                problems.push(format!("the preview's pages can't reach the {} branch from the browser: {}", res.kind.as_str(), self.masked_error(&r.id, &e).await));
+            }
+        }
+        // An earlier push with its own copy of the data: its pages, at its own URLs.
+        for d in self.store.pinned_data(&r.id)? {
+            let Ok(b) = self.brancher(d.kind) else { continue };
+            let own: Vec<String> = pinned.iter().filter(|p| p.revision == d.revision).map(|p| p.url.clone()).collect();
+            if let Err(e) = b.serve(&d.parent, &d.r#ref, d.kept.as_deref(), &own).await {
+                problems.push(format!("an earlier push's pages can't reach its {} copy from the browser: {}", d.kind.as_str(), self.masked_error(&r.id, &e).await));
+            }
+        }
         // 4b. Health: a service with a `health` path counts once it answers 2xx/3xx there, asked
         // once per revision (Render's and Railway's checks). Anything else fails the preview, and
         // the retry asks again.
@@ -1150,7 +1183,7 @@ impl Engine {
                 // `<first>:/` is the screenshot itself (which service is first isn't the person's to know).
                 if let Some(e) = entries.iter().find(|e| crate::settings::page_entry(e) == Some((Some(first.name.as_str()), "/"))) {
                     let errors = shot.health.as_ref().map_or(0, |h| h.errors + h.failed);
-                    let report = crate::PageReport { a11y: shot.a11y.clone(), links: shot.links.clone(), text: shot.text.clone(), unstable: shot.health.as_ref().is_some_and(|h| h.unstable), step: None, step_ms: None };
+                    let report = crate::PageReport { a11y: shot.a11y.clone(), links: shot.links.clone(), text: shot.text.clone(), unstable: shot.health.as_ref().is_some_and(|h| h.unstable), step: None, step_ms: None, play: None, play_error: None, play_step: None };
                     pages.push(crate::ports::PageShot { path: e.clone(), png: shot.png.clone(), errors, report });
                 }
                 pages.extend(self.other_services_pages(r, &first.name, &entries, &hide, storybook.as_ref()).await);
@@ -1302,7 +1335,7 @@ impl Engine {
                     }
                     if paths.contains(&"/") {
                         let errors = shot.health.as_ref().map_or(0, |h| h.errors + h.failed);
-                        let report = crate::PageReport { a11y: shot.a11y.clone(), links: shot.links.clone(), text: shot.text.clone(), unstable: shot.health.as_ref().is_some_and(|h| h.unstable), step: None, step_ms: None };
+                        let report = crate::PageReport { a11y: shot.a11y.clone(), links: shot.links.clone(), text: shot.text.clone(), unstable: shot.health.as_ref().is_some_and(|h| h.unstable), step: None, step_ms: None, play: None, play_error: None, play_step: None };
                         out.push(crate::ports::PageShot { path: format!("{svc}:/"), png: shot.png.clone(), errors, report });
                     }
                     // A story is a story whichever service serves it (`story:<id>`).

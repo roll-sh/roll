@@ -46,7 +46,15 @@ pub struct BackupSchedule {
     /// The last backup's object key in the bucket.
     pub last_key: Option<String>,
     pub last_error: Option<String>,
+    /// Who set it up (a person, `operator`, `token:…`): it runs only while they may manage and
+    /// reveal the whole project, as they are then.
     pub created_by: String,
+    /// Whether its backups carry registrations' keys: not when a token set it up.
+    pub registrations: bool,
+    /// An incident's cut-off paused it (`…/reach/cut-off`): nothing is backed up until an admin
+    /// sets it up again (`PUT …/backup/schedule`).
+    pub paused_at: Option<i64>,
+    pub paused_why: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -75,7 +83,7 @@ impl Secrets {
         self.project(project)?;
         Ok(self.db.read(|c| {
             c.query_row(
-                "SELECT bucket, recipient, every_hours, keep, next_at, last_at, last_key, last_error, created_by FROM backup_schedules WHERE project_id = ?",
+                "SELECT bucket, recipient, every_hours, keep, next_at, last_at, last_key, last_error, created_by, registrations, paused_at, paused_why FROM backup_schedules WHERE project_id = ?",
                 [project],
                 |r| {
                     Ok(BackupSchedule {
@@ -88,6 +96,9 @@ impl Secrets {
                         last_key: r.get(6)?,
                         last_error: r.get(7)?,
                         created_by: r.get(8)?,
+                        registrations: r.get::<_, i64>(9)? != 0,
+                        paused_at: r.get(10)?,
+                        paused_why: r.get(11)?,
                     })
                 },
             )
@@ -95,9 +106,14 @@ impl Secrets {
         })?)
     }
 
-    /// Back the project up on a schedule (replacing any): the first backup is due now.
+    /// Back the project up on a schedule (replacing any, and lifting a cut-off's pause): the first
+    /// backup is due now. Every value leaves in each, so it's for a caller who may back the project
+    /// up now (`backup::need_whole`), recorded as its maker (the person behind a session or their
+    /// token), and runs only while they still may.
     pub fn set_backup_schedule(&self, project: &str, n: NewBackupSchedule, caller: &Caller) -> Result<BackupSchedule> {
-        caller.need(Action::Admin, &Scope::project(project))?;
+        crate::backup::need_whole(caller, project)?;
+        let by = self.maker_of(caller)?;
+        let keys = crate::backup::carries_keys(caller);
         self.project(project)?;
         if self.deliver.is_none() {
             return Err(Error::BadRequest("scheduled backups aren't on this server".into()));
@@ -113,9 +129,9 @@ impl Secrets {
         let now = self.db.now_ms()?;
         self.db.write(|c| {
             c.execute(
-                "INSERT INTO backup_schedules (project_id, bucket, recipient, every_hours, keep, next_at, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                 ON CONFLICT (project_id) DO UPDATE SET bucket = excluded.bucket, recipient = excluded.recipient, every_hours = excluded.every_hours, keep = excluded.keep, next_at = excluded.next_at, last_error = NULL, created_at = excluded.created_at, created_by = excluded.created_by",
-                params![project, n.bucket, n.recipient, n.every_hours as i64, n.keep as i64, now, now, caller.principal],
+                "INSERT INTO backup_schedules (project_id, bucket, recipient, every_hours, keep, next_at, created_at, created_by, registrations) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 ON CONFLICT (project_id) DO UPDATE SET bucket = excluded.bucket, recipient = excluded.recipient, every_hours = excluded.every_hours, keep = excluded.keep, next_at = excluded.next_at, last_error = NULL, created_at = excluded.created_at, created_by = excluded.created_by, registrations = excluded.registrations, paused_at = NULL, paused_why = NULL",
+                params![project, n.bucket, n.recipient, n.every_hours as i64, n.keep as i64, now, now, by, i64::from(keys)],
             )?;
             audit::record(c, self.keys()?, project, caller, "backup.schedule", None, None, &[], &format!("backs the project up to bucket {} every {} h, keeping {}", n.bucket, n.every_hours, n.keep), now)
         })?;
@@ -139,11 +155,11 @@ impl Secrets {
     pub(crate) fn sweep_backups(&self) -> Result<(usize, usize)> {
         let Some(deliver) = self.deliver.clone() else { return Ok((0, 0)) };
         let now = self.db.now_ms()?;
-        let due: Vec<(String, i64)> = self.db.read(|c| c.query(&format!("SELECT project_id, next_at FROM backup_schedules WHERE next_at <= ? AND {} ORDER BY next_at LIMIT 10", crate::deleted::live("backup_schedules.project_id")), [now], |r| Ok((r.get(0)?, r.get(1)?))))?;
+        let due: Vec<(String, i64)> = self.db.read(|c| c.query(&format!("SELECT project_id, next_at FROM backup_schedules WHERE next_at <= ? AND paused_at IS NULL AND {} ORDER BY next_at LIMIT 10", crate::deleted::live("backup_schedules.project_id")), [now], |r| Ok((r.get(0)?, r.get(1)?))))?;
         let (mut made, mut failed) = (0, 0);
         for (project, next_at) in due {
             // Claimed by moving next_at on: another node sees it not due.
-            let claimed = self.db.write(|c| c.execute("UPDATE backup_schedules SET next_at = ? + every_hours * 3600000 WHERE project_id = ? AND next_at = ?", params![now, project, next_at]))?;
+            let claimed = self.db.write(|c| c.execute("UPDATE backup_schedules SET next_at = ? + every_hours * 3600000 WHERE project_id = ? AND next_at = ? AND paused_at IS NULL", params![now, project, next_at]))?;
             if claimed == 0 {
                 continue;
             }
@@ -173,8 +189,9 @@ impl Secrets {
 
     /// Make one backup: sealed, written, read back whole, the oldest beyond `keep` deleted.
     fn scheduled_backup(&self, project: &str, deliver: &dyn crate::Deliver) -> Result<String> {
-        let (bucket, recipient, keep, by): (String, String, i64, String) =
-            self.db.read(|c| c.query_row("SELECT bucket, recipient, keep, created_by FROM backup_schedules WHERE project_id = ?", [project], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))))?;
+        let (bucket, recipient, keep, by, keys): (String, String, i64, String, bool) = self.db.read(|c| {
+            c.query_row("SELECT bucket, recipient, keep, created_by, registrations FROM backup_schedules WHERE project_id = ?", [project], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get::<_, i64>(4)? != 0)))
+        })?;
         // A backup holds every value of the project: it runs only while whoever set it up may still
         // manage the project and reveal all of it, as they are now.
         if !self.maker_reaches(&by, &[(Action::Admin, Scope::whole(project)), (Action::Reveal, Scope::whole(project))])? {
@@ -185,8 +202,10 @@ impl Secrets {
             return Err(Error::BadRequest(self.not_linkable(project, "bucket", &bucket)));
         }
         let caller = Caller::acting(format!("backup:{project}"), Arc::new(Everything));
-        // As `POST …/backup` answers it, so `roll secrets restore` takes either.
-        let sealed = serde_json::json!({ "sealed": self.backup(project, &recipient, &caller)?, "context": crate::backup::context(project) });
+        // As `POST …/backup` answers it, so `roll secrets restore` takes either; registrations'
+        // keys only if whoever set it up could take them out themselves.
+        let b = self.backup_as(project, &recipient, &caller, keys)?;
+        let sealed = serde_json::json!({ "sealed": b.sealed, "context": crate::backup::context(project), "warnings": b.warnings });
         let ms = self.db.now_ms()?;
         let t = time::OffsetDateTime::from_unix_timestamp(ms.div_euclid(1000)).map_err(|e| Error::Internal(e.to_string()))?;
         // Sortable as text: oldest first, as pruning reads them.

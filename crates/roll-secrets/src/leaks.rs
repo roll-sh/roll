@@ -207,6 +207,17 @@ fn strong(c: &str) -> bool {
     bits >= 3.0
 }
 
+/// One more call by `who` in `minute`, of `n` candidates: (calls, candidates) in that minute so far.
+/// The one counter `/scan` (by principal) and a backup verify (`backup.verify:<principal>`) share;
+/// inside a write, as each caller's read-then-write is one.
+fn bump(c: &code_sql::Conn<'_>, who: &str, minute: i64, n: i64) -> Result<(i64, i64)> {
+    Ok(c.query_row(
+        "INSERT INTO scan_counts (principal, minute, calls, candidates) VALUES (?, ?, 1, ?) ON CONFLICT (principal, minute) DO UPDATE SET calls = scan_counts.calls + 1, candidates = scan_counts.candidates + excluded.candidates RETURNING calls, candidates",
+        params![who, minute, n],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?)
+}
+
 /// A scanner's calls per caller and minute (`POST …/scan`'s limit).
 pub(crate) const SCAN_COUNTS_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS scan_counts (
@@ -223,6 +234,23 @@ CREATE TABLE IF NOT EXISTS scan_project_counts (
     PRIMARY KEY (project_id, minute)
 ) WITHOUT ROWID;
 ";
+
+/// A scanner of one project and nothing else: roll code's GitHub App for a push to a repo on the
+/// project's canvas ([`Secrets::scan_pushed`]).
+#[derive(Debug)]
+struct ScanOnly(String);
+
+impl crate::access::Grants for ScanOnly {
+    fn allows(&self, action: Action, at: &Scope<'_>) -> bool {
+        action == Action::Scan && at.project == self.0
+    }
+    fn project(&self) -> Option<&str> {
+        Some(&self.0)
+    }
+    fn sees(&self, project: &str) -> bool {
+        project == self.0
+    }
+}
 
 /// What a pre-receive hook says about the push it checks (`POST …/scan`): who pushed (as the git
 /// server tells the hook: `GITHUB_USER_LOGIN`, `GL_USERNAME`…) and to which refs. Text for the
@@ -340,6 +368,40 @@ impl Secrets {
     /// anyway, audited as `secrets.scan.breakglass`, and only when the project's `breakglass`
     /// list allows the hook's token or the pusher ([`Secrets::breakglass`]): 403 otherwise.
     pub fn scan_only(&self, project: &str, candidates: &[String], caller: &Caller, push: &Push) -> Result<Vec<ScanFound>> {
+        Ok(self
+            .scanned(project, candidates, caller, push)?
+            .into_iter()
+            .map(|m| {
+                let named = caller.allows(Action::Read, &Scope::at(project, &m.leak.environment, &m.leak.path));
+                ScanFound { index: m.index, key: named.then(|| m.leak.key.clone()), path: named.then(|| m.leak.path.clone()), environment: m.leak.environment }
+            })
+            .collect())
+    }
+
+    /// A push to GitHub repository `repo` (roll code's repo `owner/name`, on `project`'s canvas,
+    /// which roll secrets trusts for it), checked by roll code's GitHub App (docs/secrets.md, "On
+    /// GitHub.com: roll code's GitHub App"): the App's installation is a scanner of `project`
+    /// (`principal`, `github:<installation>:<repo>`), with the `scan` right and nothing else, so
+    /// it's [`Secrets::scan_only`]'s check (whole candidates, its floor, its limits, its audit),
+    /// never a sensitive or a personal value. What it finds already left: a leak in code, as a
+    /// change's is ([`Secrets::leaks_in_code`]), with its `secret.leaked` and `leaks.rotate`. Each
+    /// match names its key, as a `secret_leak` blocker does: the pusher holds the value.
+    pub fn scan_pushed(&self, project: &str, repo: &str, principal: &str, candidates: &[String], push: &Push) -> Result<Vec<(usize, Leak, bool)>> {
+        let caller = Caller::acting(principal.to_string(), std::sync::Arc::new(ScanOnly(project.to_string())));
+        let found = self.scanned(project, candidates, &caller, push)?;
+        let settings = self.respond(&found, &Whence::Code { repo: repo.to_string(), project: project.to_string() });
+        Ok(found
+            .into_iter()
+            .map(|m| {
+                let offer = m.credential.is_some() && settings.get(&m.project) == Some(&LeakRotate::Off);
+                (m.index, m.leak, offer)
+            })
+            .collect())
+    }
+
+    /// [`Secrets::scan_only`]'s check, audited: the candidates that are values the caller may
+    /// `scan`, with where they are.
+    fn scanned(&self, project: &str, candidates: &[String], caller: &Caller, push: &Push) -> Result<Vec<Match>> {
         caller.need(Action::Scan, &Scope::project(project))?;
         if candidates.len() > SCAN_MAX {
             return Err(Error::BadRequest(format!("at most {SCAN_MAX} candidates a scan")));
@@ -355,11 +417,7 @@ impl Secrets {
         if caller.principal != "operator" {
             let minute = self.db.now_ms()? / 60_000;
             let (calls, mine, project_minute, project_hour): (i64, i64, i64, i64) = self.db.write(|c| {
-                let (calls, mine) = c.query_row(
-                    "INSERT INTO scan_counts (principal, minute, calls, candidates) VALUES (?, ?, 1, ?) ON CONFLICT (principal, minute) DO UPDATE SET calls = scan_counts.calls + 1, candidates = scan_counts.candidates + excluded.candidates RETURNING calls, candidates",
-                    params![caller.principal, minute, n],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )?;
+                let (calls, mine) = bump(c, &caller.principal, minute, n)?;
                 let at = c.query_row(
                     "INSERT INTO scan_project_counts (project_id, minute, candidates) VALUES (?, ?, ?) ON CONFLICT (project_id, minute) DO UPDATE SET candidates = scan_project_counts.candidates + excluded.candidates RETURNING candidates",
                     params![project, minute, n],
@@ -384,11 +442,10 @@ impl Secrets {
             self.audit_now(project, caller, action, None, None, &[], &format!("refused break glass{said}: the project's breakglass list doesn't name this token or pusher"));
             return Err(Error::Forbidden(format!("break glass isn't allowed{said} in this project: an admin names who may with `roll secrets breakglass`")));
         }
-        let found: Vec<Found> = self
+        let found: Vec<Match> = self
             .matches(project, &tried, Some(&caller.principal), false)?
             .into_iter()
             .filter(|m| !m.leak.environment.contains('/') && caller.allows(Action::Scan, &Scope::at(project, &m.leak.environment, &m.leak.path)))
-            .map(|m| Found { index: m.index, leak: m.leak })
             .collect();
         let summary = format!("scanned {} candidates ({n} tried){said}: {} matched{}", candidates.len(), found.len(), if push.breakglass { ", let through with breakglass" } else { "" });
         if found.is_empty() {
@@ -403,13 +460,7 @@ impl Secrets {
             let event = Event::new(Kind::ScanFinding, json!({ "candidates": candidates.len(), "matched": found.len(), "guard": false, "breakglass": push.breakglass, "pusher": push.pusher }));
             self.audit_now_event(project, caller, action, Some(env), Some(path), &keys, &summary, Some(event));
         }
-        Ok(found
-            .into_iter()
-            .map(|f| {
-                let named = caller.allows(Action::Read, &Scope::at(project, &f.leak.environment, &f.leak.path));
-                ScanFound { index: f.index, key: named.then(|| f.leak.key.clone()), path: named.then(|| f.leak.path.clone()), environment: f.leak.environment }
-            })
-            .collect())
+        Ok(found)
     }
 
     /// Who may push past `project`'s pre-receive hooks (`git push -o breakglass`): pushers' logins
@@ -440,6 +491,14 @@ impl Secrets {
             crate::audit::record(c, self.keys()?, project, caller, "scan.breakglass", None, None, &[], &summary, now)
         })?;
         Ok(who)
+    }
+
+    /// One more call by `who` this minute, outside a scan (a backup verify counts as
+    /// `backup.verify:<principal>`): (calls, candidates) so far this minute, in `scan_counts` as
+    /// [`bump`] keeps it for `/scan`.
+    pub(crate) fn count_calls(&self, who: &str, n: i64) -> Result<(i64, i64)> {
+        let minute = self.db.now_ms()? / 60_000;
+        self.db.write(|c| bump(c, who, minute, n))
     }
 
     /// Minutes of scan counts that have passed (the sweeper): a caller's last minute, a project's

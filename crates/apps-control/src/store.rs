@@ -527,6 +527,16 @@ CREATE TABLE IF NOT EXISTS domains (
 CREATE INDEX IF NOT EXISTS domains_env ON domains (service, env);
 -- A project's own preview domain (`*.preview.acme.dev`, roll previews' preview deployment
 -- suffix), and the label each preview environment answers to under it.
+CREATE TABLE IF NOT EXISTS status_domains (
+    project TEXT PRIMARY KEY,
+    hostname TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL,
+    token TEXT NOT NULL,
+    error TEXT,
+    tls TEXT NOT NULL DEFAULT 'none',
+    tls_error TEXT,
+    created_at INTEGER NOT NULL
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS preview_domains (
     project TEXT PRIMARY KEY,
     hostname TEXT NOT NULL UNIQUE,
@@ -907,6 +917,7 @@ pub struct Store {
 
 /// A project's preview domain: `(hostname, status, token, error, created_at)`.
 pub type PreviewDomainRow = (String, DomainStatus, String, Option<String>, i64);
+pub type StatusDomainRow = (String, DomainStatus, String, Option<String>, TlsStatus, Option<String>, i64);
 
 const SERVICE_COLS: &str = "id, project, name, source, build, run, created_at";
 /// An environment's (or any row with a `service` column's) service isn't deleted.
@@ -2232,14 +2243,16 @@ impl Store {
         )?)
     }
 
-    /// The page and its incidents, together.
-    pub fn delete_status_page(&self, project: &str) -> Result<()> {
+    /// The page, its incidents and its own domain, together: the domain's hostname returned.
+    pub fn delete_status_page(&self, project: &str) -> Result<Option<String>> {
         self.db.write(|c| {
             if c.execute("DELETE FROM status_pages WHERE project = ?", [project])? == 0 {
                 return Err(Error::NotFound(format!("{project} has no status page")));
             }
             c.execute("DELETE FROM status_incidents WHERE project = ?", [project])?;
-            Ok(())
+            let host: Option<String> = c.query_row("SELECT hostname FROM status_domains WHERE project = ?", [project], |r| r.get(0)).optional()?;
+            c.execute("DELETE FROM status_domains WHERE project = ?", [project])?;
+            Ok(host)
         })
     }
 
@@ -2653,7 +2666,7 @@ impl Store {
         let (now, token) = (self.now()?, random(24));
         self.db.write(|c| {
             let other: Option<String> = c.query_row("SELECT project FROM preview_domains WHERE hostname = ?", [host], |r| r.get(0)).optional()?;
-            if other.is_some_and(|p| p != project) || c.query_row("SELECT 1 FROM domains WHERE hostname = ?", [host], |_| Ok(())).optional()?.is_some() {
+            if other.is_some_and(|p| p != project) || c.query_row("SELECT 1 FROM domains WHERE hostname = ?", [host], |_| Ok(())).optional()?.is_some() || c.query_row("SELECT 1 FROM status_domains WHERE hostname = ?", [host], |_| Ok(())).optional()?.is_some() {
                 return Err(Error::Conflict(format!("{host} is already a domain of roll apps")));
             }
             c.execute(
@@ -2763,8 +2776,73 @@ impl Store {
 
     /// Every active custom domain's hostname (what the edge holds certificates for).
     pub fn active_custom_domains(&self) -> Result<Vec<String>> {
-        Ok(self.db.query("SELECT hostname FROM domains WHERE kind = 'custom' AND status = 'active' ORDER BY hostname", (), |r| r.get(0))?)
+        Ok(self.db.query("SELECT hostname FROM domains WHERE kind = 'custom' AND status = 'active' UNION SELECT hostname FROM status_domains WHERE status = 'active' ORDER BY hostname", (), |r| r.get(0))?)
     }
+
+    /// A project's status page's own domain: (hostname, status, token, error, tls, tls error, made).
+    pub fn status_domain(&self, project: &str) -> Result<Option<StatusDomainRow>> {
+        Ok(self
+            .db
+            .query_row("SELECT hostname, status, token, error, tls, tls_error, created_at FROM status_domains WHERE project = ?", [project], |r| {
+                Ok((r.get(0)?, DomainStatus::parse(&r.get::<_, String>(1)?), r.get(2)?, r.get(3)?, TlsStatus::parse(&r.get::<_, String>(4)?), r.get(5)?, r.get(6)?))
+            })
+            .optional()?)
+    }
+
+    /// A status page's own domain (a new one replaces it, pending, with a new token): refused
+    /// when a service's domain, an environment's name or another page has it.
+    /// Returns the hostname it replaced, if another (for its certificate's provider to let go).
+    pub fn set_status_domain(&self, project: &str, host: &str, tls: TlsStatus) -> Result<Option<String>> {
+        let (now, token) = (self.now()?, random(24));
+        self.db.write(|c| {
+            let other: Option<String> = c.query_row("SELECT project FROM status_domains WHERE hostname = ?", [host], |r| r.get(0)).optional()?;
+            if other.is_some_and(|p| p != project) || c.query_row("SELECT 1 FROM domains WHERE hostname = ?", [host], |_| Ok(())).optional()?.is_some() || c.query_row("SELECT 1 FROM preview_domains WHERE hostname = ?", [host], |_| Ok(())).optional()?.is_some() {
+                return Err(Error::Conflict(format!("{host} is already a domain of roll apps")));
+            }
+            let was: Option<String> = c.query_row("SELECT hostname FROM status_domains WHERE project = ?", [project], |r| r.get(0)).optional()?;
+            c.execute(
+                "INSERT INTO status_domains (project, hostname, status, token, error, tls, tls_error, created_at) VALUES (?, ?, 'pending', ?, NULL, ?, NULL, ?) \
+                 ON CONFLICT (project) DO UPDATE SET hostname = excluded.hostname, status = 'pending', token = excluded.token, error = NULL, tls = excluded.tls, tls_error = NULL, created_at = excluded.created_at",
+                params![project, host, token, tls.as_str(), now],
+            )?;
+            Ok(was.filter(|w| w != host))
+        })
+    }
+
+    pub fn set_status_domain_status(&self, project: &str, status: DomainStatus, error: Option<&str>) -> Result<()> {
+        self.db.execute("UPDATE status_domains SET status = ?, error = ? WHERE project = ?", params![status.as_str(), error, project])?;
+        Ok(())
+    }
+
+    pub fn delete_status_domain(&self, project: &str) -> Result<Option<String>> {
+        self.db.write(|c| {
+            let host: Option<String> = c.query_row("SELECT hostname FROM status_domains WHERE project = ?", [project], |r| r.get(0)).optional()?;
+            c.execute("DELETE FROM status_domains WHERE project = ?", [project])?;
+            Ok(host)
+        })
+    }
+
+    /// Remove the status page domains still unverified since before `cutoff` (ms): a claim nobody
+    /// proves frees the hostname for its real owner, as a custom domain's does. Returns them.
+    pub fn expire_status_domains(&self, cutoff: i64) -> Result<Vec<String>> {
+        self.db.write(|c| {
+            let hosts: Vec<String> = c.query("SELECT hostname FROM status_domains WHERE status <> 'active' AND created_at < ?", [cutoff], |r| r.get(0))?;
+            c.execute("DELETE FROM status_domains WHERE status <> 'active' AND created_at < ?", [cutoff])?;
+            Ok(hosts)
+        })
+    }
+
+    /// Every active status page domain, by hostname: the project whose page answers there.
+    pub fn active_status_domains(&self) -> Result<Vec<(String, String)>> {
+        Ok(self.db.query("SELECT hostname, project FROM status_domains WHERE status = 'active'", (), |r| Ok((r.get(0)?, r.get(1)?)))?)
+    }
+
+    /// The status page domains the minute's pass looks at: unverified ones, and verified ones
+    /// whose certificate is still coming (project, hostname, status).
+    pub fn status_domains_to_check(&self) -> Result<Vec<(String, String, DomainStatus)>> {
+        Ok(self.db.query("SELECT project, hostname, status FROM status_domains WHERE status <> 'active' OR tls = 'pending'", (), |r| Ok((r.get(0)?, r.get(1)?, DomainStatus::parse(&r.get::<_, String>(2)?))))?)
+    }
+
 
     /// `tls`: where a new domain's certificate starts (`pending`, or `none` where nothing issues).
     pub fn add_domain(&self, service: &str, env: &str, host: &str, tls: TlsStatus) -> Result<Domain> {
@@ -2772,7 +2850,8 @@ impl Store {
         let token = random(24);
         self.db.write(|c| {
             let taken = c.query_row("SELECT 1 FROM domains WHERE hostname = ?", [host], |_| Ok(())).optional()?.is_some()
-                || c.query_row("SELECT 1 FROM environments WHERE slug = ?", [host], |_| Ok(())).optional()?.is_some();
+                || c.query_row("SELECT 1 FROM environments WHERE slug = ?", [host], |_| Ok(())).optional()?.is_some()
+                || c.query_row("SELECT 1 FROM status_domains WHERE hostname = ?", [host], |_| Ok(())).optional()?.is_some();
             if taken {
                 return Err(Error::Conflict(format!("{host} is already a domain of a service")));
             }
@@ -2821,7 +2900,8 @@ impl Store {
         let now = self.now()?;
         Ok(self.db.write(|c| {
             let was: Option<(String, String, String)> = c.query_row("SELECT service, env, tls FROM domains WHERE hostname = ? AND kind = 'custom'", [host], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
-            let Some((svc, env, before)) = was else { return Ok::<_, code_sql::Error>(false) };
+            // A status page's own domain (the edge reports for every active custom hostname).
+            let Some((svc, env, before)) = was else { return Ok::<_, code_sql::Error>(c.execute("UPDATE status_domains SET tls = ?, tls_error = ? WHERE hostname = ?", params![tls.as_str(), error, host])? > 0) };
             c.execute("UPDATE domains SET tls = ?, tls_error = ? WHERE hostname = ? AND kind = 'custom'", params![tls.as_str(), error, host])?;
             if tls == TlsStatus::Failed && before != TlsStatus::Failed.as_str() {
                 insert_event(c, now, "domain.tls_failed", &svc, &env, None, &serde_json::json!({ "hostname": host, "error": error }))?;
@@ -3866,8 +3946,6 @@ impl Store {
         Ok((minutes, hours))
     }
 
-    /// An environment's hourly rollups since `since_hour`, as rows whose `minute` is the hour's
-    /// first.
     /// A volume's measured size this hour (one a service's owner takes hourly), and those past
     /// 90 days dropped.
     pub fn put_volume_hour(&self, service: &str, env: &str, hour: i64, bytes: u64) -> Result<()> {
@@ -3881,6 +3959,8 @@ impl Store {
         Ok(self.db.query("SELECT hour, bytes FROM volume_hours WHERE service = ? AND env = ? AND hour >= ? ORDER BY hour", params![service, env, since_hour], |r| Ok((r.get(0)?, r.get::<_, i64>(1)? as u64)))?)
     }
 
+    /// An environment's hourly rollups since `since_hour`, as rows whose `minute` is the hour's
+    /// first.
     pub fn hours(&self, service: &str, env: &str, since_hour: i64) -> Result<Vec<MinuteRow>> {
         Ok(self.db.query(
             "SELECT hour, requests, errors, p50_ms, p95_ms, p99_ms, cpu, memory_bytes, instances, cold_starts, cold_start_ms, egress_bytes, over_capacity FROM metrics_hourly WHERE service = ? AND env = ? AND hour >= ? ORDER BY hour",

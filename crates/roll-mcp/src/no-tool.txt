@@ -84,6 +84,8 @@ POST /v1/redis/databases/{id}/password                                         a
 POST /v1/redis/databases/{id}/unload                                           the operator's (health, migrations, process control)
 POST /v1/redis/replicas/{id}/unload                                            the operator's (health, migrations, process control)
 POST /v1/search/clusters/{id}/browser-keys                                     answers or sets a credential (#358)
+POST /v1/search/clusters/{id}/browser-keys/from-parent                         answers or sets a credential (a branch's own browser keys and signing secrets; roll previews' call)
+POST /v1/search/clusters/{id}/browser-keys/from-parent/prune                   roll previews' upkeep of a preview's search branch (the operator's): revokes copies of revoked parent keys
 POST /v1/search/clusters/{id}/browser-keys/{key}/rotate                        answers or sets a credential (a derivable browser key's signing secret)
 GET /v1/search/clusters/{id}/indices/{index}/docs                              no such handler (only POST exists)
 POST /v1/search/clusters/{id}/keys                                             answers or sets a credential

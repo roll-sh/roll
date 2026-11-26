@@ -1309,6 +1309,29 @@ async fn a_repo_service_builds_its_plan_deploys_on_push_and_rolls_back_without_a
     assert_eq!(count().await, before + 1);
 }
 
+/// A workspace package watching its own folder also follows the packages its build uses (Vercel's
+/// affected projects): a push into one it depends on deploys it, one into another package doesn't.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pushes_deploy_a_workspace_package_that_uses_what_changed() {
+    let w = world().await;
+    w.code.push("a1a1a1a1a1a1", "a workspace", &[
+        ("package.json", r#"{"private":true,"workspaces":["apps/*","packages/*"]}"#),
+        ("package-lock.json", "{}"),
+        ("apps/web/package.json", r#"{"name":"web","scripts":{"start":"node index.js"},"dependencies":{"@acme/ui":"*"}}"#),
+        ("apps/web/index.js", "v1"),
+        ("packages/ui/package.json", r#"{"name":"@acme/ui"}"#),
+        ("packages/other/package.json", r#"{"name":"@acme/other"}"#),
+    ]);
+    let (_, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "web", "source": {"kind": "repo", "repo": "acme/site", "root": "apps/web"}, "build": {"watch": ["apps/web/**"]} }))).await;
+    let id = svc["id"].as_str().unwrap_or_else(|| panic!("{svc}")).to_string();
+    let d = settled(&w, &id, "production", svc["environments"][0]["latest"]["id"].as_str().unwrap()).await;
+    assert_eq!((d["status"].as_str(), d["plan"]["watch_derived"].clone()), (Some("active"), json!(["packages/ui/**", "package.json", "package-lock.json"])), "{d}");
+    w.code.push("b2b2b2b2b2b2", "another package", &[("packages/other/x.js", "x")]);
+    w.code.push("c3c3c3c3c3c3", "the ui", &[("packages/ui/button.js", "b")]);
+    let revs = get_until(&w.api, &format!("/v1/apps/services/{id}/environments/production/deploys"), |a| a.to_string().contains("c3c3c3c3c3c3")).await;
+    assert!(!revs.to_string().contains("b2b2b2b2b2b2"), "{revs}");
+}
+
 /// Each environment keeps its newest built deployments to roll back to; older ones are pruned
 /// (history only, their images gone unless another deployment runs the same one), a rollback to
 /// one is refused with why, and the list pages back through all of them.
@@ -3220,11 +3243,26 @@ async fn a_status_page_shows_the_projects_checks() {
     let (st, html) = get("/").await;
     assert!(st == StatusCode::OK && html.contains("Acme status") && html.contains("web · home") && html.contains("Everything is up"), "{html}");
     assert!(!html.contains("secret-health") && !j.to_string().contains("secret-health"), "names only, never a path");
+    // On a domain of its own once its DNS checks out; no service can take that name, and it
+    // goes with the page.
+    let own = format!("{page}/domain");
+    let (st, d) = call(&w.api, "POST", &own, Some(json!({"hostname": "status.acme.dev"}))).await;
+    assert_eq!((st, d["status"].as_str()), (StatusCode::CREATED, Some("pending")), "{d}");
+    let at = |path: &'static str| {
+        let public = w.public.clone();
+        async move { public.oneshot(Request::builder().uri(path).header("host", "status.acme.dev").body(Body::empty()).unwrap()).await.unwrap().status() }
+    };
+    assert_eq!(at("/status.json").await, StatusCode::NOT_FOUND, "not before it's verified");
+    w.dns.add("_roll-challenge.status.acme.dev", "TXT", d["token"].as_str().unwrap());
+    assert_eq!(call(&w.api, "POST", &format!("{own}/verify"), None).await.1["status"], "active");
+    assert_eq!(at("/status.json").await, StatusCode::OK);
+    assert_eq!(call(&w.api, "POST", &format!("{env}/domains"), Some(json!({"hostname": "status.acme.dev"}))).await.0, StatusCode::CONFLICT);
     // Kept by its address when changed; gone when deleted.
     let (_, p2) = call(&w.api, "PUT", &page, Some(json!({"title": "Acme"}))).await;
     assert_eq!(p2["url"], p["url"]);
     assert_eq!(call(&w.api, "DELETE", &page, None).await.0, StatusCode::NO_CONTENT);
     assert_eq!(get("/status.json").await.0, StatusCode::NOT_FOUND);
+    assert_eq!((at("/status.json").await, call(&w.api, "GET", &own, None).await.0), (StatusCode::NOT_FOUND, StatusCode::NOT_FOUND));
 }
 
 /// Traffic mirroring (Envoy's): a copy of a share of bodiless requests goes to another
@@ -3846,6 +3884,14 @@ async fn roll_up_deploys_an_uploaded_tree_and_cron_runs_on_demand() {
     assert_eq!(found.as_array().unwrap().len(), 1, "{found}");
     let (_, all) = call(&w.api, "GET", &format!("{base}/logs?q=job%20ran"), None).await;
     assert!(all.as_array().unwrap().len() >= 2, "{all}");
+    // `roll up --no-traffic`: the upload is built and checked at its own URL, nothing switched.
+    let live = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None).await.1["active"]["id"].clone();
+    let mut bundle = Vec::new();
+    roll_fetch::pack(&mut bundle, &Default::default(), Some(tree.path()), roll_fetch::Limits::default()).unwrap();
+    let req = Request::post(format!("/v1/apps/services/{id}/environments/production/deploys")).header("content-type", "application/gzip").header("x-roll-no-traffic", "1").body(Body::from(bundle)).unwrap();
+    let d: Value = serde_json::from_slice(&w.api.clone().oneshot(req).await.unwrap().into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(settled(&w, &id, "production", d["id"].as_str().unwrap()).await["status"], "ready", "{d}");
+    assert_eq!(call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None).await.1["active"]["id"], live);
     let _ = Ordering::SeqCst;
 }
 

@@ -669,7 +669,7 @@ pub struct New {
 
 /// An earlier push's own data: a copy-on-write branch of the preview's branch of `parent`, taken
 /// as the next head's data step began, so `revision`'s code runs on the data it left.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct PinnedData {
     pub revision: String,
     pub kind: Kind,
@@ -680,6 +680,21 @@ pub struct PinnedData {
     pub kept: Option<String>,
     /// The preview's branch it was copied from.
     pub source: String,
+}
+
+/// `kept` holds credentials: never printed.
+impl std::fmt::Debug for PinnedData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PinnedData")
+            .field("revision", &self.revision)
+            .field("kind", &self.kind)
+            .field("parent", &self.parent)
+            .field("name", &self.name)
+            .field("ref", &self.r#ref)
+            .field("kept", &self.kept.as_ref().map(|_| "<redacted>"))
+            .field("source", &self.source)
+            .finish()
+    }
 }
 
 /// A restore point (`…/restore-points`): the preview's data saved as it was, to put back later.
@@ -711,7 +726,7 @@ pub struct PointData {
     pub mask: String,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct ResourceRow {
     pub kind: Kind,
     pub parent: String,
@@ -725,6 +740,25 @@ pub struct ResourceRow {
     pub spent_usd: f64,
     /// Credentials the product gave out once ([`crate::ports::Branched::kept`]).
     pub kept: Option<String>,
+}
+
+/// `kept` holds credentials: never printed.
+impl std::fmt::Debug for ResourceRow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResourceRow")
+            .field("kind", &self.kind)
+            .field("parent", &self.parent)
+            .field("mode", &self.mode)
+            .field("ref", &self.r#ref)
+            .field("state", &self.state)
+            .field("error", &self.error)
+            .field("bytes", &self.bytes)
+            .field("usd_month", &self.usd_month)
+            .field("usd_hour", &self.usd_hour)
+            .field("spent_usd", &self.spent_usd)
+            .field("kept", &self.kept.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 pub struct Store {
@@ -2309,6 +2343,9 @@ impl Store {
                 unstable: report.unstable,
                 step: report.step,
                 step_ms: report.step_ms,
+                play: report.play,
+                play_error: report.play_error,
+                play_step: report.play_step,
                 base_group: sig.filter(|_| base.is_some()),
             })
             .collect())

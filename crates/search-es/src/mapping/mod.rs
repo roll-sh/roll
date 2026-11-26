@@ -68,6 +68,9 @@ pub struct MappingCtx {
     /// `index.mapping.dynamic_strings.auto_text`: dynamic strings map as `text` with a
     /// `keyword` sub-field (`false`: as plain `keyword`).
     pub dynamic_auto_text: bool,
+    /// `index.semantic_text.default_inference_id`: the endpoint a `semantic_text` field that
+    /// names none is recorded with (`None`: Elasticsearch's own default).
+    pub semantic_default: Option<String>,
     pub field_name_length_limit: i64,
     /// `index.mapping.total_fields.ignore_dynamic_beyond_limit` (default in logs modes):
     /// dynamic fields past the limit are ignored instead of failing the document.
@@ -151,6 +154,7 @@ impl MappingCtx {
             nested_objects_limit: n("index.mapping.nested_objects.limit", 10000),
             array_objects_limit: n("index.mapping.array_objects.limit", 50000),
             dynamic_auto_text: b("index.mapping.dynamic_strings.auto_text", true),
+            semantic_default: s.get("index.semantic_text.default_inference_id").map(str::trim).filter(|v| !v.is_empty()).map(str::to_string),
             field_name_length_limit: n("index.mapping.field_name_length.limit", i64::MAX),
             ignore_dynamic_beyond_limit: b("index.mapping.total_fields.ignore_dynamic_beyond_limit", logs),
             ignore_dynamic_names_beyond_limit: b("index.mapping.field_name_length.ignore_dynamic_beyond_limit", false),
@@ -1534,6 +1538,15 @@ fn parse_mapper(name: &str, ty: &str, node: &Map, ctx: &MappingCtx, depth: usize
                 return Err(EsError::mapper_parsing(format!("The [path] property must be specified for field [{name}].")));
             };
             Ok(Mapper::Alias(AliasMapper { name: name.to_string(), path }))
+        }
+        // A `semantic_text` field that names no endpoint is recorded with the index's default
+        // (`index.semantic_text.default_inference_id`), as if given: the mapping shows it, and
+        // the field keeps it when the setting's source changes.
+        "semantic_text" if !node.contains_key("inference_id") && ctx.semantic_default.is_some() => {
+            let def = types::lookup_in(ctx.dialect, ty).ok_or_else(|| unknown_type(ty, name, ctx))?;
+            let mut node = node.clone();
+            node.insert("inference_id".into(), ctx.semantic_default.clone().unwrap_or_default().into());
+            Ok(Mapper::Field(FieldMapper::parse(name, def, &node, ctx, false)?))
         }
         _ => {
             let def = types::lookup_in(ctx.dialect, ty).ok_or_else(|| unknown_type(ty, name, ctx))?;

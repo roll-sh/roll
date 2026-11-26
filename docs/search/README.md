@@ -326,6 +326,30 @@ applications). A web page calls a cluster directly, with no backend of its own i
   parent's security, keys included, and a point-in-time branch from before a revoke would bring a
   revoked key back. A restore keeps the cluster's id, so its keys keep working. A branch lists none
   of its parent's browser keys.
+- *Browser search on a preview* (roll previews; Vercel's and Netlify's preview deployments of a
+  site on Algolia): a branch can get browser keys of its own, made after its parent's:
+  `POST /v1/search/clusters/{branch}/browser-keys/from-parent` makes one for each of the parent's
+  browser keys that still works, with the same indices or application, filter, limits, rate and
+  expiry (what's left of it), and for a derivable one a signing secret of the branch's own,
+  never the parent's (a 409 on a cluster that isn't a branch). The keys and secrets are in that
+  answer only, and asking again revokes the ones it made before, so a retried branch keeps one
+  set; a copy that fails midway revokes what it made. `…/from-parent` asks `admin` (it revokes)
+  and `reveal` (it answers keys). `…/from-parent/prune` (`admin`) revokes the copies whose
+  parent key was revoked, expired or rotated since (a copy records its parent key's secret
+  generation; lists show `secret_generation`), the ids it revoked. roll previews asks for them
+  when it branches a search cluster, hands them to the preview's services as
+  `ROLL_SEARCH_BROWSER_KEYS` (JSON: `name`, `id`, `api_key` and `signing_secret` for each; the
+  one to read) and, only while the parent has exactly one, `ROLL_SEARCH_BROWSER_KEY`,
+  `ROLL_SEARCH_BROWSER_KEY_ID` and `ROLL_SEARCH_SIGNING_SECRET` (environment values, as the
+  branch's data key is: never argv, never a log, masked as it is). After each deploy it sets
+  the branch's allowed origins to its parent's plus the preview's pages (its services' and
+  pinned heads' URLs, normalised as allowed origins are; a pinned head with its own copy, that
+  copy's), off when the parent's are, and prunes stale copies (at most once a minute: listing
+  keys wakes both clusters); and it revokes the branch's copies (every one, recorded or not)
+  before the branch is deleted, as it revokes its data key (a deleted cluster is restorable with
+  its keys). `crates/search-control/tests/control.rs`
+  `browser_search_works_on_a_preview_branch` and rolld's
+  `a_search_branch_gets_browser_keys_of_its_own_for_the_previews_pages` cover it.
 - *Keys derived without a call to roll* (Algolia's `generateSecuredApiKey`, Typesense's
   `generateScopedSearchKey`, Meilisearch's tenant tokens; `search_es::xpack::security::derived`).
   A SaaS serving many end customers makes one derivable browser key (`derivable: true` on the
@@ -919,7 +943,7 @@ origins (browser search), once they're on main.
 | DELETE | `/v1/search/clusters/{id}` | waits for running requests and for a wake in progress (which is locked out and unloaded, never left serving); the cluster leaves the list, its REST endpoint answers as for a missing cluster and its name is free at once, but its storage is kept for `--search-deleted-retention-days` (7) and billed as storage, for `restore` (0 days: removed at once); branches keep working |
 | POST | `/v1/search/clusters/{id}/restore` | a deleted cluster (by its id) back as it was within its window: data, snapshots, settings, owner, password and API keys; under its own name, else 409 and `{"name": "…"}` restores it under another (the new name is its Basic auth user, API key id suffix and host label; the password stays). Scoped like every per-cluster route (owner, admins, the operator); 404 once purged |
 | GET, POST | `/v1/search/clusters/{id}/branches` | list; branch `{name, at?}` (`at`: Unix seconds within `--search-history`) |
-| POST | `/v1/search/clusters/{id}/password` | rotate; the new password is in the answer, once. From the answer on, the old one fails, also on a cluster that was waking up. `admin` at the gate, and refused (403) to a grant that can't also reveal |
+| POST | `/v1/search/clusters/{id}/password` | rotate; the new password is in the answer, once. From the answer on, the old one fails, also on a cluster that was waking up. `admin` at the gate, and refused (403) to a grant that can't also reveal. With a body `{"secret": {"environment", "key", "path"?, "tags"?, "project"?}, "rotate"?}` (`project` when more than one project stands for the cluster) the password is kept in roll secrets instead, written as the caller in the project whose canvas holds the cluster (their rights, the environment's protection, guardrails and the audit apply), and the answer is `{cluster, stored: {environment, path, key, version}}` with no password: it needs `reveal` on the cluster too, as the plain rotation does (a password kept where the caller may reveal it is answered); a store roll secrets would refuse (its `check_batch`: rights, names, guardrails, types, a protected environment or a folder policy that would make it a change request) is refused before anything rotates; a write that fails after the rotation is a 409 saying so, and `"rotate": false` stores the current password without rotating again. Not for a branch (its parent's password is the one to keep). |
 | POST | `/v1/search/clusters/{id}/unload` | sleep now (`{"unloaded": false}` while requests run) |
 | GET | `/v1/search/clusters/{id}/indices` | `_cat/indices` as JSON numbers: health, status, shards, docs, sizes; docs and sizes of open indices come from the engine (as `_stats` reports them: Lucene documents, nested ones included, unflushed writes included). Wakes the cluster |
 | POST | `/v1/search/clusters/{id}/request` | console: `{method, path, body?}` (a JSON body, sent byte for byte so `_source` keeps its key order, or a string such as NDJSON, sent as is) → `{status, headers, body, took_ms, truncated}`; an answer the cluster streams (`_inference/…/_stream`) is passed through as it comes instead, with its status and `Content-Type: text/event-stream`. Accepts bodies up to the cluster's `max_body_mb` (the request may be up to twice that plus 1 MiB, for JSON escapes) |
@@ -1341,13 +1365,19 @@ filtered listing; and the auth matrix's probe of storage's nested route (also br
 
 Ranked; the top item is in progress. Updated as work lands (the watchdog reads this list).
 
-Working order (2026-11-26, after the 2026-11-25 category review): the fourth sweep's fixes first
-(item 4: #1059, `fix/search-resolved-names`, `fix/search-indirect-meds`, each a HIGH or MED on
-main), then the work in review or in progress (item 1's previews, #1054; item 11's RAG phase 2;
-item 13's crawler, #1060 and politeness), then item 12's frictions (the first thing a new user
-hits, and where Algolia, Meilisearch and Typesense are fastest: nobody else is on it, so it's the
-top open item), item 30 (read-only ES|QL for agents, after item 4's ENRICH fix), and item 15
-(Algolia's strongest ground: A/B tests, conversion analytics, merchandising rules).
+Working order (2026-11-26, refreshed after the day's landings): the fourth sweep's fixes first
+(item 4: #1059 in its second round, `fix/search-resolved-names`, `fix/search-indirect-meds`,
+each a HIGH or MED on main), then the work in review (item 1's previews, #1054; item 11's RAG
+phase 2, #1068 in its second round; item 13's politeness, #1075), then item 12's last friction
+(an API key's `encoded` working at a shared address), item 31 (re-embedding an index's own
+documents, for agents setting up semantic search), item 30 (read-only ES|QL for agents, after
+item 4's ENRICH fix), and item 15 (Algolia's strongest ground: A/B tests, conversion analytics,
+merchandising rules; its first slice is in progress on `feature/search-experiments`).
+Landed 2026-11-26: the PIT and caches fix (#1021), a cluster's admin password kept in roll
+secrets and the MCP sweep's person flow (#1097), Terraform for synonyms sets and rulesets
+(#1071), inference endpoints from a secret answered redacted and limited to `api_key` services
+(#1076, #1104), the `semantic_text` default (#1093), click events with a `data` key (#1078) and
+the help-articles sample (#1081).
 
 Landed 2026-11-17: per-person cluster caps (#162: 50 clusters and 2 always-on per person,
 rolld flags, 409 past a cap, counted in the write's own transaction); the search playground (#159); the Relevance tab for
@@ -1397,9 +1427,9 @@ deterministic (#396).
    filters only when the parent allows them, and each end user's own context owner; then #1025:
    usage and 429s per browser key by reason, with a derived key's top users and the top refused
    origins, in the Browser search section, the CLI and MCP, as Algolia shows per-key usage);
-   what remains: RAG's chat limits for browser keys (item 11); browser search on previews (a branch keeps the
-   parent's origins but no browser key works there: give it one and the preview's URL, roll
-   previews' side); Algolia's search-only and secured API keys,
+   then browser search on previews (a preview's search branch gets browser keys of its own after
+   its parent's, and the preview's pages among its allowed origins); what remains: RAG's chat
+   limits for browser keys (item 11); Algolia's search-only and secured API keys,
    Typesense's scoped keys, Meilisearch's tenant tokens, Elastic's search applications): a web
    page can't call a roll cluster today. There's no CORS (`http.cors.*` are static settings no
    tenant can set), so every site needs a backend in front of search, which is the first thing
@@ -1645,9 +1675,10 @@ deterministic (#396).
 10. **Relevance tuning by MCP and Terraform**: `/v1/search` serves synonyms sets, query rulesets
    (and `_test`), writing an index's settings and `_explain` (the routes table), and `roll search`
    has `synonyms`, `rules`, `indices settings` and `explain` and makes `read` and `append` keys on
-   named indices; roll's MCP maps them next (`no-tool.txt`). Terraform has `roll_search_synonyms_set` and `roll_search_query_ruleset`. Left: a redacted answer for
-   `POST …/inference/secrets`, so it can become a tool and an agent can set up semantic search end
-   to end.
+   named indices; roll's MCP maps them next (`no-tool.txt`). Terraform has `roll_search_synonyms_set` and `roll_search_query_ruleset` (#1071), and
+   `POST …/inference/secrets` answers redacted and takes only services whose credential is an
+   `api_key` (#1076, #1104), so roll MCP maps it (`search_create_inference_endpoint`, #1086) and an
+   agent sets up semantic search end to end. Left: item 31.
 11. **Conversational search and RAG** (Elastic Playground's chat with citations, Typesense
    `conversation=true`, Meilisearch `/chats`, OpenSearch's `retrieval_augmented_generation`
    processor). Design: [rag.md](rag.md). Phase 1 is built: streamed inference (`…/_stream` sent as
@@ -1662,11 +1693,13 @@ deterministic (#396).
    guides do; a 30-day `data` key made in the panel goes into the copied code, shown once). Left:
    a sample dataset for RAG (passages with `semantic_text` on E5); and
    what writing the guides found: an API key's `encoded` value works only at the cluster's own
-   host, so clients behind a shared address re-encode it as `<id>@<cluster>:<key>`; a `data` key
-   can't post click events, so an app tracking clicks needs a second key; a `semantic_text` field
-   with no `inference_id` fails, because its default (`.elser-2-elasticsearch`) answers as a
-   cluster without ML nodes, the first error anyone copying Elasticsearch's docs hits; and no
-   screen is named Discover.
+   host, so clients behind a shared address re-encode it as `<id>@<cluster>:<key>` (the shared
+   address routes keys by `<key id>@<cluster>`; Elasticsearch's own `_security/api_key` answers a
+   plain `encoded`: answer it qualified, as the keys route's `api_key` is, once the cluster's own
+   host accepts the qualifier; an authentication change, so with a review); and no screen is named
+   Discover. Landed: a `semantic_text` field with no `inference_id` defaults to the E5 the node
+   runs (#1093), a `data` key records click events (#1078), and a help-articles sample on E5 with
+   semantic, hybrid and passage queries (#1081).
 13. **A web crawler for site search** (design in [crawler.md](crawler.md); Elastic Open Crawler,
    Algolia Crawler, DocSearch, Meilisearch's docs-scraper). Phases 1 and 2 landed: a native
    connector roll runs (`roll_web_crawler`, on #318's runner) taking Open Crawler's config, fields
@@ -1685,8 +1718,9 @@ deterministic (#396).
    back, a 304 kept as it is and counted as seen) with `incremental` jobs that delete nothing, and
    the docs preset (one record per section, `lvl0` to `lvl6` from the headings, the URL with its
    `#anchor`, a mapping and a search-as-you-type template; `roll search crawler create --preset
-   docs` and the crawl box). Open: charset detection beyond UTF-8, fetching several origins at
-   once, and per-site politeness by address rather than name.
+   docs` and the crawl box); then pages decoded in their own charset (WHATWG sniffing,
+   `encoding_rs`), politeness per server (the address the egress check resolves, shared by every
+   name on it), and several servers fetched at once (`roll.crawler.max_parallel_fetches`).
 14. **Semantic search on OpenSearch-flavor clusters** (design in
    [opensearch-neural.md](opensearch-neural.md); AWS OpenSearch neural search):
    `neural`, `neural_sparse` and `agentic` are names only (`meta/aliases.rs`); ML Commons
@@ -1912,13 +1946,18 @@ deterministic (#396).
    an OpenSearch user): links made before one are reissued. The fleet test with every product on
    passed (2026-11-13: search 8,077 writes acknowledged and verified, no errors, longest stall
    1.2 s in the rolling restart).
+   A cluster's admin password is kept as a project secret from roll's API and CLI (`POST …/password`
+   with `secret`, `roll search clusters password --secret ENV/KEY`): rotated, written as the caller, shown
+   to nobody.
    Joins the 2026-11-21 category review found: landed since, an apps link narrowed to indices and
    `read` or `append` (#721, through secrets' `names` and `permission` link options), apps' log
    drains into a roll search data stream (#735: ECS documents through `_bulk` with an `append` key
    on `logs-roll.apps-*`), and previews giving a branch only its data credential (#607). Not yet
-   built: a cluster's admin password can't be kept as a project secret from roll's API or CLI; and only a
-   unit test covers previews' search branch, and one MCP test search (no create → bulk → query
-   flow with a person's scoped token). Project members landed in #808
+   built: only a
+   unit test covers previews' search branch. The MCP sweep (`pnpm test:mcp-sweep`) runs a
+   person's own flow: a project admin signed in, with a token scoped to search, makes a cluster in the
+   project, bulk-indexes and finds the document through `/v1/mcp`, and their read-only token is
+   refused the bulk. Project members landed in #808
    (`feature/search-members`): search is a member product, so a member's role in a cluster's project
    decides what they do to it through roll-access, a person's own clusters stay theirs, and linking
    two clusters takes administering both ([Who sees a cluster](architecture.md#who-sees-a-cluster)).
@@ -2076,3 +2115,11 @@ deterministic (#396).
    `ENRICH`) authorized against the grant's scope as it plans, sync only, storing nothing; the
    `search_esql` tool and `roll search esql`. Queued (`feature/search-esql-route`) behind item 4's
    ENRICH fix, which it depends on.
+31. **Re-embedding an index's own documents** (asked by roll MCP, 2026-11-26): an index whose
+   `semantic_text` field came after its documents has no embeddings, and an agent's only way is
+   reading pages and writing them back. `POST /v1/search/clusters/{id}/indices/{index}/update_by_query`
+   (`{query?, script?, max_docs?, conflicts?, slices?}`; a write on the index): with no script
+   it re-indexes each document in place, so a new field fed by `copy_to` embeds;
+   `wait_for_completion=false` answers 202 `{task}`, with the tasks route catalogued as a read
+   (roll MCP's wait tool follows it). Each document's E5 time is charged and rate-limited as bulk
+   indexing is. roll MCP maps it as `search_update_by_query`.

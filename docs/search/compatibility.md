@@ -1346,6 +1346,15 @@ The inference API of Elasticsearch 9.5.5's inference plugin (`crates/search-es/s
 `PUT/GET/DELETE _inference[/{task_type}]/{id}`, `PUT …/_update`, `POST _inference[/{task_type}]/{id}`
 to run one, `POST …/_stream` (completion and the unified `chat_completion`), `GET _inference/_services[/{task_type}]`,
 the region policy (`_inference/_region_policy`) and the `inference` section of `_xpack/usage`.
+
+A `semantic_text` field that names no `inference_id` defaults to Elasticsearch's ELSER
+(`.elser-2-elasticsearch`), which needs ML nodes roll doesn't run. On a node that runs E5, roll
+records `.multilingual-e5-small-elasticsearch` instead, as a new index's
+`index.semantic_text.default_inference_id` (shown in `GET _settings`) and in the field's mapping,
+the way Elastic Cloud picks its own service's default: a mapping copied from Elasticsearch's docs
+works as written. An index that sets the setting, a field that names its endpoint, and a node
+without the model (or whose operator sets `roll.semantic_text.default_inference_id`; empty:
+Elasticsearch's) keep the other. The setting is honoured as given either way.
 Task types `text_embedding`, `sparse_embedding`, `rerank`, `completion`, `chat_completion`.
 The services after `anthropic` were measured the same way, on a private Elasticsearch 9.5.5 whose
 provider hosts (`*.openai.azure.com`, `bedrock-runtime.*.amazonaws.com` over HTTP/2,
@@ -1734,8 +1743,10 @@ taken over by roll's crawler. Where roll's differs ([crawler.md](crawler.md)):
   validation. A connector holds at most 1,000 crawl rules across its domains. Until domain
   verification lands every domain is unverified: at most 1,000 URLs a crawl, a second between
   requests to one site across every crawl on the node, and 4 crawls a day per connector and per
-  owner and site on the node. A crawl fetches one URL at a time (`threads_per_crawl` doesn't
-  apply).
+  owner and site on the node. Politeness is per server (the address a host resolves to), not per
+  site: one turn per server across every crawl on the node, and a crawl fetches up to
+  `roll.crawler.max_parallel_fetches` (4) URLs at once, each from another server and origin
+  (`threads_per_crawl` doesn't apply).
 - **Credentials** are the connector's sealed `auth_header` or basic auth, sent only to
   `auth_origin` over https, never after a redirect to another origin; one per connector.
   `http_auth_allowed`, proxies and `domains[].auth` in the snippet aren't taken (the CLI import
@@ -1758,8 +1769,10 @@ taken over by roll's crawler. Where roll's differs ([crawler.md](crawler.md)):
   a record per paragraph; roll makes one per section.
 - **Not yet**: XPath selectors, binary content extraction (only `text/html` and
   `application/xhtml+xml` are indexed), `data-elastic-name` and `meta.elastic` beyond 100 fields a
-  page, and `full_html` is the page as served, not Jsoup's re-serialisation. Pages are decoded as
-  UTF-8 (a page in another charset reads with replacement characters).
+  page, and `full_html` is the page as decoded, not Jsoup's re-serialisation.
+- **Charsets** are sniffed as browsers sniff them (WHATWG: BOM, `Content-Type`, a `<meta>` in the
+  first 1,024 bytes, else windows-1252), except that a body that is valid UTF-8 is read as UTF-8
+  before the windows-1252 fallback.
 - **URLs** are normalised with the WHATWG URL parser plus RFC 3986's percent-encoding rules, where
   Open Crawler uses Addressable's `normalize!`: IDNs, case, default ports, dot segments and
   percent-encoding agree; `links` and `url` hold the normalised URL rather than the link as written.

@@ -5078,7 +5078,11 @@ fn volume_full_in_days(points: &[(i64, u64)], size: u64, now_hour: i64) -> Optio
     let (mx, my) = (week.iter().map(|p| p.0).sum::<f64>() / n, week.iter().map(|p| p.1).sum::<f64>() / n);
     let slope = week.iter().map(|p| (p.0 - mx) * (p.1 - my)).sum::<f64>() / week.iter().map(|p| (p.0 - mx).powi(2)).sum::<f64>();
     let last = week.last()?.1;
-    (slope.is_finite() && slope > 0.0 && (size as f64) > last).then(|| ((size as f64 - last) / slope / 24.0 * 10.0).round() / 10.0)
+    // Already full: now.
+    if last >= size as f64 {
+        return Some(0.0);
+    }
+    (slope.is_finite() && slope > 0.0).then(|| ((size as f64 - last) / slope / 24.0 * 10.0).round() / 10.0)
 }
 
 #[cfg(test)]
@@ -5093,5 +5097,6 @@ mod volume_tests {
         let flat: Vec<(i64, u64)> = (0..48).map(|h| (1000 + h, gib)).collect();
         assert_eq!(super::volume_full_in_days(&flat, 10 * gib, 1047), None);
         assert_eq!(super::volume_full_in_days(&points[..10], 10 * gib, 1047), None, "under a day of points");
+        assert_eq!(super::volume_full_in_days(&points, 2 * gib, 1047), Some(0.0), "already full");
     }
 }
