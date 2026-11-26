@@ -190,7 +190,9 @@ Reproduce the YAML numbers with `scripts/search-yaml-suites.sh roll` (set `ROLL_
   filters without adding OpenSearch's +1.0 to scores; masked fields are unmapped for queries
   and aggregations (OpenSearch aggregates and matches their hashes); mappings by `hosts` never
   match (roll doesn't see the client's address); `hash`es given by clients are bcrypt (as the
-  plugin's) up to cost 14. Not yet: `nodesdn`, `allowlist`, API tokens and
+  plugin's) up to cost 14; a DLS query with a terms lookup (or any query reading another
+  document) fails the request, where the plugin's filter-level DLS runs the lookup (roll's DLS
+  queries read nothing as anyone, as Elasticsearch's role queries can't). Not yet: `nodesdn`, `allowlist`, API tokens and
   multi-tenancy itself (tenants are stored and listed; no tenant indices).
 
 
@@ -487,7 +489,19 @@ only the clusters named in the node setting `roll.security.service_token_file.cl
 (a dev-mode `search-dev` node serves one cluster, which always does). An API key whose role descriptors
 carry `restriction.workflows` runs only requests of those workflows (`search_application_query`:
 a search application's `_search`, with the searches it makes), anything else fails with
-`role_restriction_exception` ("access restricted by workflow"), `_authenticate` included. A search with `ignore_unavailable`
+`role_restriction_exception` ("access restricted by workflow"), `_authenticate` included.
+A new API key's `encoded` (create, grant and cross-cluster keys) is Elasticsearch's
+`base64(<id>:<api_key>)` when the request came to the cluster's own address (its host name, or a
+node serving only it, as the YAML suites' does), which is where a bare id works. Made anywhere
+else (a node's shared address such as `http://127.0.0.1:59200`, roll's console) it's
+`base64(<id>@<cluster>:<api_key>)`: roll's nodes route `<id>@<cluster>` to that cluster at any
+address, so the copied value works at the shared address and the cluster's own host alike. `id`
+and `api_key` are Elasticsearch's either way. A qualifier names one cluster: only that cluster
+accepts it, and a cluster's own host refuses another cluster's (`<id>@<other>`, a Basic
+`<user>@<other>`, a derived key or `<cluster>_<secret>` token naming another) with a 401; host
+names are matched case-insensitively. APIs that take a key's id (`GET _security/api_key?id=`,
+`DELETE _security/api_key` `ids`, updates) take the `id` field, never the id decoded out of
+`encoded`, which may carry `@<cluster>`. A search with `ignore_unavailable`
 leaves out the explicitly named indices its user may not read (without it they are refused);
 ES|QL and SQL name their indices strictly either way.
 Background jobs run as the user or API key that set them up, and roll checks that user or key
@@ -1698,6 +1712,8 @@ APIs ([relevance-experiments.md](relevance-experiments.md), "First slice as buil
   (`page_view`, `search` and `search_click` as Elasticsearch has them).
 - A browser key with `limits.events` may post `search_click` and `roll_conversion` events, which
   are counted and not stored.
+- `POST _application/search_application/{name}/_roll/experiments/{id}/_promote` writes a
+  variant into the application and ends the experiment (roll's own route, under `_roll`).
 
 ## Connectors (`_connector`)
 

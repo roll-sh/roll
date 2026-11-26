@@ -177,6 +177,9 @@ pub fn definition() -> Value {
         "description": "Find any roll resource (project, service, repo, database, cluster, bucket, stream, queue, function, preview, token) by its name or part of it (\"checkout-db\"), part of its id, or a roll dashboard link a person pasted. Each match says its kind, id and name, and the tool and arguments that read it (read). A link is read at once: the answer is that read's.",
         "inputSchema": { "type": "object", "properties": { "query": { "type": "string", "description": "A name, part of one or of an id, or a roll dashboard URL" } }, "required": ["query"] },
         "annotations": { "readOnlyHint": true, "openWorldHint": false },
+        // The way in from a name or a pasted link: loaded upfront where a client defers tools
+        // behind its tool search (Claude Code), as search mode's tools are.
+        "_meta": { "roll/product": "roll", "anthropic/alwaysLoad": true },
     })
 }
 

@@ -265,6 +265,15 @@ pub struct Note {
 }
 
 /// What answers a name under a project's preview domain that no roll apps environment holds (a
+/// Writes a custom domain's records at the customer's DNS provider with a token of theirs (rolld:
+/// Cloudflare, through roll-edge's client). The token is used for one call and never kept.
+#[async_trait]
+pub trait DnsWriter: Send + Sync {
+    /// Make `name`'s `kind` record (`CNAME` or `TXT`) say `content`. A CNAME beside the name's A or
+    /// AAAA records: with `replace` they're deleted, else nothing is written and they're answered.
+    async fn put_record(&self, token: &str, kind: &str, name: &str, content: &str, replace: bool) -> anyhow::Result<Vec<String>>;
+}
+
 /// preview on roll's own runtime, from roll.toml's `[preview]`): rolld fills it with roll
 /// previews' router, called in process with the request as it came (its Host unchanged).
 /// Unset: those names are a 404.

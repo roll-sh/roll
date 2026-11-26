@@ -454,12 +454,14 @@ pub async fn search(ctx: &Ctx<'_>) -> EsResult<Reply> {
     if ctx.bool_param("typed_keys", false)? {
         uri.push_str("?typed_keys=true");
     }
+    let started = std::time::Instant::now();
     let out = internal::call(ctx.cluster, "POST", &uri, Some(&body)).await?;
     if let Some((e, token)) = &assigned {
+        let hits = out.pointer(&["hits", "total", "value"]).and_then(Value::as_i64).map_or_else(|| out.pointer(&["hits", "hits"]).and_then(Value::as_array).map_or(0, Vec::len) as u64, |n| n.max(0) as u64);
         let v = e.assign(name, token);
         let query = crate::analytics::query_text(ctx.request.header(crate::analytics::QUERY_HEADER), None, Some(&body)).unwrap_or_default();
         let key = (name.to_string(), e.id.clone(), v.name.clone());
-        ctx.cluster.analytics.record_variant_search(&key, super::experiments::trial_key(name, &e.id, token, &query));
+        ctx.cluster.analytics.record_variant_search(&key, super::experiments::trial_key(name, &e.id, token, &query), hits, started.elapsed());
         ctx.add_header(super::experiments::EXPERIMENT_HEADER, e.id.clone());
         ctx.add_header(super::experiments::VARIANT_HEADER, v.name.clone());
     }
@@ -646,9 +648,7 @@ pub async fn post_event(ctx: &Ctx<'_>) -> EsResult<Reply> {
         }
         let outcome = if ty == "roll_conversion" { crate::analytics::Outcome::Conversion(value) } else { crate::analytics::Outcome::Click };
         super::experiments::record_event(ctx, &body, outcome);
-        if ty == "search_click" {
-            record_click(ctx, &body);
-        }
+        record_index_event(ctx, &body, outcome);
         return Ok(Reply::Body(202, obj! { "accepted" => true }));
     }
     let mut session = body.get("session").and_then(Value::as_object).cloned().unwrap_or_default();
@@ -704,10 +704,11 @@ pub async fn post_event(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let session_id = ev.pointer(&["session", "id"]).map(Value::to_es_string).unwrap_or_default();
     internal::call_system(ctx.cluster, "POST", &format!("/{}/_doc?op_type=create&routing={}", enc(&events_stream(&name)), enc(&session_id)), Some(&ev)).await?;
     if ty == "search_click" {
-        record_click(ctx, &body);
+        record_index_event(ctx, &body, crate::analytics::Outcome::Click);
         super::experiments::record_event(ctx, &body, crate::analytics::Outcome::Click);
     }
     if ty == "roll_conversion" {
+        record_index_event(ctx, &body, crate::analytics::Outcome::Conversion(value));
         super::experiments::record_event(ctx, &body, crate::analytics::Outcome::Conversion(value));
     }
     let mut out = Map::new();
@@ -718,10 +719,10 @@ pub async fn post_event(ctx: &Ctx<'_>) -> EsResult<Reply> {
     Ok(Reply::Body(202, Value::Obj(out)))
 }
 
-/// A `search_click` on a document of an index with search analytics on is a click on the
-/// event's search query ([`crate::analytics`]), at the document's position when the event lists
+/// A `search_click` (or a `roll_conversion`) on a document of an index with search analytics on
+/// is a click (a conversion, with its value) on the event's search query ([`crate::analytics`]), at the document's position when the event lists
 /// the search's results (`search.results.items`, after `search.page`'s earlier pages).
-fn record_click(ctx: &Ctx, body: &Map) {
+fn record_index_event(ctx: &Ctx, body: &Map, outcome: crate::analytics::Outcome) {
     let a = &ctx.cluster.analytics;
     if !a.on() {
         return;
@@ -753,7 +754,10 @@ fn record_click(ctx: &Ctx, body: &Map) {
         let before = n("current").saturating_sub(1).saturating_mul(n("size"));
         u32::try_from(before.saturating_add(at as u64 + 1)).ok()
     });
-    a.record_click(&index, &query, position);
+    match outcome {
+        crate::analytics::Outcome::Click => a.record_click(&index, &query, position),
+        crate::analytics::Outcome::Conversion(value) => a.record_conversion(&index, &query, value),
+    }
 }
 
 #[cfg(test)]

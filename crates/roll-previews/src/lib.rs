@@ -432,6 +432,10 @@ pub struct Preview {
     /// `release` (or seed) ran at `head`: `+ …` added, `- …` removed (`schema::diff`). `None`:
     /// not known (no Postgres branch, or not read yet).
     pub schema_changes: Option<Vec<String>>,
+    /// The project's other open changes whose schema changes touch the same tables (PlanetScale's
+    /// conflicting deploy requests): whichever lands second migrates a table the first changed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub schema_overlaps: Vec<SchemaOverlap>,
     /// What in `schema_changes` would hurt production when the change lands (`schema::risks`:
     /// a dropped table or column, a type change, a column made NOT NULL).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1276,7 +1280,13 @@ pub struct VisualReview {
     /// its time): nobody saw them, so they're under review too (Chromatic captures every story).
     #[serde(skip_serializing_if = "is_zero")]
     pub untaken: u32,
+    /// Refused: why (the latest refusal's, one line; `by` and `at` are its).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
+
+/// What a masked base's branch is named after (`pvbase-<rules>-<when>`): no preview's name starts so.
+pub const MASK_BASE_PREFIX: &str = "pvbase-";
 
 /// The visual review's entry for the stories a change touched that its run didn't take.
 pub use code_control::model::UNTAKEN_STORIES;
@@ -1298,6 +1308,9 @@ pub struct PageReview {
     /// shares it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
+    /// Refused at this head: by whom, when, why.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refused: Option<Refusal>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -1308,6 +1321,26 @@ pub enum VisualState {
     /// They differ, and nobody has accepted them at this head.
     Changed,
     Accepted,
+    /// Someone refused a page at this head (Chromatic's Deny): it fails until a new head, or
+    /// until someone accepts that page.
+    Refused,
+}
+
+/// Another open change's preview whose schema changes touch the same tables as this one's.
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+pub struct SchemaOverlap {
+    pub preview: String,
+    pub branch: String,
+    /// The tables both change (`schema.table`).
+    pub tables: Vec<String>,
+}
+
+/// Who refused a page of a visual review at its head, when, and why (one line).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Refusal {
+    pub by: String,
+    pub at: i64,
+    pub reason: String,
 }
 
 /// How much a change's page differs from the default branch's (Chromatic's baseline).

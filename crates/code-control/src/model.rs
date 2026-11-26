@@ -333,6 +333,10 @@ pub struct PreviewEnvironment {
     /// `schema::risks`); untrusted text too.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub schema_risks: Vec<String>,
+    /// Other open changes whose previews' schema changes touch the same tables: `(branch,
+    /// tables)`; untrusted text too.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub schema_overlaps: Vec<(String, Vec<String>)>,
     /// How long the project's release (migrations) took on the preview's data at `head`, and at
     /// the run before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -446,7 +450,8 @@ pub struct PreviewSpeedBudget {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PreviewVisualReview {
-    /// `unchanged`, `changed` (waiting for someone to accept it) or `accepted`.
+    /// `unchanged`, `changed` (waiting for someone to accept it), `accepted`, or `refused`
+    /// (someone refused a page at this head; `by` is who, `reason` why).
     pub state: String,
     pub branch: String,
     pub percent: f64,
@@ -464,6 +469,9 @@ pub struct PreviewVisualReview {
     /// Stories the change touched that its preview's run didn't take: unreviewed.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub untaken: u32,
+    /// Refused: why (one line).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// A visual review's entry (`pages[].path`) for the stories the change touched that the run

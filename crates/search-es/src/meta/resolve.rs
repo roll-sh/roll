@@ -386,6 +386,20 @@ pub fn require_names(expressions: &[String]) -> Result<(), EsError> {
     Ok(())
 }
 
+/// The name an index permission check is about for expression `expr`, as
+/// `IndicesAndAliasesResolver` resolves it before authorizing: date math resolved
+/// (`<logs-{now/d}>` is the day's index) and the selector split off (`logs::failures` is
+/// `logs`'s failure store, whose reads need the failure store privilege). A wildcard stays one:
+/// the caller resolves it against the state it reads.
+pub fn authorization_name(expr: &str, now_ms: i64) -> Result<(String, Selector), EsError> {
+    // `<logs-{now/d}>::failures`: the selector follows the date math.
+    let (base, selector) = match expr.rfind(">::") {
+        Some(i) if expr.starts_with('<') => (&expr[..=i], split_selector(&format!("x{}", &expr[i + 1..]))?.1),
+        _ => split_selector(expr)?,
+    };
+    Ok((resolve_date_math(base, now_ms)?, selector))
+}
+
 /// `DateMathExpressionResolver`: `<logs-{now/d}>`, `<logs-{now/M{yyyy.MM}}>`,
 /// `<logs-{now/d{yyyy.MM.dd|+12:00}}>`, with `\` escaping `{` and `}`.
 pub fn resolve_date_math(expr: &str, now_ms: i64) -> Result<String, EsError> {

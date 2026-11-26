@@ -155,9 +155,11 @@ A key made with an API key is limited by that key's own permissions, so it can n
 the admin key. Revoke one at once with `DELETE /_security/api_key` and `{"ids": ["<id>"]}`, or every
 key of a tenant with `{"name": "tenant-acme"}`.
 
-`encoded` works against the cluster's own host (`https://app-search.search.…`). On a shared address
-such as `http://127.0.0.1:59200`, encode `<id>@app-search:<api_key>` in base64 instead, so the
-address knows which cluster the key belongs to.
+`encoded` works where the key was made. Made at the cluster's own host
+(`https://app-search.search.…`) it's Elasticsearch's; made at a shared address such as
+`http://127.0.0.1:59200` it names the cluster (`<id>@app-search:<api_key>` in base64), which
+works at both, and no other cluster accepts it. A client that encodes `id` and `api_key` itself
+works at the cluster's own host only.
 
 ## Stage changes on a branch
 
