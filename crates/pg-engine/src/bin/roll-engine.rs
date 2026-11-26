@@ -375,6 +375,9 @@ fn main() -> anyhow::Result<()> {
                     }
                     tracing::info!("shutting down");
                     lifecycle::shutdown(&engine);
+                    // (The sessions' sockets close as their clients end them, not with the
+                    // process: `server::wait_closed`.)
+                    pg_engine::server::wait_closed(Duration::from_millis(500));
                     pg_engine::log::flush();
                     std::process::exit(0);
                 }

@@ -298,6 +298,11 @@ struct IdleRead {
     /// client slower than that (8 clients' range reads, each checking 100 rows) would only
     /// have its server threads poll for nothing: 7% fewer reads, 11% more CPU per read.
     spin: bool,
+    /// Set while a read waits for the client (`Engine::terminate` shuts the socket's reading
+    /// side only then, to wake it), and the backend's termination flag once it has one: a
+    /// read that would wait after a termination ends the input instead, as the shut side does.
+    reading: Arc<AtomicBool>,
+    terminated: Option<Arc<AtomicBool>>,
 }
 
 impl Drop for IdleRead {
@@ -321,7 +326,7 @@ impl std::fmt::Display for IdleTimeout {
 impl std::error::Error for IdleTimeout {}
 
 impl IdleRead {
-    fn new(s: Arc<TcpStream>) -> std::io::Result<IdleRead> {
+    fn new(s: Arc<TcpStream>, reading: Arc<AtomicBool>) -> std::io::Result<IdleRead> {
         if IDLE_HOOK.get().is_some() {
             s.set_read_timeout(Some(IDLE_TRIM))?;
         }
@@ -329,7 +334,7 @@ impl IdleRead {
         if counted {
             WORKING.fetch_add(1, Ordering::Relaxed);
         }
-        Ok(IdleRead { s, armed: true, deadline: None, counted, spin: counted })
+        Ok(IdleRead { s, armed: true, deadline: None, counted, spin: counted, reading, terminated: None })
     }
 
     /// Wake for the pending idle trim or a session deadline; otherwise block for data.
@@ -364,7 +369,16 @@ impl Read for IdleRead {
         #[cfg(test)]
         tests::before_wait();
         loop {
-            match (&*self.s).read(buf) {
+            // (Set before `terminated` is read, as `Engine::terminate` sets `terminated` before
+            // it reads this: a termination either finds the read waiting or is seen here.)
+            self.reading.store(true, Ordering::SeqCst);
+            if self.terminated.as_ref().is_some_and(|t| t.load(Ordering::SeqCst)) {
+                self.reading.store(false, Ordering::Relaxed);
+                return Ok(0);
+            }
+            let r = (&*self.s).read(buf);
+            self.reading.store(false, Ordering::Relaxed);
+            match r {
                 Ok(n) => {
                     if let Some(b) = began {
                         self.spin = idle_clock().saturating_duration_since(b).as_nanos() as u64
@@ -728,7 +742,19 @@ pub fn quit_clients(engine: &Engine) {
     error_fields(&mut b, &e, e.severity.as_str());
     let len = (b.len() - 1) as i32;
     b[1..5].copy_from_slice(&len.to_be_bytes());
-    engine.quit_client_backends(&b);
+    // The process exits next, closing every socket: each gets the WARNING and the FIN, then
+    // its client's acknowledgement of them (or a moment) before its unread input is dropped (a
+    // socket closed with input unread is reset: `Closing`). (Its reading side shuts too: a
+    // session reads no more queries.)
+    let sockets = engine.client_sockets();
+    for s in &sockets {
+        let _ = (&**s).write_all(&b);
+        let _ = s.shutdown(std::net::Shutdown::Both);
+    }
+    let until = std::time::Instant::now() + std::time::Duration::from_millis(100);
+    for s in &sockets {
+        settle(s, until);
+    }
 }
 
 fn error_fields(b: &mut BytesMut, e: &Error, severity: &str) {
@@ -889,45 +915,95 @@ impl Drop for BackendGuard<'_> {
 }
 
 /// The connection's socket as its thread lets it go (dropped last in `handle`, after the
-/// session's teardown): the FIN goes out if the session hasn't sent it, and the socket closes
-/// once the client has acknowledged everything up to the FIN, or the connection is gone, or
-/// `CLOSE_ACK_WAIT` passed. A socket closed with the client's input unread (a query it sent
-/// before it read the session's FATAL) is reset at once, and the reset drops what is still
-/// queued, a FIN not yet out with it: the client read "connection reset" where PostgreSQL's
-/// connection just ends (wire_waits' transaction_timeout cases, 1% of runs under load). A FIN
-/// the client acknowledged can't be overtaken. (On loopback the acknowledgement is in by the
-/// time the teardown is done: nothing waits.)
+/// session's teardown). Closing a socket with the client's input unread makes the kernel reset
+/// the connection, and the reset drops what is still queued to send (the session's FATAL, its
+/// FIN) and fails the client's next write ("Broken pipe"): a client that sent its next query
+/// before it read the FATAL (wire_waits' transaction_timeout cases) saw "connection reset" or
+/// "error communicating with the server" under load where PostgreSQL's connection just ends.
+/// So the FIN goes out if the session hasn't sent it, what the client sends meanwhile is read
+/// and dropped until the client closes its end (it does once it reads the FIN) or `CLOSE_WAIT`
+/// passed, and the socket closes once the client has acknowledged the FIN (or the connection
+/// is gone) with nothing unread: a plain close, which no later input can turn into a reset of
+/// what the client still has to read. (A client that reads its end closes it at once: on
+/// loopback nothing waits; a remote one holds the finished thread about a round trip.)
 struct Closing(Arc<TcpStream>);
 
-const CLOSE_ACK_WAIT: std::time::Duration = std::time::Duration::from_millis(200);
+const CLOSE_WAIT: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Connections whose thread hasn't closed its socket yet (`wait_closed`).
+static OPEN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+impl Closing {
+    fn new(s: Arc<TcpStream>) -> Closing {
+        OPEN.fetch_add(1, Ordering::Relaxed);
+        Closing(s)
+    }
+}
 
 impl Drop for Closing {
     fn drop(&mut self) {
-        let _ = self.0.shutdown(std::net::Shutdown::Write);
-        #[cfg(target_os = "linux")]
-        {
-            use std::os::fd::AsRawFd;
-            let fd = self.0.as_raw_fd();
-            let unacked = || {
-                // SAFETY: tcp_info is plain data; getsockopt writes at most `len` bytes of it
-                // and TIOCOUTQ (SIOCOUTQ: bytes sent or queued, not yet acknowledged) one int.
-                unsafe {
-                    let mut info: libc::tcp_info = std::mem::zeroed();
-                    let mut len = std::mem::size_of::<libc::tcp_info>() as libc::socklen_t;
-                    let mut queued: libc::c_int = 0;
-                    libc::getsockopt(fd, libc::IPPROTO_TCP, libc::TCP_INFO, (&raw mut info).cast(), &mut len) == 0
-                        && info.tcpi_state != 7 // TCP_CLOSE: reset, or the FIN acknowledged
-                        && libc::ioctl(fd, libc::TIOCOUTQ, &mut queued) == 0
-                        && queued > 0
-                }
-            };
-            let until = std::time::Instant::now() + CLOSE_ACK_WAIT;
-            let mut pause = std::time::Duration::from_micros(20);
-            while unacked() && std::time::Instant::now() < until {
-                std::thread::sleep(pause);
-                pause = (pause * 2).min(std::time::Duration::from_millis(5));
+        let s = &*self.0;
+        let _ = s.shutdown(std::net::Shutdown::Write);
+        let until = std::time::Instant::now() + CLOSE_WAIT;
+        let mut buf = [0u8; 4096];
+        loop {
+            let left = until.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() || s.set_read_timeout(Some(left)).is_err() {
+                break;
+            }
+            match (&*s).read(&mut buf) {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => break,
             }
         }
+        // (The reads end at once after a termination shut the reading side: the client's
+        // acknowledgement of the FIN then keeps a reset of input coming after it from
+        // overtaking the FIN.)
+        settle(s, until);
+        OPEN.fetch_sub(1, Ordering::Release);
+    }
+}
+
+/// Wait until the client has acknowledged everything sent on `s`, its FIN too (SIOCOUTQ 0), or
+/// the connection is gone, or `until`; then read and drop what input is there, without
+/// waiting.
+fn settle(s: &TcpStream, until: std::time::Instant) {
+    use std::os::fd::AsRawFd;
+    let fd = s.as_raw_fd();
+    #[cfg(target_os = "linux")]
+    {
+        let unacked = || {
+            // SAFETY: tcp_info is plain data; getsockopt writes at most `len` bytes of it
+            // and TIOCOUTQ (SIOCOUTQ: bytes sent or queued, not yet acknowledged) one int.
+            unsafe {
+                let mut info: libc::tcp_info = std::mem::zeroed();
+                let mut len = std::mem::size_of::<libc::tcp_info>() as libc::socklen_t;
+                let mut queued: libc::c_int = 0;
+                libc::getsockopt(fd, libc::IPPROTO_TCP, libc::TCP_INFO, (&raw mut info).cast(), &mut len) == 0
+                    && info.tcpi_state != 7 // TCP_CLOSE: reset, or the FIN acknowledged
+                    && libc::ioctl(fd, libc::TIOCOUTQ, &mut queued) == 0
+                    && queued > 0
+            }
+        };
+        let mut pause = std::time::Duration::from_micros(20);
+        while unacked() && std::time::Instant::now() < until {
+            std::thread::sleep(pause);
+            pause = (pause * 2).min(std::time::Duration::from_millis(5));
+        }
+    }
+    let mut buf = [0u8; 4096];
+    // SAFETY: recv writes at most buf.len() bytes into buf, a live exclusive array.
+    while unsafe { libc::recv(fd, buf.as_mut_ptr().cast(), buf.len(), libc::MSG_DONTWAIT) } > 0 {}
+}
+
+/// Wait up to `within` for the connections' threads to close their sockets (`Closing`): a
+/// server that exits closes what is still open with the client's input unread, a reset.
+pub fn wait_closed(within: std::time::Duration) {
+    let until = std::time::Instant::now() + within;
+    while OPEN.load(Ordering::Acquire) > 0 && std::time::Instant::now() < until {
+        std::thread::sleep(std::time::Duration::from_millis(1));
     }
 }
 
@@ -944,9 +1020,10 @@ fn handle(
     crate::published::keep_on_this_thread();
     stream.set_nodelay(true)?;
     let stream = Arc::new(stream);
-    let _closing = Closing(stream.clone());
+    let _closing = Closing::new(stream.clone());
+    let reading = Arc::new(AtomicBool::new(false));
     let mut c = Conn {
-        rd: BufReader::with_capacity(16 << 10, IdleRead::new(stream.clone())?),
+        rd: BufReader::with_capacity(16 << 10, IdleRead::new(stream.clone(), reading.clone())?),
         wr: stream.clone(),
         out: BytesMut::with_capacity(8 << 10),
         partial: None,
@@ -1014,12 +1091,13 @@ fn handle(
     }
     // (A 3.2 client's cancel key is MAX_CANCEL_KEY_LENGTH bytes long, an older one's 4.)
     let key_len = if proto >= PROTOCOL_LATEST { 32 } else { 4 };
-    let (pid, key, terminated) = engine.register_backend(Some(stream.clone()), peer, key_len);
+    let (pid, key, terminated) = engine.register_backend(Some((stream.clone(), reading)), peer, key_len);
     let _guard = BackendGuard {
         engine: &engine,
         pid,
     };
     c.terminated = Some(terminated.clone());
+    c.rd.get_mut().terminated = Some(terminated.clone());
     c.reads = engine.read_counter(pid);
     if crate::log::active() {
         let files = engine.server_conf().loaded();
@@ -3286,7 +3364,7 @@ mod tests {
         let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
         let socket = listener.accept().unwrap().0;
         let observer = socket.try_clone().unwrap();
-        let mut reader = IdleRead::new(std::sync::Arc::new(socket)).unwrap();
+        let mut reader = IdleRead::new(std::sync::Arc::new(socket), Default::default()).unwrap();
         let worker = std::thread::spawn(move || {
             let mut byte = [0];
             reader.read_exact(&mut byte).unwrap();
@@ -3322,7 +3400,7 @@ mod tests {
         set_wait_spin(Duration::from_millis(1));
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        let mut reader = IdleRead::new(std::sync::Arc::new(listener.accept().unwrap().0)).unwrap();
+        let mut reader = IdleRead::new(std::sync::Arc::new(listener.accept().unwrap().0), Default::default()).unwrap();
         let mut b = [0u8; 1];
         client.write_all(&[1]).unwrap();
         reader.read_exact(&mut b).unwrap();

@@ -1872,6 +1872,37 @@ fn idle_hook_runs_and_the_connection_goes_on() {
     s.engine.shutdown();
 }
 
+/// A session the server ends (transaction_timeout, pg_terminate_backend) while the client's
+/// next query is on its way, unread: the client reads the FATAL and the end of the connection,
+/// and what it writes after them (a query, a Terminate) still goes out. (A socket closed with
+/// input unread is reset, as is one with its reading side shut that gets input after its FIN:
+/// the writes failed with "Broken pipe", and under load a client could read "connection
+/// reset" before the FATAL.)
+#[test]
+fn server_ends_a_session_with_input_unread() {
+    let s = server(AuthMethod::Trust);
+    let mut admin = raw::Raw::connect(&s.addr, "postgres");
+    for (set, end) in [("SET transaction_timeout = 200", "25P04"), ("", "57P01")] {
+        let mut c = raw::Raw::connect(&s.addr, "postgres");
+        if !set.is_empty() {
+            c.query(set);
+        }
+        c.send(b'Q', b"SELECT pg_sleep(5)\0");
+        std::thread::sleep(Duration::from_millis(50));
+        // (Sent while the server runs the sleep: still in its socket when the session ends.)
+        c.send(b'Q', b"SELECT 2\0");
+        if set.is_empty() {
+            assert_eq!(admin.query(&format!("SELECT pg_terminate_backend({})", c.key.0)), ["T pg_terminate_backend:16/-1", "D t", "C SELECT 1"]);
+        }
+        // (Past the session's end and its FIN, while the client reads nothing.)
+        std::thread::sleep(Duration::from_millis(450));
+        // (A RowDescription may come first: PostgreSQL sends it as the statement starts.)
+        let got = c.finish();
+        assert!(got.as_ref().is_ok_and(|m| m.last() == Some(&format!("E FATAL {end}"))), "{end}: {got:?}");
+    }
+    s.engine.shutdown();
+}
+
 // ── what client libraries' own test suites found (tests/clients) ──
 
 /// A cursor DECLARE made is a portal too (psycopg's server-side cursors describe it; JDBC

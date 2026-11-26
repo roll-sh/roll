@@ -149,6 +149,34 @@ impl Raw {
         Some((t[0], b))
     }
 
+    /// A connection the server ended, as a client that hasn't read the end yet ends it: its
+    /// next query and then a Terminate written (tokio-postgres's query, then its drop), then
+    /// what the server sent up to the end of the connection ("E FATAL 25P04"), or the error a
+    /// step failed with.
+    pub fn finish(mut self) -> std::io::Result<Vec<String>> {
+        self.s.write_all(b"Q\0\0\0\x0dSELECT 3\0")?;
+        self.s.write_all(&[b'X', 0, 0, 0, 4])?;
+        let mut all = Vec::new();
+        self.s.read_to_end(&mut all)?;
+        let (mut out, mut at) = (Vec::new(), 0);
+        while at + 5 <= all.len() {
+            let n = i32::from_be_bytes(all[at + 1..at + 5].try_into().unwrap()) as usize;
+            let b = &all[at + 5..(at + 1 + n).min(all.len())];
+            let field = |t: u8| {
+                b.split(|c| *c == 0)
+                    .find(|f| f.first() == Some(&t))
+                    .map(|f| String::from_utf8_lossy(&f[1..]).into_owned())
+                    .unwrap_or_default()
+            };
+            out.push(match all[at] {
+                b'E' => format!("E {} {}", field(b'S'), field(b'C')),
+                t => (t as char).to_string(),
+            });
+            at += 1 + n;
+        }
+        Ok(out)
+    }
+
     pub fn read(&mut self) -> Vec<String> {
         let mut out = Vec::new();
         loop {
