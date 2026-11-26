@@ -1919,7 +1919,7 @@ function Errors({ preview: p }: { preview: Preview }) {
 
 /** A look at a data branch (Neon's Tables): its tables as the branch's own role sees them, and a
  * table's first rows, read-only, cells as text (the branch's data, masked as the preview's is). */
-/** Restore points (Neon's snapshots): the preview's Postgres data saved now and put back later,
+/** Restore points (Neon's snapshots): the preview's Postgres, NoSQL and Redis data saved now and put back later,
  * after a test run or a demo changed it. Putting one back is the preview's next converge. */
 function RestorePoints({ previewId, busy, run }: { previewId: string; busy: string | null; run: (key: string, fn: () => Promise<Preview>) => Promise<boolean> }) {
   const [points, setPoints] = useState<{ points: RestorePoint[]; max: number } | null>(null);
