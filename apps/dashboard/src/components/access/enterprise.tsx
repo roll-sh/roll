@@ -255,6 +255,7 @@ function Apps({ apps, tokenEndpoint, refresh, hasIdp, idps }: { apps: Enterprise
       {made && <Made made={made} tokenEndpoint={tokenEndpoint} />}
       {making && (
         <NewApp
+          idps={idps}
           onCancel={() => setMaking(false)}
           onMade={async (m) => {
             setMaking(false);
