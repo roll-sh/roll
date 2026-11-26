@@ -1775,6 +1775,10 @@ false` (or "Resume deploys") ends it, as it ends a rollback's hold; a rollback n
 person's hold with its own. `api.rs::a_rollback_holds_the_next_push_until_deploys_resume` holds
 production, pushes (ready, not live), puts it live (still held) and resumes.
 
+`roll up --no-traffic` (Vercel's preview deploy, Netlify's draft) uploads a tree the same way, to
+`ready` on its own URL (`X-Roll-No-Traffic: 1`), and prints that URL and the `roll apps rollback`
+that puts it live; `roll apps deploy --no-traffic` ends the same way.
+
 ## Status badges
 
 An environment's `badge: true` (Netlify's deploy status badges; the environment panel's "Status

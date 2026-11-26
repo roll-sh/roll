@@ -80,6 +80,9 @@ const CACHED: std::time::Duration = std::time::Duration::from_secs(10);
 #[derive(Default)]
 pub(crate) struct StatusCache {
     generation: std::sync::atomic::AtomicU64,
+    /// Active own domains → their project, as last read (when, under which `hosts_gen`): every
+    /// request with a Host asks, so it's one read a second at most, never one a request.
+    own: parking_lot::Mutex<Option<(std::time::Instant, u64, Arc<std::collections::HashMap<String, String>>)>>,
     pages: parking_lot::Mutex<std::collections::HashMap<String, (std::time::Instant, Arc<Shown>)>>,
 }
 
@@ -292,9 +295,10 @@ impl Apps {
 
     pub async fn delete_status_page(self: &Arc<Self>, project: &str) -> Result<()> {
         let p = project.to_string();
-        self.db(move |s| s.delete_status_page(&p)).await?;
+        let freed = self.db(move |s| s.delete_status_page(&p)).await?;
         self.status_cache.forget();
         self.hosts_changed();
+        self.release_domains(&freed.into_iter().collect::<Vec<_>>()).await;
         Ok(())
     }
 
@@ -318,13 +322,23 @@ impl Apps {
         if name.is_empty() || name.len() > 253 {
             return None;
         }
-        self.db(move |s| match s.status_domain_project(&name)? {
-            Some(p) => s.status_page(&p),
-            None => Ok(None),
-        })
-        .await
-        .ok()
-        .flatten()
+        let project = self.own_status_hosts().await.get(&name)?.clone();
+        self.db(move |s| s.status_page(&project)).await.ok().flatten()
+    }
+
+    async fn own_status_hosts(self: &Arc<Self>) -> Arc<std::collections::HashMap<String, String>> {
+        let generation = self.hosts_gen.load(std::sync::atomic::Ordering::SeqCst);
+        if let Some((at, g, m)) = self.status_cache.own.lock().clone()
+            && g == generation
+            && at.elapsed() < std::time::Duration::from_secs(1)
+        {
+            return m;
+        }
+        // A failed read answers nothing this time and keeps nothing.
+        let Ok(rows) = self.db(|s| s.active_status_domains()).await else { return Default::default() };
+        let m = Arc::new(rows.into_iter().collect::<std::collections::HashMap<_, _>>());
+        *self.status_cache.own.lock() = Some((std::time::Instant::now(), generation, m.clone()));
+        m
     }
 
     // ── a status page's own domain ──
@@ -370,8 +384,9 @@ impl Apps {
         }
         let tls = if self.deps.tls.issues() { crate::model::TlsStatus::Pending } else { crate::model::TlsStatus::None };
         let (p, h) = (project.to_string(), host.clone());
-        self.db(move |s| s.set_status_domain(&p, &h, tls)).await?;
+        let replaced = self.db(move |s| s.set_status_domain(&p, &h, tls)).await?;
         self.hosts_changed();
+        self.release_domains(&replaced.into_iter().collect::<Vec<_>>()).await;
         self.status_domain(project).await
     }
 
@@ -380,7 +395,13 @@ impl Apps {
     /// Pending ones are checked every minute too.
     pub async fn verify_status_domain(self: &Arc<Self>, project: &str) -> Result<crate::model::Domain> {
         let p = project.to_string();
-        let (host, _, token, ..) = self.db(move |s| s.status_domain(&p)).await?.ok_or_else(|| Error::NotFound(format!("{project}'s status page has no domain of its own")))?;
+        let (host, was, token, ..) = self.db(move |s| s.status_domain(&p)).await?.ok_or_else(|| Error::NotFound(format!("{project}'s status page has no domain of its own")))?;
+        // Once proven it stays (as a custom domain's `verified_at` does): a DNS hiccup later
+        // never takes the page off its name; only its certificate is looked at again.
+        if was == crate::model::DomainStatus::Active {
+            self.refresh_tls(&host).await;
+            return self.status_domain(project).await;
+        }
         let target = self.status_target(project).await?;
         let cnames = self.deps.resolver.cname(&host).await;
         let cname_ok = cnames.contains(&target);
@@ -405,16 +426,26 @@ impl Apps {
     /// `DELETE …/status-page/domain`.
     pub async fn delete_status_domain(self: &Arc<Self>, project: &str) -> Result<()> {
         let p = project.to_string();
-        if self.db(move |s| s.delete_status_domain(&p)).await?.is_none() {
+        let Some(host) = self.db(move |s| s.delete_status_domain(&p)).await? else {
             return Err(Error::NotFound(format!("{project}'s status page has no domain of its own")));
-        }
+        };
         self.hosts_changed();
+        self.release_domains(&[host]).await;
         Ok(())
     }
 
-    /// The minute pass's share (`apps:domains`): pending domains checked, active ones' certificates.
+    /// The minute pass's share (`apps:domains`): claims unproven past [`crate::PENDING_CLAIM_TTL`]
+    /// expire, pending ones are checked, and a verified one's certificate only while it's coming
+    /// (the provider isn't asked about every page every minute).
     pub(crate) async fn check_status_domains(self: &Arc<Self>) {
-        let Ok(all) = self.db(|s| s.status_domains()).await else { return };
+        let age = crate::PENDING_CLAIM_TTL.as_millis() as i64;
+        if let Ok(gone) = self.db(move |s| s.expire_status_domains(s.now()? - age)).await
+            && !gone.is_empty()
+        {
+            self.hosts_changed();
+            self.release_domains(&gone).await;
+        }
+        let Ok(all) = self.db(|s| s.status_domains_to_check()).await else { return };
         for (project, host, status) in all {
             if status == crate::model::DomainStatus::Active {
                 self.refresh_tls(&host).await;

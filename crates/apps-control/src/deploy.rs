@@ -1031,7 +1031,14 @@ impl Apps {
                         None => None,
                     };
                     match live {
-                        Some(kept) => run.port = kept,
+                        Some(kept) => {
+                            // A new image that exposes another port is said, not followed.
+                            let exposed = exposed_port(&self.deps.runtime.image_ports(&pinned).await);
+                            if let Some(p) = exposed.filter(|p| Some(*p) != kept) {
+                                log.line(format!("the image exposes port {p}; it's served on {}, the live deployment's (set a port to move it)", kept.map_or("the default".to_string(), |k| k.to_string())));
+                            }
+                            run.port = kept;
+                        }
                         None => {
                             if let Some(p) = exposed_port(&self.deps.runtime.image_ports(&pinned).await) {
                                 log.line(format!("the image exposes port {p}: it's served there (set a port to choose another)"));

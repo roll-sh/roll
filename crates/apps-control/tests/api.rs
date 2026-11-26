@@ -3861,6 +3861,14 @@ async fn roll_up_deploys_an_uploaded_tree_and_cron_runs_on_demand() {
     assert_eq!(found.as_array().unwrap().len(), 1, "{found}");
     let (_, all) = call(&w.api, "GET", &format!("{base}/logs?q=job%20ran"), None).await;
     assert!(all.as_array().unwrap().len() >= 2, "{all}");
+    // `roll up --no-traffic`: the upload is built and checked at its own URL, nothing switched.
+    let live = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None).await.1["active"]["id"].clone();
+    let mut bundle = Vec::new();
+    roll_fetch::pack(&mut bundle, &Default::default(), Some(tree.path()), roll_fetch::Limits::default()).unwrap();
+    let req = Request::post(format!("/v1/apps/services/{id}/environments/production/deploys")).header("content-type", "application/gzip").header("x-roll-no-traffic", "1").body(Body::from(bundle)).unwrap();
+    let d: Value = serde_json::from_slice(&w.api.clone().oneshot(req).await.unwrap().into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(settled(&w, &id, "production", d["id"].as_str().unwrap()).await["status"], "ready", "{d}");
+    assert_eq!(call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None).await.1["active"]["id"], live);
     let _ = Ordering::SeqCst;
 }
 
