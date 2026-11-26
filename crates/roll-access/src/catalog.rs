@@ -1965,6 +1965,7 @@ static ROWS: &[Row] = &[
     // Accepting a visual change is a person's call (with `visual_review = "required"` previews
     // refuses tokens anyway): admin, so a write token can't wave its own diff through.
     row("POST", "/v1/previews/{id}/visual/accept", "previews", ADMIN, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    row("POST", "/v1/previews/{id}/visual/refuse", "previews", ADMIN, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
     row("POST", "/v1/previews/{id}/regressions/accept", "previews", ADMIN, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
     // Letting a fork's pull request run with the project's data (a Git URL service's preview,
     // roll code's `approve-run`): a person's call, as accepting a visual change is.
