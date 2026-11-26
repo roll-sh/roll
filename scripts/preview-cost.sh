@@ -676,6 +676,9 @@ PLAY_ERROR=$(api GET "/v1/previews/$PV" | jq_ "[x.get('play_error') for x in d['
 # stories): Deep's, taken first, in Firefox and WebKit at a phone's size.
 STORY_BROWSERS=$(api GET "/v1/previews/$PV" | jq_ "sorted(x['path'] for x in d['pages'] if x['path'].startswith('story:deep--one@'))")
 [ "$STORY_BROWSERS" = "['story:deep--one@firefox', 'story:deep--one@webkit-phone']" ] || { echo "the change's first story should be taken in the other browsers asked for: $STORY_BROWSERS"; exit 1; }
+# And its interaction test in each of them, as Storybook ran it there.
+PLAY_BROWSERS=$(api GET "/v1/previews/$PV" | jq_ "sorted('%s %s %s' % (x['path'], x.get('play'), x.get('play_error')) for x in d['pages'] if x['path'].startswith('story:deep--one@'))")
+[ "$PLAY_BROWSERS" = "['story:deep--one@firefox failed expected Pay to be visible', 'story:deep--one@webkit-phone failed expected Pay to be visible']" ] || { echo "a story's interaction test should be read in the other browsers too: $PLAY_BROWSERS"; exit 1; }
 # Signed in first (github.login): its $GREETING put in by roll and handed to the browser through
 # its container's stdin. The page has no #nope, so the run says where it stopped, never what it
 # would have typed.
