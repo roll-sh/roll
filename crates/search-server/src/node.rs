@@ -1955,10 +1955,11 @@ impl Node {
             out.analytics.cleared = o.analytics.cleared.clone();
             out.analytics.enabled = o.analytics.enabled.clone();
             out.analytics.hours = o.analytics.hours.clone();
+            out.analytics.experiments = o.analytics.experiments.clone();
             out.browser.extend(o.browser.iter().cloned());
         }
         if let Some(l) = self.get_loaded(name).filter(|l| l.id() == id) {
-            let analytics = search_es::analytics::Taken { hours: l.cluster.analytics.peek(), ..Default::default() };
+            let analytics = search_es::analytics::Taken { hours: l.cluster.analytics.peek(), experiments: l.cluster.analytics.peek_experiments(), ..Default::default() };
             out.extend(Observed { minutes: l.metrics.peek(), slow: l.cluster.engine.slowlog.peek(), analytics, browser: l.browser_usage.peek() });
             // Loaded here: which indices have analytics on now decides what reads may show.
             out.analytics.enabled = Some(l.cluster.analytics.enabled_names());
