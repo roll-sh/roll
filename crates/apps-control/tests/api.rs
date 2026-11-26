@@ -8619,6 +8619,9 @@ async fn a_public_git_url_deploys_its_branch_and_follows_new_commits() {
     assert!(st == StatusCode::OK && v["ignored"].as_str().unwrap().contains("no environment follows it"), "{v}");
     assert_eq!(call(&w.api, "POST", &hook, Some(json!({ "zen": "Keep it logically awesome.", "hook_id": 1 }))).await.1["ignored"], "pong");
     assert_eq!(settled(&w, &id, "production", d3["id"].as_str().unwrap()).await["status"], "active");
+    // What it brought since what ran before it, from the host (Render's for GitLab and Bitbucket).
+    let (st, c) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/deploys/{}/commits", d3["id"].as_str().unwrap()), None).await;
+    assert_eq!((st, c["commits"].as_array().map(Vec::len), c["commits"][0]["summary"].as_str(), c["complete"].as_bool()), (StatusCode::OK, Some(1), Some("fix the header"), Some(true)), "{c}");
     // Another branch deployed once by its name (Render's manual deploy): its head, said in the
     // message; a name the repository hasn't is a 400.
     git.branches.lock().insert("feature-x".into(), second.parse().unwrap());
