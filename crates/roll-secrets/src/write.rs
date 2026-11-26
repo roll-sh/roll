@@ -1181,6 +1181,9 @@ impl Secrets {
     /// isn't stored, and a managed link's next rotation replaces it).
     pub fn check_batch(&self, project: &str, env: &str, b: &Batch, caller: &Caller) -> Result<Vec<SlotNow>> {
         let (items, expect) = self.batch_checks(project, env, b, caller)?;
+        // The project's secrets as the write would find them: made (its key and default
+        // environments) the first time anything needs them, as every read and write does.
+        self.project(project)?;
         // The write's own checks inside its transaction (it runs them again).
         self.db.read(|c| {
             let e = envs::by_slug(c, project, env)?;
