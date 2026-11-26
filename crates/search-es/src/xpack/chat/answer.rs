@@ -67,7 +67,8 @@ fn url_ahead(word: &str) -> bool {
     if w.is_empty() {
         return false;
     }
-    w.contains("://") || w.starts_with("www.") || w.starts_with('/') || ["https://", "http://", "ftp://", "www."].iter().any(|p| p.starts_with(w.as_str()))
+    // `//host` may follow anything (`src=//evil…`): a word holding `//`, or ending in `/`, waits.
+    w.contains("//") || w.ends_with('/') || w.starts_with("www.") || ["https://", "http://", "ftp://", "www."].iter().any(|p| p.starts_with(w.as_str()))
 }
 
 impl Sanitizer {
