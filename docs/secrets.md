@@ -711,10 +711,10 @@ unit's `Environment=` (and `roll run`'s, and every `roll secrets` command's: the
   Akeyless' Universal Identity does:
   1. A **machine identity** (`POST …/identities {name, kind: "machine", environments, actions,
      ttl_minutes?, allowed_ips?}`, `roll secrets identities add racks --machine --for-env
-     production`): the scope its machines' logins get.
+     production`, or the dashboard's New identity → Machine): the scope its machines' logins get.
   2. A **bootstrap token** per machine (`POST …/identities/{id}/bootstrap {minutes?,
-     allowed_ips?, credential_hours?}`, `roll secrets identities bootstrap idn_…`; admin, made by a
-     person): `rlbt_…`, shown once, single-use, valid for `minutes` (1–60, default 10), and from
+     allowed_ips?, credential_hours?}`, `roll secrets identities bootstrap idn_…`, or the
+     dashboard's Access → Workload identities → Machines; admin, made by a person): `rlbt_…`, shown once, single-use, valid for `minutes` (1–60, default 10), and from
      `allowed_ips` only if given. Hand it to the machine's provisioning (cloud-init, Ansible,
      a USB stick), never to a repository.
   3. On the machine, `ROLL_IDENTITY=idn_…` with `ROLL_BOOTSTRAP_TOKEN` (or
@@ -743,12 +743,14 @@ unit's `Environment=` (and `roll run`'s, and every `roll secrets` command's: the
   same token left in the environment isn't exchanged again (the file remembers its SHA-256); a new
   one there is, and replaces the file. A credential that wasn't replaced before it ended (the
   machine was off longer than `credential_hours`) needs a new bootstrap token too. The audit log has
-  `identity.bootstrap`, `identity.bootstrap.exchange`, `identity.machine.refresh` and
-  `identity.machine.reused`; deleting, disabling or cutting off the identity revokes all its
-  machines. An identity has at most 1,000 bootstrap tokens (one per machine; delete it and make it
-  again past that), and a project makes at most 60 a minute. Its machines' credentials don't count
-  toward the workload token caps that every project's logins share (docs/permissions.md); their
-  logins' tokens do, as any identity's. The bootstrap tokens and credentials are roll-access grants (docs/permissions.md,
+  `identity.bootstrap`, `identity.bootstrap.exchange`, `identity.machine.refresh`,
+  `identity.machine.reused` and `identity.machine.revoke`; deleting, disabling or cutting off the
+  identity revokes all its machines. `GET …/identities/{id}/machines` lists them (the chain, when
+  its credential was last replaced, live or revoked), and `DELETE …/machines/{chain}` revokes one,
+  as the dashboard's identities page does. An identity has at most 1,000 bootstrap tokens (one per
+  machine; delete it and make it again past that), and a project makes at most 60 a minute. Its
+  machines' credentials don't count toward the workload token caps that every project's logins
+  share (docs/permissions.md); their logins' tokens do, as any identity's. The bootstrap tokens and credentials are roll-access grants (docs/permissions.md,
   "Bootstrap tokens and machine credentials"), looked up on every use, and open nothing but these
   logins.
 
@@ -774,7 +776,8 @@ Tests: `crates/roll-cli/tests/secrets.rs` (`the_local_agent_answers_only_request
 identity login's renewal is `relogin_tests` in `crates/roll-cli/src/secrets.rs`, which the agent
 shares. Bootstrap tokens over HTTP:
 `a_bootstrap_token_is_exchanged_once_and_a_spent_credential_ends_its_machine` in
-`crates/rolld/tests/secrets.rs`; their chains in roll-access:
+`crates/rolld/tests/secrets.rs` (with the machines list and an admin's revoke); the dashboard's
+bootstrap token, shown once, in `apps/dashboard/src/components/secrets/secrets-bootstrap.test.tsx`; their chains in roll-access:
 `a_spent_bootstrap_token_or_machine_credential_ends_its_chain` in `crates/roll-access/tests/access.rs`.
 ## Customer-managed keys
 A project's data key can be wrapped once more by a KMS key in the customer's own AWS account, as
@@ -3275,10 +3278,15 @@ the names with dns-01, renews them, and keys link to the result.
     certificate.
   - **Renewals asked for are capped**, per registration: one an hour and three a week, a 429
     `rate_limited` saying when the next may come. Each renewal spends the CA's limit for the exact
-    set of names (Let's Encrypt issues 5 a week), so a script or an agent retrying in a loop could
-    otherwise use it up and block the renewal a leak needs. A leak's renewal (below) is exempt from
-    the weekly count but not repeatable within the hour; a person's renewal just before it doesn't
-    hold it up. Scheduled renewals and new domains or credentials aren't counted.
+    set of names (Let's Encrypt issues 5 a week, across every account, and revoking doesn't give
+    one back), so a script or an agent retrying in a loop could otherwise use it up and leave the
+    names with only revoked certificates. A leak's renewal (below) counts toward the same caps: the
+    week's first comes at once whatever was asked before it (a leaked key must be replaced), and
+    later ones are held like any other. A held leak revokes nothing: its `secret.leaked` event says
+    `rotating: false` with `reason: "already rotated"` and when the next may come (audited), so a
+    writer who reveals each new key and reports it again can't spend the limit. An admin's
+    `…/revoke` is never held, but counts. Scheduled renewals and new domains or credentials aren't
+    counted.
 - **A leaked private key is revoked at the CA, then replaced.** A leak of a key linked to a public
   certificate (roll code's landing check, `POST …/leaks` with `leaked: true` by someone who may
   write there, under `leaks.rotate = managed`) rotates it as any managed key's leak does, claimed
@@ -3980,7 +3988,9 @@ webhook design do.
   rotation was found by, and a key sharing the credential counts too. A leak of its new value
   within the hour is recorded with `rotating: false` and `reason: "rotated within the hour"`, each
   time it's reported, and rotates nothing. So revealing each new value and reporting it again
-  can't churn the key against the vendor.
+  can't churn the key against the vendor. A key linked to a public certificate is held longer,
+  by its registration's renewal cap ("Publicly trusted certificates"): `reason: "already rotated"`,
+  and nothing is revoked.
 - **Where approvals are needed.** A leak never rotates a key in an environment, or a folder, that
   needs approvals (a protected environment with `approvals` ≥ 1, or a folder policy). Instead it
   opens a change request for the rotation (`action: "rotate"`, its one item the key, `rotated`),
@@ -4282,7 +4292,8 @@ refuses any push whose new commits add a value of the project, whoever pushes it
   budget gone), the push is refused: break glass never passes unrecorded. Only
   `--breakglass-unrecorded` on the hook's command line lets such a push through, saying it went
   unrecorded; set it only where the git server's own log names pushers.
-- **Its token.** `roll secrets -p <project> tokens create pre-receive --scan-only` makes a token
+- **Its token.** `roll secrets -p <project> tokens create pre-receive --scan-only` (or the
+  dashboard's Access → New token → Scan-only, which labels such tokens `scan-only`) makes a token
   that has only `scan`, in every environment unless `--for-env` names some. It can't read a name
   or reveal a value. Give the hook `ROLL_API_URL`, `ROLL_TOKEN` and `ROLL_PROJECT` (the project's
   `prj_…` id: a scan-only token can't look a name up).
@@ -6700,7 +6711,7 @@ roll-workspace's records, not secrets' audit rows: they're the workspace's own f
 | --- | --- | --- |
 | `secret.changed` | a change added, changed, linked or rotated stored values (a change that only edits comments, tags or expiry isn't one) | `via`, `change` (its number in the history), `version` (one key) or `versions` (`{key: version}`), `keys` when the row names more (the change's other keys only had their metadata edited or were deleted), `deleted` (keys the same change deleted), `folders` (a change across folders) |
 | `secret.deleted` | a change only deleted keys (a folder's delete too) | `via`, `change`, `version` or `versions` (the delete's), `folders` (a change across folders) |
-| `secret.leaked` | a stored value turned up in a roll code repository (a change's added lines or a scan) or in text reported published (`POST …/leaks` with `leaked: true`), in the project holding the value, once a day for the same keys and place and whenever a rotation of them starts ("When a value leaks"); or GitHub's secret scanning found a placeholder (`secrets.placeholders.end`) | `repo` (and `project`, the repo's, when the value came from another's shared folder) or `reported: true`, with `rotatable` (roll can rotate one of the keys), `rotating` (the keys `leaks.rotate = managed` rotates now; `false` with `reason: "rotated within the hour"` when the keys rotated for a leak within the hour) and `requests` (the change requests opened for their rotation where approvals are needed), `revoking` (the serials of public certificates whose leaked key roll revokes at the CA first, `keyCompromise`); or `placeholder`, `consumer`, `reason` |
+| `secret.leaked` | a stored value turned up in a roll code repository (a change's added lines or a scan) or in text reported published (`POST …/leaks` with `leaked: true`), in the project holding the value, once a day for the same keys and place and whenever a rotation of them starts ("When a value leaks"); or GitHub's secret scanning found a placeholder (`secrets.placeholders.end`) | `repo` (and `project`, the repo's, when the value came from another's shared folder) or `reported: true`, with `rotatable` (roll can rotate one of the keys), `rotating` (the keys `leaks.rotate = managed` rotates now; `false` with `reason: "rotated within the hour"` when the keys rotated for a leak within the hour, or `reason: "already rotated"` when a public certificate's renewal cap holds the leak's renewal) and `requests` (the change requests opened for their rotation where approvals are needed), `revoking` (the serials of public certificates whose leaked key roll revokes at the CA first, `keyCompromise`); or `placeholder`, `consumer`, `reason` |
 | `scan.finding` | `roll secrets scan` or roll MCP's credential guard (`POST …/leaks`), or a pre-receive hook (`POST …/scan`), matched values: a row per folder | `candidates`, `matched`, `guard`, and `breakglass` from a hook |
 | `rotation.failed` | a managed key's scheduled rotation failed: once as a failing run starts (health's `rotation_failing` until one works); a leaked key's rotation failed | `reason`, `via: "leak"` (a leak's) |
 | `rotation.succeeded` | a rotation worked, scheduled, `--now` or for a leak: a managed key's new credential (the row right after its `secret.changed` via `rotation`, in the same transaction), or a live link's resource credential reset | `mode` (`managed` or `live`), `scheduled`, `version` and `change` (managed), `sharing` (the keys holding the same credential, when more than one), `via: "leak"` and `grace_minutes: 0` (a leak's: the leaked credential revoked at once), `revoked: <serial>` (a public certificate's key moving off a certificate roll revoked at the CA) |
@@ -6975,6 +6986,8 @@ isn't in the workspace is 404.
 | `PATCH /identities/{id}` | `{disabled}` | `Identity` (admin; a person's): `false` enables one a cut-off disabled, `true` disables it and revokes its live logins |
 | `PUT /identities/{id}/jwks` | `{jwks}` | `Identity` (admin; a person's): its pinned keys replaced, its id kept (400 for an `aws` or `machine` one) |
 | `POST /identities/{id}/bootstrap` | `{minutes?, allowed_ips?, credential_hours?}` | 201 `{identity, chain, secret, expires_at}` (admin; a person's; a `machine` identity's single-use `rlbt_…`, "On a VM") |
+| `GET /identities/{id}/machines` | | `MachineChain[]` newest first (admin): `{chain, state, credential_hours, created_at, created_by, refreshed_at, expires_at, revoked_at, revoked_why}`, `state` `waiting` (its bootstrap token not exchanged yet), `live`, `ended` or `revoked`; never a secret |
+| `DELETE /identities/{id}/machines/{chain}` | | 204 (admin, audited as `identity.machine.revoke`): the machine's credential and its logins' tokens revoked at once; it needs a new bootstrap token |
 | `POST /v1/secrets/login` | `{identity, token}`, `{identity, aws: {method, url, headers, body}}` or `{identity, machine}` | `{token, expires_at, project, identity}` (public; `aws`: a signed `GetCallerIdentity`, "AWS IAM"; `machine`: a machine credential) |
 | `POST /v1/secrets/login/bootstrap` | `{identity, token}` | `{identity, chain, secret, expires_at, refresh_at}` (public: a bootstrap token for a machine credential, `rlmc_…`; 401 for one used already, which revokes its machine) |
 | `POST /v1/secrets/login/refresh` | `{identity, credential}` | as `…/login/bootstrap` (public: the current machine credential for the next; the one presented is spent) |

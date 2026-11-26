@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { bulkPages, pageLimit, presentSamples, SAMPLES, sample } from "./search-samples";
+import { bulkPages, pageLimit, presentSamples, SAMPLES, sample, samplesFor } from "./search-samples";
 
 const NOW = Date.UTC(2026, 10, 21, 12);
 
@@ -41,6 +41,13 @@ describe("sample data", () => {
   });
 
   it("finds loaded datasets in an index listing", () => {
-    expect([...presentSamples(["sample-products", ".ds-sample-logs-2026.11.21-000001", "other"])].sort()).toEqual(["sample-logs", "sample-products"]);
+    expect([...presentSamples(["sample-products", ".ds-sample-logs-2026.11.21-000001", "sample-articles", "other"])].sort()).toEqual(["sample-articles", "sample-logs", "sample-products"]);
+  });
+
+  it("offers the semantic articles only where semantic_text is", () => {
+    expect(samplesFor("elasticsearch").map((s) => s.id)).toContain("sample-articles");
+    expect(samplesFor("opensearch").map((s) => s.id)).not.toContain("sample-articles");
+    const body = (sample("sample-articles").setup[0].body as { mappings: { properties: Record<string, { type: string; inference_id?: string }> } }).mappings.properties.body;
+    expect(body).toEqual({ type: "semantic_text", inference_id: ".multilingual-e5-small-elasticsearch" });
   });
 });

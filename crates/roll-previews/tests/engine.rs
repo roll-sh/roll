@@ -2709,6 +2709,60 @@ async fn a_preview_over_its_size_cap_stays_asleep() {
     assert_eq!(held(false), held(true), "let wake again: {:?}", e.apps.held.lock());
 }
 
+/// A story a change took that main's preview hasn't (past its first 40, or in another browser) is
+/// taken by main's preview at its head, so the change's has main's to be compared with (a baseline
+/// on demand); one main's Storybook doesn't have (the change added it) is asked for once per set.
+#[tokio::test]
+async fn main_takes_the_stories_a_change_has_and_it_hasnt() {
+    let e = env(json!({ "enabled": true, "github": { "screenshot": true, "storybook": "web:/sb/" } }));
+    let mut png = Vec::new();
+    image::RgbaImage::from_pixel(4, 4, image::Rgba([0, 0, 0, 255])).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+    *e.apps.shot.lock() = Some(png);
+    *e.apps.new_stories.lock() = vec!["card--added".into()];
+    e.code.open(change("chg_bl", 5));
+    let p = || e.engine.store.row_by_change("chg_bl").unwrap().unwrap();
+    // Screenshots done, within 30 s: a preview asked for again and again never settles.
+    async fn settle(e: &Env) {
+        for _ in 0..3000 {
+            if !e.engine.shooting() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("screenshots never settled: {:?}", e.apps.stories_first.lock());
+    }
+    let compared = |e: &Env| e.engine.store.preview(&p().id).unwrap().pages.iter().find(|x| x.path == "story:card--new").and_then(|x| x.base_percent);
+    // Both took their pictures (main's in the index's order), then a push brings the change's
+    // own stories: only asking main again can give them a main to be compared with.
+    for _ in 0..10 {
+        e.engine.pass().await.unwrap();
+        settle(&e).await;
+    }
+    *e.apps.change_stories.lock() = vec!["card--new".into(), "card--added".into()];
+    e.code.paths.lock().insert("cs_5b".into(), vec!["src/Card.tsx".into()]);
+    e.code.edit("chg_bl", |c| c.head = "cs_5b".into());
+    for _ in 0..40 {
+        e.engine.pass().await.unwrap();
+        settle(&e).await;
+        if compared(&e).is_some() {
+            break;
+        }
+    }
+    let asked = e.apps.stories_first.lock().clone();
+    assert!(asked.iter().any(|(pv, ids)| *pv != p().id && ids.contains(&"card--new".to_string())), "main's preview asked for the change's story first: {asked:?}");
+    assert!(compared(&e).is_some(), "and the change's story compared with main's");
+    // The one main hasn't got stays wanted, but isn't asked for again at the same head, even as
+    // main converges again.
+    let runs = e.apps.stories_first.lock().len();
+    let main = e.engine.store.rows(Some(&e.project)).unwrap().into_iter().find(|x| x.change_id.is_none()).expect("main's preview");
+    e.engine.refresh(&main.id).unwrap();
+    for _ in 0..3 {
+        e.engine.pass().await.unwrap();
+        settle(&e).await;
+    }
+    assert_eq!(e.apps.stories_first.lock().len(), runs, "once per set at main's head: {:?}", e.apps.stories_first.lock());
+}
+
 /// A guest's note through a share link that takes notes: on the change as `guest:<name>`, its
 /// words inert for a pull request, the link's label said; a link that takes none refuses; ten an
 /// hour per link; a guest sees only their link's notes.

@@ -2224,6 +2224,11 @@ impl roll_secrets::Workloads for Workloads {
         self.0.revoke_chain(chain, why).map(|_| ()).map_err(|e| access_error(e, "revoking a machine's credentials"))
     }
 
+    fn chains(&self, chains: &[String]) -> roll_secrets::Result<Vec<roll_secrets::ChainState>> {
+        let states = self.0.store.chain_states(chains).map_err(|e| access_error(e, "reading a machine's credentials"))?;
+        Ok(states.into_iter().map(|s| roll_secrets::ChainState { chain: s.chain, state: s.state, refreshed_at: s.refreshed_at, expires_at: s.expires_at, revoked_at: s.revoked_at, revoked_why: s.revoked_why }).collect())
+    }
+
     /// Only tokens whose rules (and rules approved for a while) can name `project` are read
     /// (`Store::naming`, one indexed read whatever the number of tokens) and resolved.
     fn grants_naming(&self, project: &str) -> roll_secrets::Result<Vec<roll_auth::Grant>> {
