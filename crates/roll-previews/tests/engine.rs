@@ -1673,6 +1673,23 @@ async fn masked_branches_come_from_one_masked_base() {
     assert!(!e.pg.branches.lock().contains(&base), "the old base is deleted once nothing comes from it");
 }
 
+/// A masked base that couldn't be made holds no branch up: the preview masks its own copy, and
+/// the next one takes the claim over at once (no wait on a claim nothing holds) and makes it.
+#[tokio::test]
+async fn a_masked_base_that_failed_holds_no_branch_up() {
+    let e = env_with_config(json!({ "enabled": true, "masking": { "postgres:prj_db": { "public.users.email": "email" } } }), |c| c.mask_base_for = std::time::Duration::from_secs(86_400));
+    e.pg.fail_masks.store(1, std::sync::atomic::Ordering::SeqCst);
+    e.code.open(change("chg_mf1", 1));
+    e.engine.pass().await.unwrap();
+    let masked = || e.pg.masks.lock().iter().map(|(b, _)| b.clone()).collect::<Vec<_>>();
+    assert!(masked().iter().all(|b| !b.starts_with("prj_db~pvbase-")) && masked().len() == 1, "its own copy masked: {:?}", masked());
+    e.code.open(change("chg_mf2", 2));
+    let started = std::time::Instant::now();
+    e.engine.pass().await.unwrap();
+    assert!(started.elapsed() < std::time::Duration::from_secs(30), "no wait on the failed claim: {:?}", started.elapsed());
+    assert!(masked().iter().any(|b| b.starts_with("prj_db~pvbase-")), "the base made now: {:?}", masked());
+}
+
 /// A restore point: the data saved (Postgres's and Redis's, the products that put a branch back
 /// in place), put back without seeding again, Redis's part gone once a reset makes it a new
 /// database, the point gone when the masking rules change, and with the preview.

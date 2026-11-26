@@ -1689,7 +1689,9 @@ impl Engine {
                         made.r#ref
                     }
                     Err(e) => {
-                        // Its half-made branch is found again by name next time, and masked again.
+                        // Its half-made branch is found again by name next time, and masked
+                        // again; meanwhile nobody waits on the claim.
+                        self.store.release_mask_base(res.kind, &res.parent, &base)?;
                         self.store.log(&r.id, &self.mask_text(&r.id, &format!("couldn't make {key}'s masked base, so its branch is masked itself: {e:#}")).await?)?;
                         return Ok(None);
                     }

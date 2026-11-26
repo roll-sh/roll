@@ -183,6 +183,8 @@ fn postgres() -> Router {
         .route("/v1/search/clusters/{id}/request", post(|ext: axum::http::Extensions| async move { axum::Json(json!({ "reveal": ext.get::<roll_auth::Capable>().is_some_and(|c| c.has(roll_auth::scope::Action::Reveal)) })) }))
         .route("/v1/search/clusters/{id}/indices/{index}/bulk", post(|body: String| async move { axum::Json(json!({ "lines": body.lines().count() })) }))
         .route("/v1/search/clusters/{id}/indices/{index}/settings", axum::routing::put(|| async { axum::Json(json!({ "acknowledged": true })) }))
+        .route("/v1/search/clusters/{id}/indices/{index}/update_by_query", post(|| async { axum::Json(json!({ "task": "n:1" })) }))
+        .route("/v1/search/clusters/{id}/tasks/{task}", get(|| async { axum::Json(json!({ "completed": true })) }))
         .route("/v1/secrets/projects/{project}/environments/{env}/secrets", get(|| async { axum::Json(json!([])) }))
         .route("/v1/secrets/projects/{project}/health", get(|| async { axum::Json(json!({ "findings": [] })) }))
         .route("/v1/secrets/projects/{project}/transit", get(|| async { axum::Json(json!([])) }))
@@ -421,6 +423,17 @@ async fn a_scoped_token_does_only_what_its_rules_say() {
     assert_eq!(settings(r#"{"index.roll.suggestions.enabled": true}"#).await.0, StatusCode::OK);
     let (s, e) = settings(r#"{"index.lifecycle.name": "30-days-default", "index.lifecycle.indexing_complete": true, "index.lifecycle.origination_date": 0}"#).await;
     assert_eq!((s, e["needs"]["action"].as_str()), (StatusCode::FORBIDDEN, Some("delete")));
+    // Re-indexing an index by query is write (a script, which can delete, needs delete); its
+    // task is a read, which a read-only token has and can't re-index with.
+    let daemon = &d;
+    let reindex = |token: String, body: &'static str| async move { daemon.raw(&token, Method::POST, "/v1/search/clusters/c1/indices/logs/update_by_query?wait_for_completion=false", Body::from(body), &[], None).await };
+    assert_eq!(reindex(indexer.clone(), "{}").await.0, StatusCode::OK);
+    let (s, e) = reindex(indexer.clone(), r#"{"script": {"source": "ctx.op = 'delete'"}}"#).await;
+    assert_eq!((s, e["needs"]["action"].as_str()), (StatusCode::FORBIDDEN, Some("delete")));
+    let (reader, _) = d.token(json!([{ "product": "search", "resources": "*", "actions": { "read": "allow" } }]), json!({})).await;
+    let (s, e) = reindex(reader.clone(), "{}").await;
+    assert_eq!((s, e["needs"]["action"].as_str()), (StatusCode::FORBIDDEN, Some("write")));
+    assert_eq!(d.call(&reader, Method::GET, "/v1/search/clusters/c1/tasks/n:1", None).await.0, StatusCode::OK);
 
     // A bucket in another storage account is `<account>/<bucket>`: a rule for one doesn't reach
     // the same name in the default account or in a third.
@@ -3490,4 +3503,57 @@ async fn claude_signs_a_member_in_with_its_own_assertion() {
     let mut outside = claims(claude, public, "c8");
     outside["email"] = json!("alice@elsewhere.test");
     assert_eq!(public_with(signed(outside)).await, "access_denied", "the operator's domains bound Claude's issuer too");
+}
+
+/// Claude's express admin setup (its connector docs, "Support express admin setup"): an admin
+/// approves `ema_issuer:manage` for Claude's client with the email domains its issuer vouches
+/// for, Claude trades the code for a short token (no refresh token) and sends its organization's
+/// issuer to `ema_setup_endpoint`. roll then trusts that issuer for those domains and registers
+/// Claude. Only roll's admins consent, only for Claude's client and callback; codes and tokens are
+/// used once, and an issuer that isn't Claude's is refused without spending the token.
+#[tokio::test(flavor = "multi_thread")]
+async fn claude_sets_up_auto_connect_with_an_admins_consent() {
+    use base64::Engine;
+    use sha2::Digest;
+    let d = Daemon::new(50);
+    d.people.add("usr_dee", "dee");
+    let client = "https://claude.ai/oauth/mcp-oauth-client-metadata";
+    let callback = "https://claude.ai/api/mcp/auth_callback";
+    let (_, meta) = d.call("", Method::GET, "/.well-known/oauth-authorization-server", None).await;
+    assert!(meta["scopes_supported"].as_array().unwrap().iter().any(|s| s == "ema_issuer:manage"), "{meta}");
+    let verifier = "v".repeat(50);
+    let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(verifier.as_bytes()));
+    let api = d.access.config.api_url.trim_end_matches('/').to_string();
+    let rules = json!([{ "product": "workspace", "resources": "*", "actions": { "read": "allow" } }]);
+    let consent = |redirect: &str| json!({ "client_id": client, "redirect_uri": redirect, "code_challenge": challenge, "state": "s1", "resource": format!("{api}/v1/mcp"), "ema_domains": ["acme.test"], "rules": rules });
+    assert_eq!(d.as_user("usr_dee", Method::POST, "/v1/access/oauth/authorize", Some(consent(callback))).await.0, StatusCode::FORBIDDEN, "an admin's consent only");
+    assert_eq!(d.call(OPERATOR, Method::POST, "/v1/access/oauth/authorize", Some(consent("https://evil.example/cb"))).await.0, StatusCode::BAD_REQUEST, "Claude's callback only");
+    let (s, out) = d.call(OPERATOR, Method::POST, "/v1/access/oauth/authorize", Some(consent(callback))).await;
+    assert_eq!(s, StatusCode::OK, "{out}");
+    let back = url::Url::parse(out["redirect"].as_str().unwrap()).unwrap();
+    let q: std::collections::HashMap<String, String> = back.query_pairs().into_owned().collect();
+    assert_eq!((q["state"].as_str(), q["iss"].as_str()), ("s1", api.as_str()), "RFC 9207's iss: {back}");
+    let exchange = |code: String| {
+        let (d, verifier) = (&d, verifier.clone());
+        async move { d.form("/v1/access/oauth/token", &[("grant_type", "authorization_code"), ("code", &code), ("redirect_uri", callback), ("code_verifier", &verifier), ("client_id", client)]).await }
+    };
+    let (s, got) = exchange(q["code"].clone()).await;
+    assert_eq!((s, got["scope"].as_str(), got.get("refresh_token")), (StatusCode::OK, Some("ema_issuer:manage"), None), "{got}");
+    assert_eq!(exchange(q["code"].clone()).await.1["error"], "invalid_grant", "a code is used once");
+    let endpoint = got["ema_setup_endpoint"].as_str().unwrap().to_string();
+    let path = endpoint.strip_prefix(&api).unwrap().to_string();
+    let token = got["access_token"].as_str().unwrap().to_string();
+    let put = |issuer: &str| {
+        let (d, path, token) = (&d, path.clone(), token.clone());
+        let body = json!({ "ema_issuer": issuer });
+        async move { d.call(&token, Method::PUT, &path, Some(body)).await }
+    };
+    assert_eq!(put("https://login.example/issuers/x").await.1["error"], "invalid_request", "a Claude issuer only");
+    let claude = "https://identity.anthropic.com/issuers/iss_8f2a";
+    assert_eq!(put(claude).await.0, StatusCode::OK);
+    assert_eq!(put(claude).await.1["error"], "invalid_token", "a token is used once");
+    let (_, e) = d.call(OPERATOR, Method::GET, "/v1/access/enterprise", None).await;
+    let idp = e["idps"].as_array().unwrap().iter().find(|i| i["issuer"] == claude).unwrap_or_else(|| panic!("{e}"));
+    assert_eq!((idp["domains"].clone(), idp["express"].clone()), (json!(["acme.test"]), json!(true)), "{e}");
+    assert!(e["apps"].as_array().unwrap().iter().any(|a| a["metadata"][0] == client && a["rules"] == rules), "Claude registered: {e}");
 }
