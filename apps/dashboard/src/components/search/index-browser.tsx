@@ -313,8 +313,8 @@ function Loading({ err }: { err: string | null }) {
   );
 }
 
-/** Pretty JSON of one GET (settings). */
-function JsonDoc({ cluster, path, onOpenConsole }: { cluster: SearchCluster; path: string; onOpenConsole: (text: string) => void }) {
+/** Pretty JSON of one GET (settings, a document). */
+export function JsonDoc({ cluster, path, onOpenConsole }: { cluster: SearchCluster; path: string; onOpenConsole: (text: string) => void }) {
   const { text, err } = useGet(cluster.id, path);
   const pretty = useMemo(() => (text === null ? null : formatJson(text)), [text]);
   return (
@@ -941,7 +941,7 @@ function when(ms: number, o: { day: boolean; seconds: boolean }) {
  * Documents over time on a time-based index (Kibana Discover's histogram): the range presets, a
  * bar per bucket of the current query, and a click on a bar narrows the range to it.
  */
-function TimeHistogram({ field, range, buckets, total, onRange }: { field: string; range: TimeRange; buckets: TimeBucket[]; total?: { value: number; relation: string }; onRange: (r: TimeRange) => void }) {
+export function TimeHistogram({ field, range, buckets, total, onRange }: { field: string; range: TimeRange; buckets: TimeBucket[]; total?: { value: number; relation: string }; onRange: (r: TimeRange) => void }) {
   const max = Math.max(1, ...buckets.map((b) => b.count));
   const span = buckets.length > 1 ? buckets[buckets.length - 1].key - buckets[0].key : 0;
   const step = buckets.length > 1 ? buckets[1].key - buckets[0].key : 0;

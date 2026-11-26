@@ -551,6 +551,17 @@ fn one_line(s: &str) -> String {
     s.chars().filter(|c| !c.is_control()).map(|c| if matches!(c, '`' | '"' | '[' | ']' | '<' | '>' | '@' | '*' | '_' | '\\') { ' ' } else { c }).take(200).collect::<String>().trim().to_string()
 }
 
+/// Other open changes that change the same tables (PlanetScale's conflicting deploy requests):
+/// whichever lands second migrates a table the first changed. Names as code, never markup.
+fn overlaps_line(overlaps: &[(String, Vec<String>)]) -> String {
+    if overlaps.is_empty() {
+        return String::new();
+    }
+    let code = |s: &str| format!("`{}`", s.chars().filter(|c| !c.is_control()).map(|c| if c == '`' { '\'' } else { c }).take(120).collect::<String>());
+    let each: Vec<String> = overlaps.iter().take(5).map(|(b, t)| format!("{} ({})", code(&branch_name(b)), t.iter().take(5).map(|t| code(t)).collect::<Vec<_>>().join(", "))).collect();
+    format!("**Also changing these tables:** {}. Whichever lands second migrates a table the first one changed: rebase it, and look at its preview again.\n\n", each.join("; "))
+}
+
 fn stories(n: u32) -> String {
     if n == 1 { "1 story".into() } else { format!("{n} stories") }
 }
@@ -958,6 +969,7 @@ pub fn preview_comment_for(p: Option<&Preview>, marker: &str, teardown: Option<&
             if let Some(lines) = e.schema_changes.as_ref().filter(|l| !l.is_empty()) {
                 out.push_str(&risks_line(&e.schema_risks));
                 out.push_str(&schema_block(lines));
+                out.push_str(&overlaps_line(&e.schema_overlaps));
             }
             if let Some(line) = release_line(e) {
                 out.push_str(&line);
@@ -1224,6 +1236,7 @@ mod preview_tests {
             head: None,
             schema_changes: None,
             schema_risks: Vec::new(),
+            schema_overlaps: Vec::new(),
             release_ms: None,
             release_before_ms: None,
             screenshot_url: None,

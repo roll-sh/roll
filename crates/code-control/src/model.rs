@@ -333,6 +333,10 @@ pub struct PreviewEnvironment {
     /// `schema::risks`); untrusted text too.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub schema_risks: Vec<String>,
+    /// Other open changes whose previews' schema changes touch the same tables: `(branch,
+    /// tables)`; untrusted text too.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub schema_overlaps: Vec<(String, Vec<String>)>,
     /// How long the project's release (migrations) took on the preview's data at `head`, and at
     /// the run before.
     #[serde(default, skip_serializing_if = "Option::is_none")]

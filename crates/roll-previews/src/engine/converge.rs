@@ -1157,7 +1157,8 @@ impl Engine {
         // (whichever of its services serves the Storybook; recorded once its run is kept).
         let asked_first = if storybook.is_some() && r.change_id.is_none() { self.stories_wanted(r) } else { Vec::new() };
         let stories_first = if stories.is_some() { asked_first.clone() } else { Vec::new() };
-        let opts = crate::ports::ShotOptions { pages: first_paths, hide: hide.clone(), openapi, endpoints, states, browsers, crops, stories, modes, login, changed, stories_first };
+        let story_runs = self.story_runs(r);
+        let opts = crate::ports::ShotOptions { pages: first_paths, hide: hide.clone(), openapi, endpoints, states, browsers, crops, stories, modes, login, changed, stories_first, story_runs };
         let started = std::time::Instant::now();
         // The page's words are its code's: what it was given is masked before they're kept (and
         // reach the pull request's comment); a run whose masks can't be read fails as a run.
@@ -1336,7 +1337,7 @@ impl Engine {
                 out.extend(kept_stories);
                 continue;
             }
-            let opts = crate::ports::ShotOptions { pages: paths.iter().filter(|p| **p != "/").map(|p| p.to_string()).collect(), hide: hide.to_vec(), stories, changed, stories_first, ..Default::default() };
+            let opts = crate::ports::ShotOptions { pages: paths.iter().filter(|p| **p != "/").map(|p| p.to_string()).collect(), hide: hide.to_vec(), stories, changed, stories_first, story_runs: self.story_runs(r), ..Default::default() };
             match self.apps.screenshot(&r.id, svc, &opts).await {
                 Ok(Some(mut shot)) => {
                     let _ = self.store.add_run_usage(&r.id, crate::runtime::BROWSER_GIB, shot.container_ms as i64);
@@ -1393,7 +1394,12 @@ impl Engine {
                 }
             }
         }
-        want.into_iter().take(crate::settings::MAX_STORIES).collect()
+        want.into_iter().take(crate::settings::MAX_STORIES * self.story_runs(base)).collect()
+    }
+
+    /// How many containers take `r`'s stories side by side (`github.story_runs`).
+    fn story_runs(&self, r: &Row) -> usize {
+        self.store.settings(&r.project_id).map_or(1, |s| s.github.story_runs as usize).clamp(1, crate::settings::MAX_STORY_RUNS)
     }
 
     /// Whether `r`, a default branch's or the baseline's preview, takes its stories again at its
