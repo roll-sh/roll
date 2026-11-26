@@ -179,8 +179,17 @@ further:
   processor, so there is no PDF or Office text yet.
 - **Timeouts.** Open Crawler's defaults apply: `connect_timeout` 10 s, `socket_timeout` 10 s and
   `request_timeout` 60 s. Every wait races the job's cancel, as connector syncs do.
-- **Politeness.** One request at a time per origin, spaced by the larger of robots.txt's
-  `Crawl-delay` and `roll.crawler.min_request_interval` (500 ms, a node setting). A 429 or 503
+- **Politeness, per server.** Two turns gate every request, and the stricter wins:
+  - the origin's: one request at a time, spaced by the larger of robots.txt's `Crawl-delay` and
+    `roll.crawler.min_request_interval` (500 ms, a node setting; 1 s for an unverified site);
+  - the server's, shared by every crawl, `crawl-test` and verification check on the node: the
+    node's interval after the last request to that server. A server is the address the egress
+    check resolves the host to (the lowest IPv4 address it has, else the lowest IPv6 /64), and that
+    resolution is the one the request then connects with (the crawler's resolver hands it the
+    addresses the check found), so no second lookup is made and many names on one server
+    (shared hosting, subdomains without a CDN) share one limit.
+
+  A 429 or 503
   with `Retry-After` pauses that origin for the time given, up to 10 minutes; beyond that, the
   origin's remaining URLs are skipped and counted. Requests carry the user agent
   `roll-crawler/<version> (+https://roll.sh/docs/crawler)`. A site can't be made to see another
@@ -284,7 +293,7 @@ They're MCP tools (`search_list_site_verifications`, `search_verify_site`,
 `roll search crawler sites <cluster>`.
 
 Checks and `crawl-test` make roll send requests, so they're held like a crawl's: refused while
-crawlers are off on the node, each request in the site's turn at the unverified interval (shared
+crawlers are off on the node, each request in its server's turn at the unverified interval (shared
 with every crawl on the node), and at most 10 a minute per owner on a node (429 past that).
 
 `roll.crawler.enabled` (a node setting, on by default) lets an operator stop every crawler on a
@@ -330,6 +339,15 @@ A new index is created with these mappings, which Open Crawler leaves to the use
 The site-search guide then has no mapping step.
 
 ### Parsing
+
+A page is decoded in its own charset, found as WHATWG's encoding sniffing algorithm finds it
+(`crawler/charset.rs`): a byte order mark, then the `Content-Type` header's `charset`, then a
+prescan of the first 1,024 bytes for `<meta charset>` or `<meta http-equiv="content-type">`
+(comments and other tags' attributes skipped), then, as the algorithm's optional "likely encoding"
+step, UTF-8 when the body is valid UTF-8 (so unlabeled UTF-8 pages read as they did before), and
+last windows-1252. It is decoded with `encoding_rs` (the Encoding Standard's decoders) in one
+pass, into text no longer than `max_response_size`, charged to the request breaker before the
+body is let go. `crawl-test` names the charset it read the page in (`charset`).
 
 HTML is parsed with `html5ever`, the WHATWG parser used by Servo, so malformed pages parse as
 browsers parse them. Parsing builds a small arena DOM because extraction rules need selectors. By
@@ -542,8 +560,13 @@ limits, not by the site. Crawler traps such as endless calendars and session ids
 `max_unique_url_count`, `max_url_params` and `max_crawl_depth`, and the job's metadata shows which
 limit stopped the crawl.
 
-Unlike Open Crawler's `threads_per_crawl`, a crawl fetches from at most 4 origins at once and makes
-one request per origin. Crawls share the node's connector slots.
+Unlike Open Crawler's `threads_per_crawl`, a crawl fetches several URLs at once only from different
+servers and different origins: up to `roll.crawler.max_parallel_fetches` (a node setting, 4 by
+default, at most 16), each waiting for its own turns. Their answers are then handled one after the
+other in queue order, by the crawl's one task, so every verdict, count and document (and the
+purge's guards) is what a crawl of one URL at a time would make; redirects after the first request
+are followed one at a time. The crawl's rate (`roll.connectors.max_bytes_per_second`) is applied
+as each answer is handled. Crawls share the node's connector slots.
 
 ## Checking a URL
 
@@ -606,6 +629,8 @@ to see why pages are missing.
 | Extraction rules end to end: a URL filter, `extract` as a string and an array, `set`, a URL group | `crates/search-es/tests/crawler.rs` (`extraction_rules_fill_fields`) |
 | Conditional requests: 304s kept as they are and seen by the purge, a changed page behind unchanged ones re-read and its new link followed, an incremental crawl deleting nothing | `crates/search-es/tests/crawler.rs` (`unchanged_pages_answer_304_and_stay`) |
 | The docs preset: section records from a fixture page (hierarchy, content, anchors, nav and footer left out) and its search template | `crates/search-es/tests/crawler.rs` (`the_docs_preset_makes_section_records`) |
+| Charsets: a Shift_JIS page by its `<meta charset>`, an unlabeled windows-1252 page by the fallback | `crates/search-es/tests/crawler.rs` (`pages_are_decoded_in_their_charset`); the sniffing order, the prescan's skips and the decode cap in unit tests in `crawler/charset.rs` |
+| Politeness per server: two names on one address one request at a time (counted in flight on the fixture server), two servers at once | `crates/search-es/tests/crawler.rs` (`one_request_at_a_time_per_server`) |
 | Selector parsing bounds and one-pass matching; a huge attribute on a page of a few elements meets the deadline | unit tests in `crawler/select.rs` |
 | Extraction regexes share the crawl rules' budget (too many, or too big for their share, are refused; a capture group's one-pass table stays within it; ASCII `\w`) | unit test in `crawler/config.rs` |
 | A rule whose hits nest spends a page's text visits: later rules are dropped and counted, earlier fields stay | unit test in `crawler/html.rs` |

@@ -6,6 +6,7 @@
 //! [`Sink`]. A crawl that ends `completed` purges what proves gone and keeps what an outage hid
 //! ([`Crawl::purge`]).
 
+pub mod charset;
 pub mod config;
 pub mod fetch;
 pub mod hosts;
@@ -169,18 +170,72 @@ pub fn unverified_floor<'a>(setting: impl Fn(&str) -> Option<&'a str>) -> Durati
 /// The longest a `crawl-test` or verification check waits for one request turn.
 pub(crate) const TURN_WAIT: Duration = Duration::from_secs(10);
 
-/// Waits for `link`'s site's request turn on this node, `floor` after the last request to it
-/// (crawls, `crawl-test` and verification checks share the turns, `hosts::turn`); `Err` (sending
-/// nothing) when it wouldn't come by `until`.
-pub(crate) async fn polite_turn(link: &Link, floor: Duration, until: Instant) -> Result<(), String> {
-    let site = hosts::site_of(link);
-    while let Some(at) = hosts::turn(&site, floor) {
+/// Waits for `link`'s server's request turn on this node, `floor` after the last request to it
+/// (crawls, `crawl-test` and verification checks share the turns, `hosts::turn`, keyed by the
+/// address the egress check resolves the host to: [`fetch::Fetcher::server`]); `Err` (sending
+/// nothing) when it wouldn't come by `until`. A host that doesn't resolve takes its site's turn
+/// (its request then fails as it would have).
+pub(crate) async fn polite_turn(fetcher: &Fetcher, link: &Link, floor: Duration, until: Instant) -> Result<(), String> {
+    let server = fetcher.server(link).await.unwrap_or_else(|_| hosts::site_of(link));
+    while let Some(at) = hosts::turn(&server, floor) {
         if at > until {
-            return Err(format!("[{site}] is busy: its next request turn is too far off; try again shortly"));
+            return Err(format!("[{}] is busy: its next request turn is too far off; try again shortly", hosts::site_of(link)));
         }
         tokio::time::sleep_until(at.into()).await;
     }
     Ok(())
+}
+
+/// The URLs a crawl fetches at once, from different servers and origins (a node setting).
+pub const MAX_PARALLEL_FETCHES: &str = "roll.crawler.max_parallel_fetches";
+const PARALLEL_DEFAULT: u64 = 4;
+const PARALLEL_CEILING: u64 = 16;
+
+/// What waiting for a request's turns came to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Turn {
+    Now,
+    /// The origin's turn comes after the deadline (a long `Crawl-delay`).
+    OriginLate,
+    /// The server's turn, or the request itself, would come after the deadline.
+    Late,
+}
+
+/// Waits for a request's two turns, the stricter winning: its origin's (`origin_at`: the larger
+/// of its robots.txt `Crawl-delay` and the node's interval after its last request) and its
+/// server's (`hosts::turn` at `floor`, shared by every crawl on the node, `server` from
+/// [`fetch::Fetcher::server`]). No wait outlasts `deadline`, and a cancel ends it.
+async fn take_turns(sink: &Sink<'_>, server: &str, origin_at: Option<Instant>, floor: Duration, deadline: Instant) -> Result<Turn, Stop> {
+    let sleep = |at: Instant| async move {
+        tokio::select! {
+            _ = tokio::time::sleep_until(at.min(deadline).into()) => Ok(()),
+            s = sink.stopped() => Err(s),
+        }
+    };
+    if let Some(at) = origin_at.filter(|at| *at > Instant::now()) {
+        if at >= deadline {
+            return Ok(Turn::OriginLate);
+        }
+        sleep(at).await?;
+    }
+    while let Some(at) = hosts::turn(server, floor) {
+        if Instant::now() >= deadline || at >= deadline {
+            return Ok(Turn::Late);
+        }
+        sleep(at).await?;
+    }
+    if Instant::now() >= deadline {
+        return Ok(Turn::Late);
+    }
+    Ok(Turn::Now)
+}
+
+/// A first request made with others at once ([`Crawl::drain`]): what its turns came to, and its
+/// response with when it was sent.
+enum Prefetched {
+    OriginLate,
+    Late,
+    Sent(Result<fetch::Response, fetch::Failure>, Instant),
 }
 
 /// Why a URL isn't fetched.
@@ -237,6 +292,8 @@ struct Crawl<'s, 'a> {
     robots: HashMap<String, Robots>,
     next_at: HashMap<String, Instant>,
     floor: Duration,
+    /// URLs fetched at once at most ([`MAX_PARALLEL_FETCHES`]).
+    parallel: usize,
     skipped_origins: HashSet<String>,
     /// Hashes of URLs queued or visited.
     known: HashSet<u64>,
@@ -374,6 +431,7 @@ pub async fn sync(cid: &str, v: &Values, sink: &mut Sink<'_>, full: bool, cursor
         robots: HashMap::new(),
         next_at: HashMap::new(),
         floor,
+        parallel: number(cluster, MAX_PARALLEL_FETCHES, PARALLEL_DEFAULT).min(PARALLEL_CEILING) as usize,
         skipped_origins: HashSet::new(),
         known: HashSet::new(),
         queue: VecDeque::new(),
@@ -604,9 +662,16 @@ impl Crawl<'_, '_> {
     }
 
     /// Visits the frontier breadth first until it's empty, the budget is spent or the deadline
-    /// comes.
+    /// comes. Up to [`MAX_PARALLEL_FETCHES`] URLs at a time, each on another server and another
+    /// origin, have their first requests made at once (each waiting for its own turns); what they
+    /// answered is then handled one URL after the other, in queue order, as a single fetch is:
+    /// every count, verdict and document is the crawl's one task's, so the purge's guards and the
+    /// job's stats see exactly what a crawl one URL at a time would.
     async fn drain(&mut self) -> Result<(), Stop> {
-        while let Some((link, depth)) = self.queue.pop_front() {
+        loop {
+            if self.queue.is_empty() {
+                break;
+            }
             if Instant::now() >= self.deadline {
                 self.limit_reached.get_or_insert("max_duration");
                 break;
@@ -615,14 +680,101 @@ impl Crawl<'_, '_> {
                 self.limit_reached = Some(self.budget_name);
                 break;
             }
+            let batch = self.take_batch().await;
+            if batch.len() <= 1 {
+                if let Some((link, depth, _, cond)) = batch.into_iter().next() {
+                    self.visit_from(link, depth, cond, None).await?;
+                    self.tick().await?;
+                }
+                continue;
+            }
+            // The first requests, at once: they read only the fetcher and the sink.
+            let (fetcher, sink, floor, deadline, max) = (&self.fetcher, &*self.sink, self.floor, self.deadline, self.plan.limits.usize(L::ResponseSize));
+            let origin_at: Vec<Option<Instant>> = batch.iter().map(|(l, ..)| self.next_at.get(&l.origin()).copied()).collect();
+            let futures = batch
+                .iter()
+                .zip(&origin_at)
+                .map(|((link, _, server, cond), at)| async move {
+                    match take_turns(sink, server, *at, floor, deadline).await? {
+                        Turn::OriginLate => Ok(Prefetched::OriginLate),
+                        Turn::Late => Ok(Prefetched::Late),
+                        Turn::Now => {
+                            let sent = Instant::now();
+                            tokio::select! {
+                                r = fetcher.get(link, true, max, cond.as_ref()) => Ok(Prefetched::Sent(r, sent)),
+                                s = sink.stopped() => Err(s),
+                            }
+                        }
+                    }
+                })
+                .collect();
+            let answers: Vec<Result<Prefetched, Stop>> = crate::api::by_query::join_all(futures).await;
+            for ((link, depth, _, cond), answer) in batch.into_iter().zip(answers) {
+                let first = match answer? {
+                    Prefetched::OriginLate => {
+                        self.visited += 1;
+                        self.stats.skipped_origin_urls += 1;
+                        self.skipped_origins.insert(link.origin());
+                        continue;
+                    }
+                    Prefetched::Late => {
+                        self.visited += 1;
+                        self.limit_reached.get_or_insert("max_duration");
+                        continue;
+                    }
+                    Prefetched::Sent(r, sent) => {
+                        self.next_at.insert(link.origin(), sent + self.origin_gap(&link));
+                        if let Ok(resp) = &r {
+                            self.sink.read(resp.wire_bytes);
+                            self.stats.fetched_bytes += resp.wire_bytes;
+                        }
+                        r
+                    }
+                };
+                self.visit_from(link, depth, cond, Some(first)).await?;
+                self.tick().await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The next URLs to fetch at once: from the queue's front, each on a server and an origin no
+    /// other in the batch is on (the rest go back to the front, in order), with the server each
+    /// is on and its document's validators. At most [`MAX_PARALLEL_FETCHES`], and within the
+    /// crawl's budget; a few more are looked at than taken, so a queue of one server's URLs costs
+    /// little.
+    async fn take_batch(&mut self) -> Vec<(Link, u64, String, Option<fetch::Validators>)> {
+        let cap = self.parallel.min((self.budget - self.visited).max(1) as usize);
+        let mut batch: Vec<(Link, u64, String, Option<fetch::Validators>)> = Vec::new();
+        let mut later: Vec<(Link, u64)> = Vec::new();
+        let mut looked = 0;
+        while batch.len() < cap && looked < cap * 4 {
+            let Some((link, depth)) = self.queue.pop_front() else { break };
+            looked += 1;
             if self.skipped_origins.contains(&link.origin()) {
                 self.stats.skipped_origin_urls += 1;
                 continue;
             }
-            self.visit(link, depth).await?;
-            self.tick().await?;
+            // Unresolved: a server of its own (its request fails as it would have).
+            let server = self.fetcher.server(&link).await.unwrap_or_else(|_| format!("unresolved {}", link.origin()));
+            if batch.iter().any(|(l, _, s, _)| *s == server || l.origin() == link.origin()) {
+                later.push((link, depth));
+                continue;
+            }
+            let cond = self.stored_validators(&link).await;
+            batch.push((link, depth, server, cond));
         }
-        Ok(())
+        for l in later.into_iter().rev() {
+            self.queue.push_front(l);
+        }
+        batch
+    }
+
+    /// The gap after a request to `link`'s origin: the larger of its robots.txt `Crawl-delay` and
+    /// the node's interval.
+    fn origin_gap(&self, link: &Link) -> Duration {
+        let delay = self.robots.get(&link.origin()).and_then(|r| r.crawl_delay).map(|d| Duration::from_secs_f64(d.min(86_400.0))).unwrap_or_default();
+        self.floor.max(delay)
     }
 
     /// Writes the crawl's counts into the job's metadata (the heartbeat sends them).
@@ -770,46 +922,29 @@ impl Crawl<'_, '_> {
         Ok(())
     }
 
-    /// Sleeps until `at`, or the crawl's deadline if that comes first.
-    async fn sleep_until(&self, at: Instant) -> Result<(), Stop> {
-        tokio::select! {
-            _ = tokio::time::sleep_until(at.min(self.deadline).into()) => Ok(()),
-            s = self.sink.stopped() => Err(s),
-        }
-    }
 
-    /// Waits for `link`'s turn: one request at a time per origin, spaced by the larger of its
-    /// `Crawl-delay` and the node's interval, and one at a time per site across every crawl on
-    /// the node. No wait outlasts the crawl's deadline: a turn that would come after it is not
-    /// taken (`false`), and the request isn't made.
+    /// Waits for `link`'s turns ([`take_turns`]): its origin's (one request at a time, spaced by
+    /// the larger of its `Crawl-delay` and the node's interval) and its server's (by address,
+    /// across every crawl on the node). No wait outlasts the crawl's deadline: a turn that would
+    /// come after it is not taken (`false`), and the request isn't made. A turn of the origin's
+    /// after the deadline (a long `Crawl-delay`) leaves the origin for this crawl, rather than
+    /// holding every other origin until the deadline.
     async fn wait_turn(&mut self, link: &Link) -> Result<bool, Stop> {
         let origin = link.origin();
-        let delay = self.robots.get(&origin).and_then(|r| r.crawl_delay).map(|d| Duration::from_secs_f64(d.min(86_400.0))).unwrap_or_default();
-        let gap = self.floor.max(delay);
-        if let Some(at) = self.next_at.get(&origin).copied()
-            && at > Instant::now()
-        {
-            // A turn after the deadline (a long `Crawl-delay`): the origin is left for this
-            // crawl, rather than holding every other origin until the deadline.
-            if at >= self.deadline {
+        let server = self.fetcher.server(link).await.unwrap_or_else(|_| format!("unresolved {origin}"));
+        match take_turns(self.sink, &server, self.next_at.get(&origin).copied(), self.floor, self.deadline).await? {
+            Turn::Now => {}
+            Turn::OriginLate => {
                 self.stats.skipped_origin_urls += 1;
                 self.skipped_origins.insert(origin);
                 return Ok(false);
             }
-            self.sleep_until(at).await?;
-        }
-        let site = hosts::site_of(link);
-        while let Some(at) = hosts::turn(&site, self.floor) {
-            if Instant::now() >= self.deadline || at >= self.deadline {
+            Turn::Late => {
                 self.limit_reached.get_or_insert("max_duration");
                 return Ok(false);
             }
-            self.sleep_until(at).await?;
         }
-        if Instant::now() >= self.deadline {
-            self.limit_reached.get_or_insert("max_duration");
-            return Ok(false);
-        }
+        let gap = self.origin_gap(link);
         self.next_at.insert(origin, Instant::now() + gap);
         Ok(true)
     }
@@ -948,18 +1083,28 @@ impl Crawl<'_, '_> {
     /// what the URL proved: indexed, gone ([`Crawl::gone`]) or kept by an error
     /// ([`Crawl::kept`]).
     async fn visit(&mut self, link: Link, depth: u64) -> Result<(), Stop> {
+        let cond = self.stored_validators(&link).await;
+        self.visit_from(link, depth, cond, None).await
+    }
+
+    /// [`Crawl::visit`] with `link`'s document's validators read, and, when [`Crawl::drain`] made
+    /// it with others at once, the first request's answer (`first`).
+    async fn visit_from(&mut self, link: Link, depth: u64, cond: Option<fetch::Validators>, mut first: Option<Result<fetch::Response, fetch::Failure>>) -> Result<(), Stop> {
         self.visited += 1;
         let src = link.hash64();
         // The validators of the URL's own document go only on the request for that URL: never
         // on a redirect's next hop.
-        let cond = self.stored_validators(&link).await;
         let mut at = link;
         let mut clean = true;
         let mut hops = 0u64;
         let mut retries = 0usize;
         let max = self.plan.limits.usize(L::ResponseSize);
         let resp = loop {
-            let r = match self.get(&at, clean, max, cond.as_ref().filter(|_| hops == 0)).await? {
+            let got = match first.take() {
+                Some(r) => Some(r),
+                None => self.get(&at, clean, max, cond.as_ref().filter(|_| hops == 0)).await?,
+            };
+            let r = match got {
                 // Its turn came after the deadline: not checked, so it proves nothing.
                 None => return Ok(()),
                 Some(Ok(r)) => r,
@@ -1047,7 +1192,7 @@ impl Crawl<'_, '_> {
             self.kept.insert(src);
             return Ok(());
         }
-        self.index_page(src, at, depth, resp.body, resp.validators).await
+        self.index_page(src, at, depth, resp.body, &resp.content_type, resp.validators).await
     }
 
     /// The validators the document of `link` holds (its records' first, with the docs preset),
@@ -1071,12 +1216,17 @@ impl Crawl<'_, '_> {
     }
 
     /// Parses and indexes a page: the document under its canonical URL, its links queued.
-    async fn index_page(&mut self, src: u64, at: Link, depth: u64, body: Vec<u8>, validators: fetch::Validators) -> Result<(), Stop> {
+    async fn index_page(&mut self, src: u64, at: Link, depth: u64, body: Vec<u8>, content_type: &str, validators: fetch::Validators) -> Result<(), Stop> {
         let mut held = self.sink.reserve();
-        if let Err(e) = held.add(body.len() as u64 * 2, "crawled page") {
+        if let Err(e) = held.add(body.len() as u64, "crawled page") {
             return self.failed(src, &at, e.reason());
         }
-        let text = String::from_utf8_lossy(&body).into_owned();
+        // In the page's own charset (BOM, header, `<meta>`, else windows-1252), the text no larger
+        // than the response's cap, and charged before the body goes.
+        let (text, _) = charset::decode(&body, content_type, self.plan.limits.usize(L::ResponseSize));
+        if let Err(e) = held.add(text.capacity() as u64, "crawled page") {
+            return self.failed(src, &at, e.reason());
+        }
         drop(body);
         let tags = self.plan.domain(&at).map(|d| d.exclude_tags.clone()).unwrap_or_default();
         let extraction = self.plan.domain(&at).map(|d| d.extraction.clone()).unwrap_or_default();
