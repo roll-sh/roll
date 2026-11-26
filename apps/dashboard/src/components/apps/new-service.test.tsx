@@ -20,7 +20,7 @@ describe("NewServiceSheet", () => {
   it("makes the database the code uses and links it before the first deploy", async () => {
     code.repos.mockResolvedValue([{ id: "r1", full_name: "acme/shop" }]);
     code.github.mockRejectedValue(new Error("no app"));
-    apps.plan.mockResolvedValue({ provider: "node", framework: null, language_version: null, install: null, build: null, start: "node server.js", port: 3000, dockerfile: "", notes: ["pg in package.json: it uses Postgres"], uses: ["postgres"] });
+    apps.plan.mockResolvedValue({ provider: "node", framework: null, language_version: null, install: null, build: null, start: "node server.js", port: 3000, dockerfile: "", notes: ["pg in package.json: it uses Postgres"], uses: ["postgres"], suggest: { pre_deploy: "npx prisma migrate deploy", health_path: "/up" } });
     ws.make.mockResolvedValue("pg_9");
     apps.create.mockResolvedValue({ id: "svc_1" });
     const created = vi.fn();
@@ -36,6 +36,8 @@ describe("NewServiceSheet", () => {
     expect(ws.make).toHaveBeenCalledWith("prj_1", "postgres", "shop-db", expect.objectContaining({ x: expect.any(Number) }));
     expect(apps.create.mock.calls[0][0].links).toEqual([{ kind: "postgres", ref: "pg_9" }]);
     expect(apps.create.mock.calls[0][0].branch).toBe("develop");
+    // The framework's migrations, ticked by default, and its health route.
+    expect(apps.create.mock.calls[0][0].run).toEqual({ health_path: "/up", pre_deploy: "npx prisma migrate deploy" });
   });
 
   it("starts a repo from a code starter and deploys the service following it", async () => {
