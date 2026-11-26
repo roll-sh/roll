@@ -83,6 +83,13 @@ pub struct Batch {
     pub confirm: Option<String>,
 }
 
+/// A key's slot as [`Secrets::check_batch`] found it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SlotNow {
+    pub version: i64,
+    pub linked: bool,
+}
+
 /// Each op's `if_version`, by its item's index (each op makes one item, in order).
 pub(crate) fn expectations(ops: &[Op]) -> Result<Vec<(usize, i64)>> {
     let expect: Vec<(usize, i64)> = ops
@@ -1166,9 +1173,10 @@ impl Secrets {
     /// references, shared certificates, types, `if_version`s, a protected environment or a folder
     /// policy that needs a change request), for a caller about to do something it can't take back
     /// before writing (roll search rotates a cluster's password, then stores it). The write checks
-    /// it all again. Each op's slot's version now (0: none), in order: what its `if_version` would
-    /// be.
-    pub fn check_batch(&self, project: &str, env: &str, b: &Batch, caller: &Caller) -> Result<Vec<i64>> {
+    /// it all again. Each op's slot as it is now, in order: its version (0: none), what its
+    /// `if_version` would be, and whether it's linked (a value written onto a live or dynamic link
+    /// isn't stored, and a managed link's next rotation replaces it).
+    pub fn check_batch(&self, project: &str, env: &str, b: &Batch, caller: &Caller) -> Result<Vec<SlotNow>> {
         let (items, expect) = self.batch_checks(project, env, b, caller)?;
         // The write's own checks inside its transaction (it runs them again).
         self.db.read(|c| {
@@ -1182,7 +1190,16 @@ impl Secrets {
                 return Err(Error::Conflict("approval_required", format!("changes to {} in {} need approval: open a change request", p.path, e.slug)));
             }
             let now_at = currents(c, &e.id, items.iter())?;
-            Ok(items.iter().map(|i| now_at.get(&i.slot()).map_or(0, |c| c.version)).collect())
+            for i in &items {
+                // `apply`'s own refusal: sensitive is for good.
+                if let (ItemAction::Set { tags: Some(new), .. }, Some(cur)) = (&i.action, now_at.get(&i.slot()))
+                    && names::sensitive(&cur.tags)
+                    && !names::sensitive(new)
+                {
+                    return Err(Error::BadRequest(format!("{} is sensitive for good: delete it and set it again to have a value people can read", i.key)));
+                }
+            }
+            Ok(items.iter().map(|i| now_at.get(&i.slot()).map_or(SlotNow { version: 0, linked: false }, |c| SlotNow { version: c.version, linked: c.link.is_some() })).collect())
         })
     }
 

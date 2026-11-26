@@ -1539,10 +1539,20 @@ impl Control {
     /// A new password. Requests with the old one fail from now on, loaded, waking or not (on a
     /// fleet this runs on the cluster's owner).
     pub async fn rotate_password(&self, id: &str) -> Result<SearchCluster> {
+        self.rotate_password_to(id, None, random_string(32)).await
+    }
+
+    /// Sets the cluster's admin password to `password`, only if it's still `expect` (when given):
+    /// a store into roll secrets rotates to the password it checked, and a rotation that landed
+    /// since it read the cluster is a conflict, never overwritten.
+    async fn rotate_password_to(&self, id: &str, expect: Option<&str>, password: String) -> Result<SearchCluster> {
         let c = {
             let _g = self.specs.lock().await;
             let mut c = self.get(id).await?;
-            c.password = random_string(32);
+            if expect.is_some_and(|e| e != c.password) {
+                return Err(ControlError::Conflict(format!("{}'s password was rotated meanwhile: nothing was changed; try again", c.name)));
+            }
+            c.password = password;
             c.password_rotated_at = Some(now());
             self.save(&c, Caps::NONE).await?;
             self.apply_spec(&c.name).await;
@@ -1569,8 +1579,10 @@ impl Control {
             return Err(ControlError::Invalid(format!("{} is a branch: its password isn't kept in roll secrets (keep its parent's)", c.name)));
         }
         let (holder, secrets) = self.secret_refs.holder(&c.id, "").await.map_err(ControlError::Invalid)?;
-        let target = secrets.store_target(who, &holder, to).await.map_err(refused)?;
-        let c = if rotate { self.rotate_password(&c.id).await? } else { c };
+        // The password to keep, checked by roll secrets as it is (its rules judge the real value).
+        let value = if rotate { random_string(32) } else { c.password.clone() };
+        let target = secrets.store_target(who, &holder, to, &crate::secret_refs::Revealed::new(value.clone())).await.map_err(refused)?;
+        let c = if rotate { self.rotate_password_to(&c.id, Some(&c.password), value).await? } else { c };
         let value = crate::secret_refs::Revealed::new(c.password.clone());
         match secrets.store(who, &holder, to, &target, value).await {
             Ok(version) => {

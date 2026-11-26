@@ -2094,18 +2094,29 @@ impl search_control::secret_refs::ResourceSecrets for ForSearch {
     /// protected environment or a folder policy that would turn it into a change request), so a
     /// store that would be refused is refused before anything rotates. The key's shared slot's
     /// version now, which the write is then made at.
-    async fn store_target(&self, who: &search_control::secret_refs::Who, holder: &search_control::secret_refs::Holder, to: &search_control::secret_refs::StoreTo) -> Result<search_control::secret_refs::StoreTarget, search_control::secret_refs::Refused> {
+    async fn store_target(
+        &self,
+        who: &search_control::secret_refs::Who,
+        holder: &search_control::secret_refs::Holder,
+        to: &search_control::secret_refs::StoreTo,
+        value: &search_control::secret_refs::Revealed,
+    ) -> Result<search_control::secret_refs::StoreTarget, search_control::secret_refs::Refused> {
         use search_control::secret_refs::Refused;
         let resource = Self::resource(holder);
-        let (secrets, who, to) = (self.0.clone(), who.clone(), to.clone());
+        let (secrets, who, to, value) = (self.0.clone(), who.clone(), to.clone(), search_control::secret_refs::Revealed::new(value.expose()));
         tokio::task::spawn_blocking(move || {
             let caller = secrets.caller_of(who.operator, who.user.as_ref(), who.grant.as_ref()).map_err(|e| Refused::Forbidden(e.to_string()))?;
             let project = secrets.project_for(&resource, to.project.as_deref()).map_err(|e| Refused::Invalid(e.to_string()))?;
-            // A stand-in of the password's shape (roll's are 32 letters and digits): the checks
-            // read its references and type, never its value.
-            let batch = store_batch(&to, "x".repeat(32), None);
-            let versions = secrets.check_batch(&project, &to.environment, &batch, &caller).map_err(store_refusal)?;
-            Ok(search_control::secret_refs::StoreTarget { project, version: versions.first().copied().unwrap_or(0) })
+            // Checked with the password about to be set: a password or pattern rule judges it now.
+            let batch = store_batch(&to, value.expose().to_string(), None);
+            drop(value);
+            let slot = secrets.check_batch(&project, &to.environment, &batch, &caller).map_err(store_refusal)?.first().copied().unwrap_or(roll_secrets::SlotNow { version: 0, linked: false });
+            // A link's value comes from the link (a live or dynamic one stores nothing written, a
+            // managed one's next rotation replaces it): the password would be lost.
+            if slot.linked {
+                return Err(Refused::Invalid(format!("{} in {}{} is linked to a resource: keep the password in a key of its own", to.key, to.environment, to.path)));
+            }
+            Ok(search_control::secret_refs::StoreTarget { project, version: slot.version })
         })
         .await
         .map_err(|e| Refused::Invalid(e.to_string()))?
@@ -2129,8 +2140,9 @@ impl search_control::secret_refs::ResourceSecrets for ForSearch {
             let batch = store_batch(&to, value.expose().to_string(), Some(target.version));
             drop(value);
             secrets.batch(&target.project, &to.environment, batch, &caller).map_err(store_refusal)?;
-            let read = secrets.secret(&target.project, &to.environment, &to.path, &to.key, Some(roll_secrets::SecretType::Shared), &caller).map_err(store_refusal)?;
-            Ok(read.version)
+            // Written at `target.version`: one past it, or what a read shows (a caller who may
+            // write and reveal but not read still stored it).
+            Ok(secrets.secret(&target.project, &to.environment, &to.path, &to.key, Some(roll_secrets::SecretType::Shared), &caller).map_or(target.version + 1, |s| s.version))
         })
         .await
         .map_err(|e| Refused::Invalid(e.to_string()))?

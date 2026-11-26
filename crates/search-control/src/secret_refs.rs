@@ -112,9 +112,10 @@ pub trait ResourceSecrets: Send + Sync {
     async fn resolve(&self, holder: &Holder, reference: &str) -> Result<Revealed, String>;
     /// The digest, under the same check.
     async fn digest(&self, holder: &Holder, reference: &str) -> Result<String, String>;
-    /// Whether `who` may write `to` directly (no change request), in the project whose canvas
-    /// holds the cluster: checked before a rotation, so a refused store changes no password.
-    async fn store_target(&self, _who: &Who, _holder: &Holder, _to: &StoreTo) -> Result<StoreTarget, Refused> {
+    /// Whether `who` may write `value` (the password about to be set) at `to` directly (no change
+    /// request), in the project whose canvas holds the cluster: checked before a rotation, so a
+    /// refused store changes no password.
+    async fn store_target(&self, _who: &Who, _holder: &Holder, _to: &StoreTo, _value: &Revealed) -> Result<StoreTarget, Refused> {
         Err(Refused::Invalid("roll secrets can't store a cluster's password on this node".into()))
     }
     /// Writes `value` at `to` as `who`, if the key is still at `target`'s version.

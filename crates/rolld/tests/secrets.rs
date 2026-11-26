@@ -851,7 +851,8 @@ async fn a_search_clusters_password_is_kept_in_roll_secrets_and_shown_to_nobody(
     ]);
     let made = r.post("/v1/access/tokens", json!({ "name": "no-reveal", "rules": rules })).await;
     let a = r.http.post(format!("{}/v1/search/clusters/{id}/password", r.api)).bearer_auth(made["token"].as_str().unwrap()).json(&keep(false)).send().await.unwrap();
-    assert_eq!(a.status().as_u16(), 403, "{}", a.text().await.unwrap());
+    let (status, text) = (a.status().as_u16(), a.text().await.unwrap());
+    assert!(status == 403 && text.contains("needs reveal"), "{status} {text}");
 }
 
 /// Reach names the roll apps services that read a folder (rolld's `ReachHolders`): one deploying
