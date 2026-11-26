@@ -539,7 +539,7 @@ impl ServerConfig {
 
     /// ALTER SYSTEM SET `name` = `value` (None: RESET), or RESET ALL (`name` None): rewrite
     /// postgresql.auto.conf (a changed setting moves to its end), replacing the file
-    /// atomically. The caller has checked the name, the value and the privileges.
+    /// atomically and durably. The caller has checked the name, the value and the privileges.
     pub fn alter_system(&self, name: Option<&str>, value: Option<&str>) -> Result<()> {
         let mut g = self.auto.lock();
         let mut items: Vec<(String, String)> = Vec::new();
@@ -563,19 +563,11 @@ impl ServerConfig {
         let text = auto_text(&items);
         match &self.dir {
             None => *g = text,
-            Some(d) => {
-                let tmp = d.join(format!("{AUTO_NAME}.tmp"));
-                let write = || -> std::io::Result<()> {
-                    use std::io::Write;
-                    let mut f = std::fs::File::create(&tmp)?;
-                    f.write_all(text.as_bytes())?;
-                    f.sync_all()?;
-                    std::fs::rename(&tmp, d.join(AUTO_NAME))
-                };
-                write().map_err(|e| {
-                    Error::new(code::IO_ERROR, format!("could not write to file \"{AUTO_NAME}.tmp\": {e}"))
-                })?;
-            }
+            // <name>.tmp written and fsynced, renamed over the file and the directory fsynced
+            // (durable_rename): the new entry outlives a power cut once ALTER SYSTEM returns.
+            Some(d) => crate::storage::durable::replace(&d.join(AUTO_NAME), text.as_bytes(), true).map_err(|e| {
+                Error::new(code::IO_ERROR, format!("could not write to file \"{AUTO_NAME}.tmp\": {e}"))
+            })?,
         }
         Ok(())
     }

@@ -564,11 +564,10 @@ fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
             right,
             nondet,
             ..
-        } => Box::new(
-            SetOpNode::new(*kind, *all, left.clone(), right.clone())
-                .nondet(nondet)
-                .planned(plan.clone()),
-        ),
+        } => match SortedSetOpNode::of(*kind, *all, left, right, nondet, plan, ctx) {
+            Some(n) => n,
+            None => Box::new(SetOpNode::new(*kind, *all, left.clone(), right.clone()).nondet(nondet).planned(plan.clone())),
+        },
         Plan::Append { inputs, inh, .. } => open_append(inputs, inh.is_some(), ctx),
         Plan::Join {
             kind,
@@ -4430,6 +4429,190 @@ impl Node for UniqueNode {
             return Ok(Some(r));
         }
         Ok(None)
+    }
+}
+
+/// A sorted INTERSECT / EXCEPT [ALL] (EXPLAIN's SetOp over its inputs sorted on every column,
+/// `distinct_order`), of values that compare equal only when identical: each input sorted
+/// through extsort as PostgreSQL's Sorts below it are (within work_mem in memory, else runs on
+/// disk), then merged a group of equal rows at a time (setop_retrieve_sorted): a group the
+/// first input has comes out as many times as the operation keeps it. (`SetOpNode` collected
+/// both inputs and counted the second's rows in a hash table.)
+struct SortedSetOpNode {
+    kind: SetOpKind,
+    all: bool,
+    /// The input read first (EXCEPT's left; INTERSECT's with fewer groups) and the other,
+    /// until opened; whether the first is the right one.
+    first: Option<Arc<Plan>>,
+    second: Option<Arc<Plan>>,
+    swapped: bool,
+    keys: Vec<SortKey>,
+    types: Vec<crate::types::DataType>,
+    left: Option<BoxNode>,
+    right: Option<BoxNode>,
+    /// The next row of each, read ahead.
+    l: Option<Row>,
+    r: Option<Row>,
+    /// The group being given out: its row and how many more copies of it.
+    out: Option<(Row, usize)>,
+    done: bool,
+}
+
+impl SortedSetOpNode {
+    #[inline(never)]
+    fn of(kind: SetOpKind, all: bool, left: &Arc<Plan>, right: &Arc<Plan>, nondet: &[Option<String>], plan: &Arc<Plan>, ctx: &ExecCtx) -> Option<BoxNode> {
+        if !matches!(kind, SetOpKind::Intersect | SetOpKind::Except) || nondet.iter().any(Option::is_some) {
+            return None;
+        }
+        if matches!(**left, Plan::Context { .. }) || matches!(**right, Plan::Context { .. }) {
+            return None;
+        }
+        let types = row_types(left);
+        if types.is_empty()
+            || types.iter().any(|t| *t == crate::types::DataType::Unknown || t.holds_composite() || !equal_is_identical(t))
+        {
+            return None;
+        }
+        let cols = crate::sql::explain::distinct_order(plan, ctx)?;
+        let mut covered = vec![false; types.len()];
+        for &c in &cols {
+            *covered.get_mut(c)? = true;
+        }
+        if covered.contains(&false) {
+            return None;
+        }
+        let keys = cols
+            .iter()
+            .map(|&c| SortKey { expr: Expr::Col(c, types[c].clone()), desc: false, nulls_first: false, using: None })
+            .collect();
+        let swapped = kind == SetOpKind::Intersect && crate::sql::explain::setop_shape(left, right, true, ctx).0;
+        let (first, second) = if swapped { (right.clone(), left.clone()) } else { (left.clone(), right.clone()) };
+        Some(Box::new(SortedSetOpNode {
+            kind,
+            all,
+            first: Some(first),
+            second: Some(second),
+            swapped,
+            keys,
+            types,
+            left: None,
+            right: None,
+            l: None,
+            r: None,
+            out: None,
+            done: false,
+        }))
+    }
+
+    /// `plan`'s rows sorted on the keys.
+    fn sorted(&self, plan: &Arc<Plan>, ctx: &ExecCtx) -> Result<BoxNode> {
+        ctx.statement(|| sort_all(open(plan, ctx)?, &self.keys, self.types.clone(), None, ctx))
+    }
+
+    fn cmp(keys: &[SortKey], a: &Row, b: &Row, ctx: &ExecCtx) -> Result<Ordering> {
+        for k in keys {
+            let Expr::Col(c, _) = k.expr else { unreachable!("column keys") };
+            match compare_values(&a[c], &b[c], k, ctx)? {
+                Ordering::Equal => {}
+                o => return Ok(o),
+            }
+        }
+        Ok(Ordering::Equal)
+    }
+
+    /// Both inputs sorted, the first read first: an empty one leaves the other unread.
+    #[inline(never)]
+    fn start(&mut self, ctx: &ExecCtx) -> Result<()> {
+        let (first, second) = (self.first.take().unwrap(), self.second.take().unwrap());
+        let mut a = self.sorted(&first, ctx)?;
+        let ra = a.next(ctx)?;
+        if ra.is_none() {
+            self.done = true;
+            return Ok(());
+        }
+        let mut b = self.sorted(&second, ctx)?;
+        let rb = b.next(ctx)?;
+        if self.swapped {
+            (self.left, self.l, self.right, self.r) = (Some(b), rb, Some(a), ra);
+        } else {
+            (self.left, self.l, self.right, self.r) = (Some(a), ra, Some(b), rb);
+        }
+        Ok(())
+    }
+
+    /// The next group of the left input's rows: its row and how many times it comes out.
+    fn group(&mut self, ctx: &ExecCtx) -> Result<Option<(Row, usize)>> {
+        loop {
+            let Some(row) = self.l.take() else { return Ok(None) };
+            let mut nl = 1usize;
+            let (keys, left) = (&self.keys, self.left.as_mut().unwrap());
+            loop {
+                ctx.check()?;
+                match left.next(ctx)? {
+                    Some(x) => {
+                        if Self::cmp(keys, &x, &row, ctx)? == Ordering::Equal {
+                            nl += 1;
+                        } else {
+                            self.l = Some(x);
+                            break;
+                        }
+                    }
+                    None => break,
+                }
+            }
+            let mut nr = 0usize;
+            while let Some(x) = self.r.take() {
+                match Self::cmp(&self.keys, &x, &row, ctx)? {
+                    Ordering::Less => {}
+                    Ordering::Equal => nr += 1,
+                    Ordering::Greater => {
+                        self.r = Some(x);
+                        break;
+                    }
+                }
+                ctx.check()?;
+                self.r = self.right.as_mut().unwrap().next(ctx)?;
+            }
+            let n = match (self.kind, self.all) {
+                (SetOpKind::Intersect, true) => nl.min(nr),
+                (SetOpKind::Intersect, false) => usize::from(nr > 0),
+                (_, true) => nl.saturating_sub(nr),
+                (_, false) => usize::from(nr == 0),
+            };
+            if n > 0 {
+                return Ok(Some((row, n)));
+            }
+        }
+    }
+}
+
+impl Node for SortedSetOpNode {
+    fn next(&mut self, ctx: &ExecCtx) -> Result<Option<Row>> {
+        if self.first.is_some() {
+            self.start(ctx)?;
+        }
+        if self.done {
+            return Ok(None);
+        }
+        // (A group kept more than once: its other copies, the last moved out.)
+        if let Some((row, n)) = self.out.as_mut() {
+            if *n > 1 {
+                *n -= 1;
+                return Ok(Some(row.clone()));
+            }
+            return Ok(self.out.take().map(|(r, _)| r));
+        }
+        match self.group(ctx)? {
+            Some((row, 1)) => Ok(Some(row)),
+            Some((row, n)) => {
+                self.out = Some((row.clone(), n - 1));
+                Ok(Some(row))
+            }
+            None => {
+                self.done = true;
+                Ok(None)
+            }
+        }
     }
 }
 

@@ -110,11 +110,10 @@ impl Origins {
         st.dirty = false;
         st.saved_at = Some(std::time::Instant::now());
         let Some(p) = &self.path else { return };
-        let tmp = p.with_extension("json.tmp");
-        if let Ok(b) = serde_json::to_vec(&Stored { origins: st.origins.clone() })
-            && std::fs::write(&tmp, b).is_ok()
-        {
-            let _ = std::fs::rename(&tmp, p);
+        // Durably (fsynced, renamed, the directory fsynced): an unsynced file renamed over the
+        // old one can be empty after a power cut, and `open` would then start with no origins.
+        if let Ok(b) = serde_json::to_vec(&Stored { origins: st.origins.clone() }) {
+            let _ = crate::storage::durable::replace(p, &b, true);
         }
     }
 

@@ -15050,7 +15050,7 @@ scan-bound queries at small caches.
 
 BENCH.md "Query memory, round 3" has the tables. Plain dist builds (`tools/dist.sh`): **b0**
 `0037841bd` (before agent 320's windows), **n1** the first three changes on it, **n2** all four on
-origin's `eccf1d824` (`cbfcb7229`). Four commits, one a change, each its own candidate
+origin's `eccf1d824` (`cbfcb7229`; the candidates are the same code rebased on `98bc2e3b6`). Four commits, one a change, each its own candidate
 (`cand/a326` .. `cand/a326-4`, stacked in this order). Rule kept throughout (agent 320's lesson):
 the spilling or streaming path is a node or function of its own, chosen once, and the in-memory
 functions' text is left alone.
@@ -15105,8 +15105,11 @@ on purpose (the new paths are out of line and the old ones' text is the same but
 `right_rows`' return type and the Sort's dead branch); the point select pair wasn't run (no
 changed node runs in a point select).
 
-**Verification:** `tools/quick-check.sh` with `QC_CHECKED=1` on `cbfcb7229` (the four code
-commits on `eccf1d824`): QC-RESULT. New query_spill cases: `nested_loop_inner_spills` (agent
+**Verification:** `tools/quick-check.sh` with `QC_CHECKED=1` on `79302a0ca` (the four code
+commits and this section on `98bc2e3b6`): Clippy 16 warnings, none new in a changed file; 398
+tests in 12 binaries passed, again built `--profile verify-checked` (398 passed); regress
+51,148 / 51,150, 0 newly differing; isolation 1,647 / 1,648; pg_dump_tap 14,609 passed. Each
+lower candidate is a prefix of that stack; only the stack's head was checked. New query_spill cases: `nested_loop_inner_spills` (agent
 320's) and `sorted_distinct_spills`, their temp file counts (2 and 1) PostgreSQL 18.6's for the
 same statements.
 
@@ -15903,6 +15906,74 @@ failed: all passed.
 
 Not this round's: roll's `VACUUM (VERBOSE)` sends none of PostgreSQL's INFO lines (agent 205's
 note, still open).
+
+## Short write transactions, round 19: the TPC-B-like standing at fixed counts; the L0 merge left out, its read cost itemized (agent 322)
+
+BENCH "Short write transactions, round 19" has the tables. No engine code changed: what was tried is in
+`~/.cache/a322/patches/`.
+
+**The standing** (brief item 1). roll's shipped build (`tools/dist-pgo.sh --out` of `5192a74c0`, its own
+training), PostgreSQL 18.6 and pgrust, the same night on lane A, scale 32, 160,000 TPC-B-like
+transactions a run (fixed, not timed), counted to 8 s after the last and a CHECKPOINT. User instructions a
+transaction: roll 485-647k at 8 clients (five runs), 434-553k at 32 (five); PostgreSQL 459k / 528k and
+430k / 433k; pgrust 523k / 458k and 565k / 594k. Peak anon+shmem: roll 485-496 MB, PostgreSQL 638-679,
+pgrust 828-928. Bytes written a transaction: roll 8.9-11.4 KB, the others 19.9-26.4 KB. Agent 313's 335k /
+311k were 10 s windows without the checkpoint and its background work; 314's 494k / 469k are within this
+spread. Lane A carried 3.4-7.4 foreign cores in every hold, so tps and cycles are readings: roll reached
+664-4,368 tps, the others 3,010-5,698.
+
+So, in user instructions: in roll's runs that reached PostgreSQL-like throughput (3,023-4,368 tps at 8 clients,
+2,951 at 32) it read 541-647k and 553k, over PostgreSQL's 459-528k and 430-433k and over pgrust's at 8; its
+slow runs (664-1,853 tps) read 434-487k, level with PostgreSQL at 32 and under pgrust (565-594k at 32). Its
+own spread is the largest single item. It is **planning in the connection threads**: the profiled 32-client runs differ by 116k a
+transaction there (315k at 1,853 tps, 431k at 2,951), all of it parse / bind / plan code (`Expr::clone`,
+`Planner::rel`, `explain::Name::col`, `lit_env`, mimalloc). Behind it is the plan choice that PostgreSQL makes the
+same way (`bench/plans2.sh`, measured on both): after 160k transactions `pgbench_branches` and
+`pgbench_tellers` have grown (roll 1 -> 11 and 2 -> 16 pages, PostgreSQL 1 -> 17 and 2 -> 42), the re-costed
+generic plan (an index scan, 8.16) costs more than the first five custom plans' average (seq scans at 1-2
+pages), and a prepared UPDATE takes a custom plan on about half of its runs (both servers: branches 6
+generic / 7 custom of 13, tellers 8 / 5). How often depends on when the tables grew during the run; a
+custom plan of these one-row UPDATEs costs roll far more than it costs PostgreSQL. That is the largest cut
+left for TPC-B (session planning: agent 323's area, not touched here): a custom plan whose shape is
+the one the session planned last for the same statement, or cheaper replanning of a one-table UPDATE. The
+flush thread is ~78-83k a transaction (zstd ~38k, `Compacted::entry` 17k, `zip_entries` 8.5k): the L0
+merge's target.
+
+**The L0 merge** (brief item 3): **not landed**. The cycle pair on the head (`0037841bd` + 305's patch,
+one binary, the merge off by a switch) shows the same picture as rounds 15-18: select-only -1.2%, the
+100-row read +1.5%, the 1,000-row +1.6%. Exactly why a range read pays, from the read's profile across the
+cycle (+38.4k a 1,000-row read):
+
+- It isn't a seek per file or run: the merge leaves L0 with no more files (16 / 15 samples at 1 / 2
+  files against 10 / 8 / 9 spread over 1-3), and `Merge::min` and `position` are within 1k.
+- It is the newer versions met. The merged file keeps the big table's UPDATEs in L0 about three
+  flushes longer (10 merges and 2 compactions into L1 against 7 compactions), so a range meets about three
+  times as many newer versions of its rows: about 19 more a 1,000-row read at the ~2k a version below.
+- A newer version costs about ten rows. In process: a 1,000-row read with 10 / 30 newer versions in an L0 file
+  costs +20.3k / +46.4k over none (a version ~1.3k and ~7k a read that meets any; a row ~220). At the
+  server, the +38.4k splits into the run loop's rows moved into the stop-checking instance (+47.1k there,
+  -41.5k from the stop-free one), the list's setup and use (`Overlay::take` / `finish` / `past_limit` /
+  `push` / `value_span` +12.6k), `fill_batch_rows`' inlined `gather` / `ungather` / `position` +7.9k,
+  `zip_rows` tried after short runs +3.4k, more blocks read +1.9k, and `count_row` +4.1k (the
+  executor's, the same rows: not explained).
+- Level within 0.2% (4.4k) needs a newer version to cost about what the row it replaces costs. No single
+  item of the list above is over 6k net, so no check made cheaper gets there. The brief's far-stop check
+  was tried: a run that goes without a stop up to the restart interval of the list's next entry
+  (`Block::first_restart`). It lost in process (+0.3% / +1.5% with 10 / 30 newer versions; 16 entries
+  between restarts, ~30 in a block, so few rows run before the stop's interval and each stop pays the search
+  and a second run's setup): dropped, patch `run-rows-ov-restart-bounded.patch`.
+
+What would get the merge in: merging a sparse source's newer versions into the oldest source's blocks
+at about a row's cost. That means no list built per range (the merged file's entries are known when it is
+opened: a per-block index of L0 positions, or a merged view cached with the block for a given L0 state),
+no re-ranking after each run, and the superseded row skipped in the stop-free loop. The write side is as round 18 measured
+it (-9.9% user instructions a transaction at 32 clients). Until then the reads' gate holds.
+
+Harness for whoever goes on: `~/.cache/a322/bench` (314's `oltp.sh` with the compactions in the window
+and the by-thread split; `plans.sh` / `plans2.sh` the plan choice), `~/.cache/a322/b313` (313's
+`cycle.sh` / `epair.sh` / `recagg.py`, `cpair-run.sh` one pair a hold), the probe
+`crates/pg-engine/src/storage/a322_probe.rs` on `wip/a322` (with `A322_NO_MERGE` / `A322_NOFAR`
+switches, not for landing), the PGO profile `~/.cache/a322/pgo/roll-engine.profdata` (of `5192a74c0`).
 
 ## Short write transactions, round 18: a compaction's filter bits for keys the adopted file holds; a range read's newer versions taken in its runs' loop; the standing table; the L0 merge again (agent 313)
 
@@ -23485,3 +23556,141 @@ per-statement steps (`run_query`, `bind_message`, `execute_portal_here`, `finish
 the `TxnState` / `ExecCtx` drops) are ~60 functions of ~10-120 executed lines each. Merging them
 into fewer, denser ones is a refactor to gate on cycles, which the loaded lanes didn't allow
 tonight (6-8 foreign cores on lane A all night).
+
+## Power cuts of the shipped binary, and a release script (agent 325, 2026-11-26)
+
+**Three durability bugs, found by power cuts of the shipped binary and fixed.** None of them is in
+the stores (WAL, SSTs, manifests: those go through `storage::durable` and its in-process power
+model, and held up). All three are cluster files written with plain `std::fs`, which the
+in-process model never saw:
+1. **ALTER SYSTEM was lost.** `ServerConfig::alter_system` wrote `postgresql.auto.conf.tmp`,
+   fsynced it and renamed it over `postgresql.auto.conf`, with no fsync of the data directory.
+   An ALTER SYSTEM that had returned was gone after a cut (first one: no file at all; later
+   ones: the old value), unless some other change happened to fsync the directory first.
+   PostgreSQL's `durable_rename` fsyncs the directory. Now `durable::replace(.., true)`.
+   Found on the dev dist binary: `--power keep --seed 3` round 9 and `--seed 5 --set
+   synchronous_commit=off` ("ALTER SYSTEM SET log_min_duration_statement: -1 after the restart,
+   acknowledged 100009").
+2. **Replication origins were lost.** `Origins::save` (`pg_replication_origin_create` / `_drop`
+   / `_advance`, and the once-a-second progress save of an apply session) wrote
+   `replorigins.json.tmp` with no fsync at all and renamed it. A cut lost a created origin, and
+   once anything else fsynced the directory it could leave an empty file, which `Origins::open`
+   reads as no origins at all (`unwrap_or_default`). Now durable too (one fsync a save; the
+   progress save stays throttled to one a second). Found: `--power drop --seed 1` round 2 and
+   `--power keep --seed 10` round 5, dev binary ("replication origin o_r2: its creation
+   acknowledged, gone after the restart").
+3. **The server would not start after a power cut.** `Slots::save` with `sync` false (a slot's
+   release when its session ends, `backend_exit`, unsynced `update`s) wrote `replslots.json.tmp`
+   without fsync and renamed it over the good file. A later fsync of the data directory (any
+   durable change there: the next slot creation, ALTER SYSTEM now, a registry write) makes the
+   rename durable before the bytes; the cut leaves an empty `replslots.json`, and `Slots::open`
+   refuses it: `Error: XX000: replication slots file: EOF while parsing a value at line 1 column
+   0`, exit 1, on every start. Now the unsynced save fsyncs its file before the rename
+   (`durable::replace_atomic`: atomic, not yet durable: the old file or the new one, whole);
+   the synced one is `durable::replace`. Found on the **shipped PGO binary** of `5192a74c0e`:
+   `--power drop --seed 1` round 2, and `--seed 21 --kinds ddl` round 3.
+
+Test: `crash_random`'s `power_cut_keeps_alter_system_and_origins` (`--features powerloss`):
+two ALTER SYSTEMs, two origins, a slot made then changed unsynced, a bare fsync of the
+directory, SIGKILL, the in-process power cut; the file must hold the second value, both origins
+and a whole slots' file. With the old sysconf.rs / origin.rs it fails ("postgresql.auto.conf
+after the cut: \"\""); with `replace_atomic` not fsyncing its file it fails as the binary did
+("the slots' file after the cut: ... EOF while parsing"). With the old slot.rs it passes: that
+code wrote with plain `std::fs`, which the in-process model doesn't record (an unrecorded file is
+taken as it is when its directory is fsynced), the reason only the binary-level cut found it.
+
+**1. `tools/crash-binary.py --power drop|keep`: power cuts of any roll-engine binary.**
+A SIGKILL keeps the page cache; a cut keeps only what was fsynced. Agent 307 left this as needing
+root (device mapper) or an LD_PRELOAD shim; this is the shim, no root, no container:
+- `tools/powercut/powercut.c` (built with `cc` on each run, a second): LD_PRELOAD'ed into the
+  server only (`POWERCUT_EXE`: not taskset, not programs the server runs). Every change under
+  the data directory goes through one mutex and one record, written with `write(2)` (a SIGKILL
+  keeps it): writes and size changes with the bytes they overwrite (an undo log: the new bytes
+  are in the file), fsync / fdatasync with the sequence number at their start (what they made
+  durable), creates, mkdirs, renames, links, unlinks. An unlink or a replaced file is moved into
+  a grave instead, so a cut can bring it back. fds are followed through dup, fcntl(F_DUPFD),
+  close and closedir; reads and other files pass straight through.
+- `tools/powercut/rebuild.py`: after the kill, the record replayed over the tree as it was at
+  power-on, checked against the real directory (every entry and size must match: otherwise it
+  is a TOOL ERROR, exit 2, not the engine's failure), then the directory replaced with what a cut
+  leaves. The model is POSIX's, stricter than ext4's journal: a file's bytes as of its last fsync;
+  a directory's entries as of its last fsync (so a rename or create without a parent fsync is
+  undone, an unlink comes back). `keep` (a disk that wrote some of its cache): per file a seeded
+  prefix of its unsynced writes stays and the next may be torn at 4 KiB pages, and a seeded
+  prefix of all unsynced name changes, in order.
+- `tools/powercut/selftest.py`: eleven known cases (a fsynced file in an unsynced directory,
+  rename over an old manifest without a directory fsync, O_TRUNC, unlink, ftruncate, a rename
+  across directories ...) through a child python under the shim; a second.
+- The test's rounds: the 7 kinds of the SIGKILL test (the schema is loaded unwatched and shut
+  down cleanly first), plus `ack` (0-300 us after a COMMIT's acknowledgement), `ddl` (CREATE
+  TABLE, INSERT, ADD COLUMN, CREATE INDEX, ALTER SYSTEM, a physical slot, a replication origin,
+  DROP TABLE of the last round's: killed after the nth was sent or acknowledged; each
+  acknowledged step must be there, ALTER SYSTEM / the slot / the origin also under
+  synchronous_commit=off) and `prepare` (two-phase TPC-B on a connection of its own: an
+  acknowledged PREPARE is in pg_prepared_xacts after the restart, then committed by the check; an
+  acknowledged COMMIT PREPARED in history, also under synchronous_commit=off); and the clean
+  shutdown at the end is followed by a cut too. With `--set synchronous_commit=off` acknowledged
+  writes may be lost, but only as a suffix: one may be missing only when nothing that survived was
+  sent after its acknowledgement; anything else, and every torn or half state, still fails.
+  `--kinds` runs only some kinds. A failure keeps the data directory, the directory before the
+  cut (`d.precut`) and the record (`pc/`), and prints the replay command.
+- A seed fixes the kill points, the cut's choices and the order of kinds, not the threads'
+  timing: a bug that needs no later directory fsync before the kill shows on some runs of a seed
+  and not others (the ALTER SYSTEM loss: seeds 3 and 5 on the dev binary, not on the PGO one).
+- Cost: 10 rounds in 1-6 minutes on CPUs 0-5/18-23 under load 50-70.
+
+**Seeds run** (all `--power`, 10 rounds unless said):
+Before the fixes (every failure is one of the three bugs; no tool error in any run):
+- dev dist binary (agent 320's `n11` build, `d46a0575`, the old code): drop 1 (2 rounds) FAIL
+  origin, drop 2 ok, keep 3 FAIL ALTER SYSTEM, drop 4 + `synchronous_commit=off` ok (456
+  acknowledged writes lost as a suffix, allowed), keep 5 off FAIL ALTER SYSTEM, drop 6, keep 7,
+  keep 8 off, drop 9 off ok, keep 10 FAIL origin.
+- **the shipped PGO binary of `5192a74c0e`** (`dist-pgo.sh --out`, fresh training, staleness
+  0.00%, `e8508b54`): drop 1 FAIL (empty replslots.json, no start), keep 3, keep 10, drop 2,
+  drop 4 off, keep 7 ok; after the ddl / prepare kills on acknowledgements were added: drop 1
+  FAIL (same), drop 3 ok, drop 21 `--kinds ddl --rounds 12` FAIL (same, round 3).
+
+After (the candidate's code, `dist-pgo.sh --profdata` with that training's profile on the rebased
+head `34964127c`: staleness 0.77%, 7 of 2,804 hot functions, agent 311's format 5 changes;
+`b30d0ca8`): drop 1, keep 3, keep 10, drop 21 ddl x 12, drop 2, drop 4 off (222 lost as a
+suffix), keep 5 off (11), keep 7, drop 9 off (573), keep 11, drop 22 `--kinds prepare`, keep 23
+off `--kinds ddl,prepare,ack` (120), and release.sh's drop 1, keep 2, drop 3 off: 15 runs, 167
+cuts, all green. quick-check on the head rebased onto `eccf1d824` (`a72536013`): clippy 16
+warnings, none new; 159 tests in 20 binaries; crash seeds 1-3 x 2 and power_cut_at_every_point;
+regress 51,148 / 51,150, 0 newly differing; isolation 1,647 / 1,648; pg_dump_tap 14,609 passed,
+0 failed (1,146 s; the same on `0037841bd` before). The new test passed in its `--features
+powerloss` build. The profile of this training is kept in `~/.cache/a325/pgo/roll-engine.profdata`
+(20 MB, trained on `5192a74c0e`) for `dist-pgo.sh --profdata`.
+
+**2. `tools/release.sh`**: the release build, one command (no release pipeline builds
+pg-engine; `.github/workflows/release-cli.yml` builds only the CLI; no workflow was added or
+changed, nothing published). `release.sh --out DIR`: dist-pgo.sh (a fresh training, refuses a
+dirty checkout and a "NOT THE SHIPPED RECIPE" build), pgo-stale.py (refuses past
+`RELEASE_STALE_MAX`, default 1%), a smoke start, quick-check with `QC_PGO` (the shipped build's
+gate), three power-cut seeds (`RELEASE_POWER`, default `drop:1 keep:2 drop:3:off`), then
+`DIR/roll-engine`, `roll-engine.sha256`, `BUILD.txt` (dist-pgo's facts, each step's line, host,
+date) and the profile. `--built DIR` takes a dist-pgo output of the same code (a pipeline's build
+job; a later commit that changes only docs and tools is accepted), `--profdata FILE` builds with
+a merged profile. Its header has how a pipeline would call it. Run on this machine with `--built` the fixed PGO
+build and `RELEASE_SKIP=gate` (quick-check had run on the same code; the `QC_PGO` gate adds two
+fat-LTO builds, ~1.5 hours): build, stale 0.77%, smoke, three power seeds 111 / 115 / 105 s,
+`sha256sum -c` OK; with `RELEASE_STALE_MAX=0.5` it stops at stale, with an uncommitted change at
+build.
+
+**Measured**: no performance change was made. The fixes add an fsync: per ALTER SYSTEM (it had
+one; now the directory too), per origin create / drop / advance and at most one a second for an
+apply session's progress, and one per unsynced slot save (a session's release of its slot).
+
+**Dropped**: nothing measured and dropped.
+
+**Left**:
+1. quick-check and the batch train don't run `--power` yet (release.sh does): adding a
+   seed to quick-check's `QC_PGO` crash step and the train's `TRAIN_ENGINE_BIN` stage is a few
+   lines each, ~3 minutes a seed.
+2. Other files written with plain `std::fs` and no fsync that a cut can lose: `current_logfiles`
+   (PostgreSQL doesn't fsync it either), COPY TO / lo_export files (nor these). None found that
+   holds acknowledged state besides the three above.
+3. The shim models what the process asks for, by POSIX: no filesystem's actual reordering
+   (ext4's journal makes more durable). dm-log-writes in a privileged container would replay real
+   ext4 / XFS crash states; needs loop devices on the host.
+4. initdb and the first schema load are not cut (they run unwatched).
