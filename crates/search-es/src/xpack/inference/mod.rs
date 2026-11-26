@@ -646,6 +646,15 @@ impl Use {
     }
 }
 
+/// A linked OpenSearch cluster's user runs no inference here: a link reads this cluster's data
+/// within its ceiling, it never spends this cluster's models or its providers' keys.
+pub(crate) fn refuse_over_link(ctx: &Ctx) -> EsResult<()> {
+    if ctx.cluster.dialect == crate::cluster::Dialect::OpenSearch && crate::remote::links::is_link_call(ctx) {
+        return Err(EsError::illegal_argument("inference isn't available to a remote cluster's request: a link reads this cluster's data, it doesn't use its models"));
+    }
+    Ok(())
+}
+
 /// Runs an endpoint from inside roll (the `semantic` query, queries on `semantic_text` fields,
 /// rerankers) for `what`: an endpoint whose task type can't serve it is refused before any call
 /// (a paid call whose answer would be thrown away).

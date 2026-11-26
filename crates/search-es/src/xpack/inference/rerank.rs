@@ -122,7 +122,7 @@ fn check_endpoint(ctx: &crate::rest::Ctx<'_>, rr: &Reranker) -> EsResult<()> {
 
 pub async fn apply(ctx: &crate::rest::Ctx<'_>, rr: &Reranker, answer: &mut Value) -> EsResult<()> {
     // The endpoint is checked whether or not there are hits to rerank.
-    let checked = check_endpoint(ctx, rr);
+    let checked = super::refuse_over_link(ctx).and_then(|()| check_endpoint(ctx, rr));
     if let Err(e) = &checked
         && !rr.allow_failures
     {
