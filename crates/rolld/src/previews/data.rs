@@ -1097,6 +1097,93 @@ impl Search {
         }
         anyhow::bail!("roll search's data credential for the search branch holds no key or user")
     }
+
+    /// [`Self::kept_with_key`] plus the branch's own browser keys, one for each of its parent's
+    /// (roll search's `…/browser-keys/from-parent`: same reach, filter and limits, a derivable
+    /// one with a signing secret of the branch's own): the copy of the parent's keys the branch
+    /// holds works only on the parent, so a preview's page that searches from the browser needs
+    /// these. They're its environment's `ROLL_SEARCH_BROWSER_KEYS` (JSON: `name`, `id`,
+    /// `api_key`, `signing_secret` for each), and with exactly one, `ROLL_SEARCH_BROWSER_KEY`,
+    /// `ROLL_SEARCH_BROWSER_KEY_ID` and (derivable) `ROLL_SEARCH_SIGNING_SECRET`; none when the
+    /// parent has no browser keys. Revoked with the branch ([`Brancher::retire`]).
+    async fn kept_for(&self, v: &Value, name: &str) -> anyhow::Result<String> {
+        let kept = self.kept_with_key(v, name).await?;
+        let id = s(&v["id"]).unwrap_or_default();
+        let made = match self.0.post(&format!("/v1/search/clusters/{}/browser-keys/from-parent", seg(&id)), json!({})).await {
+            Ok(m) => m,
+            Err(e) => {
+                // No link without them: the data key just made goes too (roll search took back
+                // whatever browser keys it had made).
+                let _ = self.retire("", &id, Some(&kept)).await;
+                anyhow::bail!("the search branch's own browser keys couldn't be made ({e:#})")
+            }
+        };
+        let keys: Vec<Value> = made["keys"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|k| {
+                let mut one = json!({ "name": k["name"], "id": k["id"], "api_key": k["api_key"] });
+                if let Some(secret) = k.get("signing_secret") {
+                    one["signing_secret"] = secret.clone();
+                }
+                one
+            })
+            .collect();
+        let mut kept: Value = serde_json::from_str(&kept)?;
+        if !keys.is_empty() {
+            kept[BROWSER_KEYS] = json!(Value::Array(keys.clone()).to_string());
+            if let [only] = keys.as_slice() {
+                kept["ROLL_SEARCH_BROWSER_KEY"] = only["api_key"].clone();
+                kept["ROLL_SEARCH_BROWSER_KEY_ID"] = only["id"].clone();
+                if let Some(secret) = only.get("signing_secret") {
+                    kept["ROLL_SEARCH_SIGNING_SECRET"] = secret.clone();
+                }
+            }
+        }
+        Ok(kept.to_string())
+    }
+
+    /// Revokes branch `id`'s data keys previews made for preview branch `name` (`roll preview
+    /// <name>`): for a branch whose link was never recorded (made just before a crash).
+    async fn revoke_data_keys_named(&self, id: &str, name: &str) -> anyhow::Result<()> {
+        let path = format!("/_security/api_key?active_only=true&name={}", seg(&format!("roll preview {name}")));
+        let v = match self.0.post(&format!("/v1/search/clusters/{}/request", seg(id)), json!({ "method": "GET", "path": path })).await {
+            Ok(v) => v,
+            Err(e) if is_404(&e) => return Ok(()),
+            Err(e) => return Err(e),
+        };
+        let listed: Value = serde_json::from_str(v["body"].as_str().unwrap_or("{}")).unwrap_or(Value::Null);
+        for key in listed["api_keys"].as_array().into_iter().flatten().filter_map(|k| s(&k["id"])) {
+            self.0.delete(&format!("/v1/search/clusters/{}/keys/{}", seg(id), seg(&key))).await?;
+        }
+        Ok(())
+    }
+}
+
+/// The origin of a page's URL as browsers send it, normalised as roll search keeps allowed
+/// origins (`search_server::cors::normalize_origin`): `None` for anything that isn't one (it's
+/// skipped, never a failed pass).
+fn origin_of(url: &str) -> Option<String> {
+    let (scheme, rest) = url.split_once("://")?;
+    let authority = rest.split(['/', '?', '#']).next()?;
+    // A login in the URL is no part of an origin.
+    let authority = authority.rsplit('@').next()?;
+    search_server::cors::normalize_origin(&format!("{scheme}://{authority}")).ok()
+}
+
+/// When each search branch's copies of its parent's browser keys were last checked against the
+/// parent ([`Search::serve`]): at most once a minute, as listing keys wakes both clusters.
+static PRUNED: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>> = std::sync::LazyLock::new(Default::default);
+
+/// What a search branch's own browser keys are kept as, and the variable the preview reads them
+/// from ([`Search::kept_for`]).
+const BROWSER_KEYS: &str = "ROLL_SEARCH_BROWSER_KEYS";
+
+/// The ids of the browser keys `kept` holds.
+fn browser_key_ids(kept: &Value) -> Vec<String> {
+    let listed: Value = kept[BROWSER_KEYS].as_str().and_then(|k| serde_json::from_str(k).ok()).unwrap_or(Value::Null);
+    listed.as_array().into_iter().flatten().filter_map(|k| s(&k["id"])).collect()
 }
 
 #[async_trait]
@@ -1172,14 +1259,19 @@ impl Brancher for Search {
     async fn branch(&self, parent: &str, name: &str, mode: Mode) -> anyhow::Result<Branched> {
         let path = format!("/v1/search/clusters/{}/branches", seg(parent));
         match self.0.post(&path, json!({ "name": name })).await {
-            Ok(v) => Ok(Branched { r#ref: s(&v["id"]).ok_or_else(|| anyhow::anyhow!("a search branch without an id"))?, kept: Some(self.kept_with_key(&v, name).await?) }),
+            Ok(v) => Ok(Branched { r#ref: s(&v["id"]).ok_or_else(|| anyhow::anyhow!("a search branch without an id"))?, kept: Some(self.kept_for(&v, name).await?) }),
             // From before a crash: its password is gone, and it holds nothing yet. Make it again.
             Err(e) if conflict_is_ours(&e) => {
                 let c = self.0.get(&format!("/v1/search/clusters/{}", seg(name))).await?;
-                self.delete(parent, &s(&c["id"]).unwrap_or_default(), name).await?;
+                let old = s(&c["id"]).unwrap_or_default();
+                // What it handed out was never recorded: found by what they are (its own browser
+                // keys, its data keys by name) and revoked, or a restore would bring them back.
+                self.retire(parent, &old, None).await?;
+                self.revoke_data_keys_named(&old, name).await?;
+                self.delete(parent, &old, name).await?;
                 let v = self.0.post(&path, json!({ "name": name })).await?;
                 let _ = mode;
-                Ok(Branched { r#ref: s(&v["id"]).unwrap_or_default(), kept: Some(self.kept_with_key(&v, name).await?) })
+                Ok(Branched { r#ref: s(&v["id"]).unwrap_or_default(), kept: Some(self.kept_for(&v, name).await?) })
             }
             Err(e) => Err(e),
         }
@@ -1210,7 +1302,23 @@ impl Brancher for Search {
     /// branch's data credential previews handed out is revoked (its id is in what's kept: an API
     /// key is `base64(<id>@<cluster>:<key>)`, an OpenSearch data user `<id>@<cluster>`).
     async fn retire(&self, _parent: &str, branch: &str, kept: Option<&str>) -> anyhow::Result<()> {
-        let Some(v) = kept.and_then(|k| serde_json::from_str::<Value>(k).ok()) else { return Ok(()) };
+        let v = kept.and_then(|k| serde_json::from_str::<Value>(k).ok()).unwrap_or(Value::Null);
+        // Its own browser keys too, they'd come back with a restore as the data key would: every
+        // one made after its parent's (`from_parent`), recorded or not, and the ones recorded.
+        let mut ids = browser_key_ids(&v);
+        match self.0.get(&format!("/v1/search/clusters/{}/browser-keys", seg(branch))).await {
+            Ok(listed) => ids.extend(listed["keys"].as_array().into_iter().flatten().filter(|k| k.get("from_parent").is_some_and(|p| !p.is_null())).filter_map(|k| s(&k["id"]))),
+            Err(e) if is_404(&e) => {}
+            Err(e) => return Err(e),
+        }
+        ids.sort();
+        ids.dedup();
+        for key in ids {
+            self.0.delete(&format!("/v1/search/clusters/{}/browser-keys/{}", seg(branch), seg(&key))).await?;
+        }
+        if v.is_null() {
+            return Ok(());
+        }
         let from_key = s(&v["ELASTICSEARCH_API_KEY"]).and_then(|k| {
             use base64::Engine as _;
             let raw = String::from_utf8(base64::engine::general_purpose::STANDARD.decode(k).ok()?).ok()?;
@@ -1235,6 +1343,56 @@ impl Brancher for Search {
         anyhow::ensure!(c["name"] == name && of_parent && branch != parent, "refusing to delete search cluster {branch}: it isn't {parent}'s branch {name}");
         self.0.post(&format!("/v1/search/clusters/{}/password", seg(branch)), json!({})).await.map_err(|e| anyhow::anyhow!("changing the search branch's password before it's deleted: {e:#}"))?;
         self.0.delete(&format!("/v1/search/clusters/{}", seg(branch))).await
+    }
+
+    /// A branch with browser keys of its own answers the preview's pages: its allowed origins are
+    /// its parent's and the pages' (`urls`' origins, normalised; one that isn't an origin is
+    /// skipped), and only those, set when they differ (the parent's methods, headers and max age
+    /// kept). It follows its parent: a parent that turned its CORS off turns the branch's off, and
+    /// copies of parent keys revoked, expired or rotated since are revoked
+    /// (`…/browser-keys/from-parent/prune`, at most once a minute: listing keys wakes both
+    /// clusters). A branch without browser keys of its own has its origins left as they are.
+    async fn serve(&self, parent: &str, branch: &str, kept: Option<&str>, urls: &[String]) -> anyhow::Result<()> {
+        anyhow::ensure!(branch != parent, "refusing to change search cluster {parent}'s origins: it's the parent, not the preview's branch");
+        let v = kept.and_then(|k| serde_json::from_str::<Value>(k).ok()).unwrap_or(Value::Null);
+        let has_keys = !browser_key_ids(&v).is_empty();
+        let theirs = self.0.get(&format!("/v1/search/clusters/{}", seg(parent))).await?;
+        let mine = self.0.get(&format!("/v1/search/clusters/{}", seg(branch))).await?;
+        let origins_of = |c: &Value| -> Vec<String> { c["cors"]["allow_origin"].as_array().into_iter().flatten().filter_map(s).collect() };
+        let (parents, mut has) = (origins_of(&theirs), origins_of(&mine));
+        if parents.is_empty() {
+            // The parent lets no browser in now: neither does its branch.
+            if !has.is_empty() {
+                self.0.call(Method::PATCH, &format!("/v1/search/clusters/{}", seg(branch)), Some(json!({ "cors": null }))).await?;
+            }
+        } else if has_keys {
+            let mut want: Vec<String> = parents.into_iter().chain(urls.iter().filter_map(|u| origin_of(u))).collect();
+            want.sort();
+            want.dedup();
+            has.sort();
+            if has != want {
+                let mut set = theirs["cors"].clone();
+                set["allow_origin"] = json!(want);
+                self.0.call(Method::PATCH, &format!("/v1/search/clusters/{}", seg(branch)), Some(json!({ "cors": set }))).await?;
+            }
+        }
+        if has_keys {
+            let due = {
+                let mut last = PRUNED.lock().unwrap_or_else(|e| e.into_inner());
+                let now = std::time::Instant::now();
+                match last.get(branch) {
+                    Some(t) if now.duration_since(*t) < std::time::Duration::from_secs(60) => false,
+                    _ => {
+                        last.insert(branch.to_string(), now);
+                        true
+                    }
+                }
+            };
+            if due {
+                self.0.post(&format!("/v1/search/clusters/{}/browser-keys/from-parent/prune", seg(branch)), json!({})).await?;
+            }
+        }
+        Ok(())
     }
 
     async fn connect(&self, _parent: &str, branch: &str, kept: Option<&str>) -> anyhow::Result<Vec<(String, String)>> {
@@ -1423,6 +1581,96 @@ mod tests {
         search.retire("srch_p", "srch_b", Some(&serde_json::json!({ "OPENSEARCH_USERNAME": "pv@pv-x" }).to_string())).await.unwrap();
         search.delete("srch_p", "srch_b", "pv-x").await.unwrap();
         assert_eq!(revoked.lock().unwrap().clone(), ["key_1", "pv", "password", "cluster"].map(String::from).to_vec());
+    }
+
+    /// A search branch's own browser keys reach the preview as variables. Its allowed origins
+    /// become its parent's plus the origins of the preview's pages (normalised; a URL that isn't
+    /// one skipped; set once, not again when nothing moved), and off once the parent's are; stale
+    /// copies are pruned at most once a minute. The keys are revoked with the branch, the ones
+    /// never recorded too, and a branch whose keys couldn't be made gives its data key back.
+    #[tokio::test]
+    async fn a_search_branch_gets_browser_keys_of_its_own_for_the_previews_pages() {
+        use axum::routing::{delete, get, post};
+        use roll_previews::ports::Brancher as _;
+        use std::sync::{Arc, Mutex};
+        type Shared<T> = Arc<Mutex<T>>;
+        let branch_cors: Shared<serde_json::Value> = Arc::new(Mutex::new(serde_json::json!({ "allow_origin": ["https://shop.example.com"] })));
+        let parent_cors: Shared<serde_json::Value> = Arc::new(Mutex::new(serde_json::json!({ "allow_origin": ["https://shop.example.com"], "max_age": 60 })));
+        let (patched, revoked, pruned): (Shared<Vec<serde_json::Value>>, Shared<Vec<String>>, Shared<u32>) = Default::default();
+        let copy_fails = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (c1, c2, pc, p1, r1, r2, pr, cf) = (branch_cors.clone(), branch_cors.clone(), parent_cors.clone(), patched.clone(), revoked.clone(), revoked.clone(), pruned.clone(), copy_fails.clone());
+        let data_key = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, "key_1@pv-x:secret");
+        let dk = data_key.clone();
+        let app = axum::Router::new()
+            .route("/v1/search/clusters/{id}/keys", post(move || { let dk = dk.clone(); async move { axum::Json(serde_json::json!({ "id": "key_1", "access": "data", "api_key": dk })) } }))
+            .route(
+                "/v1/search/clusters/{id}/browser-keys/from-parent",
+                post(move || {
+                    let cf = cf.clone();
+                    async move {
+                        if cf.load(std::sync::atomic::Ordering::SeqCst) {
+                            return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, axum::Json(serde_json::json!({ "error": "the parent's keys couldn't be read" })));
+                        }
+                        (axum::http::StatusCode::OK, axum::Json(serde_json::json!({ "keys": [{ "parent_key": "bk_p", "id": "bk_b", "name": "site", "api_key": "browser-key", "derivable": true, "signing_secret": "rdks_b" }] })))
+                    }
+                }),
+            )
+            .route("/v1/search/clusters/{id}/browser-keys/from-parent/prune", post(move || { let pr = pr.clone(); async move { *pr.lock().unwrap() += 1; axum::Json(serde_json::json!({ "revoked": [] })) } }))
+            // What the branch holds: the recorded key, and one made just before a crash.
+            .route("/v1/search/clusters/{id}/browser-keys", get(|| async { axum::Json(serde_json::json!({ "keys": [{ "id": "bk_b", "from_parent": "bk_p" }, { "id": "bk_lost", "from_parent": "bk_p" }, { "id": "bk_mine" }] })) }))
+            .route(
+                "/v1/search/clusters/{id}",
+                get(move |axum::extract::Path(id): axum::extract::Path<String>| {
+                    let (c, pc) = (c1.clone(), pc.clone());
+                    async move {
+                        axum::Json(match id.as_str() {
+                            "srch_p" => serde_json::json!({ "id": "srch_p", "cors": pc.lock().unwrap().clone() }),
+                            _ => serde_json::json!({ "id": "srch_b", "cors": c.lock().unwrap().clone() }),
+                        })
+                    }
+                })
+                .patch(move |axum::Json(body): axum::Json<serde_json::Value>| {
+                    let (c, p) = (c2.clone(), p1.clone());
+                    async move {
+                        *c.lock().unwrap() = body["cors"].clone();
+                        p.lock().unwrap().push(body);
+                        axum::Json(serde_json::json!({}))
+                    }
+                }),
+            )
+            .route("/v1/search/clusters/{id}/browser-keys/{key}", delete(move |axum::extract::Path((_, key)): axum::extract::Path<(String, String)>| { let r = r1.clone(); async move { r.lock().unwrap().push(key); axum::http::StatusCode::NO_CONTENT } }))
+            .route("/v1/search/clusters/{id}/keys/{key}", delete(move |axum::extract::Path((_, key)): axum::extract::Path<(String, String)>| { let r = r2.clone(); async move { r.lock().unwrap().push(key); axum::http::StatusCode::NO_CONTENT } }));
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+        let search = super::Search(super::super::Api::new(addr));
+        let branch = serde_json::json!({ "id": "srch_b", "url": "http://search.test:9200" });
+        let kept = search.kept_for(&branch, "pv-x").await.unwrap();
+        let vars: std::collections::BTreeMap<String, String> = search.connect("srch_p", "srch_b", Some(&kept)).await.unwrap().into_iter().collect();
+        assert_eq!((vars["ROLL_SEARCH_BROWSER_KEY"].as_str(), vars["ROLL_SEARCH_BROWSER_KEY_ID"].as_str(), vars["ROLL_SEARCH_SIGNING_SECRET"].as_str()), ("browser-key", "bk_b", "rdks_b"));
+        assert!(vars["ROLL_SEARCH_BROWSER_KEYS"].contains("\"api_key\":\"browser-key\""), "{vars:?}");
+        // The pages' origins beside the parent's: a default port dropped, a path ignored, what
+        // isn't a URL skipped; set once, not again when nothing moved; pruned once a minute.
+        let urls = ["https://Web-PV-X.preview.test:443/docs?q=1", "not a url", "ftp://files.test/"].map(String::from);
+        search.serve("srch_p", "srch_b", Some(&kept), &urls).await.unwrap();
+        search.serve("srch_p", "srch_b", Some(&kept), &urls).await.unwrap();
+        assert_eq!(patched.lock().unwrap().clone(), vec![serde_json::json!({ "cors": { "allow_origin": ["https://shop.example.com", "https://web-pv-x.preview.test"], "max_age": 60 } })]);
+        assert_eq!(*pruned.lock().unwrap(), 1, "at most once a minute");
+        assert!(search.serve("srch_b", "srch_b", Some(&kept), &urls).await.is_err(), "never the parent's own origins");
+        // The parent turned its CORS off: so does the branch.
+        *parent_cors.lock().unwrap() = serde_json::Value::Null;
+        search.serve("srch_p", "srch_b", Some(&kept), &urls).await.unwrap();
+        assert_eq!(patched.lock().unwrap().last().cloned(), Some(serde_json::json!({ "cors": null })));
+        // Revoked with the branch, as its data key is: the ones never recorded too.
+        search.retire("srch_p", "srch_b", Some(&kept)).await.unwrap();
+        let mut gone = revoked.lock().unwrap().clone();
+        gone.sort();
+        assert_eq!(gone, ["bk_b", "bk_lost", "key_1"].map(String::from).to_vec());
+        // No browser keys made: no link, and the data key just made is given back.
+        revoked.lock().unwrap().clear();
+        copy_fails.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(search.kept_for(&branch, "pv-x").await.is_err());
+        assert!(revoked.lock().unwrap().contains(&"key_1".to_string()), "{:?}", revoked.lock().unwrap());
     }
 
     /// Previews' masking over a real roll search (in process): on a branch of a seeded cluster,
