@@ -17,7 +17,9 @@
 //! once for a machine credential (`POST /v1/secrets/login/bootstrap`), logs in with that, and
 //! replaces it at half its life (`POST /v1/secrets/login/refresh`). The secrets are roll-access's
 //! chains ([`crate::Workloads::bootstrap`]); `machine_chains` only says which identity a chain is
-//! for. A spent one used again revokes its chain.
+//! for, and until when its newest credential lives (`live_until`). A spent one used again revokes
+//! its chain, so a chain's row is kept, and counted, until its last credential would have ended
+//! (revoked or not); the sweeper forgets it a day after, and an admin may sooner.
 
 use crate::access::{Action, Caller, Scope};
 use crate::issuer::Subject;
@@ -63,7 +65,8 @@ CREATE TABLE IF NOT EXISTS aws_logins (
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS aws_logins_at ON aws_logins (at);
 -- Machine identities' chains (roll-access's: a bootstrap token, the machine credentials it led
--- to): the identity each is for, and how long its credentials live.
+-- to): the identity each is for, and how long its credentials live (`live_until`, lib.rs: when
+-- its newest one ends).
 CREATE TABLE IF NOT EXISTS machine_chains (
     chain TEXT PRIMARY KEY,
     identity TEXT NOT NULL,
@@ -78,10 +81,18 @@ CREATE INDEX IF NOT EXISTS machine_chains_identity ON machine_chains (identity);
 pub(crate) const IDENTITIES_MAX: i64 = 50;
 pub const TTL_MIN: i64 = 5;
 pub const TTL_MAX: i64 = 60;
-/// Bootstrap tokens an identity has made and not deleted, at most (one per machine). With
-/// [`IDENTITIES_MAX`], a project's cap on machine chains: roll-access doesn't count them toward the
-/// workload token caps every project's logins share, so this is all that bounds them.
-const CHAINS_MAX: i64 = 1000;
+/// Machines an identity has at once, at most: chains whose newest bootstrap token or machine
+/// credential hasn't ended yet, revoked or not (a spent secret is kept until then, to catch its
+/// reuse). With [`IDENTITIES_MAX`], a project's cap on machine chains: roll-access doesn't count
+/// them toward the workload token caps every project's logins share, so this is all that bounds
+/// them.
+pub(crate) const CHAINS_MAX: i64 = 1000;
+/// How long after its last credential ended a chain's row is kept (its machine shows as ended).
+const CHAIN_KEEP_MS: i64 = 86_400_000;
+/// Chains the sweeper reads from roll-access in one pass, at most.
+const CHAIN_SWEEP: i64 = 500;
+/// The chains [`CHAINS_MAX`] counts: not past their newest credential's end (NULL: not read yet).
+const HELD: &str = "(live_until IS NULL OR live_until > ?)";
 /// Bootstrap tokens a project makes a minute, at most.
 const BOOTSTRAPS_PER_PROJECT: u32 = 60;
 /// A bootstrap token's minutes, and its machine credentials' hours, unless the admin says.
@@ -809,9 +820,11 @@ impl Secrets {
             crate::caller::Origin::Operator => None,
             crate::caller::Origin::Gone => return Err(Error::Forbidden(format!("whoever made identity {} can't sign in any more: make it again", i.name))),
         };
-        let full = || bad(format!("identity {} has {CHAINS_MAX} bootstrap tokens: delete it and make it again", i.name));
-        let count = |c: &code_sql::Conn<'_>| c.query_row("SELECT COUNT(*) FROM machine_chains WHERE identity = ?", [id], |r| r.get::<_, i64>(0));
-        if self.db.read(count)? >= CHAINS_MAX {
+        let max = self.machines_max.load(std::sync::atomic::Ordering::Relaxed);
+        let full = || bad(format!("identity {} has {max} machines whose credentials haven't ended: revoke the ones it doesn't have any more, and each frees its place once its last credential would have ended", i.name));
+        let count = |c: &code_sql::Conn<'_>, now: i64| c.query_row(&format!("SELECT COUNT(*) FROM machine_chains WHERE identity = ? AND {HELD}"), params![id, now], |r| r.get::<_, i64>(0));
+        let now = self.db.now_ms()?;
+        if self.db.read(|c| count(c, now))? >= max {
             return Err(full());
         }
         // Outside the write (roll-access's store), then the row, counted again in its write (it
@@ -825,11 +838,11 @@ impl Secrets {
             if there.is_none() {
                 return Ok(false);
             }
-            if count(c)? >= CHAINS_MAX {
+            if count(c, now)? >= max {
                 return Err(full());
             }
             crate::guardrails::read(c)?.machine_hours(hours)?;
-            c.execute("INSERT INTO machine_chains (chain, identity, project_id, hours, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?)", params![made.chain, id, project, hours, now, by])?;
+            c.execute("INSERT INTO machine_chains (chain, identity, project_id, hours, created_at, created_by, live_until) VALUES (?, ?, ?, ?, ?, ?, ?)", params![made.chain, id, project, hours, now, by, made.expires_at])?;
             audit::record(c, self.keys()?, project, caller, "identity.bootstrap", None, None, &[], &format!("made a bootstrap token for identity {} (chain {}, {minutes} min, credentials of {hours} h)", i.name, made.chain), now)?;
             Ok::<_, Error>(true)
         });
@@ -891,6 +904,68 @@ impl Secrets {
         Ok(())
     }
 
+    /// `POST …/identities/{id}/machines/prune` (admin): forget the identity's machines whose last
+    /// credential has ended, revoked or not (the sweeper does a day after). How many, audited.
+    pub fn prune_machines(&self, project: &str, id: &str, caller: &Caller) -> Result<usize> {
+        caller.need(Action::Admin, &Scope::project(project))?;
+        self.project(project)?;
+        let now = self.db.now_ms()?;
+        let found: Option<(String, Vec<String>)> = self.db.read(|c| {
+            let Some(name) = c.query_row("SELECT name FROM identities WHERE id = ? AND project_id = ?", [id, project], |r| r.get::<_, String>(0)).optional()? else { return Ok::<_, Error>(None) };
+            let chains = c.query("SELECT chain FROM machine_chains WHERE identity = ? AND project_id = ? AND (live_until IS NULL OR live_until <= ?)", params![id, project, now], |r| r.get(0))?;
+            Ok(Some((name, chains)))
+        })?;
+        let (name, chains) = found.ok_or_else(|| Error::NotFound(format!("no identity {id}")))?;
+        self.settle_chains(&chains)?;
+        let now = self.db.now_ms()?;
+        Ok(self.db.write(|c| {
+            let n = c.execute("DELETE FROM machine_chains WHERE identity = ? AND project_id = ? AND live_until <= ?", params![id, project, now])?;
+            if n > 0 {
+                audit::record(c, self.keys()?, project, caller, "identity.machine.prune", None, None, &[], &format!("forgot {n} ended machine{} of identity {name}", if n == 1 { "" } else { "s" }), now)?;
+            }
+            Ok::<_, Error>(n)
+        })?)
+    }
+
+    /// Write each chain's `live_until` as roll-access has it now: its newest credential's end,
+    /// revoked or not. One roll-access no longer holds has ended (now, when it was never read).
+    fn settle_chains(&self, chains: &[String]) -> Result<()> {
+        let Some(w) = &self.workloads else { return Ok(()) };
+        if chains.is_empty() {
+            return Ok(());
+        }
+        let states: BTreeMap<String, crate::ChainState> = w.chains(chains)?.into_iter().map(|s| (s.chain.clone(), s)).collect();
+        let now = self.db.now_ms()?;
+        self.db.write(|c| {
+            for chain in chains {
+                match states.get(chain).and_then(|s| s.expires_at) {
+                    // Never earlier than a refresh wrote meanwhile.
+                    Some(until) => c.execute("UPDATE machine_chains SET live_until = ? WHERE chain = ? AND (live_until IS NULL OR live_until < ?)", params![until, chain, until])?,
+                    None => c.execute("UPDATE machine_chains SET live_until = ? WHERE chain = ? AND live_until IS NULL", params![now, chain])?,
+                };
+            }
+            Ok::<_, Error>(())
+        })
+    }
+
+    /// The sweeper: forget machines a day after their last credential ended (read again from
+    /// roll-access first, so a refresh whose row write was lost isn't taken for an end).
+    pub(crate) fn sweep_machine_chains(&self) -> Result<usize> {
+        if self.workloads.is_none() {
+            return Ok(0);
+        }
+        let now = self.db.now_ms()?;
+        let chains: Vec<String> = self.db.read(|c| c.query("SELECT chain FROM machine_chains WHERE live_until IS NULL OR live_until <= ? ORDER BY live_until IS NOT NULL, live_until LIMIT ?", params![now, CHAIN_SWEEP], |r| r.get(0)))?;
+        self.settle_chains(&chains)?;
+        let old = self.db.now_ms()? - CHAIN_KEEP_MS;
+        Ok(self.db.write(|c| c.execute("DELETE FROM machine_chains WHERE live_until < ?", [old]))?)
+    }
+
+    /// Machines one machine identity has at once, at most (a test's lower cap).
+    pub fn set_machines_max(&self, n: i64) {
+        self.machines_max.store(n, std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// `POST /v1/secrets/login/bootstrap` (`from_bootstrap`) and `…/login/refresh` (public): a
     /// machine identity's bootstrap token, or its current machine credential, for the next machine
     /// credential. The one presented is spent; a spent one presented again revokes its chain.
@@ -926,7 +1001,11 @@ impl Secrets {
         let mut caller = Caller::acting(format!("identity:{}", i.id), std::sync::Arc::new(crate::access::Everything));
         caller.ip = ip;
         let (what, step) = if from_bootstrap { ("exchanged a bootstrap token", "identity.bootstrap.exchange") } else { ("replaced its machine credential", "identity.machine.refresh") };
-        self.db.write(|c| audit::record(c, self.keys()?, &project, &caller, step, None, None, &[], &format!("machine {} {what} for identity {}", next.chain, i.name), now))?;
+        self.db.write(|c| {
+            // Its place is held until the new credential ends (`CHAINS_MAX`).
+            c.execute("UPDATE machine_chains SET live_until = ? WHERE chain = ? AND identity = ? AND (live_until IS NULL OR live_until < ?)", params![next.expires_at, next.chain, i.id, next.expires_at])?;
+            audit::record(c, self.keys()?, &project, &caller, step, None, None, &[], &format!("machine {} {what} for identity {}", next.chain, i.name), now)
+        })?;
         let refresh_at = next.issued_at + (next.expires_at - next.issued_at) / 2;
         Ok(MachineSecret { identity: i.id, chain: next.chain, secret: next.secret, expires_at: next.expires_at, refresh_at: Some(refresh_at) })
     }

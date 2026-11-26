@@ -483,6 +483,8 @@ pub struct Secrets {
     bound_hosts: std::sync::OnceLock<Arc<dyn intercept::BoundHosts>>,
     /// Days a deleted project's secrets are kept to be recovered (deleted.rs).
     delete_window_days: std::sync::atomic::AtomicU32,
+    /// Machines one machine identity has at once (identities.rs).
+    machines_max: std::sync::atomic::AtomicI64,
     /// Hours the purge waits for an audit sink behind on a closed project (deleted.rs).
     purge_sink_grace_hours: std::sync::atomic::AtomicU32,
     /// rolld's ACME client for publicly trusted certificates (public_certs.rs), once it says.
@@ -796,6 +798,9 @@ impl Secrets {
         db.add_column("outside_dbs", "gateway", "TEXT")?;
         db.add_column("directories", "gateway", "TEXT")?;
         db.add_column("identities", "gateway", "TEXT")?;
+        // When a machine chain's newest credential ends (identities.rs, `CHAINS_MAX` counts the chains
+        // not past it); NULL until the sweeper reads it from roll-access.
+        db.add_column("machine_chains", "live_until", "INTEGER")?;
         if let (Some(directory), Ok(keys)) = (&opts.directory, &opts.keyring) {
             links.register(Arc::new(directories::Provider { db: db.clone(), keys: keys.clone(), unwrap: unwrap.clone(), directory: directory.clone() }));
         }
@@ -814,7 +819,7 @@ impl Secrets {
         if let (Some(github), Ok(keys)) = (&opts.github, &opts.keyring) {
             links.register(Arc::new(github_app::Provider { db: db.clone(), keys: keys.clone(), unwrap: unwrap.clone(), github: github.clone() }));
         }
-        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, people: opts.people, workloads: opts.workloads, gateway_links: opts.gateways, unwrap: unwrap.clone(), open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, outside: opts.outside, directory: opts.directory, github: opts.github, oidc: Default::default(), logins: Default::default(), answers: Default::default(), reads_per_minute: read::READS_PER_MINUTE.into(), code_refs: Default::default(), reach_holders: Default::default(), sts: opts.sts.clone(), clouds: opts.clouds, public_api, aws_server_id: Default::default(), crls, live_fps: Default::default(), issuer_keys: Default::default(), issuer_rotate_days: issuer::ROTATE_DAYS.into(), audit_keys: Default::default(), audit_rotate_days: audit_key::ROTATE_DAYS.into(), digests: Default::default(), counters: Default::default(), acme: Default::default(), recorder: Default::default(), validity: Default::default(), bound_hosts: Default::default(), uses: Default::default(), delete_window_days: deleted::WINDOW_DAYS.into(), purge_sink_grace_hours: deleted::SINK_GRACE_HOURS.into(), notifier: Default::default(), public_ca: Default::default() })
+        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, people: opts.people, workloads: opts.workloads, gateway_links: opts.gateways, unwrap: unwrap.clone(), open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, outside: opts.outside, directory: opts.directory, github: opts.github, oidc: Default::default(), logins: Default::default(), answers: Default::default(), reads_per_minute: read::READS_PER_MINUTE.into(), code_refs: Default::default(), reach_holders: Default::default(), sts: opts.sts.clone(), clouds: opts.clouds, public_api, aws_server_id: Default::default(), crls, live_fps: Default::default(), issuer_keys: Default::default(), issuer_rotate_days: issuer::ROTATE_DAYS.into(), audit_keys: Default::default(), audit_rotate_days: audit_key::ROTATE_DAYS.into(), digests: Default::default(), counters: Default::default(), acme: Default::default(), recorder: Default::default(), validity: Default::default(), bound_hosts: Default::default(), uses: Default::default(), delete_window_days: deleted::WINDOW_DAYS.into(), machines_max: identities::CHAINS_MAX.into(), purge_sink_grace_hours: deleted::SINK_GRACE_HOURS.into(), notifier: Default::default(), public_ca: Default::default() })
     }
 
     pub fn links(&self) -> &Links {
