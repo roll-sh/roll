@@ -647,8 +647,10 @@ LocalSystem; `--service-name` picks another name) with the flags given, and its 
 `%ProgramData%\roll\agent`, which only the Administrators and the service may open:
 
 - `agent-token`, the request token, readable by the service and the accounts `--token-reader`
-  names (the app's: `--token-reader "IIS AppPool\shop"`), never by every user. An existing one is
-  kept and its access list set again.
+  names (the app's: `--token-reader "IIS AppPool\shop"`), never by every user. An existing one an
+  administrator made (owned by the Administrators, SYSTEM or you) is kept and its access list set
+  again; one someone else made is replaced by a new token, which the command says on stderr (never
+  the value), since whoever made it knows it.
 - `<name>.login`, the login this command was run with: `ROLL_TOKEN`, or a workload identity's
   `ROLL_IDENTITY` and what it logs in with ("On a VM" below: `ROLL_IDENTITY_KIND=azure` and
   `ROLL_OIDC_AUDIENCE` on an Azure VM, a bootstrap token on bare metal; a `ROLL_OIDC_TOKEN_FILE`
@@ -656,6 +658,19 @@ LocalSystem; `--service-name` picks another name) with the flags given, and its 
   command line names only the project, the environment and the flags. A machine identity's
   credential is kept next to it (`<name>.machine.json`).
 - `<name>.log`, the agent's stderr (which never holds a value).
+
+By default every user may create folders in `%ProgramData%`, and owns what they make there, so a
+local user could make `roll\agent` first and plant a token. Before writing anything, the command
+opens `%ProgramData%\roll`, `%ProgramData%\roll\agent`, and the directories of a `--token-file`
+and of the login's `ROLL_MACHINE_CREDENTIAL_FILE` (each a full path), without following a link or
+junction (`trusted_dir` in `crates/roll-cli/src/sys.rs`). Any one that doesn't exist is made, owned
+by the Administrators, with an access list of the Administrators and SYSTEM only (plus the service
+on its own directories) and `OWNER RIGHTS` given nothing, so no owner keeps the right to change it.
+Any one that exists is refused if it's a link or junction, if its owner isn't the Administrators,
+SYSTEM or you, or if anyone else may add to it, remove from it, or change its owner or access
+list (services' own accounts aside): "someone else made C:\ProgramData\roll\agent (…): remove it
+as an administrator and run this again". Your own logins' directory, `%APPDATA%\roll`, is refused
+when someone else owns it.
 
 ```powershell
 $env:ROLL_TOKEN = "rlt_…"   # roll secrets tokens create agent --for-env production
@@ -668,7 +683,9 @@ The service runs `roll.exe` from where it is, so install roll for the machine fi
 -System`, `winget install --scope machine`, `scoop install -g`): a `roll.exe` in your profile is
 refused, since the service's account can't read it (`crates/roll-cli/src/secrets/service.rs`; its
 command line's quoting is `a_windows_service_command_line_keeps_each_argument_whole` in `sys.rs`,
-and `release-cli.yml`'s `windows-check` builds it).
+and `release-cli.yml`'s `windows-check` builds it and runs
+`a_directory_someone_else_owns_or_may_change_isnt_trusted_for_the_machine`, the directory checks,
+on Windows; Linux CI can't).
 
 ### On a VM
 A VM logs in as itself, with no long-lived token on its disk. Each platform's way, in the agent's
