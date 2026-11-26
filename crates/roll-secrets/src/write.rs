@@ -1143,15 +1143,23 @@ impl Secrets {
 
     /// [`Self::batch`], saying how the change came about (an import, a restore).
     pub(crate) fn batch_via(&self, project: &str, env: &str, b: Batch, via: Via, caller: &Caller) -> Result<Applied> {
+        let (items, expect) = self.batch_checks(project, env, &b, caller)?;
+        self.commit_with(project, env, items, &expect, via, b.message.as_deref().unwrap_or_default(), b.if_seq, false, caller)
+    }
+
+    /// What [`Self::batch`] and [`Self::check_batch`] both check before the write's transaction,
+    /// in one place so they can't drift: a check added here refuses a dry run too. The items and
+    /// their `if_version`s.
+    fn batch_checks(&self, project: &str, env: &str, b: &Batch, caller: &Caller) -> Result<(Vec<Item>, Vec<(usize, i64)>)> {
         let path = names::path(b.path.as_deref().unwrap_or("/"))?;
         caller.need(Action::Write, &Scope::at(project, env, &path))?;
-        let message = b.message.unwrap_or_default();
-        names::message(&message)?;
+        names::message(b.message.as_deref().unwrap_or_default())?;
         let items = items(&path, &b.ops, caller)?;
         self.check_items(project, env, &items, caller)?;
         self.check_shared_certs(project, env, &items, b.confirm.as_deref())?;
         let expect = expectations(&b.ops)?;
-        self.commit_with(project, env, items, &expect, via, &message, b.if_seq, false, caller)
+        self.check_types(project, &items)?;
+        Ok((items, expect))
     }
 
     /// [`Self::batch`]'s checks, applying nothing: what the write would refuse (rights, names,
@@ -1161,14 +1169,8 @@ impl Secrets {
     /// it all again. Each op's slot's version now (0: none), in order: what its `if_version` would
     /// be.
     pub fn check_batch(&self, project: &str, env: &str, b: &Batch, caller: &Caller) -> Result<Vec<i64>> {
-        let path = names::path(b.path.as_deref().unwrap_or("/"))?;
-        caller.need(Action::Write, &Scope::at(project, env, &path))?;
-        names::message(b.message.as_deref().unwrap_or_default())?;
-        let items = items(&path, &b.ops, caller)?;
-        self.check_items(project, env, &items, caller)?;
-        self.check_shared_certs(project, env, &items, b.confirm.as_deref())?;
-        let expect = expectations(&b.ops)?;
-        self.check_types(project, &items)?;
+        let (items, expect) = self.batch_checks(project, env, b, caller)?;
+        // The write's own checks inside its transaction (it runs them again).
         self.db.read(|c| {
             let e = envs::by_slug(c, project, env)?;
             check_versions(c, &e.id, &items, &expect)?;
