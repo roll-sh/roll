@@ -8122,6 +8122,9 @@ async fn a_volume_filling_up_is_said_once() {
     assert_eq!(events().await, 1, "once while it stays full");
     let (_, env) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None).await;
     assert_eq!(env["volume_used"]["bytes"], 1_000_000_000u64, "{env}");
+    // Kept by the hour too: Metrics charts it against its size.
+    let (_, m) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/metrics?minutes=60"), None).await;
+    assert_eq!((m["volume"]["size_gb"].as_u64(), m["volume"]["points"].as_array().and_then(|p| p.last()).map(|p| p["bytes"].clone())), (Some(1), Some(json!(1_000_000_000u64))), "{}", m["volume"]);
     w.fake.set_volume_used(&volume, 1_000);
     w.apps.measure_volumes().await;
     w.fake.set_volume_used(&volume, 1_050_000_000);
