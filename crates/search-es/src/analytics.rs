@@ -65,6 +65,9 @@ pub struct QueryStats {
     pub position_sum: u64,
     /// Clicks that had a position.
     pub positioned: u64,
+    /// `roll_conversion` events for the query, and their values summed, in thousandths.
+    pub conversions: u64,
+    pub value_milli: u64,
 }
 
 impl QueryStats {
@@ -76,10 +79,12 @@ impl QueryStats {
         self.clicks += o.clicks;
         self.position_sum += o.position_sum;
         self.positioned += o.positioned;
+        self.conversions += o.conversions;
+        self.value_milli += o.value_milli;
     }
 
     fn to_json(self, q: &str) -> serde_json::Value {
-        serde_json::json!([q, self.searches, self.no_hits, self.hits, self.latency_us, self.clicks, self.position_sum, self.positioned])
+        serde_json::json!([q, self.searches, self.no_hits, self.hits, self.latency_us, self.clicks, self.position_sum, self.positioned, self.conversions, self.value_milli])
     }
 
     fn from_json(v: &serde_json::Value) -> Option<(String, QueryStats)> {
@@ -87,7 +92,8 @@ impl QueryStats {
         let n = |i: usize| a.get(i).and_then(serde_json::Value::as_u64).unwrap_or(0);
         Some((
             a.first()?.as_str()?.to_string(),
-            QueryStats { searches: n(1), no_hits: n(2), hits: n(3), latency_us: n(4), clicks: n(5), position_sum: n(6), positioned: n(7) },
+            // Buckets stored before conversions were counted have none.
+            QueryStats { searches: n(1), no_hits: n(2), hits: n(3), latency_us: n(4), clicks: n(5), position_sum: n(6), positioned: n(7), conversions: n(8), value_milli: n(9) },
         ))
     }
 }
@@ -190,6 +196,9 @@ pub struct Bucket {
     pub searches: u64,
     pub no_hits: u64,
     pub clicks: u64,
+    /// `roll_conversion` events, and their values summed in thousandths.
+    pub conversions: u64,
+    pub value_milli: u64,
     pub top: TopQueries,
     /// Queries that found nothing (only `searches` is counted).
     pub empty: TopQueries,
@@ -197,7 +206,7 @@ pub struct Bucket {
 
 impl Bucket {
     pub fn new(top: usize, empty: usize) -> Bucket {
-        Bucket { searches: 0, no_hits: 0, clicks: 0, top: TopQueries::new(top), empty: TopQueries::new(empty) }
+        Bucket { searches: 0, no_hits: 0, clicks: 0, conversions: 0, value_milli: 0, top: TopQueries::new(top), empty: TopQueries::new(empty) }
     }
 
     fn pending() -> Bucket {
@@ -205,7 +214,7 @@ impl Bucket {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.searches == 0 && self.clicks == 0
+        self.searches == 0 && self.clicks == 0 && self.conversions == 0
     }
 
     fn search(&mut self, q: &str, hits: u64, latency_us: u64, bytes: &mut usize) {
@@ -239,11 +248,23 @@ impl Bucket {
         }
     }
 
+    /// A conversion of a search for `q`, worth `value_milli` thousandths.
+    fn conversion(&mut self, q: &str, value_milli: u64, bytes: &mut usize) {
+        self.conversions += 1;
+        self.value_milli = self.value_milli.saturating_add(value_milli);
+        if let Some(s) = self.top.slot(q, bytes) {
+            s.conversions += 1;
+            s.value_milli = s.value_milli.saturating_add(value_milli);
+        }
+    }
+
     /// Adds `other` (each list then keeps its own capacity).
     pub fn merge(&mut self, other: &Bucket) {
         self.searches += other.searches;
         self.no_hits += other.no_hits;
         self.clicks += other.clicks;
+        self.conversions += other.conversions;
+        self.value_milli = self.value_milli.saturating_add(other.value_milli);
         self.top.merge(&other.top);
         self.empty.merge(&other.empty);
     }
@@ -263,6 +284,8 @@ impl Bucket {
             "s": self.searches,
             "z": self.no_hits,
             "c": self.clicks,
+            "v": self.conversions,
+            "m": self.value_milli,
             "q": self.top.map.iter().map(|(q, s)| s.to_json(q)).collect::<Vec<_>>(),
             "n": self.empty.map.iter().map(|(q, s)| serde_json::json!([&**q, s.searches])).collect::<Vec<_>>(),
         })
@@ -278,6 +301,8 @@ impl Bucket {
         b.searches = n("s");
         b.no_hits = n("z");
         b.clicks = n("c");
+        b.conversions = n("v");
+        b.value_milli = n("m");
         for e in v.get("q").and_then(serde_json::Value::as_array).into_iter().flatten() {
             if let Some((q, s)) = QueryStats::from_json(e) {
                 b.top.map.insert(q.into(), s);
@@ -298,14 +323,21 @@ impl Bucket {
     }
 }
 
+/// Buckets of [`VariantStats::latency`]: bucket `i` holds searches under `2^i` ms (the first,
+/// under 1 ms), the last everything slower.
+pub const LATENCY_BUCKETS: usize = 16;
+
 /// One variant's counts: trials (a user's query in an hour), the trials with a click, those with
-/// a conversion, and the conversions' values summed.
+/// a conversion, the conversions' values summed, the trials whose first search found nothing, and
+/// every search's latency.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct VariantStats {
     pub searches: u64,
     pub clicks: u64,
     pub conversions: u64,
     pub value: f64,
+    pub no_hits: u64,
+    pub latency: [u64; LATENCY_BUCKETS],
 }
 
 impl VariantStats {
@@ -314,6 +346,34 @@ impl VariantStats {
         self.clicks += o.clicks;
         self.conversions += o.conversions;
         self.value += o.value;
+        self.no_hits += o.no_hits;
+        for (a, b) in self.latency.iter_mut().zip(o.latency) {
+            *a += b;
+        }
+    }
+
+    /// The latency bucket of a search that took `d`.
+    pub fn latency_bucket(d: std::time::Duration) -> usize {
+        let ms = d.as_millis().min(u64::MAX as u128) as u64;
+        if ms == 0 { 0 } else { ((64 - ms.leading_zeros()) as usize).min(LATENCY_BUCKETS - 1) }
+    }
+
+    /// The 95th percentile of the searches' latency, in milliseconds, as its bucket's upper bound
+    /// (`None`: no search timed).
+    pub fn p95_ms(&self) -> Option<u64> {
+        let total: u64 = self.latency.iter().sum();
+        if total == 0 {
+            return None;
+        }
+        let want = total - total / 20;
+        let mut seen = 0;
+        for (i, n) in self.latency.iter().enumerate() {
+            seen += n;
+            if seen >= want {
+                return Some(1u64 << i);
+            }
+        }
+        Some(1u64 << (LATENCY_BUCKETS - 1))
     }
 }
 
@@ -540,21 +600,26 @@ impl Analytics {
 
     /// Records a search of experiment variant `v` by trial `key` (a hash of the experiment, the
     /// user and the query): a trial counts once.
-    pub fn record_variant_search(&self, v: &VariantKey, key: u64) {
-        let mut e = self.experiments.lock();
+    /// Each search's latency counts; a trial's first search also counts whether it found nothing
+    /// (`hits`).
+    pub fn record_variant_search(&self, v: &VariantKey, key: u64, hits: u64, latency: std::time::Duration) {
+        let mut guard = self.experiments.lock();
+        let e = &mut *guard;
         e.roll(unix_hour());
-        let seen = e.trials.get(&key).or_else(|| e.previous.get(&key)).copied().unwrap_or(0);
-        if seen & SEARCHED != 0 {
-            return;
-        }
-        if e.trials.len() >= MAX_TRIALS {
-            return;
-        }
-        e.trials.insert(key, seen | SEARCHED);
         if !e.counts.contains_key(v) && e.counts.len() >= MAX_PENDING_VARIANTS {
             return;
         }
-        e.counts.entry(v.clone()).or_default().searches += 1;
+        let c = e.counts.entry(v.clone()).or_default();
+        c.latency[VariantStats::latency_bucket(latency)] += 1;
+        let seen = e.trials.get(&key).or_else(|| e.previous.get(&key)).copied().unwrap_or(0);
+        if seen & SEARCHED != 0 || e.trials.len() >= MAX_TRIALS {
+            return;
+        }
+        e.trials.insert(key, seen | SEARCHED);
+        c.searches += 1;
+        if hits == 0 {
+            c.no_hits += 1;
+        }
     }
 
     /// Records a click or conversion of trial `key` of variant `v`: counted once per trial, and
@@ -599,6 +664,16 @@ impl Analytics {
         let mut v: Vec<(VariantKey, VariantStats)> = e.counts.iter().map(|(k, s)| (k.clone(), *s)).collect();
         v.sort_unstable_by(|a, b| a.0.cmp(&b.0));
         v
+    }
+
+    /// Records a conversion of a search of index `index` (with analytics on) for `query`
+    /// (normalized), worth `value` (in the event's currency; summed as given).
+    pub fn record_conversion(&self, index: &str, query: &str, value: f64) {
+        let hour = unix_hour();
+        let milli = (value * 1000.0).round().clamp(0.0, u64::MAX as f64) as u64;
+        let mut p = self.pending.lock();
+        let (b, bytes) = p.hour(index, hour);
+        b.conversion(query, milli, bytes);
     }
 
     /// Everything waiting, handed on once.
@@ -776,16 +851,22 @@ mod tests {
         let a = Analytics::default();
         let v: VariantKey = ("app".into(), "e1".into(), "b".into());
         assert!(!a.record_variant_event(&v, 7, Outcome::Click), "a click for a search nobody made");
-        a.record_variant_search(&v, 7);
-        a.record_variant_search(&v, 7);
-        a.record_variant_search(&v, 8);
+        let ms = std::time::Duration::from_millis;
+        a.record_variant_search(&v, 7, 3, ms(3));
+        a.record_variant_search(&v, 7, 3, ms(3));
+        a.record_variant_search(&v, 8, 0, ms(40));
         let first = a.take();
-        assert_eq!(first.experiments, vec![(v.clone(), VariantStats { searches: 2, ..Default::default() })]);
+        let mut latency = [0; LATENCY_BUCKETS];
+        latency[2] = 2;
+        latency[6] = 1;
+        assert_eq!(first.experiments, vec![(v.clone(), VariantStats { searches: 2, no_hits: 1, latency, ..Default::default() })]);
+        // Every search is timed; the 95th percentile is its bucket's bound (40 ms: under 64).
+        assert_eq!(first.experiments[0].1.p95_ms(), Some(64));
         assert!(a.record_variant_event(&v, 7, Outcome::Click));
         assert!(!a.record_variant_event(&v, 7, Outcome::Click), "one click per trial");
         assert!(a.record_variant_event(&v, 7, Outcome::Conversion(12.5)));
         assert!(!a.record_variant_event(&v, 7, Outcome::Conversion(12.5)));
-        assert_eq!(a.take().experiments, vec![(v, VariantStats { searches: 0, clicks: 1, conversions: 1, value: 12.5 })]);
+        assert_eq!(a.take().experiments, vec![(v, VariantStats { clicks: 1, conversions: 1, value: 12.5, ..Default::default() })]);
     }
 
     /// CPU time this thread has used (the cost test's rounds await, so they can't run inside

@@ -148,7 +148,8 @@ fn secret_path(p: &str) -> Option<String> {
     if rest.is_empty() {
         return Some("/".into());
     }
-    rest.split('/').all(roll_secrets_ref::is_segment).then(|| format!("/{rest}"))
+    let segments: Vec<&str> = rest.split('/').collect();
+    (segments.len() <= roll_secrets_ref::DEPTH_MAX && segments.iter().all(|s| roll_secrets_ref::is_segment(s))).then(|| format!("/{rest}"))
 }
 
 /// A worker's `run.scale.stream`: apps reads that stream group's lag for it (read on the stream).
@@ -1753,6 +1754,8 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/apps/projects/{project}/status-page/incidents", "apps", R, one(&["project"], "project")),
     row("POST", "/v1/apps/projects/{project}/status-page/incidents", "apps", W, one(&["project"], "project")),
     row("POST", "/v1/apps/projects/{project}/status-page/incidents/{iid}/updates", "apps", W, one(&["project"], "project")),
+    row("GET", "/v1/apps/projects/{project}/board", "apps", R, one(&["project"], "project")),
+    row("PUT", "/v1/apps/projects/{project}/board", "apps", W, one(&["project"], "project")),
     row("GET", "/v1/apps/projects/{project}/status-page/domain", "apps", R, one(&["project"], "project")),
     row("POST", "/v1/apps/projects/{project}/status-page/domain", "apps", W, one(&["project"], "project")),
     row("DELETE", "/v1/apps/projects/{project}/status-page/domain", "apps", D, one(&["project"], "project")),
@@ -1965,6 +1968,7 @@ static ROWS: &[Row] = &[
     // Accepting a visual change is a person's call (with `visual_review = "required"` previews
     // refuses tokens anyway): admin, so a write token can't wave its own diff through.
     row("POST", "/v1/previews/{id}/visual/accept", "previews", ADMIN, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    row("POST", "/v1/previews/{id}/visual/refuse", "previews", ADMIN, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
     row("POST", "/v1/previews/{id}/regressions/accept", "previews", ADMIN, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
     // Letting a fork's pull request run with the project's data (a Git URL service's preview,
     // roll code's `approve-run`): a person's call, as accepting a visual change is.

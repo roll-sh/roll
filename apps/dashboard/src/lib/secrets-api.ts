@@ -234,6 +234,7 @@ export function secretsApi(project: string) {
     machines: (id: string) => req<MachineChain[]>("GET", `${P}/identities/${enc(id)}/machines`),
     /** End one machine: its credential and its logins' tokens, at once. */
     revokeMachine: (id: string, chain: string) => req<null>("DELETE", `${P}/identities/${enc(id)}/machines/${enc(chain)}`),
+    pruneMachines: (id: string) => req<{ pruned: number }>("POST", `${P}/identities/${enc(id)}/machines/prune`),
 
     shares: () => req<Share[]>("GET", `${P}/shares`),
     createShare: (s: NewShare) => req<Share>("POST", `${P}/shares`, s),

@@ -290,6 +290,7 @@ handlers! { ctx;
     InferenceInference | InferenceTextEmbedding | InferenceSparseEmbedding | InferenceRerank | InferenceCompletion | InferenceEmbedding => inference::infer(ctx).await,
     InferenceStreamCompletion | InferenceChatCompletionUnified => inference::stream_route(ctx).await,
     InferencePutRegionPolicy => inference::region::put(ctx).await,
+    RollSearchApplicationPromoteExperiment => entsearch::experiments::promote(ctx).await,
     InferenceGetRegionPolicy => inference::region::get(ctx),
     InferenceDeleteRegionPolicy => inference::region::delete(ctx).await,
     MlPutDataFrameAnalytics => ml::dfa::put(ctx).await,

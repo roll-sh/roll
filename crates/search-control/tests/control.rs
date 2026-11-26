@@ -1528,6 +1528,137 @@ async fn filtered_api_key(e: &Env) -> String {
     base64::engine::general_purpose::STANDARD.encode(format!("{}@shop:{}", v["id"].as_str().unwrap(), v["api_key"].as_str().unwrap()))
 }
 
+/// Lookups are authorized where they run, as the reader, whatever hides them from the body's
+/// scan: a reader of `mine` reads nothing of `secret` through a `lookup` runtime field named
+/// `document` or a terms lookup in an aggregation named `document` or `params`, nor through its
+/// own API key's templated role query; an alias filter can't hold a lookup. A lookup into
+/// `mine` still works. Both dialects, where they have the feature.
+#[tokio::test]
+async fn lookups_are_authorized_where_they_run() {
+    use base64::Engine;
+    use reqwest::Method;
+    let e = env().await;
+    let lookup = |index: &str| json!({"terms": {"n": {"index": index, "id": "1", "path": "ids"}}});
+    for (name, flavor) in [("lk", "elasticsearch"), ("lk-os", "opensearch")] {
+        let c = e.post("/v1/search/clusters", json!({"name": name, "flavor": flavor})).await;
+        let (admin, pw) = creds(&c);
+        let (role_path, role, user_path, user) = match flavor {
+            "elasticsearch" => (
+                "/_security/role/m",
+                json!({"cluster": ["manage_own_api_key"], "indices": [{"names": ["mine", "mine-*"], "privileges": ["read", "manage"]}]}),
+                "/_security/user/ann",
+                json!({"password": "ann-password-1", "roles": ["m"]}),
+            ),
+            _ => (
+                "/_plugins/_security/api/roles/m",
+                json!({"index_permissions": [{"index_patterns": ["mine", "mine-*"], "allowed_actions": ["indices_all"]}]}),
+                "/_plugins/_security/api/internalusers/ann",
+                json!({"password": "Zq9#vLx2!pRt7mWk", "opendistro_security_roles": ["m"]}),
+            ),
+        };
+        for (path, body) in [
+            ("/secret/_doc/1?refresh=true", json!({"k": "a", "v": "hidden-value", "ids": ["1"]})),
+            ("/mine", json!({"mappings": {"properties": {"k": {"type": "keyword"}, "n": {"type": "keyword"}}}})),
+            ("/mine/_doc/1?refresh=true", json!({"k": "a", "n": "1", "ids": ["1"]})),
+            (role_path, role),
+            (user_path, user.clone()),
+        ] {
+            let (s, v) = e.es(&admin, &pw, Method::PUT, path, Some(body)).await;
+            assert!(s == 200 || s == 201, "{name} {path}: {v}");
+        }
+        let ann = format!("ann@{name}");
+        let ann_pw = user["password"].as_str().unwrap();
+        let search = |body: Value| e.es(&ann, ann_pw, Method::POST, "/mine/_search", Some(body));
+        let refused = |what: &str, s: u16, v: &Value| assert!(s >= 400 && !v.to_string().contains("hidden-value"), "{name} {what}: {s} {v}");
+
+        let (s, v) = search(json!({"query": lookup("mine")})).await;
+        assert_eq!((s, v["hits"]["total"]["value"].as_i64()), (200, Some(1)), "{name}: a lookup into the reader's own index: {v}");
+        let (s, v) = search(json!({"query": lookup("_all")})).await;
+        refused("a lookup into _all", s, &v);
+        // The request cache holds no lookup's answer: the owner's cached aggregation isn't
+        // served to a reader who may not make its lookup.
+        let cached = json!({"size": 0, "aggs": {"params": {"filter": lookup("secret")}}});
+        let (s, v) = e.es(&admin, &pw, Method::POST, "/mine/_search?request_cache=true", Some(cached.clone())).await;
+        assert_eq!((s, v["aggregations"]["params"]["doc_count"].as_i64()), (200, Some(1)), "{name}: {v}");
+        let (s, v) = e.es(&ann, ann_pw, Method::POST, "/mine/_search?request_cache=true", Some(cached)).await;
+        refused("the owner's cached lookup", s, &v);
+        // Nor through a `wrapper`, whose base64 query hides the lookup from the request's text.
+        let wrapped = json!({"size": 0, "query": {"wrapper": {"query": base64::engine::general_purpose::STANDARD.encode(lookup("secret").to_string())}}});
+        let (s, v) = e.es(&admin, &pw, Method::POST, "/mine/_search?request_cache=true", Some(wrapped.clone())).await;
+        assert_eq!((s, v["hits"]["total"]["value"].as_i64()), (200, Some(1)), "{name}: {v}");
+        let (s, v) = e.es(&ann, ann_pw, Method::POST, "/mine/_search?request_cache=true", Some(wrapped)).await;
+        refused("the owner's cached wrapped lookup", s, &v);
+        for agg in ["document", "params"] {
+            let (s, v) = search(json!({"size": 0, "aggs": {agg: {"filter": lookup("secret")}}})).await;
+            refused(&format!("an aggregation named {agg}"), s, &v);
+        }
+        let (s, v) = e.es(&ann, ann_pw, Method::PUT, "/mine/_alias/mine-f", Some(json!({"filter": lookup("secret")}))).await;
+        assert_eq!((s, v["error"]["reason"].as_str()), (400, Some("failed to parse filter for alias [mine-f]")), "{name}: {v}");
+        if flavor != "elasticsearch" {
+            // OpenSearch's terms lookup by `query` is the reader's search of the index it names.
+            let by_query = json!({"terms": {"n": {"index": "secret", "path": "v", "query": {"match_all": {}}}}});
+            let (s, v) = search(json!({"size": 0, "aggs": {"params": {"filter": by_query}}})).await;
+            refused("a terms lookup by query", s, &v);
+            continue;
+        }
+        // A `more_like_this` document of the searched index is read under the search's document
+        // level security, even for a role that grants searches alone: a hidden document lends
+        // no terms (`2` would make `1` match).
+        for (path, body) in [
+            ("/pub", json!({"mappings": {"properties": {"body": {"type": "text"}, "public": {"type": "boolean"}}}})),
+            ("/pub/_doc/1", json!({"public": true, "body": "alpha beta"})),
+            ("/pub/_doc/3?refresh=true", json!({"public": true, "body": "beta gamma"})),
+            ("/pub/_doc/2?refresh=true", json!({"public": false, "body": "alpha zeta"})),
+            ("/_security/role/searcher", json!({"indices": [{"names": ["pub"], "privileges": ["indices:data/read/search*"], "query": {"term": {"public": true}}}]})),
+            ("/_security/user/sam", json!({"password": "sam-password-1", "roles": ["searcher"]})),
+        ] {
+            let (s, v) = e.es(&admin, &pw, Method::PUT, path, Some(body)).await;
+            assert!(s == 200 || s == 201, "{path}: {v}");
+        }
+        let sam = format!("sam@{name}");
+        let like = |id: &str| json!({"query": {"more_like_this": {"fields": ["body"], "like": [{"_id": id}], "min_term_freq": 1, "min_doc_freq": 1}}});
+        let (s, v) = e.es(&sam, "sam-password-1", Method::POST, "/pub/_search", Some(like("1"))).await;
+        assert_eq!((s, v["hits"]["total"]["value"].as_i64()), (200, Some(1)), "a visible document's terms: {v}");
+        let (s, v) = e.es(&sam, "sam-password-1", Method::POST, "/pub/_search", Some(like("2"))).await;
+        assert_eq!((s, v["hits"]["total"]["value"].as_i64()), (200, Some(0)), "a hidden document lent its terms: {v}");
+        // A lookup's name is checked as resolved: a failure store needs its own privilege, which
+        // `read` on `mine-*` doesn't give.
+        for (path, body) in [
+            ("/_index_template/mine-ds", Some(json!({"index_patterns": ["mine-ds*"], "data_stream": {}, "template": {"data_stream_options": {"failure_store": {"enabled": true}}}}))),
+            ("/_data_stream/mine-ds", None),
+        ] {
+            let (s, v) = e.es(&admin, &pw, Method::PUT, path, body).await;
+            assert_eq!(s, 200, "{path}: {v}");
+        }
+        let (s, v) = search(json!({"query": lookup("mine-ds::failures")})).await;
+        assert_eq!((s, v["error"]["type"].as_str()), (403, Some("security_exception")), "a failure store lookup: {v}");
+        let runtime = json!({"runtime_mappings": {"document": {"type": "lookup", "target_index": "secret", "input_field": "k", "target_field": "k", "fetch_fields": ["v"]}}, "fields": ["document"]});
+        let (s, v) = search(runtime).await;
+        refused("a lookup runtime field named document", s, &v);
+        let template = json!({"template": {"source": lookup("secret").to_string()}});
+        let (s, k) = e.es(&ann, ann_pw, Method::POST, "/_security/api_key", Some(json!({"name": "t", "role_descriptors": {"r": {"indices": [{"names": ["mine"], "privileges": ["read"], "query": template}]}}}))).await;
+        assert_eq!(s, 200, "{k}");
+        let key = base64::engine::general_purpose::STANDARD.encode(format!("{}@{name}:{}", k["id"].as_str().unwrap(), k["api_key"].as_str().unwrap()));
+        let (s, v) = as_key(&e, &key, Method::POST, "/mine/_search", Some(json!({}))).await;
+        refused("a templated role query's lookup", s, &v);
+        assert!(v.to_string().contains("terms query with terms lookup isn't supported as part of a role query"), "{v}");
+        // However it's nested, a role query reads no other document: refused when stored, and
+        // when a template renders it, a get (which evaluates it) fails too.
+        let mlt = json!({"more_like_this": {"fields": ["k"], "like": [{"_index": "secret", "_id": "1"}], "min_term_freq": 1, "min_doc_freq": 1}});
+        let role_key = |q: Value| e.es(&ann, ann_pw, Method::POST, "/_security/api_key", Some(json!({"name": "q", "role_descriptors": {"r": {"indices": [{"names": ["mine"], "privileges": ["read"], "query": q}]}}})));
+        for q in [mlt.clone(), json!({"nested": {"path": "p", "query": lookup("secret")}})] {
+            let (s, v) = role_key(q.clone()).await;
+            assert_eq!(s, 400, "{q}: {v}");
+        }
+        let (s, k) = role_key(json!({"template": {"source": mlt.to_string()}})).await;
+        assert_eq!(s, 200, "{k}");
+        let key = base64::engine::general_purpose::STANDARD.encode(format!("{}@{name}:{}", k["id"].as_str().unwrap(), k["api_key"].as_str().unwrap()));
+        let (s, v) = as_key(&e, &key, Method::GET, "/mine/_doc/1", None).await;
+        refused("a get under a templated more_like_this role query", s, &v);
+        assert!(v.to_string().contains("more_like_this query with documents isn't supported as part of a role query"), "{v}");
+    }
+}
+
 /// An update reads the whole document and writes it back, so where a key's document or field
 /// level security restricts the index it isn't run (Elasticsearch 400, OpenSearch 500), in a
 /// bulk request too. An update by query reads as the key: only the documents it sees, without
@@ -4006,6 +4137,97 @@ async fn a_wildcard_key_reaches_no_watch_history() {
     let (_, v) = e.es(&u, &p, Method::POST, "/.watcher-history-*/_search?expand_wildcards=all", Some(json!({"query": {"match_all": {}}}))).await;
     assert_eq!(v["hits"]["total"]["value"], 1, "{v}");
     assert!(v["hits"]["hits"][0]["_source"].get("leaked").is_none(), "{v}");
+}
+
+/// Runs `POST {path}?wait_for_completion=false` as the cluster's owner and waits for its result
+/// to be stored in `.tasks`.
+async fn stored_task(e: &Env, u: &str, p: &str, path: &str, body: Value) -> String {
+    let (s, v) = e.es(u, p, reqwest::Method::POST, &format!("{path}?wait_for_completion=false"), Some(body)).await;
+    let task = v["task"].as_str().unwrap_or_else(|| panic!("{s} {v}")).to_string();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    // Completed in memory first, then `.tasks` made for its result: wait for both.
+    loop {
+        let (_, t) = e.es(u, p, reqwest::Method::GET, &format!("/_tasks/{task}"), None).await;
+        let (s, _) = e.es(u, p, reqwest::Method::GET, "/.tasks/_count", None).await;
+        if t["completed"] == true && s == 200 {
+            return task;
+        }
+        assert!(std::time::Instant::now() < deadline, "{t}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// Task results (`.tasks`) are every principal's: on Elasticsearch a hidden, restricted system
+/// index, so a `*` data key's searches answer as before once one is stored, its by-query over
+/// everything leaves them alone, and naming `.tasks` is refused; the result still reads back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn task_results_are_out_of_a_wildcard_keys_reach() {
+    use reqwest::Method;
+    let e = env().await;
+    let c = e.post("/v1/search/clusters", json!({"name": "tk"})).await;
+    let (u, p) = creds(&c);
+    assert_eq!(e.es(&u, &p, Method::PUT, "/docs/_doc/1?refresh=true", Some(json!({"a": 1}))).await.0, 201);
+    let task = stored_task(&e, &u, &p, "/docs/_update_by_query", json!({"script": {"source": "ctx._source.b = 2"}})).await;
+    // The update is visible before the key's by-query scans it (no version conflict).
+    assert_eq!(e.es(&u, &p, Method::POST, "/docs/_refresh", None).await.0, 200);
+    let (_, v) = e.es(&u, &p, Method::GET, "/.tasks/_settings", None).await;
+    assert_eq!(v[".tasks"]["settings"]["index"]["hidden"], "true", "{v}");
+    let key = e.post("/v1/search/clusters/tk/keys", json!({"name": "app", "access": "data"})).await;
+    let auth = format!("ApiKey {}", key["api_key"].as_str().unwrap());
+    let as_key = |m: Method, path: &str, body: Option<Value>| {
+        let mut r = e.http.request(m, format!("{}{path}", e.es)).header("authorization", auth.clone());
+        if let Some(b) = body {
+            r = r.json(&b);
+        }
+        async move {
+            let r = r.send().await.unwrap();
+            (r.status().as_u16(), r.json::<Value>().await.unwrap_or(Value::Null))
+        }
+    };
+    let (s, v) = as_key(Method::GET, "/_search", None).await;
+    assert_eq!((s, &v["hits"]["total"]["value"]), (200, &json!(1)), "{v}");
+    let (s, v) = as_key(Method::POST, "/*/_delete_by_query?expand_wildcards=all&refresh=true", Some(json!({"query": {"match_all": {}}}))).await;
+    assert_eq!((s, &v["total"]), (200, &json!(1)), "only the key's own document: {v}");
+    let (s, v) = as_key(Method::GET, "/.tasks/_search", None).await;
+    assert_eq!(s, 403, "{v}");
+    let (_, t) = e.es(&u, &p, Method::GET, &format!("/_tasks/{task}"), None).await;
+    assert_eq!((&t["completed"], &t["response"]["updated"]), (&json!(true), &json!(1)), "{t}");
+}
+
+/// On OpenSearch, whose plugin refuses a request over `*` when one index it reaches isn't
+/// permitted: a data user's `GET /_search` answers once a task result is stored, `_cat/aliases`
+/// answers for the indices it may see (an alias over watch records left out), and a by-query
+/// expanding hidden indices onto watch records is refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_opensearch_data_user_answers_over_task_results() {
+    use reqwest::Method;
+    let e = env().await;
+    let c = e.post("/v1/search/clusters", json!({"name": "tko", "flavor": "opensearch"})).await;
+    let (u, p) = creds(&c);
+    for (m, path, body) in [
+        (Method::PUT, "/docs/_doc/1?refresh=true", json!({"a": 1})),
+        (Method::PUT, "/.watcher-history-7-x", json!({"settings": {"index.hidden": true}})),
+        (Method::POST, "/_aliases", json!({"actions": [{"add": {"index": ".watcher-history-7-x", "alias": "wh-alias"}}]})),
+    ] {
+        let (s, v) = e.es(&u, &p, m, path, Some(body)).await;
+        assert!(s < 300, "{path}: {v}");
+    }
+    stored_task(&e, &u, &p, "/docs/_update_by_query", json!({"script": {"source": "ctx._source.b = 2"}})).await;
+    let key = e.post("/v1/search/clusters/tko/keys", json!({"name": "app", "access": "data"})).await;
+    let (ku, kp) = (key["username"].as_str().unwrap().to_string(), key["password"].as_str().unwrap().to_string());
+    let as_user = |m: Method, path: &str| {
+        let r = e.http.request(m, format!("{}{path}", e.es)).basic_auth(&ku, Some(&kp)).send();
+        async move {
+            let r = r.await.unwrap();
+            (r.status().as_u16(), r.text().await.unwrap_or_default())
+        }
+    };
+    let (s, v) = as_user(Method::GET, "/_search").await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = as_user(Method::GET, "/_cat/aliases?format=json").await;
+    assert!(s == 200 && !v.contains("wh-alias"), "{s} {v}");
+    let (s, v) = as_user(Method::POST, "/*/_update_by_query?expand_wildcards=all").await;
+    assert_eq!(s, 403, "{v}");
 }
 
 #[path = "control/cloud_repositories.rs"]
@@ -6960,6 +7182,7 @@ async fn search_application_experiments() {
     };
     es(Method::PUT, "/products", json!({"mappings": {"properties": {"title": {"type": "text"}}}})).await;
     es(Method::PUT, "/products/_doc/1?refresh=true", json!({"title": "red shoes"})).await;
+    es(Method::PUT, "/products/_settings", json!({"index.roll.analytics.enabled": true})).await;
     let app = json!({
         "indices": ["products"],
         "template": {"script": {"source": {"query": {"match": {"title": "{{query}}"}}}, "params": {"query": ""}}},
@@ -7046,10 +7269,33 @@ async fn search_application_experiments() {
         }
         let value: f64 = ex["variants"].as_array().unwrap().iter().map(|v| v["value"].as_f64().unwrap()).sum();
         assert_eq!(value, 125.0, "{a}");
+        // Every search found the shoes; each variant's searches were timed.
+        for v in ex["variants"].as_array().unwrap() {
+            assert!(v["no_hit_rate"] == json!(0.0) && v["p95_latency_ms"].as_u64().is_some(), "{v}");
+        }
+        // The index's own analytics count every conversion (the one without a search too).
+        let idx = &a["totals"];
+        assert_eq!((idx["conversions"].as_u64(), idx["value"].as_f64()), (Some(11), Some(224.0)), "{a}");
     };
     check(&e.get("/v1/search/clusters/ab/analytics").await);
     e.control.sample().await.unwrap();
     check(&e.get("/v1/search/clusters/ab/analytics").await);
     // The browser key's events weren't stored with the owner's.
     assert_eq!(count().await, stored);
+
+    // Promoting the phrase variant: the application takes its template, the experiment ends, and
+    // searches get no variant any more. Once only, and never by a browser key.
+    let promote = "/_application/search_application/shop/_roll/experiments/ranking/_promote";
+    let r = e.http.post(format!("{}{promote}", e.es)).header("authorization", &key).json(&json!({"variant": "phrase"})).send().await.unwrap();
+    assert!(matches!(r.status().as_u16(), 400 | 403), "{}", r.status());
+    let done = es(Method::POST, promote, json!({"variant": "phrase"})).await;
+    assert_eq!((done["variant"].as_str(), done["ended_at"].is_i64()), (Some("phrase"), true), "{done}");
+    let (s, _) = e.es(&user, &pw, Method::POST, promote, Some(json!({"variant": "phrase"}))).await;
+    assert_eq!(s, 409);
+    let app = es(Method::GET, "/_application/search_application/shop", Value::Null).await;
+    assert!(app["template"]["script"]["source"].to_string().contains("match_phrase"), "{app}");
+    assert_eq!(app["experiments"][0]["promoted"]["variant"], "phrase", "{app}");
+    let r = e.http.post(format!("{}/_application/search_application/shop/_search", e.es)).header("authorization", &owner).header("x-roll-user", "v1").json(&json!({"params": {"query": "shoes"}})).send().await.unwrap();
+    assert_eq!(r.status().as_u16(), 200);
+    assert!(r.headers().get("x-roll-variant").is_none());
 }

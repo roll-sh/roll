@@ -1,7 +1,8 @@
 # Relevance evaluation, A/B tests and merchandising: design
 
-`## Next` item 15 in [README.md](README.md). Status: a first slice of section 3 (live A/B tests)
-and of section 2 (conversion events, browser keys' events) is built: [First slice as built](#first-slice-as-built).
+`## Next` item 15 in [README.md](README.md). Status: two slices of section 3 (live A/B tests, with
+results and promotion) and of section 2 (conversion events, browser keys' events, conversions in
+the indices' analytics) are built: [First slice as built](#first-slice-as-built).
 The rest is design.
 
 ## First slice as built
@@ -24,7 +25,9 @@ Where this design or the request left a choice open, the stricter one:
   by weight. The identity is a derived key's `user` (signed, so nothing a page sends overrides it),
   else the `X-Roll-User` header only when the experiment sets `allow_user_header` (off by
   default), else the client's address. Without any of them the application's own template runs and
-  nothing is counted. The identity is hashed and never stored.
+  nothing is counted. The identity is hashed and never stored. With `X-Roll-User` allowed, a
+  visitor can rotate identities to add trials to whichever arm their new names land in; each
+  needs a search of its own first, so the key's rate limits bound how many.
 - **The answer says which** in headers, `X-Roll-Experiment` and `X-Roll-Variant`, exposed to pages
   by CORS: the body stays Elasticsearch's, so no client needs to ask (section 3's `roll.variant`).
 - **What's counted.** A *trial* is one visitor's query in an hour (searching it again or paging
@@ -47,9 +50,25 @@ Where this design or the request left a choice open, the stricter one:
   (the variant named `control`, else the first by name) a two-sided two-proportion z-test with
   the pooled standard error: `significant` below p 0.05, `not_yet_significant` above it, and
   `not_enough_data` until both arms have 100 trials with five successes and five failures.
-- **Left:** promoting the winner, zero-result rate and p95 latency per variant, confidence
-  intervals beside the p-values, judgment lists and evaluation (section 1), the `roll_` rule types
-  (section 4) and dynamic re-ranking (section 5).
+- **Second slice** (also built):
+  - **Conversions in the indices' analytics.** A `roll_conversion` about a document of an index
+    with analytics on counts against the event's query in that index's hour, like a click, with
+    its value (in thousandths, summed as given): `conversions`, `conversion_rate` and `value` in
+    `GET …/analytics`'s totals and query rows. Like clicks there, every event counts; the
+    per-variant counts keep their once-per-trial rule.
+  - **Zero results and latency per variant.** A trial whose first search found nothing counts in
+    `no_hits` (`no_hit_rate`); every search of the variant is timed into a histogram of 16
+    buckets (under 1, 2, 4 … ms), so nodes and passes add up exactly, and `p95_latency_ms` is the
+    bound of the bucket holding the 95th percentile.
+  - **Promoting a winner.** `POST _application/search_application/{name}/_roll/experiments/{id}/_promote`
+    with `{"variant"}`, authorized as the application's `PUT`: the variant's params go over the
+    template's own params, or its template takes the application's place (the `dictionary`
+    stays); the experiment ends now if it still runs and records `promoted: {variant, at}`. Once
+    per experiment (409 again). An ended experiment can't be started again by a `PUT` (400): its
+    counts would mix two tests.
+- **Left:** confidence intervals beside the p-values, promoting from the Relevance tab, judgment
+  lists and evaluation (section 1), the `roll_` rule types (section 4) and dynamic re-ranking
+  (section 5).
 
 ## Why
 

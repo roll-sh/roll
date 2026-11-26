@@ -190,7 +190,9 @@ Reproduce the YAML numbers with `scripts/search-yaml-suites.sh roll` (set `ROLL_
   filters without adding OpenSearch's +1.0 to scores; masked fields are unmapped for queries
   and aggregations (OpenSearch aggregates and matches their hashes); mappings by `hosts` never
   match (roll doesn't see the client's address); `hash`es given by clients are bcrypt (as the
-  plugin's) up to cost 14. Not yet: `nodesdn`, `allowlist`, API tokens and
+  plugin's) up to cost 14; a DLS query with a terms lookup (or any query reading another
+  document) fails the request, where the plugin's filter-level DLS runs the lookup (roll's DLS
+  queries read nothing as anyone, as Elasticsearch's role queries can't). Not yet: `nodesdn`, `allowlist`, API tokens and
   multi-tenancy itself (tenants are stored and listed; no tenant indices).
 
 
@@ -533,6 +535,11 @@ password and `Authorization` redacted. So a watch read back with `GET` and put a
 refused (400 `found a redacted value in field [path]`) unless the update says `if_seq_no` and
 goes to the same scheme, host and port, when each redacted value keeps the stored one, as the
 password does on Elasticsearch. The watcher suites pass as before (89 and 9).
+
+Task results: on the Elasticsearch dialect `.tasks` is a hidden, restricted system index (as
+`TaskResultsService` creates it); the OpenSearch dialect keeps it an ordinary index, which its
+roles name. Known gap: on the OpenSearch dialect a `wait_for_completion=false` by-query creates
+`.tasks` but stores no result document in it, where OpenSearch stores one.
 
 Watch records (`.watcher-history-*`) are reached only by a grant that names them (`.watch*`,
 `.watcher-history-*`, Elasticsearch's watcher roles) or that allows restricted indices, through an
@@ -1695,6 +1702,8 @@ APIs ([relevance-experiments.md](relevance-experiments.md), "First slice as buil
   (`page_view`, `search` and `search_click` as Elasticsearch has them).
 - A browser key with `limits.events` may post `search_click` and `roll_conversion` events, which
   are counted and not stored.
+- `POST _application/search_application/{name}/_roll/experiments/{id}/_promote` writes a
+  variant into the application and ends the experiment (roll's own route, under `_roll`).
 
 ## Connectors (`_connector`)
 
