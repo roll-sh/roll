@@ -7962,7 +7962,8 @@ async fn otlp_logs_land_in_otel_data_streams_with_an_otel_key() {
     let (status, text) = (r.status().as_u16(), r.text().await.unwrap());
     assert_eq!(e.es(&u, &p, Method::POST, "/logs-*.otel-*/_refresh", None).await.0, 200);
     let (_, v) = e.es(&u, &p, Method::POST, "/logs-*.otel-*/_count", None).await;
-    assert_eq!((status, &v["count"]), (403, &json!(2)), "the read key's write: {text}");
+    // Two log records and the trace's event; the read key's write added nothing.
+    assert_eq!((status, &v["count"]), (403, &json!(3)), "the read key's write: {text}");
 }
 
 /// `cluster.max_shards_per_node`: creating or opening past it is refused with Elasticsearch's
