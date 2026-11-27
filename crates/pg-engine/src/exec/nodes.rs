@@ -4209,16 +4209,20 @@ fn row_types(p: &Plan) -> Vec<crate::types::DataType> {
 /// the rows `next` reads as they come, `key` a row's key (None: the row is its own). Only
 /// each group's first row is held, a row of a group already in the table dropped as it
 /// comes, as nodeAgg's table holds them (every row was held first, and each group's key a
-/// copy of its row); `types`: the key's, from the first row.
+/// copy of its row); `types`: the key's, from the first row. With `spills` (a whole row its
+/// key), past hash_mem as nodeAgg spills (`hashspill`): the rows of groups not in the table
+/// to partitions read back as batches, each batch's groups after the table's.
 fn hashed_distinct(
     mut next: impl FnMut() -> Result<Option<Row>>,
     key: impl Fn(&Row) -> Result<Option<Row>>,
     types: impl FnOnce(&Row) -> Vec<crate::types::DataType>,
+    spills: bool,
     plan: &Arc<Plan>,
     ctx: &ExecCtx,
 ) -> Result<Vec<Row>> {
     let Some(first) = next()? else { return Ok(Vec::new()) };
-    let mut order = super::pghash::GroupOrder::new(types(&first), ctx);
+    let types = types(&first);
+    let mut order = super::pghash::GroupOrder::new(types.clone(), ctx);
     // (A HashAggregate without aggregates: its table made for the estimate first.)
     let e = super::pghash::agg_estimate(plan, ctx);
     let sizing = super::pghash::AggSizing {
@@ -4230,6 +4234,11 @@ fn hashed_distinct(
     };
     let nbuckets = sizing.nbuckets(e.rows, super::pghash::hash_mem(ctx));
     order.size(nbuckets);
+    let mut spill = spills.then(|| {
+        let mem = super::workmem::HashAggMem::new(super::workmem::work_mem(ctx), 0, Vec::new());
+        let need = vec![true; types.len()];
+        super::hashspill::HashSpill::new(mem, sizing.entry_size(), e.rows, super::pghash::hash_mem(ctx), need, types.clone())
+    });
     let st = super::fasthash::FastState::default();
     let mut table: hashbrown::HashTable<usize> = hashbrown::HashTable::new();
     let mut firsts: Vec<Row> = Vec::new();
@@ -4237,33 +4246,80 @@ fn hashed_distinct(
     // row: equal keys hash alike.)
     let mut keys: Vec<Row> = Vec::new();
     let mut hashes: Vec<u32> = Vec::new();
+    let mut out: Vec<Row> = Vec::new();
+    // (A batch of spilled rows being deduplicated.)
+    let mut batch: Option<super::hashspill::Batch> = None;
     let mut row = Some(first);
-    while let Some(r) = row {
-        let k = key(&r)?;
-        let keyed = k.is_some();
-        let kv: &[Value] = k.as_deref().unwrap_or(&r);
-        let h = std::hash::BuildHasher::hash_one(&st, kv);
-        let g = match table.find(h, |&g| if keyed { keys[g][..] == *kv } else { firsts[g][..] == *kv }) {
-            Some(&g) => g,
-            None => {
-                let g = firsts.len();
-                hashes.push(order.hash(kv));
-                if let Some(k) = k {
-                    keys.push(k);
+    loop {
+        while let Some(r) = row {
+            let k = key(&r)?;
+            let keyed = k.is_some();
+            let kv: &[Value] = k.as_deref().unwrap_or(&r);
+            let h = std::hash::BuildHasher::hash_one(&st, kv);
+            let spilling = spill.as_ref().is_some_and(|s| s.spilling);
+            match table.find(h, |&g| if keyed { keys[g][..] == *kv } else { firsts[g][..] == *kv }) {
+                // (In spill mode nodeAgg only looks a group up, SH_LOOKUP: the table doesn't
+                // grow.)
+                Some(&g) => {
+                    if !spilling {
+                        order.lookup(hashes[g], g);
+                    }
                 }
-                firsts.push(r);
-                let (keys, firsts) = (&keys, &firsts);
-                table.insert_unique(h, g, |&x| std::hash::BuildHasher::hash_one(&st, if keyed { &keys[x][..] } else { &firsts[x][..] }));
-                g
+                // Spill mode: the row goes to its partition.
+                None if spilling => {
+                    let pg = order.hash(kv);
+                    spill.as_mut().expect("spilling").spill(pg, &r, ctx)?;
+                }
+                None => {
+                    let g = firsts.len();
+                    let pg = order.hash(kv);
+                    hashes.push(pg);
+                    if let Some(k) = k {
+                        keys.push(k);
+                    }
+                    firsts.push(r);
+                    let (keys, firsts) = (&keys, &firsts);
+                    table.insert_unique(h, g, |&x| std::hash::BuildHasher::hash_one(&st, if keyed { &keys[x][..] } else { &firsts[x][..] }));
+                    order.lookup(pg, g);
+                    if let Some(sp) = &mut spill {
+                        sp.new_group(super::workmem::minimal_tuple_len(&firsts[g], &types, ctx), order.slots());
+                    }
+                }
             }
-        };
-        order.lookup(hashes[g], g);
-        row = next()?;
+            row = match (&mut batch, &mut spill) {
+                (Some(b), Some(sp)) => {
+                    ctx.check()?;
+                    sp.read(b)?
+                }
+                _ => next()?,
+            };
+        }
+        if let Some(sp) = &mut spill {
+            sp.end_input(batch.is_some())?;
+        }
+        let mut slots: Vec<Option<Row>> = std::mem::take(&mut firsts).into_iter().map(Some).collect();
+        out.extend(order.order(nbuckets).into_iter().filter_map(|i| slots[i].take()));
+        // The next batch of spilled rows, in the emptied table (its size kept, as
+        // ResetTupleHashTable keeps it).
+        let Some(sp) = &mut spill else { break };
+        match sp.next_batch() {
+            Some(mut b) => {
+                table.clear();
+                keys.clear();
+                hashes.clear();
+                order.reset();
+                row = sp.read(&mut b)?;
+                batch = Some(b);
+            }
+            None => {
+                if let Some(instr) = ctx.instr.borrow().as_ref() {
+                    instr.update(Arc::as_ptr(plan) as usize, |s| s.hashagg = Some(sp.stats()));
+                }
+                break;
+            }
+        }
     }
-    drop(table);
-    drop(keys);
-    let mut slots: Vec<Option<Row>> = firsts.into_iter().map(Some).collect();
-    Ok(order.order(nbuckets).into_iter().filter_map(|i| slots[i].take()).collect())
+    Ok(out)
 }
 
 /// Rows sorted ascending on columns `cols` (a Unique's input order).
@@ -4353,7 +4409,7 @@ impl Node for DistinctNode {
             } else if let Some(on) = &self.on {
                 let colls = super::agg::nondeterministic_keys(on, ctx);
                 let key = |r: &Row| -> Result<Option<Row>> { Ok(Some(super::agg::group_key(&eval_all(on, r, ctx)?, &colls))) };
-                hashed_distinct(next, key, |_| on.iter().map(Expr::ty).collect(), &plan, ctx)?
+                hashed_distinct(next, key, |_| on.iter().map(Expr::ty).collect(), false, &plan, ctx)?
             // (Shown as a Unique over its input sorted: the rows in that order. With values
             // that compare equal but differ (`'1 mon'` / `'30 days'`, `1.0` / `1.00`), the
             // one kept is the first of its run in that order, so all rows are sorted first.)
@@ -4382,7 +4438,7 @@ impl Node for DistinctNode {
                 // (A row is its own key but for bpchar's trailing spaces.)
                 let plain = norms.iter().all(Option::is_none);
                 let key = |r: &Row| -> Result<Option<Row>> { Ok((!plain).then(|| whole(r))) };
-                hashed_distinct(next, key, |first| output_types(&input, Some(first)), &plan, ctx)?
+                hashed_distinct(next, key, |first| output_types(&input, Some(first)), true, &plan, ctx)?
             };
             self.out = Some(out.into_iter());
         }
@@ -4875,7 +4931,7 @@ impl SetOpNode {
                     Some(plan) => {
                         let plain = colls.iter().all(Option::is_none);
                         let mut rows = left.into_iter().chain(right);
-                        hashed_distinct(|| Ok(rows.next()), |r| Ok((!plain).then(|| key(r))), |_| types, plan, ctx)
+                        hashed_distinct(|| Ok(rows.next()), |r| Ok((!plain).then(|| key(r))), |_| types, true, plan, ctx)
                     }
                     None => {
                         let mut seen: HashMap<Row, ()> = HashMap::default();
