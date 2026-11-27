@@ -9,7 +9,7 @@
 //! - **Markdown's characters as entities.** Every `&`, `\`, `` ` ``, `~`, `|`, `<`, `>`, `[`,
 //!   `]`, `!`, `*`, `_` and `#` the model writes becomes its numeric entity (`&#60;`), which every
 //!   renderer shows as the character and none reads as syntax: no tag, image, link, definition,
-//!   table, code span, emphasis or heading can start, and an entity or escape the model wrote
+//!   table cell boundary, code span, emphasis or heading can start, and an entity or escape the model wrote
 //!   (`&#47;`, `\/`) shows as written, never decoded into what it spells.
 //! - **Link-shaped tokens broken.** U+2060 WORD JOINER goes inside every `//`, after a `:` that
 //!   follows a letter (`https:`, `mailto:`), between `www` and its `.`, and before every `@`: no

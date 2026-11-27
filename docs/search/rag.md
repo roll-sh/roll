@@ -59,7 +59,9 @@ what the best of the four products does:
   - **Markdown's characters as entities.** Every `&`, `\`, `` ` ``, `~`, `|`, `<`, `>`, `[`, `]`,
     `!`, `*`, `_` and `#` the model writes becomes its numeric entity (`&#60;`): every renderer
     shows the character and none reads it as syntax, so no tag, image, link, reference
-    definition, footnote, table, code span, strikethrough, emphasis or heading can start, and an
+    definition, footnote, table cell boundary, code span, strikethrough, emphasis or heading
+    can start (remark-gfm still makes a one-column table of `text` over `-:`, which holds
+    nothing but text: with no `|` there's nothing to split), and an
     entity or escape the model wrote (`https:&#47;&#47;`, `\/`) shows as written, never decoded
     into what it spells. `\r` and `\r\n` become `\n`.
   - **Link-shaped tokens broken.** U+2060 WORD JOINER goes inside every `//`, after a `:` that
@@ -87,7 +89,10 @@ what the best of the four products does:
     whole, a character at a time and split at every point, and 4,000 random compositions of the
     reviewers' fragments, read as GitHub-flavored markdown (comrak): any link but a kept one,
     image, HTML, table, footnote or linkable text fails. The gate also renders the corpus and
-    70,000 random compositions with marked, markdown-it (linkify on and off) and remark-gfm.
+    70,000 random compositions, each in random pieces, through this code with marked,
+    markdown-it (linkify on and off) and remark-gfm (`~/.cache/rr1068r4/jscheck`, outside the
+    repo for its node packages): no link but a kept one (markdown-it's linkify linking a bare
+    domain is counted apart), image, HTML or table with a raw `|`.
   - **Left to the renderer:** a kept link carries no `rel` or `referrerpolicy`; a renderer that
     links bare domains (markdown-it's fuzzy linkify) can still link `evil.com/?d=…` as text;
     and a renderer must decode entities once, as markdown does: one that decodes the answer
