@@ -1713,7 +1713,7 @@ struct Api {
 
 impl Api {
     async fn new() -> Api {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = scratch();
         let ws_db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("workspace.db")), "workspace").unwrap();
         let ws = Arc::new(roll_workspace::Workspace::new(ws_db.clone()).unwrap());
         let db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("secrets.db")), "secrets").unwrap();
@@ -1817,6 +1817,14 @@ impl Api {
     async fn values(&self, env: &str, path: &str) -> Value {
         self.ok(Method::GET, &format!("/environments/{env}/values?path={path}"), None).await
     }
+}
+
+/// A scratch directory for the test's databases: in memory where there's one (`/dev/shm`). Every
+/// SQLite write fsyncs its WAL, which on a busy disk cost these tests most of their time, and
+/// nothing here is meant to outlive a crash.
+fn scratch() -> tempfile::TempDir {
+    let shm = std::path::Path::new("/dev/shm");
+    shm.is_dir().then(|| tempfile::tempdir_in(shm).ok()).flatten().unwrap_or_else(|| tempfile::tempdir().unwrap())
 }
 
 fn slugs(v: &Value) -> Vec<&str> {
