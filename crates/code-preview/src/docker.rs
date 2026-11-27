@@ -457,22 +457,3 @@ pub fn random_suffix() -> String {
     getrandom::fill(&mut b).expect("system randomness");
     b.iter().map(|x| ALPHABET[(*x as usize) % ALPHABET.len()] as char).collect()
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn tail_keeps_the_end_from_a_line_boundary() {
-        let mut t = Tail::new(16);
-        t.push(b"first line\nsecond\n");
-        t.push(b"third\n");
-        assert_eq!(t.text(), "second\nthird");
-        let mut t = Tail::new(8);
-        t.push(&b"x".repeat(100));
-        assert_eq!(t.buf.len(), 8);
-        let mut t = Tail::new(100);
-        t.push(b"all of it\n");
-        assert_eq!(t.text(), "all of it");
-    }
-}

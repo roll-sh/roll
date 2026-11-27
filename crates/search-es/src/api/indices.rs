@@ -16,6 +16,7 @@ use crate::meta::{AliasMeta, ClusterState, IndexMeta, IndexState, templates};
 use crate::obj;
 use crate::rest::{Ctx, Reply};
 use crate::xcontent::filter::glob_match;
+use crate::xpack::security::AliasAuth;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -430,6 +431,8 @@ fn create_index_unhooked(st: &mut ClusterState, provided_name: &str, name: &str,
     if opensearch {
         crate::opensearch::check_adaptive_shard_selection(name, &settings)?;
     }
+    // `cluster.max_shards_per_node`: refused before anything is made.
+    crate::meta::shard_limit::check_adding(st, crate::meta::shard_limit::shards_of(&settings))?;
     if let Some(b) = &backing {
         data_stream_index_settings(&st.metadata, b.data_stream, &mut settings, &composed.mappings, now_ms)?;
         if let Some((start, end)) = b.past {
@@ -571,19 +574,31 @@ fn finish_create(
     Ok(warnings)
 }
 
+/// The aliases a request creates an index with (a create, a resize, a rollover), their date math
+/// resolved once so the names authorized are the names made, and what authorizes them on the new
+/// index ([`AliasAuth::check`], inside the update that makes it).
+pub fn authorized_aliases(ctx: &Ctx, aliases: &mut [(String, AliasMeta)]) -> EsResult<(AliasAuth, Vec<String>)> {
+    for (name, _) in aliases.iter_mut() {
+        *name = resolve::resolve_date_math(name, ctx.now_ms)?;
+    }
+    Ok((AliasAuth::of(ctx), aliases.iter().map(|(n, _)| n.clone()).collect()))
+}
+
 pub async fn create(ctx: &Ctx<'_>) -> EsResult<Reply> {
     ctx.validate_timeouts()?;
     let provided = ctx.path_param("index").unwrap_or_default().to_string();
     let name = resolve::resolve_date_math(&provided, ctx.now_ms)?;
     let body = ctx.body_map()?;
-    let req = parse_create_body(body)?;
+    let mut req = parse_create_body(body)?;
     let hidden = req.settings.get("index.hidden") == Some("true");
     let now = ctx.now_ms;
     let n2 = name.clone();
     let scripts = ctx.cluster.scripts.clone();
+    let (auth, aliases) = authorized_aliases(ctx, &mut req.aliases)?;
     let warnings = ctx
         .cluster
         .update(move |st| {
+            auth.check_new(st, &n2, &aliases)?;
             let w = create_index(st, &provided, &n2, req, now)?;
             if let Some(idx) = st.metadata.indices.get(&n2).cloned() {
                 crate::search::runtime::check_mapping_scripts(&scripts, st, &idx.mapping)?;
@@ -1172,6 +1187,9 @@ async fn open_indices(ctx: &Ctx<'_>) -> EsResult<Value> {
             let names = resolve::resolve(st, &exprs, &opts, now)?;
             let indices: Vec<Arc<IndexMeta>> = names.iter().map(|n| st.metadata.indices[n].clone()).collect();
             blocks::check(indices.iter().map(|i| i.as_ref()), Level::MetadataWrite)?;
+            // Opening closed indices opens their shards: `cluster.max_shards_per_node`.
+            let reopened = indices.iter().filter(|i| i.is_closed()).map(|i| crate::meta::shard_limit::shards_of(&i.settings)).fold(0u64, u64::saturating_add);
+            crate::meta::shard_limit::check_adding(st, reopened)?;
             for idx in indices {
                 if !idx.is_closed() {
                     continue;

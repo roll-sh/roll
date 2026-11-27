@@ -304,23 +304,32 @@ impl Secrets {
     /// [`Maker`] is recorded and nothing re-checks them later. The checks [`Secrets::bind_ref`]
     /// makes: the one project that holds and stands for `resource`, `reveal` on the folder for the
     /// caller (an approval of an `ask` there is enough, since it's this request's: the gate lends
-    /// it), no sensitive key (a person or a token never reads one), no protected environment for
-    /// an untrusted copy, and no caller that's itself untrusted. Audited as `secrets.use` by the
-    /// caller, naming the resource and `purpose` (a fixed phrase of the product's, never a value).
-    pub fn use_once(&self, resource: &ResourceRef, reference: &str, caller: &Caller, purpose: &str) -> Result<Resolved, Refusal> {
+    /// it), no protected environment for an untrusted copy, and no caller that's itself untrusted.
+    /// Never a sensitive key, `to` or not: a person who may reveal the folder but not read the
+    /// key would otherwise have roll act with it wherever it reaches (a DNS token writing records
+    /// in every zone it can edit), so it waits for an opt-in on the key its owner sets. `to` is
+    /// the one fixed host the product sends the value to, a constant in its code
+    /// (`roll_edge::acme::Cloudflare::API`), named in the audit. Audited as `secrets.use` by the
+    /// caller, naming the resource, `purpose` (a fixed phrase of the product's, never a value) and
+    /// `to`.
+    pub fn use_once(&self, resource: &ResourceRef, reference: &str, caller: &Caller, purpose: &str, to: Option<&'static str>) -> Result<Resolved, Refusal> {
+        if to.is_some_and(|t| !t.starts_with("https://") || t.contains('@')) {
+            return Err(Refusal::Failed(Error::Internal("a fixed host is an https:// URL with no credentials".into())));
+        }
         let r = required(reference)?;
         let project = self.project_for(resource, r.project.as_deref())?;
         if caller.grants.untrusted() {
             return Err(Refusal::NotAllowed(format!("{} runs code nobody vetted, so it reads no roll:// reference", caller.principal)));
         }
         self.may_reveal_for(&project, &r, caller)?;
-        // Read with the caller's rights, never as a runtime, and named for the resource (with a `:`,
-        // so no person's own overrides are read: `Caller::personal`).
+        // Read with the caller's rights, never as a runtime (so a sensitive key is refused, even for
+        // a fixed host: `consumer_entry`), and named for the resource (with a `:`, so no person's
+        // own overrides are read: `Caller::personal`).
         let by = caller.made_by().to_string();
         let mut reader = caller.clone().not_runtime().acting_as(format!("{} for {by}", resource.consumer()));
         reader.maker = Some(by);
         let resource = &ResourceRef { placeholders: false, ..resource.clone() };
-        self.resolve_one(&project, &r.env, &r.path, &r.key, &reader, resource.untrusted, resource, Some((caller, purpose)))
+        self.resolve_one(&project, &r.env, &r.path, &r.key, &reader, resource.untrusted, resource, Some(crate::read::Once { by: caller, purpose, to }))
     }
 
     /// The digest of the folder `reference` reads, as `maker` may now: refused exactly as
@@ -361,15 +370,16 @@ impl Secrets {
         }
         // While its maker may still reveal what it reads, as they are now (a member removed or
         // demoted, or no longer an admin, stops it at once).
-        if !self.maker_reaches(by, &[(crate::access::Action::Reveal, crate::access::Scope::at(project, &r.env, &r.path))])? {
+        if !self.maker_reaches(by, &[(crate::access::Action::Reveal, crate::access::Scope::at(project, &r.env, &r.path).key(&r.key))])? {
             return Err(gone());
         }
         Ok(Caller::consumer(&format!("{} (runtime read for {by})", resource.consumer())))
     }
 
-    /// Whether `caller` may reveal `r`'s folder in `project`. Never says more than a reveal's 403.
+    /// Whether `caller` may reveal `r`'s key in `project` (its folder, or a rule naming that key).
+    /// Never says more than a reveal's 403.
     pub(crate) fn may_reveal_for(&self, project: &str, r: &Reference, caller: &Caller) -> Result<(), Refusal> {
-        if caller.allows(crate::access::Action::Reveal, &crate::access::Scope::at(project, &r.env, &r.path)) {
+        if caller.allows(crate::access::Action::Reveal, &crate::access::Scope::at(project, &r.env, &r.path).key(&r.key)) {
             return Ok(());
         }
         let who = caller.maker.as_deref().unwrap_or(&caller.principal);
@@ -393,7 +403,14 @@ impl Secrets {
     }
 
     fn digest_one(&self, project: &str, r: &Reference, caller: &Caller, resource: &ResourceRef) -> Result<String, Refusal> {
-        let (reader, _, _) = self.consumer_entry(project, &r.env, &r.path, &r.key, caller, resource.untrusted, resource.wants_placeholders())?;
+        let (reader, e, _) = self.consumer_entry(project, &r.env, &r.path, &r.key, caller, resource.untrusted, resource.wants_placeholders())?;
+        // A reader limited to some keys never reads the folder's digest: the key's own, which moves
+        // with each version it's written at.
+        if reader.grants.limits_keys() {
+            use sha2::Digest;
+            let d = sha2::Sha256::digest(format!("key\0{}\0{}\0{}\0{}", e.row.id, e.row.version, e.row.fp, e.row.updated_at).as_bytes());
+            return Ok(d.iter().take(16).map(|b| format!("{b:02x}")).collect());
+        }
         match self.digest(project, &r.env, &r.path, &reader) {
             Err(Error::NotFound(m)) => Err(Refusal::NoSuchKey(m)),
             d => Ok(d?),

@@ -189,8 +189,10 @@ pub const OWNER_MAX_WORKLOADS: usize = 1_000;
 /// identity (roll secrets' `machine_chains`, store/bootstrap.rs), and a chain's logins are capped
 /// per chain ([`CHAIN_MAX_LOGINS`]), so a maker's 900 machines leave their own CI its 1,000.
 const COUNTED_WORKLOADS: &str = "kind = 'workload' AND revoked_at IS NULL AND expires_at > ? AND chain IS NULL";
-/// Live login tokens one machine (a chain) holds at most: one, the next it logs in for before that
-/// one ends, and a few lost answers retried.
+/// Login tokens one machine (a chain) holds at most that are live now (not revoked, not yet ended:
+/// an ended one frees its place at once): one, the next it logs in for before that one ends, and a
+/// few lost answers retried. Not one per process: roll's CLI keeps the machine's login beside its
+/// credential, and every process on the machine reuses it until a quarter of its life is left.
 pub const CHAIN_MAX_LOGINS: usize = 5;
 /// How long a workload grant lives, in minutes.
 pub const WORKLOAD_MINUTES: std::ops::RangeInclusive<u32> = 5..=60;
@@ -503,6 +505,10 @@ pub struct Approval {
     pub scope_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope_index: Option<String>,
+    /// The one secret key it was about, when the path doesn't say it (a lend's: apps' DNS token):
+    /// remembering it reaches that key only (`keys`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope_key: Option<String>,
     /// Who approved it so far, in order: one name once it's approved, more when roll's policy asks
     /// for several people ("Two-person approvals"; it stays pending until they're enough).
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -542,6 +548,7 @@ pub struct Ask<'a> {
     pub environment: Option<&'a str>,
     pub scope_path: Option<&'a str>,
     pub scope_index: Option<&'a str>,
+    pub scope_key: Option<&'a str>,
     /// How long it waits for its people (the policy's `approval_wait_ms`).
     pub wait_ms: i64,
     /// The route's own rule it covers too (a lend's approval whose route's own action asked).
@@ -886,7 +893,7 @@ pub(crate) fn name_rules(c: &code_sql::Conn<'_>, id: &str) -> code_sql::Result<(
 }
 
 const APPROVAL_COLUMNS: &str =
-    "id, grant_id, grant_name, product, action, resource, method, route, path, summary, args, tool, state, reason, created_at, decided_at, decided_by, expires_at, request_hash, environment, scope_path, scope_index, approved_by, also";
+    "id, grant_id, grant_name, product, action, resource, method, route, path, summary, args, tool, state, reason, created_at, decided_at, decided_by, expires_at, request_hash, environment, scope_path, scope_index, approved_by, also, scope_key";
 
 fn approval_row(r: &code_sql::Row<'_>) -> code_sql::Result<Approval> {
     let args: Option<String> = r.get(10)?;
@@ -916,6 +923,7 @@ fn approval_row(r: &code_sql::Row<'_>) -> code_sql::Result<Approval> {
         approved_by: r.get::<_, Option<String>>(22)?.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default(),
         gates: Vec::new(),
         also: r.get::<_, Option<String>>(23)?.and_then(|s| serde_json::from_str(&s).ok()),
+        scope_key: r.get(24)?,
     })
 }
 
@@ -997,7 +1005,8 @@ impl Store {
         // What environment and path a request was about (a remembered approval keeps to them), and
         // who approved it so far (a policy can ask for several people).
         // ...and the route's own rule a lend's approval covers too (`also`).
-        for col in ["environment", "scope_path", "scope_index", "approved_by", "also"] {
+        // ...and the one secret key a lend's approval is about (`scope_key`).
+        for col in ["environment", "scope_path", "scope_index", "approved_by", "also", "scope_key"] {
             if !db.has_column("approvals", col)? {
                 db.add_column("approvals", col, "TEXT")?;
             }
@@ -1305,7 +1314,7 @@ impl Store {
             if let Some(chain) = &chain {
                 let logins: i64 = c.query_row("SELECT COUNT(*) FROM grants WHERE chain = ? AND kind = 'workload' AND revoked_at IS NULL AND expires_at > ? AND rules <> '[]'", params![chain, now], |r| r.get(0))?;
                 if logins as usize >= CHAIN_MAX_LOGINS {
-                    return Err(Error::Conflict(format!("at most {CHAIN_MAX_LOGINS} live login tokens for one machine: use the one it has, or log in again once one ends (each within {} minutes)", WORKLOAD_MINUTES.end())));
+                    return Err(Error::Conflict(format!("at most {CHAIN_MAX_LOGINS} live login tokens for one machine: its processes share the one it has (roll's CLI keeps it beside the machine credential), or log in again once one ends (each within {} minutes)", WORKLOAD_MINUTES.end())));
                 }
             }
             c.execute(
@@ -1698,7 +1707,7 @@ impl Store {
                 return Err(Error::TooMany("this token has 50 approvals waiting: decide some first".into()));
             }
             c.execute(
-                &format!("INSERT INTO approvals ({APPROVAL_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, ?, NULL, NULL, ?, ?, ?, ?, ?, NULL, ?)"),
+                &format!("INSERT INTO approvals ({APPROVAL_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, ?, NULL, NULL, ?, ?, ?, ?, ?, NULL, ?, ?)"),
                 params![
                     id,
                     a.grant.id,
@@ -1718,7 +1727,8 @@ impl Store {
                     a.environment,
                     a.scope_path,
                     a.scope_index,
-                    a.also.and_then(|r| serde_json::to_string(r).ok())
+                    a.also.and_then(|r| serde_json::to_string(r).ok()),
+                    a.scope_key
                 ],
             )?;
             Ok(())

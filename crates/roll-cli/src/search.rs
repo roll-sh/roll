@@ -356,8 +356,9 @@ pub enum Keys {
         name: String,
         /// `data`: indices, templates, pipelines and lifecycle policies, no security (users,
         /// roles, keys); `read`: search and read the indices only; `append`: add documents to
-        /// the named data streams only (a log drain; it can't read them); `admin`: everything
-        /// the cluster's own user may do.
+        /// the named data streams only (a log drain; it can't read them); `otel`: an OpenTelemetry
+        /// Collector's key for the cluster's OTLP intake (OTel's own data streams, write only);
+        /// `admin`: everything the cluster's own user may do.
         #[arg(long, default_value = "data")]
         access: String,
         /// Shorthand for `--access read`.
@@ -1282,6 +1283,7 @@ pub async fn run(api: &Api, as_json: bool, cmd: Search) -> anyhow::Result<()> {
                             ["roll_link"] => "data",
                             ["roll_read"] => "read",
                             ["roll_append"] => "append",
+                            ["roll_otel"] => "otel",
                             _ => "limited",
                         };
                         let expires = k["expiration"].as_i64().map_or("never expires".to_string(), |ms| format!("expires {}", key_time(ms)));

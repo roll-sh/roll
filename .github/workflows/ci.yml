@@ -89,7 +89,11 @@ jobs:
 
   # roll secrets' Go, Python and Ruby clients (sdk/): the same surface as @roll/secrets; the Ansible
   # collection on the Python one.
-  sdk:
+  # roll secrets' Go clients: the client (sdk/go/secrets), and the Kubernetes operator, the CSI
+  # provider and the Lambda extension built on it, plus the two Helm charts. Its own job, with Go's
+  # build cache (the race-enabled standard library is most of a cold run), so neither SDK job nears
+  # a minute.
+  sdk-go:
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
@@ -97,31 +101,21 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.24"
-          cache: false
-      - name: Go
-        working-directory: sdk/go/secrets
+          cache-dependency-path: |
+            sdk/go/secrets/go.mod
+            sdk/kubernetes-operator/go.mod
+            sdk/csi-provider/go.mod
+            sdk/lambda-extension/go.mod
+      - name: Go client, operator, CSI provider, Lambda extension
+        # One go command over the four modules (a go.work made here, not committed), so a cold
+        # cache compiles the race-enabled standard library and the client once, not per module.
         run: |
-          test -z "$(gofmt -l .)"
-          go vet ./...
-          go test -race -count=1 ./...
-      - name: Kubernetes operator
-        working-directory: sdk/kubernetes-operator
-        run: |
-          test -z "$(gofmt -l .)"
-          go vet ./...
-          go test -race -count=1 ./...
-      - name: CSI provider
-        working-directory: sdk/csi-provider
-        run: |
-          test -z "$(gofmt -l .)"
-          go vet ./...
-          go test -race -count=1 ./...
-      - name: Lambda extension
-        working-directory: sdk/lambda-extension
-        run: |
-          test -z "$(gofmt -l .)"
-          go vet ./...
-          go test -race -count=1 ./...
+          mods="sdk/go/secrets sdk/kubernetes-operator sdk/csi-provider sdk/lambda-extension"
+          test -z "$(gofmt -l $mods)"
+          go work init $mods
+          pkgs=$(for d in $mods; do echo "./$d/..."; done)
+          go vet $pkgs
+          go test -race -count=1 $pkgs
       - uses: azure/setup-helm@v4
         with:
           version: v3.16.4
@@ -129,6 +123,13 @@ jobs:
         run: helm lint sdk/kubernetes-operator/chart --set roll.identity=idn_ci
       - name: The CSI provider's Helm chart
         run: helm lint sdk/csi-provider/chart
+
+  # roll secrets' Python and Ruby clients and the Ansible collection on the Python one.
+  sdk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v5
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -235,7 +236,7 @@ jobs:
           fi
 
   ci:
-    needs: [rust, web, dashboard, sdk, java, dotnet, scripts, terraform]
+    needs: [rust, web, dashboard, sdk, sdk-go, java, dotnet, scripts, terraform]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 2

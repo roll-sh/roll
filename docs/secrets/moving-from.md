@@ -307,7 +307,9 @@ production:/
 
 - `-` is a key the source has and roll doesn't. `~` is a key whose value differs. `+` is a key only
   roll has, such as one you added after the import.
-- It fails while a key is missing or different, so a script can wait for a clean check.
+- It exits 1 while a key is missing or different, so a script can wait for a clean check. It
+  exits 2 when every key it compared matches but some couldn't be compared (below): check those by
+  hand before you switch over. 0 means every key was compared and matches.
 - `--map`, `--all-environments` and `--recursive` check every environment and folder they import.
 - A value with references in roll, a linked key and a sensitive key you can't read are listed, not
   compared.

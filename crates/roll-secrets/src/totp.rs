@@ -168,7 +168,7 @@ impl Secrets {
     /// code is a credential), and is audited as `secrets.totp` without the code.
     pub fn totp(&self, project: &str, slug: &str, path: &str, key: &str, caller: &Caller) -> Result<Code> {
         let path = names::path(path)?;
-        caller.need(Action::Reveal, &Scope::at(project, slug, &path))?;
+        caller.need(Action::Reveal, &Scope::at(project, slug, &path).key(key))?;
         let narrowed = self.caller_for(project, slug, caller)?;
         let (seed, problems, leases) = self.reveal_entry(project, slug, &path, key, true, &narrowed)?;
         let t = (|| {

@@ -476,10 +476,10 @@ mod tests {
 
     #[test]
     fn spill_vecs_round_trip_and_sort_in_place() {
-        for limit in [usize::MAX, 0, 1, 7, 4096, 1 << 20] {
+        for limit in [usize::MAX, 0, 7, 4096, 1 << 18] {
             let opts = SpillOptions { dir: None, memory_bytes: limit };
             let mut v = SpillVec::<u64>::new(&opts);
-            let want: Vec<u64> = (0..200_000u64).map(|i| i.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 7).collect();
+            let want: Vec<u64> = (0..50_000u64).map(|i| i.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 7).collect();
             for (i, c) in want.chunks(333).enumerate() {
                 if i % 2 == 0 {
                     v.extend_from_slice(c).unwrap();

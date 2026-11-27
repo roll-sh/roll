@@ -11,6 +11,9 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
+/// The most of a TCP check's banner read to look for its `contains`.
+const MAX_BANNER: usize = 64 << 10;
+
 impl Apps {
     /// The TCP services' ports this node should listen on: `(port, service, env)`, a port
     /// given to each environment that has none yet. None: the store couldn't say (the
@@ -74,6 +77,42 @@ impl Apps {
         let (up, down) = tokio::io::copy_bidirectional(&mut conn, &mut app).await.unwrap_or((0, 0));
         live.meter.lock().request(code_sql::now_ms(), reached.as_secs_f64() * 1000.0, 200, up + down);
         drop(lease);
+    }
+
+    /// A TCP check ([`crate::model::Check::tcp`]): the app's port connected to as a client's
+    /// connection is (an instance woken and leased; past its allow list, as an HTTP check is past
+    /// its gates), and its `contains` looked for in what it says first, all within its timeout.
+    pub(crate) async fn tcp_check(self: &Arc<Self>, service: &str, env: &str, c: &crate::model::Check) -> Result<(), String> {
+        use tokio::io::AsyncReadExt;
+        let go = async {
+            let live = self.load_live(service, env).await.map_err(|e| e.to_string())?;
+            let tpl = live.template().filter(|t| t.run.tcp).ok_or("its live deployment isn't a TCP service's")?;
+            live.may_wake().map_err(|e| e.to_string())?;
+            let lease = live.acquire_tpl(tpl).await.map_err(|e| e.to_string())?;
+            let mut conn = match tokio::net::TcpStream::connect(lease.addr).await {
+                Ok(conn) => conn,
+                Err(e) => {
+                    live.connect_failed(&lease.inst);
+                    return Err(format!("its port refused the connection: {e}"));
+                }
+            };
+            if let Some(want) = &c.contains {
+                let (mut seen, mut buf) = (Vec::new(), [0u8; 4096]);
+                while !String::from_utf8_lossy(&seen).contains(want.as_str()) {
+                    if seen.len() >= MAX_BANNER {
+                        return Err(format!("its first {MAX_BANNER} bytes don't contain {want:?}"));
+                    }
+                    match conn.read(&mut buf).await {
+                        Ok(0) => return Err(format!("it closed the connection without saying {want:?}")),
+                        Ok(n) => seen.extend_from_slice(&buf[..n]),
+                        Err(e) => return Err(format!("reading its banner: {e}")),
+                    }
+                }
+            }
+            drop(lease);
+            Ok(())
+        };
+        tokio::time::timeout(Duration::from_secs(c.timeout_s as u64), go).await.unwrap_or_else(|_| Err(format!("no answer in {}s", c.timeout_s)))
     }
 
     /// Listen on every TCP service's port this node owns, binding and closing them as services
