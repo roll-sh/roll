@@ -13,6 +13,22 @@ pub(super) struct KeptBuild {
 /// How long one resource's columns are read for mask suggestions before it's named in `unread`.
 pub const SUGGEST_READ_FOR: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// How strong a Postgres lock mode is (`pg_locks.mode`): `ShareLock` (5) and up make writes wait,
+/// `AccessExclusiveLock` (8) reads too.
+fn lock_rank(mode: &str) -> u8 {
+    match mode {
+        "AccessShareLock" => 1,
+        "RowShareLock" => 2,
+        "RowExclusiveLock" => 3,
+        "ShareUpdateExclusiveLock" => 4,
+        "ShareLock" => 5,
+        "ShareRowExclusiveLock" => 6,
+        "ExclusiveLock" => 7,
+        "AccessExclusiveLock" => 8,
+        _ => 0,
+    }
+}
+
 /// How long a converge holds its claim on making a masked base (a dead one's lapses).
 const MASK_BASE_HOLD_MS: i64 = 30 * 60_000;
 /// How long a branch waits for a masked base another converge is making.
@@ -595,7 +611,45 @@ impl Engine {
             && self.store.released(&r.id)?.as_deref() != Some(r.build())
         {
             let started = std::time::Instant::now();
-            self.run_job(r, &s, &vars, "release", release).await?;
+            // The locks it holds, sampled while it runs: what it would hold on production.
+            let watched: Vec<(Arc<dyn Brancher>, String, String)> = self
+                .store
+                .resources(&r.id)?
+                .into_iter()
+                .filter(|x| x.kind == Kind::Postgres)
+                .filter_map(|x| Some((self.brancher(x.kind).ok()?.clone(), x.parent.clone(), x.r#ref.clone()?)))
+                .collect();
+            let several = watched.len() > 1;
+            let job = self.run_job(r, &s, &vars, "release", release);
+            tokio::pin!(job);
+            let mut seen: BTreeMap<String, (u8, String, std::time::Instant, std::time::Instant)> = BTreeMap::new();
+            let ran = loop {
+                for (b, parent, branch) in &watched {
+                    let Ok(Ok(held)) = tokio::time::timeout(std::time::Duration::from_secs(2), b.locks(parent, branch)).await else { continue };
+                    let now = std::time::Instant::now();
+                    for (table, mode) in held {
+                        let rank = lock_rank(&mode);
+                        if rank < lock_rank("ShareLock") {
+                            continue;
+                        }
+                        let key = if several { format!("{table} (postgres:{parent})") } else { table };
+                        let e = seen.entry(key).or_insert((rank, mode.clone(), now, now));
+                        if rank > e.0 {
+                            (e.0, e.1) = (rank, mode);
+                        }
+                        e.3 = now;
+                    }
+                }
+                tokio::select! {
+                    ran = &mut job => break ran,
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {}
+                }
+            };
+            ran?;
+            let mut locks: Vec<crate::ReleaseLock> = seen.into_iter().map(|(table, (_, mode, first, last))| crate::ReleaseLock { table, mode, ms: (last - first).as_millis() as i64 + 500 }).collect();
+            locks.sort_by(|a, b| lock_rank(&b.mode).cmp(&lock_rank(&a.mode)).then(b.ms.cmp(&a.ms)));
+            locks.truncate(10);
+            self.store.set_runtime_fact(&r.id, "release_locks", Some(&crate::ReleaseLocksAt { head: r.build().to_string(), locks }))?;
             let ms = started.elapsed().as_millis() as i64;
             self.store.set_released(&r.id, r.build(), ms)?;
             self.store.log(&r.id, &format!("released in {:.1} s", ms as f64 / 1000.0))?;

@@ -535,6 +535,7 @@ async fn blockers_keep_changes_out_of_the_queue() {
             schema_risks: Vec::new(),
             schema_overlaps: Vec::new(),
             release_ms: None,
+            release_locks: Vec::new(),
             release_before_ms: None,
             screenshot_url: None,
             expires_at: None,
