@@ -7030,8 +7030,8 @@ async fn a_frozen_folder_answers_423_to_readers_and_lets_its_admins_through() {
 
 /// A reference named for one request and kept by nothing (roll apps' Cloudflare token): read
 /// once as the caller, audited as their use of it naming the resource, under `bind_ref`'s checks
-/// (reveal there, no untrusted caller), with no maker recorded; a sensitive key only when the
-/// product names the fixed host it goes to, audited with it, and never for an untrusted copy.
+/// (reveal there, no untrusted caller), with no maker recorded, audited with the fixed host it
+/// goes to; never a sensitive key, even for that host.
 #[tokio::test]
 async fn a_reference_read_once_reads_as_the_caller_and_is_audited_as_theirs() {
     use roll_secrets::{Refusal, ResourceRef};
@@ -7054,14 +7054,13 @@ async fn a_reference_read_once_reads_as_the_caller_and_is_audited_as_theirs() {
     assert!(audit[0]["summary"].as_str().unwrap().contains("apps:service:web"), "{audit}");
     let untrusted = s.untrusted(&api.project, &prod).unwrap();
     let cf = Some("https://api.cloudflare.com/client/v4");
-    for (caller, reference, to) in [(&token("staging").0, "roll://production/CF_TOKEN", cf), (&prod, "roll://production/CF_SENSITIVE", None), (&untrusted, "roll://production/CF_TOKEN", None), (&untrusted, "roll://production/CF_SENSITIVE", cf)] {
+    for (caller, reference, to) in [(&token("staging").0, "roll://production/CF_TOKEN", cf), (&prod, "roll://production/CF_SENSITIVE", None), (&prod, "roll://production/CF_SENSITIVE", cf), (&untrusted, "roll://production/CF_TOKEN", None), (&untrusted, "roll://production/CF_SENSITIVE", cf)] {
         let refused = s.use_once(&web, reference, caller, "writing a domain's records", to).unwrap_err();
         assert!(matches!(refused, Refusal::NotAllowed(_) | Refusal::Unusable(_)) && !refused.to_string().contains("fake-"), "{refused}");
     }
-    let kept = s.use_once(&web, "roll://production/CF_SENSITIVE", &prod, "writing a domain's records", cf).unwrap();
-    assert_eq!(kept.value.expose(), "fake-cf-kept", "a sensitive key, to its fixed host");
+    s.use_once(&web, "roll://production/CF_TOKEN", &prod, "writing a domain's records", cf).unwrap();
     let audit = api.ok(Method::GET, "/audit?action=secrets.use", None).await;
-    assert!(audit[0]["summary"].as_str().unwrap().ends_with("a sensitive key sent only to https://api.cloudflare.com/client/v4"), "{audit}");
+    assert!(audit[0]["summary"].as_str().unwrap().ends_with("sent only to https://api.cloudflare.com/client/v4"), "{audit}");
 }
 
 #[tokio::test]
