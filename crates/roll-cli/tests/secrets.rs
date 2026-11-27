@@ -61,6 +61,15 @@ async fn create_token(axum::extract::State(tokens): axum::extract::State<Tokens>
     axum::Json(serde_json::json!({ "grant": { "id": id, "name": name, "rules": b["rules"], "expires_at": b["expires_at"] }, "token": secret }))
 }
 
+/// roll-access's grants looked up by id, as rolld hands them to roll secrets: a token as it is now.
+struct Granted(Tokens);
+
+impl roll_auth::Grants for Granted {
+    fn grant(&self, id: &str) -> Option<roll_auth::Grant> {
+        self.0.lock().unwrap().values().find(|g| &*g.id == id).cloned()
+    }
+}
+
 async fn gate(axum::extract::State(tokens): axum::extract::State<Tokens>, mut req: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
     use axum::response::IntoResponse;
     if let Some(t) = roll_auth::bearer(req.headers()).map(str::to_string) {
@@ -210,7 +219,7 @@ async fn start_with(logins: bool) -> Server {
         trust_forwarded_for: false,
         web_url: None,
         deliver: None,
-        grants: None,
+        grants: Some(Arc::new(Granted(tokens.clone()))),
         people: None,
         clouds: None,
         outside: None,
@@ -1315,6 +1324,55 @@ async fn a_bootstrap_token_becomes_a_machine_credential_kept_on_disk_and_replace
     assert!(next["credential"].as_str().unwrap() != first && next["refresh_at"].as_i64().unwrap() > 0, "{next}");
     let old = reqwest::Client::new().post(format!("{}/v1/secrets/login", s.api)).json(&serde_json::json!({ "identity": id, "machine": first })).send().await.unwrap();
     assert_eq!(old.status(), 401, "the old one stops");
+}
+
+/// The machine credential file is trusted only as this user's own, and only by the server that made
+/// it: its directory is made 0700, a file others can write (0666: another local user may have put
+/// it there) is refused naming the fix and no value, and with `ROLL_API_URL` moved to another
+/// server, neither the credential nor the kept login is sent there.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_machine_credential_file_is_used_only_as_this_users_and_only_with_its_server() {
+    use std::os::unix::fs::PermissionsExt;
+    let s = start_with(true).await;
+    ok(&s.api, &[], &["secrets", "-p", "shop", "-e", "production", "set", "GREETING=fake-hello"], None).await;
+    let id = ok(&s.api, &[], &["secrets", "-p", "shop", "identities", "add", "racks", "--machine", "--for-env", "production"], None).await.trim().to_string();
+    let token = ok(&s.api, &[], &["secrets", "-p", "shop", "identities", "bootstrap", &id], None).await.trim().to_string();
+    let state = s._dir.path().join("state").join("roll");
+    let file = state.join("machine.json");
+    let file_env = file.to_str().unwrap().to_string();
+    let env = [("ROLL_IDENTITY", id.as_str()), ("ROLL_BOOTSTRAP_TOKEN", token.as_str()), ("ROLL_MACHINE_CREDENTIAL_FILE", file_env.as_str())];
+    let args = ["secrets", "-p", "shop", "-e", "production", "get", "GREETING"];
+    assert_eq!(ok(&s.api, &env, &args, None).await.trim(), "fake-hello");
+    assert_eq!(std::fs::metadata(&state).unwrap().permissions().mode() & 0o777, 0o700, "the directory roll made");
+    let kept: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    let (credential, login) = (kept["credential"].as_str().unwrap().to_string(), kept["login"]["token"].as_str().unwrap_or_else(|| panic!("{kept}")).to_string());
+
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o666)).unwrap();
+    let o = roll(&s.api, &env, &args, None).await;
+    assert!(o.code != Some(0) && o.stderr.contains(&file_env) && o.stderr.contains("chmod 600"), "{}", o.stderr);
+    assert!(!o.stderr.contains(&credential) && !o.stderr.contains(&login), "never a value: {}", o.stderr);
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+    // Another server, recording what it's sent.
+    let other = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let other_url = format!("http://{}", other.local_addr().unwrap());
+    let heard: Arc<std::sync::Mutex<String>> = Arc::default();
+    let h = heard.clone();
+    tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        while let Ok((mut c, _)) = other.accept().await {
+            let mut buf = vec![0u8; 64 * 1024];
+            let n = c.read(&mut buf).await.unwrap_or(0);
+            h.lock().unwrap().push_str(&String::from_utf8_lossy(&buf[..n]));
+            let _ = c.write_all(b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\nconnection: close\r\n\r\n").await;
+        }
+    });
+    let o = roll(&other_url, &env, &args, None).await;
+    assert!(o.code != Some(0) && o.stderr.contains(&s.api), "refused, naming the server that made it: {}", o.stderr);
+    let heard = heard.lock().unwrap().clone();
+    assert!(!heard.contains(&credential) && !heard.contains(&login), "nothing of the machine's goes to another server: {heard}");
+    assert_eq!(ok(&s.api, &env, &args, None).await.trim(), "fake-hello", "its own server still takes it");
 }
 
 /// `roll secrets mount` of shop's production at `env_file` with `token`, once it serves, and its
