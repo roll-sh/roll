@@ -81,8 +81,47 @@ impl crate::Apps {
                     Err(e) => sink().line(format!("deploying {url} at {}: {e}", &sha[..12])),
                 }
             }
+            started.extend(self.watch_deploy_tags(&svc, url, &remote).await);
         }
         started
+    }
+
+    /// The repository's new tags an environment's `deploy_tags` matches, with no hook (Cloud
+    /// Build's triggers): the newest of them by version order (`v10` after `v9`), the older ones
+    /// marked as seen so a pass never puts an older release live after a newer one. Through the
+    /// hook's own tag path.
+    async fn watch_deploy_tags(self: &std::sync::Arc<Self>, svc: &crate::store::ServiceRow, url: &str, remote: &Remote<'_>) -> Vec<String> {
+        let sid = svc.id.clone();
+        let Ok(envs) = self.db(move |s| s.environments(&sid)).await else { return Vec::new() };
+        let mut watched = Vec::new();
+        for e in envs.into_iter().filter(|e| !e.ephemeral) {
+            let (sid, en) = (svc.id.clone(), e.name.clone());
+            if let Ok(Some((pattern, seen))) = self.db(move |s| s.deploy_tags(&sid, &en)).await {
+                watched.push((e.name, pattern, seen));
+            }
+        }
+        if watched.is_empty() {
+            return Vec::new();
+        }
+        let Ok(refs) = remote.ls_refs().await else { return Vec::new() };
+        let tags: Vec<&str> = refs.refs.iter().filter_map(|r| r.name.strip_prefix("refs/tags/")).collect();
+        let mut wanted = Vec::new();
+        for (env, pattern, seen) in watched {
+            let mut new: Vec<&str> = tags.iter().copied().filter(|t| crate::tags::tag_matches(&pattern, t) && !seen.iter().any(|s| s == t)).collect();
+            new.sort_by(|a, b| crate::tags::version_order(a, b));
+            let Some(newest) = new.pop() else { continue };
+            for older in new {
+                let (sid, en, t) = (svc.id.clone(), env.clone(), older.to_string());
+                let _ = self.db(move |s| s.mark_tag_seen(&sid, &en, &t)).await;
+            }
+            wanted.push(newest.to_string());
+        }
+        wanted.sort();
+        wanted.dedup();
+        match self.deploy_pushed_tags(&svc.id, svc, url, &wanted, "tag watch").await {
+            Ok((_, deployed, _)) => deployed.into_iter().map(|d| d.id).collect(),
+            Err(_) => Vec::new(),
+        }
     }
 }
 

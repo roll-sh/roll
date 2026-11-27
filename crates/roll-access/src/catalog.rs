@@ -141,7 +141,7 @@ fn search_secret_write(b: &Value) -> Vec<Lent> {
 }
 
 /// A folder as roll secrets' `names::path` normalizes it, or `None` where it refuses it.
-fn secret_path(p: &str) -> Option<String> {
+pub(crate) fn secret_path(p: &str) -> Option<String> {
     let p = if p.is_empty() { "/" } else { p };
     let rest = p.strip_prefix('/').filter(|r| !r.starts_with('/'))?;
     let rest = rest.strip_suffix('/').unwrap_or(rest);

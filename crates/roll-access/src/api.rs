@@ -1162,7 +1162,7 @@ async fn remembered(a: &Arc<Access>, id: &str, remember: Option<&str>) -> crate:
     }
     // A folder's rule reaches every folder under it, so one at a secrets environment's root (or with
     // no folder) is the whole environment, or more: remembered for 8 hours at most.
-    if found.product == "secrets" && found.scope_path.as_deref().is_none_or(|p| p == "/") && until.is_none_or(|u| u > code_sql::now_ms() + 8 * 3_600_000) {
+    if found.product == "secrets" && found.scope_path.as_deref().is_none_or(roll_auth::scope::is_root) && until.is_none_or(|u| u > code_sql::now_ms() + 8 * 3_600_000) {
         return Err(Error::BadRequest("this reaches every folder of the environment: remember it for an hour or 8 hours at most, or approve it once".into()));
     }
     let rule = rule_of(&found)?;
@@ -1295,7 +1295,7 @@ async fn request_access(State(a): S, ext: Extensions, Json(r): Json<AccessReques
     // A folder's rule reaches every folder under it: one at a secrets environment's root (or with
     // no folder) is all of it, or every environment's, so it lasts 8 hours at most, as a
     // remembered approval of one does.
-    if r.product == "secrets" && r.path.as_deref().is_none_or(|p| p == "/") && lasts > 8 * 3_600_000 {
+    if r.product == "secrets" && r.path.as_deref().is_none_or(roll_auth::scope::is_root) && lasts > 8 * 3_600_000 {
         return Err(Error::BadRequest("this reaches every folder of the environment (name a folder in path for longer): for 15m, 1h or 8h".into()));
     }
     // Tokens and approvals are changed by people, never asked for: a token that could manage

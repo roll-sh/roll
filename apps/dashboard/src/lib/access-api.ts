@@ -262,9 +262,14 @@ export const REMEMBER: { value: Remember; label: string }[] = [
   { value: "always", label: "Always" },
 ];
 
+/** Whether a folder is the root, as `roll_auth::scope::is_root` decides: none, `/`, or `/` spelled with more slashes (`//`). */
+function isRoot(path: string | null | undefined): boolean {
+  return !path || path.replace(/\/+$/, "") === "";
+}
+
 /** Whether remembering `a` reaches a whole environment's secrets: a folder's rule reaches every folder under it, so the root (or no folder) is all of them. */
 export function wholeEnvironment(a: Pick<Approval, "product" | "scope_path">): boolean {
-  return a.product === "secrets" && (!a.scope_path || a.scope_path === "/");
+  return a.product === "secrets" && isRoot(a.scope_path);
 }
 
 /** How long `a` may be remembered: a whole environment's secrets for 8 hours at most (the server refuses longer). */
@@ -274,7 +279,7 @@ export function rememberChoices(a: Pick<Approval, "product" | "scope_path">): ty
 
 /** Where in its resource an approval is (what remembering it keeps to): "production · folder /db". */
 export function approvalWhere(a: Pick<Approval, "environment" | "scope_path">): string {
-  return [a.environment, a.scope_path && a.scope_path !== "/" ? `folder ${a.scope_path}` : null].filter(Boolean).join(" · ");
+  return [a.environment, !isRoot(a.scope_path) ? `folder ${a.scope_path}` : null].filter(Boolean).join(" · ");
 }
 
 /** Whether approving it can be remembered: it's about one resource, and roll's policy doesn't ask several people for it. */
