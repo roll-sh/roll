@@ -19697,34 +19697,42 @@ impl Render<'_> {
                         if st.groups[g] == 0 || st.groups[0] == 0 {
                             continue;
                         }
-                        let methods: Vec<String> = [(1u8, "top-N heapsort"), (2, "quicksort")]
+                        let methods: Vec<String> = [(1u8, "top-N heapsort"), (2, "quicksort"), (8, "external merge")]
                             .iter()
                             .filter(|(b, _)| st.methods[g] & b != 0)
                             .map(|(_, m)| m.to_string())
                             .collect();
                         let kb = |kept: u64, sorts: u64| (kept * (width + 40)).div_ceil(1024) + 25 * sorts;
-                        let peak = kb(st.kept_max[g], 1);
-                        let avg = kb(st.kept_total[g], st.groups[g]) / st.groups[g];
+                        // (The sorts tuplesort_get_stats found in memory, then those on disk:
+                        // each average over every group.)
+                        let mem_groups = st.groups[g] - st.disk_groups[g];
+                        let mut spaces: Vec<(&str, u64, u64)> = Vec::new();
+                        if mem_groups > 0 {
+                            spaces.push(("Memory", kb(st.kept_total[g], mem_groups) / st.groups[g], kb(st.kept_max[g], 1)));
+                        }
+                        if st.disk_groups[g] > 0 {
+                            spaces.push(("Disk", st.disk_total[g] / st.groups[g], st.disk_max[g]));
+                        }
                         let name = format!("{label} Groups");
                         if text {
                             let s = if methods.len() > 1 { "s" } else { "" };
+                            let space: String =
+                                spaces.iter().map(|(t, avg, peak)| format!("  Average {t}: {avg}kB  Peak {t}: {peak}kB")).collect();
                             self.w.prop(
                                 &name,
-                                &format!(
-                                    "{}  Sort Method{s}: {}  Average Memory: {avg}kB  Peak Memory: {peak}kB",
-                                    st.groups[g],
-                                    methods.join(", ")
-                                ),
+                                &format!("{}  Sort Method{s}: {}{space}", st.groups[g], methods.join(", ")),
                                 true,
                             );
                         } else {
                             self.w.open("Incremental Sort Groups", Some(&name), true);
                             self.w.prop("Group Count", &st.groups[g].to_string(), true);
                             self.w.list("Sort Methods Used", &methods);
-                            self.w.open("Sort Space", Some("Sort Space Memory"), true);
-                            self.w.prop("Average Sort Space Used", &avg.to_string(), true);
-                            self.w.prop("Peak Sort Space Used", &peak.to_string(), true);
-                            self.w.close("Sort Space", true);
+                            for (t, avg, peak) in &spaces {
+                                self.w.open("Sort Space", Some(&format!("Sort Space {t}")), true);
+                                self.w.prop("Average Sort Space Used", &avg.to_string(), true);
+                                self.w.prop("Peak Sort Space Used", &peak.to_string(), true);
+                                self.w.close("Sort Space", true);
+                            }
                             self.w.close("Incremental Sort Groups", true);
                         }
                     }

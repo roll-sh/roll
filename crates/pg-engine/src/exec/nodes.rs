@@ -407,8 +407,6 @@ fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
             sets,
             aggs,
         } => {
-            let sorted = super::agg::sorted_distinct(input, groups, sets.is_none(), aggs, ctx);
-            let aggs = sorted.as_ref().unwrap_or(aggs);
             Box::new(
                 super::agg::AggNode::new(
                     open_agg_input(input, groups, aggs, ctx)?,
@@ -3516,8 +3514,32 @@ struct IncrSortNode {
     presorted: usize,
     key: usize,
     started: bool,
-    sorter: super::pgsort::IncrSort<(Vec<Value>, Row)>,
+    sorter: super::pgsort::IncrSort<(Vec<Value>, Row), true>,
     batch: std::vec::IntoIter<(Vec<Value>, Row)>,
+    /// A prefix group past work_mem sorted as tuplesort sorts it then (`IncrSpill`).
+    spill: Option<Box<IncrSpill>>,
+}
+
+/// An Incremental Sort's prefix groups past work_mem (not with a bound): a group is counted
+/// as tuplesort counts its tuples once it has `FIRST` rows, then at checkpoints as it grows
+/// (`IncrSort::check_at`); past work_mem, its rows and the rest of it go to an ExtSort (runs
+/// on disk, read back merged: "external merge"), read as its batch.
+struct IncrSpill {
+    types: Vec<crate::types::DataType>,
+    mask: Option<Vec<bool>>,
+    /// The group counted (`IncrSort`'s number of it), its rows counted so far.
+    group: u64,
+    counted: usize,
+    mem: super::workmem::SortMem,
+    /// The prefix sorts' tuplesort_get_stats on disk so far (maxSpace, kB): every later
+    /// prefix group shows it.
+    disk_kb: u64,
+    /// The spilled group's sorted rows.
+    out: Option<super::extsort::Sorted>,
+}
+
+impl IncrSpill {
+    const FIRST: usize = 1024;
 }
 
 impl IncrSortNode {
@@ -3585,15 +3607,106 @@ impl IncrSortNode {
         if let Some(e) = read_err.or(err).or(cf.err).or(cs.err) {
             return Err(e);
         }
+        // (After a prefix group on disk, tuplesort_get_stats of every later one is its.)
+        let disk_kb = self.spill.as_ref().map_or(0, |s| s.disk_kb);
         ctx.count(self.key, |st| {
             for g in 0..2 {
                 st.incr.groups[g] += stats.groups[g];
+                if g == 1 && disk_kb > 0 {
+                    st.incr.methods[g] |= 8;
+                    st.incr.disk_groups[g] += stats.groups[g];
+                    st.incr.disk_total[g] += disk_kb * stats.groups[g];
+                    continue;
+                }
                 st.incr.methods[g] |= stats.methods[g];
                 st.incr.kept_total[g] += stats.kept_total[g];
                 st.incr.kept_max[g] = st.incr.kept_max[g].max(stats.kept_max[g]);
             }
         });
+        if batch.is_none()
+            && let Some(sp) = &mut self.spill
+            && let Some((rows, group)) = self.sorter.paused()
+        {
+            // A prefix group at a checkpoint: counted on from where the last count stopped.
+            if sp.group != group {
+                sp.group = group;
+                sp.counted = 0;
+                sp.mem = super::workmem::SortMem::new(super::workmem::work_mem(ctx));
+            }
+            let mut past = false;
+            for (_, r) in &rows[sp.counted..] {
+                let len = super::workmem::minimal_tuple_len_of(r, &sp.types, sp.mask.as_deref(), ctx);
+                if sp.mem.put(super::workmem::maxalign(len)) {
+                    past = true;
+                    break;
+                }
+            }
+            let n = rows.len();
+            sp.counted = n;
+            if past {
+                return self.spill_group(ctx);
+            }
+            // (The next checkpoint: half the room left at the rows' average size.)
+            let used = sp.mem.used().max(1) as usize;
+            let room = (sp.mem.allowed as usize).saturating_sub(used);
+            self.sorter.check_at = n + (room / (2 * used.div_ceil(n.max(1)))).max(32);
+            return self.fill(ctx);
+        }
         self.batch = batch.unwrap_or_default().into_iter();
+        Ok(())
+    }
+
+    /// A prefix group past work_mem: its rows so far and the rest of it (to the next group's
+    /// first row) sorted by an ExtSort, as the prefix tuplesort sorts it past work_mem; the
+    /// sorter goes on at the next group.
+    #[inline(never)]
+    fn spill_group(&mut self, ctx: &ExecCtx) -> Result<()> {
+        let sp = self.spill.as_mut().expect("spilling");
+        let rows = self.sorter.take_prefix();
+        let mut es = super::extsort::ExtSort::new(&self.keys, sp.types.clone(), sp.mask.clone(), None, false, ctx);
+        let first: Vec<Value> = rows.first().map(|r| r.0[..self.presorted].to_vec()).unwrap_or_default();
+        let mut n = rows.len() as u64;
+        for (_, r) in rows {
+            es.put(r, None, ctx)?;
+        }
+        let next = loop {
+            let Some(r) = self.input.next(ctx)? else { break None };
+            ctx.check()?;
+            let k = self.keys.iter().map(|k| eval(&k.expr, &r, ctx)).collect::<Result<Vec<_>>>()?;
+            let mut same = true;
+            for (i, key) in self.keys.iter().enumerate().take(self.presorted) {
+                if compare_values(&first[i], &k[i], key, ctx)? != Ordering::Equal {
+                    same = false;
+                    break;
+                }
+            }
+            if !same {
+                break Some((k, r));
+            }
+            n += 1;
+            es.put(r, None, ctx)?;
+        };
+        let (out, method, kb) = es.finish(ctx)?;
+        self.sorter.resume(next);
+        if method.on_disk() {
+            sp.disk_kb = sp.disk_kb.max(kb);
+        }
+        let disk_kb = sp.disk_kb;
+        ctx.count(self.key, |st| {
+            st.incr.groups[1] += 1;
+            if disk_kb > 0 {
+                st.incr.methods[1] |= 8;
+                st.incr.disk_groups[1] += 1;
+                st.incr.disk_total[1] += disk_kb;
+                st.incr.disk_max[1] = st.incr.disk_max[1].max(disk_kb);
+            } else {
+                st.incr.methods[1] |= 2;
+                st.incr.kept_total[1] += n;
+                st.incr.kept_max[1] = st.incr.kept_max[1].max(n);
+            }
+        });
+        sp.out = Some(out);
+        self.batch = Vec::new().into_iter();
         Ok(())
     }
 }
@@ -3603,7 +3716,16 @@ impl Node for IncrSortNode {
         if let Some((_, r)) = self.batch.next() {
             return Ok(Some(r));
         }
+        if let Some(out) = self.spill.as_mut().and_then(|s| s.out.as_mut()) {
+            if let Some(r) = out.next(ctx)? {
+                return Ok(Some(r));
+            }
+            self.spill.as_mut().unwrap().out = None;
+        }
         self.fill(ctx)?;
+        if let Some(out) = self.spill.as_mut().and_then(|s| s.out.as_mut()) {
+            return out.next(ctx);
+        }
         Ok(self.batch.next().map(|(_, r)| r))
     }
 }
@@ -3846,6 +3968,7 @@ pub(super) fn incremental_sort(input: BoxNode, keys: Vec<SortKey>, presorted: us
         started: false,
         sorter: super::pgsort::IncrSort::new(None),
         batch: Vec::new().into_iter(),
+        spill: None,
     })
 }
 
@@ -3856,14 +3979,28 @@ impl SortNode {
         if self.presorted == 0 {
             return Box::new(self);
         }
+        let mut sorter = super::pgsort::IncrSort::new(self.bound);
+        let spill = self.bound.is_none().then(|| {
+            sorter.check_first = IncrSpill::FIRST;
+            Box::new(IncrSpill {
+                types: self.types,
+                mask: self.mask,
+                group: 0,
+                counted: 0,
+                mem: super::workmem::SortMem::new(0),
+                disk_kb: 0,
+                out: None,
+            })
+        });
         Box::new(IncrSortNode {
             input: self.input.expect("a sort not yet run"),
             keys: self.keys,
             presorted: self.presorted,
             key: self.key,
             started: false,
-            sorter: super::pgsort::IncrSort::new(self.bound),
+            sorter,
             batch: Vec::new().into_iter(),
+            spill,
         })
     }
 

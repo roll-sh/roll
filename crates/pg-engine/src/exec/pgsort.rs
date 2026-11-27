@@ -324,13 +324,18 @@ impl<T> Bounded<T> {
 }
 
 /// An incremental sort's sorts, full ones (0) and of presorted prefix groups (1): how many,
-/// the methods used (1 top-N heapsort, 2 quicksort), and the rows each kept.
+/// the methods used (1 top-N heapsort, 2 quicksort, 8 external merge), the rows each kept in
+/// memory; and the sorts tuplesort_get_stats found on disk, their kB (its maxSpace: the most
+/// any sort of the node's used so far, disk before memory) and the most.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct IncrStats {
     pub groups: [u64; 2],
     pub methods: [u8; 2],
     pub kept_total: [u64; 2],
     pub kept_max: [u64; 2],
+    pub disk_groups: [u64; 2],
+    pub disk_total: [u64; 2],
+    pub disk_max: [u64; 2],
 }
 
 /// DEFAULT_MIN_GROUP_SIZE and DEFAULT_MAX_FULL_SORT_GROUP_SIZE.
@@ -352,7 +357,7 @@ pub fn incremental_sort<T: Clone>(
     stats: &mut IncrStats,
 ) -> Vec<T> {
     let mut input = input.into_iter();
-    let mut sorter = IncrSort::new(bound);
+    let mut sorter = IncrSort::<T, false>::new(bound);
     let mut out: Vec<T> = Vec::new();
     while let Some(batch) = sorter.next_batch(&mut input, full, suffix, same, stats) {
         out.extend(batch);
@@ -369,8 +374,9 @@ enum IncrSt {
 }
 
 /// `incremental_sort`'s state between its sorted batches (ExecIncrementalSort's), so that
-/// an Incremental Sort node gives out one batch at a time.
-pub struct IncrSort<T> {
+/// an Incremental Sort node gives out one batch at a time. `CHECK`: a prefix group is paused
+/// at `check_at` rows (`IncrSortNode`'s; without it the loop has no test of its own).
+pub struct IncrSort<T, const CHECK: bool> {
     bound: Option<usize>,
     st: IncrSt,
     pivot: Option<T>,
@@ -384,6 +390,13 @@ pub struct IncrSort<T> {
     /// Rows given out, and whether the last batch was.
     emitted: usize,
     done: bool,
+    /// A prefix group being loaded stops at this many rows (`paused`) for its caller to
+    /// count them (`IncrSortNode`: past work_mem it sorts the group itself); usize::MAX: never.
+    pub check_at: usize,
+    /// `check_at` for each prefix group's start, and the groups started so far.
+    pub check_first: usize,
+    group_no: u64,
+    paused: bool,
 }
 
 /// tuplesort with an optional bound: (rows, whether the bounded heap was used), counted as a
@@ -398,7 +411,7 @@ fn incr_group_sort<T: Clone>(rows: Vec<T>, b: Option<usize>, c: &mut Cmp<T>, st:
     (tuplesort(rows, b, c), used)
 }
 
-impl<T: Clone> IncrSort<T> {
+impl<T: Clone, const CHECK: bool> IncrSort<T, CHECK> {
     pub fn new(bound: Option<usize>) -> Self {
         IncrSort {
             bound,
@@ -413,6 +426,40 @@ impl<T: Clone> IncrSort<T> {
             prefixsorted: Vec::new().into_iter(),
             emitted: 0,
             done: false,
+            check_at: usize::MAX,
+            check_first: usize::MAX,
+            group_no: 0,
+            paused: false,
+        }
+    }
+
+    /// The prefix group being loaded stopped at `check_at` rows: its rows so far (`next_batch`
+    /// goes on loading it).
+    pub fn paused(&mut self) -> Option<(&[T], u64)> {
+        std::mem::take(&mut self.paused).then_some((&self.prefix[..], self.group_no))
+    }
+
+    /// The paused prefix group's rows, taken to be sorted by the caller, which reads the rest
+    /// of the group itself; `resume` then.
+    pub fn take_prefix(&mut self) -> Vec<T> {
+        std::mem::take(&mut self.prefix)
+    }
+
+    /// The caller sorted a prefix group itself: the input goes on at `next` (the next group's
+    /// first row; None: the input ended), counted as one presorted group, as after
+    /// ReadPrefix.
+    pub fn resume(&mut self, next: Option<T>) {
+        self.pivot = None;
+        self.transfer = None;
+        match next {
+            Some(t) => {
+                self.pivot = Some(t);
+                self.st = IncrSt::LoadFull;
+            }
+            None => {
+                self.outer_done = true;
+                self.done = true;
+            }
         }
     }
 
@@ -443,6 +490,10 @@ impl<T: Clone> IncrSort<T> {
         self.remaining -= n;
         if self.remaining == 0 {
             self.pivot = self.transfer.take();
+            if CHECK {
+                self.check_at = self.check_first;
+                self.group_no += 1;
+            }
             IncrSt::LoadPrefix
         } else {
             let b = self.bound.map(|b| b.saturating_sub(self.bound_done));
@@ -545,6 +596,10 @@ impl<T: Clone> IncrSort<T> {
                         if self.pivot.as_ref().is_some_and(|p| same(p, &t)) {
                             self.prefix.push(t);
                             n += 1;
+                            if CHECK && self.prefix.len() >= self.check_at {
+                                self.paused = true;
+                                return None;
+                            }
                         } else {
                             self.pivot = Some(t);
                             break;
