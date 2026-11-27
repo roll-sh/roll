@@ -407,8 +407,6 @@ fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
             sets,
             aggs,
         } => {
-            let sorted = super::agg::sorted_distinct(input, groups, sets.is_none(), aggs, ctx);
-            let aggs = sorted.as_ref().unwrap_or(aggs);
             Box::new(
                 super::agg::AggNode::new(
                     open_agg_input(input, groups, aggs, ctx)?,

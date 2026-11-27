@@ -2392,49 +2392,6 @@ pub fn hash_distinct(a: &AggCall) -> bool {
     }
 }
 
-/// A plain aggregation's `hash_distinct` aggregates when the table its input scans has more
-/// rows than their values' sort fits in work_mem (pg_class.reltuples, each value a SortTuple
-/// and its tuple): each given its arguments as its ORDER BY (the same aggregate), so its values
-/// are sorted as PostgreSQL's per-aggregate tuplesort sorts them (`Buffered::Sort`, runs on
-/// disk past work_mem) and fed once a run of equal ones, not kept in a hash set. Decided when
-/// the plan is opened; None: the aggregates as they are.
-#[inline(never)]
-pub fn sorted_distinct(
-    input: &crate::sql::plan::Plan,
-    groups: &[crate::sql::expr::Expr],
-    plain: bool,
-    aggs: &[AggCall],
-    ctx: &ExecCtx,
-) -> Option<Vec<AggCall>> {
-    use crate::sql::plan::Plan;
-    if !groups.is_empty() || !plain || !aggs.iter().any(hash_distinct) {
-        return None;
-    }
-    let mut p = input;
-    let table = loop {
-        match p {
-            Plan::Project { input, .. } | Plan::Filter { input, .. } => p = input,
-            Plan::Scan(s) if s.index.is_none() && !matches!(s.access, crate::sql::plan::Access::Index { .. }) => break &s.table,
-            _ => return None,
-        }
-    };
-    let tuples = ctx.catalog().relstats.get(&table.oid)?.tuples;
-    if tuples * 56.0 <= super::workmem::work_mem(ctx) as f64 {
-        return None;
-    }
-    Some(
-        aggs.iter()
-            .map(|a| {
-                let mut a = a.clone();
-                if hash_distinct(&a) {
-                    a.order_by = a.args.iter().map(|e| SortKey { expr: e.clone(), desc: false, nulls_first: false, using: None }).collect();
-                }
-                a
-            })
-            .collect(),
-    )
-}
-
 /// Aggregates that share another's transition state (`find_compatible_trans`): the same
 /// user-defined transition function, initial value and inputs. `share[i] = Some(j)`: i
 /// takes j's state.
@@ -3951,6 +3908,8 @@ struct Stream {
     /// The input comes aggregated in parts by a parallel scan (`partial_run`), in order.
     parts: bool,
     share: Vec<Option<usize>>,
+    /// The aggregates whose rows come sorted for them (`AggState::set_presorted`).
+    presorted: Vec<usize>,
     open: Option<(Vec<Value>, Vec<AggState>)>,
     /// The row that ended the last group, fed to the group it starts on the next call.
     pending: Option<Row>,
@@ -3997,7 +3956,8 @@ impl AggNode {
         let colls = nondeterministic_keys(&self.groups, ctx);
         match &self.input {
             Some(input) if self.streams(input, &colls, ctx) => {}
-            _ => return Ok(None),
+            Some(_) => return self.sorted_stream(&colls, ctx),
+            None => return Ok(None),
         }
         let mut input = self.input.take().unwrap();
         let parts = self.partial_run(&mut input, &colls, false, true, ctx)?;
@@ -4005,11 +3965,21 @@ impl AggNode {
             input,
             parts,
             share: shared_states(&self.aggs, None),
+            presorted: Vec::new(),
             open: None,
             pending: None,
             ready: Default::default(),
             done: false,
         }))
+    }
+
+    /// A new group's states in a `Stream`: the aggregates fed presorted marked so.
+    fn stream_states(&self, key: &[Value], presorted: &[usize], ctx: &ExecCtx) -> Result<Vec<AggState>> {
+        let mut states = self.states(key, ctx)?;
+        for &p in presorted {
+            states[p].set_presorted();
+        }
+        Ok(states)
     }
 
     fn finish_streamed(&self, (key, mut states): (Vec<Value>, Vec<AggState>), share: &[Option<usize>], ctx: &ExecCtx) -> Result<Row> {
@@ -4053,7 +4023,7 @@ impl AggNode {
                         let (mut it, mut k, mut st) = (p.groups.into_groups(), Vec::new(), Vec::new());
                         while it.next(&mut k, &mut st) {
                             if s.open.as_ref().is_none_or(|(open, _)| *open != k) {
-                                let states = self.states(&k, ctx)?;
+                                let states = self.stream_states(&k, &s.presorted, ctx)?;
                                 if let Some(g) = s.open.replace((std::mem::take(&mut k), states)) {
                                     s.ready.push_back(g);
                                 }
@@ -4082,12 +4052,344 @@ impl AggNode {
             }
             // (The last group is finished before the new one's first row is fed, as
             // Postgres finalizes it first.)
-            let states = self.states(&key, ctx)?;
+            let states = self.stream_states(&key, &s.presorted, ctx)?;
             s.pending = Some(row);
             if let Some(g) = s.open.replace((key, states)) {
                 return self.finish_streamed(g, &s.share, ctx).map(Some);
             }
         }
+    }
+}
+
+/// The keys a DISTINCT aggregate's arguments are sorted on: ascending, each under its
+/// collation when that doesn't sort by bytes (the Sort the planner puts below orders them so:
+/// ties a nondeterministic one finds stay in input order).
+fn distinct_keys(args: &[crate::sql::expr::Expr], ctx: &ExecCtx) -> Vec<SortKey> {
+    let colls = sort_collations(args, ctx);
+    args.iter()
+        .zip(colls)
+        .map(|(e, c)| SortKey {
+            expr: e.clone(),
+            desc: false,
+            nulls_first: false,
+            using: c.and_then(|c| {
+                let ty = e.ty();
+                let lt = crate::sql::func::resolve_binop("<", &ty, &ty).ok()?.def;
+                Some(Arc::new(crate::sql::func::FuncDef { coll: Some(c), ..(*lt).clone() }))
+            }),
+        })
+        .collect()
+}
+
+fn same_key(a: &SortKey, b: &SortKey) -> bool {
+    a.expr.same_as(&b.expr)
+        && a.desc == b.desc
+        && a.nulls_first == b.nulls_first
+        && a.using.as_ref().map(|f| (f.name, f.coll.as_ref().map(|c| c.name.clone())))
+            == b.using.as_ref().map(|f| (f.name, f.coll.as_ref().map(|c| c.name.clone())))
+}
+
+/// The rows the tables under plan `p` hold (pg_class.reltuples; a join's sides added), as a
+/// bound of its rows that needs no estimate; None where a leaf isn't a table with statistics.
+fn leaf_tuples(p: &crate::sql::plan::Plan, ctx: &ExecCtx) -> Option<f64> {
+    use crate::sql::plan::Plan;
+    match p {
+        Plan::Scan(s) => ctx.catalog().relstats.get(&s.table.oid).map(|r| r.tuples.max(0.0)),
+        Plan::One | Plan::Empty { .. } => Some(1.0),
+        _ => {
+            let ins = crate::sql::explain::plan_inputs(p);
+            if ins.is_empty() {
+                return None;
+            }
+            ins.iter().map(|i| leaf_tuples(i, ctx)).sum()
+        }
+    }
+}
+
+/// A grouping run over a Sort of its whole input, its groups streamed (`Stream`, one held at a
+/// time) where `run` holds every group to the end: a GroupAggregate over a Sort
+/// (`AggEstimate::presort`) whose `run` sorts anyway or whose groups may pass work_mem, and
+/// DISTINCT aggregates whose values in a group may pass work_mem, sorted once for the
+/// aggregates the order PostgreSQL picks suits (`pg_presorted`), the others each sorting its
+/// own rows (`Buffered::Sort`). Chosen once, when the node starts; the rows and their order are
+/// `run`'s (PostgreSQL's). Nothing here is on `run`'s path.
+impl AggNode {
+    #[inline(never)]
+    fn sorted_stream(&mut self, colls: &[Option<KeyNorm>], ctx: &ExecCtx) -> Result<Option<Stream>> {
+        use crate::sql::plan::Plan;
+        if self.sets.is_some() || colls.iter().any(Option::is_some) {
+            return Ok(None);
+        }
+        let distinct = self.aggs.iter().any(|a| a.distinct);
+        if self.groups.is_empty() && !distinct {
+            return Ok(None);
+        }
+        let Some(plan) = self.plan.clone() else { return Ok(None) };
+        let Plan::Agg { input: plan_in, .. } = &*plan else { return Ok(None) };
+        if self.split(ctx) {
+            return Ok(None);
+        }
+        let n = self.groups.len();
+        // (An index scan's rows may come in a presorted aggregate's order: no Sort there.)
+        let mut p: &Plan = plan_in;
+        while let Plan::Project { input, .. } | Plan::Filter { input, .. } = p {
+            p = input;
+        }
+        if n == 0 && matches!(p, Plan::Scan(s) if s.index.is_some() || matches!(s.access, crate::sql::plan::Access::Index { .. })) {
+            return Ok(None);
+        }
+        let ordered = self.aggs.iter().any(|a| a.distinct || !a.order_by.is_empty());
+        let asc: Vec<SortKey> =
+            self.groups.iter().map(|g| SortKey { expr: g.clone(), desc: false, nulls_first: false, using: None }).collect();
+        let ascending: Vec<(usize, bool, bool)> = (0..n).map(|i| (i, false, false)).collect();
+        // (A plain aggregation's own estimate is made only when a DISTINCT one may need it.)
+        let e = if n > 0 { Some(super::pghash::agg_estimate(&plan, ctx)) } else { None };
+        // The groups' order out of `run` (`group_order`): the sort's must give it.
+        let out_order: Option<&Vec<(usize, bool, bool)>> = match &e {
+            Some(_) if ordered => Some(&ascending),
+            Some(e) => e.sorted.as_ref(),
+            None => None,
+        };
+        if n > 0 && (e.as_ref().is_none_or(|e| e.presort.is_none()) || out_order.is_none()) {
+            return Ok(None);
+        }
+        let (keys, presorted, aggs) = if distinct && self.distinct_past_work_mem(plan_in, e.as_deref(), ctx) {
+            // PostgreSQL's plan: the group keys, then the presorted aggregates' order.
+            if e.as_ref().is_some_and(|e| e.presort.as_ref() != Some(&ascending)) {
+                return Ok(None);
+            }
+            let Some((keys, best)) = self.pg_presorted(&asc, ctx) else { return Ok(None) };
+            // (A DISTINCT aggregate's arguments as its ORDER BY: one not presorted sorts its own
+            // values, none keeps a hash set.)
+            let aggs: Vec<AggCall> = self
+                .aggs
+                .iter()
+                .map(|a| {
+                    let mut a = a.clone();
+                    if a.distinct && a.order_by.is_empty() && a.def.kind == AggKind::Normal {
+                        a.order_by = distinct_keys(&a.args, ctx);
+                    }
+                    a
+                })
+                .collect();
+            (keys, best, Some(aggs))
+        } else {
+            let Some(e) = &e else { return Ok(None) };
+            let Some(input) = self.input.as_ref() else { return Ok(None) };
+            let (keys, presorted) = self.run_presort(input, colls, ctx);
+            let keys = match keys {
+                Some(k) => k,
+                // (`run` hashes the groups: sorted only when they may pass work_mem.)
+                None if self.groups_past_work_mem(e, ctx) => e
+                    .presort
+                    .iter()
+                    .flatten()
+                    .map(|&(i, desc, nulls_first)| SortKey { expr: self.groups[i].clone(), desc, nulls_first, using: None })
+                    .collect(),
+                None => return Ok(None),
+            };
+            (keys, presorted.into_iter().collect(), None)
+        };
+        // (The groups come out in the sort's order: `run`'s, every key that groups sorted.)
+        if let Some(order) = out_order {
+            let red = self.redundant_keys(ctx);
+            let lead = order.iter().zip(&keys).all(|(&(i, desc, nf), k)| {
+                k.expr.same_as(&self.groups[i]) && k.desc == desc && k.nulls_first == nf && k.using.is_none()
+            });
+            if keys.len() < order.len() || !lead || !(0..n).all(|g| red.get(g).copied().unwrap_or(false) || order.iter().any(|o| o.0 == g)) {
+                return Ok(None);
+            }
+        }
+        if let Some(a) = aggs {
+            self.aggs = a;
+        }
+        let input = self.input.take().unwrap();
+        let types = crate::sql::paths::analyzejoins::col_types(plan_in);
+        let input = super::nodes::sort_all(input, &keys, types, self.sort_held(), ctx)?;
+        let share = shared_states(&self.aggs, if presorted.len() == 1 { presorted.first().copied() } else { None });
+        // (No groups: the one group open from the start, so empty input still makes its row.)
+        let open = if n == 0 { Some((Vec::new(), self.stream_states(&[], &presorted, ctx)?)) } else { None };
+        Ok(Some(Stream { input, parts: false, share, presorted, open, pending: None, ready: Default::default(), done: false }))
+    }
+
+    /// Whether a DISTINCT aggregate's values in one group may pass work_mem as a sort counts
+    /// them (56 bytes a value: a SortTuple and its datum): the input's estimated rows over the
+    /// estimated groups. The tables under the input bound its rows first (reltuples), so an
+    /// input over small tables needs no estimate of its own.
+    fn distinct_past_work_mem(&self, plan_in: &Arc<crate::sql::plan::Plan>, e: Option<&super::pghash::AggEstimate>, ctx: &ExecCtx) -> bool {
+        let wm = super::workmem::work_mem(ctx) as f64;
+        let groups = e.map_or(1.0, |e| e.rows.max(1.0));
+        if leaf_tuples(plan_in, ctx).is_some_and(|t| t / groups * 56.0 <= wm) {
+            return false;
+        }
+        crate::sql::explain::estimate(plan_in, ctx).rows / groups * 56.0 > wm
+    }
+
+    /// Whether a hashed grouping's groups may pass work_mem: its estimated groups' entries
+    /// (hash_agg_entry_size, as `hash_spill` sizes them).
+    fn groups_past_work_mem(&self, e: &super::pghash::AggEstimate, ctx: &ExecCtx) -> bool {
+        let (num_trans, trans_space) = crate::sql::paths::parallel::agg_transitions(&self.aggs);
+        let sizing = super::pghash::AggSizing { input_width: e.input_width, num_trans, trans_space, num_hashes: 1, total_groups: e.rows };
+        sizing.entry_size() * e.rows > super::workmem::work_mem(ctx) as f64
+    }
+
+    /// The input sort `run` puts below this grouping and the aggregate it feeds presorted,
+    /// as `run` finds them.
+    fn run_presort(&self, input: &BoxNode, colls: &[Option<KeyNorm>], ctx: &ExecCtx) -> (Option<Vec<SortKey>>, Option<usize>) {
+        let presortable = |a: &AggCall| {
+            (a.distinct || !a.order_by.is_empty())
+                && !hash_distinct(a)
+                && (a.filter.is_none()
+                    || a.args.iter().chain(a.order_by.iter().map(|k| &k.expr)).all(|e| {
+                        let mut e = e;
+                        while let crate::sql::expr::Expr::Relabel(x, _) = e {
+                            e = x;
+                        }
+                        matches!(e, crate::sql::expr::Expr::Col(..) | crate::sql::expr::Expr::Const(..))
+                    }))
+        };
+        let presorted_agg = self.aggs.iter().position(presortable).filter(|&p| {
+            let a = &self.aggs[p];
+            !a.def.kind.is_ordered()
+                && (a.distinct != !a.order_by.is_empty())
+                && !(a.distinct && nondeterministic_keys(&a.args, ctx).iter().any(Option::is_some))
+        });
+        let presort = self.aggs.iter().find(|a| presortable(a) && (presorted_agg.is_some() || !self.groups.is_empty())).map(|a| {
+            let mut keys: Vec<SortKey> =
+                self.groups.iter().map(|g| SortKey { expr: g.clone(), desc: false, nulls_first: false, using: None }).collect();
+            if a.distinct {
+                keys.extend(distinct_keys(&a.args, ctx));
+            } else {
+                keys.extend(a.order_by.iter().cloned());
+            }
+            keys
+        });
+        let presort = presort.or_else(|| {
+            let shown = self.groups.iter().zip(colls).any(|(g, c)| !shows_alike(g, c.as_ref(), input.projection()));
+            if self.groups.is_empty() || (!shown && self.aggs.iter().all(order_insensitive)) {
+                return None;
+            }
+            let e = super::pghash::agg_estimate(self.plan.as_ref()?, ctx);
+            let sorted = e.presort.as_ref()?;
+            Some(
+                sorted
+                    .iter()
+                    .filter(|(i, _, _)| *i < self.groups.len())
+                    .map(|&(i, desc, nulls_first)| SortKey { expr: self.groups[i].clone(), desc, nulls_first, using: None })
+                    .collect(),
+            )
+        });
+        (presort, presorted_agg)
+    }
+
+    /// The columns a Sort below this grouping holds, as make_group_input_target lists them:
+    /// the grouping keys', then each aggregate's direct arguments, arguments, ORDER BY and
+    /// FILTER, each column at its first appearance (`run`'s). None: every column.
+    fn sort_held(&self) -> Option<Vec<usize>> {
+        use crate::sql::expr::Expr as E;
+        let mut cols: Vec<usize> = Vec::new();
+        let mut ok = true;
+        let mut add = |e: &E| {
+            e.walk(&mut |x| match x {
+                E::Col(i, _) => {
+                    if !cols.contains(i) {
+                        cols.push(*i);
+                    }
+                }
+                E::Xml(_) | E::Srf(..) | E::Agg(..) | E::Window(..) | E::Grouping(_) => ok = false,
+                _ => {}
+            })
+        };
+        for g in &self.groups {
+            add(g);
+        }
+        for a in &self.aggs {
+            if a.user.is_some() {
+                return None;
+            }
+            for e in a.direct.iter().chain(&a.args).chain(a.order_by.iter().map(|k| &k.expr)).chain(a.filter.iter()) {
+                add(e);
+            }
+        }
+        ok.then_some(cols)
+    }
+
+    /// PostgreSQL's presorted aggregates (adjust_group_pathkeys_for_groupagg): of the DISTINCT
+    /// / ORDER BY aggregates (not ordered-set ones; with a FILTER only over plain columns and
+    /// constants; none with a volatile key), the order after the group keys that suits the
+    /// most, found as its passes find it; the sort's keys and the aggregates fed in that order
+    /// (every copy of one). None: one this can't feed so (DISTINCT with ORDER BY, or under a
+    /// nondeterministic collation).
+    fn pg_presorted(&self, group_keys: &[SortKey], ctx: &ExecCtx) -> Option<(Vec<SortKey>, Vec<usize>)> {
+        use crate::sql::expr::Expr as E;
+        // (Each distinct aggregate, AggInfo: its copies and its pathkeys, group keys first.)
+        let mut cands: Vec<(Vec<usize>, Vec<SortKey>)> = Vec::new();
+        for (i, a) in self.aggs.iter().enumerate() {
+            if !(a.distinct || !a.order_by.is_empty()) || a.def.kind != AggKind::Normal {
+                continue;
+            }
+            if a.distinct && (!a.order_by.is_empty() || nondeterministic_keys(&a.args, ctx).iter().any(Option::is_some)) {
+                return None;
+            }
+            let id = format!("{a:?}");
+            if let Some(c) = cands.iter_mut().find(|c| format!("{:?}", self.aggs[c.0[0]]) == id) {
+                c.0.push(i);
+                continue;
+            }
+            if a.filter.is_some()
+                && !a.args.iter().all(|e| {
+                    let e = match e {
+                        E::Relabel(x, _) | E::Cast(x, _, _, false) => &**x,
+                        e => e,
+                    };
+                    matches!(e, E::Col(..) | E::Const(..))
+                })
+            {
+                continue;
+            }
+            let keys = if a.distinct { distinct_keys(&a.args, ctx) } else { a.order_by.clone() };
+            if keys.iter().any(|k| k.expr.is_volatile()) {
+                continue;
+            }
+            let mut pk: Vec<SortKey> = group_keys.to_vec();
+            for k in keys {
+                if (k.expr.columns().is_empty() && !k.expr.has_outer_refs()) || pk.iter().any(|x| same_key(x, &k)) {
+                    continue;
+                }
+                pk.push(k);
+            }
+            cands.push((vec![i], pk));
+        }
+        let prefix = |short: &[SortKey], long: &[SortKey]| short.len() <= long.len() && short.iter().zip(long).all(|(a, b)| same_key(a, b));
+        let mut unprocessed: Vec<usize> = (0..cands.len()).collect();
+        let (mut best, mut best_keys): (Vec<usize>, Vec<SortKey>) = (Vec::new(), group_keys.to_vec());
+        while unprocessed.len() > best.len() {
+            let mut cur: Option<Vec<SortKey>> = None;
+            let mut taken = Vec::new();
+            for &c in &unprocessed {
+                let pk = &cands[c].1;
+                match &cur {
+                    None => {
+                        cur = Some(pk.clone());
+                        taken.push(c);
+                    }
+                    Some(k) if prefix(k, pk) => {
+                        cur = Some(pk.clone());
+                        taken.push(c);
+                    }
+                    Some(k) if prefix(pk, k) => taken.push(c),
+                    Some(_) => {}
+                }
+            }
+            unprocessed.retain(|c| !taken.contains(c));
+            if taken.len() > best.len() {
+                best = taken;
+                best_keys = cur.unwrap_or_default();
+            }
+        }
+        let mut aggs: Vec<usize> = best.iter().flat_map(|&c| cands[c].0.iter().copied()).collect();
+        aggs.sort_unstable();
+        Some((best_keys, aggs))
     }
 }
 
