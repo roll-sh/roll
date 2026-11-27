@@ -142,8 +142,45 @@ impl Apps {
             let (from, text) = if next == "maintenance" { ("scheduled", "The scheduled maintenance has begun.") } else { ("maintenance", "The scheduled maintenance is over.") };
             // One that hasn't begun yet and is already over goes straight to resolved.
             let from = if next == "resolved" { None } else { Some(from) };
+            let (p2, i2) = (project.clone(), id.clone());
             if self.db(move |s| s.advance_maintenance(&project, &id, from, next, text, now)).await.unwrap_or(false) {
                 self.status_cache.forget();
+                // Its window quiets the alerts of what the page shows (a planned restart pages no one).
+                if next == "maintenance" {
+                    self.silence_for_maintenance(&p2, &i2).await;
+                }
+            }
+        }
+    }
+
+    /// A silence, until a maintenance's window ends, for each environment its page shows.
+    async fn silence_for_maintenance(self: &Arc<Self>, project: &str, id: &str) {
+        let (p, i) = (project.to_string(), id.to_string());
+        let Ok(Some(until)) = self.db(move |s| s.maintenance_until(&p, &i)).await else { return };
+        let p = project.to_string();
+        let Ok((Some(page), services, envs)) = self
+            .db(move |s| {
+                let services = s.services(Some(&p))?;
+                let mut envs = Vec::new();
+                for svc in &services {
+                    envs.extend(s.environments(&svc.id)?);
+                }
+                Ok((s.status_page(&p)?, services, envs))
+            })
+            .await
+        else {
+            return;
+        };
+        let mut done = std::collections::BTreeSet::new();
+        for (key, _, _) in shown(&page, &services, &envs, false) {
+            // `check:<service>/<env>/<name>` or `hb:…`: the environment, once.
+            let Some((svc, env)) = key.split_once(':').and_then(|(_, r)| r.split_once('/')).and_then(|(s, r)| r.split_once('/').map(|(e, _)| (s.to_string(), e.to_string()))) else { continue };
+            if !done.insert((svc.clone(), env.clone())) {
+                continue;
+            }
+            let (s2, e2, reason) = (svc.clone(), env.clone(), format!("scheduled maintenance {id}"));
+            if let Err(e) = self.db(move |s| s.add_silence(&s2, &e2, until, &[], &reason)).await {
+                tracing::warn!(service = %svc, env = %env, error = %e, "apps: a maintenance's silence wasn't made");
             }
         }
     }
