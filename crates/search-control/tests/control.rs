@@ -3030,6 +3030,34 @@ async fn a_due_slm_run_wakes_its_sleeping_cluster() {
     }
 }
 
+/// OpenSearch's snapshot management policies on an OpenSearch-flavor cluster, through the
+/// cluster's API and the console route the dashboard's Snapshots tab uses: a policy is stored
+/// with its job and its deletion's schedule taken from its creation's, listed, explained (before
+/// its job's first run: its name alone), stopped and deleted. Its runs are tested tick by tick
+/// in search-es (`opensearch::sm`), where the job's minutes can be run by hand.
+#[tokio::test]
+async fn opensearch_snapshot_management_policies_are_served() {
+    use reqwest::Method;
+    let e = env().await;
+    let c = e.post("/v1/search/clusters", json!({"name": "smc", "flavor": "opensearch"})).await;
+    let (user, pw) = creds(&c);
+    let policy = json!({"creation": {"schedule": {"cron": {"expression": "30 1 * * *", "timezone": "UTC"}}}, "deletion": {"condition": {"max_count": 7}}, "snapshot_config": {"repository": "found-snapshots", "indices": "*"}});
+    let (s, v) = e.es(&user, &pw, Method::POST, "/_plugins/_sm/policies/nightly", Some(policy)).await;
+    let schedule = &v["sm_policy"]["deletion"]["schedule"]["cron"]["expression"];
+    assert_eq!((s, &v["_id"], schedule, &v["sm_policy"]["enabled"]), (201, &json!("nightly-sm-policy"), &json!("30 1 * * *"), &json!(true)), "{v}");
+    let console = |m: &str, p: &str| e.post("/v1/search/clusters/smc/request", json!({"method": m, "path": p, "body": null}));
+    let listed = body(&console("GET", "/_plugins/_sm/policies").await);
+    assert_eq!((&listed["total_policies"], &listed["policies"][0]["sm_policy"]["name"]), (&json!(1), &json!("nightly")), "{listed}");
+    let explained = body(&console("GET", "/_plugins/_sm/policies/*/_explain").await);
+    assert_eq!(explained["policies"], json!([{"name": "nightly", "enabled": true}]), "{explained}");
+    assert_eq!(body(&console("POST", "/_plugins/_sm/policies/nightly/_stop").await), json!({"acknowledged": true}));
+    let (_, v) = e.es(&user, &pw, Method::GET, "/_plugins/_sm/policies/nightly", None).await;
+    assert_eq!((&v["_version"], &v["sm_policy"]["enabled"], &v["sm_policy"]["enabled_time"]), (&json!(2), &json!(false), &Value::Null), "{v}");
+    assert_eq!(e.es(&user, &pw, Method::DELETE, "/_plugins/_sm/policies/nightly", None).await.0, 200);
+    let (s, v) = e.es(&user, &pw, Method::GET, "/_plugins/_sm/policies/nightly", None).await;
+    assert_eq!((s, &v["error"]["reason"]), (404, &json!("Snapshot management policy not found")), "{v}");
+}
+
 /// An S3-compatible bucket in memory (path-style requests): objects with ETags, `If-None-Match:
 /// *` and `If-Match` writes, ranged reads, `ListObjectsV2`, multipart uploads (listed by prefix),
 /// and the access key each request was signed with.
@@ -6187,6 +6215,61 @@ async fn the_embedding_pool_takes_turns_caps_queues_and_meters_cpu() {
     let _ = std::fs::remove_dir_all(&model);
 }
 
+/// Provider tokens are metered per cluster (not priced: the provider bills them): an answered
+/// completion's and a streamed one's, the provider's own figures, reach the cluster's usage on
+/// the next metering pass, the first's although the cluster unloaded in between, each once.
+/// With `ROLL_CODE_TEST_DATABASE` the catalog is a fresh Postgres schema (`Store::open`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn completion_tokens_are_metered() {
+    use axum::response::IntoResponse;
+    use reqwest::Method;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let router = axum::Router::new().route(
+        "/v1/chat/completions",
+        axum::routing::post(|axum::Json(b): axum::Json<Value>| async move {
+            if b["stream"] == true {
+                let sse = [
+                    json!({"choices": [{"index": 0, "delta": {"content": "Hel"}}]}),
+                    json!({"choices": [{"index": 0, "delta": {"content": "lo"}}]}),
+                    json!({"choices": [], "usage": {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18}}),
+                ]
+                .iter()
+                .map(|c| format!("data: {c}\n\n"))
+                .collect::<String>()
+                    + "data: [DONE]\n\n";
+                ([("content-type", "text/event-stream")], sse).into_response()
+            } else {
+                axum::Json(json!({"choices": [{"index": 0, "message": {"role": "assistant", "content": "Hello"}}], "usage": {"prompt_tokens": 20, "completion_tokens": 5, "total_tokens": 25}})).into_response()
+            }
+        }),
+    );
+    tokio::spawn(async move { axum::serve(listener, router).await });
+    let e = env_with(|c| {
+        c.node_settings.push((search_control::INFERENCE_ALLOW_PRIVATE.into(), "true".into()));
+        c.node_settings.push(("xpack.inference.skip_validate_and_start".into(), "true".into()));
+    })
+    .await;
+    let c = e.post("/v1/search/clusters", json!({"name": "chatty"})).await;
+    let id = c["id"].as_str().unwrap().to_string();
+    let (u, p) = creds(&c);
+    let endpoint = json!({"service": "openai", "service_settings": {"api_key": "sk-1", "model_id": "gpt", "url": format!("http://127.0.0.1:{port}/v1/chat/completions")}});
+    let (s, v) = e.es(&u, &p, Method::PUT, "/_inference/completion/chat", Some(endpoint)).await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = e.es(&u, &p, Method::POST, "/_inference/completion/chat", Some(json!({"input": "hi"}))).await;
+    assert_eq!((s, &v["completion"][0]["result"]), (200, &json!("Hello")), "{v}");
+    assert_eq!(e.post(&format!("/v1/search/clusters/{id}/unload"), json!({})).await["unloaded"], true);
+    let (s, v) = e.es(&u, &p, Method::POST, "/_inference/completion/chat/_stream", Some(json!({"input": "hi"}))).await;
+    assert!(s == 200 && v.as_str().is_some_and(|t| t.contains("Hel") && t.ends_with("data: [DONE]\n\n")), "{s} {v}");
+
+    e.control.sample().await.unwrap();
+    let usage = e.get(&format!("/v1/search/clusters/{id}/usage")).await;
+    assert_eq!((&usage["input_tokens"], &usage["output_tokens"]), (&json!(31), &json!(12)), "{usage}");
+    e.control.sample().await.unwrap();
+    let usage = e.get(&format!("/v1/search/clusters/{id}/usage")).await;
+    assert_eq!((&usage["input_tokens"], &usage["output_tokens"]), (&json!(31), &json!(12)), "counted once: {usage}");
+}
+
 /// A migration's bounds: a host that isn't a name or an address (`https://*`) is refused and
 /// nothing is whitelisted; one migration call runs per cluster at a time (another gets a 429);
 /// and copies past the free task slots wait (`queued`), with nothing created for them.
@@ -7421,4 +7504,79 @@ async fn update_by_query_re_embeds_an_indexs_documents() {
     assert_eq!(inputs.load(Ordering::SeqCst), 3, "each document embedded once");
     let (s, v) = e.es(&u, &p, Method::POST, "/docs/_search", Some(json!({"query": {"semantic": {"field": "body", "query": "a seat"}}}))).await;
     assert_eq!((s, &v["hits"]["total"]["value"]), (200, &json!(3)), "{v}");
+}
+
+/// `…/indices/{index}/evaluate` scores two configurations against judged queries with the
+/// cluster's `_rank_eval` and compares them query by query; a configuration the cluster refuses
+/// answers the cluster's error, and the body takes only its own fields.
+#[tokio::test]
+async fn evaluate_compares_two_configurations_on_judged_queries() {
+    use reqwest::Method;
+    let e = env().await;
+    let c = e.post("/v1/search/clusters", json!({"name": "judged"})).await;
+    let (u, p) = creds(&c);
+    let id = c["id"].as_str().unwrap().to_string();
+    // The title says one thing, the description another: matching on the description finds
+    // what the judgments call relevant.
+    for (i, (title, desc)) in [("sofa", "a red couch"), ("couch", "a blue chair"), ("lamp", "a green light")].iter().enumerate() {
+        assert_eq!(e.es(&u, &p, Method::PUT, &format!("/goods/_doc/{i}?refresh=true"), Some(json!({"title": title, "desc": desc}))).await.0, 201);
+    }
+    let judgments = json!([
+        {"query": "couch", "ratings": [{"_id": "0", "rating": 3}, {"_id": "1", "rating": 0}]},
+        {"query": "lamp", "ratings": [{"_id": "2", "rating": 3}]},
+    ]);
+    let configs = json!([
+        {"name": "title", "request": {"query": {"match": {"title": "{{query}}"}}}},
+        {"name": "desc", "request": {"query": {"match": {"desc": "{{query}}"}}}},
+    ]);
+    let path = format!("/v1/search/clusters/{id}/indices/goods/evaluate");
+    let (s, v) = e.call(Method::POST, &path, Some(json!({"judgments": judgments, "configurations": configs}))).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["metric"], json!({"dcg": {"k": 10, "normalize": true}}));
+    let cmp = &v["comparison"];
+    assert_eq!((&cmp["baseline"], &cmp["candidate"]), (&json!("title"), &json!("desc")), "{v}");
+    // "couch": the title finds the chair (rated 0), the description the sofa (rated 3);
+    // "lamp": the title finds it, the description doesn't.
+    assert_eq!(cmp["better_queries"][0]["query"], "couch", "{v}");
+    assert_eq!(cmp["worse_queries"][0]["query"], "lamp", "{v}");
+    assert_eq!((cmp["better"].as_u64(), cmp["worse"].as_u64()), (Some(1), Some(1)), "{v}");
+    assert_eq!(v["configurations"][0]["queries"][1]["score"], 1.0, "{v}");
+
+    let (s, v) = e.call(Method::POST, &path, Some(json!({"judgments": judgments, "configurations": [{"name": "x", "request": {"query": {"nope": {}}}}]}))).await;
+    assert_eq!(s, 400, "the cluster's own refusal: {v}");
+    let (s, v) = e.call(Method::POST, &path, Some(json!({"judgments": judgments, "configurations": configs, "size": 3}))).await;
+    assert!(s == 400 && v.to_string().contains("no field [size]"), "{s} {v}");
+}
+
+/// An application's configuration renders each judged query through the application's own
+/// template, and a variant's through its experiment's params, so a variant is scored offline
+/// before it takes traffic.
+#[tokio::test]
+async fn evaluate_scores_an_applications_variant_offline() {
+    use reqwest::Method;
+    let e = env().await;
+    let c = e.post("/v1/search/clusters", json!({"name": "apps-judged"})).await;
+    let (u, p) = creds(&c);
+    let id = c["id"].as_str().unwrap().to_string();
+    for (i, (title, desc)) in [("sofa", "a red couch"), ("couch", "a blue chair")].iter().enumerate() {
+        assert_eq!(e.es(&u, &p, Method::PUT, &format!("/goods/_doc/{i}?refresh=true"), Some(json!({"title": title, "desc": desc}))).await.0, 201);
+    }
+    let app = json!({
+        "indices": ["goods"],
+        "template": {"script": {"source": {"query": {"match": {"{{field}}": "{{query_string}}"}}}, "params": {"field": "title", "query_string": "*"}}},
+        "experiments": [{"id": "e1", "variants": [{"name": "control", "weight": 1}, {"name": "desc", "weight": 1, "params": {"field": "desc"}}]}],
+    });
+    let (s, v) = e.es(&u, &p, Method::PUT, "/_application/search_application/shop", Some(app)).await;
+    assert!(s == 200 || s == 201, "{s} {v}");
+    let judgments = json!([{"query": "couch", "ratings": [{"_id": "0", "rating": 3}, {"_id": "1", "rating": 0}]}]);
+    let configs = json!([{"name": "live", "application": "shop"}, {"name": "desc", "application": "shop", "variant": {"experiment": "e1", "variant": "desc"}}]);
+    let (s, v) = e.call(Method::POST, &format!("/v1/search/clusters/{id}/indices/shop/evaluate"), Some(json!({"judgments": judgments, "configurations": configs}))).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!((v["configurations"][0]["score"].as_f64(), v["configurations"][1]["score"].as_f64()), (Some(0.0), Some(1.0)), "{v}");
+    assert_eq!(v["comparison"]["better_queries"][0]["query"], "couch", "{v}");
+    // On another name, and with a variant the experiment lacks: refused with what's wrong.
+    let (s, v) = e.call(Method::POST, &format!("/v1/search/clusters/{id}/indices/goods/evaluate"), Some(json!({"judgments": judgments, "configurations": [{"name": "live", "application": "shop"}]}))).await;
+    assert!(s == 400 && v.to_string().contains("indices/shop/evaluate"), "{s} {v}");
+    let (s, v) = e.call(Method::POST, &format!("/v1/search/clusters/{id}/indices/shop/evaluate"), Some(json!({"judgments": judgments, "configurations": [{"name": "x", "application": "shop", "variant": {"experiment": "e1", "variant": "nope"}}]}))).await;
+    assert!(s == 400 && v.to_string().contains("no variant [nope]"), "{s} {v}");
 }

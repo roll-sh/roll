@@ -469,6 +469,11 @@ def search_flow():
     res, text = dcall("search_query", {"cluster": "sweep-dev", "index": "notes", "query": {"match_all": {}}}, token=ro["token"])
     if res.get("isError") or '"n2"' in text:
         out.append(f"the read-only token should read the index, without n2: {text[:200]}")
+    # Evaluating relevance is a read: the read-only token scores a configuration on judged queries.
+    judged = [{"query": "agent", "ratings": [{"_id": "n1", "rating": 3}]}]
+    res, text = dcall("search_evaluate", {"cluster": "sweep-dev", "index": "notes", "judgments": judged, "configurations": [{"name": "title", "request": {"query": {"match": {"title": "{{query}}"}}}}]}, token=ro["token"])
+    if res.get("isError") or '"score": 1.0' not in text:
+        out.append(f"search_evaluate as the read-only token should score 1.0: {text[:200]}")
     # Kept: the sweep reads back every link a tool answered (search_create_cluster's too), and its
     # rolld is thrown away at the end.
     print("member: a person's search flow ok" if not out else f"member: a person's search flow: {len(out)} problems")

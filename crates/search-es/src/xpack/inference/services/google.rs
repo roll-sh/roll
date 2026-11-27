@@ -403,7 +403,7 @@ pub async fn infer_vertex(cluster: &Cluster, ep: &Endpoint, req: &Request) -> Es
             let input = super::one_input(req, "Google VertexAI chat completion")?;
             let body = gemini_body(&[obj! { "role" => "user", "parts" => crate::arr![obj! { "text" => input }] }], None, &ts, &Map::new());
             let v = answer_json("googlevertexai", &vertex_send(cluster, ep, gemini_url(cluster, ep, false)?, &body, req.timeout, false).await?)?;
-            Ok(Results::Completion(vec![candidate_text(&v).ok_or_else(|| missing_field("candidates", "Google Vertex AI completion"))?]))
+            Ok(Results::completion(vec![candidate_text(&v).ok_or_else(|| missing_field("candidates", "Google Vertex AI completion"))?], &v))
         }
         other => Err(crate::xpack::inference::unsupported_task(other, "googlevertexai")),
     }
@@ -603,7 +603,7 @@ pub async fn infer_studio(cluster: &Cluster, ep: &Endpoint, req: &Request) -> Es
         TaskType::Completion => {
             let input = super::one_input(req, "Google AI Studio completion")?;
             let v = answer_json("googleaistudio", &studio_send(cluster, ep, "generateContent", false, &studio_completion_body(input), req.timeout).await?)?;
-            Ok(Results::Completion(vec![candidate_text(&v).ok_or_else(|| missing_field("candidates", "Google AI Studio completion"))?]))
+            Ok(Results::completion(vec![candidate_text(&v).ok_or_else(|| missing_field("candidates", "Google AI Studio completion"))?], &v))
         }
         other => Err(crate::xpack::inference::unsupported_task(other, "googleaistudio")),
     }
