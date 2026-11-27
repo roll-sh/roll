@@ -571,10 +571,11 @@ POST  /v1/code/work/{id}/heartbeat | /release | /complete {agent?} → WorkItem
 `preview`, `queue`, `review`, `thread`, `push`, `budget` and `masking`. Repo webhooks get the same events with the same data.
 A `budget` event is `{budget: {project, project_name, percent /* 80, 100 */, spent_usd_month, max_usd_month},
 dashboard_url}`: the repo's workspace project's previews passed that share of their monthly budget
-(docs/previews.md). A `masking` event is `{masking: {project, project_name, columns: [{resource,
-column, why}]}, dashboard_url}`: columns of the project's parents that its previews masked by default
-(they look like people's data and the rules don't name them), each said once (docs/previews.md,
-"Safe by default"). A `preview` event is `{change, preview}`, with `preview: null` once it's gone; a
+(docs/previews.md). A `masking` event is `{masking: {project, project_name, resources: [{resource,
+columns}]}, dashboard_url}`: how many columns of each of the project's parents its previews masked by
+default (they look like people's data and the rules don't name them), each column counted once
+(docs/previews.md, "Safe by default"); never their names (the repo's readers may not read the
+resource's schema): the dashboard names them. A `preview` event is `{change, preview}`, with `preview: null` once it's gone; a
 preview environment that went with the project's `teardown` failing adds `teardown` (what the job
 said: its exit code and its output's tail, the change's code's words), and the pull request's
 comment says so too. `became` lists what the update reached that the change's preview wasn't

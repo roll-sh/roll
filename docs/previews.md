@@ -1161,15 +1161,19 @@ thirty-fourth review found them in the clear.
       sheet. The project's repos are told of each such column once, the first time a preview masks
       it (production gained it, or the project's first rules), as their `masking` event
       (webhooks, the event stream, automations; docs/code/http-api.md), so a person who can write
-      its rule hears of it. `keep` is a rule that leaves a column as it is (the project's word that it isn't
+      its rule hears of it: how many each resource has, never their names (a repo's readers may
+      not read the resource's schema), with the dashboard's link, which names them. `keep` is a rule that leaves a column as it is (the project's word that it isn't
       people's data); it's never sent as a mask. A parent with no rules hands over its data as its
       `data` says (`real`). NoSQL and search parents the same way: a NoSQL table's columns
       outside its keys and its views' keys (`mask_default()`, a secret's `mask_null()`), and a
       search index's fields (`email` or `redact` into a text-like field, `remove` otherwise). A
       NoSQL column masked by default is a mask like any other, so a query that compares it is
-      refused: `keep` it if the app filters on it. Columns that can't be read (10 s) leave only
-      the rules, and the activity says so. Masked bases are masked the same way when they're made
-      (`engine.rs::columns_that_look_like_peoples_data_are_masked_by_default`).
+      refused: `keep` it if the app filters on it. The columns are read on the branch (or masked
+      base) just made from the parent, so a production database that sleeps isn't woken for it.
+      Columns that can't be read (or not within 10 s) fail it, as Neosync's and Tonic's do:
+      what's masked by default isn't known, so the preview fails with why and tries again rather
+      than hand anything over, and a masked base isn't made. Masked bases are masked the same way
+      when they're made (`engine.rs::columns_that_look_like_peoples_data_are_masked_by_default`).
     - **Masked once, branched many** (Neon's anonymized branches): a masked Postgres branch comes
       from its parent's masked base, a branch of the parent masked once by the rules (the rewrite
       and `VACUUM (FULL)` above, once; with no role of its own, which would take the tables, so

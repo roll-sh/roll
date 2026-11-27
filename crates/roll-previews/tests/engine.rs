@@ -1753,6 +1753,9 @@ async fn columns_that_look_like_peoples_data_are_masked_by_default() {
         e.engine.pass().await.unwrap();
         e.engine.pass().await.unwrap();
         let told: Vec<String> = e.code.maskings.lock().iter().flat_map(|(_, n)| n.columns.iter().map(|m| format!("{}/{}", m.resource, m.column))).collect();
+        // Sent as counts only: a repo's events reach people who may not read the schema.
+        let sent: Vec<serde_json::Value> = e.code.maskings.lock().iter().map(|(_, n)| serde_json::to_value(n).unwrap()).collect();
+        assert!(sent.iter().all(|v| v.get("columns").is_none() && !v.to_string().contains("phone")), "{sent:?}");
         (masked, e.engine.store.preview(&p.id).unwrap().masked_by_default, told)
     };
     let (masked, by_default, told) = masks_of(json!({ "public.users.email": "email" })).await;
@@ -1762,6 +1765,13 @@ async fn columns_that_look_like_peoples_data_are_masked_by_default() {
     let (masked, by_default, told) = masks_of(json!({ "public.users.email": "email", "public.users.phone": "keep" })).await;
     assert_eq!(masked.keys().cloned().collect::<Vec<_>>(), ["public.users.email"], "keep leaves it, and isn't sent as a mask");
     assert!(by_default.is_empty() && told.is_empty());
+    // Columns that can't be read fail it (Neosync's, Tonic's): nothing is handed over unmasked.
+    let e = env(json!({ "enabled": true, "masking": { "postgres:prj_db": { "public.users.email": "email" } } }));
+    e.pg.columns.lock().insert("prj_db".into(), Err(roll_previews::ports::Asleep));
+    e.code.open(change("chg_mz", 3));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_mz").unwrap().unwrap();
+    assert!(p.state == State::Failed && p.error.as_deref().is_some_and(|x| x.contains("nothing is handed over")), "{:?} {:?}", p.state, p.error);
     // A search cluster's fields the same way: an index's `user.email` that has no rule.
     let e = env_with_search(json!({ "enabled": true, "masking": { "search:srch_logs": { "logs.ip": "redact" } } }));
     e.search.columns.lock().insert("srch_logs".into(), Ok(vec![col("logs.ip", "keyword"), col("logs.user.email", "keyword"), col("logs.status", "long")]));

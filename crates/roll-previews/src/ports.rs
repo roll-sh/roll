@@ -209,6 +209,13 @@ pub trait Brancher: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// [`Brancher::columns`] read on `branch` of the parent, just made from it (so the parent's
+    /// columns, without waking a parent that sleeps): what's masked by default comes from here.
+    /// The parent's, where the product reads those without waking anything.
+    async fn branch_columns(&self, parent: &str, _branch: &str, _kept: Option<&str>, max: usize) -> anyhow::Result<Vec<crate::mask::Column>> {
+        self.columns(parent, max).await
+    }
+
     /// The parent's schema and the branch's, one line per object, for [`crate::schema::diff`].
     /// `None` from products without a schema to compare.
     async fn schema(&self, _parent: &str, _branch: &str) -> anyhow::Result<Option<(Vec<String>, Vec<String>)>> {
@@ -709,7 +716,19 @@ pub struct BudgetAlert {
 pub struct MaskingNotice {
     pub project: String,
     pub project_name: String,
+    /// How many of each resource's (`kind:parent`), never their names: a repo's event stream is
+    /// read by people who may not read the resource's schema. The dashboard names them.
+    pub resources: Vec<MaskedCount>,
+    /// The columns told of (kept so they're told once), not sent.
+    #[serde(skip)]
     pub columns: Vec<crate::MaskedByDefault>,
+}
+
+/// A resource's columns masked by default that the project is told of, counted.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct MaskedCount {
+    pub resource: String,
+    pub columns: usize,
 }
 
 /// What's at a path in a service, as a tar, as it's read.
