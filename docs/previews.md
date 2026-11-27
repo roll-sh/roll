@@ -2101,6 +2101,9 @@ restore_points(preview_id TEXT NOT NULL, point TEXT NOT NULL, label TEXT NOT NUL
                ref TEXT NOT NULL, kept TEXT, source TEXT NOT NULL,
                mask TEXT NOT NULL,         -- the masking rules' digest it was masked by
                PRIMARY KEY (preview_id, point, kind, parent))   -- a row per branch it holds
+replay_writes(id TEXT PRIMARY KEY, preview_id TEXT NOT NULL, at INTEGER NOT NULL, service TEXT NOT NULL,
+              size INTEGER NOT NULL,
+              sealed TEXT NOT NULL)    -- {method, path, content_type, body} sealed to (preview, id); newest 20, 256 KiB a preview
 ```
 
 - A preview id is `pv_` followed by 12 random characters of lowercase base32. Times are unix
@@ -2180,7 +2183,7 @@ previews in it), the operator and admins see every project.
 | `GET /v1/previews/{id}/routes?minutes=` | | `{ minutes, main, routes: [{ name, count, p50_ms, p95_ms, main_p50_ms, main_count, slower, repeated?, grew?, budget_ms, over_budget }] }`: each route's time from its traces (a trace's root span's name, as an SDK names a request by its route), against the same route on main's preview (the repo's default branch's, else the project's baseline; `main` its id), the slower ones first: `slower` with at least 5 traces on both sides and a p50 half again main's and 100 ms more. Names masked |
 | `PUT /v1/previews/{id}/files?service=&path=` | a tar, at most 100 MiB | `{ service, path }`: its files written under the directory `path`, said in the activity. Admin |
 | `GET /v1/previews/{id}/requests` | | `{requests: [{at, service, method, path, status, ms}]}`: its latest 200 requests through roll's runtime, newest first (Vercel's request log): never the query, which can carry a token, and the path masked as its logs are (a path is its code's to choose); `ms` until the answer's headers. Kept in memory on the preview's holder (runs there) and gone with its last service; a roll apps instance's requests are roll apps' own. The sheet's Requests tab, errors at a glance; `roll preview requests <id> [--errors]` |
-| `POST /v1/previews/{id}/replay` | | 202 `{head, by, at, ok: null, requests: []}`: its recent GETs (its own and main's preview's request logs, newest first, each once, 40 at most, never roll's `/__roll/` paths) asked of it and of main's preview again, in the background; `replay` on the preview has them at its head once done (`{…, ok, requests: [{service, path, status, main_status, removed, added}], error}`: `removed`/`added` a JSON answer's top-level fields main's has and its hasn't, or the other way; 0 is no answer); 409 for a fork's preview, or one already replaying; 400 for a branch's (`roll preview replay <id>`, the Requests tab's Replay) |
+| `POST /v1/previews/{id}/replay` | | 202 `{head, by, at, ok: null, requests: []}`: its recent GETs (its own and main's preview's request logs, newest first, each once, 40 at most, never roll's `/__roll/` paths) asked of it and of main's preview again, in the background, on fresh copies of both previews' data where both run on roll's runtime, and with the project's `replay_writes` the writes both kept (oldest first, 20 at most) there too (see "Replaying on copies"); `replay` on the preview has them at its head once done (`{…, ok, requests: [{service, method, path, status, main_status, removed, added}], error, copies_error}`: `removed`/`added` a JSON answer's top-level fields main's has and its hasn't, or the other way; 0 is no answer; `copies_error` why it couldn't run on copies of both previews' data, so its GETs were asked of them as they serve and kept writes weren't replayed, null when it ran on copies); 409 for a fork's preview, or one already replaying; 400 for a branch's (`roll preview replay <id>`, the Requests tab's Replay) |
 | `GET /v1/previews/{id}/metrics` | | `{services: [{service, cpu, memory_bytes, memory_mb}]}`: what its running services use right now (Render's and Railway's metrics): cores of CPU and resident memory, against the memory each runs with. It comes from `docker stats` for roll's runtime. For roll apps' instances it's their last finished minute (`…/environments/pv-…/metrics`), with memory per instance. A sleeping service isn't listed. 404 for no such preview. It runs on the preview's holder, and is read again at most every 10 s, however many sheets ask. The sheet shows it on each running service, read every 15 s while it's open |
 | `GET /v1/previews/{id}/errors?minutes=` | | `{minutes, groups: [{service, fingerprint, kind, title, count, first_seen, last_seen, sample, trace?}]}`: its services' errors in the last `minutes` (5–1,440, 60 by default, rounded up to a 15-minute step), grouped as roll apps groups an environment's (Sentry's issues and Vercel's runtime logs, from the output alone; docs/apps/http-api.md): a stack trace (Python, JVM, Node, Go) joined from its lines, or an error line, by what it is (its type and first frames with numbers and ids taken out). `fingerprint` names a group (keyed under a random key per process, so it says nothing of the error and changes on a restart); `kind` is `python`, `java`, `node`, `go` or `line`; `sample` is the newest one whole (8 KiB at most); newest first; `trace` the kept trace its sample names, if any. Title and sample are masked as its logs are, a value a cut split included (its start at a line's end is `***` too): its code can print its secrets. Its values are read (an audited read) only when there's an error. A roll apps service's are roll apps' own (`…/environments/pv-…/errors`, its 50 most frequent); a `roll.toml` service's are read from its container's last 2,000 lines in the span (`docker logs --timestamps --since`, at most 4 MiB a stream for at most 10 s), masked before they're grouped, its newest 50. A runtime that doesn't stamp lines gives none (its tail's old crash would read as new). 404 for no such preview. It runs on the preview's holder and is read again at most every 10 s for a span, however many ask. The sheet's Errors tab |
 | `GET /v1/previews/{id}/errors/count?minutes=` | | `{minutes, count}`: how many errors those groups hold. Nothing in them leaves, so nothing is masked and no values are read. Kept as long. A row of the Previews tab shows the last hour's once it's on screen, three rows at a time |
@@ -2237,7 +2240,7 @@ type Preview = {
   release?: { head: string; ms: number; before_ms: number | null; locks?: { table: string; mode: string; ms: number }[] } | null;
   rehearsal?: { head: string; by: string; at: number; ok: boolean | null; ms: number | null; error: string | null } | null; // its release on today's data (POST …/rehearse)
   main_on_change?: { head: string; at: number; ms: number; pages: { service: string; path: string; status: number; main_status: number }[]; error: string | null } | null; // main's code on a copy of this head's migrated data (0: no answer)
-  replay?: { head: string; by: string; at: number; ok: boolean | null; requests: { service: string; path: string; status: number; main_status: number; removed: string[]; added: string[] }[]; error: string | null } | null; // its recent GETs replayed against main's preview, at its head
+  replay?: { head: string; by: string; at: number; ok: boolean | null; requests: { service: string; method: string; path: string; status: number; main_status: number; removed: string[]; added: string[] }[]; error: string | null; copies_error?: string | null } | null; // its recent GETs (and, with replay_writes, its kept writes) replayed against main's preview, on copies of both previews' data where it can, at its head
   masked_by_default?: { resource: string; column: string; why: string }[]; // columns masked as they look like people's data and no rule names them
   reaches?: "open" | "roll";
   visual_change?: { since: string; percent: number; phone_percent?: number | null } | null;
@@ -2309,6 +2312,7 @@ type Settings = {
   env_for: Record<string, Record<string, string>>; // branch glob → variables, over env, under a preview's own ({})
   seed: Job | null;                   // once on fresh data
   release: Job | null;                // at each new head, before services deploy (migrations)
+  replay_writes?: boolean;            // trusted previews' writes (POST, PUT, PATCH, DELETE) kept with their bodies on roll's runtime, sealed (64 KiB each, 20 and 256 KiB a preview), so …/replay replays them on fresh copies of both previews' data (false)
   rehearse_when_queued?: boolean;      // when a change is queued to land, its release rehearsed on today's data by roll (false)
   release_checks?: "off" | "check" | "required"; // check: its release rehearsed on today's data at every head; required: also keeps it from landing until, at its head, that passed and main's code didn't break on its migrated data (needs release; "off")
   teardown: Job | null;               // once when the preview goes, before its services and branches
@@ -2347,7 +2351,10 @@ type Settings = {
   logs, roll's runtime's: paths only, never a query) of each again, in the background, and keeps
   how each answered: another status, or a JSON object answer whose top-level fields main's has
   and the change's hasn't, is a difference ("/api/items 200 (main 200) · lost price"). The
-  Requests tab and `roll preview replay` say them. Only GETs (a write would act twice), only a
+  Requests tab and `roll preview replay` say them. Where both previews run on roll's runtime the
+  GETs are asked of their services on copies of their data (below: a GET can act too); elsewhere
+  of the previews as they serve. Only GETs from the request logs (a write would act twice: it's
+  replayed from what `replay_writes` kept, and only on copies), only a
   trusted change's preview (a fork's visitors and code choose its paths, and main's preview
   answers with main's secrets), never a path that acts on a GET (signing out, unsubscribing,
   confirming), 3 minutes at most (one asked longer ago that never said how it went may be
@@ -2355,6 +2362,48 @@ type Settings = {
   fleet, main's preview's lines only where it's held there too): replaying
   production's traffic needs its capture's privacy designed first
   (`engine.rs::recent_requests_are_replayed_against_mains_preview`).
+- **Replaying on copies** (Signadot's SmartTests, Speedscale's replays, on branched data): where
+  both previews run every replayed service on roll's runtime, `…/replay` asks its GETs on fresh
+  copies of both previews' data, and with the project's `replay_writes` (off by default) it also
+  replays the writes (POST, PUT, PATCH, DELETE) both previews took lately there: never against
+  the branches they serve from.
+  - **Captured.** Only previews' own traffic, never production's. roll's runtime keeps a write
+    to a trusted preview's service (never a fork's, never an earlier push's or a replay's own
+    `web@…`) with its body, by its method, path (never the query), content type and body: never
+    its other headers (a visitor's cookies and `Authorization` are their credentials, so a
+    replayed write is signed out on both sides alike). Bounded: a body above 64 KiB (or without a
+    `Content-Length`) isn't kept; a preview keeps its 20 latest, 256 KiB in all, the oldest going
+    first. Sealed at rest with the store's sealer (`ROLL_SECRET_KEY`, bound to its preview and
+    row; with no key nothing is kept), and gone with the preview. Turning `replay_writes` off
+    stops it, and the next replay drops what was kept. A body is never shown: what is (the
+    method and the path) is masked as the preview's logs are.
+  - **Replayed.** The GETs, then the writes both previews took, oldest first (state builds up),
+    each once, 20 at most, of a service both run. Each preview's services run again, taking no
+    traffic, as `<name>@replay-<change's preview>` (the way main's code on a change's data runs
+    as `<name>@main`; tagged by the change, so two changes replaying against main never share a
+    run):
+    its own revision (the change's at its head, main's at main's), on fresh copy-on-write copies
+    of every one of its branches (`<change preview>-w` and `<change preview>-wm` for main's, both
+    named by the change's preview, so two changes replaying against main never share one),
+    masked as the branch is. A branch its product can't copy stops it, saying which: the GETs are
+    then asked of the previews as they serve, and the writes aren't replayed. A
+    replay run can't reach the outside (`egress: "roll"`, no `egress_hosts`: no payment, webhook
+    or message goes out twice), runs no crons, catches its mail, and gets none of the services'
+    `ROLL_PREVIEW_URL_*` (they serve from the real branches; a URL the project wrote into its own
+    variables still reaches them). Each write goes to both
+    runs, one at a time, and is compared as a GET is (the status, a JSON answer's top-level
+    fields). Then the runs stop and the copies are deleted (`Brancher::delete_snapshot`, never
+    `delete`), whatever happened, also when the 3 minutes run out; a copy a crash left behind is
+    cleared by its name before the next replay makes it again.
+  - **Said.** On the same `replay` record (`method` on each request; `copies_error` when it
+    couldn't run on copies), in the activity, the Requests tab and `roll preview replay`. Nothing is posted on the pull request. Only a trusted change's preview: a fork's
+    preview is refused, so a fork's code never takes a write.
+  - **Not yet.** roll apps services: their requests are served by roll apps' proxy, which neither
+    keeps bodies nor takes a write from roll previews, and their builds aren't run on copies for
+    a replay yet (main's code on a change's data does, with `view_build`); a project there gets
+    `copies_error` saying so, and its GETs are asked as before. Kept writes are in the store (the fleet's), so on a fleet they replay from
+    whichever node holds the change's preview; the `@replay` runs start there.
+  (`engine.rs::writes_are_replayed_on_copies_of_both_previews_data`).
 - **GitHub PR**, through roll code's GitHub outbox (durable, retried, sent on the repo's owner):
   - one comment, edited in place, with a table of services, URLs, status, data branches and cost;
   - a commit status `roll/preview` on the head. A preview removed before it was ready (the change
@@ -3197,7 +3246,8 @@ In progress, each in a pull request of its own:
 - a snapshot's head checked on roll apps too (an older push's picture could stand for the head's);
 - what a note's reviewer saw, from their own browser (Jam, Marker.io);
 - writes replayed safely on fresh copies of both previews' data (Signadot, Speedscale), which
-  also takes GET replay off main's preview's own data (a replayed GET can act);
+  also takes GET replay off main's preview's own data (a replayed GET can act), on roll's
+  runtime (roll apps services next);
 - a member's preview of a project with a search cluster, checked end to end.
 
 1. **A note resolved when its fix lands** (Marker.io's and Jam's two-way sync): a note's work

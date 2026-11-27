@@ -273,6 +273,61 @@ async fn recent_requests_are_replayed_against_mains_preview() {
 }
 
 #[tokio::test]
+async fn writes_are_replayed_on_copies_of_both_previews_data() {
+    use base64::Engine as _;
+    let e = env(json!({ "enabled": true, "github": { "screenshot": true }, "replay_writes": true }));
+    e.code.open(change("chg_rw", 1));
+    e.engine.pass().await.unwrap();
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_rw").unwrap().unwrap();
+    let main = e.engine.store.rows(Some(&e.project)).unwrap().into_iter().find(|r| r.change_id.is_none()).unwrap();
+    // Both services on roll's runtime, started with what the engine gives them.
+    e.apps.runtime.store(true, Ordering::SeqCst);
+    let source: Arc<dyn roll_previews::ports::EnvSource> = e.engine.clone();
+    *e.apps.env_source.lock() = Some(Arc::downgrade(&source));
+    let kept = |method: &str, path: &str, body: &str| roll_previews::store::KeptWrite { at: 0, service: "web".into(), method: method.into(), path: path.into(), content_type: Some("application/json".into()), body: base64::engine::general_purpose::STANDARD.encode(body) };
+    e.engine.store.keep_write(&p.id, &kept("POST", "/api/orders", r#"{"qty":1}"#)).unwrap();
+    e.engine.store.keep_write(&main.id, &kept("DELETE", "/api/orders/1", "")).unwrap();
+    e.apps.sent_status.lock().insert(format!("{} POST /api/orders", p.id), 500);
+    e.apps.request_log.lock().insert(p.id.clone(), vec![roll_previews::RequestLine { at: 1, service: "web".into(), method: "GET".into(), path: "/api/orders".into(), status: 200, ms: 3 }]);
+    let serving = |id: &str| e.engine.store.resources(id).unwrap().into_iter().filter_map(|r| r.r#ref).collect::<Vec<_>>();
+    let before: Vec<String> = serving(&p.id).into_iter().chain(serving(&main.id)).collect();
+    e.engine.replay(&p.id, "ada").await.unwrap();
+    let mut done = None;
+    for _ in 0..500 {
+        done = e.engine.store.preview(&p.id).unwrap().replay.filter(|x| x.ok.is_some());
+        if done.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let done = done.expect("replayed");
+    assert_eq!(done.copies_error, None, "{:?}", done.error);
+    let got: Vec<(&str, &str, u16, u16)> = done.requests.iter().map(|q| (q.method.as_str(), q.path.as_str(), q.status, q.main_status)).collect();
+    assert_eq!(got, vec![("GET", "/api/orders", 200, 200), ("POST", "/api/orders", 500, 200), ("DELETE", "/api/orders/1", 200, 200)], "its GETs, then both previews' writes, oldest first, compared");
+    assert!(!e.apps.started.lock().iter().any(|(_, s, _, _)| s == "web"), "nothing asked of the services as they serve");
+    // Each preview's own code took them, on a copy of its own data: never a branch it serves from.
+    let run = format!("web@replay-{}", p.id.trim_start_matches("pv_"));
+    let sent = e.apps.sent.lock().clone();
+    assert!(sent.contains(&(p.id.clone(), run.clone(), "POST".into())) && sent.contains(&(main.id.clone(), run.clone(), "POST".into())), "{sent:?}");
+    for (pv, svc, _, vars) in e.apps.started.lock().iter().filter(|(_, s, _, _)| *s == run) {
+        let db = vars.iter().find(|(k, _)| k == "DATABASE_URL").map(|(_, v)| v.clone()).unwrap_or_default();
+        let copy = if *pv == p.id { "-w" } else { "-wm" };
+        assert!(db.ends_with(&format!("{}{copy}", roll_previews::branch_name(&p.id))), "{pv} {svc} ran on {db}");
+        assert!(!before.iter().any(|b| db.ends_with(b.as_str())), "never on a serving branch: {db}");
+    }
+    // Afterwards the runs stopped and the copies are gone; the serving branches are as they were.
+    let removed = e.apps.removed.lock().clone();
+    assert!(removed.contains(&(p.id.clone(), run.clone())) && removed.contains(&(main.id.clone(), run.clone())), "{removed:?}");
+    let live: Vec<String> = e.pg.branches.lock().iter().chain(e.redis.branches.lock().iter()).cloned().collect();
+    assert!(before.iter().all(|b| live.contains(b)), "{live:?}");
+    assert!(!live.iter().any(|b| b.contains("-w")), "the copies are gone: {live:?}");
+    // A fork's preview is refused: its code never takes a write.
+    e.engine.store.update(&p.id, |r| r.trusted = false).unwrap();
+    assert!(matches!(e.engine.replay(&p.id, "ada").await, Err(roll_previews::Error::Conflict(_))));
+}
+
+#[tokio::test]
 async fn a_visual_change_waits_for_someone_to_accept_it_at_each_head() {
     let e = env(json!({ "enabled": true, "visual_review": "check", "github": { "screenshot": true } }));
     let png = |v: u8| {
