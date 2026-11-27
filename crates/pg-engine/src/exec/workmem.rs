@@ -612,6 +612,17 @@ impl Blocks {
         self.free -= size;
     }
 
+    /// A chunk of `size` bytes taken from the block being filled when it fits there (no
+    /// block allocated: `allocated` unchanged); false, nothing taken, otherwise.
+    #[inline]
+    pub fn take(&mut self, size: i64) -> bool {
+        if size > self.free || size > self.limit {
+            return false;
+        }
+        self.free -= size;
+        true
+    }
+
     /// MemoryContextReset: the first block kept.
     pub fn reset(&mut self) {
         self.allocated = 8192;

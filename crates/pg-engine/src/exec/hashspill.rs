@@ -115,7 +115,7 @@ impl HashSpill {
             types,
             tapes: workmem::TapeSet::default(),
             disk_peak: 0,
-            slots: 0,
+            slots: u64::MAX,
         };
         s.set_limits();
         s
@@ -169,15 +169,30 @@ impl HashSpill {
     /// bucket array counted again only when the table grew. (`HashAggMem::new_group`'s count
     /// without its states, written here: a second caller of it would compile the GROUP BY's
     /// `AggNode::run` otherwise.)
+    /// While the table's bucket array stays and the group fits in the bump block being
+    /// filled, the memory total is what the last group's check found within the limit: only
+    /// the group count is tested then.
     #[inline]
     pub fn distinct_group(&mut self, tuple_len: i64, slots: u64) -> bool {
+        let size = workmem::maxalign(tuple_len);
+        let m = &mut self.mem;
+        if slots == self.slots && m.entries.take(size) {
+            m.ngroups += 1;
+            return m.ngroups > m.ngroups_limit;
+        }
+        self.distinct_group_counted(size, slots)
+    }
+
+    /// `distinct_group` when a block is taken or the bucket array grew: counted in full.
+    #[inline(never)]
+    fn distinct_group_counted(&mut self, size: i64, slots: u64) -> bool {
         if slots != self.slots {
             self.slots = slots;
             self.mem.table(slots);
         }
         let m = &mut self.mem;
         debug_assert!(m.trans_chunks.is_empty() && m.additional == 0);
-        m.entries.alloc(workmem::maxalign(tuple_len));
+        m.entries.alloc(size);
         m.ngroups += 1;
         m.total() > m.mem_limit || m.ngroups > m.ngroups_limit
     }
@@ -270,6 +285,8 @@ impl HashSpill {
         self.input_card = b.input_card;
         self.set_limits();
         self.mem.reset();
+        // (The next group checked against the new limits in full.)
+        self.slots = u64::MAX;
         if let Some(f) = &self.file {
             f.pg_read(b.pg as u64);
         }
