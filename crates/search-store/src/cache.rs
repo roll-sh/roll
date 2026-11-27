@@ -1226,13 +1226,15 @@ mod tests {
             busy.push(cache.fetch_progressive(&format!("u{i}.seg"), &format!("search/seg/u{i}.seg")).await.unwrap());
         }
         let started = std::time::Instant::now();
+        let before: u64 = busy.iter().map(|b| b.downloaded()).sum();
         let f = cache.fetch_progressive("u8.seg", "search/seg/u8.seg").await.unwrap();
         let mid = len as u64 / 2;
         let got = f.read(mid..mid + 100).await.unwrap();
         let waited = started.elapsed();
         assert_eq!(&got[..], &bytes(8)[mid as usize..mid as usize + 100]);
-        let done: u64 = busy.iter().map(|b| b.downloaded()).sum();
-        assert!(done < 2 << 20, "the reader came after the bulk downloads ({done} bytes of them were in after {waited:?})");
+        // What came over the link meanwhile (the old single FIFO: about 7.7 MB, 968 ms).
+        let done = busy.iter().map(|b| b.downloaded()).sum::<u64>() - before;
+        assert!(done < 2 << 20, "the reader came after the bulk downloads ({done} bytes of them came in the {waited:?} it waited)");
         let whole = f.complete().await.unwrap();
         assert_eq!(&whole[..], &bytes(8)[..]);
         for (i, b) in busy.iter().enumerate() {
