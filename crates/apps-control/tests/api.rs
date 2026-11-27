@@ -5160,6 +5160,30 @@ async fn on_call_targets_open_and_close_incidents() {
     assert_eq!(og_calls.len(), 2, "{seen:?}");
     assert_eq!((og_calls[0].1["authorization"].to_str().unwrap(), og_calls[0].2["alias"].as_str(), og_calls[0].2["priority"].as_str()), ("GenieKey g3n1e", Some(key("alert.memory").as_str()), Some("P3")));
     assert!(og_calls[1].0.ends_with("/close?identifierType=alias") && og_calls[1].0.contains("alert.memory"), "{}", og_calls[1].0);
+    // A silence (Cloud Monitoring's snooze): its alert pages no one while it's open; another
+    // alert still does.
+    let silences = format!("/v1/apps/services/{id}/environments/production/silences");
+    let until = code_sql::now_ms() + 3_600_000;
+    assert_eq!(call(&w.api, "POST", &silences, Some(json!({"until": until, "reason": "x", "alerts": ["deploy.active"]}))).await.0, StatusCode::BAD_REQUEST, "only alerts");
+    let (st, sil) = call(&w.api, "POST", &silences, Some(json!({"until": until, "reason": "db migration", "alerts": ["alert.memory"]}))).await;
+    assert_eq!((st, sil["alerts"].clone()), (StatusCode::CREATED, json!(["alert.memory"])), "{sil}");
+    assert_eq!(call(&w.api, "GET", &silences, None).await.1.as_array().map(Vec::len), Some(1));
+    let before = seen.len();
+    for (kind, data) in [("alert.memory", json!({"value": 97, "limit_mb": 512, "threshold": 90})), ("deploy.failed", json!({"error": "again"}))] {
+        let sid = id.clone();
+        w.apps.db(move |s| s.add_event(kind, &sid, "production", None, &data)).await.unwrap();
+    }
+    for _ in 0..400 {
+        seen = got.lock().clone();
+        if seen[before..].iter().any(|(u, _, b)| u == "/pd" && b["dedup_key"] == key("deploy.failed").as_str() && b["event_action"] == "trigger") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let after: Vec<String> = seen[before..].iter().map(|(u, _, b)| format!("{u} {}", b["dedup_key"].as_str().or(b["alias"].as_str()).unwrap_or(""))).collect();
+    assert!(after.iter().any(|c| c.contains("deploy.failed")) && !after.iter().any(|c| c.contains("alert.memory")), "the silenced alert paged no one: {after:?}");
+    assert_eq!(call(&w.api, "DELETE", &format!("{silences}/{}", sil["id"].as_str().unwrap()), None).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(call(&w.api, "GET", &silences, None).await.1, json!([]));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

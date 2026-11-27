@@ -72,6 +72,8 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route("/v1/apps/projects/{project}/export", post(export_project))
         .route("/v1/apps/projects/{project}/status-page", get(status_page).put(put_status_page).delete(delete_status_page))
         .route("/v1/apps/projects/{project}/board", get(board).put(put_board))
+        .route("/v1/apps/services/{id}/environments/{env}/silences", get(silences).post(add_silence))
+        .route("/v1/apps/services/{id}/environments/{env}/silences/{sid}", axum::routing::delete(end_silence))
         .route("/v1/apps/services/{id}/environments/{env}/domains/{host}/configure", post(configure_domain))
         .route("/v1/apps/services/{id}/environments/{env}/domains/{host}/claim", post(claim_domain))
         .route("/v1/apps/projects/{project}/status-page/domain", get(status_domain).post(set_status_domain).delete(delete_status_domain))
@@ -244,6 +246,19 @@ async fn claim_domain(State(apps): S, Path((id, env, host)): Path<(String, Strin
 
 async fn configure_domain(State(apps): S, Path((id, env, host)): Path<(String, String, String)>, ext: Extensions, b: Bytes) -> R {
     ok(apps.configure_domain(&id, &env, &host, body(&b)?, asker(&ext)).await?)
+}
+
+async fn silences(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {
+    ok(apps.silences(&id, &env).await?)
+}
+
+async fn add_silence(State(apps): S, Path((id, env)): Path<(String, String)>, b: Bytes) -> R {
+    Ok((StatusCode::CREATED, Json(apps.add_silence(&id, &env, body(&b)?).await?)).into_response())
+}
+
+async fn end_silence(State(apps): S, Path((id, env, sid)): Path<(String, String, String)>) -> R {
+    apps.end_silence(&id, &env, &sid).await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 async fn board(State(apps): S, Path(project): Path<String>) -> R {
