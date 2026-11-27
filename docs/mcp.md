@@ -1540,6 +1540,7 @@ previews are listed once those products are on.
 | `previews_list_notes` | Notes left on a preview's pages that nobody has resolved yet (read). | `GET /v1/previews/{id}/notes` |
 | `previews_note_crop` | The element a preview note is about, as roll's browser cropped it at the reviewer's viewport and steps (roll previews #879), as an image the agent looks at. | `GET /v1/previews/{id}/notes/{note}/crop` |
 | `previews_resolve_note` | A note from the preview page's feedback button marked dealt with (write). | `POST /v1/previews/{id}/notes/{note}/resolve` |
+| `previews_note_to_work` | A note from a preview page made a work item on its change's repo, once a note (write; the repo's code too). | `POST /v1/previews/{id}/notes/{note}/work` |
 | `previews_screenshot` | A preview's page as an image the agent can look at (`diff`, `page`, `view`); accepting a visual change stays a person's (admin, no tool). | `GET /v1/previews/{id}/screenshot` |
 | `previews_fetch` | A preview's page read through roll as a visitor gets it, without a share link (Vercel's `web_fetch_vercel_url`): status, a few headers and the text, masked as its logs are, cut at 256 KiB (`path`, `service`, `head`); reveal, since a page can show copies of production's people. `review_preview` uses it on the pages a change touches. | `GET /v1/previews/{id}/fetch` |
 | `previews_try` | A preview's page in a browser in its own network with steps taken on it (`click`, `type`, `press`, `wait`; 10 at most, stateless: the whole way each time), as GitHub Copilot's coding agent drives Playwright: status, the step that found nothing, the visible text after, errors on the way, masked; typed text is redacted from the audit (#887) and never kept by previews; reveal. | `POST /v1/previews/{id}/try` |
@@ -1576,9 +1577,11 @@ From a 2026-11-26 comparison (the spec's anniversary post, Claude's connector do
    `:asked` when it passed on an approval (an older owner in a rolling restart decides again and
    fails closed); #1111's `approved_ask` becomes `outcome == Ask && (!decided_before ||
    approved_before)` after both are on main.
-2. **A preview note as a work item (after roll previews #1196 lands):** `POST
-   /v1/previews/{id}/notes/{note}/work` (idempotent per note; a guest's note makes an outside-marked
-   item), next to `previews_resolve_note`; `previews_list_notes` answers carry `work`.
+2. **A preview note as a work item (this PR):** `previews_note_to_work` maps roll previews #1196's
+   `POST /v1/previews/{id}/notes/{note}/work` (once a note; a 409 while another call makes it; write
+   on the repo's code too), and `review_preview` offers it for a note that asks for real work. On a
+   GitHub-mirrored repo a team member's note opens a GitHub issue instead (roll previews #1209):
+   the same tool, its description to say so once that lands.
 3. **Watched:** SEP-1913 (`sensitiveHint`, `privateHint` and `maliciousActivityHint` annotations, close to lockdown's marks) and the files extension (Claude says uploads are "rolling out soon").
 
 4. **Paging is the products'.** No list route takes a cursor (approvals take `limit` only). History
