@@ -305,6 +305,15 @@ impl TempFile {
         Ok(())
     }
 
+    /// A row with a word in front (`put_sized_row`).
+    pub fn write_sized_row(&mut self, w: u32, row: &[Value]) -> Result<()> {
+        put_sized_row(&mut self.buf, w, row);
+        if self.buf.len() >= WRITE_BUF {
+            self.flush()?;
+        }
+        Ok(())
+    }
+
     /// Rows encoded elsewhere (`put_row`): where they went.
     pub fn append(&mut self, rows: &[u8]) -> Result<(u64, u64)> {
         let start = self.pos();
@@ -357,6 +366,12 @@ pub fn put_row(buf: &mut Vec<u8>, row: &[Value]) {
     buf[start..start + 4].copy_from_slice(&n.to_le_bytes());
 }
 
+/// A row with a word in front (a sort's runs: its tuple's bytes on PostgreSQL's tape).
+pub fn put_sized_row(buf: &mut Vec<u8>, w: u32, row: &[Value]) {
+    buf.extend_from_slice(&w.to_le_bytes());
+    put_row(buf, row);
+}
+
 /// A row with two words in front (a hash join's batch files: its hash value and its
 /// MinimalTuple's length).
 pub fn put_tagged_row(buf: &mut Vec<u8>, tag: [u32; 2], row: &[Value]) {
@@ -403,6 +418,14 @@ impl RowReader {
         let (tag, len) = ([w(0), w(4)], w(8) as usize);
         let b = self.take(len)?.ok_or_else(|| Error::new(code::INTERNAL_ERROR, "temporary file ended early"))?;
         Ok(Some((tag, b)))
+    }
+
+    /// A row `put_sized_row` wrote: its word, the row.
+    pub fn read_sized_row(&mut self) -> Result<Option<(u32, Vec<Value>)>> {
+        let Some(t) = self.take(4)? else { return Ok(None) };
+        let w = u32::from_le_bytes(t.try_into().unwrap());
+        let row = self.read_row()?.ok_or_else(|| Error::new(code::INTERNAL_ERROR, "temporary file ended early"))?;
+        Ok(Some((w, row)))
     }
 
     pub fn read_row(&mut self) -> Result<Option<Vec<Value>>> {

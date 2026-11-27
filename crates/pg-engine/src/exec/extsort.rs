@@ -7,7 +7,7 @@
 //! tuplesort_get_stats' method and space.
 
 use super::spill::{RowReader, TempFile};
-use super::workmem::{self, BLCKSZ, SortMem};
+use super::workmem::{self, BLCKSZ, SortMem, TAPE_BLOCK_DATA};
 use super::{ExecCtx, Row};
 use crate::error::Result;
 use crate::sql::expr::{Expr, eval};
@@ -95,6 +95,9 @@ pub struct ExtSort {
     tapes: Option<Tapes>,
     /// TUPLESORT_RANDOMACCESS: the runs end up merged onto one tape ("external sort").
     random: bool,
+    /// Rows were held narrowed: their tape bytes can't be counted again from them, so merge
+    /// passes aren't followed block by block (`TapeSim`).
+    narrowed: bool,
 }
 
 /// What a sort's rows come out of.
@@ -177,6 +180,7 @@ impl ExtSort {
             run_pg: 4,
             tapes: None,
             random,
+            narrowed: false,
         }
     }
 
@@ -190,12 +194,13 @@ impl ExtSort {
         }
         let (tuplen, tape) = self.sizes(&row, ctx);
         if let Some(n) = narrow {
+            self.narrowed = true;
             let keys = row.split_off(self.full);
             row = n.shrink(row);
             row.extend(keys);
         }
         match &mut self.packed {
-            Some(p) => p.push(row, &self.cols),
+            Some(p) => p.push(row, &self.cols, tape as u32),
             None => self.rows.push(row),
         }
         self.run_pg += tape;
@@ -238,6 +243,8 @@ impl ExtSort {
             return Ok(());
         }
         let rows = self.sort_run(rows, ctx)?;
+        // (Each row's tape bytes beside it, for the merge passes.)
+        let sizes: Vec<u32> = rows.iter().map(|r| if self.narrowed { 0 } else { self.sizes(r, ctx).1 as u32 }).collect();
         // (The next runs' rows are packed as they come.)
         self.packed = Some(Packed::default());
         if self.tapes.is_none() {
@@ -248,8 +255,8 @@ impl ExtSort {
         let t = self.tapes.as_mut().unwrap();
         let tape = t.select();
         let start = t.file.pos();
-        for r in &rows {
-            t.file.write_row(r)?;
+        for (r, &w) in rows.iter().zip(&sizes) {
+            t.file.write_sized_row(w, r)?;
         }
         t.tapes[tape].push_back((start, t.file.pos()));
         t.pg[tape] += pg;
@@ -298,34 +305,145 @@ impl ExtSort {
         };
         self.dump(ctx)?;
         let t = self.tapes.take().unwrap();
-        let blocks = workmem::tape_blocks(&t.pg);
-        t.file.pg_size((blocks * BLCKSZ) as u64)?;
-        let kb = (blocks * BLCKSZ) as u64 / 1024;
         let method = if self.random { SortMethod::ExternalSort } else { SortMethod::ExternalMerge };
+        // (The tape buffers merge passes read with, unless the rows' tape bytes are unknown;
+        // pass-by-value datums have no slab.)
+        let byval = self.datum.is_some_and(|c| {
+            let l = crate::catalog::relsize::typlen(&self.types[c]);
+            l > 0 && l <= 8
+        });
+        let mem = (!self.narrowed).then(|| self.mem.merge_buffer_mem(t.tapes.len(), !byval));
         let width = self.width;
         let keys = self.keys;
-        let m = merge_runs(t, keys, width, self.random, ctx)?;
+        let (m, blocks) = merge_runs(t, keys, width, self.random, mem, ctx)?;
+        let kb = (blocks * BLCKSZ) as u64 / 1024;
         Ok((Sorted::Merge(Box::new(m)), method, kb))
     }
 }
 
+/// logtape.c's blocks through tuplesort's merge passes (a sort's tape set hands out the lowest
+/// free block, else a new one; a block read back into a tape's buffer is freed at once, and
+/// written over by the pass's output): the file's size (LogicalTapeSetBlocks, EXPLAIN's
+/// Disk) is the most blocks ever handed out, which a pass grows when its output needs a block
+/// before its inputs' reads have freed one.
+struct TapeSim {
+    /// nBlocksAllocated, and the free list's length.
+    high: i64,
+    free: i64,
+    /// tape_buffer_mem, the merge order, and this pass's read buffer (whole blocks).
+    mem: i64,
+    max: usize,
+    buf: i64,
+    /// The pass's input tapes: their bytes, bytes read, bytes in the blocks read, blocks read.
+    ins: Vec<[i64; 4]>,
+    /// The pass's output tapes: bytes written, blocks taken.
+    outs: Vec<[i64; 2]>,
+    out: usize,
+}
+
+impl TapeSim {
+    /// A merge pass over tapes of `bytes` each (`runs` runs on them).
+    fn pass(&mut self, bytes: &[i64], runs: usize) {
+        self.buf = SortMem::read_buffer(self.mem, bytes.len(), runs, self.max);
+        self.ins = bytes.iter().map(|&b| [b, 0, 0, 0]).collect();
+        self.outs.clear();
+    }
+
+    /// LogicalTapeRead of `n` bytes of input `i`: ltsReadFillBuffer once its buffer is read,
+    /// blocks while the buffer has more than a block's room.
+    fn read(&mut self, i: usize, mut n: i64) {
+        let t = &mut self.ins[i];
+        let nb = (t[0] + TAPE_BLOCK_DATA - 1) / TAPE_BLOCK_DATA;
+        while n > 0 {
+            if t[1] == t[2] {
+                let mut got = 0;
+                while t[3] < nb {
+                    got += if t[3] == nb - 1 { t[0] - (nb - 1) * TAPE_BLOCK_DATA } else { TAPE_BLOCK_DATA };
+                    t[3] += 1;
+                    self.free += 1;
+                    if self.buf - got <= BLCKSZ {
+                        break;
+                    }
+                }
+                if got == 0 {
+                    return;
+                }
+                t[2] += got;
+            }
+            let k = n.min(t[2] - t[1]);
+            t[1] += k;
+            n -= k;
+        }
+    }
+
+    /// A tuple of `w` tape bytes read from input `i`, or (None) its run's end mark.
+    fn read_tuple(&mut self, i: usize, w: Option<u32>) {
+        self.read(i, 4);
+        if let Some(w) = w {
+            self.read(i, w as i64 - 4);
+        }
+    }
+
+    /// LogicalTapeWrite of `n` bytes to the current output: a block taken when the one
+    /// being filled is full and more comes.
+    fn write(&mut self, mut n: i64) {
+        while self.outs.len() <= self.out {
+            self.outs.push([0, 0]);
+        }
+        let o = &mut self.outs[self.out];
+        while n > 0 {
+            if o[0] == o[1] * TAPE_BLOCK_DATA {
+                if self.free > 0 {
+                    self.free -= 1;
+                } else {
+                    self.high += 1;
+                }
+                o[1] += 1;
+            }
+            let k = n.min(o[1] * TAPE_BLOCK_DATA - o[0]);
+            o[0] += k;
+            n -= k;
+        }
+    }
+}
+
 /// mergeruns: merge passes while some tape holds more than one run (or, with random
-/// access, until one run is left), then the final merge's rows as they're read.
-fn merge_runs(mut t: Tapes, keys: Vec<SortKey>, width: usize, random: bool, ctx: &ExecCtx) -> Result<Merge> {
+/// access, until one run is left), then the final merge's rows as they're read; and the
+/// blocks the tape set ends with (`TapeSim`; `mem`: tape_buffer_mem, None: the runs' blocks).
+fn merge_runs(mut t: Tapes, keys: Vec<SortKey>, width: usize, random: bool, mem: Option<i64>, ctx: &ExecCtx) -> Result<(Merge, i64)> {
+    let mut sim = mem.map(|mem| TapeSim {
+        high: workmem::tape_blocks(&t.pg),
+        free: 0,
+        mem,
+        max: t.max,
+        buf: BLCKSZ,
+        ins: Vec::new(),
+        outs: Vec::new(),
+        out: 0,
+    });
+    let mut blocks = workmem::tape_blocks(&t.pg);
     loop {
         let inputs = std::mem::take(&mut t.tapes);
         let nruns: usize = inputs.iter().map(VecDeque::len).sum();
         let ntapes = inputs.len();
+        let bytes = std::mem::take(&mut t.pg);
         t.runs = 0;
-        t.pg.clear();
         if !random && nruns <= ntapes {
+            if let Some(s) = &sim {
+                blocks = s.high;
+            }
+            t.file.pg_size((blocks * BLCKSZ) as u64)?;
             let mut srcs = Vec::new();
             for mut q in inputs {
                 if let Some((s, e)) = q.pop_front() {
                     srcs.push(t.file.reader(s, e)?);
                 }
             }
-            return Merge::begin(t.file, srcs, keys, width, ctx);
+            let (m, _) = Merge::begin(t.file, srcs, keys, width, ctx)?;
+            return Ok((m, blocks));
+        }
+        if let Some(s) = &mut sim {
+            s.pass(&bytes, nruns);
         }
         // Merges of the next run of each tape (of as many tapes as runs remain), each onto
         // the next output tape, until the input runs are used up.
@@ -342,27 +460,51 @@ fn merge_runs(mut t: Tapes, keys: Vec<SortKey>, width: usize, random: bool, ctx:
             left -= srcs.len();
             let out = t.select();
             let start = t.file.pos();
-            let mut m = Merge::begin_borrowed(srcs, &keys, ctx)?;
-            while let Some(r) = m.next_raw(&keys, ctx)? {
+            let (mut m, firsts) = Merge::begin_borrowed(srcs, &keys, ctx)?;
+            if let Some(s) = &mut sim {
+                s.out = out;
+                for (i, w) in firsts.into_iter().enumerate() {
+                    s.read_tuple(i, w);
+                }
+            }
+            while let Some((r, src, w, next)) = m.next_entry(&keys, ctx)? {
                 ctx.check()?;
-                t.file.write_row(&r)?;
+                if let Some(s) = &mut sim {
+                    s.write(w as i64);
+                    s.read_tuple(src, next);
+                }
+                t.file.write_sized_row(w, &r)?;
+            }
+            if let Some(s) = &mut sim {
+                // (markrunend.)
+                s.write(4);
             }
             t.tapes[out].push_back((start, t.file.pos()));
         }
+        // (The outputs' bytes: the next pass's inputs.)
+        t.pg = match &sim {
+            Some(s) => (0..t.tapes.len()).map(|i| s.outs.get(i).map_or(0, |o| o[0])).collect(),
+            None => vec![0; t.tapes.len()],
+        };
+        if let Some(s) = &sim {
+            blocks = s.high;
+        }
         if t.tapes.iter().map(VecDeque::len).sum::<usize>() <= 1 && random {
+            t.file.pg_size((blocks * BLCKSZ) as u64)?;
             let mut srcs = Vec::new();
             if let Some((s, e)) = t.tapes.first_mut().and_then(VecDeque::pop_front) {
                 srcs.push(t.file.reader(s, e)?);
             }
-            return Merge::begin(t.file, srcs, keys, width, ctx);
+            let (m, _) = Merge::begin(t.file, srcs, keys, width, ctx)?;
+            return Ok((m, blocks));
         }
     }
 }
 
 /// A merge of sorted runs through tuplesort's heap (tuplesort_heap_insert / replace_top /
-/// delete_top): (row, source) entries, the top the smallest.
+/// delete_top): (row, source, its tape bytes) entries, the top the smallest.
 pub struct Merge {
-    heap: Vec<(Row, usize)>,
+    heap: Vec<(Row, usize, u32)>,
     srcs: Vec<RowReader>,
     keys: Vec<SortKey>,
     width: usize,
@@ -382,22 +524,26 @@ fn cmp(a: &Row, b: &Row, keys: &[SortKey], ctx: &ExecCtx) -> Result<Ordering> {
 }
 
 impl Merge {
-    fn begin(file: TempFile, srcs: Vec<RowReader>, keys: Vec<SortKey>, width: usize, ctx: &ExecCtx) -> Result<Merge> {
-        let mut m = Merge::begin_borrowed(srcs, &keys, ctx)?;
+    fn begin(file: TempFile, srcs: Vec<RowReader>, keys: Vec<SortKey>, width: usize, ctx: &ExecCtx) -> Result<(Merge, Vec<Option<u32>>)> {
+        let (mut m, firsts) = Merge::begin_borrowed(srcs, &keys, ctx)?;
         m.keys = keys;
         m.width = width;
         m._file = Some(file);
-        Ok(m)
+        Ok((m, firsts))
     }
 
-    /// beginmerge: each source's first row into the heap.
-    fn begin_borrowed(mut srcs: Vec<RowReader>, keys: &[SortKey], ctx: &ExecCtx) -> Result<Merge> {
-        let mut heap: Vec<(Row, usize)> = Vec::with_capacity(srcs.len());
+    /// beginmerge: each source's first row into the heap; their tape bytes (None: the source
+    /// is empty).
+    fn begin_borrowed(mut srcs: Vec<RowReader>, keys: &[SortKey], ctx: &ExecCtx) -> Result<(Merge, Vec<Option<u32>>)> {
+        let mut heap: Vec<(Row, usize, u32)> = Vec::with_capacity(srcs.len());
+        let mut firsts = Vec::with_capacity(srcs.len());
         for (i, s) in srcs.iter_mut().enumerate() {
-            if let Some(r) = s.read_row()? {
+            let first = s.read_sized_row()?;
+            firsts.push(first.as_ref().map(|f| f.0));
+            if let Some((w, r)) = first {
                 // tuplesort_heap_insert.
                 let mut j = heap.len();
-                heap.push((r, i));
+                heap.push((r, i, w));
                 while j > 0 {
                     let p = (j - 1) >> 1;
                     if cmp(&heap[j].0, &heap[p].0, keys, ctx)? != Ordering::Less {
@@ -408,42 +554,46 @@ impl Merge {
                 }
             }
         }
-        Ok(Merge { heap, srcs, keys: Vec::new(), width: usize::MAX, _file: None })
+        Ok((Merge { heap, srcs, keys: Vec::new(), width: usize::MAX, _file: None }, firsts))
     }
 
     /// The next row (the input's columns only).
     pub fn next(&mut self, ctx: &ExecCtx) -> Result<Option<Row>> {
         let keys = std::mem::take(&mut self.keys);
-        let r = self.next_raw(&keys, ctx);
+        let r = self.next_entry(&keys, ctx);
         self.keys = keys;
-        Ok(r?.map(|mut r| {
+        Ok(r?.map(|(mut r, ..)| {
             r.truncate(self.width);
             r
         }))
     }
 
-    fn next_raw(&mut self, keys: &[SortKey], ctx: &ExecCtx) -> Result<Option<Row>> {
+    /// The top row, its source and tape bytes, and what was read from that source in its
+    /// place (the next row's tape bytes; None: its run ended).
+    fn next_entry(&mut self, keys: &[SortKey], ctx: &ExecCtx) -> Result<Option<(Row, usize, u32, Option<u32>)>> {
         if self.heap.is_empty() {
             return Ok(None);
         }
         let src = self.heap[0].1;
-        let next = match self.srcs[src].read_row()? {
-            Some(r) => Some((r, src)),
+        let read = self.srcs[src].read_sized_row()?;
+        let got = read.as_ref().map(|r| r.0);
+        let next = match read {
+            Some((w, r)) => (r, src, w),
             // tuplesort_heap_delete_top: the last entry replaces the top.
             None => {
                 let last = self.heap.pop().unwrap();
                 if self.heap.is_empty() {
-                    return Ok(Some(last.0));
+                    return Ok(Some((last.0, last.1, last.2, None)));
                 }
-                Some(last)
+                last
             }
         };
-        let top = self.replace_top(next.unwrap(), keys, ctx)?;
-        Ok(Some(top))
+        let (row, w) = self.replace_top(next, keys, ctx)?;
+        Ok(Some((row, src, w, got)))
     }
 
     /// tuplesort_heap_replace_top: `t` sifted down from the top; the old top returned.
-    fn replace_top(&mut self, t: (Row, usize), keys: &[SortKey], ctx: &ExecCtx) -> Result<Row> {
+    fn replace_top(&mut self, t: (Row, usize, u32), keys: &[SortKey], ctx: &ExecCtx) -> Result<(Row, u32)> {
         let n = self.heap.len();
         let mut i = 0;
         loop {
@@ -461,7 +611,8 @@ impl Merge {
             i = j;
         }
         // (The old top sank to `i` through the swaps: `t` takes its place.)
-        Ok(std::mem::replace(&mut self.heap[i], t).0)
+        let old = std::mem::replace(&mut self.heap[i], t);
+        Ok((old.0, old.2))
     }
 }
 
@@ -520,9 +671,9 @@ struct Packed {
 }
 
 impl Packed {
-    fn push(&mut self, row: Row, cols: &[usize]) {
+    fn push(&mut self, row: Row, cols: &[usize], w: u32) {
         self.keys.extend(cols.iter().map(|&c| row[c].clone()));
-        super::spill::put_row(&mut self.bytes, &row);
+        super::spill::put_sized_row(&mut self.bytes, w, &row);
         self.ends.push(self.bytes.len());
     }
 
