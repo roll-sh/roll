@@ -15155,6 +15155,81 @@ the loop. (2) The ring's per-block cost: three hash lookups a recycled block (`e
 looks the key up twice and then removes it). One `entry` would do. It is worth about 0.4% on
 scan-bound queries at small caches.
 
+## Executor values at 24 bytes: the uuid as two words (agent 342)
+
+BENCH "Executor values at 24 bytes" has the tables. Plain dist builds (`tools/dist.sh`): **b0**
+`e3f93d1a4`, **n1** b0 + this change (the candidate's code; rebased since onto `19c7a8758`).
+
+**What changed.** `Value` was 32 bytes with 16-byte alignment only because `Uuid(u128)` aligned
+it; every other variant fits 24 (the widest: `Bits(u32, Arc<[u8]>)`, `Ext(u16, Arc<[u8]>)`,
+`Interval`, fat `Arc<str>` payloads beside the tag). `Value::Uuid` now holds `types::Uuid128`, the
+same 128 bits as two `u64` words (high word first). Its `Ord` / `Eq` / `Hash` and its `Debug` are
+the `u128`'s, so the order (bytewise big-endian, PostgreSQL's `uuid_cmp`), in-memory hash tables'
+placement and every encoding (`to_be_bytes` / `from_be_bytes`: row and key formats, binary I/O,
+`uuid_hash`, hash partitions and hash indexes) are as before. `Value` is 24 bytes, align 8, and
+`Option<Value>` 24 (the tag's niche): both `const` asserts in `types/value.rs`. Everything built of
+`Value`s shrinks with it: a row's values (a three-column row 96 -> 72 bytes), `(Value, usize)`
+48 -> 32, the parallel top-k heap key 64 -> 48. Engine-wide sizing is PostgreSQL's model (work_mem,
+EXPLAIN's Memory figures), not `size_of`, so no spill point or EXPLAIN line moves; the one
+`size_of` budget that does (`parscan::topk_slots_fit`, whether a parallel top-k's heap slots fit
+work_mem) only admits more bounds to a kernel path with the same results. A unit test
+(`uuid128_as_u128`) checks order, hash and bytes against `u128` at the edge values.
+
+**Checks.** Uuid against PostgreSQL 18.6 (`~/.cache/a342/uuid`): 3,000 md5-derived uuids plus
+the edge values (all-zero, all-one, each word's sign bit and halves, NULL): order ASC / DESC,
+`uuid_hash` / `uuid_hash_extended` (seeds 0, 42), `uuid_cmp` over a cross product, hash-partition
+placement (4 partitions) and `satisfies_hash_partition`, a hash index and a btree range read,
+hashed and sorted DISTINCT / GROUP BY, a hash join, `rank()` by uuid, text round trips, errors of
+three malformed inputs, array / json / record output, and a binary COPY out and back (the file's
+md5 too): n1's output is PostgreSQL's byte for byte (so was b0's). Upgrade: a data directory
+written by b0 (uuid primary key, hash index on uuid, table hash-partitioned by uuid, btree on
+uuid) read, updated (UPDATEs moving rows across partitions, DELETEs, INSERT ... ON CONFLICT on
+the key, VACUUM), read again and once more after a restart by b0 and by n1, each on its own
+copy: the same output (sorted; psql's stdout and stderr interleave differently).
+Gates on the candidate (`bcea38795`, on `19c7a8758`): `tools/quick-check.sh` with `QC_CHECKED=1`
+(398-400 tests in 20 binaries, crash seeds 1-3 x 2 and the power cut; regress 0 newly differing,
+isolation 1,647 / 1,648, pg_dump 14,609 passed / 0 failed). Its checked step's wire binary failed
+one case once, `cancel_30` (the case's client read no BackendKeyData before its timeout under load,
+so it cancelled with an empty key; the session's startup came after): the same checked binary then
+passed `protocol_cases` twice and all 76 of its tests; the other 19 checked binaries passed. The
+same gate was green on the two earlier heads (`e3f93d1a4`, `247e4bcd5`). `tools/crash-binary.py`
+seed 1 (7 rounds) against the candidate's plain dist build: ok.
+
+**Measured** (BENCH): peak memory of agent 340's window and DISTINCT probes plus a hash join's
+build and a 1M-row sort, 1M rows: the windows -10 to -13% (247.9 -> 215.4 MB, 305.2 -> 273.9,
+200.1 -> 178.1), the hash join 321.4 -> 294.7, the sort 229.4 -> 215.5; hashed DISTINCT / UNION
+level (their tables hold hashes and indexes; the output rows are one column). TPC-H SF1 user
+instructions, the 22: 81.99 -> 81.78 G (-0.25%), every query's hash equal; q01, q05, q07, q09,
+q10, q14, q16 down 0.4-2.0% in both pairs; q11 up +0.30 / +0.16% (five more runs on two servers
+each: +0.3%, 2.5 M a run of 822 M). q11's rise is in the store's sorted multi-get
+(`TxnState::get_sorted_snap`, the 405 index scans' heap fetches): its machine code is the same in
+both binaries to the byte, and n1 runs more of its in-block seek loop and less `find_block` /
+`mem_get`; no `Value` code is on that path, and q11's `Value` code (clone, hash, aggregation, the
+allocator: its group rows' growth now reallocates where b0's measured `mi_usable_size`) nets level
+or lower. Bulk insert -0.9 / -1.2% a row. The 1,000-row range read +1.0 / -1.2% and TPC-B-like
+(warmed, no seq scans, agent 333's connection-thread count) +2.2 / -0.6%: level within their
+spread. The point select's wire count spreads 9% for one binary by the load's LSM state:
+nothing resolvable there.
+PGO: with a borrowed profile (agent 333's, `--profdata`) both arms built on `f1a33ecd2` read
+TPC-H +1.2% (all 22 within -1.0 .. +3.7%), the range read -1.5%, TPC-B-like -2.0%: the profile
+misses 8.02% of the hot functions' counts in b0 and 11.13% in n1 (166 against 489 changed
+functions: every function matching on `Value` changed), so it measured the profile. Trained on
+each arm's own commit (`tools/dist-pgo.sh`): b0 built (`247e4bcd5`, staleness 0); n1's training
+was stopped for the rebase onto `19c7a8758`: that pair comes as a later candidate.
+
+**Looked at, nothing clean to take (item 2).** Past the uuid, nothing on the row path has a
+padded field to drop: `Value`'s 24 is the tag plus a fat pointer (16) with 4-byte payloads beside
+the tag (`Bits`, `Ext`, `Inet`); 16 bytes would need thin pointers for text / bytea / json /
+bit strings and `Interval` out of line, a representation change, not a layout one. `Interval`
+(16), `Timetz` (12), the hash tables' entries (`KeyIndex`'s `(u64, u32)`, 16), `RowBatch`'s `Ent`
+(16) and the tuplestore's rows (`Vec<Value>`) are already tight.
+
+**Left.** `Result<Value>` is 120 bytes: `Error` (code, message, detail, hint, position, context,
+objects) is returned inline by every expression evaluation; boxing it would make
+`Result<Value>` 24 (the tag's niche) and every `?` move a word instead of 15. Only 24 sites build
+`Error { .. }` literally; the rest go through constructors. A row is still a `Vec<Value>`: 24 bytes
+of header plus the allocator's rounding over n x 24; `Box<[Value]>` would save 8 a row.
+
 ## Query memory, round 8: the DISTINCT spill's cost paid back, spilled batches and UNION's arms streamed, DISTINCT's group estimate over computed columns, a sorted SetOp's Sorts under EXPLAIN ANALYZE; bounded window frames streamed past 4 MB dropped (agent 343)
 
 BENCH.md "Query memory, round 8" has the tables. Plain dist builds (`tools/dist.sh`): **n1**

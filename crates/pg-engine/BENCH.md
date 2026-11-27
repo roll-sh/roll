@@ -771,6 +771,106 @@ The last against PGO, select-only at 8 clients, 3 alternating pairs: user instru
 31,777 -> 32,105 / 31,587 -> 34,607 / 34,026 -> 31,978, user cycles 69,268 -> 69,872 / 68,855 ->
 72,931 / 69,927 -> 68,111 (foreign 1.25-1.88): no direction, dropped.
 
+## Executor values at 24 bytes: the uuid as two words (2026-11-27, agent 342)
+
+HANDOFF "Executor values at 24 bytes" has what changed. Plain dist builds (`tools/dist.sh`): **b0**
+`e3f93d1a4`, **n1** b0 + this change (the same code as the candidate, rebased since onto
+`247e4bcd5`). Harness: agent 340's `mem.sh` / `tpair.sh` and agent 333's `reads.sh` / `split.sh` /
+`bulk.sh`, copied to `~/.cache/a342/bench` (`mem-q9.txt`: the hash join and the sort;
+`tpair.sh` also takes each query's peak). One pair a `tools/lane.sh` hold; every hold read 4.8-7.5
+foreign cores (2.2-3.5 in the measured windows): instruction counts only, walls not compared.
+
+### Sizes (bytes, size / align)
+
+| type | b0 | n1 |
+|---|---:|---:|
+| `Value` | 32 / 16 | 24 / 8 |
+| `Option<Value>` | 32 / 16 | 24 / 8 |
+| a row's values, three columns | 96 | 72 |
+| `(Value, usize)` | 48 | 32 |
+| `parscan::TopKey` (`Value`, `TopK`) | 64 | 48 |
+| `Result<Value>` (`Error` is 120) | 128 | 120 |
+
+### Peak memory a query (MB of the server cgroup's anon+shmem over the level before; 1M rows, lane C)
+
+Result hashes equal in every cell.
+
+| query | b0 | n1 |
+|---|---:|---:|
+| `count(*)`, `last_value(s)` `OVER (ORDER BY a RANGE BETWEEN 50 PRECEDING AND 50 FOLLOWING EXCLUDE CURRENT ROW)`, work_mem 1 GB | 247.9 | 215.4 |
+| `sum(id)`, `lag(s)`, `rank()` `OVER (PARTITION BY id % 10 ORDER BY a)`, 1 GB | 305.2 | 273.9 |
+| `row_number()`, `sum(id)` `OVER (ORDER BY a ROWS BETWEEN 5 PRECEDING AND 5 FOLLOWING)`, 1 GB | 200.1 | 178.1 |
+| `SELECT DISTINCT s` (HashAggregate, work_mem 4 MB) | 111.1 | 109.7 |
+| `SELECT DISTINCT a % 1000` | 14.9 | 13.9 |
+| `SELECT DISTINCT a % 1000, id % 7` | 1.3 | 1.1 |
+| `SELECT a % 100000 FROM t UNION SELECT id % 100000 FROM t` | 161.0 | 161.1 |
+| `t a JOIN t b ON a.id = b.a` (hash join, 1M-row build), 1 GB | 321.4 | 294.7 |
+| `SELECT id, a, s FROM t ORDER BY s`, 1 GB | 229.4 | 215.5 |
+
+### TPC-H SF1, user instructions a query (G; lane C; pair 2: the queries that moved, again, in the other order)
+
+Rows and hashes equal in every cell. Peak: MB over the level before the query (0.05 s samples).
+
+| query | b0 | n1 | pair 1 | pair 2 | peak MB b0 / n1 |
+|---|---:|---:|---:|---:|---:|
+| q01 | 7.3169 | 7.2882 | -0.39% | -0.38% | 0 / 0 |
+| q02 | 2.2494 | 2.2473 | -0.09% |  | 21 / 18 |
+| q03 | 4.0889 | 4.0843 | -0.11% |  | 12 / 5 |
+| q04 | 1.3417 | 1.3415 | -0.02% |  | 3 / 0 |
+| q05 | 2.7665 | 2.7526 | -0.50% | -0.86% | 17 / 16 |
+| q06 | 3.3761 | 3.3771 | +0.03% |  | 14 / 19 |
+| q07 | 3.4548 | 3.4277 | -0.78% | -0.81% | 11 / 9 |
+| q08 | 1.3483 | 1.3453 | -0.22% |  | 14 / 17 |
+| q09 | 7.6300 | 7.5871 | -0.56% | -0.59% | 15 / 14 |
+| q10 | 5.5435 | 5.5180 | -0.46% | -0.53% | 92 / 84 |
+| q11 | 0.8215 | 0.8240 | +0.30% | +0.16% | 12 / 10 |
+| q12 | 5.8782 | 5.8736 | -0.08% |  | 11 / 11 |
+| q13 | 4.1028 | 4.1335 | +0.75% | -0.03% | 67 / 57 |
+| q14 | 1.3800 | 1.3649 | -1.10% | -2.01% | 48 / 54 |
+| q15 | 2.3063 | 2.3039 | -0.10% |  | 11 / 12 |
+| q16 | 2.8660 | 2.8137 | -1.82% | -1.51% | 32 / 26 |
+| q17 | 2.8501 | 2.8498 | -0.01% |  | 1 / 3 |
+| q18 | 15.4555 | 15.4385 | -0.11% |  | 28 / 30 |
+| q19 | 0.4707 | 0.4703 | -0.08% |  | 7 / 7 |
+| q20 | 0.8815 | 0.8811 | -0.04% |  | 7 / 6 |
+| q21 | 5.2380 | 5.2390 | +0.02% |  | 2 / 1 |
+| q22 | 0.6228 | 0.6231 | +0.04% |  | 5 / 3 |
+| total | 81.9896 | 81.7849 | -0.25% | | |
+
+q11 five times more on two servers each: b0 821.47-821.50 / 822.13-822.17 M, n1 824.49-824.52 /
+824.37-824.41 M (+0.3%). q13 three more: b0 4103.2-4103.9 M on both servers, n1 4101.7-4102.0 and
+4112.1-4112.4 M (its server-to-server spread). q11 profiled (200 runs an arm, `instructions:u`
+period 2,000,003, under the kernel's 1,500 samples/s cap; two servers an arm): samples 75,931 /
+74,739 -> 76,181 / 78,114; `TxnState::get_sorted_snap` 7,822 / 7,611 -> 8,623 / 8,810 (the same
+15,743 bytes of machine code in both binaries; the extra samples are its per-key in-block seek
+loop), `SstReader::find_block` 1,483 / 1,494 -> 1,120 / 1,158, `mem_get` 359 / 372 -> 241 / 263,
+`block_with` 825 / 821 -> 714 / 738; the allocator's symbols together about 265 fewer
+(`_mi_heap_realloc_zero` 49 -> 239 from `AggNode::run`'s group rows' growth, `mi_usable_size`
+134 -> 0, `mi_find_page` 262 -> 95).
+
+### Reads, bulk and TPC-B-like (user instructions an operation)
+
+| case | pair | b0 | n1 | |
+|---|---|---:|---:|---|
+| 1,000-row range read, 8 clients x 2,000 (connection threads; lane B) | 1 | 2,095,246 | 2,116,688 | +1.0% |
+| | 2 (reversed) | 2,106,769 | 2,082,186 | -1.2% |
+| bulk insert, 50 x 20,000 rows (server cgroup, a row; lane C) | 1 | 10,257 | 10,168 | -0.9% |
+| | 2 (reversed) | 10,276 | 10,152 | -1.2% |
+| TPC-B-like, 8 clients, 160,000 warmed, enable_seqscan off (connection threads; lane A) | 1 | 287,591 (2,782 tps) | 294,001 (1,383 tps) | +2.2% |
+| | 2 (reversed) | 292,810 (808 tps) | 291,003 (1,055 tps) | -0.6% |
+| prepared point select, 1 client x 100,000 (connection threads; lane A), 3 L0 files at the start | 1-4 | 54,972, 59,953 | 54,856, 55,548 | |
+| the same, no L0 file at the start | 1-4 | 51,259, 52,748 | 53,795, 52,214 | |
+
+(TPC-B-like: no seq scan in any window; the count follows the run's tps, other tenants' load.
+The point select's wire count spreads up to 9% for one binary: nothing to read at 1%.)
+
+### PGO, the borrowed profile (misleading)
+
+Both arms on `f1a33ecd2` with agent 333's profile (`--profdata`): TPC-H 78.4102 -> 79.3601 G (+1.21%;
+q14 -0.97, q17 -0.47, q21 -0.08, the rest +0.15 .. +3.66%), the 1,000-row range read 1,907,481 ->
+1,879,699 (-1.5%), TPC-B-like 243,123 (1,624 tps) -> 238,383 (2,705 tps) (-2.0%). The profile's
+staleness: b0 62 of 2,886 hot functions without data, 8.02% of their counts; n1 110, 11.13%.
+
 ## Query memory, round 8: hashed DISTINCT / UNION paid back and streamed, DISTINCT's estimate over computed columns, sorted SetOp's Sorts; windows streamed past 4 MB dropped (2026-11-27, agent 343)
 
 HANDOFF "Query memory, round 8" has what changed. Plain dist builds (`tools/dist.sh`): **n1**
