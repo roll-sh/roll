@@ -273,13 +273,15 @@ pub struct Note {
 }
 
 /// roll previews' snapshots from a team's own tests (a Playwright test's PNG for the visual
-/// review): `POST /__roll/snapshot?name=` on a preview's host, with the project's bypass secret.
-/// rolld fills it with roll previews' engine, which checks the preview (`env`, `pv-<id>`) runs on
-/// `service` before taking anything. Its answer is the snapshot's (`{page, head}`); a bad name is
-/// a `BadRequest`, a preview that can't take one (full, going, another service's) a `Conflict`.
+/// review): `POST /__roll/snapshot?name=&head=` on a preview's host, with the project's bypass
+/// secret. rolld fills it with roll previews' engine, which checks the preview (`env`, `pv-<id>`)
+/// runs on `service` before taking anything. `head` is the head the test ran against: a picture of
+/// a head the preview doesn't serve is a `Conflict`. Its answer is the snapshot's (`{page, head}`);
+/// a bad name is a `BadRequest`, a preview that can't take one (full, going, another service's, at
+/// another head) a `Conflict`.
 #[async_trait]
 pub trait PreviewSnapshots: Send + Sync {
-    async fn snapshot(&self, service: &str, env: &str, name: &str, png: bytes::Bytes) -> crate::Result<serde_json::Value>;
+    async fn snapshot(&self, service: &str, env: &str, name: &str, head: Option<&str>, png: bytes::Bytes) -> crate::Result<serde_json::Value>;
 }
 
 /// Writes a custom domain's records at the customer's DNS provider with a token of theirs (rolld:
