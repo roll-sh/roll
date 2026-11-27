@@ -30,6 +30,7 @@
 
 pub mod ask;
 pub mod card;
+pub mod denials;
 pub mod events;
 pub mod find;
 pub mod guard;
@@ -923,6 +924,8 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
                         Err(r) => unwrapped = Some(r),
                     }
                 }
+                // A retry echoing a denial's context id (SEP-2643) is a call with that approval.
+                denials::echo(&params, &mut args);
                 if let Some(r) = unwrapped {
                     rpc_result(id, r)
                 } else if ctx.search && name == search::FIND {
@@ -964,9 +967,18 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
                         Ok(Some(r)) if ctx.url_elicitation && waiting_approval(&r["structuredContent"]).is_some() && r["structuredContent"]["url"].as_str().is_some_and(|u| !u.is_empty()) => {
                             // 2026-07-28 asks for it in the result (Multi Round-Trip Requests);
                             // earlier revisions as URL elicitation's error.
-                            if ctx.modern { rpc_result(id, modern::approval_input_required(&r)) } else { approval_elicitation(id, &r) }
+                            // Either way it says there's a way forward, at a URL (SEP-2643).
+                            if ctx.modern {
+                                let mut asked = modern::approval_input_required(&r);
+                                if let Some(e) = denials::envelope(&r["structuredContent"], true) {
+                                    asked["_meta"][denials::KEY] = e;
+                                }
+                                rpc_result(id, asked)
+                            } else {
+                                denials::on_error(approval_elicitation(id, &r), &r, true)
+                            }
                         }
-                        Ok(Some(r)) => rpc_result(id, r),
+                        Ok(Some(r)) => rpc_result(id, denials::on_result(r, false)),
                         Ok(None) => rpc_result(id, unknown_tool(ctx, &name)),
                     }
                 }
@@ -1327,6 +1339,8 @@ fn capabilities(tasks: bool) -> Value {
     });
     // MCP Apps: HTML views for the hosts that render them.
     c["extensions"][ui::EXT] = json!({});
+    // Structured authorization denials (SEP-2643, draft): a refused call says if there's a way on.
+    c["extensions"][denials::EXT] = json!({});
     // 2026-07-28's tasks extension, where results can be sealed (tasks::on).
     if tasks {
         c["extensions"][tasks::EXT] = json!({});

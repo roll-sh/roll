@@ -12,9 +12,12 @@
 //! client's own value: UPSERT the set with it added, UPSERT the rest without it, and DELETE only when
 //! nothing else is left (with the values and TTL just read, which DELETE must match exactly). A
 //! DELETE that no longer matches (someone wrote in between) is read and tried again once. Route 53
-//! has no compare-and-swap for an UPSERT, so two writers within the same instant can still lose one
-//! value, as lego's provider can. The client is made per order: the values it removes are only the
-//! ones it wrote.
+//! has no compare-and-swap for an UPSERT, so another writer that read the set before our UPSERT can
+//! write it back without our value: [`DnsProvider::settle`] reads each set again once the changes
+//! are `INSYNC`, adds a missing value back and waits again (once), and fails the order if it's
+//! still gone, before the CA looks. (roll's own orders don't race each other: roll secrets claims
+//! each record name in its shared database for an order.) The client is made per order: the values
+//! it removes are only the ones it wrote.
 
 use super::{DnsProvider, read_bounded, short};
 use anyhow::Context as _;
@@ -268,28 +271,62 @@ impl DnsProvider for Route53 {
         })
     }
 
+    /// Every change `INSYNC`, then every value this client wrote read back: one missing (another
+    /// writer's UPSERT from an older read) is added again and waited on once more, and still
+    /// missing fails, so the CA never looks at a set without it.
     fn settle(&self) -> BoxFuture<'_, anyhow::Result<()>> {
         Box::pin(async move {
-            let started = Instant::now();
+            let mut again = false;
             loop {
-                let pending = std::mem::take(&mut *self.pending.lock().unwrap());
-                let mut left = vec![];
-                for change in pending {
-                    let xml = self.call("GET", &format!("/{VERSION}/change/{change}"), None, &format!("change {change}")).await?;
-                    if first(&xml, "Status").as_deref() != Some("INSYNC") {
-                        left.push(change);
-                    }
+                self.insync().await?;
+                let missing = self.missing().await?;
+                let Some((_, name, _)) = missing.first() else { return Ok(()) };
+                if again {
+                    anyhow::bail!("Route 53: roll's challenge value in TXT {name} was gone after its change was INSYNC, twice (another client keeps writing the set without it)");
                 }
-                if left.is_empty() {
-                    return Ok(());
+                again = true;
+                tracing::warn!(%name, "Route 53: roll's challenge value was gone after its change was INSYNC; adding it again");
+                for (zone, name, value) in &missing {
+                    self.edit(zone, name, value, true).await?;
                 }
-                if started.elapsed() + self.poll > self.within {
-                    anyhow::bail!("Route 53: change {} wasn't INSYNC within {} s", left[0], self.within.as_secs());
-                }
-                self.pending.lock().unwrap().extend(left);
-                tokio::time::sleep(self.poll).await;
             }
         })
+    }
+}
+
+impl Route53 {
+    /// Wait until every change made so far is `INSYNC`, within the bound.
+    async fn insync(&self) -> anyhow::Result<()> {
+        let started = Instant::now();
+        loop {
+            let pending = std::mem::take(&mut *self.pending.lock().unwrap());
+            let mut left = vec![];
+            for change in pending {
+                let xml = self.call("GET", &format!("/{VERSION}/change/{change}"), None, &format!("change {change}")).await?;
+                if first(&xml, "Status").as_deref() != Some("INSYNC") {
+                    left.push(change);
+                }
+            }
+            if left.is_empty() {
+                return Ok(());
+            }
+            if started.elapsed() + self.poll > self.within {
+                anyhow::bail!("Route 53: change {} wasn't INSYNC within {} s", left[0], self.within.as_secs());
+            }
+            self.pending.lock().unwrap().extend(left);
+            tokio::time::sleep(self.poll).await;
+        }
+    }
+
+    /// The values this client wrote that their sets, read now, don't hold: (zone, name, value).
+    async fn missing(&self) -> anyhow::Result<Vec<(String, String, String)>> {
+        let ours: Vec<(String, String, Vec<String>)> = self.records.lock().unwrap().iter().filter(|(_, (_, v))| !v.is_empty()).map(|(n, (z, v))| (z.clone(), n.clone(), v.clone())).collect();
+        let mut out = vec![];
+        for (zone, name, values) in ours {
+            let set = self.read_set(&zone, &name).await?.map(|(_, v)| v).unwrap_or_default();
+            out.extend(values.into_iter().filter(|v| !set.contains(&format!("\"{v}\""))).map(|v| (zone.clone(), name.clone(), v)));
+        }
+        Ok(out)
     }
 }
 
@@ -342,6 +379,9 @@ mod tests {
         sets: Arc<Mutex<Sets>>,
         log: Arc<Mutex<Vec<String>>>,
         polled: Arc<Mutex<HashMap<String, u32>>>,
+        /// How many more changes another writer follows, once INSYNC, with an UPSERT of every set
+        /// as it read it before (only `"foreign"` in it).
+        clobber: Arc<Mutex<u32>>,
     }
 
     fn signed(h: &HeaderMap) -> bool {
@@ -402,12 +442,16 @@ mod tests {
         let n = polled.entry(id.clone()).or_default();
         *n += 1;
         let status = if *n > 1 { "INSYNC" } else { "PENDING" };
+        let mut clobber = f.clobber.lock().unwrap();
+        if status == "INSYNC" && *clobber > 0 {
+            *clobber -= 1;
+            f.sets.lock().unwrap().values_mut().for_each(|s| s.1 = vec!["\"foreign\"".into()]);
+        }
         format!("<GetChangeResponse><ChangeInfo><Id>/change/{id}</Id><Status>{status}</Status></ChangeInfo></GetChangeResponse>")
     }
 
-    #[tokio::test]
-    async fn a_wildcard_and_its_apex_share_one_record_set_and_other_clients_values_stay() {
-        let fake = Fake::default();
+    /// The fake on a port of its own: its address and a client for it.
+    async fn serve(fake: &Fake) -> (String, reqwest::Client, AwsKeys) {
         let app = axum::Router::new()
             .route("/2013-04-01/hostedzonesbyname", get(zones))
             .route("/2013-04-01/hostedzone/{zone}/rrset", post(rrset).get(list))
@@ -417,7 +461,13 @@ mod tests {
         let api = format!("http://{}", listener.local_addr().unwrap());
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let http = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap();
-        let keys = AwsKeys { access_key_id: "AKIDROLLTEST".into(), secret_access_key: "secret".into(), session_token: Some("session-token".into()) };
+        (api, http, AwsKeys { access_key_id: "AKIDROLLTEST".into(), secret_access_key: "secret".into(), session_token: Some("session-token".into()) })
+    }
+
+    #[tokio::test]
+    async fn a_wildcard_and_its_apex_share_one_record_set_and_other_clients_values_stay() {
+        let fake = Fake::default();
+        let (api, http, keys) = serve(&fake).await;
         let r53 = Route53::new(keys.clone(), &api, http.clone()).unwrap().with_poll(Duration::from_millis(10), Duration::from_secs(5));
 
         assert_eq!(r53.zone_for("_acme-challenge.www.example.com").await.unwrap(), "ZPUBLIC", "the public zone, past a neighbour and a private twin");
@@ -452,5 +502,26 @@ mod tests {
         let bad = Route53::new(AwsKeys { session_token: None, ..keys }, &api, http).unwrap();
         let e = bad.zone_for("_acme-challenge.example.com").await.unwrap_err().to_string();
         assert!(e.contains("InvalidSignatureException") && !e.contains("secret"), "{e}");
+    }
+
+    /// Another writer's UPSERT from a read before ours lands after it: settle reads the set back,
+    /// adds roll's value again and waits once more, so the CA finds it; gone again, the order fails
+    /// saying so, before the CA looks.
+    #[tokio::test]
+    async fn a_value_another_writer_dropped_is_added_again_before_the_ca_looks() {
+        let fake = Fake::default();
+        let (api, http, keys) = serve(&fake).await;
+        let name = "_acme-challenge.example.com";
+        let r53 = Route53::new(keys.clone(), &api, http.clone()).unwrap().with_poll(Duration::from_millis(10), Duration::from_secs(5));
+        r53.create_txt(name, "ours").await.unwrap();
+        *fake.clobber.lock().unwrap() = 1;
+        r53.settle().await.unwrap();
+        assert_eq!(fake.sets.lock().unwrap()[&format!("{name}.")].1, ["\"foreign\"", "\"ours\""], "added again, the other writer's value kept");
+
+        let r53 = Route53::new(keys, &api, http).unwrap().with_poll(Duration::from_millis(10), Duration::from_secs(5));
+        r53.create_txt(name, "lost").await.unwrap();
+        *fake.clobber.lock().unwrap() = 2;
+        let e = r53.settle().await.unwrap_err().to_string();
+        assert!(e.contains("TXT _acme-challenge.example.com was gone"), "{e}");
     }
 }
