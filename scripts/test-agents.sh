@@ -122,6 +122,14 @@ if [[ $e2e == 1 ]]; then
     fi
     grep -q "doesn't match its checksum" "$work/err"
     [[ ! -e $work/bin/roll ]]
+    # A download roll's release workflow didn't attest is refused when provenance is required.
+    (cd "$work/rel/download/cli-v9.9.9" && shasum -a 256 "roll-$target.tar.gz" > SHA256SUMS)
+    if ROLL_VERIFY=attestation ROLL_RELEASES="file://$work/rel" ROLL_VERSION=9.9.9 ROLL_INSTALL_DIR="$work/bin" sh apps/dashboard/public/install.sh 2>"$work/err"; then
+      echo "agents: install.sh installed a download with no build provenance under ROLL_VERIFY=attestation" >&2
+      exit 1
+    fi
+    grep -q "provenance" "$work/err"
+    [[ ! -e $work/bin/roll ]]
     echo "agents: install.sh checks out"
   fi
 fi

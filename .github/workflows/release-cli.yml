@@ -204,6 +204,13 @@ jobs:
   release:
     needs: [build, rolld]
     runs-on: ubuntu-latest
+    # Build provenance for every asset, signed with this workflow's OIDC identity and kept by
+    # GitHub, not in the release: whoever could replace an asset (and SHA256SUMS with it) can't
+    # make an attestation for it, and install.sh checks it with `gh attestation verify`.
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@v5
         with:
@@ -219,6 +226,16 @@ jobs:
           cd artifacts
           sha256sum roll-*.tar.gz roll-*.zip rolld-*.tar.gz > SHA256SUMS
           cat SHA256SUMS
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-checksums: artifacts/SHA256SUMS
+      - name: Check the attestation as install.sh does
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for f in artifacts/roll-x86_64-unknown-linux-gnu.tar.gz artifacts/rolld-x86_64-unknown-linux-gnu.tar.gz; do
+            gh attestation verify "$f" --repo "${{ github.repository }}" --signer-workflow "${{ github.repository }}/.github/workflows/release-cli.yml"
+          done
       - name: winget and Scoop manifests
         run: deploy/cli/render.sh "$TAG" artifacts/SHA256SUMS artifacts
       - name: Publish the release
@@ -230,5 +247,5 @@ jobs:
             gh release upload "$TAG" artifacts/* --clobber
           else
             gh release create "$TAG" artifacts/* --title "roll CLI ${TAG#cli-v}" \
-              --notes "Install with \`curl -fsSL https://roll.sh/install.sh | sh\`, or on Windows \`irm https://roll.sh/install.ps1 | iex\` (both check SHA256SUMS), or download a tarball or zip below. \`rolld-*.tar.gz\` is the roll daemon for Linux and Apple silicon macOS (\`curl -fsSL https://roll.sh/install.sh | sh -s -- --with-rolld\` installs it too). \`roll.json\` is the Scoop manifest (\`scoop install <its URL>\`); \`roll-winget.zip\` holds the winget manifests."
+              --notes "Install with \`curl -fsSL https://roll.sh/install.sh | sh\`, or on Windows \`irm https://roll.sh/install.ps1 | iex\` (both check SHA256SUMS; install.sh also checks each download's build provenance with \`gh attestation verify\` when gh is logged in), or download a tarball or zip below. \`rolld-*.tar.gz\` is the roll daemon for Linux and Apple silicon macOS (\`curl -fsSL https://roll.sh/install.sh | sh -s -- --with-rolld\` installs it too). \`roll.json\` is the Scoop manifest (\`scoop install <its URL>\`); \`roll-winget.zip\` holds the winget manifests."
           fi
