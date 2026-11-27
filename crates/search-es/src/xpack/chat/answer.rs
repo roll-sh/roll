@@ -68,6 +68,12 @@ fn markup() -> &'static Regex {
     })
 }
 
+/// A whole inline link or image, as [`markup`]'s `link` reads it.
+fn links() -> &'static Regex {
+    static R: OnceLock<Regex> = OnceLock::new();
+    R.get_or_init(|| Regex::new(r"!?\[[^\[\]\n]*\]\([^()\s]*\)").expect("the link pattern"))
+}
+
 /// `s` as a code span (backticks inside it dropped).
 fn code(s: &str) -> String {
     let s: String = s.chars().filter(|c| *c != '`').collect();
@@ -239,6 +245,10 @@ impl Sanitizer {
             if open {
                 cut = cut.min(p);
             }
+        }
+        // Never inside a whole link (a URL word in its label): it goes out as one.
+        if let Some(m) = links().find_iter(b.as_str()).find(|m| m.start() < cut && cut < m.end()) {
+            cut = m.start();
         }
         // What stands right before the held text (or ends the answer so far) may join what
         // follows, so it waits with it: `<` a tag, `]` a link or a definition, `!` an image, and
