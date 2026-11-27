@@ -736,10 +736,17 @@ fn distinct_aggregates() {
     ] {
         q(&mut s, sql).unwrap();
     }
-    for (sql, files) in [
-        ("SELECT count(DISTINCT t), count(DISTINCT a) FROM cd", 2),
-        ("SELECT count(DISTINCT t) FROM cd WHERE a > 10", 1),
+    // (Aggregates sharing an order read the input sorted once, the others sort their own
+    // values: PostgreSQL 18.6's files; a sorted grouping's groups streamed over its Sort.)
+    for (set, sql, files) in [
+        ("on", "SELECT count(DISTINCT t), count(DISTINCT a) FROM cd", 2),
+        ("on", "SELECT count(DISTINCT t) FROM cd WHERE a > 10", 1),
+        ("on", "SELECT sum(DISTINCT a), avg(DISTINCT a) FROM cd", 1),
+        ("on", "SELECT count(DISTINCT t), sum(DISTINCT a), avg(DISTINCT a) FROM cd", 2),
+        ("on", "SELECT a % 3, count(DISTINCT t) FROM cd GROUP BY a % 3 ORDER BY 1", 1),
+        ("off", "SELECT count(*), sum(c), max(m) FROM (SELECT a % 1000, count(*) c, max(t) m FROM cd GROUP BY a % 1000) z", 1),
     ] {
+        q(&mut s, &format!("SET enable_hashagg = {set}")).unwrap();
         q(&mut s, "SET work_mem = '256MB'").unwrap();
         let want = q(&mut s, sql).unwrap();
         q(&mut s, "SET work_mem = '64kB'").unwrap();
