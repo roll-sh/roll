@@ -166,10 +166,19 @@ struct Download {
     /// Rung when a reader asks for parts first ([`SegmentFetch::prioritize`]) or a bulk worker
     /// runs out of parts: the download's urgent worker looks again.
     wanted: tokio::sync::Notify,
+    /// Started for a reader that opens it while it downloads ([`Cache::fetch_progressive`]): the
+    /// first read is only the suffix ([`FIRST_READ`]). Otherwise the whole file is awaited and
+    /// the first read is a part (all of an object no larger), as one request.
+    progressive: bool,
 }
 
 impl Download {
+    #[cfg(test)]
     fn new(name: &str) -> Self {
+        Self::started(name, true)
+    }
+
+    fn started(name: &str, progressive: bool) -> Self {
         Download {
             name: name.to_string(),
             result: watch::Sender::new(None),
@@ -179,6 +188,7 @@ impl Download {
             map: Mutex::new(Weak::new()),
             reserved: AtomicU64::new(0),
             wanted: tokio::sync::Notify::new(),
+            progressive,
         }
     }
 
@@ -739,7 +749,7 @@ impl Cache {
             self.counters.hits.fetch_add(1, Relaxed);
             return Ok(d);
         }
-        let dl = match self.start(name, key)? {
+        let dl = match self.start(name, key, false)? {
             Ok(d) => return Ok(d),
             Err(dl) => dl,
         };
@@ -754,7 +764,7 @@ impl Cache {
             self.counters.hits.fetch_add(1, Relaxed);
             return Ok(SegmentFetch(FetchState::Cached(d)));
         }
-        let dl = match self.start(name, key)? {
+        let dl = match self.start(name, key, true)? {
             Ok(d) => return Ok(SegmentFetch(FetchState::Cached(d))),
             Err(dl) => dl,
         };
@@ -774,7 +784,7 @@ impl Cache {
     }
 
     /// Join the download of `name`, or start one. `Ok` when it turned out to be cached.
-    fn start(self: &Arc<Self>, name: &str, key: &str) -> anyhow::Result<Result<SegmentData, Arc<Download>>> {
+    fn start(self: &Arc<Self>, name: &str, key: &str, progressive: bool) -> anyhow::Result<Result<SegmentData, Arc<Download>>> {
         let mut fetches = self.fetches.lock();
         if let Some(dl) = fetches.get(name) {
             return Ok(Err(dl.clone()));
@@ -785,7 +795,7 @@ impl Cache {
             return Ok(Ok(d));
         }
         self.counters.misses.fetch_add(1, Relaxed);
-        let dl = Arc::new(Download::new(name));
+        let dl = Arc::new(Download::started(name, progressive));
         fetches.insert(name.to_string(), dl.clone());
         let me = self.clone();
         let (name, key, task_dl) = (name.to_string(), key.to_string(), dl.clone());
@@ -893,7 +903,7 @@ impl Cache {
     /// the rest come in parallel, parts readers wait for first.
     async fn download(&self, key: &str, file: &Arc<File>, dl: &Download) -> anyhow::Result<u64> {
         let part = self.fetch_part();
-        let first = part.min(FIRST_READ);
+        let first = if dl.progressive { part.min(FIRST_READ) } else { part };
         let (tail, size) = {
             // Whoever opens the segment waits for this one (its size, footer and table of
             // contents): the urgent lane, and only the suffix holding them.
