@@ -62,6 +62,8 @@ pub struct Experiment {
     /// Unix milliseconds it ends at (`None`: until it's ended).
     pub ends_at: Option<i64>,
     pub allow_user_header: bool,
+    /// The variant promoted into the application ([`promote`]) and when (unix ms).
+    pub promoted: Option<(String, i64)>,
 }
 
 fn name_ok(s: &str) -> bool {
@@ -103,6 +105,9 @@ impl Experiment {
             m.insert("ends_at".into(), e.into());
         }
         m.insert("allow_user_header".into(), self.allow_user_header.into());
+        if let Some((v, at)) = &self.promoted {
+            m.insert("promoted".into(), crate::obj! { "variant" => v.clone(), "at" => *at });
+        }
         Value::Obj(m)
     }
 
@@ -125,6 +130,7 @@ impl Experiment {
             variants,
             ends_at: v.get("ends_at").and_then(Value::as_i64),
             allow_user_header: v.get("allow_user_header").and_then(Value::as_bool).unwrap_or(false),
+            promoted: v.get("promoted").and_then(|p| Some((p.get("variant")?.as_str()?.to_string(), p.get("at")?.as_i64()?))),
         })
     }
 
@@ -180,7 +186,7 @@ pub fn parse(v: &Value, dict: Option<&Value>, stored: &[Experiment], now_ms: i64
     for e in list {
         let m = e.as_object().ok_or_else(|| bad("each is an object"))?;
         for k in m.keys() {
-            if !matches!(k.as_str(), "id" | "variants" | "ends_at" | "allow_user_header") {
+            if !matches!(k.as_str(), "id" | "variants" | "ends_at" | "allow_user_header" | "promoted") {
                 return Err(bad(format!("unknown field [{k}]")));
             }
         }
@@ -234,12 +240,21 @@ pub fn parse(v: &Value, dict: Option<&Value>, stored: &[Experiment], now_ms: i64
             None | Some(Value::Null) => false,
             Some(x) => x.as_bool().ok_or_else(|| bad(format!("[{id}].[allow_user_header]: true or false")))?,
         };
-        let exp = Experiment { id: id.to_string(), variants, ends_at, allow_user_header };
+        // What a promotion recorded stays as the stored experiment has it (a PUT sending back what
+        // GET printed keeps it; nothing else sets it).
+        let promoted = stored.iter().find(|o| o.id == id).and_then(|o| o.promoted.clone());
+        let exp = Experiment { id: id.to_string(), variants, ends_at, allow_user_header, promoted };
         // A running experiment keeps its arms: only its end may move.
         if let Some(old) = stored.iter().find(|o| o.id == exp.id && o.running(now_ms))
             && (old.variants != exp.variants || old.allow_user_header != exp.allow_user_header)
         {
             return Err(bad(format!("[{id}] is running: its variants, weights and identity can't change (end it with [ends_at] and start another)")));
+        }
+        // An ended experiment stays ended: running it again would add a new test's counts to its.
+        if let Some(old) = stored.iter().find(|o| o.id == exp.id && !o.running(now_ms))
+            && exp.running(now_ms)
+        {
+            return Err(bad(format!("[{id}] has ended (at [{}]): start another with a new id", old.ends_at.unwrap_or_default())));
         }
         out.push(exp);
     }
@@ -301,3 +316,54 @@ pub fn record_event(ctx: &Ctx, body: &Map, outcome: Outcome) {
     ctx.cluster.analytics.record_variant_event(&key, trial_key(app_name, &e.id, &token, &query), outcome);
 }
 
+/// `POST _application/search_application/{name}/_roll/experiments/{id}/_promote`
+/// (`{"variant": name}`): the application takes the variant (its params over the template's own,
+/// or its template in place, the `dictionary` kept), the experiment ends now if it still runs, and
+/// it records the promotion. Authorized as the application's `PUT`; once per experiment.
+pub async fn promote(ctx: &Ctx<'_>) -> EsResult<crate::rest::Reply> {
+    use super::search_application::APPS;
+    let name = ctx.path_param("name").unwrap_or_default().to_string();
+    let id = ctx.path_param("id").unwrap_or_default().to_string();
+    let body = ctx.body_map()?.unwrap_or_default();
+    if let Some(k) = body.keys().find(|k| k.as_str() != "variant") {
+        return Err(crate::xpack::unknown_field(ctx, "promote_experiment", k));
+    }
+    let variant = body.get("variant").and_then(Value::as_str).ok_or_else(|| EsError::action_request_validation(&["[variant] is required: the variant to promote".into()]))?.to_string();
+    let now = ctx.now_ms;
+    let (n, i, v) = (name.clone(), id.clone(), variant.clone());
+    let ended = ctx
+        .cluster
+        .update(move |st| {
+            let mut app = st.metadata.xpack.get(APPS, &n).cloned().ok_or_else(|| EsError::resource_not_found(n.clone()))?;
+            let mut list = of(&app);
+            let e = list.iter_mut().find(|e| e.id == i).ok_or_else(|| EsError::resource_not_found(format!("experiment [{i}] of search application [{n}]")))?;
+            if let Some((p, _)) = &e.promoted {
+                return Err(EsError::new(409, "version_conflict_engine_exception", format!("experiment [{i}] promoted [{p}] already")));
+            }
+            let chosen = e.variants.iter().find(|x| x.name == v).cloned().ok_or_else(|| bad(format!("[{i}] has no variant [{v}]")))?;
+            let ends_at = e.ends_at.filter(|end| *end <= now).unwrap_or(now);
+            e.ends_at = Some(ends_at);
+            e.promoted = Some((v.clone(), now));
+            let m = app.as_object_mut().ok_or_else(|| EsError::illegal_state("a stored search application isn't an object"))?;
+            let mut template = m.get("template").and_then(Value::as_object).cloned().unwrap_or_default();
+            if let Some(t) = chosen.template.as_ref().and_then(|t| t.get("script")) {
+                template.insert("script".into(), t.clone());
+            }
+            if let Some(p) = &chosen.params {
+                let mut script = template.get("script").and_then(Value::as_object).cloned().unwrap_or_default();
+                let mut params = script.get("params").and_then(Value::as_object).cloned().unwrap_or_default();
+                for (k, x) in p {
+                    params.insert(k.clone(), x.clone());
+                }
+                script.insert("params".into(), Value::Obj(params));
+                template.insert("script".into(), Value::Obj(script));
+            }
+            m.insert("template".into(), Value::Obj(template));
+            m.insert("experiments".into(), Value::Arr(list.iter().map(Experiment::to_value).collect()));
+            m.insert("updated_at_millis".into(), now.into());
+            crate::xpack::store::put(st, APPS, &n, app, now)?;
+            Ok(ends_at)
+        })
+        .await?;
+    crate::rest::Reply::ok(crate::obj! { "acknowledged" => true, "search_application" => name, "experiment" => id, "variant" => variant, "ended_at" => ended })
+}

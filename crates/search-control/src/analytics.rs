@@ -46,7 +46,41 @@ pub fn two_proportion_p(x1: u64, n1: u64, x2: u64, n2: u64) -> Option<f64> {
     Some(erfc(((p1 - p2) / se).abs() / std::f64::consts::SQRT_2).clamp(0.0, 1.0))
 }
 
-/// A variant's rate against the baseline's: the p-value and whether it's called yet.
+/// The normal quantile of a two-sided 95% interval.
+const Z95: f64 = 1.959_963_985;
+
+/// The Wilson score interval of `x` of `n` at 95% (it stays inside [0, 1] and holds up at small
+/// counts and rates near 0 or 1, where the plain normal interval doesn't); `None` with no trials.
+pub fn wilson(x: u64, n: u64) -> Option<(f64, f64)> {
+    if n == 0 {
+        return None;
+    }
+    let (n, p) = (n as f64, x.min(n) as f64 / n as f64);
+    let z2 = Z95 * Z95;
+    let mid = (p + z2 / (2.0 * n)) / (1.0 + z2 / n);
+    let half = Z95 * (p * (1.0 - p) / n + z2 / (4.0 * n * n)).sqrt() / (1.0 + z2 / n);
+    Some(((mid - half).max(0.0), (mid + half).min(1.0)))
+}
+
+/// The 95% interval of the difference `x1/n1 - x2/n2`, from the two Wilson intervals
+/// (Newcombe's hybrid score interval, his method 10).
+pub fn difference_interval(x1: u64, n1: u64, x2: u64, n2: u64) -> Option<(f64, f64)> {
+    let ((l1, u1), (l2, u2)) = (wilson(x1, n1)?, wilson(x2, n2)?);
+    let (p1, p2) = (x1.min(n1) as f64 / n1 as f64, x2.min(n2) as f64 / n2 as f64);
+    let d = p1 - p2;
+    Some((d - ((p1 - l1).powi(2) + (u2 - p2).powi(2)).sqrt(), d + ((u1 - p1).powi(2) + (p2 - l2).powi(2)).sqrt()))
+}
+
+fn round4(v: f64) -> f64 {
+    (v * 10_000.0).round() / 10_000.0
+}
+
+fn interval_json(i: Option<(f64, f64)>) -> Value {
+    i.map_or(Value::Null, |(lo, hi)| json!([round4(lo), round4(hi)]))
+}
+
+/// A variant's rate against the baseline's: the p-value, whether it's called yet, the difference
+/// in rate and its 95% interval.
 fn compare(x: u64, n: u64, bx: u64, bn: u64) -> Value {
     let enough = |x: u64, n: u64| n >= MIN_TRIALS && x >= 5 && n - x.min(n) >= 5;
     let p = two_proportion_p(x, n, bx, bn);
@@ -55,11 +89,19 @@ fn compare(x: u64, n: u64, bx: u64, bn: u64) -> Value {
         Some(p) if p < SIGNIFICANCE => "significant",
         _ => "not_yet_significant",
     };
-    json!({ "p_value": p.map(|p| (p * 10_000.0).round() / 10_000.0), "state": state })
+    let difference = (n > 0 && bn > 0).then(|| round4(x.min(n) as f64 / n as f64 - bx.min(bn) as f64 / bn as f64));
+    json!({
+        "p_value": p.map(round4),
+        "state": state,
+        "difference": difference,
+        "interval": interval_json(difference_interval(x, n, bx, bn)),
+    })
 }
 
 /// Experiments' results, by application and experiment: each variant's trials (a user's query in
-/// an hour), clicks, conversions, value, click-through and conversion rate, against the baseline
+/// an hour), clicks, conversions, value, click-through and conversion rate, the share of trials
+/// that found nothing and its searches' 95th percentile latency (a bucket's bound: under 1, 2, 4
+/// … ms), against the baseline
 /// (the variant named `control`, else the first by name).
 pub fn experiments_json(counts: &[(search_es::analytics::VariantKey, search_es::analytics::VariantStats)]) -> Value {
     let mut by: std::collections::BTreeMap<(String, String), std::collections::BTreeMap<String, search_es::analytics::VariantStats>> = std::collections::BTreeMap::new();
@@ -82,6 +124,11 @@ pub fn experiments_json(counts: &[(search_es::analytics::VariantKey, search_es::
                         "value": (s.value * 100.0).round() / 100.0,
                         "ctr": ratio(s.clicks, s.searches),
                         "conversion_rate": ratio(s.conversions, s.searches),
+                        "ctr_interval": interval_json(wilson(s.clicks, s.searches)),
+                        "conversion_rate_interval": interval_json(wilson(s.conversions, s.searches)),
+                        "no_hits": s.no_hits,
+                        "no_hit_rate": ratio(s.no_hits, s.searches),
+                        "p95_latency_ms": s.p95_ms(),
                     });
                     if *name != baseline {
                         v["vs_baseline"] = json!({
@@ -129,6 +176,9 @@ fn query_json(q: &str, s: &QueryStats) -> Value {
         "clicks": s.clicks,
         "ctr": ratio(s.clicks, s.searches),
         "avg_position": ratio(s.position_sum, s.positioned).map(|v| (v * 10.0).round() / 10.0),
+        "conversions": s.conversions,
+        "conversion_rate": ratio(s.conversions, s.searches),
+        "value": s.value_milli as f64 / 1000.0,
     })
 }
 
@@ -155,13 +205,15 @@ impl Control {
         let gone = |i: &str| pending.cleared.iter().any(|c| c == i) || pending.enabled.as_ref().is_some_and(|on| !on.iter().any(|o| o == i));
         let mut total = Bucket::new(4 * LIST_ROWS, 2 * LIST_ROWS);
         let mut indices: Vec<String> = Vec::new();
-        // Per bucket of the range's resolution: searches, searches with no results, clicks.
-        let mut points: std::collections::BTreeMap<i64, [u64; 3]> = std::collections::BTreeMap::new();
+        // Per bucket of the range's resolution: searches, searches with no results, clicks,
+        // conversions.
+        let mut points: std::collections::BTreeMap<i64, [u64; 4]> = std::collections::BTreeMap::new();
         let mut point = |at: i64, b: &Bucket| {
             let p = points.entry(at - at.rem_euclid(r.res)).or_default();
             p[0] += b.searches;
             p[1] += b.no_hits;
             p[2] += b.clicks;
+            p[3] += b.conversions;
         };
         for (i, at, b) in self.store.analytics_since(&c.id, index, r.res, from).await? {
             if gone(&i) {
@@ -210,13 +262,16 @@ impl Control {
             "from": from,
             "step_s": r.res,
             "indices": indices,
-            "points": points.iter().map(|(at, p)| json!({ "at": at, "searches": p[0], "no_hits": p[1], "clicks": p[2] })).collect::<Vec<_>>(),
+            "points": points.iter().map(|(at, p)| json!({ "at": at, "searches": p[0], "no_hits": p[1], "clicks": p[2], "conversions": p[3] })).collect::<Vec<_>>(),
             "totals": {
                 "searches": total.searches,
                 "no_hits": total.no_hits,
                 "no_hit_rate": ratio(total.no_hits, total.searches),
                 "clicks": total.clicks,
                 "ctr": ratio(total.clicks, total.searches),
+                "conversions": total.conversions,
+                "conversion_rate": ratio(total.conversions, total.searches),
+                "value": total.value_milli as f64 / 1000.0,
             },
             "top": top,
             "no_results": no_results,
@@ -238,5 +293,23 @@ mod tests {
         assert!(two_proportion_p(150, 1000, 100, 1000).unwrap() < 0.001);
         assert_eq!(two_proportion_p(0, 10, 0, 10), Some(1.0));
         assert_eq!(two_proportion_p(1, 0, 1, 10), None);
+    }
+
+    #[test]
+    fn intervals() {
+        let near = |a: f64, b: f64| (a - b).abs() < 0.0005;
+        // Newcombe (1998), table I and II: 81 of 263 is 0.2553 to 0.3662; 15 of 148 is
+        // 0.0624 to 0.1605; 56/70 - 48/80 is 0.0524 to 0.3339.
+        let (lo, hi) = wilson(81, 263).unwrap();
+        assert!(near(lo, 0.2553) && near(hi, 0.3662), "{lo} {hi}");
+        let (lo, hi) = wilson(15, 148).unwrap();
+        assert!(near(lo, 0.0624) && near(hi, 0.1605), "{lo} {hi}");
+        let (lo, hi) = difference_interval(56, 70, 48, 80).unwrap();
+        assert!(near(lo, 0.0524) && near(hi, 0.3339), "{lo} {hi}");
+        // Rates at the edges stay inside [0, 1]; no trials, no interval.
+        let (lo, hi) = wilson(0, 10).unwrap();
+        assert!(lo == 0.0 && near(hi, 0.2775), "{hi}");
+        assert_eq!(wilson(3, 0), None);
+        assert_eq!(difference_interval(1, 10, 1, 0), None);
     }
 }

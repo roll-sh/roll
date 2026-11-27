@@ -152,6 +152,42 @@ pub fn risks(lines: &[String]) -> Vec<String> {
     out
 }
 
+/// The Postgres tables a schema diff's lines touch (`schema.table`, with its `(postgres:<ref>)`
+/// when the lines name several branches): a table or a column added or removed, a constraint or
+/// an index on it. Other objects (views, functions, types, search's indices) aren't tables.
+pub fn tables_touched(lines: &[String]) -> BTreeSet<String> {
+    let mut section = "";
+    let mut out = BTreeSet::new();
+    for l in lines {
+        if let Some(h) = l.strip_prefix("# ") {
+            section = h;
+            continue;
+        }
+        let Some(rest) = l.strip_prefix("+ ").or_else(|| l.strip_prefix("- ")) else { continue };
+        let table = if let Some(name) = rest.strip_prefix("table ") {
+            Some(name.to_string())
+        } else if let Some(col) = rest.strip_prefix("column ") {
+            column_line(col).map(|(table, _, _)| table)
+        } else if rest.starts_with("constraint ") || rest.starts_with("index CREATE ") {
+            // `constraint <name> on <schema>.<table> …`, `index CREATE … INDEX <name> ON <schema>.<table> USING …`.
+            rest.split_once(" on ").or_else(|| rest.split_once(" ON ")).and_then(|(_, t)| qualified(t.strip_prefix("ONLY ").unwrap_or(t)))
+        } else {
+            None
+        };
+        if let Some(t) = table {
+            out.insert(format!("{t}{}", at(section)));
+        }
+    }
+    out
+}
+
+/// `schema.table` at the start of `s` (identifiers as written), what follows dropped.
+fn qualified(s: &str) -> Option<String> {
+    let (schema, rest) = identifier(s)?;
+    let (table, _) = identifier(rest.strip_prefix('.')?)?;
+    Some(format!("{schema}.{table}"))
+}
+
 fn at(section: &str) -> String {
     if section.is_empty() { String::new() } else { format!(" ({section})") }
 }
@@ -208,6 +244,23 @@ fn type_of(spec: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_diffs_tables_are_those_its_lines_touch() {
+        use super::tables_touched;
+        let lines: Vec<String> = [
+            "+ column public.users.nickname text",
+            "- constraint users_email_key on public.users UNIQUE (email)",
+            "+ index CREATE INDEX orders_at ON public.orders USING btree (at)",
+            "+ table public.\"Audit Log\"",
+            "+ view public.active_users",
+            "+ function public.f() returns integer",
+        ]
+        .map(String::from)
+        .to_vec();
+        let got: Vec<String> = tables_touched(&lines).into_iter().collect();
+        assert_eq!(got, ["public.\"Audit Log\"", "public.orders", "public.users"]);
+    }
+
     /// A migration's dangerous steps, read from the diff: a dropped table and column (a rename
     /// is one), a type change and a column made NOT NULL; an added column or index isn't one.
     #[test]

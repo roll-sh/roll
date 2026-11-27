@@ -167,6 +167,8 @@ export interface Run {
   start?: string;
   /** Once per deploy before the switch (a migration); a non-zero exit fails the deploy. */
   pre_deploy?: string;
+  /** Once before a preview environment is deleted (Heroku's `pr-predestroy`). */
+  teardown?: string;
   schedule?: string;
   /** The zone a cron schedule's fields are in (IANA); UTC when unset. */
   timezone?: string;
@@ -1939,6 +1941,8 @@ export const appsApi = {
   domains: (id: string, e: string) => call<Domain[]>("GET", `${env(id, e)}/domains`),
   addDomain: (id: string, e: string, hostname: string) => call<Domain>("POST", `${env(id, e)}/domains`, { hostname }),
   verifyDomain: (id: string, e: string, host: string) => call<Domain>("POST", `${env(id, e)}/domains/${enc(host)}/verify`),
+  claimDomain: (id: string, e: string, host: string) => call<{ claimed: false; txt: { name: string; value: string } } | { claimed: true; domain: Domain }>("POST", `${env(id, e)}/domains/${enc(host)}/claim`),
+  configureDomain: (id: string, e: string, host: string, cloudflareToken: string, replace = false) => call<Domain>("POST", `${env(id, e)}/domains/${enc(host)}/configure`, { cloudflare_token: cloudflareToken, ...(replace ? { replace: true } : {}) }),
   removeDomain: (id: string, e: string, host: string) => call<null>("DELETE", `${env(id, e)}/domains/${enc(host)}`),
   redirectDomain: (id: string, e: string, host: string, to: string | null) => call<Domain>("PATCH", `${env(id, e)}/domains/${enc(host)}`, { redirect_to: to }),
   /** Send a custom domain to another of the app's ports (null: the service's own). */

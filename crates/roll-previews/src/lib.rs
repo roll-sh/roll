@@ -432,10 +432,18 @@ pub struct Preview {
     /// `release` (or seed) ran at `head`: `+ …` added, `- …` removed (`schema::diff`). `None`:
     /// not known (no Postgres branch, or not read yet).
     pub schema_changes: Option<Vec<String>>,
+    /// The project's other open changes whose schema changes touch the same tables (PlanetScale's
+    /// conflicting deploy requests): whichever lands second migrates a table the first changed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub schema_overlaps: Vec<SchemaOverlap>,
     /// What in `schema_changes` would hurt production when the change lands (`schema::risks`:
     /// a dropped table or column, a type change, a column made NOT NULL).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub schema_risks: Vec<String>,
+    /// Its release rehearsed on the parents' data as it is now (PlanetScale's deploy requests
+    /// check against today's production): asked for at a head, then how it went.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rehearsal: Option<Rehearsal>,
     /// The project's `release` (migrations) at its last head: how long it took on this
     /// preview's data, which is the parent's (PlanetScale's deploy requests show this before a
     /// merge: what's slow here locks production as long).
@@ -1281,6 +1289,9 @@ pub struct VisualReview {
     pub reason: Option<String>,
 }
 
+/// What a masked base's branch is named after (`pvbase-<rules>-<when>`): no preview's name starts so.
+pub const MASK_BASE_PREFIX: &str = "pvbase-";
+
 /// The visual review's entry for the stories a change touched that its run didn't take.
 pub use code_control::model::UNTAKEN_STORIES;
 
@@ -1317,6 +1328,34 @@ pub enum VisualState {
     /// Someone refused a page at this head (Chromatic's Deny): it fails until a new head, or
     /// until someone accepts that page.
     Refused,
+}
+
+/// A change's release run again on fresh branches of its Postgres parents, as they are now
+/// (`POST …/rehearse`): its preview's data may be days old, production's isn't.
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+pub struct Rehearsal {
+    /// The head it's for.
+    pub head: String,
+    pub by: String,
+    /// When it was asked for.
+    pub at: i64,
+    /// `None` while it waits for the next converge; then whether the release passed.
+    #[serde(default)]
+    pub ok: Option<bool>,
+    #[serde(default)]
+    pub ms: Option<i64>,
+    /// What it failed with (one line, masked).
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// Another open change's preview whose schema changes touch the same tables as this one's.
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+pub struct SchemaOverlap {
+    pub preview: String,
+    pub branch: String,
+    /// The tables both change (`schema.table`).
+    pub tables: Vec<String>,
 }
 
 /// Who refused a page of a visual review at its head, when, and why (one line).

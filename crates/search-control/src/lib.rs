@@ -15,6 +15,7 @@
 //! ```
 
 pub mod analytics;
+pub mod evaluate;
 pub mod api;
 pub mod cluster;
 pub mod control;

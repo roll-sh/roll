@@ -28,6 +28,7 @@ describe("access", () => {
     expect(presetRules(presets[2], "prj_a")[0].resources).toEqual([{ project: "prj_a" }]);
     expect(presetRules(presets[2])[0].resources).toBe("*");
     expect(denyRedirect("http://127.0.0.1:5000/cb?x=1", "s")).toBe("http://127.0.0.1:5000/cb?x=1&error=access_denied&error_description=The+user+denied+the+request&state=s");
+    expect(new URL(denyRedirect("https://claude.ai/api/mcp/auth_callback", "s", "https://api.roll.example/")).searchParams.get("iss")).toBe("https://api.roll.example");
     expect(statusOf({ revoked_at: null, expires_at: 1 }, 2)).toBe("expired");
   });
 });

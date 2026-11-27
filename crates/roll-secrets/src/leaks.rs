@@ -79,7 +79,8 @@ enum Whence {
     /// only where the caller may rotate (`write`) itself.
     Report { by: Caller },
     /// In a push a pre-receive hook (`by`, its token) let through with break glass, into
-    /// `project`'s git server: the value is in the server's history and every clone now.
+    /// `project`'s git server: the value is in the server's history and every clone now. It
+    /// rotates only where `by` may write, as a report does: the pusher is the hook's word.
     Breakglass { by: Caller, project: String, pusher: Option<String>, refs: Vec<String> },
 }
 
@@ -724,11 +725,13 @@ impl Secrets {
                 }
             };
             data["rotatable"] = json!(!creds.is_empty());
-            // A report is the reporter's say-so: it rotates only what the reporter could rotate
-            // through `…/rotate` (`write` there). Otherwise it's answered as `off` would be.
+            // A report is the reporter's say-so, and so is break glass (its pusher and the push
+            // itself are what the hook's call says): each rotates only what the caller could rotate
+            // through `…/rotate` (`write` there). Otherwise it's answered as `off` would be, and the
+            // leak waits on Health for a writer. Only roll code's own landings rotate on their own.
             let may_rotate = match whence {
-                Whence::Code { .. } | Whence::Breakglass { .. } => true,
-                Whence::Report { by } => by.allows(Action::Write, &Scope::at(holder, env, path)),
+                Whence::Code { .. } => true,
+                Whence::Report { by } | Whence::Breakglass { by, .. } => by.allows(Action::Write, &Scope::at(holder, env, path)),
             };
             let res = self.db.write(|c| {
                 // Claims first, so the event says what happens next.

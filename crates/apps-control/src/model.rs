@@ -662,6 +662,11 @@ pub struct Run {
     /// migration): a failure fails the deploy and the old deployment keeps serving.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pre_deploy: Option<String>,
+    /// Runs once in a container of the live deployment's image before a preview (ephemeral)
+    /// environment is deleted (Heroku's `pr-predestroy`): its data cleaned up, its webhooks
+    /// removed. Ten minutes at most; a failure is said, never holding the delete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub teardown: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub schedule: Option<String>,
     /// The zone a cron schedule's fields are in (IANA, `Europe/Budapest`); UTC when unset.
@@ -1445,6 +1450,7 @@ impl Default for Run {
             port: None,
             start: None,
             pre_deploy: None,
+            teardown: None,
             schedule: None,
             timezone: None,
             timeout_s: None,
@@ -1851,6 +1857,9 @@ impl Run {
         }
         if self.pre_deploy.as_ref().is_some_and(|c| c.trim().is_empty() || c.len() > 2000 || c.contains('\0')) {
             return bad("pre_deploy is a command of at most 2000 characters");
+        }
+        if self.teardown.as_ref().is_some_and(|c| c.trim().is_empty() || c.len() > 2000 || c.contains('\0')) {
+            return bad("teardown is a command of at most 2000 characters");
         }
         if let Some(v) = &self.volume {
             if !v.mount.starts_with('/') || v.mount == "/" || v.mount.len() > 200 || v.mount.contains("..") {

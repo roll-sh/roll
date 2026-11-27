@@ -79,6 +79,8 @@ export function DomainsTab({ service, env, runner }: { service: string; env: Env
   // Renaming the generated name: what's typed, while the field is open.
   const [rename, setRename] = useState<string | null>(null);
   const [renamed, setRenamed] = useState(false);
+  // A name another environment holds, offered to claim (its add answered so).
+  const [claiming, setClaiming] = useState<string | null>(null);
   const { copied, copy } = useCopy();
   const generated = env.url ? new URL(env.url).hostname : null;
   const [label, suffix] = generated ? [generated.split(".")[0]!, generated.slice(generated.indexOf("."))] : ["", ""];
@@ -100,8 +102,12 @@ export function DomainsTab({ service, env, runner }: { service: string; env: Env
   const pair = valid ? wwwPair(h) : null;
   const pairNew = pair && !env.domains.some((d) => d.hostname === pair) ? pair : null;
   const add = async () => {
+    setClaiming(null);
     const done = await runner.run("domain", async () => {
-      await appsApi.addDomain(service, env.name, h);
+      await appsApi.addDomain(service, env.name, h).catch((e: unknown) => {
+        if (e instanceof Error && e.message.includes("/claim")) setClaiming(h);
+        throw e;
+      });
       if (pairNew && pairToo) {
         await appsApi.addDomain(service, env.name, pairNew);
         await appsApi.redirectDomain(service, env.name, pairNew, h);
@@ -260,6 +266,7 @@ export function DomainsTab({ service, env, runner }: { service: string; env: Env
                       : "Add the CNAME with your DNS provider, then Verify. At a zone's apex, where a CNAME isn't allowed, use your provider's ALIAS or flattening and add the TXT record. The certificate is issued once it resolves."}
                   </p>
                 )}
+                {d.kind === "custom" && d.status !== "active" && !d.hostname.startsWith("*.") && <OnCloudflare service={service} env={env.name} host={d.hostname} runner={runner} />}
               </li>
             );
           })}
@@ -282,8 +289,72 @@ export function DomainsTab({ service, env, runner }: { service: string; env: Env
             </label>
           )}
         </form>
+        {claiming && <ClaimDomain key={claiming} service={service} env={env.name} host={claiming} runner={runner} copied={copied} copy={copy} onDone={() => (setClaiming(null), setHost(""))} />}
       </section>
     </div>
+  );
+}
+
+/** A name another environment holds, taken by proving it (Vercel's "linked to another team"):
+ *  the TXT record to add, then a check that moves the domain here. */
+function ClaimDomain({ service, env, host, runner, copied, copy, onDone }: { service: string; env: string; host: string; runner: Runner; copied: string | null; copy: (k: string, t: string) => void; onDone: () => void }) {
+  const [txt, setTxt] = useState<{ name: string; value: string } | null>(null);
+  const ask = () =>
+    runner.run(`claim:${host}`, async () => {
+      const r = await appsApi.claimDomain(service, env, host);
+      if (r.claimed) onDone();
+      else setTxt(r.txt);
+    });
+  return (
+    <div className="space-y-2 border-t border-line px-5 py-3 text-[12.5px]">
+      <p className="text-muted">
+        {host} is another environment's. If its DNS is yours, prove it with a TXT record and take it: it stops answering there.
+      </p>
+      {txt && (
+        <table className="w-full overflow-hidden rounded-lg border border-line font-mono text-[12px]">
+          <tbody>
+            <Record type="TXT" name={txt.name} value={txt.value} copied={copied} copy={copy} />
+          </tbody>
+        </table>
+      )}
+      <button type="button" className={btn} disabled={runner.busy !== null} onClick={() => void ask()}>
+        {txt ? "Check it and take the domain" : "Claim it"}
+      </button>
+    </div>
+  );
+}
+
+/** The records written at the customer's own Cloudflare with their token (Vercel's own DNS):
+ *  a `roll://` reference to it, read as the person for this one call, never kept. */
+function OnCloudflare({ service, env, host, runner }: { service: string; env: string; host: string; runner: Runner }) {
+  const [open, setOpen] = useState(false);
+  const [ref, setRef] = useState("");
+  // Its name's A and AAAA records (the old host's) deleted for roll's CNAME.
+  const [replace, setReplace] = useState(false);
+  if (!open)
+    return (
+      <button type="button" className="text-[12px] text-accent hover:underline" onClick={() => setOpen(true)}>
+        Its DNS is on Cloudflare? Write the records there
+      </button>
+    );
+  return (
+    <form
+      className="flex flex-wrap items-center gap-2"
+      onSubmit={(e) => {
+        e.preventDefault();
+        void runner.run(`cloudflare:${host}`, () => appsApi.configureDomain(service, env, host, ref.trim(), replace));
+      }}
+    >
+      <input value={ref} onChange={(e) => setRef(e.target.value)} placeholder="roll://production/CLOUDFLARE_TOKEN" aria-label="Cloudflare token's roll:// reference" spellCheck={false} className={`${input} min-w-64 flex-1 font-mono text-[12px]`} />
+      <button type="submit" className={btn} disabled={runner.busy !== null || !ref.trim().startsWith("roll://")}>
+        {runner.busy === `cloudflare:${host}` ? <span className="shimmer">Writing…</span> : "Write and verify"}
+      </button>
+      <label className="flex items-center gap-1.5 text-[12px] text-muted">
+        <input type="checkbox" checked={replace} onChange={(e) => setReplace(e.target.checked)} />
+        Replace its A and AAAA records
+      </label>
+      <span className="w-full text-[12px] text-subtle">A roll secret holding a Cloudflare API token with Zone:DNS:Edit on this domain's zone, read as you for this once and never kept. A name still pointing at another host keeps its records unless you replace them.</span>
+    </form>
   );
 }
 

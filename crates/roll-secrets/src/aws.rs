@@ -291,6 +291,8 @@ impl Secrets {
             if c.execute("UPDATE aws_roles SET name = ?, role_arn = ?, trust = ? WHERE id = ? AND project_id = ?", params![name, role_arn, trust, id, project])? == 0 {
                 return Err(Error::NotFound(format!("no AWS role {id}")));
             }
+            // Public certificates name the role they write Route 53's records as: renamed with it.
+            c.execute("UPDATE public_certs SET aws_role = ? WHERE project_id = ? AND aws_role = ?", params![name, project, old.name])?;
             audit::record(c, self.keys()?, project, caller, "aws_role.update", None, None, &[], &format!("changed AWS role {name} ({role_arn}, trust {trust})"), now)
         })?;
         Ok(AwsRole { name, role_arn, trust, ..old })
@@ -342,6 +344,10 @@ impl Secrets {
             if !users.is_empty() {
                 return Err(Error::Conflict("in_use", format!("{name} still rotates the keys of {}: delete those first", users.join(", "))));
             }
+            let certs: Vec<String> = c.query("SELECT name FROM public_certs WHERE project_id = ? AND aws_role = ? ORDER BY name LIMIT 5", [project, name.as_str()], |r| r.get(0))?;
+            if !certs.is_empty() {
+                return Err(Error::Conflict("in_use", format!("{name} still proves the names of public certificates {} in Route 53: give them another role or key first", certs.join(", "))));
+            }
             c.execute("DELETE FROM aws_roles WHERE id = ?", [id])?;
             audit::record(c, self.keys()?, project, caller, "aws_role.delete", None, None, &[], &format!("deleted AWS role {name}"), now)
         })
@@ -351,6 +357,13 @@ impl Secrets {
     /// [`crate::syncs::SyncTarget::aws_role`]): the shortest STS gives, as a link's issue would,
     /// and only while the role's maker may still manage the project.
     pub(crate) fn sync_aws_session(&self, project: &str, name: &str, sync: &str) -> Result<Session> {
+        self.aws_role_session(project, name, &format!("sync-{sync}"))
+    }
+
+    /// A session of the project's role `name` for one use `label` names (a sync's push, a public
+    /// certificate's Route 53 records): the shortest STS gives, and only while the role's maker
+    /// may still manage the project.
+    pub(crate) fn aws_role_session(&self, project: &str, name: &str, label: &str) -> Result<Session> {
         let id: String = self
             .db
             .read(|c| c.query_row("SELECT id FROM aws_roles WHERE project_id = ? AND name = ?", [project, name], |r| r.get(0)).optional())?
@@ -362,7 +375,7 @@ impl Secrets {
             (Some(c), Ok(keys)) => Some(Issuing { url: c.issuer.clone(), keys: keys.clone() }),
             _ => None,
         };
-        session(&*sts, &self.db, issuing.as_ref(), project, &arn, &trust, &session_name(&format!("sync-{sync}")), 900).map_err(|why| Error::Link(format!("AWS didn't let roll assume {name}: {why}")))
+        session(&*sts, &self.db, issuing.as_ref(), project, &arn, &trust, &session_name(label), 900).map_err(|why| Error::Link(format!("AWS didn't let roll assume {name}: {why}")))
     }
 
     /// The project's roles, as link targets' (kind, ref).

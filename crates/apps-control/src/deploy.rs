@@ -781,7 +781,7 @@ impl Apps {
         let (sid, e) = (service.to_string(), env.to_string());
         let (svc, row, all) = self.db(move |s| Ok((s.service(&sid)?, s.environment(&sid, &e)?, s.deployments(&sid, &e, 100, None)?))).await?;
         let none = json!({ "since": null, "commits": null, "complete": false });
-        let (Source::Repo { repo, .. }, Some(to), Some(sources)) = (&svc.source, d.revision.as_deref(), self.deps.sources.clone()) else { return Ok(none) };
+        let Some(to) = d.revision.as_deref() else { return Ok(none) };
         let since = if row.active.as_deref() == Some(dep) {
             all.iter().filter(|x| x.created_at < d.created_at && x.revision.is_some() && x.image.is_some() && x.status == DeployStatus::Inactive).max_by_key(|x| x.created_at)
         } else {
@@ -789,6 +789,15 @@ impl Apps {
         };
         let Some(since) = since.filter(|s| s.revision.is_some()) else { return Ok(none) };
         let from = since.revision.clone().unwrap_or_default();
+        // A Git URL's: from its host, as its push watch reads changed paths.
+        if let Source::Git { url, .. } = &svc.source {
+            return match crate::git_source::commits(&self.git_remote(&svc.id, url).await, &from, to, 50).await {
+                Ok(Some((commits, complete))) => Ok(json!({ "since": { "id": since.id, "revision": from }, "commits": commits, "complete": complete })),
+                Ok(None) => Ok(none),
+                Err(e) => Err(Error::BadRequest(format!("its repository's commits couldn't be read: {e:#}"))),
+            };
+        }
+        let (Source::Repo { repo, .. }, Some(sources)) = (&svc.source, self.deps.sources.clone()) else { return Ok(none) };
         match sources.commits(repo, &from, to, 50).await {
             Ok(Some((commits, complete))) => Ok(json!({ "since": { "id": since.id, "revision": from }, "commits": commits, "complete": complete })),
             Ok(None) => Ok(none),
@@ -1481,16 +1490,37 @@ impl Apps {
     /// deployment's variables on the project network, without the volume (the old instance may
     /// still be using it) and without a port. Removed afterwards, whatever happened.
     async fn pre_deploy(self: &Arc<Self>, tpl: &Template, cmd: &str, log: &LogSink, cancel: &CancellationToken) -> anyhow::Result<()> {
+        self.run_once(tpl, cmd, "pre-deploy", self.cfg.build_timeout, log, cancel).await.map_err(|e| anyhow::anyhow!("{e:#}: nothing was switched"))
+    }
+
+    /// `run.teardown` before a preview environment goes: once, in a container of its live
+    /// deployment's image, at most ten minutes. Said in the log and as a `job.failed` when it
+    /// fails; the delete goes on either way.
+    pub(crate) async fn teardown_command(self: &Arc<Self>, service: &str, env: &str) {
+        let Ok(live) = self.load_live(service, env).await else { return };
+        let Some(tpl) = live.template() else { return };
+        let Some(cmd) = tpl.run.teardown.clone() else { return };
+        let log = self.logs.sink(format!("env:{service}/{env}"), Stream::System);
+        if let Err(e) = self.run_once(&tpl, &cmd, "teardown", Duration::from_secs(600), &log, &CancellationToken::new()).await {
+            warn!(service, env, error = %e, "apps: a preview's teardown command failed");
+            let (sid, en, dep, data) = (service.to_string(), env.to_string(), tpl.deployment.clone(), serde_json::json!({ "command": "teardown", "error": format!("{e:#}") }));
+            let _ = self.db(move |s| s.add_event("job.failed", &sid, &en, Some(&dep), &data)).await;
+        }
+    }
+
+    /// `cmd` once in a container of `tpl`'s image with its variables and the project network (no
+    /// volume, no port): what `what` (`pre-deploy`, `teardown`) runs; its exit code 0 is Ok.
+    async fn run_once(self: &Arc<Self>, tpl: &Template, cmd: &str, what: &str, limit: Duration, log: &LogSink, cancel: &CancellationToken) -> anyhow::Result<()> {
         let mut spec = tpl.spec.clone();
         let svc = spec.service.strip_prefix("svc_").unwrap_or(&spec.service).to_string();
-        spec.name = format!("roll-apps-{svc}-{}-pre-{}", spec.env, random(6).to_ascii_lowercase());
+        let short = if what == "teardown" { "down" } else { "pre" };
+        spec.name = format!("roll-apps-{svc}-{}-{short}-{}", spec.env, random(6).to_ascii_lowercase());
         spec.command = Some(cmd.to_string());
         spec.port = None;
         spec.volume = None;
         spec.aliases.clear();
         spec.vars.push(("ROLL_INSTANCE".into(), spec.name.clone()));
-        let limit = self.cfg.build_timeout;
-        log.stream(Stream::System).line(format!("pre-deploy: {cmd}"));
+        log.stream(Stream::System).line(format!("{what}: {cmd}"));
         let rt = &self.deps.runtime;
         rt.create(&spec).await?;
         let ran = async {
@@ -1499,7 +1529,7 @@ impl Apps {
             tokio::select! {
                 code = tokio::time::timeout(limit, rt.wait(&spec.name)) => match code {
                     Ok(code) => code,
-                    Err(_) => anyhow::bail!("the pre-deploy command took longer than {} minutes", limit.as_secs() / 60),
+                    Err(_) => anyhow::bail!("the {what} command took longer than {} minutes", limit.as_secs() / 60),
                 },
                 _ = cancel.cancelled() => anyhow::bail!("canceled"),
             }
@@ -1509,10 +1539,10 @@ impl Apps {
         rt.remove(&spec.name).await;
         match ran? {
             0 => {
-                log.stream(Stream::System).line("pre-deploy done");
+                log.stream(Stream::System).line(format!("{what} done"));
                 Ok(())
             }
-            n => anyhow::bail!("the pre-deploy command exited with {n}: nothing was switched"),
+            n => anyhow::bail!("the {what} command exited with {n}"),
         }
     }
 
@@ -3699,6 +3729,8 @@ impl Apps {
                 continue;
             }
             let _ = self.expire_domain_claims(PENDING_CLAIM_TTL).await;
+            let age = PENDING_CLAIM_TTL.as_millis() as i64;
+            let _ = self.db(move |s| s.expire_claim_tokens(s.now()? - age)).await;
             // A day before: the owner hears it's going (and what DNS says), not only after.
             let cutoff = code_sql::now_ms() - (PENDING_CLAIM_TTL.as_millis() as i64 - 86_400_000);
             let _ = self.db(move |s| s.warn_domain_claims(cutoff)).await;

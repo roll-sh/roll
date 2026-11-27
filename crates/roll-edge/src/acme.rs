@@ -1,7 +1,8 @@
 //! Certificates from an ACME CA (Let's Encrypt), proven by a [`Solver`]:
 //!
 //! - DNS-01 (the edge's own wildcards): every name in an order gets an `_acme-challenge` TXT
-//!   record through a [`DnsProvider`] (Cloudflare's API in the cloud).
+//!   record through a [`DnsProvider`] (Cloudflare's API in the cloud; [`Route53`] for roll secrets'
+//!   public certificates too).
 //! - HTTP-01 (custom domains on a node alone): the key authorization goes into [`Http01`], which
 //!   the plain-HTTP listener answers `/.well-known/acme-challenge/<token>` from.
 //!
@@ -23,11 +24,19 @@ use std::time::Duration;
 use tokio_rustls::rustls::pki_types::CertificateDer;
 use tracing::{info, warn};
 
+mod route53;
+pub use route53::{AwsKeys, Route53};
+
 /// Publishes and removes DNS TXT records.
 pub trait DnsProvider: Send + Sync + 'static {
     /// Create a TXT record `name` (no trailing dot) with `value`; returns the id to delete it by.
     fn create_txt<'a>(&'a self, name: &'a str, value: &'a str) -> BoxFuture<'a, anyhow::Result<String>>;
     fn delete_txt<'a>(&'a self, name: &'a str, id: &'a str) -> BoxFuture<'a, anyhow::Result<()>>;
+    /// Wait until every record created so far is live on the provider's servers (Route 53's
+    /// `INSYNC`), before an order's propagation wait. Most providers have nothing to wait for.
+    fn settle(&self) -> BoxFuture<'_, anyhow::Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
 }
 
 /// Cloudflare's API with a token that may edit DNS in the zones (`ROLL_CLOUDFLARE_API_TOKEN`),
@@ -58,6 +67,15 @@ struct CfResponse<T> {
 #[derive(serde::Deserialize)]
 struct CfId {
     id: String,
+}
+
+#[derive(serde::Deserialize)]
+struct CfRecord {
+    id: String,
+    #[serde(rename = "type")]
+    kind: String,
+    #[serde(default)]
+    content: String,
 }
 
 impl Cloudflare {
@@ -119,6 +137,43 @@ impl Cloudflare {
             }
         }
         anyhow::bail!("Cloudflare: no zone for {name} (does the token see it?)")
+    }
+
+    /// Make `name`'s `kind` record (`CNAME`, `TXT`) say `content`, unproxied (roll apps writing a
+    /// customer's domain records with their own token): the one there changed, else one made. A
+    /// CNAME's name may be its zone's apex (Cloudflare flattens it). A CNAME can't sit beside its
+    /// name's A and AAAA records (the old host's): with `replace` they're deleted first, else
+    /// nothing is written and they're answered (`type content` each).
+    pub async fn put_record(&self, kind: &str, name: &str, content: &str, comment: &str, replace: bool) -> anyhow::Result<Vec<String>> {
+        anyhow::ensure!(matches!(kind, "CNAME" | "TXT"), "only CNAME and TXT records");
+        let zone = match self.zone_id(name).await? {
+            Some(z) => z,
+            None => self.zone_for(name).await?,
+        };
+        let base = format!("{}/zones/{zone}/dns_records", self.api);
+        // Names are DNS names (checked by the caller): nothing in them needs escaping.
+        let all: Vec<CfRecord> = self.call(self.http.get(format!("{base}?name={name}&per_page=100")), &format!("find {name}'s records")).await?;
+        let same: Vec<&CfRecord> = all.iter().filter(|r| r.kind == kind).collect();
+        if kind == "CNAME" {
+            // What a CNAME can't stand beside: the name's addresses (Cloudflare refuses it there:
+            // 81053), the old host's usually. Anything else Cloudflare refuses comes back as its error.
+            let others: Vec<&CfRecord> = all.iter().filter(|r| matches!(r.kind.as_str(), "A" | "AAAA")).collect();
+            if !others.is_empty() && !replace {
+                return Ok(others.iter().map(|r| format!("{} {}", r.kind, short(&r.content, 100))).collect());
+            }
+            for r in &others {
+                let _: CfId = self.call(self.http.delete(format!("{base}/{}", r.id)), &format!("delete {} {name}", r.kind)).await?;
+            }
+        }
+        let mut body = serde_json::json!({ "type": kind, "name": name, "content": content, "ttl": 1, "comment": comment });
+        if kind == "CNAME" {
+            body["proxied"] = serde_json::json!(false);
+        }
+        let _: CfId = match same.first() {
+            Some(r) => self.call(self.http.put(format!("{base}/{}", r.id)).json(&body), &format!("update {kind} {name}")).await?,
+            None => self.call(self.http.post(base).json(&body), &format!("create {kind} {name}")).await?,
+        };
+        Ok(Vec::new())
     }
 }
 
@@ -353,7 +408,8 @@ async fn order_inner(account: &Account, solver: &Solver, names: &[String], timin
         let ch = a.challenge(kind.clone()).with_context(|| format!("acme: the CA offers no {kind:?} challenge"))?;
         publish(solver, &ch, published).await?;
     }
-    if matches!(solver, Solver::Dns01(_)) {
+    if let Solver::Dns01(dns) = solver {
+        dns.settle().await?;
         tokio::time::sleep(timing.propagation).await;
     }
     let mut authzs = order.authorizations();

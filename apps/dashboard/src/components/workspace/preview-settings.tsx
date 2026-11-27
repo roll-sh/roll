@@ -101,6 +101,7 @@ function Form({
   const [widths, setWidths] = useState((saved.github.widths ?? []).join(", "));
   const [openapi, setOpenapi] = useState(saved.github.openapi ?? "");
   const [storybook, setStorybook] = useState(saved.github.storybook ?? "");
+  const [storyRuns, setStoryRuns] = useState(saved.github.story_runs ?? 1);
   const [endpoints, setEndpoints] = useState((saved.github.endpoints ?? []).join(", "));
   const [routeBudgets, setRouteBudgets] = useState(routeBudgetLines(saved.github.budget?.routes));
   // Selectors can hold commas: one per line.
@@ -173,6 +174,7 @@ function Form({
       widths: words(widths).map(Number),
       openapi: openapi.trim() || null,
       storybook: storybook.trim() || null,
+      story_runs: storyRuns,
       endpoints: words(endpoints),
       budget: { ...(s.github.budget ?? { load_ms: 0, bytes: 0 }), routes: parseRouteBudgets(routeBudgets).routes },
       states: parseStates(states),
@@ -485,6 +487,14 @@ function Form({
           placeholder={["node:22", "npm ci && npm run migrate"]}
           onChange={(j) => set("release", j)}
         />
+        {s.release && (
+          <Toggle
+            label="Rehearse when queued"
+            note="When a change is queued to land, its release runs once more on fresh branches of the parents as they are now (masked as the rules say): a preview's data may be days old."
+            checked={s.rehearse_when_queued ?? false}
+            onChange={(v) => set("rehearse_when_queued", v)}
+          />
+        )}
         <Job
           label="Teardown"
           note="Runs once when a preview goes, before its services and branches: remove what its code made outside roll (test webhooks, OAuth redirect URIs). A failure is logged; the preview goes anyway."
@@ -607,6 +617,17 @@ function Form({
         {s.github.screenshot && (
           <Field label="Storybook" note="The service that serves the preview's Storybook, and its path when not /: each story (up to 40) is taken alone, compared with main's and reviewed like a page.">
             <input value={storybook} onChange={(e) => setStorybook(e.target.value)} placeholder="web:/storybook/" className={`${field} h-8 w-full font-mono text-[12px]`} spellCheck={false} />
+          </Field>
+        )}
+        {s.github.screenshot && storybook.trim() && (
+          <Field label="Story runs" note="How many screenshot containers take the stories side by side, each up to 40, the change's touched stories first: 1 to 4. Each is billed as a browser run.">
+            <select value={storyRuns} onChange={(e) => setStoryRuns(Number(e.target.value))} className={`${field} h-8 w-24 text-[12px]`}>
+              {[1, 2, 3, 4].map((n) => (
+                <option key={n} value={n}>
+                  {n} · {n * 40}
+                </option>
+              ))}
+            </select>
           </Field>
         )}
         {s.github.screenshot && (

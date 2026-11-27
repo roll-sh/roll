@@ -33,6 +33,7 @@ import { ApiKeys } from "./api-keys";
 import { BrowserSearch } from "./browser";
 import { AuditLog } from "./audit-log";
 import { SearchConsole } from "./console";
+import { DiscoverTab } from "./discover";
 import { IndexBrowser } from "./index-browser";
 import { PerformanceTab } from "./performance";
 import { Playground } from "./playground";
@@ -44,7 +45,7 @@ import { SnapshotsTab } from "./snapshots";
 import { CredentialsOnce, SearchStateDot, settingsOf, SettingsFields, stateLabel, useAction, useSearchClusters, type Run } from "./shared";
 import { presentSamples, type SampleId } from "@/lib/search-samples";
 
-const TABS = ["overview", "indices", "console", "playground", "analyze", "relevance", "inference", "pipelines", "snapshots", "connectors", "branches", "performance", "usage", "settings"] as const;
+const TABS = ["overview", "indices", "discover", "console", "playground", "analyze", "relevance", "inference", "pipelines", "snapshots", "connectors", "branches", "performance", "usage", "settings"] as const;
 type Tab = (typeof TABS)[number];
 
 /** Placeholder while the route's params resolve. */
@@ -78,7 +79,8 @@ export function SearchClusterPage({ id }: { id: string }) {
   });
 
   useEffect(() => {
-    const h = window.location.hash.slice(1) as Tab;
+    // A tab's own state may follow its name (`#discover?view=…`).
+    const h = window.location.hash.slice(1).split("?")[0] as Tab;
     if (TABS.includes(h)) setTabRaw(h);
   }, []);
   const setTab = (t: Tab) => {
@@ -225,6 +227,7 @@ export function SearchClusterPage({ id }: { id: string }) {
       <div className="mt-6">
         {tab === "overview" && <OverviewTab cluster={cluster} info={info} {...sampleProps} />}
         {tab === "indices" && <IndicesTab key={cluster.id} cluster={cluster} {...sampleProps} />}
+        {tab === "discover" && <DiscoverTab key={cluster.id} cluster={cluster} onOpenConsole={openConsole} />}
         {tab === "console" && <SearchConsole key={cluster.id} cluster={cluster} prefill={prefill} />}
         {tab === "playground" && <Playground key={cluster.id} cluster={cluster} onOpenInference={() => setTab("inference")} />}
         {tab === "analyze" && <AnalyzeTab key={cluster.id} cluster={cluster} />}
