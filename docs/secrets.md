@@ -594,7 +594,15 @@ server](secrets/platforms.md#a-vm-or-a-server).
      `machine-<identity>.json` (0600, in a 0700 directory) under systemd's `$STATE_DIRECTORY`, else
      `$XDG_STATE_HOME/roll` (Windows: `%LOCALAPPDATA%\roll`, readable by you and the
      Administrators), else `~/.local/state/roll` (`ROLL_MACHINE_CREDENTIAL_FILE` names another),
-     and logs in with it (`POST /v1/secrets/login {identity, machine}`).
+     and logs in with it (`POST /v1/secrets/login {identity, machine}`). On Unix, a directory roll
+     makes for it is 0700, and the file and its lock (`machine-<identity>.json.lock`) must be owned by the user
+     running `roll` and writable by no one else: one that isn't is refused, naming the path and the
+     fix (`chmod 600` or `chown`). Otherwise another local user could plant a credential in a shared
+     directory, and the process would log in as their machine and run with their values; or plant
+     the lock and stop every login. The file also names the server that made it (`api_base`): with
+     `ROLL_API_URL` pointing elsewhere, the credential and its login are refused, never sent (a file
+     from before this has none and gets the current server). A machine that talks to two servers
+     needs a file for each.
   4. Every login after reads the file. Past half its life, the credential is replaced
      (`POST /v1/secrets/login/refresh {identity, credential}`): a new one is made, the old one is
      spent, and the file is written whole (a temporary file renamed over it). Replacing and logging
@@ -4324,10 +4332,14 @@ refuses any push whose new commits add a value of the project, whoever pushes it
   a login no hook has named is refused (400), and so is one that several hooks' tokens have
   named, until it's named as `alice@token:<id>`. `alice@token:<id>` is taken once that token's
   hook has named a pusher. The answer, and `roll secrets breakglass`, print each binding with
-  its token's name (`alice@token:tok_… (git-hook)`), so a token that isn't the hook stands out. A
-  list set before logins were bound keeps its bare logins, each counting only through a
-  scan-only token whose hook named that login in an earlier scan; `roll secrets breakglass` shows
-  them, and setting the same list again binds them. The hook asks roll
+  its token's name (`alice@token:tok_… (git-hook)`), so a token that isn't the hook stands out.
+  "Scan-only" is the token as roll-access has it when it's asked, never as it was when it named
+  the pusher: a token's rules and name can change after it scans (`PATCH /v1/access/tokens/{id}`,
+  a remembered approval), so `roll secrets breakglass alice` looks up each token that named alice
+  now, and roll only remembers which token named whom. A list set before logins were bound keeps
+  its bare logins, each counting only through a token that is scan-only at the push and whose
+  hook named that login in an earlier scan; `roll secrets breakglass` shows them, and setting the
+  same list again binds them. The hook asks roll
   first: roll refuses a pusher the list doesn't name through this token (403, audited), and records the push as
   `secrets.scan.breakglass` with the pusher and refs before anything is read. It's still scanned,
   and the keys it found go in the same log. What it lets through is leaked: the value is in the
@@ -7064,7 +7076,7 @@ isn't in the workspace is 404.
 | `GET /v1/secrets/health` | | `{ok, key: "env"\|"kms"\|"file"\|"shares"\|"missing", resealed: "all"\|number\|null, customer_managed, issuer_pulled: {kid, pulled_at, detail}[], links: string[], syncs: string[]}` (`links`, `syncs`: the kinds registered; `issuer_pulled`: issuer keys an emergency rotation pulled in the last 30 days) |
 | `GET`, `POST /v1/secrets/unseal` | `{share}` (`POST`) | `{sealed, have?, need?, error?}`: a sealed node's progress (public; see "Starting sealed"); 429 with `Retry-After` past the limits |
 | `GET` | | `{project, environments: Environment[], previews: number, history_days: number \| null, validity_checks: "on" \| "off", leaks: {rotate: "managed" \| "off"}, breakglass: string[], deletion: {window_days, holds: string \| null}}` (`deletion`: what deleting the workspace project takes with it, as its refusal says it, and how many days it stays recoverable; `leaks.rotate`: "When a value leaks") |
-| `PATCH` | `{history_days?, validity_checks?: "on" \| "off", leaks?: {rotate: "managed" \| "off"}, breakglass?: string[]}` (`breakglass`: who may push past a pre-receive hook, at most 100 of a pusher's login through one hook's token, `alice@token:<id>` (taken once that token's hook has named a pusher), a bare `alice` (bound to the one scan-only token whose hook has named alice; 400 when none has, or several have), `token:<id>` and `*`; `[]` no one; the answer is the list as stored, and `breakglass_hooks: {"token:<id>": name}`, each bound token's name as its hook last scanned) | what changed, as given (`admin`; validity checks audited as `validity.checks`, leak rotation as `leaks.rotate`, break glass as `scan.breakglass`) |
+| `PATCH` | `{history_days?, validity_checks?: "on" \| "off", leaks?: {rotate: "managed" \| "off"}, breakglass?: string[]}` (`breakglass`: who may push past a pre-receive hook, at most 100 of a pusher's login through one hook's token, `alice@token:<id>` (taken once that token's hook has named a pusher), a bare `alice` (bound to the one scan-only token whose hook has named alice; 400 when none has, or several have), `token:<id>` and `*`; `[]` no one; the answer is the list as stored, and `breakglass_hooks: {"token:<id>": name}`, each bound scan-only token's name as roll-access has it now) | what changed, as given (`admin`; validity checks audited as `validity.checks`, leak rotation as `leaks.rotate`, break glass as `scan.breakglass`) |
 | `GET /grid?path=` | | `Grid` |
 | `GET /environments` | | `Environment[]` in order |
 | `POST /environments` | `NewEnvironment` | 201 `Environment` |
