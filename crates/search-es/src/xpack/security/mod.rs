@@ -512,7 +512,7 @@ impl Effective {
     /// data stream may, as on Elasticsearch 9.5).
     fn failure_store(&self, action: &str, name: &str) -> bool {
         const ROLLOVER: &str = "indices:admin/rollover";
-        self.allows(|p| p.grants_failure_store(action, name)) || (action == ROLLOVER && self.allows(|p| p.allows_index(ROLLOVER, name, self.restricted(name))))
+        self.allows(|p| p.grants_failure_store(action, name, self.restricted(name))) || (action == ROLLOVER && self.allows(|p| p.allows_index(ROLLOVER, name, self.restricted(name))))
     }
 
     /// Whether every index action allowed on `wider` is allowed on `narrower` too: an alias or a

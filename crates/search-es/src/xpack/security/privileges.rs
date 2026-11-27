@@ -517,9 +517,11 @@ impl Permission {
     /// actions `read` covers, `manage_failure_store` those `manage` covers (settings, mappings,
     /// rollover; never a write or a read), `all` every one. No other privilege reaches it
     /// (`read`'s patterns cover the failure store's, but `read` doesn't).
-    pub fn grants_failure_store(&self, action: &str, index: &str) -> bool {
+    /// A restricted data stream's needs `allow_restricted_indices`, as [`Permission::allows_index`].
+    pub fn grants_failure_store(&self, action: &str, index: &str, restricted: bool) -> bool {
         self.indices.iter().any(|g| {
-            grant_names(g, index)
+            (!restricted || g.allow_restricted)
+                && grant_names(g, index)
                 && g.privileges.iter().any(|p| match p.as_str() {
                     "all" => true,
                     "read_failure_store" => index_grants("read", action),
