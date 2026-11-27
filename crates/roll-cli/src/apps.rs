@@ -1392,17 +1392,25 @@ pub enum AppsCmd {
     },
     /// Quiet an environment's alerts for a while (Cloud Monitoring's snooze): `--for 2h --reason
     /// "db migration"`, `--alert check.down` (repeated) for some kinds only; alone, the open ones;
-    /// `--end sil_…` ends one early. Events are still kept, and resolves still go out.
+    /// `--end sil_…` ends one early. Events are still kept, and resolves still go out. A
+    /// repeating one: `--every "sat 02:00-sat 04:00"` (repeated; `--timezone Europe/Berlin`),
+    /// quiet only inside its weekly windows, for a year unless `--for` says.
     Silence {
         #[command(flatten)]
         target: Target,
-        /// How long (`30m`, `2h`, `1d`; at most 30 days).
+        /// How long (`30m`, `2h`, `1d`; at most 30 days, a repeating one's a year).
         #[arg(long = "for", value_name = "DURATION", requires = "reason", conflicts_with = "end")]
         duration: Option<String>,
         #[arg(long)]
         reason: Option<String>,
-        #[arg(long = "alert", value_name = "KIND", requires = "duration")]
+        #[arg(long = "alert", value_name = "KIND", requires = "reason")]
         alerts: Vec<String>,
+        /// A weekly window it's quiet in: `"sat 02:00-sat 04:00"` (repeat it for more).
+        #[arg(long, value_name = "WINDOW", requires = "reason", conflicts_with = "end")]
+        every: Vec<String>,
+        /// The windows' time zone (IANA; default UTC).
+        #[arg(long, requires = "every")]
+        timezone: Option<String>,
         #[arg(long, value_name = "ID")]
         end: Option<String>,
     },
@@ -5541,19 +5549,29 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             eprintln!("{} MiB of {deployment}'s image", n >> 20);
             return Ok(());
         }
-        AppsCmd::Silence { target, duration, reason, alerts, end } => {
+        AppsCmd::Silence { target, duration, reason, alerts, every, timezone, end } => {
             let svc = service(api, &target).await?;
             let path = format!("{}/silences", env_path(&svc, &target.env));
             if let Some(id) = end {
                 api.call(reqwest::Method::DELETE, &format!("{path}/{}", enc(&id)), None).await?;
                 json!({ "ended": id })
-            } else if let Some(d) = duration {
-                let ms = ago_ms(&d).map_err(|_| anyhow::anyhow!("--for is a duration like 30m, 2h or 1d"))?;
-                let until = chrono::Utc::now().timestamp_millis() + ms;
-                let v = api.post(&path, json!({ "until": until, "reason": reason, "alerts": alerts })).await?;
+            } else if duration.is_some() || !every.is_empty() {
+                let until = match duration {
+                    Some(d) => Some(chrono::Utc::now().timestamp_millis() + ago_ms(&d).map_err(|_| anyhow::anyhow!("--for is a duration like 30m, 2h or 1d"))?),
+                    None => None,
+                };
+                let mut body = json!({ "until": until, "reason": reason, "alerts": alerts });
+                if !every.is_empty() {
+                    let windows = every
+                        .iter()
+                        .map(|w| w.split_once('-').map(|(from, to)| json!({ "from": from.trim(), "to": to.trim() })).ok_or_else(|| anyhow::anyhow!("--every is a weekly window like \"sat 02:00-sat 04:00\"")))
+                        .collect::<anyhow::Result<Vec<_>>>()?;
+                    body["every"] = json!({ "windows": windows, "timezone": timezone });
+                }
+                let v = api.post(&path, body).await?;
                 if !json_out {
-                    let at = chrono::DateTime::from_timestamp_millis(until).map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string()).unwrap_or_default();
-                    println!("{}  quiet until {at}", s(&v["id"]));
+                    let at = v["until"].as_i64().and_then(chrono::DateTime::from_timestamp_millis).map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string()).unwrap_or_default();
+                    println!("{}  quiet {}until {at}", s(&v["id"]), if every.is_empty() { String::new() } else { format!("in {} ", every.join(", ")) });
                     return Ok(());
                 }
                 v
@@ -5563,7 +5581,8 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                     for x in v.as_array().into_iter().flatten() {
                         let at = x["until"].as_i64().and_then(chrono::DateTime::from_timestamp_millis).map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string()).unwrap_or_default();
                         let what = x["alerts"].as_array().filter(|a| !a.is_empty()).map(|a| a.iter().map(s).collect::<Vec<_>>().join(", ")).unwrap_or_else(|| "every alert".into());
-                        println!("{}  until {at}  {what}  {}", s(&x["id"]), s(&x["reason"]));
+                        let windows = x["every"]["windows"].as_array().map(|w| format!("  in {}", w.iter().map(|w| format!("{}-{}", s(&w["from"]), s(&w["to"]))).collect::<Vec<_>>().join(", "))).unwrap_or_default();
+                        println!("{}  until {at}{windows}  {what}  {}", s(&x["id"]), s(&x["reason"]));
                     }
                     return Ok(());
                 }

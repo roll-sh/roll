@@ -5262,6 +5262,13 @@ async fn on_call_targets_open_and_close_incidents() {
     let silences = format!("/v1/apps/services/{id}/environments/production/silences");
     let until = code_sql::now_ms() + 3_600_000;
     assert_eq!(call(&w.api, "POST", &silences, Some(json!({"until": until, "reason": "x", "alerts": ["deploy.active"]}))).await.0, StatusCode::BAD_REQUEST, "only alerts");
+    // A repeating one (Better Stack's maintenance windows): weekly, a year unless it says.
+    let (st, weekly) = call(&w.api, "POST", &silences, Some(json!({"reason": "backups", "every": {"windows": [{"from": "sat 02:00", "to": "sat 04:00"}], "timezone": "Europe/Berlin"}}))).await;
+    assert_eq!((st, weekly["every"]["windows"][0]["from"].as_str()), (StatusCode::CREATED, Some("sat 02:00")), "{weekly}");
+    assert!(weekly["until"].as_i64().unwrap() > code_sql::now_ms() + 300 * 86_400_000, "{weekly}");
+    assert_eq!(call(&w.api, "DELETE", &format!("{silences}/{}", weekly["id"].as_str().unwrap()), None).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(call(&w.api, "POST", &silences, Some(json!({"reason": "x", "every": {"windows": [{"from": "sat 02:00", "to": "sat 02:00"}]}}))).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(call(&w.api, "POST", &silences, Some(json!({"reason": "x"}))).await.0, StatusCode::BAD_REQUEST, "a one-off has an end");
     let (st, sil) = call(&w.api, "POST", &silences, Some(json!({"until": until, "reason": "db migration", "alerts": ["alert.memory"]}))).await;
     assert_eq!((st, sil["alerts"].clone()), (StatusCode::CREATED, json!(["alert.memory"])), "{sil}");
     assert_eq!(call(&w.api, "GET", &silences, None).await.1.as_array().map(Vec::len), Some(1));
