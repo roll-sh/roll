@@ -2548,6 +2548,38 @@ type Settings = {
     service's pages while it runs what it ran (TurboSnap), and taken at once when the rule is
     turned on (checked in the screenshot image: a docs entry and a bad id skipped, a 600 by 120
     card captured as 616 by 136 with its console error counted).
+  - **Snapshots from the team's own tests** (Argos's and Percy's SDKs): a Playwright or Cypress
+    test sends a picture to the preview it runs against, `POST /__roll/snapshot?name=<name>` on
+    the preview's own host with the project's bypass secret (`x-roll-preview-bypass`, the one CI
+    already has; a public preview's too, and never a visitor's cookie) and a PNG of 2 MiB at most
+    as the body (201 `{page, head}`; `&head=<changeset or git commit>`, which Playwright's run
+    knows, is a 409 unless it's what the preview serves, so a test of another head isn't filed
+    as this one's). It's page `snap:<name>` of the visual review at the head the preview serves
+    ("checkout (your tests)" on the sheet): compared with the one it replaces at an earlier
+    head, and with main's preview's `snap:<name>`, which main's own CI run sends the same way.
+    The preview's owner compares them at its next converge, once for every picture sent since
+    (a change's against main's, then reported; main's kept by head, then the changes waiting on
+    it compared again), so a suite of 40 is one comparison, not 40. Accepted, refused and
+    grouped like any page; another picture by the same name asks again (an acceptance was for
+    the one before). With `github.screenshot` on only: the review starts from roll's own
+    screenshot of the first page. A name is 1 to 80 of `a-z A-Z 0-9 -
+    _ . /`; 40 a preview. A screenshot run at that head keeps them; the first at a new head
+    drops the earlier head's, so the review only shows what this head's tests sent. A fork's
+    preview has no bypass secret, so it takes none. Services on roll apps don't take them yet
+    (their proxy serves `/__roll/` paths itself)
+    (`engine.rs::the_teams_snapshots_join_the_visual_review`):
+
+    ```js
+    // playwright: a fixture next to the bypass one above
+    export async function snapshot(page, name) {
+      await fetch(new URL(`/__roll/snapshot?name=${encodeURIComponent(name)}&head=${process.env.GITHUB_SHA}`, page.url()), {
+        method: 'POST',
+        headers: { 'x-roll-preview-bypass': process.env.ROLL_PREVIEW_BYPASS, 'content-type': 'image/png' },
+        body: await page.screenshot({ fullPage: true, animations: 'disabled' }),
+      });
+    }
+    // cypress: cy.screenshot(name) then, in an after:screenshot plugin, the same POST of its file
+    ```
     Page states too (Chromatic's interaction tests, Percy's scripted snapshots): much of what a
     change touches shows only after a click (a cart open, a dialog, a form's errors). A project
     names up to 3 (`github.states`: a name, a page of the first service's, and 1 to 10 steps:
@@ -3081,34 +3113,28 @@ variables roll makes from a branch's URL too (it could run on the preview's own 
 change becoming queued wakes its settled preview, a rehearsal shows only at its head, and schema
 overlaps stay within a repo.
 
-1. **The twelfth review's fixes, in review**: masking by default fails closed (the columns read on
-   the branch just made), the `masking` event says counts, main's code runs on copies of every
-   branch named by the head, a webhook URL opens its own service only (and reaches roll apps'
-   gate); the snapshot and note fixes ride their own pull requests.
-2. **Webhooks into private previews, in review** (roll's runtime); roll apps' gate next (agreed:
-   `access.webhooks`, on their Next).
-3. **Snapshots from the team's own Playwright or Cypress suite** (Argos's, Percy's SDKs; M):
-   a step in their tests sends a page's picture to the preview's visual review.
-4. **Notes to Jira, GitHub Issues or Asana** (Marker.io, Netlify's Drawer; S).
-5. **Replaying recorded traffic against the preview and main** (Signadot, Speedscale; L): writes
+1. **Snapshots from the team's own Playwright or Cypress suite, in review** (roll's runtime);
+   roll apps' proxy next (agreed: its `PreviewSnapshots` hook, with the service checked).
+2. **Notes to Jira, GitHub Issues or Asana** (Marker.io, Netlify's Drawer; S).
+3. **Replaying recorded traffic against the preview and main** (Signadot, Speedscale; L): writes
    replay safely on branched data; capturing production's requests needs its privacy designed
    first.
-6. **A rehearsal that holds a change back** (a required rule): rehearsed at each head, so the
+4. **A rehearsal that holds a change back** (a required rule): rehearsed at each head, so the
    landing blocker never waits on the queue that would ask for it.
-7. **Older pushes past the last three, started on demand**; **what a note's reviewer saw, from
+5. **Older pushes past the last three, started on demand**; **what a note's reviewer saw, from
    their own browser** (Jam, Marker.io).
-8. **Restore points for search and buckets**: search's once roll search's `reset {from}` is in
+6. **Restore points for search and buckets**: search's once roll search's `reset {from}` is in
    (its Next 32); buckets need a put-back on roll storage's side.
-9. **Previews for the members thread's next products**: once roll apps' and roll search's routes
+7. **Previews for the members thread's next products**: once roll apps' and roll search's routes
    become member routes (docs/members.md, v1.1).
-10. **Watches on pg-control**: the data step's Postgres compute start; cheap branches on ext4
-    through overlay volumes; recovery to a time seconds old (unowned).
+8. **Watches on pg-control**: the data step's Postgres compute start; cheap branches on ext4
+   through overlay volumes; recovery to a time seconds old (unowned).
 
 Not to build: more lab checks on the first page (each adds noise to every pull request), or a
 Kubernetes cluster per preview (roll apps' Compose import covers multi-service apps, and a
 cluster would break "costs nothing asleep").
 
-Landed 2026-11-27, early: a failed story shard's share of the touched stories counted as untaken (#1175), and masking that's safe by default for NoSQL and search, with the project told of each column masked by default (#1177), and main's code on a copy of a change's migrated data, on roll apps (#1183) and roll's runtime (#1185).
+Landed 2026-11-27, early: a failed story shard's share of the touched stories counted as untaken (#1175), and masking that's safe by default for NoSQL and search, with the project told of each column masked by default (#1177), and main's code on a copy of a change's migrated data, on roll apps (#1183) and roll's runtime (#1185), webhook URLs into private previews (#1187), and the twelfth review's fixes (#1200).
 
 Landed 2026-11-26, midday: restore points for streams (#1112), the TurboSnap test's race under
 load (#1114), the tenth review's fixes (#1119), the visual review holding on stories a change
