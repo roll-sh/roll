@@ -1135,7 +1135,10 @@ thirty-fourth review found them in the clear.
       ids, bank and card numbers, secrets) and has none is masked too, with the rule suggested for
       it, so a column production gains never reaches a preview in the clear. The preview's
       activity names them, and `masked_by_default` (`[{resource, column, why}]`) has them for the
-      sheet. `keep` is a rule that leaves a column as it is (the project's word that it isn't
+      sheet. The project's repos are told of each such column once, the first time a preview masks
+      it (production gained it, or the project's first rules), as their `masking` event
+      (webhooks, the event stream, automations; docs/code/http-api.md), so a person who can write
+      its rule hears of it. `keep` is a rule that leaves a column as it is (the project's word that it isn't
       people's data); it's never sent as a mask. A parent with no rules hands over its data as its
       `data` says (`real`). NoSQL and search parents the same way: a NoSQL table's columns
       outside its keys and its views' keys (`mask_default()`, a secret's `mask_null()`), and a
@@ -3029,9 +3032,8 @@ variables roll makes from a branch's URL too (it could run on the preview's own 
 change becoming queued wakes its settled preview, a rehearsal shows only at its head, and schema
 overlaps stay within a repo.
 
-1. **The project told when production gains a column masked by default** (masking that's safe
-   by default landed for Postgres, #1166, and NoSQL and search, in review): once per column, to
-   the project's repos (webhooks, the event stream, automations), not only the preview's activity.
+1. **Masking that's safe by default for NoSQL and search, and the project told of each column
+   masked by default, in review**: once per column, as its repos' `masking` event.
 2. **Main's code on the change's migrated data** (pgroll and Reshape's expand/contract; M): main's
    preview run once against a copy of the change's branch after its release (its pages and
    endpoints), so a migration that breaks the version still running while it deploys is caught on
