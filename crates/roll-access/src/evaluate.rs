@@ -189,7 +189,7 @@ pub(crate) fn folder_from_body(row: &Row, target: &mut Target, body: Option<&Val
 /// What a request is about, from its row and path. `person`: a person's grant decides it (their
 /// session, or a token of theirs), which a canvas's project reaches only where it trusts the
 /// resource ([`Access::resource_as`]).
-pub(crate) fn target(access: &Access, row: &Row, params: &[(String, String)], query: Option<&str>, headers: &axum::http::HeaderMap, person: bool) -> Target {
+pub(crate) fn target(access: &Access, row: &Row, path: &str, params: &[(String, String)], query: Option<&str>, headers: &axum::http::HeaderMap, person: bool) -> Target {
     let param = |name: &str| params.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone());
     let product = row.product.to_string();
     // Storage acts in the account a request names. Bucket names repeat across accounts, so a
@@ -226,7 +226,9 @@ pub(crate) fn target(access: &Access, row: &Row, params: &[(String, String)], qu
             r.index = row.index.and_then(param);
             r.filters_itself = row.filters_itself;
             r.filters_index = row.filters_index;
-            r.key = row.key.and_then(param);
+            // Only a path under `…/secrets/{key}`: another route's `{key}` (an encryption key, a
+            // decoy) is never read as a secret key.
+            r.key = if row.secret_key { catalog::secret_key_in(path) } else { None };
             r.filters_keys = row.filters_keys;
             if let Some(name) = row.path_query {
                 let path = query.and_then(|qs| url::form_urlencoded::parse(qs.as_bytes()).find(|(k, _)| k == name).map(|(_, v)| v.into_owned()));
@@ -700,9 +702,9 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
         return deny(StatusCode::BAD_REQUEST, "bad_request", why, json!({}));
     }
     let mut target = {
-        let (a, q, h) = (access.clone(), original.query().map(str::to_string), parts.headers.clone());
+        let (a, q, h, path) = (access.clone(), original.query().map(str::to_string), parts.headers.clone(), original.path().to_string());
         let params = params.clone();
-        match tokio::task::spawn_blocking(move || target(&a, row, &params, q.as_deref(), &h, as_user)).await {
+        match tokio::task::spawn_blocking(move || target(&a, row, &path, &params, q.as_deref(), &h, as_user)).await {
             Ok(t) => t,
             Err(e) => return Error::Internal(e.to_string()).into_response(),
         }

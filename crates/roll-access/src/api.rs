@@ -361,9 +361,9 @@ async fn check(State(a): S, ext: Extensions, Json(c): Json<Check>) -> crate::Res
             headers.insert(k, v);
         }
     }
-    let (a2, q, h) = (a.clone(), uri.query().map(str::to_string), headers.clone());
+    let (a2, q, h, path) = (a.clone(), uri.query().map(str::to_string), headers.clone(), uri.path().to_string());
     let params2 = params.clone();
-    let mut target = tokio::task::spawn_blocking(move || crate::evaluate::target(&a2, row, &params2, q.as_deref(), &h, person))
+    let mut target = tokio::task::spawn_blocking(move || crate::evaluate::target(&a2, row, &path, &params2, q.as_deref(), &h, person))
         .await
         .map_err(|e| Error::Internal(e.to_string()))?;
     crate::evaluate::project_from_body(row, &mut target, c.body.as_ref()).map_err(Error::BadRequest)?;
