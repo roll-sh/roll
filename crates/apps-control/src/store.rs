@@ -5409,4 +5409,3 @@ mod tests {
         assert!(s.switch_active(&sw(Some("dep_new"), "dep_next", 2)).unwrap());
     }
 }
-
