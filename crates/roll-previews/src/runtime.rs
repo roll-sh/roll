@@ -976,6 +976,20 @@ impl Runtime {
         let team = access.mode == crate::settings::Access::Team;
         let query = req.uri().query().unwrap_or("").to_string();
         let given = |name: &str| query.split('&').filter_map(|kv| kv.split_once('=')).find(|(k, _)| *k == name).map(|(_, v)| v);
+        // A webhook URL (Stripe's, GitHub's): its token in the query, for its one path only, at
+        // every request (no cookie, no redirect); the service gets the request without it.
+        if let Some(t) = given("roll_hook").map(str::to_string)
+            && let Some(hook) = crate::visit::webhook_visit(&self.store, self.engine().ok().as_ref(), preview, &t, req.uri().path(), self.cfg.visitor_recheck).await
+        {
+            let rest: Vec<&str> = query.split('&').filter(|kv| !kv.starts_with("roll_hook=") && !kv.is_empty()).collect();
+            let path = req.uri().path().to_string();
+            let Ok(uri) = (if rest.is_empty() { path } else { format!("{path}?{}", rest.join("&")) }).parse() else { return Some((StatusCode::BAD_REQUEST, "bad request").into_response()) };
+            *req.uri_mut() = uri;
+            if let Ok(now) = self.store.now_ms() {
+                let _ = self.store.webhook_hit(&hook.id, now);
+            }
+            return None;
+        }
         if team {
             // A ticket from roll's dashboard, coming back: the session it opens.
             if req.uri().path() == crate::visit::PATH {
@@ -3254,6 +3268,17 @@ mod tests {
         assert!(raw(post("https://evil.example")).await.starts_with("HTTP/1.1 403"), "another site's page posts nothing");
         rt.store.revoke_share(&row.id, &share.id).unwrap();
         assert!(raw(with_share).await.starts_with("HTTP/1.1 401"), "revoked: out at once");
+        // A webhook URL: its one path only, the service never seeing its token, no cookie; it
+        // isn't a share link, and it's out at once when revoked.
+        let (hook, htoken) = rt.store.create_webhook(&row.id, "/hooks/stripe", "ada", None, "Stripe").unwrap();
+        let post_hook = format!("POST /hooks/stripe?roll_hook={htoken}&x=1 HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        let hooked = raw(post_hook.clone()).await;
+        assert!(hooked.ends_with("service saw /hooks/stripe?x=1") && !hooked.to_ascii_lowercase().contains("set-cookie"), "{hooked}");
+        assert!(raw(format!("GET /hello?roll_hook={htoken} HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nConnection: close\r\n\r\n")).await.starts_with("HTTP/1.1 401"), "another path");
+        assert!(raw(format!("GET /hello?roll_share={htoken} HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nConnection: close\r\n\r\n")).await.starts_with("HTTP/1.1 401"), "not a share link");
+        assert_eq!(rt.store.webhooks(&row.id).unwrap()[0].hits, 1);
+        rt.store.revoke_webhook(&row.id, &hook.id).unwrap();
+        assert!(raw(post_hook).await.starts_with("HTTP/1.1 401"), "revoked: out at once");
         // The notes already left on a page: for the same visitors only.
         let notes = raw(format!("GET /__roll/feedback.json?path=%2F HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nCookie: roll_access_{}={token}\r\nConnection: close\r\n\r\n", row.id)).await;
         assert!(notes.contains("application/json") && notes.ends_with("[]"), "{notes}");

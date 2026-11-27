@@ -238,6 +238,18 @@ export interface PreviewJob {
 }
 
 /** A link that opens a preview until it ends, for someone outside the team. */
+/** A webhook URL into a private preview: one path, its token in the URL's query (shown once), no cookie. */
+export interface PreviewWebhook {
+  id: string;
+  path: string;
+  label: string;
+  created_by: string;
+  created_at: number;
+  revoked: boolean;
+  hits: number;
+  last_at: number | null;
+}
+
 export interface PreviewShare {
   id: string;
   expires_at: number;
@@ -644,6 +656,11 @@ export const previewsApi = {
   share: (id: string, hours: number, opts: { label?: string; notes?: boolean } = {}) =>
     call<PreviewShare & { url: string }>("POST", `${one(id)}/shares`, { hours, label: opts.label ?? "", notes: opts.notes ?? false }),
   unshare: (id: string, share: string) => call<void>("DELETE", `${one(id)}/shares/${encodeURIComponent(share)}`),
+  /** Its webhook URLs (never their tokens). */
+  webhooks: (id: string) => call<PreviewWebhook[]>("GET", `${one(id)}/webhooks`),
+  /** A URL that lets requests to exactly `path` in (Stripe's, GitHub's webhooks): shown only in this answer. */
+  webhook: (id: string, path: string, label = "") => call<PreviewWebhook & { url: string }>("POST", `${one(id)}/webhooks`, { path, label }),
+  unwebhook: (id: string, webhook: string) => call<void>("DELETE", `${one(id)}/webhooks/${encodeURIComponent(webhook)}`),
   /** Its own variables, over the project's `env`. */
   vars: (id: string) => call<{ vars: Record<string, string> }>("GET", `${one(id)}/env`),
   /** Resolve a note left on its page (the note's review id): the page's button stops listing it. */

@@ -458,6 +458,40 @@ impl Engine {
         Ok((share, format!("{}/?roll_share={token}", url.trim_end_matches('/'))))
     }
 
+    /// `POST …/{id}/webhooks {path, label}`: a URL that lets requests to exactly `path` of the
+    /// preview's first service past its privacy, its token in the query (Stripe's and GitHub's
+    /// webhooks take a URL, not a header), for the preview's life or until revoked. It sets no
+    /// cookie, and the service never sees the token. Only a private, trusted preview's: a fork's
+    /// code would be handed what's sent to it. The URL is shown only here.
+    pub async fn webhook(&self, id: &str, path: &str, by: &str, maker: Option<&str>, label: &str) -> Result<(crate::Webhook, String)> {
+        if !crate::settings::page_path_ok(path) || path.contains('?') {
+            return Err(Error::BadRequest("path: a path of the service's own, starting with / (up to 200 characters, no query, #, quotes or spaces)".into()));
+        }
+        let label = label.trim();
+        if label.chars().count() > 60 || label.chars().any(char::is_control) {
+            return Err(Error::BadRequest("a webhook URL's label is one line of 60 characters at most".into()));
+        }
+        let r = self.store.row(id)?;
+        if r.desired == Desired::Deleted {
+            return Err(Error::Conflict("the preview is being deleted".into()));
+        }
+        if !r.trusted {
+            return Err(Error::Conflict("a preview of a pull request from a fork takes no webhook URL: its code would get what's sent to it".into()));
+        }
+        if !self.store.access(id)?.is_some_and(|a| a.required()) {
+            return Err(Error::Conflict("the preview is public: a webhook can use its plain URL".into()));
+        }
+        let svc = self.store.services(id)?.into_iter().next().ok_or_else(|| Error::Conflict("the preview has no service yet".into()))?;
+        // roll's runtime checks them; roll apps' gate doesn't yet.
+        if !self.apps.can_swap(id, &svc.name).await.unwrap_or(false) {
+            return Err(Error::Conflict(format!("{} runs on roll apps, whose gate doesn't take webhook URLs yet", svc.name)));
+        }
+        let url = svc.url;
+        let (hook, token) = self.store.create_webhook(id, path, by, maker, label)?;
+        self.store.log(id, &format!("a webhook URL for {path} made by {by} ({}{})", hook.id, if label.is_empty() { String::new() } else { format!(", \"{label}\"") }))?;
+        Ok((hook, format!("{}{path}?roll_hook={token}", url.trim_end_matches('/'))))
+    }
+
     /// A picture the team's own tests sent (`POST /__roll/snapshot?name=` on the preview's host,
     /// with the project's bypass secret; Argos's and Percy's SDKs): page `snap:<name>` of the
     /// visual review at the head the preview serves, compared with main's preview's `snap:<name>`
