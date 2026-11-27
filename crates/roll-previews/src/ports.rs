@@ -657,6 +657,9 @@ pub struct Target {
     /// With `access_token` or `signed_in`: the project's bypass secret's SHA-256 (hex), which
     /// opens it for automation too (`x-roll-preview-bypass`).
     pub bypass_sha256: Option<String>,
+    /// Its webhook URLs' paths and their tokens' SHA-256 (hex): a backend whose own gate serves
+    /// it (roll apps) lets a request to exactly that path in with the token (`?roll_hook=`).
+    pub webhooks: Vec<(String, String)>,
     /// The feedback button on its pages (the project's `feedback`, a change's preview, link
     /// access): a backend that serves the pages itself (roll apps) adds it as the runtime does.
     pub feedback: bool,

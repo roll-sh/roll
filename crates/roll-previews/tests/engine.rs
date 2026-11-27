@@ -212,6 +212,27 @@ async fn with_screenshots_a_baseline_of_the_default_branch_is_kept_to_compare_ch
     assert_eq!(e.engine.store.row_by_change("chg_1").unwrap().map(|r| r.desired), Some(Desired::Active), "the change's preview came back with its repo");
 }
 
+/// A webhook URL of a service roll apps serves reaches roll apps' own gate: made, the service is
+/// deployed again with its path and its token's SHA-256 (never the token); revoked, without it.
+#[tokio::test]
+async fn a_webhook_url_reaches_roll_apps_gate() {
+    let e = env(json!({ "enabled": true, "access": "link" }));
+    *e.apps.catalog.lock() = Some(vec![roll_previews::ports::CatalogService { name: "web".into(), repo: Some("acme/web".into()), root: String::new(), memory_mb: 512 }]);
+    e.code.open(change("chg_wh", 1));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_wh").unwrap().unwrap();
+    let (hook, url) = e.engine.webhook(&p.id, "/api/stripe", "ada", None, "Stripe").await.unwrap();
+    let token = url.split("roll_hook=").nth(1).unwrap().to_string();
+    e.engine.pass().await.unwrap();
+    let sent = e.apps.hooks.lock().get(&(p.id.clone(), "web".into())).cloned().unwrap_or_default();
+    assert_eq!(sent, vec![("/api/stripe".to_string(), roll_previews::store::bypass_hash(&token))], "its path and hash, never the token");
+    assert!(e.engine.webhook(&p.id, "/__roll/notes", "ada", None, "").await.is_err() && e.engine.webhook(&p.id, "/a/../b", "ada", None, "").await.is_err(), "roll's own paths and dot segments refused");
+    e.engine.store.revoke_webhook(&p.id, &hook.id).unwrap();
+    e.engine.store.update(&p.id, |r| r.next_at = 0).unwrap();
+    e.engine.pass().await.unwrap();
+    assert!(e.apps.hooks.lock().get(&(p.id.clone(), "web".into())).is_some_and(|h| h.is_empty()), "revoked: told again without it");
+}
+
 /// A preview's browsers' containers cost what services' do, by their GiB-hours: its screenshot
 /// runs (every container's own time) are in its month's cost, and so in the project's budget.
 #[tokio::test]

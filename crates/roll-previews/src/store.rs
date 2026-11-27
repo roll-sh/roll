@@ -3675,6 +3675,11 @@ impl Store {
         })?)
     }
 
+    /// The live webhook URLs' (service, path, token SHA-256), for a backend whose gate checks them.
+    pub fn webhook_hashes(&self, id: &str) -> Result<Vec<(String, String, String)>> {
+        Ok(self.db.read(|c| c.query("SELECT service, path, hash FROM shares WHERE preview_id = ? AND path IS NOT NULL AND service IS NOT NULL AND revoked = 0 ORDER BY created_at", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))))?)
+    }
+
     /// A request came in by webhook URL `webhook` (how many, and when last: a relaxed write).
     pub fn webhook_hit(&self, webhook: &str, now: i64) -> Result<()> {
         self.db.write(|c| c.execute("UPDATE shares SET hits = hits + 1, last_at = ? WHERE id = ?", params![now, webhook]).map(drop))?;

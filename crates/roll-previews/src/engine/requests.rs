@@ -485,13 +485,12 @@ impl Engine {
             return Err(Error::Conflict("the preview is public: a webhook can use its plain URL".into()));
         }
         let svc = self.store.services(id)?.into_iter().next().ok_or_else(|| Error::Conflict("the preview has no service yet".into()))?;
-        // roll's runtime checks them; roll apps' gate doesn't yet.
-        if !self.apps.can_swap(id, &svc.name).await.unwrap_or(false) {
-            return Err(Error::Conflict(format!("{} runs on roll apps, whose gate doesn't take webhook URLs yet", svc.name)));
-        }
         let url = svc.url;
         let (hook, token) = self.store.create_webhook(id, &svc.name, path, by, maker, label)?;
         self.store.log(id, &format!("a webhook URL for {path} made by {by} ({}{})", hook.id, if label.is_empty() { String::new() } else { format!(", \"{label}\"") }))?;
+        // A backend whose own gate serves the service (roll apps) is told at the next converge.
+        self.store.update(id, |row| row.next_at = 0)?;
+        self.kick();
         Ok((hook, format!("{}{path}?roll_hook={token}", url.trim_end_matches('/'))))
     }
 

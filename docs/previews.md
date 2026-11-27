@@ -1500,9 +1500,10 @@ thirty-fourth review found them in the clear.
     previews ends it). Its token is never a share link's (a `roll_share` with it opens
     nothing), the project's bypass never comes into it, and how many requests it let in and when
     last are kept (`hits`, `last_at`). Only a private, trusted preview takes one: a fork's code
-    would get what's sent to it. Services on roll apps don't take them yet (their gate is roll
-    apps'), so a preview whose first service is there gets a 409
-    (`runtime.rs::service_hosts_reach_their_containers`).
+    would get what's sent to it. A service on roll apps gets them on its `pv-` environment's
+    access (`webhooks: [{path, token_sha256}]`, never the token; roll apps' gate checks them the
+    same way, roll apps #1198), sent again at the next converge when one is made or revoked
+    (`engine.rs::a_webhook_url_reaches_roll_apps_gate`, (`runtime.rs::service_hosts_reach_their_containers`).
     Services on roll apps get the secret's SHA-256 with the link's token (`access: {token,
     bypass_sha256}`, or `{signed_in: true, bypass_sha256}` under team access); their proxy checks
     it the same way. Rotating or removing the secret makes
@@ -2110,7 +2111,7 @@ previews in it), the operator and admins see every project.
 | `GET /v1/previews/{id}/screenshot.png?exp=&sig=` | | `image/png` behind a signed, expiring link, without credentials (403 otherwise): the pull request comment's image; `&diff=base` under its own signature, the diff against main |
 | `GET`/`POST /v1/previews/{id}/shares` | `{hours, label?, notes?}` (1–720 hours; `label` who it's for, one line of 60 characters at most; `notes` its visitors may leave notes as guests) for a new one | `Share[]` (never a token), or 201 `Share` with `url`, the only time the link is shown; 409 for a public preview or past 20 live ones. A link works only while its maker (the person, or the person behind the token, that made it; not the operator's) may still open the project's previews: an account that still signs in, with a role that reveals a preview. Asked again at most every few minutes while it's used; one whose maker may not ends at once ("ada's share link ended: …" in the activity). `visit::tests::a_signed_in_person_gets_into_a_team_preview` |
 | `DELETE /v1/previews/{id}/shares/{share}` | | 204: the link stops at the visitor's next request |
-| `GET`/`POST /v1/previews/{id}/webhooks` | `{path, label?}` (`path` its first service's own: no query, `#`, `%`, `\`, `.` or `..` segment, nor `/__roll/`; `label` what it's for, 60 characters at most) | `GET`: `[{id, service, path, label, created_by, created_at, revoked, hits, last_at}]` (never the URL); `POST`: 201 with `url` (`<first service's URL><path>?roll_hook=<token>`), shown only here; 409 for a public preview, a fork's, one whose first service is on roll apps, or 20 already |
+| `GET`/`POST /v1/previews/{id}/webhooks` | `{path, label?}` (`path` its first service's own: no query, `#`, `%`, `\`, `.` or `..` segment, nor `/__roll/`; `label` what it's for, 60 characters at most) | `GET`: `[{id, service, path, label, created_by, created_at, revoked, hits, last_at}]` (never the URL); `POST`: 201 with `url` (`<first service's URL><path>?roll_hook=<token>`), shown only here; 409 for a public preview, a fork's, or 20 already |
 | `DELETE /v1/previews/{id}/webhooks/{webhook}` | | 204: it lets nothing in from the next request |
 | `GET`/`PUT /v1/previews/{id}/env` | `{vars: {NAME: value \| null}}` (`null` removes; at most 100, 32 KiB each; a value may be `roll://ENV[/folder]/KEY`) | `{vars}`: the preview's own variables; its services redeploy with them. 403 for a reference to an environment other than the base without the caller's reveal on its folder; 400 for a malformed one or a look-alike |
 | `POST /v1/previews/{id}/approve` | `{head}` (the head looked at) | `Preview`: that head of a fork's pull request on a Git URL service runs (`pull.approved_head`); the next push waits again. 409 when the preview moved on to another head or isn't a fork's pull request. Admin in the permissions catalogue, and no MCP tool: letting outside code run with the project's data is a person's call |
