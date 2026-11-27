@@ -85,6 +85,8 @@ export interface GithubLink {
   url: string;
   /** Whether branch protection on the default branch lets only the roll App push. `null` = unknown. */
   default_branch_protected: boolean | null;
+  /** Whether the GitHub repository is private, as last seen. Absent on older links. */
+  private?: boolean;
   mirror: {
     state: MirrorState;
     last_push_at: number | null;
@@ -1295,7 +1297,7 @@ export interface CodeEvents {
   /** A workspace project's previews passed a share of their monthly budget (roll previews). */
   budget: { budget: { project: string; project_name: string; percent: number; spent_usd_month: number; max_usd_month: number }; dashboard_url: string | null };
   /** Columns of a workspace project's parents its previews masked by default, each said once (roll previews). */
-  masking: { masking: { project: string; project_name: string; columns: { resource: string; column: string; why: string }[] }; dashboard_url: string | null };
+  masking: { masking: { project: string; project_name: string; resources: { resource: string; columns: number }[] }; dashboard_url: string | null };
 }
 
 // ── client ──

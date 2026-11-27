@@ -411,6 +411,13 @@ pub fn page_key_ok(p: &str) -> bool {
             Some((id, b)) => story_id_ok(id) && BROWSERS.contains(&b),
             None => story_id_ok(s),
         })
+        || p.strip_prefix("snap:").is_some_and(snapshot_name_ok)
+}
+
+/// A snapshot's name from the team's tests (`snap:<name>`): 1 to 80 of `a-z A-Z 0-9 - _ . /`,
+/// not starting with `/` or `.`.
+pub fn snapshot_name_ok(n: &str) -> bool {
+    (1..=80).contains(&n.len()) && !n.starts_with(['/', '.']) && !n.contains("..") && n.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/'))
 }
 
 /// The most screenshot containers that take a Storybook's stories side by side (`github.story_runs`).

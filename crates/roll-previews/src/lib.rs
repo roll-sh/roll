@@ -1169,6 +1169,8 @@ pub struct Share {
 pub struct Webhook {
     /// `whk_…`
     pub id: String,
+    /// The service it opens `path` of (the preview's first, when it was made).
+    pub service: String,
     pub path: String,
     pub label: String,
     pub created_by: String,

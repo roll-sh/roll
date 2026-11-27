@@ -456,7 +456,7 @@ function storyLabel(id: string): string {
 }
 
 export const pageLabel = (path: string) =>
-  /^@\d+$/.test(path) ? `${path.slice(1)} px` : path.startsWith("mode:") ? `${path.slice(5)} mode` : path.startsWith("story:") ? storyLabel(path.slice(6)) : path === "browser:firefox" ? "Firefox" : path === "browser:webkit" ? "WebKit" : path === "browser:webkit-phone" ? "WebKit, phone" : path || "/";
+  /^@\d+$/.test(path) ? `${path.slice(1)} px` : path.startsWith("mode:") ? `${path.slice(5)} mode` : path.startsWith("story:") ? storyLabel(path.slice(6)) : path.startsWith("snap:") ? `${path.slice(5)} (your tests)` : path === "browser:firefox" ? "Firefox" : path === "browser:webkit" ? "WebKit" : path === "browser:webkit-phone" ? "WebKit, phone" : path || "/";
 
 /** "1.2 s" or "380 ms". */
 export const duration = (ms: number) => (ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(1)} s`);
@@ -669,6 +669,10 @@ export const previewsApi = {
   vars: (id: string) => call<{ vars: Record<string, string> }>("GET", `${one(id)}/env`),
   /** Resolve a note left on its page (the note's review id): the page's button stops listing it. */
   resolveNote: (id: string, note: string) => call<{ resolved: string }>("POST", `${one(id)}/notes/${encodeURIComponent(note)}/resolve`, {}),
+  /** The open notes on its pages (the page's own list), each with the work item made of it. */
+  notes: (id: string) => call<{ notes: { id: string; path: string; note: string; by: string; work?: { number: number; url: string } }[] }>("GET", `${one(id)}/notes`),
+  /** The note made a work item on its change's repo by roll (once a note; a guest's marked as outside the team's words). */
+  noteWork: (id: string, note: string) => call<{ number: number; url: string }>("POST", `${one(id)}/notes/${encodeURIComponent(note)}/work`, {}),
   /** The mail its services sent, caught instead of delivered (newest first; the last 50). */
   mail: (id: string) => call<{ mail: CaughtMail[] }>("GET", `${one(id)}/mail`),
   /** One caught message as it was sent, as text. */

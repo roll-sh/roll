@@ -25,6 +25,10 @@ const MAX_BODY: usize = 4 << 20;
 const MAX_ANSWER: usize = 64 << 20;
 /// Names a request's approval when it's sent again.
 pub const APPROVAL_HEADER: &str = "x-roll-approval";
+/// After the grant id in a forward's signed decision ([`roll_cluster::Decided`]): it passed on a
+/// person's approval of an `ask`, so the owner, which doesn't ask again, knows it was approved
+/// rather than allowed (an older owner reads no grant there and decides again: it fails closed).
+const ASKED: &str = ":asked";
 /// Names the workspace project a create goes in.
 pub const PROJECT_HEADER: &str = "x-roll-project";
 
@@ -167,6 +171,19 @@ pub(crate) fn project_from_body(row: &Row, target: &mut Target, body: Option<&Va
         }
         _ => Ok(()),
     }
+}
+
+/// A row whose body names its secrets folder ([`Row::path_body`]): the folder, as roll secrets reads
+/// it (absent is `/`), or why the request is refused before anyone is asked.
+pub(crate) fn folder_from_body(row: &Row, target: &mut Target, body: Option<&Value>) -> Result<(), String> {
+    let (Some(field), Target::One(r)) = (row.path_body, target) else { return Ok(()) };
+    let named = match body.and_then(|b| b.get(field)) {
+        None | Some(Value::Null) => "/",
+        Some(Value::String(p)) => p.as_str(),
+        Some(_) => return Err(format!("{field} is a folder: / or /folder/…")),
+    };
+    r.path = Some(catalog::secret_path(named).ok_or_else(|| format!("{field} is / or /folder/… with up to {} folders of A-Z, a-z, 0-9, _ and -", roll_secrets_ref::DEPTH_MAX))?);
+    Ok(())
 }
 
 /// What a request is about, from its row and path. `person`: a person's grant decides it (their
@@ -412,7 +429,9 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
     }
     // Forwarded by a node that decided it for this grant already (a signed hop to an owner): a
     // person isn't asked twice, and the first node logs it. Everything else is decided again.
-    let decided_before = req.extensions().get::<roll_cluster::Forwarded>().and_then(|f| f.decided.as_deref()) == Some(grant.id.as_str());
+    let decided = req.extensions().get::<roll_cluster::Forwarded>().and_then(|f| f.decided.as_deref());
+    let decided_before = decided.is_some_and(|d| d.strip_suffix(ASKED).unwrap_or(d) == grant.id.as_str());
+    let approved_before = decided.and_then(|d| d.strip_suffix(ASKED)) == Some(grant.id.as_str());
     // A token for roll's MCP server (an MCP client's, RFC 8707) works there and in the calls that
     // server makes for it (or a hop another node decided), never on the API directly: what the
     // server adds (lockdown, the credential guard, a read-only connection URL) can't be stepped
@@ -506,7 +525,7 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
         }
         None => None,
     };
-    judge(ctx, req, next, Judge { session: false, as_user, decided_before, limit, person, within }).await
+    judge(ctx, req, next, Judge { session: false, as_user, decided_before, approved_before, limit, person, within }).await
 }
 
 /// How [`judge`] decides: for a token (a person's acts `within` their session), or for a person's
@@ -515,6 +534,8 @@ struct Judge {
     session: bool,
     as_user: bool,
     decided_before: bool,
+    /// The node that decided it let it through on a person's approval of an `ask` ([`ASKED`]).
+    approved_before: bool,
     limit: Option<(u32, u32, std::time::Duration)>,
     person: Option<roll_auth::SignedIn>,
     within: Option<roll_auth::Grant>,
@@ -549,7 +570,7 @@ async fn decide_session(access: Arc<Access>, req: Request, next: Next) -> Respon
     let stored = Grant { id: grant.id.to_string(), name: grant.name.to_string(), kind: "session", rules: (*grant.scope).clone(), user: Some(person.user.clone()), ..Default::default() };
     let ip = client_ip(&req, &access.config);
     let ctx = Ctx { access: access.clone(), grant: stored, started: Instant::now(), ip, mcp: None, method, route, args: None, list_prefix: None, about: None, client: None, session: true, person: true };
-    judge(ctx, req, next, Judge { session: true, as_user: true, decided_before: false, limit: None, person: Some(person), within: None }).await
+    judge(ctx, req, next, Judge { session: true, as_user: true, decided_before: false, approved_before: false, limit: None, person: Some(person), within: None }).await
 }
 
 /// A refusal for a person's session or their token's session: a project they aren't a member of
@@ -591,7 +612,7 @@ fn refuse_session(scope: &Scope, target: &Target, action: Action, about: &str, n
 
 /// The decision itself, once the grant is known: the route's row, the resource, the rules.
 async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
-    let Judge { session, as_user, decided_before, limit, person, mut within } = j;
+    let Judge { session, as_user, decided_before, approved_before, limit, person, mut within } = j;
     let access = ctx.access.clone();
     ctx.person = as_user;
     // A nested service (storage) sees its path without the prefix: the original has it.
@@ -672,15 +693,9 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
         ctx.audit(Some(row), None, None, "deny", None, StatusCode::BAD_REQUEST);
         return deny(StatusCode::BAD_REQUEST, "repeated_parameter", format!("?{name}= is given more than once"), json!({}));
     }
-    // A secrets folder as roll secrets spells it, or refused before anyone is asked: `//` would be
-    // asked about (and remembered) as a folder, and reach every one.
-    if row.product == "secrets"
-        && let Some(name) = row.path_query
-        && let Some(p) = original.query().and_then(|q| url::form_urlencoded::parse(q.as_bytes()).find(|(k, _)| k == name).map(|(_, v)| v.into_owned()))
-        && catalog::secret_path(&p).is_none()
-    {
+    if let Some(why) = bad_folder(row, original.query()) {
         ctx.audit(Some(row), None, None, "deny", None, StatusCode::BAD_REQUEST);
-        return deny(StatusCode::BAD_REQUEST, "bad_request", format!("?{name}= is / or /folder/… with up to {} folders of A-Z, a-z, 0-9, _ and -", roll_secrets_ref::DEPTH_MAX), json!({}));
+        return deny(StatusCode::BAD_REQUEST, "bad_request", why, json!({}));
     }
     let mut target = {
         let (a, q, h) = (access.clone(), original.query().map(str::to_string), parts.headers.clone());
@@ -701,8 +716,12 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
         }
     }
     let json_body = buffered.as_ref().and_then(|b| serde_json::from_slice::<Value>(b).ok());
+    if !row.body_shape_ok(json_body.as_ref()) {
+        ctx.audit(Some(row), None, None, "deny", None, StatusCode::BAD_REQUEST);
+        return deny(StatusCode::BAD_REQUEST, "bad_request", if row.array_body { "the body is a JSON array".into() } else { "the body is a JSON object".into() }, json!({}));
+    }
     // A create that names its project in its body is decided by it (and by nothing else).
-    if let Err(why) = project_from_body(row, &mut target, json_body.as_ref()) {
+    if let Err(why) = project_from_body(row, &mut target, json_body.as_ref()).and_then(|()| folder_from_body(row, &mut target, json_body.as_ref())) {
         ctx.audit(Some(row), None, None, "deny", None, StatusCode::BAD_REQUEST);
         return deny(StatusCode::BAD_REQUEST, "bad_request", why, json!({}));
     }
@@ -711,6 +730,9 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
         catalog::Act::Raw(f) => f(buffered.as_deref().unwrap_or_default()),
         _ => row.action_with(&ctx.method, &params, json_body.as_ref(), &parts.headers),
     }];
+    if let (Some(more), Some(b)) = (row.needs_too, json_body.as_ref()) {
+        needs.extend(more(b));
+    }
     // A git push: its ref updates come first; the pack after them streams on untouched.
     let mut git_commands: Option<bytes::Bytes> = None;
     if matches!(row.act, catalog::Act::GitPush) {
@@ -794,6 +816,7 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
     // grant handed to the product gets for the lent secrets its own rules don't allow: the request
     // gets this far only allowed or approved, and roll secrets checks the caller again inside.
     let mut lent_folder: Option<(String, String)> = None;
+    let mut lent_key: Option<String> = None;
     // The request's own action, when a lend decided its approval and it asked too.
     let mut lent_also: Option<String> = None;
     let mut lent_also_rule: Option<roll_auth::scope::Rule> = None;
@@ -808,6 +831,7 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
             (asked_env, asked_path) = (None, None);
             lent = Some((l.product, l.id));
             lent_folder = l.folder;
+            lent_key = l.key;
             lent_rules = l.grants.into_iter().chain(l.reads).collect();
             lent_also = (own_outcome != Outcome::Allow).then(|| format!("{} {}{}", own.0, row.product, own.1.as_deref().map(|r| format!(" {r}")).unwrap_or_default()));
             // The same, as the rule remembering the approval would add: recorded with it, so what
@@ -1004,7 +1028,8 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
             };
             // A lend's approval says what it lends (its product, folder) and what else it covers.
             let summary = lent.as_ref().map(|(p, id)| {
-                let at = lent_folder.as_ref().map(|(e, f)| format!(" in {e}:{f}")).unwrap_or_default();
+                let key = lent_key.as_ref().map(|k| format!(" {k}")).unwrap_or_default();
+                let at = lent_folder.as_ref().map(|(e, f)| format!("{key} in {e}:{f}")).unwrap_or(key);
                 let also = lent_also.as_ref().map(|a| format!(", and {a}")).unwrap_or_default();
                 let via = ctx.mcp.as_ref().map(|m| format!(", tool {}", m.tool)).unwrap_or_default();
                 format!("{action} {p} {id}{at}{also} ({} {}{via})", ctx.method, row.route)
@@ -1040,9 +1065,13 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
         parts.extensions.insert(roll_auth::ClientIp(ip));
         parts.extensions.insert(roll_cluster::ClientAddr(ip.to_string()));
     }
-    // Forwarded to an owner, it carries this decision (signed) so a person isn't asked again.
+    // Forwarded to an owner, it carries this decision (signed) so a person isn't asked again, and
+    // whether it passed on a person's approval (here, or on the node that forwarded it here): the
+    // owner skips asking either way, and only this says which it was.
     if !session {
-        parts.extensions.insert(roll_cluster::Decided(ctx.grant.id.clone()));
+        let approved = outcome == Outcome::Ask && (!decided_before || approved_before);
+        let decision = if approved { format!("{}{ASKED}", ctx.grant.id) } else { ctx.grant.id.to_string() };
+        parts.extensions.insert(roll_cluster::Decided(decision));
     }
     // roll's own work for the grant has no token to forward: a forward carries the grant (signed),
     // and the owner's gate acts for it again (rolld's `act_as_from_hop`).
@@ -1206,8 +1235,13 @@ pub(crate) async fn copy_outcome(
         };
         let mut from = r.clone();
         from.environment = Some(env.clone());
+        // A source's folder as roll secrets spells it; one it would refuse decides nothing in the
+        // request's favour (and is never asked about).
         if let Some(p) = path {
-            from.path = Some(p);
+            match catalog::secret_path(&p) {
+                Some(folder) => from.path = Some(folder),
+                None => return Some((Outcome::Deny, env, Some(p))),
+            }
         }
         let outcome = scope.outcome(&Target::One(from.clone()), Action::Reveal);
         if weakest.as_ref().is_none_or(|(w, _, _)| rank(outcome) < rank(*w)) {
@@ -1225,8 +1259,8 @@ pub(crate) async fn lend_outcome(access: &Arc<Access>, row: &'static Row, params
     let lent: Vec<catalog::Lent> = match row.lends? {
         // A route that names them otherwise than its row is refused, never let through.
         catalog::Lend::Path(k, r) => match (param(k), param(r)) {
-            (Some(kind), Some(r#ref)) => vec![catalog::Lent { kind, r#ref, action: Action::Reveal, folder: None }],
-            _ => return Some(Lending { outcome: Outcome::Deny, product: row.product, action: Action::Reveal, id: "a link this route doesn't name".into(), all: Vec::new(), folder: None, grants: Vec::new(), reads: Vec::new() }),
+            (Some(kind), Some(r#ref)) => vec![catalog::Lent { kind, r#ref, action: Action::Reveal, folder: None, key: None }],
+            _ => return Some(Lending { outcome: Outcome::Deny, product: row.product, action: Action::Reveal, id: "a link this route doesn't name".into(), all: Vec::new(), folder: None, key: None, grants: Vec::new(), reads: Vec::new() }),
         },
         catalog::Lend::Each(f) => f(body?),
     };
@@ -1238,6 +1272,7 @@ pub(crate) async fn lend_outcome(access: &Arc<Access>, row: &'static Row, params
     let mut short: Vec<String> = Vec::new();
     let mut all: Vec<(&'static str, Action, String)> = Vec::new();
     let mut weakest_folder: Option<(String, String)> = None;
+    let mut weakest_key: Option<String> = None;
     let mut grants: Vec<roll_auth::scope::Rule> = Vec::new();
     let mut reads: Vec<roll_auth::scope::Rule> = Vec::new();
     for l in lent {
@@ -1260,7 +1295,7 @@ pub(crate) async fn lend_outcome(access: &Arc<Access>, row: &'static Row, params
             })
             .await;
             // A lookup that fails decides nothing in the request's favour.
-            let Ok(res) = resolved else { return Some(Lending { outcome: Outcome::Deny, product: "secrets", action: l.action, id: l.r#ref, all, folder: Some((env, path)), grants: Vec::new(), reads: Vec::new() }) };
+            let Ok(res) = resolved else { return Some(Lending { outcome: Outcome::Deny, product: "secrets", action: l.action, id: l.r#ref, all, folder: Some((env, path)), key: l.key.clone(), grants: Vec::new(), reads: Vec::new() }) };
             let outcome = scope.outcome(&Target::One(res.clone()), l.action);
             let id = res.id.clone().unwrap_or_default();
             let named = format!("{id}:{env}:{path}");
@@ -1293,6 +1328,7 @@ pub(crate) async fn lend_outcome(access: &Arc<Access>, row: &'static Row, params
             if weakest.as_ref().is_none_or(|(w, ..)| rank(outcome) < rank(*w)) {
                 weakest = Some((outcome, "secrets", l.action, id));
                 weakest_folder = res.environment.clone().zip(res.path.clone());
+                weakest_key = l.key.clone();
             }
             continue;
         }
@@ -1314,9 +1350,10 @@ pub(crate) async fn lend_outcome(access: &Arc<Access>, row: &'static Row, params
         if weakest.as_ref().is_none_or(|(w, ..)| rank(found.0) < rank(*w)) {
             weakest = Some(found);
             weakest_folder = None;
+            weakest_key = None;
         }
     }
-    weakest.map(|(outcome, product, action, id)| Lending { outcome, product, action, id: if short.len() > 1 { short.join(", ") } else { id }, all, folder: weakest_folder, grants, reads })
+    weakest.map(|(outcome, product, action, id)| Lending { outcome, product, action, id: if short.len() > 1 { short.join(", ") } else { id }, all, folder: weakest_folder, key: weakest_key, grants, reads })
 }
 
 /// What handing other resources to this one decides ([`lend_outcome`]): the weakest outcome, the
@@ -1329,6 +1366,8 @@ pub(crate) struct Lending {
     pub all: Vec<(&'static str, Action, String)>,
     /// A lent secret's folder (environment, path), when one decides: its approval keeps to it.
     pub folder: Option<(String, String)>,
+    /// That secret's key, when the request names one: its approval card says it.
+    pub key: Option<String>,
     /// The exact rules for each lent secret the scope doesn't allow, which the grant handed to the
     /// product carries once the request is allowed or approved.
     pub grants: Vec<roll_auth::scope::Rule>,
@@ -1410,6 +1449,15 @@ struct Asked<'a> {
     summary: Option<String>,
     /// The route's own rule a lend's approval covers too.
     also: Option<roll_auth::scope::Rule>,
+}
+
+/// A secrets folder in the query that roll secrets would refuse (`//`, `/a//b`, `..`, too deep):
+/// what to answer, before anyone is asked (`//` would be asked about, and remembered, as a folder
+/// reaching every one). The gate and `POST /v1/access/check` both ask it.
+pub(crate) fn bad_folder(row: &Row, query: Option<&str>) -> Option<String> {
+    let name = row.path_query.filter(|_| row.product == "secrets")?;
+    let p = url::form_urlencoded::parse(query?.as_bytes()).find(|(k, _)| k == name)?.1.into_owned();
+    catalog::secret_path(&p).is_none().then(|| format!("?{name}= is / or /folder/… with up to {} folders of A-Z, a-z, 0-9, _ and -", roll_secrets_ref::DEPTH_MAX))
 }
 
 /// Wait for a person: an approval sent with the request (`X-Roll-Approval`), or a new one.

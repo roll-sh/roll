@@ -264,6 +264,16 @@ CREATE TABLE IF NOT EXISTS visual_page_refusals (
     reason TEXT NOT NULL,
     PRIMARY KEY (preview_id, path)
 );
+-- A note made a work item on its change's repo (`POST …/notes/{note}/work`): once a note.
+CREATE TABLE IF NOT EXISTS note_work (
+    preview_id TEXT NOT NULL,
+    review_id TEXT NOT NULL,
+    number INTEGER NOT NULL,
+    url TEXT NOT NULL,
+    by TEXT NOT NULL,
+    at INTEGER NOT NULL,
+    PRIMARY KEY (preview_id, review_id)
+);
 CREATE TABLE IF NOT EXISTS resolved_notes (
     preview_id TEXT NOT NULL,
     review_id TEXT NOT NULL,
@@ -400,6 +410,17 @@ CREATE TABLE IF NOT EXISTS restore_points (
 type PageShotRow = (String, String, i64, Option<(String, String)>, Option<i64>, Option<String>);
 
 fn write_page_shots(c: &Conn<'_>, id: &str, head: &str, rows: &[PageShotRow], wanted: &[String]) -> Result<()> {
+    upsert_page_shots(c, id, head, rows)?;
+    let paths: Vec<String> = c.query("SELECT path FROM page_shots WHERE preview_id = ?", [id], |r| r.get(0))?;
+    for gone in paths.iter().filter(|p| !wanted.contains(p)) {
+        // The team's own snapshots at this head stay (sent from their tests, not taken by this
+        // run); an earlier head's go.
+        c.execute("DELETE FROM page_shots WHERE preview_id = ? AND path = ? AND NOT (path LIKE 'snap:%' AND head = ?)", [id, gone.as_str(), head])?;
+    }
+    Ok(())
+}
+
+fn upsert_page_shots(c: &Conn<'_>, id: &str, head: &str, rows: &[PageShotRow]) -> Result<()> {
     for (path, png, errors, before, change_bp, report) in rows {
         match before {
             Some((prev_head, prev_png)) => c.execute(
@@ -414,10 +435,6 @@ fn write_page_shots(c: &Conn<'_>, id: &str, head: &str, rows: &[PageShotRow], wa
                 params![id, path, head, png, errors, report],
             )?,
         };
-    }
-    let paths: Vec<String> = c.query("SELECT path FROM page_shots WHERE preview_id = ?", [id], |r| r.get(0))?;
-    for gone in paths.iter().filter(|p| !wanted.contains(p)) {
-        c.execute("DELETE FROM page_shots WHERE preview_id = ? AND path = ?", [id, gone.as_str()])?;
     }
     Ok(())
 }
@@ -1048,6 +1065,10 @@ impl Store {
         if !db.has_column("shares", "path")? {
             db.add_column("shares", "path", "TEXT")?;
         }
+        // A webhook URL's service: its token opens its path there only.
+        if !db.has_column("shares", "service")? {
+            db.add_column("shares", "service", "TEXT")?;
+        }
         if !db.has_column("shares", "hits")? {
             db.add_column("shares", "hits", "INTEGER NOT NULL DEFAULT 0")?;
         }
@@ -1569,7 +1590,7 @@ impl Store {
             if let Some((project, change, head)) = gone {
                 emit(c, now, "deleted", &project, id, change.as_deref(), &serde_json::json!({ "head": head }))?;
             }
-            for t in ["resources", "services", "pinned", "pinned_data", "restore_points", "shares", "guest_notes", "note_tells", "visit_tickets", "visit_sessions", "visits", "activity", "screenshots", "page_shots", "visual_page_accepts", "visual_page_refusals", "mail", "resolved_notes", "base_history", "leases", "note_crops", "git_pulls", "git_reports", "runtime_facts", "gone_pushes", "run_usage", "service_spend", "previews"] {
+            for t in ["resources", "services", "pinned", "pinned_data", "restore_points", "shares", "guest_notes", "note_tells", "visit_tickets", "visit_sessions", "visits", "activity", "screenshots", "page_shots", "visual_page_accepts", "visual_page_refusals", "mail", "resolved_notes", "note_work", "base_history", "leases", "note_crops", "git_pulls", "git_reports", "runtime_facts", "gone_pushes", "run_usage", "service_spend", "previews"] {
                 let col = if t == "previews" { "id" } else { "preview_id" };
                 c.execute(&format!("DELETE FROM {t} WHERE {col} = ?"), [id])?;
             }
@@ -2457,6 +2478,29 @@ impl Store {
         self.db.write(|c| write_page_shots(c, id, head, &rows, wanted))
     }
 
+    /// A picture the team's own tests sent (`snap:<name>`, Argos's and Percy's SDKs) at `head`:
+    /// a page of the visual review like any other, compared with the one it replaces at an
+    /// earlier head. At most [`SNAPSHOTS_MAX`] a preview.
+    pub fn put_snapshot(&self, id: &str, head: &str, name: &str, png: &[u8]) -> Result<()> {
+        let path = format!("snap:{name}");
+        let rows = self.prepare_page_shots(id, head, &[crate::ports::PageShot { path: path.clone(), png: png.to_vec(), errors: 0, report: Default::default() }])?;
+        use base64::Engine as _;
+        let new = base64::engine::general_purpose::STANDARD.encode(png);
+        self.db.write(|c| {
+            let others: i64 = c.query_row("SELECT COUNT(*) FROM page_shots WHERE preview_id = ? AND path LIKE 'snap:%' AND path <> ?", params![id, path], |r| r.get(0))?;
+            if others as usize >= SNAPSHOTS_MAX {
+                return Err(Error::Conflict(format!("the preview has {SNAPSHOTS_MAX} snapshots")));
+            }
+            // Another picture by the same name: what was accepted or refused isn't this one.
+            let was: Option<String> = c.query_row("SELECT png FROM page_shots WHERE preview_id = ? AND path = ?", params![id, path], |r| r.get(0)).optional()?;
+            if was.is_some_and(|w| w != new) {
+                c.execute("DELETE FROM visual_page_accepts WHERE preview_id = ? AND path = ?", params![id, path])?;
+                c.execute("DELETE FROM visual_page_refusals WHERE preview_id = ? AND path = ?", params![id, path])?;
+            }
+            upsert_page_shots(c, id, head, &rows)
+        })
+    }
+
     /// What [`Store::set_page_shots`] writes, read and compared first (outside the write).
     fn prepare_page_shots(&self, id: &str, head: &str, pages: &[crate::ports::PageShot]) -> Result<Vec<PageShotRow>> {
         use base64::Engine as _;
@@ -2789,6 +2833,46 @@ impl Store {
     }
 
     /// The notes resolved on a preview's page (their reviews' ids).
+    /// The notes made work items, by note: (number, where it's shown). One still being made
+    /// isn't one.
+    pub fn note_work(&self, preview: &str) -> Result<std::collections::HashMap<String, (u64, String)>> {
+        let rows: Vec<(String, i64, String)> = self.db.read(|c| c.query("SELECT review_id, number, url FROM note_work WHERE preview_id = ? AND number > 0", [preview], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))))?;
+        Ok(rows.into_iter().map(|(n, num, url)| (n, (num as u64, url))).collect())
+    }
+
+    /// Who makes note `review`'s work item, decided in one write: this caller (a row of its
+    /// own, number 0 until it's made; one a crash left over a minute ago is taken over), or the
+    /// item already made, or `Busy` while another caller makes it.
+    pub fn claim_note_work(&self, preview: &str, review: &str, by: &str) -> Result<NoteWorkClaim> {
+        let now = self.now_ms()?;
+        self.db.write(|c| {
+            let row: Option<(i64, String, i64)> = c.query_row("SELECT number, url, at FROM note_work WHERE preview_id = ? AND review_id = ?", params![preview, review], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
+            Ok::<_, Error>(match row {
+                Some((number, url, _)) if number > 0 => NoteWorkClaim::Made(number as u64, url),
+                Some((_, _, at)) if now - at < 60_000 => NoteWorkClaim::Busy,
+                Some(_) => {
+                    c.execute("UPDATE note_work SET by = ?, at = ? WHERE preview_id = ? AND review_id = ? AND number = 0", params![by, now, preview, review])?;
+                    NoteWorkClaim::Mine
+                }
+                None => {
+                    c.execute("INSERT INTO note_work (preview_id, review_id, number, url, by, at) VALUES (?, ?, 0, '', ?, ?) ON CONFLICT (preview_id, review_id) DO NOTHING", params![preview, review, by, now])?;
+                    NoteWorkClaim::Mine
+                }
+            })
+        })
+    }
+
+    /// Note `review`'s work item made (`number`), or, with `None`, not: its claim let go.
+    pub fn set_note_work(&self, preview: &str, review: &str, made: Option<(u64, &str)>) -> Result<()> {
+        self.db.write(|c| {
+            match made {
+                Some((number, url)) => c.execute("UPDATE note_work SET number = ?, url = ? WHERE preview_id = ? AND review_id = ?", params![number as i64, url, preview, review])?,
+                None => c.execute("DELETE FROM note_work WHERE preview_id = ? AND review_id = ? AND number = 0", params![preview, review])?,
+            };
+            Ok::<_, Error>(())
+        })
+    }
+
     pub fn resolved_notes(&self, preview: &str) -> Result<std::collections::HashSet<String>> {
         let ids: Vec<String> = self.db.read(|c| c.query("SELECT review_id FROM resolved_notes WHERE preview_id = ?", [preview], |r| r.get(0)))?;
         Ok(ids.into_iter().collect())
@@ -3622,7 +3706,7 @@ impl Store {
 
     /// A webhook URL for `path` of preview `id` (Stripe's or GitHub's, into a private preview):
     /// that path only, for the preview's life, its token in the query. Shown once.
-    pub fn create_webhook(&self, id: &str, path: &str, by: &str, maker: Option<&str>, label: &str) -> Result<(crate::Webhook, String)> {
+    pub fn create_webhook(&self, id: &str, service: &str, path: &str, by: &str, maker: Option<&str>, label: &str) -> Result<(crate::Webhook, String)> {
         let now = self.now_ms()?;
         let token = format!("rph_{}", new_token());
         let wid = format!("whk_{}", &new_token()[..12]);
@@ -3633,19 +3717,19 @@ impl Store {
                 return Err(Error::Conflict(format!("the preview has {WEBHOOKS_MAX} webhook URLs: revoke one first")));
             }
             c.execute(
-                "INSERT INTO shares (id, preview_id, hash, expires_at, created_by, created_at, maker, maker_checked, label, notes, path) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)",
-                params![wid, id, hash, i64::MAX, by, now, maker, now, label, path],
+                "INSERT INTO shares (id, preview_id, hash, expires_at, created_by, created_at, maker, maker_checked, label, notes, path, service) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
+                params![wid, id, hash, i64::MAX, by, now, maker, now, label, path, service],
             )?;
             Ok::<_, Error>(())
         })?;
-        Ok((crate::Webhook { id: wid, path: path.to_string(), label: label.to_string(), created_by: by.to_string(), created_at: now, revoked: false, hits: 0, last_at: None }, token))
+        Ok((crate::Webhook { id: wid, service: service.to_string(), path: path.to_string(), label: label.to_string(), created_by: by.to_string(), created_at: now, revoked: false, hits: 0, last_at: None }, token))
     }
 
     /// The preview's webhook URLs, newest first (never their tokens).
     pub fn webhooks(&self, id: &str) -> Result<Vec<crate::Webhook>> {
         Ok(self.db.read(|c| {
-            c.query("SELECT id, path, label, created_by, created_at, revoked, hits, last_at FROM shares WHERE preview_id = ? AND path IS NOT NULL ORDER BY created_at DESC", [id], |r| {
-                Ok(crate::Webhook { id: r.get(0)?, path: r.get(1)?, label: r.get(2)?, created_by: r.get(3)?, created_at: r.get(4)?, revoked: r.get::<_, i64>(5)? != 0, hits: r.get(6)?, last_at: r.get(7)? })
+            c.query("SELECT id, path, label, created_by, created_at, revoked, hits, last_at, service FROM shares WHERE preview_id = ? AND path IS NOT NULL ORDER BY created_at DESC", [id], |r| {
+                Ok(crate::Webhook { id: r.get(0)?, service: r.get::<_, Option<String>>(8)?.unwrap_or_default(), path: r.get(1)?, label: r.get(2)?, created_by: r.get(3)?, created_at: r.get(4)?, revoked: r.get::<_, i64>(5)? != 0, hits: r.get(6)?, last_at: r.get(7)? })
             })
         })?)
     }
@@ -3658,17 +3742,22 @@ impl Store {
         Ok(())
     }
 
-    /// A live webhook URL `token` of preview `id` for exactly `path` (as a share link's row, for
-    /// its maker's check: [`crate::visit::share_visit`]).
-    pub fn webhook_live(&self, id: &str, token: &str, path: &str) -> Result<Option<LiveShare>> {
+    /// A live webhook URL `token` of preview `id` for exactly `path` of `service` (as a share
+    /// link's row, for its maker's check: [`crate::visit::share_visit`]).
+    pub fn webhook_live(&self, id: &str, token: &str, service: &str, path: &str) -> Result<Option<LiveShare>> {
         Ok(self.db.read(|c| {
             c.query_row(
-                "SELECT id, expires_at, maker, maker_checked, label, notes FROM shares WHERE preview_id = ? AND hash = ? AND path = ? AND revoked = 0",
-                params![id, bypass_hash(token), path],
+                "SELECT id, expires_at, maker, maker_checked, label, notes FROM shares WHERE preview_id = ? AND hash = ? AND service = ? AND path = ? AND revoked = 0",
+                params![id, bypass_hash(token), service, path],
                 |r| Ok(LiveShare { id: r.get(0)?, ends: r.get(1)?, maker: r.get(2)?, maker_checked: r.get(3)?, label: r.get(4)?, notes: false }),
             )
             .optional()
         })?)
+    }
+
+    /// The live webhook URLs' (service, path, token SHA-256), for a backend whose gate checks them.
+    pub fn webhook_hashes(&self, id: &str) -> Result<Vec<(String, String, String)>> {
+        Ok(self.db.read(|c| c.query("SELECT service, path, hash FROM shares WHERE preview_id = ? AND path IS NOT NULL AND service IS NOT NULL AND revoked = 0 ORDER BY created_at", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))))?)
     }
 
     /// A request came in by webhook URL `webhook` (how many, and when last: a relaxed write).
@@ -4225,6 +4314,16 @@ pub struct BaseRow {
 pub const SHARES_MAX: usize = 20;
 /// The most live webhook URLs a preview has.
 pub const WEBHOOKS_MAX: usize = 20;
+/// The most snapshots the team's tests keep on a preview.
+pub const SNAPSHOTS_MAX: usize = 40;
+
+/// [`Store::claim_note_work`]'s answer.
+#[derive(Clone, Debug, PartialEq)]
+pub enum NoteWorkClaim {
+    Mine,
+    Made(u64, String),
+    Busy,
+}
 
 /// Earlier pushes kept reachable per service.
 /// How long after it was replaced an earlier push still answers requests that name it (skew
