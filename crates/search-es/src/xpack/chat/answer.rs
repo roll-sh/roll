@@ -222,13 +222,6 @@ impl Sanitizer {
     fn hold_from(&self) -> usize {
         let b = &self.held;
         let mut cut = b.len();
-        // A run of backslashes waits whole: how many there are decides what follows.
-        let slashes = b.len() - b.trim_end_matches('\\').len();
-        if slashes > 0 {
-            cut = b.len() - slashes;
-        } else if b.ends_with(']') || b.ends_with('<') {
-            cut = b.len() - 1;
-        }
         let ws = last_word(b);
         if url_ahead(&b[ws..]) {
             cut = cut.min(ws);
@@ -236,19 +229,24 @@ impl Sanitizer {
         // Letters an address's local part may hold: `help` may still become `help@evil.example`.
         let local = b.len() - b.trim_end_matches(|c: char| c.is_ascii_alphanumeric() || ".+_-".contains(c)).len();
         cut = cut.min(b.len() - local);
-        // An open `[…` or `[…](…`: released whole, as one link.
+        // An open `[…`, `[…]` (a `(` may follow) or `[…](…`: released whole, as one link.
         if let Some(p) = b.rfind('[') {
             let rest = &b[p..];
             let open = match rest.find("](") {
-                None => !rest.contains(']'),
+                None => !rest.contains(']') || rest.ends_with(']'),
                 Some(i) => !rest[i..].contains(')'),
             };
             if open {
                 cut = cut.min(p);
             }
         }
-        // Backslashes before what waits wait with it: they decide whether it's escaped.
-        b[..cut].trim_end_matches('\\').len()
+        // What stands right before the held text (or ends the answer so far) may join what
+        // follows, so it waits with it: `<` a tag, `]` a link or a definition, `!` an image, and
+        // backslashes, whose count decides what's escaped.
+        while cut > 0 && matches!(b.as_bytes()[cut - 1], b'<' | b']' | b'!' | b'\\') {
+            cut -= 1;
+        }
+        cut
     }
 }
 
