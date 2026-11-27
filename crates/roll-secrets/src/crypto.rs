@@ -356,7 +356,8 @@ mod tests {
     use super::*;
 
     /// No request or answer type prints a value or a credential through `Debug` (AGENTS.md). A
-    /// type that holds one gets a line here.
+    /// type that holds one gets a line here ([`every_debug_type_with_a_credential_is_checked`]
+    /// finds those with a credential's name).
     #[test]
     fn no_debug_prints_a_credential() {
         use serde_json::json;
@@ -375,10 +376,102 @@ mod tests {
             format!("{:?}", serde_json::from_value::<crate::Policy>(json!({ "protected": true, "notify_url": format!("https://hooks.example/{CANARY}") })).unwrap()),
             format!("{:?}", crate::identities::Login { token: CANARY.into(), expires_at: 0, project: "p".into(), identity: "i".into() }),
             format!("{:?}", serde_json::from_value::<crate::aws_identity::SignedRequest>(json!({ "method": "POST", "url": "https://sts.amazonaws.com/", "headers": { "authorization": CANARY, "x-amz-security-token": CANARY }, "body": CANARY })).unwrap()),
+            format!("{:?}", crate::acme::NewKey { binding: crate::acme::Binding { id: "eab_1".into(), label: String::new(), names: None, expires_at: None, created_at: 0, created_by: "operator".into(), revoked_at: None, revoked_by: None, used_at: None, accounts: 0 }, key_id: "eab_1".into(), hmac_key: Value::new(CANARY), directory: "https://acme.example/directory".into() }),
         ];
         for p in printed {
             assert!(!p.contains(CANARY), "{p}");
         }
+    }
+
+    /// Every struct or enum in this crate's sources that derives `Debug` with a field named like a
+    /// credential (`token`, `secret`, `password`, `hmac`…) held as text or bytes, not a `Value`,
+    /// has a line in [`no_debug_prints_a_credential`] or in `debug-no-credential.txt` saying why it
+    /// holds none: a new type can't be forgotten, and a line for one that's gone fails too.
+    #[test]
+    fn every_debug_type_with_a_credential_is_checked() {
+        const NAMES: &[&str] = &["token", "secret", "password", "passwd", "passphrase", "private", "hmac", "credential", "seed", "api_key", "cookie", "authorization", "bearer"];
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let canary = {
+            let me = std::fs::read_to_string(src.join("crypto.rs")).unwrap();
+            let from = me.find("fn no_debug_prints_a_credential").unwrap();
+            me[from..from + me[from..].find("for p in printed").unwrap()].to_string()
+        };
+        let allowed: std::collections::BTreeMap<String, String> = include_str!("debug-no-credential.txt")
+            .lines()
+            .filter(|l| !l.trim().is_empty() && !l.starts_with('#'))
+            .map(|l| {
+                let (field, why) = l.split_once(": ").unwrap_or_else(|| panic!("`Type.field: why`, not {l}"));
+                assert!(!why.trim().is_empty(), "{l}: say why");
+                (field.to_string(), why.to_string())
+            })
+            .collect();
+        let mut files = vec![src.clone()];
+        let mut found = std::collections::BTreeSet::new();
+        let mut missing = vec![];
+        while let Some(p) = files.pop() {
+            if p.is_dir() {
+                files.extend(std::fs::read_dir(&p).unwrap().map(|e| e.unwrap().path()));
+                continue;
+            }
+            if p.extension().is_none_or(|e| e != "rs") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&p).unwrap();
+            let lines: Vec<&str> = text.lines().collect();
+            let mut i = 0;
+            while i < lines.len() {
+                let line = lines[i].trim();
+                i += 1;
+                if !line.starts_with("#[derive(") {
+                    continue;
+                }
+                // The attribute (it may span lines), then the item after any others and its docs.
+                let mut attr = line.to_string();
+                while !attr.contains(")]") && i < lines.len() {
+                    attr.push_str(lines[i].trim());
+                    i += 1;
+                }
+                if !attr.split(|c: char| !c.is_alphanumeric() && c != '_').any(|w| w == "Debug") {
+                    continue;
+                }
+                while i < lines.len() && (lines[i].trim().starts_with("#[") || lines[i].trim().starts_with("//")) {
+                    i += 1;
+                }
+                let Some(item) = lines.get(i).map(|l| l.trim()) else { break };
+                let words: Vec<&str> = item.split(|c: char| !c.is_alphanumeric() && c != '_').filter(|w| !w.is_empty()).collect();
+                let Some(at) = words.iter().position(|w| *w == "struct" || *w == "enum") else { continue };
+                let ty = words.get(at + 1).copied().unwrap_or_default();
+                if !item.contains('{') {
+                    continue;
+                }
+                let mut depth = item.matches('{').count() as i64 - item.matches('}').count() as i64;
+                i += 1;
+                while depth > 0 && i < lines.len() {
+                    let l = lines[i].trim();
+                    i += 1;
+                    if !l.starts_with("//")
+                        && let Some((name, kind)) = l.trim_start_matches("pub(crate) ").trim_start_matches("pub(super) ").trim_start_matches("pub ").split_once(':')
+                        && name.chars().all(|c| c.is_alphanumeric() || c == '_')
+                        && !kind.starts_with(':')
+                    {
+                        let named = name.to_ascii_lowercase();
+                        let text_or_bytes = kind.contains("String") || kind.contains("u8");
+                        if text_or_bytes && NAMES.iter().any(|n| named.contains(n)) {
+                            let field = format!("{ty}.{name}");
+                            let canaried = canary.contains(&format!("::{ty}>")) || canary.contains(&format!("::{ty} {{"));
+                            if !canaried && !allowed.contains_key(&field) {
+                                missing.push(format!("{}: {field}", p.strip_prefix(&src).unwrap().display()));
+                            }
+                            found.insert(field);
+                        }
+                    }
+                    depth += l.matches('{').count() as i64 - l.matches('}').count() as i64;
+                }
+            }
+        }
+        assert!(missing.is_empty(), "derive(Debug) over a credential's name: keep it in a Value, or give the type a line in no_debug_prints_a_credential, or say why it holds none in debug-no-credential.txt: {missing:#?}");
+        let stale: Vec<&String> = allowed.keys().filter(|f| !found.contains(*f)).collect();
+        assert!(stale.is_empty(), "debug-no-credential.txt names fields no longer found: {stale:?}");
     }
 
     #[test]

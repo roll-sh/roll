@@ -4,6 +4,28 @@ The ranked work list and the log of roll secrets' review rounds. It's internal: 
 
 ## Next
 
+**State, 2026-11-27 15:45.** The forty-third review is done. It found two live bugs, both fixed. Landed since 05:00, each with main's CI green and after a check of the merged tree wherever main had moved under it:
+- The forty-third product review's live bugs:
+  - medium: a rolld with no `ROLL_ADMIN_TOKEN` (the guide's step 0 for an evaluation) answered any `Host`, so a web page could act as the operator through DNS rebinding, or open a shell over a WebSocket. Fixed by #1193 (fedf38742), where an open gate answers only loopback hosts and step 0 gets a token, and #1202 (0d628850d), where an open gate refuses a foreign `Origin` whatever the method, after roll MCP's review;
+  - low: `//` passed the 8-hour cap on a whole environment. Fixed by roll MCP in #1186, which also checks folders canonically at the gate.
+- #1199 (df9d5d905): item 8. `import --check` exits 2, naming how many keys weren't compared.
+- #1225 (97bac47b1): items 3, 7, 10 and 5 (roll secrets' half).
+  - Machines' processes share one login.
+  - A bare break-glass login binds only to a scan-only hook that named it first.
+  - The `Debug` canary is enforced by a source scan (`debug-no-credential.txt`).
+  - `use_once` reads a sensitive key only for a product's fixed host.
+- #1219 (11fbd4453): items 4 and 6. A certificate's AWS role works with the documented trust condition, and Route 53 names are claimed fleet-wide and read back after `INSYNC`.
+- roll MCP's #1201: item 5's lend part. A root lend is approved once only.
+- #1203 (a03f8065e): Health flags a public repository whose project has `leaks.rotate` off.
+- #1206 (a2be4c27f): SaaS rotation for Prisma Cloud (Palo Alto Networks), and Paddle's self-rotating keys. Netskope and Cisco aren't added, with the reasons in docs/secrets.md.
+- #1188 (ac7c9b54b): rolld is released with the CLI (Linux and Apple Silicon tarballs, checksummed), `install.sh --with-rolld`, and step 0 uses it.
+
+In flight:
+- key-scoped secrets rules (#1226, `keys: [..]` on a secrets rule), reviewed by roll MCP. After it lands, roll MCP lets a lend that names its key be remembered for that key.
+
+Left:
+- the forty-fourth review.
+
 **State, 2026-11-27 05:00.** The forty-second review is done, except item 9, which roll MCP has (docs/permissions.md's lend wording and the approval screen's remembered scope). Landed since 22:40, each with main's CI green and after a check of the merged tree wherever main had moved under it:
 - #1167 (fb06af79e): item 8. The guides' step 0 runs one rolld on SQLite for an evaluation, moving-from covers Kubernetes Secrets, SOPS and CI variables, and `roll secrets import --from … --check` compares a source with roll by fingerprint without writing.
 - #1172 (d1feb5b5a): item 1's rest and item 5. A break-glass login is bound to the hook token that named it (`alice@token:<id>`), and a token's total is its scan budget, so invented pushers buy nothing.

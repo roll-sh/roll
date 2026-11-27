@@ -253,9 +253,10 @@ pub trait SecretSource: Send + Sync {
     }
     /// `reference`'s value for one request of `who`'s on `service` in `env` (a domain's
     /// Cloudflare token), read as them that once and kept by nothing: refused unless they may
-    /// reveal it now (an approval of an `ask` there is enough), never a sensitive key. Audited as
-    /// their use, for `purpose`.
-    async fn use_once(&self, _who: Asker<'_>, _project: &str, _env: &str, _service: &str, _reference: &str, _purpose: &str) -> anyhow::Result<String> {
+    /// reveal it now (an approval of an `ask` there is enough), and a sensitive key only when `to`
+    /// names the fixed host the value is sent to. Audited as their use, for `purpose`, to `to`.
+    #[allow(clippy::too_many_arguments)]
+    async fn use_once(&self, _who: Asker<'_>, _project: &str, _env: &str, _service: &str, _reference: &str, _purpose: &str, _to: Option<&'static str>) -> anyhow::Result<String> {
         anyhow::bail!("roll secrets isn't on this node")
     }
 }
@@ -288,6 +289,8 @@ pub trait DnsWriter: Send + Sync {
     /// Make `name`'s `kind` record (`CNAME` or `TXT`) say `content`. A CNAME beside the name's A or
     /// AAAA records: with `replace` they're deleted, else nothing is written and they're answered.
     async fn put_record(&self, token: &str, kind: &str, name: &str, content: &str, replace: bool) -> anyhow::Result<Vec<String>>;
+    /// The one API it sends the token to (rolld: `roll_edge::acme::Cloudflare::API`), fixed in code.
+    fn api(&self) -> &'static str;
 }
 
 /// What answers a name under a project's preview domain that no roll apps environment holds (a
@@ -304,23 +307,25 @@ pub trait PreviewRouter: Send + Sync {
 #[async_trait]
 pub trait FeedbackNotes: Send + Sync {
     /// `env` (`pv-<id>`)'s notes on `path`, oldest first; none for a name that isn't a live
-    /// preview's.
-    async fn notes(&self, env: &str, path: &str) -> anyhow::Result<Vec<Note>>;
+    /// preview's, or one that doesn't run on `service` (roll apps' service id: a preview found by
+    /// its environment's name alone could be someone else's).
+    async fn notes(&self, service: &str, env: &str, path: &str) -> anyhow::Result<Vec<Note>>;
 }
 
 /// roll previews' share links (someone outside the team, until the link ends) for a preview
 /// environment's own host (rolld fills it from `roll_previews::Engine`). Unset: none taken. Every
-/// call checks the link again, so a revoked or ended one stops at once.
+/// call checks the link again, so a revoked or ended one stops at once. Each is told the roll apps
+/// service the request came to, and refuses a preview that doesn't run on it.
 #[async_trait]
 pub trait PreviewShares: Send + Sync {
     /// Link `token` to `env` (`pv-<id>`)'s preview, if it's live. `followed`: the link itself was
     /// followed (previews counts that once a day).
-    async fn live(&self, env: &str, token: &str, followed: bool) -> Option<Share>;
+    async fn live(&self, service: &str, env: &str, token: &str, followed: bool) -> Option<Share>;
     /// A guest's note from the page's button (its JSON body) through link `token`: the note's id,
     /// or why not (an HTTP status and a line).
-    async fn note(&self, env: &str, token: &str, body: &[u8]) -> Result<String, (u16, String)>;
+    async fn note(&self, service: &str, env: &str, token: &str, body: &[u8]) -> Result<String, (u16, String)>;
     /// The notes on `path` left through link `token`: all its guests see.
-    async fn notes(&self, env: &str, token: &str, path: &str) -> Vec<Note>;
+    async fn notes(&self, service: &str, env: &str, token: &str, path: &str) -> Vec<Note>;
 }
 
 /// A live share link.

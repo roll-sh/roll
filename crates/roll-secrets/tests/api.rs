@@ -1428,6 +1428,14 @@ struct FakeSts {
     last: Mutex<Option<(String, Option<String>)>>,
     /// IAM user `legacy-ci`'s access key ids, and how many were ever made.
     keys: Mutex<(Vec<String>, u32)>,
+    /// The role's trust takes only sessions whose name starts so (`sts:RoleSessionName`).
+    session_like: Mutex<Option<&'static str>>,
+}
+
+impl FakeSts {
+    fn named_ok(&self, session: &str) -> bool {
+        self.session_like.lock().unwrap().is_none_or(|p| session.starts_with(p))
+    }
 }
 
 impl roll_secrets::aws::Sts for FakeSts {
@@ -1436,7 +1444,7 @@ impl roll_secrets::aws::Sts for FakeSts {
         if *self.throttled.lock().unwrap() {
             return Err("Throttling".into());
         }
-        if role_arn != "arn:aws:iam::123456789012:role/roll" || self.pinned.lock().unwrap().as_deref().is_some_and(|p| p != external_id) {
+        if role_arn != "arn:aws:iam::123456789012:role/roll" || self.pinned.lock().unwrap().as_deref().is_some_and(|p| p != external_id) || !self.named_ok(session) {
             return Err("AccessDenied".into());
         }
         let mut n = self.sessions.lock().unwrap();
@@ -1455,7 +1463,7 @@ impl roll_secrets::aws::Sts for FakeSts {
         let payload = token.split('.').nth(1).ok_or("InvalidIdentityToken")?;
         let claims: Value = serde_json::from_slice(&base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(payload).map_err(|_| "InvalidIdentityToken")?).map_err(|_| "InvalidIdentityToken")?;
         let sub_ok = self.web_pinned.lock().unwrap().as_deref().is_none_or(|p| claims["sub"] == p);
-        if role_arn != "arn:aws:iam::123456789012:role/roll-oidc" || claims["aud"] != "sts.amazonaws.com" || claims["iss"] != ISSUER_URL || !sub_ok {
+        if role_arn != "arn:aws:iam::123456789012:role/roll-oidc" || claims["aud"] != "sts.amazonaws.com" || claims["iss"] != ISSUER_URL || !sub_ok || !self.named_ok(session) {
             return Err("AccessDenied".into());
         }
         let mut n = self.sessions.lock().unwrap();
@@ -2721,22 +2729,26 @@ async fn one_pusher_spends_its_share_and_made_up_pushers_only_the_tokens_budget(
 }
 
 /// A login on the break-glass list is a pusher as one hook's token names it: `alice` is refused
-/// until a hook has named alice, then bound to that hook's token, so another scan token naming
-/// alice can't break glass; and the leak says the pusher is the hook's word.
+/// until a hook has named alice, then bound to that hook's token (a scan-only one), not to a
+/// reveal+scan token that named alice too, so that token can't break glass; the answer names the
+/// hook's token; and the leak says the pusher is the hook's word.
 #[tokio::test]
 async fn a_break_glass_login_is_bound_to_the_hook_token_that_named_it() {
     let api = Api::new().await;
     let value = "fake-Kq8mZ3vT9xLr2WbN";
     api.set("production", "API_KEY", value).await;
-    let (hook, other) = (api.token(json!({ "actions": ["scan"] })), api.token(json!({ "actions": ["reveal", "scan"] })));
-    let (s, e) = api.call(Method::PATCH, "", Some(json!({ "breakglass": ["alice"] }))).await;
-    assert_eq!(s, StatusCode::BAD_REQUEST, "no hook has named alice yet: {e}");
+    let (hook, other) = (api.token(json!({ "actions": ["scan"], "name": "git-hook" })), api.token(json!({ "actions": ["reveal", "scan"] })));
     let push = |breakglass: bool| json!({ "candidates": [value], "breakglass": breakglass, "pusher": "alice", "refs": ["refs/heads/main"] });
+    let named = json!({ "candidates": [], "pusher": "alice", "refs": ["refs/heads/main"] });
+    assert_eq!(api.req(Method::POST, "/scan", Some(named), Some(&other)).await.0, StatusCode::OK);
+    let (s, e) = api.call(Method::PATCH, "", Some(json!({ "breakglass": ["alice"] }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "only a token that may do more has named alice: {e}");
     assert_eq!(api.req(Method::POST, "/scan", Some(push(false)), Some(&hook)).await.0, StatusCode::OK);
     let set = api.ok(Method::PATCH, "", Some(json!({ "breakglass": ["alice"] }))).await;
     let bound = set["breakglass"][0].as_str().unwrap_or_default().to_string();
     let principal = bound.strip_prefix("alice@").filter(|t| t.starts_with("token:")).unwrap_or_else(|| panic!("{set}")).to_string();
     assert_eq!(set["breakglass"].as_array().map(Vec::len), Some(1), "only the hook that named alice: {set}");
+    assert_eq!(set["breakglass_hooks"], json!({ principal.clone(): "git-hook" }), "{set}");
 
     let (s, e) = api.req(Method::POST, "/scan", Some(push(true)), Some(&other)).await;
     assert_eq!(s, StatusCode::FORBIDDEN, "another token naming alice isn't her hook: {e}");
@@ -7018,7 +7030,8 @@ async fn a_frozen_folder_answers_423_to_readers_and_lets_its_admins_through() {
 
 /// A reference named for one request and kept by nothing (roll apps' Cloudflare token): read
 /// once as the caller, audited as their use of it naming the resource, under `bind_ref`'s checks
-/// (reveal there, no sensitive key, no untrusted caller), with no maker recorded.
+/// (reveal there, no untrusted caller), with no maker recorded, audited with the fixed host it
+/// goes to; never a sensitive key, even for that host.
 #[tokio::test]
 async fn a_reference_read_once_reads_as_the_caller_and_is_audited_as_theirs() {
     use roll_secrets::{Refusal, ResourceRef};
@@ -7034,15 +7047,20 @@ async fn a_reference_read_once_reads_as_the_caller_and_is_audited_as_theirs() {
         (s.caller_of(false, None, Some(&grant)).unwrap(), id)
     };
     let (prod, id) = token("production");
-    let once = s.use_once(&web, "roll://production/CF_TOKEN", &prod, "writing a domain's records").unwrap();
+    let once = s.use_once(&web, "roll://production/CF_TOKEN", &prod, "writing a domain's records", None).unwrap();
     assert_eq!(once.value.expose(), "fake-cf");
     let audit = api.ok(Method::GET, "/audit?action=secrets.use", None).await;
     assert_eq!(audit[0]["actor"].as_str(), Some(format!("token:{id}").as_str()), "{audit}");
     assert!(audit[0]["summary"].as_str().unwrap().contains("apps:service:web"), "{audit}");
-    for (caller, reference) in [(&token("staging").0, "roll://production/CF_TOKEN"), (&prod, "roll://production/CF_SENSITIVE"), (&s.untrusted(&api.project, &prod).unwrap(), "roll://production/CF_TOKEN")] {
-        let refused = s.use_once(&web, reference, caller, "writing a domain's records").unwrap_err();
+    let untrusted = s.untrusted(&api.project, &prod).unwrap();
+    let cf = Some("https://api.cloudflare.com/client/v4");
+    for (caller, reference, to) in [(&token("staging").0, "roll://production/CF_TOKEN", cf), (&prod, "roll://production/CF_SENSITIVE", None), (&prod, "roll://production/CF_SENSITIVE", cf), (&untrusted, "roll://production/CF_TOKEN", None), (&untrusted, "roll://production/CF_SENSITIVE", cf)] {
+        let refused = s.use_once(&web, reference, caller, "writing a domain's records", to).unwrap_err();
         assert!(matches!(refused, Refusal::NotAllowed(_) | Refusal::Unusable(_)) && !refused.to_string().contains("fake-"), "{refused}");
     }
+    s.use_once(&web, "roll://production/CF_TOKEN", &prod, "writing a domain's records", cf).unwrap();
+    let audit = api.ok(Method::GET, "/audit?action=secrets.use", None).await;
+    assert!(audit[0]["summary"].as_str().unwrap().ends_with("sent only to https://api.cloudflare.com/client/v4"), "{audit}");
 }
 
 #[tokio::test]
@@ -9137,6 +9155,9 @@ struct FakeCa {
     dns: Mutex<Vec<String>>,
     /// (serial, reason) of each certificate revoked.
     revoked: Mutex<Vec<(String, roll_secrets::public_certs::RevokeReason)>>,
+    /// Route 53's TXT sets, each read and written whole as the real one is, with a pause between,
+    /// and looked at by the CA after another.
+    txt: Mutex<BTreeMap<String, Vec<String>>>,
 }
 
 impl FakeCa {
@@ -9146,7 +9167,7 @@ impl FakeCa {
         root.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
         root.distinguished_name.push(rcgen::DnType::CommonName, "roll fake public root");
         let root_pem = root.self_signed(&root_key).unwrap().pem();
-        FakeCa { root, root_key, root_pem, orders: Mutex::default(), dns: Mutex::default(), revoked: Mutex::default() }
+        FakeCa { root, root_key, root_pem, orders: Mutex::default(), dns: Mutex::default(), revoked: Mutex::default(), txt: Mutex::default() }
     }
 
     /// The credential, as the fake provider takes it: what it was, or its refusal.
@@ -9178,8 +9199,32 @@ impl roll_secrets::public_certs::PublicCa for FakeCa {
     }
 
     fn order(&self, o: roll_secrets::public_certs::Order<'_>) -> Result<roll_secrets::public_certs::Ordered, String> {
-        self.orders.lock().unwrap().push((o.names.to_vec(), o.account.is_some()));
+        let value = {
+            let mut orders = self.orders.lock().unwrap();
+            orders.push((o.names.to_vec(), o.account.is_some()));
+            format!("order-{}", orders.len())
+        };
         self.signed_in(o.dns).expect("the registration's DNS credential");
+        if matches!(o.dns, roll_secrets::public_certs::DnsCredential::Route53 { .. }) {
+            let records: std::collections::BTreeSet<String> = o.names.iter().map(|n| format!("_acme-challenge.{}", n.trim_start_matches("*."))).collect();
+            for r in &records {
+                let mut set = self.txt.lock().unwrap().get(r).cloned().unwrap_or_default();
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                set.push(value.clone());
+                self.txt.lock().unwrap().insert(r.clone(), set);
+            }
+            // The propagation wait, then the CA looks.
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            let missing = records.iter().find(|r| !self.txt.lock().unwrap()[*r].contains(&value));
+            for r in &records {
+                let mut set = self.txt.lock().unwrap().get(r).cloned().unwrap_or_default();
+                set.retain(|v| *v != value);
+                self.txt.lock().unwrap().insert(r.clone(), set);
+            }
+            if let Some(r) = missing {
+                return Err(format!("the CA refused: unauthorized No TXT record found at {r}"));
+            }
+        }
         if let Some(n) = o.names.iter().find(|n| n.starts_with("unproven.")) {
             return Err(format!("the CA refused: unauthorized No TXT record found at _acme-challenge.{n}"));
         }
@@ -9352,6 +9397,8 @@ async fn route53_proves_public_certificates_as_the_projects_aws_role_or_an_acces
     let ca = Arc::new(FakeCa::new());
     api.secrets.set_public_ca(ca.clone());
     *api.sts.pinned.lock().unwrap() = Some(format!("roll-secrets:{}", api.project));
+    // Kept for certificates as the docs say: its trust takes `roll-public-cert-*` sessions only.
+    *api.sts.session_like.lock().unwrap() = Some("roll-public-cert-");
     let role = api.ok(Method::POST, "/aws-roles", Some(json!({ "name": "dns", "role_arn": "arn:aws:iam::123456789012:role/roll" }))).await;
     let role_id = role["id"].as_str().unwrap().to_string();
     let new = |dns: Value| {
@@ -9396,6 +9443,35 @@ async fn route53_proves_public_certificates_as_the_projects_aws_role_or_an_acces
     assert_eq!(ca.dns.lock().unwrap().last().map(String::as_str), Some("key AKIAROLLFAKE00000001"));
     assert_eq!(ca.orders.lock().unwrap().len(), 2);
     api.ok(Method::DELETE, &format!("/aws-roles/{role_id}"), None).await;
+}
+
+/// Two of roll's orders writing one Route 53 name (`*.example.com` and `example.com`, which share
+/// `_acme-challenge.example.com`), as two nodes' sweeps at once: each read-and-UPSERT of the set
+/// could drop the other's value, so an order holds its record names in the shared database and the
+/// other waits for the next pass. Both are issued, and no order fails.
+#[tokio::test]
+async fn two_orders_on_one_route53_name_never_write_it_at_once() {
+    let api = Api::new().await;
+    let ca = Arc::new(FakeCa::new());
+    api.secrets.set_public_ca(ca.clone());
+    for (name, domain) in [("wild", "*.roll-fake.test"), ("apex", "roll-fake.test")] {
+        let body = json!({ "name": name, "directory_url": roll_secrets::public_certs::PUBLIC_CAS[0], "domains": [domain], "dns_provider": "route53", "dns_credential": "AKIAROLLFAKE00000001:fake-secret", "eab_kid": "kid-roll-fake", "eab_hmac_key": "cm9sbC1mYWtlLWhtYWM" });
+        api.ok(Method::POST, "/public-certs", Some(body)).await;
+    }
+    for _ in 0..3 {
+        let sweep = || {
+            let s = api.secrets.clone();
+            tokio::task::spawn_blocking(move || s.sweep_public_certs().unwrap())
+        };
+        let (a, b) = tokio::join!(sweep(), sweep());
+        assert_eq!(a.unwrap().failed + b.unwrap().failed, 0, "no order lost its value: {:?}", ca.orders.lock().unwrap());
+        if api.ok(Method::GET, "/public-certs", None).await.as_array().unwrap().iter().all(|c| c["status"] == "issued") {
+            break;
+        }
+    }
+    let certs = api.ok(Method::GET, "/public-certs", None).await;
+    assert!(certs.as_array().unwrap().iter().all(|c| c["status"] == "issued"), "{certs}");
+    assert_eq!(ca.orders.lock().unwrap().len(), 2, "each ordered once");
 }
 
 /// docs/secrets.md, "Publicly trusted certificates": a leak of a linked key revokes its certificate

@@ -33,6 +33,16 @@ pub struct Note {
     /// lockdown withholds its words, and roll's browser never takes its steps.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub outside: bool,
+    /// The work item it was made on its change's repo (`POST …/notes/{note}/work`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub work: Option<NoteWork>,
+}
+
+/// A note's work item: its number on the repo, and where the repo's work is shown.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct NoteWork {
+    pub number: u64,
+    pub url: String,
 }
 
 /// How a note's reviewer saw its page (the note's own words, from the page's button): their
@@ -238,7 +248,7 @@ pub fn thread(comments: impl IntoIterator<Item = Comment>) -> Vec<Note> {
             let outside = c.outside || c.by.starts_with("guest:");
             // Its steps aren't taken from outside the team (a reader's could click anything).
             let seen = if outside { Seen { steps: Vec::new(), ..Seen::of(&c.body) } } else { Seen::of(&c.body) };
-            notes.push(Note { id: c.id, path, selector, note, by: c.by, at: c.at, replies: Vec::new(), crop: false, crop_as: None, seen, outside });
+            notes.push(Note { id: c.id, path, selector, note, by: c.by, at: c.at, replies: Vec::new(), crop: false, crop_as: None, seen, outside, work: None });
         } else if let Some((to, note)) = parse_reply(&c.body) {
             let outside = c.outside || c.by.starts_with("guest:");
             replies.push((to, Reply { id: c.id, note, by: c.by, at: c.at, outside }));

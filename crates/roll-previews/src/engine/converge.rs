@@ -657,17 +657,19 @@ impl Engine {
             self.store.log(&r.id, &format!("released in {:.1} s", ms as f64 / 1000.0))?;
         }
         // 3c'. A rehearsal asked for at this head: the release again on the parents as they are
-        // now. Asked by roll when the change is queued to land, where the project wants it.
-        if s.rehearse_when_queued
+        // now. Asked by roll at every head where the project checks its releases, else when the
+        // change is queued to land, where the project wants that.
+        let every_head = s.release_checks != crate::settings::ReleaseChecksRule::Off;
+        if (s.rehearse_when_queued || every_head)
             && s.release.is_some()
             && let Some(change) = r.change_id.as_deref()
             && self.store.runtime_fact::<crate::Rehearsal>(&r.id, "rehearsal")?.is_none_or(|x| x.head != r.build())
-            && self.source.change(change).await.ok().flatten().is_some_and(|c| c.queued)
+            && (every_head || self.source.change(change).await.ok().flatten().is_some_and(|c| c.queued))
             && self.store.resources(&r.id)?.iter().any(|x| x.kind == Kind::Postgres && x.r#ref.is_some())
         {
             let asked = crate::Rehearsal { head: r.build().to_string(), by: "roll".into(), at: self.store.now_ms()?, ok: None, ms: None, error: None };
             self.store.set_runtime_fact(&r.id, "rehearsal", Some(&asked))?;
-            self.store.log(&r.id, "the change is queued to land: rehearsing its release on today's data")?;
+            self.store.log(&r.id, if every_head { "rehearsing its release on today's data at this head (the project checks its releases)" } else { "the change is queued to land: rehearsing its release on today's data" })?;
         }
         if let Some(release) = &s.release
             && let Some(asked) = self.store.runtime_fact::<crate::Rehearsal>(&r.id, "rehearsal")?.filter(|x| x.ok.is_none() && x.head == r.build())
@@ -1991,7 +1993,7 @@ impl Engine {
     /// any more): a failure is said and doesn't hold the push up. The copy stays recorded, so
     /// the next eviction or the preview's teardown deletes it. A reset, changed masks and the
     /// teardown use the strict one: a copy masked by older rules must never stay reachable.
-    async fn drop_pinned_data_or_say(&self, id: &str, which: impl Fn(&crate::store::PinnedData) -> bool) -> anyhow::Result<()> {
+    pub(super) async fn drop_pinned_data_or_say(&self, id: &str, which: impl Fn(&crate::store::PinnedData) -> bool) -> anyhow::Result<()> {
         if let Err(e) = self.drop_pinned_data(id, which).await {
             warn!(preview = %id, error = %e, "previews: deleting an earlier push's copy");
             self.store.log(id, &format!("couldn't delete an earlier push's copy of its data yet: tried again later ({e:#})"))?;

@@ -180,6 +180,8 @@ Preview = {state: "creating" | "running" | "sleeping" | "failed", url: string | 
                           schema_changes?: string[] /* "+ …"/"- …": its Postgres schema against the parents' */,
                           schema_risks?: string[] /* what in them would hurt production when it lands */,
                           schema_overlaps?: [branch, tables[]][] /* other open changes whose schema changes touch the same tables */,
+                          release_checks?: "check" | "required" /* the project's rule for its release at each head */,
+                          rehearsal?: {ok: boolean | null, error?} /* its release rehearsed on today's data at its head (ok null while it waits) */,
                           screenshot_url?: string /* a public preview's screenshot, signed and expiring */,
                           diff_url?: string /* the same for where it differs from the default branch's, when it does */,
                           expires_at?: number /* ms: when it goes (its TTL, or a keep, running out), once a day away */,

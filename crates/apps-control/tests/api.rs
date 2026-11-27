@@ -3611,8 +3611,9 @@ async fn a_domains_records_are_written_with_the_customers_token() {
             Ok(vec![])
         }
         // Read once as the caller: nothing bound, no maker kept.
-        async fn use_once(&self, _: apps_control::integrations::Asker<'_>, _: &str, env: &str, _: &str, reference: &str, _: &str) -> anyhow::Result<String> {
+        async fn use_once(&self, _: apps_control::integrations::Asker<'_>, _: &str, env: &str, _: &str, reference: &str, _: &str, to: Option<&'static str>) -> anyhow::Result<String> {
             anyhow::ensure!((env, reference) == ("production", "roll://production/CF_TOKEN"), "you may not reveal {reference}");
+            assert_eq!(to, Some("https://dns.example/v4"), "the writer's own API");
             Ok("cf-secret".into())
         }
     }
@@ -3628,6 +3629,9 @@ async fn a_domains_records_are_written_with_the_customers_token() {
             self.1.lock().push((kind.to_string(), name.to_string()));
             self.0.add(name, if kind == "TXT" { "TXT" } else { "CNAME" }, content);
             Ok(Vec::new())
+        }
+        fn api(&self) -> &'static str {
+            "https://dns.example/v4"
         }
     }
     let w = world_full(|_| {}, false, |d| d.secrets = Arc::new(Cf)).await;
@@ -5272,6 +5276,17 @@ async fn on_call_targets_open_and_close_incidents() {
     assert!(after.iter().any(|c| c.contains("deploy.failed")) && !after.iter().any(|c| c.contains("alert.memory")), "the silenced alert paged no one: {after:?}");
     assert_eq!(call(&w.api, "DELETE", &format!("{silences}/{}", sil["id"].as_str().unwrap()), None).await.0, StatusCode::NO_CONTENT);
     assert_eq!(call(&w.api, "GET", &silences, None).await.1, json!([]));
+    // Ended with its alert still open (no resolve since): it pages now, as a snooze's end does.
+    let mut paged = false;
+    for _ in 0..400 {
+        seen = got.lock().clone();
+        if seen[before..].iter().any(|(u, _, b)| u == "/pd" && b["dedup_key"] == key("alert.memory").as_str() && b["event_action"] == "trigger") {
+            paged = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(paged, "the held alert went out when the silence ended");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -5769,7 +5784,7 @@ async fn a_previews_pages_carry_the_feedback_button_for_its_link_visitors() {
     struct Said(Mutex<Vec<(String, String)>>);
     #[async_trait]
     impl apps_control::integrations::FeedbackNotes for Said {
-        async fn notes(&self, env: &str, path: &str) -> anyhow::Result<Vec<apps_control::integrations::Note>> {
+        async fn notes(&self, _service: &str, env: &str, path: &str) -> anyhow::Result<Vec<apps_control::integrations::Note>> {
             self.0.lock().push((env.into(), path.into()));
             Ok(vec![apps_control::integrations::Note { path: path.into(), selector: "h1".into(), note: "bigger".into(), by: "ana".into(), at: 1 }])
         }
@@ -5844,7 +5859,7 @@ async fn a_previews_share_link_lets_its_guest_in_until_it_ends() {
     }
     #[async_trait]
     impl PreviewShares for Links {
-        async fn live(&self, env: &str, token: &str, followed: bool) -> Option<Share> {
+        async fn live(&self, _service: &str, env: &str, token: &str, followed: bool) -> Option<Share> {
             if env != "pv-abc" || token != "share-1" || self.revoked.load(Ordering::SeqCst) {
                 return None;
             }
@@ -5853,11 +5868,11 @@ async fn a_previews_share_link_lets_its_guest_in_until_it_ends() {
             }
             Some(Share { ends_ms: i64::MAX / 2, notes: true })
         }
-        async fn note(&self, env: &str, token: &str, body: &[u8]) -> Result<String, (u16, String)> {
+        async fn note(&self, _service: &str, env: &str, token: &str, body: &[u8]) -> Result<String, (u16, String)> {
             self.posted.lock().push((env.into(), token.into(), String::from_utf8_lossy(body).into()));
             Ok("rv_g".into())
         }
-        async fn notes(&self, _env: &str, token: &str, path: &str) -> Vec<Note> {
+        async fn notes(&self, _service: &str, _env: &str, token: &str, path: &str) -> Vec<Note> {
             vec![Note { path: path.into(), selector: "h1".into(), note: format!("through {token}"), by: "guest:Ada".into(), at: 1 }]
         }
     }

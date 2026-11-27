@@ -571,6 +571,15 @@ pub trait Source: Send + Sync {
     async fn comment(&self, _change: &str, _body: &str, _by: &str, _outside: bool) -> anyhow::Result<Option<String>> {
         Ok(None)
     }
+    /// A work item on the change's repo (roll code's issues: what an agent can claim) with
+    /// `title`, `body` and `labels`, `outside` when its words are someone's outside the team: its
+    /// number and where it's shown. On a repo mirrored to GitHub, the team's words open an issue
+    /// there instead (which becomes the repo's work item); someone's outside the team's stay a
+    /// work item in roll only (marked so, and never published to GitHub). `None` where this source
+    /// can't.
+    async fn work_item(&self, _change: &str, _title: &str, _body: &str, _labels: &[&str], _outside: bool) -> anyhow::Result<Option<(u64, String)>> {
+        Ok(None)
+    }
     /// The git commit of a changeset.
     async fn git_commit(&self, _repo: &str, _revision: &str) -> anyhow::Result<Option<String>> {
         Ok(None)

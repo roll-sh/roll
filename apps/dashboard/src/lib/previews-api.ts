@@ -120,6 +120,8 @@ export interface Preview {
   release?: { head: string; ms: number; before_ms: number | null; locks?: { table: string; mode: string; ms: number }[] } | null;
   /** Its release rehearsed on the parents' data as it is now: asked at `head` (`ok` null while it waits), then how it went. */
   rehearsal?: { head: string; by: string; at: number; ok: boolean | null; ms: number | null; error: string | null } | null;
+  /** Its recent GETs replayed against main's preview (0: no answer; `removed`/`added`: a JSON answer's top-level fields). */
+  replay?: { head: string; by: string; at: number; ok: boolean | null; requests: { service: string; path: string; status: number; main_status: number; removed: string[]; added: string[] }[]; error: string | null } | null;
   /** Main's code on a copy of this head's migrated data: each page's status there and on main's (0: no answer). */
   main_on_change?: { head: string; at: number; ms: number; pages: { service: string; path: string; status: number; main_status: number }[]; error: string | null } | null;
   /** Columns its branches were masked with by default: they look like people's data and no rule names them (`keep` leaves one as it is). */
@@ -173,6 +175,8 @@ export interface Preview {
   browser_checks_rule?: "check" | "required" | null;
   /** The project's rule for regressions against main (`check`, `required`). */
   regressions?: "check" | "required" | null;
+  /** The project's rule for its release at each head (where there's a Postgres branch to rehearse on). */
+  release_checks?: "check" | "required" | null;
   /** Who accepted its regressions at its head. */
   regressions_accepted?: { head: string; by: string; at: number } | null;
   /** Compared with main's preview at its head (errors; routes too with traces): until then nothing says it has no regressions. */
@@ -526,6 +530,8 @@ export interface PreviewSettings {
   release?: PreviewJob | null;
   /** When a change is queued to land, its release is rehearsed on today's data (`…/rehearse`, by roll). */
   rehearse_when_queued?: boolean;
+  /** check: its release rehearsed on today's data at every head; required: also a landing blocker. */
+  release_checks?: "off" | "check" | "required";
   /** Run once when the preview is deleted, before its services and branches go (cleanup outside roll). */
   teardown?: PreviewJob | null;
   /** NoSQL column masks: `"nosql:<ref>"` → `{"keyspace.table.column": "mask_default()"}`. */
@@ -665,6 +671,12 @@ export const previewsApi = {
   vars: (id: string) => call<{ vars: Record<string, string> }>("GET", `${one(id)}/env`),
   /** Resolve a note left on its page (the note's review id): the page's button stops listing it. */
   resolveNote: (id: string, note: string) => call<{ resolved: string }>("POST", `${one(id)}/notes/${encodeURIComponent(note)}/resolve`, {}),
+  /** Its recent GETs replayed against main's preview, in the background (`replay` has it at its head). */
+  replay: (id: string) => call<NonNullable<Preview["replay"]>>("POST", `${one(id)}/replay`, {}),
+  /** The open notes on its pages (the page's own list), each with the work item made of it. */
+  notes: (id: string) => call<{ notes: { id: string; path: string; note: string; by: string; work?: { number: number; url: string } }[] }>("GET", `${one(id)}/notes`),
+  /** The note made a work item on its change's repo by roll (once a note; a guest's marked as outside the team's words). */
+  noteWork: (id: string, note: string) => call<{ number: number; url: string }>("POST", `${one(id)}/notes/${encodeURIComponent(note)}/work`, {}),
   /** The mail its services sent, caught instead of delivered (newest first; the last 50). */
   mail: (id: string) => call<{ mail: CaughtMail[] }>("GET", `${one(id)}/mail`),
   /** One caught message as it was sent, as text. */

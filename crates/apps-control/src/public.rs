@@ -484,8 +484,14 @@ pub(crate) async fn call_scheduled(apps: Arc<Apps>, service: &str, env: &str, ho
 /// GET `path` of an environment on its owner for an uptime check (`crate::checks`), as `host`
 /// asks and past its gates as a schedule's call is: the status and at most `max` bytes of the
 /// answer, or why it never answered.
-pub(crate) async fn call_check(apps: Arc<Apps>, service: &str, env: &str, host: &str, path: &str, timeout: std::time::Duration, max: usize) -> std::result::Result<(u16, Vec<u8>), String> {
-    let mut req = Request::builder().method(axum::http::Method::GET).uri(path).header(header::HOST, host).header(header::USER_AGENT, "roll-uptime/1.0").body(Body::empty()).map_err(|e| e.to_string())?;
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn call_check(apps: Arc<Apps>, service: &str, env: &str, host: &str, method: &str, path: &str, headers: &[(String, String)], body: Option<String>, timeout: std::time::Duration, max: usize) -> std::result::Result<(u16, Vec<u8>), String> {
+    let method = axum::http::Method::from_bytes(method.as_bytes()).unwrap_or(axum::http::Method::GET);
+    let mut b = Request::builder().method(method).uri(path).header(header::HOST, host).header(header::USER_AGENT, "roll-uptime/1.0");
+    for (k, v) in headers {
+        b = b.header(k.as_str(), v.as_str());
+    }
+    let mut req = b.body(body.map(Body::from).unwrap_or_else(Body::empty)).map_err(|e| e.to_string())?;
     req.extensions_mut().insert(Scheduled);
     tokio::time::timeout(timeout, async {
         let r = proxy(apps, service, env, None, req).await;
@@ -936,14 +942,14 @@ async fn check_access(apps: &Arc<Apps>, service: &str, env: &str, req: &mut Requ
     {
         let name = host_only(apps, format!("roll_share_{env}"));
         if let Some(t) = take_cookie(req, &name)
-            && let Some(s) = shares.live(env, &t, false).await
+            && let Some(s) = shares.live(service, env, &t, false).await
         {
             take_cookie(req, &host_only(apps, format!("roll_access_{env}")));
             req.extensions_mut().insert(ShareGuest { token: t, notes: s.notes });
             return None;
         }
         if let Some(t) = query_value(req, "roll_share")
-            && let Some(s) = shares.live(env, &t, true).await
+            && let Some(s) = shares.live(service, env, &t, true).await
         {
             let left = ((s.ends_ms - code_sql::now_ms()) / 1000).max(1);
             return Some(match enter(apps, req, "roll_share", &name, &t, Some(left)) {
@@ -1977,8 +1983,8 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
     }
     if target.is_some() && req.uri().path() == crate::feedback::NOTES {
         return match &guest {
-            Some(g) => crate::feedback::guest_notes(apps.preview_shares(), env, &g.token, req.uri().query()).await,
-            None => crate::feedback::notes(apps.feedback_notes(), env, req.uri().query()).await,
+            Some(g) => crate::feedback::guest_notes(apps.preview_shares(), service, env, &g.token, req.uri().query()).await,
+            None => crate::feedback::notes(apps.feedback_notes(), service, env, req.uri().query()).await,
         };
     }
     if target.is_some()
@@ -1987,7 +1993,7 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
         && req.method() == axum::http::Method::POST
     {
         let token = g.token.clone();
-        return crate::feedback::guest_note(apps.preview_shares(), env, &token, req).await;
+        return crate::feedback::guest_note(apps.preview_shares(), service, env, &token, req).await;
     }
     let page_load = req.method() == axum::http::Method::GET
         && match req.headers().get("sec-fetch-dest").and_then(|v| v.to_str().ok()) {

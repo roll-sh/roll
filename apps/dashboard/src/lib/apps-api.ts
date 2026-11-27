@@ -1308,6 +1308,10 @@ export interface UptimeCheck {
   from?: "roll" | "public";
   /** A public check's host: one of its active custom domains (none: its own URL). */
   host?: string;
+  /** Its request beyond a GET: a header value's `${NAME}` is the environment's own variable. */
+  method?: "GET" | "HEAD" | "POST" | "PUT" | "PATCH" | "DELETE" | "OPTIONS";
+  headers?: Record<string, string>;
+  body?: string;
 }
 
 export interface UptimeCheckState {

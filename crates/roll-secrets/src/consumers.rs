@@ -304,23 +304,32 @@ impl Secrets {
     /// [`Maker`] is recorded and nothing re-checks them later. The checks [`Secrets::bind_ref`]
     /// makes: the one project that holds and stands for `resource`, `reveal` on the folder for the
     /// caller (an approval of an `ask` there is enough, since it's this request's: the gate lends
-    /// it), no sensitive key (a person or a token never reads one), no protected environment for
-    /// an untrusted copy, and no caller that's itself untrusted. Audited as `secrets.use` by the
-    /// caller, naming the resource and `purpose` (a fixed phrase of the product's, never a value).
-    pub fn use_once(&self, resource: &ResourceRef, reference: &str, caller: &Caller, purpose: &str) -> Result<Resolved, Refusal> {
+    /// it), no protected environment for an untrusted copy, and no caller that's itself untrusted.
+    /// Never a sensitive key, `to` or not: a person who may reveal the folder but not read the
+    /// key would otherwise have roll act with it wherever it reaches (a DNS token writing records
+    /// in every zone it can edit), so it waits for an opt-in on the key its owner sets. `to` is
+    /// the one fixed host the product sends the value to, a constant in its code
+    /// (`roll_edge::acme::Cloudflare::API`), named in the audit. Audited as `secrets.use` by the
+    /// caller, naming the resource, `purpose` (a fixed phrase of the product's, never a value) and
+    /// `to`.
+    pub fn use_once(&self, resource: &ResourceRef, reference: &str, caller: &Caller, purpose: &str, to: Option<&'static str>) -> Result<Resolved, Refusal> {
+        if to.is_some_and(|t| !t.starts_with("https://") || t.contains('@')) {
+            return Err(Refusal::Failed(Error::Internal("a fixed host is an https:// URL with no credentials".into())));
+        }
         let r = required(reference)?;
         let project = self.project_for(resource, r.project.as_deref())?;
         if caller.grants.untrusted() {
             return Err(Refusal::NotAllowed(format!("{} runs code nobody vetted, so it reads no roll:// reference", caller.principal)));
         }
         self.may_reveal_for(&project, &r, caller)?;
-        // Read with the caller's rights, never as a runtime, and named for the resource (with a `:`,
-        // so no person's own overrides are read: `Caller::personal`).
+        // Read with the caller's rights, never as a runtime (so a sensitive key is refused, even for
+        // a fixed host: `consumer_entry`), and named for the resource (with a `:`, so no person's
+        // own overrides are read: `Caller::personal`).
         let by = caller.made_by().to_string();
         let mut reader = caller.clone().not_runtime().acting_as(format!("{} for {by}", resource.consumer()));
         reader.maker = Some(by);
         let resource = &ResourceRef { placeholders: false, ..resource.clone() };
-        self.resolve_one(&project, &r.env, &r.path, &r.key, &reader, resource.untrusted, resource, Some((caller, purpose)))
+        self.resolve_one(&project, &r.env, &r.path, &r.key, &reader, resource.untrusted, resource, Some(crate::read::Once { by: caller, purpose, to }))
     }
 
     /// The digest of the folder `reference` reads, as `maker` may now: refused exactly as

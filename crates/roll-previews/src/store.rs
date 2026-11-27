@@ -264,6 +264,16 @@ CREATE TABLE IF NOT EXISTS visual_page_refusals (
     reason TEXT NOT NULL,
     PRIMARY KEY (preview_id, path)
 );
+-- A note made a work item on its change's repo (`POST …/notes/{note}/work`): once a note.
+CREATE TABLE IF NOT EXISTS note_work (
+    preview_id TEXT NOT NULL,
+    review_id TEXT NOT NULL,
+    number INTEGER NOT NULL,
+    url TEXT NOT NULL,
+    by TEXT NOT NULL,
+    at INTEGER NOT NULL,
+    PRIMARY KEY (preview_id, review_id)
+);
 CREATE TABLE IF NOT EXISTS resolved_notes (
     preview_id TEXT NOT NULL,
     review_id TEXT NOT NULL,
@@ -1580,7 +1590,7 @@ impl Store {
             if let Some((project, change, head)) = gone {
                 emit(c, now, "deleted", &project, id, change.as_deref(), &serde_json::json!({ "head": head }))?;
             }
-            for t in ["resources", "services", "pinned", "pinned_data", "restore_points", "shares", "guest_notes", "note_tells", "visit_tickets", "visit_sessions", "visits", "activity", "screenshots", "page_shots", "visual_page_accepts", "visual_page_refusals", "mail", "resolved_notes", "base_history", "leases", "note_crops", "git_pulls", "git_reports", "runtime_facts", "gone_pushes", "run_usage", "service_spend", "previews"] {
+            for t in ["resources", "services", "pinned", "pinned_data", "restore_points", "shares", "guest_notes", "note_tells", "visit_tickets", "visit_sessions", "visits", "activity", "screenshots", "page_shots", "visual_page_accepts", "visual_page_refusals", "mail", "resolved_notes", "note_work", "base_history", "leases", "note_crops", "git_pulls", "git_reports", "runtime_facts", "gone_pushes", "run_usage", "service_spend", "previews"] {
                 let col = if t == "previews" { "id" } else { "preview_id" };
                 c.execute(&format!("DELETE FROM {t} WHERE {col} = ?"), [id])?;
             }
@@ -2823,6 +2833,46 @@ impl Store {
     }
 
     /// The notes resolved on a preview's page (their reviews' ids).
+    /// The notes made work items, by note: (number, where it's shown). One still being made
+    /// isn't one.
+    pub fn note_work(&self, preview: &str) -> Result<std::collections::HashMap<String, (u64, String)>> {
+        let rows: Vec<(String, i64, String)> = self.db.read(|c| c.query("SELECT review_id, number, url FROM note_work WHERE preview_id = ? AND number > 0", [preview], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))))?;
+        Ok(rows.into_iter().map(|(n, num, url)| (n, (num as u64, url))).collect())
+    }
+
+    /// Who makes note `review`'s work item, decided in one write: this caller (a row of its
+    /// own, number 0 until it's made; one a crash left over a minute ago is taken over), or the
+    /// item already made, or `Busy` while another caller makes it.
+    pub fn claim_note_work(&self, preview: &str, review: &str, by: &str) -> Result<NoteWorkClaim> {
+        let now = self.now_ms()?;
+        self.db.write(|c| {
+            let row: Option<(i64, String, i64)> = c.query_row("SELECT number, url, at FROM note_work WHERE preview_id = ? AND review_id = ?", params![preview, review], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
+            Ok::<_, Error>(match row {
+                Some((number, url, _)) if number > 0 => NoteWorkClaim::Made(number as u64, url),
+                Some((_, _, at)) if now - at < 60_000 => NoteWorkClaim::Busy,
+                Some(_) => {
+                    c.execute("UPDATE note_work SET by = ?, at = ? WHERE preview_id = ? AND review_id = ? AND number = 0", params![by, now, preview, review])?;
+                    NoteWorkClaim::Mine
+                }
+                None => {
+                    c.execute("INSERT INTO note_work (preview_id, review_id, number, url, by, at) VALUES (?, ?, 0, '', ?, ?) ON CONFLICT (preview_id, review_id) DO NOTHING", params![preview, review, by, now])?;
+                    NoteWorkClaim::Mine
+                }
+            })
+        })
+    }
+
+    /// Note `review`'s work item made (`number`), or, with `None`, not: its claim let go.
+    pub fn set_note_work(&self, preview: &str, review: &str, made: Option<(u64, &str)>) -> Result<()> {
+        self.db.write(|c| {
+            match made {
+                Some((number, url)) => c.execute("UPDATE note_work SET number = ?, url = ? WHERE preview_id = ? AND review_id = ?", params![number as i64, url, preview, review])?,
+                None => c.execute("DELETE FROM note_work WHERE preview_id = ? AND review_id = ? AND number = 0", params![preview, review])?,
+            };
+            Ok::<_, Error>(())
+        })
+    }
+
     pub fn resolved_notes(&self, preview: &str) -> Result<std::collections::HashSet<String>> {
         let ids: Vec<String> = self.db.read(|c| c.query("SELECT review_id FROM resolved_notes WHERE preview_id = ?", [preview], |r| r.get(0)))?;
         Ok(ids.into_iter().collect())
@@ -3383,6 +3433,8 @@ impl Store {
                  ON CONFLICT (preview_id, service, revision) DO UPDATE SET at = excluded.at",
                 params![id, service, revision, host, url, now],
             )?;
+            // Kept again (started on demand): its link isn't a gone push's any more.
+            c.execute("DELETE FROM gone_pushes WHERE host = ?", [host.as_str()])?;
             let old: Vec<String> = c.query(
                 "SELECT revision FROM pinned WHERE preview_id = ? AND service = ? ORDER BY at DESC LIMIT 1000 OFFSET ?",
                 params![id, service, PINNED_KEEP as i64],
@@ -4012,6 +4064,7 @@ impl Store {
         // head's outcome isn't this one's.
         let rehearsal = self.runtime_fact::<crate::Rehearsal>(&r.id, "rehearsal")?.filter(|x| x.head == r.build());
         let main_on_change = self.runtime_fact::<crate::MainOnChange>(&r.id, "main_on_change")?.filter(|x| x.head == r.build());
+        let replay = self.runtime_fact::<crate::Replay>(&r.id, "replay")?.filter(|x| x.head == r.build());
         let masked_by_default: Vec<crate::MaskedByDefault> = self.runtime_fact(&r.id, "masked_by_default")?.unwrap_or_default();
         let schema_overlaps = self.schema_overlaps(&r, schema_changes.as_deref())?;
         let kept_until = self.kept_until(&r.id)?;
@@ -4091,6 +4144,15 @@ impl Store {
             crate::settings::RegressionsRule::Check => Some("check".to_string()),
             crate::settings::RegressionsRule::Required => Some("required".to_string()),
         };
+        // Only where there's a Postgres branch to rehearse on: a rule that could never be met
+        // holds nothing back.
+        let rehearsable = self.resources(&r.id)?.iter().any(|x| x.kind == crate::Kind::Postgres && x.r#ref.is_some());
+        let release_checks = match settings.release_checks {
+            _ if !rehearsable => None,
+            crate::settings::ReleaseChecksRule::Off => None,
+            crate::settings::ReleaseChecksRule::Check => Some("check".to_string()),
+            crate::settings::ReleaseChecksRule::Required => Some("required".to_string()),
+        };
         // An acceptance counts at its head, for what it accepted (more at that head asks again), and
         // for a required rule only a person's.
         let showing = crate::RegressionsAccepted::of(slower_routes.as_ref(), new_errors.as_ref());
@@ -4155,6 +4217,7 @@ impl Store {
             schema_overlaps,
             rehearsal,
             main_on_change,
+            replay,
             masked_by_default,
             release,
             kept_until,
@@ -4181,6 +4244,7 @@ impl Store {
             served_secrets,
             skipped,
             regressions,
+            release_checks,
             regressions_accepted,
             regressions_compared,
             intercepted,
@@ -4256,6 +4320,14 @@ pub const SHARES_MAX: usize = 20;
 pub const WEBHOOKS_MAX: usize = 20;
 /// The most snapshots the team's tests keep on a preview.
 pub const SNAPSHOTS_MAX: usize = 40;
+
+/// [`Store::claim_note_work`]'s answer.
+#[derive(Clone, Debug, PartialEq)]
+pub enum NoteWorkClaim {
+    Mine,
+    Made(u64, String),
+    Busy,
+}
 
 /// Earlier pushes kept reachable per service.
 /// How long after it was replaced an earlier push still answers requests that name it (skew
