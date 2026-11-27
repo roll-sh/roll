@@ -728,6 +728,46 @@ fn distinct_aggregates() {
 }
 
 
+/// A hashed DISTINCT and UNION (enable_sort off) past hash_mem: nodeAgg's spilling, the rows of
+/// groups not in the table to partitions read back as batches, one temporary file; the rows in
+/// their order, the file and EXPLAIN ANALYZE's batches are PostgreSQL 18.6's.
+#[test]
+fn hashed_distinct_spills() {
+    std::thread::Builder::new().stack_size(64 << 20).spawn(hashed_distinct).unwrap().join().unwrap();
+}
+
+fn hashed_distinct() {
+    let dir = tempfile::tempdir().unwrap();
+    let eng = open(dir.path());
+    let mut s = eng.connect(1, "postgres", "postgres", "postgres").unwrap();
+    for sql in [
+        "CREATE TABLE hd (a int, t text)",
+        "INSERT INTO hd SELECT g % 9000, md5((g % 9000)::text) FROM generate_series(1, 20000) g",
+        "ANALYZE hd",
+        "SET enable_sort = off",
+        "SET work_mem = '64kB'",
+    ] {
+        q(&mut s, sql).unwrap();
+    }
+    for (sql, want) in [
+        ("SELECT DISTINCT t, a FROM hd", "3b17158565fcf15e93939dc84c59091d"),
+        ("SELECT t FROM hd UNION SELECT md5(a::text) FROM hd WHERE a % 2 = 0", "0d5d653427a972ab20f3baea876eb3e2"),
+    ] {
+        q(&mut s, "SELECT pg_stat_force_next_flush()").unwrap();
+        let f0 = int(&mut s, "SELECT temp_files FROM pg_stat_database WHERE datname = current_database()");
+        let md5 = format!("SELECT md5(string_agg(x::text, ',')) FROM ({sql}) x");
+        assert_eq!(one(&mut s, &md5), Value::Text(want.into()), "{sql}");
+        assert_eq!(temp_files(dir.path()), 0);
+        q(&mut s, "SELECT pg_stat_force_next_flush()").unwrap();
+        let f1 = int(&mut s, "SELECT temp_files FROM pg_stat_database WHERE datname = current_database()");
+        assert_eq!(f1 - f0, 1, "{sql}: the spill's file");
+    }
+    let plan = q(&mut s, "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) SELECT DISTINCT t, a FROM hd").unwrap();
+    assert!(format!("{plan:?}").contains("Batches: 21  Memory Usage: 169kB  Disk Usage: 1584kB"), "{plan:?}");
+    drop(s);
+    eng.shutdown();
+}
+
 /// RANGE and GROUPS frames with offset bounds in memory, over a 20,000-row partition: each
 /// bound found by a pointer moving forward (`window::FrameSearch`, as nodeWindowAgg.c), where
 /// a search from the partition's start each row took minutes; NULLs, DESC, floats, exclusions.
