@@ -16573,6 +16573,138 @@ Harness: `~/.cache/a328/bench` (`stmt.sh`: per-statement cells, custom against g
 `prof.sh`: an LBR profile of one cell; `oltp.sh` from 322 with `PCM=<plan_cache_mode>`), the probe test and
 its trace prints in `~/.cache/a328/patches/` (`a328_probe.rs`, `probe-trace2.patch`; not for landing).
 
+## Short write transactions, round 22: the estimate's change records were never restored (agent 341)
+
+**Item 1: what recovery does with the change records.** Both of the brief's possibilities were half
+right. `restore` reads them, and recovery needs them: `ensure`'s cold path calls it at a table's first
+use after reopening, and the records are all that keep the places of the versions past the model, the
+runs, the fill and the btrees' leaves since the last full record. But it never got that far. Since
+agent 241 (`1b9f54d64`), the full record's key was `est_key(oid)` and the change records' keys were
+`est_key(oid) ++ seq`, so the full record's key was a prefix of theirs. The store's user keys must be
+prefix-free (a version's key is the user key with `!ts` appended; `sst.rs` and `mod.rs` rely on it).
+So the memtable held the full record after its change records (its `!ts` begins 0xff, their numbers
+0x00), and a file's reader took a change record for an older version of it. `restore` found a change
+record first and refused all the table's records. That happened after a crash and after a clean
+close alike: a probe (120-300 one-row UPDATEs after `past_model_history`) showed 227 change records
+under the prefix after a clean restart and no full record. The table was then estimated afresh
+(relstats' pages, the rows' stored layout): the same sizes, pg_class and plans, but another serial
+scan order and float sum (md5 `6b652f93…` for `25e4f20e…`). That is why 337's crash test passed with
+every change record refused: it checked sizes, which the fallback gets right.
+
+**What changed** (`cand/a341`): the records live under a prefix of their own (0x29), all keys one
+length. `rec_key(oid, 0)` holds the full record and `rec_key(oid, 1)`, 2, ... the change records in
+order. `restore` reads the table's range, full record first. A store written before this has its
+records under 0x22: they are not read (the table is estimated afresh once, as those builds already
+did in practice), and they are deleted with the table's first full record here (`drop_records` with
+the count unknown). The 0xe2 change record and btest's changed-leaves form, never written under the
+new keys, are no longer read. A build before this one finds no record under 0x22 and estimates the
+table afresh; it never misreads the new ones. Bytes a commit are unchanged (a change key is 20 bytes
+as before; the full record's key grows from 12 to 20).
+
+**The test** (`big_tables::change_records_restored_after_a_crash`): `past_model_history`, a modelled
+1,000-row table beside it, then 120 one-row UPDATEs of the big table (40 of the modelled one), each a
+commit, none folded, then `kill -9`. After reopening, these equal the same statements run without a
+crash: sizes, pg_class, EXPLAIN rows of three plans, the serial order's md5 and float sum, both
+tables. A clean restart equals a second reading without one (the first reading's scans prune). pg_stat's
+counts are all 0 after the crash, as PostgreSQL discards them (pgstat_discard_stats), and kept across
+the restart. Then the same with the change records folded every kilobyte (`estkeep::with_fold_after`,
+a thread's hook; 40 rows updated three times, so a stale record would put an older place over a newer
+one): the store holds the full record and the change records since the last fold (`kept_records`),
+`restore` applies exactly those, and an UPDATE after the crash places its versions as one after the
+restart. It fails on the head before this (the restart's order), with `restore` applying no change
+record (the crash's order: a clean close folds them, so only the crash needs them), and with a fold
+deleting no change record (the records left; re-applying them moved nothing the queries read, which
+is why the test counts records). It runs in 25-35 s in a debug build.
+
+Gates (`cand/a341-2`, code `ff68c825f` on `247e4bcd5`): quick-check with `QC_CHECKED=1` and
+`QC_TESTS="big_tables crash_bulk storage_linked_gc"`: 13 test binaries, clippy 16 warnings, none new
+in a changed file, tests 394 passed in 10 binaries, checked 394 passed, regress 51,148 / 51,150 (0
+newly differing), isolation 1,647 / 1,648, pg_dump 14,609 passed (no crash stage: the diff maps
+`exec/sizing` to none); `tools/crash-binary.py` seeds 1-3 and `--power drop` seeds 1-3 against its
+plain dist build: ok. On `db3d53b38`, one `--power drop
+--seed 3` stopped in round 2 with "TOOL ERROR (not the engine's)": the power-cut layer's record had a
+spill file renamed into `base/` that it had not seen (`spill/3448/...sst` against
+`base/16384/...1e.sst`, one inode). The same seed again passed all 10 rounds. The tool's interposer
+(`powercut.so`) misses one way a spill file is moved now and then; it is not the estimate records.
+
+**Item 2: a fold's change records by one range deletion, dropped.** A fold of pgbench_accounts' records
+at scale 32 writes ~75,000 deletions at once (~37 bytes a commit of the memtable's ~540). One range
+deletion (`rdel` marker from the first change record to the table's last possible one, the same range
+at every fold, so the marker's newest version hides what an older one did) took them to one write.
+Plain dist pairs, warmed TPC-B-like, 480,000 counted at 8 clients, lane A at 1.7-2.8 foreign cores (the
+machine at load 50-200; instruction counts only): 353.9k / 357.3k -> 371.6k / 364.3k user instructions
+a transaction. The flush thread went 45.8k / 47.1k -> 55.2k / 57.1k with two compactions in every
+window, peak anon+shmem 621-628 -> 682-753 MB. A live range deletion keeps compaction from copying
+any block of an L1 file it meets until it retires (`Copies::new`), and `collect_ranges` rewrites that
+file: the compaction after the warm-up copied 12,845 blocks unchanged instead of 45,881. Patch:
+`~/.cache/a341/patches/fold-range-deletion.patch`.
+
+Built instead and tested, not measured (`~/.cache/a341/patches/fold-epochs.patch`, on `cand/a341`):
+a fold writes no deletion. The full record and each change record carry the fold's epoch (the
+store's visible ts at the fold; tags 0xe5 / 0xe4 with a varint after them). The next change records
+are written over the old ones under the same numbers, and `restore` stops at the first record of an
+older epoch, so what is left behind is at most one fold's run of records. Item 1's 0xe1 / 0xe3
+records are still read, and the next record after them is a full one. The crash test above passes
+with it (`kept_records` reports each record's epoch), and fails with `restore` reading past the
+fold's run (45 change records restored for 16). It saves the ~37 bytes a commit, about 7% of the
+memtable's bytes, so compactions come about 7% less often: about 1% of the total, which needs a
+quiet lane to show.
+
+**Item 3: compaction of the big table, probes.** One probe build (`probe-zstd-level-row-block-env.patch`:
+the L1 blocks' zstd level from `ROLL_PROBE_ZSTD_LEVEL`, the row block size from `ROLL_PROBE_ROW_BLOCK`;
+not for landing), all arms on the same binary, the same 480,000-transaction window at 8 clients, two
+runs each, lane A at 2.4-3.3 foreign cores (instruction counts only):
+
+| arm | user instr / txn | flush thread | connection threads | blocks copied a compaction | L1 MB after |
+|---|---|---|---|---|---|
+| zstd 1, 8 kB (now) | 371.8k (3 compactions) / 359.4k | 66.7k / 47.9k | 292.3k / 296.3k | 344 / 689 | 80.0 / 77.3 |
+| zstd -1 | 355.4k / 348.7k | 44.0k / 44.2k | 293.9k / 294.6k | 318 / 353 | 81.7 / 75.7 |
+| 4 kB row blocks | 352.4k / 359.8k | 45.3k / 47.7k | 295.1k / 295.8k | 7,497 / 7,892 | 71.1 / 72.4 |
+
+- Copied blocks: 0.7-1.5% of the table's at 8 kB (fewer than 337's 3-6%: random updates reach
+  nearly every block between two compactions). With 4 kB blocks the copy covers ~17%, yet the flush
+  thread doesn't come down beyond the runs' spread (45.3k / 47.7k against 47.9k) and the
+  connection threads are ~0.5k higher. Dropped.
+- zstd -1 on the L1 rewrite: the flush thread 47.9k -> 44.0-44.2k at two compactions each (-8% of it,
+  -1% of the total), the connection threads level. Not kept yet: bytes on disk need one data set
+  compacted both ways (the end-of-run sizes above differ by compaction timing more than by level;
+  agent 231 measured +14% for these accounts at negative levels), and the read cost of a block missed
+  after a compaction (point select, the 1,000-row range read right after a load, TPC-H SF 0.1).
+
+**CHECKPOINT and the active memtable (agent 339's question), analysis only.** `CHECKPOINT` runs
+`store.flush_all()` of the session's database (`session/mod.rs`): the frozen memtables go to L0, the
+active one stays in its WAL file, and the other databases' stores are not touched (PostgreSQL's is the
+cluster's and writes every dirty buffer, so nothing before its redo point is replayed). Nothing runs a
+checkpoint on a timer either (`checkpoint_timeout` drives none). That is why agent 339 keeps
+`pg_stat_io`'s checkpointer writes / fsyncs at one per checkpoint.
+
+- Durability: not affected either way. A commit is durable when its WAL record is fsynced; a
+  checkpoint only shortens what the next start replays.
+- Recovery time: already bounded without it. What a start replays is the active memtable's WAL and
+  any frozen one not yet flushed: at most `memtable_bytes` (32 MB in the server's profile) plus the
+  frozen ones, per database. `crash-binary.py` restarts after a kill in 0.03-0.22 s.
+- What writing the active memtable would cost: a rotate (a new WAL file, an fsync of the old one) and
+  one L0 file per database whose memtable holds anything. That is about a memtable flush (~0.1 s of
+  CPU for a full 32 MB one, by agent 333's ~9k instructions a transaction for 8 MB flushes) and one
+  file fsync. Then one L0 file more towards the compaction trigger. A small one counts as a full one,
+  as `rotate_full`'s note says, so each CHECKPOINT can bring the big table's next compaction forward
+  (a whole rewrite of pgbench_accounts at scale 32: the flush thread's ~23 G user instructions for two
+compactions in this round's 480,000-transaction windows, so ~10 G, about 3 s of CPU, each). Every harness that runs
+  CHECKPOINT before a measured window (agent 333's measure, `split.sh`) would then start from a
+  different L0 state, so the standing comparisons would move.
+- So it is not small in effect, and not needed for durability or recovery time. If PostgreSQL's
+  counts are wanted, it should be cluster-wide (every open database's store), skip a store whose
+  memtable is empty (`rotate_locked` makes a WAL file even then), and report the real counts
+  (files written and fsynced) with at least one. The harnesses' baselines have to be re-measured
+  with it. Not done.
+
+**Left.** (1) The epoch fold, measured against `cand/a341` on a quiet lane: pairs at 480,000, 8 and 32
+clients. (2) zstd -1 for L1 rewrites: bytes on disk on one data set, then the read cells. (3) The block
+cache's copy of the table lost at each compaction: the new file's blocks whose input block was
+cached, put in the cache as the compaction writes them (a cache id given to the writer up front, so
+nothing is held back; reads after a compaction then hit). Not built: a miss's read and decompression of
+an 8 kB block is what each read of a cold block pays until the table is warm again.
+
 ## Short write transactions, round 21: where the 32 MB memtable's memory goes; compact estimate change records (agent 337)
 
 BENCH "Short write transactions, round 21" has the tables. Harness `~/.cache/a337/bench` (333's `split.sh` with
