@@ -746,6 +746,69 @@ The last against PGO, select-only at 8 clients, 3 alternating pairs: user instru
 31,777 -> 32,105 / 31,587 -> 34,607 / 34,026 -> 31,978, user cycles 69,268 -> 69,872 / 68,855 ->
 72,931 / 69,927 -> 68,111 (foreign 1.25-1.88): no direction, dropped.
 
+## Query memory, round 7: in-memory window partitions, hashed DISTINCT / UNION read as they come and spilling; grouping sets' PGO gate (2026-11-27, agent 340)
+
+HANDOFF "Query memory, round 7" has what changed. Plain dist builds (`tools/dist.sh`): **b0**
+agent 338's stack (`3549f8392`, its exec code landed as `7bc3cddf6`); **n1** the window and the
+streamed DISTINCT on it (`73b6c4b5a`); **n2** n1 with the DISTINCT / UNION spill. PostgreSQL 18.6
+by digest. Harness: agent 338's copied to `~/.cache/a340/bench` (lane C; `mem.sh` with
+`mem-q7.txt` / `mem-q8.txt`, `fpair.sh` with `hdist`, `hdmod`, `hunion` added). Foreign load on
+lane C was 5-7.3 cores in every hold (2.2-3.8 in the perf windows): instruction counts only,
+walls are not compared.
+
+### Peak memory a query (MB of the server cgroup's anon+shmem over the level before; 1M rows)
+
+Result hashes sorted equal PostgreSQL's in every cell; in order too except where noted.
+
+| query | b0 | n1 | n2 | PostgreSQL 18.6 | temp files: b0 / n2 / PostgreSQL |
+|---|---:|---:|---:|---:|---|
+| `count(*)`, `last_value(s)` `OVER (ORDER BY a RANGE BETWEEN 50 PRECEDING AND 50 FOLLOWING EXCLUDE CURRENT ROW)`, work_mem 1 GB | 428.4 (24.0 s) | 246.5 (7.5 s) | | 29.1 (24.1 s) | 0 / - / 0 |
+| `sum(id)`, `lag(s)`, `rank()` `OVER (PARTITION BY id % 10 ORDER BY a)`, 1 GB | 306.5 | 305.2 | | 59.8 | 0 / - / 0 |
+| `row_number()`, `sum(id)` `OVER (ORDER BY a ROWS BETWEEN 5 PRECEDING AND 5 FOLLOWING)`, 1 GB | 383.1 | 204.6 | | 52.1 | 0 / - / 0 |
+| `SELECT DISTINCT s` (HashAggregate, work_mem 4 MB) | 337.8 (order not PostgreSQL's) | 204.8 (not PostgreSQL's) | 109.2 | 15.9 | 0 / 1, 49,168,384 B / 1, 49,168,384 B |
+| `SELECT DISTINCT a % 1000, id % 7` (order not PostgreSQL's in all: the planner's estimate) | 100.1 | 1.3 | 1.3 | 8.4 | 0 / 0 / 0 |
+| `SELECT DISTINCT a % 1000` (roll plans a Unique over a parallel sort) | 14.7 | 18.8 | 17.8 | 8.2 | 1 / 1 / 0 |
+| `SELECT a % 100000 FROM t UNION SELECT id % 100000 FROM t` | 160.3 | 161.3 | 161.2 | 12.6 | 0 / 0 / 0 |
+
+### When the input fits (G user instructions, 40 runs, 20,000 rows; alternating pairs; results equal)
+
+| query | base | new | new / base |
+|---|---:|---:|---|
+| window: sum, lag, rank by `id % 10` (agent 320's), b0 -> n1 | 8.3774 / 8.3780 | 7.7917 / 7.7918 | -6.99%, -7.00% |
+| `sum(id)`, `last_value(s)` over `ROWS BETWEEN 5 PRECEDING AND 5 FOLLOWING` | 7.3776 / 7.3775 | 6.9862 / 6.9861 | -5.31%, -5.31% |
+| `first_value(id)`, `last_value(s)` over `ROWS BETWEEN 3 PRECEDING AND 3 FOLLOWING` | 8.1571 / 8.1572 | 7.6277 / 7.6277 | -6.49%, -6.49% |
+| `count(*)`, `last_value(s)` over `RANGE BETWEEN 50 PRECEDING AND 50 FOLLOWING EXCLUDE CURRENT ROW`, 10 partitions | 12.1900 / 12.1897 | 9.9889 / 9.9886 | -18.06%, -18.06% |
+| `msum(a)` (CREATE AGGREGATE with msfunc / minvfunc) over 6 rows | 7.3697 / 7.3685 | 7.0404 / 7.0412 | -4.47%, -4.44% |
+| two windows: `row_number() OVER (ORDER BY a)`, `rank() OVER (ORDER BY s)` | 9.2523 / 9.2525 | 8.2057 / 8.2055 | -11.31%, -11.32% |
+| `SELECT DISTINCT s` (HashAggregate), b0 -> n1 | 4.1482 / 4.1487 | 3.8381 / 3.8382 | -7.48%, -7.49% |
+| `SELECT DISTINCT a % 1000, id % 7`, b0 -> n1 | 4.3688 / 4.3683 | 4.1144 / 4.1143 | -5.82%, -5.81% |
+| `SELECT a UNION SELECT id`, b0 -> n1 | 6.4166 / 6.4155 | 5.9340 / 5.9345 | -7.52%, -7.50% |
+| `SELECT DISTINCT s`, n1 -> n2 (the spill) | 3.8442 / 3.8454 | 3.9831 / 3.9834 | +3.61%, +3.59% |
+| `SELECT DISTINCT a % 1000, id % 7`, n1 -> n2 | 4.1143 / 4.1150 | 4.1850 / 4.1838 | +1.72%, +1.67% |
+| `SELECT a UNION SELECT id`, n1 -> n2 | 5.9341 / 5.9340 | 6.0709 / 6.0714 | +2.31%, +2.31% |
+| window (agent 320's), n1 -> n2 | 7.7835 / 7.7835 | 7.7836 / 7.7838 | +0.00%, +0.00% |
+| plain GROUP BY `a % 1000` (n2's `AggNode::run` compiles 83.3 -> 72.8 kB), n1 -> n2, three pairs | 2.6049 / 2.6050 / 2.6048 | 2.6047 / 2.6047 / 2.6044 | -0.01%, -0.01%, -0.02% |
+| two hashed grouping sets, n1 -> n2, three pairs | 5.6580 / 5.6578 / 5.6743 | 5.6589 / 5.6734 / 5.6748 | +0.02%, +0.28%, +0.01% |
+| a hashed set and (), n1 -> n2 | 4.3627 / 4.3608 | 4.3625 / 4.3621 | -0.01%, +0.03% |
+
+No TPC-H query runs a window, a DISTINCT or a UNION node.
+
+### Grouping sets out of `AggNode::run` (agent 338's patch) on PGO builds
+
+Both built with agent 333's profile (`~/.cache/a333/keep-pgo`, 3.6% of the hot counts stale):
+**b0-pgo** b0, **gs-pgo** b0 with `grouping-sets-out-of-run.diff`. G user instructions, 40 runs,
+two alternating pairs:
+
+| query | b0-pgo | gs-pgo | gs / b0 |
+|---|---:|---:|---|
+| two hashed grouping sets | 4.7784 / 4.7780 | 4.7677 / 4.7676 | -0.23%, -0.22% |
+| a hashed set and () | 3.5484 / 3.5479 | 3.5432 / 3.5412 | -0.15%, -0.19% |
+| plain GROUP BY | 2.1420 / 2.1423 | 2.1494 / 2.1507 | +0.35%, +0.39% |
+
+gs-pgo's `AggNode::run` is a changed function with no counts in the borrowed profile (its
+BUILD.txt's staleness list has it; b0-pgo's doesn't): the plain GROUP BY's `run` is unprofiled
+there. Not conclusive; a pair trained on each commit decides.
+
 ## Query memory, round 6: in-memory RANGE / GROUPS frame search, EXPLAIN ANALYZE of a nested loop's Materialize and of every plan's rows; grouping sets and user aggregates' narrower sorts dropped (2026-11-26, agent 338)
 
 HANDOFF "Query memory, round 6" has what changed. Plain dist builds (`tools/dist.sh`): **b0**

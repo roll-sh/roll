@@ -15046,6 +15046,110 @@ the loop. (2) The ring's per-block cost: three hash lookups a recycled block (`e
 looks the key up twice and then removes it). One `entry` would do. It is worth about 0.4% on
 scan-bound queries at small caches.
 
+## Query memory, round 7: in-memory window partitions held narrower, hashed DISTINCT / UNION read as they come and spilling past hash_mem; grouping sets' PGO gate inconclusive (agent 340)
+
+BENCH.md "Query memory, round 7" has the tables. Plain dist builds (`tools/dist.sh`): **b0** agent
+338's stack (`3549f8392`, its exec code landed as `7bc3cddf6`); **n1** b0 with the window and the
+streamed DISTINCT (`73b6c4b5a`); **n2** n1 with the DISTINCT / UNION spill (the candidates' code,
+rebased onto origin's `0fa8e55bd` without conflicts: what that adds is pgstat / engine / repl,
+off these paths). Two candidates, stacked on `0fa8e55bd`: `cand/a340` (window, streamed
+DISTINCT), `cand/a340-2` (the spill and its query_spill case, with this section).
+
+**What changed:**
+- **An in-memory window's partition** (`exec/window.rs`). Per window `run_windows` made a vector of
+  ORDER BY values a row (`okeys`: a row's vector and its values, 56+ bytes a row; for partition
+  and sort keys that aren't columns, `pvals` / `vals` the same), a list of row numbers a partition
+  (`parts`), a result vector a call (`out`, then copied row by row into the results), and
+  `compute` gave out every row at once, each widened by its results, in a second vector. Now:
+  ORDER BY values read in place when they are consecutive columns, else one array (`OKeys`;
+  `key_vals` for the others); a partition a range of the order; each call's results written
+  straight into its column of one array (call c's of row i at `c * n + i`); the rows given out as
+  they are read (`Held`), each widened then and gone from the node. first_value / last_value /
+  nth_value with an exclusion or IGNORE NULLS evaluated the argument at every row of every frame
+  into two vectors to take one; now, as WinGetFuncArgInFrame, the frame is read from the end
+  that counts until the row wanted (nth_value's argument first, as nth_value reads it).
+- **Hashed DISTINCT and UNION** (`exec/nodes.rs`, `hashed_distinct`). DistinctNode read its whole
+  input into a vector, then deduplicated it into a map keyed by a copy of each group's row, the
+  model of PostgreSQL's table replaying every lookup at the end. Now the rows come as they are
+  read: a row of a group already in the table is dropped as it comes, a group's key is its first
+  row (a copy only where bpchar or a nondeterministic collation normalises it), the table model
+  sized for the estimate first. The sorted paths (presorted DISTINCT, a Unique with ties) still
+  read every row; UNION's arms are still collected whole (`SetOpNode::run`).
+- **Their spill past hash_mem** (cand/a340-2). As nodeAgg (`hashspill`, the GROUP BY path's): the
+  table's memory counted as PostgreSQL's (`HashAggMem`), and once past its limits a row of a group
+  not in the table goes to a partition by its hash bits, read back as a batch after the table's
+  groups. The rows come out in the order the spilling GROUP BY of the same columns gives (the
+  base gave the in-memory order), and EXPLAIN ANALYZE shows the model's `Batches / Memory Usage
+  / Disk Usage` (the base showed an estimate). For the 1M-row `SELECT DISTINCT s` that is
+  PostgreSQL's order and its temporary file (49,168,384 bytes; the base's order differed). Not
+  for a 20,000-row `DISTINCT t, a` (text, int) at work_mem 64kB: there the GROUP BY's own spill
+  (agent 132's model, unchanged) already orders its groups otherwise than PostgreSQL, whose
+  DISTINCT and GROUP BY agree (21 batches both, Memory Usage 177kB against PostgreSQL's 169kB,
+  the DISTINCT's Disk 1600kB against 1584kB: its spilled tuple is the projection's (t, a), the
+  GROUP BY's the scan's (a, t)). Not for DISTINCT ON (never hashed in PostgreSQL).
+
+**Measured:** BENCH "Query memory, round 7". 1M rows, peak anon+shmem over the level before, MB,
+b0 -> new (PostgreSQL 18.6): the RANGE +-50 / EXCLUDE / last_value window at work_mem 1 GB 428.4 ->
+246.5 (29.1), its wall 24.0 -> 7.5 s (PostgreSQL 24.1 s in b0's conditions: foreign load 5-7
+cores, walls only indicative); `row_number`, a sliding sum at 1 GB 383.1 -> 204.6 (52.1); the
+partitioned window 306.5 -> 305.2 (59.8: its Sort holds the rows); `SELECT DISTINCT s` 337.8 ->
+204.8 (n1) -> 109.2 (n2) (15.9), n2's row order and file PostgreSQL's; `DISTINCT a % 1000, id % 7`
+100.1 -> 1.3 (8.4); UNION 160.3 -> 161.2 (12.6: the arms held). Fitting queries (20,000 rows, user
+instructions, two alternating pairs agreeing to 0.03%): n1 against b0 every window -4.4 to -18.1%
+(the RANGE frame -18.1%, two windows -11.3%), hashed DISTINCT -7.5 / -5.8%, UNION -7.5%; n2
+against n1 the hashed DISTINCT / UNION +3.6 / +1.7 / +2.3% (the spill's per-group accounting,
+nodeAgg's), so n2 against b0 -4.0 / -4.2 / -5.4%; windows +0.00%. `nm -S`: `run_windows` 85.6 ->
+50.9 kB (`count_store`, EXPLAIN ANALYZE's, now out of line, 15.0 kB); `DistinctNode::next` 14.3 ->
+22.6 -> 33.4 kB; in n2 `AggNode::run` compiled smaller (83.3 -> 72.8 kB, a shared spill helper no
+longer inlined), so GROUP BY was gated too: plain GROUP BY -0.008 / -0.013 / -0.017%, two hashed
+grouping sets +0.017 / +0.275 / +0.007% (n1 itself moved 0.3% between holds), a set and ()
+-0.005 / +0.03%. No TPC-H query runs a window, a DISTINCT or a UNION node, so TPC-H wasn't run.
+Not gated on a PGO build: n1 changes no hot function's inlining but its own (`run_windows`
+shrank, all window queries faster); n2's `AggNode::run` change reads flat on the plain build.
+
+**Dropped / not handed in:**
+- **Grouping sets out of `AggNode::run`** (agent 338's `grouping-sets-out-of-run.diff`, item 4),
+  taken to the PGO gate: plain dist b0 and b0 + the patch built with agent 333's profile
+  (`keep-pgo`, 3.6% stale), two pairs: two hashed sets -0.23 / -0.22%, a set and () -0.15 /
+  -0.19%, plain GROUP BY +0.35 / +0.39%. Not conclusive: the patched build's `AggNode::run` is a
+  changed function, so the borrowed profile has no counts for it (its BUILD.txt lists `run`
+  among the functions without data; the base's has them), and the plain path runs unprofiled
+  there. Deciding needs each arm trained on its own commit (`tools/dist-pgo.sh` without
+  `--profdata`, about 3 hours a build). The perf annotate of `run`'s plain path wasn't done.
+
+**Verification:** `tools/quick-check.sh` with `QC_CHECKED=1` and `QC_TESTS=query_spill` on
+`140a4dd53` (the tree of `ae3c2222b`, the three code commits on `0fa8e55bd`) (the code and test commits on `0fa8e55bd`): Clippy 16 warnings, none new in a changed file; 397 tests in 10 binaries passed, again built `--profile verify-checked` (397 passed); regress 51,148 / 51,150, 0 newly differing; isolation 1,647 / 1,648; pg_dump_tap 14,609 passed. New query_spill case
+`hashed_distinct_spills`: `SELECT DISTINCT t, a` and a UNION at work_mem 64kB with enable_sort off:
+one temporary file each and 21 batches (PostgreSQL 18.6's), the DISTINCT's rows in the spilling
+GROUP BY's order, the UNION's those it gives in memory (as a set: PostgreSQL's own UNION and
+GROUP BY over UNION ALL differ in order). The lower candidate
+is a prefix of that stack; only its head was checked.
+
+**Found, not changed (planner):** a DISTINCT over computed columns estimates its groups as
+unknown (200 each) where PostgreSQL's estimate_num_groups reads the Vars under them (and roll's
+GROUP BY does: `ColInfo.groups` is there, `num_groups` doesn't use it): `SELECT DISTINCT a % 1000
+FROM t` (1M rows) estimates 200 groups against PostgreSQL's 1,000,000 and is planned as a Unique
+over a parallel sort where PostgreSQL has a HashAggregate; `DISTINCT a % 1000, id % 7` estimates
+40,000 against 1,000,000, so its table is sized smaller and its 7,000 rows come out in another
+order than PostgreSQL's (the same GROUP BY's order is PostgreSQL's). The DISTINCT's builder sees
+the projection folded into its scan, so the fix needs the projected expressions' input columns
+there.
+
+**Left** (largest first, MB over PostgreSQL's): Sorts holding `Value` rows (the partitioned window
+305 / 60, the in-memory windows 205-247 / 29-52: a row of three columns is a 24-byte vector, 96
+bytes of values and 48 a text, where PostgreSQL's tuple is ~60; `Value` is 32 bytes only because
+`Uuid(u128)` aligns it to 16, every other variant fits 24); a hashed DISTINCT's output (n2's 109 /
+16: every batch's groups are collected before the first row goes up; given out a batch at a time
+it would hold the table); UNION's arms collected whole (161 / 13: `SetOpNode::run` collects
+each arm, then deduplicates; reading them through `hashed_distinct` as they come needs the arms'
+statement frames kept); the DISTINCT estimate above; the hashed aggregation spill model's order for a text key at small
+work_mem (the 20,000-row case above: GROUP BY and DISTINCT alike; its Memory Usage reads 8 kB
+over PostgreSQL's; where the model departs from nodeAgg wasn't found); DISTINCT aggregates (44 / 14); grouping sets
+past work_mem (the PGO gate above); EXPLAIN ANALYZE's figures of the Sorts under a sorted SetOp
+(an INTERSECT ALL's second Sort shows 20,000 rows where PostgreSQL's shows 19,988, its Disk
+879kB / 1008kB: those Sorts are `sort_all`'s, which records nothing, so EXPLAIN shows the scan's
+rows and a width estimate); an Incremental Sort group past work_mem; GroupAggregate over a Sort.
+
 ## Query memory, round 6: in-memory RANGE / GROUPS frame search, EXPLAIN ANALYZE of a nested loop's Materialize and of every plan's rows; grouping sets and user aggregates' narrower sorts dropped (agent 338)
 
 BENCH.md "Query memory, round 6" has the tables. Plain dist builds (`tools/dist.sh`): **b0** agent
