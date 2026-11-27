@@ -359,6 +359,15 @@ state. A pass of the reconciler:
        says how it went beside the release's time, at the head it's for only (one asked at an
        earlier head never runs, and an earlier head's outcome isn't shown); a failure is said
        (masked, one line), never the converge's, and it runs once a head. With
+       `release_checks` (`check` or `required`, off by default) roll rehearses it at every head of
+       a change instead, queued or not, and with `required` the change can't land in roll until,
+       at its head, the rehearsal passed and main's code didn't break on its migrated data (step
+       4e; `release` on the change's blockers: "its release hasn't been rehearsed on today's data
+       at its head yet", "its release failed on today's data: …", "main's code breaks on its
+       migrated data: /orders (500): expand first, contract in a later change"). Rehearsed at each
+       head before it's queued, the blocker never waits on the queue that would ask for it; a
+       preview with no Postgres branch has nothing to rehearse, so the rule holds nothing back
+       there (`queue.rs::blockers_keep_changes_out_of_the_queue`, the `release` case). With
        `rehearse_when_queued` (off by default: each is a fresh branch, its masking and a release
        run) roll asks for one itself when the change is queued to land in roll code, at that
        head: the change becoming queued wakes a settled preview at once, before the queue lands it
@@ -2209,6 +2218,7 @@ type Preview = {
   served_secrets?: { key: string; path: string }[]; // its secret values its pages serve at its head: names and where, never values
   skipped?: { pages?: string[]; stories?: number; first_stories?: string[]; by_files?: true }; // what its latest screenshot run left out at its head: pages past a run's ten, stories it didn't take (the first 10 by id); by_files: it chose them by the change's files alone, its Storybook serving no module graph (--stats-json)
   regressions?: "check" | "required" | null;
+  release_checks?: "check" | "required" | null; // the project's rule for its release at each head, where it has a Postgres branch to rehearse on
   regressions_accepted?: { head: string; by: string; at: number } | null;
   regressions_compared?: boolean;     // compared with main's preview at its head (errors; routes too with traces)
   timeline?: { head: string; started_at: number; steps: { step: "data" | "copies" | "setup" | "deploy" | "checks" | "ready"; at: number }[] };
@@ -2264,6 +2274,7 @@ type Settings = {
   seed: Job | null;                   // once on fresh data
   release: Job | null;                // at each new head, before services deploy (migrations)
   rehearse_when_queued?: boolean;      // when a change is queued to land, its release rehearsed on today's data by roll (false)
+  release_checks?: "off" | "check" | "required"; // check: its release rehearsed on today's data at every head; required: also keeps it from landing until, at its head, that passed and main's code didn't break on its migrated data (needs release; "off")
   teardown: Job | null;               // once when the preview goes, before its services and branches
   masking: Record<string, Record<string, string>>; // "postgres:<ref>" → {"schema.table.column": "email"}, "nosql:<ref>" → {"ks.table.column": "mask_default()"}, "search:<ref>" → {"index.field": "redact" | "remove" | "email"} (redact and email only on a text-like field of the parent's: a number, a date or a vector is refused when set, use remove; an index whose name has dots, `logs.2024.user.email`, is split off at the longest name the cluster has)
 };
@@ -3080,8 +3091,8 @@ overlaps stay within a repo.
 4. **Replaying recorded traffic against the preview and main** (Signadot, Speedscale; L): writes
    replay safely on branched data; capturing production's requests needs its privacy designed
    first.
-5. **A rehearsal that holds a change back** (a required rule): rehearsed at each head, so the
-   landing blocker never waits on the queue that would ask for it.
+5. **A rehearsal that holds a change back, in review** (`release_checks`): rehearsed at each
+   head, and main's code on its migrated data, as a landing blocker.
 6. **Older pushes past the last three, started on demand**; **what a note's reviewer saw, from
    their own browser** (Jam, Marker.io).
 7. **Restore points for search and buckets**: search's once roll search's `reset {from}` is in

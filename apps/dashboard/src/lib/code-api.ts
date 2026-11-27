@@ -411,6 +411,10 @@ export interface PreviewEnvironment {
   schema_risks?: string[];
   /** Other open changes whose previews' schema changes touch the same tables: `[branch, tables]`. */
   schema_overlaps?: [string, string[]][];
+  /** The project's rule for its release at each head, when it has one. */
+  release_checks?: "check" | "required";
+  /** Its release rehearsed on today's data at its head (`ok` null while it waits). */
+  rehearsal?: { ok: boolean | null; error?: string };
   /** How long the release (migrations) took on the preview's data, and at the run before. */
   release_ms?: number;
   release_before_ms?: number;
