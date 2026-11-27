@@ -95,6 +95,12 @@ pub struct Row {
     /// A secrets folder its JSON body names (this top-level field; absent is `/`), as
     /// [`path_query`](Row::path_query) is one its query names: the folder the product reads.
     pub path_body: Option<&'static str>,
+    /// Its body is a JSON array (secrets' imports), not the object every other row decided from its
+    /// body reads by field name.
+    pub array_body: bool,
+    /// More actions its body needs beside the row's (a `.env` import that replaces: delete, and the
+    /// write it also does).
+    pub needs_too: Option<fn(&Value) -> Vec<Action>>,
     /// A JSON body field whose presence makes it `admin` (apps' `freeze`: setting or lifting a
     /// freeze is the same call as going past one).
     pub admin_if_field: Option<&'static [&'static str]>,
@@ -142,7 +148,8 @@ fn search_secret_write(b: &Value) -> Vec<Lent> {
     let Some(env) = s["environment"].as_str() else { return Vec::new() };
     let path = secret_path(s["path"].as_str().unwrap_or(""));
     let folder = path.filter(|_| roll_secrets_ref::is_slug(env)).map(|p| (env.to_string(), p));
-    let key = s["key"].as_str().map(str::to_string);
+    // Named on the approval card: only a key as roll secrets names one.
+    let key = s["key"].as_str().filter(|k| roll_secrets_ref::is_key(k)).map(str::to_string);
     vec![Lent { kind: "secret".into(), r#ref: s["project"].as_str().unwrap_or("").into(), action: Action::Write, folder, key }]
 }
 
@@ -226,7 +233,8 @@ fn search_parent(b: &Value) -> Vec<Lent> {
 fn search_key_action(b: &Value) -> Action {
     match b.get("access").and_then(Value::as_str) {
         Some("read") => Action::Reveal,
-        Some("append") => Action::Write,
+        // An `otel` key adds documents to OpenTelemetry's data streams and reads nothing.
+        Some("append" | "otel") => Action::Write,
         Some("data") => Action::Delete,
         _ => Action::Admin,
     }
@@ -277,6 +285,13 @@ impl Row {
         self.admin_if_field.is_some() || self.project_in_body.is_some() || self.path_body.is_some() || matches!(self.act, Act::Body(_) | Act::Raw(_)) || matches!(self.copies_from, Some(CopyFrom::Body(_) | CopyFrom::Each(_))) || matches!(self.lends, Some(Lend::Each(_)))
     }
 
+    /// Whether a JSON body has the shape this row decides from: an object (an array where the row
+    /// says so). A product parsing into a typed struct takes an array too, field by field in order,
+    /// where the gate's reads by name find nothing: a `links` or `replace` the gate never saw.
+    pub fn body_shape_ok(&self, body: Option<&Value>) -> bool {
+        !self.needs_body() || matches!(self.act, Act::Raw(_) | Act::GitPush) || body.is_none_or(|b| b.is_object() || (self.array_body && b.is_array()))
+    }
+
     pub fn action(&self, method: &str, params: &[(String, String)], body: Option<&Value>) -> Action {
         match self.act {
             Act::Is(a) => a,
@@ -298,7 +313,7 @@ impl Row {
 }
 
 const fn row(method: &'static str, route: &'static str, product: &'static str, act: Act, target: Tgt) -> Row {
-    Row { method, route, product, act, target, env: EnvFrom::None, path_query: None, reveals: &[], copies_from: None, index: None, lends: None, filters_itself: false, filters_index: false, admin_if: None, admin_if_field: None, capable: &[], project_in_body: None, path_body: None }
+    Row { method, route, product, act, target, env: EnvFrom::None, path_query: None, reveals: &[], copies_from: None, index: None, lends: None, filters_itself: false, filters_index: false, admin_if: None, admin_if_field: None, capable: &[], project_in_body: None, path_body: None, array_body: false, needs_too: None }
 }
 
 const R: Act = Act::Is(Action::Read);
@@ -335,6 +350,14 @@ impl Row {
     }
     const fn path_query(mut self, q: &'static str) -> Row {
         self.path_query = Some(q);
+        self
+    }
+    const fn array_body(mut self) -> Row {
+        self.array_body = true;
+        self
+    }
+    const fn needs_too(mut self, f: fn(&Value) -> Vec<Action>) -> Row {
+        self.needs_too = Some(f);
         self
     }
     const fn path_body(mut self, field: &'static str) -> Row {
@@ -972,6 +995,11 @@ fn secrets_import_action(b: &Value) -> Action {
     if b["replace"] == true { Action::Delete } else { Action::Write }
 }
 
+/// A replacing import writes the file's keys too.
+fn secrets_import_also(b: &Value) -> Vec<Action> {
+    if b["replace"] == true { vec![Action::Write] } else { Vec::new() }
+}
+
 /// A service's Git login: `deploy` when it names a project secret (`secret`): the service's
 /// fetches then send that production secret to its source's host, which only someone who may
 /// change what production runs gets to decide; `write` for a password the caller gives itself.
@@ -1545,6 +1573,7 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/secrets/projects/{project}/environments/{env}/decoys", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")),
     // Imports: write, reveal on each in-project source, admin for another project's folder.
     row("PUT", "/v1/secrets/projects/{project}/environments/{env}/imports", "secrets", Act::Body(secrets_imports_action), one(&["project"], "project"))
+        .array_body()
         .env(EnvFrom::Param("env"))
         .path_query("path")
         .copies_from(CopyFrom::Each(secrets_import_sources)),
@@ -1757,7 +1786,7 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/secrets/projects/{project}/environments/{env}/diff", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_body("path"),
     // A .env import writes into the folder its body names; with `replace` it deletes that folder's
     // keys the file lacks.
-    row("POST", "/v1/secrets/projects/{project}/environments/{env}/import", "secrets", Act::Body(secrets_import_action), one(&["project"], "project")).env(EnvFrom::Param("env")).path_body("path"),
+    row("POST", "/v1/secrets/projects/{project}/environments/{env}/import", "secrets", Act::Body(secrets_import_action), one(&["project"], "project")).env(EnvFrom::Param("env")).path_body("path").needs_too(secrets_import_also),
     // ── apps (feature/roll-apps, docs/apps/http-api.md) ──
     row("GET", "/v1/apps/services", "apps", R, list("id")),
     // A service from a repo or an image deploys production at once; an upload one waits for `roll up`.
