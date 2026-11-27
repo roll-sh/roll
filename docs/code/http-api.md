@@ -1262,8 +1262,9 @@ POST /v1/code/github/webhook          X-Hub-Signature-256 verified; 401 on a bad
 GET  /v1/code/github/setup            the App's setup URL: 302 to {web}/dashboard/code?github=installed
 ```
 
-`Repo.github` also has `remote_head` (GitHub's default branch as last seen) and `connected` (it's
-`false` once the App loses access). With `ROLL_CODE_TOKEN` set, listing installations and
+`Repo.github` also has `remote_head` (GitHub's default branch as last seen), `connected` (it's
+`false` once the App loses access) and `private` (whether the GitHub repository is private, as
+connecting and each delivery about it last said; absent on links from before it was kept). With `ROLL_CODE_TOKEN` set, listing installations and
 connecting a repository need the admin token: an installation isn't tied to a roll owner, so an
 owner token could otherwise import another account's repositories.
 

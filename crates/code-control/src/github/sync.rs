@@ -722,7 +722,13 @@ pub(crate) async fn handle_for_repo(code: &Arc<Code>, repo_id: &str, event_name:
     let Some(hub) = code.github_hub().cloned() else { return Err(Error::NotFound("GitHub App".into())) };
     let event = Event::parse(event_name, body).map_err(|e| Error::Invalid(e.to_string()))?;
     let Some(full_name) = repo_of(&event) else { return Ok(()) };
-    let Some((r, link)) = repos_for(code, full_name)?.into_iter().find(|(r, _)| r.id == repo_id) else { return Ok(()) };
+    let Some((r, mut link)) = repos_for(code, full_name)?.into_iter().find(|(r, _)| r.id == repo_id) else { return Ok(()) };
+    // GitHub's word on its privacy, kept as the mirror last saw it (roll secrets' Health reads it);
+    // only where the payload says (`private` defaults to false when a slim one leaves it out).
+    let private = serde_json::from_slice::<serde_json::Value>(body).ok().and_then(|v| v["repository"]["private"].as_bool());
+    if let Some(p) = private.filter(|p| link.private != Some(*p)) {
+        link = update_link(code, &r.id, |l| l.private = Some(p))?.unwrap_or(link);
+    }
     // The owner's automations hear of it first (recorded once per delivery and repo).
     crate::chatops::github::record(code, &hub, &r, &link, receipt, &event)?;
     handle_repo(code, &hub, &r, &link, &event).await
