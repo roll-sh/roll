@@ -805,6 +805,8 @@ pub struct EnvRow {
     pub egress: crate::model::Egress,
     /// Its pages measure their Web Vitals for roll (a tag the proxy adds).
     pub vitals: bool,
+    /// Its Strict-Transport-Security: the default unless it set one; None: off (`hsts: false`).
+    pub hsts: Option<crate::model::Hsts>,
     /// Days its logs are kept (7, 30 or 90); None: [`crate::logs::KEEP_DAYS`].
     pub log_retention_days: Option<u32>,
     /// Approvals a deployment needs from people other than its author before it goes live.
@@ -975,7 +977,7 @@ fn name_taken(name: &str, deleted: Option<i64>) -> String {
         Some(_) => format!("a deleted service named {name} holds the name: restore it, or delete it again to delete it for good"),
     }
 }
-const ENV_COLS: &str = "service, name, branch, ephemeral, active, slug, port, created_at, wait_for_ci, run, hook_hash, follow_tag, tag_seen, feedback, maintenance, allow_ips, rate_limit, tcp_port, firewall, pages, redeploy_on_secrets, secrets_seen, headers, paused, held_by, egress, vitals, routes, report, checks, heartbeats, split, freeze, mirror, pause_schedule, snippets, log_retention_days, approvals, badge, egress_by, redirects, keep_days";
+const ENV_COLS: &str = "service, name, branch, ephemeral, active, slug, port, created_at, wait_for_ci, run, hook_hash, follow_tag, tag_seen, feedback, maintenance, allow_ips, rate_limit, tcp_port, firewall, pages, redeploy_on_secrets, secrets_seen, headers, paused, held_by, egress, vitals, routes, report, checks, heartbeats, split, freeze, mirror, pause_schedule, snippets, log_retention_days, approvals, badge, egress_by, redirects, keep_days, hsts";
 /// A deployment [`Store::prune_deployments`] pruned, with its image when nothing else names it.
 pub struct Pruned {
     pub id: String,
@@ -1070,6 +1072,11 @@ fn env_row(r: &code_sql::Row<'_>) -> code_sql::Result<EnvRow> {
         egress_by: r.get(39)?,
         redirects: r.get(40)?,
         keep_days: r.get::<_, Option<i64>>(41)?.map(|d| d as u32),
+        // NULL: the default; `false`: off; an object: its own.
+        hsts: match r.get::<_, Option<String>>(42)? {
+            None => Some(crate::model::HSTS_DEFAULT),
+            Some(s) => serde_json::from_str::<Option<crate::model::Hsts>>(&s).ok().flatten(),
+        },
     })
 }
 
@@ -1255,6 +1262,8 @@ impl Store {
         db.add_column("environments", "report", "INTEGER NOT NULL DEFAULT 1")?;
         db.add_column("environments", "log_retention_days", "INTEGER")?;
         db.add_column("environments", "keep_days", "INTEGER")?;
+        // Its Strict-Transport-Security, as JSON (`false`, or its own); NULL: the default.
+        db.add_column("environments", "hsts", "TEXT")?;
         db.add_column("environments", "approvals", "INTEGER")?;
         db.add_column("environments", "badge", "INTEGER NOT NULL DEFAULT 0")?;
         db.add_column("environments", "egress_by", "TEXT")?;
@@ -1627,7 +1636,7 @@ impl Store {
                     None => None,
                 };
                 c.execute(
-                    &format!("INSERT INTO environments ({ENV_COLS}) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 0, '{{}}', NULL, 0, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL, 0, NULL, NULL, 0, NULL, 1, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL, NULL)"),
+                    &format!("INSERT INTO environments ({ENV_COLS}) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 0, '{{}}', NULL, 0, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL, 0, NULL, NULL, 0, NULL, 1, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL, NULL, NULL)"),
                     params![service, env, branch.flatten(), ephemeral.unwrap_or(false) as i64, slug, port, now],
                 )?;
             }
@@ -4813,6 +4822,16 @@ impl Store {
 
     pub fn approvals_of(&self, deployment: &str) -> Result<Vec<String>> {
         Ok(self.db.query("SELECT approver FROM deploy_approvals WHERE deployment = ? ORDER BY at, approver", [deployment], |r| r.get(0))?)
+    }
+
+    /// Its Strict-Transport-Security: None the default, Some(None) off, Some(Some(h)) its own.
+    pub fn set_hsts(&self, service: &str, env: &str, hsts: Option<Option<&crate::model::Hsts>>) -> Result<()> {
+        let v = hsts.map(|h| match h {
+            Some(h) => serde_json::to_string(h).expect("hsts serializes"),
+            None => "false".to_string(),
+        });
+        self.db.execute("UPDATE environments SET hsts = ? WHERE service = ? AND name = ?", params![v, service, env])?;
+        Ok(())
     }
 
     pub fn set_keep_days(&self, service: &str, env: &str, days: Option<u32>) -> Result<()> {

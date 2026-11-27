@@ -1955,6 +1955,7 @@ impl Apps {
             },
             feedback: r.feedback,
             vitals: r.vitals,
+            hsts: r.hsts.clone(),
             log_retention_days: r.log_retention_days.unwrap_or(crate::logs::KEEP_DAYS),
             keep_days: r.keep_days,
             approvals: r.approvals,
@@ -2077,7 +2078,7 @@ impl Apps {
                 settings.push(json!({ "field": format!("run.{k}"), "from": x, "to": y, "put": { "run": { k: x } } }));
             }
         }
-        for k in ["wait_for_ci", "follow_tag", "redeploy_on_secrets", "traces", "vitals", "report", "egress", "allow_ips", "rate_limit", "firewall", "headers", "routes", "redirects", "checks", "log_retention_days", "keep_days", "approvals"] {
+        for k in ["wait_for_ci", "follow_tag", "redeploy_on_secrets", "traces", "vitals", "hsts", "report", "egress", "allow_ips", "rate_limit", "firewall", "headers", "routes", "redirects", "checks", "log_retention_days", "keep_days", "approvals"] {
             let (x, y) = (a.get(k).cloned().unwrap_or(Value::Null), b.get(k).cloned().unwrap_or(Value::Null));
             if x != y {
                 settings.push(json!({ "field": k, "from": x, "to": y, "put": { k: x } }));
@@ -2127,7 +2128,7 @@ impl Apps {
     pub async fn put_environment_by(self: &Arc<Self>, service: &str, env: &str, body: Value, by: Option<String>) -> Result<Environment> {
         let o = body.as_object().cloned().unwrap_or_default();
         for k in o.keys() {
-            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "routes", "redirects", "checks", "heartbeats", "split", "mirror", "snippets", "config", "freeze", "pause_schedule", "paused", "held", "hostname", "traces", "egress", "vitals", "report", "preview_host", "log_retention_days", "keep_days", "approvals", "badge", "closed_by", "data", "scheduled", "attack_mode", "challenge_until", "preflight", "deploy_tags"].contains(&k.as_str()) {
+            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "routes", "redirects", "checks", "heartbeats", "split", "mirror", "snippets", "config", "freeze", "pause_schedule", "paused", "held", "hostname", "traces", "egress", "vitals", "report", "preview_host", "log_retention_days", "keep_days", "approvals", "badge", "closed_by", "data", "scheduled", "attack_mode", "challenge_until", "preflight", "deploy_tags", "hsts"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
@@ -2615,6 +2616,19 @@ impl Apps {
                 _ => return Err(Error::BadRequest("keep_days is 1–90 (null: only the newest deployments)".into())),
             },
         };
+        // Strict-Transport-Security: its own, `false` (none sent) or null (the default). The
+        // outer None: not given; then None the default, Some(None) off.
+        let hsts: Option<Option<Option<crate::model::Hsts>>> = match o.get("hsts") {
+            None => None,
+            Some(Value::Null) => Some(None),
+            Some(Value::Bool(false)) => Some(Some(None)),
+            Some(v @ Value::Object(_)) => {
+                let h: crate::model::Hsts = serde_json::from_value(v.clone()).map_err(|e| Error::BadRequest(format!("hsts is {{max_age, include_subdomains?, preload?}}, false or null: {e}")))?;
+                h.check()?;
+                Some(Some(Some(h)))
+            }
+            Some(_) => return Err(Error::BadRequest("hsts is {max_age, include_subdomains?, preload?}, false (none sent) or null (the default)".into())),
+        };
         // Approvals from people other than a deployment's author before it goes live: 0–3.
         let approvals = match o.get("approvals") {
             None => None,
@@ -2841,6 +2855,13 @@ impl Apps {
         if let Some(n) = approvals {
             let (sid, e) = (service.to_string(), env.to_string());
             self.db(move |s| s.set_approvals(&sid, &e, n)).await?;
+            self.changed(service);
+        }
+        // On its answers from the next request on.
+        if let Some(h) = hsts {
+            let (sid, e) = (service.to_string(), env.to_string());
+            self.db(move |s| s.set_hsts(&sid, &e, h.as_ref().map(Option::as_ref))).await?;
+            self.live(service, env).forget_gate();
             self.changed(service);
         }
         // Kept from the next pruning pass on.
@@ -4616,6 +4637,7 @@ impl Apps {
             pages: row.pages,
             preview: row.ephemeral,
             headers: row.headers,
+            hsts: row.hsts.as_ref().and_then(|h| axum::http::HeaderValue::from_str(&h.value()).ok()),
             routes: row.routes, traces, vitals: row.vitals, challenge_key, attack_until: attack.until, split: row.split, mirror: row.mirror, snippets: snippets_of(&row.snippets),
             redirects: row.redirects.as_deref().map(crate::site_rules::EnvRedirects::parse).filter(|r| !r.is_empty()).map(Arc::new) });
         live.set_gate(g.clone(), seen);

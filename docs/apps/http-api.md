@@ -525,6 +525,11 @@ type EnvironmentPut = {
    *  environment, then 429). No cookie, no id; the edge's country is kept. Off: those paths are
    *  the app's. */
   vitals?: boolean;
+  /** Strict-Transport-Security on its answers when roll serves HTTPS, unless the app or its
+   *  `headers` send one (Vercel's, Netlify's): null the default (`max-age=63072000`, two years),
+   *  false none, or its own (max_age at most 63072000, 0 tells browsers to forget it; preload
+   *  needs include_subdomains and a year at least). */
+  hsts?: { max_age: number; include_subdomains?: boolean; preload?: boolean } | false | null;
   log_retention_days?: 7 | 30 | 90 | null; // how long its logs are kept (null: 7); a preview's stay 7 (400)
   keep_days?: number | null; // 1–90: its built deployments stay to roll back to that many days past the newest ten (Vercel's retention); null: only those
   scheduled?: boolean; // false: its schedules don't run (a cron service's, run.schedules' commands and calls), skipped and not made up when turned back on; deploys and POST …/runs still go; default true (roll previews turns pv- environments' off)
@@ -644,6 +649,7 @@ type Environment = EnvironmentSummary & {
   redeploy_on_secrets: boolean; // the project's secrets changing redeploys it (same image, new values)
   traces: boolean; // its instances send OpenTelemetry traces to roll
   vitals: boolean; // its pages measure their Web Vitals for roll (`…/vitals`)
+  hsts: { max_age: number; include_subdomains?: boolean; preload?: boolean } | null; // its Strict-Transport-Security over HTTPS (null: none sent)
   approvals?: number; // approvals a deployment needs before it goes live (absent: none)
   badge_url?: string; // its deploy status badge, when `badge` is on
   log_retention_days: number; // 7 (default), 30 or 90: its logs (output, access log, traces, metrics, events, Vitals) are kept that long, then deleted hourly by the owner; a preview's are 7
