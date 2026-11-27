@@ -709,6 +709,18 @@ impl Runtime for Docker {
         docker(&["image", "inspect", "-f", "{{.Size}}", image]).await.ok().and_then(|s| s.trim().parse().ok())
     }
 
+    async fn export_image(&self, image: &str) -> anyhow::Result<Option<Box<dyn tokio::io::AsyncRead + Send + Unpin>>> {
+        // Here, or it's gone (a pruned deployment's): said before anything streams.
+        docker(&["image", "inspect", "-f", "{{.Id}}", image]).await.map_err(|_| anyhow::anyhow!("its image isn't kept on this node any more"))?;
+        let mut child = Command::new("docker").args(["save", image]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true).spawn()?;
+        let out = child.stdout.take().ok_or_else(|| anyhow::anyhow!("docker save gave no output"))?;
+        // Reaped whenever the reader stops (a client that went away ends it).
+        tokio::spawn(async move {
+            let _ = child.wait().await;
+        });
+        Ok(Some(Box::new(out)))
+    }
+
     async fn image_ports(&self, image: &str) -> Vec<u16> {
         let Ok(text) = docker(&["image", "inspect", "-f", "{{json .Config.ExposedPorts}}", image]).await else { return Vec::new() };
         let v: serde_json::Value = serde_json::from_str(text.trim()).unwrap_or_default();

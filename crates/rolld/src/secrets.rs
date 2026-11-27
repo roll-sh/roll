@@ -1354,9 +1354,10 @@ fn search_parts(k: &Json) -> roll_secrets::Result<BTreeMap<String, Value>> {
     Ok(BTreeMap::from([("user".to_string(), text(k, "/username")?), ("password".to_string(), text(k, "/password")?)]))
 }
 
-/// roll code's search for roll secrets' health (`code` check): whether a repository's default
-/// branch mentions each key, from roll code's trigram index. Any error (code search off, the
-/// index not ready, the repository not on this node) is "can't tell": nothing gets flagged.
+/// roll code for roll secrets' health: whether a repository's default branch mentions each key
+/// (`code` check), from roll code's trigram index, and where a repository is public (roll code's
+/// visibility, or its GitHub mirror's as last seen). Any error (code search off, the index not
+/// ready, the repository not on this node) is "can't tell": nothing gets flagged.
 pub struct CodeRefs(pub Arc<code_control::Code>);
 
 impl roll_secrets::health::CodeRefs for CodeRefs {
@@ -1373,6 +1374,11 @@ impl roll_secrets::health::CodeRefs for CodeRefs {
             }
             Some(found)
         })
+    }
+
+    fn public(&self, repo: &str) -> Option<String> {
+        let (owner, name) = repo.split_once('/')?;
+        code_control::github::public_at(&self.0.find_repo(owner, name).ok()?)
     }
 }
 
