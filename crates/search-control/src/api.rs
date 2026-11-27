@@ -86,6 +86,10 @@ pub fn router(control: Arc<Control>) -> Router {
         .route("/v1/search/clusters/{id}/browser-keys/from-parent/prune", post(prune_parent_browser_keys))
         .route("/v1/search/clusters/{id}/browser-keys/{key}/usage", get(browser_key_usage))
         .route("/v1/search/clusters/{id}/remotes", get(remotes))
+        .route("/v1/search/clusters/{id}/alerts", get(alerts).post(create_alert))
+        .route("/v1/search/clusters/{id}/alerts/{rule}", get(alert).delete(delete_alert))
+        .route("/v1/search/clusters/{id}/alerts/{rule}/test", post(test_alert))
+        .route("/v1/search/clusters/{id}/alerts/{rule}/deliveries", get(alert_deliveries))
         .route("/v1/search/clusters/{id}/remotes/{alias}", axum::routing::put(link_remote).delete(unlink_remote))
         .route("/v1/search/clusters/{id}/indices/{index}", get(index_get).put(index_create).delete(index_delete))
         .route("/v1/search/clusters/{id}/indices/{index}/mapping", axum::routing::put(index_mapping).get(index_mapping_get))
@@ -1276,6 +1280,36 @@ async fn link_remote(State(c): State<AppState>, caller: Caller, Path((id, alias)
 async fn unlink_remote(State(c): State<AppState>, Path((id, alias)): Path<(String, String)>) -> Result<StatusCode, ControlError> {
     c.unlink_remote(&id, &alias).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// A cluster's health alert rules (`crate::alerts`), with their state.
+async fn alerts(State(c): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
+    Ok(Json(c.alerts(&id).await?))
+}
+
+/// Adds a rule. Its chat targets post as its maker may (an install of their own roll code owner),
+/// checked again on every send.
+async fn create_alert(State(c): State<AppState>, caller: Caller, Path(id): Path<String>, ext: Extensions, Json(b): Json<crate::alerts::NewRule>) -> Result<(StatusCode, Json<Value>), ControlError> {
+    let made_by = caller.user().or_else(|| ext.get::<roll_auth::SignedIn>().map(|s| s.user.as_str())).unwrap_or(crate::remotes::OPERATOR);
+    Ok((StatusCode::CREATED, Json(c.create_alert(&id, made_by, b).await?)))
+}
+
+async fn alert(State(c): State<AppState>, Path((id, rule)): Path<(String, String)>) -> ApiResult<Value> {
+    Ok(Json(c.alert(&id, &rule).await?))
+}
+
+async fn delete_alert(State(c): State<AppState>, Path((id, rule)): Path<(String, String)>) -> Result<StatusCode, ControlError> {
+    c.delete_alert(&id, &rule).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Queues a test delivery to each of the rule's targets; the worker sends them at once.
+async fn test_alert(State(c): State<AppState>, Path((id, rule)): Path<(String, String)>) -> Result<(StatusCode, Json<Value>), ControlError> {
+    Ok((StatusCode::ACCEPTED, Json(c.test_alert(&id, &rule).await?)))
+}
+
+async fn alert_deliveries(State(c): State<AppState>, Path((id, rule)): Path<(String, String)>) -> ApiResult<Value> {
+    Ok(Json(c.alert_deliveries(&id, &rule).await?))
 }
 
 #[derive(Deserialize)]
