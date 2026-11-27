@@ -1632,7 +1632,8 @@ From a 2026-11-26 comparison (the spec's anniversary post, Claude's connector do
 4. **Lends that name their key (this PR; roll secrets #1226 landed `keys`):** #1226 adds rules for single
    secret keys (`keys`); a lend naming its key (`Lent.key`: apps' DNS token, search's rotated
    password) then hands and remembers `keys: [KEY]` rather than the folder, so a root lend naming a
-   key is rememberable again (8 hours at most), and `lent_also_rule` keeps the key.
+   key is rememberable again (8 hours at most). `lent_also_rule` stays keyless: it's the route's own
+   product's (apps', search's), and only a secrets rule names keys.
 5. **Watched:** SEP-1913 (`sensitiveHint`, `privateHint` and `maliciousActivityHint` annotations, close to lockdown's marks) and the files extension (Claude says uploads are "rolling out soon").
 
 6. **Paging is the products'.** No list route takes a cursor (approvals take `limit` only). History

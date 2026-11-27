@@ -280,8 +280,8 @@ export function rememberChoices(a: Pick<Approval, "product" | "scope_path">): ty
 }
 
 /** Where in its resource an approval is (what remembering it keeps to): "production · folder /db". */
-export function approvalWhere(a: Pick<Approval, "environment" | "scope_path">): string {
-  return [a.environment, !isRoot(a.scope_path) ? `folder ${a.scope_path}` : null].filter(Boolean).join(" · ");
+export function approvalWhere(a: Pick<Approval, "environment" | "scope_path"> & { scope_key?: string | null }): string {
+  return [a.environment, !isRoot(a.scope_path) ? `folder ${a.scope_path}` : null, a.scope_key ? `key ${a.scope_key}` : null].filter(Boolean).join(" · ");
 }
 
 /** Whether approving it can be remembered: it's about one resource, and roll's policy doesn't ask several people for it. */
