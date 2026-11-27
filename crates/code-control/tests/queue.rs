@@ -627,6 +627,11 @@ async fn blockers_keep_changes_out_of_the_queue() {
         a.code.report_environment(&id(&c), Some(&released(ok, broke))).unwrap();
         assert_eq!(kinds(&a.ok("GET", &format!("/v1/code/changes/{}", id(&c)), None).await), ["release"], "{ok:?} {broke}");
     }
+    // Not settled at its head yet (main's code on its data runs before it settles): it waits.
+    let mut converging = released(Some(true), false);
+    converging.environment.as_mut().unwrap().state = "updating".into();
+    a.code.report_environment(&id(&c), Some(&converging)).unwrap();
+    assert_eq!(kinds(&a.ok("GET", &format!("/v1/code/changes/{}", id(&c)), None).await), ["release"], "still converging");
     a.code.report_environment(&id(&c), Some(&released(Some(true), false))).unwrap();
     let c = a.ok("GET", &format!("/v1/code/changes/{}", id(&c)), None).await;
     assert_eq!(c["blockers"], json!([]));

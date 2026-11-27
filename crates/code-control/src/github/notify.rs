@@ -52,14 +52,18 @@ pub(super) async fn change_landed(code: &Code, hub: &Hub, c: &Change) -> Result<
 
 impl Code {
     /// An issue on the repo's GitHub mirror, made by roll's App (Issues: read and write), when the
-    /// repo is connected: its number and page. GitHub's `issues` webhook then makes it the repo's
-    /// work item, as any issue there. `None` when the repo isn't connected or there's no App.
+    /// repo is connected, made the repo's work item at once (as GitHub's `issues` webhook would,
+    /// which then finds it): the work item's number in roll and the issue's page. `None` when the
+    /// repo isn't connected or there's no App.
     pub async fn open_github_issue(&self, r: &RepoRow, title: &str, body: &str, labels: &[String]) -> Result<Option<(u64, String)>> {
         let (Some(hub), Some((_, l))) = (self.github_hub().cloned(), connected(self, &r.id)) else { return Ok(None) };
         let gh = |e: code_github::Error| crate::Error::Internal(e.into());
         let issue = hub.client.create_issue(l.installation_id, &l.owner, &l.repo, title, body, labels).await.map_err(gh)?;
+        let draft = super::sync::issue_draft(&hub, &issue);
+        super::sync::upsert_issue(self, r, &draft)?;
+        let number = self.db.work_by_source(&r.id, &draft.external_id)?.map_or(issue.number, |w| w.number);
         let url = issue.html_url.unwrap_or_else(|| format!("{}/{}/issues/{}", hub.config.web_base, l.full_name(), issue.number));
-        Ok(Some((issue.number, url)))
+        Ok(Some((number, url)))
     }
 }
 
