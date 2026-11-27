@@ -431,6 +431,8 @@ pub struct FakeApps {
     pub on_deploy: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
     /// Which service each screenshot run was of.
     pub shot_services: Mutex<Vec<String>>,
+    /// The same, with whose preview each was: (preview, service).
+    pub shots_of: Mutex<Vec<(String, String)>>,
     /// The notes each screenshot was asked to crop (a `#missing` selector finds nothing).
     pub crops_asked: Mutex<Vec<String>>,
     /// What an agent's run (`…/try`) answers.
@@ -643,6 +645,7 @@ impl Apps for FakeApps {
     async fn screenshot(&self, preview: &str, service: &str, opts: &roll_previews::ports::ShotOptions) -> anyhow::Result<Option<roll_previews::ports::Shot>> {
         let Some(png) = self.shot.lock().clone() else { return Ok(None) };
         self.shot_services.lock().push(service.to_string());
+        self.shots_of.lock().push((preview.to_string(), service.to_string()));
         // The API the preview serves: by any revision it runs (whichever service is first).
         let revs: Vec<String> = self.deployed.lock().iter().filter(|((p, _), _)| p == preview).map(|(_, r)| r.clone()).collect();
         let api = opts.openapi.as_ref().and_then(|_| revs.iter().find_map(|r| self.api.lock().get(r).cloned()));

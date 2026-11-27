@@ -2799,12 +2799,23 @@ async fn a_storybooks_stories_are_pages_kept_while_its_service_doesnt_change() {
     let mut png = Vec::new();
     image::RgbaImage::new(4, 4).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
     *e.apps.shot.lock() = Some(png);
-    let runs = |svc: &str| e.apps.shot_services.lock().iter().filter(|s| *s == svc).count();
     let mut c = change("chg_sb", 3);
     c.repo = "acme/api".into();
     e.code.open(c);
     e.engine.pass().await.unwrap();
     let p = e.engine.store.row_by_change("chg_sb").unwrap().unwrap();
+    // This preview's own runs of web: main's preview takes the change's stories too (a baseline
+    // on demand), whenever its run comes.
+    let runs = |svc: &str| e.apps.shots_of.lock().iter().filter(|(pv, s)| *pv == p.id && s == svc).count();
+    // Every screenshot run settled (this one's, and main's it asked for), so none lands later.
+    let settled = || async {
+        for _ in 0..3000 {
+            if !e.engine.shooting() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    };
     let stories = |e: &Env| e.engine.store.preview(&p.id).unwrap().pages.iter().filter(|x| x.path.starts_with("story:")).map(|x| x.path.clone()).collect::<Vec<_>>();
     for _ in 0..3000 {
         if stories(&e).len() == 2 {
@@ -2813,6 +2824,7 @@ async fn a_storybooks_stories_are_pages_kept_while_its_service_doesnt_change() {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
     assert_eq!(stories(&e), ["story:button--primary", "story:button--secondary"]);
+    settled().await;
     let web_before = runs("web");
     // A push to api: web runs what it ran, so its stories are kept, not taken again.
     e.code.edit("chg_sb", |c| c.head = "cs_4b".into());
@@ -2823,6 +2835,7 @@ async fn a_storybooks_stories_are_pages_kept_while_its_service_doesnt_change() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
+    settled().await;
     assert_eq!((runs("web"), stories(&e).len()), (web_before, 2), "kept with web's other pages");
 }
 
