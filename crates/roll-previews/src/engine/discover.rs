@@ -60,7 +60,14 @@ impl Engine {
         if columns.is_empty() {
             return;
         }
-        let notice = crate::ports::MaskingNotice { project: project.id.clone(), project_name: project.name.clone(), columns };
+        let mut resources: Vec<crate::ports::MaskedCount> = Vec::new();
+        for c in &columns {
+            match resources.iter_mut().find(|r| r.resource == c.resource) {
+                Some(r) => r.columns += 1,
+                None => resources.push(crate::ports::MaskedCount { resource: c.resource.clone(), columns: 1 }),
+            }
+        }
+        let notice = crate::ports::MaskingNotice { project: project.id.clone(), project_name: project.name.clone(), resources, columns };
         if let Err(e) = self.source.masking(repos, &notice).await {
             return warn!(project = %project.id, error = %e, "previews: telling the project of columns masked by default (tried again next pass)");
         }

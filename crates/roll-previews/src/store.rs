@@ -1048,6 +1048,10 @@ impl Store {
         if !db.has_column("shares", "path")? {
             db.add_column("shares", "path", "TEXT")?;
         }
+        // A webhook URL's service: its token opens its path there only.
+        if !db.has_column("shares", "service")? {
+            db.add_column("shares", "service", "TEXT")?;
+        }
         if !db.has_column("shares", "hits")? {
             db.add_column("shares", "hits", "INTEGER NOT NULL DEFAULT 0")?;
         }
@@ -3622,7 +3626,7 @@ impl Store {
 
     /// A webhook URL for `path` of preview `id` (Stripe's or GitHub's, into a private preview):
     /// that path only, for the preview's life, its token in the query. Shown once.
-    pub fn create_webhook(&self, id: &str, path: &str, by: &str, maker: Option<&str>, label: &str) -> Result<(crate::Webhook, String)> {
+    pub fn create_webhook(&self, id: &str, service: &str, path: &str, by: &str, maker: Option<&str>, label: &str) -> Result<(crate::Webhook, String)> {
         let now = self.now_ms()?;
         let token = format!("rph_{}", new_token());
         let wid = format!("whk_{}", &new_token()[..12]);
@@ -3633,19 +3637,19 @@ impl Store {
                 return Err(Error::Conflict(format!("the preview has {WEBHOOKS_MAX} webhook URLs: revoke one first")));
             }
             c.execute(
-                "INSERT INTO shares (id, preview_id, hash, expires_at, created_by, created_at, maker, maker_checked, label, notes, path) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)",
-                params![wid, id, hash, i64::MAX, by, now, maker, now, label, path],
+                "INSERT INTO shares (id, preview_id, hash, expires_at, created_by, created_at, maker, maker_checked, label, notes, path, service) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
+                params![wid, id, hash, i64::MAX, by, now, maker, now, label, path, service],
             )?;
             Ok::<_, Error>(())
         })?;
-        Ok((crate::Webhook { id: wid, path: path.to_string(), label: label.to_string(), created_by: by.to_string(), created_at: now, revoked: false, hits: 0, last_at: None }, token))
+        Ok((crate::Webhook { id: wid, service: service.to_string(), path: path.to_string(), label: label.to_string(), created_by: by.to_string(), created_at: now, revoked: false, hits: 0, last_at: None }, token))
     }
 
     /// The preview's webhook URLs, newest first (never their tokens).
     pub fn webhooks(&self, id: &str) -> Result<Vec<crate::Webhook>> {
         Ok(self.db.read(|c| {
-            c.query("SELECT id, path, label, created_by, created_at, revoked, hits, last_at FROM shares WHERE preview_id = ? AND path IS NOT NULL ORDER BY created_at DESC", [id], |r| {
-                Ok(crate::Webhook { id: r.get(0)?, path: r.get(1)?, label: r.get(2)?, created_by: r.get(3)?, created_at: r.get(4)?, revoked: r.get::<_, i64>(5)? != 0, hits: r.get(6)?, last_at: r.get(7)? })
+            c.query("SELECT id, path, label, created_by, created_at, revoked, hits, last_at, service FROM shares WHERE preview_id = ? AND path IS NOT NULL ORDER BY created_at DESC", [id], |r| {
+                Ok(crate::Webhook { id: r.get(0)?, service: r.get::<_, Option<String>>(8)?.unwrap_or_default(), path: r.get(1)?, label: r.get(2)?, created_by: r.get(3)?, created_at: r.get(4)?, revoked: r.get::<_, i64>(5)? != 0, hits: r.get(6)?, last_at: r.get(7)? })
             })
         })?)
     }
@@ -3658,17 +3662,22 @@ impl Store {
         Ok(())
     }
 
-    /// A live webhook URL `token` of preview `id` for exactly `path` (as a share link's row, for
-    /// its maker's check: [`crate::visit::share_visit`]).
-    pub fn webhook_live(&self, id: &str, token: &str, path: &str) -> Result<Option<LiveShare>> {
+    /// A live webhook URL `token` of preview `id` for exactly `path` of `service` (as a share
+    /// link's row, for its maker's check: [`crate::visit::share_visit`]).
+    pub fn webhook_live(&self, id: &str, token: &str, service: &str, path: &str) -> Result<Option<LiveShare>> {
         Ok(self.db.read(|c| {
             c.query_row(
-                "SELECT id, expires_at, maker, maker_checked, label, notes FROM shares WHERE preview_id = ? AND hash = ? AND path = ? AND revoked = 0",
-                params![id, bypass_hash(token), path],
+                "SELECT id, expires_at, maker, maker_checked, label, notes FROM shares WHERE preview_id = ? AND hash = ? AND service = ? AND path = ? AND revoked = 0",
+                params![id, bypass_hash(token), service, path],
                 |r| Ok(LiveShare { id: r.get(0)?, ends: r.get(1)?, maker: r.get(2)?, maker_checked: r.get(3)?, label: r.get(4)?, notes: false }),
             )
             .optional()
         })?)
+    }
+
+    /// The live webhook URLs' (service, path, token SHA-256), for a backend whose gate checks them.
+    pub fn webhook_hashes(&self, id: &str) -> Result<Vec<(String, String, String)>> {
+        Ok(self.db.read(|c| c.query("SELECT service, path, hash FROM shares WHERE preview_id = ? AND path IS NOT NULL AND service IS NOT NULL AND revoked = 0 ORDER BY created_at", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))))?)
     }
 
     /// A request came in by webhook URL `webhook` (how many, and when last: a relaxed write).
