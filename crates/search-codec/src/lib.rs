@@ -72,7 +72,7 @@ pub use merge::{MergeInput, MergeSource};
 pub use norms::{NormsReader, byte4_to_int, int_to_byte4};
 pub use points::{PointVisitor, PointsReader, Relation};
 pub use postings::{Impact, PostingsCursor, PostingsFlags, TermState};
-pub use reader::{DocValuesReader, SegmentReader, UNINVERTED};
+pub use reader::{DocValuesReader, SectionWait, SegmentReader, UNINVERTED};
 pub use slice::Slice;
 pub use sort::sort_doc_map;
 pub use spill::SpillOptions;

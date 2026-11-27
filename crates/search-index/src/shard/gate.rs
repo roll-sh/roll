@@ -3,11 +3,15 @@
 //! A shard waking on a node whose cache lacks a large segment should not wait for the whole
 //! file. The caller hands [`Shard::open`](super::Shard::open) a memory map of the partial file
 //! (missing bytes read as zeros) plus a gate that says which byte ranges have arrived. Opening
-//! waits only for what the codec's `SegmentReader::open` parses — header, footer, table of
-//! contents, metadata, term dictionaries, norms, doc values, points, vectors, the stored-fields
-//! index — and the `_id` postings (tiny: single-doc terms live in the term dictionary), so
-//! writes and realtime gets never block on the download. The bulk of a segment stays lazy:
+//! waits only for what the codec's `SegmentReader::open_lazy` parses — header, footer, table of
+//! contents, metadata, term dictionaries, norms, vectors, the stored-fields index, and the
+//! internal fields' doc values and points — and the `_id` postings (tiny: single-doc terms live
+//! in the term dictionary), so writes and realtime gets never block on the download. The bulk of
+//! a segment stays lazy:
 //!
+//! - every user field's doc values and points (on a numeric index, most of the file), opened by
+//!   the codec the first time something reads the field in that segment
+//!   ([`search_codec::SectionWait`], [`GateWait`]);
 //! - the doc streams (docs, freqs, skip data) of every other field, awaited per field the
 //!   first time a scorer opens postings on the field in that segment
 //!   ([`SegmentContext::ensure_postings`](crate::search::SegmentContext::ensure_postings));
@@ -29,7 +33,20 @@ use search_codec::container::{self, ContainerReader, FOOTER_LEN, GLOBAL, HEADER_
 use search_codec::{Slice, stored};
 
 use crate::error::Result;
-use crate::schema::ID_FIELD;
+use crate::schema::{FIRST_USER_FIELD, ID_FIELD};
+
+/// A gate as the codec waits on it for the sections it opens on first use.
+pub(crate) struct GateWait(pub(crate) Arc<dyn SegmentGate>);
+
+impl search_codec::SectionWait for GateWait {
+    fn is_ready(&self, range: Range<u64>) -> bool {
+        self.0.is_ready(range)
+    }
+
+    fn wait(&self, range: Range<u64>) -> std::io::Result<()> {
+        self.0.wait_ready(std::slice::from_ref(&range))
+    }
+}
 
 /// Which byte ranges of a segment file are readable yet (search-store's `SegmentFetch`).
 ///
@@ -107,6 +124,8 @@ impl Gate {
         src.wait_ready(&[toc])?;
         let c = ContainerReader::open(data.clone())?;
         let mut eager = Vec::new();
+        // User fields' doc values and points: opened by the codec on first use.
+        let mut values = Vec::new();
         let mut fields: Vec<FieldParts> = Vec::new();
         let mut stored = Part::default();
         for e in c.entries() {
@@ -130,6 +149,7 @@ impl Gate {
                     eager.push(e.offset + open.start..r.end);
                     stored.ranges.push(r.start..e.offset + open.start);
                 }
+                SectionKind::DocValues | SectionKind::Points if e.field >= FIRST_USER_FIELD => values.push(r),
                 _ => eager.push(r),
             }
         }
@@ -137,6 +157,7 @@ impl Gate {
         // Eager first (the caller waits on them now), then what queries need most often: doc
         // streams, documents (every fetch phase), positions.
         src.prioritize(&eager);
+        src.prioritize(&values);
         let docs: Vec<Range<u64>> = fields.iter().flat_map(|f| f.docs.ranges.iter().cloned()).collect();
         src.prioritize(&docs);
         src.prioritize(&stored.ranges);

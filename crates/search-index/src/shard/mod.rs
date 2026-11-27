@@ -844,11 +844,16 @@ impl Shard {
         let mut uid = 1u64;
         for h in segments {
             let fetching = h.gate.is_some();
+            let wait = h.gate.clone();
             let gate = match h.gate {
                 Some(g) => gate::Gate::open(&h.data, g)?,
                 None => None,
             };
-            let reader = SegmentReader::open(h.data)?;
+            // Still downloading: the codec opens user fields' doc values and points on first use.
+            let reader = match (wait, &gate) {
+                (Some(w), Some(_)) => SegmentReader::open_lazy(h.data, Some(Arc::new(gate::GateWait(w))))?,
+                _ => SegmentReader::open(h.data)?,
+            };
             if let Some(l) = &h.live
                 && l.max_doc() != reader.max_doc()
             {

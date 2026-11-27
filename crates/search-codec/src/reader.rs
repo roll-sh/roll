@@ -9,6 +9,12 @@
 //!
 //! The reader is `Send + Sync` and clones by reference count; per-thread cursors
 //! ([`PostingsCursor`], [`StoredReader`], doc set cursors) are created from it.
+//!
+//! A segment still downloading ([`SegmentReader::open_lazy`], with a [`SectionWait`]) opens its
+//! fields' doc values and points readers on first use instead, once their section is in: a waking
+//! shard then waits for metadata and term dictionaries, not for every field's values (on a
+//! numeric index, most of the file). A section that was already in when the segment opened is
+//! opened at once, as before.
 
 use std::sync::Arc;
 
@@ -28,6 +34,54 @@ use crate::suggest::SuggestReader;
 use crate::terms::TermsReader;
 use crate::vectors::VectorsReader;
 
+/// A segment file still downloading ([`SegmentReader::open_lazy`]): which byte ranges are in, and
+/// a wait for the others. `wait` blocks the calling thread (a shard's readers run on blocking
+/// threads).
+pub trait SectionWait: Send + Sync {
+    fn is_ready(&self, range: std::ops::Range<u64>) -> bool;
+    /// Blocks until every byte of `range` is readable, or the download failed.
+    fn wait(&self, range: std::ops::Range<u64>) -> std::io::Result<()>;
+}
+
+/// A field's reader of one section: open, or opened on first use once the section is in.
+#[derive(Debug, Default)]
+enum Lazy<R> {
+    Now(Option<R>),
+    Later {
+        range: std::ops::Range<u64>,
+        slot: std::sync::OnceLock<std::result::Result<R, String>>,
+    },
+    #[default]
+    None,
+}
+
+impl<R: Clone> Clone for Lazy<R> {
+    fn clone(&self) -> Self {
+        match self {
+            Lazy::Now(r) => Lazy::Now(r.clone()),
+            Lazy::None => Lazy::None,
+            Lazy::Later { range, slot } => {
+                let copy = std::sync::OnceLock::new();
+                if let Some(v) = slot.get() {
+                    let _ = copy.set(v.clone());
+                }
+                Lazy::Later { range: range.clone(), slot: copy }
+            }
+        }
+    }
+}
+
+impl<R> Lazy<R> {
+    /// The reader if it is open (never waits).
+    fn now(&self) -> Option<&R> {
+        match self {
+            Lazy::Now(r) => r.as_ref(),
+            Lazy::Later { slot, .. } => slot.get().and_then(|r| r.as_ref().ok()),
+            Lazy::None => None,
+        }
+    }
+}
+
 /// The doc values of a field, by type.
 #[derive(Clone, Debug)]
 pub enum DocValuesReader {
@@ -42,8 +96,8 @@ pub enum DocValuesReader {
 struct FieldReaders {
     terms: Option<TermsReader>,
     norms: Option<NormsReader>,
-    doc_values: Option<DocValuesReader>,
-    points: Option<PointsReader>,
+    doc_values: Lazy<DocValuesReader>,
+    points: Lazy<PointsReader>,
     vectors: Option<VectorsReader>,
     suggest: Option<SuggestReader>,
     /// Sorted doc values rebuilt from the terms on first use ([`UNINVERTED`]); boxed so a
@@ -67,6 +121,8 @@ pub const UNINVERTED: u32 = 1 << 31;
 
 struct Inner {
     container: ContainerReader,
+    /// A segment still downloading: what lazy readers wait on ([`SegmentReader::open_lazy`]).
+    wait: Option<Arc<dyn SectionWait>>,
     info: SegmentInfo,
     fields: Vec<FieldReaders>,
     stored: StoredFields,
@@ -116,6 +172,16 @@ fn hex(b: &[u8]) -> String {
 impl SegmentReader {
     /// Opens a segment file.
     pub fn open(data: Slice) -> Result<SegmentReader> {
+        Self::open_lazy(data, None)
+    }
+
+    /// Opens a segment file that may still be downloading: `data` maps the whole file (bytes not
+    /// in yet read as zeros) and `wait` says which ranges are in. Everything this parses must be in
+    /// already (header, table of contents, metadata, term dictionaries, stored-fields index); a
+    /// field's doc values or points section that isn't opens on first use
+    /// ([`SegmentReader::doc_values`], [`SegmentReader::points`] block until it is in). `None`: a
+    /// complete file, everything opened now.
+    pub fn open_lazy(data: Slice, wait: Option<Arc<dyn SectionWait>>) -> Result<SegmentReader> {
         let container = ContainerReader::open(data)?;
         container.verify_section(SectionKind::Meta, GLOBAL)?;
         let meta = container
@@ -129,7 +195,7 @@ impl SegmentReader {
         let max_doc = info.max_doc;
         let mut fields = Vec::with_capacity(info.fields.len());
         for f in &info.fields {
-            fields.push(open_field(&container, f, max_doc)?);
+            fields.push(open_field(&container, f, max_doc, wait.as_deref())?);
         }
         let stored = StoredFields::open(
             container
@@ -143,6 +209,7 @@ impl SegmentReader {
         Ok(SegmentReader {
             inner: Arc::new(Inner {
                 container,
+                wait,
                 slots: slot_table(&info),
                 info,
                 fields,
@@ -207,10 +274,10 @@ impl SegmentReader {
             if let Some(t) = &fr.terms {
                 n += t.min_term().len() + t.max_term().len();
             }
-            if let Some(p) = &fr.points {
+            if let Some(p) = fr.points.now() {
                 n += p.min_packed_value().len() * 2;
             }
-            if let Some(DocValuesReader::SortedSet(_) | DocValuesReader::Sorted(_)) = &fr.doc_values {
+            if let Some(DocValuesReader::SortedSet(_) | DocValuesReader::Sorted(_)) = fr.doc_values.now() {
                 n += 64;
             }
         }
@@ -227,6 +294,32 @@ impl SegmentReader {
     }
 
     #[inline]
+    /// A field's reader of a section, opening it first when it was left for its first use: blocks
+    /// until the section is in. A section that never arrives (the download failed) or doesn't
+    /// open is a panic naming the segment, never a field without values: a search's pool
+    /// reports it as the search's failure.
+    fn opened<'a, R>(&'a self, l: &'a Lazy<R>, field: u32, kind: SectionKind, open: impl FnOnce(Slice, &FieldInfo, u32) -> Result<R>) -> Option<&'a R> {
+        match l {
+            Lazy::Now(r) => r.as_ref(),
+            Lazy::None => None,
+            Lazy::Later { range, slot } => {
+                let r = slot.get_or_init(|| {
+                    let inner = &*self.inner;
+                    if let Some(w) = &inner.wait {
+                        w.wait(range.clone()).map_err(|e| e.to_string())?;
+                    }
+                    let s = inner.container.section(kind, field).ok_or_else(|| "missing section".to_string())?;
+                    let fi = inner.info.field(field).ok_or_else(|| "missing field".to_string())?;
+                    open(s, fi, inner.info.max_doc).map_err(|e| e.to_string())
+                });
+                match r {
+                    Ok(r) => Some(r),
+                    Err(e) => panic!("segment {}: field {field}'s {kind:?} section isn't readable: {e}", hex(&self.inner.info.id)),
+                }
+            }
+        }
+    }
+
     fn field(&self, number: u32) -> Option<&FieldReaders> {
         let inner = &*self.inner;
         if !inner.slots.is_empty() {
@@ -256,7 +349,7 @@ impl SegmentReader {
 
     pub fn doc_values(&self, field: u32) -> Option<&DocValuesReader> {
         match self.field(field) {
-            Some(f) => f.doc_values.as_ref(),
+            Some(f) => self.opened(&f.doc_values, field, SectionKind::DocValues, |s, fi, max_doc| open_doc_values(s, fi, max_doc)),
             // Numbers this large are never real fields (`u32::MAX` sentinels included).
             None if field & UNINVERTED != 0 => self.uninverted(field & !UNINVERTED),
             None => None,
@@ -312,7 +405,9 @@ impl SegmentReader {
     }
 
     pub fn points(&self, field: u32) -> Option<&PointsReader> {
-        self.field(field)?.points.as_ref()
+        self.opened(&self.field(field)?.points, field, SectionKind::Points, |s, fi, _| {
+            PointsReader::open(s, fi.points.as_ref().ok_or_else(|| corrupt(format!("points for field [{}] without a spec", fi.name)))?)
+        })
     }
 
     pub fn vectors(&self, field: u32) -> Option<&VectorsReader> {
@@ -375,7 +470,29 @@ fn uninvert(terms: &TermsReader, max_doc: u32) -> Option<Uninverted> {
     SortedDocValues::open(Slice::from(out), max_doc).ok().map(|dv| Uninverted { reader: DocValuesReader::Sorted(dv), bytes })
 }
 
-fn open_field(c: &ContainerReader, f: &FieldInfo, max_doc: u32) -> Result<FieldReaders> {
+/// Opens a field's doc values reader over its section.
+fn open_doc_values(s: Slice, f: &FieldInfo, max_doc: u32) -> Result<DocValuesReader> {
+    Ok(match f.doc_values {
+        DocValuesType::Numeric => DocValuesReader::Numeric(NumericDocValues::open(s, max_doc)?),
+        DocValuesType::Binary => DocValuesReader::Binary(BinaryDocValues::open(s, max_doc)?),
+        DocValuesType::Sorted => DocValuesReader::Sorted(SortedDocValues::open(s, max_doc)?),
+        DocValuesType::SortedSet => DocValuesReader::SortedSet(SortedSetDocValues::open(s, max_doc)?),
+        DocValuesType::SortedNumeric => DocValuesReader::SortedNumeric(SortedNumericDocValues::open(s, max_doc)?),
+        DocValuesType::None => return Err(corrupt(format!("doc values for field [{}] without a type", f.name))),
+    })
+}
+
+/// A section's reader now, or left for its first use when `wait` says its bytes aren't in yet.
+fn lazy<R>(c: &ContainerReader, kind: SectionKind, field: u32, wait: Option<&dyn SectionWait>, open: impl FnOnce(Slice) -> Result<R>) -> Result<Lazy<R>> {
+    let Some(e) = c.entry(kind, field) else { return Ok(Lazy::None) };
+    let range = e.offset..e.offset + e.len;
+    match wait {
+        Some(w) if !w.is_ready(range.clone()) => Ok(Lazy::Later { range, slot: std::sync::OnceLock::new() }),
+        _ => Ok(Lazy::Now(Some(open(c.section(kind, field).expect("an entry has a section"))?))),
+    }
+}
+
+fn open_field(c: &ContainerReader, f: &FieldInfo, max_doc: u32, wait: Option<&dyn SectionWait>) -> Result<FieldReaders> {
     let n = f.number;
     let mut fr = FieldReaders::default();
     if f.index.is_indexed()
@@ -400,27 +517,9 @@ fn open_field(c: &ContainerReader, f: &FieldInfo, max_doc: u32) -> Result<FieldR
     if let Some(s) = c.section(SectionKind::Norms, n) {
         fr.norms = Some(NormsReader::open(s, max_doc)?);
     }
-    if let Some(s) = c.section(SectionKind::DocValues, n) {
-        fr.doc_values = Some(match f.doc_values {
-            DocValuesType::Numeric => DocValuesReader::Numeric(NumericDocValues::open(s, max_doc)?),
-            DocValuesType::Binary => DocValuesReader::Binary(BinaryDocValues::open(s, max_doc)?),
-            DocValuesType::Sorted => DocValuesReader::Sorted(SortedDocValues::open(s, max_doc)?),
-            DocValuesType::SortedSet => {
-                DocValuesReader::SortedSet(SortedSetDocValues::open(s, max_doc)?)
-            }
-            DocValuesType::SortedNumeric => {
-                DocValuesReader::SortedNumeric(SortedNumericDocValues::open(s, max_doc)?)
-            }
-            DocValuesType::None => {
-                return Err(corrupt(format!(
-                    "doc values for field [{}] without a type",
-                    f.name
-                )));
-            }
-        });
-    }
-    if let (Some(spec), Some(s)) = (&f.points, c.section(SectionKind::Points, n)) {
-        fr.points = Some(PointsReader::open(s, spec)?);
+    fr.doc_values = lazy(c, SectionKind::DocValues, n, wait, |s| open_doc_values(s, f, max_doc))?;
+    if let Some(spec) = &f.points {
+        fr.points = lazy(c, SectionKind::Points, n, wait, |s| PointsReader::open(s, spec))?;
     }
     if let (Some(spec), Some(s)) = (&f.vectors, c.section(SectionKind::VectorData, n)) {
         fr.vectors = Some(VectorsReader::open(
