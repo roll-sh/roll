@@ -267,12 +267,13 @@ system indices: a client can read and write them directly.
      - They run on the cluster's owner after the answer, one search per query and configuration,
        as the caller who made them, with SRW's metric definitions above (not `_rank_eval`'s,
        whose precision and relevance threshold differ).
-     - An experiment that a node stops in the middle of stays `PROCESSING`, as the plugin's
-       does. Next: mark it `ERROR` when the cluster loads.
+     - An experiment that a node stops in the middle of is marked `ERROR` when the cluster loads
+       again (the plugin leaves it `PROCESSING`).
      - Each answer and error is a REST fixture captured from the image.
-   - **evaluate** (next). On these clusters, `evaluate` will also take `judgment_id`, a Workbench
-     judgment list. Its ratings are strings and can be fractions, so they will be graded as a
-     click list's are.
+   - **evaluate.** On these clusters, `evaluate` also takes `judgment_id`, a Workbench judgment
+     list (`COMPLETED`; the grant must read its store). Its ratings are strings: whole numbers
+     from 0 to 100 as they are, fractions graded as a click list's are.
+   - **stats.** The plugin's seven counters since the cluster loaded.
 5. **Left out, and why.**
    - **`LLM_JUDGMENT`.** It needs an ML Commons model connector, and it sends documents to a model
      provider. roll has no such connector yet, and no test may call a real model. It answers 400:
