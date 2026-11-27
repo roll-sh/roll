@@ -947,7 +947,7 @@ origins (browser search), once they're on main.
 | POST | `/v1/search/clusters/{id}/unload` | sleep now (`{"unloaded": false}` while requests run) |
 | GET | `/v1/search/clusters/{id}/indices` | `_cat/indices` as JSON numbers: health, status, shards, docs, sizes; docs and sizes of open indices come from the engine (as `_stats` reports them: Lucene documents, nested ones included, unflushed writes included). Wakes the cluster |
 | POST | `/v1/search/clusters/{id}/request` | console: `{method, path, body?}` (a JSON body, sent byte for byte so `_source` keeps its key order, or a string such as NDJSON, sent as is) → `{status, headers, body, took_ms, truncated}`; an answer the cluster streams (`_inference/…/_stream`) is passed through as it comes instead, with its status and `Content-Type: text/event-stream`. Accepts bodies up to the cluster's `max_body_mb` (the request may be up to twice that plus 1 MiB, for JSON escapes) |
-| GET | `/v1/search/clusters/{id}/usage?days=30` | loaded seconds, GiB-hours, requests, stored GiB-months, cost, and the same workload on Elastic Cloud Hosted, an Amazon OpenSearch Service domain and OpenSearch Serverless |
+| GET | `/v1/search/clusters/{id}/usage?days=30` | loaded seconds, GiB-hours, requests, stored GiB-months, provider tokens (`input_tokens`, `output_tokens`; not priced), cost, and the same workload on Elastic Cloud Hosted, an Amazon OpenSearch Service domain and OpenSearch Serverless |
 | GET | `/v1/search/clusters/{id}/metrics?range=1h\|24h\|14d` | request metrics (architecture.md, "Observability"): `{range, step_s, from, to, points, totals}`; each point (`at`, the start of its step: a minute for `1h`, 15 minutes for `24h`, 2 hours for `14d`; only steps with requests) and `totals` hold `all`, `search`, `index` and `other`, each `{requests, rate, 2xx, 4xx, 5xx, rejected, p50_ms, p95_ms, p99_ms}` (`rate` per second; `rejected`: 429s; percentiles `null` when nothing ran). Includes what the cluster's node recorded since the last metering pass |
 | GET | `/v1/search/clusters/{id}/slowlog` | the search and indexing slow logs, newest first, at most 500: `{entries, max_entries}`, each entry Elasticsearch's JSON slow log line (`@timestamp`, `log.level`, `log.logger`, `elasticsearch.index.name`, `elasticsearch.shard.id`, `elasticsearch.slowlog.{message,took,took_millis,source,total_hits,stats,search_type,total_shards,id,routing}`) |
 | GET | `/v1/search/clusters/{id}/audit?from=&to=&event=&size=` | the cluster's security audit log (below), newest first: `{flavor, retention_days, entries: [{at_ms, event, entry}], more}`. `from` (inclusive) and `to` (exclusive) are Unix milliseconds; `event` takes names or categories, comma-separated (an Elasticsearch `event.action` such as `put_user` too); `size` up to 1,000 (100). Never wakes the cluster. A read in roll's permissions, not a reveal: entries hold no secret |
@@ -975,6 +975,7 @@ origins (browser search), once they're on main.
 | POST | `/v1/search/clusters/{id}/query_rules/{ruleset}/test` | `POST _query_rules/<ruleset>/_test` `{match_criteria}`: the rules that match |
 | POST | `/v1/search/clusters/{id}/indices/{index}/refresh` | `POST /<index>/_refresh` |
 | POST | `/v1/search/clusters/{id}/indices/{index}/analyze` | `POST /<index>/_analyze` (a read) |
+| POST | `/v1/search/clusters/{id}/indices/{index}/evaluate` | Offline relevance evaluation ([relevance-experiments.md](relevance-experiments.md), section 1): `{judgments: [{query, ratings: [{_id, rating, _index?}]}], configurations: [{name, request | template, query_param?}], metric?}`, one or two configurations, each a search body with `{{query}}` where each judged query goes (`request`), a search template (`template`: `{id}` or `{source}`, with `params`; the query goes in `query_param`, by default `query`), or a search application's own (`application`, evaluated on the application's name: each query rendered by its `_render_query` with `query_param` `query_string` unless said, and `variant: {experiment, variant}` puts that variant's params over it, so an A/B variant is scored before it takes traffic; a variant with a template of its own is a `template` configuration), up to 500 queries of 200 ratings (a rating's `_index` defaults to `{index}`; for a pattern or list each names its own, and for an alias each names its concrete index), `metric` one of `_rank_eval`'s (nDCG@10 by default). Each configuration is one `_rank_eval` on the index, run as the index's routes run. Answers `{metric, queries, configurations: [{name, score, failed, queries: [{query, score, unrated, failure?}]}], comparison?}`, with two the second against the first: `{baseline, candidate, difference, better, worse, unchanged, better_queries, worse_queries}` (50 each, the largest change first). A configuration the cluster refuses answers the cluster's error. A read |
 | POST | `/v1/search/clusters/{id}/indices/{index}/search` | `POST /<index>/_search` (reads take index expressions: `logs-*`, `a,b`) |
 | POST | `/v1/search/clusters/{id}/indices/{index}/docs` | `POST /<index>/_doc`: index a document under a new id |
 | GET, PUT, DELETE | `/v1/search/clusters/{id}/indices/{index}/docs/{doc}` | `/<index>/_doc/<id>` |
@@ -1316,7 +1317,11 @@ storage is billed until it is purged, when its rows go. Inference on the node's 
 time is measured on its worker and handed to the meter with the requests
 (`inference_cpu_seconds`, priced per vCPU-hour as `usd_per_vcpu_hour`), to the cluster whose
 request runs it: a linked cluster's cross-cluster query that embeds on this cluster, or a
-browser key's search, is billed here (the browser keys of #358 will cap inference per request). Prices are AWS list prices in `crates/search-control/src/pricing.rs`, each
+browser key's search, is billed here (the browser keys of #358 will cap inference per request).
+Provider tokens of completions and chat answers are metered beside them, not priced (the provider
+bills them): `input_tokens` and `output_tokens`, the provider's own figures when its answer carries
+them, else roll's estimate (rag.md, "Metering"), taken each pass like requests, also from clusters
+unloaded in between. Prices are AWS list prices in `crates/search-control/src/pricing.rs`, each
 with its source.
 
 ## Tests
@@ -1381,8 +1386,7 @@ in review (item 11's RAG phase 2, #1068 in its third round; item 30's read-only 
 its second; item 1's derived-key follow-ups, #1127 in its second; item 31's re-embed route,
 #1132, landing), then item 32 (resetting a branch from a copy for previews' restore points; in
 progress), item 33's second slice (saved searches, surrounding documents, a field's chart; in
-progress), item 15's confidence intervals and promoting from the Relevance tab (in review),
-then its judgment lists and offline evaluation (the top open item), item 14 (semantic search on OpenSearch-flavor
+progress), item 15's offline evaluation of applications and variants (in review; judgment lists from clicks next), item 14 (semantic search on OpenSearch-flavor
 clusters; resumes after #1111), item 16 (cold start at size; resumes after #1127), OpenSearch's
 `_plugins/_sm` (item 9; in progress), item 5's OpenSearch links (designed), and chat token
 metering (item 11's follow-up; in progress).
@@ -1755,9 +1759,11 @@ deterministic (#396).
    zero-result rate and p95 latency per variant, and promoting a variant into the application
    (`…/_roll/experiments/{id}/_promote`). Then 95% intervals for each rate and for each
    difference from the baseline, and promoting from the Relevance tab
-   (`feature/search-exp-ci`). Next: judgment lists and offline evaluation (phase 1: OpenSearch's
-   Search Relevance Workbench and `_rank_eval` with lists, for CI). Left: the `roll_` rule types
-   and dynamic re-ranking.
+   (#1145). Offline evaluation landed in #1159 (`…/indices/{index}/evaluate`,
+   `roll search index evaluate` for CI, `search_evaluate`, the Relevance tab's Evaluate); a
+   search application's template and its experiment's variants scored the same way are in review
+   (`feature/search-evaluate-apps`). Next: judgment lists kept as indices and built from clicks. Left: the `roll_` rule types and
+   dynamic re-ranking.
 16. **Cold start at size**: the 19.8 ms cold start is a 50k-document index from local cache;
    nothing measures the first query and p99 on a node with an empty cache for 1, 10 and 50 GB
    indices loaded from object storage, or on Graviton. Buyers comparing always-on Typesense or Algolia

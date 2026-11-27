@@ -23,6 +23,7 @@ import {
   type StepUp,
   waitsForAdmin,
 } from "@/lib/access-api";
+import { accountsApi } from "@/lib/accounts-api";
 import { requestSignIn, subscribeToken } from "@/lib/code-token";
 import { SignIn } from "../code/sign-in";
 import { btn, Connecting, ErrorNote, input, primary } from "../ui";
@@ -66,6 +67,13 @@ function ExpressSetup({ req }: { req: AuthorizeRequest }) {
   const loaded = useSignedInLoad(() => Promise.resolve(null), []);
   const [domains, setDomains] = useState("");
   const [rules, setRules] = useState<Rule[] | null>(null);
+  // The domains a DNS record proved for roll's SSO connections, to start from (the admin changes them).
+  useEffect(() => {
+    accountsApi.ssoConnections().then(
+      (cs) => setDomains((d) => d || [...new Set(cs.flatMap((c) => c.verified))].join(", ")),
+      () => {},
+    );
+  }, []);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
@@ -77,7 +85,17 @@ function ExpressSetup({ req }: { req: AuthorizeRequest }) {
   if (loaded.state !== "ready") return <LoadState loaded={loaded} what="set up Claude's auto-connect" />;
   if (!CLAUDE_CLIENTS.includes(req.client_id) || req.redirect_uri !== CLAUDE_CALLBACK) return <Problem text="Only Claude asks for this, returning to claude.ai." />;
   if (loaded.me.kind !== "operator")
-    return <Problem title="An admin of roll approves this" text="Claude's auto-connect makes roll trust your Claude organization for everyone in the domains you name." next="Ask an admin of roll to click Connect in Claude's auto-connect setup." />;
+    return (
+      <div className="space-y-4">
+        <Problem title="An admin of roll approves this" text="Claude's auto-connect makes roll trust your Claude organization for everyone in the domains you name." next="Ask an admin of roll to click Connect in Claude's auto-connect setup." />
+        <button
+          onClick={() => window.location.assign(denyRedirect(req.redirect_uri, req.state, loaded.catalog.api_url, "Only roll's admins approve auto-connect"))}
+          className={btn}
+        >
+          Back to Claude
+        </button>
+      </div>
+    );
   const list = domains
     .split(/[\s,]+/)
     .map((d) => d.trim().replace(/^@/, "").toLowerCase())
@@ -129,7 +147,7 @@ function ExpressSetup({ req }: { req: AuthorizeRequest }) {
         <button onClick={allow} disabled={busy || problems.length > 0} className={primary}>
           {busy ? <span className="shimmer">Setting up…</span> : "Approve"}
         </button>
-        <button onClick={() => window.location.assign(denyRedirect(req.redirect_uri, req.state))} className={btn}>
+        <button onClick={() => window.location.assign(denyRedirect(req.redirect_uri, req.state, loaded.catalog.api_url))} className={btn}>
           Deny
         </button>
         {problems.length > 0 && <span className="text-[12px] text-subtle">{problems[0]}</span>}
@@ -198,7 +216,7 @@ function Ask({ req }: { req: AuthorizeRequest }) {
           });
           window.location.assign(redirect);
         }}
-        onDeny={() => window.location.assign(denyRedirect(req.redirect_uri, req.state))}
+        onDeny={() => window.location.assign(denyRedirect(req.redirect_uri, req.state, catalog.api_url))}
         onFresh={() => setFresh(true)}
       />
     );
@@ -221,7 +239,7 @@ function Ask({ req }: { req: AuthorizeRequest }) {
         });
         window.location.assign(redirect);
       }}
-      onDeny={() => window.location.assign(denyRedirect(req.redirect_uri, req.state))}
+      onDeny={() => window.location.assign(denyRedirect(req.redirect_uri, req.state, catalog.api_url))}
       head={(busy) => (
         <section className="flex items-start gap-4">
           <HorizonMark state={busy ? "thinking" : "idle"} size={36} interactive />

@@ -2900,7 +2900,8 @@ impl Store {
             return Ok(Vec::new());
         }
         let mut out = Vec::new();
-        for o in self.rows(Some(&r.project_id))?.into_iter().filter(|o| o.id != r.id && o.change_id.is_some() && o.desired == crate::Desired::Active) {
+        // Its own repo's: a pull request's comment never names another repo's branch or tables.
+        for o in self.rows(Some(&r.project_id))?.into_iter().filter(|o| o.id != r.id && o.repo == r.repo && o.change_id.is_some() && o.desired == crate::Desired::Active) {
             let (theirs, _, _) = self.release_facts(&o.id)?;
             let both: Vec<String> = crate::schema::tables_touched(theirs.as_deref().unwrap_or_default()).intersection(&tables).take(5).cloned().collect();
             if !both.is_empty() {
@@ -3863,7 +3864,9 @@ impl Store {
         let url = services.first().map(|(s, _)| s.url.clone());
         let share_url = url.as_deref().map(share);
         let (schema_changes, schema_risks, release) = self.release_facts(&r.id)?;
-        let rehearsal = self.runtime_fact::<crate::Rehearsal>(&r.id, "rehearsal")?;
+        // Only at the head it's for: one asked at an earlier head never runs, and an earlier
+        // head's outcome isn't this one's.
+        let rehearsal = self.runtime_fact::<crate::Rehearsal>(&r.id, "rehearsal")?.filter(|x| x.head == r.build());
         let schema_overlaps = self.schema_overlaps(&r, schema_changes.as_deref())?;
         let kept_until = self.kept_until(&r.id)?;
         // Its page as a link only when it's `https://` (it's kept whole to tell its repository).

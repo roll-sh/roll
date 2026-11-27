@@ -1079,10 +1079,11 @@ async fn a_products_lifetime_cap_binds_consents_and_remembered_approvals() {
     let conn = d.access.store.list().unwrap().into_iter().find(|g| g.kind == "oauth").unwrap();
     assert!(within(&json!(conn.expires_at)), "a connection with no end ends at the cap: {:?}", conn.expires_at);
 
-    // A token that never expires, with no secrets rule, asks for the rest: a secrets read
-    // remembered for good is remembered for the cap's 30 days, its rules unchanged.
+    // A token that never expires, with no secrets rule, asks for the rest: a secrets read of one
+    // folder remembered for good is remembered for the cap's 30 days, its rules unchanged (the
+    // root's, every folder, is 8 hours at most whatever the cap).
     let (token, id) = d.token(json!([{ "product": "workspace", "resources": "*", "actions": { "read": "allow" } }]), json!({ "ask_otherwise": true })).await;
-    let (_, pending) = d.call(&token, Method::GET, "/v1/secrets/projects/pa/environments/development/secrets", None).await;
+    let (_, pending) = d.call(&token, Method::GET, "/v1/secrets/projects/pa/environments/development/secrets?path=/api", None).await;
     let apr = pending["approval"].as_str().unwrap_or_else(|| panic!("{pending}")).to_string();
     let (s, out) = d.call(OPERATOR, Method::POST, &format!("/v1/access/approvals/{apr}/approve"), Some(json!({ "remember": "always" }))).await;
     assert_eq!(s, StatusCode::OK, "{out}");
@@ -3429,6 +3430,15 @@ async fn a_secret_written_as_the_caller_is_asked_for_and_only_it_is_allowed() {
     root["secret"]["path"] = json!("/");
     let (s, out) = d.call(&asks, Method::POST, path, Some(root)).await;
     assert_eq!((s, out["code"].as_str()), (StatusCode::FORBIDDEN, Some("approval_pending")), "{out}");
+    // The root folder reaches every folder under it: the whole environment, remembered for 8 hours
+    // at most.
+    let root_id = out["approval"].as_str().unwrap().to_string();
+    let approve = |remember: &str| {
+        let (d, url, body) = (&d, format!("/v1/access/approvals/{root_id}/approve"), json!({ "remember": remember }));
+        async move { d.call(OPERATOR, Method::POST, &url, Some(body)).await.0 }
+    };
+    assert_eq!(approve("1d").await, StatusCode::BAD_REQUEST);
+    assert_eq!(approve("8h").await, StatusCode::OK);
     let (allows, _) = d.token(json!([search("allow"), { "product": "secrets", "resources": [{ "project": project }], "actions": { "write": "allow" } }]), json!({})).await;
     let (s, seen) = d.call(&allows, Method::POST, path, Some(body("production"))).await;
     assert_eq!((s, seen["here"].as_bool()), (StatusCode::OK, Some(true)), "{seen}");

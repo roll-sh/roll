@@ -20,6 +20,7 @@
 
 use super::TaskType;
 use super::http::{Answer, Opened};
+use super::tokens::Count;
 use crate::error::{EsError, EsResult};
 use crate::json::{Map, Value};
 use crate::obj;
@@ -55,10 +56,12 @@ impl Streaming {
         }
     }
 
-    /// The answer as server-sent events, sent as they come.
-    pub fn into_sse(self, id: String, task: TaskType) -> ByteStream {
+    /// The answer as server-sent events, sent as they come; what it used goes to `count` when
+    /// it ends.
+    pub fn into_sse(self, id: String, task: TaskType, mut count: Count) -> ByteStream {
         match self {
             Streaming::Ready(events) => {
+                count.sent(&events);
                 let mut out = String::new();
                 for e in &events {
                     message(&mut out, &e.to_json());
@@ -67,7 +70,7 @@ impl Streaming {
                 Box::pin(futures::stream::iter([Bytes::from(out)]))
             }
             Streaming::Live { opened, decode } => {
-                let state = Live { opened, decode, reader: Reader::default(), id, task, done: false };
+                let state = Live { opened, decode, reader: Reader::default(), id, task, done: false, count };
                 Box::pin(futures::stream::unfold(state, |mut s| async move {
                     let piece = s.step().await?;
                     Some((piece, s))
@@ -84,6 +87,8 @@ struct Live {
     id: String,
     task: TaskType,
     done: bool,
+    /// Dropped with the stream, when it counts what it used.
+    count: Count,
 }
 
 impl Live {
@@ -102,18 +107,29 @@ impl Live {
                 let rest = self.reader.finish();
                 let mut out = String::new();
                 if !rest.is_empty() {
+                    self.count.upstream(&rest);
                     match (self.decode)(&rest) {
-                        Ok(values) => values.iter().for_each(|v| message(&mut out, &v.to_json())),
+                        Ok(values) => {
+                            self.count.sent(&values);
+                            values.iter().for_each(|v| message(&mut out, &v.to_json()))
+                        }
                         Err(e) => return Some(self.fail(&e)),
                     }
                 }
                 message(&mut out, "[DONE]");
                 return Some(Bytes::from(out));
             };
-            let values = match self.reader.feed(&piece, &self.id).and_then(|events| if events.is_empty() { Ok(vec![]) } else { (self.decode)(&events) }) {
+            let values = match self.reader.feed(&piece, &self.id).and_then(|events| {
+                if events.is_empty() {
+                    return Ok(vec![]);
+                }
+                self.count.upstream(&events);
+                (self.decode)(&events)
+            }) {
                 Ok(v) => v,
                 Err(e) => return Some(self.fail(&e)),
             };
+            self.count.sent(&values);
             if values.is_empty() {
                 continue;
             }

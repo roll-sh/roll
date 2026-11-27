@@ -382,6 +382,8 @@ pub struct FakeApps {
     pub egress: Mutex<HashMap<(String, String), roll_previews::settings::EgressRule>>,
     /// Seeds run (their DATABASE_URL), and the exit code the next ones give.
     pub seeds: Mutex<Vec<String>>,
+    /// The last job's variables.
+    pub last_job_env: Mutex<Vec<(String, String)>>,
     pub seed_exit: std::sync::atomic::AtomicI32,
     /// Every seed or release run: (its command, the revision), and how many services were
     /// deployed at that revision when it ran.
@@ -574,6 +576,7 @@ impl Apps for FakeApps {
     async fn seed(&self, job: &roll_previews::ports::SeedJob) -> anyhow::Result<(i32, String)> {
         let db = job.env.iter().find(|(k, _)| k == "DATABASE_URL").map(|(_, v)| v.clone()).unwrap_or_default();
         self.seeds.lock().push(db);
+        *self.last_job_env.lock() = job.env.clone();
         self.seed_egress.lock().push(job.egress);
         let at_rev = self.deployed.lock().values().filter(|r| **r == job.revision).count();
         self.runs.lock().push((job.seed.run.clone(), job.revision.clone(), at_rev));
@@ -779,6 +782,7 @@ pub fn change(id: &str, n: i64) -> ChangeInfo {
         branch: Some(format!("feat/{n}")),
         head: format!("cs_{n}a"),
         open: true,
+        queued: false,
         draft: false,
         labels: Vec::new(),
         trusted: true,

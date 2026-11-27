@@ -115,7 +115,7 @@ pub async fn infer(cluster: &Cluster, ep: &Endpoint, req: &Request) -> EsResult<
     let v = answer_json("anthropic", &answer)?;
     let content = v.get("content").and_then(Value::as_array).ok_or_else(|| missing_field("content", "Anthropic chat completions"))?;
     // `AnthropicChatCompletionResponseEntity`: one result per text block.
-    Ok(Results::Completion(content.iter().filter(|c| c.get("type").and_then(Value::as_str) == Some("text")).filter_map(|c| c.get("text").and_then(Value::as_str)).map(str::to_owned).collect()))
+    Ok(Results::completion(content.iter().filter(|c| c.get("type").and_then(Value::as_str) == Some("text")).filter_map(|c| c.get("text").and_then(Value::as_str)).map(str::to_owned).collect(), &v))
 }
 
 /// A Messages stream's error event as Elasticsearch reports it.

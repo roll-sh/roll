@@ -851,6 +851,9 @@ function usd(n: number) {
   return formatUsd(n);
 }
 
+/** A row of the cost estimate: a price (`v`), or a figure roll doesn't price (`shown`). */
+type CostRow = { label: string; detail: string; v?: number; shown?: string };
+
 function UsageTab({ cluster, info }: { cluster: SearchCluster; info: SearchInfo }) {
   const [days, setDays] = useState(30);
   const [usage, setUsage] = useState<SearchUsage | null>(null);
@@ -924,21 +927,26 @@ function UsageTab({ cluster, info }: { cluster: SearchCluster; info: SearchInfo 
               <table className="w-full text-[13px]">
                 <tbody>
                   {[
-                    { label: "Memory", detail: `${p.usd_per_gib_hour} USD / GiB-hour loaded`, v: c.memory_usd },
+                    { label: "Memory", detail: `${p.usd_per_gib_hour} USD / GiB-hour loaded`, v: c.memory_usd } as CostRow,
                     { label: "Requests", detail: `${p.usd_per_million_requests} USD / million`, v: c.requests_usd },
                     {
                       label: "Inference",
                       detail: `${(u?.inference_cpu_seconds ?? 0).toFixed(1)} CPU-s of the built-in model at ${p.usd_per_vcpu_hour} USD / vCPU-hour`,
                       v: c.inference_usd,
                     },
+                    {
+                      label: "Model tokens",
+                      detail: `${formatCount(u?.input_tokens ?? 0)} in, ${formatCount(u?.output_tokens ?? 0)} out, for chat and completions; your provider bills them`,
+                      shown: formatCount((u?.input_tokens ?? 0) + (u?.output_tokens ?? 0)),
+                    },
                     { label: "Storage", detail: `S3 at ${p.usd_per_gb_month_s3} USD / GB-month`, v: c.storage_usd },
-                  ].map((r) => (
+                  ].map((r: CostRow) => (
                     <tr key={r.label} className="border-b border-line">
                       <td className="py-2.5 pr-3 align-top">
                         <p>{r.label}</p>
                         <p className="text-[11px] text-subtle">{r.detail}</p>
                       </td>
-                      <td className="py-2.5 text-right align-top font-mono tabular-nums">{usd(r.v)}</td>
+                      <td className="py-2.5 text-right align-top font-mono tabular-nums">{r.shown ?? usd(r.v ?? 0)}</td>
                     </tr>
                   ))}
                   <tr>

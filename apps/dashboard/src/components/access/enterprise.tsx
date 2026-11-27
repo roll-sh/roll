@@ -60,7 +60,7 @@ export function EnterprisePanel() {
         consent screen, never more than their account reaches, and revoking their connection here keeps them out.
       </p>
       <Providers idps={e.idps} audience={e.audience} save={saveIdps} />
-      <Apps apps={e.apps} tokenEndpoint={e.token_endpoint} refresh={load} hasIdp={e.idps.length > 0} />
+      <Apps apps={e.apps} tokenEndpoint={e.token_endpoint} refresh={load} hasIdp={e.idps.length > 0} idps={e.idps} />
       {error && (
         <div className="px-5 pb-4">
           <ErrorNote error={error} />
@@ -215,7 +215,7 @@ function NewIdp({ onAdd, onCancel }: { onAdd: (idp: EnterpriseIdp) => Promise<bo
   );
 }
 
-function Apps({ apps, tokenEndpoint, refresh, hasIdp }: { apps: EnterpriseApp[]; tokenEndpoint: string; refresh: () => Promise<void>; hasIdp: boolean }) {
+function Apps({ apps, tokenEndpoint, refresh, hasIdp, idps }: { apps: EnterpriseApp[]; tokenEndpoint: string; refresh: () => Promise<void>; hasIdp: boolean; idps: EnterpriseIdp[] }) {
   const [making, setMaking] = useState(false);
   const [made, setMade] = useState<(EnterpriseApp & { client_secret?: string }) | null>(null);
   // One app's action open at a time: its rules, a new credential, or removing it.
@@ -255,6 +255,7 @@ function Apps({ apps, tokenEndpoint, refresh, hasIdp }: { apps: EnterpriseApp[];
       {made && <Made made={made} tokenEndpoint={tokenEndpoint} />}
       {making && (
         <NewApp
+          idps={idps}
           onCancel={() => setMaking(false)}
           onMade={async (m) => {
             setMaking(false);
@@ -464,12 +465,16 @@ function rulesSummary(rules: Rule[]): string {
   return [...by].map(([p, acts]) => `${[...acts].join(", ") || "nothing"} in ${p === "*" ? "every product" : p}`).join("; ");
 }
 
-function NewApp({ onMade, onCancel }: { onMade: (m: EnterpriseApp & { client_secret?: string }) => Promise<void>; onCancel: () => void }) {
+function NewApp({ onMade, onCancel, idps }: { onMade: (m: EnterpriseApp & { client_secret?: string }) => Promise<void>; onCancel: () => void; idps: EnterpriseIdp[] }) {
   const [catalog, setCatalog] = useState<Catalog | null>(null);
   const [name, setName] = useState("");
   const [rules, setRules] = useState<Rule[]>([]);
   const [key, setKey] = useState("");
   const [claude, setClaude] = useState(false);
+  // Providers besides Claude's own issuer that may vouch for it (an identity provider running
+  // Claude's auto-connect, "IdP-managed"); Claude's issuers need no choosing.
+  const others = idps.filter((i) => !i.issuer.startsWith("https://identity.anthropic.com/"));
+  const [issuers, setIssuers] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
@@ -491,7 +496,7 @@ function NewApp({ onMade, onCancel }: { onMade: (m: EnterpriseApp & { client_sec
     try {
       const public_jwk = parsed && "jwk" in parsed ? parsed.jwk : null;
       const metadata = claude ? [CLAUDE_CLIENT, `${CLAUDE_CLIENT}/confidential_client`] : [];
-      await onMade(await accessApi.addEnterpriseApp({ name: name.trim(), rules, ...(public_jwk ? { public_jwk } : {}), ...(metadata.length ? { metadata } : {}) }));
+      await onMade(await accessApi.addEnterpriseApp({ name: name.trim(), rules, ...(public_jwk ? { public_jwk } : {}), ...(metadata.length ? { metadata, issuers } : {}) }));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -525,6 +530,22 @@ function NewApp({ onMade, onCancel }: { onMade: (m: EnterpriseApp & { client_sec
           </span>
         </span>
       </label>
+      {claude && others.length > 0 && (
+        <fieldset className="space-y-1.5 text-[12px]">
+          <legend className="text-subtle">Also from these providers (an identity provider running Claude&apos;s auto-connect); Claude&apos;s own issuer always may</legend>
+          {others.map((i) => (
+            <label key={i.issuer} className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={issuers.includes(i.issuer)}
+                onChange={(e) => setIssuers((l) => (e.target.checked ? [...l, i.issuer] : l.filter((x) => x !== i.issuer)))}
+              />
+              <span>{i.name ?? i.issuer}</span>
+              <code className="font-mono text-subtle">{i.issuer}</code>
+            </label>
+          ))}
+        </fieldset>
+      )}
       {!claude && (
       <label className="block space-y-1.5">
         <span className="block text-[12px] text-subtle">

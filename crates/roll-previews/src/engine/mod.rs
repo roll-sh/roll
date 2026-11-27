@@ -1034,6 +1034,7 @@ mod tests {
             branch: Some("feat/x".into()),
             head: "cs_1".into(),
             open: true,
+            queued: false,
             draft: false,
             labels: Vec::new(),
             trusted: true,

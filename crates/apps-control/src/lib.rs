@@ -2973,7 +2973,11 @@ impl Apps {
     /// history as `removed`.
     pub async fn delete_environment(self: &Arc<Self>, service: &str, env: &str) -> Result<()> {
         let (sid, e) = (service.to_string(), env.to_string());
-        self.db(move |s| s.environment(&sid, &e)).await?;
+        let row = self.db(move |s| s.environment(&sid, &e)).await?;
+        // A preview's `run.teardown` first, while its deployment and variables are still there.
+        if row.ephemeral {
+            self.teardown_command(service, env).await;
+        }
         // Its jobs' ids, for their logs: the rows go with the environment.
         let (sid, e) = (service.to_string(), env.to_string());
         let jobs = self.db(move |s| s.jobs_started(&sid, &e, 0, i64::MAX)).await.unwrap_or_default();
