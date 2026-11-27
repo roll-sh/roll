@@ -469,7 +469,7 @@ fn apps_area(method: &str, path: &str) -> Area {
         ["services", "environments", "deploys", "source" | "output"] => "observe",
         ["services"] | ["services", "environments"] | ["projects", "services"] => "configure",
         ["services", "environments", s, ..] => match *s {
-            "analytics" | "app-metrics" | "errors" | "logs" | "metrics" | "routes" | "slo" | "traces" | "usage" | "vitals" | "push" | "fetch" | "advice" | "checks" => "observe",
+            "analytics" | "app-metrics" | "errors" | "logs" | "metrics" | "routes" | "slo" | "traces" | "usage" | "vitals" | "push" | "fetch" | "advice" | "checks" | "silences" => "observe",
             "deploys" | "promote" | "redeploy" | "rollback" | "pending" | "diff" | "jobs" | "runs" | "restart" | "sleep" | "wake" | "instances" | "cache" | "sandboxes" => "deploy",
             "private-network" => "configure",
             "visitors" if read => "observe",
