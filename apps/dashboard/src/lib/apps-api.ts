@@ -1295,7 +1295,10 @@ export type VitalName = "lcp" | "inp" | "cls" | "fcp" | "ttfb";
 /** An uptime check: GET `path` every `every_s` (30–3600, default 60) through the environment's own proxy; passes on `status` (any 2xx/3xx when none) and, with `contains`, an answer holding it. */
 export interface UptimeCheck {
   name: string;
-  path: string;
+  /** An HTTP check's; none for a TCP check. */
+  path?: string;
+  /** A TCP service's check: its port connected to through its own network, `contains` read in its banner. */
+  tcp?: boolean;
   every_s?: number;
   timeout_s?: number;
   status?: number;

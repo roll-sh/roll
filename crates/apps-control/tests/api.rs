@@ -7613,6 +7613,37 @@ async fn a_tcp_service_answers_on_its_own_port() {
     let _ = twice.read_to_string(&mut b).await;
     assert!(b.is_empty(), "the second is closed: {b}");
     call(&w.api, "PUT", &format!("/v1/apps/services/{id}/environments/production"), Some(json!({"rate_limit": null}))).await;
+    // Its uptime checks connect to its port (Fly's TCP checks), past its rate limit and allow
+    // list as an HTTP check is past its gates; `contains` is looked for in its banner.
+    let base = format!("/v1/apps/services/{id}/environments/production");
+    for bad in [json!([{"name": "home", "path": "/"}]), json!([{"name": "port", "tcp": true, "path": "/"}]), json!([{"name": "port", "tcp": true, "status": 200}])] {
+        assert_eq!(call(&w.api, "PUT", &base, Some(json!({"checks": bad}))).await.0, StatusCode::BAD_REQUEST, "{bad}");
+    }
+    let (st, env) = call(&w.api, "PUT", &base, Some(json!({"checks": [{"name": "port", "tcp": true}], "allow_ips": ["10.9.9.9/32"]}))).await;
+    assert_eq!((st, env["checks"][0]["tcp"].as_bool()), (StatusCode::OK, Some(true)), "{env}");
+    let t0 = code_sql::now_ms() + 3_600_000;
+    let pass = |n: i64| {
+        let (w, base) = (&w, base.clone());
+        async move {
+            w.apps.cron_pass(t0 + n * 61_000).await;
+            for _ in 0..300 {
+                let st = call(&w.api, "GET", &base, None).await.1["check_states"][0].clone();
+                if st["last_at"].as_i64() == Some(t0 + n * 61_000) {
+                    return st;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            panic!("pass {n} never came back");
+        }
+    };
+    let up = pass(0).await;
+    assert_eq!((up["up"].as_bool(), up["error"].clone()), (Some(true), Value::Null), "{up}");
+    call(&w.api, "PUT", &base, Some(json!({"checks": [{"name": "port", "tcp": true, "contains": "MQTT", "timeout_s": 1}], "allow_ips": null}))).await;
+    pass(1).await;
+    let down = pass(2).await;
+    assert_eq!(down["up"].as_bool(), Some(false), "an HTTP app says nothing first: {down}");
+    assert!(down["error"].as_str().unwrap().contains("no answer in 1s"), "{down}");
+    call(&w.api, "PUT", &base, Some(json!({"checks": null}))).await;
     // Private, it has no public port (TCP carries no token): the private network reaches it.
     call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"public": false}}))).await;
     assert!(call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None).await.1["tcp"].is_null());
