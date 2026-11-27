@@ -5,7 +5,9 @@
 //! `body` (JSON) or `raw` (text) and `headers`), each with the status, body and selected
 //! headers Elasticsearch answered. Values that differ by nature (UUIDs, timestamps) are masked
 //! on both sides before comparing; a step may add masks (`mask`) or be skipped with a reason
-//! (`skip`).
+//! (`skip`). A step may keep a field of its answer for later steps (`"stash": {"name":
+//! "field"}`, a top-level field): `${name}` in a later step's `req` or `body` is that value, on
+//! each side (ids a create answers).
 //!
 //! To (re)capture the expected responses from a real Elasticsearch:
 //! `ROLL_ES_CAPTURE=http://127.0.0.1:19200 cargo test -p search-es --test rest_fixtures -- --ignored`.
@@ -150,7 +152,9 @@ fn mask_uuids(s: &str) -> String {
                 i += 1;
             }
             let tok = &s[start..i];
-            let looks_random = tok.len() == 22 && tok.bytes().any(|c| c.is_ascii_uppercase()) && tok.bytes().any(|c| c.is_ascii_lowercase());
+            let looks_random = (tok.len() == 22 && tok.bytes().any(|c| c.is_ascii_uppercase()) && tok.bytes().any(|c| c.is_ascii_lowercase()))
+                // `UUID.randomUUID()` (OpenSearch's plugins' ids).
+                || (tok.len() == 36 && tok.split('-').map(str::len).eq([8, 4, 4, 4, 12]) && tok.bytes().all(|c| c == b'-' || c.is_ascii_hexdigit()));
             // Simulated templates get a random lower-cased name (also inside alias names made
             // from an `{index}` placeholder).
             let simulated = ["simulate_template_", "simulate_index_template_"].iter().find_map(|p| tok.find(*p).map(|at| at + p.len()));
@@ -180,6 +184,26 @@ fn step_masks(step: &Value) -> Vec<String> {
 
 fn split_req(req: &str) -> (&str, &str) {
     req.split_once(' ').unwrap_or(("GET", req))
+}
+
+/// `text` with each `${name}` of `stash` replaced.
+fn stashed(text: &str, stash: &[(String, String)]) -> String {
+    let mut out = text.to_string();
+    for (k, v) in stash {
+        out = out.replace(&format!("${{{k}}}"), v);
+    }
+    out
+}
+
+/// Keeps the fields a step's `stash` names from its answer.
+fn keep(step: &Value, answer: &[u8], stash: &mut Vec<(String, String)>) {
+    let Some(Value::Obj(want)) = step.get("stash") else { return };
+    let v = parse(answer).ok().flatten().unwrap_or(Value::Null);
+    for (name, field) in want {
+        let got = field.as_str().and_then(|f| v.get(f)).map(Value::to_es_string).unwrap_or_default();
+        stash.retain(|(k, _)| k != name);
+        stash.push((name.clone(), got));
+    }
 }
 
 fn body_of(step: &Value) -> Option<String> {
@@ -225,11 +249,13 @@ async fn responses_match_elasticsearch() {
         }
         let cluster = Cluster::open(cfg, Arc::new(MemoryStore::new())).await.unwrap();
         let mut ism_clock = 0i64;
+        let mut stash: Vec<(String, String)> = Vec::new();
         for (i, step) in scenario.get("steps").and_then(Value::as_array).unwrap().iter().enumerate() {
-            let req = step.get("req").and_then(Value::as_str).unwrap();
+            let req = stashed(step.get("req").and_then(Value::as_str).unwrap(), &stash);
+            let req = req.as_str();
             let label = format!("{file} #{i} {req}");
             let (method, uri) = split_req(req);
-            let body = body_of(step);
+            let body = body_of(step).map(|b| stashed(&b, &stash));
             let mut r = EsRequest::new(method, uri);
             r.headers = headers_of(step, body.is_some());
             if let Some(b) = &body {
@@ -246,6 +272,7 @@ async fn responses_match_elasticsearch() {
                 search_es::opensearch::ism_run::run_at(&cluster, &names, now + ism_clock).await;
             }
             let resp = search_es::handle(&cluster, r).await;
+            keep(step, &resp.body, &mut stash);
             // An ISM template applies only to indices created strictly after its
             // `last_updated_time` (milliseconds); a real cluster never answers the policy PUT
             // and the next index creation within the same millisecond, this in-process one can.
@@ -335,6 +362,7 @@ async fn capture() {
         }
         cleanup(&client, &base).await;
         let mut steps_out = Vec::new();
+        let mut stash: Vec<(String, String)> = Vec::new();
         for step in scenario.get("steps").and_then(Value::as_array).unwrap() {
             // A reference cluster that applies some changes asynchronously (OpenSearch's ISM
             // registers managed indices in the background) gets a pause first; roll needs none.
@@ -356,9 +384,9 @@ async fn capture() {
                 }
                 tokio::time::sleep(std::time::Duration::from_secs(8)).await;
             }
-            let req = step.get("req").and_then(Value::as_str).unwrap();
-            let (method, uri) = split_req(req);
-            let body = body_of(step);
+            let req = stashed(step.get("req").and_then(Value::as_str).unwrap(), &stash);
+            let (method, uri) = split_req(&req);
+            let body = body_of(step).map(|b| stashed(&b, &stash));
             let mut rb = client.request(reqwest::Method::from_bytes(method.as_bytes()).unwrap(), format!("{base}{uri}"));
             for (k, v) in headers_of(step, body.is_some()) {
                 rb = rb.header(k, v);
@@ -381,6 +409,7 @@ async fn capture() {
                 hs.insert("allow".into(), Value::from(a.to_str().unwrap_or("").to_string()));
             }
             let bytes = resp.bytes().await.unwrap();
+            keep(step, &bytes, &mut stash);
             let mut out = Map::new();
             if let Value::Obj(m) = step {
                 for (k, v) in m {
