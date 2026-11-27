@@ -54,5 +54,5 @@ are left out and named in `dynamic()`).
 Spring Boot apps import an environment with one line instead (`spring.config.import=roll-secrets:production/api`):
 see `sdk/java/secrets-spring`.
 
-Tests: `mvn -B -q test` here (CI's `sdk` job), or without Java installed:
+Tests: `mvn -B -q test` here (CI's `java` job), or without Java installed:
 `docker run --rm -v "$PWD":/src -w /src maven:3.9-eclipse-temurin-17 mvn -B -q test`.

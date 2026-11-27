@@ -22,6 +22,6 @@ protocol's seven messages encoded in `wire.go`.
    Add `--jwks <(kubectl get --raw /openid/v1/jwks)` when roll can't reach the issuer.
 4. Mount a SecretProviderClass with `provider: roll` (parameters in docs/secrets.md).
 
-Tests: `go test -race ./...` here (CI's `sdk` job), or without Go installed:
+Tests: `go test -race ./...` here (CI's `sdk-go` job), or without Go installed:
 `docker run --rm -v "$PWD/..":/src -w /src/csi-provider golang:1.24-bookworm go test -race ./...`.
 Built from `sdk/`: `docker build -f csi-provider/Dockerfile .`.

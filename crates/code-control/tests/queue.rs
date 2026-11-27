@@ -627,6 +627,11 @@ async fn blockers_keep_changes_out_of_the_queue() {
         a.code.report_environment(&id(&c), Some(&released(ok, broke))).unwrap();
         assert_eq!(kinds(&a.ok("GET", &format!("/v1/code/changes/{}", id(&c)), None).await), ["release"], "{ok:?} {broke}");
     }
+    // Not settled at its head yet (main's code on its data runs before it settles): it waits.
+    let mut converging = released(Some(true), false);
+    converging.environment.as_mut().unwrap().state = "updating".into();
+    a.code.report_environment(&id(&c), Some(&converging)).unwrap();
+    assert_eq!(kinds(&a.ok("GET", &format!("/v1/code/changes/{}", id(&c)), None).await), ["release"], "still converging");
     a.code.report_environment(&id(&c), Some(&released(Some(true), false))).unwrap();
     let c = a.ok("GET", &format!("/v1/code/changes/{}", id(&c)), None).await;
     assert_eq!(c["blockers"], json!([]));
@@ -985,6 +990,7 @@ async fn storing_a_notices_credential_needs_write_in_the_folder_and_a_trusted_pr
         environments: None,
         paths: None,
         unprotected: false,
+        keys: None,
         actions: std::collections::BTreeMap::from([(roll_auth::scope::Action::Read, roll_auth::scope::Effect::Allow)]),
     };
     let grant = roll_auth::Grant { user: None, ask_otherwise: false, id: "tok_reader".into(), name: "reader".into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(roll_auth::scope::Scope(vec![rule])) };

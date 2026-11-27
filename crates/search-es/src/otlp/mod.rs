@@ -19,8 +19,27 @@
 //! rejected, how many values were cut), in the request's encoding; a request whose every record
 //! was refused for the same 401, 403 or 429 answers that status; another content type is a 415.
 
+#[macro_use]
 pub mod logs;
+pub mod traces;
 pub mod wire;
+
+/// What an export carries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Signal {
+    Logs,
+    Traces,
+}
+
+impl Signal {
+    /// The JSON answer's count field (`ExportLogsPartialSuccess`, `ExportTracePartialSuccess`).
+    fn rejected_field(self) -> &'static str {
+        match self {
+            Signal::Logs => "rejectedLogRecords",
+            Signal::Traces => "rejectedSpans",
+        }
+    }
+}
 
 use crate::breaker::Reservation;
 use crate::error::{EsError, EsResult};
@@ -47,7 +66,7 @@ fn mime(content_type: Option<&str>) -> Option<&str> {
 }
 
 /// `ExportLogsServiceResponse`, in the request's encoding.
-fn answer(proto: bool, rejected: u64, reason: Option<&str>) -> Reply {
+fn answer(signal: Signal, proto: bool, rejected: u64, reason: Option<&str>) -> Reply {
     if proto {
         let mut body = Vec::new();
         if rejected > 0 || reason.is_some() {
@@ -68,7 +87,7 @@ fn answer(proto: bool, rejected: u64, reason: Option<&str>) -> Reply {
         return Reply::Raw(200, PROTOBUF.into(), Bytes::from(body));
     }
     let v = if rejected > 0 || reason.is_some() {
-        obj! { "partialSuccess" => obj! { "rejectedLogRecords" => rejected.to_string(), "errorMessage" => reason.unwrap_or_default() } }
+        obj! { "partialSuccess" => obj! { signal.rejected_field() => rejected.to_string(), "errorMessage" => reason.unwrap_or_default() } }
     } else {
         obj! {}
     };
@@ -96,6 +115,15 @@ fn busy(ctx: &Ctx<'_>, e: EsError) -> EsError {
 
 /// `POST /_otlp/v1/logs`.
 pub async fn logs(ctx: &Ctx<'_>) -> EsResult<Reply> {
+    export(ctx, Signal::Logs).await
+}
+
+/// `POST /_otlp/v1/traces`: spans into `traces-*.otel-*`, their events into `logs-*.otel-*`.
+pub async fn traces(ctx: &Ctx<'_>) -> EsResult<Reply> {
+    export(ctx, Signal::Traces).await
+}
+
+async fn export(ctx: &Ctx<'_>, signal: Signal) -> EsResult<Reply> {
     let content_type = ctx.request.header("content-type");
     let proto = is_protobuf(content_type);
     if !proto && !mime(content_type).is_some_and(|m| m.eq_ignore_ascii_case("application/json")) {
@@ -118,11 +146,17 @@ pub async fn logs(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let decoded = tokio::task::spawn_blocking(move || {
         let mut held = logs::Budget::new(Reservation::new(budget));
         let batch = if proto {
-            logs::from_protobuf(&body, now, &mut held)
+            match signal {
+                Signal::Logs => logs::from_protobuf(&body, now, &mut held),
+                Signal::Traces => traces::from_protobuf(&body, now, &mut held),
+            }
         } else {
             match crate::json::parse(&body) {
-                Ok(Some(v)) => logs::from_json(&v, now, &mut held),
-                Ok(None) => logs::from_json(&Value::Obj(Default::default()), now, &mut held),
+                Ok(Some(v)) => match signal {
+                    Signal::Logs => logs::from_json(&v, now, &mut held),
+                    Signal::Traces => traces::from_json(&v, now, &mut held),
+                },
+                Ok(None) => Ok(logs::Batch::default()),
                 Err(e) => Err(logs::Fail::Malformed(format!("the OTLP/JSON body isn't JSON: {e}"))),
             }
         };
@@ -174,7 +208,7 @@ pub async fn logs(ctx: &Ctx<'_>) -> EsResult<Reply> {
         .clone()
         .or_else(|| first.as_ref().and_then(|(_, e)| e.get("reason").and_then(Value::as_str)).map(str::to_string))
         .or_else(|| (batch.truncated > 0).then(|| format!("{} values were cut at {} bytes", batch.truncated, logs::MAX_VALUE_BYTES)));
-    Ok(answer(proto, batch.rejected + failed, reason.as_deref()))
+    Ok(answer(signal, proto, batch.rejected + failed, reason.as_deref()))
 }
 
 #[cfg(test)]
@@ -183,15 +217,15 @@ mod tests {
 
     #[test]
     fn answers_are_otlps_in_the_requests_encoding() {
-        let Reply::Raw(200, ct, b) = answer(true, 0, None) else { panic!() };
+        let Reply::Raw(200, ct, b) = answer(Signal::Logs, true, 0, None) else { panic!() };
         assert_eq!((ct.as_str(), b.len()), (PROTOBUF, 0));
-        let Reply::Raw(200, _, b) = answer(true, 3, Some("no")) else { panic!() };
+        let Reply::Raw(200, _, b) = answer(Signal::Logs, true, 3, Some("no")) else { panic!() };
         // partial_success { rejected_log_records: 3, error_message: "no" }
         assert_eq!(&b[..], &[0x0a, 0x06, 0x08, 0x03, 0x12, 0x02, b'n', b'o']);
         // A warning with nothing rejected: error_message alone.
-        let Reply::Raw(200, _, b) = answer(true, 0, Some("w")) else { panic!() };
+        let Reply::Raw(200, _, b) = answer(Signal::Logs, true, 0, Some("w")) else { panic!() };
         assert_eq!(&b[..], &[0x0a, 0x03, 0x12, 0x01, b'w']);
-        let Reply::Raw(200, _, b) = answer(false, 2, Some("why")) else { panic!() };
+        let Reply::Raw(200, _, b) = answer(Signal::Logs, false, 2, Some("why")) else { panic!() };
         assert_eq!(&b[..], br#"{"partialSuccess":{"rejectedLogRecords":"2","errorMessage":"why"}}"#);
         assert!(is_protobuf(Some("application/x-protobuf; charset=binary")) && !is_protobuf(Some("application/json")));
     }

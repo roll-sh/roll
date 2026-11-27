@@ -281,6 +281,13 @@ async fn roll_run_injects_an_environments_secrets_and_refuses_unresolved_referen
     let token = ok(&api, &[], &["secrets", "-p", "shop", "tokens", "create", "ci", "--for-env", "production"], None).await;
     let t = [("ROLL_TOKEN", token.trim())];
     assert_eq!(ok(&api, &t, &["run", "-e", "production", "--no-mask", "--", "sh", "-c", "echo $HOST"], None).await.trim(), "db.internal");
+    // The command never gets roll's own credentials, run straight or masked, unless asked.
+    let seen = "echo ${ROLL_TOKEN:-none} ${ROLL_ADMIN_TOKEN:-none} $ROLL_PROJECT_HINT";
+    let t = [t[0], ("ROLL_ADMIN_TOKEN", "fake-admin-token"), ("ROLL_PROJECT_HINT", "kept")];
+    assert_eq!(ok(&api, &t, &["run", "-e", "production", "--no-mask", "--", "sh", "-c", seen], None).await.trim(), "none none kept");
+    assert_eq!(ok(&api, &[&t[..], &[("CI", "true")]].concat(), &["run", "-e", "production", "--", "sh", "-c", seen], None).await.trim(), "none none kept");
+    let kept = ok(&api, &t, &["run", "-e", "production", "--no-mask", "--keep-roll-credentials", "--", "sh", "-c", "echo ${ROLL_ADMIN_TOKEN:-none}"], None).await;
+    assert_eq!(kept.trim(), "fake-admin-token");
     let denied = roll(&api, &t, &["run", "-e", "staging", "--", "true"], None).await;
     assert_ne!(denied.code, Some(0));
     // `kubernetes` prints what External Secrets Operator needs: its store's URL, with the token it

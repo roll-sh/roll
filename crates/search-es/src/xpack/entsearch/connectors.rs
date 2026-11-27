@@ -116,13 +116,6 @@ async fn create(ctx: &Ctx<'_>, id: String) -> EsResult<(bool, String)> {
     if !errors.is_empty() {
         return Err(EsError::action_request_validation(&errors));
     }
-    // Putting a connector again replaces it: one aimed at another index needs write there, as
-    // `_index_name` does.
-    if ctx.state().metadata.xpack.get(CONNECTORS, &id).is_some()
-        && let Some(i) = index
-    {
-        crate::xpack::security::check_index_action(ctx, "indices:data/write/bulk", i)?;
-    }
     let now = ctx.now_ms;
     let user = crate::xpack::internal::stored_user(crate::xpack::security::principal(ctx));
     let created = ctx
@@ -859,10 +852,8 @@ pub async fn update(ctx: &Ctx<'_>) -> EsResult<Reply> {
         _ => {}
     }
     // A connector's syncs write to its index as whoever last changed where or what it writes
-    // (below): one aimed at another index must be by someone who may write there.
-    if let Some(Value::Str(i)) = &index_name {
-        crate::xpack::security::check_index_action(ctx, "indices:data/write/bulk", i)?;
-    }
+    // (below), so an index its aimer may not write is refused at the sync's `_bulk`: these APIs
+    // need only `manage_connector`, as in Elasticsearch.
     let id = ctx.path_param("connector_id").unwrap_or_default().to_string();
     let now_ms = ctx.now_ms;
     let (sealer, unsealed) = (ctx.cluster.config.sealer.clone(), ctx.cluster.config.unsealed_secrets);

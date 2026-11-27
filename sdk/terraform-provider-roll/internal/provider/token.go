@@ -25,6 +25,7 @@ type tokenModel struct {
 	Name         types.String `tfsdk:"name"`
 	Environments types.List   `tfsdk:"environments"`
 	Paths        types.List   `tfsdk:"paths"`
+	Keys         types.List   `tfsdk:"keys"`
 	Actions      types.List   `tfsdk:"actions"`
 	ExpiresAt    types.String `tfsdk:"expires_at"`
 	AllowedIPs   types.List   `tfsdk:"allowed_ips"`
@@ -50,6 +51,7 @@ func (r *tokenResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 			"name":         schema.StringAttribute{Required: true, PlanModifiers: replace},
 			"environments": list(false, "The environments it reaches (all when left out)."),
 			"paths":        list(false, "The folders it reaches (all when left out)."),
+			"keys":         list(false, "Only these keys of those folders (STRIPE_KEY): it reads, lists and writes these alone (every key when left out)."),
 			"actions":      list(true, "read, reveal, write, delete, admin."),
 			"expires_at":   schema.StringAttribute{Optional: true, PlanModifiers: replace, Description: "When it stops working (RFC 3339); never when left out."},
 			"allowed_ips":  list(false, "Client addresses or CIDRs it works from (any when left out)."),
@@ -85,6 +87,9 @@ func (r *tokenResource) Create(ctx context.Context, req resource.CreateRequest, 
 	}
 	if paths := stringList(ctx, m.Paths, &resp.Diagnostics); paths != nil {
 		rule["paths"] = paths
+	}
+	if keys := stringList(ctx, m.Keys, &resp.Diagnostics); keys != nil {
+		rule["keys"] = keys
 	}
 	body := map[string]any{"name": m.Name.ValueString(), "rules": []any{rule}}
 	if !m.ExpiresAt.IsNull() && !m.ExpiresAt.IsUnknown() {
