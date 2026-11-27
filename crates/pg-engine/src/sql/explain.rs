@@ -512,6 +512,8 @@ struct ExNode {
     rel_order: Vec<String>,
     /// Output columns (empty: not tracked).
     cols: Vec<ColInfo>,
+    /// A projection's input columns (a DISTINCT over it estimates its groups from them).
+    proj_in: Vec<ColInfo>,
     /// The order rows come out in, as sort keys show (empty: none known).
     order: Vec<String>,
     /// Per `order` key, other names for it (an inner merge join's other side's key).
@@ -7332,7 +7334,7 @@ impl Builder<'_, '_> {
                         pt.cols = cols.clone();
                     }
                 }
-                c.node.cols = cols;
+                c.node.proj_in = std::mem::replace(&mut c.node.cols, cols);
                 // (cost_qual_eval: a called function's procost too. Over a ProjectSet, the
                 // level's target list with the calls in it, as split_pathtarget_at_srfs
                 // left it: the calls' costs count again.)
@@ -8746,7 +8748,20 @@ impl Builder<'_, '_> {
                     }
                     _ => keys.clone(),
                 };
-                n.rows = self.num_groups(&group_cols, c.node.rows);
+                // (Computed columns: estimate_num_groups over the Vars they read, as a GROUP
+                // BY of them estimates it.)
+                let computed = match &**input {
+                    Plan::Project { exprs, .. }
+                        if on.is_none() && !c.node.proj_in.is_empty() && exprs.iter().any(|e| !matches!(e, Expr::Col(..))) =>
+                    {
+                        Some((exprs, c.node.proj_in.clone()))
+                    }
+                    _ => None,
+                };
+                n.rows = match &computed {
+                    Some((exprs, cols)) => self.group_num_groups(exprs, cols, c.node.rows),
+                    None => self.num_groups(&group_cols, c.node.rows),
+                };
                 // (estimate_num_groups: a volatile key with no columns makes every row a
                 // group.)
                 if let Plan::Project { exprs, .. } = &**input
@@ -9028,7 +9043,10 @@ impl Builder<'_, '_> {
                     && let Some(pt) = part.as_deref()
                     && self.par.is_some()
                     && !keys.is_empty()
-                    && let Some(best) = self.parallel_distinct(&n, u, pt, &part_others, &distinct_named, &keys, key_ops, match &**input {
+                    && let Some(best) = self.parallel_distinct(&n, u, pt, &part_others, &distinct_named, &|rows| match &computed {
+                        Some((exprs, cols)) => self.group_num_groups(exprs, cols, rows),
+                        None => self.num_groups(&keys, rows),
+                    }, key_ops, match &**input {
                         // (create_agg_path: the computed keys per group.)
                         Plan::Project { exprs, .. } => exprs
                             .iter()
@@ -11505,7 +11523,8 @@ impl Builder<'_, '_> {
     /// kept for their order), then over what a Gather (Merge) of them sends
     /// (create_final_distinct_paths), when such a plan survives add_path and is the
     /// cheapest; the other plans that survive go beside it (`alt`), for a LIMIT above.
-    /// `needed`: the DISTINCT's keys (distinct_pathkeys: column, name); each sorted path
+    /// `needed`: the DISTINCT's keys (distinct_pathkeys: column, name), `groups_at` its groups
+    /// over so many rows; each sorted path
     /// is also tried in the order of a path's own leading keys among them
     /// (get_useful_pathkeys_for_distinct).
     #[allow(clippy::too_many_arguments)]
@@ -11516,7 +11535,7 @@ impl Builder<'_, '_> {
         pt: &ExNode,
         others: &[ExNode],
         needed: &[(usize, String)],
-        keys: &[ColInfo],
+        groups_at: &dyn Fn(f64) -> f64,
         key_ops: f64,
         per_group: f64,
         every_row: bool,
@@ -11551,7 +11570,7 @@ impl Builder<'_, '_> {
             }
             out
         };
-        let pd_rows = if every_row { pt.rows } else { self.num_groups(keys, pt.rows) };
+        let pd_rows = if every_row { pt.rows } else { groups_at(pt.rows) };
         let unique_over = |child: ExNode, rows: f64, ord: &[String]| -> ExNode {
             let mut x = ExNode::new("Unique");
             x.unique_keys = Some(ord.iter().filter_map(|k| col_of(k)).collect());
