@@ -47,6 +47,10 @@ use std::time::Duration;
 pub const ENDPOINTS: &str = "inference";
 /// Endpoints' secrets by id: `{key: sealed value}`.
 pub const SECRETS: &str = "inference_secret";
+/// The families holding values sealed as [`SECRET_KIND`] (`{key: sealed}` records): endpoints'
+/// keys and ML Commons connectors' credentials ([`crate::opensearch::ml`]). A branch's copy holds
+/// [`crate::seal::INHERITED`] in their place.
+pub const SECRET_FAMILIES: [&str; 2] = [SECRETS, crate::opensearch::ml::SECRETS];
 /// Preconfigured endpoints deleted with `force=true`.
 pub const DELETED_DEFAULTS: &str = "inference.deleted_default";
 /// A deadline that never comes: what roll's own calls pass where Elasticsearch passes

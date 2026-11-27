@@ -1,0 +1,29 @@
+{
+  "ml.undeploy_model": {
+    "documentation": {
+      "url": "https://docs.opensearch.org/latest/ml-commons-plugin/api/",
+      "description": "Undeploys a model."
+    },
+    "stability": "stable",
+    "url": {
+      "paths": [
+        {
+          "path": "/_plugins/_ml/models/{model_id}/_undeploy",
+          "methods": [
+            "POST"
+          ],
+          "parts": {
+            "model_id": {
+              "type": "string",
+              "description": "model_id"
+            }
+          }
+        }
+      ]
+    },
+    "params": {},
+    "body": {
+      "description": "The request definition."
+    }
+  }
+}

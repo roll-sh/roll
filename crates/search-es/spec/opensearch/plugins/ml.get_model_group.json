@@ -1,0 +1,26 @@
+{
+  "ml.get_model_group": {
+    "documentation": {
+      "url": "https://docs.opensearch.org/latest/ml-commons-plugin/api/",
+      "description": "Returns a model group."
+    },
+    "stability": "stable",
+    "url": {
+      "paths": [
+        {
+          "path": "/_plugins/_ml/model_groups/{model_group_id}",
+          "methods": [
+            "GET"
+          ],
+          "parts": {
+            "model_group_id": {
+              "type": "string",
+              "description": "model_group_id"
+            }
+          }
+        }
+      ]
+    },
+    "params": {}
+  }
+}

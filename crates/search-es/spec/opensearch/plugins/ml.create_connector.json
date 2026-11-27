@@ -1,0 +1,23 @@
+{
+  "ml.create_connector": {
+    "documentation": {
+      "url": "https://docs.opensearch.org/latest/ml-commons-plugin/api/",
+      "description": "Creates a connector to a model provider."
+    },
+    "stability": "stable",
+    "url": {
+      "paths": [
+        {
+          "path": "/_plugins/_ml/connectors/_create",
+          "methods": [
+            "POST"
+          ]
+        }
+      ]
+    },
+    "params": {},
+    "body": {
+      "description": "The request definition."
+    }
+  }
+}

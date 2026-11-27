@@ -178,6 +178,8 @@ queries! {
     OsKnn(crate::opensearch::knn::OsKnn) = "knn",
     // The opensearch dialect's `hybrid` (the neural-search plugin's builder).
     OsHybrid(crate::opensearch::hybrid::Hybrid) = "hybrid",
+    // The opensearch dialect's `neural`, rewritten to `knn` before the search runs.
+    OsNeural(crate::opensearch::neural::Neural) = "neural",
     SparseVector(specialized::SparseVector) = "sparse_vector",
     TextExpansion(specialized::TextExpansion) = "text_expansion",
     WeightedTokens(specialized::WeightedTokens) = "weighted_tokens",
@@ -371,6 +373,7 @@ fn parse_named(name: &str, p: &mut XParser<'_>) -> EsResult<Query> {
         "pinned" => specialized::Pinned::parse(p)?.into(),
         "knn" if crate::opensearch::active() => crate::opensearch::knn::OsKnn::parse(p)?.into(),
         "hybrid" if crate::opensearch::active() => crate::opensearch::hybrid::Hybrid::parse(p)?.into(),
+        "neural" if crate::opensearch::active() => crate::opensearch::neural::Neural::parse(p)?.into(),
         // OpenSearch's `template` query: its body is a query, rewritten (placeholders filled
         // from the search pipeline's context; without them, as written) on the coordinator.
         "template" if crate::opensearch::active() => {

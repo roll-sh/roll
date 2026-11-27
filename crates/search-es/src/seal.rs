@@ -273,7 +273,7 @@ fn secret_values(raw: &[u8], out: &mut std::collections::HashSet<String>) {
     }
     let Ok(Some(v)) = crate::json::parse(raw) else { return };
     let xpack = crate::xpack::store::XpackState::from_stored(v.get("xpack").or_else(|| v.get("metadata").and_then(|m| m.get("xpack"))));
-    for family in [inference::SECRETS, connectors::SECRETS, fleet::SECRETS, watcher::WATCHES] {
+    for family in [inference::SECRETS, crate::opensearch::ml::SECRETS, connectors::SECRETS, fleet::SECRETS, watcher::WATCHES] {
         for (_, rec) in xpack.iter(family) {
             out.insert(rec.to_json());
             strings(rec, out);
@@ -290,15 +290,17 @@ fn plan(cluster: &Cluster, st: &crate::meta::ClusterState, sealer: &Sealer, bran
     use crate::xpack::{entsearch::connectors, fleet, inference, watcher};
     let mut changes: Vec<Change> = Vec::new();
     let to = bind(cluster, inference::SECRET_KIND);
-    for (id, rec) in st.metadata.xpack.iter(inference::SECRETS) {
-        let Value::Obj(m) = rec else { continue };
-        let settled: crate::json::Map = m
-            .iter()
-            .map(|(k, v)| (k.clone(), v.as_str().map_or_else(|| v.clone(), |s| Value::from(settle(sealer, branch, copied, inference::SECRET_KIND, &to, s)))))
-            .collect();
-        if &settled != m {
-            let taken = settled.values().zip(m.values()).any(|(a, b)| a.as_str() == Some(INHERITED) && b.as_str() != Some(INHERITED));
-            changes.push((inference::SECRETS, id.clone(), rec.clone(), Some(Value::Obj(settled)), taken));
+    for family in inference::SECRET_FAMILIES {
+        for (id, rec) in st.metadata.xpack.iter(family) {
+            let Value::Obj(m) = rec else { continue };
+            let settled: crate::json::Map = m
+                .iter()
+                .map(|(k, v)| (k.clone(), v.as_str().map_or_else(|| v.clone(), |s| Value::from(settle(sealer, branch, copied, inference::SECRET_KIND, &to, s)))))
+                .collect();
+            if &settled != m {
+                let taken = settled.values().zip(m.values()).any(|(a, b)| a.as_str() == Some(INHERITED) && b.as_str() != Some(INHERITED));
+                changes.push((family, id.clone(), rec.clone(), Some(Value::Obj(settled)), taken));
+            }
         }
     }
     for (family, kind) in [(connectors::SECRETS, connectors::SECRET_KIND), (fleet::SECRETS, fleet::SECRET_KIND)] {

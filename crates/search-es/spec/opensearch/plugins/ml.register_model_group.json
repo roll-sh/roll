@@ -1,0 +1,23 @@
+{
+  "ml.register_model_group": {
+    "documentation": {
+      "url": "https://docs.opensearch.org/latest/ml-commons-plugin/api/",
+      "description": "Registers a model group."
+    },
+    "stability": "stable",
+    "url": {
+      "paths": [
+        {
+          "path": "/_plugins/_ml/model_groups/_register",
+          "methods": [
+            "POST"
+          ]
+        }
+      ]
+    },
+    "params": {},
+    "body": {
+      "description": "The request definition."
+    }
+  }
+}

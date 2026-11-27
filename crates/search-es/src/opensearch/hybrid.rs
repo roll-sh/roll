@@ -207,6 +207,14 @@ pub fn push_filter(q: Query, f: &Query) -> Query {
             });
             Query::OsKnn(k)
         }
+        // `NeuralQueryBuilder.filter`: into its k-NN search's.
+        Query::OsNeural(mut n) => {
+            n.filter = Some(match n.filter.take() {
+                None => f.clone(),
+                Some(existing) => push_filter(existing, f),
+            });
+            Query::OsNeural(n)
+        }
         other => {
             let b = crate::query::compound::Bool { must: vec![other], filter: vec![f.clone()], ..Default::default() };
             Query::Bool(Box::new(b))

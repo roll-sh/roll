@@ -1169,6 +1169,12 @@ fn count_failure(s: &mut Status, proceed: bool, index: &str, id: &str, e: &EsErr
 /// copies. The failure names the request (`BulkShardRequest [[index][shard]] containing
 /// [<item>]`, the item as `IndexRequest` / `DeleteRequest.toString` print it: `source` is
 /// `None` for a delete) and, as a bulk item's cause, carries no index metadata.
+/// The by-query request's caller, as its writes' writer: a pipeline's `text_embedding` runs its
+/// model as them (model access), and `set_security_user` records them.
+fn writer(ctx: &Ctx) -> Option<std::sync::Arc<crate::xpack::security::Principal>> {
+    Some(std::sync::Arc::new(crate::xpack::security::principal(ctx).clone()))
+}
+
 async fn check_copies(ctx: &Ctx<'_>, idx: &IndexMeta, id: &str, routing: Option<&str>, source: Option<&[u8]>) -> EsResult<()> {
     let shard = crate::meta::routing::shard_for(idx, id, routing);
     let item = match source {
@@ -1236,7 +1242,7 @@ pub async fn delete_by_query(ctx: &Ctx<'_>) -> EsResult<Reply> {
                     throttle.start(batch.len());
                     s.batches += 1;
                     for d in &batch {
-                        let args = WriteArgs { if_seq_no: Some(d.seq_no), if_primary_term: Some(d.primary_term), internal: true, ..Default::default() };
+                        let args = WriteArgs { if_seq_no: Some(d.seq_no), if_primary_term: Some(d.primary_term), internal: true, principal: writer(ctx), ..Default::default() };
                         let r = match check_copies(ctx, &d.index, &d.id, d.routing.as_deref(), None).await {
                             Ok(()) => write::apply_delete(ctx.cluster, &d.index, &d.id, d.routing.as_deref(), &args),
                             Err(e) => Err(e),
@@ -1335,7 +1341,7 @@ pub async fn update_by_query(ctx: &Ctx<'_>) -> EsResult<Reply> {
                                     continue;
                                 }
                                 Op::Delete(..) => {
-                                    let args = WriteArgs { if_seq_no: Some(d.seq_no), if_primary_term: Some(d.primary_term), internal: true, ..Default::default() };
+                                    let args = WriteArgs { if_seq_no: Some(d.seq_no), if_primary_term: Some(d.primary_term), internal: true, principal: writer(ctx), ..Default::default() };
                                     match write::apply_delete(ctx.cluster, &d.index, &d.id, d.routing.as_deref(), &args) {
                                         Ok(_) => {
                                             s.deleted += 1;
@@ -1369,6 +1375,7 @@ pub async fn update_by_query(ctx: &Ctx<'_>) -> EsResult<Reply> {
                             if_primary_term: Some(d.primary_term),
                             pipeline: pipeline.clone(),
                             internal: true,
+                            principal: writer(ctx),
                             ..Default::default()
                         };
                         let r = match check_copies(ctx, &d.index, &d.id, d.routing.as_deref(), Some(&source[..])).await {
@@ -1512,7 +1519,7 @@ async fn reindex_doc(ctx: &Ctx<'_>, p: &ReindexPlan, writes: &crate::xpack::secu
                 let st = ctx.state();
                 match write::resolve_existing(&st, &di) {
                     Some(meta) => {
-                        let args = WriteArgs { internal: true, ..Default::default() };
+                        let args = WriteArgs { internal: true, principal: writer(ctx), ..Default::default() };
                         match write::apply_delete(ctx.cluster, &meta, &did, r.as_deref(), &args) {
                             Ok(_) => s.deleted += 1,
                             Err(e) => {
@@ -1549,7 +1556,7 @@ async fn reindex_doc(ctx: &Ctx<'_>, p: &ReindexPlan, writes: &crate::xpack::secu
     }
     let given_id = if p.dest_time_series && id == d.id { None } else { Some(id.clone()) };
     let generated_id = given_id.is_none();
-    let mut args = WriteArgs { id: given_id, routing, create: p.op_create, pipeline: p.pipeline.clone(), internal: true, ..Default::default() };
+    let mut args = WriteArgs { id: given_id, routing, create: p.op_create, pipeline: p.pipeline.clone(), internal: true, principal: writer(ctx), ..Default::default() };
     if let Some(vt) = p.version_type
         && vt != search_index::VersionType::Internal
         && !version_cleared

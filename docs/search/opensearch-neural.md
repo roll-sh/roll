@@ -1,6 +1,6 @@
 # Semantic search on OpenSearch-flavor clusters: design
 
-`## Next` item 14 in [README.md](README.md). Status: design, nothing built.
+`## Next` item 14 in [README.md](README.md). Status: phase 1 built (see "Phase 1 as built" at the end).
 
 ## Why
 
@@ -152,3 +152,98 @@ model family on its own CPUs: E5 (#563).
 2. **Phase 2:** `neural_sparse`, `sparse_encoding`, `text_chunking`, the `semantic` field, and
    `ml_inference` processors.
 3. **Phase 3:** agents and agentic search, with RAG (item 11).
+
+## Phase 1 as built
+
+Code: `crates/search-es/src/opensearch/ml/` (`mod.rs` the APIs, `connector.rs` connectors,
+`ingest.rs` the processor) and `opensearch/neural.rs`. Test:
+`search-control/tests/control.rs::opensearch_semantic_search_follows_the_guide`.
+
+### Where it departs from the design
+
+Each is the stricter choice, or what the code shows the design assumed wrongly.
+
+- **Connectors run as ML Commons runs them, not as a roll service.** roll renders the connector's
+  URL, headers and body template itself, with ML Commons' substitution rules: a string parameter is
+  escaped as commons-text's `escapeJson` writes it, and lists are written as Gson writes them. So
+  the provider gets OpenSearch's body byte for byte (checked against OpenSearch 3.9.0), which
+  mapping onto roll's OpenAI or Cohere service wouldn't give. The call still goes through the
+  inference client (`xpack/inference/http.rs`), with its egress check, timeouts, retries and
+  response cap. SigV4 is signed with the connector's own keys.
+- **A model isn't an `_inference` endpoint row.** An OpenSearch cluster has no `.inference`
+  index. Connectors, model groups, models and tasks are records homed at
+  `.plugins-ml-connector`, `-model-group`, `-model` and `-task`. A connector's credential is
+  sealed as an inference key is, bound to the cluster (`inference::SECRET_FAMILIES`), so
+  branches and keyless nodes treat it the same way.
+- **Credentials reach headers and the URL only.** Only what the connector stores fills the URL
+  and headers. A `_predict` call's `parameters` reach the body only, so a caller can't send the
+  credential to a host it picks. OpenSearch fills the URL from predict-time parameters too.
+- **A connector update that moves the credential must give it again.** Changing the protocol, an
+  action's URL or headers, or a stored parameter they name, without a new `credential`, is a 400.
+  Otherwise anyone allowed to update connectors could send the stored key to a host of their own.
+  OpenSearch keeps the old credential.
+- **Functions:** only the built-in embedding pre- and post-process functions run (`openai`,
+  `cohere`, `default` and `bedrock` `.embedding`). Any other name, and any Painless, is refused
+  when the connector is written. OpenSearch accepts any name and fails later.
+- **Methods:** only `POST` predict actions (the inference client posts).
+- **Access control:**
+  - Model groups' `access_mode` and `backend_roles` apply only when
+    `plugins.ml_commons.model_access_control_enabled` is set. Otherwise they're refused with
+    OpenSearch's message.
+  - With access control on, a group registered without a mode is `private`.
+  - Connector access control isn't served: its fields are refused as OpenSearch refuses them when
+    it's off.
+  - OpenSearch's read-only role is `ml_read_access`, not `ml_readonly_access`. Both roles come
+    from the security plugin's captured configuration.
+  - `neural` and `text_embedding` run a remote model only for a caller holding
+    `cluster:admin/opensearch/ml/predict`, as OpenSearch's plugins call the predict action as the
+    user. roll's own E5 needs nothing more.
+  - `_reindex` and the by-query APIs run pipelines as their caller, so model groups' access
+    applies there too. With access control on, work with no caller to check is refused.
+  - Only the owner or an admin changes a group's access mode or backend roles.
+  - `GET _plugins/_ml/tasks/{id}` checks the task's model against the caller.
+- **Tasks** are `COMPLETED` when they're answered. `_register?deploy=true` also records the
+  deploy task. The newest 1,000 are kept.
+- **Bounds:** one document or request embeds at most 256 texts, and at most 32 with a
+  pre-process that takes one text a call (Bedrock's). A connector calls at most 10,000 times a
+  minute per model.
+- **`text_embedding`:**
+  - A processor reads its texts where it runs. The vectors are written when its pipeline ends,
+    before the next pipeline or the write. So a later processor in the same pipeline doesn't see
+    them, and a failed call fails the document (`ignore_failure` and `on_failure` don't catch it).
+  - Nested `field_map` objects are refused; use dotted names.
+  - `skip_existing` is accepted, but every write embeds.
+  - `_simulate` doesn't call the model.
+- **`neural`:**
+  - It's embedded on the coordinator before the search runs, wherever it is in the search's query
+    (`hybrid` included).
+  - Elsewhere it's refused: in an aggregation's filter or a rescore query, and in `_count`,
+    `_explain`, `_validate/query` and the by-query APIs.
+  - `query_image` is refused (multimodal is phase 2).
+- **Local models:** E5 is pre-registered as `.multilingual-e5-small` and registers under
+  `intfloat/multilingual-e5-small`. A node without the embedder answers as Elasticsearch-flavor
+  E5 does without one.
+- **Not here yet:**
+  - the dashboard's Inference tab doesn't list OpenSearch models;
+  - embedding calls aren't metered, as `_inference`'s embeddings aren't. A `_predict` call without
+    an embedding post-process answers as a completion does, so its tokens are metered the way
+    #1141 meters completions (the provider's figures, else roll's estimate).
+
+### For OpenSearch customers
+
+OpenSearch's semantic search tutorial runs unchanged:
+
+1. `POST /_plugins/_ml/connectors/_create` with the provider's blueprint. Every published
+   embedding blueprint that uses the built-in functions works: OpenAI, Cohere, and Amazon Bedrock
+   Titan over `aws_sigv4`. A blueprint with a Painless function isn't run yet. The `credential`
+   is sealed and never shown again.
+2. `POST /_plugins/_ml/model_groups/_register`, then
+   `POST /_plugins/_ml/models/_register?deploy=true` with `"function_name": "remote"` and the
+   `connector_id`.
+3. `PUT /_ingest/pipeline/<name>` with `text_embedding` (`model_id`, `field_map`), and an index
+   with `"index.knn": true`, `default_pipeline` and a `knn_vector` field of the model's dimension.
+4. Search with `neural` (`query_text`, `model_id`, `k`). For hybrid search, use a search pipeline
+   with a `normalization-processor`, and `neural_query_enricher` to name the model once.
+
+Without a provider, register nothing: `.multilingual-e5-small` embeds on roll's own CPUs.
+

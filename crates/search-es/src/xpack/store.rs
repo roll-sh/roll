@@ -59,6 +59,11 @@ const HOMES: &[Home] = &[
     Home { prefix: "watcher.watch", index: ".watches", alias: None },
     Home { prefix: "logstash.", index: ".logstash", alias: None },
     Home { prefix: "inference_secret", index: ".secrets-inference", alias: None },
+    // ML Commons (opensearch-flavor clusters); a connector's credential lives in its document.
+    Home { prefix: "os_ml.connector", index: ".plugins-ml-connector", alias: None },
+    Home { prefix: "os_ml.model_group", index: ".plugins-ml-model-group", alias: None },
+    Home { prefix: "os_ml.model", index: ".plugins-ml-model", alias: None },
+    Home { prefix: "os_ml.task", index: ".plugins-ml-task", alias: None },
     Home { prefix: "inference", index: ".inference", alias: Some(".inference-alias") },
 ];
 

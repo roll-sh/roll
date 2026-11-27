@@ -39,6 +39,9 @@ pub struct IngestDoc {
     pub procs: Option<std::sync::Arc<super::pipeline::ProcMetrics>>,
     /// This run counts towards the ingest stats (writes do, simulations don't).
     pub count_stats: bool,
+    /// Texts `text_embedding` processors read, embedded when their pipeline ends
+    /// ([`crate::opensearch::ml::ingest::settle`]).
+    pub embeddings: Vec<crate::opensearch::ml::ingest::Pending>,
 }
 
 /// Where a `flexible` path leads (`IngestDocument` with `IngestPipelineFieldAccessPattern.FLEXIBLE`):

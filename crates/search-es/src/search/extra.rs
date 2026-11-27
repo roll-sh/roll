@@ -49,6 +49,9 @@ pub fn to_query(ctx: &QueryCtx, q: &Query) -> EsResult<QueryRef> {
         Query::Knn(k) => knn_query(ctx, k),
         Query::OsKnn(k) => crate::opensearch::knn::to_query(ctx, k),
         Query::OsHybrid(h) => crate::opensearch::hybrid::to_query(ctx, h),
+        // Embedded and rewritten on the coordinator ([`crate::opensearch::neural::rewrite_request`]):
+        // one that's still here sits where roll doesn't embed (an aggregation's filter, a rescore).
+        Query::OsNeural(_) => Err(crate::error::EsError::illegal_argument("a [neural] query is served only in a search's query (hybrid included), where it's embedded before the search runs")),
         Query::GeoDistance(g) => geo_distance(ctx, g),
         Query::GeoBoundingBox(g) => geo_bbox(ctx, g),
         Query::GeoGrid(g) => geo_grid(ctx, g),

@@ -86,8 +86,12 @@ fn java_class(v: &Value) -> &'static str {
     }
 }
 
+/// The opensearch dialect's processors beyond Elasticsearch's (the neural-search plugin's).
+const OS_PROCESSORS: &[(&str, &[&str], &[&str])] = &[("text_embedding", &["model_id", "field_map"], &["batch_size", "skip_existing"])];
+
 fn validate_processor(ptype: &str, config: &Value) -> EsResult<()> {
-    let Some((_, required, optional)) = PROCESSORS.iter().find(|(n, _, _)| *n == ptype) else {
+    let os = if crate::opensearch::active() { OS_PROCESSORS } else { &[] };
+    let Some((_, required, optional)) = PROCESSORS.iter().chain(os).find(|(n, _, _)| *n == ptype) else {
         return Err(parse_err(format!("No processor type exists with name [{ptype}]")).with_meta("processor_type", ptype));
     };
     let Value::Obj(cfg) = config else {

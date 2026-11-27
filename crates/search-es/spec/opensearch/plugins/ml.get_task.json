@@ -1,0 +1,26 @@
+{
+  "ml.get_task": {
+    "documentation": {
+      "url": "https://docs.opensearch.org/latest/ml-commons-plugin/api/",
+      "description": "Returns an ML task."
+    },
+    "stability": "stable",
+    "url": {
+      "paths": [
+        {
+          "path": "/_plugins/_ml/tasks/{task_id}",
+          "methods": [
+            "GET"
+          ],
+          "parts": {
+            "task_id": {
+              "type": "string",
+              "description": "task_id"
+            }
+          }
+        }
+      ]
+    },
+    "params": {}
+  }
+}

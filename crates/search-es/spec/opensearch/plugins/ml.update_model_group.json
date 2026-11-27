@@ -1,0 +1,29 @@
+{
+  "ml.update_model_group": {
+    "documentation": {
+      "url": "https://docs.opensearch.org/latest/ml-commons-plugin/api/",
+      "description": "Updates a model group."
+    },
+    "stability": "stable",
+    "url": {
+      "paths": [
+        {
+          "path": "/_plugins/_ml/model_groups/{model_group_id}",
+          "methods": [
+            "PUT"
+          ],
+          "parts": {
+            "model_group_id": {
+              "type": "string",
+              "description": "model_group_id"
+            }
+          }
+        }
+      ]
+    },
+    "params": {},
+    "body": {
+      "description": "The request definition."
+    }
+  }
+}

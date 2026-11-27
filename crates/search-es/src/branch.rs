@@ -201,11 +201,13 @@ pub async fn mark_inherited(cluster: &Cluster) -> EsResult<()> {
             // The parent's secrets: the stores' entries go, endpoints keep their settings.
             store::clear(st, crate::xpack::entsearch::connectors::SECRETS);
             store::clear(st, crate::xpack::fleet::SECRETS);
-            let keys: Vec<(String, Value)> = st.metadata.xpack.iter(crate::xpack::inference::SECRETS).map(|(k, v)| (k.clone(), v.clone())).collect();
-            for (id, rec) in keys {
-                let Value::Obj(m) = rec else { continue };
-                let none = m.into_iter().map(|(k, v)| (k, if v.is_null() { v } else { Value::from(crate::seal::INHERITED) })).collect();
-                store::put(st, crate::xpack::inference::SECRETS, &id, Value::Obj(none), now)?;
+            for family in crate::xpack::inference::SECRET_FAMILIES {
+                let keys: Vec<(String, Value)> = st.metadata.xpack.iter(family).map(|(k, v)| (k.clone(), v.clone())).collect();
+                for (id, rec) in keys {
+                    let Value::Obj(m) = rec else { continue };
+                    let none = m.into_iter().map(|(k, v)| (k, if v.is_null() { v } else { Value::from(crate::seal::INHERITED) })).collect();
+                    store::put(st, family, &id, Value::Obj(none), now)?;
+                }
             }
             let m = obj! {
                 "cluster" => me,

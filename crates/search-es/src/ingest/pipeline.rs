@@ -879,6 +879,12 @@ async fn run_write_counted(
             Ok(Flow::Continue) => {}
             Err(e) => return Err(fail(e, vec![pid.clone()])),
         }
+        // Its `text_embedding` processors' vectors (model calls can't run inside the pipeline).
+        if !d.embeddings.is_empty()
+            && let Err(e) = crate::opensearch::ml::ingest::settle(cluster, &mut d).await
+        {
+            return Err(fail(e, vec![pid.clone()]));
+        }
         if let Some(r) = d.reroute.clone() {
             d.meta.insert("_index".into(), Value::Str(r));
         }

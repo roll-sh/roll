@@ -170,6 +170,8 @@ enum RequestKind {
     Script { bound: crate::scripting::Bound },
     /// The routing processors: validated, then a no-op (see the module documentation).
     Routing,
+    /// The neural-search plugin's `neural_query_enricher`: models for `neural` queries without one.
+    NeuralEnricher { default: Option<String>, by_field: Map },
 }
 
 #[derive(Clone)]
@@ -206,7 +208,8 @@ pub struct Pipeline {
     inline: Option<Value>,
 }
 
-const REQUEST_TYPES: &[&str] = &["filter_query", "script", "oversample", "hierarchical_routing_search", "temporal_routing_search", "acl_routing_search"];
+const REQUEST_TYPES: &[&str] =
+    &["filter_query", "script", "oversample", "hierarchical_routing_search", "temporal_routing_search", "acl_routing_search", "neural_query_enricher"];
 const RESPONSE_TYPES: &[&str] = &["rename_field", "truncate_hits", "collapse", "split", "sort", "hybrid_score_explanation"];
 const PHASE_TYPES: &[&str] = &["normalization-processor", "score-ranker-processor"];
 
@@ -297,6 +300,14 @@ fn request_processor(ctx: &Ctx, ptype: &str, c: &mut Config) -> EsResult<Request
                 .compile(&ctx.state(), &parsed, search_painless::Context::Ingest)
                 .map_err(|e| config_error(Some("script"), c.tag.as_deref(), None, e.reason()).caused_by(e.clone()).with_root_causes(vec![e]))?;
             RequestKind::Script { bound }
+        }
+        "neural_query_enricher" => {
+            let default = c.optional_string("default_model_id")?;
+            let by_field = c.optional_map("neural_field_default_id")?.unwrap_or_default();
+            if let Some((f, _)) = by_field.iter().find(|(_, v)| v.as_str().is_none()) {
+                return Err(c.err("neural_field_default_id", &format!("the model id of field [{f}] must be a string")));
+            }
+            RequestKind::NeuralEnricher { default, by_field }
         }
         "acl_routing_search" => {
             c.string("acl_field")?;
@@ -672,6 +683,11 @@ fn run_request(k: &RequestKind, req: &mut crate::search::SearchRequest, rc: &mut
         }
         RequestKind::Script { bound } => run_script(bound, src)?,
         RequestKind::Routing => {}
+        RequestKind::NeuralEnricher { default, by_field } => {
+            if let Some(q) = src.query.as_mut() {
+                crate::opensearch::neural::fill_models(q, default.as_deref(), by_field);
+            }
+        }
     }
     Ok(())
 }

@@ -803,18 +803,27 @@ impl OsKnn {
         if q.vector.is_empty() {
             return Err(arg("[knn] query vector is empty".into()));
         }
-        let set = [q.k.is_some(), q.max_distance.is_some(), q.min_score.is_some()].iter().filter(|x| **x).count();
+        q.validate()?;
+        q.common.boost = check_boost(boost, || q.clone().into())?;
+        Ok(q)
+    }
+
+    /// `KNNQueryBuilder.Builder.validate`'s bounds on what the search may return: exactly one of
+    /// `k`, `max_distance` and `min_score`, `k` in `(0, 10000]`, `min_score` above 0. Every way to
+    /// a k-NN search goes through it (`neural` too, before its text is embedded).
+    pub fn validate(&self) -> EsResult<()> {
+        let arg = |m: String| EsError::illegal_argument(m);
+        let set = [self.k.is_some(), self.max_distance.is_some(), self.min_score.is_some()].iter().filter(|x| **x).count();
         if set != 1 {
             return Err(arg("[knn] requires exactly one of k, distance or score to be set".into()));
         }
-        if q.k.is_some_and(|k| k <= 0 || k > K_MAX) {
+        if self.k.is_some_and(|k| k <= 0 || k > K_MAX) {
             return Err(arg(format!("[knn] requires k to be in the range (0, {K_MAX}]")));
         }
-        if q.min_score.is_some_and(|s| s <= 0.0) {
+        if self.min_score.is_some_and(|s| s <= 0.0) {
             return Err(arg("[knn] requires minScore to be greater than 0".into()));
         }
-        q.common.boost = check_boost(boost, || q.clone().into())?;
-        Ok(q)
+        Ok(())
     }
 
     /// `KNNQueryBuilderParser.toXContent` (the body under `knn`).
