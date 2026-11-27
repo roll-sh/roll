@@ -554,6 +554,9 @@ pub struct Answering {
     sanitizer: answer::Sanitizer,
     /// The sanitizer's held text went out.
     flushed: bool,
+    /// The cluster's token count, once the model's stream opened: the answer's `usage` goes to
+    /// it when it settles (`crate::xpack::inference::tokens`).
+    tokens: Option<Arc<crate::xpack::inference::tokens::Tokens>>,
 }
 
 impl Drop for Answering {
@@ -610,8 +613,12 @@ impl Answering {
         Value::Arr(self.omitted.iter().map(Source::reference).collect())
     }
 
-    /// Gives back the output tokens it didn't use (once).
+    /// Gives back the output tokens it didn't use, and counts what it used (once).
     fn settle(&mut self) {
+        if let Some(t) = self.tokens.take() {
+            let (i, o) = self.usage();
+            t.add(i, o);
+        }
         if let Some(c) = self.charge.take() {
             let used = self.usage.map_or_else(|| prompt::tokens(&self.answer), |(_, o)| o);
             c.limiter.refund_output(c.payer.as_ref(), &c.profile, c.per_day, c.output.saturating_sub(used));
@@ -801,6 +808,7 @@ pub async fn run(ctx: &Ctx<'_>, profile: &Profile, ask: Ask) -> EsResult<Answeri
         ended: false,
         sanitizer: answer::Sanitizer::new(None),
         flushed: false,
+        tokens: None,
     };
     // Links only to the sources' own URLs, and only when the profile allows links.
     if profile.allow_links {
@@ -826,6 +834,7 @@ pub async fn run(ctx: &Ctx<'_>, profile: &Profile, ask: Ask) -> EsResult<Answeri
     let request = obj! { "messages" => built.messages, "max_completion_tokens" => output as i64 };
     let left = deadline.saturating_duration_since(tokio::time::Instant::now()).max(Duration::from_millis(1));
     let streaming = service.stream_chat(c, &ep, &request, left).await?;
+    answering.tokens = Some(c.xpack.tokens.clone());
     answering.values = Some(streaming.into_values(ep.id.clone()));
     Ok(answering)
 }

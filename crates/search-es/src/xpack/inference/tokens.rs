@@ -3,8 +3,8 @@
 //! and chat answers use beside the limits that bound them.
 //!
 //! Counted: `_inference/completion` (answered or streamed) and `_inference/chat_completion`'s
-//! streams; the chat engine's answers (`_roll/chat`) add their own `usage` with [`Tokens::add`]
-//! as they end (the call comes with the engine, which reads its stream itself). Each call counts the
+//! streams; chat answers (`_roll/chat`, which read their stream with `into_values`) add the
+//! `usage` they report with [`Tokens::add`] as they settle. Each call counts the
 //! provider's figures when its answer carries them ([`Reported::see`]: OpenAI's, Anthropic's,
 //! Cohere's, Bedrock's and Google's shapes), else roll's estimate of the text ([`estimate`]),
 //! figure by figure. A stream counts when it ends, also when its client went away (the provider

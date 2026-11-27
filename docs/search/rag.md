@@ -125,12 +125,10 @@ what the best of the four products does:
   is refused a profile over an index (403).
 - **Metering.** An answer is metered as every inference call is today: one request, and the
   embedding pool's CPU when retrieval embeds with roll's E5 (`search-control/src/pricing.rs`).
-  Provider tokens aren't metered for any endpoint (the provider bills them); each answer reports
-  its own (`usage`, the provider's count or roll's estimate). Adding chat tokens to the cluster's
-  usage totals is the first token metering: a per-cluster counter in search-es, the node taking
-  it each metering pass (unloaded clusters' too, as `take_request_counts` does), two
-  `search_usage` columns (SQLite and Postgres), and the usage route, CLI and docs. Scheduled
-  separately.
+  Its provider tokens are metered too, not priced (the provider bills them): each answer that
+  reached the model adds the `usage` it reports (the provider's count, else roll's estimate) to
+  the cluster's token count when it ends, fails or its client goes away, and the usage route,
+  `roll search clusters usage` and the dashboard show them ("Metering (built)" below).
 - **Left for later:** the official `openai` Python client in Docker against a node; the
   help-center retrieval fixture; query rewriting and memory (phase 3).
 
@@ -411,9 +409,9 @@ in one call. So roll adds a route.
     node at a time, as compatibility.md notes for `rate_limit`), after which `_answer` answers 429.
   - **Metering (built):** provider tokens are counted per cluster, input and output apart
     (`xpack/inference/tokens.rs`), for `_inference/completion` (answered or streamed) and
-    `_inference/chat_completion`'s streams; `_answer` adds each answer's `usage` (the provider's
-    count, else its estimate) to the same counter, a call that comes with the chat engine. Each
-    call counts the provider's own
+    `_inference/chat_completion`'s streams; `_answer` and the OpenAI route add each answer's
+    `usage` (the provider's count, else its estimate) to the same counter once the model's stream
+    opened. Each call counts the provider's own
     figures when its answer carries them (OpenAI's `usage` and the services shaped like it,
     Anthropic's, Bedrock's, Cohere's `billed_units`, Google's `usageMetadata`), else roll's
     estimate of the text, figure by figure. A stream counts when it ends, also when its client

@@ -187,6 +187,8 @@ async fn an_answer_cites_the_documents_it_retrieved() {
     assert!(sources.iter().all(|s| s.pointer(&["fields", "url"]).is_some() && !s.get("passages").and_then(Value::as_array).unwrap().is_empty()), "{v:?}");
     assert_eq!((v.get("finish_reason").and_then(Value::as_str), v.pointer(&["usage", "completion_tokens"]).and_then(Value::as_i64)), (Some("stop"), Some(17)));
     assert!(!text.contains("sk-chat-secret"));
+    // The answer's usage, the provider's figures, is metered as the cluster's tokens.
+    assert_eq!(c.xpack.tokens.take(), (321, 17));
 
     // What the model got: roll's frame and the profile's instructions as the system message, the
     // history as it was, the sources quoted, the output capped, no tools.
