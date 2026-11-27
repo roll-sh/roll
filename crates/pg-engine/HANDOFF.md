@@ -25789,7 +25789,11 @@ immediate shutdown and a kill; `active.py`: one session kind at a time), outputs
   writes and the milliseconds writing and syncing (rounded up), the shutdown checkpoint's in the
   statistics file.
 
-### What changed (`cand/a339`)
+### What changed
+
+`cand/a339-2` holds both pieces on `f1a33ecd2` (`cand/a339`, the first alone on `d74be5d78`, is
+superseded: origin moved under it).
+
 
 - `ext/pg_stat_statements/file.rs` (new) and `store.rs` (`Store::dump` / `restore`): the file. Every
   entry in the order they were made (key, text, every counter, stats_since, minmax_stats_since),
@@ -25872,20 +25876,48 @@ enable_seqscan=off, 8 clients, lane A at 6.0 foreign cores, one pair): user inst
 transaction 364,853 -> 359,969 (connection threads 292,850 -> 286,261): level within this
 measure's spread under that load (the session's `state_time` is a few instructions a statement).
 
+### Second piece: blocks read from table files
+
+- `storage::note_read` (in `Sst::block_with`, on a block cache miss of a query's read; compaction's
+  reads aren't counted): the block's relation, from its last key (`keys::index_prefix`'s table oid
+  and id), whether the read is a bulk read, and the bytes read from the file, appended to a
+  thread-local list (at most 64 relations between two takes) and a thread-local flag set. Nothing
+  is added on a hit.
+- At a transaction's end (`end_xact_counts`), when the flag is set, `pgstat::count_reads` takes
+  the list: each relation's blocks_fetched grows by the bytes read in 8 kB blocks and its
+  blocks_hit doesn't (heap / idx / toast blks_read of pg_statio_*, pg_stat_database's blks_read:
+  the table's rows are id 0, its TOAST table `toast::SPACE`, an index its id or its oid), pg_stat_io's
+  client backend reads (normal, bulkread for a bulk read's, vacuum under VACUUM), and
+  pg_stat_bgwriter's buffers_alloc (a new `Fixed` counter, in the statistics file, reset with
+  'bgwriter'). The hits stay the scans' modelled pages, as before.
+- What it doesn't see: reads on another thread than the session's (a parallel scan's workers,
+  never folded), reads of a transaction counted at its end (as PostgreSQL's pending counts). A
+  block that holds the end of one relation and the start of the next counts for the next.
+- Test: crash_unlogged's child after the clean restart: the table read from its file
+  (heap_blks_read 1-9, buffers_alloc > 0); with `count_reads` a no-op it fails.
+- `probe-views.py` on it (`new2.json`, `cmp-new2.txt`, 120 differing cells): before the restart
+  everything is in the block cache (0 read, as before); after the clean restart the second round
+  reads table t and its index from the files: heap_blks_read 1 and idx_blks_read 1 (PostgreSQL 8
+  and 10, its 8 kB pages against roll's compressed blocks of a few kB), pg_stat_database
+  blks_read 2 (PostgreSQL 799: its catalog reads), buffers_alloc 3 (625), pg_stat_io's client
+  backend reads with them.
+
+Measured: plain dist `bench`, base `cand/a339` (`6ae205546`), the piece on it (agent 335's perf
+stat pairs, lane A at 7.1-7.8 foreign cores, instructions only). The first build, with the miss's
+note and the fold inlined, read point select 31,966.8 -> 32,003.3 (+0.11%), simple 34,684.0 ->
+34,761.0 (+0.22%), range_scan_100 388,087.9 -> 388,218.3 (+0.03%), short_txn 249,917.3 ->
+250,978.3 (+0.4%); with both out of line (`#[cold]`, what is kept): point select 32,027.6 ->
+32,052.3 (+0.08%), simple 34,805.3 -> 34,750.9 (-0.16%). The base's own two runs differ by 0.19%
+and 0.35% under that load: within the noise, no measure of this agent's tells it from 0 (the hit
+path is unchanged; a transaction's end reads one thread-local flag).
+
 ### Left
 
-1. Block counts. pg_statio_* heap / index / toast blks_read and blks_hit, pg_stat_database
-   blks_read / blks_hit, pg_stat_io client backend reads and hits, pg_stat_bgwriter
-   buffers_alloc. The real events roll has: a block cache miss (a read from the file, on the
-   query's thread: `Sst::block_with` with `fill`) and the scans' modelled pages (already counted
-   as hits: seq scans' modelled pages, one index block a scan). A plan that costs nothing on the
-   hit path: a thread-local list of (table, index id) and bytes appended only on a miss (the
-   block's last key names its relation: `keys::index_prefix`), folded into the relation's
-   blocks_fetched in 8 kB units at the transaction's end (one thread-local check), pg_stat_io's
-   reads and buffers_alloc with it. Not done: no time left in this round. PostgreSQL also counts a
-   heap and index block hit for every row an INSERT / UPDATE writes and every heap tuple an index
-   scan fetches; roll has no buffer access there and the per-row count is what the cost rule
-   forbids, so those stay below PostgreSQL's.
+1. Block hits. The hits are still the scans' modelled pages (seq scans' pages, one index block a
+   scan). PostgreSQL also counts a heap and index block hit for every row an INSERT / UPDATE writes
+   and every heap tuple an index scan fetches; roll has no buffer access there and a per-row count
+   is what the cost rule forbids, so those stay below PostgreSQL's. Reads on a parallel scan's
+   worker threads aren't folded (the counts are the session thread's).
 2. No event in roll, left 0: tup_returned / tup_fetched / blks_* of catalog reads (the catalog is
    in memory), pg_stat_checkpointer num_timed (no timed checkpoints) and slru_written (no SLRUs
    written), pg_stat_wal wal_fpi and wal_buffers_full (no full-page images, no WAL buffers),

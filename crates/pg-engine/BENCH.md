@@ -324,6 +324,11 @@ TPC-B-like, agent 333's warmed measure (scale 32, 8 clients, 160,000 counted, en
 lane A at 6.0 foreign cores, one pair): 364,853 -> 359,969 user instructions a transaction
 (connection threads 292,850 -> 286,261).
 
+The second piece (blocks read from table files counted, its miss and fold paths out of line),
+base `cand/a339` (`6ae205546`), one pair each at 7.5 foreign cores: point select 32,027.6 ->
+32,052.3 (+0.08%), simple 34,805.3 -> 34,750.9 (-0.16%); the base's own runs differ by 0.19% /
+0.35% here (noise). Inlined, the first build read +0.11% / +0.22% / range_scan_100 +0.03%.
+
 ## Point selects, outside the session: lock keys, portals and pgstat (2026-11-26, agent 329)
 
 HANDOFF "Point selects, outside the session: lock keys, portals and pgstat" has what changed. Plain
