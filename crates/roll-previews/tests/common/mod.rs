@@ -12,6 +12,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+/// A work item the fake made: (change, title, body, labels, outside).
+pub type MadeWork = (String, String, String, Vec<String>, bool);
+
 #[derive(Default)]
 pub struct FakeCode {
     pub changes: Mutex<HashMap<String, ChangeInfo>>,
@@ -28,6 +31,8 @@ pub struct FakeCode {
     pub feedback: Mutex<HashMap<String, Vec<roll_previews::notes::Note>>>,
     /// Comments made on changes: (change, body, by, outside).
     pub comments: Mutex<Vec<(String, String, String, bool)>>,
+    /// Work items made on changes' repos.
+    pub works: Mutex<Vec<MadeWork>>,
     /// The `health` path every service says it has.
     pub health: Mutex<Option<String>>,
     /// The page states every service's `roll.toml` names (`[[preview.states]]`).
@@ -93,6 +98,11 @@ impl Source for FakeCode {
         let mut all = self.comments.lock();
         all.push((change.into(), body.into(), by.into(), outside));
         Ok(Some(format!("rv_c{}", all.len())))
+    }
+    async fn work_item(&self, change: &str, title: &str, body: &str, labels: &[&str], outside: bool) -> anyhow::Result<Option<(u64, String)>> {
+        let mut all = self.works.lock();
+        all.push((change.into(), title.into(), body.into(), labels.iter().map(|l| l.to_string()).collect(), outside));
+        Ok(Some((all.len() as u64, "https://roll.test/acme/web/work".into())))
     }
     async fn paths_between(&self, _repo: &str, from: &str, to: &str) -> anyhow::Result<Option<Vec<String>>> {
         Ok(self.between.lock().get(&format!("{from}..{to}")).cloned())
@@ -360,6 +370,8 @@ pub struct FakeApps {
     pub browser: Mutex<HashMap<String, Vec<roll_previews::ports::BrowserCheckResult>>>,
     /// Builds started again on an earlier push's copy: (service, deployment, the variables).
     pub views: Mutex<Vec<(String, String, Vars)>>,
+    /// The webhook URLs each service was last deployed with: (path, token SHA-256).
+    pub hooks: Mutex<HashMap<(String, String), Vars>>,
     /// What `fetch` answers for a service, URL and path (`<service> <url><path>`; unset: 200).
     pub fetched: Mutex<HashMap<String, u16>>,
     /// Whether services run on roll's runtime here (`can_swap`).
@@ -467,6 +479,7 @@ impl Apps for FakeApps {
         }
         // What the backend was sent, whatever it answers.
         self.vars.lock().insert((t.preview.clone(), t.service.clone()), t.vars.clone());
+        self.hooks.lock().insert((t.preview.clone(), t.service.clone()), t.webhooks.clone());
         if self.still.load(Ordering::SeqCst) > 0 {
             self.still.fetch_sub(1, Ordering::SeqCst);
             return Err(roll_previews::ports::StillDeploying("building".into()).into());

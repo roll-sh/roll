@@ -1354,9 +1354,10 @@ fn search_parts(k: &Json) -> roll_secrets::Result<BTreeMap<String, Value>> {
     Ok(BTreeMap::from([("user".to_string(), text(k, "/username")?), ("password".to_string(), text(k, "/password")?)]))
 }
 
-/// roll code's search for roll secrets' health (`code` check): whether a repository's default
-/// branch mentions each key, from roll code's trigram index. Any error (code search off, the
-/// index not ready, the repository not on this node) is "can't tell": nothing gets flagged.
+/// roll code for roll secrets' health: whether a repository's default branch mentions each key
+/// (`code` check), from roll code's trigram index, and where a repository is public (roll code's
+/// visibility, or its GitHub mirror's as last seen). Any error (code search off, the index not
+/// ready, the repository not on this node) is "can't tell": nothing gets flagged.
 pub struct CodeRefs(pub Arc<code_control::Code>);
 
 impl roll_secrets::health::CodeRefs for CodeRefs {
@@ -1373,6 +1374,11 @@ impl roll_secrets::health::CodeRefs for CodeRefs {
             }
             Some(found)
         })
+    }
+
+    fn public(&self, repo: &str) -> Option<String> {
+        let (owner, name) = repo.split_once('/')?;
+        code_control::github::public_at(&self.0.find_repo(owner, name).ok()?)
     }
 }
 
@@ -1980,8 +1986,9 @@ impl apps_control::integrations::SecretSource for ForApps {
     }
 
     /// A reference read once for the asker's request on the service (`Secrets::use_once`: as
-    /// them, no maker kept; untrusted in an untrusted preview, as `resolve_as`).
-    async fn use_once(&self, who: apps_control::integrations::Asker<'_>, project: &str, env: &str, service: &str, reference: &str, purpose: &str) -> anyhow::Result<String> {
+    /// them, no maker kept, a sensitive key only for `to`, the fixed host it goes to; untrusted
+    /// in an untrusted preview, as `resolve_as`).
+    async fn use_once(&self, who: apps_control::integrations::Asker<'_>, project: &str, env: &str, service: &str, reference: &str, purpose: &str, to: Option<&'static str>) -> anyhow::Result<String> {
         let (secrets, _) = self.0.get().cloned().ok_or_else(|| anyhow::anyhow!("roll secrets is starting: try again in a moment"))?;
         let caller = secrets.caller_of(who.operator, who.user, who.grant).map_err(|e| anyhow::anyhow!("{e}"))?;
         let (project, env, service, reference, purpose) = (project.to_string(), env.to_string(), service.to_string(), reference.to_string(), purpose.to_string());
@@ -1991,7 +1998,7 @@ impl apps_control::integrations::SecretSource for ForApps {
             if untrusted {
                 r = r.untrusted();
             }
-            secrets.use_once(&r, &reference, &caller, &purpose).map(|v| v.value.expose().to_string()).map_err(|e| anyhow::anyhow!("{e}"))
+            secrets.use_once(&r, &reference, &caller, &purpose, to).map(|v| v.value.expose().to_string()).map_err(|e| anyhow::anyhow!("{e}"))
         })
         .await?
     }

@@ -26,6 +26,7 @@ export function day(ms: number) {
 function accessOf(k: SearchKeyInfo) {
   const roles = Object.keys(k.role_descriptors ?? {});
   if (roles.includes(DATA_ROLE)) return "Data";
+  if (roles.includes("roll_otel")) return "OpenTelemetry";
   return roles.length ? "Limited" : "Admin";
 }
 
@@ -122,6 +123,7 @@ export function ApiKeys({ cluster }: { cluster: SearchCluster }) {
               options={[
                 { label: "Data", value: "data" },
                 { label: "Admin", value: "admin" },
+                ...(cluster.flavor === "opensearch" ? [] : [{ label: "OpenTelemetry", value: "otel" as const }]),
               ]}
               onChange={setAccess}
             />

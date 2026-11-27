@@ -173,6 +173,8 @@ export interface Preview {
   browser_checks_rule?: "check" | "required" | null;
   /** The project's rule for regressions against main (`check`, `required`). */
   regressions?: "check" | "required" | null;
+  /** The project's rule for its release at each head (where there's a Postgres branch to rehearse on). */
+  release_checks?: "check" | "required" | null;
   /** Who accepted its regressions at its head. */
   regressions_accepted?: { head: string; by: string; at: number } | null;
   /** Compared with main's preview at its head (errors; routes too with traces): until then nothing says it has no regressions. */
@@ -238,6 +240,18 @@ export interface PreviewJob {
 }
 
 /** A link that opens a preview until it ends, for someone outside the team. */
+/** A webhook URL into a private preview: one path, its token in the URL's query (shown once), no cookie. */
+export interface PreviewWebhook {
+  id: string;
+  path: string;
+  label: string;
+  created_by: string;
+  created_at: number;
+  revoked: boolean;
+  hits: number;
+  last_at: number | null;
+}
+
 export interface PreviewShare {
   id: string;
   expires_at: number;
@@ -442,7 +456,7 @@ function storyLabel(id: string): string {
 }
 
 export const pageLabel = (path: string) =>
-  /^@\d+$/.test(path) ? `${path.slice(1)} px` : path.startsWith("mode:") ? `${path.slice(5)} mode` : path.startsWith("story:") ? storyLabel(path.slice(6)) : path === "browser:firefox" ? "Firefox" : path === "browser:webkit" ? "WebKit" : path === "browser:webkit-phone" ? "WebKit, phone" : path || "/";
+  /^@\d+$/.test(path) ? `${path.slice(1)} px` : path.startsWith("mode:") ? `${path.slice(5)} mode` : path.startsWith("story:") ? storyLabel(path.slice(6)) : path.startsWith("snap:") ? `${path.slice(5)} (your tests)` : path === "browser:firefox" ? "Firefox" : path === "browser:webkit" ? "WebKit" : path === "browser:webkit-phone" ? "WebKit, phone" : path || "/";
 
 /** "1.2 s" or "380 ms". */
 export const duration = (ms: number) => (ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(1)} s`);
@@ -514,6 +528,8 @@ export interface PreviewSettings {
   release?: PreviewJob | null;
   /** When a change is queued to land, its release is rehearsed on today's data (`…/rehearse`, by roll). */
   rehearse_when_queued?: boolean;
+  /** check: its release rehearsed on today's data at every head; required: also a landing blocker. */
+  release_checks?: "off" | "check" | "required";
   /** Run once when the preview is deleted, before its services and branches go (cleanup outside roll). */
   teardown?: PreviewJob | null;
   /** NoSQL column masks: `"nosql:<ref>"` → `{"keyspace.table.column": "mask_default()"}`. */
@@ -644,10 +660,19 @@ export const previewsApi = {
   share: (id: string, hours: number, opts: { label?: string; notes?: boolean } = {}) =>
     call<PreviewShare & { url: string }>("POST", `${one(id)}/shares`, { hours, label: opts.label ?? "", notes: opts.notes ?? false }),
   unshare: (id: string, share: string) => call<void>("DELETE", `${one(id)}/shares/${encodeURIComponent(share)}`),
+  /** Its webhook URLs (never their tokens). */
+  webhooks: (id: string) => call<PreviewWebhook[]>("GET", `${one(id)}/webhooks`),
+  /** A URL that lets requests to exactly `path` in (Stripe's, GitHub's webhooks): shown only in this answer. */
+  webhook: (id: string, path: string, label = "") => call<PreviewWebhook & { url: string }>("POST", `${one(id)}/webhooks`, { path, label }),
+  unwebhook: (id: string, webhook: string) => call<void>("DELETE", `${one(id)}/webhooks/${encodeURIComponent(webhook)}`),
   /** Its own variables, over the project's `env`. */
   vars: (id: string) => call<{ vars: Record<string, string> }>("GET", `${one(id)}/env`),
   /** Resolve a note left on its page (the note's review id): the page's button stops listing it. */
   resolveNote: (id: string, note: string) => call<{ resolved: string }>("POST", `${one(id)}/notes/${encodeURIComponent(note)}/resolve`, {}),
+  /** The open notes on its pages (the page's own list), each with the work item made of it. */
+  notes: (id: string) => call<{ notes: { id: string; path: string; note: string; by: string; work?: { number: number; url: string } }[] }>("GET", `${one(id)}/notes`),
+  /** The note made a work item on its change's repo by roll (once a note; a guest's marked as outside the team's words). */
+  noteWork: (id: string, note: string) => call<{ number: number; url: string }>("POST", `${one(id)}/notes/${encodeURIComponent(note)}/work`, {}),
   /** The mail its services sent, caught instead of delivered (newest first; the last 50). */
   mail: (id: string) => call<{ mail: CaughtMail[] }>("GET", `${one(id)}/mail`),
   /** One caught message as it was sent, as text. */

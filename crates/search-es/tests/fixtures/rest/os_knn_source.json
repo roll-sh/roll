@@ -1,0 +1,547 @@
+{
+  "description" : "OpenSearch 3.9.0 k-NN plugin (opensearch dialect): knn_vector values in the derived _source by engine and space: cosinesimil normalized on faiss (the default engine, on_disk included), as given on lucene and for innerproduct and l2; as written without derived source.",
+  "dialect" : "opensearch",
+  "steps" : [
+    {
+      "req" : "PUT /esm-src",
+      "body" : {
+        "settings" : {
+          "index.knn" : true,
+          "number_of_shards" : 1,
+          "number_of_replicas" : 0
+        },
+        "mappings" : {
+          "properties" : {
+            "luc_cos" : {
+              "type" : "knn_vector",
+              "dimension" : 3,
+              "method" : {
+                "name" : "hnsw",
+                "space_type" : "cosinesimil",
+                "engine" : "lucene"
+              }
+            },
+            "fai_cos" : {
+              "type" : "knn_vector",
+              "dimension" : 3,
+              "method" : {
+                "name" : "hnsw",
+                "space_type" : "cosinesimil",
+                "engine" : "faiss"
+              }
+            },
+            "def_cos" : {
+              "type" : "knn_vector",
+              "dimension" : 3,
+              "space_type" : "cosinesimil"
+            },
+            "disk_cos" : {
+              "type" : "knn_vector",
+              "dimension" : 3,
+              "space_type" : "cosinesimil",
+              "mode" : "on_disk"
+            },
+            "luc_ip" : {
+              "type" : "knn_vector",
+              "dimension" : 3,
+              "method" : {
+                "name" : "hnsw",
+                "space_type" : "innerproduct",
+                "engine" : "lucene"
+              }
+            },
+            "fai_ip" : {
+              "type" : "knn_vector",
+              "dimension" : 3,
+              "method" : {
+                "name" : "hnsw",
+                "space_type" : "innerproduct",
+                "engine" : "faiss"
+              }
+            },
+            "fai_l2" : {
+              "type" : "knn_vector",
+              "dimension" : 3,
+              "method" : {
+                "name" : "hnsw",
+                "space_type" : "l2",
+                "engine" : "faiss"
+              }
+            }
+          }
+        }
+      },
+      "mask" : [
+        "took",
+        "node"
+      ],
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-src"
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /esm-src/_doc/1?refresh=true",
+      "body" : {
+        "luc_cos" : [
+          0.1,
+          1.0,
+          0.5
+        ],
+        "fai_cos" : [
+          0.1,
+          1.0,
+          0.5
+        ],
+        "def_cos" : [
+          0.1,
+          1.0,
+          0.5
+        ],
+        "disk_cos" : [
+          0.1,
+          1.0,
+          0.5
+        ],
+        "luc_ip" : [
+          0.1,
+          1.0,
+          0.5
+        ],
+        "fai_ip" : [
+          0.1,
+          1.0,
+          0.5
+        ],
+        "fai_l2" : [
+          0.1,
+          1.0,
+          0.5
+        ]
+      },
+      "mask" : [
+        "took",
+        "node"
+      ],
+      "status" : 201,
+      "response" : {
+        "_index" : "esm-src",
+        "_id" : "1",
+        "_version" : 1,
+        "result" : "created",
+        "forced_refresh" : true,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 0,
+        "_primary_term" : 1
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /esm-src/_doc/2?refresh=true",
+      "body" : {
+        "luc_cos" : [
+          3,
+          4,
+          0
+        ],
+        "fai_cos" : [
+          3,
+          4,
+          0
+        ],
+        "def_cos" : [
+          3,
+          4,
+          0
+        ],
+        "disk_cos" : [
+          3,
+          4,
+          0
+        ],
+        "luc_ip" : [
+          3,
+          4,
+          0
+        ],
+        "fai_ip" : [
+          3,
+          4,
+          0
+        ],
+        "fai_l2" : [
+          3,
+          4,
+          0
+        ]
+      },
+      "mask" : [
+        "took",
+        "node"
+      ],
+      "status" : 201,
+      "response" : {
+        "_index" : "esm-src",
+        "_id" : "2",
+        "_version" : 1,
+        "result" : "created",
+        "forced_refresh" : true,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 1,
+        "_primary_term" : 1
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /esm-src/_doc/1",
+      "mask" : [
+        "took",
+        "node"
+      ],
+      "status" : 200,
+      "response" : {
+        "_index" : "esm-src",
+        "_id" : "1",
+        "_version" : 1,
+        "_seq_no" : 0,
+        "_primary_term" : 1,
+        "found" : true,
+        "_source" : {
+          "luc_cos" : [
+            0.1,
+            1.0,
+            0.5
+          ],
+          "fai_cos" : [
+            0.089087084,
+            0.8908708,
+            0.4454354
+          ],
+          "def_cos" : [
+            0.089087084,
+            0.8908708,
+            0.4454354
+          ],
+          "disk_cos" : [
+            0.089087084,
+            0.8908708,
+            0.4454354
+          ],
+          "luc_ip" : [
+            0.1,
+            1.0,
+            0.5
+          ],
+          "fai_ip" : [
+            0.1,
+            1.0,
+            0.5
+          ],
+          "fai_l2" : [
+            0.1,
+            1.0,
+            0.5
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /esm-src/_doc/2",
+      "mask" : [
+        "took",
+        "node"
+      ],
+      "status" : 200,
+      "response" : {
+        "_index" : "esm-src",
+        "_id" : "2",
+        "_version" : 1,
+        "_seq_no" : 1,
+        "_primary_term" : 1,
+        "found" : true,
+        "_source" : {
+          "luc_cos" : [
+            3.0,
+            4.0,
+            0.0
+          ],
+          "fai_cos" : [
+            0.6,
+            0.8,
+            0.0
+          ],
+          "def_cos" : [
+            0.6,
+            0.8,
+            0.0
+          ],
+          "disk_cos" : [
+            0.6,
+            0.8,
+            0.0
+          ],
+          "luc_ip" : [
+            3.0,
+            4.0,
+            0.0
+          ],
+          "fai_ip" : [
+            3.0,
+            4.0,
+            0.0
+          ],
+          "fai_l2" : [
+            3.0,
+            4.0,
+            0.0
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "POST /esm-src/_search",
+      "body" : {
+        "sort" : [
+          {
+            "_id" : "asc"
+          }
+        ]
+      },
+      "mask" : [
+        "took",
+        "node"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 31,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "esm-src",
+              "_id" : "1",
+              "_score" : null,
+              "_source" : {
+                "luc_cos" : [
+                  0.1,
+                  1.0,
+                  0.5
+                ],
+                "fai_cos" : [
+                  0.089087084,
+                  0.8908708,
+                  0.4454354
+                ],
+                "def_cos" : [
+                  0.089087084,
+                  0.8908708,
+                  0.4454354
+                ],
+                "disk_cos" : [
+                  0.089087084,
+                  0.8908708,
+                  0.4454354
+                ],
+                "luc_ip" : [
+                  0.1,
+                  1.0,
+                  0.5
+                ],
+                "fai_ip" : [
+                  0.1,
+                  1.0,
+                  0.5
+                ],
+                "fai_l2" : [
+                  0.1,
+                  1.0,
+                  0.5
+                ]
+              },
+              "sort" : [
+                "1"
+              ]
+            },
+            {
+              "_index" : "esm-src",
+              "_id" : "2",
+              "_score" : null,
+              "_source" : {
+                "luc_cos" : [
+                  3.0,
+                  4.0,
+                  0.0
+                ],
+                "fai_cos" : [
+                  0.6,
+                  0.8,
+                  0.0
+                ],
+                "def_cos" : [
+                  0.6,
+                  0.8,
+                  0.0
+                ],
+                "disk_cos" : [
+                  0.6,
+                  0.8,
+                  0.0
+                ],
+                "luc_ip" : [
+                  3.0,
+                  4.0,
+                  0.0
+                ],
+                "fai_ip" : [
+                  3.0,
+                  4.0,
+                  0.0
+                ],
+                "fai_l2" : [
+                  3.0,
+                  4.0,
+                  0.0
+                ]
+              },
+              "sort" : [
+                "2"
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /esm-src-plain",
+      "body" : {
+        "settings" : {
+          "index.knn" : true,
+          "index.knn.derived_source.enabled" : false,
+          "number_of_shards" : 1,
+          "number_of_replicas" : 0
+        },
+        "mappings" : {
+          "properties" : {
+            "fai_cos" : {
+              "type" : "knn_vector",
+              "dimension" : 3,
+              "method" : {
+                "name" : "hnsw",
+                "space_type" : "cosinesimil",
+                "engine" : "faiss"
+              }
+            }
+          }
+        }
+      },
+      "mask" : [
+        "took",
+        "node"
+      ],
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-src-plain"
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "PUT /esm-src-plain/_doc/1?refresh=true",
+      "body" : {
+        "fai_cos" : [
+          3,
+          4,
+          0
+        ]
+      },
+      "mask" : [
+        "took",
+        "node"
+      ],
+      "status" : 201,
+      "response" : {
+        "_index" : "esm-src-plain",
+        "_id" : "1",
+        "_version" : 1,
+        "result" : "created",
+        "forced_refresh" : true,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 0,
+        "_primary_term" : 1
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req" : "GET /esm-src-plain/_doc/1",
+      "mask" : [
+        "took",
+        "node"
+      ],
+      "status" : 200,
+      "response" : {
+        "_index" : "esm-src-plain",
+        "_id" : "1",
+        "_version" : 1,
+        "_seq_no" : 0,
+        "_primary_term" : 1,
+        "found" : true,
+        "_source" : {
+          "fai_cos" : [
+            3,
+            4,
+            0
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json; charset=UTF-8"
+      }
+    }
+  ]
+}

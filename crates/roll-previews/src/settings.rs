@@ -138,6 +138,12 @@ pub struct Settings {
     /// parents as they are now (`POST …/rehearse`, asked by roll at that head; off by default:
     /// each is a fresh branch, its masking and a release run).
     pub rehearse_when_queued: bool,
+    /// The release checked at each head (PlanetScale's deploy requests, pgroll's expand/contract):
+    /// `check` rehearses it on the parents as they are now at every head of a change (not only
+    /// when it's queued), beside main's code on its migrated data; `required` also keeps the
+    /// change from landing in roll until, at its head, the rehearsal passed and main's code
+    /// didn't break on the migrated data. Needs a `release`.
+    pub release_checks: ReleaseChecksRule,
     /// A command run once when the preview is deleted, before its services, secrets environment
     /// and branches go (Heroku's `pr-predestroy`): what its code made outside roll (a test-mode
     /// webhook, an OAuth redirect URI, a DNS record) cleaned up with the preview's own variables.
@@ -207,6 +213,15 @@ pub enum BrowserChecksRule {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RegressionsRule {
+    #[default]
+    Off,
+    Check,
+    Required,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReleaseChecksRule {
     #[default]
     Off,
     Check,
@@ -396,6 +411,13 @@ pub fn page_key_ok(p: &str) -> bool {
             Some((id, b)) => story_id_ok(id) && BROWSERS.contains(&b),
             None => story_id_ok(s),
         })
+        || p.strip_prefix("snap:").is_some_and(snapshot_name_ok)
+}
+
+/// A snapshot's name from the team's tests (`snap:<name>`): 1 to 80 of `a-z A-Z 0-9 - _ . /`,
+/// not starting with `/` or `.`.
+pub fn snapshot_name_ok(n: &str) -> bool {
+    (1..=80).contains(&n.len()) && !n.starts_with(['/', '.']) && !n.contains("..") && n.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/'))
 }
 
 /// The most screenshot containers that take a Storybook's stories side by side (`github.story_runs`).
@@ -610,6 +632,7 @@ impl Default for Settings {
             seed: None,
             release: None,
             rehearse_when_queued: false,
+            release_checks: ReleaseChecksRule::Off,
             teardown: None,
             masking: BTreeMap::new(),
         }
@@ -687,6 +710,9 @@ impl Settings {
 
     pub fn check(&self) -> Result<()> {
         let bad = |m: String| Err(Error::BadRequest(m));
+        if self.release_checks != ReleaseChecksRule::Off && self.release.is_none() {
+            return bad("release_checks: checks a release; set `release` first".into());
+        }
         if self.branches.is_empty() || self.branches.len() > MAX_BRANCH_GLOBS || self.branches.iter().any(|b| b.is_empty() || b.len() > 200) {
             return bad(format!("branches: 1–{MAX_BRANCH_GLOBS} globs of 1–200 characters"));
         }

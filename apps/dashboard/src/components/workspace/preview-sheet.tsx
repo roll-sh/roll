@@ -5,8 +5,8 @@ import { appsApi, followShell as followAppsShell } from "@/lib/apps-api";
 import { codeApi } from "@/lib/code-api";
 import { Confirm } from "@/components/ui";
 import { TerminalScreen } from "@/components/terminal-screen";
-import { type RestorePoint, endpointSlower, type EndpointTime, a11yWords, checkSummary, seoWords, duration, followLogs, followShell, downloadFiles, openUrl, pageGroup, pageLabel, previewsApi, noteCropUrl, qrUrl, screenshotUrl, resourceId, thanMain, type CaughtMail, type PageCheck, type Preview, type TextDiff, type PreviewActivity, type PreviewVisitor, type PreviewKind, type PreviewShare, type RequestLine, type ServiceMetrics, type ErrorGroup, type TraceSummary, type TraceSpan, type RouteTime, type Repeated, UNTAKEN_STORIES } from "@/lib/previews-api";
-import { workFromError, workFromNote } from "@/lib/preview-work";
+import { type RestorePoint, endpointSlower, type EndpointTime, a11yWords, checkSummary, seoWords, duration, followLogs, followShell, downloadFiles, openUrl, pageGroup, pageLabel, previewsApi, noteCropUrl, qrUrl, screenshotUrl, resourceId, thanMain, type CaughtMail, type PageCheck, type Preview, type TextDiff, type PreviewActivity, type PreviewVisitor, type PreviewKind, type PreviewShare, type PreviewWebhook, type RequestLine, type ServiceMetrics, type ErrorGroup, type TraceSummary, type TraceSpan, type RouteTime, type Repeated, UNTAKEN_STORIES } from "@/lib/previews-api";
+import { workFromError } from "@/lib/preview-work";
 import { verdict, type VerdictTarget } from "@/lib/preview-verdict";
 import { isProblem, logFilter, logLevel } from "@/lib/preview-logs";
 import { formatBytes } from "@/lib/roll-api";
@@ -674,6 +674,7 @@ export function PreviewSheet({
 
             <Vars id={p.id} />
             <Shares id={p.id} />
+            <Webhooks id={p.id} />
 
             <Label>Details</Label>
             <Rows
@@ -876,6 +877,88 @@ function Shares({ id }: { id: string }) {
                 {x.notes ? " · takes notes" : ""}
               </span>
               <button type="button" className="text-muted hover:text-danger disabled:opacity-40" disabled={busy} onClick={() => void act(() => previewsApi.unshare(id, x.id))}>
+                Revoke
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {error && <p className="text-[11.5px] text-danger">{error}</p>}
+    </>
+  );
+}
+
+/** URLs for webhooks into the private preview (Stripe's, GitHub's): one path each, until revoked. */
+function Webhooks({ id }: { id: string }) {
+  const [list, setList] = useState<PreviewWebhook[] | null>(null);
+  const [made, setMade] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [path, setPath] = useState("");
+  const [label, setLabel] = useState("");
+  useEffect(() => {
+    let live = true;
+    previewsApi.webhooks(id).then(
+      (l) => live && setList(l),
+      (e) => live && setError(errorText(e)),
+    );
+    return () => {
+      live = false;
+    };
+  }, [id]);
+  const act = async (fn: () => Promise<void>) => {
+    setBusy(true);
+    try {
+      await fn();
+      setList(await previewsApi.webhooks(id));
+      setError(null);
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  if (!list) return error ? <p className="text-[11.5px] text-danger">{error}</p> : null;
+  const open = list.filter((x) => !x.revoked);
+  const field = "h-7 min-w-0 rounded-md border border-line-2 bg-canvas px-2 text-[11.5px] outline-none placeholder:text-subtle focus:border-accent/60";
+  return (
+    <>
+      <Label>Webhooks</Label>
+      <p className="text-[11.5px] text-subtle">A URL for a webhook (Stripe, GitHub): requests to that one path get in, for as long as the preview lives.</p>
+      <form
+        className="flex gap-1.5"
+        onSubmit={(e) => {
+          e.preventDefault();
+          void act(async () => setMade((await previewsApi.webhook(id, path.trim(), label.trim())).url));
+        }}
+      >
+        <input value={path} onChange={(e) => setPath(e.target.value)} placeholder="/api/stripe" aria-label="The path it lets in" className={`${field} flex-1 font-mono`} />
+        <input value={label} onChange={(e) => setLabel(e.target.value)} maxLength={60} placeholder="For (optional)" aria-label="What it's for" className={`${field} w-28`} />
+        <button type="submit" className={small} disabled={busy || !path.trim().startsWith("/")}>
+          Make
+        </button>
+      </form>
+      {made && (
+        <div className="flex items-center gap-1.5 rounded-md border border-line-2 bg-canvas px-2 py-1.5">
+          <span className="min-w-0 flex-1 truncate font-mono text-[11px]" title={made}>
+            {made}
+          </span>
+          <button type="button" className="text-[11.5px] text-accent hover:underline" onClick={() => void navigator.clipboard?.writeText(made)}>
+            Copy
+          </button>
+        </div>
+      )}
+      {made && <p className="text-[11px] text-subtle">Shown only now: roll keeps no copy of it.</p>}
+      {open.length > 0 && (
+        <ul className="space-y-1">
+          {open.map((x) => (
+            <li key={x.id} className="flex items-center gap-2 text-[11.5px]">
+              <span className="min-w-0 truncate font-mono text-subtle">{x.path}</span>
+              <span className="min-w-0 flex-1 truncate text-muted">
+                {x.label ? `${x.label} · ` : ""}
+                {x.hits} {x.hits === 1 ? "request" : "requests"}
+              </span>
+              <button type="button" className="text-muted hover:text-danger disabled:opacity-40" disabled={busy} onClick={() => void act(() => previewsApi.unwebhook(id, x.id))}>
                 Revoke
               </button>
             </li>
@@ -1464,8 +1547,7 @@ export function ApiBreaking({ items }: { items: string[] }) {
  * it (`POST …/notes/{review}/resolve`, kept by previews), and the page stops listing it. */
 function NoteThread({ previewId, change, review, where, onDone }: { previewId: string; change: string; review: string; where: Pick<Preview, "repo" | "number">; onDone?: () => void }) {
   const [note, setNote] = useState<string | null>(null);
-  // The note's whole review (the page, the element, what went wrong there), for a work item.
-  const [whole, setWhole] = useState<string | null>(null);
+  // The work item roll made of it (`POST …/notes/{review}/work`), if any.
   const [made, setMade] = useState<number | null>(null);
   const [replies, setReplies] = useState<{ id: string; by: string; text: string }[]>([]);
   const [reply, setReply] = useState("");
@@ -1495,7 +1577,10 @@ function NoteThread({ previewId, change, review, where, onDone }: { previewId: s
         const r = all.find((x) => x.id === review);
         if (!r) return setError("That note isn't on this change.");
         setNote(r.body.split("\n\n")[1] ?? r.body);
-        setWhole(r.body);
+        previewsApi.notes(previewId).then(
+          (n) => setMade(n.notes.find((x) => x.id === review)?.work?.number ?? null),
+          () => {},
+        );
         setReplies(
           all
             .filter((x) => !x.dismissed && replyOf(x.body)?.note === review)
@@ -1576,15 +1661,12 @@ function NoteThread({ previewId, change, review, where, onDone }: { previewId: s
         {where.repo && (
           <button
             type="button"
-            disabled={state === "busy" || whole === null || made !== null}
+            disabled={state === "busy" || note === null || made !== null}
             title="A work item in the repo, with the note and its page: someone, or an agent, picks it up"
             onClick={async () => {
-              if (!where.repo || whole === null) return;
               setState("busy");
               try {
-                const item = await codeApi.createWork(where.repo, workFromNote(where, review, whole));
-                setMade(item.number);
-                await codeApi.submitReview(change, { verdict: "comment", body: replyBody(review, `Made work item #${item.number} from this note.`) });
+                setMade((await previewsApi.noteWork(previewId, review)).number);
                 await load();
               } catch (e) {
                 setError(errorText(e));

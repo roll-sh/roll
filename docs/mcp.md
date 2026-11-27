@@ -583,6 +583,30 @@ person's reason). A 2026-07-28 client that declares URL elicitation in its reque
 No `requestState` is needed: the gate matches the retry to its approval itself, so nothing the
 client echoes can decide what runs.
 
+Every refusal by roll's gate also says whether there's a way forward, as SEP-2643 (structured
+authorization denials, a draft of the Fine-Grained Authorization working group) puts it:
+`_meta["io.modelcontextprotocol/authorization"]` on the result (on `-32042`, in `data._meta`) is
+`{reason: "insufficient_authorization", remediation, authorizationContextId?, remediationHints?}`,
+and `capabilities.extensions["io.modelcontextprotocol/structured-authorization-denials"]` is `{}`.
+
+| roll's answer | `remediation` |
+| --- | --- |
+| an approval asked through a URL the client opens (`-32042`, `input_required`) | `available`, hint `{type: "url"}` |
+| an approval asked in the text (the model calls again with `approval`), or one used or expired | `undisclosed` |
+| not allowed, with a step-up challenge (`insufficient_scope`) | `available` |
+| not allowed, with a page to widen the token or an access request to make | `undisclosed` |
+| not allowed otherwise, denied by a person, the operator's, an address outside the token's | `unavailable` |
+
+`authorizationContextId` is the approval's id, and a retry that echoes it in
+`_meta["io.modelcontextprotocol/authorization-context-id"]` is read as the call's `approval` (the
+gate still checks it's this grant's approval of this very request). Only the gate's own refusals
+are classified: a product's own `403` (a deploy freeze) carries no envelope. A call held as a task
+while a person decides (a client that takes tasks) is the out-of-band interaction: its
+`CreateTaskResult` and every `tasks/get` until it ends carry `remediation: "available"`, the
+approval as `authorizationContextId` and `remediationHints: [{type: "task"}]` (with `{type: "url"}`
+too while it shows the approval page), and its result, once decided, the call's own envelope (a
+denial's `unavailable`).
+
 ## Authorization
 
 roll implements the MCP authorization spec (2025-06-18 and 2025-11-25) with OAuth 2.1:
@@ -741,6 +765,9 @@ project, is theirs to make).
     call; a value that isn't an id is refused. Other clients get the call's own answer. Checked
     live with the official TypeScript SDK v2 (`live/sdk2/ask.mjs`: its elicitation handler picks
     from the form, and it retries by itself).
+  - **Structured authorization denials** (`roll_mcp::denials`,
+    `io.modelcontextprotocol/structured-authorization-denials`, SEP-2643, a draft): every refusal
+    by the gate says in `_meta` whether there's a way forward ("With a scoped token" has the table).
   - **MCP Apps** (`roll_mcp::ui`, `io.modelcontextprotocol/ui`, SEP-1865): for a host that
     declares HTML views (`mimeTypes: ["text/html;profile=mcp-app"]`), the read-only tools that
     answer rows (lists, queries, logs, reads, usage) point at `ui://roll/table` (`_meta.ui`). The
@@ -1531,6 +1558,8 @@ previews are listed once those products are on.
 | `previews_list_hooks` | A project's preview deploy hooks (never their secrets). | `GET /v1/previews/projects/{project}/hooks` |
 | `previews_delete_hook` | Delete a preview deploy hook. | `DELETE /v1/previews/projects/{project}/hooks/{hook}` |
 | `previews_list_shares` | Who a preview is shared with outside the team (never the links' tokens). | `GET /v1/previews/{id}/shares` |
+| `previews_list_webhooks` | A preview's webhook URLs for outside services (never their tokens; making one is a person's). | `GET /v1/previews/{id}/webhooks` |
+| `previews_revoke_webhook` | Revoke a preview's webhook URL. | `DELETE /v1/previews/{id}/webhooks/{webhook}` |
 | `previews_env` | A preview's own variables, with their values (reveal). | `GET /v1/previews/{id}/env` |
 | `previews_connect` | Each data branch's connection as the preview's services get it (the branches' own credentials; reveal). | `GET /v1/previews/{id}/connect` |
 | `previews_list_mail` | The mail a preview's services sent, caught and never delivered (reveal). | `GET /v1/previews/{id}/mail` |
@@ -1538,6 +1567,7 @@ previews are listed once those products are on.
 | `previews_list_notes` | Notes left on a preview's pages that nobody has resolved yet (read). | `GET /v1/previews/{id}/notes` |
 | `previews_note_crop` | The element a preview note is about, as roll's browser cropped it at the reviewer's viewport and steps (roll previews #879), as an image the agent looks at. | `GET /v1/previews/{id}/notes/{note}/crop` |
 | `previews_resolve_note` | A note from the preview page's feedback button marked dealt with (write). | `POST /v1/previews/{id}/notes/{note}/resolve` |
+| `previews_note_to_work` | A note from a preview page made a work item on its change's repo, once a note (write; the repo's code too). | `POST /v1/previews/{id}/notes/{note}/work` |
 | `previews_screenshot` | A preview's page as an image the agent can look at (`diff`, `page`, `view`); accepting a visual change stays a person's (admin, no tool). | `GET /v1/previews/{id}/screenshot` |
 | `previews_fetch` | A preview's page read through roll as a visitor gets it, without a share link (Vercel's `web_fetch_vercel_url`): status, a few headers and the text, masked as its logs are, cut at 256 KiB (`path`, `service`, `head`); reveal, since a page can show copies of production's people. `review_preview` uses it on the pages a change touches. | `GET /v1/previews/{id}/fetch` |
 | `previews_try` | A preview's page in a browser in its own network with steps taken on it (`click`, `type`, `press`, `wait`; 10 at most, stateless: the whole way each time), as GitHub Copilot's coding agent drives Playwright: status, the step that found nothing, the visible text after, errors on the way, masked; typed text is redacted from the audit (#887) and never kept by previews; reveal. | `POST /v1/previews/{id}/try` |
@@ -1567,21 +1597,21 @@ From a 2026-11-24 gap review (every tool run as an agent would against a fresh r
 
 From a 2026-11-26 comparison (the spec's anniversary post, Claude's connector docs, Atlassian's, Stripe's and GitHub's changelogs; no core SEP went final since 2026-11-15):
 
-1. **A missing document and main's code on migrated data (this PR).** `search_get_document` and
-   `search_delete_document` said "not found: 404 Not Found" (Elasticsearch's `{_index, _id, found:
-   false}` has no message): the refusal now names the document and index. `review_preview` reads
-   `previews_get`'s `main_on_change` (roll previews #1183) and calls out a page that breaks on the
-   change's migrated data but answers on main's. Both found in the 2026-11-27 sweep report (1,255 calls).
-2. **A forwarded approved ask says so (after roll search #1111 lands).** From roll search's
+1. **A forwarded approved ask says so (this PR; #1111 reads it once both land).** From roll search's
    re-check of #1111: its `IndexScope` gives an approved `ask`'s indices when the owner's outcome is
    `ask`, but on a fleet the owner skips asking for a request another node decided, Allow or an
-   approved ask alike. The forwarder's signed decision (`roll_cluster::Decided`) gets an `:asked`
-   suffix when it passed on an approval, and the owner counts the ask approved only then (an older
-   owner in a rolling restart decides again and fails closed). roll search asked for it as a
-   follow-up, not inside #1111.
-3. **Previews' webhooks as tools (after roll previews #1187 lands):** listing and revoking
-   (`GET /v1/previews/{id}/webhooks`, `DELETE …/webhooks/{webhook}`, `no tool yet` in no-tool.txt);
-   making one answers its URL with a token (a reveal) and stays tool-less.
+   approved ask alike. The forwarder's signed decision (`roll_cluster::Decided`) now ends in
+   `:asked` when it passed on an approval (an older owner in a rolling restart decides again and
+   fails closed); #1111's `approved_ask` becomes `outcome == Ask && (!decided_before ||
+   approved_before)` after both are on main.
+2. **A preview note as a work item (this PR):** `previews_note_to_work` maps roll previews #1196's
+   `POST /v1/previews/{id}/notes/{note}/work` (once a note; a 409 while another call makes it; write
+   on the repo's code too), and `review_preview` offers it for a note that asks for real work. On a
+   GitHub-mirrored repo a team member's note opens a GitHub issue instead (roll previews #1209):
+   the same tool, its description to say so once that lands.
+3. **Structured authorization denials, on tasks too (this PR):** #1218 put SEP-2643's envelope on
+   every refusal by the gate; a call held as a task while a person decides now says so on the task
+   (`task` hint) and on every poll, and its decided result carries its own.
 4. **Watched:** SEP-1913 (`sensitiveHint`, `privateHint` and `maliciousActivityHint` annotations, close to lockdown's marks) and the files extension (Claude says uploads are "rolling out soon").
 
 5. **Paging is the products'.** No list route takes a cursor (approvals take `limit` only). History
@@ -1630,7 +1660,7 @@ From a 2026-11-26 comparison (the spec's anniversary post, Claude's connector do
    model-written code on fleet nodes, which roll apps' rule keeps customer code off. Options: (a)
    build it in rolld behind a flag; (b) run scripts in a preview-style container, slower to start;
    (c) not now, search mode is enough. Not started until the user picks.
-14. **As siblings land** (`sibling-check.py`, 2026-11-22 13:45, over every open PR): members'
+14. **As siblings land** (`sibling-check.py`, 2026-11-27 11:30, over every open PR): roll search's judgment lists (#1189, #1194, #1207) map their own tools; lists built from clicks hold visitors' queries, so their tools mark `query` outside (asked of roll search, as `search_analytics` does). members'
    groups (#681) mapped in #781; secrets' delta reads (#754) stay tool-less (a runtime client's
    read); roll search's `rolld/tests/auth.rs::mcp_search_with_a_project_token` to review when it opens;
    secrets' event feed landed (#751). #485's migration landed with both
@@ -1644,8 +1674,7 @@ From a 2026-11-26 comparison (the spec's anniversary post, Claude's connector do
    console reaches it, so a read token can't); log grouping and field values (apps). Done:
    fetching an app environment's page through its gate (`apps_fetch`; previews' is
    `previews_fetch`).
-16. **Later:** an alert's own mail and chat where a person chose (people already get roll's mails for their tokens' decoys and revocations, so the feed is the new part); client ID metadata documents' 5 KB read limit and cache headers (draft -03; roll
-   reads 64 KiB and re-fetches hourly) once real clients' documents are measured; the every-row SQL guard: computes run stock Postgres images, which have no
+16. **Later:** an alert's own mail and chat where a person chose (people already get roll's mails for their tokens' decoys and revocations, so the feed is the new part); the every-row SQL guard: computes run stock Postgres images, which have no
    safe-update setting (no pg-safeupdate), and an event trigger neither fires for `TRUNCATE` nor
    sees a `WHERE`, so it needs Postgres's own parser in pg-control (`pg_query`: libpg_query, built
    with libclang) and would still catch only mistakes, since a `DO` block or a function runs the
@@ -1662,11 +1691,12 @@ From a 2026-11-26 comparison (the spec's anniversary post, Claude's connector do
    owners (they fail only under load and pass alone): code-control's
    `automations::concurrency_cancel_and_retry` and
    `agents_code::roll_code_projects_with_auto_pull_follow_their_default_branch`.
+   Measured and left (2026-11-27): client ID metadata documents are small (Claude's 342 bytes, VS Code's 477 with `no-store`), so roll's 64 KiB read limit and short cache cost nothing.
    Not doing: dynamic toolsets (GitHub's: the model turns toolsets on mid-session), since 2026-07-28 is
    stateless and search mode (`?tools=search`) covers clients that can't take the list; "remember this browser"; a preset that reveals development's values without asking
    (#354); a connection-level `?project=` (only a token's rules bound a project; a default that
    some tools can't honour would look like a boundary).
-17. **Landed 2026-11-26 and 27:** a rule's index never holds an exclusion, which reached what it
+17. **Landed 2026-11-26 and 27:** a body the gate decides from is the JSON object (imports: array) the route reads, closing write decided for admin or delete SQL and CQL sent as an array, and a replacing `.env` import needs delete and write (#1208); a secret lent at an environment's root approved once, its key on the card, and previews' webhook list and revoke tools (#1201); fixes from a review of #1182 and #1186 (a rule stored with `//` reaches nothing, `/api/` is `/api`, the check endpoint and import sources take folders as the gate does) and resolve, diff and `.env` import decided by their body's folder, with one folder parser for roll secrets and the gate (#1195); a missing document names itself and its index, `review_preview` reads `main_on_change` (#1191); a rule's index never holds an exclusion, which reached what it
    excluded at the gate and in search's scoped principal (#1182, from the re-check of search #1111);
    the root folder spelled `//` is the root, so the 8-hour caps hold and a secrets folder has one
    spelling, refused at the gate where secrets would refuse it (#1186, from roll secrets' 43rd

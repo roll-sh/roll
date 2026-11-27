@@ -529,6 +529,9 @@ pub struct Preview {
     /// The project's rule for regressions against main's (`check`, `required`), when it has one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub regressions: Option<String>,
+    /// The project's rule for its release at each head (`check`, `required`), when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_checks: Option<String>,
     /// Who accepted its regressions at its head (`POST …/regressions/accept`); a new head asks again.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub regressions_accepted: Option<RegressionsAccepted>,
@@ -1158,6 +1161,24 @@ pub struct Share {
     pub label: String,
     /// Its visitors may leave notes on the preview's pages (as `guest:<name>`).
     pub notes: bool,
+}
+
+/// A webhook URL of a private preview (Vercel's bypass in a query parameter): one path, its
+/// token in the URL (shown once), for a Stripe or GitHub webhook. It sets no cookie.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Webhook {
+    /// `whk_…`
+    pub id: String,
+    /// The service it opens `path` of (the preview's first, when it was made).
+    pub service: String,
+    pub path: String,
+    pub label: String,
+    pub created_by: String,
+    pub created_at: i64,
+    pub revoked: bool,
+    /// Requests it let in, and the last one's time.
+    pub hits: i64,
+    pub last_at: Option<i64>,
 }
 
 /// How much a preview's page changed between the screenshots of two heads.
