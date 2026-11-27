@@ -931,6 +931,10 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
                 denials::echo(&params, &mut args);
                 if let Some(r) = unwrapped {
                     rpc_result(id, r)
+                } else if ctx.modern && params.get("inputResponses").is_some_and(|r| r.as_object().is_none_or(|o| o.values().any(|a| !a.is_object()))) {
+                    // A retry's answers to an input request are an object keyed by request, each an
+                    // answer object (SEP-2322).
+                    rpc_error(id, -32602, "inputResponses is an object of the answers (each an object), keyed by each input request's name")
                 } else if ctx.search && name == search::FIND {
                     rpc_result(id, search::find(&ctx.tools(), &args))
                 } else if !args.is_object() {
@@ -1032,7 +1036,7 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
                             let message: String = r["content"][0]["text"].as_str().unwrap_or("not read").chars().take(300).collect();
                             json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message, "data": r["structuredContent"] } })
                         }
-                        None => rpc_error(id, -32002, format!("resource not found: {uri}")),
+                        None => json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32002, "message": format!("resource not found: {uri}"), "data": { "uri": uri } } }),
                     }
                 }
                 Some(uri) if uri.starts_with("skill://") => match skills::read(uri, &tool_names(ctx)) {
@@ -1040,7 +1044,8 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
                     // The Skills extension's answer for a file roll doesn't serve.
                     None => rpc_error(id, -32602, format!("No skill file is served at {uri}")),
                 },
-                other => rpc_error(id, -32002, format!("resource not found: {}", other.unwrap_or(""))),
+                // Which one, as SEP-2164 asks (`data.uri`).
+                other => json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32002, "message": format!("resource not found: {}", other.unwrap_or("")), "data": { "uri": other.unwrap_or("") } } }),
             },
             "skills/list" => rpc_result(id, skills::list(&tool_names(ctx))),
             "skills/get" => match skills::get(params.get("uri").and_then(Value::as_str).unwrap_or(""), &tool_names(ctx)) {

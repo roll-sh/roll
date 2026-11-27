@@ -738,7 +738,10 @@ async fn a_2026_client_is_served_without_initialize() {
     // A resource that isn't there is Invalid Params in this revision (SEP-2164; -32002 before it).
     let uri = "roll://nothing/here";
     let (_, _, out) = send(OPERATOR, 21, "resources/read", json!({ "uri": uri }), std_headers("resources/read", Some(uri))).await;
-    assert_eq!(out["error"]["code"], -32602, "{out}");
+    assert_eq!((&out["error"]["code"], &out["error"]["data"]["uri"]), (&json!(-32602), &json!(uri)), "{out}");
+    // A retry's answers that aren't answers are refused, not ignored (SEP-2322).
+    let (s, _, out) = send(OPERATOR, 22, "tools/call", json!({ "name": "postgres_list_projects", "arguments": {}, "inputResponses": { "pick": 42 } }), std_headers("tools/call", Some("postgres_list_projects"))).await;
+    assert_eq!((s, out["error"]["code"].as_i64()), (StatusCode::OK, Some(-32602)), "{out}");
 
     // Headers that don't say what the body says, or a version roll doesn't speak.
     let call = json!({ "name": "postgres_list_projects", "arguments": {} });
