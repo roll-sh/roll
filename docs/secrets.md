@@ -1802,7 +1802,12 @@ instead of at the first rotation:
   `grace_minutes`, and Paddle keeps an old secret a day at most, so a link with `grace_minutes` over
   1440 is refused. Two rotations at once would undo each other at Paddle (a new rotation cancels a
   pending one), so one claims the registration (409 for the other, for five minutes at most if its
-  node stops). The key's id never changes (`id` is `api_key_id`). With `expires_days`, each new
+  node stops), and holds it until the new secret is stored in the key, not only until Paddle has
+  answered. A rotation that read the key before another's was stored, and rotated after it (from
+  the secret that one stored), finds the key moved on when it comes to store its own; for most
+  vendors that's a lost race and its credential is revoked, but Paddle ends the secret it rotated
+  from, so its new secret, the newest and the only one that keeps working, is stored over the
+  other's. The key's id never changes (`id` is `api_key_id`). With `expires_days`, each new
   secret gets `new_key_expires_at` that many days ahead, and a link's `rotate_days` is at most
   `expires_days` less 14; without it, each keeps the key's own expiry, which the registration's
   `credential_expires_at` can give health. One environment per registration: the registration is one
@@ -3206,9 +3211,15 @@ the names with dns-01, renews them, and keys link to the result.
     (an UPSERT of the rest), and DELETEs the set only when nothing else is left, as it stands (a set
     that moved in between is read again and tried once more). Route 53 has no compare-and-swap, so
     two writers of one set can drop each other's value. roll's own orders never do: an order holds
-    its `_acme-challenge` names in the shared database (`public_cert_dns_claims`, taken in the same
-    write as the order's own claim and released after its cleanup), across projects and nodes, and
-    another order of a held name waits for the next pass. Another client can still write the set
+    its `_acme-challenge` record sets in the shared database (`public_cert_dns_claims`, by hosted
+    zone id and name, taken once the order has claimed its registration and found each name's zone,
+    and released after its cleanup), across projects and nodes, and another order of a held set
+    waits for the next pass. A set is one zone's: anyone can make a public hosted zone named
+    `example.com` in their own AWS account, and its set of `_acme-challenge.example.com` is another
+    set, so an order there never holds up an order in the zone the name is delegated to. An order
+    held for over an hour (by orders of the same names in the same zone) is the registration's
+    problem: `failing`, with `last_error` saying so, `rotation.failed` on its keys, and an hour
+    before it's tried again. Another client can still write the set
     from an older read, so once the changes are `INSYNC` roll reads each set back: a missing value
     is added again and waited on once more, and still missing fails the order (saying so) before
     the CA is asked to look. A role in use can't be deleted (409), and renaming it carries over.

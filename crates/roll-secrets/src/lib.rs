@@ -674,6 +674,10 @@ impl Secrets {
         for (column, decl) in public_certs::ADDED {
             db.add_column("public_certs", column, decl)?;
         }
+        // Route 53 claims are by hosted zone and name: a same-named zone in another account is
+        // another record set (public_certs.rs).
+        db.migrate("secrets-public-cert-dns-claims-by-zone", |c| c.execute_batch("DROP TABLE IF EXISTS public_cert_dns_claims"))?;
+        db.ensure_schema(public_certs::DNS_CLAIMS)?;
         db.ensure_schema(aws::SCHEMA)?;
         // An audit sink's format and its SIEM's token, sealed (sinks.rs): absent is roll's own.
         db.add_column("audit_sinks", "format", "TEXT")?;

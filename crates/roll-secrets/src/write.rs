@@ -1051,8 +1051,18 @@ impl Secrets {
         }
     }
 
+    /// The write of what [`Secrets::prepare`] issued is done ([`crate::links::LinkProvider::settled`]).
+    pub(crate) fn settle(&self, p: &Prepared) {
+        for f in &p.fresh {
+            if let Ok(provider) = self.links.get(&f.kind) {
+                provider.settled(&f.r#ref, &f.handle);
+            }
+        }
+    }
+
     /// Revoke what [`Secrets::prepare`] issued, after the write failed.
     pub(crate) fn discard(&self, p: &Prepared) {
+        self.settle(p);
         for f in &p.fresh {
             if let Ok(provider) = self.links.get(&f.kind)
                 && let Err(e) = provider.revoke(&f.r#ref, &f.handle)
@@ -1126,6 +1136,7 @@ impl Secrets {
         });
         match res {
             Ok((change, items)) => {
+                self.settle(&prepared);
                 // A decoy whose key this changed or deleted: its token goes now.
                 if items.iter().any(|d| d.what.iter().any(|w| w == "deleted" || w == "changed" || w == "link"))
                     && let Err(e) = self.end_decoys()
