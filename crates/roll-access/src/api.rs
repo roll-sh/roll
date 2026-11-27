@@ -1167,6 +1167,15 @@ async fn remembered(a: &Arc<Access>, id: &str, remember: Option<&str>) -> crate:
         let why = if found.product == "secrets" { "this request names no single encryption key" } else { "this request excludes indices, which a rule can't" };
         return Err(Error::BadRequest(format!("{why}: approve it once")));
     }
+    // A secret lent to another product's route (apps' DNS token, search's rotated password) at an
+    // environment's root: remembered, every later call would reveal every key there, so it's
+    // approved once; one in a folder of its own is remembered for that folder.
+    if found.product == "secrets"
+        && found.scope_path.as_deref().is_none_or(roll_auth::scope::is_root)
+        && catalog::find(&found.method, &found.route, &found.path).is_some_and(|f| f.row.product != "secrets" && f.row.lends.is_some())
+    {
+        return Err(Error::BadRequest("this lends a whole environment's secrets: approve it once, or keep the token in a folder of its own".into()));
+    }
     // A folder's rule reaches every folder under it, so one at a secrets environment's root (or with
     // no folder) is the whole environment, or more: remembered for 8 hours at most.
     if found.product == "secrets" && found.scope_path.as_deref().is_none_or(roll_auth::scope::is_root) && until.is_none_or(|u| u > code_sql::now_ms() + 8 * 3_600_000) {

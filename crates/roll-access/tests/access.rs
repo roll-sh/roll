@@ -3505,7 +3505,8 @@ async fn a_secret_written_as_the_caller_is_asked_for_and_only_it_is_allowed() {
 
 /// A domain's Cloudflare token is a `roll://` reference apps reads once as the caller (nothing
 /// keeps it): a token whose reveal on its folder is `ask` gets an approval naming that folder, not
-/// a 403 with nothing to approve.
+/// a 403 with nothing to approve, its card naming the key; at the environment's root it's approved
+/// once only.
 #[tokio::test]
 async fn a_dns_token_read_once_is_asked_for_by_its_folder() {
     let d = Daemon::new(50);
@@ -3518,6 +3519,18 @@ async fn a_dns_token_read_once_is_asked_for_by_its_folder() {
     assert_eq!((s, out["code"].as_str()), (StatusCode::FORBIDDEN, Some("approval_pending")), "{out}");
     let (_, asked) = d.call(OPERATOR, Method::GET, &format!("/v1/access/approvals/{}", out["approval"].as_str().unwrap()), None).await;
     assert_eq!((asked["product"].as_str(), asked["action"].as_str(), asked["environment"].as_str(), asked["scope_path"].as_str()), (Some("secrets"), Some("reveal"), Some("production"), Some("/dns")), "{asked}");
+    assert!(asked["summary"].as_str().is_some_and(|s| s.contains("CF_TOKEN in production:/dns")), "the card names the key: {asked}");
+    // At the environment's root, remembering it would reveal every production key to every later
+    // configure: approved once only.
+    let (s, out) = d.call(&token, Method::POST, path, Some(json!({ "cloudflare_token": "roll://production/CF_TOKEN" }))).await;
+    assert_eq!((s, out["code"].as_str()), (StatusCode::FORBIDDEN, Some("approval_pending")), "{out}");
+    let root = out["approval"].as_str().unwrap().to_string();
+    let approve = |remember: Option<&str>| {
+        let (d, url, body) = (&d, format!("/v1/access/approvals/{root}/approve"), remember.map(|r| json!({ "remember": r })));
+        async move { d.call(OPERATOR, Method::POST, &url, body).await.0 }
+    };
+    assert_eq!(approve(Some("8h")).await, StatusCode::BAD_REQUEST);
+    assert_eq!(approve(None).await, StatusCode::OK);
 }
 
 /// Claude's auto-connect (its connector docs, "Enterprise Managed Auth"): Claude signs the
