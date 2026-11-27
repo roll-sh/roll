@@ -1,0 +1,41 @@
+{
+  "sm.get_policies": {
+    "documentation": {
+      "url": "https://docs.opensearch.org/latest/tuning-your-cluster/availability-and-recovery/snapshots/sm-api/",
+      "description": "Lists snapshot management policies."
+    },
+    "stability": "stable",
+    "url": {
+      "paths": [
+        {
+          "path": "/_plugins/_sm/policies",
+          "methods": [
+            "GET"
+          ]
+        }
+      ]
+    },
+    "params": {
+      "from": {
+        "type": "number",
+        "description": "The first policy to return."
+      },
+      "size": {
+        "type": "number",
+        "description": "How many policies to return."
+      },
+      "sortField": {
+        "type": "string",
+        "description": "The field to sort by."
+      },
+      "sortOrder": {
+        "type": "string",
+        "description": "asc or desc."
+      },
+      "queryString": {
+        "type": "string",
+        "description": "A query string the policies must match."
+      }
+    }
+  }
+}
