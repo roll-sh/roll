@@ -8926,7 +8926,8 @@ struct FakeCa {
     dns: Mutex<Vec<String>>,
     /// (serial, reason) of each certificate revoked.
     revoked: Mutex<Vec<(String, roll_secrets::public_certs::RevokeReason)>>,
-    /// Route 53's TXT sets, each read and written whole as the real one is, with a pause between.
+    /// Route 53's TXT sets, each read and written whole as the real one is, with a pause between,
+    /// and looked at by the CA after another.
     txt: Mutex<BTreeMap<String, Vec<String>>>,
 }
 
@@ -8979,10 +8980,12 @@ impl roll_secrets::public_certs::PublicCa for FakeCa {
             let records: std::collections::BTreeSet<String> = o.names.iter().map(|n| format!("_acme-challenge.{}", n.trim_start_matches("*."))).collect();
             for r in &records {
                 let mut set = self.txt.lock().unwrap().get(r).cloned().unwrap_or_default();
-                std::thread::sleep(std::time::Duration::from_millis(100));
+                std::thread::sleep(std::time::Duration::from_millis(200));
                 set.push(value.clone());
                 self.txt.lock().unwrap().insert(r.clone(), set);
             }
+            // The propagation wait, then the CA looks.
+            std::thread::sleep(std::time::Duration::from_millis(200));
             let missing = records.iter().find(|r| !self.txt.lock().unwrap()[*r].contains(&value));
             for r in &records {
                 let mut set = self.txt.lock().unwrap().get(r).cloned().unwrap_or_default();
