@@ -749,6 +749,8 @@ export interface EnterpriseApp {
   signs_with_key: boolean;
   /** The Client ID Metadata Documents it presents as its client id (Claude's auto-connect): it signs with their keys, and roll holds no credential of it. */
   metadata?: string[];
+  /** Providers besides Claude's issuer that may vouch for an app named by its documents (IdP-managed auto-connect). */
+  issuers?: string[];
   /** Until when the secret before a rotation still works (Unix ms). */
   old_until?: number | null;
   /** Where its secret was found leaked: roll dropped it, and it signs in again once rotated. */
@@ -824,7 +826,7 @@ export const accessApi = {
   /** Every trusted provider at once: the list replaces the old one. */
   setIdps: (idps: EnterpriseIdp[]) => call<{ idps: EnterpriseIdp[] }>("PUT", "/v1/access/enterprise/idps", { idps }),
   /** A new app: with no key, its secret is in the answer this once. */
-  addEnterpriseApp: (a: { name: string; rules: Rule[]; public_jwk?: Record<string, string> | null; metadata?: string[] }) =>
+  addEnterpriseApp: (a: { name: string; rules: Rule[]; public_jwk?: Record<string, string> | null; metadata?: string[]; issuers?: string[] }) =>
     call<EnterpriseApp & { client_secret?: string }>("POST", "/v1/access/enterprise/apps", a),
   /** A new name or rules: its people's connections take the rules at once. */
   updateEnterpriseApp: (id: string, c: { name?: string; rules?: Rule[] }) => call<EnterpriseApp>("PATCH", `/v1/access/enterprise/apps/${encodeURIComponent(id)}`, c),
@@ -1285,11 +1287,13 @@ export function presetFor(scope: string | undefined, presets: Preset[]): Preset 
 }
 
 /** An error back to the client (the redirect was registered and the request came from it). */
-export function denyRedirect(redirect: string, state?: string): string {
+export function denyRedirect(redirect: string, state?: string, issuer?: string, why = "The user denied the request"): string {
   const u = new URL(redirect);
   u.searchParams.set("error", "access_denied");
-  u.searchParams.set("error_description", "The user denied the request");
+  u.searchParams.set("error_description", why);
   if (state) u.searchParams.set("state", state);
+  // RFC 9207: every authorization response names roll's issuer (its metadata says so), a denial too.
+  if (issuer) u.searchParams.set("iss", issuer.replace(/\/+$/, ""));
   return u.toString();
 }
 

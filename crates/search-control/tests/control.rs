@@ -6187,6 +6187,61 @@ async fn the_embedding_pool_takes_turns_caps_queues_and_meters_cpu() {
     let _ = std::fs::remove_dir_all(&model);
 }
 
+/// Provider tokens are metered per cluster (not priced: the provider bills them): an answered
+/// completion's and a streamed one's, the provider's own figures, reach the cluster's usage on
+/// the next metering pass, the first's although the cluster unloaded in between, each once.
+/// With `ROLL_CODE_TEST_DATABASE` the catalog is a fresh Postgres schema (`Store::open`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn completion_tokens_are_metered() {
+    use axum::response::IntoResponse;
+    use reqwest::Method;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let router = axum::Router::new().route(
+        "/v1/chat/completions",
+        axum::routing::post(|axum::Json(b): axum::Json<Value>| async move {
+            if b["stream"] == true {
+                let sse = [
+                    json!({"choices": [{"index": 0, "delta": {"content": "Hel"}}]}),
+                    json!({"choices": [{"index": 0, "delta": {"content": "lo"}}]}),
+                    json!({"choices": [], "usage": {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18}}),
+                ]
+                .iter()
+                .map(|c| format!("data: {c}\n\n"))
+                .collect::<String>()
+                    + "data: [DONE]\n\n";
+                ([("content-type", "text/event-stream")], sse).into_response()
+            } else {
+                axum::Json(json!({"choices": [{"index": 0, "message": {"role": "assistant", "content": "Hello"}}], "usage": {"prompt_tokens": 20, "completion_tokens": 5, "total_tokens": 25}})).into_response()
+            }
+        }),
+    );
+    tokio::spawn(async move { axum::serve(listener, router).await });
+    let e = env_with(|c| {
+        c.node_settings.push((search_control::INFERENCE_ALLOW_PRIVATE.into(), "true".into()));
+        c.node_settings.push(("xpack.inference.skip_validate_and_start".into(), "true".into()));
+    })
+    .await;
+    let c = e.post("/v1/search/clusters", json!({"name": "chatty"})).await;
+    let id = c["id"].as_str().unwrap().to_string();
+    let (u, p) = creds(&c);
+    let endpoint = json!({"service": "openai", "service_settings": {"api_key": "sk-1", "model_id": "gpt", "url": format!("http://127.0.0.1:{port}/v1/chat/completions")}});
+    let (s, v) = e.es(&u, &p, Method::PUT, "/_inference/completion/chat", Some(endpoint)).await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = e.es(&u, &p, Method::POST, "/_inference/completion/chat", Some(json!({"input": "hi"}))).await;
+    assert_eq!((s, &v["completion"][0]["result"]), (200, &json!("Hello")), "{v}");
+    assert_eq!(e.post(&format!("/v1/search/clusters/{id}/unload"), json!({})).await["unloaded"], true);
+    let (s, v) = e.es(&u, &p, Method::POST, "/_inference/completion/chat/_stream", Some(json!({"input": "hi"}))).await;
+    assert!(s == 200 && v.as_str().is_some_and(|t| t.contains("Hel") && t.ends_with("data: [DONE]\n\n")), "{s} {v}");
+
+    e.control.sample().await.unwrap();
+    let usage = e.get(&format!("/v1/search/clusters/{id}/usage")).await;
+    assert_eq!((&usage["input_tokens"], &usage["output_tokens"]), (&json!(31), &json!(12)), "{usage}");
+    e.control.sample().await.unwrap();
+    let usage = e.get(&format!("/v1/search/clusters/{id}/usage")).await;
+    assert_eq!((&usage["input_tokens"], &usage["output_tokens"]), (&json!(31), &json!(12)), "counted once: {usage}");
+}
+
 /// A migration's bounds: a host that isn't a name or an address (`https://*`) is refused and
 /// nothing is whitelisted; one migration call runs per cluster at a time (another gets a 429);
 /// and copies past the free task slots wait (`queued`), with nothing created for them.
