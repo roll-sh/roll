@@ -5769,7 +5769,7 @@ async fn a_previews_pages_carry_the_feedback_button_for_its_link_visitors() {
     struct Said(Mutex<Vec<(String, String)>>);
     #[async_trait]
     impl apps_control::integrations::FeedbackNotes for Said {
-        async fn notes(&self, env: &str, path: &str) -> anyhow::Result<Vec<apps_control::integrations::Note>> {
+        async fn notes(&self, _service: &str, env: &str, path: &str) -> anyhow::Result<Vec<apps_control::integrations::Note>> {
             self.0.lock().push((env.into(), path.into()));
             Ok(vec![apps_control::integrations::Note { path: path.into(), selector: "h1".into(), note: "bigger".into(), by: "ana".into(), at: 1 }])
         }
@@ -5844,7 +5844,7 @@ async fn a_previews_share_link_lets_its_guest_in_until_it_ends() {
     }
     #[async_trait]
     impl PreviewShares for Links {
-        async fn live(&self, env: &str, token: &str, followed: bool) -> Option<Share> {
+        async fn live(&self, _service: &str, env: &str, token: &str, followed: bool) -> Option<Share> {
             if env != "pv-abc" || token != "share-1" || self.revoked.load(Ordering::SeqCst) {
                 return None;
             }
@@ -5853,11 +5853,11 @@ async fn a_previews_share_link_lets_its_guest_in_until_it_ends() {
             }
             Some(Share { ends_ms: i64::MAX / 2, notes: true })
         }
-        async fn note(&self, env: &str, token: &str, body: &[u8]) -> Result<String, (u16, String)> {
+        async fn note(&self, _service: &str, env: &str, token: &str, body: &[u8]) -> Result<String, (u16, String)> {
             self.posted.lock().push((env.into(), token.into(), String::from_utf8_lossy(body).into()));
             Ok("rv_g".into())
         }
-        async fn notes(&self, _env: &str, token: &str, path: &str) -> Vec<Note> {
+        async fn notes(&self, _service: &str, _env: &str, token: &str, path: &str) -> Vec<Note> {
             vec![Note { path: path.into(), selector: "h1".into(), note: format!("through {token}"), by: "guest:Ada".into(), at: 1 }]
         }
     }
