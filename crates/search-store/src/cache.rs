@@ -20,6 +20,9 @@
 //! doesn't cancel it for the others. Objects larger than [`FETCH_PART`] download as parallel
 //! ranged reads written in place (one S3 connection tops out around 100 MB/s; a cold shard
 //! wants its segments at disk speed), with at most [`FETCH_PARTS`] parts in memory node-wide.
+//! The reads someone waits for (every download's first read, and the parts a reader asked for)
+//! have a lane of their own, [`URGENT_PARTS`] more: a waking shard's footers and its first
+//! query's ranges never queue behind other segments' bulk parts.
 //!
 //! Parts are aligned to the object's *end*: the first request is a suffix read, which learns
 //! the size and brings the last part, where a segment keeps its footer and table of contents.
@@ -157,6 +160,9 @@ struct Download {
     map: Mutex<Weak<Mapped>>,
     /// Bytes this download reserved in the cache budget (0 once handed to the entry or released).
     reserved: AtomicU64,
+    /// Rung when a reader asks for parts first ([`SegmentFetch::prioritize`]) or a bulk worker
+    /// runs out of parts: the download's urgent worker looks again.
+    wanted: tokio::sync::Notify,
 }
 
 impl Download {
@@ -169,6 +175,7 @@ impl Download {
             file: std::sync::OnceLock::new(),
             map: Mutex::new(Weak::new()),
             reserved: AtomicU64::new(0),
+            wanted: tokio::sync::Notify::new(),
         }
     }
 
@@ -258,6 +265,22 @@ impl Parts {
 
     fn complete(&self, range: &std::ops::Range<u64>) -> bool {
         self.covering(range).all(|k| self.done[k])
+    }
+
+    /// The next part a reader asked for, if any isn't taken yet ([`Parts::prioritize`]).
+    fn take_urgent(&mut self) -> Option<usize> {
+        while let Some(k) = self.urgent.pop_front() {
+            if !self.taken[k] {
+                self.taken[k] = true;
+                return Some(k);
+            }
+        }
+        None
+    }
+
+    /// Whether every part has been taken by some worker.
+    fn all_taken(&self) -> bool {
+        self.taken.iter().all(|t| *t)
     }
 
     /// The next part to download: wanted ones first, then in file order.
@@ -366,6 +389,7 @@ impl SegmentFetch {
             for r in ranges.iter().filter(|r| !r.is_empty() && r.end <= *size) {
                 p.prioritize(r);
             }
+            dl.wanted.notify_one();
         }
     }
 
@@ -458,6 +482,10 @@ const LOW_WATER: u64 = 61;
 pub const FETCH_PART: u64 = 8 << 20;
 /// Ranged reads in flight (and so buffered) at once across the node.
 pub const FETCH_PARTS: usize = 8;
+/// Ranged reads a reader waits for, and every download's first (suffix) read, in flight at once
+/// across the node beside [`FETCH_PARTS`]: a lane of their own, so a waking shard's footers and
+/// the ranges its first query reads never queue behind other segments' bulk parts.
+pub const URGENT_PARTS: usize = 4;
 
 #[derive(Default)]
 struct Counters {
@@ -505,6 +533,8 @@ pub(crate) struct Cache {
     fetches: Mutex<HashMap<String, Arc<Download>>>,
     /// Permits for ranged reads in flight ([`FETCH_PARTS`]).
     parts: tokio::sync::Semaphore,
+    /// Permits for the reads someone waits for ([`URGENT_PARTS`]).
+    urgent: tokio::sync::Semaphore,
     /// Ranged-read size of downloads ([`FETCH_PART`] by default).
     part: AtomicU64,
     /// Tests: downloads share a link of this many bytes per second (0: unlimited), and when
@@ -548,6 +578,7 @@ impl Cache {
             st: Mutex::new(st),
             fetches: Mutex::new(HashMap::new()),
             parts: tokio::sync::Semaphore::new(FETCH_PARTS),
+            urgent: tokio::sync::Semaphore::new(URGENT_PARTS),
             part: AtomicU64::new(FETCH_PART),
             throttle: AtomicU64::new(0),
             link_free: Mutex::new(None),
@@ -766,7 +797,9 @@ impl Cache {
     async fn download(&self, key: &str, file: &Arc<File>, dl: &Download) -> anyhow::Result<u64> {
         let part = self.fetch_part();
         let (tail, size) = {
-            let _permit = self.parts.acquire().await?;
+            // Whoever opens the segment waits for this one (its size, footer and table of
+            // contents): the urgent lane.
+            let _permit = self.urgent.acquire().await?;
             let r = self.objects.get_suffix(key, part).await?.ok_or_else(|| anyhow::anyhow!("object {key} is missing"))?;
             self.throttled(r.0.len() as u64).await;
             r
@@ -802,22 +835,53 @@ impl Cache {
             dl.tick.send_modify(|t| *t += 1);
             left.min(FETCH_PARTS)
         };
+        let fetch = |k: usize, range: std::ops::Range<u64>| async move {
+            let (data, now) = self.objects.get_range_sized(key, range.clone()).await?.ok_or_else(|| anyhow::anyhow!("object {key} is missing"))?;
+            self.throttled(data.len() as u64).await;
+            anyhow::ensure!(now == size && data.len() as u64 == range.end - range.start, "{key} changed while being read");
+            write_at(file, data, range.start).await?;
+            if let Some(p) = dl.parts.lock().as_mut() {
+                p.finish(k);
+            }
+            dl.tick.send_modify(|t| *t += 1);
+            anyhow::Ok(())
+        };
         let worker = || async {
             loop {
                 let permit = self.parts.acquire().await?;
-                let Some((k, range)) = dl.parts.lock().as_mut().and_then(|p| p.take().map(|k| (k, p.range(k)))) else { return anyhow::Ok(()) };
-                let (data, now) = self.objects.get_range_sized(key, range.clone()).await?.ok_or_else(|| anyhow::anyhow!("object {key} is missing"))?;
-                self.throttled(data.len() as u64).await;
-                anyhow::ensure!(now == size && data.len() as u64 == range.end - range.start, "{key} changed while being read");
-                write_at(file, data, range.start).await?;
+                let Some((k, range)) = dl.parts.lock().as_mut().and_then(|p| p.take().map(|k| (k, p.range(k)))) else {
+                    // Out of parts: the urgent worker may be done too.
+                    dl.wanted.notify_one();
+                    return anyhow::Ok(());
+                };
+                fetch(k, range).await?;
                 drop(permit);
-                if let Some(p) = dl.parts.lock().as_mut() {
-                    p.finish(k);
-                }
-                dl.tick.send_modify(|t| *t += 1);
             }
         };
-        futures::future::try_join_all((0..workers).map(|_| worker())).await?;
+        // The parts readers wait for, on the urgent lane, so they never queue behind the bulk
+        // parts of every other download on the node (the bulk workers take them first too,
+        // whichever gets there first).
+        let urgent = async {
+            loop {
+                let next = {
+                    let mut g = dl.parts.lock();
+                    let Some(p) = g.as_mut() else { return anyhow::Ok(()) };
+                    match p.take_urgent() {
+                        Some(k) => Some((k, p.range(k))),
+                        None if p.all_taken() => return anyhow::Ok(()),
+                        None => None,
+                    }
+                };
+                match next {
+                    Some((k, range)) => {
+                        let _permit = self.urgent.acquire().await?;
+                        fetch(k, range).await?;
+                    }
+                    None => dl.wanted.notified().await,
+                }
+            }
+        };
+        futures::future::try_join(futures::future::try_join_all((0..workers).map(|_| worker())), urgent).await?;
         Ok(size)
     }
 
