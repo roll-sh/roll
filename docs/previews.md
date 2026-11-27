@@ -2640,16 +2640,22 @@ type Settings = {
     name alone proves nothing (`engine.rs::the_teams_snapshots_join_the_visual_review`,
     `scripts/preview-apps.sh`'s snapshot step):
 
+    `@roll/previews` (`packages/previews`, no dependencies) does both for a team's tests:
+    `bypass(page, baseURL)` sets the project's secret on the preview's own origin only (a header
+    set for the whole browser a page could send anywhere), `snapshot(page, name)` sends the
+    page's picture (whole, animations stopped) with `GITHUB_SHA` as its head, and
+    `sendSnapshot(baseURL, name, png)` takes a file's bytes (Cypress' `after:screenshot`); a
+    refused one fails the test, saying why (`packages/previews/test/index.test.ts`):
+
     ```js
-    // playwright: a fixture next to the bypass one above
-    export async function snapshot(page, name) {
-      await fetch(new URL(`/__roll/snapshot?name=${encodeURIComponent(name)}&head=${process.env.GITHUB_SHA}`, page.url()), {
-        method: 'POST',
-        headers: { 'x-roll-preview-bypass': process.env.ROLL_PREVIEW_BYPASS, 'content-type': 'image/png' },
-        body: await page.screenshot({ fullPage: true, animations: 'disabled' }),
-      });
-    }
-    // cypress: cy.screenshot(name) then, in an after:screenshot plugin, the same POST of its file
+    // playwright.config's fixture
+    import { bypass, snapshot } from "@roll/previews";
+    test.beforeEach(async ({ page, baseURL }) => bypass(page, baseURL));
+    test("checkout", async ({ page }) => {
+      await page.goto("/checkout");
+      await snapshot(page, "checkout");
+    });
+    // cypress: on("after:screenshot", (d) => sendSnapshot(config.baseUrl, d.name, fs.readFileSync(d.path)))
     ```
     Page states too (Chromatic's interaction tests, Percy's scripted snapshots): much of what a
     change touches shows only after a click (a cart open, a dialog, a form's errors). A project
@@ -3184,17 +3190,19 @@ variables roll makes from a branch's URL too (it could run on the preview's own 
 change becoming queued wakes its settled preview, a rehearsal shows only at its head, and schema
 overlaps stay within a repo.
 
-1. **Replaying recorded traffic against the preview and main** (Signadot, Speedscale; L): writes
+1. **`@roll/previews` for a team's tests, in review**: the bypass on the preview's own origin and
+   `snapshot()` (Argos's and Percy's SDKs), instead of a copied snippet.
+2. **Replaying recorded traffic against the preview and main** (Signadot, Speedscale; L): writes
    replay safely on branched data; capturing production's requests needs its privacy designed
    first. The previews' own GETs replayed
    against main's, in review.
-2. **Older pushes past the last three, started on demand, in review** (roll's runtime); **what a
+3. **Older pushes past the last three, started on demand, in review** (roll's runtime); **what a
    note's reviewer saw, from their own browser** (Jam, Marker.io).
-3. **Restore points for search and buckets**: search's once roll search's `reset {from}` is in
+4. **Restore points for search and buckets**: search's once roll search's `reset {from}` is in
    (its Next 32); buckets need a put-back on roll storage's side.
-4. **Previews for the members thread's next products**: once roll apps' and roll search's routes
+5. **Previews for the members thread's next products**: once roll apps' and roll search's routes
    become member routes (docs/members.md, v1.1).
-5. **Watches on pg-control**: the data step's Postgres compute start; cheap branches on ext4
+6. **Watches on pg-control**: the data step's Postgres compute start; cheap branches on ext4
    through overlay volumes; recovery to a time seconds old (unowned).
 
 Not to build: more lab checks on the first page (each adds noise to every pull request), or a

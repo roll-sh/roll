@@ -21,7 +21,11 @@ directory, listens on `127.0.0.1` only, and asks for a token of its own, so neit
 the machine nor a web page you open can use it.
 
 Download rolld with the CLI (Linux on x86_64 and ARM64, macOS on Apple silicon). The install script
-checks both against the release's `SHA256SUMS` and puts them in `~/.local/bin`:
+checks both against the release's `SHA256SUMS` and puts them in `~/.local/bin`. With
+[gh](https://cli.github.com) installed and logged in, it also checks each download's build
+provenance: a signature that roll's release workflow made and GitHub keeps outside the release.
+Replacing the files and `SHA256SUMS` in a release can't forge that. Set `ROLL_VERIFY=attestation`
+to refuse to install without the provenance check:
 
 ```sh
 curl -fsSL https://roll.sh/install.sh | sh -s -- --with-rolld
@@ -47,7 +51,18 @@ And in the shell you'll use the CLI from:
 export ROLL_ADMIN_TOKEN="$(cat ~/roll-eval/admin.token)"
 ```
 
-Or build it from a clone, with a current stable Rust (the first build takes a while):
+To check a download by hand, as the script does:
+
+```sh
+gh release download cli-vX.Y.Z --repo roll-sh/roll -p 'rolld-x86_64-unknown-linux-gnu.tar.gz' -p SHA256SUMS
+gh attestation verify rolld-x86_64-unknown-linux-gnu.tar.gz --repo roll-sh/roll \
+  --signer-workflow roll-sh/roll/.github/workflows/release-cli.yml
+sha256sum -c --ignore-missing SHA256SUMS
+```
+
+Or build it from a clone. You need a current stable Rust, a C toolchain and libclang
+(`apt install build-essential clang libclang-dev` on Debian and Ubuntu; the Xcode command line
+tools on macOS). The first build takes a while, and `target/` grows large:
 
 ```sh
 git clone https://github.com/roll-sh/roll && cd roll
