@@ -3183,6 +3183,8 @@ impl Store {
     /// The host a service (or an earlier push's, `<service>@<revision>`) answers on.
     pub fn service_host(&self, id: &str, name: &str) -> Result<Option<String>> {
         Ok(self.db.read(|c| match name.split_once('@') {
+            // Main's code on the preview's data (`web@main`): a host of its own no visitor reaches.
+            Some((svc, "main")) => c.query_row("SELECT host FROM services WHERE preview_id = ? AND name = ?", [id, svc], |r| r.get::<_, String>(0)).optional().map(|h| h.map(|h| format!("{}-main", crate::label_part(&h, 58)))),
             Some((svc, rev)) => c.query_row("SELECT host FROM pinned WHERE preview_id = ? AND service = ? AND revision = ?", [id, svc, rev], |r| r.get(0)).optional(),
             None => c.query_row("SELECT host FROM services WHERE preview_id = ? AND name = ?", [id, name], |r| r.get(0)).optional(),
         })?)

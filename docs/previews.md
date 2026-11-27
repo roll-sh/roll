@@ -369,9 +369,13 @@ state. A pass of the reconciler:
    4e. Main's code on the change's migrated data (pgroll's and Reshape's expand/contract,
        tested on real data instead of assumed): while a change deploys, the version before it
        still serves, on the schema its release just changed. So once per head of a trusted change
-       whose release changed the schema, after its services are up and healthy, main's live build
-       of each of main's services runs again, taking no traffic (roll apps' rollback with
-       variables, as an earlier push's own copy does), on a copy of each of the change's Postgres
+       whose release changed the schema, after its services are up and healthy, main's code runs
+       again, taking no traffic: on roll apps, main's live build of each of main's services (roll
+       apps' rollback with variables, as an earlier push's own copy does); on roll's runtime,
+       main's revision of each of the change's repo's services, in the change's preview as
+       `<name>@main` (the other repos' services run main's code there already), at a host no
+       visitor reaches (`?dpl=` and skew cookies name pinned pushes only), its variables held in
+       memory while it runs (they're the copy's credentials) and stopped after. Both run on a copy of each of the change's Postgres
        branches as the release left them (`<preview>-m`, copy-on-write, masked as the branch is),
        with main's own branches' variables swapped for the copy's by value (and the ones roll
        makes from them). Its pages, `/` and the project's `github.pages` (10 at most; the other
@@ -381,8 +385,8 @@ state. A pass of the reconciler:
        main_status}], error}`) has it at that head, the sheet and the pull request comment say it
        ("Main's code breaks on this change's migrated data: `/orders` answers 500 (on main's
        data, 200)… expand first and contract in a later change"), and the activity too. Only a
-       trusted change: main's build reads the copy with main's secrets. Where it can't run (no
-       preview of main, a service on roll's runtime, a branch that can't be copied) `error` says
+       trusted change: main's build reads the copy with main's (or the preview's) secrets. Where it
+       can't run (no preview of main, a branch that can't be copied) `error` says
        why and nothing is said on the pull request
        (`engine.rs::mains_code_runs_on_a_copy_of_the_changes_migrated_data`).
    5. The secrets environment `pv-<preview id>` is ensured (base, overrides, resource URLs).
@@ -3052,8 +3056,8 @@ variables roll makes from a branch's URL too (it could run on the preview's own 
 change becoming queued wakes its settled preview, a rehearsal shows only at its head, and schema
 overlaps stay within a repo.
 
-1. **Main's code on the change's migrated data, in review** (roll apps services); roll's runtime
-   next: it has no build taking no traffic yet.
+1. **Main's code on the change's migrated data on roll's runtime, in review** (`<name>@main` in
+   the change's preview; roll apps services landed, #1183).
 2. **Webhooks into private previews** (Vercel's bypass in a query parameter; S): a per-preview,
    per-path bypass that fits in a Stripe or GitHub webhook URL, never the project-wide secret.
 3. **Snapshots from the team's own Playwright or Cypress suite** (Argos's, Percy's SDKs; M):
@@ -3077,7 +3081,7 @@ Not to build: more lab checks on the first page (each adds noise to every pull r
 Kubernetes cluster per preview (roll apps' Compose import covers multi-service apps, and a
 cluster would break "costs nothing asleep").
 
-Landed 2026-11-27, early: a failed story shard's share of the touched stories counted as untaken (#1175), and masking that's safe by default for NoSQL and search, with the project told of each column masked by default (#1177).
+Landed 2026-11-27, early: a failed story shard's share of the touched stories counted as untaken (#1175), and masking that's safe by default for NoSQL and search, with the project told of each column masked by default (#1177), and main's code on a copy of a change's migrated data, on roll apps (#1183).
 
 Landed 2026-11-26, midday: restore points for streams (#1112), the TurboSnap test's race under
 load (#1114), the tenth review's fixes (#1119), the visual review holding on stories a change

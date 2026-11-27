@@ -168,6 +168,10 @@ type OidcIssued = HashMap<(String, String, String), (i64, crate::OidcToken)>;
 /// How often the leader looks for masked bases to delete.
 const BASES_SWEPT_EVERY: Duration = Duration::from_secs(600);
 
+/// Main's code running on a copy of a change's data on roll's runtime: main's revision, and the
+/// copy's variables (main_on_change.rs).
+type MainRun = (String, Vec<(String, String)>);
+
 pub struct Engine {
     pub cfg: Config,
     pub store: Arc<Store>,
@@ -270,6 +274,10 @@ pub struct Engine {
     secrets_told: Mutex<HashMap<String, Vec<String>>>,
     /// The rules' references last left out per preview, their writers unable to now (told once).
     refs_told: Mutex<HashMap<String, Vec<String>>>,
+    /// Main's code run on roll's runtime in a change's preview (`web@main`), by (preview,
+    /// service): main's revision and the copy's variables, only while it runs (held in memory:
+    /// they're credentials).
+    main_runs: Mutex<HashMap<(String, String), MainRun>>,
     /// Keys bound to hosts its egress doesn't allow, last told per preview.
     bound_told: Mutex<HashMap<String, Vec<String>>>,
     /// What ends a preview's interception when it's torn down (rolld, over roll secrets).
@@ -342,6 +350,7 @@ impl Engine {
             },
             secrets_told: Mutex::new(HashMap::new()),
             refs_told: Mutex::new(HashMap::new()),
+            main_runs: Mutex::new(HashMap::new()),
             bound_told: Mutex::new(HashMap::new()),
             intercepts: std::sync::OnceLock::new(),
             domain_read: Mutex::new(HashMap::new()),
