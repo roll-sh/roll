@@ -3352,7 +3352,7 @@ async fn naming_lists_only_tokens_whose_rules_can_name_a_project() {
     store.update(&moved_away, &GrantChange { rules: Some(scope(json!([rule("secrets", json!([{ "project": "other" }]))]))), ..Default::default() }).unwrap();
     store.update(&moved, &GrantChange { rules: Some(scope(json!([rule("secrets", json!([{ "id": "prj_a" }]))]))), ..Default::default() }).unwrap();
     let until = code_sql::now_ms() + 3_600_000;
-    store.remember(&for_a_while, &serde_json::from_value(rule("secrets", json!([{ "project": "web" }]))).unwrap(), Some(until), "apr_1").unwrap();
+    store.remember(&for_a_while, &[serde_json::from_value(rule("secrets", json!([{ "project": "web" }]))).unwrap()], Some(until), "apr_1").unwrap();
     store.revoke(&revoked).unwrap();
     let mut want = vec![every, any_product, by_slug, by_id, moved, for_a_while];
     want.sort();
@@ -3404,7 +3404,7 @@ async fn a_secret_written_as_the_caller_is_asked_for_and_only_it_is_allowed() {
     };
     // The route's own action asks too: the approval names the secret, and the route's own action
     // beside it; remembered, both are, so the next call asks about neither.
-    let (tie, _) = d.token(json!([search("ask"), write_asks]), json!({})).await;
+    let (tie, tie_grant) = d.token(json!([search("ask"), write_asks]), json!({})).await;
     let tie_id = asked(tie.clone()).await;
     let (_, card) = d.call(OPERATOR, Method::GET, &format!("/v1/access/approvals/{tie_id}"), None).await;
     let summary = card["summary"].as_str().unwrap_or_default();
@@ -3413,6 +3413,22 @@ async fn a_secret_written_as_the_caller_is_asked_for_and_only_it_is_allowed() {
     assert_eq!(d.send(&tie, Method::POST, path, Some(body("production")), &[("x-roll-approval", &tie_id)]).await.0, StatusCode::OK);
     let (s, seen) = d.call(&tie, Method::POST, path, Some(body("production"))).await;
     assert_eq!((s, seen["here"].as_bool()), (StatusCode::OK, Some(true)), "both remembered: {seen}");
+    // Another folder while the hour lasts: the route's admin is allowed (by that hour), only the
+    // secret asks, and remembering it for 30 days keeps the admin to its hour: what a later
+    // approval remembers is what it asked, never more.
+    let mut db = body("production");
+    db["secret"]["path"] = json!("/db");
+    let (s, out) = d.call(&tie, Method::POST, path, Some(db)).await;
+    assert_eq!((s, out["code"].as_str()), (StatusCode::FORBIDDEN, Some("approval_pending")), "{out}");
+    let db_id = out["approval"].as_str().unwrap().to_string();
+    let (_, card) = d.call(OPERATOR, Method::GET, &format!("/v1/access/approvals/{db_id}"), None).await;
+    assert!(card.get("also").is_none() && !card["summary"].as_str().unwrap_or_default().contains("admin"), "{card}");
+    assert_eq!(d.call(OPERATOR, Method::POST, &format!("/v1/access/approvals/{db_id}/approve"), Some(json!({ "remember": "30d" }))).await.0, StatusCode::OK);
+    let (_, g) = d.call(OPERATOR, Method::GET, &format!("/v1/access/tokens/{tie_grant}"), None).await;
+    let hour = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64 + 2 * 3_600_000;
+    let admin_until: Vec<i64> = g["temporary"].as_array().unwrap().iter().filter(|t| t["rule"]["product"] == "search").filter_map(|t| t["until"].as_i64()).collect();
+    assert!(!admin_until.is_empty() && admin_until.iter().all(|u| *u < hour), "the admin keeps its hour: {g}");
+    assert_eq!(g["rules"], json!([search("ask"), write_asks]), "nothing permanent: {g}");
     let (asks, _) = d.token(json!([search("allow"), write_asks]), json!({})).await;
     let id = asked(asks.clone()).await;
     assert_eq!(d.call(OPERATOR, Method::POST, &format!("/v1/access/approvals/{id}/approve"), Some(json!({ "remember": "1h" }))).await.0, StatusCode::OK);

@@ -108,6 +108,15 @@ function Pending({ a, focused, refresh, viewer }: { a: Approval; focused: boolea
             <span title={a.resource ?? undefined}>{a.resource ? resourceName(a.product, a.resource) : productName(a.product)}</span>
             {(approvalWhere(a) || (accessRequest(a) && "every environment")) && <span className="text-muted"> · {approvalWhere(a) || "every environment"}</span>}
           </h2>
+          {a.also && (
+            <p className="mt-1 text-[12px] text-subtle">
+              and <b className="font-medium text-fg">{Object.keys(a.also.actions).join(", ")}</b> in {productName(a.also.product)}
+              {Array.isArray(a.also.resources) && a.also.resources[0] && "id" in a.also.resources[0] ? (
+                <code className="font-mono"> {resourceName(a.also.product, a.also.resources[0].id)}</code>
+              ) : null}
+              <span> (the route&apos;s own: approving covers it, remembering keeps it)</span>
+            </p>
+          )}
           {accessRequest(a) ? (
             <p className="mt-1 text-[13px]">
               <span className="text-muted">asks for {forLabel(accessRequest(a)!.for)}:</span> {accessRequest(a)!.reason}

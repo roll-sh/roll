@@ -1569,7 +1569,12 @@ From a 2026-11-26 comparison (the spec's anniversary post, Claude's connector do
    - **A refused express setup** (not an admin) sends Claude `access_denied` from a "Back to Claude" button, rather than leaving it waiting.
    - **Express setup's domains** start from the ones DNS proved for roll's SSO connections; the admin still changes them.
    - **Claude's app form** names the other trusted providers that may vouch for it (`issuers`, IdP-managed auto-connect), as `--issuer` does.
-2. **One approval covers both, and remembers both (this PR).** When a lend decides an approval (a lent secret, an apps link) and the route's own action asked too, the card's summary now says what is lent ("write secrets prj_… in production:/ai") and adds ", and admin search cl_…". Before, it named the route's product with the lent resource's id. Remembering keeps both rules (`own_rule`: the route's own action, when its row decides it without the body and the grant doesn't allow it already). Before, the next call asked about the route's own action again. The 8-hour rule for a whole environment and the products' lifetime caps apply to both.
+2. **One approval covers both, recorded when it asks (this PR; #1170 and its review).** #1170 made a lend's approval name the route's own action and remember both. A review then found three problems:
+   - **High: `own_rule` worked the route's rule out again at approval time,** from the token's permanent rules. An admin allowed for an hour by an earlier approval, so never asked about, would be remembered for 30 days or for good by a later approval of another folder. The gate now records the route's own rule on the approval when it asks (`also`, a new column). Remembering uses only that, against the token's effective rules.
+   - **Medium:** roll's policy gates are now checked for that rule too; remembering is refused when the policy asks again.
+   - **Medium:** the dashboard's waiting card now shows it ("and admin in roll search cl_…").
+   - **Low:** both rules are remembered in one write.
+   - **Test:** an approval made while the admin's hour lasts is remembered for 30 days, and the admin keeps its hour.
 3. **Watched:** SEP-1913 (`sensitiveHint`, `privateHint` and `maliciousActivityHint` annotations, close to lockdown's marks) and the files extension (Claude says uploads are "rolling out soon").
 
 4. **Paging is the products'.** No list route takes a cursor (approvals take `limit` only). History
