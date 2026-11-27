@@ -13,6 +13,22 @@ pub(super) struct KeptBuild {
 /// How long one resource's columns are read for mask suggestions before it's named in `unread`.
 pub const SUGGEST_READ_FOR: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// How strong a Postgres lock mode is (`pg_locks.mode`): `ShareLock` (5) and up make writes wait,
+/// `AccessExclusiveLock` (8) reads too.
+fn lock_rank(mode: &str) -> u8 {
+    match mode {
+        "AccessShareLock" => 1,
+        "RowShareLock" => 2,
+        "RowExclusiveLock" => 3,
+        "ShareUpdateExclusiveLock" => 4,
+        "ShareLock" => 5,
+        "ShareRowExclusiveLock" => 6,
+        "ExclusiveLock" => 7,
+        "AccessExclusiveLock" => 8,
+        _ => 0,
+    }
+}
+
 /// How long a converge holds its claim on making a masked base (a dead one's lapses).
 const MASK_BASE_HOLD_MS: i64 = 30 * 60_000;
 /// How long a branch waits for a masked base another converge is making.
@@ -595,12 +611,62 @@ impl Engine {
             && self.store.released(&r.id)?.as_deref() != Some(r.build())
         {
             let started = std::time::Instant::now();
-            self.run_job(r, &s, &vars, "release", release).await?;
+            // The locks it holds, sampled while it runs: what it would hold on production.
+            let watched: Vec<(Arc<dyn Brancher>, String, String)> = self
+                .store
+                .resources(&r.id)?
+                .into_iter()
+                .filter(|x| x.kind == Kind::Postgres)
+                .filter_map(|x| Some((self.brancher(x.kind).ok()?.clone(), x.parent.clone(), x.r#ref.clone()?)))
+                .collect();
+            let several = watched.len() > 1;
+            let job = self.run_job(r, &s, &vars, "release", release);
+            tokio::pin!(job);
+            let mut seen: BTreeMap<String, (u8, String, std::time::Instant, std::time::Instant)> = BTreeMap::new();
+            let ran = loop {
+                for (b, parent, branch) in &watched {
+                    let Ok(Ok(held)) = tokio::time::timeout(std::time::Duration::from_secs(2), b.locks(parent, branch)).await else { continue };
+                    let now = std::time::Instant::now();
+                    for (table, mode) in held {
+                        let rank = lock_rank(&mode);
+                        if rank < lock_rank("ShareLock") {
+                            continue;
+                        }
+                        let key = if several { format!("{table} (postgres:{parent})") } else { table };
+                        let e = seen.entry(key).or_insert((rank, mode.clone(), now, now));
+                        if rank > e.0 {
+                            (e.0, e.1) = (rank, mode);
+                        }
+                        e.3 = now;
+                    }
+                }
+                tokio::select! {
+                    ran = &mut job => break ran,
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {}
+                }
+            };
+            ran?;
+            let mut locks: Vec<crate::ReleaseLock> = seen.into_iter().map(|(table, (_, mode, first, last))| crate::ReleaseLock { table, mode, ms: (last - first).as_millis() as i64 + 500 }).collect();
+            locks.sort_by(|a, b| lock_rank(&b.mode).cmp(&lock_rank(&a.mode)).then(b.ms.cmp(&a.ms)));
+            locks.truncate(10);
+            self.store.set_runtime_fact(&r.id, "release_locks", Some(&crate::ReleaseLocksAt { head: r.build().to_string(), locks }))?;
             let ms = started.elapsed().as_millis() as i64;
             self.store.set_released(&r.id, r.build(), ms)?;
             self.store.log(&r.id, &format!("released in {:.1} s", ms as f64 / 1000.0))?;
         }
-        // 3c'. A rehearsal asked for at this head: the release again on the parents as they are now.
+        // 3c'. A rehearsal asked for at this head: the release again on the parents as they are
+        // now. Asked by roll when the change is queued to land, where the project wants it.
+        if s.rehearse_when_queued
+            && s.release.is_some()
+            && let Some(change) = r.change_id.as_deref()
+            && self.store.runtime_fact::<crate::Rehearsal>(&r.id, "rehearsal")?.is_none_or(|x| x.head != r.build())
+            && self.source.change(change).await.ok().flatten().is_some_and(|c| c.queued)
+            && self.store.resources(&r.id)?.iter().any(|x| x.kind == Kind::Postgres && x.r#ref.is_some())
+        {
+            let asked = crate::Rehearsal { head: r.build().to_string(), by: "roll".into(), at: self.store.now_ms()?, ok: None, ms: None, error: None };
+            self.store.set_runtime_fact(&r.id, "rehearsal", Some(&asked))?;
+            self.store.log(&r.id, "the change is queued to land: rehearsing its release on today's data")?;
+        }
         if let Some(release) = &s.release
             && let Some(asked) = self.store.runtime_fact::<crate::Rehearsal>(&r.id, "rehearsal")?.filter(|x| x.ok.is_none() && x.head == r.build())
         {
@@ -944,6 +1010,11 @@ impl Engine {
             }
         }
 
+        // 4c. Main's code on a copy of this head's migrated data, once (its live builds, taking
+        // no traffic): what the version still serving while the change deploys would answer.
+        if problems.is_empty() && self.main_on_change_due(r, &s)? {
+            self.main_on_change(r, &s).await?;
+        }
         self.store.mark_step(&r.id, &r.head, "checks")?;
 
         // 5. Settled.
@@ -1503,14 +1574,19 @@ impl Engine {
                 let fresh = b.branch(&res.parent, &name, Mode::Branch).await?;
                 made.push((b.clone(), res.parent.clone(), fresh.r#ref.clone()));
                 let key = format!("{}:{}", res.kind.as_str(), res.parent);
-                if let Some(cols) = s.masking.get(&key).filter(|c| !c.is_empty()) {
-                    b.mask(&res.parent, &fresh.r#ref, fresh.kept.as_deref(), cols).await?;
+                if let Some(rules) = s.masking.get(&key).filter(|c| !c.is_empty()) {
+                    let (cols, _) = self.effective_masks(&r.id, &b, res.kind, &res.parent, rules).await;
+                    if !cols.is_empty() {
+                        b.mask(&res.parent, &fresh.r#ref, fresh.kept.as_deref(), &cols).await?;
+                    }
                 }
                 // Its variables in place of the preview's branch's: the same names, wherever their
                 // values went (a suffixed name too), by value (a branch's URL holds its own role's
-                // password, so it's that branch's alone).
-                let old = b.connect(&res.parent, branch, res.kept.as_deref()).await?;
-                let new = b.connect(&res.parent, &fresh.r#ref, fresh.kept.as_deref()).await?;
+                // password, so it's that branch's alone), and the ones roll makes from them
+                // (`PGHOST`, `PGUSER`, `PGPASSWORD`, `PGOPTIONS`…), so a release that reads those
+                // never runs on the preview's own branch.
+                let old = crate::names::with_standard(res.kind, b.connect(&res.parent, branch, res.kept.as_deref()).await?);
+                let new = crate::names::with_standard(res.kind, b.connect(&res.parent, &fresh.r#ref, fresh.kept.as_deref()).await?);
                 for (k, v) in &old {
                     if let Some((_, nv)) = new.iter().find(|(nk, _)| nk == k) {
                         for kv in vars.iter_mut().filter(|(_, vv)| vv == v) {
@@ -1658,11 +1734,16 @@ impl Engine {
     /// masked, the product can't, bases are off, or another converge is making the base; a base
     /// that couldn't be made is said and left to the next converge.
     async fn branch_from_mask_base(&self, r: &Row, s: &Settings, key: &str, res: &ResourceRow, b: &Arc<dyn Brancher>, name: &str) -> anyhow::Result<Option<crate::ports::Branched>> {
-        let Some(cols) = s.masking.get(key).filter(|c| !c.is_empty()) else { return Ok(None) };
+        let Some(rules) = s.masking.get(key).filter(|c| !c.is_empty()) else { return Ok(None) };
         if !b.branches_from_base() || res.mode != Mode::Branch || self.cfg.mask_base_for.is_zero() {
             return Ok(None);
         }
-        let digest = mask_digest_of(Some(cols));
+        // Masked with what's masked by default too, as the parent's columns are when it's made;
+        // keyed by the rules: a column production gains later isn't in its data at all.
+        let (cols, by_default) = self.effective_masks(&r.id, b, res.kind, &res.parent, rules).await;
+        self.said_masked_by_default(&r.id, key, by_default)?;
+        let cols = &cols;
+        let digest = mask_digest_of(Some(rules));
         let fresh_since = self.store.now_ms()? - self.cfg.mask_base_for.as_millis() as i64;
         // Another converge making it: waited for (as long as masking a copy would take), then
         // this branch masks its own.
@@ -1724,12 +1805,63 @@ impl Engine {
         let (kind, parent) = key.split_once(':').unwrap_or((key, ""));
         let kind = Kind::parse(kind)?;
         let digest = mask_digest_of(s.masking.get(key));
-        if let Some(cols) = s.masking.get(key).filter(|c| !c.is_empty()) {
-            let kept = self.store.resources(id)?.into_iter().find(|x| x.kind == kind && x.parent == parent).and_then(|x| x.kept);
-            b.mask(parent, branch, kept.as_deref(), cols).await.map_err(|e| anyhow::anyhow!("masking {key}: {e:#}"))?;
-            self.store.log(id, &format!("masked {} column(s) of {key}", cols.len()))?;
+        if let Some(rules) = s.masking.get(key).filter(|c| !c.is_empty()) {
+            let (cols, by_default) = self.effective_masks(id, b, kind, parent, rules).await;
+            if !cols.is_empty() {
+                let kept = self.store.resources(id)?.into_iter().find(|x| x.kind == kind && x.parent == parent).and_then(|x| x.kept);
+                b.mask(parent, branch, kept.as_deref(), &cols).await.map_err(|e| anyhow::anyhow!("masking {key}: {e:#}"))?;
+                self.store.log(id, &format!("masked {} column(s) of {key}", cols.len()))?;
+            }
+            self.said_masked_by_default(id, key, by_default)?;
         }
         self.store.set_mask_digest(id, kind, parent, &digest)?;
+        Ok(())
+    }
+
+    /// The masks a branch of `kind:parent` gets under its rules `rules`: the rules (but `keep`),
+    /// and every column (a NoSQL table's outside its keys, a search index's field) of the parent
+    /// that looks like people's data ([`crate::mask::suggest`]) and has no rule, with the rule
+    /// suggested for it: masked until
+    /// someone says otherwise (Tonic flags new sensitive columns, Neosync needs a rule for each),
+    /// so a column production gains doesn't reach a preview in the clear. Only where the project
+    /// has rules for the parent (one that masks nothing hands over its data as it says). Second,
+    /// those masked by default: (column, why). A parent whose columns can't be read gets its rules
+    /// alone, and the preview's activity says so.
+    pub(super) async fn effective_masks(&self, id: &str, b: &Arc<dyn Brancher>, kind: Kind, parent: &str, rules: &BTreeMap<String, String>) -> (BTreeMap<String, String>, Vec<(String, String)>) {
+        let mut cols: BTreeMap<String, String> = rules.iter().filter(|(_, r)| r.trim() != crate::mask::KEEP).map(|(c, r)| (c.clone(), r.clone())).collect();
+        let mut by_default = Vec::new();
+        if !matches!(kind, Kind::Postgres | Kind::Nosql | Kind::Search) || rules.is_empty() {
+            return (cols, by_default);
+        }
+        match tokio::time::timeout(SUGGEST_READ_FOR, b.columns(parent, crate::mask::SUGGEST_COLUMNS_MAX)).await {
+            Ok(Ok(columns)) => {
+                for c in columns.iter().filter(|c| !rules.contains_key(&c.path)) {
+                    if let Some(sg) = crate::mask::suggest(kind, c) {
+                        by_default.push((c.path.clone(), sg.why.to_string()));
+                        cols.insert(c.path.clone(), sg.rule);
+                    }
+                }
+            }
+            Ok(Err(e)) => {
+                let _ = self.store.log(id, &format!("{}:{parent}: its columns couldn't be read, so only its rules mask it: {e:#}", kind.as_str()));
+            }
+            Err(_) => {
+                let _ = self.store.log(id, &format!("{}:{parent}: its columns weren't read within {} s, so only its rules mask it", kind.as_str(), SUGGEST_READ_FOR.as_secs()));
+            }
+        }
+        (cols, by_default)
+    }
+
+    /// What a branch of `key` was masked with by default, kept for the sheet and said once.
+    fn said_masked_by_default(&self, id: &str, key: &str, by_default: Vec<(String, String)>) -> anyhow::Result<()> {
+        let mut all: Vec<crate::MaskedByDefault> = self.store.runtime_fact(id, "masked_by_default")?.unwrap_or_default();
+        all.retain(|m: &crate::MaskedByDefault| m.resource != key);
+        if !by_default.is_empty() {
+            let names: Vec<&str> = by_default.iter().map(|(c, _)| c.as_str()).collect();
+            self.store.log(id, &format!("{key}: masked by default, as they look like people's data: {} (a rule, or keep, says otherwise)", names.join(", ")))?;
+        }
+        all.extend(by_default.into_iter().map(|(column, why)| crate::MaskedByDefault { resource: key.to_string(), column, why }));
+        self.store.set_runtime_fact(id, "masked_by_default", Some(&all))?;
         Ok(())
     }
 

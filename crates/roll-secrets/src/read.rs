@@ -1153,9 +1153,11 @@ impl Secrets {
     /// One key's value for another roll product, read as [`Secrets::consumer_entry`] decides:
     /// audited as `secrets.resolve` by `caller` (the resource asking), no dynamic credential.
     /// A key bound to hosts, for a resource that asks for placeholders, is answered as one; for a
-    /// reference a person chose ([`Secrets::resolve_as`]), its swaps re-check that person.
+    /// reference a person chose ([`Secrets::resolve_as`]), its swaps re-check that person. `once`:
+    /// a read for one request ([`Secrets::use_once`]), audited as `secrets.use` by that request's
+    /// caller, for its purpose, instead.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn resolve_one(&self, project: &str, slug: &str, path: &str, key: &str, caller: &Caller, untrusted: bool, resource: &crate::consumers::ResourceRef) -> std::result::Result<crate::consumers::Resolved, crate::consumers::Refusal> {
+    pub(crate) fn resolve_one(&self, project: &str, slug: &str, path: &str, key: &str, caller: &Caller, untrusted: bool, resource: &crate::consumers::ResourceRef, once: Option<(&Caller, &str)>) -> std::result::Result<crate::consumers::Resolved, crate::consumers::Refusal> {
         use crate::consumers::{Refusal, Resolved};
         let (narrowed, e, bound) = self.consumer_entry(project, slug, path, key, caller, untrusted, resource.wants_placeholders())?;
         let consumer = &caller.principal;
@@ -1180,7 +1182,10 @@ impl Secrets {
         if let Some(p) = problem {
             return Err(Refusal::Unusable(format!("{key} doesn't resolve: {p}")));
         }
-        self.audit_now(project, &narrowed, "secrets.resolve", Some(slug), Some(path), &[key.to_string()], &format!("resolved {key} for {consumer}{chosen}"));
+        match once {
+            Some((by, purpose)) => self.audit_now(project, by, "secrets.use", Some(slug), Some(path), &[key.to_string()], &format!("used {key} once for {} ({purpose}), as {}", resource.consumer(), by.made_by())),
+            None => self.audit_now(project, &narrowed, "secrets.resolve", Some(slug), Some(path), &[key.to_string()], &format!("resolved {key} for {consumer}{chosen}")),
+        }
         Ok(Resolved { value, version: e.row.version, expires_at: e.row.expires_at, placeholder: None })
     }
 

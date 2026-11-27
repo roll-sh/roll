@@ -380,12 +380,15 @@ async fn open_changes_that_change_the_same_tables_name_each_other() {
     for (c, n) in [("chg_sa", 1), ("chg_sb", 2), ("chg_sc", 3)] {
         e.code.open(change(c, n));
     }
+    e.code.open(ChangeInfo { repo: "acme/api".into(), ..change("chg_sd", 4) });
     e.engine.pass().await.unwrap();
     let id = |c: &str| e.engine.store.row_by_change(c).unwrap().unwrap().id;
     let set = |c: &str, l: &str| e.engine.store.set_schema_changes(&id(c), "h", Some(&[l.to_string()]), &[]).unwrap();
     set("chg_sa", "+ column public.users.nickname text");
     set("chg_sb", "- constraint users_email_key on public.users UNIQUE (email)");
     set("chg_sc", "+ table public.orders");
+    // Another repo's change on the same table: never named on this one's (its comment could be public).
+    set("chg_sd", "+ column public.users.age int");
     let overlaps = |c: &str| e.engine.store.preview(&id(c)).unwrap().schema_overlaps.into_iter().map(|o| (o.preview, o.tables)).collect::<Vec<_>>();
     assert_eq!(overlaps("chg_sa"), [(id("chg_sb"), vec!["public.users".to_string()])]);
     assert_eq!(overlaps("chg_sb"), [(id("chg_sa"), vec!["public.users".to_string()])]);
@@ -412,6 +415,20 @@ async fn the_toolbars_main_is_the_same_page_on_mains_preview() {
     assert_eq!(e.engine.main_page_url(&chg.id, "web", "//evil.example/").await.unwrap(), None, "only a path on main's host");
 }
 
+/// The locks a release holds that make others wait (PlanetScale's safe migrations) are said with
+/// its time: the strongest per table, sampled while it runs; ordinary writes' locks aren't.
+#[tokio::test]
+async fn a_releases_blocking_locks_are_said_with_its_time() {
+    let e = env(json!({ "enabled": true, "release": { "image": "node:22", "run": "npm run migrate" } }));
+    *e.pg.locks.lock() = vec![("public.orders".into(), "AccessExclusiveLock".into()), ("public.users".into(), "RowExclusiveLock".into()), ("public.orders".into(), "RowExclusiveLock".into())];
+    e.code.open(change("chg_lk", 1));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_lk").unwrap().unwrap();
+    let release = e.engine.store.preview(&p.id).unwrap().release.expect("its release ran");
+    assert_eq!(release.locks.iter().map(|l| (l.table.as_str(), l.mode.as_str())).collect::<Vec<_>>(), [("public.orders", "AccessExclusiveLock")]);
+    assert!(release.locks[0].ms >= 500);
+}
+
 /// A release rehearsed on today's data (PlanetScale's deploy requests): at the next converge,
 /// the release runs once more on a fresh branch of the parent, masked by the rules before it
 /// runs, and the branch goes after; how it went is on the preview.
@@ -428,6 +445,8 @@ async fn a_rehearsal_runs_the_release_on_a_fresh_masked_branch_then_drops_it() {
     let seeds = e.apps.seeds.lock().clone();
     assert_eq!(seeds.len(), ran + 1, "the release once more");
     assert_eq!(seeds.last().map(String::as_str), Some(format!("fake://{fresh}").as_str()), "on the fresh branch, not the preview's");
+    let host = e.apps.last_job_env.lock().iter().find(|(k, _)| k == "PGHOST").map(|(_, v)| v.clone());
+    assert_eq!(host.as_deref(), Some(fresh.as_str()), "the variables made from its URL too (PGHOST), never the preview's branch");
     assert!(e.pg.masks.lock().iter().any(|(b, _)| *b == fresh), "masked before it ran");
     assert!(!e.pg.branches.lock().contains(&fresh), "and gone after");
     let r = e.engine.store.preview(&p.id).unwrap().rehearsal.expect("how it went");
@@ -436,6 +455,36 @@ async fn a_rehearsal_runs_the_release_on_a_fresh_masked_branch_then_drops_it() {
     e.engine.store.update(&p.id, |x| x.next_at = 0).unwrap();
     e.engine.pass().await.unwrap();
     assert_eq!(e.apps.seeds.lock().len(), ran + 1);
+}
+
+/// With `rehearse_when_queued`, a change queued to land has its release rehearsed on today's data
+/// by roll, once at that head; without it, nothing is asked.
+#[tokio::test]
+async fn a_change_queued_to_land_is_rehearsed_where_the_project_asks() {
+    let e = env(json!({ "enabled": true, "release": { "image": "node:22", "run": "npm run migrate" }, "rehearse_when_queued": true }));
+    e.code.open(ChangeInfo { queued: true, ..change("chg_rq", 1) });
+    e.code.open(change("chg_rn", 3));
+    e.engine.pass().await.unwrap();
+    let open = e.engine.store.row_by_change("chg_rn").unwrap().unwrap();
+    assert!(e.engine.store.preview(&open.id).unwrap().rehearsal.is_none(), "an open change that isn't queued isn't rehearsed");
+    // Queued later, its preview settled: discovered, and rehearsed before the queue lands it.
+    e.code.edit("chg_rn", |c| c.queued = true);
+    e.engine.pass().await.unwrap();
+    e.engine.pass().await.unwrap();
+    assert_eq!(e.engine.store.preview(&open.id).unwrap().rehearsal.and_then(|x| x.ok), Some(true), "rehearsed once it was queued");
+    let p = e.engine.store.row_by_change("chg_rq").unwrap().unwrap();
+    let r = e.engine.store.preview(&p.id).unwrap().rehearsal.expect("rehearsed");
+    assert_eq!((r.by.as_str(), r.ok), ("roll", Some(true)));
+    let ran = e.apps.seeds.lock().len();
+    e.engine.store.update(&p.id, |x| x.next_at = 0).unwrap();
+    e.engine.pass().await.unwrap();
+    assert_eq!(e.apps.seeds.lock().len(), ran, "once at that head");
+    // Not queued, or not asked for: none.
+    let quiet = env(json!({ "enabled": true, "release": { "image": "node:22", "run": "npm run migrate" } }));
+    quiet.code.open(ChangeInfo { queued: true, ..change("chg_rq2", 2) });
+    quiet.engine.pass().await.unwrap();
+    let q = quiet.engine.store.row_by_change("chg_rq2").unwrap().unwrap();
+    assert!(quiet.engine.store.preview(&q.id).unwrap().rehearsal.is_none());
 }
 
 /// A visual change refused (Chromatic's Deny): the review fails at that head, the change is told at
@@ -1414,6 +1463,54 @@ async fn the_teardown_runs_once_at_a_head_the_preview_ran_before_its_data_goes()
     assert!(told.len() == 1 && told[0].0 == p.id && told[0].1.contains("exit code 2"), "the change is told how it failed: {told:?}");
 }
 
+/// Main's code on the change's migrated data (pgroll's expand/contract, tested): once per head
+/// whose release changed the schema, main's live build runs on a copy of the change's branch and
+/// its pages are read there and on main's preview; one that fails only on the change's data is
+/// said, and the copy goes.
+#[tokio::test]
+async fn mains_code_runs_on_a_copy_of_the_changes_migrated_data() {
+    let e = env(json!({ "enabled": true, "release": { "image": "node:22", "run": "npm run migrate" }, "github": { "screenshot": true, "pages": ["/orders"] } }));
+    *e.pg.schema.lock() = Some((vec!["table public.users".into()], vec!["table public.users".into(), "column public.users.nick text".into()]));
+    e.apps.live.lock().insert("web".into(), ("abc123".into(), "https://web-main.apps.test".into()));
+    e.apps.fetched.lock().insert("web https://view-dep_abc123--pv-x.apps.test/orders".into(), 500);
+    e.code.open(change("chg_mc", 1));
+    e.engine.pass().await.unwrap();
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_mc").unwrap().unwrap();
+    let v = e.engine.store.view(e.engine.store.row(&p.id).unwrap()).unwrap();
+    let m = v.main_on_change.expect("tried at its head");
+    assert_eq!(m.error, None);
+    let broke: Vec<&str> = m.pages.iter().filter(|x| x.broke()).map(|x| x.path.as_str()).collect();
+    assert_eq!(broke, ["/orders"], "/orders fails on the change's data only: {:?}", m.pages);
+    assert_eq!(e.code.last_report("chg_mc").main_on_change.as_ref(), Some(&m), "the change (and its pull request) get it");
+    let views = e.apps.views.lock().clone();
+    let copy = format!("fake://prj_db~{}-m", roll_previews::branch_name(&p.id));
+    assert!(views.iter().any(|(svc, dep, vars)| svc == "web" && dep == "dep_abc123" && vars.iter().any(|(k, v)| k == "DATABASE_URL" && *v == copy)), "main's build, on the copy: {views:?}");
+    assert!(!e.pg.branches.lock().iter().any(|b| b.ends_with("-m")), "the copy goes after");
+
+    // On roll's runtime: main's revision runs in the change's preview (`web@main`), started with
+    // the copy's variables in place of the preview's branch, and stopped after.
+    let e = env(json!({ "enabled": true, "release": { "image": "node:22", "run": "npm run migrate" }, "github": { "screenshot": true } }));
+    *e.pg.schema.lock() = Some((vec!["table public.users".into()], vec!["table public.users".into(), "column public.users.nick text".into()]));
+    e.apps.runtime.store(true, Ordering::SeqCst);
+    let source: Arc<dyn roll_previews::ports::EnvSource> = e.engine.clone();
+    *e.apps.env_source.lock() = Some(Arc::downgrade(&source));
+    e.apps.fetched.lock().insert("web@main /".into(), 500);
+    e.code.open(change("chg_mr", 2));
+    e.engine.pass().await.unwrap();
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_mr").unwrap().unwrap();
+    let main = e.engine.store.rows(Some(&e.project)).unwrap().into_iter().find(|x| x.change_id.is_none()).unwrap();
+    let main_rev = e.engine.store.services(&main.id).unwrap().into_iter().find(|x| x.name == "web").and_then(|x| x.revision).unwrap();
+    let started = e.apps.started.lock().clone();
+    let copy = format!("fake://prj_db~{}-m", roll_previews::branch_name(&p.id));
+    assert!(started.iter().any(|(id, svc, rev, vars)| *id == p.id && svc == "web@main" && *rev == main_rev && vars.iter().any(|(k, v)| k == "DATABASE_URL" && *v == copy)), "main's revision on the copy: {started:?}");
+    let m = e.engine.store.view(e.engine.store.row(&p.id).unwrap()).unwrap().main_on_change.expect("tried");
+    assert_eq!(m.pages.iter().filter(|x| x.broke()).map(|x| x.path.as_str()).collect::<Vec<_>>(), ["/"], "{m:?}");
+    assert!(e.apps.removed.lock().iter().any(|(id, svc)| *id == p.id && svc == "web@main"), "stopped after");
+    assert!(source.env(&p.id, "web@main").await.is_err(), "and it can't start again");
+}
+
 #[tokio::test]
 async fn the_release_runs_at_each_new_head_before_services_and_its_schema_changes_show() {
     let e = env(json!({ "enabled": true, "release": { "image": "node:22", "run": "npm run migrate" } }));
@@ -1636,6 +1733,43 @@ async fn masked_postgres_is_masked_before_it_serves_and_new_rules_reach_it() {
     assert_eq!(e.pg.made.load(Ordering::SeqCst), made + 2);
     assert_eq!(e.pg.masks.lock().len(), 3);
     assert_eq!(e.engine.store.row(&p.id).unwrap().state, State::Ready);
+}
+
+/// Masking that's safe by default (Tonic, Neosync): where a parent has rules, a column of it that
+/// looks like people's data and has none is masked with the rule suggested for it, and the preview
+/// says so; `keep` leaves it as it is (and is never sent as a mask).
+#[tokio::test]
+async fn columns_that_look_like_peoples_data_are_masked_by_default() {
+    let col = |path: &str, ty: &str| roll_previews::mask::Column { path: path.into(), r#type: Some(ty.into()), ..Default::default() };
+    let masks_of = |rules: serde_json::Value| async move {
+        let e = env(json!({ "enabled": true, "masking": { "postgres:prj_db": rules } }));
+        e.pg.columns.lock().insert("prj_db".into(), Ok(vec![col("public.users.email", "text"), col("public.users.phone", "text"), col("public.orders.total", "numeric")]));
+        e.code.open(change("chg_md", 1));
+        e.engine.pass().await.unwrap();
+        let p = e.engine.store.row_by_change("chg_md").unwrap().unwrap();
+        let masked = e.pg.masks.lock().last().map(|(_, c)| c.clone()).unwrap_or_default();
+        // The project is told once: a second preview with the same column says nothing more.
+        e.code.open(change("chg_md2", 2));
+        e.engine.pass().await.unwrap();
+        e.engine.pass().await.unwrap();
+        let told: Vec<String> = e.code.maskings.lock().iter().flat_map(|(_, n)| n.columns.iter().map(|m| format!("{}/{}", m.resource, m.column))).collect();
+        (masked, e.engine.store.preview(&p.id).unwrap().masked_by_default, told)
+    };
+    let (masked, by_default, told) = masks_of(json!({ "public.users.email": "email" })).await;
+    assert_eq!(masked.keys().cloned().collect::<Vec<_>>(), ["public.users.email", "public.users.phone"], "the phone too, orders' total not");
+    assert_eq!(by_default.iter().map(|m| m.column.as_str()).collect::<Vec<_>>(), ["public.users.phone"], "said on the preview");
+    assert_eq!(told, ["postgres:prj_db/public.users.phone"], "and to the project's repos, once");
+    let (masked, by_default, told) = masks_of(json!({ "public.users.email": "email", "public.users.phone": "keep" })).await;
+    assert_eq!(masked.keys().cloned().collect::<Vec<_>>(), ["public.users.email"], "keep leaves it, and isn't sent as a mask");
+    assert!(by_default.is_empty() && told.is_empty());
+    // A search cluster's fields the same way: an index's `user.email` that has no rule.
+    let e = env_with_search(json!({ "enabled": true, "masking": { "search:srch_logs": { "logs.ip": "redact" } } }));
+    e.search.columns.lock().insert("srch_logs".into(), Ok(vec![col("logs.ip", "keyword"), col("logs.user.email", "keyword"), col("logs.status", "long")]));
+    e.code.open(change("chg_ms", 1));
+    e.engine.pass().await.unwrap();
+    let masked = e.search.masks.lock().last().map(|(_, c)| c.clone()).unwrap_or_default();
+    assert_eq!(masked.get("logs.user.email").map(String::as_str), Some("email"), "the search field too: {masked:?}");
+    assert!(!masked.contains_key("logs.status"));
 }
 
 /// Masked branches come from one masked base per parent and rules (Neon's anonymized branches):

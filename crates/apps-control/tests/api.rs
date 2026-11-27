@@ -1638,6 +1638,15 @@ async fn a_deploy_that_fails_its_health_check_leaves_the_old_one_serving() {
     call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"pre_deploy": "exit 0"}}))).await;
     let (_, d4) = call(&w.api, "POST", &format!("{base}/deploys"), Some(json!({}))).await;
     assert_eq!(settled(&w, id, "production", d4["id"].as_str().unwrap()).await["status"], "active");
+    // A preview's teardown command (Heroku's pr-predestroy) runs once before it's deleted, in its
+    // live image; production's never does.
+    call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"pre_deploy": null, "teardown": "echo bye"}}))).await;
+    let pv = format!("/v1/apps/services/{id}/environments/pv-9");
+    call(&w.api, "PUT", &pv, Some(json!({"ephemeral": true}))).await;
+    let (_, d5) = call(&w.api, "POST", &format!("{pv}/deploys"), Some(json!({}))).await;
+    assert_eq!(settled(&w, id, "pv-9", d5["id"].as_str().unwrap()).await["status"], "active");
+    assert_eq!(call(&w.api, "DELETE", &pv, None).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(w.fake.commands_made.lock().iter().filter(|(c, _, _)| c == "echo bye").count(), 1, "{:?}", w.fake.commands_made.lock());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -3472,8 +3481,39 @@ async fn status_page_incidents_open_and_close() {
     assert_eq!(state(&w, page).await, (json!("resolved"), true));
 }
 
+/// A hostname another environment holds is taken by whoever proves its DNS (Vercel's "linked to
+/// another team"): a TXT record of the claimant's own at its challenge name, then one write moves
+/// it, and the holder is told.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_held_domain_is_claimed_by_proving_its_dns() {
+    let w = world().await;
+    let (a, _) = image_service(&w, "squatter", json!({"port": 80})).await;
+    let (b, _) = image_service(&w, "owner", json!({"port": 80})).await;
+    let (a, b) = (a["id"].as_str().unwrap().to_string(), b["id"].as_str().unwrap().to_string());
+    let domains = |id: &str| format!("/v1/apps/services/{id}/environments/production/domains");
+    assert_eq!(call(&w.api, "POST", &domains(&a), Some(json!({"hostname": "shop.acme.dev"}))).await.0, StatusCode::CREATED);
+    let (st, v) = call(&w.api, "POST", &domains(&b), Some(json!({"hostname": "shop.acme.dev"}))).await;
+    assert!(st == StatusCode::CONFLICT && v["error"].as_str().unwrap().contains("/claim"), "{v}");
+    let claim = format!("{}/shop.acme.dev/claim", domains(&b));
+    let (st, c) = call(&w.api, "POST", &claim, None).await;
+    assert_eq!((st, c["claimed"].as_bool(), c["txt"]["name"].as_str()), (StatusCode::OK, Some(false), Some("_roll-challenge.shop.acme.dev")), "{c}");
+    assert_eq!(call(&w.api, "POST", &claim, None).await.1["txt"], c["txt"], "the same token until it's used");
+    // The holder's own challenge doesn't prove the claimant's.
+    let held = call(&w.api, "GET", &domains(&a), None).await.1;
+    let held_token = held.as_array().unwrap().iter().find(|d| d["hostname"] == "shop.acme.dev").unwrap()["token"].as_str().unwrap().to_string();
+    w.dns.add("_roll-challenge.shop.acme.dev", "TXT", &held_token);
+    assert_eq!(call(&w.api, "POST", &claim, None).await.1["claimed"], false);
+    w.dns.add("_roll-challenge.shop.acme.dev", "TXT", c["txt"]["value"].as_str().unwrap());
+    let (st, t) = call(&w.api, "POST", &claim, None).await;
+    assert_eq!((st, t["claimed"].as_bool(), t["domain"]["status"].as_str()), (StatusCode::OK, Some(true), Some("active")), "{t}");
+    assert!(!call(&w.api, "GET", &domains(&a), None).await.1.to_string().contains("shop.acme.dev"), "gone from the holder");
+    let events = call(&w.api, "GET", "/v1/apps/events?after=0", None).await.1;
+    assert!(events["events"].as_array().unwrap().iter().any(|e| e["kind"] == "domain.expired" && e["service"] == a.as_str() && e["data"]["reason"] == "claimed"), "the holder is told: {events}");
+    assert_eq!(call(&w.api, "POST", &format!("{}/free.acme.dev/claim", domains(&b)), None).await.0, StatusCode::BAD_REQUEST, "a free name is added, not claimed");
+}
+
 /// A custom domain's records written at the customer's Cloudflare (Vercel's own DNS): the token a
-/// `roll://` reference the caller may reveal, read as them for the call; then it's verified.
+/// `roll://` reference the caller may reveal, read once as them (nothing bound); then it's verified.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_domains_records_are_written_with_the_customers_token() {
     struct Cf;
@@ -3485,12 +3525,9 @@ async fn a_domains_records_are_written_with_the_customers_token() {
         async fn resolve(&self, _: &str, _: &str, _: &str) -> anyhow::Result<Vec<apps_control::integrations::SecretVar>> {
             Ok(vec![])
         }
-        async fn bind_ref(&self, _: apps_control::integrations::Asker<'_>, _: &str, _: &str, reference: &str) -> anyhow::Result<String> {
-            anyhow::ensure!(reference == "roll://production/CF_TOKEN", "you may not reveal {reference}");
-            Ok("usr_ada".into())
-        }
-        async fn resolve_as(&self, _: &str, _: &str, _: &str, reference: &str, maker: &str) -> anyhow::Result<String> {
-            assert_eq!((reference, maker), ("roll://production/CF_TOKEN", "usr_ada"));
+        // Read once as the caller: nothing bound, no maker kept.
+        async fn use_once(&self, _: apps_control::integrations::Asker<'_>, _: &str, env: &str, _: &str, reference: &str, _: &str) -> anyhow::Result<String> {
+            anyhow::ensure!((env, reference) == ("production", "roll://production/CF_TOKEN"), "you may not reveal {reference}");
             Ok("cf-secret".into())
         }
     }
@@ -5120,6 +5157,30 @@ async fn on_call_targets_open_and_close_incidents() {
     assert_eq!(og_calls.len(), 2, "{seen:?}");
     assert_eq!((og_calls[0].1["authorization"].to_str().unwrap(), og_calls[0].2["alias"].as_str(), og_calls[0].2["priority"].as_str()), ("GenieKey g3n1e", Some(key("alert.memory").as_str()), Some("P3")));
     assert!(og_calls[1].0.ends_with("/close?identifierType=alias") && og_calls[1].0.contains("alert.memory"), "{}", og_calls[1].0);
+    // A silence (Cloud Monitoring's snooze): its alert pages no one while it's open; another
+    // alert still does.
+    let silences = format!("/v1/apps/services/{id}/environments/production/silences");
+    let until = code_sql::now_ms() + 3_600_000;
+    assert_eq!(call(&w.api, "POST", &silences, Some(json!({"until": until, "reason": "x", "alerts": ["deploy.active"]}))).await.0, StatusCode::BAD_REQUEST, "only alerts");
+    let (st, sil) = call(&w.api, "POST", &silences, Some(json!({"until": until, "reason": "db migration", "alerts": ["alert.memory"]}))).await;
+    assert_eq!((st, sil["alerts"].clone()), (StatusCode::CREATED, json!(["alert.memory"])), "{sil}");
+    assert_eq!(call(&w.api, "GET", &silences, None).await.1.as_array().map(Vec::len), Some(1));
+    let before = seen.len();
+    for (kind, data) in [("alert.memory", json!({"value": 97, "limit_mb": 512, "threshold": 90})), ("deploy.failed", json!({"error": "again"}))] {
+        let sid = id.clone();
+        w.apps.db(move |s| s.add_event(kind, &sid, "production", None, &data)).await.unwrap();
+    }
+    for _ in 0..400 {
+        seen = got.lock().clone();
+        if seen[before..].iter().any(|(u, _, b)| u == "/pd" && b["dedup_key"] == key("deploy.failed").as_str() && b["event_action"] == "trigger") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let after: Vec<String> = seen[before..].iter().map(|(u, _, b)| format!("{u} {}", b["dedup_key"].as_str().or(b["alias"].as_str()).unwrap_or(""))).collect();
+    assert!(after.iter().any(|c| c.contains("deploy.failed")) && !after.iter().any(|c| c.contains("alert.memory")), "the silenced alert paged no one: {after:?}");
+    assert_eq!(call(&w.api, "DELETE", &format!("{silences}/{}", sil["id"].as_str().unwrap()), None).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(call(&w.api, "GET", &silences, None).await.1, json!([]));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -5628,6 +5689,43 @@ async fn a_previews_pages_carry_the_feedback_button_for_its_link_visitors() {
     assert_eq!(st, StatusCode::OK);
     assert_eq!(serde_json::from_str::<Value>(&list).unwrap(), json!([{"path": "/pricing", "selector": "h1", "note": "bigger", "by": "ana", "at": 1}]));
     assert_eq!(*said.0.lock(), [("pv-abc".to_string(), "/pricing".to_string())], "the preview and the page's path");
+    // A team member signed in to roll (team access) gets it too, its notes through roll's own path.
+    struct Team;
+    impl apps_control::integrations::Visitors for Team {
+        fn may_open(&self, user: &str, _project: &str) -> bool {
+            user == "usr_ada"
+        }
+        fn session_live(&self, _user: &str, _session: &str) -> bool {
+            true
+        }
+    }
+    w.apps.set_visitors(Arc::new(Team));
+    assert_eq!(call(&w.api, "PUT", &base, Some(json!({"ephemeral": true, "access": {"signed_in": true}, "feedback": true}))).await.0, StatusCode::OK);
+    let load = |path: String, cookie: Option<String>| {
+        let mut r = Request::builder().uri(path).header("host", &h).header("accept", "text/html");
+        if let Some(c) = cookie {
+            r = r.header("cookie", c);
+        }
+        let public = w.public.clone();
+        async move {
+            let resp = public.oneshot(r.body(Body::empty()).unwrap()).await.unwrap();
+            let (st, hd) = (resp.status(), resp.headers().clone());
+            (st, hd, String::from_utf8(resp.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap())
+        }
+    };
+    let (_, hd, _) = load("/page".into(), None).await;
+    let state = hd["set-cookie"].to_str().unwrap().split(';').next().unwrap().to_string();
+    let binding = hd["location"].to_str().unwrap().split_once("&state=").unwrap().1.to_string();
+    let mut ask = Request::builder().method("POST").uri(format!("{base}/visit")).header("content-type", "application/json").body(Body::from(json!({ "to": format!("http://{h}/page"), "state": binding }).to_string())).unwrap();
+    ask.extensions_mut().insert(roll_auth::SignedIn { user: "usr_ada".into(), handle: "ada".into(), admin: false, code_owner: None, session: "ses_1".into() });
+    let t: Value = serde_json::from_slice(&w.api.clone().oneshot(ask).await.unwrap().into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let url = t["url"].as_str().unwrap_or_else(|| panic!("{t}"));
+    let (_, hd, _) = load(url[url.find("/__roll/visit").unwrap()..].to_string(), Some(state)).await;
+    let session = hd["set-cookie"].to_str().unwrap().split(';').next().unwrap().to_string();
+    let (st, _, page) = load("/page".into(), Some(session.clone())).await;
+    assert!(st == StatusCode::OK && page.ends_with(r#"<script src="/__roll/feedback.js" defer></script></body></html>"#), "a team member's page carries the button: {st} {page}");
+    assert_eq!(load("/__roll/feedback.json?path=%2Fteam".into(), Some(session)).await.0, StatusCode::OK);
+    assert_eq!(said.0.lock().last().cloned(), Some(("pv-abc".to_string(), "/team".to_string())), "read through roll's own notes, not a guest's");
 }
 
 /// A roll previews share link on a preview roll apps serves: followed, its cookie set and on
@@ -8308,6 +8406,8 @@ struct GitHost {
     login: Mutex<Option<(String, String)>>,
     /// Pull requests' heads (`refs/pull/N/head`), by number.
     pulls: Mutex<std::collections::BTreeMap<u64, code_git::ObjectId>>,
+    /// Tags (lightweight), by name.
+    tags: Mutex<std::collections::BTreeMap<String, code_git::ObjectId>>,
 }
 
 /// roll previews' side of a Git URL's pushes: what it was handed.
@@ -8384,6 +8484,7 @@ impl code_git::GitBackend for GitHost {
         let mut refs: Vec<code_git::Ref> = self.main.lock().iter().map(|oid| code_git::Ref { name: "refs/heads/main".into(), oid: *oid, peeled: None }).collect();
         refs.extend(self.branches.lock().iter().map(|(b, oid)| code_git::Ref { name: format!("refs/heads/{b}"), oid: *oid, peeled: None }));
         refs.extend(self.pulls.lock().iter().map(|(n, oid)| code_git::Ref { name: format!("refs/pull/{n}/head"), oid: *oid, peeled: None }));
+        refs.extend(self.tags.lock().iter().map(|(t, oid)| code_git::Ref { name: format!("refs/tags/{t}"), oid: *oid, peeled: None }));
         Ok(code_git::RefList { head: Some("refs/heads/main".into()), refs })
     }
     async fn read_object(&self, _repo: &str, oid: &code_git::ObjectId) -> code_git::GitResult<Option<code_git::Object>> {
@@ -8648,7 +8749,7 @@ async fn a_public_git_url_deploys_its_branch_and_follows_new_commits() {
         }
     };
     let (st, v) = answer(raw("application/json", Some("push"), json!({ "ref": "refs/tags/v1", "after": third }).to_string())).await;
-    assert!(st == StatusCode::OK && v["ignored"].as_str().unwrap().contains("not a branch"), "{v}");
+    assert!(st == StatusCode::OK && v["ignored"].as_str().unwrap().contains("no environment deploys it"), "{v}");
     let (st, v) = answer(raw("application/json", Some("issues"), json!({ "action": "opened" }).to_string())).await;
     assert!(st == StatusCode::OK && v["ignored"].as_str().unwrap().contains("isn't a push"), "{v}");
     let (st, v) = answer(raw("application/json", None, json!({ "star": true }).to_string())).await;
@@ -8723,6 +8824,45 @@ async fn a_public_git_url_deploys_its_branch_and_follows_new_commits() {
     let skip = git.commit_saying(&[pkg, ("server.js", "require('http') // v6"), ("README.md", "even more docs"), toml, ("api.js", "y")], "wip [skip ci]");
     let (_, v) = call(&w.api, "POST", &hook, Some(json!({ "ref": "refs/heads/main", "after": skip, "head_commit": { "message": "ship it" } }))).await;
     assert!(v["ignored"].as_str().unwrap().contains("[skip ci]"), "{v}");
+    // Tags by pattern (Cloud Build's tag triggers): a tag there when it's set never deploys; a new
+    // one deploys where the repository says it points, once, whatever the body names.
+    git.tags.lock().insert("v1".into(), code.parse().unwrap());
+    let staging = format!("/v1/apps/services/{id}/environments/staging");
+    assert_eq!(call(&w.api, "PUT", &staging, Some(json!({"deploy_tags": "*"}))).await.0, StatusCode::BAD_REQUEST);
+    let (st, e) = call(&w.api, "PUT", &staging, Some(json!({"deploy_tags": "v*"}))).await;
+    assert_eq!((st, e["deploy_tags"].as_str()), (StatusCode::OK, Some("v*")), "{e}");
+    let tag = |t: &str| json!({ "ref": format!("refs/tags/{t}"), "after": first });
+    let (_, v) = call(&w.api, "POST", &hook, Some(tag("v1"))).await;
+    assert!(v["ignored"].as_str().unwrap().contains("already"), "{v}");
+    git.tags.lock().insert("v2".into(), api.parse().unwrap());
+    let (st, d) = call(&w.api, "POST", &hook, Some(tag("v2"))).await;
+    assert_eq!((st, d["environment"].as_str(), d["revision"].as_str(), d["message"].as_str()), (StatusCode::ACCEPTED, Some("staging"), Some(api.as_str()), Some("tag v2")), "{d}");
+    settled(&w, &id, "staging", d["id"].as_str().unwrap()).await;
+    assert!(call(&w.api, "POST", &hook, Some(tag("v2"))).await.1["ignored"].as_str().unwrap().contains("already"), "once");
+    // A second tag on the same commit (an rc, then the release) is a deploy of its own.
+    git.tags.lock().insert("v2-final".into(), api.parse().unwrap());
+    let (st, d2) = call(&w.api, "POST", &hook, Some(tag("v2-final"))).await;
+    assert!(st == StatusCode::ACCEPTED && d2["id"] != d["id"] && d2["message"] == "tag v2-final", "{d2}");
+    settled(&w, &id, "staging", d2["id"].as_str().unwrap()).await;
+    // With no hook, the five-minute watch finds new tags too: the newest by version order, the
+    // older one marked as seen (never put live after it).
+    git.tags.lock().insert("v9".into(), code.parse().unwrap());
+    git.tags.lock().insert("v10".into(), api.parse().unwrap());
+    let started = w.apps.watch_git().await;
+    let mut tagged = Vec::new();
+    for d in &started {
+        let d = settled(&w, &id, "staging", d).await;
+        if d["message"].as_str().is_some_and(|m| m.starts_with("tag ")) {
+            tagged.push(d["message"].as_str().unwrap().to_string());
+        }
+    }
+    assert_eq!(tagged, ["tag v10"], "{started:?}");
+    for d in w.apps.watch_git().await {
+        let d = settled(&w, &id, "staging", &d).await;
+        assert!(!d["message"].as_str().unwrap_or("").starts_with("tag "), "nothing tagged again: {d}");
+    }
+    assert!(call(&w.api, "POST", &hook, Some(tag("v9"))).await.1["ignored"].as_str().unwrap().contains("already"), "v9 is seen, not deployed");
+    assert_eq!(call(&w.api, "POST", &hook, Some(tag("release-1"))).await.1["ignored"].as_str().map(|s| s.contains("no environment deploys it")), Some(true));
     // Pull requests go to previews with their number, title and page: a same-repository one on
     // its branch, a fork's as `pull/N` once `refs/pull/N/head` agrees, a close with no commit.
     let pr = |action: &str, n: u64, branch: &str, sha: &str, head_repo: u64| {

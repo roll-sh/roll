@@ -104,6 +104,7 @@ mod tests {
             port: Some(1),
             start: Some("a".into()),
             pre_deploy: Some("a".into()),
+            teardown: Some("a".into()),
             schedule: Some("* * * * *".into()),
             timezone: Some("UTC".into()),
             timeout_s: Some(1),

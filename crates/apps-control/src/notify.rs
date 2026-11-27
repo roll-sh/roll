@@ -353,6 +353,10 @@ impl Apps {
                     b
                 }
             };
+            // A silence open when it happened: kept, never sent (a resolve always is).
+            if self.silenced(&e.service, &e.environment, &e.kind, e.at).await {
+                continue;
+            }
             for t in self.db(move |s| s.targets(&p)).await.unwrap_or_default() {
                 if wants(&t.events, &e.kind, &e.data, matches!(t.kind.as_str(), "pagerduty" | "opsgenie")) && t.follows(&e.service, &e.environment, preview) {
                     queued.push((t.id.clone(), e.seq, e.kind.clone()));
@@ -602,6 +606,10 @@ impl Apps {
             "domain.tls_failed" => (
                 format!("{what}: {}'s certificate failed", e.data["hostname"].as_str().unwrap_or("a domain")),
                 format!("Visitors over HTTPS get an error until it's issued: {}", e.data["error"].as_str().unwrap_or("its provider gave no reason")),
+            ),
+            "domain.expired" if e.data["reason"] == "claimed" => (
+                format!("{what}: {} moved to another environment", e.data["hostname"].as_str().unwrap_or("a domain")),
+                "Someone proved they hold its DNS (a TXT record at its _roll-challenge name) and took it, so it no longer answers here.".to_string(),
             ),
             "domain.expired" => (
                 format!("{what}: {} was removed", e.data["hostname"].as_str().unwrap_or("a domain")),

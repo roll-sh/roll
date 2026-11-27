@@ -8,6 +8,7 @@ import {
   denyRedirect,
   describeRule,
   EXPIRIES,
+  lifetimeCap,
   parseAuthorize,
   presetFor,
   parseRate,
@@ -22,6 +23,7 @@ import {
   type StepUp,
   waitsForAdmin,
 } from "@/lib/access-api";
+import { accountsApi } from "@/lib/accounts-api";
 import { requestSignIn, subscribeToken } from "@/lib/code-token";
 import { SignIn } from "../code/sign-in";
 import { btn, Connecting, ErrorNote, input, primary } from "../ui";
@@ -65,6 +67,13 @@ function ExpressSetup({ req }: { req: AuthorizeRequest }) {
   const loaded = useSignedInLoad(() => Promise.resolve(null), []);
   const [domains, setDomains] = useState("");
   const [rules, setRules] = useState<Rule[] | null>(null);
+  // The domains a DNS record proved for roll's SSO connections, to start from (the admin changes them).
+  useEffect(() => {
+    accountsApi.ssoConnections().then(
+      (cs) => setDomains((d) => d || [...new Set(cs.flatMap((c) => c.verified))].join(", ")),
+      () => {},
+    );
+  }, []);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
@@ -76,7 +85,17 @@ function ExpressSetup({ req }: { req: AuthorizeRequest }) {
   if (loaded.state !== "ready") return <LoadState loaded={loaded} what="set up Claude's auto-connect" />;
   if (!CLAUDE_CLIENTS.includes(req.client_id) || req.redirect_uri !== CLAUDE_CALLBACK) return <Problem text="Only Claude asks for this, returning to claude.ai." />;
   if (loaded.me.kind !== "operator")
-    return <Problem title="An admin of roll approves this" text="Claude's auto-connect makes roll trust your Claude organization for everyone in the domains you name." next="Ask an admin of roll to click Connect in Claude's auto-connect setup." />;
+    return (
+      <div className="space-y-4">
+        <Problem title="An admin of roll approves this" text="Claude's auto-connect makes roll trust your Claude organization for everyone in the domains you name." next="Ask an admin of roll to click Connect in Claude's auto-connect setup." />
+        <button
+          onClick={() => window.location.assign(denyRedirect(req.redirect_uri, req.state, loaded.catalog.api_url, "Only roll's admins approve auto-connect"))}
+          className={btn}
+        >
+          Back to Claude
+        </button>
+      </div>
+    );
   const list = domains
     .split(/[\s,]+/)
     .map((d) => d.trim().replace(/^@/, "").toLowerCase())
@@ -128,7 +147,7 @@ function ExpressSetup({ req }: { req: AuthorizeRequest }) {
         <button onClick={allow} disabled={busy || problems.length > 0} className={primary}>
           {busy ? <span className="shimmer">Setting up…</span> : "Approve"}
         </button>
-        <button onClick={() => window.location.assign(denyRedirect(req.redirect_uri, req.state))} className={btn}>
+        <button onClick={() => window.location.assign(denyRedirect(req.redirect_uri, req.state, loaded.catalog.api_url))} className={btn}>
           Deny
         </button>
         {problems.length > 0 && <span className="text-[12px] text-subtle">{problems[0]}</span>}
@@ -197,7 +216,7 @@ function Ask({ req }: { req: AuthorizeRequest }) {
           });
           window.location.assign(redirect);
         }}
-        onDeny={() => window.location.assign(denyRedirect(req.redirect_uri, req.state))}
+        onDeny={() => window.location.assign(denyRedirect(req.redirect_uri, req.state, catalog.api_url))}
         onFresh={() => setFresh(true)}
       />
     );
@@ -220,7 +239,7 @@ function Ask({ req }: { req: AuthorizeRequest }) {
         });
         window.location.assign(redirect);
       }}
-      onDeny={() => window.location.assign(denyRedirect(req.redirect_uri, req.state))}
+      onDeny={() => window.location.assign(denyRedirect(req.redirect_uri, req.state, catalog.api_url))}
       head={(busy) => (
         <section className="flex items-start gap-4">
           <HorizonMark state={busy ? "thinking" : "idle"} size={36} interactive />
@@ -284,6 +303,7 @@ export function StepUpConfirm({
         <p className="text-[12px] text-danger">This reaches far: it applies to every resource of the product, or lets it reveal or administer. Add it only if you meant to.</p>
       )}
       {proposal.waits_for_admin && <p className="text-[12px] text-muted">Your organization&apos;s policy has an admin approve this: the connection waits until they do.</p>}
+      {proposal.ends && <p className="text-[12px] text-muted">With it, this connection ends on {new Date(proposal.ends.until).toISOString().slice(0, 10)}: roll secrets&apos; policy.</p>}
       <p className="text-[12px] text-subtle">Its other rules and settings stay as they are, and every session of this connection gets it.</p>
       <ErrorNote error={error} />
       <div className="flex flex-wrap items-center gap-2">
@@ -380,6 +400,7 @@ export function AllowForm({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const rate = parseRate(rateText);
+  const cap = lifetimeCap(catalog, rules);
   if (me.kind !== "operator" && me.kind !== "user") return <Problem text="Connect clients signed in to your account, not with a token." />;
 
   const allow = async () => {
@@ -451,6 +472,11 @@ export function AllowForm({
           ))
         )}
       </div>
+      {cap && (EXPIRIES[expiry].ms ?? Infinity) > cap.days * 86_400_000 && (
+        <p className="text-[12px] text-muted">
+          This connection ends in {cap.days} {cap.days === 1 ? "day" : "days"}: {cap.product.endsWith("s") ? `roll ${cap.product}' policy` : `roll ${cap.product}'s policy`}.
+        </p>
+      )}
       {waitsForAdmin(me, rules, askOtherwise) && (
         <p className="text-[12px] text-accent">It reaches what an admin approves first: {clientName} connects now, and works once an admin approves it (they&apos;re mailed).</p>
       )}

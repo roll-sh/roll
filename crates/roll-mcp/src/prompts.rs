@@ -430,7 +430,10 @@ const PROMPTS: &[Prompt] = &[
                  tell me why. If it's awaiting_approval, a writer has to approve-run its head first: say so and stop. Once \
                  it's ready: previews_get for what it branched and its schema_changes (flag a dropped table or column, \
                  or a NOT NULL column with no default on a table that has rows; previews_tables on a table it changed, if you \
-                 have it, for what the rows hold now); previews_errors for errors in it; \
+                 have it, for what the rows hold now) and its main_on_change (main's code on a copy of the change's \
+                 migrated data, the version that still serves while it deploys: call out a page whose status is a 5xx \
+                 or 0 there but below 500 in main_status, and suggest expanding the schema first and contracting it in a \
+                 later change); previews_errors for errors in it; \
                  previews_routes for routes slower than in main's preview (call out a p95 more than 20% slower, and \
                  open one of its slow traces with previews_get_trace if you have it); previews_screenshot with diff=base \
                  on the pages the change touches, and look at each image; previews_fetch on those pages (and the API \
@@ -439,8 +442,10 @@ const PROMPTS: &[Prompt] = &[
                  isn't enough, if you have it; before a flow that changes its data, previews_save_data, and \
                  after it previews_restore with previews_wait until it's ready again (it can take minutes); \
                  previews_list_notes for what people left on \
-                 its pages. Tell me whether it's ready to land, with the evidence for each problem. Don't resolve \
-                 notes, refresh, reset or delete the preview without asking me.",
+                 its pages. When the change migrates its database and the preview was made days ago, \
+                 offer previews_rehearse, if you have it: its release again on today's data (previews_wait, then \
+                 its rehearsal: call out a failure, or a release over a minute). Tell me whether it's ready to land, with the evidence for each problem. Don't resolve \
+                 notes, refresh, reset, rehearse or delete the preview without asking me.",
                 a("preview")
             )
         },
