@@ -106,16 +106,16 @@ impl Engine {
         let made = match self.source.work_item(change, &title, &body, &["preview-feedback"], n.outside).await {
             Ok(Some(made)) => made,
             Ok(None) => {
-                self.store.set_note_work(id, note, None)?;
+                self.store.set_note_work(id, note, by, None)?;
                 return Err(Error::Conflict("this preview's change has no repo to make work items on".into()));
             }
             Err(e) => {
-                self.store.set_note_work(id, note, None)?;
+                self.store.set_note_work(id, note, by, None)?;
                 return Err(Error::Internal(format!("{e:#}")));
             }
         };
         let (number, at) = made;
-        self.store.set_note_work(id, note, Some((number, &at)))?;
+        self.store.set_note_work(id, note, by, Some((number, &at)))?;
         self.store.log(id, &format!("{by} made a note work item #{number}"))?;
         let said = code_control::review::preview_note::reply_body(note, &format!("Made work item #{number} from this note."));
         if let Err(e) = self.source.comment(change, &said, by, false).await {
@@ -575,6 +575,43 @@ impl Engine {
         self.store.update(id, |row| row.next_at = 0)?;
         self.kick();
         Ok(serves)
+    }
+
+    /// An earlier push its preview no longer kept (past the last [`crate::store::PINNED_KEEP`]),
+    /// started on demand from its own link's page (Vercel keeps every deployment's URL): kept
+    /// again, the oldest kept push of that service going in its place, and its link starts it
+    /// on the next request (on the preview's data: its own copy went when it was dropped). A
+    /// trusted preview's only: a fork's earlier heads don't run.
+    pub async fn restart_push(&self, gone: &crate::store::GonePush, by: &str) -> Result<String> {
+        let r = self.store.row(&gone.preview)?;
+        if r.desired == Desired::Deleted {
+            return Err(Error::Conflict("the preview is being deleted".into()));
+        }
+        if !r.trusted {
+            return Err(Error::Conflict("earlier pushes of a pull request from a fork don't run".into()));
+        }
+        if !self.store.services(&r.id)?.iter().any(|s| s.name == gone.service) {
+            return Err(Error::Conflict(format!("the preview no longer runs {}", gone.service)));
+        }
+        // At most once a minute a preview: each start stops another push and drops its copy.
+        let now = self.store.now_ms()?;
+        if self.store.runtime_fact::<i64>(&r.id, "push_restarted_at")?.is_some_and(|at| now - at < 60_000) {
+            return Err(Error::Conflict("an earlier push was started again a moment ago: try again in a minute".into()));
+        }
+        self.store.set_runtime_fact(&r.id, "push_restarted_at", Some(&now))?;
+        let domain = self.store.project_domain(&r.project_id)?;
+        let evicted = self.store.pin(&r.id, &gone.service, &gone.revision, &|h| self.cfg.url_in(domain.as_ref(), h))?;
+        for name in &evicted {
+            self.apps.remove(&r.id, name).await.map_err(|e| Error::Internal(format!("stopping {name}: {e:#}")))?;
+        }
+        if !evicted.is_empty() {
+            let still: std::collections::BTreeSet<String> = self.store.pinned(&r.id)?.into_iter().map(|p| p.revision).collect();
+            self.drop_pinned_data_or_say(&r.id, |d| !still.contains(&d.revision)).await.map_err(|e| Error::Internal(format!("{e:#}")))?;
+        }
+        let url = self.store.pinned(&r.id)?.into_iter().find(|p| p.service == gone.service && p.revision == gone.revision).map(|p| p.url).unwrap_or_default();
+        let short: String = gone.revision.strip_prefix("cs_").unwrap_or(&gone.revision).chars().take(10).collect();
+        self.store.log(&r.id, &format!("{by} started {}'s earlier push {short} again from its link", gone.service))?;
+        Ok(url)
     }
 
     /// A note a guest left through share link `share` (its `notes` on): posted on the change as

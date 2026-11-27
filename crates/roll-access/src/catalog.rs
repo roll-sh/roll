@@ -78,6 +78,13 @@ pub struct Row {
     pub filters_itself: bool,
     /// The product answers only the indices the grant reaches (`roll_auth::scope::Resource::filters_index`).
     pub filters_index: bool,
+    /// A request under `…/environments/{env}/secrets/{key}` is about that one secret key
+    /// ([`secret_key_in`] reads it from the request's path, never from a parameter's name): rules
+    /// limited to some keys (`keys: ["STRIPE_KEY"]`) reach it when it's one of theirs.
+    pub secret_key: bool,
+    /// The product answers, or writes, only the keys the grant reaches, asking `Grant::allows` with
+    /// each one's key (`roll_auth::scope::Resource::filters_keys`): a folder's list and values.
+    pub filters_keys: bool,
     /// Other resources whose credentials the request hands to this one (apps' links put a
     /// database's address and password in a service's variables): it also needs `reveal` on each.
     pub lends: Option<Lend>,
@@ -151,6 +158,16 @@ fn search_secret_write(b: &Value) -> Vec<Lent> {
     // Named on the approval card: only a key as roll secrets names one.
     let key = s["key"].as_str().filter(|k| roll_secrets_ref::is_key(k)).map(str::to_string);
     vec![Lent { kind: "secret".into(), r#ref: s["project"].as_str().unwrap_or("").into(), action: Action::Write, folder, key }]
+}
+
+/// The one secret key a request's path is about (`/v1/secrets/projects/{project}/environments/{env}/secrets/{key}…`),
+/// as roll secrets names keys: what an approval of it remembers (`keys: [key]`), never the folder.
+pub fn secret_key_in(path: &str) -> Option<String> {
+    let segs: Vec<&str> = path.split('?').next().unwrap_or(path).trim_start_matches('/').split('/').collect();
+    match segs.as_slice() {
+        ["v1", "secrets", "projects", _, "environments", _, "secrets", key, ..] => Some(decode(key)).filter(|k| roll_secrets_ref::is_key(k)),
+        _ => None,
+    }
 }
 
 /// A folder as roll secrets' `names::path` normalizes it, or `None` where it refuses it (one
@@ -313,7 +330,7 @@ impl Row {
 }
 
 const fn row(method: &'static str, route: &'static str, product: &'static str, act: Act, target: Tgt) -> Row {
-    Row { method, route, product, act, target, env: EnvFrom::None, path_query: None, reveals: &[], copies_from: None, index: None, lends: None, filters_itself: false, filters_index: false, admin_if: None, admin_if_field: None, capable: &[], project_in_body: None, path_body: None, array_body: false, needs_too: None }
+    Row { method, route, product, act, target, env: EnvFrom::None, path_query: None, reveals: &[], copies_from: None, index: None, lends: None, filters_itself: false, filters_index: false, secret_key: false, filters_keys: false, admin_if: None, admin_if_field: None, capable: &[], project_in_body: None, path_body: None, array_body: false, needs_too: None }
 }
 
 const R: Act = Act::Is(Action::Read);
@@ -399,6 +416,16 @@ impl Row {
     /// a rule limited to some indices matches it too.
     const fn filters_index(mut self) -> Row {
         self.filters_index = true;
+        self
+    }
+    /// See [`Row::secret_key`].
+    const fn secret_key(mut self) -> Row {
+        self.secret_key = true;
+        self
+    }
+    /// See [`Row::filters_keys`].
+    const fn filters_keys(mut self) -> Row {
+        self.filters_keys = true;
         self
     }
     const fn lends(mut self, l: Lend) -> Row {
@@ -1560,13 +1587,13 @@ static ROWS: &[Row] = &[
     // A deleted environment's recovery is its admin's (docs/secrets.md, "When a secret, an
     // environment or the project goes").
     row("POST", "/v1/secrets/projects/{project}/environments/{env}/recover", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")),
-    row("GET", "/v1/secrets/projects/{project}/", "secrets", R, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
+    row("GET", "/v1/secrets/projects/{project}/", "secrets", R, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path").secret_key(),
     row("GET", "/v1/secrets/projects/{project}", "secrets", R, one(&["project"], "project")),
     // How long a project keeps old values (history_days): purging is the project admin's.
     row("PATCH", "/v1/secrets/projects/{project}", "secrets", ADMIN, one(&["project"], "project")),
-    row("POST", "/v1/secrets/projects/{project}/", "secrets", W, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
-    row("PUT", "/v1/secrets/projects/{project}/", "secrets", W, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
-    row("DELETE", "/v1/secrets/projects/{project}/", "secrets", D, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
+    row("POST", "/v1/secrets/projects/{project}/", "secrets", W, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path").secret_key(),
+    row("PUT", "/v1/secrets/projects/{project}/", "secrets", W, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path").secret_key(),
+    row("DELETE", "/v1/secrets/projects/{project}/", "secrets", D, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path").secret_key(),
     row("PATCH", "/v1/secrets/projects/{project}/environments/{env}", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")),
     row("PUT", "/v1/secrets/projects/{project}/environments/order", "secrets", ADMIN, one(&["project"], "project")),
     // A decoy key (docs/secrets.md, "Decoys"): an admin's, and it answers the key, never its value.
@@ -1719,13 +1746,18 @@ static ROWS: &[Row] = &[
     row("PUT", "/v1/secrets/projects/{project}/environments/{env}/folder-policies", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")),
     row("DELETE", "/v1/secrets/projects/{project}/environments/{env}/folder-policies", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")),
     row("POST", "/v1/secrets/projects/{project}/environments/{env}/requests/{id}/review", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")),
-    row("GET", "/v1/secrets/projects/{project}/environments/{env}/values", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
+    // Values and a folder's list answer only the keys the grant reaches (a rule limited to some
+    // keys reads those alone).
+    row("GET", "/v1/secrets/projects/{project}/environments/{env}/values", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path").filters_keys(),
+    row("GET", "/v1/secrets/projects/{project}/environments/{env}/secrets", "secrets", R, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path").filters_keys(),
+    // A batch writes only keys the grant reaches: roll secrets refuses one naming others.
+    row("POST", "/v1/secrets/projects/{project}/environments/{env}/changes", "secrets", W, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path").filters_keys(),
     // A watcher's read of what changed since the values it holds: values, so reveal.
     row("POST", "/v1/secrets/projects/{project}/environments/{env}/values/delta", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
-    row("GET", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/value", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
+    row("GET", "/v1/secrets/projects/{project}/environments/{env}/secrets/{key}/value", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path").secret_key(),
     // A TOTP key's current code is a credential: reveal, never the prefix's read.
-    row("GET", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/totp", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
-    row("GET", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/versions/{v}/value", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
+    row("GET", "/v1/secrets/projects/{project}/environments/{env}/secrets/{key}/totp", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path").secret_key(),
+    row("GET", "/v1/secrets/projects/{project}/environments/{env}/secrets/{key}/versions/{v}/value", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path").secret_key(),
     // What hands out more than the request itself: syncs (they push values
     // elsewhere), audit sinks and required keys are admin; a share link of a value reveals it.
     row("*", "/v1/secrets/projects/{project}/syncs", "secrets", ADMIN, one(&["project"], "project")).reveals(&["signing_secret"]),
@@ -1773,14 +1805,14 @@ static ROWS: &[Row] = &[
     row("DELETE", "/v1/secrets/projects/{project}/value-requests/{id}", "secrets", W, one(&["project"], "project")),
     // Binding a key to hosts decides where its value goes through a placeholder (docs/secrets.md,
     // "Using a key without seeing it"): the folder's admin, as purge is.
-    row("PUT", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/hosts", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
-    row("DELETE", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/hosts", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
+    row("PUT", "/v1/secrets/projects/{project}/environments/{env}/secrets/{key}/hosts", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path").secret_key(),
+    row("DELETE", "/v1/secrets/projects/{project}/environments/{env}/secrets/{key}/hosts", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path").secret_key(),
     // Purging a secret's history can't be undone.
-    row("POST", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/purge", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
+    row("POST", "/v1/secrets/projects/{project}/environments/{env}/secrets/{key}/purge", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path").secret_key(),
     // A change request's current and proposed values, for its approvers.
     row("GET", "/v1/secrets/projects/{project}/environments/{env}/requests/{id}/values", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     // Resolving and comparing read the folder their body names (never `?path=`).
-    row("POST", "/v1/secrets/projects/{project}/environments/{env}/resolve", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_body("path"),
+    row("POST", "/v1/secrets/projects/{project}/environments/{env}/resolve", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_body("path").filters_keys(),
     // Comparing a local copy with a folder's values (by fingerprint, names only) tests a guess:
     // reveal there, as reading the values is.
     row("POST", "/v1/secrets/projects/{project}/environments/{env}/diff", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_body("path"),
@@ -2224,6 +2256,27 @@ fn is_oid(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A secret key is read only from a path under `…/environments/{env}/secrets/{key}`; a row
+    /// that reads one is that route's or its prefix's, and no other secrets route's parameter (an
+    /// encryption key's `{name}`, a decoy, a request) is ever read as one.
+    #[test]
+    fn a_secret_key_comes_only_from_its_own_routes() {
+        const K: &str = "/v1/secrets/projects/{project}/environments/{env}/secrets/{key}";
+        assert_eq!(secret_key_in("/v1/secrets/projects/prj_a/environments/production/secrets/STRIPE_KEY/value?path=/api").as_deref(), Some("STRIPE_KEY"));
+        assert_eq!(secret_key_in("/v1/secrets/projects/prj_a/environments/production/secrets/STRIPE_KEY").as_deref(), Some("STRIPE_KEY"));
+        for no in ["/v1/secrets/projects/prj_a/environments/production/secrets", "/v1/secrets/projects/prj_a/transit/payments/encrypt", "/v1/secrets/projects/prj_a/environments/production/decoys", "/v1/secrets/projects/prj_a/environments/production/secrets/a%2Cb", "/v1/apps/secrets/projects/x/environments/e/secrets/K"] {
+            assert_eq!(secret_key_in(no), None, "{no}");
+        }
+        for r in ROWS.iter().filter(|r| r.secret_key) {
+            assert!(r.route.starts_with(K) || (r.route.ends_with('/') && K.starts_with(r.route)), "{} {} reads a secret key off K", r.method, r.route);
+        }
+        // Every secrets row with a parameter that isn't under K reads none from a path of its shape.
+        for r in ROWS.iter().filter(|r| r.product == "secrets" && !r.route.ends_with('/') && !r.route.starts_with(K)) {
+            let path = r.route.split('/').map(|s| if s.starts_with('{') { "A_KEY" } else { s }).collect::<Vec<_>>().join("/");
+            assert_eq!(secret_key_in(&path), None, "{} {}", r.method, r.route);
+        }
+    }
 
     /// Exact rows beat prefixes, the longest prefix wins, and a body decides SQL, Redis and CQL.
     #[test]

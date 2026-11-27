@@ -167,7 +167,17 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
   A link to one that's no longer kept says so: its host answers 410 with a page naming the
   service and the push and linking the service's latest (on roll's preview domain and on a
   project's own, there only for that project's previews; the latest 30 a preview evicted, gone
-  with the preview), not a 404 that reads as a broken preview.
+  with the preview), not a 404 that reads as a broken preview. On roll's runtime, a trusted
+  change's private preview's page also starts it again on demand (Vercel keeps every
+  deployment's URL): its "Start this push again" opens `/__roll/start-push` on that host, through
+  the preview's own gate (the link's token it carried, or roll's sign-in for team access), a page
+  that asks; only that page's own POST (this host's origin), from a visitor in by the link's
+  cookie or a person's session (not a share link, not the CI bypass), and at most once a minute
+  a preview, keeps it again in place of the oldest kept push of that service (whose container goes),
+  at the same link, and the next request starts it, on the preview's data (its own copy went
+  when it was dropped). A fork's earlier heads never start again
+  (`engine.rs::earlier_pushes_stay_reachable_at_their_own_urls`,
+  `runtime.rs::service_hosts_reach_their_containers`).
 - **A page loaded before a push keeps working** (Vercel's skew protection; roll apps'
   `run.skew_protection`): with `skew_protection = true` in `[preview]`, a request that names an
   earlier push goes to that push's own service (above), past the same gate, while the push is
@@ -361,12 +371,15 @@ state. A pass of the reconciler:
        (masked, one line), never the converge's, and it runs once a head. With
        `release_checks` (`check` or `required`, off by default) roll rehearses it at every head of
        a change instead, queued or not, and with `required` the change can't land in roll until,
-       at its head, the rehearsal passed and main's code didn't break on its migrated data (step
+       at its head, with its preview settled there (main's code runs before it settles), the
+       rehearsal passed and main's code didn't break on its migrated data (step
        4e; `release` on the change's blockers: "its release hasn't been rehearsed on today's data
        at its head yet", "its release failed on today's data: …", "main's code breaks on its
        migrated data: /orders (500): expand first, contract in a later change"). Rehearsed at each
        head before it's queued, the blocker never waits on the queue that would ask for it; a
-       preview with no Postgres branch has nothing to rehearse, so the rule holds nothing back
+       preview with no Postgres branch has nothing to rehearse, and a check of main's code that
+       couldn't run (no preview of main, a branch that can't be copied: its `error` on the preview),
+       has nothing to say, so neither holds anything back
        there (`queue.rs::blockers_keep_changes_out_of_the_queue`, the `release` case). With
        `rehearse_when_queued` (off by default: each is a fresh branch, its masking and a release
        run) roll asks for one itself when the change is queued to land in roll code, at that
@@ -1970,7 +1983,9 @@ land on the change.
   tab have "Make a work item", where roll's agents claim work too. A note's is made by roll
   (`POST …/notes/{note}/work`, `roll preview notes <id> --work <note>`): on a repo mirrored to
   GitHub, a team member's note opens an issue there, by roll's App (Marker.io's and Jam's notes
-  to GitHub Issues), which GitHub's `issues` webhook makes the repo's work item as any issue;
+  to GitHub Issues), made the repo's work item at once (GitHub's `issues` webhook finds it), by
+  roll's own number, as the team's words (an issue roll's App opened is never someone outside
+  the team's, whatever GitHub says of its bot);
   elsewhere, and always for a guest's note (its words are never published to GitHub, and stay
   marked as outside the team's), a work item in the change's repo,
   titled by the note's first line, its body the note with its page, element and link, labelled
@@ -2324,7 +2339,9 @@ type Settings = {
   `a_changes_linear_issues_from_its_title_and_branch`, `linear-templates.test.ts`.
 - **Jira and Asana** (Marker.io's notes to a tracker): the gallery's "Preview notes as Jira issues"
   and "Preview notes as Asana tasks" (`preview-note-to-jira`, `preview-note-to-asana`) take each
-  note left on a change's preview (the `review` trigger, a body that's a note's, not a reply's)
+  note left on a change's preview (the `review` trigger, a body that's a note's, not a reply's;
+  never one someone outside the team wrote, a share link's guest or a stranger's review on a
+  public mirror, nor a dismissal)
   to the team's tracker with automations' `webhook` step: public addresses only, no redirects,
   the answer read up to 1 MiB, and the credential an automation secret (`{{ secrets.jira }}`,
   base64 of email:API token; `{{ secrets.asana }}`, a personal access token), never in the
@@ -2338,7 +2355,10 @@ type Settings = {
   and the change's hasn't, is a difference ("/api/items 200 (main 200) · lost price"). The
   Requests tab and `roll preview replay` say them. Only GETs (a write would act twice), only a
   trusted change's preview (a fork's visitors and code choose its paths, and main's preview
-  answers with main's secrets), and only what the previews themselves served: replaying
+  answers with main's secrets), never a path that acts on a GET (signing out, unsubscribing,
+  confirming), 3 minutes at most (one asked longer ago that never said how it went may be
+  asked again), and only what the previews themselves served (on the preview's holder; on a
+  fleet, main's preview's lines only where it's held there too): replaying
   production's traffic needs its capture's privacy designed first
   (`engine.rs::recent_requests_are_replayed_against_mains_preview`).
 - **GitHub PR**, through roll code's GitHub outbox (durable, retried, sent on the repo's owner):
@@ -2620,16 +2640,22 @@ type Settings = {
     name alone proves nothing (`engine.rs::the_teams_snapshots_join_the_visual_review`,
     `scripts/preview-apps.sh`'s snapshot step):
 
+    `@roll/previews` (`packages/previews`, no dependencies) does both for a team's tests:
+    `bypass(page, baseURL)` sets the project's secret on the preview's own origin only (a header
+    set for the whole browser a page could send anywhere), `snapshot(page, name)` sends the
+    page's picture (whole, animations stopped) with `GITHUB_SHA` as its head, and
+    `sendSnapshot(baseURL, name, png)` takes a file's bytes (Cypress' `after:screenshot`); a
+    refused one fails the test, saying why (`packages/previews/test/index.test.ts`):
+
     ```js
-    // playwright: a fixture next to the bypass one above
-    export async function snapshot(page, name) {
-      await fetch(new URL(`/__roll/snapshot?name=${encodeURIComponent(name)}&head=${process.env.GITHUB_SHA}`, page.url()), {
-        method: 'POST',
-        headers: { 'x-roll-preview-bypass': process.env.ROLL_PREVIEW_BYPASS, 'content-type': 'image/png' },
-        body: await page.screenshot({ fullPage: true, animations: 'disabled' }),
-      });
-    }
-    // cypress: cy.screenshot(name) then, in an after:screenshot plugin, the same POST of its file
+    // playwright.config's fixture
+    import { bypass, snapshot } from "@roll/previews";
+    test.beforeEach(async ({ page, baseURL }) => bypass(page, baseURL));
+    test("checkout", async ({ page }) => {
+      await page.goto("/checkout");
+      await snapshot(page, "checkout");
+    });
+    // cypress: on("after:screenshot", (d) => sendSnapshot(config.baseUrl, d.name, fs.readFileSync(d.path)))
     ```
     Page states too (Chromatic's interaction tests, Percy's scripted snapshots): much of what a
     change touches shows only after a click (a cart open, a dialog, a form's errors). A project
@@ -3164,17 +3190,19 @@ variables roll makes from a branch's URL too (it could run on the preview's own 
 change becoming queued wakes its settled preview, a rehearsal shows only at its head, and schema
 overlaps stay within a repo.
 
-1. **Replaying recorded traffic against the preview and main** (Signadot, Speedscale; L): writes
+1. **`@roll/previews` for a team's tests, in review**: the bypass on the preview's own origin and
+   `snapshot()` (Argos's and Percy's SDKs), instead of a copied snippet.
+2. **Replaying recorded traffic against the preview and main** (Signadot, Speedscale; L): writes
    replay safely on branched data; capturing production's requests needs its privacy designed
    first. The previews' own GETs replayed
    against main's, in review.
-2. **Older pushes past the last three, started on demand**; **what a note's reviewer saw, from
-   their own browser** (Jam, Marker.io).
-3. **Restore points for search and buckets**: search's once roll search's `reset {from}` is in
+3. **Older pushes past the last three, started on demand, in review** (roll's runtime); **what a
+   note's reviewer saw, from their own browser** (Jam, Marker.io).
+4. **Restore points for search and buckets**: search's once roll search's `reset {from}` is in
    (its Next 32); buckets need a put-back on roll storage's side.
-4. **Previews for the members thread's next products**: once roll apps' and roll search's routes
+5. **Previews for the members thread's next products**: once roll apps' and roll search's routes
    become member routes (docs/members.md, v1.1).
-5. **Watches on pg-control**: the data step's Postgres compute start; cheap branches on ext4
+6. **Watches on pg-control**: the data step's Postgres compute start; cheap branches on ext4
    through overlay volumes; recovery to a time seconds old (unowned).
 
 Not to build: more lab checks on the first page (each adds noise to every pull request), or a

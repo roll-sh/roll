@@ -764,7 +764,7 @@ impl Access {
             return None;
         }
         let resources = Resources::Some(ids.into_iter().map(|id| Selector::Id { id, index: None }).collect());
-        Some(Rule { product: product.into(), resources, environments: None, paths: None, unprotected: false, actions: Action::ALL.iter().map(|a| (*a, Effect::Allow)).collect() })
+        Some(Rule { product: product.into(), resources, environments: None, paths: None, unprotected: false, keys: None, actions: Action::ALL.iter().map(|a| (*a, Effect::Allow)).collect() })
     }
 }
 
@@ -1850,7 +1850,7 @@ impl Access {
         roll_auth::scope::PRODUCTS
             .iter()
             .filter_map(|p| {
-                let rule = roll_auth::scope::Rule { product: (*p).to_string(), resources: roll_auth::scope::Resources::All, environments: None, paths: None, unprotected: false, actions: [(roll_auth::scope::Action::Read, roll_auth::scope::Effect::Allow)].into_iter().collect() };
+                let rule = roll_auth::scope::Rule { product: (*p).to_string(), resources: roll_auth::scope::Resources::All, environments: None, paths: None, unprotected: false, keys: None, actions: [(roll_auth::scope::Action::Read, roll_auth::scope::Effect::Allow)].into_iter().collect() };
                 cap(&roll_auth::scope::Scope(vec![rule])).map(|(d, why)| (*p, d, why))
             })
             .collect()

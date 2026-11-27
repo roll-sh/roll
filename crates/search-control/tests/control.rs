@@ -7547,8 +7547,9 @@ async fn index_apis_authorize_the_indices_their_wildcards_reach() {
 
 /// Elasticsearch: what reads or writes beyond the request's own indices takes the caller's
 /// privileges there. A local ES|QL `ENRICH` needs `monitor_enrich` (its policy's table is read
-/// by the system); a connector aimed at another index needs write there (its syncs write as
-/// whoever aimed it); SQL's `SHOW TABLES` lists only what the caller may read.
+/// by the system); a connector aimed at another index takes only `manage_connector`, as in
+/// Elasticsearch, and its syncs then write as whoever aimed it (so as them, refused where they
+/// may not write); SQL's `SHOW TABLES` lists only what the caller may read.
 #[tokio::test]
 async fn enrich_connectors_and_show_tables_take_the_callers_privileges() {
     use reqwest::Method;
@@ -7575,12 +7576,16 @@ async fn enrich_connectors_and_show_tables_take_the_callers_privileges() {
     let (s, v) = e.es(user, "u-password-1", Method::POST, "/_query", Some(enrich)).await;
     assert_eq!(s, 403, "{v}");
     assert!(v.to_string().contains("resolve_policy") && !v.to_string().contains("s-of-b"), "{v}");
+    let syncs_as = || {
+        let st = e.control.node.get_loaded("indirect").unwrap().cluster.state();
+        st.metadata.xpack.get(search_es::xpack::entsearch::sync::RECORDS, "c1").and_then(|r| r.pointer(&["user", "username"]).cloned())
+    };
+    assert_eq!(syncs_as(), None, "aimed by the cluster's owner: its syncs run as the cluster's own");
     let (s, v) = e.es(user, "u-password-1", Method::PUT, "/_connector/c1/_index_name", Some(json!({"index_name": "content-b"}))).await;
-    assert_eq!(s, 403, "aimed at another index: {v}");
+    assert_eq!(s, 200, "aimed at another index: {v}");
+    assert_eq!(syncs_as(), Some(search_es::json::Value::from("u")), "its syncs write as whoever aimed it");
     let (s, v) = e.es(user, "u-password-1", Method::PUT, "/_connector/c1", Some(json!({"index_name": "content-b", "is_native": false}))).await;
-    assert_eq!(s, 403, "put again, aimed at another index: {v}");
-    let (_, v) = e.es(&owner, &pw, Method::GET, "/_connector/c1", None).await;
-    assert_eq!(v["index_name"], "content-a", "{v}");
+    assert_eq!(s, 200, "put again, aimed at another index: {v}");
     let (s, v) = e.es(user, "u-password-1", Method::POST, "/_sql?format=json", Some(json!({"query": "SHOW TABLES"}))).await;
     assert_eq!(s, 200, "{v}");
     let names: Vec<&str> = v["rows"].as_array().unwrap().iter().filter_map(|r| r[1].as_str()).collect();
@@ -7941,6 +7946,17 @@ async fn otlp_logs_land_in_otel_data_streams_with_an_otel_key() {
     assert_eq!(hits[0]["_source"]["resource"]["attributes"]["service.name"], "checkout", "{v}");
     assert!(hits[0]["_index"].as_str().unwrap().contains("logs-generic.otel-default"), "{v}");
     assert!(hits[1]["_index"].as_str().unwrap().contains("logs-web.otel-default"), "{v}");
+    // Traces too: a span into traces-*.otel-*, its event a log line beside it.
+    let trace = json!({"resourceSpans": [{"scopeSpans": [{"spans": [{"traceId": "abababababababababababababababab", "spanId": "0101010101010101",
+        "name": "GET /cart", "kind": 2, "startTimeUnixNano": "1700000002000000000", "endTimeUnixNano": "1700000002250000000",
+        "events": [{"timeUnixNano": "1700000002100000000", "name": "exception"}]}]}]}]});
+    let r = e.http.post(format!("{}/_otlp/v1/traces", e.es)).header("authorization", format!("ApiKey {key}")).json(&trace).send().await.unwrap();
+    assert_eq!((r.status().as_u16(), r.text().await.unwrap()), (200, "{}".to_string()));
+    assert_eq!(e.es(&u, &p, Method::POST, "/traces-*.otel-*,logs-*.otel-*/_refresh", None).await.0, 200);
+    let (_, v) = e.es(&u, &p, Method::POST, "/traces-*.otel-*/_search", None).await;
+    assert_eq!((&v["hits"]["hits"][0]["_source"]["duration"], &v["hits"]["hits"][0]["_source"]["kind"]), (&json!(250000000), &json!("Server")), "{v}");
+    let (_, v) = e.es(&u, &p, Method::POST, "/logs-*.otel-*/_search", Some(json!({"query": {"term": {"event_name": "exception"}}}))).await;
+    assert_eq!(v["hits"]["hits"][0]["_source"]["trace_id"], "abababababababababababababababab", "{v}");
     // The key writes and never reads (a wildcard would just find nothing it may read).
     let (s, v) = as_key(&e, &key, Method::POST, "/logs-generic.otel-default/_search", None).await;
     assert_eq!(s, 403, "{v}");
@@ -7951,7 +7967,8 @@ async fn otlp_logs_land_in_otel_data_streams_with_an_otel_key() {
     let (status, text) = (r.status().as_u16(), r.text().await.unwrap());
     assert_eq!(e.es(&u, &p, Method::POST, "/logs-*.otel-*/_refresh", None).await.0, 200);
     let (_, v) = e.es(&u, &p, Method::POST, "/logs-*.otel-*/_count", None).await;
-    assert_eq!((status, &v["count"]), (403, &json!(2)), "the read key's write: {text}");
+    // Two log records and the trace's event; the read key's write added nothing.
+    assert_eq!((status, &v["count"]), (403, &json!(3)), "the read key's write: {text}");
 }
 
 /// `cluster.max_shards_per_node`: creating or opening past it is refused with Elasticsearch's

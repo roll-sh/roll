@@ -1782,10 +1782,15 @@ deterministic (#396).
    #1163. Next: judgment lists kept as indices, built from clicks, and OpenSearch's Search
    Relevance Workbench (in progress). Left: the `roll_` rule types and
    dynamic re-ranking.
-16. **Cold start at size**: the 19.8 ms cold start is a 50k-document index from local cache;
-   nothing measures the first query and p99 on a node with an empty cache for 1, 10 and 50 GB
-   indices loaded from object storage, or on Graviton. Buyers comparing always-on Typesense or Algolia
-   will ask (benchmark lane).
+16. **Cold start at size**: the 19.8 ms cold start is a 50k-document index from local cache.
+   Measured at 1M documents (docs/benchmarks/search.md, "Cold start at size"): a wake from the
+   local cache answers its first query in 18-24 ms; a node with an empty disk, reading everything
+   from object storage (MinIO on the same host, so a lower bound), in 180-365 ms, the whole index
+   downloaded before the first query because what a shard reads at open is spread over every part
+   of every segment. Making doc values and points lazy, fetching waited-for ranges exactly and
+   holding bulk downloads during the wake took 18% off the first query (48% off the first write):
+   kept out for now. Left: the same on S3 and for 10 and 50 GB indices, p99, Graviton, and the
+   first query's own ranges after a short wake.
 17. **Private networking and customer keys** (design in
    [private-networking.md](private-networking.md); Elastic Cloud PrivateLink traffic filters and BYOK,
    AWS OpenSearch VPC domains and KMS): the data plane is public with IP allowlists; roll apps and
@@ -1804,7 +1809,8 @@ deterministic (#396).
      enforced, as Elasticsearch and OpenSearch do, on every create (explicit, auto-create, a data
      stream's backing index, rollover), on opening closed indices, and on restore, resize and
      downsample targets, so an `otel` key can't add data streams past it.
-   - OTLP traces and metrics, and OTLP over gRPC.
+   - OTLP metrics and OTLP over gRPC. Traces are in review (`feature/search-otlp-traces`: spans into
+     `traces-*.otel-*`, their events as log lines, on the logs intake's machinery).
    - `_plugins/_alerting` on OpenSearch-flavor clusters.
    - Visualizations.
 19. **Vector search's footprint** (docs/benchmarks/search.md, "Vector search": 1M × 384 against

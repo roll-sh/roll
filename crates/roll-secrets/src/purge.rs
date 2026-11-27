@@ -15,7 +15,7 @@ impl Secrets {
     /// but the current one). Returns how many were purged.
     pub fn purge(&self, project: &str, slug: &str, path: &str, key: &str, before_version: Option<i64>, caller: &Caller) -> Result<i64> {
         let path = names::path(path)?;
-        caller.need(Action::Admin, &Scope::at(project, slug, &path))?;
+        caller.need(Action::Admin, &Scope::at(project, slug, &path).key(key))?;
         self.project(project)?;
         let now = self.db.now_ms()?;
         self.db.write(|c| {

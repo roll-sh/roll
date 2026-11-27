@@ -575,7 +575,7 @@ async fn recent_requests_are_replayed_against_mains_preview() {
     let p = e.engine.store.row_by_change("chg_rp").unwrap().unwrap();
     let main = e.engine.store.rows(Some(&e.project)).unwrap().into_iter().find(|r| r.change_id.is_none()).unwrap();
     let line = |method: &str, path: &str| roll_previews::RequestLine { at: 1, service: "web".into(), method: method.into(), path: path.into(), status: 200, ms: 3 };
-    e.apps.request_log.lock().insert(p.id.clone(), vec![line("GET", "/api/cart"), line("GET", "/__roll/feedback.js"), line("POST", "/api/pay")]);
+    e.apps.request_log.lock().insert(p.id.clone(), vec![line("GET", "/api/cart"), line("GET", "/__roll/feedback.js"), line("POST", "/api/pay"), line("GET", "/account/logout")]);
     e.apps.request_log.lock().insert(main.id.clone(), vec![line("GET", "/api/items"), line("GET", "/api/cart")]);
     let url = e.engine.store.services(&p.id).unwrap().into_iter().find(|s| s.name == "web").unwrap().url;
     e.apps.fetched.lock().insert(format!("web {url}/api/cart"), 500);
@@ -593,7 +593,7 @@ async fn recent_requests_are_replayed_against_mains_preview() {
     }
     let done = done.expect("replayed");
     let got: Vec<(&str, u16, u16, Vec<String>)> = done.requests.iter().map(|q| (q.path.as_str(), q.status, q.main_status, q.removed.clone())).collect();
-    assert_eq!(got, vec![("/api/cart", 500, 200, vec![]), ("/api/items", 200, 200, vec!["price".to_string()])], "GETs only, each once, never roll's own paths");
+    assert_eq!(got, vec![("/api/cart", 500, 200, vec![]), ("/api/items", 200, 200, vec!["price".to_string()])], "GETs only, each once, never roll's own paths or one that signs out");
     assert!(done.requests.iter().all(|q| q.differs()), "a lost field differs as a status does");
     assert_eq!(done.ok, Some(false));
     e.engine.store.update(&p.id, |r| r.trusted = false).unwrap();
@@ -2240,15 +2240,23 @@ async fn earlier_pushes_stay_reachable_at_their_own_urls() {
     let none = |_: &str| String::new();
     e.engine.store.set_project_domain(&e.project, Some(("preview.acme.dev", true)), &none, &none).unwrap();
     e.engine.store.set_project_domain("prj_other", Some(("preview.other.dev", false)), &none, &none).unwrap();
-    assert_eq!(e.engine.store.gone_domain_push(&a, "preview.acme.dev").unwrap(), Some(gone));
+    assert_eq!(e.engine.store.gone_domain_push(&a, "preview.acme.dev").unwrap(), Some(gone.clone()));
     assert_eq!(e.engine.store.gone_domain_push(&a, "preview.other.dev").unwrap(), None);
     // An earlier push runs its own head on its own host.
     let (t, _) = e.engine.env(&p.id, "web@cs_8c").await.unwrap();
     assert_eq!(t.revision, "cs_8c");
     assert!(view.earlier.iter().any(|x| x.url.contains(&t.host)));
+    // Started again on demand from its link's page: kept in place of the oldest, at its link.
+    let url = e.engine.restart_push(&gone, "ada").await.unwrap();
+    let kept: Vec<String> = e.engine.store.preview(&p.id).unwrap().earlier.iter().map(|x| x.revision.clone()).collect();
+    assert_eq!(kept, ["cs_8a", "cs_8d", "cs_8c"], "the oldest kept went in its place");
+    assert!(url.contains(&a) && e.engine.store.gone_push(&a).unwrap().is_none(), "its own link again, no longer gone: {url}");
+    assert!(e.apps.removed.lock().contains(&(p.id.clone(), "web@cs_8b".into())));
+    assert!(matches!(e.engine.restart_push(&gone, "ada").await, Err(roll_previews::Error::Conflict(_))), "once a minute a preview");
     // A fork's earlier heads lost their approval with the push: they don't run.
     e.engine.store.update(&p.id, |r| r.trusted = false).unwrap();
     assert!(e.engine.env(&p.id, "web@cs_8c").await.is_err());
+    assert!(e.engine.restart_push(&gone, "ada").await.is_err(), "nor start again");
     // Deleted, they all go.
     e.code.edit("chg_p", |c| c.open = false);
     e.engine.pass().await.unwrap();

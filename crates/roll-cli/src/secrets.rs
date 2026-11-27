@@ -1925,6 +1925,10 @@ pub enum Tokens {
         /// Folders it reaches (default: all).
         #[arg(long = "for-path")]
         paths: Vec<String>,
+        /// Only this key of those folders (repeatable; default: every key): it reads, lists and
+        /// writes these alone.
+        #[arg(long = "key")]
+        keys: Vec<String>,
         /// read, reveal, write, delete, admin, scan (default: read and reveal).
         #[arg(long = "action")]
         actions: Vec<String>,
@@ -2176,6 +2180,11 @@ pub struct Run {
     /// Never mask values in what the command prints.
     #[arg(long)]
     pub no_mask: bool,
+    /// Pass roll's own credentials (ROLL_ADMIN_TOKEN, ROLL_TOKEN and the like) on to the command.
+    /// By default it gets none of them unless the project sets that name itself: an app and its
+    /// dependencies never act as roll's operator or with the token that read its values.
+    #[arg(long)]
+    pub keep_roll_credentials: bool,
     /// A dotenv file whose entries join the environment's (and win over them): plain values as
     /// written, `roll://ENV/KEY` references resolved (repeatable; docs/secrets.md, "References
     /// in files").
@@ -3994,10 +4003,10 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                     let rule = t["rules"].as_array().and_then(|r| r.iter().find(|r| r["product"] == "secrets")).cloned().unwrap_or_default();
                     let actions = rule["actions"].as_object().map(|a| a.iter().map(|(k, v)| if v == "ask" { format!("{k}?") } else { k.clone() }).collect::<Vec<_>>().join(",")).unwrap_or_default();
                     let state = if t["revoked_at"].is_null() { t["last_used_at"].as_i64().map(|at| format!("used {}", ago(at))).unwrap_or_else(|| "never used".into()) } else { "revoked".into() };
-                    println!("{}  {:<20} envs {}  paths {}  {}  {}", s(&t["id"]), s(&t["name"]), list(&rule["environments"]), list(&rule["paths"]), actions, state);
+                    println!("{}  {:<20} envs {}  paths {}  keys {}  {}  {}", s(&t["id"]), s(&t["name"]), list(&rule["environments"]), list(&rule["paths"]), list(&rule["keys"]), actions, state);
                 }
             }
-            Tokens::Create { name, envs, all_environments, paths, actions, scan_only, ttl_days, no_expiry, allow_ips } => {
+            Tokens::Create { name, envs, all_environments, paths, keys, actions, scan_only, ttl_days, no_expiry, allow_ips } => {
                 let actions = if scan_only {
                     vec!["scan".to_string()]
                 } else if actions.is_empty() {
@@ -4022,6 +4031,13 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 if !paths.is_empty() {
                     rule["paths"] = json!(paths);
                 }
+                let reach = if keys.is_empty() {
+                    reach
+                } else {
+                    let named = format!("{reach}, keys {}", keys.join(", "));
+                    rule["keys"] = json!(keys);
+                    named
+                };
                 let mut body = json!({ "name": name, "rules": [rule] });
                 // The API keeps a token without `expires_at` for good: the CLI sends one unless
                 // told not to.
@@ -7380,8 +7396,12 @@ pub async fn run_command(api: &Api, r: Run) -> anyhow::Result<()> {
     if streams.any() {
         return run_masked(&r, &env, streams).await;
     }
+    let drop = roll_credentials_to_drop(&r, &env);
     let mut cmd = std::process::Command::new(crate::sys::program(&r.command[0]));
     cmd.args(&r.command[1..]).envs(env.into_iter().map(|v| (v.name, v.value)));
+    for k in &drop {
+        cmd.env_remove(k);
+    }
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -7493,7 +7513,23 @@ async fn run_masked(r: &Run, env: &[Var], streams: crate::mask::Streams) -> anyh
 fn spawn_masked(r: &Run, env: &[Var], streams: crate::mask::Streams) -> anyhow::Result<crate::mask::Running> {
     let pairs: Vec<(String, String)> = env.iter().map(|v| (v.name.clone(), v.value.clone())).collect();
     let conceal: Vec<&str> = env.iter().filter(|v| v.from_roll).map(|v| v.value.as_str()).collect();
-    crate::mask::spawn(&r.command, &pairs, &conceal, streams).with_context(|| format!("running {}", r.command[0]))
+    crate::mask::spawn(&r.command, &pairs, &roll_credentials_to_drop(r, env), &conceal, streams).with_context(|| format!("running {}", r.command[0]))
+}
+
+/// roll's own credentials in this process's environment, which the command doesn't get unless
+/// the project sets the name itself or `--keep-roll-credentials` says so.
+fn roll_credentials_to_drop(r: &Run, env: &[Var]) -> Vec<std::ffi::OsString> {
+    if r.keep_roll_credentials {
+        return Vec::new();
+    }
+    let set: std::collections::HashSet<&str> = env.iter().map(|v| v.name.as_str()).collect();
+    std::env::vars_os().filter_map(|(k, _)| k.to_str().filter(|n| is_roll_credential(n) && !set.contains(n)).map(|_| k.clone())).collect()
+}
+
+/// A `ROLL_*` variable named like a credential: a token (or a file holding one), a key, a
+/// password or a secret. `ROLL_API_URL`, `ROLL_PROJECT` and the like aren't.
+pub(crate) fn is_roll_credential(name: &str) -> bool {
+    name.starts_with("ROLL_") && ["_TOKEN", "_TOKEN_FILE", "_KEY", "_PASSWORD", "_SECRET", "_CREDENTIAL_FILE"].iter().any(|s| name.ends_with(s))
 }
 
 #[allow(clippy::too_many_arguments)]

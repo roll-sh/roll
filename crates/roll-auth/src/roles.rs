@@ -129,7 +129,7 @@ fn allow(actions: &[Action]) -> BTreeMap<Action, Effect> {
 }
 
 fn on(product: &str, project: &str, actions: &[Action]) -> Rule {
-    Rule { product: product.into(), resources: Resources::Some(vec![Selector::Project { project: project.into() }]), environments: None, paths: None, unprotected: false, actions: allow(actions) }
+    Rule { product: product.into(), resources: Resources::Some(vec![Selector::Project { project: project.into() }]), environments: None, paths: None, unprotected: false, keys: None, actions: allow(actions) }
 }
 
 /// The rules of one membership: the project itself, and each member product in it.

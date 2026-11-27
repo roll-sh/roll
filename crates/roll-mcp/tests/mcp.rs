@@ -738,7 +738,10 @@ async fn a_2026_client_is_served_without_initialize() {
     // A resource that isn't there is Invalid Params in this revision (SEP-2164; -32002 before it).
     let uri = "roll://nothing/here";
     let (_, _, out) = send(OPERATOR, 21, "resources/read", json!({ "uri": uri }), std_headers("resources/read", Some(uri))).await;
-    assert_eq!(out["error"]["code"], -32602, "{out}");
+    assert_eq!((&out["error"]["code"], &out["error"]["data"]["uri"]), (&json!(-32602), &json!(uri)), "{out}");
+    // A retry's answers that aren't answers are refused, not ignored (SEP-2322).
+    let (s, _, out) = send(OPERATOR, 22, "tools/call", json!({ "name": "postgres_list_projects", "arguments": {}, "inputResponses": { "pick": 42 } }), std_headers("tools/call", Some("postgres_list_projects"))).await;
+    assert_eq!((s, out["error"]["code"].as_i64()), (StatusCode::OK, Some(-32602)), "{out}");
 
     // Headers that don't say what the body says, or a version roll doesn't speak.
     let call = json!({ "name": "postgres_list_projects", "arguments": {} });
@@ -752,6 +755,27 @@ async fn a_2026_client_is_served_without_initialize() {
     assert_eq!((s, out["error"]["code"].as_i64(), out["error"]["data"]["supported"][0].as_str()), (StatusCode::BAD_REQUEST, Some(-32022), Some("2026-07-28")), "{out}");
     let (s, _, out) = send(OPERATOR, 6, "nonsense/method", json!({}), std_headers("nonsense/method", None)).await;
     assert_eq!((s, out["error"]["code"].as_i64()), (StatusCode::NOT_FOUND, Some(-32601)), "{out}");
+    // As the official conformance suite checks it (SEP-2575): no `_meta`, or none of its parts, is a
+    // malformed request; a header and a body that disagree, a mismatch; and the methods this
+    // revision removed with the handshake aren't there.
+    let bare = |id: u64, params: Value, version: &'static str| {
+        let d = &d;
+        async move { d.http_with(OPERATOR, Method::POST, "/v1/mcp", Some(json!({ "jsonrpc": "2.0", "id": id, "method": "tools/list", "params": params })), &[("mcp-protocol-version", version), ("mcp-method", "tools/list")]).await }
+    };
+    let (s, _, out) = bare(8, json!({}), "2026-07-28").await;
+    assert_eq!((s, out["error"]["code"].as_i64()), (StatusCode::BAD_REQUEST, Some(-32602)), "no _meta: {out}");
+    let mut no_caps = meta(json!({}));
+    no_caps.as_object_mut().unwrap().remove("io.modelcontextprotocol/clientCapabilities");
+    let (s, _, out) = bare(9, json!({ "_meta": no_caps }), "2026-07-28").await;
+    assert_eq!((s, out["error"]["code"].as_i64()), (StatusCode::BAD_REQUEST, Some(-32602)), "no capabilities: {out}");
+    let mut other = meta(json!({}));
+    other["io.modelcontextprotocol/protocolVersion"] = json!("v999.0.0");
+    let (s, _, out) = bare(10, json!({ "_meta": other }), "2026-07-28").await;
+    assert_eq!((s, out["error"]["code"].as_i64()), (StatusCode::BAD_REQUEST, Some(-32020)), "the header isn't the body's: {out}");
+    for (n, removed) in ["ping", "initialize"].into_iter().enumerate() {
+        let (s, _, out) = send(OPERATOR, 11 + n as i64, removed, json!({}), std_headers(removed, None)).await;
+        assert_eq!((s, out["error"]["code"].as_i64()), (StatusCode::NOT_FOUND, Some(-32601)), "{removed}: {out}");
+    }
 
     let (s, _, out) = send(OPERATOR, 7, "tools/call", call, std_headers("tools/call", Some("postgres_list_projects"))).await;
     assert_eq!((s, out["result"]["resultType"].as_str(), out["result"]["isError"].as_bool()), (StatusCode::OK, Some("complete"), Some(false)), "{out}");

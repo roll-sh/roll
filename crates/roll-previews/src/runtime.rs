@@ -1320,6 +1320,8 @@ pub const FEEDBACK_NOTES_PATH: &str = "/__roll/feedback.json";
 pub const GUEST_NOTE_PATH: &str = "/__roll/notes";
 /// The toolbar's Main: the page on main's preview (`?path=`), as `{url}` (a team visitor's only).
 pub const MAIN_PAGE_PATH: &str = "/__roll/main";
+/// On an earlier push's link its preview no longer keeps: start it again ([`Engine::restart_push`]).
+pub const START_PUSH_PATH: &str = "/__roll/start-push";
 /// Where the team's tests send a snapshot (`POST ?name=`, a PNG, the project's bypass secret).
 pub const SNAPSHOT_PATH: &str = "/__roll/snapshot";
 pub(crate) const FEEDBACK_TAG: &[u8] = b"<script src=\"/__roll/feedback.js\" defer></script>";
@@ -2897,28 +2899,70 @@ fn page_shots<'a>(asked: &[&String], said: &str, pngs: impl Iterator<Item = &'a 
 pub async fn route(State(rt): State<Arc<Runtime>>, req: Request, next: Next) -> Response {
     match named(&rt, &req) {
         Some((preview, service)) => serve_named(rt, preview, service, req).await,
-        None => match gone(&rt, &req) {
-            Some(page) => page,
+        None => match gone_host(&rt, &req) {
+            Some(g) => gone(&rt, g, req).await,
             None => next.run(req).await,
         },
     }
 }
 
+/// The earlier push a request's host was, if its preview no longer keeps it.
+fn gone_host(rt: &Runtime, req: &Request) -> Option<crate::store::GonePush> {
+    let host = req.headers().get(header::HOST).and_then(|h| h.to_str().ok()).map(str::to_string).or_else(|| req.uri().host().map(str::to_string))?;
+    rt.gone_for_host(&host)
+}
+
 /// An earlier push its preview no longer keeps: a page saying so (410), with the way to the
 /// current one, rather than a 404 that reads as a broken preview. It names no more than the link
 /// did (the service and its push), and the current link is the preview's own, behind its gate.
-fn gone(rt: &Runtime, req: &Request) -> Option<Response> {
-    let host = req.headers().get(header::HOST).and_then(|h| h.to_str().ok()).map(str::to_string).or_else(|| req.uri().host().map(str::to_string))?;
-    let crate::store::GonePush { service, revision, current_url: current, .. } = rt.gone_for_host(&host)?;
-    let short: String = revision.strip_prefix("cs_").unwrap_or(&revision).chars().take(10).collect();
-    let now = current.map_or_else(|| "<p>The preview no longer runs this service.</p>".to_string(), |u| format!("<p><a href=\"{}\">Open the latest push</a>.</p>", escape(&u)));
+/// A trusted, private preview's page also starts it again on demand ([`START_PUSH_PATH`]): a GET
+/// through the preview's own gate (where the link's token or roll's sign-in sets its cookie) is a
+/// page that asks, and only its own form's POST (this host's origin), from a visitor in by the
+/// link's cookie or a session of a person signed in to roll (not a share link, not the CI
+/// bypass), starts it, at most once a minute a preview. A link scanner or another site's link
+/// changes nothing.
+async fn gone(rt: &Arc<Runtime>, g: crate::store::GonePush, mut req: Request) -> Response {
+    let trusted = rt.store.row(&g.preview).is_ok_and(|r| r.trusted);
+    let private = rt.store.access(&g.preview).ok().flatten().is_some_and(|a| a.required());
+    let startable = trusted && private;
+    if req.uri().path() == START_PUSH_PATH && startable {
+        if let Some(r) = rt.gate(&g.preview, &g.service, &mut req).await {
+            return r;
+        }
+        if req.extensions().get::<ThroughRoll>().is_none() {
+            return roll_page(StatusCode::FORBIDDEN, "This push can't start again from here", "<p>Open the preview's own link first: a share link doesn't start its earlier pushes.</p>");
+        }
+        if req.method() == axum::http::Method::GET {
+            return roll_page(StatusCode::OK, "Start this push again?", &format!("<p>It runs on the preview's data now, and the oldest push of <code>{}</code> it keeps goes in its place.</p><form method=\"post\" action=\"{START_PUSH_PATH}\"><button type=\"submit\">Start it</button></form>", escape(&g.service)));
+        }
+        let host = req.headers().get(header::HOST).and_then(|h| h.to_str().ok()).unwrap_or("").to_string();
+        let origin = req.headers().get(header::ORIGIN).and_then(|h| h.to_str().ok()).unwrap_or("");
+        if req.method() != axum::http::Method::POST || origin.split_once("://").map(|(_, h)| h) != Some(host.as_str()) {
+            return (StatusCode::FORBIDDEN, "started from this page's own form only").into_response();
+        }
+        let Ok(engine) = rt.engine() else { return (StatusCode::SERVICE_UNAVAILABLE, "try again").into_response() };
+        return match engine.restart_push(&g, "a visitor").await {
+            Ok(_) => {
+                let mut r = StatusCode::SEE_OTHER.into_response();
+                r.headers_mut().insert(header::LOCATION, HeaderValue::from_static("/"));
+                r.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+                r
+            }
+            Err(e) => roll_page(StatusCode::CONFLICT, "This push can't start again", &format!("<p>{}</p>", escape(&e.to_string()))),
+        };
+    }
+    let short: String = g.revision.strip_prefix("cs_").unwrap_or(&g.revision).chars().take(10).collect();
+    let now = g.current_url.as_ref().map_or_else(|| "<p>The preview no longer runs this service.</p>".to_string(), |u| format!("<p><a href=\"{}\">Open the latest push</a>.</p>", escape(u)));
+    // The link's own query rides along: a token it carried lets its visitor in to start it.
+    let query = req.uri().query().map(|q| format!("?{q}")).unwrap_or_default();
+    let again = if startable { format!("<p><a href=\"{START_PUSH_PATH}{}\">Start this push again</a>.</p>", escape(&query)) } else { String::new() };
     let mut r = roll_page(
         StatusCode::GONE,
         "This push isn't kept any more",
-        &format!("<p>This link was <code>{}</code> at an earlier push (<code>{}</code>). A preview keeps the last {} pushes of each service; this one was replaced since.</p>{now}", escape(&service), escape(&short), crate::store::PINNED_KEEP),
+        &format!("<p>This link was <code>{}</code> at an earlier push (<code>{}</code>). A preview keeps the last {} pushes of each service; this one was replaced since.</p>{now}{again}", escape(&g.service), escape(&short), crate::store::PINNED_KEEP),
     );
     r.headers_mut().insert(header::HeaderName::from_static("x-robots-tag"), header::HeaderValue::from_static("noindex"));
-    Some(r)
+    r
 }
 
 /// A request roll apps' ingress hands on (a name under a project's own preview domain that no
@@ -2926,7 +2970,10 @@ fn gone(rt: &Runtime, req: &Request) -> Option<Response> {
 pub async fn serve_host(rt: Arc<Runtime>, req: Request) -> Response {
     match named(&rt, &req) {
         Some((preview, service)) => serve_named(rt, preview, service, req).await,
-        None => gone(&rt, &req).unwrap_or_else(|| (StatusCode::NOT_FOUND, "no such preview").into_response()),
+        None => match gone_host(&rt, &req) {
+            Some(g) => gone(&rt, g, req).await,
+            None => (StatusCode::NOT_FOUND, "no such preview").into_response(),
+        },
     }
 }
 
@@ -3270,6 +3317,23 @@ mod tests {
         assert!(raw(post("https://evil.example")).await.starts_with("HTTP/1.1 403"), "another site's page posts nothing");
         rt.store.revoke_share(&row.id, &share.id).unwrap();
         assert!(raw(with_share).await.starts_with("HTTP/1.1 401"), "revoked: out at once");
+        // An earlier push past the last three: its link says it's gone and offers to start it
+        // again, which only a visitor the preview's gate lets in may ask.
+        let url = |h: &str| format!("http://{h}.preview.test");
+        rt.store.pin(&row.id, "web", "cs_old", &url).unwrap();
+        let old_host = rt.store.pinned(&row.id).unwrap().into_iter().find(|p| p.revision == "cs_old").unwrap().url.split("://").nth(1).unwrap().to_string();
+        for rev in ["cs_p1", "cs_p2", "cs_p3"] {
+            rt.store.pin(&row.id, "web", rev, &url).unwrap();
+        }
+        let gone_page = raw(format!("GET / HTTP/1.1\r\nHost: {old_host}\r\nConnection: close\r\n\r\n")).await;
+        assert!(gone_page.starts_with("HTTP/1.1 410") && gone_page.contains("/__roll/start-push"), "{gone_page}");
+        assert!(raw(format!("GET /__roll/start-push HTTP/1.1\r\nHost: {old_host}\r\nConnection: close\r\n\r\n")).await.starts_with("HTTP/1.1 401"), "not without the preview's access");
+        // Through the link's cookie, a GET only asks (a link scanner changes nothing), and a POST
+        // from another origin is refused.
+        let ask = raw(format!("GET /__roll/start-push HTTP/1.1\r\nHost: {old_host}\r\nCookie: roll_access_{}={token}\r\nConnection: close\r\n\r\n", row.id)).await;
+        assert!(ask.starts_with("HTTP/1.1 200") && ask.contains("method=\"post\""), "{ask}");
+        let forged = raw(format!("POST /__roll/start-push HTTP/1.1\r\nHost: {old_host}\r\nOrigin: https://evil.example\r\nCookie: roll_access_{}={token}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", row.id)).await;
+        assert!(forged.starts_with("HTTP/1.1 403"), "{forged}");
         // A webhook URL: its one path only, the service never seeing its token, no cookie; it
         // isn't a share link, and it's out at once when revoked.
         let (hook, htoken) = rt.store.create_webhook(&row.id, "web", "/hooks/stripe", "ada", None, "Stripe").unwrap();
