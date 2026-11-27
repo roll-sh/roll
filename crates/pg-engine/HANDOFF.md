@@ -10627,6 +10627,115 @@ and confirm on PGO:
 Agent 218's short-transaction stack (ten steps, `wip/a218`) was gated this way and landed: BENCH
 "Profile-guided build", part 2.
 
+## Bulk writes, round 29: what the bulk DELETE's forced compaction costs; a deletion run's entries written without making their keys, dropped (agent 344)
+
+BENCH "Bulk writes, round 29" has the measurements (lane C, agent 321's bulk script with joined
+windows, `~/.cache/a344/bench`). No code kept: the one change measured (below) wins on the plain
+build and not on the shipped one. Plain dist builds: **b0** origin's `19c7a8758`, **n1** the change
+(`SstWriter::add_deletion`, `~/.cache/a344/patches/deletion-run-writer.patch`); **x0** a plain build of
+`e3f93d1a4` (same DELETE and storage code) for the profiles; PGO builds by `tools/dist-pgo.sh`. The script's DELETE is `DELETE FROM bulk WHERE id % 4 = 1`: 250,000 of 1M rows (750,000
+survive; the brief's "750,000 of 1M deleted" is the survivors), after `UPDATE ... WHERE id % 2 = 0`
+gave every even id a new version.
+
+**Where the 6.73 G goes** (x0, `perf record -e instructions:upp -c 20011` of the step's window,
+split by thread; the step 6.737 G, as round 28's 6.72):
+- The statement (connection thread), 2.65 G (39%): the scan merging the table's L1 rows with the
+  UPDATE's run (`zip_rows`, 0.43 G), the filter `id % 4 = 1` on stored values (`passes_with`,
+  `filter_kernel`, `IntOp::apply`: 0.29 G, about 290 instructions a row), the batch's locks, marks,
+  sizing and index entries (about 0.6 G), and the 750,000 deletions it defers (the row's and its two
+  index entries') sorted and written as three runs (`put_entry_deletes`, the sort, `SstWriter::add`,
+  the row run's filter: 0.51 G, about 680 instructions a deletion).
+- The compaction its deletions force at commit (`deletions_due`, the flush thread), 4.07 G (61%). It
+  merges the table's 1M stored rows, the UPDATE's 500,000 versions and the 250,000 row deletions
+  (1.75M entries) into 750,000 rows (one 13.2 MB file); both index files are only marked
+  (`mark_dead`, not visible in the profile). Its write side is 2.35 G: zstd's compression of the
+  40.4 MB of raw blocks 1.67 G (`compressBlock_fast_dictMatchState` alone 0.88 G; 42 instructions a
+  raw byte), `add_from` 0.29 G, the output's filter 0.14 G, ending outputs 0.13 G. Its read side
+  about 1.5 G: decompression 0.29 G, `Block::read` 0.22 G, `zip_entries` 0.43 G, `Compacted::entry`
+  0.18 G, the merge loop and cursors about 0.4 G (about 850 instructions an input entry).
+- So the compaction is the UPDATE's versions merged into the table, paid once at the DELETE (round
+  27: deferring it costs every later read more; not retried), and most of it is compressing the
+  750,000 rows written again.
+
+**The brief's ideas, measured or ruled out:**
+1. Copying a block whose rows are all unchanged (agent 292's `copy_blocks`): none here. With every
+   even id updated and every `id % 4 = 1` deleted, every 8 kB block of the table has new versions and
+   deletions; the copy needs a block no other input meets.
+2. Dropping a block whose every row is deleted without reading it: none here either (a quarter of
+   each block's rows goes). Both would apply to a DELETE of a key range, not to this predicate.
+3. Survivors copied as stored bytes without re-encoding rows: they already are. The compaction moves
+   each entry's key and value bytes (`zip_entries` -> `SstWriter::add_from`); no row is decoded.
+4. A lighter compression for this rewrite (offline, `~/.cache/a344/tools/zexp4.py`: the output file's
+   5,230 raw blocks compressed again by libzstd 1.5.7, user instructions by perf, three passes):
+
+   | setting | instructions a pass | bytes | |
+   |---|---:|---:|---|
+   | level 1 with the file's dictionary (now) | 1.72 G | 12,079,259 | |
+   | the same, minMatch 5 | 1.72 G | 11,879,855 | -1.7% bytes, same cost |
+   | hashLog 12 / 14 / 16 | 1.73 / 1.71 / 1.71 G | 12.04 / 12.13 / 12.15 M | |
+   | strategy dfast | 1.83 G | 11,859,629 | |
+   | the dictionary copied, not attached | 1.96 G | 12,671,425 | worse both ways |
+   | no dictionary | 1.48 G | 12,475,678 | -14% instructions, +3.3% bytes |
+   | acceleration 2 / 4 (`targetLength`) | 1.18 / 0.97 G | 14.52 / 17.38 M | +20% / +44% bytes |
+   | level -1 with the dictionary | 1.36 G | 12,839,166 | -21% instructions, +6.3% bytes |
+
+   No setting is cheaper without writing more: level 1 with the dictionary is at its floor (as agent
+   228 found before dictionaries). Not changed. minMatch 5 is a free 1.7% of bytes at the same
+   cost for these rows (left: measure it on TPC-H's and the accounts' files before taking it).
+5. The DELETE writing the table's new file from its own scan, so nothing reads the table a second
+   time: worth at most the compaction's read side, about 1.5 G (22% of the step); the write side
+   (2.35 G) moves into the statement. Not built: (a) the rows that survive never reach the DELETE: the
+   scan's filter drops them inside `ScanNode` (`each_keyed` hands only rows that pass), so the scan
+   would have to hand every row's stored entry to a writer; (b) a `RowBatch` holds user keys without
+   their versions, which the file needs (each survivor's newest version as stored); (c) the file may
+   replace the table's inputs only if they are exactly what the scan read: no file in the table's
+   range newer than the statement's snapshot, no other writer's key in it since (memtable, L0), the
+   same L1 files still in place, nothing of the transaction's own written there after the statement,
+   and the horizon past the commit when the compaction installs it (else the file is thrown away and
+   the work wasted); (d) building it is a bet: on a DELETE of a few rows of a table the compaction
+   would only mark, it is a whole rewrite for nothing. Both (a) and (b) change every scan's batch
+   (agent 311's format 5 rows are in the same structures). Left, with this plan.
+
+**Measured and dropped: a deletion run's entries without making their keys** (`storage/sst.rs`
+`SstWriter::add_deletion`, `txn/spill.rs` `write_delete_run`; the patch above): a
+DELETE's deferred deletions are written as runs of one version (`Runs::write_deletes`). Each was made
+into a key (the user key copied with the version after it) and handed to `add`, the general writer's
+entry for every file. `add_deletion` takes the user key and the version as they are and writes the
+same entry: the bytes it shares with the key before from the user keys, the varints, the key's tail,
+the filter's hash, block ends, with none of `add_from`'s paths for values, derived values, copied
+blocks or a compaction's known keys; `prev_key` keeps only the changed tail. A key it can't write that
+way (a version other than its block's, or a user key that is a prefix of the next) goes through `add`
+(`add_deletion_slow`). The files are the same bytes: test `sst::tests::deletion_runs_are_adds` (rows
+with a filter, index entries without, several blocks, prefix keys and 300-byte keys, both writers'
+metadata and file bytes compared, passes).
+- Plain dist, two pairs (both orders): the DELETE with its compaction 6.731 -> 6.653 G (-1.16%, both
+  pairs to the instruction), the count after it 0.353 both; the whole script once each -0.10% (every
+  step within 0.1% but the two index builds, +0.17 / +0.15%, which don't run the changed code: two
+  more pairs of them read b0 3.016-3.025 / 2.669-2.677 against n1 3.017-3.021 / 2.673-2.677, level).
+  Only `put_entry_deletes` changed size (the new code is inlined into it), plus the cold fallback.
+- PGO: with the head's profile (`--profdata`, so the pair differs by the change alone) the changed
+  `put_entry_deletes` loses its counts (staleness 1.58% of the hot functions' counts) and the DELETE
+  reads 5.948 -> 5.987 G (+0.66%). With its own training (`--out`, the shipped recipe, staleness 0) two
+  pairs read 5.947 / 5.948 -> 5.941 / 5.940 (-0.12%), while the count after the DELETE, which doesn't
+  run the code, moved 0.352 -> 0.360 (+2.3%) from the training alone. So the shipped build gains
+  nothing past a training's own spread: the profile already lays out `add_from`'s deletion path
+  (no value, no copied block) as the hot one. Dropped.
+- Its checks passed and are recorded for whoever takes it up: `tools/quick-check.sh` with
+  `QC_CHECKED=1` and `big_tables crash_bulk storage_linked_gc` on `706c93cc4` (the code on `19c7a8758`):
+  Clippy 16 warnings, none new in a changed file; 429 tests in 20 binaries, again `--profile
+  verify-checked`; crash seeds 1-3 x 2, power_cut_at_every_point; regress 51,148 / 51,150, 0 newly
+  differing; isolation 1,647 / 1,648; pg_dump_tap 14,609 passed. `tools/crash-binary.py` seeds 1-3 and
+  `--power drop` seeds 1-3 against n1: ok.
+
+**Left:**
+1. The statement's deletions cost about 680 instructions each on the plain build (the sort,
+   `put_entry_deletes` gathering them, `add`, the row run's filter); a cheaper writer alone doesn't
+   show on PGO (above), so what is left there is the sort and the gathering. The filter `id % 4 = 1`
+   about 290 a row (the generic kernel's i128 arithmetic and a call a row).
+2. The no-second-pass file (idea 5 above), about 1.5 G at most.
+3. zstd minMatch 5 (idea 4): measure the bytes on the other data sets.
+4. count(*) after the DELETE (1.73x pgrust: the format 4 column decode, round 27).
+
 ## Bulk writes, round 28: a bulk DELETE's rows in batches (agent 321)
 
 BENCH "Bulk writes, round 28" has the measurements (lane C, plain dist, agent 315's bulk script with

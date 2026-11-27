@@ -1185,6 +1185,98 @@ client, (I30 s - I10 s) / (ops30 - ops10) of the server's cgroup): 54,633 -> 54,
 <- 56,440 (n3 first), 55,969 -> 53,588: +0.4%, +1.1%, -4.3%, foreign load 2.2-3.6 cores; b0 alone
 ranges 54.6-56.0 k. Noise: no aggregate runs in a point select.
 
+## Bulk writes, round 29: the bulk DELETE's compaction by thread and function, zstd's settings offline, a deletion run's entries (dropped) (2026-11-27, agent 344)
+
+HANDOFF "Bulk writes, round 29" has what it means. Lane C, agent 321's bulk script with joined windows
+(`~/.cache/a344/bench`: `dpair.sh` the script through the count after the DELETE, measuring those two
+steps; `wpair.sh` the whole script; `ipair.sh` through the two index builds). Plain dist builds
+(`tools/dist.sh`): **b0** origin's `19c7a8758`, **n1** the change measured and dropped
+(`~/.cache/a344/patches/deletion-run-writer.patch`; sha256 `aade2078...` / `0f7b0f90...`); **x0** a plain build of `e3f93d1a4` for the profiles. G user instructions of the
+server's cgroup; every counter ran 100% of its window. Foreign load on the server CPUs 2.9-3.9 cores
+in every run (lane.sh: 6.4-7.7 on the lane's 8): instruction counts only, which repeat to 0.001 G on a
+build.
+
+### The DELETE of 250,000 of 1M rows with its compaction, and the count after it (one hold a pair)
+
+| pair | DELETE b0 | DELETE n1 | % | count after b0 / n1 |
+|---|---:|---:|---:|---|
+| b0 / n1 | 6.731 | 6.653 | -1.16 | 0.353 / 0.353 |
+| n1 / b0 | 6.731 | 6.653 | -1.16 | 0.353 / 0.353 |
+| whole script (below) | 6.732 | 6.653 | -1.17 | 0.353 / 0.353 |
+
+Sizes after the DELETE and after VACUUM equal (102,408,192 / 166,289,408 bytes; data directory 46.8 /
+47.8 MB), MB written by the step 52.7 both.
+
+### The whole script once each (b0 then n1, one hold)
+
+| step | b0 | n1 | % |
+|---|---:|---:|---:|
+| COPY in | 6.408 | 6.408 | 0.00 |
+| CREATE INDEX | 3.016 | 3.021 | +0.17 |
+| CREATE UNIQUE INDEX | 2.669 | 2.673 | +0.15 |
+| COPY out | 2.358 | 2.358 | 0.00 |
+| INSERT ... SELECT | 4.434 | 4.434 | 0.00 |
+| UPDATE half | 12.396 | 12.396 | 0.00 |
+| DELETE a quarter, with its compaction | 6.732 | 6.653 | -1.17 |
+| VACUUM | 1.722 | 1.717 | -0.29 |
+| ANALYZE | 0.473 | 0.469 | -0.85 |
+| count after | 0.353 | 0.353 | 0.00 |
+| TRUNCATE, DROP | 0.073 | 0.074 | |
+| COPY, primary key and index | 18.227 | 18.230 | +0.02 |
+| COPY, index only | 12.916 | 12.922 | +0.05 |
+| **all steps** | 71.777 | 71.708 | -0.10 |
+
+Rows, sums and ctid hashes equal; MB written all steps 354.4 / 384.3 (COPY with a primary key 67.5 / 122.4
+and COPY index only 42.5 / 58.5: when their compactions fell in the window; the UPDATE's 104.5 /
+63.5 the other way); data directory after 48 MB both; peak anon+shmem 230.0 / 231.0 MB, VmHWM 276.8 /
+278.1. The index builds don't run the changed code (every function but `put_entry_deletes` has b0's
+size in n1); run again as two pairs in both orders (`ipair.sh`): CREATE INDEX b0 3.025 / 3.022, n1
+3.017 / 3.020; CREATE UNIQUE INDEX b0 2.674 / 2.677, n1 2.677 / 2.675: level.
+
+### The same on PGO builds (`tools/dist-pgo.sh`, one hold a pair)
+
+**pgo** = the standing's shipped build of `19c7a8758` (BENCH "Standing, 2026-11-27"); **pn1** = n1 by
+`--profdata` of the same profile (the changed `put_entry_deletes` lost its counts: staleness 1.58% of
+the hot functions' counts); **pt1** = n1 with its own training (`--out`, staleness 0).
+
+| pair | DELETE | count after |
+|---|---|---|
+| pgo / pn1 | 5.948 -> 5.987 (+0.66%) | 0.352 / 0.352 |
+| pgo / pt1 | 5.947 -> 5.941 (-0.10%) | 0.352 / 0.360 |
+| pt1 / pgo | 5.940 / 5.948 (-0.13%) | 0.360 / 0.352 |
+
+The count after the DELETE doesn't run the changed code: its +2.3% on pt1 is the trained builds'
+own spread, larger than the DELETE's -0.12%. Dropped (HANDOFF).
+
+### Where the step's instructions go (x0, `instructions:upp -c 20011`, by thread)
+
+| thread | G | of it |
+|---|---:|---|
+| connection (the statement) | 2.65 | `zip_rows` 0.43, the filter (`passes_with`, `filter_kernel`, `IntOp::apply`) 0.29, the deferred deletions (`put_entry_deletes`, the sort, `SstWriter::add_from`, the run's filter) 0.51, the batch's locks, marks, sizing, index entries and row decode about 0.6 |
+| flush (the compaction) | 4.07 | zstd compression 1.67 (`ZSTD_compressBlock_fast_dictMatchState` 0.88), decompression 0.29, `zip_entries` 0.43, `SstWriter::add_from` 0.29, `Block::read` 0.22, `Compacted::entry` 0.18, `compact_within` 0.15, the output's filter (`bloom_set`) 0.14, `end_before` / `would_end` 0.13 |
+
+The compaction (one, at the DELETE's commit: `compacted files=3 marked=2`) writes the table's
+750,000 rows into one 13.2 MB file (5,230 blocks, 40.4 MB raw) from 1M stored rows, the UPDATE's
+500,000 versions and 250,000 row deletions; both index files are marked.
+
+### zstd on the compaction's output, offline (`~/.cache/a344/tools/zexp4.py`)
+
+The output file's 5,230 blocks decompressed with its dictionary and compressed again by libzstd 1.5.7
+(the version `zstd-sys` builds), three passes; user instructions of the process by perf (attached after
+the file is read), a pass:
+
+| setting | G instructions | bytes | vs now |
+|---|---:|---:|---|
+| level 1, the file's dictionary (now) | 1.717 | 12,079,259 | |
+| minMatch 5 | 1.716 | 11,879,855 | -1.7% bytes |
+| minMatch 6 (level 1's own) / 7 | 1.717 / 1.726 | 12,079,259 / 12,318,215 | |
+| hashLog 12 / 14 / 16 | 1.730 / 1.714 / 1.711 | 12,036,222 / 12,127,049 / 12,146,557 | |
+| strategy dfast | 1.833 | 11,859,629 | +6.8% instructions |
+| the dictionary copied, not attached (`forceAttachDict` copy) | 1.959 | 12,671,425 | +14% / +4.9% |
+| no dictionary | 1.475 | 12,475,678 | -14% / +3.3% |
+| level -1, the dictionary | 1.355 | 12,839,166 | -21% / +6.3% |
+| acceleration 2 / 4 (`targetLength`) | 1.180 / 0.970 | 14,524,804 / 17,382,540 | +20% / +44% bytes |
+
 ## Bulk writes, round 28: a bulk DELETE's rows in batches (2026-11-25, agent 321)
 
 HANDOFF "Bulk writes, round 28" has what changed. Lane C, agent 315's harness copied to
