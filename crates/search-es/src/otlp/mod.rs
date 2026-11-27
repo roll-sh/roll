@@ -35,7 +35,7 @@ pub const PROTOBUF: &str = "application/x-protobuf";
 pub const MAX_JSON_BODY: usize = 4 * 1024 * 1024;
 /// What a parsed JSON tree may cost per byte of its text: an empty object (`{}`, 2 bytes) is a
 /// `Value` and its slot, about 100 bytes.
-const JSON_TREE_FACTOR: u64 = 64;
+const JSON_TREE_FACTOR: u64 = 80;
 
 /// Whether `content_type` names OTLP's protobuf encoding.
 pub fn is_protobuf(content_type: Option<&str>) -> bool {

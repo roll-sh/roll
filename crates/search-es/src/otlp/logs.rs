@@ -126,18 +126,18 @@ impl Budget {
         }
     }
 
+    /// A kept string of the record (or context) being built.
+    fn text(&mut self, bytes: usize) -> Result<(), Fail> {
+        self.record_bytes += bytes as u64;
+        self.charge(bytes as u64)
+    }
+
     /// The record was written out (or rejected): its values are given back.
     fn record_done(&mut self) {
         let n = std::mem::take(&mut self.record_bytes);
         let from_owed = n.min(self.owed);
         self.owed -= from_owed;
         self.held.release(n - from_owed);
-        self.record_values = 0;
-    }
-
-    /// A resource's or scope's values stay for its records: they leave the record's account.
-    fn keep_record(&mut self) {
-        self.record_bytes = 0;
         self.record_values = 0;
     }
 
@@ -209,6 +209,22 @@ fn bounded(s: &str, batch: &mut Batch) -> String {
 /// A short string field (names, versions, severity text) as kept.
 fn short(s: &str, batch: &mut Batch) -> String {
     bounded(s, batch)
+}
+
+/// [`short`], charged to the record (or context) being built.
+fn text(s: &str, budget: &mut Budget, batch: &mut Batch) -> Result<String, Fail> {
+    let kept = short(s, batch);
+    budget.text(kept.len())?;
+    Ok(kept)
+}
+
+macro_rules! stop {
+    ($e:expr) => {
+        match $e {
+            Ok(v) => v,
+            Err(f) => return Step::Stop(f),
+        }
+    };
 }
 
 macro_rules! step {
@@ -365,12 +381,17 @@ fn any_json(v: &Value, depth: usize, budget: &mut Budget, batch: &mut Batch) -> 
     }
     if let Some(b) = get("bytesValue", "bytes_value") {
         let s = b.as_str().unwrap_or_default();
-        let cap = MAX_VALUE_BYTES * 4 / 3;
-        if s.len() > cap {
-            batch.truncated += 1;
-            return Step::Ok(Value::from(&s[..cap - cap % 4]));
+        // Base64 is ASCII: anything else isn't a bytes value (and can't be cut by byte).
+        if !s.is_ascii() {
+            return Step::Reject(Rejected("a bytesValue that isn't base64".into()));
         }
-        return Step::Ok(Value::from(s));
+        let cap = MAX_VALUE_BYTES * 4 / 3;
+        let kept = &s[..s.len().min(cap - cap % 4)];
+        if kept.len() < s.len() {
+            batch.truncated += 1;
+        }
+        step!(budget.bytes(kept.len()));
+        return Step::Ok(Value::from(kept));
     }
     Step::Ok(Value::Null)
 }
@@ -396,6 +417,33 @@ struct Context {
     schema_url: Option<String>,
     name: Option<String>,
     version: Option<String>,
+}
+
+/// A resource or scope as its records use it: the routing attributes, and its document part's
+/// JSON rendered once, charged once, and spliced into each record's text (so a record costs its
+/// own size, never its context's again). Its charge goes back when the next one replaces it.
+#[derive(Debug, Default)]
+struct Rendered {
+    dataset: Option<String>,
+    namespace: Option<String>,
+    json: String,
+}
+
+/// A context's tree as rendered: its JSON charged, then its tree's charge given back.
+fn render(c: Context, scope: bool, budget: &mut Budget) -> Result<Rendered, Fail> {
+    let pick = |k: &str| c.attributes.get(k).and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_string);
+    let (dataset, namespace) = (pick("data_stream.dataset"), pick("data_stream.namespace"));
+    let json = context_json(c, scope).to_json();
+    budget.ndjson(json.len())?;
+    budget.record_done();
+    Ok(Rendered { dataset, namespace, json })
+}
+
+/// A rendered context's charge given back (another replaces it).
+fn drop_rendered(r: &Result<Rendered, String>, budget: &mut Budget) {
+    if let Ok(r) = r {
+        budget.sent(r.json.len());
+    }
 }
 
 #[derive(Debug, Default)]
@@ -425,19 +473,22 @@ fn sanitize(s: &str, max: usize) -> String {
     out
 }
 
-fn routing(rec: &Record, scope: &Context, resource: &Context, key: &str) -> Option<String> {
-    [&rec.attributes, &scope.attributes, &resource.attributes].into_iter().find_map(|m| m.get(key).and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_string))
+fn routing(rec: &Record, scope: &Rendered, resource: &Rendered, dataset: bool) -> Option<String> {
+    let key = if dataset { "data_stream.dataset" } else { "data_stream.namespace" };
+    let own = rec.attributes.get(key).and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_string);
+    let pick = |r: &Rendered| if dataset { r.dataset.clone() } else { r.namespace.clone() };
+    own.or_else(|| pick(scope)).or_else(|| pick(resource))
 }
 
 /// `(dataset with its .otel, namespace)`.
-fn target(rec: &Record, scope: &Context, resource: &Context) -> (String, String) {
-    let raw = routing(rec, scope, resource, "data_stream.dataset").unwrap_or_else(|| "generic".into());
+fn target(rec: &Record, scope: &Rendered, resource: &Rendered) -> (String, String) {
+    let raw = routing(rec, scope, resource, true).unwrap_or_else(|| "generic".into()).to_lowercase();
     let base = raw.strip_suffix(".otel").unwrap_or(&raw);
     let mut base = sanitize(base, 100 - ".otel".len());
     if base.is_empty() {
         base = "generic".into();
     }
-    let mut namespace = sanitize(&routing(rec, scope, resource, "data_stream.namespace").unwrap_or_default(), 100);
+    let mut namespace = sanitize(&routing(rec, scope, resource, false).unwrap_or_default(), 100);
     if namespace.is_empty() {
         namespace = "default".into();
     }
@@ -450,26 +501,26 @@ fn timestamp(nanos: u64) -> String {
     chrono::DateTime::from_timestamp(secs, sub).unwrap_or_default().format("%Y-%m-%dT%H:%M:%S%.9fZ").to_string()
 }
 
-fn context_json(c: &Context, scope: bool) -> Value {
+fn context_json(c: Context, scope: bool) -> Value {
     let mut m = Map::new();
     if scope {
-        if let Some(n) = &c.name {
-            m.insert("name".into(), Value::from(n.as_str()));
+        if let Some(n) = c.name {
+            m.insert("name".into(), Value::from(n));
         }
-        if let Some(v) = &c.version {
-            m.insert("version".into(), Value::from(v.as_str()));
+        if let Some(v) = c.version {
+            m.insert("version".into(), Value::from(v));
         }
     }
-    m.insert("attributes".into(), Value::Obj(c.attributes.clone()));
     m.insert("dropped_attributes_count".into(), Value::from(c.dropped.min(u64::from(u32::MAX))));
-    if let Some(u) = &c.schema_url {
-        m.insert("schema_url".into(), Value::from(u.as_str()));
+    m.insert("attributes".into(), Value::Obj(c.attributes));
+    if let Some(u) = c.schema_url {
+        m.insert("schema_url".into(), Value::from(u));
     }
     Value::Obj(m)
 }
 
 /// Appends a record's `create` line and document, or rejects it past [`MAX_TARGETS`].
-fn emit(out: &mut Batch, budget: &mut Budget, rec: Record, scope: &Context, resource: &Context, now_ms: i64) -> Result<(), Fail> {
+fn emit(out: &mut Batch, budget: &mut Budget, rec: Record, scope: &Rendered, resource: &Rendered, now_ms: i64) -> Result<(), Fail> {
     let (dataset, namespace) = target(&rec, scope, resource);
     let index = format!("logs-{dataset}-{namespace}");
     if !out.targets.contains(&index) {
@@ -507,8 +558,6 @@ fn emit(out: &mut Batch, budget: &mut Budget, rec: Record, scope: &Context, reso
     }
     d.insert("attributes".into(), Value::Obj(rec.attributes));
     d.insert("dropped_attributes_count".into(), Value::from(rec.dropped.min(u64::from(u32::MAX))));
-    d.insert("resource".into(), context_json(resource, false));
-    d.insert("scope".into(), context_json(scope, true));
     if let Some(t) = rec.trace_id {
         d.insert("trace_id".into(), Value::from(t));
     }
@@ -519,7 +568,16 @@ fn emit(out: &mut Batch, budget: &mut Budget, rec: Record, scope: &Context, reso
         d.insert("event_name".into(), Value::from(e));
     }
     let action = obj! { "create" => obj! { "_index" => index } }.to_json();
-    let body = doc.to_json();
+    // The resource and scope go in as rendered once ([`Rendered`]).
+    let mut body = doc.to_json();
+    body.pop();
+    for (k, v) in [("resource", &resource.json), ("scope", &scope.json)] {
+        body.push_str(",\"");
+        body.push_str(k);
+        body.push_str("\":");
+        body.push_str(v);
+    }
+    body.push('}');
     let len = action.len() + body.len() + 2;
     if !out.current.is_empty() && out.current.len() + len > CHUNK_BYTES {
         let c = std::mem::take(&mut out.current);
@@ -544,8 +602,8 @@ fn context_pb(b: &[u8], scope: bool, budget: &mut Budget, batch: &mut Batch) -> 
     for f in Fields::new(b) {
         let (n, w) = wire!(f);
         match n {
-            1 if scope => c.name = Some(short(wire!(w.string()), batch)),
-            2 if scope => c.version = Some(short(wire!(w.string()), batch)),
+            1 if scope => c.name = Some(stop!(text(wire!(w.string()), budget, batch))),
+            2 if scope => c.version = Some(stop!(text(wire!(w.string()), budget, batch))),
             n if n == attrs => {
                 if let Some((k, v)) = step!(key_value_pb(wire!(w.bytes()), 1, budget, batch)) {
                     add_attribute(&mut c.attributes, &mut c.dropped, k, v);
@@ -567,7 +625,7 @@ fn record_pb(b: &[u8], budget: &mut Budget, batch: &mut Batch) -> Step<Record> {
             1 => r.time = wire!(w.uint()),
             11 => r.observed = wire!(w.uint()),
             2 => r.severity_number = Some(wire!(w.uint()).min(24) as i64),
-            3 => r.severity_text = Some(short(wire!(w.string()), batch)),
+            3 => r.severity_text = Some(stop!(text(wire!(w.string()), budget, batch))),
             5 => r.body = Some(step!(any_pb(wire!(w.bytes()), 0, budget, batch))),
             6 => {
                 if let Some((k, v)) = step!(key_value_pb(wire!(w.bytes()), 1, budget, batch)) {
@@ -577,7 +635,7 @@ fn record_pb(b: &[u8], budget: &mut Budget, batch: &mut Batch) -> Step<Record> {
             7 => r.dropped = r.dropped.saturating_add(wire!(w.uint())),
             9 => r.trace_id = hex(wire!(w.bytes()), 16),
             10 => r.span_id = hex(wire!(w.bytes()), 8),
-            12 => r.event_name = Some(short(wire!(w.string()), batch)),
+            12 => r.event_name = Some(stop!(text(wire!(w.string()), budget, batch))),
             _ => {}
         }
     }
@@ -605,44 +663,52 @@ pub fn from_protobuf(body: &[u8], now_ms: i64, budget: &mut Budget) -> Result<Ba
         }
         let rl = w.bytes()?;
         // The resource and the schema URL may come after the scopes: read them first.
-        let mut resource: Result<Context, String> = Ok(Context::default());
+        let mut ctx: Result<Context, String> = Ok(Context::default());
         let mut schema = None;
         for g in Fields::new(rl) {
             let (gn, gw) = g?;
             match gn {
-                1 => {
-                    resource = context_or(context_pb(gw.bytes()?, false, budget, &mut out))?;
-                    budget.keep_record();
-                }
-                3 => schema = Some(short(gw.string()?, &mut out)),
+                1 => ctx = context_or(context_pb(gw.bytes()?, false, budget, &mut out))?,
+                3 => schema = Some(text(gw.string()?, budget, &mut out)?),
                 _ => {}
             }
         }
-        if let Ok(r) = &mut resource {
-            r.schema_url = schema;
-        }
+        let resource = match ctx {
+            Ok(mut c) => {
+                c.schema_url = schema;
+                Ok(render(c, false, budget)?)
+            }
+            Err(why) => {
+                budget.record_done();
+                Err(why)
+            }
+        };
         for g in Fields::new(rl) {
             let (gn, gw) = g?;
             if gn != 2 {
                 continue;
             }
             let sl = gw.bytes()?;
-            let mut scope: Result<Context, String> = Ok(Context::default());
+            let mut ctx: Result<Context, String> = Ok(Context::default());
             let mut schema = None;
             for h in Fields::new(sl) {
                 let (hn, hw) = h?;
                 match hn {
-                    1 => {
-                        scope = context_or(context_pb(hw.bytes()?, true, budget, &mut out))?;
-                        budget.keep_record();
-                    }
-                    3 => schema = Some(short(hw.string()?, &mut out)),
+                    1 => ctx = context_or(context_pb(hw.bytes()?, true, budget, &mut out))?,
+                    3 => schema = Some(text(hw.string()?, budget, &mut out)?),
                     _ => {}
                 }
             }
-            if let Ok(s) = &mut scope {
-                s.schema_url = schema;
-            }
+            let scope = match ctx {
+                Ok(mut c) => {
+                    c.schema_url = schema;
+                    Ok(render(c, true, budget)?)
+                }
+                Err(why) => {
+                    budget.record_done();
+                    Err(why)
+                }
+            };
             for h in Fields::new(sl) {
                 let (hn, hw) = h?;
                 if hn != 2 {
@@ -657,7 +723,9 @@ pub fn from_protobuf(body: &[u8], now_ms: i64, budget: &mut Budget) -> Result<Ba
                 }
                 budget.record_done();
             }
+            drop_rendered(&scope, budget);
         }
+        drop_rendered(&resource, budget);
     }
     Ok(out.finish())
 }
@@ -676,16 +744,16 @@ fn uint_json(v: Option<&Value>) -> u64 {
     }
 }
 
-fn str_json(v: Option<&Value>, batch: &mut Batch) -> Option<String> {
-    v.and_then(Value::as_str).map(|s| short(s, batch))
+fn str_json(v: Option<&Value>, budget: &mut Budget, batch: &mut Batch) -> Result<Option<String>, Fail> {
+    v.and_then(Value::as_str).map(|s| text(s, budget, batch)).transpose()
 }
 
 fn context_json_in(v: Option<&Value>, schema_url: Option<&Value>, scope: bool, budget: &mut Budget, batch: &mut Batch) -> Step<Context> {
-    let mut c = Context { schema_url: str_json(schema_url, batch), ..Context::default() };
+    let mut c = Context { schema_url: stop!(str_json(schema_url, budget, batch)), ..Context::default() };
     let Some(v) = v else { return Step::Ok(c) };
     if scope {
-        c.name = str_json(v.get("name"), batch);
-        c.version = str_json(v.get("version"), batch);
+        c.name = stop!(str_json(v.get("name"), budget, batch));
+        c.version = stop!(str_json(v.get("version"), budget, batch));
     }
     step!(attributes_json(v.get("attributes"), &mut c.attributes, &mut c.dropped, budget, batch));
     c.dropped = c.dropped.saturating_add(uint_json(get(v, "droppedAttributesCount", "dropped_attributes_count")));
@@ -699,14 +767,16 @@ fn hex_json(v: Option<&Value>, len: usize) -> Option<String> {
 }
 
 fn record_json(v: &Value, budget: &mut Budget, batch: &mut Batch) -> Step<Record> {
+    let severity_text = stop!(str_json(get(v, "severityText", "severity_text"), budget, batch));
+    let event_name = stop!(str_json(get(v, "eventName", "event_name"), budget, batch));
     let mut r = Record {
         time: uint_json(get(v, "timeUnixNano", "time_unix_nano")),
         observed: uint_json(get(v, "observedTimeUnixNano", "observed_time_unix_nano")),
         severity_number: get(v, "severityNumber", "severity_number").and_then(|s| s.as_i64().or_else(|| s.as_str().and_then(severity_by_name))).map(|n| n.clamp(0, 24)),
-        severity_text: str_json(get(v, "severityText", "severity_text"), batch),
+        severity_text,
         trace_id: hex_json(get(v, "traceId", "trace_id"), 16),
         span_id: hex_json(get(v, "spanId", "span_id"), 8),
-        event_name: str_json(get(v, "eventName", "event_name"), batch),
+        event_name,
         ..Record::default()
     };
     if let Some(b) = v.get("body") {
@@ -719,7 +789,7 @@ fn record_json(v: &Value, budget: &mut Budget, batch: &mut Batch) -> Step<Record
 
 /// `SEVERITY_NUMBER_INFO` and the like, as some JSON encoders write the enum.
 fn severity_by_name(s: &str) -> Option<i64> {
-    let base = |p: &str, n: i64| s.strip_prefix("SEVERITY_NUMBER_").and_then(|x| x.strip_prefix(p)).map(|d| n + d.parse::<i64>().map_or(0, |k| (k - 1).clamp(0, 3)));
+    let base = |p: &str, n: i64| s.strip_prefix("SEVERITY_NUMBER_").and_then(|x| x.strip_prefix(p)).map(|d| n + d.parse::<i64>().map_or(0, |k| k.saturating_sub(1).clamp(0, 3)));
     base("TRACE", 1).or_else(|| base("DEBUG", 5)).or_else(|| base("INFO", 9)).or_else(|| base("WARN", 13)).or_else(|| base("ERROR", 17)).or_else(|| base("FATAL", 21))
 }
 
@@ -730,11 +800,21 @@ pub fn from_json(body: &Value, now_ms: i64, budget: &mut Budget) -> Result<Batch
     let Some(list) = get(body, "resourceLogs", "resource_logs") else { return Ok(out.finish()) };
     let Some(list) = list.as_array() else { return Err(Fail::Malformed("resourceLogs isn't a list".into())) };
     for rl in list {
-        let resource = context_or(context_json_in(rl.get("resource"), get(rl, "schemaUrl", "schema_url"), false, budget, &mut out))?;
-        budget.keep_record();
+        let resource = match context_or(context_json_in(rl.get("resource"), get(rl, "schemaUrl", "schema_url"), false, budget, &mut out))? {
+            Ok(c) => Ok(render(c, false, budget)?),
+            Err(why) => {
+                budget.record_done();
+                Err(why)
+            }
+        };
         for sl in get(rl, "scopeLogs", "scope_logs").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default() {
-            let scope = context_or(context_json_in(sl.get("scope"), get(sl, "schemaUrl", "schema_url"), true, budget, &mut out))?;
-            budget.keep_record();
+            let scope = match context_or(context_json_in(sl.get("scope"), get(sl, "schemaUrl", "schema_url"), true, budget, &mut out))? {
+                Ok(c) => Ok(render(c, true, budget)?),
+                Err(why) => {
+                    budget.record_done();
+                    Err(why)
+                }
+            };
             for r in get(sl, "logRecords", "log_records").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default() {
                 let rec = record_json(r, budget, &mut out);
                 match (rec, &resource, &scope) {
@@ -745,7 +825,9 @@ pub fn from_json(body: &Value, now_ms: i64, budget: &mut Budget) -> Result<Batch
                 }
                 budget.record_done();
             }
+            drop_rendered(&scope, budget);
         }
+        drop_rendered(&resource, budget);
     }
     Ok(out.finish())
 }
@@ -854,6 +936,7 @@ mod tests {
         assert_eq!(route("nginx.otel", "Prod"), "logs-nginx.otel-prod");
         assert_eq!(route("a/b:c-d", "x y"), "logs-a_b_c_d.otel-x_y");
         assert_eq!(route("_internal", "default"), "logs-_internal.otel-default");
+        assert_eq!(route("Nginx.OTEL", "default"), "logs-nginx.otel-default");
         let long = "d".repeat(300);
         assert_eq!(route(&long, "n").len(), "logs-".len() + 100 + "-n".len());
         // The routing attribute counts even past the attribute cap.
@@ -905,6 +988,34 @@ mod tests {
         assert_eq!((out.accepted, out.truncated), (1, 1));
         // A length past the bytes present fails the request.
         assert!(matches!(from_protobuf(&[0x0a, 0xff, 0x01, 0x00], 1, &mut budget(u64::MAX)), Err(Fail::Malformed(_))));
+    }
+
+    #[test]
+    fn a_non_base64_bytes_value_is_refused_not_cut_mid_character() {
+        let mut text = String::from(r#"{"resourceLogs":[{"scopeLogs":[{"logRecords":[{"body":{"bytesValue":""#);
+        text.push_str(&"é".repeat(800_000));
+        text.push_str(r#""}},{"body":{"stringValue":"fine"}}]}]}]}"#);
+        let v = crate::json::parse(text.as_bytes()).unwrap().unwrap();
+        let out = from_json(&v, 1, &mut budget(u64::MAX)).unwrap();
+        assert_eq!((out.accepted, out.rejected), (1, 1));
+        assert!(out.reason.unwrap().contains("base64"));
+    }
+
+    #[test]
+    fn a_requests_charge_is_its_ndjson_and_its_contexts_once() {
+        // A large resource and many records: each record's values go back once it's written, and
+        // the resource is charged once, not once per record.
+        let big = "r".repeat(200_000);
+        let recs: Vec<Vec<u8>> = (0..500).map(|i| field(5, &field(1, format!("record {i}").as_bytes()))).collect();
+        let body = request(&[("service.name", &big)], &recs);
+        let limit = MemoryBudget::new(u64::MAX);
+        let mut b = Budget::new(Reservation::new(limit.clone()));
+        let out = from_protobuf(&body, 1, &mut b).unwrap();
+        let ndjson: usize = out.chunks.iter().map(String::len).sum();
+        // What stays reserved is the NDJSON (each document carries the resource's text) and
+        // nothing per record beyond it; the contexts' charge was given back at the end.
+        assert!(limit.used() <= ndjson as u64 + STEP, "{} reserved for {ndjson} of NDJSON", limit.used());
+        assert_eq!(out.accepted, 500);
     }
 
     #[test]

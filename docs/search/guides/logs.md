@@ -202,7 +202,13 @@ Limits:
 - an OTLP/JSON body is at most 4 MiB, while protobuf, which Collectors send, goes to the cluster's
   `max_body_mb`;
 - a key that may not write a record's data stream gets a 403, and a busy cluster a 429 with
-  `Retry-After`, which Collectors back off on.
+  `Retry-After`, which Collectors back off on;
+- a request refused after part of it was written may be written twice when the Collector retries
+  it.
+
+An `otel` key can create data streams under `logs-*.otel-*` as it writes, and roll doesn't cap
+how many a cluster may hold yet. Keep `otel` keys in Collectors you run, not in code you ship to
+customers.
 
 An `otel` key writes and can't read: search with another key. Its `create_doc` privilege is
 Elasticsearch's, so OpenSearch-flavor clusters don't have `otel` keys; use a `data` key narrowed
