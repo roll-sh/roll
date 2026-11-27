@@ -1294,6 +1294,8 @@ impl Store {
         db.add_column("domains", "redirect_to", "TEXT")?;
         // A preview's webhook URLs (`access.webhooks`), as JSON.
         db.add_column("env_access", "webhooks", "TEXT")?;
+        // A repeating silence's weekly windows (`every`), as JSON.
+        db.add_column("alert_silences", "every", "TEXT")?;
         let store = Store { db, sealer };
         store.mark_references()?;
         store.quote_log_patterns()?;
@@ -1872,22 +1874,33 @@ impl Store {
         Ok(())
     }
 
+    /// `…/redeliver`: a target's finished delivery pending again from its first try, its id
+    /// (`X-Roll-Delivery`) kept. Ok(false): it's still pending; Err(NotFound): not this target's.
+    pub fn redeliver(&self, target: &str, id: &str) -> Result<bool> {
+        let now = self.now()?;
+        let (t, i) = (target.to_string(), id.to_string());
+        self.db.write(move |c| {
+            let status: Vec<String> = c.query("SELECT status FROM notify_deliveries WHERE id = ? AND target = ?", params![i, t], |r| r.get(0))?;
+            match status.first().map(String::as_str) {
+                None => Err(Error::NotFound(format!("no delivery {i}"))),
+                Some("pending") => Ok(false),
+                Some(_) => {
+                    c.execute("UPDATE notify_deliveries SET status = 'pending', attempts = 0, next_at = ?, code = NULL, error = NULL, at = ? WHERE id = ?", params![now, now, i])?;
+                    Ok(true)
+                }
+            }
+        })
+    }
+
+    pub fn delivery(&self, target: &str, id: &str) -> Result<Option<Delivery>> {
+        Ok(self.db.query("SELECT id, event, kind, status, attempts, code, error, at FROM notify_deliveries WHERE target = ? AND id = ?", params![target, id], delivery_row)?.pop())
+    }
+
     pub fn deliveries(&self, target: &str, limit: usize) -> Result<Vec<Delivery>> {
         Ok(self.db.query(
             "SELECT id, event, kind, status, attempts, code, error, at FROM notify_deliveries WHERE target = ? ORDER BY at DESC, id DESC LIMIT ?",
             params![target, limit as i64],
-            |r| {
-                Ok(Delivery {
-                    id: r.get(0)?,
-                    event: r.get(1)?,
-                    kind: r.get(2)?,
-                    status: r.get(3)?,
-                    attempts: r.get::<_, i64>(4)? as u32,
-                    code: r.get::<_, Option<i64>>(5)?.map(|c| c as u16),
-                    error: r.get(6)?,
-                    at: r.get(7)?,
-                })
-            },
+            delivery_row,
         )?)
     }
 
@@ -3040,25 +3053,33 @@ impl Store {
 
     /// A silence of an environment's alerts until `until` (ms): `alerts` the kinds (none: every
     /// alert). At most [`crate::silences::MAX_OPEN`] open at once; ended ones are dropped here.
-    pub fn add_silence(&self, service: &str, env: &str, until: i64, alerts: &[String], reason: &str) -> Result<crate::silences::Silence> {
+    pub fn add_silence(&self, service: &str, env: &str, until: i64, alerts: &[String], reason: &str, every: Option<&crate::freeze::PauseSchedule>) -> Result<crate::silences::Silence> {
         let (now, id) = (self.now()?, format!("sil_{}", random(12).to_ascii_lowercase()));
         let j = serde_json::to_string(alerts).expect("kinds serialize");
+        let w = every.map(|e| serde_json::to_string(e).expect("windows serialize"));
         self.db.write(|c| {
             c.execute("DELETE FROM alert_silences WHERE service = ? AND env = ? AND until_ms <= ?", params![service, env, now])?;
             let open: i64 = c.query_row("SELECT COUNT(*) FROM alert_silences WHERE service = ? AND env = ?", [service, env], |r| r.get(0))?;
             if open >= crate::silences::MAX_OPEN {
                 return Err(Error::Conflict(format!("at most {} silences are open in an environment: end one first", crate::silences::MAX_OPEN)));
             }
-            c.execute("INSERT INTO alert_silences (id, service, env, until_ms, alerts, reason, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)", params![id, service, env, until, j, reason, now])?;
+            c.execute("INSERT INTO alert_silences (id, service, env, until_ms, alerts, reason, created_at, every) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", params![id, service, env, until, j, reason, now, w])?;
             Ok(())
         })?;
-        Ok(crate::silences::Silence { id, until, alerts: alerts.to_vec(), reason: reason.into(), created_at: now })
+        Ok(crate::silences::Silence { id, until, alerts: alerts.to_vec(), reason: reason.into(), created_at: now, every: every.cloned() })
     }
 
     /// An environment's silences still open at `now`.
     pub fn silences(&self, service: &str, env: &str, now: i64) -> Result<Vec<crate::silences::Silence>> {
-        Ok(self.db.query("SELECT id, until_ms, alerts, reason, created_at FROM alert_silences WHERE service = ? AND env = ? AND until_ms > ? AND created_at <= ? ORDER BY until_ms", params![service, env, now, now], |r| {
-            Ok(crate::silences::Silence { id: r.get(0)?, until: r.get(1)?, alerts: serde_json::from_str(&r.get::<_, String>(2)?).unwrap_or_default(), reason: r.get(3)?, created_at: r.get(4)? })
+        Ok(self.db.query("SELECT id, until_ms, alerts, reason, created_at, every FROM alert_silences WHERE service = ? AND env = ? AND until_ms > ? AND created_at <= ? ORDER BY until_ms", params![service, env, now, now], |r| {
+            Ok(crate::silences::Silence {
+                id: r.get(0)?,
+                until: r.get(1)?,
+                alerts: serde_json::from_str(&r.get::<_, String>(2)?).unwrap_or_default(),
+                reason: r.get(3)?,
+                created_at: r.get(4)?,
+                every: r.get::<_, Option<String>>(5)?.and_then(|s| serde_json::from_str(&s).ok()),
+            })
         })?)
     }
 
@@ -5315,6 +5336,19 @@ fn insert_event(c: &code_sql::Conn<'_>, now: i64, kind: &str, service: &str, env
     c.execute("INSERT INTO state (key, value) VALUES ('events_seq', ?)", [seq.to_string()])?;
     c.execute("INSERT INTO events (seq, at, kind, service, env, deployment, data) VALUES (?, ?, ?, ?, ?, ?, ?)", params![seq, now, kind, service, env, deployment, data.to_string()])?;
     Ok(())
+}
+
+fn delivery_row(r: &code_sql::Row<'_>) -> code_sql::Result<Delivery> {
+    Ok(Delivery {
+        id: r.get(0)?,
+        event: r.get(1)?,
+        kind: r.get(2)?,
+        status: r.get(3)?,
+        attempts: r.get::<_, i64>(4)? as u32,
+        code: r.get::<_, Option<i64>>(5)?.map(|c| c as u16),
+        error: r.get(6)?,
+        at: r.get(7)?,
+    })
 }
 
 #[cfg(test)]

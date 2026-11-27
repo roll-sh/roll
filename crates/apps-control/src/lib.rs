@@ -2392,6 +2392,14 @@ impl Apps {
                 if cs.iter().enumerate().any(|(i, c)| cs[..i].iter().any(|o| o.name == c.name)) {
                     return Err(Error::BadRequest("checks: names are unique".into()));
                 }
+                // A TCP service's checks connect to its port; another's are HTTP.
+                if !cs.is_empty() {
+                    let sid = service.to_string();
+                    let tcp = self.db(move |s| s.service(&sid)).await?.run.tcp;
+                    if cs.iter().any(|c| c.tcp != tcp) {
+                        return Err(Error::BadRequest(if tcp { "checks: a TCP service's checks are TCP checks (tcp: true, no path)" } else { "checks: a TCP check (tcp) is a TCP service's" }.into()));
+                    }
+                }
                 Some(cs)
             }
             Some(_) => return Err(Error::BadRequest(format!("checks is at most {} checks, or null", crate::model::MAX_CHECKS))),

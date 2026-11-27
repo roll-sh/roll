@@ -2748,7 +2748,14 @@ pub const MAX_CHECKS: usize = 5;
 pub struct Check {
     /// Unique in the environment: a-z, 0-9 and -, at most 32.
     pub name: String,
+    /// An HTTP check's (empty for a TCP check's).
+    #[serde(default)]
     pub path: String,
+    /// A TCP check (Fly's TCP checks, Better Stack's port monitors): a TCP service's port
+    /// (`run.tcp`) connected to through its own network, no HTTP; `contains` is looked for in
+    /// what it says first (a banner).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub tcp: bool,
     /// 30–3600 (default 60).
     #[serde(default = "Check::default_every")]
     pub every_s: u32,
@@ -2857,7 +2864,14 @@ impl Check {
         if self.name.is_empty() || self.name.len() > 32 || !self.name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') {
             return bad("a check's name is a-z, 0-9 and -, at most 32");
         }
-        if !self.path.starts_with('/') || self.path.starts_with("//") || self.path.len() > 2000 || !self.path.bytes().all(|b| b.is_ascii_graphic()) {
+        if self.tcp {
+            if !self.path.is_empty() {
+                return bad("a TCP check has no path: it connects to the service's port");
+            }
+            if self.browser.is_some() || self.status.is_some() || self.method.is_some() || self.headers.is_some() || self.body.is_some() || self.from.as_deref().is_some_and(|f| f != "roll") {
+                return bad("a TCP check connects (and reads its banner for contains) from roll: no browser, status, method, headers, body or from public");
+            }
+        } else if !self.path.starts_with('/') || self.path.starts_with("//") || self.path.len() > 2000 || !self.path.bytes().all(|b| b.is_ascii_graphic()) {
             return bad("a check's path is an absolute path, like /healthz");
         }
         match self.from.as_deref() {
