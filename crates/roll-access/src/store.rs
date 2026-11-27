@@ -507,6 +507,10 @@ pub struct Approval {
     /// when it's answered, from the policy as it is then; not stored).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub gates: Vec<Gate>,
+    /// The route's own rule a lend's approval covers too, as the gate asked for it (the route's
+    /// own action asked as well): shown beside the lent one, and remembered with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub also: Option<roll_auth::scope::Rule>,
 }
 
 /// One rule an approval must pass: how many approvals from whom, and how many it has.
@@ -536,6 +540,8 @@ pub struct Ask<'a> {
     pub scope_index: Option<&'a str>,
     /// How long it waits for its people (the policy's `approval_wait_ms`).
     pub wait_ms: i64,
+    /// The route's own rule it covers too (a lend's approval whose route's own action asked).
+    pub also: Option<&'a roll_auth::scope::Rule>,
 }
 
 /// An approved request runs within this long (and a decided one is shown this long).
@@ -876,7 +882,7 @@ pub(crate) fn name_rules(c: &code_sql::Conn<'_>, id: &str) -> code_sql::Result<(
 }
 
 const APPROVAL_COLUMNS: &str =
-    "id, grant_id, grant_name, product, action, resource, method, route, path, summary, args, tool, state, reason, created_at, decided_at, decided_by, expires_at, request_hash, environment, scope_path, scope_index, approved_by";
+    "id, grant_id, grant_name, product, action, resource, method, route, path, summary, args, tool, state, reason, created_at, decided_at, decided_by, expires_at, request_hash, environment, scope_path, scope_index, approved_by, also";
 
 fn approval_row(r: &code_sql::Row<'_>) -> code_sql::Result<Approval> {
     let args: Option<String> = r.get(10)?;
@@ -905,6 +911,7 @@ fn approval_row(r: &code_sql::Row<'_>) -> code_sql::Result<Approval> {
         scope_index: r.get(21)?,
         approved_by: r.get::<_, Option<String>>(22)?.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default(),
         gates: Vec::new(),
+        also: r.get::<_, Option<String>>(23)?.and_then(|s| serde_json::from_str(&s).ok()),
     })
 }
 
@@ -985,7 +992,8 @@ impl Store {
         }
         // What environment and path a request was about (a remembered approval keeps to them), and
         // who approved it so far (a policy can ask for several people).
-        for col in ["environment", "scope_path", "scope_index", "approved_by"] {
+        // ...and the route's own rule a lend's approval covers too (`also`).
+        for col in ["environment", "scope_path", "scope_index", "approved_by", "also"] {
             if !db.has_column("approvals", col)? {
                 db.add_column("approvals", col, "TEXT")?;
             }
@@ -1469,7 +1477,9 @@ impl Store {
 
     /// Allow `rule` on a grant: for good (`until: None`, added to its rules unless they hold it), or
     /// until a time (its temporary rules, the lapsed ones dropped).
-    pub fn remember(&self, id: &str, rule: &roll_auth::scope::Rule, until: Option<i64>, approval: &str) -> Result<Grant> {
+    /// `rules` remembered on grant `id` in one write (an approval's: a lend's and its route's own).
+    pub fn remember(&self, id: &str, rules: &[roll_auth::scope::Rule], until: Option<i64>, approval: &str) -> Result<Grant> {
+        let new = rules;
         self.changeable(id)?;
         let now = code_sql::now_ms();
         self.db.write(|c| {
@@ -1481,13 +1491,21 @@ impl Store {
             }
             match until {
                 None => {
-                    let mut rules: Scope = serde_json::from_str(&rules).unwrap_or_default();
-                    if !rules.0.contains(rule) {
-                        rules.0.push(rule.clone());
+                    let mut kept: Scope = serde_json::from_str(&rules).unwrap_or_default();
+                    for rule in new {
+                        if !kept.0.contains(rule) {
+                            kept.0.push(rule.clone());
+                        }
                     }
-                    set_rules(c, id, &serde_json::to_string(&rules).unwrap_or_default())?;
+                    set_rules(c, id, &serde_json::to_string(&kept).unwrap_or_default())?;
                 }
-                Some(until) => push_temp(c, id, temp, TempRule { rule: rule.clone(), until, approval: Some(approval.to_string()), gated: false }, now)?,
+                Some(until) => {
+                    let mut temp = temp;
+                    for rule in new {
+                        push_temp(c, id, temp.take(), TempRule { rule: rule.clone(), until, approval: Some(approval.to_string()), gated: false }, now)?;
+                        temp = c.query_row("SELECT temp_rules FROM grants WHERE id = ?", [id], |r| r.get(0)).optional()?.flatten();
+                    }
+                }
             }
             Ok(())
         })?;
@@ -1665,7 +1683,7 @@ impl Store {
                 return Err(Error::TooMany("this token has 50 approvals waiting: decide some first".into()));
             }
             c.execute(
-                &format!("INSERT INTO approvals ({APPROVAL_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, ?, NULL, NULL, ?, ?, ?, ?, ?, NULL)"),
+                &format!("INSERT INTO approvals ({APPROVAL_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, ?, NULL, NULL, ?, ?, ?, ?, ?, NULL, ?)"),
                 params![
                     id,
                     a.grant.id,
@@ -1684,7 +1702,8 @@ impl Store {
                     a.request_hash,
                     a.environment,
                     a.scope_path,
-                    a.scope_index
+                    a.scope_index,
+                    a.also.and_then(|r| serde_json::to_string(r).ok())
                 ],
             )?;
             Ok(())

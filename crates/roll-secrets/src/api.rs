@@ -389,7 +389,7 @@ async fn project_settings(State(s): S, Who(c): Who, Path(project): Path<String>,
         None => None,
     };
     let breakglass: Option<Vec<String>> = match o.remove("breakglass") {
-        Some(v) => Some(serde_json::from_value(v).map_err(|_| Error::BadRequest("breakglass is a list: pushers' logins, token:<id>, *".into()))?),
+        Some(v) => Some(serde_json::from_value(v).map_err(|_| Error::BadRequest("breakglass is a list: pushers' logins through a hook's token (alice@token:<id>), token:<id>, *".into()))?),
         None => None,
     };
     if let Some(k) = o.keys().next() {
