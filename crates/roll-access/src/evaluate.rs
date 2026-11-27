@@ -801,6 +801,7 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
     // grant handed to the product gets for the lent secrets its own rules don't allow: the request
     // gets this far only allowed or approved, and roll secrets checks the caller again inside.
     let mut lent_folder: Option<(String, String)> = None;
+    let mut lent_key: Option<String> = None;
     // The request's own action, when a lend decided its approval and it asked too.
     let mut lent_also: Option<String> = None;
     let mut lent_also_rule: Option<roll_auth::scope::Rule> = None;
@@ -815,6 +816,7 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
             (asked_env, asked_path) = (None, None);
             lent = Some((l.product, l.id));
             lent_folder = l.folder;
+            lent_key = l.key;
             lent_rules = l.grants.into_iter().chain(l.reads).collect();
             lent_also = (own_outcome != Outcome::Allow).then(|| format!("{} {}{}", own.0, row.product, own.1.as_deref().map(|r| format!(" {r}")).unwrap_or_default()));
             // The same, as the rule remembering the approval would add: recorded with it, so what
@@ -1011,7 +1013,8 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
             };
             // A lend's approval says what it lends (its product, folder) and what else it covers.
             let summary = lent.as_ref().map(|(p, id)| {
-                let at = lent_folder.as_ref().map(|(e, f)| format!(" in {e}:{f}")).unwrap_or_default();
+                let key = lent_key.as_ref().map(|k| format!(" {k}")).unwrap_or_default();
+                let at = lent_folder.as_ref().map(|(e, f)| format!("{key} in {e}:{f}")).unwrap_or(key);
                 let also = lent_also.as_ref().map(|a| format!(", and {a}")).unwrap_or_default();
                 let via = ctx.mcp.as_ref().map(|m| format!(", tool {}", m.tool)).unwrap_or_default();
                 format!("{action} {p} {id}{at}{also} ({} {}{via})", ctx.method, row.route)
@@ -1237,8 +1240,8 @@ pub(crate) async fn lend_outcome(access: &Arc<Access>, row: &'static Row, params
     let lent: Vec<catalog::Lent> = match row.lends? {
         // A route that names them otherwise than its row is refused, never let through.
         catalog::Lend::Path(k, r) => match (param(k), param(r)) {
-            (Some(kind), Some(r#ref)) => vec![catalog::Lent { kind, r#ref, action: Action::Reveal, folder: None }],
-            _ => return Some(Lending { outcome: Outcome::Deny, product: row.product, action: Action::Reveal, id: "a link this route doesn't name".into(), all: Vec::new(), folder: None, grants: Vec::new(), reads: Vec::new() }),
+            (Some(kind), Some(r#ref)) => vec![catalog::Lent { kind, r#ref, action: Action::Reveal, folder: None, key: None }],
+            _ => return Some(Lending { outcome: Outcome::Deny, product: row.product, action: Action::Reveal, id: "a link this route doesn't name".into(), all: Vec::new(), folder: None, key: None, grants: Vec::new(), reads: Vec::new() }),
         },
         catalog::Lend::Each(f) => f(body?),
     };
@@ -1250,6 +1253,7 @@ pub(crate) async fn lend_outcome(access: &Arc<Access>, row: &'static Row, params
     let mut short: Vec<String> = Vec::new();
     let mut all: Vec<(&'static str, Action, String)> = Vec::new();
     let mut weakest_folder: Option<(String, String)> = None;
+    let mut weakest_key: Option<String> = None;
     let mut grants: Vec<roll_auth::scope::Rule> = Vec::new();
     let mut reads: Vec<roll_auth::scope::Rule> = Vec::new();
     for l in lent {
@@ -1272,7 +1276,7 @@ pub(crate) async fn lend_outcome(access: &Arc<Access>, row: &'static Row, params
             })
             .await;
             // A lookup that fails decides nothing in the request's favour.
-            let Ok(res) = resolved else { return Some(Lending { outcome: Outcome::Deny, product: "secrets", action: l.action, id: l.r#ref, all, folder: Some((env, path)), grants: Vec::new(), reads: Vec::new() }) };
+            let Ok(res) = resolved else { return Some(Lending { outcome: Outcome::Deny, product: "secrets", action: l.action, id: l.r#ref, all, folder: Some((env, path)), key: l.key.clone(), grants: Vec::new(), reads: Vec::new() }) };
             let outcome = scope.outcome(&Target::One(res.clone()), l.action);
             let id = res.id.clone().unwrap_or_default();
             let named = format!("{id}:{env}:{path}");
@@ -1305,6 +1309,7 @@ pub(crate) async fn lend_outcome(access: &Arc<Access>, row: &'static Row, params
             if weakest.as_ref().is_none_or(|(w, ..)| rank(outcome) < rank(*w)) {
                 weakest = Some((outcome, "secrets", l.action, id));
                 weakest_folder = res.environment.clone().zip(res.path.clone());
+                weakest_key = l.key.clone();
             }
             continue;
         }
@@ -1326,9 +1331,10 @@ pub(crate) async fn lend_outcome(access: &Arc<Access>, row: &'static Row, params
         if weakest.as_ref().is_none_or(|(w, ..)| rank(found.0) < rank(*w)) {
             weakest = Some(found);
             weakest_folder = None;
+            weakest_key = None;
         }
     }
-    weakest.map(|(outcome, product, action, id)| Lending { outcome, product, action, id: if short.len() > 1 { short.join(", ") } else { id }, all, folder: weakest_folder, grants, reads })
+    weakest.map(|(outcome, product, action, id)| Lending { outcome, product, action, id: if short.len() > 1 { short.join(", ") } else { id }, all, folder: weakest_folder, key: weakest_key, grants, reads })
 }
 
 /// What handing other resources to this one decides ([`lend_outcome`]): the weakest outcome, the
@@ -1341,6 +1347,8 @@ pub(crate) struct Lending {
     pub all: Vec<(&'static str, Action, String)>,
     /// A lent secret's folder (environment, path), when one decides: its approval keeps to it.
     pub folder: Option<(String, String)>,
+    /// That secret's key, when the request names one: its approval card says it.
+    pub key: Option<String>,
     /// The exact rules for each lent secret the scope doesn't allow, which the grant handed to the
     /// product carries once the request is allowed or approved.
     pub grants: Vec<roll_auth::scope::Rule>,
