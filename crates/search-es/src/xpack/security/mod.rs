@@ -593,7 +593,9 @@ impl Effective {
     /// set, or a dot-prefixed name that isn't a reachable data stream's backing index.
     fn off_limits(&self, index: &str) -> bool {
         let Some(off) = &self.off_limits else { return false };
-        off.contains(index) || (index.starts_with('.') && self.parents.get(index).is_none_or(|ds| off.contains(ds)))
+        // A data stream's `::failures` or `::data` selector is the data stream's.
+        let index = index.strip_suffix("::failures").or_else(|| index.strip_suffix("::data")).unwrap_or(index);
+        off.contains(index) || (index.starts_with('.') && self.parents.get(index).or_else(|| self.failure_parents.get(index)).is_none_or(|ds| off.contains(ds)))
     }
 
     pub fn allows_index(&self, action: &str, index: &str) -> bool {
