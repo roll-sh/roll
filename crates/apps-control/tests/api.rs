@@ -1777,6 +1777,24 @@ async fn a_preview_environment_deploys_a_revision_and_tears_down() {
     let body: Value = serde_json::from_slice(&r.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert!(!body.to_string().contains(bypass), "the app never sees the bypass");
     assert_eq!(with("not-the-secret").await.unwrap().status(), StatusCode::UNAUTHORIZED);
+    // A webhook URL (roll previews' `roll_hook`, for Stripe's and GitHub's): its exact path with
+    // its token, any method, no cookie, the token out of the query the app sees.
+    let hook = "whsec-preview-0123456789";
+    let hsha = { use sha2::Digest; sha2::Sha256::digest(hook.as_bytes()).iter().map(|b| format!("{b:02x}")).collect::<String>() };
+    assert_eq!(call(&w.api, "PUT", &base, Some(json!({"access": {"token": token, "webhooks": [{"path": "/hooks/../admin", "token_sha256": hsha}]}}))).await.0, StatusCode::BAD_REQUEST);
+    let (st, e2) = call(&w.api, "PUT", &base, Some(json!({"access": {"token": token, "webhooks": [{"path": "/hooks/stripe", "token_sha256": hsha}]}}))).await;
+    assert_eq!((st, e2["webhook_paths"].clone()), (StatusCode::OK, json!(["/hooks/stripe"])), "{e2}");
+    assert!(!e2.to_string().contains(&hsha), "never its hash");
+    let post = |path: &str| {
+        let r = Request::builder().method("POST").uri(path).header("host", host(&env["url"])).body(Body::from("{}")).unwrap();
+        w.public.clone().oneshot(r)
+    };
+    let r = post(&format!("/hooks/stripe?a=1&roll_hook={hook}")).await.unwrap();
+    assert!(r.status() == StatusCode::OK && r.headers().get("set-cookie").is_none(), "{:?}", r.headers());
+    let body: Value = serde_json::from_slice(&r.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!((body["path"].as_str(), body["query"].as_str()), (Some("/hooks/stripe"), Some("a=1")), "{body}");
+    assert_eq!(post(&format!("/hooks/other?roll_hook={hook}")).await.unwrap().status(), StatusCode::UNAUTHORIZED, "one exact path");
+    assert_eq!(post("/hooks/stripe?roll_hook=wrong").await.unwrap().status(), StatusCode::UNAUTHORIZED);
     let (st, _) = call(&w.api, "DELETE", &base, None).await;
     assert_eq!(st, StatusCode::NO_CONTENT);
     assert!(!w.fake.instances(&id).iter().any(|(_, dep, _)| *dep == d["id"]), "its instances are gone");
@@ -4007,6 +4025,12 @@ async fn roll_up_deploys_an_uploaded_tree_and_cron_runs_on_demand() {
     let d: Value = serde_json::from_slice(&w.api.clone().oneshot(req).await.unwrap().into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(settled(&w, &id, "production", d["id"].as_str().unwrap()).await["status"], "ready", "{d}");
     assert_eq!(call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None).await.1["active"]["id"], live);
+    // A deployment's image on its owner's machine (`docker load`): the runtime's archive of it.
+    let req = Request::get(format!("/v1/apps/services/{id}/environments/production/deploys/{}/image", d["id"].as_str().unwrap())).body(Body::empty()).unwrap();
+    let resp = w.api.clone().oneshot(req).await.unwrap();
+    assert_eq!((resp.status(), resp.headers()["content-type"].to_str().unwrap().to_string()), (StatusCode::OK, "application/x-tar".to_string()));
+    let tar = String::from_utf8(resp.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap();
+    assert!(tar.starts_with("fake image "), "{tar}");
     let _ = Ordering::SeqCst;
 }
 
@@ -8844,6 +8868,24 @@ async fn a_public_git_url_deploys_its_branch_and_follows_new_commits() {
     let (st, d2) = call(&w.api, "POST", &hook, Some(tag("v2-final"))).await;
     assert!(st == StatusCode::ACCEPTED && d2["id"] != d["id"] && d2["message"] == "tag v2-final", "{d2}");
     settled(&w, &id, "staging", d2["id"].as_str().unwrap()).await;
+    // With no hook, the five-minute watch finds new tags too: the newest by version order, the
+    // older one marked as seen (never put live after it).
+    git.tags.lock().insert("v9".into(), code.parse().unwrap());
+    git.tags.lock().insert("v10".into(), api.parse().unwrap());
+    let started = w.apps.watch_git().await;
+    let mut tagged = Vec::new();
+    for d in &started {
+        let d = settled(&w, &id, "staging", d).await;
+        if d["message"].as_str().is_some_and(|m| m.starts_with("tag ")) {
+            tagged.push(d["message"].as_str().unwrap().to_string());
+        }
+    }
+    assert_eq!(tagged, ["tag v10"], "{started:?}");
+    for d in w.apps.watch_git().await {
+        let d = settled(&w, &id, "staging", &d).await;
+        assert!(!d["message"].as_str().unwrap_or("").starts_with("tag "), "nothing tagged again: {d}");
+    }
+    assert!(call(&w.api, "POST", &hook, Some(tag("v9"))).await.1["ignored"].as_str().unwrap().contains("already"), "v9 is seen, not deployed");
     assert_eq!(call(&w.api, "POST", &hook, Some(tag("release-1"))).await.1["ignored"].as_str().map(|s| s.contains("no environment deploys it")), Some(true));
     // Pull requests go to previews with their number, title and page: a same-repository one on
     // its branch, a fork's as `pull/N` once `refs/pull/N/head` agrees, a close with no commit.

@@ -346,6 +346,10 @@ async fn check(State(a): S, ext: Extensions, Json(c): Json<Check>) -> crate::Res
     };
     let row = found.row;
     let params = found.params.unwrap_or_default();
+    // A folder the gate refuses before deciding is refused here too.
+    if let Some(why) = crate::evaluate::bad_folder(row, uri.query()) {
+        return Ok(Json(json!({ "decision": "deny", "why": why })));
+    }
     // Decided as the gate decides: the request's headers (a create's `X-Roll-Project`), the
     // project a create's body names, the copy a body asks for, and "ask for anything else".
     let mut headers = axum::http::HeaderMap::new();
@@ -360,6 +364,9 @@ async fn check(State(a): S, ext: Extensions, Json(c): Json<Check>) -> crate::Res
         .await
         .map_err(|e| Error::Internal(e.to_string()))?;
     crate::evaluate::project_from_body(row, &mut target, c.body.as_ref()).map_err(Error::BadRequest)?;
+    if let Err(why) = crate::evaluate::folder_from_body(row, &mut target, c.body.as_ref()) {
+        return Ok(Json(json!({ "decision": "deny", "why": why })));
+    }
     let mut action = row.action_with(&method, &params, c.body.as_ref(), &headers);
     let asked = action;
     let mut outcome = if matches!(row.target, catalog::Tgt::AnyGrant) { Outcome::Allow } else { scope.outcome(&target, action) };
@@ -1162,7 +1169,7 @@ async fn remembered(a: &Arc<Access>, id: &str, remember: Option<&str>) -> crate:
     }
     // A folder's rule reaches every folder under it, so one at a secrets environment's root (or with
     // no folder) is the whole environment, or more: remembered for 8 hours at most.
-    if found.product == "secrets" && found.scope_path.as_deref().is_none_or(|p| p == "/") && until.is_none_or(|u| u > code_sql::now_ms() + 8 * 3_600_000) {
+    if found.product == "secrets" && found.scope_path.as_deref().is_none_or(roll_auth::scope::is_root) && until.is_none_or(|u| u > code_sql::now_ms() + 8 * 3_600_000) {
         return Err(Error::BadRequest("this reaches every folder of the environment: remember it for an hour or 8 hours at most, or approve it once".into()));
     }
     let rule = rule_of(&found)?;
@@ -1295,7 +1302,7 @@ async fn request_access(State(a): S, ext: Extensions, Json(r): Json<AccessReques
     // A folder's rule reaches every folder under it: one at a secrets environment's root (or with
     // no folder) is all of it, or every environment's, so it lasts 8 hours at most, as a
     // remembered approval of one does.
-    if r.product == "secrets" && r.path.as_deref().is_none_or(|p| p == "/") && lasts > 8 * 3_600_000 {
+    if r.product == "secrets" && r.path.as_deref().is_none_or(roll_auth::scope::is_root) && lasts > 8 * 3_600_000 {
         return Err(Error::BadRequest("this reaches every folder of the environment (name a folder in path for longer): for 15m, 1h or 8h".into()));
     }
     // Tokens and approvals are changed by people, never asked for: a token that could manage

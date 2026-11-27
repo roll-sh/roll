@@ -291,7 +291,7 @@ pub struct Rule {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub environments: Option<Vec<String>>,
     /// Only resources with a path under one of these (`/api` covers `/api/x`, not `/apix`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "folders")]
     pub paths: Option<Vec<String>>,
     /// Only resources whose environment the product says isn't protected ([`Resource::protected`]),
     /// and never one named [`PRODUCTION`], protected or not: a developer's default (docs/members.md,
@@ -375,7 +375,32 @@ impl Target {
     }
 }
 
+/// A rule's folders as roll secrets reads them: one trailing `/` past the root is the folder without
+/// it (`/api/` is `/api`, as `names::path` takes it). `//` stays as written: [`problems`](Scope::problems)
+/// refuses it and [`under`] matches nothing with it.
+fn folders<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Vec<String>>, D::Error> {
+    let list: Option<Vec<String>> = Option::deserialize(d)?;
+    Ok(list.map(|l| l.into_iter().map(|p| if p.len() > 1 && p.ends_with('/') && !p.ends_with("//") { p[..p.len() - 1].to_string() } else { p }).collect()))
+}
+
+/// Whether a folder is the root, the whole environment: `/`, or one spelled with more slashes
+/// (`//`, which [`under`] reads as `/`). Anything deciding "the whole environment" asks this.
+pub fn is_root(path: &str) -> bool {
+    path.trim_end_matches('/').is_empty()
+}
+
+/// A rule's folder in its one spelling: `/`, or `/a/b` with no empty, `.` or `..` folder and no
+/// trailing `/`, so each folder is named one way and the root is only `/`.
+fn canonical_path(p: &str) -> bool {
+    p == "/" || p.strip_prefix('/').is_some_and(|rest| rest.split('/').all(|s| !s.is_empty() && s != "." && s != ".."))
+}
+
 fn under(path: &str, prefix: &str) -> bool {
+    // The root is `/`: a rule stored with `//` before #1186 refused it (remembered past the 8-hour
+    // cap on the whole environment) reaches nothing, rather than every folder.
+    if prefix != "/" && is_root(prefix) {
+        return false;
+    }
     let prefix = prefix.trim_end_matches('/');
     prefix.is_empty() || path == prefix || path.strip_prefix(prefix).is_some_and(|rest| rest.starts_with('/'))
 }
@@ -530,9 +555,9 @@ impl Scope {
                 out.push(format!("{at}: \"*\" alone isn't an environment (leave environments out for all of them)"));
             }
             if let Some(paths) = &r.paths
-                && paths.iter().any(|p| !p.starts_with('/'))
+                && paths.iter().any(|p| !canonical_path(p))
             {
-                out.push(format!("{at}: paths start with /"));
+                out.push(format!("{at}: paths are / or /folder/…, each folder named once (no empty, . or .. folder: /api or /api/x, not // or /a//b)"));
             }
         }
         out
@@ -635,6 +660,21 @@ mod tests {
         let key = |name: &str| Target::One(Resource { index: Some(name.into()), ..Resource::new("secrets", "prj_a") });
         let by_key = Target::One(Resource { filters_index: true, ..Resource::new("secrets", "prj_a") });
         assert!(one_key.matches(&by_key) && !one_key.matches(&at("prj_a", true)) && !one_key.matches(&at("prj_a", false)) && one_key.matches(&key("payments")) && !one_key.matches(&key("billing")));
+        // A folder is spelled one way, and the root only `/`: `//` reads as every folder, so it is
+        // the root wherever "the whole environment" is decided, and no rule is made with it.
+        assert!(super::is_root("/") && super::is_root("//") && !super::is_root("/api"));
+        let paths = |p: &str| Scope(vec![rule(serde_json::json!({ "product": "secrets", "resources": "*", "paths": [p], "actions": { "read": "allow" } }))]).problems();
+        for no in ["//", "/a//b", "/./a", "/a/..", "api", "/api//"] {
+            assert!(!paths(no).is_empty(), "{no}");
+        }
+        assert!(paths("/").is_empty() && paths("/api/stripe").is_empty() && paths("/api/").is_empty(), "/api/ is /api");
+        // A rule stored with `//` (before it was refused) reaches no folder, not every one.
+        let old: Rule = serde_json::from_value(serde_json::json!({ "product": "secrets", "resources": "*", "paths": ["//"], "actions": { "read": "allow" } })).unwrap();
+        let folder = |p: &str| Target::One(Resource { path: Some(p.into()), ..Resource::new("secrets", "prj_a") });
+        assert!(!old.matches(&folder("/")) && !old.matches(&folder("/api")));
+        let api: Rule = serde_json::from_value(serde_json::json!({ "product": "secrets", "resources": "*", "paths": ["/api/"], "actions": { "read": "allow" } })).unwrap();
+        assert_eq!(api.paths, Some(vec!["/api".to_string()]));
+        assert!(api.matches(&folder("/api/x")) && !api.matches(&folder("/apix")));
     }
 
     /// Resources, environments and paths narrow a rule; the most permissive matching rule wins;

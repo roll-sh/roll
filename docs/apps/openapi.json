@@ -2395,6 +2395,51 @@
         "x-roll-action": "write"
       }
     },
+    "/v1/apps/services/{id}/environments/{env}/deploys/{dep}/image": {
+      "get": {
+        "description": "Answers `application/x-tar`, streamed: the deployment's image as `docker save` writes it, for `docker load` (roll secrets' reveal rule there, as an instance's files; `image.exported` audited); 409 for one never built or pruned, 400 where the node's runtime can't hand it out (its registry holds it).",
+        "operationId": "getServicesIdEnvironmentsEnvDeploysDepImage",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "dep",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`application/x-tar`, streamed: the deployment's image as `docker save` writes it, for `docker load` (roll secrets' reveal rule there, as an instance's files; `image.exported` audited); 409 for one never built or pruned, 400 where the node's runtime can't hand it out (its registry holds it)"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Get image",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "reveal"
+      }
+    },
     "/v1/apps/services/{id}/environments/{env}/deploys/{dep}/logs": {
       "get": {
         "description": "Answers `LogLine[]` or SSE (ends with the deploy: an `end` event, then the stream closes, so a follower stops instead of reading it again; a job's and a run's log end the same way).",
