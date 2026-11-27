@@ -418,6 +418,9 @@ impl crate::access::Grants for ScanOnly {
     fn sees(&self, project: &str) -> bool {
         project == self.0
     }
+    fn limits_keys(&self) -> bool {
+        false
+    }
 }
 
 /// What a pre-receive hook says about the push it checks (`POST …/scan`): who pushed (as the git

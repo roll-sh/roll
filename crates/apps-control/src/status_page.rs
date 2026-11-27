@@ -191,7 +191,7 @@ impl Apps {
             // post never quiets the rest of production's alerts.
             let (s2, e2, reason) = (svc.clone(), env.clone(), maintenance_reason(id));
             let alerts = ["check.down".to_string(), "heartbeat.missed".to_string()];
-            match self.db(move |s| s.add_silence(&s2, &e2, until, &alerts, &reason)).await {
+            match self.db(move |s| s.add_silence(&s2, &e2, until, &alerts, &reason, None)).await {
                 Ok(sil) => {
                     let (s3, e3, data) = (svc.clone(), env.clone(), json!({ "silence": sil.id, "until": sil.until, "alerts": sil.alerts, "reason": sil.reason }));
                     let _ = self.db(move |s| s.add_event("audit.silence", &s3, &e3, None, &data)).await;

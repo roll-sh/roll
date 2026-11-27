@@ -1513,7 +1513,16 @@ impl Apps {
             row.build.submodule_repos = None;
         }
         row.build.check()?;
+        let was_tcp = row.run.tcp;
         row.run = row.run.merged(o.get("run"))?;
+        // A TCP service's checks connect to its port, another's are HTTP: a switch with checks of
+        // the old kind waits until they're changed.
+        if row.run.tcp != was_tcp {
+            let sid = id.to_string();
+            if let Some(e) = self.db(move |s| s.environments(&sid)).await?.into_iter().find(|e| e.checks.iter().any(|c| c.tcp != row.run.tcp)) {
+                return Err(Error::Conflict(format!("{}'s uptime checks are {} checks: remove them (checks: null) or make them {} checks first", e.name, if was_tcp { "TCP" } else { "HTTP" }, if was_tcp { "HTTP" } else { "TCP" })));
+            }
+        }
         let r = row.clone();
         self.db(move |s| {
             s.update_service(&r)?;
@@ -2391,6 +2400,14 @@ impl Apps {
                     .collect::<Result<Vec<_>>>()?;
                 if cs.iter().enumerate().any(|(i, c)| cs[..i].iter().any(|o| o.name == c.name)) {
                     return Err(Error::BadRequest("checks: names are unique".into()));
+                }
+                // A TCP service's checks connect to its port; another's are HTTP.
+                if !cs.is_empty() {
+                    let sid = service.to_string();
+                    let tcp = self.db(move |s| s.service(&sid)).await?.run.tcp;
+                    if cs.iter().any(|c| c.tcp != tcp) {
+                        return Err(Error::BadRequest(if tcp { "checks: a TCP service's checks are TCP checks (tcp: true, no path)" } else { "checks: a TCP check (tcp) is a TCP service's" }.into()));
+                    }
                 }
                 Some(cs)
             }
