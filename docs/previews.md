@@ -1511,6 +1511,12 @@ thirty-fourth review found them in the clear.
   - Services on roll apps get the same token (`PUT …/environments/pv-… {access: {token}}`), and
     roll apps' waking proxy checks it the same way: the token once, then a host-only cookie,
     else 401 without waking anything.
+  - roll apps' proxy asks roll previews, through its hooks, for a `pv-` environment's notes
+    (`…/feedback.json`), share links, guests' notes and team snapshots, naming its own service.
+    roll previews answers only for a preview it knows runs on that service (rolld's
+    `services::preview_on`, the lookup a deploy makes): an environment's name alone proves
+    nothing (roll apps lets only roll previews make `pv-` environments now, #1205; one a tenant
+    named after another's preview before that gets no notes, no share link and no snapshot).
 - **Who.** `/v1/previews` sits behind the operator token like every product's API. Scoped tokens
   (`feature/roll-mcp`) classify these routes: `GET` is `read`; create, refresh, sleep and wake are
   `write`; reset and `DELETE` are `delete`. `Store::environment_of(kind, ref)` tells the

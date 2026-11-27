@@ -791,12 +791,37 @@ impl apps_control::integrations::PreviewRouter for DomainRouter {
     }
 }
 
-pub struct Notes(pub std::sync::Weak<roll_previews::Engine>);
+/// The preview a roll apps `pv-` environment is (`env`), once that preview is known to run on
+/// roll apps service `service`: an environment's name alone proves nothing (a tenant may once
+/// have named one after another's preview), so it's looked up as a deploy does
+/// ([`RollApps::find`]). Every hook roll apps calls with a preview's environment asks this first.
+async fn preview_on(engine: &roll_previews::Engine, apps: &RollApps, service: &str, env: &str) -> Option<String> {
+    let preview = roll_previews::Engine::preview_of_env(env)?;
+    for s in engine.store.services(&preview).ok()? {
+        if let Ok(Some((id, e))) = apps.find(&preview, &s.name).await
+            && id == service
+            && e == env
+        {
+            return Some(preview);
+        }
+    }
+    None
+}
+
+/// roll apps' proxy lists a preview page's notes from the engine (`Engine::notes_for`), for a
+/// preview that runs on the asking service only.
+pub struct Notes {
+    pub engine: std::sync::Weak<roll_previews::Engine>,
+    pub apps: RollApps,
+}
 
 #[async_trait]
 impl apps_control::integrations::FeedbackNotes for Notes {
-    async fn notes(&self, _service: &str, env: &str, path: &str) -> anyhow::Result<Vec<apps_control::integrations::Note>> {
-        let Some(engine) = self.0.upgrade() else { return Ok(Vec::new()) };
+    async fn notes(&self, service: &str, env: &str, path: &str) -> anyhow::Result<Vec<apps_control::integrations::Note>> {
+        let Some(engine) = self.engine.upgrade() else { return Ok(Vec::new()) };
+        if preview_on(&engine, &self.apps, service, env).await.is_none() {
+            return Ok(Vec::new());
+        }
         Ok(engine
             .notes_for(env, path)
             .await?
@@ -807,8 +832,8 @@ impl apps_control::integrations::FeedbackNotes for Notes {
 }
 
 /// roll apps' proxy hands a team's snapshot (`POST /__roll/snapshot` on a `pv-` host, its bypass
-/// secret checked there) to the engine (`Engine::snapshot`), once the preview is known to run on
-/// that service: a `pv-` environment's name alone proves nothing (its own lookup, as a deploy's).
+/// secret checked there) to the engine (`Engine::snapshot`), for a preview that runs on that
+/// service only ([`preview_on`]).
 pub struct Snapshots {
     pub engine: std::sync::Weak<roll_previews::Engine>,
     pub apps: RollApps,
@@ -819,21 +844,7 @@ impl apps_control::integrations::PreviewSnapshots for Snapshots {
     async fn snapshot(&self, service: &str, env: &str, name: &str, png: bytes::Bytes) -> apps_control::Result<Value> {
         let conflict = |m: &str| apps_control::Error::Conflict(m.to_string());
         let engine = self.engine.upgrade().ok_or_else(|| conflict("roll previews is stopping"))?;
-        let preview = roll_previews::Engine::preview_of_env(env).ok_or_else(|| conflict("not a preview's environment"))?;
-        let services = engine.store.services(&preview).map_err(|_| conflict("no such preview"))?;
-        let mut runs = false;
-        for s in &services {
-            if let Ok(Some((id, e))) = self.apps.find(&preview, &s.name).await
-                && id == service
-                && e == env
-            {
-                runs = true;
-                break;
-            }
-        }
-        if !runs {
-            return Err(conflict("this service doesn't run that preview"));
-        }
+        let preview = preview_on(&engine, &self.apps, service, env).await.ok_or_else(|| conflict("this service doesn't run that preview"))?;
         match engine.snapshot(&preview, name, None, png.to_vec()).await {
             Ok(head) => Ok(json!({ "page": format!("snap:{name}"), "head": head })),
             Err(roll_previews::Error::BadRequest(m)) => Err(apps_control::Error::BadRequest(m)),
@@ -843,13 +854,17 @@ impl apps_control::integrations::PreviewSnapshots for Snapshots {
 }
 
 /// roll apps' proxy takes a preview's share links through the engine, as previews' own does
-/// (`Engine::share_visit`, the maker asked again as often).
-pub struct Shares(pub std::sync::Weak<roll_previews::Engine>);
+/// (`Engine::share_visit`, the maker asked again as often), for a preview that runs on the
+/// asking service only ([`preview_on`]).
+pub struct Shares {
+    pub engine: std::sync::Weak<roll_previews::Engine>,
+    pub apps: RollApps,
+}
 
 impl Shares {
-    async fn visit(&self, env: &str, token: &str) -> Option<(Arc<roll_previews::Engine>, String, roll_previews::store::LiveShare)> {
-        let engine = self.0.upgrade()?;
-        let preview = roll_previews::Engine::preview_of_env(env)?;
+    async fn visit(&self, service: &str, env: &str, token: &str) -> Option<(Arc<roll_previews::Engine>, String, roll_previews::store::LiveShare)> {
+        let engine = self.engine.upgrade()?;
+        let preview = preview_on(&engine, &self.apps, service, env).await?;
         let live = engine.share_visit(&preview, token, roll_previews::runtime::RuntimeConfig::default().visitor_recheck).await?;
         Some((engine, preview, live))
     }
@@ -857,16 +872,16 @@ impl Shares {
 
 #[async_trait]
 impl apps_control::integrations::PreviewShares for Shares {
-    async fn live(&self, _service: &str, env: &str, token: &str, followed: bool) -> Option<apps_control::integrations::Share> {
-        let (engine, preview, live) = self.visit(env, token).await?;
+    async fn live(&self, service: &str, env: &str, token: &str, followed: bool) -> Option<apps_control::integrations::Share> {
+        let (engine, preview, live) = self.visit(service, env, token).await?;
         if followed {
             engine.share_followed(&preview, token);
         }
         Some(apps_control::integrations::Share { ends_ms: live.ends, notes: live.notes })
     }
 
-    async fn note(&self, _service: &str, env: &str, token: &str, body: &[u8]) -> Result<String, (u16, String)> {
-        let Some((engine, preview, live)) = self.visit(env, token).await else { return Err((401, "this share link has ended".into())) };
+    async fn note(&self, service: &str, env: &str, token: &str, body: &[u8]) -> Result<String, (u16, String)> {
+        let Some((engine, preview, live)) = self.visit(service, env, token).await else { return Err((401, "this share link has ended".into())) };
         let Ok(note) = serde_json::from_slice::<roll_previews::notes::GuestNote>(body) else { return Err((400, "expected {name, path, selector?, note, …}".into())) };
         engine.guest_note(&preview, &live, &note).await.map_err(|e| {
             let status = match &e {
@@ -879,8 +894,8 @@ impl apps_control::integrations::PreviewShares for Shares {
         })
     }
 
-    async fn notes(&self, _service: &str, env: &str, token: &str, path: &str) -> Vec<apps_control::integrations::Note> {
-        let Some((engine, preview, live)) = self.visit(env, token).await else { return Vec::new() };
+    async fn notes(&self, service: &str, env: &str, token: &str, path: &str) -> Vec<apps_control::integrations::Note> {
+        let Some((engine, preview, live)) = self.visit(service, env, token).await else { return Vec::new() };
         engine
             .guest_notes_of(&preview, &live.id, path)
             .await

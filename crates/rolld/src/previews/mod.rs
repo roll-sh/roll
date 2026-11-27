@@ -228,9 +228,9 @@ pub fn start(
     let _ = engine.span_reader.set(Arc::new(services::AppsSpans));
     // roll apps' proxy lists a preview page's notes from the engine (`Engine::notes_for`).
     if let Some(a) = &apps_for_notes {
-        a.set_feedback_notes(Arc::new(services::Notes(Arc::downgrade(&engine))));
+        a.set_feedback_notes(Arc::new(services::Notes { engine: Arc::downgrade(&engine), apps: RollApps::new(api.clone()) }));
         // And a preview's share links, checked at every request as previews' proxy checks them.
-        a.set_preview_shares(Arc::new(services::Shares(Arc::downgrade(&engine))));
+        a.set_preview_shares(Arc::new(services::Shares { engine: Arc::downgrade(&engine), apps: RollApps::new(api.clone()) }));
         // And a team's snapshots from their tests, for a preview that runs on that service.
         a.set_preview_snapshots(Arc::new(services::Snapshots { engine: Arc::downgrade(&engine), apps: RollApps::new(api.clone()) }));
         // A project's own preview domain: names apps' ingress doesn't hold go to previews' router.
