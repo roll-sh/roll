@@ -1380,15 +1380,23 @@ filtered listing; and the auth matrix's probe of storage's nested route (also br
 
 Ranked; the top item is in progress. Updated as work lands (the watchdog reads this list).
 
-Working order (2026-11-27, night): the fourth sweep's last fixes first (item 4: #1096 in its
-third round, #1084 in its second; each a HIGH or MED on main), then the work in review (item
-11's RAG phase 2, #1068 in its fourth round; item 30's read-only ES|QL, #1111 in its second;
-item 1's derived-key follow-ups and OpenSearch links, #1127 in its second; item 32's branch
-reset, #1149, in review), then item 33's second slice (saved searches, surrounding documents, a
-field's chart; in its gate), item 15's judgment lists (kept as indices, built from clicks, and
-OpenSearch's Search Relevance Workbench; in progress), item 14 (semantic search on
-OpenSearch-flavor clusters; resumes after #1111), item 16 (cold start at size; resumes after
-#1127) and item 18 (logs end to end: OTLP intake, alerting; the top open item).
+Working order (2026-11-27, afternoon). Work in review or fixing first:
+- `ent-search` back to its minimum: #1084's API-time write check on connectors (fix in
+  progress);
+- item 32's branch reset (#1149, its third round: a dropped request's lock-out, clock-free
+  staleness);
+- item 30's read-only ES|QL (#1111, its third round in re-check);
+- item 14's semantic search on OpenSearch-flavor clusters (#1165, its second round in re-check);
+- item 11's RAG sanitizer, redesigned in its fifth round (#1068);
+- item 1's OpenSearch links (#1127, in re-check);
+- item 15's judgment lists, lists from clicks and OpenSearch's Search Relevance Workbench (#1189,
+  #1194, #1207, in review).
+
+Then:
+- item 33's second slice (saved searches, surrounding documents, a field's chart; in its gate);
+- item 18's health alerts (in progress);
+- item 16 (cold start at size: one deciding A/B, in progress);
+- item 18's OTLP traces and metrics (the top open item).
 Landed 2026-11-26: the PIT and caches fix (#1021), a cluster's admin password kept in roll
 secrets and the MCP sweep's person flow (#1097), Terraform for synonyms sets and rulesets
 (#1071), inference endpoints from a secret answered redacted and limited to `api_key` services
@@ -1401,7 +1409,11 @@ key's `encoded` that works at the shared address (#1115), and a Discover screen 
 Landed 2026-11-26 (night) and 27: re-embedding an index's own documents (#1132, item 31); 95%
 intervals on A/B results and promoting from the Relevance tab (#1145); offline relevance
 evaluation (#1159), of a search application and its variants too (#1163); chat and completion
-tokens metered per cluster (#1141); OpenSearch's snapshot management policies (#1153, item 9).
+tokens metered per cluster (#1141); OpenSearch's snapshot management policies (#1153, item 9);
+the fourth sweep's MEDs (#1084); names authorized as they resolve, aliases and resizes (#1096)
+with its follow-ups (#1216); an OTLP/HTTP logs intake and `otel` keys (#1178, #1213);
+`cluster.max_shards_per_node` enforced (#1224); Watcher's Alerts tab (#1180); `cosinesimil`
+vectors' `_source` as OpenSearch derives it (#1197).
 
 Landed 2026-11-17: per-person cluster caps (#162: 50 clusters and 2 always-on per person,
 rolld flags, 409 past a cap, counted in the write's own transaction); the search playground (#159); the Relevance tab for
@@ -1788,7 +1800,7 @@ deterministic (#396).
    every value charged as it's built) and Watcher's Alerts tab (#1180). In progress: alerts on a
    cluster's own p99, 5xx and 429s (`feature/search-health-alerts`) and Discover's saved searches
    (item 33). Left:
-   - **The shard limit** (in review, `feature/search-shard-limit`): `cluster.max_shards_per_node`
+   - **The shard limit** (landed in #1224): `cluster.max_shards_per_node`
      enforced, as Elasticsearch and OpenSearch do, on every create (explicit, auto-create, a data
      stream's backing index, rollover), on opening closed indices, and on restore, resize and
      downsample targets, so an `otel` key can't add data streams past it.
