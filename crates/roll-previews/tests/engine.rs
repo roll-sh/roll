@@ -2240,15 +2240,22 @@ async fn earlier_pushes_stay_reachable_at_their_own_urls() {
     let none = |_: &str| String::new();
     e.engine.store.set_project_domain(&e.project, Some(("preview.acme.dev", true)), &none, &none).unwrap();
     e.engine.store.set_project_domain("prj_other", Some(("preview.other.dev", false)), &none, &none).unwrap();
-    assert_eq!(e.engine.store.gone_domain_push(&a, "preview.acme.dev").unwrap(), Some(gone));
+    assert_eq!(e.engine.store.gone_domain_push(&a, "preview.acme.dev").unwrap(), Some(gone.clone()));
     assert_eq!(e.engine.store.gone_domain_push(&a, "preview.other.dev").unwrap(), None);
     // An earlier push runs its own head on its own host.
     let (t, _) = e.engine.env(&p.id, "web@cs_8c").await.unwrap();
     assert_eq!(t.revision, "cs_8c");
     assert!(view.earlier.iter().any(|x| x.url.contains(&t.host)));
+    // Started again on demand from its link's page: kept in place of the oldest, at its link.
+    let url = e.engine.restart_push(&gone, "ada").await.unwrap();
+    let kept: Vec<String> = e.engine.store.preview(&p.id).unwrap().earlier.iter().map(|x| x.revision.clone()).collect();
+    assert_eq!(kept, ["cs_8a", "cs_8d", "cs_8c"], "the oldest kept went in its place");
+    assert!(url.contains(&a) && e.engine.store.gone_push(&a).unwrap().is_none(), "its own link again, no longer gone: {url}");
+    assert!(e.apps.removed.lock().contains(&(p.id.clone(), "web@cs_8b".into())));
     // A fork's earlier heads lost their approval with the push: they don't run.
     e.engine.store.update(&p.id, |r| r.trusted = false).unwrap();
     assert!(e.engine.env(&p.id, "web@cs_8c").await.is_err());
+    assert!(e.engine.restart_push(&gone, "ada").await.is_err(), "nor start again");
     // Deleted, they all go.
     e.code.edit("chg_p", |c| c.open = false);
     e.engine.pass().await.unwrap();

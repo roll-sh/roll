@@ -167,7 +167,15 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
   A link to one that's no longer kept says so: its host answers 410 with a page naming the
   service and the push and linking the service's latest (on roll's preview domain and on a
   project's own, there only for that project's previews; the latest 30 a preview evicted, gone
-  with the preview), not a 404 that reads as a broken preview.
+  with the preview), not a 404 that reads as a broken preview. On roll's runtime, a trusted
+  change's page also starts it again on demand (Vercel keeps every deployment's URL): its "Start
+  this push again" (`/__roll/start-push` on that host, through the preview's own gate: the
+  link's token it carried, a share link or a session of a person signed in to roll, as any of its
+  pages) keeps it again in place of the oldest kept push of that service (whose container goes),
+  at the same link, and the next request starts it, on the preview's data (its own copy went
+  when it was dropped). A fork's earlier heads never start again
+  (`engine.rs::earlier_pushes_stay_reachable_at_their_own_urls`,
+  `runtime.rs::service_hosts_reach_their_containers`).
 - **A page loaded before a push keeps working** (Vercel's skew protection; roll apps'
   `run.skew_protection`): with `skew_protection = true` in `[preview]`, a request that names an
   earlier push goes to that push's own service (above), past the same gate, while the push is
@@ -3168,8 +3176,8 @@ overlaps stay within a repo.
    replay safely on branched data; capturing production's requests needs its privacy designed
    first. The previews' own GETs replayed
    against main's, in review.
-2. **Older pushes past the last three, started on demand**; **what a note's reviewer saw, from
-   their own browser** (Jam, Marker.io).
+2. **Older pushes past the last three, started on demand, in review** (roll's runtime); **what a
+   note's reviewer saw, from their own browser** (Jam, Marker.io).
 3. **Restore points for search and buckets**: search's once roll search's `reset {from}` is in
    (its Next 32); buckets need a put-back on roll storage's side.
 4. **Previews for the members thread's next products**: once roll apps' and roll search's routes
