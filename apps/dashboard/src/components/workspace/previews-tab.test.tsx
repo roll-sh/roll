@@ -83,6 +83,7 @@ beforeEach(() => {
   api.visitors.mockResolvedValue([]);
   api.vars.mockResolvedValue({ vars: {} });
   api.shares.mockResolvedValue([]);
+  api.notes.mockResolvedValue({ notes: [] });
   api.webhooks.mockResolvedValue([]);
   api.restorePoints.mockResolvedValue({ points: [], max: 3 });
   api.mail.mockResolvedValue({ mail: [] });

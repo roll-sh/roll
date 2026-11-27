@@ -25,6 +25,10 @@ const MAX_BODY: usize = 4 << 20;
 const MAX_ANSWER: usize = 64 << 20;
 /// Names a request's approval when it's sent again.
 pub const APPROVAL_HEADER: &str = "x-roll-approval";
+/// After the grant id in a forward's signed decision ([`roll_cluster::Decided`]): it passed on a
+/// person's approval of an `ask`, so the owner, which doesn't ask again, knows it was approved
+/// rather than allowed (an older owner reads no grant there and decides again: it fails closed).
+const ASKED: &str = ":asked";
 /// Names the workspace project a create goes in.
 pub const PROJECT_HEADER: &str = "x-roll-project";
 
@@ -427,7 +431,9 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
     }
     // Forwarded by a node that decided it for this grant already (a signed hop to an owner): a
     // person isn't asked twice, and the first node logs it. Everything else is decided again.
-    let decided_before = req.extensions().get::<roll_cluster::Forwarded>().and_then(|f| f.decided.as_deref()) == Some(grant.id.as_str());
+    let decided = req.extensions().get::<roll_cluster::Forwarded>().and_then(|f| f.decided.as_deref());
+    let decided_before = decided.is_some_and(|d| d.strip_suffix(ASKED).unwrap_or(d) == grant.id.as_str());
+    let approved_before = decided.and_then(|d| d.strip_suffix(ASKED)) == Some(grant.id.as_str());
     // A token for roll's MCP server (an MCP client's, RFC 8707) works there and in the calls that
     // server makes for it (or a hop another node decided), never on the API directly: what the
     // server adds (lockdown, the credential guard, a read-only connection URL) can't be stepped
@@ -521,7 +527,7 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
         }
         None => None,
     };
-    judge(ctx, req, next, Judge { session: false, as_user, decided_before, limit, person, within }).await
+    judge(ctx, req, next, Judge { session: false, as_user, decided_before, approved_before, limit, person, within }).await
 }
 
 /// How [`judge`] decides: for a token (a person's acts `within` their session), or for a person's
@@ -530,6 +536,8 @@ struct Judge {
     session: bool,
     as_user: bool,
     decided_before: bool,
+    /// The node that decided it let it through on a person's approval of an `ask` ([`ASKED`]).
+    approved_before: bool,
     limit: Option<(u32, u32, std::time::Duration)>,
     person: Option<roll_auth::SignedIn>,
     within: Option<roll_auth::Grant>,
@@ -564,7 +572,7 @@ async fn decide_session(access: Arc<Access>, req: Request, next: Next) -> Respon
     let stored = Grant { id: grant.id.to_string(), name: grant.name.to_string(), kind: "session", rules: (*grant.scope).clone(), user: Some(person.user.clone()), ..Default::default() };
     let ip = client_ip(&req, &access.config);
     let ctx = Ctx { access: access.clone(), grant: stored, started: Instant::now(), ip, mcp: None, method, route, args: None, list_prefix: None, about: None, client: None, session: true, person: true };
-    judge(ctx, req, next, Judge { session: true, as_user: true, decided_before: false, limit: None, person: Some(person), within: None }).await
+    judge(ctx, req, next, Judge { session: true, as_user: true, decided_before: false, approved_before: false, limit: None, person: Some(person), within: None }).await
 }
 
 /// A refusal for a person's session or their token's session: a project they aren't a member of
@@ -606,7 +614,7 @@ fn refuse_session(scope: &Scope, target: &Target, action: Action, about: &str, n
 
 /// The decision itself, once the grant is known: the route's row, the resource, the rules.
 async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
-    let Judge { session, as_user, decided_before, limit, person, mut within } = j;
+    let Judge { session, as_user, decided_before, approved_before, limit, person, mut within } = j;
     let access = ctx.access.clone();
     ctx.person = as_user;
     // A nested service (storage) sees its path without the prefix: the original has it.
@@ -1061,9 +1069,13 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
         parts.extensions.insert(roll_auth::ClientIp(ip));
         parts.extensions.insert(roll_cluster::ClientAddr(ip.to_string()));
     }
-    // Forwarded to an owner, it carries this decision (signed) so a person isn't asked again.
+    // Forwarded to an owner, it carries this decision (signed) so a person isn't asked again, and
+    // whether it passed on a person's approval (here, or on the node that forwarded it here): the
+    // owner skips asking either way, and only this says which it was.
     if !session {
-        parts.extensions.insert(roll_cluster::Decided(ctx.grant.id.clone()));
+        let approved = outcome == Outcome::Ask && (!decided_before || approved_before);
+        let decision = if approved { format!("{}{ASKED}", ctx.grant.id) } else { ctx.grant.id.to_string() };
+        parts.extensions.insert(roll_cluster::Decided(decision));
     }
     // roll's own work for the grant has no token to forward: a forward carries the grant (signed),
     // and the owner's gate acts for it again (rolld's `act_as_from_hop`).

@@ -119,7 +119,7 @@ struct Daemon {
 /// What the stand-in products saw: the operator's marker and a grant.
 fn seen(ext: &axum::http::Extensions) -> Value {
     let approved = roll_auth::Approved::on(ext).map(|a| json!({ "id": &*a.id, "by": a.by.iter().map(|b| &**b).collect::<Vec<_>>(), "until": a.until }));
-    json!({ "operator": roll_auth::Operator::on(ext), "grant": roll_auth::Grant::on(ext).map(|g| g.id.to_string()), "approved": approved, "acting": ext.get::<roll_cluster::Acting>().map(|a| a.0.clone()) })
+    json!({ "operator": roll_auth::Operator::on(ext), "grant": roll_auth::Grant::on(ext).map(|g| g.id.to_string()), "approved": approved, "acting": ext.get::<roll_cluster::Acting>().map(|a| a.0.clone()), "decided": ext.get::<roll_cluster::Decided>().map(|d| d.0.clone()) })
 }
 
 fn postgres() -> Router {
@@ -594,6 +594,18 @@ async fn escalation_paths_are_shut() {
     let hop = |decided: &str| Some(roll_cluster::Forwarded { node: "n1".into(), hops: 1, client: Some("10.1.2.3".into()), decided: Some(decided.into()), acting: None });
     let (s, out) = d.raw(&fleet, Method::DELETE, "/v1/projects/pa", Body::empty(), &[], hop(&grant)).await;
     assert_eq!((s, out["grant"].as_str()), (StatusCode::OK, Some(grant.as_str())), "{out}");
+    // A forward says whether the decision was an approval of the `ask` (an owner skipping the ask
+    // can't tell an approval from an allow otherwise), and passes that on.
+    assert_eq!(out["decided"].as_str(), Some(grant.as_str()), "allowed by the node before: {out}");
+    let asked = format!("{grant}:asked");
+    let (s, out) = d.raw(&fleet, Method::DELETE, "/v1/projects/pa", Body::empty(), &[], hop(&asked)).await;
+    assert_eq!((s, out["decided"].as_str()), (StatusCode::OK, Some(asked.as_str())), "{out}");
+    let (here, here_grant) = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "delete": "ask" } }]), json!({})).await;
+    let (_, out) = d.raw(&here, Method::DELETE, "/v1/projects/pa", Body::empty(), &[], None).await;
+    let id = out["approval"].as_str().unwrap_or_else(|| panic!("{out}")).to_string();
+    assert_eq!(d.call(OPERATOR, Method::POST, &format!("/v1/access/approvals/{id}/approve"), None).await.0, StatusCode::OK);
+    let (s, out) = d.raw(&here, Method::DELETE, "/v1/projects/pa", Body::empty(), &[("x-roll-approval", &id)], None).await;
+    assert_eq!((s, out["decided"].as_str()), (StatusCode::OK, Some(format!("{here_grant}:asked").as_str())), "approved here: {out}");
     let (_, out) = d.raw(&fleet, Method::DELETE, "/v1/projects/pa", Body::empty(), &[], hop("tok_other")).await;
     assert_eq!(out["code"], "approval_pending", "{out}");
     let stranger = Some(roll_cluster::Forwarded { node: "n1".into(), hops: 1, client: Some("192.0.2.9".into()), decided: Some(grant.clone()), acting: None });
@@ -810,7 +822,9 @@ async fn approvals_are_posted_to_chat_and_decided_there() {
     let seen = |what: String| {
         let chat = chat.clone();
         async move {
-            for _ in 0..100 {
+            // Up to 15 s (it returns as soon as it's there): the delivery is a background task, slow
+            // when the machine is loaded.
+            for _ in 0..750 {
                 if chat.0.lock().unwrap().iter().any(|l| l.starts_with(&what)) {
                     return;
                 }

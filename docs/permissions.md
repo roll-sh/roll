@@ -743,7 +743,11 @@ take only signed requests, so nobody outside the cluster can put a path there. O
   (`x-roll-code-decided: <grant id>`, `roll_cluster::Decided`). For that grant the owner doesn't
   ask a person a second time, and doesn't log the request again; it still denies whatever the
   grant's rules deny there, and a revoked token stops there too. A hop from a node that didn't
-  decide it (a public listener in front of the tasks leader) is decided in full;
+  decide it (a public listener in front of the tasks leader) is decided in full. When it passed on
+  a person's approval of an `ask`, the value is `<grant id>:asked`, passed on by every hop after:
+  the owner skips asking either way, and only this tells an approval from an allow (what an
+  approved ask reaches, such as search ES|QL's indices, follows it). An owner on an older roll
+  reads no grant there and decides again, so a rolling restart fails closed;
 - roll's own work for a grant (`roll_auth::ActAs`: an MCP Events webhook delivery reading its feed)
   has no token to forward, so the hop names the grant (`x-roll-code-acting: <grant id>`,
   `roll_cluster::Acting`, signed with a tag of its own) and the owner's gate acts for it again
