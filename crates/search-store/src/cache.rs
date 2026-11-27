@@ -1200,6 +1200,46 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// A waking shard's reads don't queue behind other segments' bulk parts: with every bulk
+    /// permit held by other downloads on a slow shared link, a reader's range (and the segment's
+    /// first read) comes on the urgent lane, with the object's bytes, while the others are far
+    /// from done; the whole file is right once it completes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_readers_parts_never_queue_behind_other_downloads() {
+        let objects = crate::test_objects("cache-urgent");
+        let dir = crate::test_dir().join(format!("urgent-{:016x}", crate::random_u64()));
+        let cache = Cache::open(dir.join("seg"), dir.join("tmp"), 1 << 30, objects.clone(), None).unwrap();
+        let part = 4096u64;
+        cache.set_fetch_part(part);
+        let len = 64 * part as usize;
+        let bytes = |i: usize| -> Vec<u8> { (0..len).map(|j| ((i * 7 + j) % 251) as u8).collect() };
+        for i in 0..9 {
+            objects.put(&format!("search/seg/u{i}.seg"), Bytes::from(bytes(i))).await.unwrap();
+        }
+        // 512 KiB/s: the eight bulk downloads take four seconds. Behind their 64 waiting workers
+        // (one FIFO for every part) the reader's two reads would come after about half a MiB of
+        // them; on the urgent lane only the reads already in flight (32 KiB) are ahead.
+        cache.set_throttle(512 << 10);
+        let mut busy = Vec::new();
+        for i in 0..8 {
+            busy.push(cache.fetch_progressive(&format!("u{i}.seg"), &format!("search/seg/u{i}.seg")).await.unwrap());
+        }
+        let started = std::time::Instant::now();
+        let f = cache.fetch_progressive("u8.seg", "search/seg/u8.seg").await.unwrap();
+        let mid = len as u64 / 2;
+        let got = f.read(mid..mid + 100).await.unwrap();
+        let waited = started.elapsed();
+        assert_eq!(&got[..], &bytes(8)[mid as usize..mid as usize + 100]);
+        let done: u64 = busy.iter().map(|b| b.downloaded()).sum();
+        assert!(done < len as u64, "the reader came after the bulk downloads ({done} bytes of them were in after {waited:?})");
+        let whole = f.complete().await.unwrap();
+        assert_eq!(&whole[..], &bytes(8)[..]);
+        for (i, b) in busy.iter().enumerate() {
+            assert_eq!(&b.complete().await.unwrap()[..], &bytes(i)[..], "u{i}");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn wanted_parts_come_first_and_each_part_is_taken_once() {
         let mut p = Parts::new(5 * FETCH_PART + 10);
