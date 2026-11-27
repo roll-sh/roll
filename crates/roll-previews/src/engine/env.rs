@@ -28,7 +28,16 @@ impl EnvSource for Engine {
             None => (service, None),
         };
         let svc = services.iter().find(|x| x.name == name).ok_or_else(|| anyhow::anyhow!("no service {name}"))?;
+        let main_run = match earlier {
+            Some("main") => Some(self.main_runs.lock().get(&(preview.to_string(), name.to_string())).cloned().ok_or_else(|| anyhow::anyhow!("main's code isn't running on this preview's data now"))?),
+            _ => None,
+        };
         let (rev, host, url) = match earlier {
+            // Main's revision on a copy of the preview's data (main_on_change.rs), trusted only.
+            Some("main") if r.trusted => {
+                let host = self.store.service_host(preview, service)?.ok_or_else(|| anyhow::anyhow!("no service {name}"))?;
+                (main_run.as_ref().map(|(rev, _)| rev.clone()).unwrap_or_default(), host, svc.url.clone())
+            }
             Some(rev) => {
                 // An approval is for one head: a fork's earlier heads don't run again.
                 if !r.trusted {
@@ -76,7 +85,10 @@ impl EnvSource for Engine {
         // A reference (`roll://…`) is roll secrets' to resolve (`secrets` has its value): never set as its text.
         let own: Vec<(String, String)> = project_env(&s, r.branch.as_deref()).into_iter().chain(self.store.vars(preview)?).filter(|(_, v)| !crate::settings::is_reference(v)).collect();
         // An earlier push runs on its own copy of the data, where one was kept.
-        let branches = self.resource_env_at(preview, earlier).await?;
+        let branches = match main_run {
+            Some((_, vars)) => vars,
+            None => self.resource_env_at(preview, earlier).await?,
+        };
         // Its logs hide what this start is given (its dynamic credentials included).
         self.add_masks(preview, masks::secret_values(&secrets, &plain, &own, &branches));
         for (k, v) in secrets.into_iter().chain(own).chain(branches) {
