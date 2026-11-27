@@ -289,6 +289,12 @@ pub struct Skipped {
     /// the visual review holds on them ([`UNTAKEN_STORIES`]).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub touched_stories: u32,
+    /// A run's own count of the stories the change touched in all, and of those it took (every
+    /// share of a sharded run knows the whole touched set): what a failed share leaves out.
+    #[serde(skip)]
+    pub touched_total: u32,
+    #[serde(skip)]
+    pub touched_taken: u32,
     /// The change's stories were chosen by its files alone: its Storybook served no module graph
     /// (`preview-stats.json`, `--stats-json`; a `storybook dev` server has none), so a story that
     /// imports a changed file from elsewhere may be among those left.

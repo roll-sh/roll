@@ -2433,7 +2433,7 @@ type Settings = {
     `stories.json` before), and takes 40 stories (with `github.story_runs`, 1 to 4 screenshot
     containers side by side, 40 each: every k-th of the order below, so each takes its share of
     the ones that matter first, merged back in that order; each billed as a browser run, their
-    times added; `STORIES_SHARD`), those the change touched first (Chromatic's
+    times added; `STORIES_SHARD`; a share whose run fails leaves the others' stories standing, and its share of the stories the change touched, what the others neither took nor left as each knows the whole touched set, counts as untaken: the visual review holds on it, `runtime.rs::tests::shards_stories_come_back_in_the_order_they_were_dealt`), those the change touched first (Chromatic's
     TurboSnap: a story whose own file the change changed since the default branch, then one that
     imports a changed file from anywhere, then one beside a file it changed, its component or its
     styles, then the rest in the index's order; a repo's path matches a story's `importPath` and a
@@ -3031,28 +3031,25 @@ overlaps stay within a repo.
    preview run once against a copy of the change's branch after its release (its pages and
    endpoints), so a migration that breaks the version still running while it deploys is caught on
    real data.
-3. **Locks measured during the release, in review** (PlanetScale's safe migrations, squawk):
-   `release.locks`, the strongest per table and how long, from `pg_locks` sampled every half
-   second.
-4. **Webhooks into private previews** (Vercel's bypass in a query parameter; S): a per-preview,
+3. **Webhooks into private previews** (Vercel's bypass in a query parameter; S): a per-preview,
    per-path bypass that fits in a Stripe or GitHub webhook URL, never the project-wide secret.
-5. **Snapshots from the team's own Playwright or Cypress suite** (Argos's, Percy's SDKs; M):
+4. **Snapshots from the team's own Playwright or Cypress suite** (Argos's, Percy's SDKs; M):
    a step in their tests sends a page's picture to the preview's visual review.
-6. **Notes to Jira, GitHub Issues or Asana** (Marker.io, Netlify's Drawer; S).
-7. **A failed story shard counted as untaken** (S): its share of the touched stories holds the
-   visual review, as the ones left out do.
-8. **Replaying recorded traffic against the preview and main** (Signadot, Speedscale; L): writes
+5. **Notes to Jira, GitHub Issues or Asana** (Marker.io, Netlify's Drawer; S).
+6. **A failed story shard counted as untaken, in review**: its share of the touched stories
+   holds the visual review, as the ones left out do.
+7. **Replaying recorded traffic against the preview and main** (Signadot, Speedscale; L): writes
    replay safely on branched data; capturing production's requests needs its privacy designed
    first.
-9. **A rehearsal that holds a change back** (a required rule): rehearsed at each head, so the
+8. **A rehearsal that holds a change back** (a required rule): rehearsed at each head, so the
    landing blocker never waits on the queue that would ask for it.
-10. **Older pushes past the last three, started on demand**; **what a note's reviewer saw, from
+9. **Older pushes past the last three, started on demand**; **what a note's reviewer saw, from
     their own browser** (Jam, Marker.io).
-11. **Restore points for search and buckets**: search's once roll search's `reset {from}` is in
+10. **Restore points for search and buckets**: search's once roll search's `reset {from}` is in
     (its Next 32); buckets need a put-back on roll storage's side.
-12. **Previews for the members thread's next products**: once roll apps' and roll search's routes
+11. **Previews for the members thread's next products**: once roll apps' and roll search's routes
     become member routes (docs/members.md, v1.1).
-13. **Watches on pg-control**: the data step's Postgres compute start; cheap branches on ext4
+12. **Watches on pg-control**: the data step's Postgres compute start; cheap branches on ext4
     through overlay volumes; recovery to a time seconds old (unowned).
 
 Not to build: more lab checks on the first page (each adds noise to every pull request), or a
@@ -3064,7 +3061,8 @@ load (#1114), the tenth review's fixes (#1119), the visual review holding on sto
 touched that its run didn't take (#1120), a visual change refused (#1125), masked bases (#1130), more stories per run (#1135), open
 changes that change the same tables named on each other (#1136), the toolbar's Main (#1138), a release
 rehearsed on today's data (#1140), and roll apps previews' feedback button for team access
-(#1151), a rehearsal when a change is queued to land (#1155), the eleventh review's fixes (#1160), and masking that's safe by default (#1166).
+(#1151), a rehearsal when a change is queued to land (#1155), the eleventh review's fixes (#1160), masking that's safe by default (#1166), and the locks a
+release holds, measured (#1169).
 
 Landed 2026-11-26, morning: stories' interaction tests (#1087), what a failed one threw (#1091), both in the other browsers (#1100), the step a failed one stopped at (#1105), and restore points for Redis (#1109).
 
