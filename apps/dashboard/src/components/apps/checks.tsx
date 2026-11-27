@@ -11,8 +11,9 @@ const NAME = /^[a-z0-9-]{1,32}$/;
  * own proxy; two failures in a row are `check.down` for its notification targets, the next
  * pass resolves it. A check wakes a service that scales to zero. With a browser script (Checkly's,
  * through Vercel) the page loads in Chromium and the script runs against it, every 5 min at most.
+ * A TCP service's checks connect to its port instead, its banner holding `contains`.
  */
-export function ChecksPanel({ service, env, runner }: { service: string; env: Environment; runner: Runner }) {
+export function ChecksPanel({ service, tcp, env, runner }: { service: string; tcp: boolean; env: Environment; runner: Runner }) {
   const checks = env.checks ?? [];
   const [name, setName] = useState("");
   const [path, setPath] = useState("/");
@@ -21,7 +22,7 @@ export function ChecksPanel({ service, env, runner }: { service: string; env: En
   const [script, setScript] = useState("");
   const [outside, setOutside] = useState(false);
   const save = (next: UptimeCheck[]) => runner.run("checks", () => appsApi.putEnvironment(service, env.name, { checks: next.length ? next : null }));
-  const ok = NAME.test(name) && !checks.some((c) => c.name === name) && path.startsWith("/") && !/\s/.test(path) && Number(every) >= (script.trim() ? 300 : 30) && Number(every) <= 3600 && script.length <= 16384 && checks.length < 5;
+  const ok = NAME.test(name) && !checks.some((c) => c.name === name) && (tcp || (path.startsWith("/") && !/\s/.test(path))) && Number(every) >= (script.trim() ? 300 : 30) && Number(every) <= 3600 && script.length <= 16384 && checks.length < 5;
   const busy = runner.busy !== null;
   // A failure's file, opened (the screenshot) or saved (the trace) from a blob: the routes need the session.
   const open = async (check: string, which: "screenshot" | "trace") => {
@@ -44,7 +45,7 @@ export function ChecksPanel({ service, env, runner }: { service: string; env: En
                 <i className={`size-1.5 rounded-full ${tone}`} aria-label={st?.up === false ? "down" : st?.up ? "up" : "not tried yet"} />
                 <span className="font-medium">{c.name}</span>
                 <code className="min-w-0 flex-1 truncate font-mono text-[12px]">
-                  {c.browser ? "Browser" : "GET"} {c.from === "public" ? `${c.host ?? "its URL"} ` : ""}{c.path}
+                  {c.tcp ? "TCP port" : <>{c.browser ? "Browser" : (c.method ?? "GET")} {c.from === "public" ? `${c.host ?? "its URL"} ` : ""}{c.path}</>}
                   {c.from === "public" ? " · from outside" : ""}
                   {c.contains ? ` · contains ${JSON.stringify(c.contains)}` : ""}
                 </code>
@@ -82,7 +83,8 @@ export function ChecksPanel({ service, env, runner }: { service: string; env: En
         className="flex flex-wrap gap-2 px-5 py-4"
         onSubmit={(e) => {
           e.preventDefault();
-          void save([...checks, { name, path: path.trim(), every_s: Number(every), ...(contains.trim() ? { contains: contains.trim() } : {}), ...(script.trim() ? { browser: script, timeout_s: 60 } : outside ? { from: "public" as const } : {}) }]).then((r) => {
+          const how = tcp ? { tcp: true } : { path: path.trim(), ...(script.trim() ? { browser: script, timeout_s: 60 } : outside ? { from: "public" as const } : {}) };
+          void save([...checks, { name, every_s: Number(every), ...(contains.trim() ? { contains: contains.trim() } : {}), ...how }]).then((r) => {
             if (!r) return;
             setName("");
             setPath("/");
@@ -92,11 +94,13 @@ export function ChecksPanel({ service, env, runner }: { service: string; env: En
         }}
       >
         <input value={name} onChange={(e) => setName(e.target.value.toLowerCase())} placeholder="health" aria-label="Check name" spellCheck={false} className={`${input} w-32 font-mono text-[12px]`} />
-        <input value={path} onChange={(e) => setPath(e.target.value)} placeholder="/healthz" aria-label="Path" spellCheck={false} className={`${input} min-w-40 flex-1 font-mono text-[12px]`} />
-        <input value={contains} onChange={(e) => setContains(e.target.value)} placeholder="its answer contains (optional)" aria-label="Contains" spellCheck={false} className={`${input} w-52 text-[12px]`} />
-        <label className="flex items-center gap-1.5 text-[12px] text-muted" title="over the internet, as a visitor's request: its DNS, a custom domain's TLS and the edge">
-          <input type="checkbox" checked={outside} disabled={!!script.trim()} onChange={(e) => setOutside(e.target.checked)} /> from outside
-        </label>
+        {!tcp && <input value={path} onChange={(e) => setPath(e.target.value)} placeholder="/healthz" aria-label="Path" spellCheck={false} className={`${input} min-w-40 flex-1 font-mono text-[12px]`} />}
+        <input value={contains} onChange={(e) => setContains(e.target.value)} placeholder={tcp ? "its banner contains (optional)" : "its answer contains (optional)"} aria-label="Contains" spellCheck={false} className={`${input} w-52 text-[12px]`} />
+        {!tcp && (
+          <label className="flex items-center gap-1.5 text-[12px] text-muted" title="over the internet, as a visitor's request: its DNS, a custom domain's TLS and the edge">
+            <input type="checkbox" checked={outside} disabled={!!script.trim()} onChange={(e) => setOutside(e.target.checked)} /> from outside
+          </label>
+        )}
         <select value={every} onChange={(e) => setEvery(e.target.value)} aria-label="Every" className={`${input} w-28 text-[12px]`}>
           {[["30", "30 s"], ["60", "1 min"], ["300", "5 min"], ["900", "15 min"], ["3600", "1 h"]].map(([v, l]) => (
             <option key={v} value={v}>
@@ -104,15 +108,17 @@ export function ChecksPanel({ service, env, runner }: { service: string; env: En
             </option>
           ))}
         </select>
-        <textarea
-          value={script}
-          onChange={(e) => setScript(e.target.value)}
-          rows={script ? 4 : 1}
-          placeholder="a browser check's Playwright script (optional): await page.getByRole('button', { name: 'Sign in' }).click()"
-          aria-label="Browser script"
-          spellCheck={false}
-          className={`${input} w-full font-mono text-[12px]`}
-        />
+        {!tcp && (
+          <textarea
+            value={script}
+            onChange={(e) => setScript(e.target.value)}
+            rows={script ? 4 : 1}
+            placeholder="a browser check's Playwright script (optional): await page.getByRole('button', { name: 'Sign in' }).click()"
+            aria-label="Browser script"
+            spellCheck={false}
+            className={`${input} w-full font-mono text-[12px]`}
+          />
+        )}
         {script.trim() && Number(every) < 300 && <span className="w-full text-[11.5px] text-muted">A browser check runs every 5 min at most.</span>}
         <button type="submit" className={primary} disabled={!ok || busy}>
           <Plus className="size-3.5" /> Add

@@ -130,9 +130,10 @@ pub trait Grants: Send + Sync + std::fmt::Debug {
     }
     /// Whether some rule of it reaches only some secret keys (`keys: [...]`): then what's answered
     /// key by key is asked again per key ([`reaches`]). Others answer the same for every key.
-    fn limits_keys(&self) -> bool {
-        false
-    }
+    /// No default: a wrapper that answered `false` for a keyed grant inside it would make
+    /// `reaches` say yes to every key, so a list or a values read answered the whole folder.
+    /// Every implementation says what it forwards.
+    fn limits_keys(&self) -> bool;
     /// The token's name when it may only scan: a pre-receive hook's (an admin's token whose every
     /// rule is `scan`, asking nothing otherwise), the only kind whose word about a pusher binds a
     /// bare break-glass login (leaks.rs). Anything that may do more, or acts as a person, `None`.
@@ -248,6 +249,9 @@ impl Grants for Everything {
     fn reads_code(&self, _: &str, _: &str) -> bool {
         true
     }
+    fn limits_keys(&self) -> bool {
+        false
+    }
 }
 
 /// Everything except the environments it names: what checks and sandboxes get, so a protected
@@ -258,6 +262,9 @@ pub struct Except(pub Vec<String>);
 impl Grants for Except {
     fn allows(&self, _: Action, at: &Scope<'_>) -> bool {
         at.env.is_none_or(|e| !self.0.iter().any(|x| x == e))
+    }
+    fn limits_keys(&self) -> bool {
+        false
     }
 }
 
