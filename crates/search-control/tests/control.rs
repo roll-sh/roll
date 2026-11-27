@@ -7655,12 +7655,15 @@ async fn otlp_logs_land_in_otel_data_streams_with_an_otel_key() {
     assert_eq!(hits[0]["_source"]["resource"]["attributes"]["service.name"], "checkout", "{v}");
     assert!(hits[0]["_index"].as_str().unwrap().contains("logs-generic.otel-default"), "{v}");
     assert!(hits[1]["_index"].as_str().unwrap().contains("logs-web.otel-default"), "{v}");
-    // The key writes and never reads.
-    let (s, _) = as_key(&e, &key, Method::POST, "/logs-*.otel-*/_search", None).await;
-    assert_eq!(s, 403);
+    // The key writes and never reads (a wildcard would just find nothing it may read).
+    let (s, v) = as_key(&e, &key, Method::POST, "/logs-generic.otel-default/_search", None).await;
+    assert_eq!(s, 403, "{v}");
     // A read key's records are refused, not half-written.
     let (_, v) = e.call(Method::POST, &format!("/v1/search/clusters/{id}/keys"), Some(json!({"name": "reader", "access": "read"}))).await;
     let reader = v["api_key"].as_str().unwrap().to_string();
     let r = e.http.post(&url).header("authorization", format!("ApiKey {reader}")).json(&json_logs).send().await.unwrap();
-    assert_eq!(r.status().as_u16(), 403);
+    let (status, text) = (r.status().as_u16(), r.text().await.unwrap());
+    assert_eq!(e.es(&u, &p, Method::POST, "/logs-*.otel-*/_refresh", None).await.0, 200);
+    let (_, v) = e.es(&u, &p, Method::POST, "/logs-*.otel-*/_count", None).await;
+    assert_eq!((status, &v["count"]), (403, &json!(2)), "the read key's write: {text}");
 }
