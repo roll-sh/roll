@@ -1198,6 +1198,36 @@ async fn a_revoked_logins_local_agent_answers_a_refusal_within_one_poll() {
     assert!(body.contains("refused the agent's login") && !body.contains("fake-"), "{body}");
 }
 
+/// A token whose rule reaches only some keys reads those with `roll run`, but can't follow the
+/// whole folder: `roll run --watch` and `roll secrets agent` say why at their start (the folder,
+/// never a key) and exit non-zero, rather than failing every poll.
+#[tokio::test]
+async fn a_key_scoped_token_says_at_the_start_that_it_cant_watch() {
+    let s = start().await;
+    ok(&s.api, &[], &["secrets", "-p", "shop", "-e", "production", "set", "STRIPE_KEY=fake-stripe", "DB_PASSWORD=fake-pw"], None).await;
+    let token = ok(&s.api, &[], &["secrets", "-p", "shop", "tokens", "create", "stripe", "--for-env", "production", "--key", "STRIPE_KEY"], None).await.trim().to_string();
+    let t = [("ROLL_TOKEN", token.as_str())];
+    let plain = ok(&s.api, &t, &["run", "-e", "production", "--no-mask", "--", "sh", "-c", "echo ${STRIPE_KEY:-none} ${DB_PASSWORD:-none}"], None).await;
+    assert_eq!(plain.trim(), "fake-stripe none");
+    let why = |o: &Out| o.code != Some(0) && o.stderr.contains("only some keys of production") && o.stderr.contains("a rule without keys") && !o.stderr.contains("STRIPE_KEY") && !o.stderr.contains("DB_PASSWORD");
+    let watched = roll(&s.api, &t, &["run", "-e", "production", "--watch", "--no-mask", "--", "true"], None).await;
+    assert!(why(&watched) && watched.stderr.contains("--watch"), "{}", watched.stderr);
+    let token_file = s._dir.path().join("agent-token");
+    let agent = tokio::process::Command::new(env!("CARGO_BIN_EXE_roll"))
+        .args(["secrets", "-e", "production", "agent", "--port", "0", "--token-file", token_file.to_str().unwrap()])
+        .env("ROLL_API_URL", &s.api)
+        .env("ROLL_TOKEN", &token)
+        .env_remove("ROLL_PROJECT")
+        .env_remove("ROLL_ENV")
+        .env_remove("ROLL_ADMIN_TOKEN")
+        .stdin(Stdio::null())
+        .kill_on_drop(true)
+        .output();
+    let out = tokio::time::timeout(std::time::Duration::from_secs(20), agent).await.expect("the agent exits at its start").unwrap();
+    let agent = Out { code: out.status.code(), stdout: String::new(), stderr: String::from_utf8_lossy(&out.stderr).into() };
+    assert!(why(&agent) && agent.stderr.contains("--ttl 0"), "{}", agent.stderr);
+}
+
 /// A Compute Engine metadata server: the instance's identity token for the audience asked, signed
 /// by `key` as Google's (a service account's numeric id as the subject), only with
 /// `Metadata-Flavor: Google`; and the audiences it was asked for.

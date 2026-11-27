@@ -5944,7 +5944,15 @@ that follow from it:
   rotate, hosts, purge) at that key, and a folder's list, values (`roll run`, an export, `?seq=`),
   resolve and batch of changes key by key: those keys alone, and a batch naming another is
   refused with its name. A digest, a watch's delta, a `.env` import or diff, a promote, health
-  and leaks stay the folder's (403). `Scope::key` and `Scope::by_key` carry it to `Grants::allows`;
+  and leaks stay the folder's (403). That 403 says why when a keyed rule would reach the folder
+  key by key: "this token reaches only some keys of production:/api; a watch (the folder's
+  digest) reads the whole folder, so it needs a rule without keys" (the folder, never a key;
+  `roll_auth::scope::keys_only`, from the gate and from `Caller::need`). So a keyed token can't
+  watch: `roll run --watch`, `roll secrets render --watch` and `roll secrets agent` (for its
+  `-e` folder and `--prefetch` ones) stop at their start with that message and exit non-zero
+  instead of failing every poll. Plain `roll run` reads the token's keys, and the agent with
+  `--ttl 0` keeps nothing and reads them on every request. There's no per-key watch yet.
+  `Scope::key` and `Scope::by_key` carry it to `Grants::allows`;
   `access::reaches` asks it per key, and `Grants::limits_keys` skips that for every other caller.
   `roll secrets tokens create … --key STRIPE_KEY` makes one. (Encryption keys are another
   thing: `{id, index}`, below.)
