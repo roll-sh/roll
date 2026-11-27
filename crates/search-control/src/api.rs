@@ -1287,11 +1287,18 @@ async fn alerts(State(c): State<AppState>, Path(id): Path<String>) -> ApiResult<
     Ok(Json(c.alerts(&id).await?))
 }
 
-/// Adds a rule. Its chat targets post as its maker may (an install of their own roll code owner),
-/// checked again on every send.
+/// Adds a rule. It sends as far as its maker may, asked again on every send: a person by
+/// roll-access now (and their own roll code chat installs only), the operator always. An
+/// operator's scoped token (no person behind it) is the operator's for webhooks but uses no one's
+/// chat install.
 async fn create_alert(State(c): State<AppState>, caller: Caller, Path(id): Path<String>, ext: Extensions, Json(b): Json<crate::alerts::NewRule>) -> Result<(StatusCode, Json<Value>), ControlError> {
-    let made_by = caller.user().or_else(|| ext.get::<roll_auth::SignedIn>().map(|s| s.user.as_str())).unwrap_or(crate::remotes::OPERATOR);
-    Ok((StatusCode::CREATED, Json(c.create_alert(&id, made_by, b).await?)))
+    let person = caller.user().or_else(|| ext.get::<roll_auth::SignedIn>().map(|s| s.user.as_str()));
+    let made_by = match (person, ext.get::<roll_auth::Grant>()) {
+        (Some(u), _) => u.to_string(),
+        (None, Some(g)) => format!("{}{}", crate::alerts::OPERATOR_TOKEN, g.id),
+        (None, None) => crate::remotes::OPERATOR.to_string(),
+    };
+    Ok((StatusCode::CREATED, Json(c.create_alert(&id, &made_by, b).await?)))
 }
 
 async fn alert(State(c): State<AppState>, Path((id, rule)): Path<(String, String)>) -> ApiResult<Value> {

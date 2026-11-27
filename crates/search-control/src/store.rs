@@ -684,6 +684,8 @@ impl Store {
             "CREATE TABLE IF NOT EXISTS search_alert_deliveries (id TEXT PRIMARY KEY, rule_id TEXT NOT NULL, cluster_id TEXT NOT NULL, target INTEGER NOT NULL, event TEXT NOT NULL, seq INTEGER, payload TEXT NOT NULL, status TEXT NOT NULL, attempts INTEGER NOT NULL, next_at INTEGER NOT NULL, last_status INTEGER, last_error TEXT, created_at INTEGER NOT NULL, delivered_at INTEGER, UNIQUE (rule_id, seq, target))",
         )?;
         db.ensure_schema("CREATE INDEX IF NOT EXISTS search_alert_deliveries_due ON search_alert_deliveries (status, next_at)")?;
+        // The token of the worker holding a delivery: only it records the try.
+        db.add_column("search_alert_deliveries", "claim", "TEXT")?;
         db.ensure_schema("CREATE INDEX IF NOT EXISTS search_alert_deliveries_rule ON search_alert_deliveries (rule_id, created_at)")?;
         // Browser keys' usage, in the metrics' rings (`record_browser_usage`).
         db.ensure_schema(

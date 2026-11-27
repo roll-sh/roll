@@ -2730,11 +2730,12 @@ impl Control {
         }
         // After the analytics above are in the catalog.
         Box::pin(self.run_suggestions()).await;
-        // After this node's minutes are in the catalog: health alerts, then what they owe.
+        // After this node's minutes are in the catalog: health alerts, then what they owe (a worker
+        // of its own: a tenant's dead webhook never holds up this pass).
         if let Err(e) = self.evaluate_alerts().await {
             tracing::warn!(error = %e, "evaluating search health alerts failed");
         }
-        self.deliver_alerts().await;
+        self.spawn_delivery();
         Ok(())
     }
 

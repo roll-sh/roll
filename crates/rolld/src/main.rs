@@ -683,8 +683,11 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
     // A search branch stays in the project its parent is at home in (docs/members.md): the
     // members who could branch it reach the copy, and no other project gains it.
     if let Some(s) = &search {
-        // Health alerts post to chat through roll code's installs.
+        // Health alerts post to chat through roll code's installs, and send as far as their maker
+        // may still read the cluster, as roll-access decides it on every send.
         s.control.set_alert_chat(std::sync::Arc::new(search::AlertChat { accounts: people.accounts.clone(), code: code.as_ref().map(|c| c.code.clone()) }));
+        let a = access.clone();
+        s.control.set_alert_makers(std::sync::Arc::new(move |maker, cluster| a.person_reaches(maker, "search", "cluster", cluster, roll_auth::scope::Action::Read)));
         s.control.on_branch(search::home_branches(workspace.clone()));
         // A branch is made only in its parent's project: search checks a request's against it.
         s.control.set_home_of(search::home_of(workspace.clone()));

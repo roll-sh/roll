@@ -264,6 +264,10 @@ impl search_control::alerts::AlertChat for AlertChat {
         if made_by == search_control::remotes::OPERATOR {
             return Ok(true);
         }
+        // An operator's scoped token, or anything else without a person: no one's install.
+        if !made_by.starts_with("usr_") {
+            return Ok(false);
+        }
         let mine = self.accounts.code_owner_id(made_by).map_err(|e| e.to_string())?;
         Ok(mine.as_deref() == Some(owner.as_str()))
     }

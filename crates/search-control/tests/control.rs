@@ -6222,8 +6222,8 @@ async fn the_embedding_pool_takes_turns_caps_queues_and_meters_cpu() {
 
 /// Health alerts: a rule fires and recovers once each, delivered to a signed webhook and a chat
 /// channel of the maker's own install (never another's), each change once whatever the passes;
-/// and with private addresses refused, a webhook at one is refused when made by address and
-/// never reached when made by a name that resolves to one.
+/// a chat send asks again whether the install is still the maker's; test sends are limited; and
+/// with private addresses refused, a webhook at one is refused when made.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn health_alerts_fire_and_recover_once_each() {
     use hmac::Mac;
@@ -6243,11 +6243,11 @@ async fn health_alerts_fire_and_recover_once_each() {
         (port, seen)
     }
     #[derive(Default)]
-    struct Chat(Mutex<Vec<(String, String)>>);
+    struct Chat(Mutex<Vec<(String, String)>>, std::sync::atomic::AtomicBool);
     #[async_trait::async_trait]
     impl search_control::alerts::AlertChat for Chat {
         async fn may_use(&self, _made_by: &str, platform: &str, install: &str) -> Result<bool, String> {
-            Ok(platform == "slack" && install == "chi_mine")
+            Ok(platform == "slack" && install == "chi_mine" && !self.1.load(std::sync::atomic::Ordering::SeqCst))
         }
         async fn post(&self, _install: &str, channel: &str, text: &str) -> Result<(), String> {
             self.0.lock().unwrap().push((channel.to_string(), text.to_string()));
@@ -6276,17 +6276,21 @@ async fn health_alerts_fire_and_recover_once_each() {
     assert!(!r.to_string().contains(secret));
     let rule_id = r["id"].as_str().unwrap().to_string();
 
-    // No requests yet: it fires, once.
-    e.control.sample().await.unwrap();
-    e.control.sample().await.unwrap();
+    // No requests yet: it fires, once (the passes start the worker; waiting for it here).
+    for _ in 0..2 {
+        e.control.sample().await.unwrap();
+        e.control.deliver_alerts().await;
+    }
     let state = |v: &Value| v["rules"][0]["state"].as_str().unwrap_or_default().to_string();
     assert_eq!(state(&e.get(&format!("/v1/search/clusters/{id}/alerts")).await), "firing");
     // Traffic again: it recovers, once.
     for _ in 0..10 {
         assert_eq!(e.es(&u, &p, Method::GET, "/", None).await.0, 200);
     }
-    e.control.sample().await.unwrap();
-    e.control.sample().await.unwrap();
+    for _ in 0..2 {
+        e.control.sample().await.unwrap();
+        e.control.deliver_alerts().await;
+    }
     assert_eq!(state(&e.get(&format!("/v1/search/clusters/{id}/alerts")).await), "ok");
 
     let got = seen.lock().unwrap().clone();
@@ -6306,30 +6310,28 @@ async fn health_alerts_fire_and_recover_once_each() {
     let d = e.get(&format!("/v1/search/clusters/{id}/alerts/{rule_id}/deliveries")).await;
     assert_eq!(d["deliveries"].as_array().unwrap().iter().filter(|d| d["status"] == "delivered").count(), 4, "{d}");
 
-    // Private addresses refused: by address when made, by name when sent (nothing arrives).
-    let (port, seen) = receiver().await;
+    // The install no longer the maker's: a test send posts nothing and says why; another test
+    // send right after is refused.
+    chat.1.store(true, std::sync::atomic::Ordering::SeqCst);
+    let (s, v) = e.call(Method::POST, &format!("/v1/search/clusters/{id}/alerts/{rule_id}/test"), Some(json!({}))).await;
+    assert_eq!(s, 202, "{v}");
+    let (s, v) = e.call(Method::POST, &format!("/v1/search/clusters/{id}/alerts/{rule_id}/test"), Some(json!({}))).await;
+    assert_eq!(s, 429, "{v}");
+    e.control.deliver_alerts().await;
+    assert_eq!(chat.0.lock().unwrap().len(), 2, "posted through an install that isn't the maker's any more");
+    let d = e.get(&format!("/v1/search/clusters/{id}/alerts/{rule_id}/deliveries")).await;
+    let chat_test = d["deliveries"].as_array().unwrap().iter().find(|d| d["event"] == "search.alert.test" && d["target"] == 1).cloned().unwrap_or_default();
+    assert!(chat_test["last_error"].as_str().is_some_and(|e| e.contains("no longer")), "{d}");
+
+    // Private addresses refused when made, written as an address or a name that is one.
     let e = env().await;
     let c = e.post("/v1/search/clusters", json!({"name": "guarded"})).await;
     let id = c["id"].as_str().unwrap().to_string();
-    let hook = |host: &str| json!({"metric": "month_cost_usd", "op": ">", "threshold": 1000, "targets": [{"type": "webhook", "url": format!("http://{host}:{port}/"), "secret": secret}]});
-    let (s, v) = e.call(Method::POST, &format!("/v1/search/clusters/{id}/alerts"), Some(hook("127.0.0.1"))).await;
-    assert!(s == 400 && v.to_string().contains("private"), "{s} {v}");
-    // `localhost.` isn't a literal the check knows, so only the resolver can refuse it.
-    let (s, r) = e.call(Method::POST, &format!("/v1/search/clusters/{id}/alerts"), Some(hook("localhost."))).await;
-    assert_eq!(s, 201, "{r}");
-    let rule_id = r["id"].as_str().unwrap();
-    let (s, v) = e.call(Method::POST, &format!("/v1/search/clusters/{id}/alerts/{rule_id}/test"), Some(json!({}))).await;
-    assert_eq!(s, 202, "{v}");
-    let mut tried = Value::Null;
-    for _ in 0..100 {
-        tried = e.get(&format!("/v1/search/clusters/{id}/alerts/{rule_id}/deliveries")).await["deliveries"][0].clone();
-        if tried["attempts"].as_i64().unwrap_or(0) >= 1 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+    for host in ["127.0.0.1", "localhost."] {
+        let rule = json!({"metric": "month_cost_usd", "op": ">", "threshold": 1000, "targets": [{"type": "webhook", "url": format!("http://{host}:9/"), "secret": secret}]});
+        let (s, v) = e.call(Method::POST, &format!("/v1/search/clusters/{id}/alerts"), Some(rule)).await;
+        assert!(s == 400 && v.to_string().contains("private"), "{host}: {s} {v}");
     }
-    assert!(tried["attempts"] == 1 && tried["status"] == "pending" && tried["last_error"].as_str().is_some_and(|e| e.contains("private")), "{tried}");
-    assert!(seen.lock().unwrap().is_empty(), "a private address was reached");
 }
 
 /// Provider tokens are metered per cluster (not priced: the provider bills them): an answered

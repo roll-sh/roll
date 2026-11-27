@@ -9,20 +9,26 @@
 //!
 //! - **Evaluation.** Every metering pass, on one node of a fleet (the singleton `search-alerts`;
 //!   every node's pass has put its minutes in the catalog by then, so a window may miss up to one
-//!   pass of another node's newest requests). A window with no requests gives latency and error
-//!   rates no value, which isn't a breach; its request rate is 0.
+//!   pass of another node's newest requests). A window is its whole minutes and the current one
+//!   so far, and a rate is over the seconds it covers. A window with no requests gives latency and
+//!   error rates no value, which isn't a breach; its request rate is 0.
 //! - **State changes.** `ok` to `firing` and back, each a compare-and-swap on the rule's `seq` in
 //!   one catalog write that also queues its deliveries (the outbox, `search_alert_deliveries`,
 //!   one row per target, unique per change and target): a change is delivered once, never
 //!   inline. A test send queues rows the same way.
-//! - **Delivery.** Rows are claimed (a compare-and-swap on `next_at`) by whichever node runs the
-//!   worker: the metering pass's, or a test send's. A webhook is a signed POST through
+//! - **Delivery.** A worker of its own (started after each metering pass and each test send,
+//!   never awaited by either) claims a few due rows at a time under a token of its own, on the
+//!   database's clock, for [`CLAIM_MS`] (well past a send's timeouts), sends them concurrently, and
+//!   records each outcome only while the row is still its claim. A webhook is a signed POST through
 //!   `roll_net::PublicOnly` with no redirects (a private address is refused, by name or literal),
 //!   as roll code's webhooks are signed: `x-roll-signature-256: sha256=<hex HMAC-SHA256(secret,
 //!   "{timestamp}.{body}")>` with `x-roll-event`, `x-roll-delivery` and `x-roll-timestamp`. A chat
-//!   target posts to a channel of a roll code chat install the rule's maker owns, checked again
-//!   on every send ([`AlertChat`], rolld's). [`ATTEMPTS`] tries, waits growing threefold from
-//!   `SearchConfig::alert_retry` up to six hours; the newest [`KEPT_DELIVERIES`] of a rule are kept.
+//!   target posts to a channel of a roll code chat install the rule's maker owns ([`AlertChat`],
+//!   rolld's). Every send, either kind, asks again whether the rule's maker may still read the
+//!   cluster, and a chat send whether the install is still theirs. [`ATTEMPTS`] tries, waits
+//!   growing threefold from `SearchConfig::alert_retry` up to six hours; the newest
+//!   [`KEPT_DELIVERIES`] finished deliveries of a rule are kept (a pending one never goes), and a
+//!   test send is refused within [`TEST_EVERY_MS`] of the last or with [`MAX_PENDING`] pending.
 //!
 //! Search keeps its own outbox: roll code's (`review_deliveries`) is in code's database, so a
 //! search state change couldn't promise into it in its own transaction.
@@ -35,7 +41,6 @@ use search_server::metrics::Stats;
 use serde_json::{Value, json};
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 /// Rules a cluster may have.
@@ -44,12 +49,22 @@ pub const MAX_RULES: usize = 20;
 pub const MAX_TARGETS: usize = 5;
 /// Tries of a delivery before it's `failed`.
 pub const ATTEMPTS: i64 = 8;
-/// Deliveries kept per rule (the newest).
+/// Finished deliveries kept per rule (the newest).
 pub const KEPT_DELIVERIES: i64 = 50;
-/// How long a claimed delivery is the claimer's.
-const CLAIM_MS: i64 = 60_000;
-/// Deliveries one worker run takes.
-const BATCH: i64 = 50;
+/// How long a claimed delivery is the claimer's: well past a webhook's 10 s and a chat post's
+/// 30 s timeouts, so a claim never lapses while its send runs.
+pub const CLAIM_MS: i64 = 120_000;
+/// Deliveries one worker round claims and sends concurrently.
+const BATCH: i64 = 8;
+/// The least time between test sends of a rule.
+pub const TEST_EVERY_MS: i64 = 30_000;
+/// Pending deliveries past which a rule's test send is refused.
+pub const MAX_PENDING: i64 = 20;
+/// A rule's value is written when it moves, and at least this often.
+const VALUE_EVERY_S: i64 = 600;
+/// Who made a rule with an operator's scoped token: the operator's authority for webhooks, but
+/// no one's chat installs.
+pub const OPERATOR_TOKEN: &str = "operator-token:";
 /// The longest wait between tries.
 const MAX_WAIT_MS: i64 = 6 * 3600 * 1000;
 
@@ -87,8 +102,8 @@ impl Metric {
         Metric::ALL.into_iter().find(|m| m.name() == s)
     }
 
-    /// Its value over `minutes` of request metrics `window_s` long.
-    pub fn of_requests(self, minutes: &[(i64, Stats)], window_s: i64) -> Option<f64> {
+    /// Its value over `minutes` of request metrics that cover `seconds`.
+    pub fn of_requests(self, minutes: &[(i64, Stats)], seconds: i64) -> Option<f64> {
         let mut all = Stats::default();
         for (_, s) in minutes {
             all.merge(s);
@@ -101,7 +116,7 @@ impl Metric {
             Metric::P95Ms => k.latency.quantile(0.95).map(|us| us / 1000.0),
             Metric::ErrorRate => share(k.server_errors),
             Metric::ThrottleRate => share(k.rejected),
-            Metric::RequestRate => Some(n as f64 / window_s.max(1) as f64),
+            Metric::RequestRate => Some(n as f64 / seconds.max(1) as f64),
             Metric::MonthCostUsd => None,
         }
     }
@@ -207,6 +222,8 @@ pub struct Rule {
     pub evaluated_at: Option<i64>,
     /// Bumped by each state change.
     pub seq: i64,
+    /// Its metric and op are ones this build knows (a rule from a later build is skipped).
+    pub known: bool,
 }
 
 const RULE_COLS: &str = "id, cluster_id, name, metric, op, threshold, window_s, targets, made_by, created_at, state, since, value, evaluated_at, seq";
@@ -216,7 +233,9 @@ fn rule_row(r: &Row<'_>) -> code_sql::Result<Rule> {
     let op: String = r.get(4)?;
     let targets: String = r.get(7)?;
     let state: String = r.get(10)?;
+    let known = Metric::parse(&metric).is_some() && Op::parse(&op).is_some();
     Ok(Rule {
+        known,
         id: r.get(0)?,
         cluster_id: r.get(1)?,
         name: r.get(2)?,
@@ -295,9 +314,11 @@ pub trait AlertChat: Send + Sync {
 /// The control's alert parts.
 pub struct Alerts {
     chat: OnceLock<Arc<dyn AlertChat>>,
+    /// Whether a rule's maker may still read its cluster (rolld's, roll-access's answer now).
+    makers: OnceLock<crate::remotes::LinkMakers>,
     http: reqwest::Client,
-    /// A worker runs on this node.
-    delivering: AtomicBool,
+    /// Held while this node's worker runs.
+    delivering: tokio::sync::Mutex<()>,
 }
 
 impl Alerts {
@@ -306,12 +327,12 @@ impl Alerts {
         if !allow_private {
             b = b.dns_resolver(roll_net::PublicOnly);
         }
-        Alerts { chat: OnceLock::new(), http: b.build().expect("the alerts' HTTP client"), delivering: AtomicBool::new(false) }
+        Alerts { chat: OnceLock::new(), makers: OnceLock::new(), http: b.build().expect("the alerts' HTTP client"), delivering: tokio::sync::Mutex::new(()) }
     }
 }
 
-/// A new rule as the API takes it.
-#[derive(Debug, serde::Deserialize)]
+/// A new rule as the API takes it (no `Debug`: a target holds a secret).
+#[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NewRule {
     pub name: Option<String>,
@@ -322,7 +343,7 @@ pub struct NewRule {
     pub targets: Vec<NewTarget>,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NewTarget {
     #[serde(rename = "type")]
@@ -352,6 +373,27 @@ impl Control {
     /// Gives chat targets a way out (rolld's; without it they're refused).
     pub fn set_alert_chat(&self, chat: Arc<dyn AlertChat>) {
         let _ = self.alerts.chat.set(chat);
+    }
+
+    /// How a rule's maker's rights are asked on every send (rolld's: roll-access's `read` on the
+    /// cluster now). Without it, a person's rule sends only while they own the cluster.
+    pub fn set_alert_makers(&self, f: crate::remotes::LinkMakers) {
+        let _ = self.alerts.makers.set(f);
+    }
+
+    /// Whether `r`'s maker may still read its cluster: the operator (or an operator's token)
+    /// always; a person as roll-access decides now.
+    async fn maker_may(&self, r: &Rule) -> bool {
+        if r.made_by == crate::remotes::OPERATOR || r.made_by.starts_with(OPERATOR_TOKEN) {
+            return true;
+        }
+        match self.alerts.makers.get() {
+            Some(f) => {
+                let (f, maker, id) = (f.clone(), r.made_by.clone(), r.cluster_id.clone());
+                tokio::task::spawn_blocking(move || f(&maker, &id)).await.unwrap_or(false)
+            }
+            None => matches!(self.store.get(&r.cluster_id).await, Ok(Some(c)) if c.owner.as_deref() == Some(r.made_by.as_str())),
+        }
     }
 
     /// A webhook URL a rule may name: http(s), a host, no credentials, and not a private address
@@ -423,7 +465,7 @@ impl Control {
         let now = now_ms() / 1000;
         let stored = serde_json::to_string(&targets.iter().map(Target::stored).collect::<Vec<_>>()).unwrap_or_default();
         let cid = c.id.clone();
-        let rule = Rule { id: rule_id, cluster_id: cid.clone(), name, metric, op, threshold: b.threshold, window_s, targets, made_by: made_by.to_string(), created_at: now, firing: false, since: now, value: None, evaluated_at: None, seq: 0 };
+        let rule = Rule { id: rule_id, cluster_id: cid.clone(), name, metric, op, threshold: b.threshold, window_s, targets, made_by: made_by.to_string(), created_at: now, firing: false, since: now, value: None, evaluated_at: None, seq: 0, known: true };
         let r = rule.clone();
         let added = self.store.db().write(move |x| {
             let n: i64 = x.query_row("SELECT COUNT(*) FROM search_alert_rules WHERE cluster_id = ?1", params![cid], |row| row.get(0))?;
@@ -479,22 +521,31 @@ impl Control {
     pub async fn test_alert(&self, id: &str, rule: &str) -> Result<Value> {
         let c = self.get(id).await?;
         let r = self.rule_of(&c.id, rule).await?;
-        let now = now_ms();
+        let now = self.store.db().now_ms()?;
         let payload = payload(&c, &r, "search.alert.test", r.value, now / 1000);
         let ids: Vec<String> = (0..r.targets.len()).map(|_| format!("ald_{}", crate::control::new_id().trim_start_matches("srch_"))).collect();
         let (rid, cid, rows) = (r.id.clone(), c.id.clone(), ids.clone());
-        self.store.db().write(move |x| {
+        let queued = self.store.db().write(move |x| {
+            // One test at a time, and not onto a backlog: a test send is a person's click, not a
+            // way to post in a loop.
+            let recent: i64 = x.query_row("SELECT COUNT(*) FROM search_alert_deliveries WHERE rule_id = ?1 AND event = 'search.alert.test' AND created_at > ?2", params![rid, (now - TEST_EVERY_MS) / 1000], |row| row.get(0))?;
+            let pending: i64 = x.query_row("SELECT COUNT(*) FROM search_alert_deliveries WHERE rule_id = ?1 AND status = 'pending'", params![rid], |row| row.get(0))?;
+            if recent > 0 || pending >= MAX_PENDING {
+                return Ok::<_, code_sql::Error>(false);
+            }
             for (i, d) in rows.iter().enumerate() {
                 x.execute(
                     "INSERT INTO search_alert_deliveries (id, rule_id, cluster_id, target, event, seq, payload, status, attempts, next_at, created_at) VALUES (?1, ?2, ?3, ?4, 'search.alert.test', NULL, ?5, 'pending', 0, ?6, ?7)",
                     params![d, rid, cid, i as i64, payload, now, now / 1000],
                 )?;
             }
-            trim_deliveries(x, &rid)
+            trim_deliveries(x, &rid)?;
+            Ok(true)
         })?;
-        if let Some(me) = self.me.get().and_then(std::sync::Weak::upgrade) {
-            tokio::spawn(async move { me.deliver_alerts().await });
+        if !queued {
+            return Err(ControlError::Busy(format!("rule [{rule}] had a test send in the last {} s, or has {MAX_PENDING} deliveries pending: try again later", TEST_EVERY_MS / 1000)));
         }
+        self.spawn_delivery();
         Ok(json!({ "queued": ids }))
     }
 
@@ -528,8 +579,9 @@ impl Control {
         Ok(json!({ "deliveries": rows }))
     }
 
-    /// One evaluation of every rule (the metering pass's, on one node of a fleet): their values
-    /// recorded, and each state change written with its deliveries in one transaction.
+    /// One evaluation of every rule (the metering pass's, on one node of a fleet): each state
+    /// change written with its deliveries in one transaction, a value only when it changed (or
+    /// every [`VALUE_EVERY_S`]), a cluster's minutes read once for all its rules.
     pub(crate) async fn evaluate_alerts(&self) -> anyhow::Result<()> {
         if let Some(cl) = self.cluster_leases().map(|l| l.cluster().clone())
             && !tokio::task::spawn_blocking(move || cl.singleton("search-alerts")).await.unwrap_or(false)
@@ -540,45 +592,64 @@ impl Control {
             x.query(&format!("SELECT {} FROM search_alert_rules r JOIN search_clusters c ON c.id = r.cluster_id WHERE c.deleted_at IS NULL ORDER BY r.cluster_id", RULE_COLS.split(", ").map(|col| format!("r.{col}")).collect::<Vec<_>>().join(", ")), params![], rule_row)
         })?;
         let now_s = now_ms() / 1000;
-        let mut cluster: Option<SearchCluster> = None;
-        for r in rules {
-            if cluster.as_ref().is_none_or(|c| c.id != r.cluster_id) {
-                cluster = self.store.get(&r.cluster_id).await?;
+        let minute = now_s - now_s.rem_euclid(60);
+        let mut i = 0;
+        while i < rules.len() {
+            let cid = rules[i].cluster_id.clone();
+            let end = rules[i..].iter().position(|r| r.cluster_id != cid).map_or(rules.len(), |n| i + n);
+            let group = &rules[i..end];
+            i = end;
+            let Some(c) = self.store.get(&cid).await? else { continue };
+            // The longest window's minutes, once: each rule takes its own from them.
+            let longest = group.iter().map(|r| r.window_s).max().unwrap_or(0);
+            let minutes = if longest > 0 { self.store.metrics_since(&c.id, 60, minute - longest + 60).await? } else { Vec::new() };
+            for r in group.iter().filter(|r| r.known) {
+                let value = match r.metric {
+                    Metric::MonthCostUsd => Some(self.month_cost(&c, now_s).await?),
+                    m => {
+                        // Its whole minutes and the current one so far: a rate is over the seconds
+                        // they cover, not the window's length.
+                        let from = minute - r.window_s + 60;
+                        let mine: Vec<(i64, Stats)> = minutes.iter().filter(|(at, _)| *at >= from).cloned().collect();
+                        m.of_requests(&mine, now_s - from)
+                    }
+                };
+                self.judge(&c, r, value, now_s).await?;
             }
-            let Some(c) = &cluster else { continue };
-            let value = match r.metric {
-                Metric::MonthCostUsd => Some(self.month_cost(c, now_s).await?),
-                m => {
-                    // The window's minutes, the current one included.
-                    let from = now_s - now_s.rem_euclid(60) - r.window_s + 60;
-                    m.of_requests(&self.store.metrics_since(&c.id, 60, from).await?, r.window_s)
-                }
-            };
-            let breach = value.is_some_and(|v| r.op.holds(v, r.threshold));
-            if breach == r.firing {
+        }
+        Ok(())
+    }
+
+    /// Records `r`'s new `value`: its state change with what that owes, or the value alone when it
+    /// moved.
+    async fn judge(&self, c: &SearchCluster, r: &Rule, value: Option<f64>, now_s: i64) -> anyhow::Result<()> {
+        let breach = value.is_some_and(|v| r.op.holds(v, r.threshold));
+        if breach == r.firing {
+            let moved = value.map(|v| (v * 1000.0).round()) != r.value.map(|v| (v * 1000.0).round());
+            if moved || r.evaluated_at.is_none_or(|t| now_s - t >= VALUE_EVERY_S) {
                 let (rid, seq) = (r.id.clone(), r.seq);
                 self.store.db().write(move |x| x.execute("UPDATE search_alert_rules SET value = ?1, evaluated_at = ?2 WHERE id = ?3 AND seq = ?4", params![value, now_s, rid, seq]).map(drop))?;
-                continue;
             }
-            let event = if breach { "search.alert.firing" } else { "search.alert.resolved" };
-            let body = payload(c, &Rule { firing: breach, since: now_s, value, ..r.clone() }, event, value, now_s);
-            let ids: Vec<String> = (0..r.targets.len()).map(|_| format!("ald_{}", crate::control::new_id().trim_start_matches("srch_"))).collect();
-            let (rid, cid, seq, state) = (r.id.clone(), r.cluster_id.clone(), r.seq, if breach { "firing" } else { "ok" });
-            let now = now_ms();
-            self.store.db().write(move |x| {
-                // Another evaluator's change won: nothing more is owed.
-                if x.execute("UPDATE search_alert_rules SET state = ?1, since = ?2, value = ?3, evaluated_at = ?2, seq = seq + 1 WHERE id = ?4 AND seq = ?5", params![state, now_s, value, rid, seq])? == 0 {
-                    return Ok::<_, code_sql::Error>(());
-                }
-                for (i, d) in ids.iter().enumerate() {
-                    x.execute(
-                        "INSERT INTO search_alert_deliveries (id, rule_id, cluster_id, target, event, seq, payload, status, attempts, next_at, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'pending', 0, ?8, ?9) ON CONFLICT (rule_id, seq, target) DO NOTHING",
-                        params![d, rid, cid, i as i64, event, seq + 1, body, now, now_s],
-                    )?;
-                }
-                trim_deliveries(x, &rid)
-            })?;
+            return Ok(());
         }
+        let event = if breach { "search.alert.firing" } else { "search.alert.resolved" };
+        let body = payload(c, &Rule { firing: breach, since: now_s, value, ..r.clone() }, event, value, now_s);
+        let ids: Vec<String> = (0..r.targets.len()).map(|_| format!("ald_{}", crate::control::new_id().trim_start_matches("srch_"))).collect();
+        let (rid, cid, seq, state) = (r.id.clone(), r.cluster_id.clone(), r.seq, if breach { "firing" } else { "ok" });
+        let now = self.store.db().now_ms()?;
+        self.store.db().write(move |x| {
+            // Another evaluator's change won: nothing more is owed.
+            if x.execute("UPDATE search_alert_rules SET state = ?1, since = ?2, value = ?3, evaluated_at = ?2, seq = seq + 1 WHERE id = ?4 AND seq = ?5", params![state, now_s, value, rid, seq])? == 0 {
+                return Ok::<_, code_sql::Error>(());
+            }
+            for (i, d) in ids.iter().enumerate() {
+                x.execute(
+                    "INSERT INTO search_alert_deliveries (id, rule_id, cluster_id, target, event, seq, payload, status, attempts, next_at, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'pending', 0, ?8, ?9) ON CONFLICT (rule_id, seq, target) DO NOTHING",
+                    params![d, rid, cid, i as i64, event, seq + 1, body, now, now / 1000],
+                )?;
+            }
+            trim_deliveries(x, &rid)
+        })?;
         Ok(())
     }
 
@@ -590,59 +661,52 @@ impl Control {
         Ok(self.cfg.pricing.cost(&totals, hours, c.stored_bytes).total_usd)
     }
 
-    /// Sends what's due (the metering pass's run, or a test send's): each delivery claimed
-    /// first, so two nodes never send one twice at once.
+    /// Starts this node's worker unless it runs already (after a metering pass, a test send):
+    /// never awaited, so one tenant's slow webhook holds up nothing else.
+    pub(crate) fn spawn_delivery(&self) {
+        let Some(me) = self.me.get().and_then(std::sync::Weak::upgrade) else { return };
+        tokio::spawn(async move {
+            if let Ok(_running) = me.alerts.delivering.try_lock() {
+                me.run_deliveries().await;
+            }
+        });
+    }
+
+    /// Sends what's due, after any run of this node's worker ends (tests; the worker is
+    /// [`Control::spawn_delivery`]'s).
     pub async fn deliver_alerts(&self) {
-        if self.alerts.delivering.swap(true, Ordering::SeqCst) {
-            return;
-        }
+        let _running = self.alerts.delivering.lock().await;
+        self.run_deliveries().await;
+    }
+
+    async fn run_deliveries(&self) {
+        let claim = format!("alc_{}", crate::control::new_id().trim_start_matches("srch_"));
         loop {
-            let now = now_ms();
-            let claimed: Vec<(String, String, i64, String, i64)> = match self.store.db().write(move |x| {
-                let due: Vec<(String, String, i64, String, i64, i64)> = x.query(
-                    "SELECT id, rule_id, target, payload, attempts, next_at FROM search_alert_deliveries WHERE status = 'pending' AND next_at <= ?1 ORDER BY next_at LIMIT ?2",
-                    params![now, BATCH],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
-                )?;
-                let mut mine = Vec::new();
-                for (id, rule, target, payload, attempts, at) in due {
-                    if x.execute("UPDATE search_alert_deliveries SET next_at = ?1 WHERE id = ?2 AND next_at = ?3 AND status = 'pending'", params![now + CLAIM_MS, id, at])? == 1 {
-                        mine.push((id, rule, target, payload, attempts));
-                    }
-                }
-                Ok::<_, code_sql::Error>(mine)
-            }) {
-                Ok(c) => c,
+            let due = match claim_deliveries(self.store.db(), &claim, CLAIM_MS, BATCH) {
+                Ok(d) => d,
                 Err(e) => {
                     tracing::warn!(error = %e, "claiming search alert deliveries failed");
-                    break;
+                    return;
                 }
             };
-            if claimed.is_empty() {
-                break;
+            if due.is_empty() {
+                return;
             }
-            for (id, rule, target, payload, attempts) in claimed {
-                let outcome = self.send(&id, &rule, target, &payload).await;
-                let tries = attempts + 1;
-                let now = now_ms();
-                let (status, next_at, code, error) = match &outcome {
-                    Ok(code) => ("delivered", now, *code, None),
-                    Err((code, e)) if tries >= ATTEMPTS => ("failed", now, *code, Some(e.clone())),
-                    Err((code, e)) => ("pending", now + wait_ms(self.cfg.alert_retry, tries), *code, Some(e.clone())),
+            let tries = due.iter().map(|d| async move { (d, self.send(&d.id, &d.rule, d.target, &d.payload).await) });
+            for (d, outcome) in futures::future::join_all(tries).await {
+                let tries = d.attempts + 1;
+                let outcome = match outcome {
+                    Ok(code) => Outcome { status: "delivered", wait_ms: 0, code, error: None },
+                    Err((code, e)) if tries >= ATTEMPTS => Outcome { status: "failed", wait_ms: 0, code, error: Some(e) },
+                    Err((code, e)) => Outcome { status: "pending", wait_ms: wait_ms(self.cfg.alert_retry, tries), code, error: Some(e) },
                 };
-                let delivered = (status == "delivered").then_some(now / 1000);
-                if let Err(e) = self.store.db().write(move |x| {
-                    x.execute(
-                        "UPDATE search_alert_deliveries SET status = ?1, attempts = ?2, next_at = ?3, last_status = ?4, last_error = ?5, delivered_at = ?6 WHERE id = ?7",
-                        params![status, tries, next_at, code, error, delivered, id],
-                    )
-                    .map(drop)
-                }) {
-                    tracing::warn!(error = %e, "recording a search alert delivery failed");
+                match finish_delivery(self.store.db(), &d.id, &claim, tries, &outcome) {
+                    Ok(true) => {}
+                    Ok(false) => tracing::warn!(delivery = d.id, "a search alert delivery's claim lapsed before its outcome was recorded"),
+                    Err(e) => tracing::warn!(error = %e, "recording a search alert delivery failed"),
                 }
             }
         }
-        self.alerts.delivering.store(false, Ordering::SeqCst);
     }
 
     /// One try: the HTTP status a webhook answered (`None` for chat), or why it failed.
@@ -653,6 +717,10 @@ impl Control {
             Ok(None) => return Err((None, "the rule was deleted".into())),
             Err(e) => return Err((None, format!("reading the rule failed: {e}"))),
         };
+        // The maker's rights now, not when they made it, whatever the target.
+        if !self.maker_may(&r).await {
+            return Err((None, "the rule's maker may no longer read the cluster".into()));
+        }
         let event: Value = serde_json::from_str(payload).unwrap_or(Value::Null);
         match r.targets.get(target as usize) {
             None => Err((None, "the rule has no such target".into())),
@@ -686,7 +754,7 @@ impl Control {
             }
             Some(Target::Chat { platform, install, channel }) => {
                 let Some(chat) = self.alerts.chat.get() else { return Err((None, "chat ops aren't running on this server".into())) };
-                // The maker's rights now, not when they made it.
+                // And the install still theirs.
                 match chat.may_use(&r.made_by, platform, install).await {
                     Ok(true) => {}
                     Ok(false) => return Err((None, "the install is no longer one of the rule maker's".into())),
@@ -778,18 +846,99 @@ fn chat_text(event: &Value) -> String {
     format!("roll search alert {what}: cluster {}: {}{value}", s(&["cluster", "name"]), s(&["text"]))
 }
 
-/// Keeps a rule's newest [`KEPT_DELIVERIES`] deliveries.
+/// Keeps a rule's newest [`KEPT_DELIVERIES`] finished deliveries; a pending one never goes (a
+/// change still owed must reach its target).
 fn trim_deliveries(x: &code_sql::Conn<'_>, rule: &str) -> code_sql::Result<()> {
     x.execute(
-        "DELETE FROM search_alert_deliveries WHERE rule_id = ?1 AND id NOT IN (SELECT id FROM search_alert_deliveries WHERE rule_id = ?1 ORDER BY created_at DESC, id DESC LIMIT ?2)",
+        "DELETE FROM search_alert_deliveries WHERE rule_id = ?1 AND status <> 'pending' AND id NOT IN (SELECT id FROM search_alert_deliveries WHERE rule_id = ?1 AND status <> 'pending' ORDER BY created_at DESC, id DESC LIMIT ?2)",
         params![rule, KEPT_DELIVERIES],
     )
     .map(drop)
 }
 
+/// A claimed delivery.
+pub(crate) struct Due {
+    pub id: String,
+    pub rule: String,
+    pub target: i64,
+    pub payload: String,
+    pub attempts: i64,
+}
+
+/// What a try came to.
+pub(crate) struct Outcome {
+    pub status: &'static str,
+    /// The wait before the next try (`pending` only).
+    pub wait_ms: i64,
+    pub code: Option<i64>,
+    pub error: Option<String>,
+}
+
+/// Claims up to `limit` due deliveries under token `claim` for `claim_ms`, on the database's
+/// clock (one clock for every node): a row is due while pending and its `next_at` passed, which
+/// a claim moves on, so no two workers hold one at once.
+pub(crate) fn claim_deliveries(db: &code_sql::Db, claim: &str, claim_ms: i64, limit: i64) -> code_sql::Result<Vec<Due>> {
+    let now = db.now_ms()?;
+    let claim = claim.to_string();
+    db.write(move |x| {
+        let due: Vec<(Due, i64)> = x.query(
+            "SELECT id, rule_id, target, payload, attempts, next_at FROM search_alert_deliveries WHERE status = 'pending' AND next_at <= ?1 ORDER BY next_at LIMIT ?2",
+            params![now, limit],
+            |r| Ok((Due { id: r.get(0)?, rule: r.get(1)?, target: r.get(2)?, payload: r.get(3)?, attempts: r.get(4)? }, r.get(5)?)),
+        )?;
+        let mut mine = Vec::new();
+        for (d, at) in due {
+            if x.execute("UPDATE search_alert_deliveries SET next_at = ?1, claim = ?2 WHERE id = ?3 AND next_at = ?4 AND status = 'pending'", params![now + claim_ms, claim, d.id, at])? == 1 {
+                mine.push(d);
+            }
+        }
+        Ok(mine)
+    })
+}
+
+/// Records a try of delivery `id`, only while it's still `claim`'s (a lapsed claim another worker
+/// took is that worker's to record): whether it was.
+pub(crate) fn finish_delivery(db: &code_sql::Db, id: &str, claim: &str, tries: i64, o: &Outcome) -> code_sql::Result<bool> {
+    let now = db.now_ms()?;
+    let (id, claim, status, code, error) = (id.to_string(), claim.to_string(), o.status, o.code, o.error.clone());
+    let next_at = now + o.wait_ms;
+    let delivered = (status == "delivered").then_some(now / 1000);
+    db.write(move |x| {
+        x.execute(
+            "UPDATE search_alert_deliveries SET status = ?1, attempts = ?2, next_at = ?3, last_status = ?4, last_error = ?5, delivered_at = ?6, claim = NULL WHERE id = ?7 AND claim = ?8 AND status = 'pending'",
+            params![status, tries, next_at, code, error, delivered, id, claim],
+        )
+        .map(|n| n == 1)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A claim that lapsed and was taken by another worker is that worker's: the first one's
+    /// outcome isn't recorded (so it can't undo or repeat the second's), and each try goes once.
+    #[test]
+    fn a_lapsed_claim_records_nothing() {
+        let store = crate::store::Store::memory().unwrap();
+        let db = store.db();
+        db.write(|x| {
+            x.execute(
+                "INSERT INTO search_alert_deliveries (id, rule_id, cluster_id, target, event, seq, payload, status, attempts, next_at, created_at) VALUES ('ald_1', 'alr_1', 'srch_1', 0, 'search.alert.test', NULL, '{}', 'pending', 0, 0, 0)",
+                params![],
+            )
+            .map(drop)
+        })
+        .unwrap();
+        // Claimed by A for no time at all, so it lapses at once and B takes it.
+        assert_eq!(claim_deliveries(db, "A", -1, 8).unwrap().len(), 1);
+        assert_eq!(claim_deliveries(db, "B", CLAIM_MS, 8).unwrap().len(), 1);
+        assert!(claim_deliveries(db, "C", CLAIM_MS, 8).unwrap().is_empty(), "held by B");
+        let done = Outcome { status: "delivered", wait_ms: 0, code: Some(200), error: None };
+        assert!(!finish_delivery(db, "ald_1", "A", 1, &done).unwrap(), "A's claim lapsed");
+        assert!(finish_delivery(db, "ald_1", "B", 1, &done).unwrap());
+        assert!(!finish_delivery(db, "ald_1", "B", 2, &done).unwrap(), "recorded once");
+    }
 
     #[test]
     fn windows_months_and_waits() {

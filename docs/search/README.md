@@ -1323,7 +1323,9 @@ while it sleeps and nothing through its Elasticsearch API reads or changes them.
   - At most 20 rules a cluster.
 - **Evaluation.** Every metering pass (60 s), on one node of a fleet (the singleton
   `search-alerts`), over the catalog's minute ring, which every node's pass fills: a window may
-  miss up to one pass of another node's newest requests. A window without requests gives
+  miss up to one pass of another node's newest requests. A window is its whole minutes and the
+  current one so far, and `request_rate` is over the seconds that covers (not the window's
+  length, which made a 1-minute rule see a few seconds as a whole minute). A window without requests gives
   latency and the error rates no value, which never fires; its request rate is 0 (so
   `request_rate < 0.1 over 10m` tells a cluster nobody reaches any more). Answers show each
   rule's `state` (`ok` or `firing`), `since`, the last `value` and `evaluated_at`.
@@ -1331,19 +1333,33 @@ while it sleeps and nothing through its Elasticsearch API reads or changes them.
   (`search.alert.resolved`) are each a compare-and-swap on the rule in one catalog write that also
   queues a delivery per target (search's own outbox, `search_alert_deliveries`: roll code's
   delivery queue is in code's database, so a search state change couldn't promise into it in its
-  own transaction). Nothing is sent from a request: a worker on the node that runs the pass (or a
-  test send's) claims due rows and sends them.
+  own transaction). Nothing is sent from a request or from the metering pass: a worker of its
+  own, started after each pass and each test send and awaited by neither, claims a few due rows
+  at a time under a token of its own for 2 minutes (well past a send's timeouts), on the
+  database's clock (one clock for every node), sends them concurrently, and records each try
+  only while the row is still its claim, so a row is sent once even if a claim lapsed and
+  another node took it. A rule keeps its newest 50 finished deliveries; a pending one is never
+  trimmed.
 - **Webhooks** are signed as roll code's are: a POST of
   `{event, at, cluster: {id, name}, rule: {id, name, metric, op, threshold, window}, state,
   value, text}` with `x-roll-event`, `x-roll-delivery`, `x-roll-timestamp` and
   `x-roll-signature-256: sha256=<hex HMAC-SHA256(secret, "{timestamp}.{body}")>`. They go through
   `roll_net::PublicOnly` with no redirects and a 10 s timeout: an address that's private, written
-  as one (refused when the rule is made) or resolved to one (never sent), isn't reached, unless
+  as one (refused when the rule is made: an IP literal, `localhost`, `*.localhost`, with or
+  without a trailing dot) or resolved to one (never sent), isn't reached, unless
   the node allows it (`--search-alerts-allow-private`, local development). A 2xx is delivered;
   anything else is tried again after 30 s, tripling to at most 6 h, 8 tries in all. Answers show
   a webhook's origin only (its path may hold a token).
-- **Chat** posts one line through roll code's install, as roll secrets' notices do; whether the
-  install is still the maker's is asked again on every send.
+- **Who it sends as.** A rule sends only as far as its maker still may: every send, webhook or
+  chat, asks roll-access whether the person who made it may still read the cluster (the
+  operator's rules always send), and a chat send whether the install is still theirs. A rule
+  made with an operator's scoped token is the operator's for webhooks but uses no one's chat
+  install.
+- **Chat** posts one line through roll code's install, as roll secrets' notices do. A Discord
+  channel must be in the install's own guild: roll code's shared helper checks it (roll
+  secrets' change to `post_access_notice`).
+- **Test sends** are a person's click, not a way to post in a loop: one a rule every 30 s, and
+  none while the rule has 20 deliveries pending (429).
 - **Routes** (rows in the table above): `GET …/alerts`, `POST …/alerts` (201), `GET` and
   `DELETE …/alerts/{rule}`, `POST …/alerts/{rule}/test` (202: a test delivery queued per target,
   `search.alert.test`) and `GET …/alerts/{rule}/deliveries` (the newest 50: `{id, target, event,
