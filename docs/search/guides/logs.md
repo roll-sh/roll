@@ -207,9 +207,9 @@ Limits:
   it.
 
 An `otel` key can create data streams under `logs-*.otel-*`, `traces-*.otel-*` and
-`metrics-*.otel-*` as it writes, and roll doesn't cap
-how many a cluster may hold yet. Keep `otel` keys in Collectors you run, not in code you ship to
-customers.
+`metrics-*.otel-*` as it writes, up to the cluster's `cluster.max_shards_per_node` (1000 shards by
+default, two a data stream; records for more are refused in `partial_success`). Only a key with
+the cluster privilege can raise it.
 
 An `otel` key writes and can't read: search with another key. Its `create_doc` privilege is
 Elasticsearch's, so OpenSearch-flavor clusters don't have `otel` keys; use a `data` key narrowed
