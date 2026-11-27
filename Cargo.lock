@@ -7681,6 +7681,7 @@ dependencies = [
  "roll-secrets-ref",
  "roll-workspace",
  "rsa",
+ "rusqlite",
  "rustls-pki-types",
  "rustls-webpki 0.103.15",
  "serde",

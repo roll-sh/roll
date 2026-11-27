@@ -13,6 +13,9 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use tower::ServiceExt;
 
+mod common;
+use common::{fresh_secrets_db, scratch};
+
 /// A fake product: a database whose password rotates, and access keys it issues and revokes.
 #[derive(Default)]
 struct Fake {
@@ -1820,36 +1823,7 @@ impl Api {
     }
 }
 
-/// A scratch directory for the test's databases: in memory where there's one (`/dev/shm`). Every
-/// SQLite write fsyncs its WAL, which on a busy disk cost these tests most of their time, and
-/// nothing here is meant to outlive a crash.
-fn scratch() -> tempfile::TempDir {
-    let shm = std::path::Path::new("/dev/shm");
-    shm.is_dir().then(|| tempfile::tempdir_in(shm).ok()).flatten().unwrap_or_else(|| tempfile::tempdir().unwrap())
-}
 
-/// Copy a fresh secrets database to `to`, as `Secrets::new` leaves one on an empty file (the schema,
-/// and the issuer's and the audit log's keys under this file's keyring), made once per run: making
-/// the issuer's RSA key and the schema was a third of every test's time. On Postgres
-/// (`ROLL_CODE_TEST_DATABASE`) each test makes its own, as before.
-fn fresh_secrets_db(to: &std::path::Path) {
-    static TEMPLATE: std::sync::OnceLock<(tempfile::TempDir, std::path::PathBuf)> = std::sync::OnceLock::new();
-    if std::env::var(code_sql::TEST_DATABASE_ENV).is_ok_and(|url| !url.is_empty()) {
-        return;
-    }
-    let (_, file) = TEMPLATE.get_or_init(|| {
-        let dir = scratch();
-        let ws = Arc::new(roll_workspace::Workspace::new(code_sql::Db::open(&code_sql::Target::Sqlite(dir.path().join("workspace.db"))).unwrap()).unwrap());
-        let live = dir.path().join("live.db");
-        let opts = Options { keyring: Ok(Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links: Default::default(), syncs: Default::default(), open: true, trust_forwarded_for: false, web_url: None, deliver: None, grants: None, people: None, kms: None, sts: None, outside: None, directory: None, github: None, gateways: None, clouds: None, workloads: None };
-        let secrets = Secrets::new(code_sql::Db::open(&code_sql::Target::Sqlite(live.clone())).unwrap(), ws, opts).unwrap();
-        let file = dir.path().join("template.db");
-        rusqlite::Connection::open(&live).unwrap().execute("VACUUM INTO ?1", [file.to_str().unwrap()]).unwrap();
-        drop(secrets);
-        (dir, file)
-    });
-    std::fs::copy(file, to).unwrap();
-}
 
 fn slugs(v: &Value) -> Vec<&str> {
     v.as_array().unwrap().iter().map(|e| e["slug"].as_str().unwrap()).collect()

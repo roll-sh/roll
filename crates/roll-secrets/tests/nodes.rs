@@ -8,20 +8,21 @@ use roll_secrets::links::{Field, Link, LinkProvider, Links, Mode};
 use roll_secrets::{Action, Batch, Caller, Import, Keyring, Op, Options, Scope, Secrets};
 use std::sync::Arc;
 
-/// A scratch directory for the test's databases: in memory where there's one (`/dev/shm`). Every
-/// SQLite write fsyncs its WAL, which on a busy disk cost these tests most of their time, and
-/// nothing here is meant to outlive a crash.
-fn scratch() -> tempfile::TempDir {
-    let shm = std::path::Path::new("/dev/shm");
-    shm.is_dir().then(|| tempfile::tempdir_in(shm).ok()).flatten().unwrap_or_else(|| tempfile::tempdir().unwrap())
-}
+mod common;
+use common::{fresh_secrets_db, scratch};
+
 
 fn node(dir: &std::path::Path, ws: Arc<roll_workspace::Workspace>) -> Arc<Secrets> {
     node_with(dir, ws, Default::default(), None)
 }
 
 fn secrets_db(dir: &std::path::Path) -> code_sql::Db {
-    code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.join("secrets.db")), "secrets").unwrap()
+    let file = dir.join("secrets.db");
+    // The first node's open makes it; the others open what's there.
+    if !file.exists() {
+        fresh_secrets_db(&file);
+    }
+    code_sql::Db::open_or_test(&code_sql::Target::Sqlite(file), "secrets").unwrap()
 }
 
 fn node_with(dir: &std::path::Path, ws: Arc<roll_workspace::Workspace>, links: Links, clouds: Option<Clouds>) -> Arc<Secrets> {

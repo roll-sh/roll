@@ -16,6 +16,9 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use tower::ServiceExt;
 
+mod common;
+use common::{fresh_secrets_db, scratch};
+
 const API: &str = "https://roll.example";
 
 /// The internet as far as challenges go: web pages by URL, TXT records by name, and the digest
@@ -83,19 +86,13 @@ struct Setup {
     _dir: tempfile::TempDir,
 }
 
-/// A scratch directory for the test's databases: in memory where there's one (`/dev/shm`). Every
-/// SQLite write fsyncs its WAL, which on a busy disk cost these tests most of their time, and
-/// nothing here is meant to outlive a crash.
-fn scratch() -> tempfile::TempDir {
-    let shm = std::path::Path::new("/dev/shm");
-    shm.is_dir().then(|| tempfile::tempdir_in(shm).ok()).flatten().unwrap_or_else(|| tempfile::tempdir().unwrap())
-}
 
 impl Setup {
     async fn new() -> Setup {
         let dir = scratch();
         let ws_db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("workspace.db")), "workspace").unwrap();
         let ws = Arc::new(roll_workspace::Workspace::new(ws_db).unwrap());
+        fresh_secrets_db(&dir.path().join("secrets.db"));
         let db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("secrets.db")), "secrets").unwrap();
         let opts = Options { keyring: Ok(Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links: Default::default(), syncs: Default::default(), open: true, trust_forwarded_for: false, web_url: None, deliver: None, grants: None, people: None, kms: None, sts: None, outside: None, directory: None, github: None, gateways: None, clouds: None, workloads: None };
         let secrets = Arc::new(Secrets::new(db.clone(), ws.clone(), opts).unwrap());
