@@ -1948,6 +1948,24 @@ async fn a_deploy_hook_builds_its_branches_previews_again() {
     assert!(matches!(e.engine.run_hook(secret, None), Err(roll_previews::Error::NotFound(_))));
 }
 
+/// A project's bypass secret (`x-roll-preview-bypass`, CI's way into its private previews) is a
+/// roll secret leak scanning finds, so one committed to a repo is revoked: it stops opening the
+/// project's previews at once.
+#[tokio::test]
+async fn a_leaked_bypass_secret_stops_opening_previews() {
+    let e = env(json!({ "enabled": true, "access": "link" }));
+    e.code.open(change("chg_b", 1));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_b").unwrap().unwrap();
+    let (secret, _) = e.engine.store.rotate_bypass(&e.project).unwrap();
+    assert!(secret.starts_with("rpb_") && roll_auth::credentials::checksum_ok(&secret), "a roll secret leak scanning finds: {secret}");
+    let opens = || e.engine.store.access(&p.id).unwrap().unwrap().bypass == Some(roll_previews::store::bypass_hash(&secret));
+    assert!(opens());
+    assert!(e.engine.revoke_leaked_bypass("rpb_nope").is_none() && opens(), "only the live secret");
+    assert!(e.engine.revoke_leaked_bypass(&secret).is_some());
+    assert!(!opens() && e.engine.store.access(&p.id).unwrap().unwrap().bypass.is_none(), "revoked: no bypass opens the preview");
+}
+
 /// A project with its own preview domain (roll apps' verified wildcard, `*.preview.acme.dev`)
 /// has its previews' services answer under it, and only its previews: a label of another
 /// project's preview under that domain names nothing.

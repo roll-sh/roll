@@ -1451,9 +1451,9 @@ thirty-fourth review found them in the clear.
       `AccountsVisitors` and `/dashboard/apps/visit`: admins only today), not previews'. roll
       apps refuses `signed_in` on a node without roll's dashboard address (`web_url`), which
       fails the deploy. Share links open them as previews' own (see Share links). roll
-      apps adds the feedback button only for a visitor with its access cookie (`via_link` in
-      `apps-control/src/public.rs`), never for one with its sign-in session, so a team
-      preview's services on roll apps have no button yet.
+      apps adds the feedback button for a visitor with its access cookie (`via_link` in
+      `apps-control/src/public.rs`) and, on a `pv-` environment, for a person signed in to roll
+      (`RollPerson`, #1151), never for one a password, an allow list or a provider let in.
     - `visit.rs::a_signed_in_person_gets_into_a_team_preview` follows a page load to the
       dashboard, a ticket only for a person, only to the preview's hosts and only on its own
       preview, its URL at the service's scheme and port whatever `to` said, the ticket used
@@ -1483,7 +1483,11 @@ thirty-fourth review found them in the clear.
     Automation field). A request with it in the `x-roll-preview-bypass` header reaches any of
     the project's private previews, with no cookie or redirect. The service never sees the
     header. The secret is shown once, kept only as its SHA-256, and compared in constant time.
-    Rotating it stops the old one at once. A fork's preview (`trusted: false`) never opens to
+    Rotating it stops the old one at once. It's a roll secret (`rpb_`, checksummed), so secret
+    scanning (GitHub's, roll code's landings) finds one committed to a repo, and roll revokes it
+    (`Access::on_leaked`: the project's bypass is deleted, and CI gets 401s until it's rotated).
+    A secret made before checksums keeps working until it's rotated, but scanning can't find it:
+    rotate it once to get one it can. A fork's preview (`trusted: false`) never opens to
     it: CI that visited one would hand the secret to the fork's code. Send the header only to the
     preview's own origin (`page.route` on the base URL, never `extraHTTPHeaders`, which a page can
     send anywhere). CI gets each preview's plain URL from the GitHub deployment
@@ -2059,7 +2063,8 @@ land on the change.
   request and the note's Slack thread hear it too (`a_pages_notes_by_its_environment_name`). The note's format is roll code's (`code_control::review::preview_note`,
   read back by `roll_previews::notes`). `preview_notes_are_slack_threads_both_ways`.
 - Previews deployed on roll apps go through apps' own proxy, which adds it for its link
-  visitors only: under team access (apps' `signed_in` environments) they get none yet.
+  visitors and, under team access (apps' `signed_in` environments), for people signed in to
+  roll (#1151).
 - Public previews don't get it (anyone could see the button), and a branch's preview has no
   change to post on.
 
