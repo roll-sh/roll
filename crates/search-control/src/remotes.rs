@@ -439,9 +439,14 @@ impl Control {
         if is_os_link(key_id) {
             // An OpenSearch-flavor link's user and its one role.
             let api = "/_plugins/_security/api";
+            // The user, then its one role (gone already counts, so a retry finishes the job).
+            let gone = |status: u16| status < 300 || status == 404;
             let r = self.call(&t, EsRequest::new("DELETE", &format!("{api}/internalusers/{}", urlencoding::encode(key_id)))).await;
-            let _ = self.call(&t, EsRequest::new("DELETE", &format!("{api}/roles/{}", urlencoding::encode(key_id)))).await;
-            return if r.status < 300 || r.status == 404 { Ok(()) } else { Err(ControlError::Internal(anyhow::anyhow!("removing remote link user {key_id} of cluster {} failed ({})", t.name, r.status))) };
+            if !gone(r.status) {
+                return Err(ControlError::Internal(anyhow::anyhow!("removing remote link user {key_id} of cluster {} failed ({})", t.name, r.status)));
+            }
+            let r = self.call(&t, EsRequest::new("DELETE", &format!("{api}/roles/{}", urlencoding::encode(key_id)))).await;
+            return if gone(r.status) { Ok(()) } else { Err(ControlError::Internal(anyhow::anyhow!("removing remote link role {key_id} of cluster {} failed ({})", t.name, r.status))) };
         }
         let body = serde_json::to_vec(&json!({ "ids": [key_id] })).unwrap_or_default();
         let r = self.call(&t, EsRequest::json("DELETE", "/_security/api_key", body)).await;
