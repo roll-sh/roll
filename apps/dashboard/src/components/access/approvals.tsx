@@ -1,6 +1,6 @@
 import { Bell, Hand } from "lucide-react";
 import { useEffect, useState } from "react";
-import { accessApi, accessRequest, approversText, parseApprovers, approvalWhere, deciderName, forLabel, gateProgress, productName, REMEMBER, RISKY, rememberable, type Approval, type ChatTarget, type Remember } from "@/lib/access-api";
+import { accessApi, accessRequest, approversText, parseApprovers, approvalWhere, deciderName, forLabel, gateProgress, productName, rememberChoices, RISKY, rememberable, wholeEnvironment, type Approval, type ChatTarget, type Remember } from "@/lib/access-api";
 import { createIntegrationsApi, type ChatInstall } from "@/lib/integrations-api";
 import { call } from "@/lib/roll-api";
 import { useShownOwner } from "../agents/use-connection";
@@ -108,6 +108,15 @@ function Pending({ a, focused, refresh, viewer }: { a: Approval; focused: boolea
             <span title={a.resource ?? undefined}>{a.resource ? resourceName(a.product, a.resource) : productName(a.product)}</span>
             {(approvalWhere(a) || (accessRequest(a) && "every environment")) && <span className="text-muted"> · {approvalWhere(a) || "every environment"}</span>}
           </h2>
+          {a.also && (
+            <p className="mt-1 text-[12px] text-subtle">
+              and <b className="font-medium text-fg">{Object.keys(a.also.actions).join(", ")}</b> in {productName(a.also.product)}
+              {Array.isArray(a.also.resources) && a.also.resources[0] && "id" in a.also.resources[0] ? (
+                <code className="font-mono"> {resourceName(a.also.product, a.also.resources[0].id)}</code>
+              ) : null}
+              <span> (the route&apos;s own: approving covers it, remembering keeps it)</span>
+            </p>
+          )}
           {accessRequest(a) ? (
             <p className="mt-1 text-[13px]">
               <span className="text-muted">asks for {forLabel(accessRequest(a)!.for)}:</span> {accessRequest(a)!.reason}
@@ -132,9 +141,9 @@ function Pending({ a, focused, refresh, viewer }: { a: Approval; focused: boolea
               onChange={(e) => setRemember(e.target.value as Remember)}
               className={input}
               aria-label="How long this approval also allows the same action on this resource"
-              title={`Also allow ${a.action} on ${a.resource}${approvalWhere(a) ? ` (${approvalWhere(a)})` : ""} without asking`}
+              title={`Also allow ${a.action} on ${a.resource}${approvalWhere(a) ? ` (${approvalWhere(a)})` : ""}${wholeEnvironment(a) ? ", every folder of the environment," : " and every folder under it"} without asking`}
             >
-              {REMEMBER.map((r) => (
+              {rememberChoices(a).map((r) => (
                 <option key={r.value} value={r.value}>
                   {r.label}
                 </option>

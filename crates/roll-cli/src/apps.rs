@@ -328,6 +328,9 @@ pub enum AppsCmd {
         /// Run once per deploy before the switch (a migration); a failure stops the deploy.
         #[arg(long)]
         pre_deploy: Option<String>,
+        /// A preview environment's teardown command, run once before it's deleted (`none` clears it).
+        #[arg(long)]
+        teardown: Option<String>,
         /// The path checked at each deploy and every 10 s while running; `none`: the port
         /// accepting.
         #[arg(long)]
@@ -1374,6 +1377,22 @@ pub enum AppsCmd {
         #[arg(long, conflicts_with_all = ["delete", "incident", "update", "title", "item"])]
         remove_domain: bool,
     },
+    /// Quiet an environment's alerts for a while (Cloud Monitoring's snooze): `--for 2h --reason
+    /// "db migration"`, `--alert check.down` (repeated) for some kinds only; alone, the open ones;
+    /// `--end sil_…` ends one early. Events are still kept, and resolves still go out.
+    Silence {
+        #[command(flatten)]
+        target: Target,
+        /// How long (`30m`, `2h`, `1d`; at most 30 days).
+        #[arg(long = "for", value_name = "DURATION", requires = "reason", conflicts_with = "end")]
+        duration: Option<String>,
+        #[arg(long)]
+        reason: Option<String>,
+        #[arg(long = "alert", value_name = "KIND", requires = "duration")]
+        alerts: Vec<String>,
+        #[arg(long, value_name = "ID")]
+        end: Option<String>,
+    },
     /// The project's spend limits this month: show them, or set `--alert` and `--hard` (dollars;
     /// `0` removes one). At the hard limit its services stop until it's raised.
     Limits {
@@ -1470,6 +1489,10 @@ pub enum AppsCmd {
         /// An image service: deploy when its tag points at a new image (`true`), or not.
         #[arg(long)]
         follow_tag: Option<bool>,
+        /// A Git URL service: deploy the repository's new tags that match (`v*`) from its hook,
+        /// each once (`none` stops it).
+        #[arg(long, value_name = "PATTERN")]
+        deploy_tags: Option<String>,
         /// Redeploy (the same image, the new values) when the project's secrets change (`true`),
         /// or not.
         #[arg(long)]
@@ -3568,7 +3591,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Set { target, name, repo, root, image, upload, builder, dockerfile, stage, install, build_command, output, build_start, health_timeout, health_every, health_failures, health_command, alert_memory, alert_errors, alert_p95, alert_log, alert_log_count, alert_cpu, alert_metric, alert_anomaly, min, max, cpu, memory, port, start, pre_deploy, health, schedule, timezone, kind, concurrency, suspend_after, sleep_after, timeout, retries, volume, watch, packages, build_timeout, build_size, submodules, submodule_repos, lfs, otel, rollout, rollout_step, rollout_errors, rollout_manual, rollout_checks, overlap, h2c, health_grpc, scale, public, drain, cpu_target, busy_cpu, memory_target, latency_target, oidc_audience, push, restart, restart_tries, affinity, tcp, udp, rollback_on_crash, rebuild_on_base, block_on, queue, alert_capacity, alert_route, skew_protection, rollout_slo_burn, rollout_p95, floor, floor_timezone, set } => {
+        AppsCmd::Set { target, name, repo, root, image, upload, builder, dockerfile, stage, install, build_command, output, build_start, health_timeout, health_every, health_failures, health_command, alert_memory, alert_errors, alert_p95, alert_log, alert_log_count, alert_cpu, alert_metric, alert_anomaly, min, max, cpu, memory, port, start, pre_deploy, teardown, health, schedule, timezone, kind, concurrency, suspend_after, sleep_after, timeout, retries, volume, watch, packages, build_timeout, build_size, submodules, submodule_repos, lfs, otel, rollout, rollout_step, rollout_errors, rollout_manual, rollout_checks, overlap, h2c, health_grpc, scale, public, drain, cpu_target, busy_cpu, memory_target, latency_target, oidc_audience, push, restart, restart_tries, affinity, tcp, udp, rollback_on_crash, rebuild_on_base, block_on, queue, alert_capacity, alert_route, skew_protection, rollout_slo_burn, rollout_p95, floor, floor_timezone, set } => {
             let svc = service(api, &target).await?;
             // The service's rollout with what was given replaced (the API takes it whole).
             let rollout = if rollout.is_some() || rollout_step.is_some() || rollout_errors.is_some() || rollout_manual.is_some() || rollout_checks.is_some() || overlap.is_some() || rollout_slo_burn.is_some() || rollout_p95.is_some() {
@@ -3741,6 +3764,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 ("port", port.map(Value::from)),
                 ("start", text(start)),
                 ("pre_deploy", text(pre_deploy)),
+                ("teardown", text(teardown)),
                 ("health_path", text(health)),
                 ("health_timeout_s", health_timeout.map(Value::from)),
                 ("health_every_s", health_every.map(|n| if n == 0 { Value::Null } else { Value::from(n) })),
@@ -4659,9 +4683,12 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             let svc = service(api, &target).await?;
             let base = env_path(&svc, &target.env);
             let (values, listed) = (api.get(&format!("{base}/variables/values")).await?, api.get(&format!("{base}/variables")).await?);
-            let vars: Vec<(String, String)> = values.as_object().into_iter().flatten().filter(|(k, _)| k.as_str() != "PORT" && !k.starts_with("ROLL_")).filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string()))).collect();
+            // roll's own (`WEB_CONCURRENCY`, `OTEL_*`, an agent's `JAVA_TOOL_OPTIONS`) are the
+            // instance's, wrong on this machine: left out, as `PORT` and `ROLL_*` are.
+            let roll_made: Vec<String> = listed["vars"].as_array().into_iter().flatten().filter(|v| v["source"] == "roll").map(|v| s(&v["name"])).collect();
+            let vars: Vec<(String, String)> = values.as_object().into_iter().flatten().filter(|(k, _)| k.as_str() != "PORT" && !k.starts_with("ROLL_") && !roll_made.contains(k)).filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string()))).collect();
             let sealed: Vec<String> = listed["vars"].as_array().into_iter().flatten().filter(|v| v["sealed"] == true).map(|v| s(&v["name"])).collect();
-            let text = dotenv(&format!("{} {} (roll apps vars --pull)", s(&svc["name"]), target.env), &vars, &sealed);
+            let text = dotenv(&format!("{} {} (roll apps vars --pull): for this machine; never read it back with --from-file (links' and secrets' values would stop following their source)", s(&svc["name"]), target.env), &vars, &sealed);
             write_private(&file, &text)?;
             if !json_out {
                 eprintln!("wrote {} {} to {}", vars.len(), if vars.len() == 1 { "variable" } else { "variables" }, file.display());
@@ -5508,6 +5535,35 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
+        AppsCmd::Silence { target, duration, reason, alerts, end } => {
+            let svc = service(api, &target).await?;
+            let path = format!("{}/silences", env_path(&svc, &target.env));
+            if let Some(id) = end {
+                api.call(reqwest::Method::DELETE, &format!("{path}/{}", enc(&id)), None).await?;
+                json!({ "ended": id })
+            } else if let Some(d) = duration {
+                let ms = ago_ms(&d).map_err(|_| anyhow::anyhow!("--for is a duration like 30m, 2h or 1d"))?;
+                let until = chrono::Utc::now().timestamp_millis() + ms;
+                let v = api.post(&path, json!({ "until": until, "reason": reason, "alerts": alerts })).await?;
+                if !json_out {
+                    let at = chrono::DateTime::from_timestamp_millis(until).map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string()).unwrap_or_default();
+                    println!("{}  quiet until {at}", s(&v["id"]));
+                    return Ok(());
+                }
+                v
+            } else {
+                let v = api.get(&path).await?;
+                if !json_out {
+                    for x in v.as_array().into_iter().flatten() {
+                        let at = x["until"].as_i64().and_then(chrono::DateTime::from_timestamp_millis).map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string()).unwrap_or_default();
+                        let what = x["alerts"].as_array().filter(|a| !a.is_empty()).map(|a| a.iter().map(s).collect::<Vec<_>>().join(", ")).unwrap_or_else(|| "every alert".into());
+                        println!("{}  until {at}  {what}  {}", s(&x["id"]), s(&x["reason"]));
+                    }
+                    return Ok(());
+                }
+                v
+            }
+        }
         AppsCmd::Limits { target, alert, hard } => {
             let svc = service(api, &target).await?;
             let path = format!("/v1/apps/projects/{}/limits", enc(&s(&svc["project"])));
@@ -5623,7 +5679,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Env { target, all_services, branch, no_branch, variables_from, data, wait_for_ci, run, follow_tag, redeploy_on_secrets, vitals, egress, egress_host, private, open, signed_in, sso, maintenance, serve, pause, resume, resume_deploys, hold, allow_ip, allow_any, rate_limit, no_rate_limit, firewall, no_firewall, header, no_headers, route, no_routes, redirects, no_redirects, error_page, maintenance_page, roll_pages, freeze, unfreeze, rotate_config, set } => {
+        AppsCmd::Env { target, all_services, branch, no_branch, variables_from, data, wait_for_ci, run, follow_tag, deploy_tags, redeploy_on_secrets, vitals, egress, egress_host, private, open, signed_in, sso, maintenance, serve, pause, resume, resume_deploys, hold, allow_ip, allow_any, rate_limit, no_rate_limit, firewall, no_firewall, header, no_headers, route, no_routes, redirects, no_redirects, error_page, maintenance_page, roll_pages, freeze, unfreeze, rotate_config, set } => {
             let svc = service(api, &target).await?;
             if rotate_config {
                 let e = api.post(&format!("{}/config/rotate", env_path(&svc, &target.env)), json!({})).await?;
@@ -5668,6 +5724,9 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             if let Some(f) = follow_tag {
                 body.insert("follow_tag".into(), json!(f));
+            }
+            if let Some(p) = deploy_tags {
+                body.insert("deploy_tags".into(), if p == "none" { Value::Null } else { json!(p) });
             }
             if signed_in {
                 body.insert("access".into(), json!({ "signed_in": true }));

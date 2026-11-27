@@ -357,6 +357,20 @@ export function PreviewSheet({
                 </button>
               )}
             </Label>
+            {p.masked_by_default && p.masked_by_default.length > 0 && (
+              <p className="mb-1.5 text-[11.5px] break-words text-soft">
+                Masked by default, as they look like people's data and no rule names them:{" "}
+                {p.masked_by_default.map((m, i) => (
+                  <span key={`${m.resource}:${m.column}`}>
+                    {i > 0 ? ", " : ""}
+                    <span className="font-mono text-[11px] text-fg" title={m.why}>
+                      {m.column}
+                    </span>
+                  </span>
+                ))}
+                . A rule in the masking settings, or <code className="font-mono text-[11px]">keep</code>, says otherwise.
+              </p>
+            )}
             {p.resources.length ? (
               <div className="rounded-lg border border-line-2 bg-raised inset-shadow-highlight">
                 {p.resources.map((r) => {
@@ -426,6 +440,14 @@ export function PreviewSheet({
                   release {duration(p.release.ms)}
                   {p.release.before_ms != null ? ` · ${thanMain(p.release.ms, p.release.before_ms, "the push before") ?? "as before"}` : ""}
                 </p>
+                {p.release.locks && p.release.locks.length > 0 && (
+                  <p className="min-w-0 break-words font-mono text-[11px] text-danger tabular-nums" title="Locks the release held that made others wait, sampled while it ran: on production it would hold them as long">
+                    {p.release.locks
+                      .slice(0, 3)
+                      .map((l) => `${l.mode === "AccessExclusiveLock" ? "ACCESS EXCLUSIVE" : l.mode.replace(/Lock$/, "").replace(/([a-z])([A-Z])/g, "$1 $2").toUpperCase()} on ${l.table} ${duration(l.ms)}`)
+                      .join(" · ")}
+                  </p>
+                )}
                 {p.rehearsal && p.rehearsal.ok === null ? (
                   <span className="text-[11px] text-subtle">rehearsing on today's data…</span>
                 ) : p.rehearsal ? (

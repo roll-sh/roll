@@ -116,9 +116,12 @@ export interface Preview {
   /** Other open changes whose previews' schema changes touch the same tables: whichever lands second migrates a table the first changed. */
   schema_overlaps?: { preview: string; branch: string; tables: string[] }[];
   /** The project's release (migrations) at its last head: how long it took on this preview's data, and the run before's. */
-  release?: { head: string; ms: number; before_ms: number | null } | null;
+  /** `locks`: the locks it held that made others wait, the strongest per table (`AccessExclusiveLock`…) and for how long. */
+  release?: { head: string; ms: number; before_ms: number | null; locks?: { table: string; mode: string; ms: number }[] } | null;
   /** Its release rehearsed on the parents' data as it is now: asked at `head` (`ok` null while it waits), then how it went. */
   rehearsal?: { head: string; by: string; at: number; ok: boolean | null; ms: number | null; error: string | null } | null;
+  /** Columns its branches were masked with by default: they look like people's data and no rule names them (`keep` leaves one as it is). */
+  masked_by_default?: { resource: string; column: string; why: string }[];
   /** Kept past its TTL until then (epoch ms). */
   kept_until?: number | null;
   /** What its code may reach: a fork's preview is `roll` by default though the project's reach anything (`egress_forks`). */

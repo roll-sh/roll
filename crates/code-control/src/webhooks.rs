@@ -88,7 +88,7 @@ CREATE TABLE IF NOT EXISTS commit_statuses (
 "#;
 
 /// Events a webhook can subscribe to (`ping` is always sent on request).
-pub const EVENTS: [&str; 10] = ["landed", "change", "review", "thread", "check", "queue", "work", "preview", "push", "budget"];
+pub const EVENTS: [&str; 11] = ["landed", "change", "review", "thread", "check", "queue", "work", "preview", "push", "budget", "masking"];
 const MAX_HOOKS_PER_REPO: usize = 20;
 const STATES: [&str; 4] = ["pending", "success", "failure", "error"];
 /// Land log rows read at a time.

@@ -52,7 +52,8 @@ pub async fn infer(cluster: &Cluster, ep: &Endpoint, req: &Request) -> EsResult<
     }
     let input = one_input(req, "DeepSeek completion")?;
     let answer = chat(cluster, ep, &oai::body(style(ep), oai::user_message(input), &Map::new(), false), req.timeout, false).await?;
-    Ok(Results::Completion(vec![oai::completion_text(&super::answer_json("deepseek", &answer)?, "DeepSeek chat completions")?]))
+    let v = super::answer_json("deepseek", &answer)?;
+    Ok(Results::completion(vec![oai::completion_text(&v, "DeepSeek chat completions")?], &v))
 }
 
 pub async fn stream_completion(cluster: &Cluster, ep: &Endpoint, req: &Request) -> EsResult<Streaming> {

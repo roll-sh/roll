@@ -172,6 +172,16 @@ pub async fn mark_inherited(cluster: &Cluster) -> EsResult<()> {
                 r.insert("last_failure".into(), obj! { "snapshot_name" => name, "time" => now, "details" => reason.to_json() });
                 store::put(st, crate::xpack::slm::POLICIES, id, Value::Obj(r), now)?;
             }
+            // OpenSearch's snapshot management policies pause the same way (put again, one is
+            // the branch's own).
+            let sm: Vec<(String, Value)> = st.metadata.xpack.iter(crate::opensearch::sm::POLICIES).map(|(k, v)| (k.clone(), v.clone())).collect();
+            for (id, rec) in &sm {
+                let Value::Obj(mut r) = rec.clone() else { continue };
+                let mut roll = r.get("_roll").and_then(Value::as_object).cloned().unwrap_or_default();
+                roll.insert("inherited".into(), true.into());
+                r.insert("_roll".into(), Value::Obj(roll));
+                store::put(st, crate::opensearch::sm::POLICIES, id, Value::Obj(r), now)?;
+            }
             let watches: Vec<(String, Value)> = st.metadata.xpack.iter(crate::xpack::watcher::WATCHES).map(|(k, v)| (k.clone(), v.clone())).collect();
             for (id, w) in &watches {
                 let Value::Obj(mut w) = w.clone() else { continue };

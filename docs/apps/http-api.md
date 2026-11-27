@@ -184,7 +184,10 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `GET /v1/apps/services/{id}/environments/{env}/domains` | | `Domain[]` | read |
 | `POST /v1/apps/services/{id}/environments/{env}/domains` | `{hostname}` | 201 `Domain` | deploy* |
 | `POST /v1/apps/services/{id}/environments/{env}/domains/{host}/verify` | | `Domain` | read |
-| `POST /v1/apps/services/{id}/environments/{env}/domains/{host}/claim` | | `{ claimed: false, txt: { name, value } }` (the `_roll-challenge` TXT to add, beside any value there: a token of this environment's own, kept a week) or, once DNS has it, `{ claimed: true, domain: Domain }`: the domain moved here in one write, verified, its certificate asked again, and the holder's `domain.expired` (`reason: claimed`); 400 when no other environment's custom domain holds the name, 409 when it moved meanwhile | deploy on production, else write |
+| `GET /v1/apps/services/{id}/environments/{env}/silences` | | `Silence[]` open now: `{ id, until /* ms */, alerts: string[] /* none: all */, reason, created_at }` | read |
+| `POST /v1/apps/services/{id}/environments/{env}/silences` | `{ until: number /* ms, in the next 30 days */, reason: string /* 1–200 */, alerts?: ("check.down" \| "heartbeat.missed" \| "crash_loop" \| "alert.memory" \| "alert.cpu" \| "alert.metric" \| "alert.errors" \| "alert.latency" \| "alert.capacity" \| "alert.log" \| "alert.route" \| "alert.slo" \| "alert.anomaly" \| "cron.failed" \| "deploy.failed")[] /* none: all */ }` | 201 `Silence`: until then those events reach no notification target (on-call included); they're still kept, and an `alert.resolved` always goes out; at most 20 open (409); `audit.silence` | deploy on production, else write |
+| `DELETE /v1/apps/services/{id}/environments/{env}/silences/{sid}` | | 204: alerts go out again from now | write |
+| `POST /v1/apps/services/{id}/environments/{env}/domains/{host}/claim` | | `{ claimed: false, txt: { name, value } }` (the `_roll-challenge` TXT to add, beside any value there: a token of this environment's own, kept a week) or, once DNS has it, `{ claimed: true, domain: Domain }`: the domain moved here in one write, verified, its certificate asked again, and the holder's `domain.expired` (`reason: claimed`); 400 when no other environment's custom domain holds the name, 409 when it moved meanwhile or the service's or project's domain cap is reached | admin (the holder may be production) |
 | `POST /v1/apps/services/{id}/environments/{env}/domains/{host}/configure` | `{ cloudflare_token: string /* a roll:// reference to a Cloudflare API token, Zone:DNS:Edit on the domain's zone; read as the caller (refused unless they may reveal it, and a sensitive key never), for this call only, never kept */; replace?: boolean /* delete the name's A and AAAA records (its old host) for the CNAME */ }` | `Domain`, checked: where `record` asks, its `_roll-challenge` TXT, then its CNAME (flattened at an apex), written there first; 409 naming the name's A and AAAA records when it has some and `replace` isn't set (the TXT is written all the same) (400 with Cloudflare's answer when it refuses; 400 for a wildcard, whose records are added by hand) | deploy on production, else write |
 | `PATCH /v1/apps/services/{id}/environments/{env}/domains/{host}` | `{ redirect_to?: string \| null, port?: number \| null }` (a field left out stays) | `Domain` (`redirect_to`: another hostname of the environment that serves it: no loops or chains; null serves the app again. `port`: another of the app's ports this hostname goes to, Railway's target port, published from the next deploy (until then the host answers 502, never the main port); null: the service's own. A web service's custom domain only, not in a closed environment (409)) | deploy* (it changes what a hostname serves) |
 | `DELETE /v1/apps/services/{id}/environments/{env}/domains/{host}` | | 204 | delete |
@@ -300,6 +303,9 @@ type Run = {
   type: "web" | "worker" | "cron";
   port?: number;            // web: the port the app listens on (default from the plan; an image's own EXPOSE on a web service's first deploy, then the port its live deployment has; else 8080; PORT is set to it)
   start?: string;           // overrides the image's command
+  teardown?: string;        // once before a preview (ephemeral) environment is deleted, in a container of its
+                            // live image with its variables (at most 2 minutes, once per deployment; a failure is a
+                            // job.failed event, never holding the delete)
   pre_deploy?: string;      // once per deploy, in a container of the new image with its variables and
                             // the project network (no volume), before the switch: a migration. A
                             // non-zero exit fails the deploy; the old one keeps serving
@@ -527,6 +533,7 @@ type EnvironmentPut = {
   report?: boolean; // false: its deploys post no commit status and no GitHub Deployment (someone else reports them: roll previews, for its `pv-` environments)
   preview_host?: string | null; // the one DNS label it answers to under its project's preview domain (`<label>.preview.acme.dev`; roll previews sets it), unique in the project (409); null: none
   follow_tag?: boolean;
+  deploy_tags?: string | null; // a Git URL service: deploy the repository's new tags matching this (`v*`: `*` any characters; 1–100 of A–Z a–z 0–9 . _ / - + *) from its hook, each once, where the repository says it points; the tags already there when it's set never deploy; null stops it (400 for another source)
   /** A preview environment (ephemeral) only, set by roll previews: a visitor who came in through
    *  its access link gets roll previews' feedback button on its pages (`/__roll/feedback.js`
    *  before `</body>`, served from the preview's host), sending notes to the preview in roll's
@@ -631,6 +638,7 @@ type Environment = EnvironmentSummary & {
   run: { [field: string]: number }; // its own run settings over the service's ({}: the service's)
   hook: boolean;              // it has a deploy hook
   follow_tag: boolean;        // an image service's tag is watched: a new digest behind it deploys
+  deploy_tags?: string;       // a Git URL service's new tags matching this deploy here, from its hook
   redeploy_on_secrets: boolean; // the project's secrets changing redeploys it (same image, new values)
   traces: boolean; // its instances send OpenTelemetry traces to roll
   vitals: boolean; // its pages measure their Web Vitals for roll (`…/vitals`)

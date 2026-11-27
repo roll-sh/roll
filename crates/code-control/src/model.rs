@@ -341,6 +341,10 @@ pub struct PreviewEnvironment {
     /// the run before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub release_ms: Option<i64>,
+    /// The locks that release held that made others wait: `(table, mode, ms)` (roll previews'
+    /// sampling; untrusted names: a fork's migrations make the tables).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub release_locks: Vec<(String, String, i64)>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub release_before_ms: Option<i64>,
     /// A signed, expiring link to the first service's screenshot (public previews only).

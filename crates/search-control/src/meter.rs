@@ -17,6 +17,10 @@
 //! [`Meter::count_inference`], recorded with the interval's requests (milliseconds, rounded up
 //! per pass so no cluster's work is lost to rounding).
 //!
+//! Provider tokens of completions and chat answers (`search_server::Node::take_tokens`) are
+//! recorded the same way ([`Meter::count_tokens`]), input and output apart. They're metered, not
+//! priced: the provider bills them, and owners see them beside chat's limits.
+//!
 //! Request metrics, slow log entries and search analytics (`search_server::Node::take_observations`)
 //! go to the catalog's rings with the same pass ([`Meter::observe`]): nothing per cluster runs for them
 //! either, and a cluster's history stays in the catalog wherever it loads next.
@@ -155,14 +159,28 @@ struct Resident {
 struct State {
     /// Loaded clusters by catalog id.
     loaded: HashMap<String, Resident>,
-    /// Requests counted since the last sample, by catalog id.
-    requests: HashMap<String, i64>,
-    /// Inference CPU time since the last sample, by catalog id.
-    inference: HashMap<String, std::time::Duration>,
+    /// What was counted since the last sample, by catalog id.
+    counted: HashMap<String, Counted>,
     /// Clusters whose figures (indices, docs, stored bytes) should be refreshed.
     dirty: HashSet<String>,
     /// Index counts seen when clusters unloaded, for the next refresh.
     indices: HashMap<String, i64>,
+}
+
+/// What a cluster did in an interval, besides being loaded.
+#[derive(Clone, Copy, Debug, Default)]
+struct Counted {
+    requests: i64,
+    /// CPU time the node's embedding pool spent on its inputs.
+    inference: std::time::Duration,
+    input_tokens: i64,
+    output_tokens: i64,
+}
+
+impl Counted {
+    fn is_empty(&self) -> bool {
+        self.requests == 0 && self.inference.is_zero() && self.input_tokens == 0 && self.output_tokens == 0
+    }
 }
 
 pub struct Meter {
@@ -180,12 +198,22 @@ impl Meter {
     }
 
     pub fn count_requests(&self, cluster: &str, n: i64) {
-        *self.state.lock().requests.entry(cluster.to_string()).or_default() += n;
+        let mut st = self.state.lock();
+        let c = st.counted.entry(cluster.to_string()).or_default();
+        c.requests = c.requests.saturating_add(n);
     }
 
     /// CPU time the node's embedding pool spent on `cluster`'s inputs.
     pub fn count_inference(&self, cluster: &str, cpu: std::time::Duration) {
-        *self.state.lock().inference.entry(cluster.to_string()).or_default() += cpu;
+        self.state.lock().counted.entry(cluster.to_string()).or_default().inference += cpu;
+    }
+
+    /// Provider tokens of `cluster`'s completions and chat answers.
+    pub fn count_tokens(&self, cluster: &str, input: u64, output: u64) {
+        let mut st = self.state.lock();
+        let c = st.counted.entry(cluster.to_string()).or_default();
+        c.input_tokens = c.input_tokens.saturating_add(input.min(i64::MAX as u64) as i64);
+        c.output_tokens = c.output_tokens.saturating_add(output.min(i64::MAX as u64) as i64);
     }
 
     pub fn is_loaded(&self, cluster: &str) -> bool {
@@ -203,21 +231,21 @@ impl Meter {
     /// Accounts the rest of a cluster's loaded time and marks it for a figures refresh.
     /// `resident` is its size measured now.
     pub async fn on_unloading(&self, cluster: &str, at_ms: i64, indices: Option<i64>, resident: Option<i64>) -> anyhow::Result<()> {
-        let (r, requests, inference) = {
+        let (r, counted) = {
             let mut st = self.state.lock();
             let r = st.loaded.remove(cluster);
             st.dirty.insert(cluster.to_string());
             if let Some(n) = indices {
                 st.indices.insert(cluster.to_string(), n);
             }
-            (r, st.requests.remove(cluster).unwrap_or(0), st.inference.remove(cluster).map_or(0, ms))
+            (r, st.counted.remove(cluster).unwrap_or_default())
         };
         let Some(r) = r else {
             // Counted after its last interval: billed on its own.
-            return self.record(cluster, at_ms, 0, requests, inference, None).await;
+            return self.record(cluster, at_ms, 0, counted, None).await;
         };
         let seconds = ((at_ms - r.since).max(0) + 999) / 1000;
-        self.record(cluster, at_ms, seconds, requests, inference, larger(r.bytes, resident)).await
+        self.record(cluster, at_ms, seconds, counted, larger(r.bytes, resident)).await
     }
 
     /// One metering interval: accounts whole loaded seconds and the requests counted since the
@@ -231,35 +259,25 @@ impl Meter {
         };
         let measured: HashMap<String, i64> = instances.iter().map(|(n, c)| (n.clone(), resident_bytes(c))).collect();
         drop(instances);
-        let work: Vec<(String, i64, i64, i64, Option<i64>)> = {
+        let work: Vec<(String, i64, Counted, Option<i64>)> = {
             let mut st = self.state.lock();
-            let State { loaded, requests, inference, .. } = &mut *st;
+            let State { loaded, counted, .. } = &mut *st;
             let mut out = Vec::new();
             for (name, r) in loaded.iter_mut() {
                 let seconds = (at_ms - r.since).max(0) / 1000;
                 r.since += seconds * 1000;
                 let now = measured.get(name).copied();
-                out.push((name.clone(), seconds, requests.remove(name).unwrap_or(0), inference.remove(name).map_or(0, ms), larger(r.bytes, now)));
+                out.push((name.clone(), seconds, counted.remove(name).unwrap_or_default(), larger(r.bytes, now)));
                 if now.is_some() {
                     r.bytes = now;
                 }
             }
-            // Requests and inference of clusters that unloaded since (counted after their last
-            // interval).
-            let mut rest: HashMap<String, (i64, i64)> = HashMap::new();
-            for (name, n) in requests.drain() {
-                rest.entry(name).or_default().0 = n;
-            }
-            for (name, cpu) in inference.drain() {
-                rest.entry(name).or_default().1 = ms(cpu);
-            }
-            for (name, (n, cpu)) in rest {
-                out.push((name, 0, n, cpu, None));
-            }
+            // What clusters that unloaded since did (counted after their last interval).
+            out.extend(counted.drain().map(|(name, c)| (name, 0, c, None)));
             out
         };
-        for (name, seconds, requests, inference_ms, bytes) in &work {
-            self.record(name, at_ms, *seconds, *requests, *inference_ms, *bytes).await?;
+        for (name, seconds, counted, bytes) in &work {
+            self.record(name, at_ms, *seconds, *counted, *bytes).await?;
         }
         let mut st = self.state.lock();
         let mut refresh: Vec<(String, bool)> = st.dirty.drain().map(|n| (n, true)).collect();
@@ -301,14 +319,22 @@ impl Meter {
 
     /// `resident`: the measured size over the interval; without a measurement (a cluster the
     /// meter can't see), its base plus stored bytes.
-    async fn record(&self, id: &str, at_ms: i64, seconds: i64, requests: i64, inference_ms: i64, resident: Option<i64>) -> anyhow::Result<()> {
-        if seconds == 0 && requests == 0 && inference_ms == 0 {
+    async fn record(&self, id: &str, at_ms: i64, seconds: i64, counted: Counted, resident: Option<i64>) -> anyhow::Result<()> {
+        if seconds == 0 && counted.is_empty() {
             return Ok(());
         }
         // Deleted meanwhile: nothing to bill.
         let Some(c) = self.store.get(id).await? else { return Ok(()) };
         let loaded_bytes = if seconds == 0 { 0 } else { resident.unwrap_or_else(|| LOADED_BASE_BYTES.saturating_add(c.stored_bytes)) };
-        let sample = UsageSample { at: at_ms / 1000, seconds, loaded_bytes, requests, inference_ms };
+        let sample = UsageSample {
+            at: at_ms / 1000,
+            seconds,
+            loaded_bytes,
+            requests: counted.requests,
+            inference_ms: ms(counted.inference),
+            input_tokens: counted.input_tokens,
+            output_tokens: counted.output_tokens,
+        };
         self.store.record_usage(&c.id, &sample).await
     }
 }

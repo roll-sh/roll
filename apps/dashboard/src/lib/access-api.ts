@@ -262,6 +262,16 @@ export const REMEMBER: { value: Remember; label: string }[] = [
   { value: "always", label: "Always" },
 ];
 
+/** Whether remembering `a` reaches a whole environment's secrets: a folder's rule reaches every folder under it, so the root (or no folder) is all of them. */
+export function wholeEnvironment(a: Pick<Approval, "product" | "scope_path">): boolean {
+  return a.product === "secrets" && (!a.scope_path || a.scope_path === "/");
+}
+
+/** How long `a` may be remembered: a whole environment's secrets for 8 hours at most (the server refuses longer). */
+export function rememberChoices(a: Pick<Approval, "product" | "scope_path">): typeof REMEMBER {
+  return wholeEnvironment(a) ? REMEMBER.filter((r) => r.value === "once" || r.value === "1h" || r.value === "8h") : REMEMBER;
+}
+
 /** Where in its resource an approval is (what remembering it keeps to): "production · folder /db". */
 export function approvalWhere(a: Pick<Approval, "environment" | "scope_path">): string {
   return [a.environment, a.scope_path && a.scope_path !== "/" ? `folder ${a.scope_path}` : null].filter(Boolean).join(" · ");
@@ -308,6 +318,8 @@ export function gateProgress(a: Pick<Approval, "gates" | "approved_by">): string
 export type ApprovalState = "pending" | "approved" | "denied" | "expired" | "used";
 
 export interface Approval {
+  /** The route's own rule a lend's approval covers too (its own action asked as well): approving covers it, remembering keeps it. */
+  also?: Rule | null;
   id: string;
   grant_id: string;
   grant_name: string;
@@ -739,6 +751,8 @@ export interface EnterpriseApp {
   signs_with_key: boolean;
   /** The Client ID Metadata Documents it presents as its client id (Claude's auto-connect): it signs with their keys, and roll holds no credential of it. */
   metadata?: string[];
+  /** Providers besides Claude's issuer that may vouch for an app named by its documents (IdP-managed auto-connect). */
+  issuers?: string[];
   /** Until when the secret before a rotation still works (Unix ms). */
   old_until?: number | null;
   /** Where its secret was found leaked: roll dropped it, and it signs in again once rotated. */
@@ -814,7 +828,7 @@ export const accessApi = {
   /** Every trusted provider at once: the list replaces the old one. */
   setIdps: (idps: EnterpriseIdp[]) => call<{ idps: EnterpriseIdp[] }>("PUT", "/v1/access/enterprise/idps", { idps }),
   /** A new app: with no key, its secret is in the answer this once. */
-  addEnterpriseApp: (a: { name: string; rules: Rule[]; public_jwk?: Record<string, string> | null; metadata?: string[] }) =>
+  addEnterpriseApp: (a: { name: string; rules: Rule[]; public_jwk?: Record<string, string> | null; metadata?: string[]; issuers?: string[] }) =>
     call<EnterpriseApp & { client_secret?: string }>("POST", "/v1/access/enterprise/apps", a),
   /** A new name or rules: its people's connections take the rules at once. */
   updateEnterpriseApp: (id: string, c: { name?: string; rules?: Rule[] }) => call<EnterpriseApp>("PATCH", `/v1/access/enterprise/apps/${encodeURIComponent(id)}`, c),
@@ -1275,11 +1289,13 @@ export function presetFor(scope: string | undefined, presets: Preset[]): Preset 
 }
 
 /** An error back to the client (the redirect was registered and the request came from it). */
-export function denyRedirect(redirect: string, state?: string): string {
+export function denyRedirect(redirect: string, state?: string, issuer?: string, why = "The user denied the request"): string {
   const u = new URL(redirect);
   u.searchParams.set("error", "access_denied");
-  u.searchParams.set("error_description", "The user denied the request");
+  u.searchParams.set("error_description", why);
   if (state) u.searchParams.set("state", state);
+  // RFC 9207: every authorization response names roll's issuer (its metadata says so), a denial too.
+  if (issuer) u.searchParams.set("iss", issuer.replace(/\/+$/, ""));
   return u.toString();
 }
 

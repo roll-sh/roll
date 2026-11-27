@@ -75,6 +75,13 @@ pub trait Brancher: Send + Sync {
         Ok(None)
     }
 
+    /// The locks other sessions hold now on `branch`'s tables, `(table, mode)` (Postgres's
+    /// `pg_locks` names, `AccessExclusiveLock`…), sampled while the release runs so its strongest
+    /// is said (PlanetScale's safe migrations). Empty where the product has none to say.
+    async fn locks(&self, _parent: &str, _branch: &str) -> anyhow::Result<Vec<(String, String)>> {
+        Ok(Vec::new())
+    }
+
     /// Whether masked branches can come from one masked base per parent (Neon's anonymized
     /// branches): [`Self::branch_from`] a branch of the parent the engine masked once, and
     /// [`Self::children`] to know when an old base is no longer used.
@@ -579,6 +586,12 @@ pub trait Source: Send + Sync {
     async fn budget(&self, _repos: &[String], _alert: &BudgetAlert) -> anyhow::Result<()> {
         Ok(())
     }
+    /// Columns of the project's parents that previews masked by default and the project hadn't
+    /// been told of (roll code: each repo's `masking` event). `Err` when it couldn't be queued:
+    /// the engine tries again on its next pass.
+    async fn masking(&self, _repos: &[String], _notice: &MaskingNotice) -> anyhow::Result<()> {
+        Ok(())
+    }
     /// A receiver that fires when roll code changed something (a nudge to converge sooner).
     fn nudges(&self) -> Option<tokio::sync::broadcast::Receiver<()>>;
 }
@@ -688,6 +701,15 @@ pub struct BudgetAlert {
     pub percent: u32,
     pub spent_usd_month: f64,
     pub max_usd_month: f64,
+}
+
+/// The columns of a project's parents masked by default that it's told of: each once, when a
+/// preview's branch was first masked with it (production gained it, or masking by default began).
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct MaskingNotice {
+    pub project: String,
+    pub project_name: String,
+    pub columns: Vec<crate::MaskedByDefault>,
 }
 
 /// What's at a path in a service, as a tar, as it's read.
