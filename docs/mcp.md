@@ -1564,13 +1564,12 @@ From a 2026-11-24 gap review (every tool run as an agent would against a fresh r
 
 From a 2026-11-26 comparison (the spec's anniversary post, Claude's connector docs, Atlassian's, Stripe's and GitHub's changelogs; no core SEP went final since 2026-11-15):
 
-1. **Consent redirects and Claude's app form (this PR, the dashboard).**
+1. **Consent redirects and Claude's app form (#1164).**
    - **A denied consent's redirect** names roll's issuer (RFC 9207), as an approved one already did. The metadata promises it on every authorization response.
    - **A refused express setup** (not an admin) sends Claude `access_denied` from a "Back to Claude" button, rather than leaving it waiting.
    - **Express setup's domains** start from the ones DNS proved for roll's SSO connections; the admin still changes them.
    - **Claude's app form** names the other trusted providers that may vouch for it (`issuers`, IdP-managed auto-connect), as `--issuer` does.
-2. **An approval of two asks remembers one.** When the route's own action and the secret both ask, the card names the secret, and remembering it keeps only the secret's rule. The card should list both and remember both.
-
+2. **One approval covers both, and remembers both (this PR).** When a lend decides an approval (a lent secret, an apps link) and the route's own action asked too, the card's summary now says what is lent ("write secrets prj_… in production:/ai") and adds ", and admin search cl_…". Before, it named the route's product with the lent resource's id. Remembering keeps both rules (`own_rule`: the route's own action, when its row decides it without the body and the grant doesn't allow it already). Before, the next call asked about the route's own action again. The 8-hour rule for a whole environment and the products' lifetime caps apply to both.
 3. **Watched:** SEP-1913 (`sensitiveHint`, `privateHint` and `maliciousActivityHint` annotations, close to lockdown's marks) and the files extension (Claude says uploads are "rolling out soon").
 
 4. **Paging is the products'.** No list route takes a cursor (approvals take `limit` only). History

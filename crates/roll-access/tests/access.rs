@@ -3413,9 +3413,17 @@ async fn a_secret_written_as_the_caller_is_asked_for_and_only_it_is_allowed() {
             id
         }
     };
-    // The route's own action asks too: the approval still names the secret.
+    // The route's own action asks too: the approval names the secret, and the route's own action
+    // beside it; remembered, both are, so the next call asks about neither.
     let (tie, _) = d.token(json!([search("ask"), write_asks]), json!({})).await;
-    asked(tie).await;
+    let tie_id = asked(tie.clone()).await;
+    let (_, card) = d.call(OPERATOR, Method::GET, &format!("/v1/access/approvals/{tie_id}"), None).await;
+    let summary = card["summary"].as_str().unwrap_or_default();
+    assert!(summary.starts_with("write secrets ") && summary.contains("in production:/ai") && summary.contains(", and admin search"), "{card}");
+    assert_eq!(d.call(OPERATOR, Method::POST, &format!("/v1/access/approvals/{tie_id}/approve"), Some(json!({ "remember": "1h" }))).await.0, StatusCode::OK);
+    assert_eq!(d.send(&tie, Method::POST, path, Some(body("production")), &[("x-roll-approval", &tie_id)]).await.0, StatusCode::OK);
+    let (s, seen) = d.call(&tie, Method::POST, path, Some(body("production"))).await;
+    assert_eq!((s, seen["here"].as_bool()), (StatusCode::OK, Some(true)), "both remembered: {seen}");
     let (asks, _) = d.token(json!([search("allow"), write_asks]), json!({})).await;
     let id = asked(asks.clone()).await;
     assert_eq!(d.call(OPERATOR, Method::POST, &format!("/v1/access/approvals/{id}/approve"), Some(json!({ "remember": "1h" }))).await.0, StatusCode::OK);

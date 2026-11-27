@@ -4672,6 +4672,14 @@ roll secrets import --from akeyless --source /prod/shop -e production
 - `--dry-run` (any `--from`) prints the folders and keys it would import, never a value, and
   imports nothing. Then the import is one change per folder, refused or opened as a change request
   where the folder is protected, as any other import.
+- `--check` (any `--from`, with `--map`, `--all-environments` and `--recursive` too) checks the copy
+  afterwards: it reads the source as the import would and compares each folder with the
+  environment through `diff --file`'s comparison (`POST …/diff`: by fingerprint on the server,
+  needing `reveal`, audited as `secrets.compare`). It prints the keys missing here, different here
+  and only here, by name, never a value, writes nothing, and fails while one is missing or
+  different. Keys with references, linked keys and sensitive keys the caller can't read are
+  listed as not compared. A Doppler or Infisical environment the project lacks counts its keys as
+  missing.
 - `--sensitive` (any `--from`) tags what the source keeps secret `sensitive`: Parameter Store's
   SecureStrings and 1Password's concealed fields, and every value of the other managers. It's
   opt-in because sensitive is for good: no person or token reads the key back, `roll run` leaves it

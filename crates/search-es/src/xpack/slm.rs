@@ -198,30 +198,35 @@ fn retention_next(st: &ClusterState) -> Option<i64> {
     crate::xpack::watcher::schedule::next_cron(schedule, &crate::time::Zone::UTC, since.max(last).max(started_at(st)))
 }
 
-/// The earliest due policy run or retention (Unix ms), while SLM is running: what wakes a
-/// sleeping cluster.
+/// The earliest due policy run or retention (Unix ms), while SLM is running, or the earliest
+/// tick an OpenSearch snapshot management policy's job has work at
+/// ([`crate::opensearch::sm`]): what wakes a sleeping cluster.
 pub fn next_due(st: &ClusterState) -> Option<i64> {
+    let sm = crate::opensearch::sm::next_due(st);
     if mode(st) != "RUNNING" || st.metadata.xpack.len(POLICIES) == 0 {
-        return None;
+        return sm;
     }
-    st.metadata.xpack.iter(POLICIES).filter_map(|(_, rec)| policy_next(st, rec)).chain(retention_next(st)).min()
+    st.metadata.xpack.iter(POLICIES).filter_map(|(_, rec)| policy_next(st, rec)).chain(retention_next(st)).chain(sm).min()
 }
 
-/// Runs every due policy, then retention when due (the job scheduler's turn).
+/// Runs every due policy, then retention when due, then the snapshot management policies'
+/// due jobs (the job scheduler's turn: one scheduler for both).
 pub async fn run_due(cluster: &Cluster, now: i64) {
     let due: Vec<String> = {
         let st = cluster.state();
         if mode(&st) != "RUNNING" {
-            return;
+            Vec::new()
+        } else {
+            st.metadata.xpack.iter(POLICIES).filter(|(_, rec)| policy_next(&st, rec).is_some_and(|t| t <= now)).map(|(id, _)| id.clone()).collect()
         }
-        st.metadata.xpack.iter(POLICIES).filter(|(_, rec)| policy_next(&st, rec).is_some_and(|t| t <= now)).map(|(id, _)| id.clone()).collect()
     };
     for id in due {
         let _ = execute(cluster, &id, now, true).await;
     }
-    if retention_next(&cluster.state()).is_some_and(|t| t <= now) {
+    if mode(&cluster.state()) == "RUNNING" && retention_next(&cluster.state()).is_some_and(|t| t <= now) {
         retention(cluster, now).await;
     }
+    crate::opensearch::sm::run_due(cluster, now).await;
 }
 
 /// `SnapshotLifecyclePolicy.generateSnapshotName`: the name with date math resolved, plus a
