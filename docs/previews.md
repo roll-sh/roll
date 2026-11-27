@@ -2303,6 +2303,15 @@ type Settings = {
   with how its pages compare with main's; attaching the same link again updates it. A name that
   isn't an issue of the workspace fails that run's step and nothing else.
   `a_changes_linear_issues_from_its_title_and_branch`, `linear-templates.test.ts`.
+- **Jira and Asana** (Marker.io's notes to a tracker): the gallery's "Preview notes as Jira issues"
+  and "Preview notes as Asana tasks" (`preview-note-to-jira`, `preview-note-to-asana`) take each
+  note left on a change's preview (the `review` trigger, a body that's a note's, not a reply's)
+  to the team's tracker with automations' `webhook` step: public addresses only, no redirects,
+  the answer read up to 1 MiB, and the credential an automation secret (`{{ secrets.jira }}`,
+  base64 of email:API token; `{{ secrets.asana }}`, a personal access token), never in the
+  spec. The owner sets their site or project; the issue's summary and description are the note
+  with its page and element (`automation-templates.test.ts`). A GitHub-mirrored repo's own
+  GitHub Issues take notes natively (a note's work item).
 - **GitHub PR**, through roll code's GitHub outbox (durable, retried, sent on the repo's owner):
   - one comment, edited in place, with a table of services, URLs, status, data branches and cost;
   - a commit status `roll/preview` on the head. A preview removed before it was ready (the change
@@ -3123,8 +3132,8 @@ variables roll makes from a branch's URL too (it could run on the preview's own 
 change becoming queued wakes its settled preview, a rehearsal shows only at its head, and schema
 overlaps stay within a repo.
 
-1. **Notes to Jira, GitHub Issues or Asana** (Marker.io, Netlify's Drawer; S): a GitHub issue on a
-   mirrored repo, in review (a note's work item by roll landed, #1196); Jira and Asana next.
+1. **Notes to Jira and Asana, in review**: the gallery's templates (GitHub Issues and roll's work items
+   landed, #1196, #1209).
 2. **Replaying recorded traffic against the preview and main** (Signadot, Speedscale; L): writes
    replay safely on branched data; capturing production's requests needs its privacy designed
    first.
