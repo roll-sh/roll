@@ -1710,6 +1710,9 @@ impl roll_secrets::public_certs::PublicCa for TokenOnlyCa {
         self.0.lock().unwrap().push(token.expose().to_string());
         if token.expose() == "cf-token-from-stdin" { Ok(()) } else { Err("Cloudflare: find zone: HTTP 401".into()) }
     }
+    fn zones(&self, _: &roll_secrets::public_certs::DnsCredential, _: &[String]) -> Result<Vec<String>, String> {
+        Err("not in this test".into())
+    }
     fn order(&self, _: roll_secrets::public_certs::Order<'_>) -> Result<roll_secrets::public_certs::Ordered, String> {
         Err("not in this test".into())
     }

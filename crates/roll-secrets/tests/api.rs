@@ -1514,6 +1514,42 @@ struct Gate {
     chains: Mutex<BTreeMap<String, (i64, Option<i64>)>>,
     /// How long a bootstrap token lives, in ms, when set (a test's short one); its minutes otherwise.
     chain_ms: std::sync::atomic::AtomicI64,
+    /// The next lookup of this grant's person waits ([`Pause`]): a rotation looks its
+    /// registration's maker up after reading the secret and before issuing, so a test can settle
+    /// another rotation in between.
+    pause: Mutex<Option<Pause>>,
+}
+
+/// One party of a race held at a point a fake names (`at`) while a test settles the other: it says
+/// it's there on `held`, then waits for `go`.
+struct Pause {
+    at: String,
+    held: std::sync::mpsc::Sender<()>,
+    go: std::sync::mpsc::Receiver<()>,
+}
+
+impl Pause {
+    /// Hold the next party to reach `at` in `slot`: wait for it with the first receiver, and let
+    /// it go with the sender.
+    fn arm(slot: &Mutex<Option<Pause>>, at: &str) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
+        let ((held, held_rx), (go, go_rx)) = (std::sync::mpsc::channel(), std::sync::mpsc::channel());
+        *slot.lock().unwrap() = Some(Pause { at: at.into(), held, go: go_rx });
+        (held_rx, go)
+    }
+
+    /// At `at`: wait here if a test armed it.
+    fn reach(slot: &Mutex<Option<Pause>>, at: &str) {
+        let armed = { slot.lock().unwrap().take_if(|p| p.at == at) };
+        if let Some(p) = armed {
+            p.held.send(()).unwrap();
+            p.go.recv().unwrap();
+        }
+    }
+
+    /// Until the party reached it (in a blocking thread: the other party runs meanwhile).
+    async fn reached(held: std::sync::mpsc::Receiver<()>) {
+        tokio::task::spawn_blocking(move || held.recv_timeout(std::time::Duration::from_secs(60))).await.unwrap().expect("the held party reached its pause");
+    }
 }
 
 impl Gate {
@@ -1581,6 +1617,7 @@ impl roll_auth::Grants for Granted {
     }
 
     fn owner(&self, id: &str) -> Option<Option<String>> {
+        Pause::reach(&self.gate.pause, id);
         self.gate.owners.lock().unwrap().get(id).cloned()
     }
 
@@ -4386,6 +4423,52 @@ async fn paddle_keys_rotate_themselves_and_a_leaked_one_ends_at_once() {
     assert_eq!(paddle(), (paddle_secret(3), Some((paddle_secret(2), 0)), vec![3600, 3600, 0]));
     let audit = api.ok(Method::GET, "/audit", None).await.to_string();
     assert!(!audit.contains("fakesecret"), "never a key: {audit}");
+}
+
+/// A leak's rotation that read the key before a scheduled one stored its new secret, and rotates
+/// after it: Paddle keeps only the newest secret (the leak gives the one before none), so that's
+/// the one the key ends with, not the one Paddle is ending.
+#[tokio::test]
+async fn paddle_rotations_at_once_leave_the_key_on_the_secret_paddle_keeps() {
+    let api = Api::new().await;
+    let admin = api.token(json!({ "name": "admin", "actions": ["admin"] }));
+    let maker = admin.replace("rlt_test", "tok_");
+    let (s, r) = api.req(Method::POST, "/saas", Some(json!({ "name": "paddle", "vendor": "paddle", "target": { "api_key_id": PADDLE_KEY_ID }, "credential": paddle_secret(0) })), Some(admin.as_str())).await;
+    assert!(s.is_success(), "{r}");
+    api.ok(Method::PUT, "/environments/production/secrets/PADDLE_API_KEY", Some(json!({ "link": { "kind": "saas", "ref": r["id"], "field": "secret", "mode": "managed", "options": { "rotate_days": 1 } } }))).await;
+    assert_eq!(api.values("production", "/").await["values"]["PADDLE_API_KEY"], paddle_secret(1));
+    let p = api.project.clone();
+    api.db
+        .write(move |c| {
+            let state: String = c.query_row("SELECT link_state FROM secrets WHERE project_id = ? AND key = 'PADDLE_API_KEY'", [p.as_str()], |r| r.get(0))?;
+            let mut state: Value = serde_json::from_str(&state).unwrap();
+            state["issued_at"] = json!(0);
+            c.execute("UPDATE secrets SET link_state = ? WHERE project_id = ? AND key = 'PADDLE_API_KEY'", [state.to_string().as_str(), p.as_str()])
+        })
+        .unwrap();
+    api.ok(Method::PATCH, "", Some(json!({ "leaks": { "rotate": "managed" } }))).await;
+    let writer = api.token(json!({ "name": "deploy", "actions": ["read", "reveal", "write"] }));
+
+    // The leak's rotation reads the key and waits; the scheduled one (due) rotates and is stored;
+    // then the leak's goes on.
+    let (held, go) = Pause::arm(&api.gate.pause, &maker);
+    let leak = api.req(Method::POST, "/leaks", Some(json!({ "candidates": [paddle_secret(1)], "leaked": true })), Some(writer.as_str()));
+    let scheduled = async {
+        Pause::reached(held).await;
+        let s = api.secrets.clone();
+        tokio::task::spawn_blocking(move || s.sweep().unwrap()).await.unwrap();
+        assert_eq!(api.values("production", "/").await["values"]["PADDLE_API_KEY"], paddle_secret(2), "the scheduled rotation was stored");
+        go.send(()).unwrap();
+    };
+    let ((s, scanned), ()) = tokio::join!(leak, scheduled);
+    assert!(s.is_success(), "{scanned}");
+    let (graces, current, old) = {
+        let p = api.sent.10.paddle.lock().unwrap();
+        (p.bodies.iter().map(|b| b["grace_period_seconds"].as_u64().unwrap()).collect::<Vec<_>>(), p.current.clone(), p.old.clone())
+    };
+    assert_eq!(graces, [3600, 3600, 0], "linked, scheduled, then the leak's");
+    assert_eq!((current, old), (paddle_secret(3), Some((paddle_secret(2), 0))));
+    assert_eq!(api.values("production", "/").await["values"]["PADDLE_API_KEY"], paddle_secret(3), "the key Paddle keeps");
 }
 
 #[tokio::test]
@@ -9219,7 +9302,9 @@ async fn a_rotation_now_is_rotation_succeeded_with_the_keys_new_version() {
 /// A public ACME CA and DNS provider (Cloudflare or Route 53), as rolld's client answers:
 /// certificates signed by a root of its own, an account made once (with the EAB it was given),
 /// names under `roll-fake.test` only, and `unproven.…` names never proven. Route 53 takes a fake
-/// STS session (`ASIA…` with its token) or the access key `AKIAROLLFAKE00000001:fake-secret`.
+/// STS session (`ASIA…` with its token) or the access key `AKIAROLLFAKE00000001:fake-secret`, both
+/// of one account (its `roll-fake.test` zone is `ZROLLFAKE1`), or `AKIAROLLFAKE00000002:fake-secret-2`
+/// of another, with a zone of the same name of its own (`ZROLLFAKE2`).
 struct FakeCa {
     root: rcgen::CertificateParams,
     root_key: rcgen::KeyPair,
@@ -9229,9 +9314,11 @@ struct FakeCa {
     dns: Mutex<Vec<String>>,
     /// (serial, reason) of each certificate revoked.
     revoked: Mutex<Vec<(String, roll_secrets::public_certs::RevokeReason)>>,
-    /// Route 53's TXT sets, each read and written whole as the real one is, with a pause between,
-    /// and looked at by the CA after another.
-    txt: Mutex<BTreeMap<String, Vec<String>>>,
+    /// Route 53's TXT sets by zone and name, each read and written whole as the real one is, with
+    /// a pause between, and looked at by the CA after another.
+    txt: Mutex<BTreeMap<(String, String), Vec<String>>>,
+    /// The next Route 53 order in this zone waits ([`Pause`]).
+    pause: Mutex<Option<Pause>>,
 }
 
 impl FakeCa {
@@ -9241,7 +9328,7 @@ impl FakeCa {
         root.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
         root.distinguished_name.push(rcgen::DnType::CommonName, "roll fake public root");
         let root_pem = root.self_signed(&root_key).unwrap().pem();
-        FakeCa { root, root_key, root_pem, orders: Mutex::default(), dns: Mutex::default(), revoked: Mutex::default(), txt: Mutex::default() }
+        FakeCa { root, root_key, root_pem, orders: Mutex::default(), dns: Mutex::default(), revoked: Mutex::default(), txt: Mutex::default(), pause: Mutex::default() }
     }
 
     /// The credential, as the fake provider takes it: what it was, or its refusal.
@@ -9252,10 +9339,19 @@ impl FakeCa {
             DnsCredential::Cloudflare(_) => return Err("Cloudflare: find zone: HTTP 401".into()),
             DnsCredential::Route53 { access_key_id, secret_access_key, session_token: Some(t) } if access_key_id.starts_with("ASIA") && secret_access_key.expose().starts_with("secret-") && t.expose().starts_with("token-") => format!("role {access_key_id}"),
             DnsCredential::Route53 { access_key_id, secret_access_key, session_token: None } if access_key_id == "AKIAROLLFAKE00000001" && secret_access_key.expose() == "fake-secret" => format!("key {access_key_id}"),
+            DnsCredential::Route53 { access_key_id, secret_access_key, session_token: None } if access_key_id == "AKIAROLLFAKE00000002" && secret_access_key.expose() == "fake-secret-2" => format!("key {access_key_id}"),
             DnsCredential::Route53 { .. } => return Err("Route 53: find hosted zone roll-fake.test: InvalidClientTokenId: The security token included in the request is invalid.".into()),
         };
         self.dns.lock().unwrap().push(who);
         Ok(())
+    }
+
+    /// The hosted zone a Route 53 credential's account has for `roll-fake.test`.
+    fn zone(dns: &roll_secrets::public_certs::DnsCredential) -> String {
+        match dns {
+            roll_secrets::public_certs::DnsCredential::Route53 { access_key_id, .. } if access_key_id == "AKIAROLLFAKE00000002" => "ZROLLFAKE2".into(),
+            _ => "ZROLLFAKE1".into(),
+        }
     }
 }
 
@@ -9272,7 +9368,16 @@ impl roll_secrets::public_certs::PublicCa for FakeCa {
         }
     }
 
+    /// With the order's own credential, which the order then takes (`dns` lists the order once).
+    fn zones(&self, dns: &roll_secrets::public_certs::DnsCredential, records: &[String]) -> Result<Vec<String>, String> {
+        Ok(records.iter().map(|_| Self::zone(dns)).collect())
+    }
+
     fn order(&self, o: roll_secrets::public_certs::Order<'_>) -> Result<roll_secrets::public_certs::Ordered, String> {
+        let zone = Self::zone(o.dns);
+        if matches!(o.dns, roll_secrets::public_certs::DnsCredential::Route53 { .. }) {
+            Pause::reach(&self.pause, &zone);
+        }
         let value = {
             let mut orders = self.orders.lock().unwrap();
             orders.push((o.names.to_vec(), o.account.is_some()));
@@ -9280,7 +9385,7 @@ impl roll_secrets::public_certs::PublicCa for FakeCa {
         };
         self.signed_in(o.dns).expect("the registration's DNS credential");
         if matches!(o.dns, roll_secrets::public_certs::DnsCredential::Route53 { .. }) {
-            let records: std::collections::BTreeSet<String> = o.names.iter().map(|n| format!("_acme-challenge.{}", n.trim_start_matches("*."))).collect();
+            let records: std::collections::BTreeSet<(String, String)> = o.names.iter().map(|n| (zone.clone(), format!("_acme-challenge.{}", n.trim_start_matches("*.")))).collect();
             for r in &records {
                 let mut set = self.txt.lock().unwrap().get(r).cloned().unwrap_or_default();
                 std::thread::sleep(std::time::Duration::from_millis(200));
@@ -9289,7 +9394,7 @@ impl roll_secrets::public_certs::PublicCa for FakeCa {
             }
             // The propagation wait, then the CA looks.
             std::thread::sleep(std::time::Duration::from_millis(200));
-            let missing = records.iter().find(|r| !self.txt.lock().unwrap()[*r].contains(&value));
+            let missing = records.iter().find(|r| !self.txt.lock().unwrap()[*r].contains(&value)).map(|r| r.1.clone());
             for r in &records {
                 let mut set = self.txt.lock().unwrap().get(r).cloned().unwrap_or_default();
                 set.retain(|v| *v != value);
@@ -9546,6 +9651,49 @@ async fn two_orders_on_one_route53_name_never_write_it_at_once() {
     let certs = api.ok(Method::GET, "/public-certs", None).await;
     assert!(certs.as_array().unwrap().iter().all(|c| c["status"] == "issued"), "{certs}");
     assert_eq!(ca.orders.lock().unwrap().len(), 2, "each ordered once");
+}
+
+/// Route 53 record sets are per hosted zone, and anyone can make a public zone of any name in their
+/// own AWS account: an order holds its zone's set, never every project's same-named one. A
+/// registration held past an hour by an order in its own zone says so.
+#[tokio::test]
+async fn route53_orders_in_same_named_zones_of_other_accounts_never_wait_for_each_other() {
+    let api = Api::new().await;
+    let ca = Arc::new(FakeCa::new());
+    api.secrets.set_public_ca(ca.clone());
+    let new = |name: &str, key: &str| json!({ "name": name, "directory_url": roll_secrets::public_certs::PUBLIC_CAS[0], "domains": ["roll-fake.test"], "dns_provider": "route53", "dns_credential": key, "eab_kid": "kid-roll-fake", "eab_hmac_key": "cm9sbC1mYWtlLWhtYWM" });
+    let sweep = || {
+        let s = api.secrets.clone();
+        async move { tokio::task::spawn_blocking(move || s.sweep_public_certs().unwrap()).await.unwrap() }
+    };
+    api.ok(Method::POST, "/public-certs", Some(new("web", "AKIAROLLFAKE00000001:fake-secret"))).await;
+    // This project's order holds ZROLLFAKE1's set while another project's, in its own account's
+    // zone of the same name, and one more of this account's come due.
+    let (held, go) = Pause::arm(&ca.pause, "ZROLLFAKE1");
+    let first = sweep();
+    let others = async {
+        Pause::reached(held).await;
+        let (_, p) = api.as_ada(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "team" }))).await;
+        let team = format!("/v1/secrets/projects/{}/public-certs", p["id"].as_str().unwrap());
+        let (s, e) = api.as_ada(Method::POST, &team, Some(new("web", "AKIAROLLFAKE00000002:fake-secret-2"))).await;
+        assert!(s.is_success(), "{e}");
+        api.ok(Method::POST, "/public-certs", Some(new("web-2", "AKIAROLLFAKE00000001:fake-secret"))).await;
+        let out = sweep().await;
+        assert_eq!((out.rotated, out.failed), (1, 0), "the other account's zone's order went at once");
+        assert_eq!(api.as_ada(Method::GET, &team, None).await.1[0]["status"], "issued");
+        // The same zone's waits; held past an hour, that's its problem.
+        let p = api.project.clone();
+        api.db.write(move |c| c.execute("UPDATE public_certs SET dns_held_since = 1 WHERE project_id = ? AND name = 'web-2'", [p.as_str()])).unwrap();
+        assert_eq!(sweep().await.rotated, 0);
+        let listed = api.ok(Method::GET, "/public-certs", None).await;
+        let held = listed.as_array().unwrap().iter().find(|c| c["name"] == "web-2").unwrap();
+        assert!(held["status"] == "failing" && held["last_error"].as_str().unwrap().contains("held its Route 53 challenge records for over an hour"), "{held}");
+        go.send(()).unwrap();
+    };
+    let (out, ()) = tokio::join!(first, others);
+    assert_eq!((out.rotated, out.failed), (1, 0));
+    let listed = api.ok(Method::GET, "/public-certs", None).await;
+    assert_eq!(listed.as_array().unwrap().iter().find(|c| c["name"] == "web").unwrap()["status"], "issued", "{listed}");
 }
 
 /// docs/secrets.md, "Publicly trusted certificates": a leak of a linked key revokes its certificate
