@@ -417,11 +417,14 @@ pub enum Index {
         index: String,
         /// Judged queries: JSON (`[{query, ratings: [{_id, rating}]}]`) or CSV with a header
         /// (`query,_id,rating`, `doc_id` or `docid` for `_id`), as `@file` or `-`.
-        #[arg(long, required_unless_present = "judgments_list", conflicts_with = "judgments_list")]
+        #[arg(long, required_unless_present_any = ["judgments_list", "judgment_id"], conflicts_with_all = ["judgments_list", "judgment_id"])]
         judgments: Option<String>,
         /// Or a judgment list stored in the cluster (`roll search judgments put`).
-        #[arg(long)]
+        #[arg(long, conflicts_with = "judgment_id")]
         judgments_list: Option<String>,
+        /// Or, on an OpenSearch-flavor cluster, a Search Relevance Workbench judgment list's id.
+        #[arg(long)]
+        judgment_id: Option<String>,
         /// A configuration (repeat once to compare): `{name?, request | template, query_param?}`,
         /// a search body with `{{query}}` where each query goes, or a search template.
         #[arg(long = "config", required = true, num_args = 1)]
@@ -992,14 +995,15 @@ pub async fn run(api: &Api, as_json: bool, cmd: Search) -> anyhow::Result<()> {
                     index_call(api, as_json, Method::POST, &cluster, &index, "/bulk", (refresh(r), Some(("application/x-ndjson", read_body(&body)?)))).await
                 }
                 Index::DeleteByQuery { cluster, index, body } => index_call(api, as_json, Method::POST, &cluster, &index, "/delete_by_query", (vec![], Some(json_body(body)?))).await,
-                Index::Evaluate { cluster, index, judgments, judgments_list, configs, metric, fail_below, fail_on_worse } => {
+                Index::Evaluate { cluster, index, judgments, judgments_list, judgment_id, configs, metric, fail_below, fail_on_worse } => {
                     if configs.len() > 2 {
                         bail!("--config takes one configuration, or two to compare");
                     }
-                    let mut body = match (judgments, judgments_list) {
-                        (Some(j), None) => json!({ "judgments": judgments_arg(&read_body(&j)?)? }),
-                        (None, Some(l)) => json!({ "judgments_list": l }),
-                        _ => bail!("give --judgments or --judgments-list, one of them"),
+                    let mut body = match (judgments, judgments_list, judgment_id) {
+                        (Some(j), None, None) => json!({ "judgments": judgments_arg(&read_body(&j)?)? }),
+                        (None, Some(l), None) => json!({ "judgments_list": l }),
+                        (None, None, Some(id)) => json!({ "judgment_id": id }),
+                        _ => bail!("give --judgments, --judgments-list or --judgment-id, one of them"),
                     };
                     let mut confs = Vec::new();
                     for (i, c) in configs.iter().enumerate() {

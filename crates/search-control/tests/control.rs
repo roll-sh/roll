@@ -7578,6 +7578,32 @@ async fn evaluate_compares_two_configurations_on_judged_queries() {
     assert_eq!(e.call(Method::POST, &path, Some(json!({"judgments_list": "couches", "configurations": configs}))).await.0, 404);
 }
 
+/// On an OpenSearch-flavor cluster, evaluate reads a Search Relevance Workbench judgment list by
+/// its id (the plugin's API made it); an Elasticsearch cluster has none to read.
+#[tokio::test]
+async fn evaluate_reads_a_workbench_judgment_list() {
+    use reqwest::Method;
+    let e = env().await;
+    let c = e.post("/v1/search/clusters", json!({"name": "srw-os", "flavor": "opensearch"})).await;
+    let (u, p) = creds(&c);
+    let id = c["id"].as_str().unwrap().to_string();
+    for (i, title) in [("1", "red shoe"), ("2", "blue shoe")] {
+        assert!(e.es(&u, &p, Method::PUT, &format!("/goods/_doc/{i}?refresh=true"), Some(json!({"title": title}))).await.0 < 300);
+    }
+    let judgment = json!({"name": "j", "type": "IMPORT_JUDGMENT", "judgmentRatings": [{"query": "red shoe", "ratings": [{"docId": "1", "rating": "3"}, {"docId": "2", "rating": "0"}]}]});
+    let (s, made) = e.es(&u, &p, Method::PUT, "/_plugins/_search_relevance/judgments", Some(judgment)).await;
+    assert_eq!(s, 200, "{made}");
+    let jid = made["judgment_id"].as_str().unwrap();
+    let configs = json!([{"name": "title", "request": {"query": {"match": {"title": "{{query}}"}}}}]);
+    let (s, v) = e.call(Method::POST, &format!("/v1/search/clusters/{id}/indices/goods/evaluate"), Some(json!({"judgment_id": jid, "configurations": configs}))).await;
+    assert_eq!((s, &v["configurations"][0]["score"], &v["judgment_id"]), (200, &json!(1.0), &json!(jid)), "{v}");
+    let (s, v) = e.call(Method::POST, &format!("/v1/search/clusters/{id}/indices/goods/evaluate"), Some(json!({"judgment_id": "nope", "configurations": configs}))).await;
+    assert_eq!(s, 404, "{v}");
+    let es = e.post("/v1/search/clusters", json!({"name": "srw-es"})).await;
+    let (s, v) = e.call(Method::POST, &format!("/v1/search/clusters/{}/indices/goods/evaluate", es["id"].as_str().unwrap()), Some(json!({"judgment_id": jid, "configurations": configs}))).await;
+    assert!(s == 400 && v.to_string().contains("OpenSearch-flavor"), "{s} {v}");
+}
+
 /// Judgments from clicks: searches with analytics on count what they showed at each position,
 /// `search_click` events what was clicked there, and `_from_clicks` rates each document as
 /// OpenSearch's implicit judgments do (COEC) on the same events, after the metering pass too.

@@ -1729,7 +1729,7 @@ contexts of x-pack's version allowlist), `EsObj::Version`, `contexts::version_al
 | GET    | `/v1/search/clusters/{id}/metrics`               | request rate, latency percentiles, errors and rejections by kind (`?range=1h\|24h\|14d`) |
 | GET    | `/v1/search/clusters/{id}/slowlog`               | the search and indexing slow logs, newest first (at most 500) |
 | POST   | `/v1/search/clusters/{id}/indices/{index}/update_by_query` | `_update_by_query` on that one index (`{query?, script?, max_docs?, conflicts?, slices?}`); 202 `{task}` with `wait_for_completion=false` |
-| POST   | `/v1/search/clusters/{id}/indices/{index}/evaluate` | one or two configurations scored by `_rank_eval` against `judgments` (or a stored `judgments_list`) and compared query by query (`{judgments \| judgments_list, configurations, metric?}`) |
+| POST   | `/v1/search/clusters/{id}/indices/{index}/evaluate` | one or two configurations scored by `_rank_eval` against `judgments` (or a stored `judgments_list`, or a Workbench `judgment_id`) and compared query by query (`{judgments \| judgments_list \| judgment_id, configurations, metric?}`) |
 | GET    | `/v1/search/clusters/{id}/judgments` | the stored judgment lists (`{lists: [{name, index, source, queries, ratings, built_at}]}`) |
 | GET    | `/v1/search/clusters/{id}/judgments/{name}` | one list: `{name, index, meta, judgments}`, `judgments` in `evaluate`'s shape |
 | PUT    | `/v1/search/clusters/{id}/judgments/{name}` | make or replace a list (`{judgments, source?}`): `{name, index, source, queries, ratings}` |
