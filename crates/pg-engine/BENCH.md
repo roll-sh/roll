@@ -864,12 +864,57 @@ loop), `SstReader::find_block` 1,483 / 1,494 -> 1,120 / 1,158, `mem_get` 359 / 3
 (TPC-B-like: no seq scan in any window; the count follows the run's tps, other tenants' load.
 The point select's wire count spreads up to 9% for one binary: nothing to read at 1%.)
 
-### PGO, the borrowed profile (misleading)
+### PGO: which profile
 
-Both arms on `f1a33ecd2` with agent 333's profile (`--profdata`): TPC-H 78.4102 -> 79.3601 G (+1.21%;
-q14 -0.97, q17 -0.47, q21 -0.08, the rest +0.15 .. +3.66%), the 1,000-row range read 1,907,481 ->
-1,879,699 (-1.5%), TPC-B-like 243,123 (1,624 tps) -> 238,383 (2,705 tps) (-2.0%). The profile's
-staleness: b0 62 of 2,886 hot functions without data, 8.02% of their counts; n1 110, 11.13%.
+**b0-pgot** / **n1-pgot**: `tools/dist-pgo.sh` trained on each arm's own commit (`247e4bcd5`, and the
+change on it), staleness 0 both. **b0-pn1**: b0's code with n1-pgot's profile (`--profdata`; 53 hot
+functions without data, 3.3% of the hot counts: the ones the change touched). Agent 333's profile on
+both arms (`f1a33ecd2`): TPC-H 78.4102 -> 79.3601 G (+1.21%), the 1,000-row range read 1,907,481 ->
+1,879,699, TPC-B-like 243,123 -> 238,383; its staleness b0 62 hot functions without data (8.02% of
+their counts), n1 110 (11.13%).
+
+TPC-H SF1, user instructions a query (G; rows and hashes equal in every cell):
+
+| query | b0, own profile | n1, own profile | pair 1 | pair 2 | b0, n1's profile | n1 against it |
+|---|---:|---:|---:|---:|---:|---:|
+| q01 | 7.2862 | 7.4112 | +1.71% | +1.71% | 7.5652 | -2.03% |
+| q02 | 1.9155 | 1.9115 | -0.21% | -0.22% | 1.9670 | -2.87% |
+| q03 | 3.6262 | 3.6469 | +0.57% | +0.55% | 3.6676 | -0.54% |
+| q04 | 1.1976 | 1.2115 | +1.16% | +1.14% | 1.2133 | -0.15% |
+| q05 | 2.3745 | 2.3643 | -0.43% | -0.65% | 2.4232 | -2.62% |
+| q06 | 3.1919 | 3.2581 | +2.07% | +2.07% | 3.2804 | -0.69% |
+| q07 | 2.9798 | 2.9643 | -0.52% | -0.59% | 3.0182 | -1.77% |
+| q08 | 1.1603 | 1.1544 | -0.50% | -0.51% | 1.1763 | -1.80% |
+| q09 | 6.6295 | 6.5789 | -0.76% | -0.76% | 6.7596 | -2.65% |
+| q10 | 5.1017 | 5.1041 | +0.05% | +0.09% | 5.2238 | -2.41% |
+| q11 | 0.7023 | 0.6972 | -0.73% | -0.74% | 0.7086 | -1.65% |
+| q12 | 5.8560 | 5.9360 | +1.37% | +1.35% | 6.0135 | -1.28% |
+| q13 | 3.6090 | 3.6879 | +2.19% | +1.97% | 3.7798 | -2.85% |
+| q14 | 1.1819 | 1.1744 | -0.63% | -0.69% | 1.2147 | -3.25% |
+| q15 | 2.2079 | 2.2437 | +1.62% | +1.60% | 2.2653 | -0.99% |
+| q16 | 2.4605 | 2.3181 | -5.79% | -5.84% | 2.4081 | -3.69% |
+| q17 | 2.7093 | 2.7404 | +1.15% | +1.20% | 2.7668 | -0.88% |
+| q18 | 13.8647 | 13.9941 | +0.93% | +0.88% | 14.3443 | -2.54% |
+| q19 | 0.4260 | 0.4247 | -0.29% | -0.29% | 0.4393 | -3.32% |
+| q20 | 0.7594 | 0.7603 | +0.13% | +0.10% | 0.7658 | -0.70% |
+| q21 | 4.7305 | 4.7634 | +0.70% | +0.70% | 4.7748 | -0.21% |
+| q22 | 0.5428 | 0.5521 | +1.70% | +1.70% | 0.5590 | -1.27% |
+| total | 74.5135 | 74.8976 | +0.52% | +0.48% | 76.3346 | -1.92% |
+
+| case | pair | b0-pgot | n1-pgot | b0-pn1 |
+|---|---|---:|---:|---:|
+| 1,000-row range read (connection threads, a read) | 1 | 1,536,946 | 1,612,249 | |
+| | 2 (reversed) | 1,574,524 | 1,646,588 | |
+| | 3 | 1,604,851 | 1,702,109 | |
+| | 4, 5 (n1-pgot against b0-pn1, both orders) | | 1,697,994, 1,588,000 | 1,691,431, 1,647,778 |
+| TPC-B-like, warmed, enable_seqscan off (connection threads) | 1 | 225,711 (8,125 tps) | 223,702 (8,617 tps) | |
+| bulk insert (a row) | 1 | 8,505 | 8,343 | |
+
+Symbol sizes (bytes): `Block::run_rows<Overlay>` b0-pgot 10,963, n1-pgot 9,141, b0-pn1 9,141 (plain
+dist 681 both); `Block::seek` 5,477 / 5,428 / 5,428. Range read profile shares (instructions:u,
+50,000 reads an arm): `run_rows<Overlay>` 6.04% -> 10.79%, `Block::seek` 1.04 -> 0.10,
+`ScanNode::each_picked` 34.36 -> 32.34. Range read pair 1 and the TPC-B pair read 0.3-1.3 foreign
+cores; the rest 1.7-3.3 in their windows.
 
 ## Query memory, round 8: hashed DISTINCT / UNION paid back and streamed, DISTINCT's estimate over computed columns, sorted SetOp's Sorts; windows streamed past 4 MB dropped (2026-11-27, agent 343)
 

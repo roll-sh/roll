@@ -15210,12 +15210,19 @@ or lower. Bulk insert -0.9 / -1.2% a row. The 1,000-row range read +1.0 / -1.2% 
 (warmed, no seq scans, agent 333's connection-thread count) +2.2 / -0.6%: level within their
 spread. The point select's wire count spreads 9% for one binary by the load's LSM state:
 nothing resolvable there.
-PGO: with a borrowed profile (agent 333's, `--profdata`) both arms built on `f1a33ecd2` read
-TPC-H +1.2% (all 22 within -1.0 .. +3.7%), the range read -1.5%, TPC-B-like -2.0%: the profile
-misses 8.02% of the hot functions' counts in b0 and 11.13% in n1 (166 against 489 changed
-functions: every function matching on `Value` changed), so it measured the profile. Trained on
-each arm's own commit (`tools/dist-pgo.sh`): b0 built (`247e4bcd5`, staleness 0); n1's training
-was stopped for the rebase onto `19c7a8758`: that pair comes as a later candidate.
+PGO (`tools/dist-pgo.sh`; BENCH has the tables): which profile a build gets moves more than the
+change does. Plain dist (no profile): TPC-H -0.25%. Agent 333's profile on both arms (built on
+`f1a33ecd2`): +1.2% (it misses 11.13% of the hot counts in n1 against 8.02% in b0: every function
+matching on `Value` changed). Each arm trained on its own commit (`247e4bcd5` and the change on
+it; staleness 0 both): TPC-H +0.48 / +0.50% in two pairs (q16 -5.8, q01 +1.7, q06 +2.1, q13 +2.0..2.2),
+the 1,000-row range read +4.6..+6.1% in three, TPC-B-like -0.9%, bulk -1.9%. The two trained
+profiles inline storage code the change doesn't touch differently (`Block::run_rows<Overlay>`
+10,963 bytes in b0's build, 9,141 in n1's; the range read's share there 6.0 -> 10.8%; q06's rise is
+`vector::num_cmp_col_consts`'s closure outlined in n1's build). b0's code built with n1's profile
+gets n1's storage layout to the byte (`run_rows` 9,141, `Block::seek` 5,428) and n1's range read
+(1,647,778 / 1,691,431 against n1's 1,588,000 / 1,697,994: -3.6 / +0.4%); on that one profile
+TPC-H is -1.93% (every query down 0.15-3.7%; the profile favours n1 as 333's favoured b0). So
+the trained pair's rises follow the training, not the type; the change itself is the plain pair's.
 
 **Looked at, nothing clean to take (item 2).** Past the uuid, nothing on the row path has a
 padded field to drop: `Value`'s 24 is the tag plus a fat pointer (16) with 4-byte payloads beside
