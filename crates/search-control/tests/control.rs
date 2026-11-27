@@ -814,7 +814,7 @@ async fn a_branch_resets_to_its_copy() {
         assert_eq!(s, 400, "{from}: {v}");
     }
     let r = e.post(&format!("{branch}/reset"), json!({"from": copy["id"]})).await;
-    assert_eq!(r["id"], id.as_str(), "{r}");
+    assert_eq!((&r["id"], &r["reset"]), (&json!(id), &json!("applied")), "{r}");
     let (s, v) = es(Method::GET, "/docs/_doc/1", None).await;
     assert_eq!((s, &v["_source"]["v"]), (200, &json!("A")), "{v}");
     let (s, v) = es(Method::GET, "/gone/_doc/1", None).await;
@@ -846,6 +846,8 @@ async fn a_branch_resets_to_its_copy() {
     assert_eq!(s, 409, "a delete: {v}");
     assert_eq!(first.await.unwrap(), 200);
     e.control.set_wake_delay(Duration::ZERO);
+    // The copy is a fixed point: the second reset puts back what the first did.
+    assert_eq!(es(Method::GET, "/docs/_count", None).await.1["count"], 1);
     let (s, v) = e.call(Method::DELETE, &branch, None).await;
     assert_eq!(s, 200, "{v}");
 }

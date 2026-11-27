@@ -77,6 +77,10 @@ pub struct ResetTicket {
 /// Attempts at reading `from` with nothing moving in between.
 const CONSISTENT_READS: usize = 3;
 
+/// The [`ShardManifest::user_data`] key marking a commit point a reset wrote (its `at_ms`). An
+/// instance key: a branch of the cluster doesn't inherit it.
+const RESET_MARK: &str = "roll.instance.reset";
+
 fn tops(h: BTreeMap<ShardId, Vec<ShardVersion>>) -> BTreeMap<ShardId, ShardVersion> {
     h.into_iter().filter_map(|(s, vs)| vs.last().copied().map(|v| (s, v))).collect()
 }
@@ -87,9 +91,16 @@ impl Store {
     /// [`Store::load_cluster`] then carries out when `target` next loads. Call it with `target`
     /// unloaded everywhere; on a fleet (`claim`), under its lease: it claims `target` before
     /// writing anything. Once this returns, the reset happens at the next load, or is dropped
-    /// there as stale ([`Store::reset_outcome`]). Refused ([`Refused`]) when `from` stored nothing
-    /// (or is being deleted), keeps changing, or either has a reset pending.
-    pub async fn begin_reset(&self, target: &str, from: &str, claim: bool, merge: impl FnOnce(&[u8], &[u8]) -> anyhow::Result<Vec<u8>>) -> anyhow::Result<ResetTicket> {
+    /// there as stale ([`Store::reset_outcome`]). A `from` that never stored anything (a copy
+    /// made while the cluster was empty) resets it to no indices (`merge` gets `None`); the
+    /// caller keeps `from` from being deleted meanwhile. Refused ([`Refused`]) when `from` is
+    /// half deleted (commit points without a state), keeps changing, or either has a reset
+    /// pending; [`crate::Fenced`] when another node claimed `target` meanwhile.
+    ///
+    /// The reset's commit points keep `target`'s own lineage (the branch base its commit points
+    /// had), so what `target` holds of its parent's data counts as shared as before
+    /// ([`Store::cluster_usage`]), however long `from` lives.
+    pub async fn begin_reset(&self, target: &str, from: &str, claim: bool, merge: impl FnOnce(&[u8], Option<&[u8]>) -> anyhow::Result<Vec<u8>>) -> anyhow::Result<ResetTicket> {
         keys::validate_cluster(target)?;
         keys::validate_cluster(from)?;
         anyhow::ensure!(target != from, "a cluster can't be reset to itself");
@@ -98,7 +109,6 @@ impl Store {
                 return Err(Refused(format!("cluster [{c}] has a reset pending; it applies when it next loads")).into());
             }
         }
-        let Some(current) = self.read_cluster(target).await? else { return Err(Refused(format!("cluster [{target}] has never stored anything")).into()) };
         // `from` as one moment: its commit points and state, read again until neither moved.
         let mut read = None;
         for _ in 0..CONSISTENT_READS {
@@ -111,28 +121,43 @@ impl Store {
             }
         }
         let Some((from_tops, from_state)) = read else { return Err(Refused(format!("cluster [{from}] kept changing while it was read; retry")).into()) };
-        // Gone mid-read (a delete removes the state first) or never written: nothing to reset to.
-        let Some(from_state) = from_state else { return Err(Refused(format!("cluster [{from}] has no stored state (never written, or being deleted)")).into()) };
+        // A delete removes the state first, then the commit points: both or neither, never one.
+        if from_state.is_none() && from_tops.values().any(|v| !v.deleted) {
+            return Err(Refused(format!("cluster [{from}] is being deleted")).into());
+        }
         // An older owner's writes are refused from here on.
         let epoch = if claim { Some(self.claim_next(target).await?) } else { None };
+        // The state the merge reads is exactly the one the intent records.
         let state_version = self.list_versions(&keys::state_prefix(target), ".json.zst").await?.last().copied();
-        let Some(state_version) = state_version else { return Err(Refused(format!("cluster [{target}] has never stored anything")).into()) };
+        let current = match state_version {
+            Some(v) => self.get_state(target, v).await?,
+            None => None,
+        };
+        let (Some(state_version), Some(current)) = (state_version, current) else {
+            return Err(Refused(format!("cluster [{target}] has never stored anything, or its state changed while it was read")).into());
+        };
         let target_tops = tops(self.list_shard_histories(target).await?);
+        // Its own lineage, which the reset's commit points keep.
+        let lineage = self.read_latest_manifests(target).await?.into_iter().find_map(|(_, m)| m.base);
         // Its operations not flushed yet are read from object storage, whichever node wrote
         // them; this node's are shipped now.
         self.wal().sync_remote().await?;
         let at = now_ms();
         let copied = Copied { at_ms: None, branched_ms: at, cut: at, cur: self.wal().current_file() };
         let listings = &Listings::default();
+        let lineage = &lineage;
         let copies: Vec<(ShardId, ShardManifest)> = futures::stream::iter(from_tops.into_iter().filter(|(_, v)| !v.deleted).map(|(shard, v)| async move {
             let base = self.get_manifest(from, &shard, v).await?.ok_or_else(|| Refused(format!("shard {shard} of cluster [{from}] changed while it was read; retry")))?;
             let sources = base.wal.clone();
-            anyhow::Ok((shard, self.copied_manifest(from, base, sources, copied, listings).await?))
+            let mut m = self.copied_manifest(from, base, sources, copied, listings).await?;
+            m.base = lineage.clone();
+            m.user_data.insert(RESET_MARK.to_string(), at.to_string());
+            anyhow::Ok((shard, m))
         }))
         .buffered(16)
         .try_collect()
         .await?;
-        let state = merge(&current.json, &from_state.json)?;
+        let state = merge(&current.json, from_state.as_ref().map(|s| &s.json[..]))?;
         let intent = Intent {
             from: from.to_string(),
             at_ms: at,
@@ -141,22 +166,33 @@ impl Store {
             tops: target_tops.into_iter().map(|(s, v)| (s.index_uuid, s.shard, v)).collect(),
             shards: copies.iter().map(|(s, _)| (s.index_uuid.clone(), s.shard)).collect(),
         };
-        if let Err(e) = self.write_reset(target, copies, state, &intent).await {
-            // What it wrote before failing applies to nothing: garbage collection would keep it.
-            let _ = self.objects().delete_prefix(&keys::reset_copies_prefix(target)).await;
-            let _ = self.objects().delete(&keys::reset_state_key(target)).await;
+        if let Err(e) = self.write_reset(target, at, copies, state, &intent).await {
+            // What it wrote before failing applies to nothing.
+            self.discard_reset(target).await;
             return Err(e);
         }
-        // Claimed: a newer owner since would fence this, and its load would find the intent.
-        self.check_owner(target).await?;
+        // Another node claimed it meanwhile and may serve it without the intent: given up here,
+        // so it never applies over what that owner writes.
+        if let Err(e) = self.check_owner(target).await {
+            self.discard_reset(target).await;
+            return Err(e);
+        }
         Ok(ResetTicket { at_ms: at })
     }
 
-    async fn write_reset(&self, target: &str, copies: Vec<(ShardId, ShardManifest)>, state: Vec<u8>, intent: &Intent) -> anyhow::Result<()> {
+    /// Best effort: a reset that will never be carried out leaves nothing behind (garbage
+    /// collection removes copies whose intent is gone anyway).
+    async fn discard_reset(&self, target: &str) {
+        let _ = self.objects().delete(&keys::reset_key(target)).await;
+        let _ = self.objects().delete_prefix(&keys::reset_copies_prefix(target)).await;
+        let _ = self.objects().delete(&keys::reset_state_key(target)).await;
+    }
+
+    async fn write_reset(&self, target: &str, at: u64, copies: Vec<(ShardId, ShardManifest)>, state: Vec<u8>, intent: &Intent) -> anyhow::Result<()> {
         // Leftovers of a reset that never got its intent written, and an earlier outcome.
         self.objects().delete_prefix(&keys::reset_copies_prefix(target)).await?;
         self.objects().delete(&keys::reset_outcome_key(target)).await?;
-        futures::stream::iter(copies.into_iter().map(|(shard, m)| async move { self.objects().put(&keys::reset_copy_key(target, &shard), Bytes::from(m.to_json())).await }))
+        futures::stream::iter(copies.into_iter().map(|(shard, m)| async move { self.objects().put(&keys::reset_copy_key(target, at, &shard), Bytes::from(m.to_json())).await }))
             .buffer_unordered(16)
             .try_collect::<Vec<()>>()
             .await?;
@@ -181,6 +217,16 @@ impl Store {
             return Ok(o.outcome);
         }
         Ok(if self.reset_pending(cluster).await? { ResetOutcome::Pending } else { ResetOutcome::Dropped("its outcome wasn't recorded".into()) })
+    }
+
+    /// Whether the reset `cluster` has pending already wrote part of what it applies (a load
+    /// that failed midway): giving it up then would keep a mix of both.
+    pub async fn reset_started(&self, cluster: &str) -> anyhow::Result<bool> {
+        keys::validate_cluster(cluster)?;
+        let Some(raw) = self.objects().get(&keys::reset_key(cluster)).await? else { return Ok(false) };
+        let Ok(intent) = serde_json::from_slice::<Intent>(&raw) else { return Ok(false) };
+        let mark = intent.at_ms.to_string();
+        Ok(self.read_latest_manifests(cluster).await?.iter().any(|(_, m)| m.user_data.get(RESET_MARK) == Some(&mark)))
     }
 
     /// Gives up the reset `cluster` has pending (its source went away before it was recorded,
@@ -218,6 +264,7 @@ impl Store {
         let Some(raw) = self.objects().get(&keys::reset_key(target)).await? else { return Ok(()) };
         let Ok(intent) = serde_json::from_slice::<Intent>(&raw) else { return self.end_reset(target, 0, ResetOutcome::Dropped("its intent is damaged".into())).await };
         let at = intent.at_ms;
+        tracing::info!(cluster = target, from = intent.from, "carrying out a reset");
         let dropped = |why: &str| self.end_reset(target, at, ResetOutcome::Dropped(why.to_string()));
         let state = match self.objects().get(&keys::reset_state_key(target)).await? {
             Some(raw) => match ClusterState::decode(&raw) {
@@ -226,7 +273,8 @@ impl Store {
             },
             None => return dropped("its state is missing").await,
         };
-        let ours = |m: &ShardManifest| m.base.as_ref().is_some_and(|b| b.cluster == intent.from && b.branched_ms == at);
+        let mark = at.to_string();
+        let ours = |m: &ShardManifest| m.user_data.get(RESET_MARK) == Some(&mark);
         let copied: Vec<ShardId> = intent.shards.iter().map(|(u, n)| ShardId::new(u.clone(), *n)).collect();
         // Written since by anything but this reset: an owner served the cluster without it, and
         // what it wrote stands.
@@ -261,7 +309,7 @@ impl Store {
         }
         let mut copies = Vec::with_capacity(copied.len());
         for shard in copied.iter().filter(|s| !done.contains(s)) {
-            let m = match self.objects().get(&keys::reset_copy_key(target, shard)).await? {
+            let m = match self.objects().get(&keys::reset_copy_key(target, at, shard)).await? {
                 Some(raw) => match ShardManifest::from_json(&raw) {
                     Ok(m) => m,
                     Err(_) => return dropped(&format!("its copy of shard {shard} is damaged")).await,

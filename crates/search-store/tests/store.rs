@@ -1508,7 +1508,7 @@ async fn a_reset_needs_nothing_of_its_source_and_a_stale_one_is_dropped() {
     }
     let ticket = store
         .begin_reset("tgt", "src", false, |t, f| {
-            assert_eq!((t, f), (&b"{\"v\":\"t\"}"[..], &b"{\"v\":\"s\"}"[..]));
+            assert_eq!((t, f), (&b"{\"v\":\"t\"}"[..], Some(&b"{\"v\":\"s\"}"[..])));
             Ok(b"{\"v\":\"merged\"}".to_vec())
         })
         .await
@@ -1536,4 +1536,54 @@ async fn a_reset_needs_nothing_of_its_source_and_a_stale_one_is_dropped() {
     assert_eq!(store.read_manifest("tgt", &a).await.unwrap().unwrap().local_checkpoint, 7, "as it was");
     assert!(matches!(store.reset_outcome("tgt", ticket).await.unwrap(), ResetOutcome::Dropped(_)));
     assert!(!store.reset_pending("tgt").await.unwrap());
+
+    // A copy made while the cluster was empty (nothing stored) resets it to no indices.
+    let ticket = store
+        .begin_reset("tgt", "never-written", false, |_, f| {
+            assert!(f.is_none());
+            Ok(b"{\"v\":\"empty\"}".to_vec())
+        })
+        .await
+        .unwrap();
+    assert_eq!(&store.load_cluster("tgt").await.unwrap().unwrap().json[..], b"{\"v\":\"empty\"}");
+    assert_eq!(store.reset_outcome("tgt", ticket).await.unwrap(), ResetOutcome::Applied);
+    assert!(store.read_latest_manifests("tgt").await.unwrap().is_empty());
+
+    // The reset's commit points keep the branch's lineage: what it holds of its parent counts as
+    // shared after the reset as before, and after the copy is deleted and collected; the copy's
+    // operation that was only in its write-ahead log still replays from the branch then.
+    let p = shard("idxP", 0);
+    store.write_cluster("prod", &ClusterState::new("{}")).await.unwrap();
+    let (shared, _) = make_segment(&store, 1000).await;
+    store.write_manifest("prod", &p, &ShardManifest { segments: vec![seg_ref(shared, 1000)], ..m(0) }).await.unwrap();
+    store.branch("prod", "pv", None).await.unwrap();
+    let (wal, mm, _) = recover(&store, "pv", &p).await;
+    let (own, own_data) = make_segment(&store, 2000).await;
+    store.write_manifest("pv", &p, &ShardManifest { segments: vec![seg_ref(shared, 1000), seg_ref(own, 2000)], max_seq_no: 1, local_checkpoint: 1, ..mm.clone() }).await.unwrap();
+    let lsn = wal.append(2, b"wal-only").unwrap();
+    store.wal().wait_ack(lsn).await.unwrap();
+    let before = store.cluster_usage("pv").await.unwrap().own_bytes;
+    assert_eq!(before, 2000);
+    store.branch("pv", "pv-copy", None).await.unwrap();
+    // Written after the copy: the reset discards it.
+    let (later, _) = make_segment(&store, 500).await;
+    let segments = vec![seg_ref(shared, 1000), seg_ref(own, 2000), seg_ref(later, 500)];
+    store.write_manifest("pv", &p, &ShardManifest { segments, max_seq_no: 3, local_checkpoint: 3, ..mm.clone() }).await.unwrap();
+    store.detach_shard(wal).await.unwrap();
+    let ticket = store.begin_reset("pv", "pv-copy", false, |t, _| Ok(t.to_vec())).await.unwrap();
+    store.load_cluster("pv").await.unwrap();
+    assert_eq!(store.reset_outcome("pv", ticket).await.unwrap(), ResetOutcome::Applied);
+    assert_eq!(store.cluster_usage("pv").await.unwrap().own_bytes, before, "counted against prod, not the copy");
+    store.delete_cluster("pv-copy").await.unwrap();
+    store.collect_garbage(Duration::ZERO).await.unwrap();
+    assert_eq!(store.cluster_usage("pv").await.unwrap().own_bytes, before, "the copy's going moves nothing");
+    let (wal, mm, replayed) = recover(&store, "pv", &p).await;
+    assert_eq!(replayed, vec![(2, b"wal-only".to_vec())], "the copy's unflushed operation, its copy collected");
+    assert!(objects.exists(&own.key()).await.unwrap());
+    assert_eq!(&*store.open_segment(&own).await.unwrap(), &own_data[..]);
+    let (new, _) = make_segment(&store, 700).await;
+    let segments = [mm.segments.clone(), vec![seg_ref(new, 700)]].concat();
+    store.write_manifest("pv", &p, &ShardManifest { segments, max_seq_no: 2, local_checkpoint: 2, ..mm }).await.unwrap();
+    assert_eq!(store.cluster_usage("pv").await.unwrap().own_bytes, before + 700, "and its own writes after it");
+    store.detach_shard(wal).await.unwrap();
 }

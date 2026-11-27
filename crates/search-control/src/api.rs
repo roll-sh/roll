@@ -49,6 +49,11 @@ impl IntoResponse for ControlError {
             ControlError::Forbidden(_) => StatusCode::FORBIDDEN,
             ControlError::Busy(_) => StatusCode::TOO_MANY_REQUESTS,
             ControlError::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
+            ControlError::NotReset { pending, .. } => {
+                let status = if *pending { StatusCode::SERVICE_UNAVAILABLE } else { StatusCode::CONFLICT };
+                let reset = if *pending { "pending" } else { "dropped" };
+                return (status, Json(json!({ "error": self.to_string(), "reset": reset }))).into_response();
+            }
             ControlError::Internal(e) => {
                 tracing::warn!(error = %e, "search control error");
                 StatusCode::INTERNAL_SERVER_ERROR
@@ -555,7 +560,9 @@ async fn reset(State(c): State<AppState>, caller: Caller, Path(id): Path<String>
     };
     // On the branch's owner already: `per_cluster` sends every per-cluster route there.
     let d = c.reset(&b, &from).await?;
-    Ok(Json(view(&c, &caller, d, false).await?).into_response())
+    let mut v = serde_json::to_value(view(&c, &caller, d, false).await?).map_err(|e| ControlError::Internal(e.into()))?;
+    v["reset"] = json!("applied");
+    Ok(Json(v).into_response())
 }
 
 async fn branches(State(c): State<AppState>, caller: Caller, Path(id): Path<String>) -> ApiResult<Vec<ClusterView>> {

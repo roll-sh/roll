@@ -312,10 +312,11 @@ pub fn reset_copies_prefix(cluster: &str) -> String {
     format!("{CLUSTER_PREFIX}{cluster}/reset/")
 }
 
-/// One shard's commit point a reset in progress applies (garbage collection keeps what it names,
-/// WAL ranges included, as for a shard's latest commit point).
-pub fn reset_copy_key(cluster: &str, shard: &ShardId) -> String {
-    format!("{CLUSTER_PREFIX}{cluster}/reset/{}/{}.json", shard.index_uuid, shard.shard)
+/// One shard's commit point the reset recorded at `at_ms` applies (garbage collection keeps what
+/// it names, WAL ranges included, as for a shard's latest commit point). Each reset's keys are its
+/// own, so removing an earlier one's leftovers never removes a later one's copy.
+pub fn reset_copy_key(cluster: &str, at_ms: u64, shard: &ShardId) -> String {
+    format!("{CLUSTER_PREFIX}{cluster}/reset/{at_ms}/{}/{}.json", shard.index_uuid, shard.shard)
 }
 
 pub fn shards_prefix(cluster: &str) -> String {
@@ -486,6 +487,10 @@ pub fn parse_cluster_key(key: &str) -> Option<ClusterObject<'_>> {
         return Some(ClusterObject::Pin { cluster, name, shard: shard.parse().ok()? });
     }
     if let Some(rest) = rest.strip_prefix("reset/") {
+        let (at, rest) = rest.split_once('/')?;
+        if at.is_empty() || !at.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
         let (index_uuid, file) = rest.split_once('/')?;
         let shard = file.strip_suffix(".json")?;
         if index_uuid.is_empty() || shard.is_empty() || !shard.bytes().all(|b| b.is_ascii_digit()) {

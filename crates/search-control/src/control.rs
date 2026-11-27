@@ -68,6 +68,11 @@ pub enum ControlError {
     /// Something it depends on can't answer now (HTTP 503): try again.
     #[error("{0}")]
     Unavailable(String),
+    /// A reset that was recorded but isn't in place: dropped (HTTP 409, final: the branch stays
+    /// as it was) or still pending (HTTP 503: the branch's next load applies it). The answer's
+    /// `reset` says which, so a caller never tells them apart from other 409s and 503s by text.
+    #[error("{message}")]
+    NotReset { pending: bool, message: String },
     #[error(transparent)]
     Internal(#[from] anyhow::Error),
 }
@@ -506,11 +511,15 @@ fn random_string(n: usize) -> String {
 }
 
 /// A store error as the API answers it: the store's refusals ([`search_store::Refused`]) are 409s.
+/// One fenced by another node's claim (it moved) is too: a retry runs on the new owner.
 fn refused_or_internal(e: anyhow::Error) -> ControlError {
-    match e.downcast_ref::<search_store::Refused>() {
-        Some(r) => ControlError::Conflict(r.0.clone()),
-        None => ControlError::Internal(e),
+    if let Some(r) = e.downcast_ref::<search_store::Refused>() {
+        return ControlError::Conflict(r.0.clone());
     }
+    if let Some(f) = e.downcast_ref::<search_store::Fenced>() {
+        return ControlError::Conflict(format!("cluster {} moved to another node; retry", f.cluster));
+    }
+    ControlError::Internal(e)
 }
 
 /// The 409 for a write past a person's cap: the cap, their count, and how it's raised.
@@ -1629,8 +1638,14 @@ impl Control {
             },
             None => None,
         };
-        // A reset recorded by an earlier call whose load failed is carried out first.
-        self.finish_pending_reset(b).await?;
+        // A reset recorded by an earlier call whose load failed is carried out first; while it
+        // can't be, this one isn't recorded (a retryable 409, never this reset's 503).
+        if let Err(e) = self.finish_pending_reset(b).await {
+            return Err(ControlError::Conflict(format!("an earlier reset of {} is still pending and couldn't be completed, so this one wasn't recorded; retry: {e}", b.name)));
+        }
+        // Its source can't be deleted while it's read (an empty copy reads the same as a deleted
+        // one): side by side with its branches, never during its delete.
+        let _from_op = self.operation(from, false, "reset")?;
         let lock = self.lock_out(b, false).await?;
         let r = self.reset_inner(b, from, lease.as_ref()).await;
         {
@@ -1642,12 +1657,14 @@ impl Control {
         // The load carries the reset out before anything reads the branch.
         if let Err(e) = self.node.open(spec_for(b)).await {
             tracing::warn!(cluster = b.name, error = %e, "loading a reset branch failed; its next load carries the reset out");
-            return Err(ControlError::Unavailable(format!("{} is reset; loading it failed and its next load completes it: {e}", b.name)));
+            return Err(ControlError::NotReset { pending: true, message: format!("{} is reset; loading it failed and its next load completes it: {e}", b.name) });
         }
         match self.data.reset_outcome(&b.name, ticket).await? {
             search_store::ResetOutcome::Applied => {}
-            search_store::ResetOutcome::Dropped(why) => return Err(ControlError::Conflict(format!("the reset of {} was dropped, and it stays as it was: {why}", b.name))),
-            search_store::ResetOutcome::Pending => return Err(ControlError::Unavailable(format!("{} is reset; its next load completes it", b.name))),
+            search_store::ResetOutcome::Dropped(why) => {
+                return Err(ControlError::NotReset { pending: false, message: format!("the reset of {} was dropped, and it stays as it was: {why}", b.name) });
+            }
+            search_store::ResetOutcome::Pending => return Err(ControlError::NotReset { pending: true, message: format!("{} is reset; its next load completes it", b.name) }),
         }
         if let Err(e) = self.refresh_stats(&b.id, now_ms()).await {
             tracing::warn!(cluster = b.name, error = %e, "reading a reset branch's figures failed");
@@ -1668,7 +1685,7 @@ impl Control {
                 return Ok(None);
             }
             // Nothing of its own to keep (not even its security): it never stored anything.
-            return Err(ControlError::Conflict(format!("{} has never stored anything; write to it once before resetting it", b.name)));
+            return Err(ControlError::Invalid(format!("{} has never stored anything; write to it once before resetting it", b.name)));
         }
         let lost = || ControlError::Conflict(format!("cluster {} moved to another node; retry", b.name));
         if lease.is_some_and(|g| !g.is_valid()) {
@@ -1677,7 +1694,7 @@ impl Control {
         let dialect = dialect(&b.flavor).unwrap_or(Dialect::Elasticsearch);
         let ticket = self
             .data
-            .begin_reset(&b.name, &from.name, lease.is_some(), |branch, copy| search_es::branch::reset_state(branch, Some(copy), dialect))
+            .begin_reset(&b.name, &from.name, lease.is_some(), |branch, copy| search_es::branch::reset_state(branch, copy, dialect))
             .await
             .map_err(refused_or_internal)?;
         // A copy deleted while it was read (its catalog row goes after its storage) gives
@@ -2052,6 +2069,11 @@ impl Control {
         if !self.cfg.deleted_retention.is_zero()
             && let Err(e) = self.finish_pending_reset(&c).await
         {
+            // Half applied, giving it up would keep (and restore) a mix of both: retry until the
+            // load can complete it.
+            if self.data.reset_started(&c.name).await? {
+                return Err(ControlError::Unavailable(format!("{} has a reset half applied that couldn't be completed; retry the delete: {e}", c.name)));
+            }
             tracing::warn!(cluster = c.name, error = %e, "a deleted cluster's pending reset couldn't be carried out; it is kept as it was");
             self.data.cancel_reset(&c.name, "the cluster was deleted").await?;
         }
