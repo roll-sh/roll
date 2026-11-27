@@ -29,10 +29,16 @@ pub enum Results {
     Bits(Vec<Vec<i8>>),
     Sparse(Vec<Sparse>),
     Rerank(Vec<Ranked>),
-    Completion(Vec<String>),
+    /// The answers, and the tokens the provider reported for them.
+    Completion(Vec<String>, super::tokens::Reported),
 }
 
 impl Results {
+    /// A completion's answers, with the tokens the provider's answer `v` reports.
+    pub fn completion(texts: Vec<String>, v: &Value) -> Results {
+        Results::Completion(texts, super::tokens::Reported::of(v))
+    }
+
     /// How many dimensions the first dense embedding has (bits count eight per byte), as
     /// `DenseEmbeddingResults.getFirstEmbeddingSize` reports it.
     pub fn first_embedding_size(&self) -> Option<usize> {
@@ -50,7 +56,7 @@ impl Results {
             Results::Bytes(v) | Results::Bits(v) => v.len(),
             Results::Sparse(v) => v.len(),
             Results::Rerank(v) => v.len(),
-            Results::Completion(v) => v.len(),
+            Results::Completion(v, _) => v.len(),
         }
     }
 
@@ -81,7 +87,7 @@ impl Results {
                     })
                     .collect(),
             ),
-            Results::Completion(v) => ("completion", v.iter().map(|r| obj! { "result" => r.clone() }).collect()),
+            Results::Completion(v, _) => ("completion", v.iter().map(|r| obj! { "result" => r.clone() }).collect()),
         };
         let mut m = Map::new();
         m.insert(key.into(), Value::Arr(items));

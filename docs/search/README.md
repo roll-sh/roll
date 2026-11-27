@@ -947,7 +947,7 @@ origins (browser search), once they're on main.
 | POST | `/v1/search/clusters/{id}/unload` | sleep now (`{"unloaded": false}` while requests run) |
 | GET | `/v1/search/clusters/{id}/indices` | `_cat/indices` as JSON numbers: health, status, shards, docs, sizes; docs and sizes of open indices come from the engine (as `_stats` reports them: Lucene documents, nested ones included, unflushed writes included). Wakes the cluster |
 | POST | `/v1/search/clusters/{id}/request` | console: `{method, path, body?}` (a JSON body, sent byte for byte so `_source` keeps its key order, or a string such as NDJSON, sent as is) → `{status, headers, body, took_ms, truncated}`; an answer the cluster streams (`_inference/…/_stream`) is passed through as it comes instead, with its status and `Content-Type: text/event-stream`. Accepts bodies up to the cluster's `max_body_mb` (the request may be up to twice that plus 1 MiB, for JSON escapes) |
-| GET | `/v1/search/clusters/{id}/usage?days=30` | loaded seconds, GiB-hours, requests, stored GiB-months, cost, and the same workload on Elastic Cloud Hosted, an Amazon OpenSearch Service domain and OpenSearch Serverless |
+| GET | `/v1/search/clusters/{id}/usage?days=30` | loaded seconds, GiB-hours, requests, stored GiB-months, provider tokens (`input_tokens`, `output_tokens`; not priced), cost, and the same workload on Elastic Cloud Hosted, an Amazon OpenSearch Service domain and OpenSearch Serverless |
 | GET | `/v1/search/clusters/{id}/metrics?range=1h\|24h\|14d` | request metrics (architecture.md, "Observability"): `{range, step_s, from, to, points, totals}`; each point (`at`, the start of its step: a minute for `1h`, 15 minutes for `24h`, 2 hours for `14d`; only steps with requests) and `totals` hold `all`, `search`, `index` and `other`, each `{requests, rate, 2xx, 4xx, 5xx, rejected, p50_ms, p95_ms, p99_ms}` (`rate` per second; `rejected`: 429s; percentiles `null` when nothing ran). Includes what the cluster's node recorded since the last metering pass |
 | GET | `/v1/search/clusters/{id}/slowlog` | the search and indexing slow logs, newest first, at most 500: `{entries, max_entries}`, each entry Elasticsearch's JSON slow log line (`@timestamp`, `log.level`, `log.logger`, `elasticsearch.index.name`, `elasticsearch.shard.id`, `elasticsearch.slowlog.{message,took,took_millis,source,total_hits,stats,search_type,total_shards,id,routing}`) |
 | GET | `/v1/search/clusters/{id}/audit?from=&to=&event=&size=` | the cluster's security audit log (below), newest first: `{flavor, retention_days, entries: [{at_ms, event, entry}], more}`. `from` (inclusive) and `to` (exclusive) are Unix milliseconds; `event` takes names or categories, comma-separated (an Elasticsearch `event.action` such as `put_user` too); `size` up to 1,000 (100). Never wakes the cluster. A read in roll's permissions, not a reveal: entries hold no secret |
@@ -1317,7 +1317,11 @@ storage is billed until it is purged, when its rows go. Inference on the node's 
 time is measured on its worker and handed to the meter with the requests
 (`inference_cpu_seconds`, priced per vCPU-hour as `usd_per_vcpu_hour`), to the cluster whose
 request runs it: a linked cluster's cross-cluster query that embeds on this cluster, or a
-browser key's search, is billed here (the browser keys of #358 will cap inference per request). Prices are AWS list prices in `crates/search-control/src/pricing.rs`, each
+browser key's search, is billed here (the browser keys of #358 will cap inference per request).
+Provider tokens of completions and chat answers are metered beside them, not priced (the provider
+bills them): `input_tokens` and `output_tokens`, the provider's own figures when its answer carries
+them, else roll's estimate (rag.md, "Metering"), taken each pass like requests, also from clusters
+unloaded in between. Prices are AWS list prices in `crates/search-control/src/pricing.rs`, each
 with its source.
 
 ## Tests
@@ -1376,16 +1380,15 @@ filtered listing; and the auth matrix's probe of storage's nested route (also br
 
 Ranked; the top item is in progress. Updated as work lands (the watchdog reads this list).
 
-Working order (2026-11-26, evening): the fourth sweep's last fixes first (item 4: #1096 in its
-re-check after round 2, #1084 in its second round; each a HIGH or MED on main), then the work
-in review (item 11's RAG phase 2, #1068 in its third round; item 30's read-only ES|QL, #1111 in
-its second; item 1's derived-key follow-ups, #1127 in its second; item 31's re-embed route,
-#1132, landing), then item 32 (resetting a branch from a copy for previews' restore points; in
-progress), item 33's second slice (saved searches, surrounding documents, a field's chart; in
-progress), item 15's offline evaluation of applications and variants (in review; judgment lists from clicks next), item 14 (semantic search on OpenSearch-flavor
-clusters; resumes after #1111), item 16 (cold start at size; resumes after #1127), OpenSearch's
-`_plugins/_sm` (item 9; in progress), item 5's OpenSearch links (designed), and chat token
-metering (item 11's follow-up; in progress).
+Working order (2026-11-27, night): the fourth sweep's last fixes first (item 4: #1096 in its
+third round, #1084 in its second; each a HIGH or MED on main), then the work in review (item
+11's RAG phase 2, #1068 in its fourth round; item 30's read-only ES|QL, #1111 in its second;
+item 1's derived-key follow-ups and OpenSearch links, #1127 in its second; item 32's branch
+reset, #1149, in review), then item 33's second slice (saved searches, surrounding documents, a
+field's chart; in its gate), item 15's judgment lists (kept as indices, built from clicks, and
+OpenSearch's Search Relevance Workbench; in progress), item 14 (semantic search on
+OpenSearch-flavor clusters; resumes after #1111), item 16 (cold start at size; resumes after
+#1127) and item 18 (logs end to end: OTLP intake, alerting; the top open item).
 Landed 2026-11-26: the PIT and caches fix (#1021), a cluster's admin password kept in roll
 secrets and the MCP sweep's person flow (#1097), Terraform for synonyms sets and rulesets
 (#1071), inference endpoints from a secret answered redacted and limited to `api_key` services
@@ -1395,6 +1398,10 @@ per-server politeness and parallel fetches (#1075), A/B tests on search applicat
 (#1090 and #1126, item 15's first two slices), names authorized as they resolve in lookups (#1059), an API
 key's `encoded` that works at the shared address (#1115), and a Discover screen (#1133, item
 33's first slice).
+Landed 2026-11-26 (night) and 27: re-embedding an index's own documents (#1132, item 31); 95%
+intervals on A/B results and promoting from the Relevance tab (#1145); offline relevance
+evaluation (#1159), of a search application and its variants too (#1163); chat and completion
+tokens metered per cluster (#1141); OpenSearch's snapshot management policies (#1153, item 9).
 
 Landed 2026-11-17: per-person cluster caps (#162: 50 clusters and 2 always-on per person,
 rolld flags, 409 past a cap, counted in the write's own transaction); the search playground (#159); the Relevance tab for
@@ -1688,7 +1695,9 @@ deterministic (#396).
    (#941); deletions and `_cleanup` show as running, so a snapshot starting meanwhile waits for
    them rather than take a removed snapshot as its base (#995); data streams restored whole, and
    a restore resumed after a takeover from the shard it reached (#1008).
-   Chunks of failed snapshots stay until `_cleanup` (compatibility.md says why).
+   Chunks of failed snapshots stay until `_cleanup` (compatibility.md says why). And
+   OpenSearch's snapshot management policies (`_plugins/_sm`), on SLM's scheduler and its
+   stored-user model, so OpenSearch-flavor clusters schedule their snapshots too.
 10. **Relevance tuning by MCP and Terraform**: `/v1/search` serves synonyms sets, query rulesets
    (and `_test`), writing an index's settings and `_explain` (the routes table), and `roll search`
    has `synonyms`, `rules`, `indices settings` and `explain` and makes `read` and `append` keys on
@@ -1757,8 +1766,9 @@ deterministic (#396).
    difference from the baseline, and promoting from the Relevance tab
    (#1145). Offline evaluation landed in #1159 (`…/indices/{index}/evaluate`,
    `roll search index evaluate` for CI, `search_evaluate`, the Relevance tab's Evaluate); a
-   search application's template and its experiment's variants scored the same way are in review
-   (`feature/search-evaluate-apps`). Next: judgment lists kept as indices and built from clicks. Left: the `roll_` rule types and
+   search application's template and its experiment's variants scored the same way landed in
+   #1163. Next: judgment lists kept as indices, built from clicks, and OpenSearch's Search
+   Relevance Workbench (in progress). Left: the `roll_` rule types and
    dynamic re-ranking.
 16. **Cold start at size**: the 19.8 ms cold start is a 50k-document index from local cache;
    nothing measures the first query and p99 on a node with an empty cache for 1, 10 and 50 GB
@@ -1848,10 +1858,12 @@ deterministic (#396).
    words, retention, next run, last success and failure, run now, edit, and starting a stopped
    SLM), every request shown and a click from the console. Checked against Elasticsearch 9.5.5:
    SLM's readable times now carry milliseconds as `XContentBuilder.timeField` writes them
-   (`2026-11-19T01:30:00.000Z`). Left: OpenSearch's snapshot management policies
-   (`_plugins/_sm`) aren't served, so OpenSearch-flavor clusters take snapshots by hand or from an
-   ISM `snapshot` action; their snapshots show no size (OpenSearch has no `index_details`); `fs`
-   repositories need `path.repo`, which roll's clusters don't set.
+   (`2026-11-19T01:30:00.000Z`). On OpenSearch-flavor clusters the policies are OpenSearch's
+   snapshot management policies (`_plugins/_sm`, compatibility.md): the creation schedule and
+   deletion condition in words, each workflow's state and last outcome from `_explain`, start,
+   stop, edit (with the document's sequence number) and delete. Left: OpenSearch-flavor
+   clusters' snapshots show no size (OpenSearch has no `index_details`); `fs` repositories need
+   `path.repo`, which roll's clusters don't set.
    And a Pipelines tab, as Kibana's Ingest Pipelines does it: every pipeline with its processors
    and the indices whose `default_pipeline` or `final_pipeline` names it (built-in ones on
    request); a pipeline edited as a list of processors (the type, the options of the 26 types

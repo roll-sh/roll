@@ -148,7 +148,8 @@ pub async fn infer(cluster: &Cluster, ep: &Endpoint, req: &Request) -> EsResult<
         TaskType::Completion => {
             let input = one_input(req, "Hugging Face completion")?;
             let answer = send(cluster, ep, &oai::body(style(ep), oai::user_message(input), &Map::new(), false), req.timeout, false).await?;
-            Ok(Results::Completion(vec![oai::completion_text(&json(&answer)?, "Hugging Face chat completions")?]))
+            let v = json(&answer)?;
+            Ok(Results::completion(vec![oai::completion_text(&v, "Hugging Face chat completions")?], &v))
         }
         other => Err(crate::xpack::inference::unsupported_task(other, "hugging_face")),
     }

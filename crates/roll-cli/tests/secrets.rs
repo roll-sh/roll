@@ -388,6 +388,18 @@ async fn roll_run_injects_an_environments_secrets_and_refuses_unresolved_referen
     ok(&api, &env, &[&at[..], &["import", "--from", "vault", "--source", "secret/shop"]].concat(), None).await;
     let got = ok(&api, &[], &["run", "-p", "shop", "-e", "production", "--allow-unresolved", "--", "sh", "-c", "echo $FROM_VAULT $RETRIES"], None).await;
     assert_eq!(got.trim(), "v-1 3");
+    // Checking the copy reads the source again and compares by fingerprint: names only, nothing
+    // written, a failure while a key is missing or differs.
+    let check = [&at[..], &["import", "--from", "vault", "--source", "secret/shop", "--check"]].concat();
+    let matching = roll(&api, &env, &check, None).await;
+    assert!(matching.code == Some(0) && matching.stdout.contains("+ HOST") && matching.stdout.contains("2 the same") && matching.stderr.contains("The copy is complete"), "{}{}", matching.stdout, matching.stderr);
+    ok(&api, &[], &[&at[..], &["set", "FROM_VAULT=fake-changed"]].concat(), None).await;
+    ok(&api, &[], &[&at[..], &["rm", "RETRIES"]].concat(), None).await;
+    let drifted = roll(&api, &env, &check, None).await;
+    let shown = format!("{}{}", drifted.stdout, drifted.stderr);
+    assert!(drifted.code != Some(0) && drifted.stdout.contains("- RETRIES") && drifted.stdout.contains("~ FROM_VAULT") && !shown.contains("v-1") && !shown.contains("fake-changed"), "{shown}");
+    let still = ok(&api, &[], &["run", "-p", "shop", "-e", "production", "--allow-unresolved", "--", "sh", "-c", "echo $FROM_VAULT ${RETRIES:-unset}"], None).await;
+    assert_eq!(still.trim(), "fake-changed unset", "a check writes nothing");
     // Several environments at once: each source path into its environment.
     let mapped = ok(&api, &env, &["secrets", "-p", "shop", "import", "--from", "vault", "--source", "secret/shop", "--map", "stg=staging"], None).await;
     assert!(mapped.contains("stg → staging: 1 value"), "{mapped}");

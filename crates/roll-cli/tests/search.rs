@@ -244,7 +244,7 @@ async fn clusters_and_requests() {
     e.control.sample().await.unwrap();
     let out = e.roll(&["search", "clusters", "usage", "app", "--days", "7"]).await;
     assert!(out.starts_with("app — last 7 days"), "{out}");
-    for label in ["loaded", "memory", "requests", "storage", "total", "Elastic Cloud", "Amazon OpenSearch Service", "OpenSearch Serverless"] {
+    for label in ["loaded", "memory", "requests", "model tokens", "storage", "total", "Elastic Cloud", "Amazon OpenSearch Service", "OpenSearch Serverless"] {
         assert!(out.contains(&format!("  {label} ")), "{label}: {out}");
     }
     let u = e.roll_json(&["search", "clusters", "usage", "app"]).await;

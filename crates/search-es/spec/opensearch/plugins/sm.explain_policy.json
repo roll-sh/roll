@@ -1,0 +1,25 @@
+{
+  "sm.explain_policy": {
+    "documentation": {
+      "url": "https://docs.opensearch.org/latest/tuning-your-cluster/availability-and-recovery/snapshots/sm-api/",
+      "description": "Explains the state of snapshot management policies."
+    },
+    "stability": "stable",
+    "url": {
+      "paths": [
+        {
+          "path": "/_plugins/_sm/policies/{policy_name}/_explain",
+          "methods": [
+            "GET"
+          ],
+          "parts": {
+            "policy_name": {
+              "type": "string",
+              "description": "The name of the snapshot management policy."
+            }
+          }
+        }
+      ]
+    }
+  }
+}

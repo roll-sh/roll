@@ -1545,6 +1545,8 @@ impl Node { fn new(catalog, stores, cfg) -> Arc<Node>; fn with_hooks(..); fn set
             async fn enforce_memory(room) -> Vec<String> /* the budget check the reaper runs every 2 s; returns the clusters unloaded */;
             fn take_request_counts() -> Vec<(String, u64)> /* metering: requests admitted per cluster since the previous call,
                                            unloaded instances included; each request reported once */;
+            fn take_tokens() -> Vec<(String, (u64, u64))> /* completions' provider tokens (input, output) per cluster since the
+                                           previous call, the same way; metered, not priced */;
             fn background_tasks() -> usize /* 0 whenever nothing is loaded */; fn scheduler() -> Option<&Arc<FairScheduler>>; pub wakes, unloads: AtomicU64 }
 impl Loaded { pub cluster: Arc<Cluster>; pub data: Option<Arc<persist::ClusterData>>; fn spec(); fn in_flight(); fn requests() -> u64;
               fn epoch() -> u64; fn bytes_in_flight(); pub wake_time: Duration; pub recovery: persist::RecoveryStats { shards, segments, fetching, records, orphans } }

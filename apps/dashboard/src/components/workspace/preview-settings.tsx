@@ -317,7 +317,7 @@ function Form({
                       />
                       <p className="mt-1 text-[11px] text-subtle">
                         {r.kind === "postgres"
-                          ? "Rewritten in each preview's branch before anything serves it, one column per line: schema.table.column = null, redact, hash, email or fixed:<value>. The parent is untouched."
+                          ? "Rewritten in each preview's branch before anything serves it, one column per line: schema.table.column = null, redact, hash, email or fixed:<value>. With any rule here, a column that looks like people's data and has none is masked too: keep leaves one as it is. The parent is untouched."
                           : r.kind === "search"
                             ? "Rewritten in each preview's branch before anything serves it, one field per line: index.field (nested: index.a.b) = redact, remove or email. The parent is untouched."
                             : "Masked in previews, one column per line: keyspace.table.column = mask function. The parent is untouched."}
