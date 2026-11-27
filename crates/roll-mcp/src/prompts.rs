@@ -442,7 +442,7 @@ const PROMPTS: &[Prompt] = &[
                  isn't enough, if you have it; before a flow that changes its data, previews_save_data, and \
                  after it previews_restore with previews_wait until it's ready again (it can take minutes); \
                  previews_list_notes for what people left on \
-                 its pages. When the change migrates its database and the preview was made days ago, \
+                 its pages (offer previews_note_to_work, if you have it, for a note that asks for real work). When the change migrates its database and the preview was made days ago, \
                  offer previews_rehearse, if you have it: its release again on today's data (previews_wait, then \
                  its rehearsal: call out a failure, or a release over a minute). Tell me whether it's ready to land, with the evidence for each problem. Don't resolve \
                  notes, refresh, reset, rehearse or delete the preview without asking me.",

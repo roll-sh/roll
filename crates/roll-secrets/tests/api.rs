@@ -1428,6 +1428,14 @@ struct FakeSts {
     last: Mutex<Option<(String, Option<String>)>>,
     /// IAM user `legacy-ci`'s access key ids, and how many were ever made.
     keys: Mutex<(Vec<String>, u32)>,
+    /// The role's trust takes only sessions whose name starts so (`sts:RoleSessionName`).
+    session_like: Mutex<Option<&'static str>>,
+}
+
+impl FakeSts {
+    fn named_ok(&self, session: &str) -> bool {
+        self.session_like.lock().unwrap().is_none_or(|p| session.starts_with(p))
+    }
 }
 
 impl roll_secrets::aws::Sts for FakeSts {
@@ -1436,7 +1444,7 @@ impl roll_secrets::aws::Sts for FakeSts {
         if *self.throttled.lock().unwrap() {
             return Err("Throttling".into());
         }
-        if role_arn != "arn:aws:iam::123456789012:role/roll" || self.pinned.lock().unwrap().as_deref().is_some_and(|p| p != external_id) {
+        if role_arn != "arn:aws:iam::123456789012:role/roll" || self.pinned.lock().unwrap().as_deref().is_some_and(|p| p != external_id) || !self.named_ok(session) {
             return Err("AccessDenied".into());
         }
         let mut n = self.sessions.lock().unwrap();
@@ -1455,7 +1463,7 @@ impl roll_secrets::aws::Sts for FakeSts {
         let payload = token.split('.').nth(1).ok_or("InvalidIdentityToken")?;
         let claims: Value = serde_json::from_slice(&base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(payload).map_err(|_| "InvalidIdentityToken")?).map_err(|_| "InvalidIdentityToken")?;
         let sub_ok = self.web_pinned.lock().unwrap().as_deref().is_none_or(|p| claims["sub"] == p);
-        if role_arn != "arn:aws:iam::123456789012:role/roll-oidc" || claims["aud"] != "sts.amazonaws.com" || claims["iss"] != ISSUER_URL || !sub_ok {
+        if role_arn != "arn:aws:iam::123456789012:role/roll-oidc" || claims["aud"] != "sts.amazonaws.com" || claims["iss"] != ISSUER_URL || !sub_ok || !self.named_ok(session) {
             return Err("AccessDenied".into());
         }
         let mut n = self.sessions.lock().unwrap();
@@ -9148,6 +9156,9 @@ struct FakeCa {
     dns: Mutex<Vec<String>>,
     /// (serial, reason) of each certificate revoked.
     revoked: Mutex<Vec<(String, roll_secrets::public_certs::RevokeReason)>>,
+    /// Route 53's TXT sets, each read and written whole as the real one is, with a pause between,
+    /// and looked at by the CA after another.
+    txt: Mutex<BTreeMap<String, Vec<String>>>,
 }
 
 impl FakeCa {
@@ -9157,7 +9168,7 @@ impl FakeCa {
         root.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
         root.distinguished_name.push(rcgen::DnType::CommonName, "roll fake public root");
         let root_pem = root.self_signed(&root_key).unwrap().pem();
-        FakeCa { root, root_key, root_pem, orders: Mutex::default(), dns: Mutex::default(), revoked: Mutex::default() }
+        FakeCa { root, root_key, root_pem, orders: Mutex::default(), dns: Mutex::default(), revoked: Mutex::default(), txt: Mutex::default() }
     }
 
     /// The credential, as the fake provider takes it: what it was, or its refusal.
@@ -9189,8 +9200,32 @@ impl roll_secrets::public_certs::PublicCa for FakeCa {
     }
 
     fn order(&self, o: roll_secrets::public_certs::Order<'_>) -> Result<roll_secrets::public_certs::Ordered, String> {
-        self.orders.lock().unwrap().push((o.names.to_vec(), o.account.is_some()));
+        let value = {
+            let mut orders = self.orders.lock().unwrap();
+            orders.push((o.names.to_vec(), o.account.is_some()));
+            format!("order-{}", orders.len())
+        };
         self.signed_in(o.dns).expect("the registration's DNS credential");
+        if matches!(o.dns, roll_secrets::public_certs::DnsCredential::Route53 { .. }) {
+            let records: std::collections::BTreeSet<String> = o.names.iter().map(|n| format!("_acme-challenge.{}", n.trim_start_matches("*."))).collect();
+            for r in &records {
+                let mut set = self.txt.lock().unwrap().get(r).cloned().unwrap_or_default();
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                set.push(value.clone());
+                self.txt.lock().unwrap().insert(r.clone(), set);
+            }
+            // The propagation wait, then the CA looks.
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            let missing = records.iter().find(|r| !self.txt.lock().unwrap()[*r].contains(&value));
+            for r in &records {
+                let mut set = self.txt.lock().unwrap().get(r).cloned().unwrap_or_default();
+                set.retain(|v| *v != value);
+                self.txt.lock().unwrap().insert(r.clone(), set);
+            }
+            if let Some(r) = missing {
+                return Err(format!("the CA refused: unauthorized No TXT record found at {r}"));
+            }
+        }
         if let Some(n) = o.names.iter().find(|n| n.starts_with("unproven.")) {
             return Err(format!("the CA refused: unauthorized No TXT record found at _acme-challenge.{n}"));
         }
@@ -9363,6 +9398,8 @@ async fn route53_proves_public_certificates_as_the_projects_aws_role_or_an_acces
     let ca = Arc::new(FakeCa::new());
     api.secrets.set_public_ca(ca.clone());
     *api.sts.pinned.lock().unwrap() = Some(format!("roll-secrets:{}", api.project));
+    // Kept for certificates as the docs say: its trust takes `roll-public-cert-*` sessions only.
+    *api.sts.session_like.lock().unwrap() = Some("roll-public-cert-");
     let role = api.ok(Method::POST, "/aws-roles", Some(json!({ "name": "dns", "role_arn": "arn:aws:iam::123456789012:role/roll" }))).await;
     let role_id = role["id"].as_str().unwrap().to_string();
     let new = |dns: Value| {
@@ -9407,6 +9444,35 @@ async fn route53_proves_public_certificates_as_the_projects_aws_role_or_an_acces
     assert_eq!(ca.dns.lock().unwrap().last().map(String::as_str), Some("key AKIAROLLFAKE00000001"));
     assert_eq!(ca.orders.lock().unwrap().len(), 2);
     api.ok(Method::DELETE, &format!("/aws-roles/{role_id}"), None).await;
+}
+
+/// Two of roll's orders writing one Route 53 name (`*.example.com` and `example.com`, which share
+/// `_acme-challenge.example.com`), as two nodes' sweeps at once: each read-and-UPSERT of the set
+/// could drop the other's value, so an order holds its record names in the shared database and the
+/// other waits for the next pass. Both are issued, and no order fails.
+#[tokio::test]
+async fn two_orders_on_one_route53_name_never_write_it_at_once() {
+    let api = Api::new().await;
+    let ca = Arc::new(FakeCa::new());
+    api.secrets.set_public_ca(ca.clone());
+    for (name, domain) in [("wild", "*.roll-fake.test"), ("apex", "roll-fake.test")] {
+        let body = json!({ "name": name, "directory_url": roll_secrets::public_certs::PUBLIC_CAS[0], "domains": [domain], "dns_provider": "route53", "dns_credential": "AKIAROLLFAKE00000001:fake-secret", "eab_kid": "kid-roll-fake", "eab_hmac_key": "cm9sbC1mYWtlLWhtYWM" });
+        api.ok(Method::POST, "/public-certs", Some(body)).await;
+    }
+    for _ in 0..3 {
+        let sweep = || {
+            let s = api.secrets.clone();
+            tokio::task::spawn_blocking(move || s.sweep_public_certs().unwrap())
+        };
+        let (a, b) = tokio::join!(sweep(), sweep());
+        assert_eq!(a.unwrap().failed + b.unwrap().failed, 0, "no order lost its value: {:?}", ca.orders.lock().unwrap());
+        if api.ok(Method::GET, "/public-certs", None).await.as_array().unwrap().iter().all(|c| c["status"] == "issued") {
+            break;
+        }
+    }
+    let certs = api.ok(Method::GET, "/public-certs", None).await;
+    assert!(certs.as_array().unwrap().iter().all(|c| c["status"] == "issued"), "{certs}");
+    assert_eq!(ca.orders.lock().unwrap().len(), 2, "each ordered once");
 }
 
 /// docs/secrets.md, "Publicly trusted certificates": a leak of a linked key revokes its certificate
