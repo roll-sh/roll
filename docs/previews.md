@@ -3185,27 +3185,46 @@ variables roll makes from a branch's URL too (it could run on the preview's own 
 change becoming queued wakes its settled preview, a rehearsal shows only at its head, and schema
 overlaps stay within a repo.
 
-Ranked again on 2026-11-27, evening, after `@roll/previews` (#1240) and older pushes on demand
-(#1232) landed:
+Ranked again on 2026-11-27, late evening, after a fourteenth product review (against Vercel and
+Netlify's toolbar, comments and protection, Render, Railway and Heroku review apps, Neon and
+PlanetScale, Signadot and Speedscale, Chromatic, Percy and Argos, Jam and Marker.io). Its first
+fix landed with it: `@roll/previews`' snapshots on `pull_request` workflows carry the pull
+request's head, not GitHub's merge commit (#1252).
 
-1. **What a note's reviewer saw, from their own browser** (Jam, Marker.io), in progress: a
-   picture of their own tab, taken only on their click, kept with the note as roll's crop is.
-2. **Writes replayed safely** (Signadot, Speedscale; L), in progress: the previews' own writes
-   (bodies captured only where the project opts in, sealed, bounded, never a fork's) replayed on
-   fresh copies of both previews' data, never on the branches they serve from. Capturing
-   production's requests still needs its privacy designed first.
-3. **Restore points for search and buckets**: search's on roll search's reset from a copy (#1149;
-   its shape is agreed: 200 put back, 409 dropped or busy, 503 recorded); buckets need a put-back
-   on roll storage's side.
-4. **Previews for the members thread's next products**: search is a member product (#808), so a
-   member's preview of a project with a cluster is checked end to end (its branch homed in the
-   project, reached by role); roll apps once its routes become member routes.
-5. **Watches on pg-control**: the data step's Postgres compute start; cheap branches on ext4
+In progress, each in a pull request of its own:
+- a leaked CI bypass secret (`rpb_`) revoked, as deploy hooks are (the review's one high finding);
+- team access on a project's own preview domain (the sign-in's ticket refused its host);
+- a snapshot's head checked on roll apps too (an older push's picture could stand for the head's);
+- what a note's reviewer saw, from their own browser (Jam, Marker.io);
+- writes replayed safely on fresh copies of both previews' data (Signadot, Speedscale), which
+  also takes GET replay off main's preview's own data (a replayed GET can act);
+- a member's preview of a project with a search cluster, checked end to end.
+
+1. **A note resolved when its fix lands** (Marker.io's and Jam's two-way sync): a note's work
+   item or GitHub issue closing resolves it, so the pull request comment stops listing fixed
+   notes; Jira and Asana through an automation trigger after.
+2. **The page's own review in the toolbar** (Vercel's toolbar, Chromatic's UI Review): a team
+   visitor sees whether this page changed against main and what it adds, with Accept opening
+   roll (never clickable by the page's own script).
+3. **A live dashboard**: the list and the sheet follow the preview event feed instead of polling
+   every 15 to 20 s, one slow poll kept as a fallback.
+4. **roll's reviewer reads the visual and API results** (Percy's Visual Review Agent): which of a
+   change's visual changes its diff explains, as the verdict's first line; model output never
+   accepts anything.
+5. **An earlier push started from the sheet, the CLI and MCP**, not only from its own 410 page.
+6. **Restore points for search and buckets**: search's on roll search's reset from a copy (#1149;
+   200 put back, 409 dropped or busy, 503 recorded); buckets need a put-back on roll storage's
+   side.
+7. **Previews for the members thread's next products**: roll apps once its routes become member
+   routes.
+8. **Watches on pg-control**: the data step's Postgres compute start; cheap branches on ext4
    through overlay volumes; recovery to a time seconds old (unowned).
 
 Not to build: more lab checks on the first page (each adds noise to every pull request), or a
 Kubernetes cluster per preview (roll apps' Compose import covers multi-service apps, and a
 cluster would break "costs nothing asleep").
+
+Landed 2026-11-27, late evening: the Next list ranked again (#1250), and snapshots' head on `pull_request` workflows (#1252).
 
 Landed 2026-11-27, evening: the thirteenth review's fixes (#1237), `@roll/previews` (#1240), older pushes started on demand (#1232), and lean tests with SQLite's allocations no longer counted under one process-wide lock (#1248: 188 Rust tests to 87, the engine suite 33 s to 4 s).
 
