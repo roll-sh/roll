@@ -1287,8 +1287,14 @@ async fn request_access(State(a): S, ext: Extensions, Json(r): Json<AccessReques
         }
         return Err(Error::Forbidden("this token was made never to ask a person: its owner changes its rules instead".into()));
     }
-    if request_duration(&r.for_).is_none() {
+    let Some(lasts) = request_duration(&r.for_) else {
         return Err(Error::BadRequest("for: 15m, 1h, 8h or 1d".into()));
+    };
+    // A folder's rule reaches every folder under it: one at a secrets environment's root (or with
+    // no folder) is all of it, or every environment's, so it lasts 8 hours at most, as a
+    // remembered approval of one does.
+    if r.product == "secrets" && r.path.as_deref().is_none_or(|p| p == "/") && lasts > 8 * 3_600_000 {
+        return Err(Error::BadRequest("this reaches every folder of the environment (name a folder in path for longer): for 15m, 1h or 8h".into()));
     }
     // Tokens and approvals are changed by people, never asked for: a token that could manage
     // tokens could widen itself past any approval.

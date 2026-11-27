@@ -1484,6 +1484,11 @@ async fn a_token_asks_for_access_for_a_while() {
     assert_eq!(d.call(OPERATOR, Method::POST, "/v1/access/requests", Some(ask.clone())).await.0, StatusCode::BAD_REQUEST, "only a token asks");
     let tokens = json!({ "product": "access", "action": "admin", "for": "15m", "reason": "let me fix my own rules" });
     assert_eq!(d.call(&token, Method::POST, "/v1/access/requests", Some(tokens)).await.0, StatusCode::FORBIDDEN, "never tokens and approvals");
+    // A whole environment's secrets (a folder's rule reaches every folder under it) for 8 hours at
+    // most; one folder for longer.
+    let secrets = |path: Option<&str>| json!({ "product": "secrets", "action": "read", "resource": "web", "environment": "production", "path": path, "for": "1d", "reason": "look into the outage" });
+    assert_eq!(d.call(&token, Method::POST, "/v1/access/requests", Some(secrets(None))).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(d.call(&token, Method::POST, "/v1/access/requests", Some(secrets(Some("/api")))).await.0, StatusCode::ACCEPTED);
     let (s, apr) = d.call(&token, Method::POST, "/v1/access/requests", Some(ask.clone())).await;
     assert_eq!((s, apr["state"].as_str(), apr["args"]["reason"].as_str()), (StatusCode::ACCEPTED, Some("pending"), Some("drop the scratch database I made")), "{apr}");
     assert!(apr["summary"].as_str().is_some_and(|s| s.contains("every environment")), "the person reads its whole reach: {apr}");

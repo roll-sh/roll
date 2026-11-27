@@ -795,7 +795,7 @@ static TOOLS: &[Tool] = &[
             b("resource", Ty::Str, "One resource's id (every resource of the product when left out)"),
             b("environment", Ty::Str, "Only in this environment"),
             b("path", Ty::Str, "Only under this folder"),
-            breq("for", Ty::Choice(&["15m", "1h", "8h", "1d"]), "For how long"),
+            breq("for", Ty::Choice(&["15m", "1h", "8h", "1d"]), "For how long (a whole environment's secrets, no folder in path, 8h at most)"),
             breq("reason", Ty::Str, "Why: the person deciding reads it"),
         ],
     ),
