@@ -23420,6 +23420,115 @@ Not done, found:
 - Subquery Scan widths (remove_unused_subquery_outputs' NULLs at their types' widths), memoize:8,
   subselect:19 rows, the catalog plans (bloat), as agent 288 left them.
 
+## Analytic CPU, round 18: numeric sums of computed numbers exact, LIKE's literal patterns on stored bytes (agent 345)
+
+Round 17 (332) left roll PGO behind the better of pgrust and PostgreSQL 18.6 the most on q02
+1.93x, q11 1.90x, q14 1.79x, q20 1.76x. Base **b1** is `19c7a8758` (cand/a341-2); BENCH
+"Analytic CPU, round 18" has the tables. A fresh profile split of the four on `68ec346cb`
+(`instructions:upp`, period 2,000,003, LBR; `~/.cache/a345/bench/split.py`, 332's categories, each
+sample put where its leaf-most frame says; LBR stacks hold 32 frames, so only the leaf side is
+trusted), % of the query:
+
+| query | keyed fetch: get / seek / decode | index scan | join build / probe | aggregate | scans | nested loop rows | other |
+|---|---|---|---|---|---|---|---|
+| q02 | 15.0 / 3.8 / 7.6 | 5.0 | 24.9 / 3.2 | 1.3 | 11.0 | 23.6 | 4.6 |
+| q11 | 16.4 / 3.2 / 10.1 | 2.8 | 2.5 / - | 33.3 | 0.7 | 20.1 | 11.0 |
+| q14 | 4.5 / 6.9 / 21.1 | 4.7 | 10.7 / 0.4 | 1.0 | 28.8 | - | 22.0 |
+| q20 | 16.2 / 7.0 / 2.6 | 13.3 | 0.2 / 1.1 | 24.6 | 20.7 | 7.4 | 6.9 |
+
+What the parts are, by the leaf frames:
+- q11 (64,800 partsupp rows through two nested loops, InitPlan and main, ~12.7k instructions a
+  row against PostgreSQL's ~5.9k): `sum(ps_supplycost * ps_availqty)` evaluated by `eval` in
+  `agg::feed`, 10.2% of the query (~1.3k a row: the int4 cast to a `Numeric`, the product, each an
+  `Arc`, then `SumNum::add`); `project_moving` 10.6% and `concat_rows` 3.3% (the 16-value joined
+  rows); the partsupp rows' decode 7.1%; the fetches ~20%.
+- q20: the SubPlan 62% (8,332 runs, ~65k instructions a run): almost all its index scan's keyed
+  lineitem fetches (`fetch_entries` / `get_sorted_snap`, ~30% of the query, ~4.4k a fetched row)
+  and entry reads; the Aggregate and the rescans ~2%. The outer `part` scan ~20%: `Pre::decode`
+  6.1%, `from_utf8` 3.6% (p_name's check before `LIKE 'forest%'`), `displaced_inserts` 4.7%.
+- q02: the Hash's 158,720 inner rows: the nested loop's partsupp fetches and decode (~900 a row),
+  sizing (`workmem::data_len` 6.3%, already on its fast paths), the 8 batches' spill encode
+  (`encode_value` 6.7%); the correlated min SubPlan 10.9%; the parallel `part` scan 11.6%
+  (`from_utf8` 1.0% for `LIKE '%BRASS'`).
+- q14: the parallel part scan's decode for the hash build (`decode_row_need_spare` 12.7%: p_type's
+  `Arc<str>`, made in the workers and freed on another thread), the build (`Narrow::shrink`,
+  `insert_entry`, `data_len`), lineitem's 80k keyed fetches through `IndexChunk` (~11%).
+
+**What changed**:
+- `exec/agg.rs`, `feed`: sum / avg of numeric (`SumNum`, through `Accum::sum_num`) of an
+  argument that isn't a plain column takes it as an exact number, `kernel::expr_num`: columns and
+  constants as `small_num` reads them, an integer cast to numeric without a typmod, numeric + − ×
+  (`num_op`, as `K::num` computes them), strict; added by `SumNum::add_wide`, no value made. Where
+  it can't (a value past an i128, a product past numeric's scale, NaN or an infinity, any other
+  expression) `eval` runs as before. The same sum, scale and count as `SumNum::add` of the value
+  `eval` makes.
+- `exec/vector.rs`, `VB::Like` (a scan's batch filter): its rows in `like_rows`, out of line
+  (inlined in `VB::eval`, the function's other kernels took +0.16% on q01, +0.25% q19: register
+  allocation), where a pattern of literals and `%` only (`LikePattern::by_bytes`) is matched on
+  the stored bytes (`matches_bytes`: a run compares as bytes either way), without `from_utf8`
+  first; other patterns as before. A stored string was valid UTF-8 when written.
+- Test: golden `a345_numeric_sums` (recorded from PostgreSQL 18.6): sums and averages over a
+  nested loop of products / sums / differences of numerics and integers, NULLs, an i128 left
+  (large products, scales that grow), the infinities and NaN, FILTER; LIKE of literal patterns,
+  multibyte ones, NOT LIKE, over a table's stored strings.
+
+**Measured** (BENCH "Analytic CPU, round 18", user instructions a run, plain dist, pairs in both
+orders, every result hash equal, peak anon+shmem 1,602-1,604 MB on every arm):
+- b1 against n3: **the 22 82.00 -> 81.53 / 81.99 -> 81.53 G (-0.57 / -0.56%)**: q11 -8.75 / -8.74%,
+  q13 -6.14 / -6.12% (`o_comment NOT LIKE '%special%requests%'` over 1.5M rows), q20 -3.79 /
+  -3.78%, q02 -1.32 / -1.34%, q16 -1.16 / -1.13%, q22 -0.49 / -0.43%, q09 -0.47 / -0.48%, q06
+  -0.26 / -0.24%, q19 -0.14 / -0.19%; the largest rise q14 +0.06 / +0.07%.
+- PGO (`tools/dist-pgo.sh` with its own training for each arm, staleness 0 of 2,955 / 3,045 hot
+  functions; BENCH's table): pt1 against ptn3 **the 22 74.82 -> 74.75 / 74.80 -> 74.73 G (-0.09 /
+  -0.09%)**: q11 -9.2 / -9.4%, q13 -5.9%, q20 -3.8 / -3.9%, q16 -1.5 / -1.6%, q02 -1.2 / -1.3%,
+  q18 -0.5 / -0.6%; and lineitem's scan queries up (q17 +2.4 / +2.2%, q15 +1.7%, q12 +1.3%, q06
+  +1.2%, q21 +0.9%, q01 +0.6%), none of them in plain dist (all within +0.07%): in ptn3's trained
+  build `Block::run_rows` (storage/sst.rs, unchanged) stays out of line in
+  `Scan::fill_batch_rows` (its own symbol, 31% / 26% of q17 / q06's samples; inlined in pt1's),
+  `VB::eval` level (12.2 / 11.1% of q06): the two trainings' inlining, not this change. With agent
+  337's profile for both arms (`--profdata`, n3 / b1's code) the 22 were -0.03%: `VB::eval`,
+  `agg::feed` and `LikePattern::matches` change their control flow and lose their counts there
+  (q06 +2.1%, q12 +2.3%, q19 +2.4%, q22 +2.5%, every batch filter), so that pair can't gate it.
+- `tools/crash-binary.py` seed 1 against pn3's binary (n3's code): 7 rounds and the clean
+  shutdown ok (329 s).
+- In process (`bench --target inproc`, 1 client, a fresh 100,000-row database a run, (I30 s - I10
+  s) / (ops30 - ops10), lane A, 5.7-6.0 foreign cores), b1 / n3: point select 31,221.0 / 31,086.9
+  user instructions an op, `range_scan_100` 386,874.1 / 386,970.3: level.
+
+**Dropped, and why** (patches in `~/.cache/a345/patches/`):
+- A projection of its input's columns in another order (q11's `ps_partkey, ps_supplycost,
+  ps_availqty`, joined columns 11, 14, 13) asking the nested loop for the ascending set
+  (`project_columns`) and reordering: q11 -5.85% against -8.75% without it (n2 against n1's
+  numbers): the nested loop's `pick` clones each value through an out-of-line `Value::clone` and
+  `NestLoopNode::step` grew (1.6 -> 5.0% of q11) more than `concat_rows` (3.1%) saved, and
+  `project_moving` stayed ~8%: its cost isn't the wide row (`project-reorder.patch`).
+- `LikePattern::matches_stored` called a row at a time from `VB::eval` (n2): q01 level but q13
+  -4.94% / q16 -0.32% against -6.14 / -1.16% with the loop out of line.
+
+**Not done, and why**:
+- q20's SubPlan: one index seek and ~7 keyed lineitem fetches a distinct (partkey, suppkey); a
+  batch of outer rows still reads ~1 key a lineitem block (8,332 pairs, ~60k rows over the whole
+  table), and a grouped hash of the year's lineitem rows (~910k) costs more than the 60k fetches:
+  what is left is the keyed fetch's own cost (the block seek, agent 311's format 5).
+- q14's `p_type LIKE 'PROMO%'` as a flag in the hash build: it would evaluate the pattern for all
+  200k parts where the join tests 80k rows, saving the decode / free of `p_type` (~3% of q14 by
+  the profile); and the plan PostgreSQL shares (Parallel Hash Join over all of part) builds the
+  whole table where 80k keyed probes of `part_pkey` would read less: a run-time swap of a
+  Parallel Hash Join's inner side for keyed probes is a larger change than this round.
+- q02 / q11's `project_moving` (~1k instructions a row, its loop over the expressions) and the
+  partsupp rows' decode (~900 a row for 3-4 values): not found cheaply.
+
+**Verification** (`tools/quick-check.sh` with `QC_CHECKED=1` on `c698e0e72`, on origin's
+`19c7a8758`): clippy 16 warnings, none new in a changed file; 415 tests in 13 binaries, and again
+`--profile verify-checked`; regress 51,148 / 51,150, 0 newly differing; isolation 1,647 / 1,648;
+pg_dump_tap 14,609 passed (no storage path changed: no crash step).
+
+**Left** (ptn3 PGO against the standing's pgrust / PostgreSQL 18.6; BENCH's table): behind the
+better of the two on 15 of the 22 (q13 now ahead, 0.94x pgrust): q02 1.90 G (1.85x pgrust), q14
+1.20 G (1.76x pgrust), q11 0.64 G (1.68x PostgreSQL), q20 0.73 G (1.66x PostgreSQL), q05 1.41x,
+q16 1.32x. q11's and q02's rows still pay the keyed fetches (~2.5k a key), the partsupp rows'
+decode, `project_moving`; q20 the SubPlan's fetches; q14 the part hash build and its fetches.
+
 ## Analytic CPU, round 17: keyed row fetches on format 4, the block seek's walk and a bitmap's checked rows (agent 332)
 
 Round 16 (319) left roll PGO behind the better of pgrust and PostgreSQL on 15 of the 22, the

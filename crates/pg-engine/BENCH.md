@@ -1568,6 +1568,102 @@ DELETE and VACUUM, 75.2 MB after VACUUM FULL (its bloat for these statements: 91
 | whole script without the three `string_agg(ctid::text ... ORDER BY id)` checks | 255.6 (UPDATE) | 359.5 |
 | the highest step's own peak, with the checks | 301 (n2 382, CHECKPOINT after the last check) | - |
 
+## Analytic CPU, round 18: numeric sums of computed numbers, LIKE's literal patterns on stored bytes (2026-11-27, agent 345)
+
+HANDOFF "Analytic CPU, round 18" has what changed. Lane C, TPC-H SF1 (loaded by b0, origin's
+`68ec346cb`), agent 332's harness copied to `~/.cache/a345/bench/` (`tpair.sh`: per build a fresh
+server on a copy of the data, a warm-up run of each query, then each query once in its own perf
+window of the server's cgroup). Builds (plain `tools/dist.sh`): **b0** `68ec346cb`, **n1** the two
+changes on it with the LIKE loop inlined in `VB::eval`; **b1** origin's `19c7a8758` (cand/a341-2),
+**n2** n1 rebased, the LIKE test a call a row and a reordered projection's columns asked of the
+nested loop, **n3** the candidate (`c698e0e72`'s code). One pair a hold; lane.sh read 3.9-5.7
+foreign cores (no pair met the 1.0 rule): instructions decide. Every result hash equal across
+each pair; peak anon+shmem over the pass 1,580-1,610 MB on every arm.
+
+### Plain dist, G user instructions a run, b1 against n3
+
+| query | b1 / n3 pair 1 (G) | n3 / b1 pair 2 (G) | % per pair |
+|---|---|---|---|
+| q01 | 7.316 / 7.316 | 7.317 / 7.316 | -0.00, +0.01 |
+| q02 | 2.254 / 2.224 | 2.224 / 2.254 | -1.32, -1.34 |
+| q03 | 4.089 / 4.088 | 4.088 / 4.089 | -0.01, -0.03 |
+| q04 | 1.342 / 1.342 | 1.341 / 1.342 | -0.02, -0.05 |
+| q05 | 2.767 / 2.766 | 2.767 / 2.767 | -0.02, +0.02 |
+| q06 | 3.376 / 3.367 | 3.367 / 3.376 | -0.26, -0.24 |
+| q07 | 3.454 / 3.455 | 3.455 / 3.455 | +0.04, -0.00 |
+| q08 | 1.349 / 1.349 | 1.349 / 1.348 | -0.01, +0.03 |
+| q09 | 7.622 / 7.586 | 7.585 / 7.622 | -0.47, -0.48 |
+| q10 | 5.544 / 5.544 | 5.544 / 5.543 | +0.00, +0.03 |
+| q11 | 0.822 / 0.750 | 0.750 / 0.822 | -8.75, -8.74 |
+| q12 | 5.878 / 5.878 | 5.879 / 5.878 | -0.00, +0.01 |
+| q13 | 4.106 / 3.854 | 3.854 / 4.105 | -6.14, -6.12 |
+| q14 | 1.380 / 1.381 | 1.381 / 1.380 | +0.06, +0.07 |
+| q15 | 2.306 / 2.305 | 2.304 / 2.306 | -0.08, -0.07 |
+| q16 | 2.867 / 2.833 | 2.833 / 2.866 | -1.16, -1.13 |
+| q17 | 2.851 / 2.850 | 2.849 / 2.848 | -0.06, +0.05 |
+| q18 | 15.464 / 15.466 | 15.465 / 15.464 | +0.01, +0.01 |
+| q19 | 0.470 / 0.470 | 0.470 / 0.471 | -0.14, -0.19 |
+| q20 | 0.881 / 0.847 | 0.848 / 0.881 | -3.79, -3.78 |
+| q21 | 5.237 / 5.239 | 5.239 / 5.238 | +0.03, +0.01 |
+| q22 | 0.623 / 0.620 | 0.620 / 0.623 | -0.49, -0.43 |
+| the 22 | 82.00 / 81.53 | 81.53 / 81.99 | -0.57, -0.56 |
+
+- n3 against b1: the 22 -0.57 / -0.56%: q11 -8.7% (its sums' products without values), q13
+  -6.1% (`o_comment NOT LIKE '%special%requests%'`), q20 -3.8% (`p_name LIKE 'forest%'` and the
+  SubPlan's sum's comparison), q02 -1.3% (`p_type LIKE '%BRASS'`), q16 -1.1%, q22 -0.5%, q09
+  -0.5%, q06 -0.25%; the largest rise q14 +0.07%.
+- b0 against n1 (both orders): the 22 -0.50 / -0.50%: q11 -8.75%, q13 -5.7%, q20 -3.5 / -3.7%,
+  q02 -1.2%, q16 -1.0 / -1.1%, but q01 +0.16 / +0.16%, q19 +0.19 / +0.25%: the LIKE loop inlined
+  in `VB::eval` made the function's other kernels cost more (q01's `VB::eval` 2.9% -> 3.6% of its
+  samples); n3's loop is out of line (`like_rows`).
+- b1 against n2 (one pair): the 22 -0.42%, q11 -5.85% (the reordered projection: dropped), q13
+  -4.94%, q16 -0.32% (the LIKE call a row: dropped).
+- In process (`bench --target inproc oltp`, 1 client, a fresh 100,000-row database a run, (I30 s -
+  I10 s) / (ops30 - ops10), lane A at 5.7-6.0 foreign cores), b1 / n3: point select 31,221.0 /
+  31,086.9 user instructions an op, `range_scan_100` 386,874.1 / 386,970.3.
+
+### PGO, each arm its own training, with the standing's pgrust and PostgreSQL 18.6
+
+**pt1** / **ptn3**: `tools/dist-pgo.sh --out` of b1 and n3's commits (each its own training;
+staleness 0). One pair a hold, both orders (lane.sh 6.1-6.6 foreign cores); the PGO columns are
+each arm's mean of its two runs, the plain ones b1's and n3's means of the pairs above. pgrust (its
+published PGO build) and PostgreSQL are BENCH "Standing, 2026-11-24"'s, not run again.
+
+| query | pt1 PGO (G) | ptn3 PGO (G) | % | b1 plain | n3 plain | pgrust | PostgreSQL | ptn3 / best other |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| q01 | 7.337 | **7.382** | +0.62 | 7.316 | 7.316 | 6.76 | 45.22 | 1.09x |
+| q02 | 1.928 | **1.904** | -1.25 | 2.254 | 2.224 | 1.03 | 1.16 | 1.85x |
+| q03 | 3.625 | **3.643** | +0.52 | 4.089 | 4.088 | 3.52 | 4.07 | 1.04x |
+| q04 | 1.203 | **1.213** | +0.90 | 1.342 | 1.341 | 1.54 | 1.01 | 1.20x |
+| q05 | 2.379 | **2.389** | +0.41 | 2.767 | 2.767 | 1.69 | 1.98 | 1.41x |
+| q06 | 3.219 | **3.258** | +1.22 | 3.376 | 3.367 | 5.76 | 4.84 | 0.67x |
+| q07 | 2.966 | **2.983** | +0.58 | 3.454 | 3.455 | 3.31 | 2.57 | 1.16x |
+| q08 | 1.158 | **1.165** | +0.53 | 1.348 | 1.349 | 1.14 | 0.93 | 1.25x |
+| q09 | 6.631 | **6.619** | -0.18 | 7.622 | 7.586 | 14.35 | 13.12 | 0.50x |
+| q10 | 5.174 | **5.192** | +0.35 | 5.543 | 5.544 | 4.33 | 6.58 | 1.20x |
+| q11 | 0.705 | **0.640** | -9.30 | 0.822 | 0.750 | 0.39 | 0.38 | 1.68x |
+| q12 | 5.877 | **5.953** | +1.29 | 5.878 | 5.878 | 8.93 | 8.73 | 0.68x |
+| q13 | 3.630 | **3.415** | -5.92 | 4.105 | 3.854 | 3.63 | 6.83 | 0.94x |
+| q14 | 1.197 | **1.197** | -0.00 | 1.380 | 1.381 | 0.68 | 1.12 | 1.76x |
+| q15 | 2.233 | **2.271** | +1.69 | 2.306 | 2.304 | 2.95 | 3.16 | 0.77x |
+| q16 | 2.393 | **2.356** | -1.56 | 2.866 | 2.833 | 1.79 | 3.60 | 1.32x |
+| q17 | 2.719 | **2.782** | +2.30 | 2.850 | 2.849 | 2.22 | 4.60 | 1.25x |
+| q18 | 13.944 | **13.870** | -0.54 | 15.464 | 15.466 | 16.22 | 41.14 | 0.86x |
+| q19 | 0.423 | **0.426** | +0.71 | 0.471 | 0.470 | 0.41 | 0.40 | 1.07x |
+| q20 | 0.761 | **0.732** | -3.88 | 0.881 | 0.847 | 0.62 | 0.44 | 1.66x |
+| q21 | 4.764 | **4.805** | +0.86 | 5.238 | 5.239 | 4.71 | 7.38 | 1.02x |
+| q22 | 0.541 | **0.544** | +0.54 | 0.623 | 0.620 | 0.59 | 1.13 | 0.92x |
+| the 22 | 74.81 | **74.74** | -0.09 | 81.99 | 81.53 | 86.57 | 160.39 | 0.86x pgrust |
+
+- ptn3 against pt1: -0.09 / -0.09% (74.82 -> 74.75, 74.80 -> 74.73 G): q11 -9.3%, q13 -5.9%, q20
+  -3.9%, q16 -1.6%, q02 -1.2%; lineitem's scan queries +0.6..+2.4% (q17, q15, q12, q06): in
+  ptn3's build `Block::run_rows` isn't inlined into `Scan::fill_batch_rows` (31% / 26% of q17 /
+  q06's samples as its own symbol), unchanged code, the trainings' inlining; plain dist level.
+- With agent 337's profile for both arms (`--profdata`, pb1 / pn3: staleness 4.66 / 4.75%) the 22
+  were 77.99 -> 77.97 G (-0.03%), q06 +2.1%, q12 +2.3%, q19 +2.4%, q22 +2.5%: `VB::eval`'s control
+  flow changed, it lost its counts.
+- Behind the better of pgrust and PostgreSQL on 15 of the 22 (q13 now 0.94x pgrust).
+
 ## Analytic CPU, round 17: keyed row fetches on format 4, the block seek's walk and a bitmap's checked rows (2026-11-26, agent 332)
 
 HANDOFF "Analytic CPU, round 17" has what changed. Lane C, TPC-H SF1 (loaded by b0, origin's
