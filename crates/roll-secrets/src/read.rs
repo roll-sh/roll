@@ -1194,7 +1194,6 @@ impl Secrets {
         match once {
             Some(Once { by, purpose, to }) => {
                 let to = match to {
-                    Some(t) if names::sensitive(&e.row.tags) => format!(", a sensitive key sent only to {t}"),
                     Some(t) => format!(", sent only to {t}"),
                     None => String::new(),
                 };

@@ -3434,6 +3434,8 @@ impl Store {
                  ON CONFLICT (preview_id, service, revision) DO UPDATE SET at = excluded.at",
                 params![id, service, revision, host, url, now],
             )?;
+            // Kept again (started on demand): its link isn't a gone push's any more.
+            c.execute("DELETE FROM gone_pushes WHERE host = ?", [host.as_str()])?;
             let old: Vec<String> = c.query(
                 "SELECT revision FROM pinned WHERE preview_id = ? AND service = ? ORDER BY at DESC LIMIT 1000 OFFSET ?",
                 params![id, service, PINNED_KEEP as i64],

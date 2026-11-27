@@ -1997,7 +1997,7 @@ impl Engine {
     /// any more): a failure is said and doesn't hold the push up. The copy stays recorded, so
     /// the next eviction or the preview's teardown deletes it. A reset, changed masks and the
     /// teardown use the strict one: a copy masked by older rules must never stay reachable.
-    async fn drop_pinned_data_or_say(&self, id: &str, which: impl Fn(&crate::store::PinnedData) -> bool) -> anyhow::Result<()> {
+    pub(super) async fn drop_pinned_data_or_say(&self, id: &str, which: impl Fn(&crate::store::PinnedData) -> bool) -> anyhow::Result<()> {
         if let Err(e) = self.drop_pinned_data(id, which).await {
             warn!(preview = %id, error = %e, "previews: deleting an earlier push's copy");
             self.store.log(id, &format!("couldn't delete an earlier push's copy of its data yet: tried again later ({e:#})"))?;
