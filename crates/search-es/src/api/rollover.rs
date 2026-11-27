@@ -648,10 +648,21 @@ pub async fn rollover(ctx: &Ctx<'_>) -> EsResult<Reply> {
         return Reply::ok(rollover_response(&source, &trial_name, false, dry_run, false, false, results));
     }
     let met = met_conditions(&req.conditions, &results);
-    let create = req.create;
+    let mut create = req.create;
+    let (auth, mut aliases) = crate::api::indices::authorized_aliases(ctx, &mut create.aliases)?;
+    // The rolled-over alias moves on its own terms (`apply` drops it from the body's aliases).
+    aliases.retain(|a| *a != target);
     let t = target.clone();
     let ni = new_index.clone();
-    let (old, new) = ctx.cluster.update(move |st| apply(st, &t, ni.as_deref(), create, met, now)).await?;
+    let (old, new) = ctx
+        .cluster
+        .update(move |st| {
+            let (old, new) = apply(st, &t, ni.as_deref(), create, met, now)?;
+            // On the index the rollover made (its name is the state's), before the state is kept.
+            auth.check_new(&new, &aliases)?;
+            Ok((old, new))
+        })
+        .await?;
     Reply::ok(rollover_response(&old, &new, true, false, false, true, results))
 }
 
