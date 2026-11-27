@@ -375,6 +375,18 @@ impl Target {
     }
 }
 
+/// Whether a folder is the root, the whole environment: `/`, or one spelled with more slashes
+/// (`//`, which [`under`] reads as `/`). Anything deciding "the whole environment" asks this.
+pub fn is_root(path: &str) -> bool {
+    path.trim_end_matches('/').is_empty()
+}
+
+/// A rule's folder in its one spelling: `/`, or `/a/b` with no empty, `.` or `..` folder and no
+/// trailing `/`, so each folder is named one way and the root is only `/`.
+fn canonical_path(p: &str) -> bool {
+    p == "/" || p.strip_prefix('/').is_some_and(|rest| rest.split('/').all(|s| !s.is_empty() && s != "." && s != ".."))
+}
+
 fn under(path: &str, prefix: &str) -> bool {
     let prefix = prefix.trim_end_matches('/');
     prefix.is_empty() || path == prefix || path.strip_prefix(prefix).is_some_and(|rest| rest.starts_with('/'))
@@ -530,9 +542,9 @@ impl Scope {
                 out.push(format!("{at}: \"*\" alone isn't an environment (leave environments out for all of them)"));
             }
             if let Some(paths) = &r.paths
-                && paths.iter().any(|p| !p.starts_with('/'))
+                && paths.iter().any(|p| !canonical_path(p))
             {
-                out.push(format!("{at}: paths start with /"));
+                out.push(format!("{at}: paths are / or /folder/…, each folder named once (no empty, . or .. folder, no trailing /: /api, not /api/ or //)"));
             }
         }
         out
@@ -635,6 +647,14 @@ mod tests {
         let key = |name: &str| Target::One(Resource { index: Some(name.into()), ..Resource::new("secrets", "prj_a") });
         let by_key = Target::One(Resource { filters_index: true, ..Resource::new("secrets", "prj_a") });
         assert!(one_key.matches(&by_key) && !one_key.matches(&at("prj_a", true)) && !one_key.matches(&at("prj_a", false)) && one_key.matches(&key("payments")) && !one_key.matches(&key("billing")));
+        // A folder is spelled one way, and the root only `/`: `//` reads as every folder, so it is
+        // the root wherever "the whole environment" is decided, and no rule is made with it.
+        assert!(super::is_root("/") && super::is_root("//") && !super::is_root("/api"));
+        let paths = |p: &str| Scope(vec![rule(serde_json::json!({ "product": "secrets", "resources": "*", "paths": [p], "actions": { "read": "allow" } }))]).problems();
+        for no in ["//", "/api/", "/a//b", "/./a", "/a/..", "api"] {
+            assert!(!paths(no).is_empty(), "{no}");
+        }
+        assert!(paths("/").is_empty() && paths("/api/stripe").is_empty());
     }
 
     /// Resources, environments and paths narrow a rule; the most permissive matching rule wins;
