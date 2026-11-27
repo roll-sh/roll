@@ -288,6 +288,8 @@ pub struct Apps {
     preview_router: std::sync::OnceLock<Arc<dyn integrations::PreviewRouter>>,
     /// What writes a customer's DNS records with their token (`…/domains/{host}/configure`).
     dns_writer: std::sync::OnceLock<Arc<dyn integrations::DnsWriter>>,
+    /// roll previews' snapshots from a team's tests (`POST /__roll/snapshot` on a preview).
+    pub(crate) preview_snapshots: std::sync::OnceLock<Arc<dyn integrations::PreviewSnapshots>>,
     /// roll previews' branch pushes ([`Apps::set_git_pushes`]).
     pub(crate) pushes: std::sync::OnceLock<Arc<dyn integrations::GitPushes>>,
     /// roll's GitHub App ([`Apps::set_github_app`]).
@@ -704,6 +706,7 @@ impl Apps {
             shares: std::sync::OnceLock::new(),
             preview_router: std::sync::OnceLock::new(),
             dns_writer: std::sync::OnceLock::new(),
+            preview_snapshots: std::sync::OnceLock::new(),
             pushes: std::sync::OnceLock::new(),
             github: std::sync::OnceLock::new(),
             mail: std::sync::OnceLock::new(),
@@ -4666,6 +4669,10 @@ impl Apps {
 
     /// Where names under a project's preview domain that no environment holds go (roll previews'
     /// router, for its previews on roll's own runtime). Set once.
+    pub fn set_preview_snapshots(&self, s: Arc<dyn integrations::PreviewSnapshots>) {
+        let _ = self.preview_snapshots.set(s);
+    }
+
     pub fn set_dns_writer(&self, w: Arc<dyn integrations::DnsWriter>) {
         let _ = self.dns_writer.set(w);
     }

@@ -265,6 +265,15 @@ pub struct Note {
 }
 
 /// What answers a name under a project's preview domain that no roll apps environment holds (a
+/// roll previews' snapshots from a team's own tests (a Playwright test's PNG for the visual
+/// review): `POST /__roll/snapshot?name=` on a preview's host, with the project's bypass secret.
+/// rolld fills it with roll previews' engine. Its answer is the snapshot's (`{page, head}`); a
+/// bad name is a `BadRequest`, a preview that can't take one (full, going) a `Conflict`.
+#[async_trait]
+pub trait PreviewSnapshots: Send + Sync {
+    async fn snapshot(&self, env: &str, name: &str, png: bytes::Bytes) -> crate::Result<serde_json::Value>;
+}
+
 /// Writes a custom domain's records at the customer's DNS provider with a token of theirs (rolld:
 /// Cloudflare, through roll-edge's client). The token is used for one call and never kept.
 #[async_trait]
