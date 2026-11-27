@@ -568,10 +568,13 @@ POST  /v1/code/work/{id}/heartbeat | /release | /complete {agent?} → WorkItem
 ## Events (SSE)
 
 `GET /v1/code/repos/{owner}/{repo}/events` sends the event types `landed`, `change`, `work`, `check`,
-`preview`, `queue`, `review`, `thread`, `push` and `budget`. Repo webhooks get the same events with the same data.
+`preview`, `queue`, `review`, `thread`, `push`, `budget` and `masking`. Repo webhooks get the same events with the same data.
 A `budget` event is `{budget: {project, project_name, percent /* 80, 100 */, spent_usd_month, max_usd_month},
 dashboard_url}`: the repo's workspace project's previews passed that share of their monthly budget
-(docs/previews.md). A `preview` event is `{change, preview}`, with `preview: null` once it's gone; a
+(docs/previews.md). A `masking` event is `{masking: {project, project_name, columns: [{resource,
+column, why}]}, dashboard_url}`: columns of the project's parents that its previews masked by default
+(they look like people's data and the rules don't name them), each said once (docs/previews.md,
+"Safe by default"). A `preview` event is `{change, preview}`, with `preview: null` once it's gone; a
 preview environment that went with the project's `teardown` failing adds `teardown` (what the job
 said: its exit code and its output's tail, the change's code's words), and the pull request's
 comment says so too. `became` lists what the update reached that the change's preview wasn't
@@ -618,7 +621,7 @@ GET    /v1/code/repos/{owner}/{repo}/leaks?history= → {head, files, found: [{k
 GET    /v1/code/repos/{owner}/{repo}/webhooks → Webhook[]                       writers (401 anonymous, 403 others)
 POST   /v1/code/repos/{owner}/{repo}/webhooks {url, events?, secret?, active?}
        → 201 {webhook: Webhook, ping: delivery id, secret? /* only when roll generated it: shown once */}
-       events: any of landed, change, review, thread, check, queue, work, preview, push, budget, or ["*"] (default
+       events: any of landed, change, review, thread, check, queue, work, preview, push, budget, masking, or ["*"] (default
        ["landed"]); secret: 16-200 characters (default: generated, rlw_…); 400 bad url/events/secret, or
        no ROLL_SECRET_KEY on the server (also for PATCH); at most 20 per repo (422)
 GET    /v1/code/repos/{owner}/{repo}/webhooks/{id} → Webhook · PATCH {url?, events?, secret?, active?} → Webhook
