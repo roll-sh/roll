@@ -1569,13 +1569,13 @@ From a 2026-11-24 gap review (every tool run as an agent would against a fresh r
 
 From a 2026-11-26 comparison (the spec's anniversary post, Claude's connector docs, Atlassian's, Stripe's and GitHub's changelogs; no core SEP went final since 2026-11-15):
 
-1. **A forwarded approved ask says so (after roll search #1111 lands).** From roll search's
+1. **A forwarded approved ask says so (this PR; #1111 reads it once both land).** From roll search's
    re-check of #1111: its `IndexScope` gives an approved `ask`'s indices when the owner's outcome is
    `ask`, but on a fleet the owner skips asking for a request another node decided, Allow or an
-   approved ask alike. The forwarder's signed decision (`roll_cluster::Decided`) gets an `:asked`
-   suffix when it passed on an approval, and the owner counts the ask approved only then (an older
-   owner in a rolling restart decides again and fails closed). roll search asked for it as a
-   follow-up, not inside #1111.
+   approved ask alike. The forwarder's signed decision (`roll_cluster::Decided`) now ends in
+   `:asked` when it passed on an approval (an older owner in a rolling restart decides again and
+   fails closed); #1111's `approved_ask` becomes `outcome == Ask && (!decided_before ||
+   approved_before)` after both are on main.
 2. **A preview note as a work item (after roll previews #1196 lands):** `POST
    /v1/previews/{id}/notes/{note}/work` (idempotent per note; a guest's note makes an outside-marked
    item), next to `previews_resolve_note`; `previews_list_notes` answers carry `work`.
