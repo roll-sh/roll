@@ -712,6 +712,7 @@ async fn connect_import_webhooks_and_mirror() {
             schema_risks: Vec::new(),
             schema_overlaps: Vec::new(),
             release_ms: None,
+            release_locks: Vec::new(),
             release_before_ms: None,
             screenshot_url: None,
             expires_at: None,

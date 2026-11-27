@@ -336,6 +336,17 @@ state. A pass of the reconciler:
        parent's: a migration that's slow here holds its locks on production as long
        (PlanetScale's deploy requests show this before a merge). The time is the whole job's,
        container start included (live: the change carries it).
+       The locks it held that make others wait are said beside it (PlanetScale's safe migrations,
+       squawk's lint, measured instead of guessed): while the release runs, each Postgres branch's
+       `pg_locks` is read every half second (`Brancher::locks`, as the superuser, the catalog's
+       names only, other sessions' granted locks on user tables), and the strongest per table from
+       `SHARE` up (writes wait; `ACCESS EXCLUSIVE`, reads too) is kept with how long it was seen
+       (`release.locks`, `[{table, mode, ms}]`, 10 at most): "It held ACCESS EXCLUSIVE (reads and
+       writes wait) on `public.orders` for 41 s: on production it would hold them as long", in the
+       comment and on the sheet (`engine.rs::a_releases_blocking_locks_are_said_with_its_time`;
+       `LOCKS_SQL` checked against `postgres:18-alpine` with a session holding `LOCK TABLE …
+       ACCESS EXCLUSIVE`. The live script's release doesn't take one: on ai-server a job's
+       container can't reach the host's Postgres, ufw drops Docker's bridge to the host).
        A preview's data is as old as its branch (days, on a long-lived change), so the release
        can be rehearsed on today's: `POST …/rehearse` (`roll preview rehearse`, the sheet's
        "Rehearse on today's data", 202) asks the next converge, at the change's head, to branch
@@ -2133,7 +2144,7 @@ type Preview = {
   created_by: string; created_at: number; updated_at: number;
   baseline: boolean;                  // roll keeps it to compare the project's changes with (github.baseline)
   // Checks against main's preview (types as in apps/dashboard/src/lib/previews-api.ts):
-  release?: { head: string; ms: number; before_ms: number | null } | null;
+  release?: { head: string; ms: number; before_ms: number | null; locks?: { table: string; mode: string; ms: number }[] } | null;
   rehearsal?: { head: string; by: string; at: number; ok: boolean | null; ms: number | null; error: string | null } | null; // its release on today's data (POST …/rehearse)
   masked_by_default?: { resource: string; column: string; why: string }[]; // columns masked as they look like people's data and no rule names them
   reaches?: "open" | "roll";
@@ -3014,17 +3025,15 @@ variables roll makes from a branch's URL too (it could run on the preview's own 
 change becoming queued wakes its settled preview, a rehearsal shows only at its head, and schema
 overlaps stay within a repo.
 
-1. **Masking that's safe by default, in review** (Tonic, Neosync): a Postgres parent's columns
-   that look like people's data and have no rule are masked too, `keep` says otherwise. Next:
-   the same for NoSQL and search, and the project told when production gains one (not only the
-   preview's activity).
+1. **Masking that's safe by default, for NoSQL and search too** (Postgres's landed, #1166), and
+   the project told when production gains such a column (not only the preview's activity).
 2. **Main's code on the change's migrated data** (pgroll and Reshape's expand/contract; M): main's
    preview run once against a copy of the change's branch after its release (its pages and
    endpoints), so a migration that breaks the version still running while it deploys is caught on
    real data.
-3. **Locks measured during the release** (PlanetScale's safe migrations, squawk; S–M): the
-   strongest lock each table held and for how long (`pg_locks` sampled while the release runs),
-   beside its time: "held ACCESS EXCLUSIVE on public.orders for 41 s".
+3. **Locks measured during the release, in review** (PlanetScale's safe migrations, squawk):
+   `release.locks`, the strongest per table and how long, from `pg_locks` sampled every half
+   second.
 4. **Webhooks into private previews** (Vercel's bypass in a query parameter; S): a per-preview,
    per-path bypass that fits in a Stripe or GitHub webhook URL, never the project-wide secret.
 5. **Snapshots from the team's own Playwright or Cypress suite** (Argos's, Percy's SDKs; M):
@@ -3055,7 +3064,7 @@ load (#1114), the tenth review's fixes (#1119), the visual review holding on sto
 touched that its run didn't take (#1120), a visual change refused (#1125), masked bases (#1130), more stories per run (#1135), open
 changes that change the same tables named on each other (#1136), the toolbar's Main (#1138), a release
 rehearsed on today's data (#1140), and roll apps previews' feedback button for team access
-(#1151), a rehearsal when a change is queued to land (#1155), and the eleventh review's fixes (#1160).
+(#1151), a rehearsal when a change is queued to land (#1155), the eleventh review's fixes (#1160), and masking that's safe by default (#1166).
 
 Landed 2026-11-26, morning: stories' interaction tests (#1087), what a failed one threw (#1091), both in the other browsers (#1100), the step a failed one stopped at (#1105), and restore points for Redis (#1109).
 
