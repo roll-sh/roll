@@ -343,7 +343,10 @@ state. A pass of the reconciler:
        `SHARE` up (writes wait; `ACCESS EXCLUSIVE`, reads too) is kept with how long it was seen
        (`release.locks`, `[{table, mode, ms}]`, 10 at most): "It held ACCESS EXCLUSIVE (reads and
        writes wait) on `public.orders` for 41 s: on production it would hold them as long", in the
-       comment and on the sheet (`engine.rs::a_releases_blocking_locks_are_said_with_its_time`).
+       comment and on the sheet (`engine.rs::a_releases_blocking_locks_are_said_with_its_time`;
+       `LOCKS_SQL` checked against `postgres:18-alpine` with a session holding `LOCK TABLE …
+       ACCESS EXCLUSIVE`. The live script's release doesn't take one: on ai-server a job's
+       container can't reach the host's Postgres, ufw drops Docker's bridge to the host).
        A preview's data is as old as its branch (days, on a long-lived change), so the release
        can be rehearsed on today's: `POST …/rehearse` (`roll preview rehearse`, the sheet's
        "Rehearse on today's data", 202) asks the next converge, at the change's head, to branch
