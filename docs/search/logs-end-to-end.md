@@ -1,6 +1,44 @@
 # Logs end to end: design
 
-`## Next` item 18 in [README.md](README.md). Status: design, nothing built.
+`## Next` item 18 in [README.md](README.md). Status: the OTLP/HTTP logs intake and `otel` keys are
+built (`feature/search-otlp`: `crates/search-es/src/otlp/`, [guides/logs.md](guides/logs.md));
+traces, metrics, gRPC, the Watcher page and the rest are design.
+
+As built, where the design left a choice: protobuf is read by a decoder of its own
+(`otlp/wire.rs`, the wire format OTLP needs, every length checked against the bytes present)
+rather than `prost`, one record at a time, off the reactor.
+- **Memory.** Every value is charged to the request breaker as it's built, and given back once its
+  record is written, so a wide array is stopped before it's built. A record holds at most 10,000
+  values. A resource's and a scope's part of the documents is rendered once, charged once and
+  spliced into each record's text, so a record costs its own size. The whole request's `_bulk`
+  NDJSON is built and charged before the first `_bulk` goes out; it's sent in chunks of at most
+  5 MiB, each released once sent. The JSON form's parsed tree is charged at 80× its text before
+  it's parsed (a parsed value's worst case per byte), which is why OTLP/JSON bodies stop at 4 MiB.
+- **Limits.**
+  - Attributes past 128 are dropped and counted, as SDK limits do; the routing attributes always
+    stay.
+  - A value past 1 MiB is cut and counted (a `partial_success` warning), rather than rejecting the
+    record.
+  - Nesting past 8, or 10,000 values, rejects the record.
+  - A request writes at most 64 data streams, so a leaked `otel` key can't create thousands.
+  - Ids of the wrong length are left out.
+  - A malformed message is a 400, and another content type a 415.
+- **Writes and answers.** Records are written as the client, so the key's privileges decide each
+  target. Every record refused for the same 401, 403 or 429 answers that status, not a partial
+  success a Collector would drop. Errors are Elasticsearch's JSON, not `google.rpc.Status`
+  (Collectors read the status code).
+- **Routing follows the exporter.** `.otel` is added to the dataset unless it's there, and the
+  dataset is at most 100 bytes with it.
+- **Retries.** A request refused after part of it was written (a 429 on its second chunk) may be
+  written twice when the client retries: OTLP is at least once, and `create` with generated ids
+  doesn't recognise a record it already wrote.
+- **Left.**
+  - A per-item 429 inside the `_bulk` is reported in `partial_success` rather than retried (roll's
+    `_bulk` doesn't make per-item 429s today).
+  - The cluster-wide shard limit isn't enforced on auto-create. `MAX_TARGETS` guards one request
+    against accidental cardinality, not a key's holder: an `otel` key can still create data
+    streams one `_bulk` at a time, so until the limit is enforced (`## Next` item 18), hand
+    `otel` keys only to Collectors you run.
 
 ## Why
 
