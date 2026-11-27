@@ -3499,6 +3499,55 @@ async fn status_page_incidents_open_and_close() {
     assert_eq!(state(&w, page).await, (json!("resolved"), true));
 }
 
+/// A team's own tests send a preview's snapshots to roll previews (`POST /__roll/snapshot`): only
+/// with the project's bypass secret, a PNG of at most 2 MiB, never reaching the app.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_previews_snapshot_goes_to_roll_previews_with_the_bypass() {
+    struct Snaps(Mutex<Vec<(String, String, usize)>>);
+    #[async_trait]
+    impl apps_control::integrations::PreviewSnapshots for Snaps {
+        async fn snapshot(&self, env: &str, name: &str, png: bytes::Bytes) -> apps_control::Result<Value> {
+            if name.is_empty() {
+                return Err(apps_control::Error::BadRequest("a snapshot has a name".into()));
+            }
+            self.0.lock().push((env.to_string(), name.to_string(), png.len()));
+            Ok(json!({ "page": "snap:".to_string() + name, "head": "abc" }))
+        }
+    }
+    let w = world().await;
+    let (svc, _) = image_service(&w, "web", json!({"port": 80})).await;
+    let pv = format!("/v1/apps/services/{}/environments/pv-1", svc["id"].as_str().unwrap());
+    let bypass = "ci-bypass-secret-0123456789";
+    let sha = { use sha2::Digest; sha2::Sha256::digest(bypass.as_bytes()).iter().map(|b| format!("{b:02x}")).collect::<String>() };
+    let (_, e) = call(&w.api, "PUT", &pv, Some(json!({"ephemeral": true, "access": {"signed_in": false, "token": "visitor-token-0123456789abc", "bypass_sha256": sha}}))).await;
+    let h = host(&e["url"]);
+    let send = |name: &str, secret: Option<&str>, body: Vec<u8>| {
+        let mut r = Request::builder().method("POST").uri(format!("/__roll/snapshot?name={name}")).header("host", &h);
+        if let Some(s) = secret {
+            r = r.header("x-roll-preview-bypass", s);
+        }
+        let public = w.public.clone();
+        let req = r.body(Body::from(body)).unwrap();
+        async move {
+            let resp = public.oneshot(req).await.unwrap();
+            let st = resp.status();
+            (st, serde_json::from_slice::<Value>(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap_or(Value::Null))
+        }
+    };
+    let png = || { let mut v = b"\x89PNG\r\n\x1a\n".to_vec(); v.extend_from_slice(&[0u8; 100]); v };
+    assert_eq!(send("home", Some(bypass), png()).await.0, StatusCode::NOT_FOUND, "no roll previews here: the app's own path");
+    let snaps = Arc::new(Snaps(Mutex::new(Vec::new())));
+    w.apps.set_preview_snapshots(snaps.clone());
+    assert_eq!(send("home", None, png()).await.0, StatusCode::UNAUTHORIZED);
+    assert_eq!(send("home", Some("not-it"), png()).await.0, StatusCode::UNAUTHORIZED);
+    assert_eq!(send("home", Some(bypass), b"GIF89a".to_vec()).await.0, StatusCode::BAD_REQUEST, "a PNG");
+    assert_eq!(send("home", Some(bypass), vec![0x89; 3 << 20]).await.0, StatusCode::PAYLOAD_TOO_LARGE);
+    let (st, v) = send("home", Some(bypass), png()).await;
+    assert_eq!((st, v["page"].as_str()), (StatusCode::CREATED, Some("snap:home")), "{v}");
+    assert_eq!(*snaps.0.lock(), [("pv-1".to_string(), "home".to_string(), 108)]);
+    assert_eq!(send("", Some(bypass), png()).await.0, StatusCode::BAD_REQUEST, "roll previews' own refusal");
+}
+
 /// A hostname another environment holds is taken by whoever proves its DNS (Vercel's "linked to
 /// another team"): a TXT record of the claimant's own at its challenge name, then one write moves
 /// it, and the holder is told.

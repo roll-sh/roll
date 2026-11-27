@@ -931,6 +931,13 @@ service"), and a call the issuer gives no token for is `cron.failed` saying so. 
   no cookie or redirect, and take `roll_hook` out of the query before the app sees it; a wrong
   token or another path gets the gate's own answer, never a hint. Only their paths are listed
   back (`webhook_paths`); roll previews sends the access again when one is made or revoked.
+  A team's own tests can send a preview's snapshots to roll previews' visual review: `POST
+  /__roll/snapshot?name=` on a `pv-` host with `X-Roll-Preview-Bypass` (the project's bypass
+  secret, constant time; never a visitor's cookie, on a public preview too), a PNG of at most
+  2 MiB, handed to roll previews (`PreviewSnapshots`) and never to the app: 401 without the
+  secret, 413 past the size, 400 for what isn't a PNG or a name roll previews refuses, 409 when
+  the preview can't take one, a 404 where roll previews isn't on the node or no bypass is set.
+  `api.rs::a_previews_snapshot_goes_to_roll_previews_with_the_bypass`.
 - **Never indexed**: every answer of a preview's (ephemeral) environment, and of a deployment's
   own URL, carries `X-Robots-Tag: noindex`, whatever the app sets (Vercel's previews do the
   same): the app's pages, roll's pages, the 401 and the access link's redirect. Production is
