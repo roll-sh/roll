@@ -1850,6 +1850,8 @@ static ROWS: &[Row] = &[
     // A folder upload's files as deployed (never the environment a bundle carries, nor a file
     // named as a secret): source can hold credentials all the same, so it's revealed, not read.
     row("GET", "/v1/apps/services/{id}/environments/{env}/deploys/{dep}/source", "apps", REVEAL, one(PG, "service")).env(EnvFrom::Param("env")),
+    // Its image's layers can hold what its build had: reveal, as its source.
+    row("GET", "/v1/apps/services/{id}/environments/{env}/deploys/{dep}/image", "apps", REVEAL, one(PG, "service")).env(EnvFrom::Param("env")),
     // A static build's files as served (what anyone can fetch from its URL, unless it's gated).
     row("GET", "/v1/apps/services/{id}/environments/{env}/deploys/{dep}/output", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
     // Keeping a deployment from pruning changes nothing that runs.
@@ -1976,6 +1978,7 @@ static ROWS: &[Row] = &[
     // A share link lets someone outside the team in, its token only in the answer: reveal, as the
     // bypass secret is. Listing (no tokens) is read and revoking one is delete, by the prefix.
     row("POST", "/v1/previews/{id}/shares", "previews", REVEAL, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    row("POST", "/v1/previews/{id}/webhooks", "previews", REVEAL, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
     // A preview's own variables come back with their values: reveal (setting them is write, by
     // the prefix).
     row("GET", "/v1/previews/{id}/env", "previews", REVEAL, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
