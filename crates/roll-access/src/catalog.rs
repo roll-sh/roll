@@ -159,6 +159,16 @@ fn search_secret_write(b: &Value) -> Vec<Lent> {
     vec![Lent { kind: "secret".into(), r#ref: s["project"].as_str().unwrap_or("").into(), action: Action::Write, folder, key }]
 }
 
+/// The one secret key a request's path is about (`/v1/secrets/projects/{project}/environments/{env}/secrets/{key}…`),
+/// as roll secrets names keys: what an approval of it remembers (`keys: [key]`), never the folder.
+pub fn secret_key_in(path: &str) -> Option<String> {
+    let segs: Vec<&str> = path.split('?').next().unwrap_or(path).trim_start_matches('/').split('/').collect();
+    match segs.as_slice() {
+        ["v1", "secrets", "projects", _, "environments", _, "secrets", key, ..] => Some(decode(key)).filter(|k| roll_secrets_ref::is_key(k)),
+        _ => None,
+    }
+}
+
 /// A folder as roll secrets' `names::path` normalizes it, or `None` where it refuses it (one
 /// function for both: [`roll_secrets_ref::folder`]).
 pub(crate) fn secret_path(p: &str) -> Option<String> {

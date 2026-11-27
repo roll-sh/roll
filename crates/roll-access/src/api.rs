@@ -1251,7 +1251,8 @@ pub(crate) fn rule_of(found: &crate::store::Approval) -> crate::Result<roll_auth
         environments: found.environment.clone().map(|e| vec![e]),
         paths: found.scope_path.clone().map(|p| vec![p]),
         unprotected: false,
-        keys: None,
+        // A request about one secret key remembers that key alone (a rule limited to it).
+        keys: (found.product == "secrets").then(|| catalog::secret_key_in(&found.path)).flatten().map(|k| vec![k]),
         actions: [(action, roll_auth::scope::Effect::Allow)].into_iter().collect(),
     })
 }

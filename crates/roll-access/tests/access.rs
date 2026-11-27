@@ -2256,6 +2256,16 @@ async fn a_rule_can_grant_some_secret_keys() {
     assert_eq!(d.call(&stripe, Method::GET, "/v1/secrets/projects/prj_a/environments/staging/secrets/STRIPE_KEY/value", None).await.0, StatusCode::FORBIDDEN);
     let (s, _) = d.call(OPERATOR, Method::POST, "/v1/access/tokens", Some(json!({ "name": "x", "rules": [{ "product": "postgres", "resources": "*", "keys": ["A"], "actions": { "read": "allow" } }] }))).await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
+    // An approval of one key's reveal, remembered, is that key's rule: the next key asks again.
+    let (asks, id) = d.token(json!([{ "product": "secrets", "resources": [{ "id": "prj_a" }], "environments": ["production"], "actions": { "reveal": "ask" } }]), json!({})).await;
+    let (_, pending) = d.call(&asks, Method::GET, &at("/secrets/STRIPE_KEY/value?path=/api"), None).await;
+    let apr = pending["approval"].as_str().unwrap_or_else(|| panic!("{pending}")).to_string();
+    assert_eq!(d.call(OPERATOR, Method::POST, &format!("/v1/access/approvals/{apr}/approve"), Some(json!({ "remember": "1h" }))).await.0, StatusCode::OK);
+    let (_, g) = d.call(OPERATOR, Method::GET, &format!("/v1/access/tokens/{id}"), None).await;
+    assert_eq!(g["temporary"][0]["rule"]["keys"], json!(["STRIPE_KEY"]), "{g}");
+    assert_eq!(d.call(&asks, Method::GET, &at("/secrets/STRIPE_KEY/value?path=/api"), None).await.0, StatusCode::OK);
+    let (s, out) = d.call(&asks, Method::GET, &at("/secrets/DB_PASSWORD/value?path=/api"), None).await;
+    assert_eq!((s, out["code"].as_str()), (StatusCode::FORBIDDEN, Some("approval_pending")), "{out}");
 }
 
 /// The search console is decided from its route alone: the gate reads no body (a large `_bulk`
