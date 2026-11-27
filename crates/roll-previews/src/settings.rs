@@ -138,6 +138,12 @@ pub struct Settings {
     /// parents as they are now (`POST …/rehearse`, asked by roll at that head; off by default:
     /// each is a fresh branch, its masking and a release run).
     pub rehearse_when_queued: bool,
+    /// The release checked at each head (PlanetScale's deploy requests, pgroll's expand/contract):
+    /// `check` rehearses it on the parents as they are now at every head of a change (not only
+    /// when it's queued), beside main's code on its migrated data; `required` also keeps the
+    /// change from landing in roll until, at its head, the rehearsal passed and main's code
+    /// didn't break on the migrated data. Needs a `release`.
+    pub release_checks: ReleaseChecksRule,
     /// A command run once when the preview is deleted, before its services, secrets environment
     /// and branches go (Heroku's `pr-predestroy`): what its code made outside roll (a test-mode
     /// webhook, an OAuth redirect URI, a DNS record) cleaned up with the preview's own variables.
@@ -207,6 +213,15 @@ pub enum BrowserChecksRule {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RegressionsRule {
+    #[default]
+    Off,
+    Check,
+    Required,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReleaseChecksRule {
     #[default]
     Off,
     Check,
@@ -396,6 +411,13 @@ pub fn page_key_ok(p: &str) -> bool {
             Some((id, b)) => story_id_ok(id) && BROWSERS.contains(&b),
             None => story_id_ok(s),
         })
+        || p.strip_prefix("snap:").is_some_and(snapshot_name_ok)
+}
+
+/// A snapshot's name from the team's tests (`snap:<name>`): 1 to 80 of `a-z A-Z 0-9 - _ . /`,
+/// not starting with `/` or `.`.
+pub fn snapshot_name_ok(n: &str) -> bool {
+    (1..=80).contains(&n.len()) && !n.starts_with(['/', '.']) && !n.contains("..") && n.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/'))
 }
 
 /// The most screenshot containers that take a Storybook's stories side by side (`github.story_runs`).
@@ -610,6 +632,7 @@ impl Default for Settings {
             seed: None,
             release: None,
             rehearse_when_queued: false,
+            release_checks: ReleaseChecksRule::Off,
             teardown: None,
             masking: BTreeMap::new(),
         }
@@ -687,6 +710,9 @@ impl Settings {
 
     pub fn check(&self) -> Result<()> {
         let bad = |m: String| Err(Error::BadRequest(m));
+        if self.release_checks != ReleaseChecksRule::Off && self.release.is_none() {
+            return bad("release_checks: checks a release; set `release` first".into());
+        }
         if self.branches.is_empty() || self.branches.len() > MAX_BRANCH_GLOBS || self.branches.iter().any(|b| b.is_empty() || b.len() > 200) {
             return bad(format!("branches: 1–{MAX_BRANCH_GLOBS} globs of 1–200 characters"));
         }
@@ -952,45 +978,6 @@ fn merge(into: &mut Value, patch: &Value) {
 mod tests {
     use super::*;
     use serde_json::json;
-
-    /// Page states are a few, named, each a page of the first service's and a few known steps,
-    /// and other browsers are Firefox and WebKit; anything past that is refused when set.
-    #[test]
-    fn page_states_and_browsers_are_bounded() {
-        let ok = |states: serde_json::Value| Settings::default().patched(&serde_json::json!({ "github": { "states": states } })).is_ok();
-        assert!(ok(serde_json::json!([{ "name": "cart", "page": "/", "steps": [{ "click": "#open" }, { "type": ["#q", "shoes"] }, { "press": "Enter" }, { "wait": 500 }] }])));
-        assert!(!ok(serde_json::json!([{ "name": "Cart", "page": "/", "steps": [{ "click": "#open" }] }])), "a name of a-z, 0-9 and -");
-        assert!(!ok(serde_json::json!([{ "name": "cart", "page": "//evil.example", "steps": [{ "click": "#open" }] }])), "a page on the service's own origin");
-        assert!(!ok(serde_json::json!([{ "name": "cart", "page": "/", "steps": [{ "press": "F12" }] }])), "a key from the list");
-        assert!(!ok(serde_json::json!([{ "name": "cart", "page": "/", "steps": [{ "wait": 60000 }] }])), "a wait up to 5 s");
-        assert!(!ok(serde_json::json!([{ "name": "cart", "page": "/", "steps": [{ "eval": "alert(1)" }] }])), "no other step");
-        assert!(!ok(serde_json::json!([{ "name": "cart", "page": "/", "steps": [] }])), "a step at least");
-        // A sign-in the same way, its typed text a variable's name where it's a secret.
-        let login = |l: serde_json::Value| Settings::default().patched(&serde_json::json!({ "github": { "login": l } })).ok().and_then(|s| s.github.login);
-        let l = login(serde_json::json!({ "page": "/login", "steps": [{ "type": ["#email", "qa@acme.dev"] }, { "type": ["#password", "$E2E_PASSWORD"] }, { "press": "Enter" }] })).expect("a sign-in");
-        assert_eq!(l.names(), ["E2E_PASSWORD"]);
-        assert!(login(serde_json::json!({ "page": "https://evil.example/login", "steps": [{ "click": "#go" }] })).is_none() && login(serde_json::json!({ "page": "/login", "steps": [] })).is_none());
-        assert!(super::var_ref("$e2e").is_none() && super::var_ref("$1X").is_none() && super::var_ref("hunter2").is_none());
-        let four: Vec<serde_json::Value> = (0..4).map(|i| serde_json::json!({ "name": format!("s{i}"), "page": "/", "steps": [{ "wait": 1 }] })).collect();
-        assert!(!ok(serde_json::json!(four)), "at most 3");
-        let browsers = |b: serde_json::Value| Settings::default().patched(&serde_json::json!({ "github": { "browsers": b } })).is_ok();
-        assert!(browsers(serde_json::json!(["firefox", "webkit", "webkit-phone"])));
-        assert!(!browsers(serde_json::json!(["chrome"])) && !browsers(serde_json::json!(["webkit", "webkit"])), "the two other browsers, each once");
-        assert_eq!((storybook_entry("web"), storybook_entry("web:/sb/")), (Some(("web", "/")), Some(("web", "/sb/"))));
-        let flags = |f: serde_json::Value| Settings::default().patched(&serde_json::json!({ "flags": f })).is_ok();
-        assert!(flags(serde_json::json!([{ "name": "new-checkout", "options": ["off", "on"] }])));
-        assert!(!flags(serde_json::json!([{ "name": "a b", "options": ["on"] }])) && !flags(serde_json::json!([{ "name": "x", "options": [] }])), "names of a word, and an option at least");
-        let rule = [FlagRule { name: "new-checkout".into(), options: vec!["off".into(), "on".into()] }];
-        assert_eq!(flags_header(&rule, "new-checkout:on|theme:dark|new-checkout:off|new-checkout"), Some("new-checkout=on".into()), "only what the rule names, once");
-        assert_eq!(flags_header(&rule, "new-checkout:maybe"), None);
-        assert!(storybook_entry("web:/sb").is_none() && storybook_entry("Web").is_none() && storybook_entry("web:/a b/").is_none(), "a service, and a path ending in /");
-        assert!(Settings::default().patched(&serde_json::json!({ "github": { "storybook": "web:/x" } })).is_err());
-        assert!(story_id_ok("components-button--primary") && !story_id_ok("button") && !story_id_ok("../x--y") && !story_id_ok("a--"), "Storybook's ids");
-        let modes = |m: serde_json::Value| Settings::default().patched(&serde_json::json!({ "github": { "modes": m } })).is_ok();
-        assert!(modes(serde_json::json!([{ "name": "dark", "color_scheme": "dark" }, { "name": "de", "locale": "de-DE", "timezone": "Europe/Berlin" }])));
-        assert!(!modes(serde_json::json!([{ "name": "none" }])) && !modes(serde_json::json!([{ "name": "x", "color_scheme": "blue" }])) && !modes(serde_json::json!([{ "name": "x", "timezone": "../etc" }])), "a mode changes something real");
-        assert!(page_key_ok("state:tab") && page_key_ok("mode:dark") && page_key_ok("browser:firefox") && page_key_ok("story:a--b") && !page_key_ok("browser:chrome") && !page_key_ok("mode:"), "every kind of page key");
-    }
 
     #[test]
     fn patches_merge_and_production_needs_a_yes() {

@@ -34,6 +34,8 @@ export interface Rule {
   resources: "*" | Selector[];
   environments?: string[];
   paths?: string[];
+  /** Secrets only: only these keys of its folders (`STRIPE_KEY`), never the folder as a whole. */
+  keys?: string[];
   actions: Partial<Record<Action, Effect>>;
 }
 
@@ -262,9 +264,14 @@ export const REMEMBER: { value: Remember; label: string }[] = [
   { value: "always", label: "Always" },
 ];
 
+/** Whether a folder is the root, as `roll_auth::scope::is_root` decides: none, `/`, or `/` spelled with more slashes (`//`). */
+function isRoot(path: string | null | undefined): boolean {
+  return !path || path.replace(/\/+$/, "") === "";
+}
+
 /** Whether remembering `a` reaches a whole environment's secrets: a folder's rule reaches every folder under it, so the root (or no folder) is all of them. */
 export function wholeEnvironment(a: Pick<Approval, "product" | "scope_path">): boolean {
-  return a.product === "secrets" && (!a.scope_path || a.scope_path === "/");
+  return a.product === "secrets" && isRoot(a.scope_path);
 }
 
 /** How long `a` may be remembered: a whole environment's secrets for 8 hours at most (the server refuses longer). */
@@ -274,11 +281,17 @@ export function rememberChoices(a: Pick<Approval, "product" | "scope_path">): ty
 
 /** Where in its resource an approval is (what remembering it keeps to): "production · folder /db". */
 export function approvalWhere(a: Pick<Approval, "environment" | "scope_path">): string {
-  return [a.environment, a.scope_path && a.scope_path !== "/" ? `folder ${a.scope_path}` : null].filter(Boolean).join(" · ");
+  return [a.environment, !isRoot(a.scope_path) ? `folder ${a.scope_path}` : null].filter(Boolean).join(" · ");
 }
 
 /** Whether approving it can be remembered: it's about one resource, and roll's policy doesn't ask several people for it. */
-export const rememberable = (a: Pick<Approval, "resource" | "gates"> & { method?: string; args?: unknown }) => Boolean(a.resource && !a.resource.startsWith("new in ")) && !a.gates?.length && !accessRequest(a);
+export const rememberable = (a: Pick<Approval, "resource" | "gates"> & { method?: string; args?: unknown; product?: string; scope_path?: string | null; scope_key?: string | null; route?: string }) =>
+  Boolean(a.resource && !a.resource.startsWith("new in ")) && !a.gates?.length && !accessRequest(a) && !lendsWholeEnvironment(a);
+
+/** Whether `a` lends a whole environment's secrets to another product's route, naming no key: approved once, never remembered (the server refuses), since every later call would reveal every key there. One naming its key (`scope_key`: apps' DNS token as `roll://production/KEY`) is remembered for that key. */
+export function lendsWholeEnvironment(a: { product?: string; scope_path?: string | null; scope_key?: string | null; route?: string }): boolean {
+  return a.product === "secrets" && !a.scope_key && isRoot(a.scope_path) && Boolean(a.route) && !a.route!.startsWith("/v1/secrets");
+}
 
 /** An access request (a token asking for one more rule for a while): how long and why, or null for a request waiting to run. */
 export function accessRequest(a: { method?: string; args?: unknown }): { for: string; reason: string } | null {
@@ -348,6 +361,8 @@ export interface Approval {
   scope_path?: string | null;
   /** The indices it was about (search). */
   scope_index?: string | null;
+  /** The one secret key a lend's approval is about (its path names another product's route). */
+  scope_key?: string | null;
 }
 
 /** Actions that destroy, ship, expose a credential or change who may do what: approve them with care. */
@@ -1007,6 +1022,7 @@ export function describeRule(r: Rule, projectName: (id: string) => string = (id)
   const parts = [productName(r.product), actions.join(", ") || "nothing", where];
   if (r.environments?.length) parts.push(r.environments.join(", "));
   if (r.paths?.length) parts.push(r.paths.join(", "));
+  if (r.keys?.length) parts.push(`keys ${r.keys.join(", ")}`);
   return parts.join(" · ");
 }
 
@@ -1309,6 +1325,8 @@ export interface Draft {
   environments: string[];
   /** Product → only these resources (its ids), instead of the project or every resource. */
   ids: Record<string, string[]>;
+  /** The secrets rule's keys: only these, never a folder as a whole. */
+  keys?: string[];
 }
 
 export const emptyDraft = (): Draft => ({ matrix: {}, project: null, environments: [], ids: {} });
@@ -1336,6 +1354,10 @@ export function draftOf(rules: Rule[]): Draft | null {
     if (res.length !== 1 || !("project" in res[0])) return null;
     d.project = res[0].project;
   }
+  // Keys narrow the one secrets rule.
+  const keyed = rules.filter((r) => r.keys?.length);
+  if (keyed.some((r) => r.product !== "secrets") || (keyed.length && rules.filter((r) => r.product === "secrets").length !== 1)) return null;
+  if (keyed.length) d.keys = keyed[0].keys;
   for (const r of rules) {
     const ids = onlyIds(r);
     if (ids) {
@@ -1356,6 +1378,7 @@ export function rulesOf(d: Draft): Rule[] {
       const resources: Rule["resources"] = ids?.length ? ids.map((id) => selectorOf(product, id)) : d.project ? [{ project: d.project }] : "*";
       const r: Rule = { product, resources, actions: Object.fromEntries(Object.entries(actions).filter(([, e]) => e)) };
       if (d.environments.length) r.environments = d.environments;
+      if (product === "secrets" && d.keys?.length) r.keys = d.keys;
       return r;
     });
 }

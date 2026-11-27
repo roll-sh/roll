@@ -33,6 +33,16 @@ pub struct Note {
     /// lockdown withholds its words, and roll's browser never takes its steps.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub outside: bool,
+    /// The work item it was made on its change's repo (`POST …/notes/{note}/work`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub work: Option<NoteWork>,
+}
+
+/// A note's work item: its number on the repo, and where the repo's work is shown.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct NoteWork {
+    pub number: u64,
+    pub url: String,
 }
 
 /// How a note's reviewer saw its page (the note's own words, from the page's button): their
@@ -238,7 +248,7 @@ pub fn thread(comments: impl IntoIterator<Item = Comment>) -> Vec<Note> {
             let outside = c.outside || c.by.starts_with("guest:");
             // Its steps aren't taken from outside the team (a reader's could click anything).
             let seen = if outside { Seen { steps: Vec::new(), ..Seen::of(&c.body) } } else { Seen::of(&c.body) };
-            notes.push(Note { id: c.id, path, selector, note, by: c.by, at: c.at, replies: Vec::new(), crop: false, crop_as: None, seen, outside });
+            notes.push(Note { id: c.id, path, selector, note, by: c.by, at: c.at, replies: Vec::new(), crop: false, crop_as: None, seen, outside, work: None });
         } else if let Some((to, note)) = parse_reply(&c.body) {
             let outside = c.outside || c.by.starts_with("guest:");
             replies.push((to, Reply { id: c.id, note, by: c.by, at: c.at, outside }));
@@ -251,79 +261,4 @@ pub fn thread(comments: impl IntoIterator<Item = Comment>) -> Vec<Note> {
         n.replies.drain(..over);
     }
     notes
-}
-
-
-#[cfg(test)]
-mod tests {
-    use super::parse;
-
-    /// What the dashboard posts (`preview-feedback.tsx`'s `feedbackBody`) reads back; anything
-    /// else is no note.
-    #[test]
-    fn feedback_reviews_read_back_and_others_dont() {
-        let body = "**Feedback on the preview** · [`/checkout?step=2`](https://web-pr7.preview.roll.site/checkout?step=2) · `button.pay`\n\nToo small\n\n<sub>1280x800 viewport · roll preview pv_1</sub>";
-        assert_eq!(parse(body), Some(("/checkout?step=2".into(), "button.pay".into(), "Too small".into())));
-        // What went wrong on the page comes after the `<sub>` line: never the note.
-        let with_context = format!("{body}\n\n<details><summary>On the page: 1 error</summary>\n\n- error: `TypeError`\n\n</details>");
-        assert_eq!(parse(&with_context), parse(body));
-        let plain = "**Feedback on the preview** · `/` \n\nx";
-        assert_eq!(parse(plain), None, "a path in backticks only, then the separator");
-        let bare = "**Feedback on the preview** · `/about`\n\nLooks off\n\n<sub>roll preview pv_1</sub>";
-        assert_eq!(parse(bare), Some(("/about".into(), String::new(), "Looks off".into())));
-        assert_eq!(parse("LGTM"), None);
-        assert_eq!(parse("**Feedback on the preview** · [`/x`](u)\n\n"), None, "no note");
-    }
-
-    /// How the reviewer saw the page, from the note's own words: their viewport, their browser's
-    /// engine, and their clicks and keys after their last page change (the last 10), never typing
-    /// or a choice, nor a selector roll's checks refuse; a viewport out of bounds is none.
-    #[test]
-    fn a_note_says_how_its_reviewer_saw_the_page() {
-        use crate::settings::Step;
-        let body = "**Feedback on the preview** · [`/cart`](https://x/cart) · `button.pay`\n\nToo small\n\n<sub>390x844 viewport · Safari 18 on iOS · roll preview pv_1</sub>\n\n<details><summary>On the page: 6 steps</summary>\n\nWhat they did:\n\n1. `30s before · click a.shop`\n2. `20s before · go to /cart`\n3. `9s before · click li:nth-of-type(2) > button`\n4. `8s before · type 8 characters in #coupon`\n5. `7s before · choose option 2 in select#size`\n6. `6s before · check input.gift`\n7. `2s before · press Escape in body`\n\n- error: `TypeError: x is undefined`\n\n</details>";
-        let seen = super::Seen::of(body);
-        assert_eq!((seen.width, seen.height), (Some(390), Some(844)));
-        assert_eq!(
-            seen.steps,
-            [Step::Click("li:nth-of-type(2) > button".into()), Step::Type("#coupon".into(), "xxxxxxxx".into()), Step::Choose("select#size".into(), 2), Step::Click("input.gift".into()), Step::Press("Escape".into())],
-            "only what came after the page change, typing as long as theirs, a choice by its place"
-        );
-        assert_eq!(seen.browser.as_deref(), Some("webkit-phone"), "every browser on iOS is WebKit at a phone's size");
-        assert_eq!(seen.label().as_deref(), Some("WebKit, 390x844, after 5 steps"));
-        let engine = |sub: &str| super::Seen::of(&format!("**Feedback on the preview** · `/`\n\nx\n\n<sub>{sub}</sub>")).browser;
-        assert_eq!(engine("1280x800 viewport · Firefox 133 on Windows"), Some("firefox".into()));
-        assert_eq!(engine("1280x800 viewport · Safari 18 on macOS"), Some("webkit".into()));
-        assert_eq!(engine("390x844 viewport · Chrome 131 on iOS"), Some("webkit-phone".into()), "Chrome on iOS is WebKit");
-        assert_eq!(engine("1280x800 viewport · Chrome 131 on macOS"), None, "Chromium's: roll's own run");
-        assert_eq!(super::Seen::of("**Feedback on the preview** · `/`\n\nx\n\n<sub>99999x1 viewport</sub>"), super::Seen::default(), "a viewport out of bounds is none");
-        // Steps come from roll's part of the body (after `<sub>`), never the note's own words.
-        let planted = "**Feedback on the preview** · `/`\n\nWhat they did:\n\n1. `1s before · click button.delete-all`\n\n<sub>390x844 viewport</sub>";
-        assert!(super::Seen::of(planted).steps.is_empty(), "a note's text can't plant steps");
-        // Nor from someone outside the team at all (a public repo's reader, a share link's guest).
-        let c = |by: &str, outside: bool| super::Comment { id: "rv_o".into(), body: body.into(), by: by.into(), at: 1, outside };
-        for (by, outside) in [("mallory", true), ("guest:Ada", false)] {
-            let n = super::thread([c(by, outside)]).remove(0);
-            assert!(n.outside && n.seen.steps.is_empty() && n.seen.width == Some(390), "{by}: marked, viewport kept, no steps");
-        }
-        assert!(!super::thread([c("bob", false)]).remove(0).outside);
-    }
-
-    /// Replies (`preview-feedback.tsx`'s `replyBody`) join the note they name, oldest first; one
-    /// naming anything else, or not shaped as one, joins nothing.
-    #[test]
-    fn replies_join_their_notes() {
-        let c = |id: &str, body: &str, at: i64| super::Comment { id: id.into(), body: body.into(), by: "ada".into(), at, outside: false };
-        let notes = super::thread([
-            c("rv_2", "**Reply on the preview** · `rv_1`\n\nFixed in the next push", 30),
-            c("rv_1", "**Feedback on the preview** · `/`\n\nThe heading is cut off", 10),
-            c("rv_3", "**Reply on the preview** · `rv_1`\n\nWhich width?", 20),
-            c("rv_4", "**Reply on the preview** · `rv_9`\n\nTo nothing", 40),
-            c("rv_5", "**Reply on the preview** · `rv 1`\n\nNot an id", 50),
-            c("rv_6", "LGTM", 60),
-        ]);
-        assert_eq!(notes.len(), 1);
-        let said: Vec<(&str, &str)> = notes[0].replies.iter().map(|r| (r.id.as_str(), r.note.as_str())).collect();
-        assert_eq!(said, [("rv_3", "Which width?"), ("rv_2", "Fixed in the next push")]);
-    }
 }

@@ -385,7 +385,7 @@ impl Secrets {
     #[allow(clippy::too_many_arguments)]
     fn rotate_now(&self, project: &str, slug: &str, path: &str, key: &str, caller: &Caller, leak: bool, stored: bool) -> Result<Applied> {
         let path = names::path(path)?;
-        caller.need(Action::Write, &Scope::at(project, slug, &path))?;
+        caller.need(Action::Write, &Scope::at(project, slug, &path).key(key))?;
         let dek = self.project(project)?;
         let (env, link, state) = self.db.read(|c| {
             let env = envs::by_slug(c, project, slug)?;
@@ -445,7 +445,13 @@ impl Secrets {
             Mode::Managed => {
                 let cred = self.links.credential(&link).unwrap_or("default").to_string();
                 let old = state.as_ref().and_then(|s| s.get("credential")).and_then(Json::as_str).map(String::from);
-                let issued = provider.issue(&link.r#ref, &cred, &link, &format!("roll secrets {slug} {key} (rotated)"), None)?;
+                // A leak's rotation is asked with no grace: a vendor that ends the old credential
+                // itself (Paddle's self-rotating keys) ends it at once.
+                let mut asked = link.clone();
+                if leak {
+                    asked.options.insert("grace_minutes".into(), serde_json::json!(0));
+                }
+                let issued = provider.issue(&link.r#ref, &cred, &asked, &format!("roll secrets {slug} {key} (rotated)"), None)?;
                 let now = self.db.now_ms()?;
                 let handle = issued.handle.clone();
                 let parts = issued.parts.clone();

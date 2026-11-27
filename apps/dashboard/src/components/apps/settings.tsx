@@ -15,6 +15,7 @@ import { SidecarsPanel } from "./sidecars";
 import { ChecksPanel } from "./checks";
 import { HeartbeatsPanel } from "./heartbeats";
 import { SplitPanel } from "./split";
+import { Silences } from "./silences";
 
 
 /** The form's values, as text (empty: the default). */
@@ -1032,6 +1033,7 @@ export function SettingsTab({
               </Field>
             )}
           </Grid>
+          {env && <Silences service={service.id} env={env.name} runner={runner} />}
         </Section>
 
         {web && (
@@ -1172,7 +1174,7 @@ export function SettingsTab({
           <Anchor id="environment" className="space-y-6">
             <InstancesPanel service={service} env={env} runner={runner} />
             <EnvironmentPanel key={env.name} service={service} env={env} runner={runner} onDeleted={onEnvDeleted} />
-            {service.run.type === "web" && <ChecksPanel service={service.id} env={env} runner={runner} />}
+            {service.run.type === "web" && <ChecksPanel service={service.id} tcp={!!service.run.tcp} env={env} runner={runner} />}
             <HeartbeatsPanel service={service.id} env={env} runner={runner} />
             {service.run.type === "web" && <SplitPanel key={env.name} service={service.id} env={env} others={service.environments.map((e) => e.name).filter((n) => n !== env.name)} runner={runner} />}
           </Anchor>

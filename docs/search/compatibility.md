@@ -169,17 +169,26 @@ Reproduce the YAML numbers with `scripts/search-yaml-suites.sh roll` (set `ROLL_
     `resource_not_found_exception`, the 500 for an id before its store exists, `…/_search`, and
     the plain-text 403 under `plugins.search_relevance.workbench_enabled: false`.
   - **Query sets.** `PUT` manual sets (other samplings refused); `POST` `topn`, `random` and
-    `pptss` from `ubi_queries` (409 without it, checked before the sampler).
-  - **Search configurations** with `%SearchText%`.
+    `pptss` from `ubi_queries` (409 without it, checked before the sampler), read as the caller.
+    Past `plugins.search_relevance.query_set.maximum` (queries, or `querySetSize`), the plugin's
+    plain-text 403 "Query Set Limit Exceeded.".
+  - **Search configurations** with `%SearchText%`, on an index that exists (400 otherwise, as the
+    plugin answers), their `searchPipeline` applied to each search.
   - **Judgments.** `IMPORT_JUDGMENT`, and `UBI_JUDGMENT` with `clickModel: coec` from UBI's events
-    (the same COEC as roll's judgments from clicks: OpenSearch's ratings to the digit). An unknown
-    click model is stored `ERROR`.
+    read as the caller through a scroll (the same COEC as roll's judgments from clicks:
+    OpenSearch's ratings to the digit). An unknown click model is stored `ERROR`.
   - **Experiments.** `POINTWISE_EVALUATION` (exactly one configuration) and `PAIRWISE_COMPARISON`
     (exactly two), run as the user who made them, with the plugin's metrics:
     - pointwise: relevant means the query's highest judged rating; precision over the hits
       returned; nDCG's ideal from every judged rating;
     - pairwise: Jaccard, RBO at 0.5 and 0.9 normalized by its depth, and the shared share.
-    Each experiment's variant and result documents are stored too.
+    Each experiment's variant and result documents are stored too, in one bulk once it's done.
+    A run is a cancellable task (the node keeps the cluster loaded for it); its maker's access is
+    checked before each search; deleting the experiment cancels it and nothing more is stored. At
+    most 4 run at once per cluster (429 past that).
+  - **Store searches** (`…/_search`) read only the store: a body with a terms lookup, an indexed
+    shape, a stored percolated document, `more_like_this` documents or a `wrapper` is refused
+    (400), since the plugin's store search runs with the plugin's own authority.
   - **Not copied.** The plugin's run order: it stores results and pairwise snapshots in the order
     its runs finish, which the fixture masks. Its null-pointer 500s for missing fields: roll
     answers 400 naming the field.
@@ -605,6 +614,26 @@ Task results: on the Elasticsearch dialect `.tasks` is a hidden, restricted syst
 `TaskResultsService` creates it); the OpenSearch dialect keeps it an ordinary index, which its
 roles name. Known gap: on the OpenSearch dialect a `wait_for_completion=false` by-query creates
 `.tasks` but stores no result document in it, where OpenSearch stores one.
+
+Aliases, where roll differs on purpose: three places are stricter than Elasticsearch 9.5.5,
+which on each is looser in a way that reads or takes over what the caller's grants don't reach
+(each checked on the 9.5.5 image).
+- An alias over a data stream may not reach a failure store the caller can't read: its
+  `::failures` component is compared too, as its plain one is (`Adding an alias is not allowed
+  when the alias has more permissions than any of the indices`). On 9.5.5, `read_failure_store`
+  on the alias's name without it on the data stream adds the alias (200), and
+  `<alias>::failures/_search` then reads the data stream's failure documents.
+- A resize's and a rollover's body aliases are authorized as an alias request is (indices:admin/aliases
+  on the new index and the alias names, no alias wider than its index, none over document or
+  field level security), as a create index's are on both. 9.5.5 lets them through: a clone of an
+  index the caller manages but can't read, made with an alias its read grant reaches, reads the
+  index; a rollover's alias takes over another index's write alias. The resize target itself
+  needs no privilege, as on 9.5.5, and can't hold more than its source.
+- `DELETE /{pattern}/_alias/{name}` (and an `_aliases` `add` or `remove_index` over a pattern)
+  answers 403 when the pattern reaches an index the caller can't change aliases on, open or
+  closed (`DELETE /*/_alias/mine-o` over another's index, and `DELETE /o*/_alias/mine-o` where
+  `o*` matches only a closed index the caller holds nothing on, are both 403); 9.5.5 narrows the
+  pattern to the indices the caller may change (404 `aliases [...] missing` when none is left).
 
 Watch records (`.watcher-history-*`) are reached only by a grant that names them (`.watch*`,
 `.watcher-history-*`, Elasticsearch's watcher roles) or that allows restricted indices, through an
@@ -1220,9 +1249,7 @@ Checked against Elasticsearch 9.5.5 (captures in
   `suppressed`, as Elasticsearch prints it), the request's other items unaffected. An update by
   query reads as the caller, as Elasticsearch's scroll does: only the documents it sees, their
   `_source` without the fields it can't see, and it writes them back so: those fields are
-  dropped from the documents (a script reading one gets `null`). Difference: Elasticsearch
-  refreshes a by-query `refresh=true` as the caller (403 without `maintenance`); roll refreshes
-  it as the cluster. A
+  dropped from the documents (a script reading one gets `null`). A
   stored result (async search, ES|QL, EQL, SQL, and SQL cursors) is its opener's (the API key, or
   the user and realm): anyone else gets 404 for it, its status and its delete (a cursor: unknown),
   except that `cancel_task` may delete it. One stored before owners were recorded is the

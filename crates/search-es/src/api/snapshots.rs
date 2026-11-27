@@ -2012,6 +2012,7 @@ pub async fn restore(ctx: &Ctx<'_>) -> EsResult<Reply> {
             rs.insert("restoreUUID".into(), random_uuid().into());
             idx.recovery_source = Some(Arc::new(rs));
             total_shards += idx.number_of_shards() as i64;
+            crate::meta::shard_limit::check_putting(st, &target, &idx.settings)?;
             st.metadata.indices.insert(target.clone(), Arc::new(idx));
             copies.push((target.clone(), name.clone(), source_uuid));
             restored.push(target);

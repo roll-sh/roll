@@ -264,6 +264,16 @@ CREATE TABLE IF NOT EXISTS visual_page_refusals (
     reason TEXT NOT NULL,
     PRIMARY KEY (preview_id, path)
 );
+-- A note made a work item on its change's repo (`POST …/notes/{note}/work`): once a note.
+CREATE TABLE IF NOT EXISTS note_work (
+    preview_id TEXT NOT NULL,
+    review_id TEXT NOT NULL,
+    number INTEGER NOT NULL,
+    url TEXT NOT NULL,
+    by TEXT NOT NULL,
+    at INTEGER NOT NULL,
+    PRIMARY KEY (preview_id, review_id)
+);
 CREATE TABLE IF NOT EXISTS resolved_notes (
     preview_id TEXT NOT NULL,
     review_id TEXT NOT NULL,
@@ -400,6 +410,17 @@ CREATE TABLE IF NOT EXISTS restore_points (
 type PageShotRow = (String, String, i64, Option<(String, String)>, Option<i64>, Option<String>);
 
 fn write_page_shots(c: &Conn<'_>, id: &str, head: &str, rows: &[PageShotRow], wanted: &[String]) -> Result<()> {
+    upsert_page_shots(c, id, head, rows)?;
+    let paths: Vec<String> = c.query("SELECT path FROM page_shots WHERE preview_id = ?", [id], |r| r.get(0))?;
+    for gone in paths.iter().filter(|p| !wanted.contains(p)) {
+        // The team's own snapshots at this head stay (sent from their tests, not taken by this
+        // run); an earlier head's go.
+        c.execute("DELETE FROM page_shots WHERE preview_id = ? AND path = ? AND NOT (path LIKE 'snap:%' AND head = ?)", [id, gone.as_str(), head])?;
+    }
+    Ok(())
+}
+
+fn upsert_page_shots(c: &Conn<'_>, id: &str, head: &str, rows: &[PageShotRow]) -> Result<()> {
     for (path, png, errors, before, change_bp, report) in rows {
         match before {
             Some((prev_head, prev_png)) => c.execute(
@@ -414,10 +435,6 @@ fn write_page_shots(c: &Conn<'_>, id: &str, head: &str, rows: &[PageShotRow], wa
                 params![id, path, head, png, errors, report],
             )?,
         };
-    }
-    let paths: Vec<String> = c.query("SELECT path FROM page_shots WHERE preview_id = ?", [id], |r| r.get(0))?;
-    for gone in paths.iter().filter(|p| !wanted.contains(p)) {
-        c.execute("DELETE FROM page_shots WHERE preview_id = ? AND path = ?", [id, gone.as_str()])?;
     }
     Ok(())
 }
@@ -1044,6 +1061,20 @@ impl Store {
         if !db.has_column("shares", "opened_day")? {
             db.add_column("shares", "opened_day", "INTEGER")?;
         }
+        // A webhook URL (one path, no cookie) is a share row with its path; a share link has none.
+        if !db.has_column("shares", "path")? {
+            db.add_column("shares", "path", "TEXT")?;
+        }
+        // A webhook URL's service: its token opens its path there only.
+        if !db.has_column("shares", "service")? {
+            db.add_column("shares", "service", "TEXT")?;
+        }
+        if !db.has_column("shares", "hits")? {
+            db.add_column("shares", "hits", "INTEGER NOT NULL DEFAULT 0")?;
+        }
+        if !db.has_column("shares", "last_at")? {
+            db.add_column("shares", "last_at", "INTEGER")?;
+        }
         Ok(Store { db, rates: Rates::default(), signing: std::sync::OnceLock::new(), sealer: std::sync::OnceLock::new() })
     }
 
@@ -1293,15 +1324,6 @@ impl Store {
                 _ => false,
             };
             Ok(Some((current, earlier)))
-        })
-    }
-
-    /// An earlier push as if it had been replaced `ms` earlier.
-    #[cfg(test)]
-    pub(crate) fn age_pinned(&self, id: &str, service: &str, revision: &str, ms: i64) -> Result<()> {
-        self.db.write(|c| {
-            c.execute("UPDATE pinned SET at = at - ? WHERE preview_id = ? AND service = ? AND revision = ?", params![ms, id, service, revision])?;
-            Ok::<_, Error>(())
         })
     }
 
@@ -1559,7 +1581,7 @@ impl Store {
             if let Some((project, change, head)) = gone {
                 emit(c, now, "deleted", &project, id, change.as_deref(), &serde_json::json!({ "head": head }))?;
             }
-            for t in ["resources", "services", "pinned", "pinned_data", "restore_points", "shares", "guest_notes", "note_tells", "visit_tickets", "visit_sessions", "visits", "activity", "screenshots", "page_shots", "visual_page_accepts", "visual_page_refusals", "mail", "resolved_notes", "base_history", "leases", "note_crops", "git_pulls", "git_reports", "runtime_facts", "gone_pushes", "run_usage", "service_spend", "previews"] {
+            for t in ["resources", "services", "pinned", "pinned_data", "restore_points", "shares", "guest_notes", "note_tells", "visit_tickets", "visit_sessions", "visits", "activity", "screenshots", "page_shots", "visual_page_accepts", "visual_page_refusals", "mail", "resolved_notes", "note_work", "base_history", "leases", "note_crops", "git_pulls", "git_reports", "runtime_facts", "gone_pushes", "run_usage", "service_spend", "previews"] {
                 let col = if t == "previews" { "id" } else { "preview_id" };
                 c.execute(&format!("DELETE FROM {t} WHERE {col} = ?"), [id])?;
             }
@@ -2144,6 +2166,12 @@ impl Store {
         Ok(self.db.read(|c| c.query_row("SELECT schema_head FROM previews WHERE id = ?", [id], |r| r.get(0)).optional())?.flatten())
     }
 
+    /// The schema's changes read at [`Store::schema_head`] (`None`: none read).
+    pub fn schema_changes(&self, id: &str) -> Result<Option<Vec<String>>> {
+        let json: Option<String> = self.db.read(|c| c.query_row("SELECT schema_changes FROM previews WHERE id = ?", [id], |r| r.get(0)).optional())?.flatten();
+        Ok(json.and_then(|j| serde_json::from_str(&j).ok()))
+    }
+
     /// `risks`: [`crate::schema::risks`] of every line, the ones past `changes`' cap too.
     pub fn set_schema_changes(&self, id: &str, head: &str, changes: Option<&[String]>, risks: &[String]) -> Result<()> {
         let json = changes.map(|c| serde_json::to_string(c).expect("strings serialize"));
@@ -2439,6 +2467,29 @@ impl Store {
     pub fn set_page_shots(&self, id: &str, head: &str, pages: &[crate::ports::PageShot], wanted: &[String]) -> Result<()> {
         let rows = self.prepare_page_shots(id, head, pages)?;
         self.db.write(|c| write_page_shots(c, id, head, &rows, wanted))
+    }
+
+    /// A picture the team's own tests sent (`snap:<name>`, Argos's and Percy's SDKs) at `head`:
+    /// a page of the visual review like any other, compared with the one it replaces at an
+    /// earlier head. At most [`SNAPSHOTS_MAX`] a preview.
+    pub fn put_snapshot(&self, id: &str, head: &str, name: &str, png: &[u8]) -> Result<()> {
+        let path = format!("snap:{name}");
+        let rows = self.prepare_page_shots(id, head, &[crate::ports::PageShot { path: path.clone(), png: png.to_vec(), errors: 0, report: Default::default() }])?;
+        use base64::Engine as _;
+        let new = base64::engine::general_purpose::STANDARD.encode(png);
+        self.db.write(|c| {
+            let others: i64 = c.query_row("SELECT COUNT(*) FROM page_shots WHERE preview_id = ? AND path LIKE 'snap:%' AND path <> ?", params![id, path], |r| r.get(0))?;
+            if others as usize >= SNAPSHOTS_MAX {
+                return Err(Error::Conflict(format!("the preview has {SNAPSHOTS_MAX} snapshots")));
+            }
+            // Another picture by the same name: what was accepted or refused isn't this one.
+            let was: Option<String> = c.query_row("SELECT png FROM page_shots WHERE preview_id = ? AND path = ?", params![id, path], |r| r.get(0)).optional()?;
+            if was.is_some_and(|w| w != new) {
+                c.execute("DELETE FROM visual_page_accepts WHERE preview_id = ? AND path = ?", params![id, path])?;
+                c.execute("DELETE FROM visual_page_refusals WHERE preview_id = ? AND path = ?", params![id, path])?;
+            }
+            upsert_page_shots(c, id, head, &rows)
+        })
     }
 
     /// What [`Store::set_page_shots`] writes, read and compared first (outside the write).
@@ -2773,6 +2824,47 @@ impl Store {
     }
 
     /// The notes resolved on a preview's page (their reviews' ids).
+    /// The notes made work items, by note: (number, where it's shown). One still being made
+    /// isn't one.
+    pub fn note_work(&self, preview: &str) -> Result<std::collections::HashMap<String, (u64, String)>> {
+        let rows: Vec<(String, i64, String)> = self.db.read(|c| c.query("SELECT review_id, number, url FROM note_work WHERE preview_id = ? AND number > 0", [preview], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))))?;
+        Ok(rows.into_iter().map(|(n, num, url)| (n, (num as u64, url))).collect())
+    }
+
+    /// Who makes note `review`'s work item, decided in one write: this caller (a row of its
+    /// own, number 0 until it's made; one a crash left over a minute ago is taken over), or the
+    /// item already made, or `Busy` while another caller makes it.
+    pub fn claim_note_work(&self, preview: &str, review: &str, by: &str) -> Result<NoteWorkClaim> {
+        let now = self.now_ms()?;
+        self.db.write(|c| {
+            let row: Option<(i64, String, i64)> = c.query_row("SELECT number, url, at FROM note_work WHERE preview_id = ? AND review_id = ?", params![preview, review], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
+            Ok::<_, Error>(match row {
+                Some((number, url, _)) if number > 0 => NoteWorkClaim::Made(number as u64, url),
+                Some((_, _, at)) if now - at < 60_000 => NoteWorkClaim::Busy,
+                Some(_) => {
+                    c.execute("UPDATE note_work SET by = ?, at = ? WHERE preview_id = ? AND review_id = ? AND number = 0", params![by, now, preview, review])?;
+                    NoteWorkClaim::Mine
+                }
+                None => {
+                    c.execute("INSERT INTO note_work (preview_id, review_id, number, url, by, at) VALUES (?, ?, 0, '', ?, ?) ON CONFLICT (preview_id, review_id) DO NOTHING", params![preview, review, by, now])?;
+                    NoteWorkClaim::Mine
+                }
+            })
+        })
+    }
+
+    /// Note `review`'s work item made (`number`), or, with `None`, not: `by`'s claim let go (one
+    /// another caller took over since stays theirs).
+    pub fn set_note_work(&self, preview: &str, review: &str, by: &str, made: Option<(u64, &str)>) -> Result<()> {
+        self.db.write(|c| {
+            match made {
+                Some((number, url)) => c.execute("UPDATE note_work SET number = ?, url = ? WHERE preview_id = ? AND review_id = ?", params![number as i64, url, preview, review])?,
+                None => c.execute("DELETE FROM note_work WHERE preview_id = ? AND review_id = ? AND number = 0 AND by = ?", params![preview, review, by])?,
+            };
+            Ok::<_, Error>(())
+        })
+    }
+
     pub fn resolved_notes(&self, preview: &str) -> Result<std::collections::HashSet<String>> {
         let ids: Vec<String> = self.db.read(|c| c.query("SELECT review_id FROM resolved_notes WHERE preview_id = ?", [preview], |r| r.get(0)))?;
         Ok(ids.into_iter().collect())
@@ -3177,6 +3269,8 @@ impl Store {
     /// The host a service (or an earlier push's, `<service>@<revision>`) answers on.
     pub fn service_host(&self, id: &str, name: &str) -> Result<Option<String>> {
         Ok(self.db.read(|c| match name.split_once('@') {
+            // Main's code on the preview's data (`web@main`): a host of its own no visitor reaches.
+            Some((svc, "main")) => c.query_row("SELECT host FROM services WHERE preview_id = ? AND name = ?", [id, svc], |r| r.get::<_, String>(0)).optional().map(|h| h.map(|h| format!("{}-main", crate::label_part(&h, 58)))),
             Some((svc, rev)) => c.query_row("SELECT host FROM pinned WHERE preview_id = ? AND service = ? AND revision = ?", [id, svc, rev], |r| r.get(0)).optional(),
             None => c.query_row("SELECT host FROM services WHERE preview_id = ? AND name = ?", [id, name], |r| r.get(0)).optional(),
         })?)
@@ -3331,6 +3425,8 @@ impl Store {
                  ON CONFLICT (preview_id, service, revision) DO UPDATE SET at = excluded.at",
                 params![id, service, revision, host, url, now],
             )?;
+            // Kept again (started on demand): its link isn't a gone push's any more.
+            c.execute("DELETE FROM gone_pushes WHERE host = ?", [host.as_str()])?;
             let old: Vec<String> = c.query(
                 "SELECT revision FROM pinned WHERE preview_id = ? AND service = ? ORDER BY at DESC LIMIT 1000 OFFSET ?",
                 params![id, service, PINNED_KEEP as i64],
@@ -3572,7 +3668,7 @@ impl Store {
         let sid = format!("shr_{}", &new_token()[..12]);
         let hash = bypass_hash(&token);
         self.db.write(|c| {
-            let live: i64 = c.query_row("SELECT COUNT(*) FROM shares WHERE preview_id = ? AND revoked = 0 AND expires_at > ?", params![id, now], |r| r.get(0))?;
+            let live: i64 = c.query_row("SELECT COUNT(*) FROM shares WHERE preview_id = ? AND path IS NULL AND revoked = 0 AND expires_at > ?", params![id, now], |r| r.get(0))?;
             if live as usize >= SHARES_MAX {
                 return Err(Error::Conflict(format!("the preview has {SHARES_MAX} live share links: revoke one first")));
             }
@@ -3588,7 +3684,7 @@ impl Store {
     /// The preview's share links, newest first (never their tokens).
     pub fn shares(&self, id: &str) -> Result<Vec<crate::Share>> {
         Ok(self.db.read(|c| {
-            c.query("SELECT id, expires_at, created_by, created_at, revoked, label, notes FROM shares WHERE preview_id = ? ORDER BY created_at DESC", [id], |r| {
+            c.query("SELECT id, expires_at, created_by, created_at, revoked, label, notes FROM shares WHERE preview_id = ? AND path IS NULL ORDER BY created_at DESC", [id], |r| {
                 Ok(crate::Share { id: r.get(0)?, expires_at: r.get(1)?, created_by: r.get(2)?, created_at: r.get(3)?, revoked: r.get::<_, i64>(4)? != 0, label: r.get(5)?, notes: r.get::<_, i64>(6)? != 0 })
             })
         })?)
@@ -3602,12 +3698,74 @@ impl Store {
         Ok(())
     }
 
+    /// A webhook URL for `path` of preview `id` (Stripe's or GitHub's, into a private preview):
+    /// that path only, for the preview's life, its token in the query. Shown once.
+    pub fn create_webhook(&self, id: &str, service: &str, path: &str, by: &str, maker: Option<&str>, label: &str) -> Result<(crate::Webhook, String)> {
+        let now = self.now_ms()?;
+        let token = format!("rph_{}", new_token());
+        let wid = format!("whk_{}", &new_token()[..12]);
+        let hash = bypass_hash(&token);
+        self.db.write(|c| {
+            let live: i64 = c.query_row("SELECT COUNT(*) FROM shares WHERE preview_id = ? AND path IS NOT NULL AND revoked = 0", [id], |r| r.get(0))?;
+            if live as usize >= WEBHOOKS_MAX {
+                return Err(Error::Conflict(format!("the preview has {WEBHOOKS_MAX} webhook URLs: revoke one first")));
+            }
+            c.execute(
+                "INSERT INTO shares (id, preview_id, hash, expires_at, created_by, created_at, maker, maker_checked, label, notes, path, service) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
+                params![wid, id, hash, i64::MAX, by, now, maker, now, label, path, service],
+            )?;
+            Ok::<_, Error>(())
+        })?;
+        Ok((crate::Webhook { id: wid, service: service.to_string(), path: path.to_string(), label: label.to_string(), created_by: by.to_string(), created_at: now, revoked: false, hits: 0, last_at: None }, token))
+    }
+
+    /// The preview's webhook URLs, newest first (never their tokens).
+    pub fn webhooks(&self, id: &str) -> Result<Vec<crate::Webhook>> {
+        Ok(self.db.read(|c| {
+            c.query("SELECT id, path, label, created_by, created_at, revoked, hits, last_at, service FROM shares WHERE preview_id = ? AND path IS NOT NULL ORDER BY created_at DESC", [id], |r| {
+                Ok(crate::Webhook { id: r.get(0)?, service: r.get::<_, Option<String>>(8)?.unwrap_or_default(), path: r.get(1)?, label: r.get(2)?, created_by: r.get(3)?, created_at: r.get(4)?, revoked: r.get::<_, i64>(5)? != 0, hits: r.get(6)?, last_at: r.get(7)? })
+            })
+        })?)
+    }
+
+    pub fn revoke_webhook(&self, id: &str, webhook: &str) -> Result<()> {
+        let n = self.db.write(|c| Ok::<_, Error>(c.execute("UPDATE shares SET revoked = 1 WHERE preview_id = ? AND id = ? AND path IS NOT NULL", params![id, webhook])?))?;
+        if n == 0 {
+            return Err(Error::NotFound(format!("no webhook URL {webhook}")));
+        }
+        Ok(())
+    }
+
+    /// A live webhook URL `token` of preview `id` for exactly `path` of `service` (as a share
+    /// link's row, for its maker's check: [`crate::visit::share_visit`]).
+    pub fn webhook_live(&self, id: &str, token: &str, service: &str, path: &str) -> Result<Option<LiveShare>> {
+        Ok(self.db.read(|c| {
+            c.query_row(
+                "SELECT id, expires_at, maker, maker_checked, label, notes FROM shares WHERE preview_id = ? AND hash = ? AND service = ? AND path = ? AND revoked = 0",
+                params![id, bypass_hash(token), service, path],
+                |r| Ok(LiveShare { id: r.get(0)?, ends: r.get(1)?, maker: r.get(2)?, maker_checked: r.get(3)?, label: r.get(4)?, notes: false }),
+            )
+            .optional()
+        })?)
+    }
+
+    /// The live webhook URLs' (service, path, token SHA-256), for a backend whose gate checks them.
+    pub fn webhook_hashes(&self, id: &str) -> Result<Vec<(String, String, String)>> {
+        Ok(self.db.read(|c| c.query("SELECT service, path, hash FROM shares WHERE preview_id = ? AND path IS NOT NULL AND service IS NOT NULL AND revoked = 0 ORDER BY created_at", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))))?)
+    }
+
+    /// A request came in by webhook URL `webhook` (how many, and when last: a relaxed write).
+    pub fn webhook_hit(&self, webhook: &str, now: i64) -> Result<()> {
+        self.db.write(|c| c.execute("UPDATE shares SET hits = hits + 1, last_at = ? WHERE id = ?", params![now, webhook]).map(drop))?;
+        Ok(())
+    }
+
     /// A live share link `token` of preview `id` (not revoked, not past).
     pub fn share_live(&self, id: &str, token: &str) -> Result<Option<LiveShare>> {
         let now = self.now_ms()?;
         Ok(self.db.read(|c| {
             c.query_row(
-                "SELECT id, expires_at, maker, maker_checked, label, notes FROM shares WHERE preview_id = ? AND hash = ? AND revoked = 0 AND expires_at > ?",
+                "SELECT id, expires_at, maker, maker_checked, label, notes FROM shares WHERE preview_id = ? AND hash = ? AND path IS NULL AND revoked = 0 AND expires_at > ?",
                 params![id, bypass_hash(token), now],
                 |r| Ok(LiveShare { id: r.get(0)?, ends: r.get(1)?, maker: r.get(2)?, maker_checked: r.get(3)?, label: r.get(4)?, notes: r.get::<_, i64>(5)? != 0 }),
             )
@@ -3706,7 +3864,7 @@ impl Store {
     pub fn share_ends(&self, id: &str, token: &str) -> Result<Option<i64>> {
         let now = self.now_ms()?;
         Ok(self.db.read(|c| {
-            c.query_row("SELECT expires_at FROM shares WHERE preview_id = ? AND hash = ? AND revoked = 0 AND expires_at > ?", params![id, bypass_hash(token), now], |r| r.get(0)).optional()
+            c.query_row("SELECT expires_at FROM shares WHERE preview_id = ? AND hash = ? AND path IS NULL AND revoked = 0 AND expires_at > ?", params![id, bypass_hash(token), now], |r| r.get(0)).optional()
         })?)
     }
 
@@ -3897,6 +4055,8 @@ impl Store {
         // Only at the head it's for: one asked at an earlier head never runs, and an earlier
         // head's outcome isn't this one's.
         let rehearsal = self.runtime_fact::<crate::Rehearsal>(&r.id, "rehearsal")?.filter(|x| x.head == r.build());
+        let main_on_change = self.runtime_fact::<crate::MainOnChange>(&r.id, "main_on_change")?.filter(|x| x.head == r.build());
+        let replay = self.runtime_fact::<crate::Replay>(&r.id, "replay")?.filter(|x| x.head == r.build());
         let masked_by_default: Vec<crate::MaskedByDefault> = self.runtime_fact(&r.id, "masked_by_default")?.unwrap_or_default();
         let schema_overlaps = self.schema_overlaps(&r, schema_changes.as_deref())?;
         let kept_until = self.kept_until(&r.id)?;
@@ -3976,6 +4136,15 @@ impl Store {
             crate::settings::RegressionsRule::Check => Some("check".to_string()),
             crate::settings::RegressionsRule::Required => Some("required".to_string()),
         };
+        // Only where there's a Postgres branch to rehearse on: a rule that could never be met
+        // holds nothing back.
+        let rehearsable = self.resources(&r.id)?.iter().any(|x| x.kind == crate::Kind::Postgres && x.r#ref.is_some());
+        let release_checks = match settings.release_checks {
+            _ if !rehearsable => None,
+            crate::settings::ReleaseChecksRule::Off => None,
+            crate::settings::ReleaseChecksRule::Check => Some("check".to_string()),
+            crate::settings::ReleaseChecksRule::Required => Some("required".to_string()),
+        };
         // An acceptance counts at its head, for what it accepted (more at that head asks again), and
         // for a required rule only a person's.
         let showing = crate::RegressionsAccepted::of(slower_routes.as_ref(), new_errors.as_ref());
@@ -4039,6 +4208,8 @@ impl Store {
             schema_changes,
             schema_overlaps,
             rehearsal,
+            main_on_change,
+            replay,
             masked_by_default,
             release,
             kept_until,
@@ -4065,6 +4236,7 @@ impl Store {
             served_secrets,
             skipped,
             regressions,
+            release_checks,
             regressions_accepted,
             regressions_compared,
             intercepted,
@@ -4136,6 +4308,18 @@ pub struct BaseRow {
 
 /// Live share links a preview may have at once.
 pub const SHARES_MAX: usize = 20;
+/// The most live webhook URLs a preview has.
+pub const WEBHOOKS_MAX: usize = 20;
+/// The most snapshots the team's tests keep on a preview.
+pub const SNAPSHOTS_MAX: usize = 40;
+
+/// [`Store::claim_note_work`]'s answer.
+#[derive(Clone, Debug, PartialEq)]
+pub enum NoteWorkClaim {
+    Mine,
+    Made(u64, String),
+    Busy,
+}
 
 /// Earlier pushes kept reachable per service.
 /// How long after it was replaced an earlier push still answers requests that name it (skew
@@ -4195,55 +4379,6 @@ pub fn month_start(now_ms: i64) -> i64 {
 
 #[cfg(test)]
 mod tests {
-    /// The pull request comment's screenshot link opens that screenshot of a public preview
-    /// until it expires; a link anyone changed (another preview, a later expiry, a guessed
-    /// signature), an older screenshot's link, or a preview gone private doesn't.
-    #[test]
-    fn a_new_heads_screenshot_keeps_the_one_before_and_how_much_changed() {
-        let png = |dark: u32| {
-            let img = image::RgbaImage::from_fn(10, 10, |x, _| if x < dark { image::Rgba([0, 0, 0, 255]) } else { image::Rgba([255, 255, 255, 255]) });
-            let mut out = std::io::Cursor::new(Vec::new());
-            img.write_to(&mut out, image::ImageFormat::Png).unwrap();
-            out.into_inner()
-        };
-        let (_dir, store) = store();
-        let (row, _) = store.create(&new("chg_visual")).unwrap();
-        let id = row.id.as_str();
-        let speed = |load_ms| crate::PageSpeed { ttfb_ms: 20, fcp_ms: Some(100), load_ms, bytes: 1000, lcp_ms: None, cls: None, endpoints: Vec::new() };
-        store.set_screenshot(id, "cs_1", &png(0), Some(&speed(900)), Some(&png(0))).unwrap();
-        assert_eq!(store.visual_change(id).unwrap(), None, "a first one: nothing to compare");
-        assert_eq!(store.page_speed(id).unwrap(), Some(crate::PageSpeedView { now: speed(900), before: None }));
-        store.set_screenshot(id, "cs_2", &png(3), Some(&speed(1200)), Some(&png(5))).unwrap();
-        assert_eq!(store.visual_change(id).unwrap(), Some(("cs_1".to_string(), 3000)), "30% of pixels");
-        assert_eq!(store.previous_screenshot(id).unwrap(), Some(png(0)));
-        assert_eq!(store.page_speed(id).unwrap(), Some(crate::PageSpeedView { now: speed(1200), before: Some(speed(900)) }));
-        // The phone-width one too, with its own change.
-        assert_eq!(store.phone_change(id).unwrap(), Some(5000));
-        assert_eq!(store.phone_screenshot(id, true).unwrap(), Some(png(0)));
-        // Against the default branch's preview: its own share, at both widths.
-        let (main, _) = store.create(&New { change_id: None, branch: Some("main".into()), key: "main".into(), ..new("chg_main") }).unwrap();
-        assert!(store.compare_with_base(id, &main.id, "main", None).is_ok() && store.base_change(id).unwrap().is_none(), "no screenshot there yet");
-        store.set_screenshot(&main.id, "cs_m", &png(1), None, Some(&png(0))).unwrap();
-        store.keep_base_history(&main.id, "cs_m").unwrap();
-        store.compare_with_base(id, &main.id, "main", None).unwrap();
-        assert_eq!(store.base_change(id).unwrap(), Some(BaseRow { preview: main.id.clone(), branch: "main".into(), change_bp: 2000, phone_bp: Some(5000), head: Some("cs_m".into()), speed: None, a11y: None, health: None, text: None, links: None, api: None, api_breaking: Vec::new(), api_unread: false }));
-        // Main moves on (to what the change's page looks like): a change that left it at cs_m is
-        // still compared with cs_m's, and shown that one.
-        store.set_screenshot(&main.id, "cs_m2", &png(3), Some(&speed(700)), Some(&png(5))).unwrap();
-        store.keep_base_history(&main.id, "cs_m2").unwrap();
-        store.compare_with_base(id, &main.id, "main", Some("cs_m")).unwrap();
-        assert_eq!(store.base_change(id).unwrap().map(|b| (b.change_bp, b.head)), Some((2000, Some("cs_m".into()))));
-        assert_eq!(store.base_screenshot(id, false, None).unwrap(), Some(png(1)));
-        store.compare_with_base(id, &main.id, "main", Some("cs_gone")).unwrap();
-        assert_eq!(store.base_change(id).unwrap().map(|b| (b.change_bp, b.head)), Some((0, Some("cs_m2".into()))), "not kept: the latest");
-        // Its load there comes along (to say "slower than main"), from the history too.
-        store.compare_with_base(id, &main.id, "main", Some("cs_m2")).unwrap();
-        assert_eq!(store.base_change(id).unwrap().and_then(|b| b.speed).map(|s| s.load_ms), Some(700));
-        // Taken again at the same head: what came before stays.
-        store.set_screenshot(id, "cs_2", &png(3), Some(&speed(1100)), Some(&png(5))).unwrap();
-        assert_eq!(store.visual_change(id).unwrap(), Some(("cs_1".to_string(), 3000)));
-        assert_eq!(store.page_speed(id).unwrap().unwrap().before, Some(speed(900)));
-    }
 
     #[test]
     fn a_share_link_opens_its_preview_until_it_ends_or_is_revoked() {
@@ -4367,23 +4502,6 @@ mod tests {
         assert!(store.vars(&b.id).is_err());
     }
 
-    /// An earlier push's copy of the data costs what it holds, in the preview's cost (and its
-    /// budget and size cap with it).
-    #[test]
-    fn an_earlier_pushs_copy_of_the_data_counts_in_the_previews_cost() {
-        let (_dir, store) = store();
-        let (row, _) = store.create(&new("chg_copy")).unwrap();
-        let before = store.cost(&row).unwrap();
-        let d = PinnedData { revision: "cs_1".into(), kind: Kind::Postgres, parent: "prj_db".into(), name: "pv-x-1".into(), r#ref: "br_1".into(), kept: None, source: "br_0".into() };
-        store.add_pinned_data(&row.id, &d).unwrap();
-        store.set_pinned_usage(&row.id, &d, &crate::ports::Usage { bytes: 3 << 20, storage_usd_month: 0.5, active_usd_hour: 0.0, month_to_date_usd: 0.25 }).unwrap();
-        let after = store.cost(&row).unwrap();
-        assert_eq!(after.bytes - before.bytes, 3 << 20);
-        assert_eq!(store.preview(&row.id).unwrap().copies, crate::Copies { count: 1, bytes: 3 << 20, usd_month: 0.5 }, "and said apart");
-        assert!((after.sleeping_usd_month - before.sleeping_usd_month - 0.5).abs() < 1e-9);
-        assert!(after.month_to_date_usd - before.month_to_date_usd >= 0.25);
-    }
-
     fn store() -> (tempfile::TempDir, Store) {
         let dir = tempfile::tempdir().unwrap();
         let s = Store::open(&Target::Sqlite(dir.path().join("p.db")), Default::default()).unwrap();
@@ -4434,10 +4552,4 @@ mod tests {
         assert_eq!(s.environment_of("postgres", "br_9").unwrap(), None);
     }
 
-    #[test]
-    fn months_start_on_the_first() {
-        // 2026-11-12T19:00:00Z → 2026-11-01T00:00:00Z
-        assert_eq!(month_start(1_794_510_000_000), 1_793_491_200_000);
-        assert_eq!(month_start(1_793_491_200_000), 1_793_491_200_000);
-    }
 }

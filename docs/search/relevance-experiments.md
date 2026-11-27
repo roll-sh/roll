@@ -242,8 +242,9 @@ system indices: a client can read and write them directly.
    - **What it counts.** For an index with analytics on, a search that records analytics counts
      an impression for each of its first 20 hits by their 1-based position (`from` included),
      each in its own index's bucket, only for a query the bucket's top list holds, at most 32
-     cells per query. A `search_click` that names a document counts on its cell; one without a
-     position counts at the document's most-shown position that hour.
+     cells per query. A `search_click` that names a document counts on its cell (one without a
+     position at the document's most-shown position), only on a cell a search made, and never
+     past its impressions.
    - **Where it's kept.** Pending hours carry the cells to the daily ring only (the 30 days, as
      the day's top queries; not the hourly ring, to keep rows small). Document ids count toward
      the pending byte budget.

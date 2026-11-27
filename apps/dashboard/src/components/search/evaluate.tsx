@@ -108,9 +108,13 @@ export function EvaluatePanel({ cluster }: { cluster: SearchCluster }) {
     return js;
   };
 
+  // Saving under a list's name replaces it: say so first.
+  const replaces = (name: string) => !lists.some((l) => l.name === name) || window.confirm(`Replace the judgment list ${name}? Its ratings are replaced by these.`);
+
   const save = async () => {
     setError(null);
     setSaved(null);
+    if (!replaces(saveAs)) return;
     try {
       const kept = await searchApi.putJudgmentList(cluster.id, saveAs, pasted());
       setLists((await searchApi.judgmentLists(cluster.id)).lists);
@@ -123,6 +127,7 @@ export function EvaluatePanel({ cluster }: { cluster: SearchCluster }) {
   const fromClicks = async () => {
     setError(null);
     setSaved(null);
+    if (!replaces(saveAs)) return;
     setBuilding(true);
     try {
       const kept = await searchApi.judgmentsFromClicks(cluster.id, saveAs, { index, min_searches: minSearches });
@@ -235,10 +240,10 @@ export function EvaluatePanel({ cluster }: { cluster: SearchCluster }) {
                 <span>or build it from clicks on {index || "the index"}, queries searched at least</span>
                 <input
                   type="number"
-                  min={1}
+                  min={5}
                   className={`${input} w-16 py-0.5 font-mono text-[12px]`}
                   value={minSearches}
-                  onChange={(e) => setMinSearches(Math.max(1, Number(e.target.value) || 1))}
+                  onChange={(e) => setMinSearches(Math.max(5, Number(e.target.value) || 5))}
                   aria-label="Minimum searches"
                 />
                 <span>times</span>

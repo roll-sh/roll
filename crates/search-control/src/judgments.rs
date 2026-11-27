@@ -223,7 +223,45 @@ pub fn parse_from_clicks(body: &[u8]) -> std::result::Result<FromClicks, String>
         Some(v) => v.as_u64().filter(|n| (1..=max).contains(n)).ok_or(format!("[{k}] is a whole number from 1 to {max}")),
     };
     let rank = u64::from(search_es::analytics::MAX_RANK);
-    Ok(FromClicks { index: index.to_string(), min_searches: n("min_searches", 10, 1_000_000)?, max_rank: n("max_rank", rank, rank)? as u32, days: n("days", 30, 30)? as u32 })
+    let min_searches = match m.get("min_searches") {
+        None | Some(Value::Null) => 10,
+        Some(v) => v.as_u64().filter(|n| (MIN_SEARCHES..=1_000_000).contains(n)).ok_or(format!("[min_searches] is a whole number from {MIN_SEARCHES} to 1000000"))?,
+    };
+    Ok(FromClicks { index: index.to_string(), min_searches, max_rank: n("max_rank", rank, rank)? as u32, days: n("days", 30, 30)? as u32 })
+}
+
+/// The fewest searches a query needs to be judged from clicks: one person's unusual searches
+/// alone never make a rating (not an anonymity guarantee: see docs/search/README.md).
+pub const MIN_SEARCHES: u64 = 5;
+/// Days a list built from clicks lasts after its window ends, as analytics' own rows do; saved
+/// again as `manual` or `import` it's the owner's for good.
+pub const CLICK_LIST_DAYS: i64 = 30;
+
+/// Whether a list built from clicks (its mapping's `_meta.roll_judgments`) is past its days at
+/// `now` (unix seconds).
+pub fn expired(meta: &Value, now: i64) -> bool {
+    meta["source"] == "clicks" && meta["clicks"]["to"].as_i64().is_some_and(|to| now > to + CLICK_LIST_DAYS * 86_400)
+}
+
+/// The lists built from clicks to delete in `st`: past their days, or whose source index lost
+/// its analytics, went, or was replaced (another uuid). Deleted in the metering pass, beside the
+/// analytics rows, as suggestions built from analytics are.
+pub fn orphaned(st: &search_es::meta::ClusterState, now: i64) -> Vec<String> {
+    let ix = &st.metadata.indices;
+    ix.values()
+        .filter(|i| i.name.starts_with(PREFIX))
+        .filter(|i| {
+            let meta = serde_json::from_str::<Value>(&i.mapping_json(false).to_json()).ok().map(|v| v["_meta"][META].clone()).unwrap_or(Value::Null);
+            if meta["source"] != "clicks" {
+                return false;
+            }
+            let source = meta["clicks"]["index"].as_str().unwrap_or("");
+            let uuid = meta["clicks"]["index_uuid"].as_str();
+            let live = ix.get(source).is_some_and(|s| search_es::analytics::enabled(s) && uuid.is_none_or(|u| u == s.uuid));
+            !live || expired(&meta, now)
+        })
+        .map(|i| i.name.clone())
+        .collect()
 }
 
 fn round3(v: f64) -> f64 {
@@ -266,7 +304,9 @@ pub fn coec(buckets: &[&search_es::analytics::Bucket], p: &FromClicks) -> Vec<St
             extra.insert("impressions".into(), json!(j.impressions));
             extra.insert("clicks".into(), json!(j.clicks));
             extra.insert("expected_clicks".into(), json!(round3(j.expected)));
-            out.push(Stored { query: q.to_string(), index: p.index.clone(), doc_id: j.doc.clone(), rating, extra });
+            // No index: a rating is about the document whichever copy of it is evaluated (a
+            // reindexed `-v2`, an alias); the source index is in the list's `_meta`.
+            out.push(Stored { query: q.to_string(), index: String::new(), doc_id: j.doc.clone(), rating, extra });
         }
     }
     out
@@ -389,6 +429,9 @@ impl Control {
     pub async fn judgment_list(&self, id: &str, name: &str) -> Result<(Value, Vec<Judgment>)> {
         let index = index_name(name).map_err(ControlError::Invalid)?;
         let Some(meta) = self.list_meta(id, name).await? else { return Err(ControlError::NotFound(format!("no judgment list [{name}]"))) };
+        if expired(&meta, crate::control::now()) {
+            return Err(ControlError::NotFound(format!("judgment list [{name}] was built from clicks and expired {CLICK_LIST_DAYS} days after its window: build it again, or save it as manual to keep it")));
+        }
         let mut ratings = Vec::new();
         let mut after: Option<Value> = None;
         loop {
@@ -411,6 +454,11 @@ impl Control {
                 break;
             }
             after = hits.last().map(|h| h["sort"].clone());
+        }
+        // A list is replaced by deleting its index and writing it again: one read while that runs
+        // (or after a write that stopped partway) finds fewer ratings than its mapping promises.
+        if meta.get("ratings").and_then(Value::as_u64).is_some_and(|n| n != ratings.len() as u64) {
+            return Err(ControlError::Conflict(format!("[{index}] holds {} ratings where its list was written with {}: it's being built, or a write stopped partway (put it again)", ratings.len(), meta["ratings"])));
         }
         let judgments = group(ratings).map_err(|e| ControlError::Invalid(format!("[{index}]: {e}")))?;
         Ok((meta, judgments))
@@ -450,8 +498,10 @@ impl Control {
     pub async fn judgments_from_clicks(&self, id: &str, name: &str, p: &FromClicks) -> Result<Value> {
         index_name(name).map_err(ControlError::Invalid)?;
         let c = self.get(id).await?;
-        let (status, v) = self.list_call(id, "GET", &format!("/{}/_settings/{}?flat_settings=true", urlencoding::encode(&p.index), search_es::analytics::SETTING), &p.index, None).await?;
-        let on = v.as_object().and_then(|o| o.get(&p.index)).and_then(|i| i["settings"][search_es::analytics::SETTING].as_str()) == Some("true");
+        let (status, v) = self.list_call(id, "GET", &format!("/{}/_settings?flat_settings=true", urlencoding::encode(&p.index)), &p.index, None).await?;
+        let settings = v.as_object().and_then(|o| o.get(&p.index)).map(|i| i["settings"].clone()).unwrap_or(Value::Null);
+        let on = settings[search_es::analytics::SETTING].as_str() == Some("true");
+        let uuid = settings["index.uuid"].as_str().unwrap_or("").to_string();
         if status == 404 || !on {
             return Err(ControlError::Invalid(format!("[{}] has no click analytics: judgments from clicks need {} on the index", p.index, search_es::analytics::SETTING)));
         }
@@ -468,7 +518,7 @@ impl Control {
             return Err(ControlError::Invalid(format!("no query of [{}] was searched {} times with its results shown in the last {} days", p.index, p.min_searches, p.days)));
         }
         let mut more = Map::new();
-        more.insert("clicks".into(), json!({ "index": p.index, "min_searches": p.min_searches, "max_rank": p.max_rank, "days": p.days, "from": from, "to": to }));
+        more.insert("clicks".into(), json!({ "index": p.index, "index_uuid": uuid, "min_searches": p.min_searches, "max_rank": p.max_rank, "days": p.days, "from": from, "to": to }));
         self.put_judgment_list(id, name, &ratings, "clicks", more).await
     }
 
@@ -486,6 +536,26 @@ impl Control {
             return Err(ControlError::NotFound(format!("no Workbench judgment list [{jid}]")));
         }
         workbench_judgments(jid, &doc)
+    }
+
+    /// The metering pass's part, for the clusters loaded here: deletes the lists built from clicks
+    /// whose source lost its analytics, or that are past their days ([`orphaned`]).
+    pub(crate) async fn run_judgment_lists(&self) {
+        for name in self.node.loaded() {
+            let Some(l) = self.node.get_loaded(&name) else { continue };
+            let st = l.cluster.state();
+            drop(l);
+            let gone = orphaned(&st, crate::control::now());
+            if gone.is_empty() {
+                continue;
+            }
+            let Ok(c) = self.get(&name).await else { continue };
+            for index in gone {
+                if let Err(e) = self.list_call(&c.id, "DELETE", &format!("/{index}"), &index, None).await {
+                    tracing::warn!(cluster = name, index, error = %e, "deleting a judgment list built from clicks failed");
+                }
+            }
+        }
     }
 
     /// `DELETE …/judgments/{name}`: the list's index goes.

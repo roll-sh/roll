@@ -130,6 +130,7 @@ function Tokens() {
                   <span className="text-[11px] text-subtle">
                     {t.environments ? t.environments.join(", ") : "all environments"}
                     {t.paths ? ` · ${t.paths.join(", ")}` : ""}
+                    {t.only_keys ? ` · keys ${t.only_keys.join(", ")}` : ""}
                     {t.allowed_ips ? ` · from ${t.allowed_ips.join(", ")}` : ""}
                     {t.keys ? ` · encryption keys ${t.keys}` : ""}
                   </span>
@@ -176,14 +177,16 @@ function NewTokenForm({ envs: all, onCreate, onCancel }: { envs: Environment[]; 
   const [allEnvs, setAllEnvs] = useState(false);
   const [picked, setPicked] = useState<Set<string>>(() => new Set([firstOpen(all)].filter((e) => e !== undefined)));
   const [paths, setPaths] = useState("");
+  const [keys, setKeys] = useState("");
   const [actions, setActions] = useState<Set<Action>>(new Set(["read", "reveal"]));
   const [ttl, setTtl] = useState("90");
   const [ips, setIps] = useState("");
   const [busy, setBusy] = useState(false);
   const pathList = paths.split(/[\s,]+/).filter(Boolean);
+  const keyList = keys.split(/[\s,]+/).filter(Boolean);
   const ipList = ips.split(/[\s,]+/).filter(Boolean);
   const ttlDays = ttl.trim() ? Number(ttl) : undefined;
-  const ok = name.trim().length > 0 && actions.size > 0 && (allEnvs || picked.size > 0) && pathList.every((p) => p.startsWith("/")) && (ttlDays === undefined || (Number.isInteger(ttlDays) && ttlDays > 0));
+  const ok = name.trim().length > 0 && actions.size > 0 && (allEnvs || picked.size > 0) && pathList.every((p) => p.startsWith("/")) && keyList.every((k) => /^[A-Za-z_][A-Za-z0-9_]{0,255}$/.test(k)) && (ttlDays === undefined || (Number.isInteger(ttlDays) && ttlDays > 0));
   const toggle = <T,>(set: Set<T>, v: T) => {
     const n = new Set(set);
     if (n.has(v)) n.delete(v);
@@ -196,6 +199,7 @@ function NewTokenForm({ envs: all, onCreate, onCancel }: { envs: Environment[]; 
     setActions(new Set(["scan"]));
     setAllEnvs(true);
     setPaths("");
+    setKeys("");
     if (!name.trim()) setName("pre-receive");
   };
   return (
@@ -209,6 +213,7 @@ function NewTokenForm({ envs: all, onCreate, onCancel }: { envs: Environment[]; 
           name: name.trim(),
           ...(allEnvs ? {} : { environments: [...picked] }),
           ...(pathList.length && { paths: pathList }),
+          ...(keyList.length && { only_keys: keyList }),
           actions: ACTIONS.filter((a) => actions.has(a)),
           ...(ttlDays !== undefined && { ttl_days: ttlDays }),
           ...(ipList.length && { allowed_ips: ipList }),
@@ -270,6 +275,10 @@ function NewTokenForm({ envs: all, onCreate, onCancel }: { envs: Environment[]; 
       <label className="block">
         <span className={label}>Folders (path prefixes; empty for all)</span>
         <input value={paths} onChange={(e) => setPaths(e.target.value)} placeholder="/api, /workers" className={`${field} font-mono`} />
+      </label>
+      <label className="block">
+        <span className={label}>Keys (only these keys of those folders; empty for every key)</span>
+        <input value={keys} onChange={(e) => setKeys(e.target.value)} placeholder="STRIPE_KEY" className={`${field} font-mono`} />
       </label>
       <label className="block">
         <span className={label}>Allowed addresses (CIDRs; empty for any)</span>
