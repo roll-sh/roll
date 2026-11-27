@@ -1511,6 +1511,12 @@ thirty-fourth review found them in the clear.
   - Services on roll apps get the same token (`PUT …/environments/pv-… {access: {token}}`), and
     roll apps' waking proxy checks it the same way: the token once, then a host-only cookie,
     else 401 without waking anything.
+  - roll apps' proxy asks roll previews, through its hooks, for a `pv-` environment's notes
+    (`…/feedback.json`), share links, guests' notes and team snapshots, naming its own service.
+    roll previews answers only for a preview it knows runs on that service (rolld's
+    `services::preview_on`, the lookup a deploy makes): an environment's name alone proves
+    nothing (roll apps lets only roll previews make `pv-` environments now, #1205; one a tenant
+    named after another's preview before that gets no notes, no share link and no snapshot).
 - **Who.** `/v1/previews` sits behind the operator token like every product's API. Scoped tokens
   (`feature/roll-mcp`) classify these routes: `GET` is `read`; create, refresh, sleep and wake are
   `write`; reset and `DELETE` are `delete`. `Store::environment_of(kind, ref)` tells the
@@ -2584,9 +2590,12 @@ type Settings = {
     screenshot of the first page. A name is 1 to 80 of `a-z A-Z 0-9 -
     _ . /`; 40 a preview. A screenshot run at that head keeps them; the first at a new head
     drops the earlier head's, so the review only shows what this head's tests sent. A fork's
-    preview has no bypass secret, so it takes none. Services on roll apps don't take them yet
-    (their proxy serves `/__roll/` paths itself)
-    (`engine.rs::the_teams_snapshots_join_the_visual_review`):
+    preview has no bypass secret, so it takes none. On a service roll apps runs, its proxy
+    takes the same request on the `pv-` host of a private preview (the environment holds the
+    secret's hash) and hands it to roll previews (its `PreviewSnapshots` hook, roll apps #1205),
+    which takes it only once that preview is known to run on that service: an environment's
+    name alone proves nothing (`engine.rs::the_teams_snapshots_join_the_visual_review`,
+    `scripts/preview-apps.sh`'s snapshot step):
 
     ```js
     // playwright: a fixture next to the bypass one above
@@ -3152,7 +3161,7 @@ Not to build: more lab checks on the first page (each adds noise to every pull r
 Kubernetes cluster per preview (roll apps' Compose import covers multi-service apps, and a
 cluster would break "costs nothing asleep").
 
-Landed 2026-11-27, early: a failed story shard's share of the touched stories counted as untaken (#1175), and masking that's safe by default for NoSQL and search, with the project told of each column masked by default (#1177), and main's code on a copy of a change's migrated data, on roll apps (#1183) and roll's runtime (#1185), webhook URLs into private previews (#1187), the twelfth review's fixes (#1200), snapshots from the team's own tests (#1192), and a note's work item made by roll (#1196).
+Landed 2026-11-27, early: a failed story shard's share of the touched stories counted as untaken (#1175), and masking that's safe by default for NoSQL and search, with the project told of each column masked by default (#1177), and main's code on a copy of a change's migrated data, on roll apps (#1183) and roll's runtime (#1185), webhook URLs into private previews (#1187), the twelfth review's fixes (#1200), snapshots from the team's own tests (#1192), a note's work item made by roll (#1196), and a team note opening a GitHub issue on a mirrored repo (#1209).
 
 Landed 2026-11-26, midday: restore points for streams (#1112), the TurboSnap test's race under
 load (#1114), the tenth review's fixes (#1119), the visual review holding on stories a change
