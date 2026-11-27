@@ -63,9 +63,11 @@ too (`./target/release/roll`).
   port of its own, so rolld listens on `127.0.0.1:7070` only: no Postgres, no Docker.
 - `ROLL_ADMIN_TOKEN` is the operator's token: every command that carries it runs as the operator.
   Without one, rolld on `127.0.0.1` is open to every user and process on the machine. It still
-  answers only requests addressed to `localhost`, `127.0.0.1` or `[::1]`, so a web page can't
-  reach it by pointing a name of its own at your machine. Keep the token for anything you import
-  real values into.
+  answers only requests addressed to `localhost`, `127.0.0.1`, `[::1]` or a name under
+  `.localhost` (`api.localhost`, which browsers send to loopback themselves), so a web page can't
+  reach it by pointing a name of its own at your machine. Any other name gets 421 (a proxy,
+  `tailscale serve`, `ssh -R` to a name): set `ROLL_DASHBOARD_ORIGIN` to the URL you open it at,
+  or set the token. Keep the token for anything you import real values into.
 
 You have the CLI already, so skip step 1, and skip step 2 as well: `roll login` signs a person in
 through the dashboard, and this node has no dashboard and no accounts. With no login, the CLI goes
