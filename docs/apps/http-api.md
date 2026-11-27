@@ -530,6 +530,7 @@ type EnvironmentPut = {
   report?: boolean; // false: its deploys post no commit status and no GitHub Deployment (someone else reports them: roll previews, for its `pv-` environments)
   preview_host?: string | null; // the one DNS label it answers to under its project's preview domain (`<label>.preview.acme.dev`; roll previews sets it), unique in the project (409); null: none
   follow_tag?: boolean;
+  deploy_tags?: string | null; // a Git URL service: deploy the repository's new tags matching this (`v*`: `*` any characters; 1–100 of A–Z a–z 0–9 . _ / - + *) from its hook, each once, where the repository says it points; the tags already there when it's set never deploy; null stops it (400 for another source)
   /** A preview environment (ephemeral) only, set by roll previews: a visitor who came in through
    *  its access link gets roll previews' feedback button on its pages (`/__roll/feedback.js`
    *  before `</body>`, served from the preview's host), sending notes to the preview in roll's
@@ -634,6 +635,7 @@ type Environment = EnvironmentSummary & {
   run: { [field: string]: number }; // its own run settings over the service's ({}: the service's)
   hook: boolean;              // it has a deploy hook
   follow_tag: boolean;        // an image service's tag is watched: a new digest behind it deploys
+  deploy_tags?: string;       // a Git URL service's new tags matching this deploy here, from its hook
   redeploy_on_secrets: boolean; // the project's secrets changing redeploys it (same image, new values)
   traces: boolean; // its instances send OpenTelemetry traces to roll
   vitals: boolean; // its pages measure their Web Vitals for roll (`…/vitals`)

@@ -1466,6 +1466,7 @@ static TOOLS: &[Tool] = &[
         b("ephemeral", Ty::Bool, "A preview environment"),
         b("run", Ty::Obj, "Its own run settings (min/max instances, cpu, memory, concurrency, suspend, sleep)"),
         b("follow_tag", Ty::Bool, "An image service: redeploy when its tag points at a new digest"),
+        b("deploy_tags", Ty::Str, "A Git URL service: deploy the repository's new tags matching this pattern (v*) from its hook, each once"),
         b("wait_for_ci", Ty::Bool, "Deploy a commit only once its checks pass"),
         b("variables_from", Ty::Str, "Creating it: start with this environment's variables"),
         // Who gets in (apps-next #26): in production each change is deploy.

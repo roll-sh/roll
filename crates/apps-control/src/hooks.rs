@@ -153,6 +153,76 @@ impl Apps {
                 }
                 return Ok(HookOutcome::Ignored(self.hand_pull_to_previews(pushes.clone(), service, url, pull).await));
             }
+            Push::Tags(tags) => {
+                let Source::Git { url, .. } = &svc.source else { unreachable!("matched above") };
+                let sid = service.to_string();
+                let envs = self.db(move |s| s.environments(&sid)).await?;
+                let remote = self.git_remote(service, url).await;
+                let (mut said, mut deployed, mut failed) = (Vec::new(), Vec::new(), Vec::new());
+                let mut refs = None;
+                for tag in tags.iter().take(20) {
+                    for e in envs.iter().filter(|e| !e.ephemeral) {
+                        let (sid, en) = (service.to_string(), e.name.clone());
+                        let Some((pattern, seen)) = self.db(move |s| s.deploy_tags(&sid, &en)).await? else { continue };
+                        if !crate::tags::tag_matches(&pattern, tag) {
+                            continue;
+                        }
+                        if seen.iter().any(|t| t == tag) {
+                            said.push(format!("{}: {tag} was deployed (or there) already", e.name));
+                            continue;
+                        }
+                        if e.paused {
+                            said.push(format!("{} is paused", e.name));
+                            continue;
+                        }
+                        let hold = crate::deploy::hold_of(svc, e);
+                        if let crate::deploy::Held::Skip(why) = &hold {
+                            said.push(format!("{}: {why}", e.name));
+                            continue;
+                        }
+                        // Where the tag points per the repository, never the body: a leaked hook
+                        // URL can't name a commit, and an old tag deploys at most once.
+                        if refs.is_none() {
+                            refs = Some(remote.ls_refs().await.map_err(|e| format!("{e:#}")));
+                        }
+                        let sha = match refs.as_ref().expect("read above") {
+                            Ok(r) => match r.get(&format!("refs/tags/{tag}")) {
+                                Some(r) => r.peeled.unwrap_or(r.oid).to_string(),
+                                None => {
+                                    said.push(format!("the repository has no tag {tag}: not deployed"));
+                                    continue;
+                                }
+                            },
+                            Err(err) => {
+                                said.push(format!("{tag} couldn't be checked against the repository ({err}): not deployed"));
+                                continue;
+                            }
+                        };
+                        let (sid, en, t) = (service.to_string(), e.name.clone(), tag.clone());
+                        if !self.db(move |s| s.mark_tag_seen(&sid, &en, &t)).await? {
+                            continue;
+                        }
+                        let body = hold.body(json!({ "revision": sha, "message": format!("tag {tag}") }));
+                        let by = By { trigger: Trigger::Push, actor: Some(actor.into()) };
+                        match self.deploy(service, &e.name, body, by, None, Some(&format!("git-tag:{}:{sha}", e.name))).await {
+                            Ok(d) => deployed.push(d),
+                            Err(err) => {
+                                said.push(format!("{}: {err}", e.name));
+                                failed.push(err);
+                            }
+                        }
+                    }
+                }
+                if deployed.is_empty() && failed.is_empty() && said.is_empty() {
+                    said.push(format!("a push of {}: no environment deploys it", tags.join(", ")));
+                }
+                deployed.sort_by_key(|d| Some(d.environment.as_str()) != env);
+                match (deployed.into_iter().next(), failed.into_iter().next()) {
+                    (Some(d), _) => Ok(HookOutcome::Deployed(Box::new(d))),
+                    (None, Some(err)) => Err(err),
+                    (None, None) => Ok(HookOutcome::Ignored(said.join("; "))),
+                }
+            }
             Push::Branches(moved) => {
                 let Source::Git { url, .. } = &svc.source else { unreachable!("matched above") };
                 // One webhook for every environment (Render's, Railway's): each branch the push
@@ -358,6 +428,9 @@ enum Push {
     Pull(PullEvent),
     /// The branches it moved (one, but for Bitbucket's that move several).
     Branches(Vec<BranchPush>),
+    /// The tags it made or moved, by name (an environment's `deploy_tags` takes them; the
+    /// repository's own refs say where each points, never the body).
+    Tags(Vec<String>),
     /// An empty body (CI's POST): a plain deploy.
     Plain,
     /// Another event, a tag, or a body that isn't a push: nothing deploys.
@@ -372,7 +445,7 @@ fn push_of(w: &Webhook) -> Push {
     if let Some(pull) = pull_of(w) {
         return pull;
     }
-    if let Some(e) = w.event.as_deref().filter(|e| !matches!(*e, "push" | "Push Hook" | "repo:push")) {
+    if let Some(e) = w.event.as_deref().filter(|e| !matches!(*e, "push" | "Push Hook" | "Tag Push Hook" | "repo:push")) {
         return Push::Ignored(format!("a {e} event isn't a push"));
     }
     let hex = |s: &str| s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit()) && s.bytes().any(|b| b != b'0');
@@ -380,9 +453,17 @@ fn push_of(w: &Webhook) -> Push {
     if let Some(changes) = p["push"]["changes"].as_array().filter(|c| !c.is_empty()) {
         let mut moved = Vec::new();
         let mut kinds = Vec::new();
+        let mut tags = Vec::new();
         for c in changes.iter().take(100) {
             let (new, old) = (&c["new"], &c["old"]);
             let kind = new["type"].as_str().or(old["type"].as_str()).unwrap_or("");
+            // A tag made or moved (a deleted one has no `new`).
+            if kind == "tag" {
+                if let Some(t) = new["name"].as_str().filter(|t| !t.is_empty() && t.len() <= 255) {
+                    tags.push(t.to_string());
+                }
+                continue;
+            }
             if kind != "branch" {
                 kinds.push(kind.to_string());
                 continue;
@@ -391,11 +472,20 @@ fn push_of(w: &Webhook) -> Push {
             let sha = new["target"]["hash"].as_str().filter(|s| hex(s)).map(str::to_ascii_lowercase);
             moved.push(BranchPush { branch, sha, message: new["target"]["message"].as_str().unwrap_or("").to_string(), pusher: actor_of(p) });
         }
-        return if moved.is_empty() { Push::Ignored(format!("a push of a {}, not a branch", kinds.join(", "))) } else { Push::Branches(moved) };
+        return match (moved.is_empty(), tags.is_empty()) {
+            (false, _) => Push::Branches(moved),
+            (true, false) => Push::Tags(tags),
+            (true, true) => Push::Ignored(format!("a push of a {}, not a branch", kinds.join(", "))),
+        };
     }
     let Some(r) = p["ref"].as_str() else {
         return if p.as_object().is_some_and(|o| o.is_empty()) { Push::Plain } else { Push::Ignored("not a push".into()) };
     };
+    if let Some(tag) = r.strip_prefix("refs/tags/") {
+        // Made or moved: `after` is a non-zero object (all zeros: deleted).
+        let made = p["after"].as_str().is_some_and(|s| s.bytes().any(|b| b != b'0')) || p["checkout_sha"].as_str().is_some_and(|s| !s.is_empty());
+        return if made && !tag.is_empty() && tag.len() <= 255 { Push::Tags(vec![tag.to_string()]) } else { Push::Ignored(format!("{r} was deleted")) };
+    }
     let Some(branch) = r.strip_prefix("refs/heads/") else { return Push::Ignored(format!("a push of {r}, not a branch")) };
     let sha = p["after"].as_str().or(p["checkout_sha"].as_str()).filter(|s| hex(s));
     let message = p["head_commit"]["message"].as_str().or_else(|| p["commits"].as_array().and_then(|c| c.last()).and_then(|c| c["message"].as_str())).unwrap_or("");
