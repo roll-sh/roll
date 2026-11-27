@@ -2236,7 +2236,8 @@ async fn a_rule_can_grant_some_indices() {
     assert!(who("resource=CL_1").await.is_empty(), "exact, case and all");
     let (_, t) = d.call(OPERATOR, Method::GET, &format!("/v1/access/tokens/{logs_id}/tighten"), None).await;
     assert_eq!(t["narrower"], true, "{t}");
-    assert_eq!(t["rules"][0]["resources"], json!([{ "id": "cl_1", "index": "logs-*,-logs-old" }, { "id": "cl_1", "index": "logs-2025" }]), "{t}");
+    // An expression's exclusions aren't a rule's: what covers that request is its patterns.
+    assert_eq!(t["rules"][0]["resources"], json!([{ "id": "cl_1", "index": "logs-*" }, { "id": "cl_1", "index": "logs-2025" }]), "{t}");
     // Applied only over the rules it was made from: a change in between is a conflict.
     let apply = |from: Value| {
         let (d, path) = (&d, format!("/v1/access/tokens/{logs_id}/tighten"));

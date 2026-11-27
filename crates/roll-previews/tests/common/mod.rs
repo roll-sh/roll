@@ -41,6 +41,7 @@ pub struct FakeCode {
     pub teardowns: Mutex<Vec<(String, String)>>,
     /// Budget alerts sent: (the repos told, the alert).
     pub budgets: Mutex<Vec<(Vec<String>, roll_previews::ports::BudgetAlert)>>,
+    pub maskings: Mutex<Vec<(Vec<String>, roll_previews::ports::MaskingNotice)>>,
 }
 
 impl FakeCode {
@@ -126,6 +127,10 @@ impl Source for FakeCode {
     }
     async fn budget(&self, repos: &[String], alert: &roll_previews::ports::BudgetAlert) -> anyhow::Result<()> {
         self.budgets.lock().push((repos.to_vec(), alert.clone()));
+        Ok(())
+    }
+    async fn masking(&self, repos: &[String], notice: &roll_previews::ports::MaskingNotice) -> anyhow::Result<()> {
+        self.maskings.lock().push((repos.to_vec(), notice.clone()));
         Ok(())
     }
     fn nudges(&self) -> Option<tokio::sync::broadcast::Receiver<()>> {
@@ -355,6 +360,8 @@ pub struct FakeApps {
     pub browser: Mutex<HashMap<String, Vec<roll_previews::ports::BrowserCheckResult>>>,
     /// Builds started again on an earlier push's copy: (service, deployment, the variables).
     pub views: Mutex<Vec<(String, String, Vars)>>,
+    /// What `fetch` answers for a URL and path (`<url><path>`; unset: 200).
+    pub fetched: Mutex<HashMap<String, u16>>,
     /// What a service answers on its health path (unset: the backend can't tell).
     pub answers: Mutex<Option<(u16, String)>>,
     /// How many health checks find the service still starting (asked again later).
@@ -480,6 +487,10 @@ impl Apps for FakeApps {
     }
     async fn memory_mb(&self, _: &str, _: &str) -> Option<u32> {
         *self.memory.lock()
+    }
+    async fn fetch(&self, _: &str, _: &str, url: &str, _: Option<&str>, path: &str, _: bool) -> anyhow::Result<Option<roll_previews::ports::Fetched>> {
+        let status = self.fetched.lock().get(&format!("{url}{path}")).copied().unwrap_or(200);
+        Ok(Some(roll_previews::ports::Fetched { status, headers: Vec::new(), body: Vec::new(), truncated: false }))
     }
     async fn probe(&self, _: &str, _: &str, _path: &str) -> anyhow::Result<Option<(u16, String)>> {
         if self.starting.load(Ordering::SeqCst) > 0 {
