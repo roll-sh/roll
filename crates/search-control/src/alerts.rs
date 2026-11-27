@@ -334,6 +334,12 @@ pub struct NewTarget {
     pub channel: Option<String>,
 }
 
+impl From<code_sql::Error> for ControlError {
+    fn from(e: code_sql::Error) -> ControlError {
+        ControlError::Internal(e.into())
+    }
+}
+
 fn invalid(m: impl Into<String>) -> ControlError {
     ControlError::Invalid(m.into())
 }
@@ -406,7 +412,7 @@ impl Control {
                         return Err(invalid("[channel] is the platform's channel id"));
                     }
                     let Some(chat) = self.alerts.chat.get() else { return Err(invalid("chat targets need roll code's chat ops on this server")) };
-                    if !chat.may_use(made_by, &t.kind, &install).await.map_err(ControlError::Internal)? {
+                    if !chat.may_use(made_by, &t.kind, &install).await.map_err(|e| ControlError::Internal(anyhow::anyhow!(e)))? {
                         return Err(invalid(format!("[install] isn't a {} install of yours (roll code's chat ops: connect one first)", t.kind)));
                     }
                     targets.push(Target::Chat { platform: t.kind, install, channel });
