@@ -4651,8 +4651,8 @@ impl Apps {
 
     /// `POST …/domains/{host}/configure {cloudflare_token}` (Vercel's and Netlify's own DNS): the
     /// domain's records written at Cloudflare with the customer's token, then checked. The token
-    /// is a `roll://` reference, bound to the caller (who must be able to reveal it) and read as
-    /// them for this call only: nothing of it is kept.
+    /// is a `roll://` reference the caller must be able to reveal, read as them for this call only
+    /// (roll secrets' `use_once`): nothing of it is kept.
     pub async fn configure_domain(self: &Arc<Self>, service: &str, env: &str, host: &str, body: Value, who: integrations::Asker<'_>) -> Result<Domain> {
         let o = body.as_object().cloned().unwrap_or_default();
         if let Some(k) = o.keys().find(|k| !matches!(k.as_str(), "cloudflare_token" | "replace")) {
@@ -4682,8 +4682,7 @@ impl Apps {
         }
         let (sid, e) = (service.to_string(), env.to_string());
         let svc = self.db(move |s| s.service(&sid)).await?;
-        let maker = self.deps.secrets.bind_ref(who, &svc.project, service, reference).await.map_err(|why| Error::Forbidden(format!("{reference}: {why:#} (it must be a key you may reveal, and not marked sensitive)")))?;
-        let token = self.deps.secrets.resolve_as(&svc.project, &e, service, reference, &maker).await.map_err(|e| Error::BadRequest(format!("{reference}: {e:#}")))?;
+        let token = self.deps.secrets.use_once(who, &svc.project, &e, service, reference, "writing a domain's records at Cloudflare").await.map_err(|why| Error::Forbidden(format!("{reference}: {why:#} (it must be a key you may reveal, and not marked sensitive)")))?;
         // The TXT challenge first where `record` asks for it (it proves the name, whatever the
         // CNAME meets), then the CNAME to its target (Cloudflare flattens one at a zone's apex,
         // which plain DNS can't hold).

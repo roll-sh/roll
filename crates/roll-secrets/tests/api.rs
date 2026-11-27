@@ -1305,12 +1305,15 @@ struct FakeSts {
     /// STS throttling every call (a failure to ask, not a refusal).
     throttled: Mutex<bool>,
     sessions: Mutex<u32>,
+    /// The last session's name and inline policy.
+    last: Mutex<Option<(String, Option<String>)>>,
     /// IAM user `legacy-ci`'s access key ids, and how many were ever made.
     keys: Mutex<(Vec<String>, u32)>,
 }
 
 impl roll_secrets::aws::Sts for FakeSts {
-    fn assume(&self, role_arn: &str, external_id: &str, _session: &str, seconds: i32) -> Result<roll_secrets::aws::Session, String> {
+    fn assume(&self, role_arn: &str, external_id: &str, session: &str, seconds: i32, policy: Option<&str>) -> Result<roll_secrets::aws::Session, String> {
+        *self.last.lock().unwrap() = Some((session.to_string(), policy.map(String::from)));
         if *self.throttled.lock().unwrap() {
             return Err("Throttling".into());
         }
@@ -1327,8 +1330,9 @@ impl roll_secrets::aws::Sts for FakeSts {
         })
     }
     /// As AWS checks a web identity: the token's audience, and the subject the trust pins.
-    fn assume_web_identity(&self, role_arn: &str, token: &str, _session: &str, seconds: i32) -> Result<roll_secrets::aws::Session, String> {
+    fn assume_web_identity(&self, role_arn: &str, token: &str, session: &str, seconds: i32, policy: Option<&str>) -> Result<roll_secrets::aws::Session, String> {
         use base64::Engine;
+        *self.last.lock().unwrap() = Some((session.to_string(), policy.map(String::from)));
         let payload = token.split('.').nth(1).ok_or("InvalidIdentityToken")?;
         let claims: Value = serde_json::from_slice(&base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(payload).map_err(|_| "InvalidIdentityToken")?).map_err(|_| "InvalidIdentityToken")?;
         let sub_ok = self.web_pinned.lock().unwrap().as_deref().is_none_or(|p| claims["sub"] == p);
@@ -1340,7 +1344,7 @@ impl roll_secrets::aws::Sts for FakeSts {
         Ok(roll_secrets::aws::Session { access_key_id: Secret::new(format!("ASIA{n}")), secret_access_key: Secret::new(format!("secret-{n}")), session_token: Secret::new(format!("token-{n}")), expires_at: i64::from(seconds) * 1000 })
     }
     fn iam_keys(&self, role_arn: &str, external_id: &str, user: &str) -> Result<Vec<String>, String> {
-        self.assume(role_arn, external_id, "iam", 900)?;
+        self.assume(role_arn, external_id, "iam", 900, None)?;
         if user != "legacy-ci" {
             return Err("NoSuchEntity".into());
         }
@@ -6793,6 +6797,35 @@ async fn a_frozen_folder_answers_423_to_readers_and_lets_its_admins_through() {
     assert_eq!(api.req(Method::GET, &values, None, Some(&reader)).await.0, StatusCode::OK);
 }
 
+/// A reference named for one request and kept by nothing (roll apps' Cloudflare token): read
+/// once as the caller, audited as their use of it naming the resource, under `bind_ref`'s checks
+/// (reveal there, no sensitive key, no untrusted caller), with no maker recorded.
+#[tokio::test]
+async fn a_reference_read_once_reads_as_the_caller_and_is_audited_as_theirs() {
+    use roll_secrets::{Refusal, ResourceRef};
+    let api = Api::new().await;
+    let s = api.secrets.clone();
+    api.ok(Method::PUT, &format!("/v1/workspace/projects/{}/resources/service/web", api.project), Some(json!({ "x": 0, "y": 0 }))).await;
+    let web = ResourceRef::new(roll_workspace::Kind::Service, "web");
+    api.set("production", "CF_TOKEN", "fake-cf").await;
+    api.ok(Method::POST, "/environments/production/changes", Some(json!({ "ops": [{ "op": "set", "key": "CF_SENSITIVE", "value": "fake-cf-kept", "tags": ["sensitive"] }] }))).await;
+    let token = |envs: &str| {
+        let (secret, id) = api.gate.grant("dns", roll_secrets::access::rule(&api.project, Some(vec![envs.into()]), None, &[roll_secrets::Action::Read, roll_secrets::Action::Reveal]), None);
+        let grant = api.gate.tokens.lock().unwrap()[&secret].clone();
+        (s.caller_of(false, None, Some(&grant)).unwrap(), id)
+    };
+    let (prod, id) = token("production");
+    let once = s.use_once(&web, "roll://production/CF_TOKEN", &prod, "writing a domain's records").unwrap();
+    assert_eq!(once.value.expose(), "fake-cf");
+    let audit = api.ok(Method::GET, "/audit?action=secrets.use", None).await;
+    assert_eq!(audit[0]["actor"].as_str(), Some(format!("token:{id}").as_str()), "{audit}");
+    assert!(audit[0]["summary"].as_str().unwrap().contains("apps:service:web"), "{audit}");
+    for (caller, reference) in [(&token("staging").0, "roll://production/CF_TOKEN"), (&prod, "roll://production/CF_SENSITIVE"), (&s.untrusted(&api.project, &prod).unwrap(), "roll://production/CF_TOKEN")] {
+        let refused = s.use_once(&web, reference, caller, "writing a domain's records").unwrap_err();
+        assert!(matches!(refused, Refusal::NotAllowed(_) | Refusal::Unusable(_)) && !refused.to_string().contains("fake-"), "{refused}");
+    }
+}
+
 #[tokio::test]
 async fn a_reference_a_person_chose_reads_only_what_they_may_reveal_now() {
     use roll_secrets::{Caller, Refusal, ResourceRef};
@@ -9122,6 +9155,9 @@ async fn route53_proves_public_certificates_as_the_projects_aws_role_or_an_acces
     assert_eq!(api.ok(Method::GET, "/public-certs", None).await[0]["status"], "issued");
     let dns = ca.dns.lock().unwrap().clone();
     assert!(dns.len() == 2 && dns.iter().all(|d| d.starts_with("role ASIA")) && dns[0] != dns[1], "a session for the check and another for the order: {dns:?}");
+    // The order's session is named for the certificate and narrowed to Route 53's challenge records.
+    let (session, policy) = api.sts.last.lock().unwrap().clone().unwrap();
+    assert_eq!((session, policy.as_deref()), (format!("roll-public-cert-{id}"), Some(roll_secrets::public_certs::ROUTE53_SESSION_POLICY)));
 
     // The role is the certificate's: renamed with it, and kept while it's used.
     api.ok(Method::PATCH, &format!("/aws-roles/{role_id}"), Some(json!({ "name": "route53" }))).await;
