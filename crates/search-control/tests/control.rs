@@ -4349,9 +4349,11 @@ async fn names_are_authorized_as_resolved() {
     for (m, path) in [(Method::PUT, "/other/_alias/mine-o"), (Method::POST, "/other/_close")] {
         assert_eq!(e.es(&u, &p, m, path, None).await.0, 200, "{path}");
     }
-    // `o*` matches no open index for the request's check; the removal resolves closed ones too.
+    // `o*` reaches the closed `other` for the request's check too (it expands as the handler does,
+    // #1084), where the caller may not change aliases: refused, as roll refuses `/*/` (stricter
+    // than Elasticsearch, which narrows the pattern; docs/search/compatibility.md).
     let (s, v) = lim(Method::DELETE, "/o*/_alias/mine-o", None).await;
-    assert_eq!(s, 404, "{v}");
+    assert!(s == 403 && v.to_string().contains("indices:admin/aliases"), "{s} {v}");
     let (_, v) = e.es(&u, &p, Method::GET, "/_alias/mine-o?expand_wildcards=all", None).await;
     assert_eq!(v, json!({"other": {"aliases": {"mine-o": {}}}}), "{v}");
 }
