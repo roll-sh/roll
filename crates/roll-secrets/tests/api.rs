@@ -2760,6 +2760,28 @@ async fn a_break_glass_login_is_bound_to_the_hook_token_that_named_it() {
     assert!(!leaked.to_string().contains(value), "never a value: {leaked}");
 }
 
+/// A hook's token is a hook as roll-access has it now, not as it was when it named a pusher: one
+/// widened since (`PATCH /v1/access/tokens/{id}`, here `reveal`) binds no `breakglass alice`, and a
+/// bare `alice` on a list set before logins were bound stops letting her through it.
+#[tokio::test]
+async fn a_hook_token_widened_after_naming_a_pusher_vouches_for_no_one() {
+    let api = Api::new().await;
+    let hook = api.token(json!({ "actions": ["scan"], "name": "git-hook" }));
+    let push = |breakglass: bool| json!({ "candidates": [], "breakglass": breakglass, "pusher": "alice", "refs": ["refs/heads/main"] });
+    assert_eq!(api.req(Method::POST, "/scan", Some(push(false)), Some(&hook)).await.0, StatusCode::OK);
+    // A list from before logins were bound: a bare login, as an old server stored it.
+    api.db.write(|c| c.execute("UPDATE projects SET breakglass = ? WHERE project_id = ?", [json!(["alice"]).to_string().as_str(), api.project.as_str()])).unwrap();
+    assert_eq!(api.req(Method::POST, "/scan", Some(push(true)), Some(&hook)).await.0, StatusCode::OK, "alice through a scan-only hook");
+
+    // The token gains reveal after naming alice.
+    let rule = roll_secrets::access::rule(&api.project, None, None, &[roll_secrets::Action::Scan, roll_secrets::Action::Reveal]);
+    api.gate.tokens.lock().unwrap().get_mut(&hook).unwrap().scope = Arc::new(roll_auth::scope::Scope(vec![rule]));
+    let (s, e) = api.req(Method::POST, "/scan", Some(push(true)), Some(&hook)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "a token that may reveal vouches for no bare login: {e}");
+    let (s, e) = api.call(Method::PATCH, "", Some(json!({ "breakglass": ["alice"] }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "nor binds one: {e}");
+}
+
 /// roll code's GitHub App checking a push to a repo on the project's canvas: a scanner of the
 /// project and nothing more (a weak password inside a URL it knows is never tried), audited as the
 /// installation with the pusher and ref, and a value it finds is a leak (`secrets.leaked`).

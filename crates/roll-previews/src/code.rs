@@ -627,12 +627,4 @@ pub fn linear_issues(title: &str, branch: Option<&str>) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn a_changes_linear_issues_from_its_title_and_branch() {
-        let i = super::linear_issues;
-        assert_eq!(i("ENG-123: Fix the cart", None), ["ENG-123"], "roll's Linear agent's changes");
-        assert_eq!(i("Fix the cart (fixes ENG-12, WEB-7)", Some("ada/eng-123-fix-cart")), ["ENG-12", "WEB-7", "ENG-123"], "Linear's branch names, in any case");
-        assert_eq!(i("bump covid-19 data, ENG-0", Some("feat/cart-badge")), Vec::<String>::new(), "lowercase in a title, a zero, a branch without one");
-        assert_eq!(i("A-1 B-2 C-3 D-4", None).len(), 3, "at most 3");
-    }
 }

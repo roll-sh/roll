@@ -63,8 +63,10 @@ cargo build "${CRATES[@]}" -p rolld -p roll-cli
 cargo clippy "${CRATES[@]}" -p rolld -p roll-cli --all-targets -- -D warnings
 cargo test "${CRATES[@]}"
 # rolld's own tests check the flags (clap only reports a clash between flattened groups at run
-# time) and run rolld with every product.
-cargo test -p roll-cli -p rolld
+# time), run rolld with every product, and classify every route; `roll search` end to end.
+# Other products' CLI and daemon tests belong to their own gates.
+cargo test -p rolld --bins --test node --test auth
+cargo test -p roll-cli --bins --test search
 
 # The dashboard's console completion, document helpers, playground requests, audit rows, and the
 # Playground's Chat (its prompt, citations and code; the tab streaming an answer).
