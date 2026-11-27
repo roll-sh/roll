@@ -62,8 +62,8 @@ pub(crate) async fn share_visit(store: &crate::store::Store, engine: Option<&std
 
 /// Webhook URL `token` of `preview` for exactly `path`, if it's live and its maker may still
 /// open the project's previews (as [`share_visit`]).
-pub(crate) async fn webhook_visit(store: &crate::store::Store, engine: Option<&std::sync::Arc<Engine>>, preview: &str, token: &str, path: &str, recheck: std::time::Duration) -> Option<crate::store::LiveShare> {
-    let live = store.webhook_live(preview, token, path).ok().flatten()?;
+pub(crate) async fn webhook_visit(store: &crate::store::Store, engine: Option<&std::sync::Arc<Engine>>, preview: &str, token: &str, service: &str, path: &str, recheck: std::time::Duration) -> Option<crate::store::LiveShare> {
+    let live = store.webhook_live(preview, token, service, path).ok().flatten()?;
     maker_still_reaches(store, engine, preview, live, recheck).await
 }
 

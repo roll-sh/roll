@@ -572,6 +572,9 @@ async fn unwebhook(AxState(e): S, Path((id, webhook)): Path<(String, String)>) -
     check_id(&id)?;
     blocking(e, move |e| {
         e.store.revoke_webhook(&id, &webhook)?;
+        // roll apps' gate is told at the next converge.
+        e.store.update(&id, |row| row.next_at = 0)?;
+        e.kick();
         e.store.log(&id, &format!("webhook URL {webhook} revoked"))
     })
     .await?;

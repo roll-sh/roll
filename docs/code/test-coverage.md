@@ -392,7 +392,7 @@ envelope `{event, delivery, webhook, repo{id, full_name, default_branch, visibil
 | `check` `{changeset, status}` | exact keys, equal to the POST response | `webhooks.rs::every_event_is_the_same_on_the_stream_and_in_webhooks` |
 | `preview` | `Preview` keys; `became: ["ready"]` once a head (not on waking); deleting sends `preview: null` (and `teardown` when roll previews' teardown failed) | `webhooks.rs::every_event_is_the_same_on_the_stream_and_in_webhooks` |
 | `budget` | `{budget: {project, project_name, percent, spent_usd_month, max_usd_month}, dashboard_url}` (roll previews) | `webhooks.rs::every_event_is_the_same_on_the_stream_and_in_webhooks` |
-| `masking` | `{masking: {project, project_name, columns: [{resource, column, why}]}, dashboard_url}` (roll previews) | `webhooks.rs::every_event_is_the_same_on_the_stream_and_in_webhooks` |
+| `masking` | `{masking: {project, project_name, resources: [{resource, columns}]}, dashboard_url}` (roll previews; counts, never names) | `webhooks.rs::every_event_is_the_same_on_the_stream_and_in_webhooks` |
 | `queue` | exact `{state, paused, depth, batch}`; every state including `landing` | `webhooks.rs::every_event_is_the_same_on_the_stream_and_in_webhooks`, `queue.rs::pausing_lets_the_batch_under_test_finish` |
 | `review` | exact `Review` keys (no `threads`); repeated once the `ai` record is attached | `webhooks.rs::every_event_is_the_same_on_the_stream_and_in_webhooks`, `webhooks.rs::webhooks_deliver_signed_events` |
 | `thread` | exact `Thread` keys, linked to its review | `webhooks.rs::every_event_is_the_same_on_the_stream_and_in_webhooks` |

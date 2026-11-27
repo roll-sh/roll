@@ -144,6 +144,8 @@ impl EnvSource for Engine {
             access_token: None,
             signed_in: false,
             bypass_sha256: None,
+            // The runtime's gate checks them itself.
+            webhooks: Vec::new(),
             // The runtime's proxy adds the button per request (`runtime::Tagger`).
             feedback: false,
             egress: s.egress_for(r.trusted),
