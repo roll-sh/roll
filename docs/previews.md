@@ -3056,8 +3056,8 @@ variables roll makes from a branch's URL too (it could run on the preview's own 
 change becoming queued wakes its settled preview, a rehearsal shows only at its head, and schema
 overlaps stay within a repo.
 
-1. **Main's code on the change's migrated data, in review** (roll apps services, #1183; roll's
-   runtime, `<name>@main` in the change's preview, stacked on it).
+1. **Main's code on the change's migrated data on roll's runtime, in review** (`<name>@main` in
+   the change's preview; roll apps services landed, #1183).
 2. **Webhooks into private previews** (Vercel's bypass in a query parameter; S): a per-preview,
    per-path bypass that fits in a Stripe or GitHub webhook URL, never the project-wide secret.
 3. **Snapshots from the team's own Playwright or Cypress suite** (Argos's, Percy's SDKs; M):
@@ -3081,7 +3081,7 @@ Not to build: more lab checks on the first page (each adds noise to every pull r
 Kubernetes cluster per preview (roll apps' Compose import covers multi-service apps, and a
 cluster would break "costs nothing asleep").
 
-Landed 2026-11-27, early: a failed story shard's share of the touched stories counted as untaken (#1175), and masking that's safe by default for NoSQL and search, with the project told of each column masked by default (#1177).
+Landed 2026-11-27, early: a failed story shard's share of the touched stories counted as untaken (#1175), and masking that's safe by default for NoSQL and search, with the project told of each column masked by default (#1177), and main's code on a copy of a change's migrated data, on roll apps (#1183).
 
 Landed 2026-11-26, midday: restore points for streams (#1112), the TurboSnap test's race under
 load (#1114), the tenth review's fixes (#1119), the visual review holding on stories a change

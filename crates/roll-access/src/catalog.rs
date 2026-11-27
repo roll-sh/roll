@@ -1892,6 +1892,11 @@ static ROWS: &[Row] = &[
     // Writing a domain's records at the customer's Cloudflare with their token (a `roll://`
     // reference roll secrets checks they may reveal): what pointing the domain here is.
     row("POST", "/v1/apps/services/{id}/environments/{env}/domains/{host}/configure", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")).lends(Lend::Each(apps_dns_token)),
+    // Quieting an environment's alerts for a while: what changing its alerts is (deploy on
+    // production, else write); ending one only lets them out again.
+    row("GET", "/v1/apps/services/{id}/environments/{env}/silences", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
+    row("POST", "/v1/apps/services/{id}/environments/{env}/silences", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")),
+    row("DELETE", "/v1/apps/services/{id}/environments/{env}/silences/{sid}", "apps", W, one(PG, "service")).env(EnvFrom::Param("env")),
     // Taking a hostname another environment holds (production's, maybe), once DNS proves it's the
     // caller's: the holder's environment isn't in the path, so it's the project's admin's call.
     row("POST", "/v1/apps/services/{id}/environments/{env}/domains/{host}/claim", "apps", ADMIN, one(PG, "service")).env(EnvFrom::Param("env")),

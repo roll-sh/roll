@@ -425,6 +425,16 @@ export function toEnv(vars: Record<string, string>): string {
 /** A field set to `null` goes back to its default (apps-control's `merge`). */
 export type Reset<T> = { [K in keyof T]?: T[K] | null };
 
+/** An environment's alert silence: its alerts reach no target until `until` (ms). */
+export interface Silence {
+  id: string;
+  until: number;
+  /** The alert kinds it quiets; none: every one. */
+  alerts: string[];
+  reason: string;
+  created_at: number;
+}
+
 /** What a project's board charts (`board.rs`): one service's metric in one environment. */
 export const BOARD_METRICS = ["requests", "errors", "error_pct", "p50_ms", "p95_ms", "p99_ms", "cpu", "memory_bytes", "instances", "cold_starts", "egress_bytes", "over_capacity"] as const;
 export interface BoardPanel {
@@ -1696,6 +1706,9 @@ export const appsApi = {
   incidents: (project: string) => call<{ incidents: Incident[] }>("GET", `/v1/apps/projects/${enc(project)}/status-page/incidents`).then((r) => r.incidents),
   updateIncident: (project: string, incident: string, body: { state: IncidentState; text: string }) => call<null>("POST", `/v1/apps/projects/${enc(project)}/status-page/incidents/${enc(incident)}/updates`, body),
   deleteStatusPage: (project: string) => call<void>("DELETE", `/v1/apps/projects/${enc(project)}/status-page`),
+  silences: (id: string, e: string) => call<Silence[]>("GET", `${env(id, e)}/silences`),
+  addSilence: (id: string, e: string, body: { until: number; reason: string; alerts?: string[] }) => call<Silence>("POST", `${env(id, e)}/silences`, body),
+  endSilence: (id: string, e: string, sid: string) => call<null>("DELETE", `${env(id, e)}/silences/${enc(sid)}`),
   board: (project: string) => call<{ panels: BoardPanel[] }>("GET", `/v1/apps/projects/${enc(project)}/board`),
   putBoard: (project: string, panels: BoardPanel[]) => call<{ panels: BoardPanel[] }>("PUT", `/v1/apps/projects/${enc(project)}/board`, { panels }),
   statusDomain: (project: string) => call<Domain>("GET", `/v1/apps/projects/${enc(project)}/status-page/domain`),
