@@ -1018,6 +1018,7 @@ mod env;
 mod main_on_change;
 mod masks;
 mod points;
+mod replay;
 pub use points::MAX_POINTS;
 pub mod shell;
 pub mod traces;

@@ -264,11 +264,14 @@ pub struct Running {
 }
 
 /// `conceal`: the values roll added (an env file's own plain values aren't secrets).
-pub fn spawn(command: &[String], env: &[(String, String)], conceal: &[&str], streams: Streams) -> std::io::Result<Running> {
+pub fn spawn(command: &[String], env: &[(String, String)], remove: &[std::ffi::OsString], conceal: &[&str], streams: Streams) -> std::io::Result<Running> {
     let masker = || Masker::new(conceal.iter().copied());
     let streams = if masker().is_some() { streams } else { Streams { stdout: false, stderr: false } };
     let mut cmd = tokio::process::Command::new(crate::sys::program(&command[0]));
     cmd.args(&command[1..]).envs(env.iter().cloned());
+    for k in remove {
+        cmd.env_remove(k);
+    }
     if streams.stdout {
         cmd.stdout(Stdio::piped());
     }

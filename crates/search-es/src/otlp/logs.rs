@@ -62,10 +62,10 @@ pub enum Fail {
 
 /// Why one record wasn't written; the request goes on without it.
 #[derive(Debug)]
-struct Rejected(String);
+pub(super) struct Rejected(pub(super) String);
 
 /// A decoding step's outcome: a value, a rejected record, or a stopped request.
-enum Step<T> {
+pub(super) enum Step<T> {
     Ok(T),
     Reject(Rejected),
     Stop(Fail),
@@ -103,7 +103,7 @@ impl Budget {
     }
 
     /// One value of the record being built, holding `bytes` of text.
-    fn value(&mut self, bytes: usize) -> Step<()> {
+    pub(super) fn value(&mut self, bytes: usize) -> Step<()> {
         self.record_values += 1;
         if self.record_values > MAX_VALUES {
             return Step::Reject(Rejected(format!("a record with more than {MAX_VALUES} values")));
@@ -117,7 +117,7 @@ impl Budget {
     }
 
     /// `bytes` of text more in the record being built (a value already counted).
-    fn bytes(&mut self, bytes: usize) -> Step<()> {
+    pub(super) fn bytes(&mut self, bytes: usize) -> Step<()> {
         let n = bytes as u64;
         self.record_bytes += n;
         match self.charge(n) {
@@ -127,13 +127,13 @@ impl Budget {
     }
 
     /// A kept string of the record (or context) being built.
-    fn text(&mut self, bytes: usize) -> Result<(), Fail> {
+    pub(super) fn text(&mut self, bytes: usize) -> Result<(), Fail> {
         self.record_bytes += bytes as u64;
         self.charge(bytes as u64)
     }
 
     /// The record was written out (or rejected): its values are given back.
-    fn record_done(&mut self) {
+    pub(super) fn record_done(&mut self) {
         let n = std::mem::take(&mut self.record_bytes);
         let from_owed = n.min(self.owed);
         self.owed -= from_owed;
@@ -142,7 +142,7 @@ impl Budget {
     }
 
     /// `bytes` more of NDJSON.
-    fn ndjson(&mut self, bytes: usize) -> Result<(), Fail> {
+    pub(super) fn ndjson(&mut self, bytes: usize) -> Result<(), Fail> {
         self.charge(bytes as u64)
     }
 
@@ -159,30 +159,30 @@ impl Budget {
 #[derive(Debug, Default)]
 pub struct Batch {
     pub chunks: Vec<String>,
-    current: String,
+    pub(super) current: String,
     pub accepted: u64,
     pub rejected: u64,
     /// Values cut at [`MAX_VALUE_BYTES`].
     pub truncated: u64,
     /// The first rejection's reason.
     pub reason: Option<String>,
-    targets: HashSet<String>,
+    pub(super) targets: HashSet<String>,
 }
 
 impl Batch {
-    fn reject(&mut self, why: String) {
+    pub(super) fn reject(&mut self, why: String) {
         self.rejected += 1;
         self.reason.get_or_insert(why);
     }
 
     /// The chunk being written is full: kept at its size (only its length is charged).
-    fn push_chunk(&mut self) {
+    pub(super) fn push_chunk(&mut self) {
         let mut c = std::mem::take(&mut self.current);
         c.shrink_to_fit();
         self.chunks.push(c);
     }
 
-    fn finish(mut self) -> Batch {
+    pub(super) fn finish(mut self) -> Batch {
         if !self.current.is_empty() {
             self.push_chunk();
         }
@@ -192,7 +192,7 @@ impl Batch {
 
 // --- values ---------------------------------------------------------------------------------
 
-fn hex(b: &[u8], len: usize) -> Option<String> {
+pub(super) fn hex(b: &[u8], len: usize) -> Option<String> {
     if b.len() != len || b.iter().all(|x| *x == 0) {
         return None;
     }
@@ -200,7 +200,7 @@ fn hex(b: &[u8], len: usize) -> Option<String> {
 }
 
 /// `s` cut to [`MAX_VALUE_BYTES`] on a character boundary, counting a cut.
-fn bounded(s: &str, batch: &mut Batch) -> String {
+pub(super) fn bounded(s: &str, batch: &mut Batch) -> String {
     if s.len() <= MAX_VALUE_BYTES {
         return s.to_string();
     }
@@ -213,12 +213,12 @@ fn bounded(s: &str, batch: &mut Batch) -> String {
 }
 
 /// A short string field (names, versions, severity text) as kept.
-fn short(s: &str, batch: &mut Batch) -> String {
+pub(super) fn short(s: &str, batch: &mut Batch) -> String {
     bounded(s, batch)
 }
 
 /// [`short`], charged to the record (or context) being built.
-fn text(s: &str, budget: &mut Budget, batch: &mut Batch) -> Result<String, Fail> {
+pub(super) fn text(s: &str, budget: &mut Budget, batch: &mut Batch) -> Result<String, Fail> {
     let kept = short(s, batch);
     budget.text(kept.len())?;
     Ok(kept)
@@ -253,7 +253,7 @@ macro_rules! wire {
 }
 
 /// An `AnyValue` from protobuf.
-fn any_pb(b: &[u8], depth: usize, budget: &mut Budget, batch: &mut Batch) -> Step<Value> {
+pub(super) fn any_pb(b: &[u8], depth: usize, budget: &mut Budget, batch: &mut Batch) -> Step<Value> {
     if depth > MAX_DEPTH {
         return Step::Reject(Rejected(format!("values nested deeper than {MAX_DEPTH}")));
     }
@@ -308,7 +308,7 @@ fn any_pb(b: &[u8], depth: usize, budget: &mut Budget, batch: &mut Batch) -> Ste
 }
 
 /// A `KeyValue` from protobuf: `(key, value)`; `None` without a key.
-fn key_value_pb(b: &[u8], depth: usize, budget: &mut Budget, batch: &mut Batch) -> Step<Option<(String, Value)>> {
+pub(super) fn key_value_pb(b: &[u8], depth: usize, budget: &mut Budget, batch: &mut Batch) -> Step<Option<(String, Value)>> {
     let (mut key, mut value) = (None, Value::Null);
     for f in Fields::new(b) {
         let (n, w) = wire!(f);
@@ -336,7 +336,7 @@ fn routing_key(k: &str) -> bool {
 }
 
 /// Adds an attribute, counting it as dropped past [`MAX_ATTRIBUTES`].
-fn add_attribute(m: &mut Map, dropped: &mut u64, k: String, v: Value) {
+pub(super) fn add_attribute(m: &mut Map, dropped: &mut u64, k: String, v: Value) {
     if m.len() >= MAX_ATTRIBUTES && !m.contains_key(&k) && !routing_key(&k) {
         *dropped = dropped.saturating_add(1);
         return;
@@ -345,7 +345,7 @@ fn add_attribute(m: &mut Map, dropped: &mut u64, k: String, v: Value) {
 }
 
 /// An `AnyValue` from OTLP/JSON (`{"stringValue": …}`, `{"intValue": "12"}`, …).
-fn any_json(v: &Value, depth: usize, budget: &mut Budget, batch: &mut Batch) -> Step<Value> {
+pub(super) fn any_json(v: &Value, depth: usize, budget: &mut Budget, batch: &mut Batch) -> Step<Value> {
     if depth > MAX_DEPTH {
         return Step::Reject(Rejected(format!("values nested deeper than {MAX_DEPTH}")));
     }
@@ -402,7 +402,7 @@ fn any_json(v: &Value, depth: usize, budget: &mut Budget, batch: &mut Batch) -> 
     Step::Ok(Value::Null)
 }
 
-fn attributes_json(list: Option<&Value>, out: &mut Map, dropped: &mut u64, budget: &mut Budget, batch: &mut Batch) -> Step<()> {
+pub(super) fn attributes_json(list: Option<&Value>, out: &mut Map, dropped: &mut u64, budget: &mut Budget, batch: &mut Batch) -> Step<()> {
     for e in list.and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default() {
         if let Some(k) = e.get("key").and_then(Value::as_str) {
             step!(budget.value(k.len().min(MAX_VALUE_BYTES)));
@@ -417,27 +417,27 @@ fn attributes_json(list: Option<&Value>, out: &mut Map, dropped: &mut u64, budge
 
 /// A resource's or scope's part of its records' documents.
 #[derive(Clone, Debug, Default)]
-struct Context {
-    attributes: Map,
-    dropped: u64,
-    schema_url: Option<String>,
-    name: Option<String>,
-    version: Option<String>,
+pub(super) struct Context {
+    pub(super) attributes: Map,
+    pub(super) dropped: u64,
+    pub(super) schema_url: Option<String>,
+    pub(super) name: Option<String>,
+    pub(super) version: Option<String>,
 }
 
 /// A resource or scope as its records use it: the routing attributes, and its document part's
 /// JSON rendered once, charged once, and spliced into each record's text (so a record costs its
 /// own size, never its context's again). Its charge goes back when the next one replaces it.
 #[derive(Debug, Default)]
-struct Rendered {
-    dataset: Option<String>,
-    namespace: Option<String>,
-    json: String,
+pub(super) struct Rendered {
+    pub(super) dataset: Option<String>,
+    pub(super) namespace: Option<String>,
+    pub(super) json: String,
 }
 
 /// A context's tree as rendered: its JSON charged, then its tree's charge given back. Its
 /// routing attributes are kept made valid, so a record never copies them again.
-fn render(c: Context, scope: bool, budget: &mut Budget) -> Result<Rendered, Fail> {
+pub(super) fn render(c: Context, scope: bool, budget: &mut Budget) -> Result<Rendered, Fail> {
     let pick = |k: &str| c.attributes.get(k).and_then(Value::as_str).filter(|s| !s.is_empty());
     let dataset = pick("data_stream.dataset").map(dataset_base).filter(|d| !d.is_empty());
     let namespace = pick("data_stream.namespace").map(|n| sanitize(n, 100)).filter(|n| !n.is_empty());
@@ -448,7 +448,7 @@ fn render(c: Context, scope: bool, budget: &mut Budget) -> Result<Rendered, Fail
 }
 
 /// A rendered context's charge given back (another replaces it).
-fn drop_rendered(r: &Result<Rendered, String>, budget: &mut Budget) {
+pub(super) fn drop_rendered(r: &Result<Rendered, String>, budget: &mut Budget) {
     if let Ok(r) = r {
         budget.sent(r.json.len());
     }
@@ -469,7 +469,7 @@ struct Record {
 }
 
 /// `data_stream.dataset` or `.namespace` made valid as Elastic's exporter does.
-fn sanitize(s: &str, max: usize) -> String {
+pub(super) fn sanitize(s: &str, max: usize) -> String {
     let mut out: String = s
         .to_lowercase()
         .chars()
@@ -482,7 +482,7 @@ fn sanitize(s: &str, max: usize) -> String {
 }
 
 /// A dataset made valid, without its `.otel` (lowercased first, so `X.OTEL` is `x`).
-fn dataset_base(raw: &str) -> String {
+pub(super) fn dataset_base(raw: &str) -> String {
     let lower = raw.to_lowercase();
     sanitize(lower.strip_suffix(".otel").unwrap_or(&lower), 100 - ".otel".len())
 }
@@ -490,7 +490,12 @@ fn dataset_base(raw: &str) -> String {
 /// `(dataset with its .otel, namespace)`: the record's own routing attributes, else its
 /// scope's, else its resource's (both made valid once, in [`render`]).
 fn target(rec: &Record, scope: &Rendered, resource: &Rendered) -> (String, String) {
-    let own = |k: &str| rec.attributes.get(k).and_then(Value::as_str).filter(|s| !s.is_empty());
+    target_from(&rec.attributes, scope, resource)
+}
+
+/// [`target`] for any signal: `own`, the record's or span's attributes.
+pub(super) fn target_from(own_attributes: &Map, scope: &Rendered, resource: &Rendered) -> (String, String) {
+    let own = |k: &str| own_attributes.get(k).and_then(Value::as_str).filter(|s| !s.is_empty());
     let base = own("data_stream.dataset")
         .map(dataset_base)
         .filter(|d| !d.is_empty())
@@ -506,7 +511,7 @@ fn target(rec: &Record, scope: &Rendered, resource: &Rendered) -> (String, Strin
     (format!("{base}.otel"), namespace)
 }
 
-fn timestamp(nanos: u64) -> String {
+pub(super) fn timestamp(nanos: u64) -> String {
     let secs = (nanos / 1_000_000_000) as i64;
     let sub = (nanos % 1_000_000_000) as u32;
     chrono::DateTime::from_timestamp(secs, sub).unwrap_or_default().format("%Y-%m-%dT%H:%M:%S%.9fZ").to_string()
@@ -533,14 +538,7 @@ fn context_json(c: Context, scope: bool) -> Value {
 /// Appends a record's `create` line and document, or rejects it past [`MAX_TARGETS`].
 fn emit(out: &mut Batch, budget: &mut Budget, rec: Record, scope: &Rendered, resource: &Rendered, now_ms: i64) -> Result<(), Fail> {
     let (dataset, namespace) = target(&rec, scope, resource);
-    let index = format!("logs-{dataset}-{namespace}");
-    if !out.targets.contains(&index) {
-        if out.targets.len() >= MAX_TARGETS {
-            out.reject(format!("a request writes at most {MAX_TARGETS} data streams"));
-            return Ok(());
-        }
-        out.targets.insert(index.clone());
-    }
+    let Some(index) = admit(out, "logs", &dataset, &namespace) else { return Ok(()) };
     let observed = if rec.observed > 0 { rec.observed } else { (now_ms.max(0) as u64) * 1_000_000 };
     let time = if rec.time > 0 { rec.time } else { observed };
     let mut doc = obj! {
@@ -578,6 +576,26 @@ fn emit(out: &mut Batch, budget: &mut Budget, rec: Record, scope: &Rendered, res
     if let Some(e) = rec.event_name.filter(|e| !e.is_empty()) {
         d.insert("event_name".into(), Value::from(e));
     }
+    push_doc(out, budget, &index, doc, scope, resource)
+}
+
+/// The data stream a document of `kind` (`logs`, `traces`) goes to, counted against
+/// [`MAX_TARGETS`]; `None` (the record rejected) past it.
+pub(super) fn admit(out: &mut Batch, kind: &str, dataset: &str, namespace: &str) -> Option<String> {
+    let index = format!("{kind}-{dataset}-{namespace}");
+    if !out.targets.contains(&index) {
+        if out.targets.len() >= MAX_TARGETS {
+            out.reject(format!("a request writes at most {MAX_TARGETS} data streams"));
+            return None;
+        }
+        out.targets.insert(index.clone());
+    }
+    Some(index)
+}
+
+/// Appends a document's `create` line and its text, the resource and scope spliced in as
+/// rendered, charged before it's written.
+pub(super) fn push_doc(out: &mut Batch, budget: &mut Budget, index: &str, doc: Value, scope: &Rendered, resource: &Rendered) -> Result<(), Fail> {
     let action = obj! { "create" => obj! { "_index" => index } }.to_json();
     // The record's own fields, without the closing brace; the resource and scope go in as
     // rendered once ([`Rendered`]), charged before anything is written.
@@ -602,7 +620,7 @@ fn emit(out: &mut Batch, budget: &mut Budget, rec: Record, scope: &Rendered, res
 
 /// A `Resource` (`attributes = 1`, `dropped_attributes_count = 2`) or an `InstrumentationScope`
 /// (`name = 1`, `version = 2`, `attributes = 3`, `dropped_attributes_count = 4`).
-fn context_pb(b: &[u8], scope: bool, budget: &mut Budget, batch: &mut Batch) -> Step<Context> {
+pub(super) fn context_pb(b: &[u8], scope: bool, budget: &mut Budget, batch: &mut Batch) -> Step<Context> {
     let mut c = Context::default();
     let (attrs, dropped) = if scope { (3, 4) } else { (1, 2) };
     for f in Fields::new(b) {
@@ -649,7 +667,7 @@ fn record_pb(b: &[u8], budget: &mut Budget, batch: &mut Batch) -> Step<Record> {
 }
 
 /// A context step: a context, a reason its records are all rejected, or a stopped request.
-fn context_or(s: Step<Context>) -> Result<Result<Context, String>, Fail> {
+pub(super) fn context_or(s: Step<Context>) -> Result<Result<Context, String>, Fail> {
     match s {
         Step::Ok(c) => Ok(Ok(c)),
         Step::Reject(Rejected(why)) => Ok(Err(why)),
@@ -738,11 +756,11 @@ pub fn from_protobuf(body: &[u8], now_ms: i64, budget: &mut Budget) -> Result<Ba
 
 // --- JSON -----------------------------------------------------------------------------------
 
-fn get<'v>(m: &'v Value, camel: &str, snake: &str) -> Option<&'v Value> {
+pub(super) fn get<'v>(m: &'v Value, camel: &str, snake: &str) -> Option<&'v Value> {
     m.get(camel).or_else(|| m.get(snake))
 }
 
-fn uint_json(v: Option<&Value>) -> u64 {
+pub(super) fn uint_json(v: Option<&Value>) -> u64 {
     match v {
         Some(Value::Str(s)) => s.parse().unwrap_or(0),
         Some(x) => x.as_i64().map_or(0, |n| n.max(0) as u64),
@@ -750,11 +768,11 @@ fn uint_json(v: Option<&Value>) -> u64 {
     }
 }
 
-fn str_json(v: Option<&Value>, budget: &mut Budget, batch: &mut Batch) -> Result<Option<String>, Fail> {
+pub(super) fn str_json(v: Option<&Value>, budget: &mut Budget, batch: &mut Batch) -> Result<Option<String>, Fail> {
     v.and_then(Value::as_str).map(|s| text(s, budget, batch)).transpose()
 }
 
-fn context_json_in(v: Option<&Value>, schema_url: Option<&Value>, scope: bool, budget: &mut Budget, batch: &mut Batch) -> Step<Context> {
+pub(super) fn context_json_in(v: Option<&Value>, schema_url: Option<&Value>, scope: bool, budget: &mut Budget, batch: &mut Batch) -> Step<Context> {
     let mut c = Context { schema_url: stop!(str_json(schema_url, budget, batch)), ..Context::default() };
     let Some(v) = v else { return Step::Ok(c) };
     if scope {
@@ -767,7 +785,7 @@ fn context_json_in(v: Option<&Value>, schema_url: Option<&Value>, scope: bool, b
 }
 
 /// A hex id of `len` bytes from JSON, lowercased; left out at any other length or all zeros.
-fn hex_json(v: Option<&Value>, len: usize) -> Option<String> {
+pub(super) fn hex_json(v: Option<&Value>, len: usize) -> Option<String> {
     let s = v.and_then(Value::as_str)?;
     (s.len() == len * 2 && s.bytes().all(|b| b.is_ascii_hexdigit()) && s.bytes().any(|b| b != b'0')).then(|| s.to_ascii_lowercase())
 }

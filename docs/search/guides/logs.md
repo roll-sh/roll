@@ -12,9 +12,9 @@ while it's written to and searched.
 
 So you know before you start:
 
-- **OTLP takes logs only.** OpenTelemetry logs go straight in over OTLP/HTTP (below); traces and
-  metrics, and OTLP over gRPC, don't yet. Other shippers use `_bulk`, or the Elasticsearch API
-  (Filebeat, Fluent Bit, Vector, Logstash).
+- **OTLP takes logs and traces.** OpenTelemetry logs and traces go straight in over OTLP/HTTP
+  (below); metrics, and OTLP over gRPC, don't yet. Other shippers use `_bulk`, or the
+  Elasticsearch API (Filebeat, Fluent Bit, Vector, Logstash).
 - **No alerting UI.** Watcher's API is served but has no screen, OpenSearch's Alerting plugin isn't
   served, and Discover-style browsing has no saved searches or visualizations.
 
@@ -161,8 +161,8 @@ cluster accepts bodies up to `max_body_mb` (100 MB by default; `--max-body-mb` o
 
 ## Send OpenTelemetry logs over OTLP
 
-A cluster takes OTLP/HTTP logs at `/_otlp/v1/logs`, in protobuf or JSON, gzip allowed, as
-Elastic's managed OTLP endpoint does. Make a key that can only write OpenTelemetry's data streams:
+A cluster takes OTLP/HTTP logs at `/_otlp/v1/logs` and traces at `/_otlp/v1/traces`, in protobuf
+or JSON, gzip allowed, as Elastic's managed OTLP endpoint does. Make a key that can only write OpenTelemetry's data streams:
 
 ```sh
 roll search keys create logs collector --access otel
@@ -181,6 +181,9 @@ service:
     logs:
       receivers: [otlp]
       exporters: [otlphttp/roll]
+    traces:
+      receivers: [otlp]
+      exporters: [otlphttp/roll]
 ```
 
 An SDK's OTLP/HTTP log exporter works the same way, with `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` set
@@ -192,6 +195,10 @@ Records land as OpenTelemetry-native documents (`body.text`, `severity_text`, `a
 namespace come from a `data_stream.dataset` or `data_stream.namespace` attribute on the record,
 its scope or its resource, else `generic` and `default`. The built-in `logs-otel@template` maps
 them, so ES|QL and Discover read `message`, `log.level` and `service.name` as ECS names too.
+Spans land in `traces-<dataset>.otel-<namespace>` (`name`, `kind`, `duration` in nanoseconds,
+`status.code`, `trace_id`, `span_id`, `parent_span_id`, `links`), and a span's events (an
+exception it recorded) as log lines with the span's `trace_id` and `span_id`, so a trace's errors
+are found in the logs.
 
 Limits:
 - a record keeps 128 attributes, and the rest count in its `dropped_attributes_count`;
@@ -207,9 +214,9 @@ Limits:
   it.
 
 An `otel` key can create data streams under `logs-*.otel-*`, `traces-*.otel-*` and
-`metrics-*.otel-*` as it writes, and roll doesn't cap
-how many a cluster may hold yet. Keep `otel` keys in Collectors you run, not in code you ship to
-customers.
+`metrics-*.otel-*` as it writes, up to the cluster's `cluster.max_shards_per_node` (1000 shards by
+default, two a data stream; records for more are refused in `partial_success`). Only a key with
+the cluster privilege can raise it.
 
 An `otel` key writes and can't read: search with another key. Its `create_doc` privilege is
 Elasticsearch's, so OpenSearch-flavor clusters don't have `otel` keys; use a `data` key narrowed

@@ -488,4 +488,63 @@ export const TEMPLATES: AutomationTemplate[] = [
       build: () => structuredClone(t.spec),
     }),
   ),
+  {
+    id: "preview-note-to-jira",
+    title: "Preview notes as Jira issues",
+    description: "A note left on a change's preview becomes an issue in a Jira project (Marker.io's notes to Jira), with the page and element it's about. Set your site, project and a `jira` secret (base64 of email:API token).",
+    trigger: "code",
+    steps: ["webhook"],
+    build: (ctx) => {
+      const p = ctx.projects.find((x) => x.repo) ?? ctx.projects[0];
+      return spec(
+        "Preview notes to Jira",
+        "Each note on a preview, as an issue in a Jira project.",
+        { type: "code", events: ["review"], repos: p?.repo ? [p.repo] : [] },
+        [
+          step("issue", "webhook", {
+            url: "https://your-site.atlassian.net/rest/api/2/issue",
+            method: "POST",
+            headers: { Authorization: "Basic {{ secrets.jira }}", "Content-Type": "application/json" },
+            body: {
+              fields: {
+                project: { key: "PROJ" },
+                issuetype: { name: "Task" },
+                summary: "Preview note on {{ event.data.repo }}: {{ event.data.body | truncate:80 }}",
+                description: "{{ event.data.body }}",
+                labels: ["preview-feedback"],
+              },
+            },
+            ok_statuses: [201],
+          }),
+        ],
+        // A note only (its body says it), not a reply to one or another review.
+        { filters: [{ field: "event.data.body", op: "contains", value: "**Feedback on the preview** · " }] },
+      );
+    },
+  },
+  {
+    id: "preview-note-to-asana",
+    title: "Preview notes as Asana tasks",
+    description: "A note left on a change's preview becomes a task in an Asana project, with the page and element it's about. Set your project's id and an `asana` secret (a personal access token).",
+    trigger: "code",
+    steps: ["webhook"],
+    build: (ctx) => {
+      const p = ctx.projects.find((x) => x.repo) ?? ctx.projects[0];
+      return spec(
+        "Preview notes to Asana",
+        "Each note on a preview, as a task in an Asana project.",
+        { type: "code", events: ["review"], repos: p?.repo ? [p.repo] : [] },
+        [
+          step("task", "webhook", {
+            url: "https://app.asana.com/api/1.0/tasks",
+            method: "POST",
+            headers: { Authorization: "Bearer {{ secrets.asana }}", "Content-Type": "application/json" },
+            body: { data: { name: "Preview note on {{ event.data.repo }}: {{ event.data.body | truncate:80 }}", notes: "{{ event.data.body }}", projects: ["your-project-id"] } },
+            ok_statuses: [201],
+          }),
+        ],
+        { filters: [{ field: "event.data.body", op: "contains", value: "**Feedback on the preview** · " }] },
+      );
+    },
+  },
 ];

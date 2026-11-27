@@ -82,8 +82,12 @@ struct CloudflareDns;
 impl apps_control::integrations::DnsWriter for CloudflareDns {
     async fn put_record(&self, token: &str, kind: &str, name: &str, content: &str, replace: bool) -> anyhow::Result<Vec<String>> {
         anyhow::ensure!(!token.trim().is_empty(), "the secret holding the Cloudflare token is empty");
-        let cf = roll_edge::acme::Cloudflare::new(token, roll_edge::acme::Cloudflare::API)?;
+        let cf = roll_edge::acme::Cloudflare::new(token, self.api())?;
         cf.put_record(kind, name, content, "roll apps: this domain's record", replace).await
+    }
+
+    fn api(&self) -> &'static str {
+        roll_edge::acme::Cloudflare::API
     }
 }
 

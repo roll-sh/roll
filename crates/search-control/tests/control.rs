@@ -4227,6 +4227,37 @@ async fn a_wildcard_key_reaches_no_watch_history() {
     assert!(v["hits"]["hits"][0]["_source"].get("leaked").is_none(), "{v}");
 }
 
+/// A restricted data stream's failure store stays restricted whichever name reaches it: the
+/// stream's `::failures`, a failure index named directly, or `*::failures`. A failure store's
+/// rollover takes nothing from its body, as a data stream's doesn't.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restricted_streams_failure_store_needs_allow_restricted_indices() {
+    use reqwest::Method;
+    let e = env().await;
+    let c = e.post("/v1/search/clusters", json!({"name": "fsx"})).await;
+    let (u, p) = creds(&c);
+    for (m, path, body) in [
+        (Method::PUT, "/_index_template/fleet-x", json!({"index_patterns": [".fleet-x*"], "data_stream": {}, "template": {"data_stream_options": {"failure_store": {"enabled": true}}}})),
+        (Method::PUT, "/_data_stream/.fleet-x", Value::Null),
+        (Method::POST, "/.fleet-x/_doc?refresh=true", json!({"@timestamp": "not a date"})),
+        (Method::PUT, "/_security/role/everything", json!({"indices": [{"names": ["*"], "privileges": ["read", "read_failure_store"]}]})),
+        (Method::PUT, "/_security/user/ev", json!({"password": "ev-pass-1", "roles": ["everything"]})),
+    ] {
+        let (s, v) = e.es(&u, &p, m, path, Some(body).filter(|b| !b.is_null())).await;
+        assert!(s < 300, "{path}: {v}");
+    }
+    let (_, v) = e.es(&u, &p, Method::GET, "/_data_stream/.fleet-x", None).await;
+    let failures = v["data_streams"][0]["failure_store"]["indices"][0]["index_name"].as_str().unwrap_or_else(|| panic!("a failure index: {v}")).to_string();
+    for path in ["/.fleet-x::failures/_search".to_string(), format!("/{failures}/_search")] {
+        let (s, v) = e.es("ev@fsx", "ev-pass-1", Method::POST, &path, Some(json!({}))).await;
+        assert_eq!(s, 403, "{path}: {v}");
+    }
+    let (s, v) = e.es("ev@fsx", "ev-pass-1", Method::POST, "/*::failures/_search?expand_wildcards=all", Some(json!({}))).await;
+    assert!(s == 200 && !v.to_string().contains("not a date"), "{s} {v}");
+    let (s, v) = e.es(&u, &p, Method::POST, "/.fleet-x::failures/_rollover", Some(json!({"aliases": {"fx": {}}}))).await;
+    assert_eq!(s, 400, "{v}");
+}
+
 /// Names are authorized as the request resolves them. An alias's index comes from wherever
 /// the request names it (the body's `index` too), and an alias can't reach more than its index
 /// grants; date math (`<.async-search>`) and `::failures` are resolved before the check; a
@@ -7915,6 +7946,17 @@ async fn otlp_logs_land_in_otel_data_streams_with_an_otel_key() {
     assert_eq!(hits[0]["_source"]["resource"]["attributes"]["service.name"], "checkout", "{v}");
     assert!(hits[0]["_index"].as_str().unwrap().contains("logs-generic.otel-default"), "{v}");
     assert!(hits[1]["_index"].as_str().unwrap().contains("logs-web.otel-default"), "{v}");
+    // Traces too: a span into traces-*.otel-*, its event a log line beside it.
+    let trace = json!({"resourceSpans": [{"scopeSpans": [{"spans": [{"traceId": "abababababababababababababababab", "spanId": "0101010101010101",
+        "name": "GET /cart", "kind": 2, "startTimeUnixNano": "1700000002000000000", "endTimeUnixNano": "1700000002250000000",
+        "events": [{"timeUnixNano": "1700000002100000000", "name": "exception"}]}]}]}]});
+    let r = e.http.post(format!("{}/_otlp/v1/traces", e.es)).header("authorization", format!("ApiKey {key}")).json(&trace).send().await.unwrap();
+    assert_eq!((r.status().as_u16(), r.text().await.unwrap()), (200, "{}".to_string()));
+    assert_eq!(e.es(&u, &p, Method::POST, "/traces-*.otel-*,logs-*.otel-*/_refresh", None).await.0, 200);
+    let (_, v) = e.es(&u, &p, Method::POST, "/traces-*.otel-*/_search", None).await;
+    assert_eq!((&v["hits"]["hits"][0]["_source"]["duration"], &v["hits"]["hits"][0]["_source"]["kind"]), (&json!(250000000), &json!("Server")), "{v}");
+    let (_, v) = e.es(&u, &p, Method::POST, "/logs-*.otel-*/_search", Some(json!({"query": {"term": {"event_name": "exception"}}}))).await;
+    assert_eq!(v["hits"]["hits"][0]["_source"]["trace_id"], "abababababababababababababababab", "{v}");
     // The key writes and never reads (a wildcard would just find nothing it may read).
     let (s, v) = as_key(&e, &key, Method::POST, "/logs-generic.otel-default/_search", None).await;
     assert_eq!(s, 403, "{v}");
@@ -7925,5 +7967,50 @@ async fn otlp_logs_land_in_otel_data_streams_with_an_otel_key() {
     let (status, text) = (r.status().as_u16(), r.text().await.unwrap());
     assert_eq!(e.es(&u, &p, Method::POST, "/logs-*.otel-*/_refresh", None).await.0, 200);
     let (_, v) = e.es(&u, &p, Method::POST, "/logs-*.otel-*/_count", None).await;
-    assert_eq!((status, &v["count"]), (403, &json!(2)), "the read key's write: {text}");
+    // Two log records and the trace's event; the read key's write added nothing.
+    assert_eq!((status, &v["count"]), (403, &json!(3)), "the read key's write: {text}");
+}
+
+/// `cluster.max_shards_per_node`: creating or opening past it is refused with Elasticsearch's
+/// error, closed indices don't count, and a key that may only create documents (an `otel` key
+/// through OTLP) can't add data streams past it.
+#[tokio::test]
+async fn the_shard_limit_holds_for_creates_opens_and_otel_keys() {
+    use reqwest::Method;
+    let e = env().await;
+    let c = e.post("/v1/search/clusters", json!({"name": "shards"})).await;
+    let (u, p) = creds(&c);
+    let id = c["id"].as_str().unwrap().to_string();
+    // The key first: whatever system index it needs is made before the limit is reached.
+    let (_, v) = e.call(Method::POST, &format!("/v1/search/clusters/{id}/keys"), Some(json!({"name": "collector", "access": "otel"}))).await;
+    let key = v["api_key"].as_str().unwrap().to_string();
+    // Shards open now (system indices included), then room for exactly two more indices.
+    let (_, v) = e.es(&u, &p, Method::GET, "/_cat/indices?format=json&expand_wildcards=all&h=pri,rep,status", None).await;
+    let open: u64 = v.as_array().unwrap().iter().filter(|i| i["status"] == "open").map(|i| {
+        let n = |k: &str| i[k].as_str().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+        n("pri") * (1 + n("rep"))
+    }).sum();
+    let max = open + 4;
+    let (s, v) = e.es(&u, &p, Method::PUT, "/_cluster/settings", Some(json!({"persistent": {"cluster.max_shards_per_node": max}}))).await;
+    assert_eq!(s, 200, "{v}");
+    // One primary and one replica each: two indices fill it.
+    for name in ["a", "b"] {
+        assert_eq!(e.es(&u, &p, Method::PUT, &format!("/{name}"), None).await.0, 200, "{name}");
+    }
+    let (s, v) = e.es(&u, &p, Method::PUT, "/c", None).await;
+    assert_eq!((s, &v["error"]["type"]), (400, &json!("validation_exception")), "{v}");
+    let expected = format!("this action would add [2] shards, but this cluster currently has [{max}]/[{max}] maximum normal shards open");
+    assert!(v["error"]["reason"].as_str().unwrap().contains(&expected), "{v}");
+    // A closed index's shards don't count; opening it again would pass the limit.
+    assert_eq!(e.es(&u, &p, Method::POST, "/a/_close", None).await.0, 200);
+    assert_eq!(e.es(&u, &p, Method::PUT, "/c", None).await.0, 200);
+    let (s, v) = e.es(&u, &p, Method::POST, "/a/_open", None).await;
+    assert_eq!((s, &v["error"]["type"]), (400, &json!("validation_exception")), "{v}");
+    // The otel key's records for a new data stream are refused, not created.
+    let logs = json!({"resourceLogs": [{"scopeLogs": [{"logRecords": [{"body": {"stringValue": "x"}}]}]}]});
+    let r = e.http.post(format!("{}/_otlp/v1/logs", e.es)).header("authorization", format!("ApiKey {key}")).json(&logs).send().await.unwrap();
+    let (status, text) = (r.status().as_u16(), r.text().await.unwrap());
+    assert!(status == 200 && text.contains("maximum normal shards open"), "{status} {text}");
+    let (_, v) = e.es(&u, &p, Method::GET, "/_data_stream/logs-*", None).await;
+    assert_eq!(v["data_streams"], json!([]), "no data stream was made: {v}");
 }

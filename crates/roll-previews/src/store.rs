@@ -3433,6 +3433,8 @@ impl Store {
                  ON CONFLICT (preview_id, service, revision) DO UPDATE SET at = excluded.at",
                 params![id, service, revision, host, url, now],
             )?;
+            // Kept again (started on demand): its link isn't a gone push's any more.
+            c.execute("DELETE FROM gone_pushes WHERE host = ?", [host.as_str()])?;
             let old: Vec<String> = c.query(
                 "SELECT revision FROM pinned WHERE preview_id = ? AND service = ? ORDER BY at DESC LIMIT 1000 OFFSET ?",
                 params![id, service, PINNED_KEEP as i64],
@@ -4062,6 +4064,7 @@ impl Store {
         // head's outcome isn't this one's.
         let rehearsal = self.runtime_fact::<crate::Rehearsal>(&r.id, "rehearsal")?.filter(|x| x.head == r.build());
         let main_on_change = self.runtime_fact::<crate::MainOnChange>(&r.id, "main_on_change")?.filter(|x| x.head == r.build());
+        let replay = self.runtime_fact::<crate::Replay>(&r.id, "replay")?.filter(|x| x.head == r.build());
         let masked_by_default: Vec<crate::MaskedByDefault> = self.runtime_fact(&r.id, "masked_by_default")?.unwrap_or_default();
         let schema_overlaps = self.schema_overlaps(&r, schema_changes.as_deref())?;
         let kept_until = self.kept_until(&r.id)?;
@@ -4141,6 +4144,15 @@ impl Store {
             crate::settings::RegressionsRule::Check => Some("check".to_string()),
             crate::settings::RegressionsRule::Required => Some("required".to_string()),
         };
+        // Only where there's a Postgres branch to rehearse on: a rule that could never be met
+        // holds nothing back.
+        let rehearsable = self.resources(&r.id)?.iter().any(|x| x.kind == crate::Kind::Postgres && x.r#ref.is_some());
+        let release_checks = match settings.release_checks {
+            _ if !rehearsable => None,
+            crate::settings::ReleaseChecksRule::Off => None,
+            crate::settings::ReleaseChecksRule::Check => Some("check".to_string()),
+            crate::settings::ReleaseChecksRule::Required => Some("required".to_string()),
+        };
         // An acceptance counts at its head, for what it accepted (more at that head asks again), and
         // for a required rule only a person's.
         let showing = crate::RegressionsAccepted::of(slower_routes.as_ref(), new_errors.as_ref());
@@ -4205,6 +4217,7 @@ impl Store {
             schema_overlaps,
             rehearsal,
             main_on_change,
+            replay,
             masked_by_default,
             release,
             kept_until,
@@ -4231,6 +4244,7 @@ impl Store {
             served_secrets,
             skipped,
             regressions,
+            release_checks,
             regressions_accepted,
             regressions_compared,
             intercepted,

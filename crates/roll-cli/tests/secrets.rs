@@ -281,6 +281,13 @@ async fn roll_run_injects_an_environments_secrets_and_refuses_unresolved_referen
     let token = ok(&api, &[], &["secrets", "-p", "shop", "tokens", "create", "ci", "--for-env", "production"], None).await;
     let t = [("ROLL_TOKEN", token.trim())];
     assert_eq!(ok(&api, &t, &["run", "-e", "production", "--no-mask", "--", "sh", "-c", "echo $HOST"], None).await.trim(), "db.internal");
+    // The command never gets roll's own credentials, run straight or masked, unless asked.
+    let seen = "echo ${ROLL_TOKEN:-none} ${ROLL_ADMIN_TOKEN:-none} $ROLL_PROJECT_HINT";
+    let t = [t[0], ("ROLL_ADMIN_TOKEN", "fake-admin-token"), ("ROLL_PROJECT_HINT", "kept")];
+    assert_eq!(ok(&api, &t, &["run", "-e", "production", "--no-mask", "--", "sh", "-c", seen], None).await.trim(), "none none kept");
+    assert_eq!(ok(&api, &[&t[..], &[("CI", "true")]].concat(), &["run", "-e", "production", "--", "sh", "-c", seen], None).await.trim(), "none none kept");
+    let kept = ok(&api, &t, &["run", "-e", "production", "--no-mask", "--keep-roll-credentials", "--", "sh", "-c", "echo ${ROLL_ADMIN_TOKEN:-none}"], None).await;
+    assert_eq!(kept.trim(), "fake-admin-token");
     let denied = roll(&api, &t, &["run", "-e", "staging", "--", "true"], None).await;
     assert_ne!(denied.code, Some(0));
     // `kubernetes` prints what External Secrets Operator needs: its store's URL, with the token it
@@ -1269,8 +1276,9 @@ async fn the_local_agent_on_a_gce_vm_logs_in_with_the_metadata_servers_identity_
 }
 
 /// On bare metal, `roll` exchanges the bootstrap token once for a machine credential kept 0600 in
-/// the state directory and logs in with it; the token still set doesn't exchange again. Past half
-/// its life, the next run replaces it, and the old one stops working.
+/// the state directory and logs in with it; the token still set doesn't exchange again, and the
+/// machine's later runs (more than its 5 live logins' worth) share the one login kept beside it.
+/// Past half its life, the next run replaces it, and the old one stops working.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_bootstrap_token_becomes_a_machine_credential_kept_on_disk_and_replaced_at_half_life() {
@@ -1291,6 +1299,12 @@ async fn a_bootstrap_token_becomes_a_machine_credential_kept_on_disk_and_replace
     let first = kept["credential"].as_str().unwrap().to_string();
     assert!(first.starts_with("rlmc_") && !kept.to_string().contains(&token), "{kept}");
     assert_eq!(get().await.trim(), "fake-hello", "the same bootstrap token isn't exchanged again");
+    let login = kept["login"]["token"].as_str().unwrap_or_else(|| panic!("{kept}")).to_string();
+    for _ in 0..7 {
+        assert_eq!(get().await.trim(), "fake-hello", "a restart storm shares the machine's login");
+    }
+    let kept: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    assert_eq!(kept["login"]["token"].as_str(), Some(login.as_str()), "one login for every run");
 
     // Past half its life: the next run replaces it.
     let mut aged = kept.clone();

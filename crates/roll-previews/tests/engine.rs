@@ -506,6 +506,15 @@ async fn a_change_queued_to_land_is_rehearsed_where_the_project_asks() {
     quiet.engine.pass().await.unwrap();
     let q = quiet.engine.store.row_by_change("chg_rq2").unwrap().unwrap();
     assert!(quiet.engine.store.preview(&q.id).unwrap().rehearsal.is_none());
+    // Where the project checks its releases: at every head, queued or not, and the change is told
+    // the rule with how it went (its landing blocker reads both).
+    let checked = env(json!({ "enabled": true, "release": { "image": "node:22", "run": "npm run migrate" }, "release_checks": "required" }));
+    checked.code.open(change("chg_rc", 4));
+    checked.engine.pass().await.unwrap();
+    let c = checked.engine.store.row_by_change("chg_rc").unwrap().unwrap();
+    let v = checked.engine.store.preview(&c.id).unwrap();
+    assert_eq!((v.rehearsal.as_ref().and_then(|x| x.ok), v.release_checks.as_deref()), (Some(true), Some("required")), "rehearsed at its head, not queued");
+    assert!(checked.engine.store.settings(&checked.project).unwrap().patched(&json!({ "release": null })).is_err(), "a rule needs a release");
 }
 
 /// Snapshots from the team's own tests (Argos's and Percy's SDKs): a picture sent to a change's
@@ -552,6 +561,43 @@ async fn the_teams_snapshots_join_the_visual_review() {
     assert!(e.engine.store.page_checks(&chg.id).unwrap().iter().any(|p| p.path == "snap:checkout"), "a run at its head keeps it");
     e.engine.store.set_page_shots(&chg.id, "cs_next", &[], &[]).unwrap();
     assert!(!e.engine.store.page_checks(&chg.id).unwrap().iter().any(|p| p.path == "snap:checkout"), "a new head's run drops it");
+}
+
+/// A change's preview's recent requests replayed against main's preview (Signadot's SmartTests):
+/// the GETs both served lately, asked of each again; one that answers with another status, or
+/// whose JSON lost a field main's has, differs. A fork's preview isn't replayed.
+#[tokio::test]
+async fn recent_requests_are_replayed_against_mains_preview() {
+    let e = env(json!({ "enabled": true, "github": { "screenshot": true } }));
+    e.code.open(change("chg_rp", 1));
+    e.engine.pass().await.unwrap();
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_rp").unwrap().unwrap();
+    let main = e.engine.store.rows(Some(&e.project)).unwrap().into_iter().find(|r| r.change_id.is_none()).unwrap();
+    let line = |method: &str, path: &str| roll_previews::RequestLine { at: 1, service: "web".into(), method: method.into(), path: path.into(), status: 200, ms: 3 };
+    e.apps.request_log.lock().insert(p.id.clone(), vec![line("GET", "/api/cart"), line("GET", "/__roll/feedback.js"), line("POST", "/api/pay")]);
+    e.apps.request_log.lock().insert(main.id.clone(), vec![line("GET", "/api/items"), line("GET", "/api/cart")]);
+    let url = e.engine.store.services(&p.id).unwrap().into_iter().find(|s| s.name == "web").unwrap().url;
+    e.apps.fetched.lock().insert(format!("web {url}/api/cart"), 500);
+    e.apps.json.lock().insert(format!("{} /api/items", p.id), r#"{"id":1}"#.into());
+    e.apps.json.lock().insert(format!("{} /api/items", main.id), r#"{"id":1,"price":2}"#.into());
+    let asked = e.engine.replay(&p.id, "ada").await.unwrap();
+    assert_eq!(asked.ok, None, "asked, replayed in the background");
+    let mut done = None;
+    for _ in 0..500 {
+        done = e.engine.store.preview(&p.id).unwrap().replay.filter(|x| x.ok.is_some());
+        if done.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let done = done.expect("replayed");
+    let got: Vec<(&str, u16, u16, Vec<String>)> = done.requests.iter().map(|q| (q.path.as_str(), q.status, q.main_status, q.removed.clone())).collect();
+    assert_eq!(got, vec![("/api/cart", 500, 200, vec![]), ("/api/items", 200, 200, vec!["price".to_string()])], "GETs only, each once, never roll's own paths");
+    assert!(done.requests.iter().all(|q| q.differs()), "a lost field differs as a status does");
+    assert_eq!(done.ok, Some(false));
+    e.engine.store.update(&p.id, |r| r.trusted = false).unwrap();
+    assert!(matches!(e.engine.replay(&p.id, "ada").await, Err(roll_previews::Error::Conflict(_))), "a fork's paths aren't sent to main's");
 }
 
 /// A visual change refused (Chromatic's Deny): the review fails at that head, the change is told at
@@ -2194,15 +2240,23 @@ async fn earlier_pushes_stay_reachable_at_their_own_urls() {
     let none = |_: &str| String::new();
     e.engine.store.set_project_domain(&e.project, Some(("preview.acme.dev", true)), &none, &none).unwrap();
     e.engine.store.set_project_domain("prj_other", Some(("preview.other.dev", false)), &none, &none).unwrap();
-    assert_eq!(e.engine.store.gone_domain_push(&a, "preview.acme.dev").unwrap(), Some(gone));
+    assert_eq!(e.engine.store.gone_domain_push(&a, "preview.acme.dev").unwrap(), Some(gone.clone()));
     assert_eq!(e.engine.store.gone_domain_push(&a, "preview.other.dev").unwrap(), None);
     // An earlier push runs its own head on its own host.
     let (t, _) = e.engine.env(&p.id, "web@cs_8c").await.unwrap();
     assert_eq!(t.revision, "cs_8c");
     assert!(view.earlier.iter().any(|x| x.url.contains(&t.host)));
+    // Started again on demand from its link's page: kept in place of the oldest, at its link.
+    let url = e.engine.restart_push(&gone, "ada").await.unwrap();
+    let kept: Vec<String> = e.engine.store.preview(&p.id).unwrap().earlier.iter().map(|x| x.revision.clone()).collect();
+    assert_eq!(kept, ["cs_8a", "cs_8d", "cs_8c"], "the oldest kept went in its place");
+    assert!(url.contains(&a) && e.engine.store.gone_push(&a).unwrap().is_none(), "its own link again, no longer gone: {url}");
+    assert!(e.apps.removed.lock().contains(&(p.id.clone(), "web@cs_8b".into())));
+    assert!(matches!(e.engine.restart_push(&gone, "ada").await, Err(roll_previews::Error::Conflict(_))), "once a minute a preview");
     // A fork's earlier heads lost their approval with the push: they don't run.
     e.engine.store.update(&p.id, |r| r.trusted = false).unwrap();
     assert!(e.engine.env(&p.id, "web@cs_8c").await.is_err());
+    assert!(e.engine.restart_push(&gone, "ada").await.is_err(), "nor start again");
     // Deleted, they all go.
     e.code.edit("chg_p", |c| c.open = false);
     e.engine.pass().await.unwrap();
@@ -2762,12 +2816,23 @@ async fn a_storybooks_stories_are_pages_kept_while_its_service_doesnt_change() {
     let mut png = Vec::new();
     image::RgbaImage::new(4, 4).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
     *e.apps.shot.lock() = Some(png);
-    let runs = |svc: &str| e.apps.shot_services.lock().iter().filter(|s| *s == svc).count();
     let mut c = change("chg_sb", 3);
     c.repo = "acme/api".into();
     e.code.open(c);
     e.engine.pass().await.unwrap();
     let p = e.engine.store.row_by_change("chg_sb").unwrap().unwrap();
+    // This preview's own runs of web: main's preview takes the change's stories too (a baseline
+    // on demand), whenever its run comes.
+    let runs = |svc: &str| e.apps.shots_of.lock().iter().filter(|(pv, s)| *pv == p.id && s == svc).count();
+    // Every screenshot run settled (this one's, and main's it asked for), so none lands later.
+    let settled = || async {
+        for _ in 0..3000 {
+            if !e.engine.shooting() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    };
     let stories = |e: &Env| e.engine.store.preview(&p.id).unwrap().pages.iter().filter(|x| x.path.starts_with("story:")).map(|x| x.path.clone()).collect::<Vec<_>>();
     for _ in 0..3000 {
         if stories(&e).len() == 2 {
@@ -2776,6 +2841,7 @@ async fn a_storybooks_stories_are_pages_kept_while_its_service_doesnt_change() {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
     assert_eq!(stories(&e), ["story:button--primary", "story:button--secondary"]);
+    settled().await;
     let web_before = runs("web");
     // A push to api: web runs what it ran, so its stories are kept, not taken again.
     e.code.edit("chg_sb", |c| c.head = "cs_4b".into());
@@ -2786,6 +2852,7 @@ async fn a_storybooks_stories_are_pages_kept_while_its_service_doesnt_change() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
+    settled().await;
     assert_eq!((runs("web"), stories(&e).len()), (web_before, 2), "kept with web's other pages");
 }
 
