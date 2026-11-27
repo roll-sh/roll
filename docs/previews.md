@@ -366,6 +366,25 @@ state. A pass of the reconciler:
        `engine.rs::a_rehearsal_runs_the_release_on_a_fresh_masked_branch_then_drops_it`).
    4d. Once per head, the Postgres branches' schema is compared with their parents' (see
        "Schema changes").
+   4e. Main's code on the change's migrated data (pgroll's and Reshape's expand/contract,
+       tested on real data instead of assumed): while a change deploys, the version before it
+       still serves, on the schema its release just changed. So once per head of a trusted change
+       whose release changed the schema, after its services are up and healthy, main's live build
+       of each of main's services runs again, taking no traffic (roll apps' rollback with
+       variables, as an earlier push's own copy does), on a copy of each of the change's Postgres
+       branches as the release left them (`<preview>-m`, copy-on-write, masked as the branch is),
+       with main's own branches' variables swapped for the copy's by value (and the ones roll
+       makes from them). Its pages, `/` and the project's `github.pages` (10 at most; the other
+       services `/`), are read there and on main's preview; a page that answers on main's data
+       (below 500) but not on the change's (a 5xx, or no answer) broke. The copies go after,
+       whatever happened. `main_on_change` (`{head, at, ms, pages: [{service, path, status,
+       main_status}], error}`) has it at that head, the sheet and the pull request comment say it
+       ("Main's code breaks on this change's migrated data: `/orders` answers 500 (on main's
+       data, 200)… expand first and contract in a later change"), and the activity too. Only a
+       trusted change: main's build reads the copy with main's secrets. Where it can't run (no
+       preview of main, a service on roll's runtime, a branch that can't be copied) `error` says
+       why and nothing is said on the pull request
+       (`engine.rs::mains_code_runs_on_a_copy_of_the_changes_migrated_data`).
    5. The secrets environment `pv-<preview id>` is ensured (base, overrides, resource URLs).
    6. Every service whose revision is not the one it should run is redeployed (the change's head
       for its repo; for the others their branch of the same name, else their default head), all
@@ -2146,6 +2165,7 @@ type Preview = {
   // Checks against main's preview (types as in apps/dashboard/src/lib/previews-api.ts):
   release?: { head: string; ms: number; before_ms: number | null; locks?: { table: string; mode: string; ms: number }[] } | null;
   rehearsal?: { head: string; by: string; at: number; ok: boolean | null; ms: number | null; error: string | null } | null; // its release on today's data (POST …/rehearse)
+  main_on_change?: { head: string; at: number; ms: number; pages: { service: string; path: string; status: number; main_status: number }[]; error: string | null } | null; // main's code on a copy of this head's migrated data (0: no answer)
   masked_by_default?: { resource: string; column: string; why: string }[]; // columns masked as they look like people's data and no rule names them
   reaches?: "open" | "roll";
   visual_change?: { since: string; percent: number; phone_percent?: number | null } | null;
@@ -3027,10 +3047,8 @@ overlaps stay within a repo.
 
 1. **Masking that's safe by default, for NoSQL and search too** (Postgres's landed, #1166), and
    the project told when production gains such a column (not only the preview's activity).
-2. **Main's code on the change's migrated data** (pgroll and Reshape's expand/contract; M): main's
-   preview run once against a copy of the change's branch after its release (its pages and
-   endpoints), so a migration that breaks the version still running while it deploys is caught on
-   real data.
+2. **Main's code on the change's migrated data, in review** (roll apps services); roll's runtime
+   next: it has no build taking no traffic yet.
 3. **Webhooks into private previews** (Vercel's bypass in a query parameter; S): a per-preview,
    per-path bypass that fits in a Stripe or GitHub webhook URL, never the project-wide secret.
 4. **Snapshots from the team's own Playwright or Cypress suite** (Argos's, Percy's SDKs; M):

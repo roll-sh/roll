@@ -2115,6 +2115,12 @@ impl Store {
         Ok(self.db.read(|c| c.query_row("SELECT schema_head FROM previews WHERE id = ?", [id], |r| r.get(0)).optional())?.flatten())
     }
 
+    /// The schema's changes read at [`Store::schema_head`] (`None`: none read).
+    pub fn schema_changes(&self, id: &str) -> Result<Option<Vec<String>>> {
+        let json: Option<String> = self.db.read(|c| c.query_row("SELECT schema_changes FROM previews WHERE id = ?", [id], |r| r.get(0)).optional())?.flatten();
+        Ok(json.and_then(|j| serde_json::from_str(&j).ok()))
+    }
+
     /// `risks`: [`crate::schema::risks`] of every line, the ones past `changes`' cap too.
     pub fn set_schema_changes(&self, id: &str, head: &str, changes: Option<&[String]>, risks: &[String]) -> Result<()> {
         let json = changes.map(|c| serde_json::to_string(c).expect("strings serialize"));
@@ -3868,6 +3874,7 @@ impl Store {
         // Only at the head it's for: one asked at an earlier head never runs, and an earlier
         // head's outcome isn't this one's.
         let rehearsal = self.runtime_fact::<crate::Rehearsal>(&r.id, "rehearsal")?.filter(|x| x.head == r.build());
+        let main_on_change = self.runtime_fact::<crate::MainOnChange>(&r.id, "main_on_change")?.filter(|x| x.head == r.build());
         let masked_by_default: Vec<crate::MaskedByDefault> = self.runtime_fact(&r.id, "masked_by_default")?.unwrap_or_default();
         let schema_overlaps = self.schema_overlaps(&r, schema_changes.as_deref())?;
         let kept_until = self.kept_until(&r.id)?;
@@ -4010,6 +4017,7 @@ impl Store {
             schema_changes,
             schema_overlaps,
             rehearsal,
+            main_on_change,
             masked_by_default,
             release,
             kept_until,
