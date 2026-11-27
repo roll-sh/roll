@@ -425,10 +425,13 @@ async fn fake_postgres(mode: Fake) -> (u16, Arc<std::sync::Mutex<Vec<String>>>) 
     (port, got)
 }
 
-/// Pointing a connector somewhere else without giving the password again clears it: the new host
-/// never receives the stored one.
+/// A stored password goes only to the host it was given with: pointing a connector somewhere
+/// else without giving the password again clears it, and so does a detour through another
+/// service; a detour through self-managed (where roll doesn't guard the configuration) and back,
+/// or a sealed value moved from a non-sensitive entry to the sensitive one, never sends it to a
+/// host it wasn't paired with.
 #[tokio::test]
-async fn a_retargeted_connector_never_sends_the_stored_password() {
+async fn a_stored_password_never_goes_to_another_host() {
     let (first, first_got) = fake_postgres(Fake::Password).await;
     let (second, second_got) = fake_postgres(Fake::Password).await;
     let c = cluster(&[]).await;
@@ -465,6 +468,29 @@ async fn a_retargeted_connector_never_sends_the_stored_password() {
     let job = finished(&c, &start(&c, "pg", "full").await).await;
     assert_eq!(at(&job, "status").as_str(), Some("error"), "{job:?}");
     assert!(third_got.lock().unwrap().is_empty(), "the detour's host got a password: {:?}", third_got.lock().unwrap());
+
+    let (home, home_got) = fake_postgres(Fake::Password).await;
+    let (evil, evil_got) = fake_postgres(Fake::Password).await;
+    pg_connector(&c, &format!("127.0.0.1:{home}"), "x", "content-x", "*", "pw-paired-7").await;
+    let sealed = at(c.state().metadata.xpack.get("connector", "x").unwrap(), "configuration.password.value").as_str().unwrap().to_string();
+    // (a) Made self-managed, pointed elsewhere, made native again.
+    assert_eq!(call(&c, "PUT", "/_connector/x/_native", Some(r#"{"is_native":false}"#)).await.0, 200);
+    assert_eq!(call(&c, "PUT", "/_connector/x/_configuration", Some(&format!(r#"{{"values":{{"port":{evil}}}}}"#))).await.0, 200);
+    assert_eq!(call(&c, "PUT", "/_connector/x/_native", Some(r#"{"is_native":true}"#)).await.0, 200);
+    // (b) The sealed value written back under a non-sensitive entry, then (c) the entry made
+    // sensitive with the same value.
+    let replace = |sensitive: bool| {
+        format!(
+            r#"{{"configuration":{{"host":{{"label":"Host","value":"127.0.0.1"}},"port":{{"label":"Port","value":{evil}}},"username":{{"label":"Username","value":"roll"}},"database":{{"label":"Database","value":"shop"}},"ssl_enabled":{{"label":"SSL","value":false}},"password":{{"label":"Password","sensitive":{sensitive},"value":"{sealed}"}}}}}}"#
+        )
+    };
+    assert_eq!(call(&c, "PUT", "/_connector/x/_configuration", Some(&replace(false))).await.0, 200);
+    assert_eq!(call(&c, "PUT", "/_connector/x/_configuration", Some(&replace(true))).await.0, 200);
+    // (d) The sync reaches the new host without the paired password.
+    let job = finished(&c, &start(&c, "x", "full").await).await;
+    assert_eq!(at(&job, "status").as_str(), Some("error"), "{job:?}");
+    assert!(home_got.lock().unwrap().is_empty());
+    assert!(!evil_got.lock().unwrap().iter().any(|p| p == "pw-paired-7"), "the paired password reached another host: {:?}", evil_got.lock().unwrap());
 }
 
 /// A server whose message header claims a huge length fails the sync at the header, before the
@@ -481,25 +507,10 @@ async fn a_huge_message_header_fails_the_sync() {
     assert!(started.elapsed() < Duration::from_secs(10), "took {:?}", started.elapsed());
 }
 
-/// The node's egress rules cover connectors as they cover reindex from remote: a host the node
-/// denies (its own addresses, the operator's networks) is refused with reindex's refusal, written
-/// out or behind a name, even where private hosts are allowed, and nothing connects to it.
-#[tokio::test]
-async fn a_denied_address_is_refused_as_reindex_refuses_it() {
-    let (port, got) = fake_postgres(Fake::Password).await;
-    let c = cluster(&[("roll.egress.deny_addresses", "127.0.0.0/8,::1")]).await;
-    for (id, host) in [("pg", "127.0.0.1"), ("pg-named", "localhost.")] {
-        pg_connector(&c, &format!("{host}:{port}"), id, &format!("content-{id}"), "*", "pw-denied-1").await;
-        let job = finished(&c, &start(&c, id, "full").await).await;
-        assert_eq!(at(&job, "status").as_str(), Some("error"), "{job:?}");
-        assert!(at(&job, "error").as_str().is_some_and(|e| e.contains(&format!("[{host}] is an address roll may not reach"))), "{host}: {job:?}");
-    }
-    assert!(got.lock().unwrap().is_empty(), "a denied address was reached");
-}
-
 /// Without `allow_private_hosts`, neither connector reaches a private address or one the node
 /// denies, whichever way it's named: a loopback literal, a name that resolves to loopback, or a
-/// deny-list address. Each job fails with the egress refusal, and nothing connects.
+/// deny-list address. Each job fails with the egress refusal, and nothing connects. With private
+/// hosts allowed, the node's deny list still holds, with reindex from remote's refusal.
 #[tokio::test]
 async fn a_connector_never_reaches_a_private_address() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -535,6 +546,13 @@ async fn a_connector_never_reaches_a_private_address() {
         assert_eq!(at(&job, "status").as_str(), Some("error"), "{id}: {job:?}");
         assert!(at(&job, "error").as_str().is_some_and(|e| e.contains(refusal)), "{id}: {job:?}");
     }
+    let open = cluster(&[("roll.egress.deny_addresses", "127.0.0.0/8,::1")]).await;
+    for (id, host) in [("pg", "127.0.0.1"), ("pg-named", "localhost.")] {
+        pg_connector(&open, &format!("{host}:{port}"), id, &format!("content-{id}"), "*", "pw-denied-1").await;
+        let job = finished(&open, &start(&open, id, "full").await).await;
+        assert_eq!(at(&job, "status").as_str(), Some("error"), "{job:?}");
+        assert!(at(&job, "error").as_str().is_some_and(|e| e.contains(&format!("[{host}] is an address roll may not reach"))), "{host}: {job:?}");
+    }
     assert_eq!(reached.load(std::sync::atomic::Ordering::SeqCst), 0, "a connector reached a private address");
 }
 
@@ -567,36 +585,6 @@ async fn a_planted_sealed_value_opens_to_nothing() {
     let job = finished(&c, &start(&c, "planted", "full").await).await;
     assert_eq!(at(&job, "status").as_str(), Some("error"), "{job:?}");
     assert!(got.lock().unwrap().is_empty(), "something was sent: {:?}", got.lock().unwrap());
-}
-
-/// A detour through self-managed (where roll doesn't guard the configuration) and back, or a
-/// sealed value moved from a non-sensitive entry to the sensitive one, never sends the stored
-/// password to a host it wasn't paired with.
-#[tokio::test]
-async fn a_detour_through_self_managed_never_sends_the_password_elsewhere() {
-    let (home, home_got) = fake_postgres(Fake::Password).await;
-    let (evil, evil_got) = fake_postgres(Fake::Password).await;
-    let c = cluster(&[]).await;
-    pg_connector(&c, &format!("127.0.0.1:{home}"), "x", "content-x", "*", "pw-paired-7").await;
-    let sealed = at(c.state().metadata.xpack.get("connector", "x").unwrap(), "configuration.password.value").as_str().unwrap().to_string();
-    // (a) Made self-managed, pointed elsewhere, made native again.
-    assert_eq!(call(&c, "PUT", "/_connector/x/_native", Some(r#"{"is_native":false}"#)).await.0, 200);
-    assert_eq!(call(&c, "PUT", "/_connector/x/_configuration", Some(&format!(r#"{{"values":{{"port":{evil}}}}}"#))).await.0, 200);
-    assert_eq!(call(&c, "PUT", "/_connector/x/_native", Some(r#"{"is_native":true}"#)).await.0, 200);
-    // (b) The sealed value written back under a non-sensitive entry, then (c) the entry made
-    // sensitive with the same value.
-    let replace = |sensitive: bool| {
-        format!(
-            r#"{{"configuration":{{"host":{{"label":"Host","value":"127.0.0.1"}},"port":{{"label":"Port","value":{evil}}},"username":{{"label":"Username","value":"roll"}},"database":{{"label":"Database","value":"shop"}},"ssl_enabled":{{"label":"SSL","value":false}},"password":{{"label":"Password","sensitive":{sensitive},"value":"{sealed}"}}}}}}"#
-        )
-    };
-    assert_eq!(call(&c, "PUT", "/_connector/x/_configuration", Some(&replace(false))).await.0, 200);
-    assert_eq!(call(&c, "PUT", "/_connector/x/_configuration", Some(&replace(true))).await.0, 200);
-    // (d) The sync reaches the new host without the paired password.
-    let job = finished(&c, &start(&c, "x", "full").await).await;
-    assert_eq!(at(&job, "status").as_str(), Some("error"), "{job:?}");
-    assert!(home_got.lock().unwrap().is_empty());
-    assert!(!evil_got.lock().unwrap().iter().any(|p| p == "pw-paired-7"), "the paired password reached another host: {:?}", evil_got.lock().unwrap());
 }
 
 /// A cluster whose queued job is canceled while the node's slots are all taken doesn't hold up
@@ -681,6 +669,7 @@ async fn cancel_stops_a_sync_waiting_on_a_silent_server() {
 #[tokio::test]
 async fn a_branch_runs_no_inherited_sync_until_the_connector_is_its_own() {
     let (port, got) = fake_postgres(Fake::Password).await;
+    let (own_port, _) = fake_postgres(Fake::Password).await;
     let mut cfg = ClusterConfig::new("branch");
     cfg.connector_slots = Some(slots());
     cfg.sealer = search_es::seal::Sealer::from_secret("0123456789abcdef0123456789abcdef-connectors");
@@ -693,11 +682,15 @@ async fn a_branch_runs_no_inherited_sync_until_the_connector_is_its_own() {
     // Its first load marks what it inherited, then its scheduler starts.
     search_es::branch::mark_inherited(&b).await.unwrap();
     b.enable_background_tasks();
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    // A connector the branch made runs a sync meanwhile: the scheduler has passed the inherited
+    // one's jobs by.
+    pg_connector(&b, &format!("127.0.0.1:{own_port}"), "own", "content-own", "*", "pw-own-5").await;
+    let ran = || async { finished(&b, &start(&b, "own", "full").await).await };
+    ran().await;
     let (_, j, _) = call(&b, "GET", &format!("/_connector/_sync_job/{waiting}"), None).await;
     assert_eq!(at(&j, "status").as_str(), Some("pending"), "an inherited connector's job waits: {j:?}");
     let again = start(&b, "pg", "full").await;
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    ran().await;
     let (_, j, _) = call(&b, "GET", &format!("/_connector/_sync_job/{again}"), None).await;
     assert_eq!(at(&j, "status").as_str(), Some("pending"), "a job started on the branch waits too: {j:?}");
     assert!(got.lock().unwrap().is_empty(), "the parent's source was reached");

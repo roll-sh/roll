@@ -53,35 +53,39 @@ fn at<'v>(v: &'v Value, path: &[&str]) -> &'v Value {
     .unwrap_or(&NULL)
 }
 
+/// Sizes and counts a client sends never size an allocation: a slice count up to `i32::MAX`
+/// fails at once (its suppressed copies bounded) with nothing written, deleted or left
+/// registered, and a `term` suggester's `size` and `shard_size` of `i32::MAX` answer normally.
 #[tokio::test]
-async fn huge_slice_counts_fail_without_allocating() {
-    let c = Cluster::in_memory("limits").await;
-    call(&c, "PUT", "/idx/_doc/1?refresh=true", r#"{"a":1}"#).await;
-    for uri in ["/idx/_update_by_query?slices=2147483647", "/idx/_delete_by_query?slices=2147483647", "/idx/_update_by_query?slices=100000"] {
-        let t = Instant::now();
-        let body = if uri.contains("delete") { r#"{"query":{"match_all":{}}}"# } else { "" };
-        let (status, v) = call(&c, "POST", uri, body).await;
-        assert_eq!(status, 400, "{uri}: {}", v.to_json());
-        assert!(at(&v, &["error", "root_cause", "0", "reason"]).as_str().unwrap().starts_with("The number of slices ["), "{}", v.to_json());
-        // Suppressed copies of the slice failure are bounded.
-        let suppressed = at(&v, &["error", "suppressed"]).as_array().map_or(0, Vec::len);
-        assert!(suppressed <= 4096, "{suppressed}");
-        assert!(t.elapsed() < Duration::from_secs(20), "{uri} took {:?}", t.elapsed());
+async fn client_sizes_never_size_an_allocation() {
+    {
+        let c = Cluster::in_memory("limits").await;
+        call(&c, "PUT", "/idx/_doc/1?refresh=true", r#"{"a":1}"#).await;
+        for uri in ["/idx/_update_by_query?slices=2147483647", "/idx/_delete_by_query?slices=2147483647", "/idx/_update_by_query?slices=100000"] {
+            let t = Instant::now();
+            let body = if uri.contains("delete") { r#"{"query":{"match_all":{}}}"# } else { "" };
+            let (status, v) = call(&c, "POST", uri, body).await;
+            assert_eq!(status, 400, "{uri}: {}", v.to_json());
+            assert!(at(&v, &["error", "root_cause", "0", "reason"]).as_str().unwrap().starts_with("The number of slices ["), "{}", v.to_json());
+            // Suppressed copies of the slice failure are bounded.
+            let suppressed = at(&v, &["error", "suppressed"]).as_array().map_or(0, Vec::len);
+            assert!(suppressed <= 4096, "{suppressed}");
+            assert!(t.elapsed() < Duration::from_secs(20), "{uri} took {:?}", t.elapsed());
+        }
+        // Nothing was written or deleted, and no task was left registered.
+        let (_, v) = call(&c, "GET", "/idx/_count", "").await;
+        assert_eq!(at(&v, &["count"]).as_i64(), Some(1));
+        let (_, v) = call(&c, "GET", "/_tasks?actions=*byquery*", "").await;
+        assert_eq!(at(&v, &["nodes"]).as_object().map_or(0, |m| m.len()), 0, "{}", v.to_json());
     }
-    // Nothing was written or deleted, and no task was left registered.
-    let (_, v) = call(&c, "GET", "/idx/_count", "").await;
-    assert_eq!(at(&v, &["count"]).as_i64(), Some(1));
-    let (_, v) = call(&c, "GET", "/_tasks?actions=*byquery*", "").await;
-    assert_eq!(at(&v, &["nodes"]).as_object().map_or(0, |m| m.len()), 0, "{}", v.to_json());
-}
 
-#[tokio::test]
-async fn huge_suggest_sizes_stay_bounded() {
-    let c = Cluster::in_memory("limits").await;
-    call(&c, "PUT", "/idx/_doc/1?refresh=true", r#"{"t":"hello world"}"#).await;
-    let (status, v) = call(&c, "POST", "/idx/_search", r#"{"suggest":{"s":{"text":"helo","term":{"field":"t","size":2147483647,"shard_size":2147483647}}}}"#).await;
-    assert_eq!(status, 200, "{}", v.to_json());
-    assert_eq!(at(&v, &["suggest", "s", "0", "options", "0", "text"]).as_str(), Some("hello"));
+    {
+        let c = Cluster::in_memory("limits").await;
+        call(&c, "PUT", "/idx/_doc/1?refresh=true", r#"{"t":"hello world"}"#).await;
+        let (status, v) = call(&c, "POST", "/idx/_search", r#"{"suggest":{"s":{"text":"helo","term":{"field":"t","size":2147483647,"shard_size":2147483647}}}}"#).await;
+        assert_eq!(status, 200, "{}", v.to_json());
+        assert_eq!(at(&v, &["suggest", "s", "0", "options", "0", "text"]).as_str(), Some("hello"));
+    }
 }
 
 #[tokio::test]
@@ -167,27 +171,45 @@ async fn concurrent_dynamic_fields_are_all_indexed() {
     }
 }
 
-/// Points in time are bounded per cluster: each keeps its searchers for up to a day on a node
-/// other tenants share.
+/// Points in time and scrolls are bounded per cluster, as they keep searchers on a node other
+/// tenants share: at most 1,000 open points in time (closing one makes room), and no keep-alive
+/// past roll's ceiling (24h) whatever `search.max_keep_alive` the tenant sets (it reads as
+/// written).
 #[tokio::test]
-async fn open_points_in_time_are_bounded() {
-    let c = Cluster::in_memory("limits").await;
-    call(&c, "PUT", "/idx/_doc/1?refresh=true", r#"{"a":1}"#).await;
-    let mut first = String::new();
-    for i in 0..1000 {
-        let (status, v) = call(&c, "POST", "/idx/_pit?keep_alive=1h", "").await;
-        assert_eq!(status, 200, "#{i}: {}", v.to_json());
-        if i == 0 {
-            first = at(&v, &["id"]).as_str().unwrap().to_string();
+async fn points_in_time_and_scrolls_are_bounded() {
+    {
+        let c = Cluster::in_memory("limits").await;
+        call(&c, "PUT", "/idx/_doc/1?refresh=true", r#"{"a":1}"#).await;
+        let mut first = String::new();
+        for i in 0..1000 {
+            let (status, v) = call(&c, "POST", "/idx/_pit?keep_alive=1h", "").await;
+            assert_eq!(status, 200, "#{i}: {}", v.to_json());
+            if i == 0 {
+                first = at(&v, &["id"]).as_str().unwrap().to_string();
+            }
         }
+        let (status, v) = call(&c, "POST", "/idx/_pit?keep_alive=1h", "").await;
+        assert_eq!(status, 429, "{}", v.to_json());
+        assert_eq!(at(&v, &["error", "type"]).as_str(), Some("rejected_execution_exception"));
+        assert_eq!(at(&v, &["error", "reason"]).as_str(), Some("Trying to create too many Point In Time contexts. Must be less than or equal to: [1000]."));
+        // Closing one makes room.
+        assert_eq!(call(&c, "DELETE", "/_pit", &format!(r#"{{"id":"{first}"}}"#)).await.0, 200);
+        assert_eq!(call(&c, "POST", "/idx/_pit?keep_alive=1h", "").await.0, 200);
     }
-    let (status, v) = call(&c, "POST", "/idx/_pit?keep_alive=1h", "").await;
-    assert_eq!(status, 429, "{}", v.to_json());
-    assert_eq!(at(&v, &["error", "type"]).as_str(), Some("rejected_execution_exception"));
-    assert_eq!(at(&v, &["error", "reason"]).as_str(), Some("Trying to create too many Point In Time contexts. Must be less than or equal to: [1000]."));
-    // Closing one makes room.
-    assert_eq!(call(&c, "DELETE", "/_pit", &format!(r#"{{"id":"{first}"}}"#)).await.0, 200);
-    assert_eq!(call(&c, "POST", "/idx/_pit?keep_alive=1h", "").await.0, 200);
+
+    {
+        let c = Cluster::in_memory("keep-alive").await;
+        call(&c, "PUT", "/k/_doc/1?refresh=true", r#"{"a":1}"#).await;
+        assert_eq!(call(&c, "PUT", "/_cluster/settings", r#"{"persistent":{"search.max_keep_alive":"3650d"}}"#).await.0, 200);
+        let (_, v) = call(&c, "GET", "/_cluster/settings", "").await;
+        assert_eq!(at(&v, &["persistent", "search", "max_keep_alive"]).as_str(), Some("3650d"), "{}", v.to_json());
+        for uri in ["/k/_search?scroll=48h", "/k/_pit?keep_alive=48h"] {
+            let (s, v) = call(&c, "POST", uri, "").await;
+            assert_eq!(s, 400, "{uri}: {}", v.to_json());
+            assert!(v.to_json().contains("is too large"), "{uri}: {}", v.to_json());
+        }
+        assert_eq!(call(&c, "POST", "/k/_search?scroll=24h", "").await.0, 200);
+    }
 }
 
 /// A cluster whose node caps one request at `cap`, with `idx` spread over 10 shards.
@@ -226,7 +248,7 @@ const ENDLESS: &str = "long n = 0; for (long i = 0; i < 1000000000000L; i++) { n
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_node_cap_bounds_one_request() {
-    let c = capped("1s").await;
+    let c = capped("300ms").await;
     let within = Duration::from_secs(8);
     let score = format!(r#""query":{{"script_score":{{"query":{{"match_all":{{}}}},"script":{{"source":"{ENDLESS} return n % 2 + 1;"}}}}}}"#);
     // No timeout of its own, then a larger one: both stop at the cap with partial results.
@@ -257,7 +279,7 @@ async fn the_cap_bounds_a_by_query_runs_searches_not_its_writes() {
     // Every scan takes milliseconds; slice 0's updates take longer than the cap before slice 1
     // scans. The run succeeds: the cap is per search.
     let c = capped("300ms").await;
-    let update = r#"{"script":{"source":"long n = 0; for (int i = 0; i < 900000; i++) { n += i; } ctx._source.a = n;"}}"#;
+    let update = r#"{"script":{"source":"long n = 0; for (int i = 0; i < 300000; i++) { n += i; } ctx._source.a = n;"}}"#;
     let (status, v, took) = call_within(&c, Duration::from_secs(120), "POST", "/idx/_update_by_query?slices=2&refresh=true", update.into()).await;
     assert_eq!(status, 200, "{}", v.to_json());
     // Both slices wrote their share, slice 1 after slice 0's updates outlasted the cap.
@@ -267,7 +289,7 @@ async fn the_cap_bounds_a_by_query_runs_searches_not_its_writes() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_transform_whose_search_hits_the_cap_fails() {
-    let c = capped("1s").await;
+    let c = capped("300ms").await;
     let t = format!(
         r#"{{"source":{{"index":"idx","query":{{"script":{{"script":{{"source":"{ENDLESS} return n >= 0;"}}}}}}}},"dest":{{"index":"out"}},"pivot":{{"group_by":{{"k":{{"terms":{{"field":"k"}}}}}},"aggregations":{{"a":{{"max":{{"field":"a"}}}}}}}},"settings":{{"unattended":true}}}}"#
     );
@@ -467,19 +489,3 @@ async fn a_failing_sort_script_stops_at_its_first_failure() {
     }
 }
 
-/// A tenant can't keep scrolls or points in time alive past roll's ceiling (24h): its
-/// `search.max_keep_alive` reads as written, but the limit applied is the ceiling.
-#[tokio::test]
-async fn keep_alive_is_held_to_the_ceiling() {
-    let c = Cluster::in_memory("keep-alive").await;
-    call(&c, "PUT", "/k/_doc/1?refresh=true", r#"{"a":1}"#).await;
-    assert_eq!(call(&c, "PUT", "/_cluster/settings", r#"{"persistent":{"search.max_keep_alive":"3650d"}}"#).await.0, 200);
-    let (_, v) = call(&c, "GET", "/_cluster/settings", "").await;
-    assert_eq!(at(&v, &["persistent", "search", "max_keep_alive"]).as_str(), Some("3650d"), "{}", v.to_json());
-    for uri in ["/k/_search?scroll=48h", "/k/_pit?keep_alive=48h"] {
-        let (s, v) = call(&c, "POST", uri, "").await;
-        assert_eq!(s, 400, "{uri}: {}", v.to_json());
-        assert!(v.to_json().contains("is too large"), "{uri}: {}", v.to_json());
-    }
-    assert_eq!(call(&c, "POST", "/k/_search?scroll=24h", "").await.0, 200);
-}
