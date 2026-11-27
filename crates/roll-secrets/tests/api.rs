@@ -5902,6 +5902,54 @@ async fn a_rule_naming_one_encryption_key_reaches_it_alone() {
     assert_eq!(call(Method::POST, "/transit/billing/encrypt", Some(plain)).await.0, StatusCode::FORBIDDEN);
 }
 
+/// A rule limited to some keys (`keys: ["STRIPE_KEY"]`) reaches those keys of its folders alone:
+/// it reveals one, lists and reads the folder's values as that one, and is refused another key's
+/// value and any write naming another key (the batch names it).
+#[tokio::test]
+async fn key_scoped_rule_reaches_only_its_keys() {
+    use roll_auth::scope::{Action as A, Effect, Resources, Rule, Scope, Selector};
+    let api = Api::new().await;
+    api.set("production", "STRIPE_KEY", "sk_live").await;
+    api.set("production", "DB_PASSWORD", "pw").await;
+    let rule = Rule {
+        product: "secrets".into(),
+        resources: Resources::Some(vec![Selector::Project { project: api.project.clone() }]),
+        environments: Some(vec!["production".into()]),
+        paths: None,
+        unprotected: false,
+        keys: Some(vec!["STRIPE_KEY".into()]),
+        actions: BTreeMap::from([(A::Read, Effect::Allow), (A::Reveal, Effect::Allow), (A::Write, Effect::Allow)]),
+    };
+    let grant = roll_auth::Grant { user: None, ask_otherwise: false, id: "tok_stripe".into(), name: "stripe".into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(Scope(vec![rule])) };
+    let call = |method: Method, path: &str, body: Option<Value>| {
+        let mut req = Request::builder().method(method).uri(format!("/v1/secrets/projects/{}{path}", api.project)).header("content-type", "application/json").body(body.map_or(Body::empty(), |b| Body::from(b.to_string()))).unwrap();
+        req.extensions_mut().insert(roll_auth::Operator);
+        req.extensions_mut().insert(grant.clone());
+        let router = api.router.clone();
+        async move {
+            let resp = router.oneshot(req).await.unwrap();
+            let status = resp.status();
+            let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+            (status, serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null))
+        }
+    };
+    let (s, v) = call(Method::GET, "/environments/production/secrets/STRIPE_KEY/value", None).await;
+    assert_eq!((s, v["value"].as_str()), (StatusCode::OK, Some("sk_live")), "{v}");
+    assert_eq!(call(Method::GET, "/environments/production/secrets/DB_PASSWORD/value", None).await.0, StatusCode::FORBIDDEN);
+    let (s, list) = call(Method::GET, "/environments/production/secrets", None).await;
+    let names: Vec<&str> = list.as_array().map(|l| l.iter().filter_map(|x| x["key"].as_str()).collect()).unwrap_or_default();
+    assert_eq!((s, names), (StatusCode::OK, vec!["STRIPE_KEY"]), "{list}");
+    let (s, v) = call(Method::GET, "/environments/production/values", None).await;
+    assert_eq!((s, v["values"].as_object().map(|o| o.keys().cloned().collect::<Vec<_>>())), (StatusCode::OK, Some(vec!["STRIPE_KEY".to_string()])), "{v}");
+    assert_eq!(call(Method::PUT, "/environments/production/secrets/DB_PASSWORD", Some(json!({ "value": "mine" }))).await.0, StatusCode::FORBIDDEN);
+    let (s, e) = call(Method::POST, "/environments/production/changes", Some(json!({ "ops": [{ "op": "set", "key": "STRIPE_KEY", "value": "sk_2" }, { "op": "set", "key": "NEW_KEY", "value": "x" }] }))).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{e}");
+    assert!(e.to_string().contains("NEW_KEY") && !e.to_string().contains("STRIPE_KEY,"), "names the key outside the rule: {e}");
+    let (s, w) = call(Method::PUT, "/environments/production/secrets/STRIPE_KEY", Some(json!({ "value": "sk_2" }))).await;
+    assert_eq!(s, StatusCode::OK, "{w}");
+    assert_eq!(api.values("production", "/").await["values"]["DB_PASSWORD"], "pw", "the other key is as it was");
+}
+
 #[tokio::test]
 async fn a_roll_access_grant_reaches_only_what_its_rules_name() {
     use roll_auth::scope::{Action as A, Effect, Resources, Rule, Scope, Selector};

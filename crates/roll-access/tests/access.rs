@@ -187,6 +187,8 @@ fn postgres() -> Router {
         .route("/v1/search/clusters/{id}/indices/{index}/update_by_query", post(|| async { axum::Json(json!({ "task": "n:1" })) }))
         .route("/v1/search/clusters/{id}/tasks/{task}", get(|| async { axum::Json(json!({ "completed": true })) }))
         .route("/v1/secrets/projects/{project}/environments/{env}/secrets", get(|| async { axum::Json(json!([])) }))
+        .route("/v1/secrets/projects/{project}/environments/{env}/secrets/{key}/value", get(|| async { axum::Json(json!({ "value": "x" })) }))
+        .route("/v1/secrets/projects/{project}/environments/{env}/secrets/{key}", axum::routing::put(|| async { axum::Json(json!({})) }))
         .route("/v1/secrets/projects/{project}/health", get(|| async { axum::Json(json!({ "findings": [] })) }))
         .route("/v1/secrets/projects/{project}/transit", get(|| async { axum::Json(json!([])) }))
         .route("/v1/secrets/projects/{project}/transit/{name}/encrypt", axum::routing::post(|| async { axum::Json(json!({ "ciphertext": "roll:v1:x" })) }))
@@ -2234,6 +2236,26 @@ async fn a_rule_can_grant_one_encryption_key() {
     // A rule on the whole project still reaches every key.
     let (all, _) = d.token(json!([{ "product": "secrets", "resources": [{ "id": "prj_a" }], "actions": { "write": "allow" } }]), json!({})).await;
     assert_eq!(d.call(&all, Method::POST, "/v1/secrets/projects/prj_a/transit/billing/encrypt", Some(json!({ "plaintext": "aGk=" }))).await.0, StatusCode::OK);
+}
+
+/// A rule limited to some secret keys: a request about one key is decided by it, a folder's
+/// list and values (answered key by key) let it through, and what's answered only per
+/// environment and folder (health), a list or a create don't. Keys are secrets' only.
+#[tokio::test]
+async fn a_rule_can_grant_some_secret_keys() {
+    let d = Daemon::new(50);
+    let (stripe, _) = d.token(json!([{ "product": "secrets", "resources": [{ "id": "prj_a" }], "environments": ["production"], "keys": ["STRIPE_KEY"], "actions": { "read": "allow", "reveal": "allow", "write": "allow" } }]), json!({})).await;
+    let at = |rest: &str| format!("/v1/secrets/projects/prj_a/environments/production{rest}");
+    assert_eq!(d.call(&stripe, Method::GET, &at("/secrets/STRIPE_KEY/value"), None).await.0, StatusCode::OK);
+    assert_eq!(d.call(&stripe, Method::GET, &at("/secrets/DB_PASSWORD/value"), None).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(d.call(&stripe, Method::PUT, &at("/secrets/STRIPE_KEY"), Some(json!({ "value": "x" }))).await.0, StatusCode::OK);
+    assert_eq!(d.call(&stripe, Method::PUT, &at("/secrets/DB_PASSWORD"), Some(json!({ "value": "x" }))).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(d.call(&stripe, Method::GET, &at("/values"), None).await.0, StatusCode::OK);
+    assert_eq!(d.call(&stripe, Method::GET, &at("/secrets"), None).await.0, StatusCode::OK);
+    assert_eq!(d.call(&stripe, Method::GET, "/v1/secrets/projects/prj_a/health", None).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(d.call(&stripe, Method::GET, "/v1/secrets/projects/prj_a/environments/staging/secrets/STRIPE_KEY/value", None).await.0, StatusCode::FORBIDDEN);
+    let (s, _) = d.call(OPERATOR, Method::POST, "/v1/access/tokens", Some(json!({ "name": "x", "rules": [{ "product": "postgres", "resources": "*", "keys": ["A"], "actions": { "read": "allow" } }] }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
 }
 
 /// The search console is decided from its route alone: the gate reads no body (a large `_bulk`

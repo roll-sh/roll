@@ -652,6 +652,57 @@ mod tests {
         assert!(super::rememberable_part("secrets", "payments") && !super::rememberable_part("secrets", "pay*") && !super::rememberable_part("secrets", "a,b"));
     }
 
+    /// A secrets rule's keys: exact names only, on secrets only; a request about one key matches
+    /// when it's listed, one about no key only where the product answers key by key; lists,
+    /// creates and the product as a whole never; it covers only a subset of its keys. A node that
+    /// doesn't know `keys` reads such a grant as no rules: denied, never wider.
+    #[test]
+    fn keys_narrow_a_secrets_rule() {
+        let keyed = |keys: serde_json::Value| rule(serde_json::json!({ "product": "secrets", "resources": [{ "project": "prj_a" }], "environments": ["production"], "keys": keys, "actions": { "reveal": "allow" } }));
+        let r = keyed(serde_json::json!(["STRIPE_KEY"]));
+        assert!(Scope(vec![r.clone()]).problems().is_empty());
+        for bad in [serde_json::json!([]), serde_json::json!(["STRIPE_*"]), serde_json::json!(["*"]), serde_json::json!(["9LIVES"]), serde_json::json!(["A,B"])] {
+            assert!(!Scope(vec![keyed(bad.clone())]).problems().is_empty(), "{bad}");
+        }
+        assert!(!Scope(vec![rule(serde_json::json!({ "product": "postgres", "resources": "*", "keys": ["A"], "actions": { "read": "allow" } }))]).problems().is_empty(), "secrets only");
+        assert!(!Scope(vec![rule(serde_json::json!({ "product": "*", "resources": "*", "keys": ["A"], "actions": { "read": "allow" } }))]).problems().is_empty(), "not every product's");
+        let at = |key: Option<&str>, filters_keys: bool, filters_itself: bool| {
+            Target::One(Resource { project: Some("prj_a".into()), environment: Some("production".into()), path: Some("/".into()), key: key.map(Into::into), filters_keys, filters_itself, ..Resource::new("secrets", "prj_a") })
+        };
+        assert!(r.matches(&at(Some("STRIPE_KEY"), false, false)));
+        assert!(!r.matches(&at(Some("STRIPE"), false, false)) && !r.matches(&at(Some("OTHER"), false, false)), "exact names");
+        assert!(!r.matches(&at(None, false, false)), "the folder as a whole");
+        assert!(r.matches(&at(None, true, false)), "a folder answered key by key");
+        assert!(!r.matches(&at(None, false, true)), "a route that filters only by environment and folder");
+        assert!(!r.matches(&Target::List { product: "secrets".into() }));
+        assert!(!r.matches(&Target::Create { product: "secrets".into(), project: Some("prj_a".into()), environment: Some("production".into()) }));
+        assert!(!r.matches(&Target::Product { product: "secrets".into() }));
+        // Environments and folders still narrow a keyed rule's key-by-key match.
+        let staging = Target::One(Resource { environment: Some("staging".into()), key: Some("STRIPE_KEY".into()), ..Resource::new("secrets", "prj_a") });
+        assert!(!r.matches(&staging));
+        // Covering: a subset of keys, or no keys (every key); never a keyed rule over a keyless one.
+        let two = keyed(serde_json::json!(["STRIPE_KEY", "STRIPE_WEBHOOK"]));
+        let keyless = rule(serde_json::json!({ "product": "secrets", "resources": [{ "project": "prj_a" }], "environments": ["production"], "actions": { "reveal": "allow" } }));
+        assert!(two.covers(&r) && !r.covers(&two) && keyless.covers(&two) && !two.covers(&keyless));
+        // Serialized only when set.
+        assert!(serde_json::to_value(&keyless).unwrap().get("keys").is_none());
+        assert_eq!(serde_json::to_value(&r).unwrap()["keys"], serde_json::json!(["STRIPE_KEY"]));
+        // A node from before `keys` (it refuses fields it doesn't know) reads the grant's rules as
+        // none, as roll-access's store does (`unwrap_or_default`): everything denied.
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        #[allow(dead_code)]
+        struct Old {
+            product: String,
+            resources: Resources,
+            environments: Option<Vec<String>>,
+            actions: BTreeMap<Action, Effect>,
+        }
+        let stored = serde_json::to_string(&Scope(vec![r.clone()])).unwrap();
+        let old: Vec<Old> = serde_json::from_str(&stored).unwrap_or_default();
+        assert!(old.is_empty());
+    }
+
     /// A selector's indices cover an index expression name by name and pattern by pattern, as
     /// Elasticsearch authorizes one; the cluster as a whole is never theirs.
     #[test]
