@@ -85,6 +85,8 @@ export interface GithubLink {
   url: string;
   /** Whether branch protection on the default branch lets only the roll App push. `null` = unknown. */
   default_branch_protected: boolean | null;
+  /** Whether the GitHub repository is private, as last seen. Absent on older links. */
+  private?: boolean;
   mirror: {
     state: MirrorState;
     last_push_at: number | null;

@@ -112,6 +112,10 @@ pub struct Link {
     /// `false` once the App lost access (uninstalled, suspended, repo removed).
     #[serde(default = "yes")]
     pub connected: bool,
+    /// Whether the GitHub repository is private, as last seen (connecting, then each delivery
+    /// about it). `None` on links from before it was kept: nothing tells.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub private: Option<bool>,
 }
 
 fn yes() -> bool {
@@ -360,6 +364,16 @@ pub(crate) fn link_of(r: &RepoRow) -> Option<Link> {
     serde_json::from_value(r.github.clone()?).ok()
 }
 
+/// Where anyone may read repo `r`, from what roll code already knows (no call to GitHub): roll
+/// code itself when it's public, else the GitHub repository it mirrors when GitHub last said that
+/// one is public and the mirror still pushes there. `None`: private everywhere, or nothing tells.
+pub fn public_at(r: &RepoRow) -> Option<String> {
+    if r.visibility == crate::model::Visibility::Public {
+        return Some("roll code".into());
+    }
+    link_of(r).filter(|l| l.connected && l.private == Some(false)).map(|l| format!("GitHub ({})", l.full_name()))
+}
+
 pub(crate) fn linked_repos(code: &Code) -> Result<Vec<RepoRow>> {
     Ok(code.db.repos(None)?.into_iter().filter(|r| r.source == "github" && r.github.is_some()).collect())
 }
@@ -472,6 +486,7 @@ pub(crate) async fn prepare(code: &Code, s: &Spec) -> Result<Prepared> {
             mirror: MirrorView { state: "pending".into(), ..Default::default() },
             remote_head: None,
             connected: true,
+            private: Some(gh.private),
         },
     })
 }

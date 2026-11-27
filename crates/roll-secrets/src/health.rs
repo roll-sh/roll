@@ -57,6 +57,12 @@ pub enum Issue {
     Public,
     /// A credential easy to guess (shown to whoever may reveal it).
     Weak,
+    /// A repository the project stands for ([`Secrets::counts_for_repo`]) that anyone may read
+    /// (roll code's own visibility, or the GitHub repository it mirrors as the mirror last saw it),
+    /// while the project's `leaks.rotate` is `off`: a value pushed there is world-readable at
+    /// once, and roll only reports it. `key` is the repository, `environment` empty. A warning;
+    /// under a policy that keeps `leaks.rotate` managed it's `off_policy` instead.
+    PublicRepoNoLeakRotation,
     /// A key bound to hosts with no header or query parameter (bound before a placement was
     /// required): a trusted reader's placeholder may ride in any header, one the host might echo,
     /// and an untrusted consumer's doesn't swap.
@@ -88,13 +94,18 @@ pub enum Issue {
     Unreferenced,
 }
 
-/// roll code's search, as health's `code` check needs it (rolld implements it with roll code's
-/// trigram index): roll secrets reads no files.
+/// roll code, as health needs it (rolld implements it over code-control): its search for the
+/// `code` check, from roll code's trigram index, and repositories' visibility. roll secrets reads
+/// no files and asks no other service.
 pub trait CodeRefs: Send + Sync {
     /// Which of `keys` appear on repository `repo`'s (`owner/name`) default branch, anywhere, case
     /// sensitive (a substring is enough: a key that might be read is never flagged). `None`: the
     /// repository can't be searched here (not indexed yet, roll code off), so nothing is said.
     fn referenced(&self, repo: &str, keys: &[String]) -> Option<BTreeSet<String>>;
+    /// Where anyone may read repository `repo` (`owner/name`): "roll code", or the GitHub
+    /// repository it mirrors, from what roll code already knows (no network call). `None`: private
+    /// everywhere, or nothing tells (no such repository, roll code off), so nothing is said.
+    fn public(&self, repo: &str) -> Option<String>;
 }
 
 /// The most keys one `code` check looks for.
@@ -239,6 +250,7 @@ impl Secrets {
         // How far the project is from roll secrets' policy.
         let floors = self.floors()?;
         out.extend(self.off_policy(project, caller, &floors, &envs)?);
+        out.extend(self.public_repos_unrotated(project, caller, &floors)?);
         let mut have: HashSet<(String, String, String)> = HashSet::new();
         for (env_id, path, key, fp, link, refs, updated_at, expires_at, weak, public) in &rows {
             let Some(e) = slug.get(env_id.as_str()) else { continue };
@@ -538,6 +550,24 @@ impl Secrets {
                 let detail = format!("{kind} sync signs in with a cloud key stored in roll ({keys}), which roll secrets' policy rules out: {instead}, and delete the key (\"Syncing without a cloud key\")");
                 out.push(Finding { issue: Issue::OffPolicy, environment: env, path, key: id, detail, owner: None, decoy: None });
             }
+        }
+        Ok(out)
+    }
+
+    /// [`Issue::PublicRepoNoLeakRotation`]: each repository the project stands for that anyone may
+    /// read, while its `leaks.rotate` is `off` (under a policy that keeps it managed, `off_policy`
+    /// already says so). For whoever reads the whole project, as `leaks.rotate`'s own finding.
+    fn public_repos_unrotated(&self, project: &str, caller: &Caller, floors: &crate::guardrails::Guardrails) -> Result<Vec<Finding>> {
+        let Some(code) = self.code_refs.get() else { return Ok(vec![]) };
+        if floors.leaks_rotate == Some(crate::leaks::LeakRotate::Managed) || !caller.allows(Action::Read, &Scope::whole(project)) || self.leak_rotate(project)? == crate::leaks::LeakRotate::Managed {
+            return Ok(vec![]);
+        }
+        let repos: BTreeSet<String> = self.workspace.get(roll_workspace::Scope::All, project).map(|p| p.resources.into_iter().filter(|r| r.kind == roll_workspace::Kind::Repo).map(|r| r.r#ref).collect()).unwrap_or_default();
+        let mut out = vec![];
+        for repo in repos.into_iter().filter(|r| self.counts_for_repo(project, r)) {
+            let Some(at) = code.public(&repo) else { continue };
+            let detail = format!("{repo} is public on {at}, and leaks.rotate is off: a value pushed there is world-readable at once, and roll only reports it. Rotate leaked managed keys at once: `roll secrets leaks managed`, or the dashboard's Leaked keys setting");
+            out.push(Finding { issue: Issue::PublicRepoNoLeakRotation, environment: String::new(), path: "/".into(), key: repo, detail, owner: None, decoy: None });
         }
         Ok(out)
     }
