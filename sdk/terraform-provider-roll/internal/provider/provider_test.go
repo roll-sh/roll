@@ -834,7 +834,8 @@ resource "roll_machine_client" "ci" {
 }
 
 // What a project registers itself, as code: a CA, an SSH CA, an encryption key and a database
-// outside roll, whose admin URL is write-only (sent once, never in the state).
+// outside roll, whose admin URL is write-only (sent once, never in the state). Values roll keeps
+// normalised (the CA's domains) plan as no change: the framework plans again after each apply.
 func TestRegistrationsAsCode(t *testing.T) {
 	t.Parallel()
 	f := &fakeRolld{envs: map[string]*environment{}, keys: map[string]map[string]any{}, identities: map[string]map[string]any{}, syncs: map[string]map[string]any{}, tokens: map[string]map[string]any{}}
@@ -901,10 +902,6 @@ resource "roll_secrets_outside_database" "rds" {
 					return nil
 				},
 			),
-		}, {
-			// Values roll keeps normalised, as configured: nothing to change.
-			Config:   config(protected),
-			PlanOnly: true,
 		}, {
 			// A protected key isn't destroyed (a rename, or taking it out of the configuration)…
 			Config:      config(""),

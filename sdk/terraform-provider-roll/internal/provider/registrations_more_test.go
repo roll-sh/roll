@@ -216,16 +216,11 @@ resource "roll_secrets_project" "settings" {
 					sentButNotKept,
 				),
 			},
-			// What roll shows once, or never, isn't imported.
+			// What roll shows once, or never, isn't imported. One import per shape: the
+			// registrations share one import (`importProject` with an id), the project's settings
+			// another, the project a third.
 			imported("roll_secrets_rotator.vendor", "url_wo_version", "secret", "rotate_secret"),
-			imported("roll_secrets_audit_sink.splunk", "token_wo_version", "secret"),
-			imported("roll_secrets_github_app.deploy", "private_key_wo_version"),
-			imported("roll_secrets_aws_role.deploy"),
-			imported("roll_secrets_aws_user.legacy"),
-			imported("roll_secrets_cloud_account.gcp"),
-			imported("roll_secrets_cloud_account.azure"),
 			imported("roll_secrets_required_keys.all"),
-			imported("roll_secrets_kms_key.cmk"),
 			imported("roll_secrets_project.settings"),
 		},
 		CheckDestroy: func(*terraform.State) error {
