@@ -158,7 +158,9 @@ tarballs, and checks the x86_64 build on every pull request that touches `crates
 
 - **Installing.** `irm https://roll.sh/install.ps1 | iex` puts `roll.exe` in
   `%LOCALAPPDATA%\Programs\roll` and on your PATH, after checking it against the release's
-  `SHA256SUMS` as `install.sh` does (a mismatch installs nothing). For a server, from an
+  `SHA256SUMS` and, with gh logged in, its build provenance (`gh attestation verify`), as
+  `install.sh` does (a mismatch installs nothing; `ROLL_VERIFY=attestation` requires the
+  provenance check). For a server, from an
   administrator's PowerShell, `& ([scriptblock]::Create((irm https://roll.sh/install.ps1))) -System`
   installs into `%ProgramFiles%\roll` for every account. Each release also carries a Scoop manifest
   (`scoop install https://github.com/roll-sh/roll/releases/download/cli-v<version>/roll.json`) and
@@ -3590,6 +3592,11 @@ roll completions bash|zsh|fish|powershell
   above, by fingerprint), and whether staged files hold any of
   the project's values (the scan, names only). It fails when a check does: a first step when
   `roll run` doesn't see what it should.
+- `roll run` never hands the command roll's own credentials: a `ROLL_*` variable named like one
+  (`_TOKEN`, `_TOKEN_FILE`, `_KEY`, `_PASSWORD`, `_SECRET`, `_CREDENTIAL_FILE`: `ROLL_ADMIN_TOKEN`,
+  `ROLL_TOKEN`, `ROLL_FALLBACK_KEY`…) is dropped from its environment unless the project sets
+  that name itself, so an app and its dependencies never act as roll's operator or with the token
+  that read its values. `--keep-roll-credentials` passes them on (a script that calls `roll`).
 - `roll run --watch [--interval 5]` keeps the command as a child and restarts it (SIGTERM, then
   SIGKILL after 10 s) when the environment changes. It polls `…/digest`, a hash of the folder's
   effective keys, versions, fingerprints and links, and of what their references reach (in this
@@ -5115,10 +5122,11 @@ Agent's templates do).
     writing a domain's records): `Secrets::use_once(resource, reference, caller, purpose, to)`.
     The checks `bind_ref` makes, as the caller now: the one project that holds and stands for the
     resource, reveal on the folder, no protected environment for an untrusted copy, and no
-    untrusted caller. A sensitive key only with `to`, the one host the product sends the value
-    to, fixed in its code (roll apps: `roll_edge::acme::Cloudflare::API`): the value goes from
-    roll's process to that host and never to the caller, so the best-kept token (a sensitive one)
-    still works; without `to`, a person or a token never reads one.
+    untrusted caller. Never a sensitive key, even with `to` (the one host the product sends the
+    value to, fixed in its code: roll apps' `roll_edge::acme::Cloudflare::API`): someone who may
+    reveal the folder but not read the key would have roll act with it wherever it reaches (a DNS
+    token writes records in every zone it can edit). An opt-in the key's owner sets on the key is
+    a later design.
     No `Maker` is recorded, since nothing reads it later, so an approval of an `ask` there stands
     in for reveal: the permissions catalogue lends the reference's folder (`Lend::Each`), and the
     gate asks a person about that folder. Audited as `secrets.use` by the caller, naming the
@@ -5898,8 +5906,8 @@ verifies them all.
 
 The roll-wide permission model (docs/permissions.md, `crates/roll-access`, branch
 `feature/roll-mcp`) decides who may do what: rolld's gate classifies each request by its route
-pattern and method into the product `secrets`, a resource (`{project, environments, paths}`) and one
-action:
+pattern and method into the product `secrets`, a resource (`{project, environments, paths, keys}`)
+and one action:
 
 | Action | Routes |
 | --- | --- |
@@ -5931,6 +5939,15 @@ that follow from it:
   environment, so none reaches them through a reference, an import or a base either.
 - **Folders.** A caller limited to some folders sees only their changes, change items, requests,
   audit rows and the leases of their secrets.
+- **Keys.** A rule with `keys: ["STRIPE_KEY"]` (docs/permissions.md, "Secrets' keys") reaches
+  only those keys of its folders: one key's routes (its value, versions, TOTP code, set, delete,
+  rotate, hosts, purge) at that key, and a folder's list, values (`roll run`, an export, `?seq=`),
+  resolve and batch of changes key by key: those keys alone, and a batch naming another is
+  refused with its name. A digest, a watch's delta, a `.env` import or diff, a promote, health
+  and leaks stay the folder's (403). `Scope::key` and `Scope::by_key` carry it to `Grants::allows`;
+  `access::reaches` asks it per key, and `Grants::limits_keys` skips that for every other caller.
+  `roll secrets tokens create … --key STRIPE_KEY` makes one. (Encryption keys are another
+  thing: `{id, index}`, below.)
 - **Fingerprints** are shown only to a caller who may reveal the value: a writer could otherwise
   test guesses against values it can't read. The grid's and compare's statuses still say whether
   two environments match, to a caller who can read both.

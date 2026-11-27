@@ -100,7 +100,10 @@ async fn issues(State(m): S) -> Json<Value> {
 async fn create_issue(State(m): S, Path((o, r)): Path<(String, String)>, Json(b): Json<Value>) -> Json<Value> {
     record(&m, "POST", format!("/repos/{o}/{r}/issues"), b.clone());
     let n = 100 + m.next_id.fetch_add(1, Ordering::SeqCst);
-    let made = issue_json(n, b["title"].as_str().unwrap_or(""), "open", &[]);
+    // Made by roll's App: its bot, whose association GitHub says is NONE.
+    let mut made = issue_json(n, b["title"].as_str().unwrap_or(""), "open", &[]);
+    made["user"] = json!({ "login": "roll-test[bot]", "id": 99, "type": "Bot" });
+    made["author_association"] = json!("NONE");
     m.issues.lock().push(made.clone());
     Json(made)
 }
@@ -634,7 +637,11 @@ async fn connect_import_webhooks_and_mirror() {
     // A preview note's issue (roll previews' note to work): opened on the mirror by roll's App.
     let row = a.code.find_repo("acme", "app").unwrap();
     let (n, url) = a.code.open_github_issue(&row, "Preview feedback: cut off", "the note", &["preview-feedback".to_string()]).await.unwrap().expect("a connected repo");
-    assert_eq!(url, format!("https://github.com/acme/app/issues/{n}"));
+    // The repo's work item at once, by roll's own number, the team's words (roll's App opened it).
+    let item = a.ok("GET", "/v1/code/repos/acme/app/work", None).await.as_array().unwrap().iter().find(|w| w["title"] == "Preview feedback: cut off").cloned().expect("made a work item");
+    assert_eq!(item["number"].as_u64(), Some(n), "{item}");
+    assert_ne!(item["outside"], true, "{item}");
+    assert!(url.starts_with("https://github.com/acme/app/issues/"), "{url}");
     assert!(g.mock.calls.lock().iter().any(|(m, p, b)| m == "POST" && p == "/repos/acme/app/issues" && b["labels"] == json!(["preview-feedback"]) && b["body"] == "the note"));
     assert_eq!(work[0]["source"], "github#1");
     assert_eq!(work[0]["priority"], 1);

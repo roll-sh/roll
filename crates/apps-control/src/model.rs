@@ -2114,6 +2114,9 @@ pub struct Environment {
     pub traces: bool,
     /// Its pages measure their Web Vitals for roll (`…/vitals`).
     pub vitals: bool,
+    /// Its Strict-Transport-Security when roll serves HTTPS ([`HSTS_DEFAULT`] unless it says;
+    /// None: none sent).
+    pub hsts: Option<Hsts>,
     /// Where its deploy status badge is (Netlify's), when it has one (`badge: true`): an SVG for a
     /// README, answered to anyone.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2748,7 +2751,14 @@ pub const MAX_CHECKS: usize = 5;
 pub struct Check {
     /// Unique in the environment: a-z, 0-9 and -, at most 32.
     pub name: String,
+    /// An HTTP check's (empty for a TCP check's).
+    #[serde(default)]
     pub path: String,
+    /// A TCP check (Fly's TCP checks, Better Stack's port monitors): a TCP service's port
+    /// (`run.tcp`) connected to through its own network, no HTTP; `contains` is looked for in
+    /// what it says first (a banner).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub tcp: bool,
     /// 30–3600 (default 60).
     #[serde(default = "Check::default_every")]
     pub every_s: u32,
@@ -2857,7 +2867,14 @@ impl Check {
         if self.name.is_empty() || self.name.len() > 32 || !self.name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') {
             return bad("a check's name is a-z, 0-9 and -, at most 32");
         }
-        if !self.path.starts_with('/') || self.path.starts_with("//") || self.path.len() > 2000 || !self.path.bytes().all(|b| b.is_ascii_graphic()) {
+        if self.tcp {
+            if !self.path.is_empty() {
+                return bad("a TCP check has no path: it connects to the service's port");
+            }
+            if self.browser.is_some() || self.status.is_some() || self.method.is_some() || self.headers.is_some() || self.body.is_some() || self.from.as_deref().is_some_and(|f| f != "roll") {
+                return bad("a TCP check connects (and reads its banner for contains) from roll: no browser, status, method, headers, body or from public");
+            }
+        } else if !self.path.starts_with('/') || self.path.starts_with("//") || self.path.len() > 2000 || !self.path.bytes().all(|b| b.is_ascii_graphic()) {
             return bad("a check's path is an absolute path, like /healthz");
         }
         match self.from.as_deref() {
@@ -2913,6 +2930,11 @@ impl Check {
         if (self.headers.is_some() || self.body.is_some() || self.method.is_some()) && self.browser.is_some() {
             return bad("method, headers and body are an HTTP check's (a browser check's script makes its own requests)");
         }
+        // A value's `${NAME}` is the environment's own variable: from roll only, never over the
+        // internet to wherever a domain's DNS points at the time.
+        if self.from.as_deref() == Some("public") && self.headers.as_ref().is_some_and(|h| h.values().any(|v| v.contains("${"))) {
+            return bad("a check from outside sends its headers as written: ${NAME} (the environment's own variable) is a check from roll's");
+        }
         if let Some(h) = &self.headers {
             let token = |n: &str| !n.is_empty() && n.len() <= 64 && n.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b));
             let reserved = |n: &str| { let l = n.to_ascii_lowercase(); matches!(l.as_str(), "host" | "content-length" | "transfer-encoding" | "connection" | "upgrade" | "te" | "trailer") || l.starts_with("x-roll-") };
@@ -2929,6 +2951,41 @@ impl Check {
             }
         }
         Ok(self)
+    }
+}
+
+/// An environment's Strict-Transport-Security (Vercel's, Netlify's `_headers`): on by default
+/// when roll serves HTTPS, added to its answers unless the app or its own headers send one.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Hsts {
+    /// Seconds, at most two years; 0 tells browsers to forget it.
+    pub max_age: u32,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub include_subdomains: bool,
+    /// For the browsers' preload list (hstspreload.org): with include_subdomains and a year at least.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub preload: bool,
+}
+
+/// What an environment answers with when it sets nothing: two years, its own name only.
+pub const HSTS_DEFAULT: Hsts = Hsts { max_age: 63_072_000, include_subdomains: false, preload: false };
+
+impl Hsts {
+    pub fn check(&self) -> Result<()> {
+        let bad = |m: &str| Err(Error::BadRequest(format!("hsts: {m}")));
+        if self.max_age > 63_072_000 {
+            return bad("max_age is at most 63072000 (two years)");
+        }
+        if self.preload && !(self.include_subdomains && self.max_age >= 31_536_000) {
+            return bad("preload needs include_subdomains and a max_age of a year (31536000) at least");
+        }
+        Ok(())
+    }
+
+    /// The header's value.
+    pub fn value(&self) -> String {
+        format!("max-age={}{}{}", self.max_age, if self.include_subdomains { "; includeSubDomains" } else { "" }, if self.preload { "; preload" } else { "" })
     }
 }
 

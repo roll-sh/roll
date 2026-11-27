@@ -1592,6 +1592,10 @@ impl Engine {
             for res in self.store.resources(&r.id)?.into_iter().filter(|x| x.kind == Kind::Postgres && x.mode == Mode::Branch) {
                 let (Some(branch), Ok(b)) = (&res.r#ref, self.brancher(res.kind)) else { continue };
                 let b = b.clone();
+                // One a crash left (named so) holds a half-run release's data: gone first.
+                if let Ok(Some(left)) = b.find(&res.parent, &name).await {
+                    b.delete(&res.parent, &left, &name).await?;
+                }
                 let fresh = b.branch(&res.parent, &name, Mode::Branch).await?;
                 made.push((b.clone(), res.parent.clone(), fresh.r#ref.clone()));
                 let key = format!("{}:{}", res.kind.as_str(), res.parent);
@@ -1993,7 +1997,7 @@ impl Engine {
     /// any more): a failure is said and doesn't hold the push up. The copy stays recorded, so
     /// the next eviction or the preview's teardown deletes it. A reset, changed masks and the
     /// teardown use the strict one: a copy masked by older rules must never stay reachable.
-    async fn drop_pinned_data_or_say(&self, id: &str, which: impl Fn(&crate::store::PinnedData) -> bool) -> anyhow::Result<()> {
+    pub(super) async fn drop_pinned_data_or_say(&self, id: &str, which: impl Fn(&crate::store::PinnedData) -> bool) -> anyhow::Result<()> {
         if let Err(e) = self.drop_pinned_data(id, which).await {
             warn!(preview = %id, error = %e, "previews: deleting an earlier push's copy");
             self.store.log(id, &format!("couldn't delete an earlier push's copy of its data yet: tried again later ({e:#})"))?;

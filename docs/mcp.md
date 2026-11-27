@@ -1506,6 +1506,7 @@ previews are listed once those products are on.
 | `apps_delete_notification` | Stop sending a project's events there. | `DELETE /v1/apps/projects/{project}/notifications/{nid}` |
 | `apps_test_notification` | Send a test event now (not retried): whether it arrived. | `POST /v1/apps/projects/{project}/notifications/{nid}/test` |
 | `apps_notification_deliveries` | A notification's last 50 deliveries, newest first: what was sent and whether it arrived. | `GET /v1/apps/projects/{project}/notifications/{nid}/deliveries` |
+| `apps_redeliver_notification` | Send a delivered or failed delivery's event again, from its first try (its delivery id kept). Not an on-call event a later one undid. | `POST /v1/apps/projects/{project}/notifications/{nid}/deliveries/{did}/redeliver` |
 | `apps_list_drains` | Where a project's logs are sent (the URL's host only). | `GET /v1/apps/projects/{project}/drains` |
 | `apps_add_drain` | Send every matching service's logs out of roll: an HTTPS endpoint (signed; its signing secret comes back once), an OTLP collector, syslog over TLS, or an S3 bucket (apps #580; the AWS keys go as headers, which the audit log redacts), or the project's own roll storage bucket with nothing to paste (`bucket`, apps #590), or a data stream of the project's own roll search cluster as ECS documents with an append-only key (`search`). | `POST /v1/apps/projects/{project}/drains` |
 | `apps_update_drain` | Change what a drain sends or its headers: given ones replace (a new URL is a new drain). | `PATCH /v1/apps/projects/{project}/drains/{did}` |
@@ -1585,6 +1586,7 @@ previews are listed once those products are on.
 | `previews_note_crop` | The element a preview note is about, as roll's browser cropped it at the reviewer's viewport and steps (roll previews #879), as an image the agent looks at. | `GET /v1/previews/{id}/notes/{note}/crop` |
 | `previews_resolve_note` | A note from the preview page's feedback button marked dealt with (write). | `POST /v1/previews/{id}/notes/{note}/resolve` |
 | `previews_note_to_work` | A note from a preview page made a work item on its change's repo (a GitHub issue on a repo mirrored there, a guest's note excepted), once a note (write; the repo's code too). | `POST /v1/previews/{id}/notes/{note}/work` |
+| `previews_replay` | A preview's recent GETs asked again of it and of main's preview, in the background; `previews_get`'s `replay` has how each answered (write). | `POST /v1/previews/{id}/replay` |
 | `previews_screenshot` | A preview's page as an image the agent can look at (`diff`, `page`, `view`); accepting a visual change stays a person's (admin, no tool). | `GET /v1/previews/{id}/screenshot` |
 | `previews_fetch` | A preview's page read through roll as a visitor gets it, without a share link (Vercel's `web_fetch_vercel_url`): status, a few headers and the text, masked as its logs are, cut at 256 KiB (`path`, `service`, `head`); reveal, since a page can show copies of production's people. `review_preview` uses it on the pages a change touches. | `GET /v1/previews/{id}/fetch` |
 | `previews_try` | A preview's page in a browser in its own network with steps taken on it (`click`, `type`, `press`, `wait`; 10 at most, stateless: the whole way each time), as GitHub Copilot's coding agent drives Playwright: status, the step that found nothing, the visible text after, errors on the way, masked; typed text is redacted from the audit (#887) and never kept by previews; reveal. | `POST /v1/previews/{id}/try` |
@@ -1614,25 +1616,24 @@ From a 2026-11-24 gap review (every tool run as an agent would against a fresh r
 
 From a 2026-11-26 comparison (the spec's anniversary post, Claude's connector docs, Atlassian's, Stripe's and GitHub's changelogs; no core SEP went final since 2026-11-15):
 
-1. **Conformance with the official MCP suite (this PR):** `pnpm test:mcp-conformance` and its
-   baseline (see "Conformance"), and what its first run found: 2026-07-28 requests without `_meta`
-   or with a header that disagrees, `initialize` and `ping` in a revision that removed them,
-   `-32021`'s `data`, a missing resource's `data.uri`, malformed `inputResponses`. Also
-   `previews_note_to_work` saying a note on a GitHub-mirrored repo opens an issue (#1209).
-2. **#1111 reads the forwarded approval (after roll search #1111 lands; #1210 landed the bit).** From roll search's
+1. **roll code's own MCP server speaks 2026-07-28** (found by the conformance suite run against
+   `/v1/code/mcp`: 54 checks pass, 131 fail, its errors to a modern request carry `id: null`).
+   `/v1/mcp?toolsets=code` already serves roll code's tools in every revision; a 2026-07-28 request
+   to `/v1/code/mcp` should be served the same way (its token kinds, `?lockdown=1` and sessions
+   kept), and docs/code/mcp.md say so.
+2. **`previews_replay` (this PR):** roll previews #1223's `POST /v1/previews/{id}/replay`, offered
+   by `review_preview` for a change to an API (then `previews_get`'s `replay`).
+3. **#1111 reads the forwarded approval (after roll search #1111 lands; #1210 landed the bit).** From roll search's
    re-check of #1111: its `IndexScope` gives an approved `ask`'s indices when the owner's outcome is
    `ask`, but on a fleet the owner skips asking for a request another node decided, Allow or an
    approved ask alike. The forwarder's signed decision (`roll_cluster::Decided`) now ends in
    `:asked` when it passed on an approval (an older owner in a rolling restart decides again and
    fails closed); #1111's `approved_ask` becomes `outcome == Ask && (!decided_before ||
    approved_before)` after both are on main.
-3. **Lends that name their key (after roll secrets #1226 lands):** #1226 adds rules for single
+4. **Lends that name their key (this PR; roll secrets #1226 landed `keys`):** #1226 adds rules for single
    secret keys (`keys`); a lend naming its key (`Lent.key`: apps' DNS token, search's rotated
    password) then hands and remembers `keys: [KEY]` rather than the folder, so a root lend naming a
    key is rememberable again (8 hours at most), and `lent_also_rule` keeps the key.
-4. **`previews_replay` (after roll previews #1223 lands):** `POST /v1/previews/{id}/replay` replays
-   the change's preview's recent GETs against main's preview; `review_preview` can ask for one and
-   read `replay` on `previews_get` (a 409 for a fork's preview or one already running).
 5. **Watched:** SEP-1913 (`sensitiveHint`, `privateHint` and `maliciousActivityHint` annotations, close to lockdown's marks) and the files extension (Claude says uploads are "rolling out soon").
 
 6. **Paging is the products'.** No list route takes a cursor (approvals take `limit` only). History
@@ -1717,7 +1718,7 @@ From a 2026-11-26 comparison (the spec's anniversary post, Claude's connector do
    stateless and search mode (`?tools=search`) covers clients that can't take the list; "remember this browser"; a preset that reveals development's values without asking
    (#354); a connection-level `?project=` (only a token's rules bound a project; a default that
    some tools can't honour would look like a boundary).
-18. **Landed 2026-11-26 and 27:** structured authorization denials (SEP-2643) on every refusal by the gate and on tasks held while a person decides (#1218, #1221); `previews_note_to_work` (#1217); a forward's signed decision says when it passed on an approval (#1210); a body the gate decides from is the JSON object (imports: array) the route reads, closing write decided for admin or delete SQL and CQL sent as an array, and a replacing `.env` import needs delete and write (#1208); a secret lent at an environment's root approved once, its key on the card, and previews' webhook list and revoke tools (#1201); fixes from a review of #1182 and #1186 (a rule stored with `//` reaches nothing, `/api/` is `/api`, the check endpoint and import sources take folders as the gate does) and resolve, diff and `.env` import decided by their body's folder, with one folder parser for roll secrets and the gate (#1195); a missing document names itself and its index, `review_preview` reads `main_on_change` (#1191); a rule's index never holds an exclusion, which reached what it
+18. **Landed 2026-11-26 and 27:** the official MCP conformance suite as `pnpm test:mcp-conformance` and the 2026-07-28 gaps it found (#1231); structured authorization denials (SEP-2643) on every refusal by the gate and on tasks held while a person decides (#1218, #1221); `previews_note_to_work` (#1217); a forward's signed decision says when it passed on an approval (#1210); a body the gate decides from is the JSON object (imports: array) the route reads, closing write decided for admin or delete SQL and CQL sent as an array, and a replacing `.env` import needs delete and write (#1208); a secret lent at an environment's root approved once, its key on the card, and previews' webhook list and revoke tools (#1201); fixes from a review of #1182 and #1186 (a rule stored with `//` reaches nothing, `/api/` is `/api`, the check endpoint and import sources take folders as the gate does) and resolve, diff and `.env` import decided by their body's folder, with one folder parser for roll secrets and the gate (#1195); a missing document names itself and its index, `review_preview` reads `main_on_change` (#1191); a rule's index never holds an exclusion, which reached what it
    excluded at the gate and in search's scoped principal (#1182, from the re-check of search #1111);
    the root folder spelled `//` is the root, so the 8-hour caps hold and a secrets folder has one
    spelling, refused at the gate where secrets would refuse it (#1186, from roll secrets' 43rd

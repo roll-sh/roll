@@ -17,6 +17,7 @@ export function grantFor(project: string, t: NewToken, now = Date.now()): NewGra
   };
   if (t.environments?.length) rule.environments = t.environments;
   if (t.paths?.length) rule.paths = t.paths;
+  if (t.only_keys?.length) rule.keys = t.only_keys;
   const g: NewGrant = { name: t.name, rules: [rule] };
   if (t.expires_at) g.expires_at = t.expires_at;
   else if (t.ttl_days) g.expires_at = now + t.ttl_days * DAY;
@@ -41,6 +42,7 @@ export function tokenOf(g: Grant, project: string): Token {
     name: g.name,
     environments: rule?.environments ?? null,
     paths: rule?.paths ?? null,
+    only_keys: rule?.keys ?? null,
     actions,
     expires_at: g.expires_at,
     created_at: g.created_at,

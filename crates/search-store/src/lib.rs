@@ -1228,6 +1228,11 @@ impl Store {
         Ok(u)
     }
 
+    /// Bytes segment downloads have read from object storage (cheap: one counter).
+    pub fn received_bytes(&self) -> u64 {
+        self.inner.cache.received_bytes()
+    }
+
     pub fn stats(&self) -> StoreStats {
         let c = &self.inner.counters;
         let (mut staging_files, mut staging_bytes) = (0, 0);
