@@ -168,6 +168,21 @@ pub enum Preview {
         #[arg(long)]
         revoke: Option<String>,
     },
+    /// A URL into a private preview for a webhook (Stripe's, GitHub's): requests to exactly PATH
+    /// of its first service get past its privacy, its token in the URL's query, for the
+    /// preview's life. Printed once. --label says what it's for; --list shows them, --revoke ends
+    /// one.
+    Webhook {
+        preview: String,
+        #[arg(required_unless_present_any = ["list", "revoke"], conflicts_with_all = ["list", "revoke"])]
+        path: Option<String>,
+        #[arg(long, default_value = "", conflicts_with_all = ["list", "revoke"])]
+        label: String,
+        #[arg(long)]
+        list: bool,
+        #[arg(long)]
+        revoke: Option<String>,
+    },
     /// Its own variables, over the project's `env`: list them, set `NAME=value`, or --unset NAME.
     /// Its services redeploy with them.
     Env {
@@ -196,8 +211,11 @@ pub enum Preview {
     /// (the page's button stops listing it).
     Notes {
         preview: String,
-        #[arg(long)]
+        #[arg(long, conflicts_with = "work")]
         resolve: Option<String>,
+        /// Make the note a work item on the change's repo (once; prints its number).
+        #[arg(long)]
+        work: Option<String>,
     },
     /// Its restore points (its Postgres data saved, to put back later): --save [label] one now,
     /// --restore <point> to put the data back as that point left it, --delete <point>.
@@ -1165,6 +1183,37 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
             }
             v
         }
+        Preview::Webhook { preview, path, label, list, revoke } => {
+            let at = format!("/v1/previews/{preview}/webhooks");
+            let v = match (list, revoke, path) {
+                (_, Some(id), _) => {
+                    api.call(reqwest::Method::DELETE, &format!("{at}/{id}"), None).await?;
+                    json!({ "revoked": id })
+                }
+                (true, None, _) | (false, None, None) => api.get(&at).await?,
+                (false, None, Some(path)) => api.post(&at, json!({ "path": path, "label": label })).await?,
+            };
+            if !as_json {
+                match (&v["url"], v.as_array()) {
+                    (Value::String(url), _) => {
+                        println!("{url}");
+                        eprintln!("it's shown only now; roll preview webhook {preview} --revoke {} ends it", s(&v["id"]));
+                    }
+                    (_, Some(list)) if !list.is_empty() => {
+                        for x in list {
+                            let state = if x["revoked"] == true { "revoked" } else { "open" };
+                            let label = s(&x["label"]);
+                            let label = if label.is_empty() { String::new() } else { format!("  \"{label}\"") };
+                            println!("{}  {state}  {}  {} request(s)  by {}{label}", s(&x["id"]), s(&x["path"]), x["hits"].as_i64().unwrap_or(0), s(&x["created_by"]));
+                        }
+                    }
+                    (_, Some(_)) => println!("no webhook URLs"),
+                    _ => println!("revoked {}", s(&v["revoked"])),
+                }
+                return Ok(());
+            }
+            v
+        }
         Preview::Env { preview, set, unset } => {
             let path = format!("/v1/previews/{preview}/env");
             let v = if set.is_empty() && unset.is_empty() {
@@ -1210,12 +1259,17 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
             }
             v
         }
-        Preview::Notes { preview, resolve } => {
-            let v = match &resolve {
-                Some(note) => api.post(&format!("/v1/previews/{preview}/notes/{note}/resolve"), json!({})).await?,
-                None => api.get(&format!("/v1/previews/{preview}/notes")).await?,
+        Preview::Notes { preview, resolve, work } => {
+            let v = match (&resolve, &work) {
+                (Some(note), _) => api.post(&format!("/v1/previews/{preview}/notes/{note}/resolve"), json!({})).await?,
+                (None, Some(note)) => api.post(&format!("/v1/previews/{preview}/notes/{note}/work"), json!({})).await?,
+                (None, None) => api.get(&format!("/v1/previews/{preview}/notes")).await?,
             };
             if !as_json {
+                if work.is_some() {
+                    println!("work item #{}  {}", v["number"].as_u64().unwrap_or(0), s(&v["url"]));
+                    return Ok(());
+                }
                 match (&resolve, v["notes"].as_array()) {
                     (Some(note), _) => println!("resolved {note}"),
                     (None, Some(list)) if !list.is_empty() => list.iter().for_each(|n| {

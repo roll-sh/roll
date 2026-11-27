@@ -293,6 +293,7 @@ handlers! { ctx;
     InferenceStreamCompletion | InferenceChatCompletionUnified => inference::stream_route(ctx).await,
     InferencePutRegionPolicy => inference::region::put(ctx).await,
     RollSearchApplicationPromoteExperiment => entsearch::experiments::promote(ctx).await,
+    RollOtlpLogs => crate::otlp::logs(ctx).await,
     InferenceGetRegionPolicy => inference::region::get(ctx),
     InferenceDeleteRegionPolicy => inference::region::delete(ctx).await,
     MlPutDataFrameAnalytics => ml::dfa::put(ctx).await,

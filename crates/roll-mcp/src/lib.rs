@@ -30,6 +30,7 @@
 
 pub mod ask;
 pub mod card;
+pub mod denials;
 pub mod events;
 pub mod find;
 pub mod guard;
@@ -923,6 +924,8 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
                         Err(r) => unwrapped = Some(r),
                     }
                 }
+                // A retry echoing a denial's context id (SEP-2643) is a call with that approval.
+                denials::echo(&params, &mut args);
                 if let Some(r) = unwrapped {
                     rpc_result(id, r)
                 } else if ctx.search && name == search::FIND {
@@ -964,9 +967,18 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
                         Ok(Some(r)) if ctx.url_elicitation && waiting_approval(&r["structuredContent"]).is_some() && r["structuredContent"]["url"].as_str().is_some_and(|u| !u.is_empty()) => {
                             // 2026-07-28 asks for it in the result (Multi Round-Trip Requests);
                             // earlier revisions as URL elicitation's error.
-                            if ctx.modern { rpc_result(id, modern::approval_input_required(&r)) } else { approval_elicitation(id, &r) }
+                            // Either way it says there's a way forward, at a URL (SEP-2643).
+                            if ctx.modern {
+                                let mut asked = modern::approval_input_required(&r);
+                                if let Some(e) = denials::envelope(&r["structuredContent"], true) {
+                                    asked["_meta"][denials::KEY] = e;
+                                }
+                                rpc_result(id, asked)
+                            } else {
+                                denials::on_error(approval_elicitation(id, &r), &r, true)
+                            }
                         }
-                        Ok(Some(r)) => rpc_result(id, r),
+                        Ok(Some(r)) => rpc_result(id, denials::on_result(r, false)),
                         Ok(None) => rpc_result(id, unknown_tool(ctx, &name)),
                     }
                 }
@@ -1327,6 +1339,8 @@ fn capabilities(tasks: bool) -> Value {
     });
     // MCP Apps: HTML views for the hosts that render them.
     c["extensions"][ui::EXT] = json!({});
+    // Structured authorization denials (SEP-2643, draft): a refused call says if there's a way on.
+    c["extensions"][denials::EXT] = json!({});
     // 2026-07-28's tasks extension, where results can be sealed (tasks::on).
     if tasks {
         c["extensions"][tasks::EXT] = json!({});
@@ -1968,6 +1982,16 @@ fn refusal(body: &Value) -> Option<String> {
         }
         _ => {}
     }
+    // Elasticsearch's answer for a document that isn't there says nothing but where it looked:
+    // `{_index, _id, found: false}` (a get) or `result: "not_found"` (a delete).
+    if (body["found"] == false || body["result"] == "not_found")
+        && let Some(id) = said(body["_id"].as_str())
+    {
+        return Some(match said(body["_index"].as_str()) {
+            Some(index) => format!("no document {id} in index {index}"),
+            None => format!("no document {id}"),
+        });
+    }
     said(body["message"].as_str())
 }
 
@@ -2019,6 +2043,9 @@ mod refusal_tests {
         assert_eq!(text, "mapper_parsing_exception: Failed to parse mapping: no type [x]", "a cause that repeats the reason is left out");
         let (text, _) = refused(StatusCode::NOT_FOUND, json!({ "error": { "type": "index_not_found_exception", "reason": "no such index [nope]" }, "status": 404 })).await;
         assert_eq!(text, "not found: index_not_found_exception: no such index [nope]");
+        // A document that isn't there: where it looked, not just the status.
+        let (text, _) = refused(StatusCode::NOT_FOUND, json!({ "_index": "logs", "_id": "d1", "found": false })).await;
+        assert_eq!(text, "not found: no document d1 in index logs");
         // axum's refusal of a body: the part about the argument.
         let (text, _) = refused(StatusCode::UNPROCESSABLE_ENTITY, json!({ "error": "Failed to deserialize the JSON body into the target type: action: unknown variant `go`, expected one of `advance`, `all`, `abort` at line 1 column 24" })).await;
         assert_eq!(text, "action: unknown variant `go`, expected one of `advance`, `all`, `abort`");

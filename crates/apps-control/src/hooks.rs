@@ -282,7 +282,7 @@ impl Apps {
     /// a hold, `wait_for_ci` and everything a deploy does, `ROLL_GIT_TAG` its name. A tag is marked
     /// as done only once its deploy is queued (or waits for its checks): a refused one (a spend
     /// cap, a freeze) is tried again by the next delivery. What it said, made and failed.
-    async fn deploy_pushed_tags(self: &Arc<Self>, service: &str, svc: &crate::store::ServiceRow, url: &str, tags: &[String], actor: &str) -> Result<(Vec<String>, Vec<Deployment>, Vec<Error>)> {
+    pub(crate) async fn deploy_pushed_tags(self: &Arc<Self>, service: &str, svc: &crate::store::ServiceRow, url: &str, tags: &[String], actor: &str) -> Result<(Vec<String>, Vec<Deployment>, Vec<Error>)> {
         let sid = service.to_string();
         let envs = self.db(move |s| s.environments(&sid)).await?;
         let remote = self.git_remote(service, url).await;

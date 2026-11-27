@@ -393,6 +393,10 @@ async fn roll_run_injects_an_environments_secrets_and_refuses_unresolved_referen
     let check = [&at[..], &["import", "--from", "vault", "--source", "secret/shop", "--check"]].concat();
     let matching = roll(&api, &env, &check, None).await;
     assert!(matching.code == Some(0) && matching.stdout.contains("+ HOST") && matching.stdout.contains("2 the same") && matching.stderr.contains("The copy is complete"), "{}{}", matching.stdout, matching.stderr);
+    // A key roll can't compare (a reference here) isn't counted as the same: exit 2, named.
+    ok(&api, &[], &[&at[..], &["set", "RETRIES=${HOST}"]].concat(), None).await;
+    let unchecked = roll(&api, &env, &check, None).await;
+    assert!(unchecked.code == Some(2) && unchecked.stdout.contains("? RETRIES") && unchecked.stderr.contains("1 key wasn't compared"), "{}{}", unchecked.stdout, unchecked.stderr);
     ok(&api, &[], &[&at[..], &["set", "FROM_VAULT=fake-changed"]].concat(), None).await;
     ok(&api, &[], &[&at[..], &["rm", "RETRIES"]].concat(), None).await;
     let drifted = roll(&api, &env, &check, None).await;
@@ -1265,8 +1269,9 @@ async fn the_local_agent_on_a_gce_vm_logs_in_with_the_metadata_servers_identity_
 }
 
 /// On bare metal, `roll` exchanges the bootstrap token once for a machine credential kept 0600 in
-/// the state directory and logs in with it; the token still set doesn't exchange again. Past half
-/// its life, the next run replaces it, and the old one stops working.
+/// the state directory and logs in with it; the token still set doesn't exchange again, and the
+/// machine's later runs (more than its 5 live logins' worth) share the one login kept beside it.
+/// Past half its life, the next run replaces it, and the old one stops working.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_bootstrap_token_becomes_a_machine_credential_kept_on_disk_and_replaced_at_half_life() {
@@ -1287,6 +1292,12 @@ async fn a_bootstrap_token_becomes_a_machine_credential_kept_on_disk_and_replace
     let first = kept["credential"].as_str().unwrap().to_string();
     assert!(first.starts_with("rlmc_") && !kept.to_string().contains(&token), "{kept}");
     assert_eq!(get().await.trim(), "fake-hello", "the same bootstrap token isn't exchanged again");
+    let login = kept["login"]["token"].as_str().unwrap_or_else(|| panic!("{kept}")).to_string();
+    for _ in 0..7 {
+        assert_eq!(get().await.trim(), "fake-hello", "a restart storm shares the machine's login");
+    }
+    let kept: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    assert_eq!(kept["login"]["token"].as_str(), Some(login.as_str()), "one login for every run");
 
     // Past half its life: the next run replaces it.
     let mut aged = kept.clone();

@@ -188,6 +188,7 @@ POST /v1/previews/{id}/restore-points
 DELETE /v1/previews/{id}/restore-points/{point}
 GET /v1/previews/{id}/notes
 POST /v1/previews/{id}/notes/{note}/resolve
+POST /v1/previews/{id}/notes/{note}/work
 GET /v1/previews/{id}/notes/{note}/crop
 GET /v1/previews/{id}/logs
 POST /v1/previews/{id}/refresh
@@ -198,6 +199,8 @@ GET /v1/previews/{id}/errors/count
 GET /v1/previews/{id}/screenshot
 GET /v1/previews/{id}/shares
 DELETE /v1/previews/{id}/shares/{share}
+GET /v1/previews/{id}/webhooks
+DELETE /v1/previews/{id}/webhooks/{webhook}
 POST /v1/previews/{id}/sleep
 POST /v1/previews/{id}/wake
 DELETE /v1/queues/vhosts/{vhost}/bindings
@@ -245,7 +248,6 @@ GET /v1/secrets/projects/{project}/environments/{env}/exports
 DELETE /v1/secrets/projects/{project}/environments/{env}/folders
 GET /v1/secrets/projects/{project}/environments/{env}/folders
 POST /v1/secrets/projects/{project}/environments/{env}/folders
-POST /v1/secrets/projects/{project}/environments/{env}/import
 GET /v1/secrets/projects/{project}/environments/{env}/imports
 GET /v1/secrets/projects/{project}/environments/{env}/insights
 GET /v1/secrets/projects/{project}/environments/{env}/requests

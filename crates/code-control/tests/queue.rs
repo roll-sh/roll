@@ -537,6 +537,9 @@ async fn blockers_keep_changes_out_of_the_queue() {
             release_ms: None,
             release_locks: Vec::new(),
             release_before_ms: None,
+            main_on_change: None,
+            release_checks: None,
+            rehearsal: None,
             screenshot_url: None,
             expires_at: None,
             earlier: Vec::new(),
@@ -608,6 +611,23 @@ async fn blockers_keep_changes_out_of_the_queue() {
         assert_eq!(kinds(&a.ok("GET", &format!("/v1/code/changes/{}", id(&c)), None).await), ["browser"], "{state}");
     }
     a.code.report_environment(&id(&c), Some(&checked("passed"))).unwrap();
+    let c = a.ok("GET", &format!("/v1/code/changes/{}", id(&c)), None).await;
+    assert_eq!(c["blockers"], json!([]));
+    // A required release check waits for the rehearsal at its head, then on main's code on its
+    // migrated data.
+    let released = |ok: Option<bool>, broke: bool| {
+        let mut p = checked("passed");
+        let e = p.environment.as_mut().unwrap();
+        e.release_checks = Some("required".into());
+        e.rehearsal = Some(code_control::model::PreviewRehearsal { ok, error: None });
+        e.main_on_change = Some(code_control::model::PreviewMainOnChange { asked: 2, broke: if broke { vec![("/orders".into(), 500, 200)] } else { Vec::new() } });
+        p
+    };
+    for (ok, broke) in [(None, false), (Some(false), false), (Some(true), true)] {
+        a.code.report_environment(&id(&c), Some(&released(ok, broke))).unwrap();
+        assert_eq!(kinds(&a.ok("GET", &format!("/v1/code/changes/{}", id(&c)), None).await), ["release"], "{ok:?} {broke}");
+    }
+    a.code.report_environment(&id(&c), Some(&released(Some(true), false))).unwrap();
     let c = a.ok("GET", &format!("/v1/code/changes/{}", id(&c)), None).await;
     assert_eq!(c["blockers"], json!([]));
     enqueue(&a, &c, "normal").await;

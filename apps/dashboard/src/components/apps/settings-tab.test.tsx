@@ -12,6 +12,7 @@ vi.mock("@/components/link", () => ({ Link: ({ href, children }: { href: string;
 vi.mock("./sidecars", () => ({ SidecarsPanel: () => null }));
 vi.mock("./activity", () => ({ ActivityPanel: () => null }));
 vi.mock("./duplicate", () => ({ DuplicatePanel: () => null }));
+vi.mock("./silences", () => ({ Silences: () => null }));
 
 const svc = {
   id: "svc_a",

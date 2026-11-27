@@ -289,7 +289,21 @@ pub struct Access {
     /// Other services of the project let in with roll's own token for them (Cloud Run's invoker,
     /// [`Access::callers`] entries: `api`, `api/production`, or an id): `x-roll-caller`.
     pub callers: Vec<String>,
+    /// A preview's webhook URLs (roll previews': a provider that can't send a header, Stripe's,
+    /// GitHub's): one exact path each, in with `?roll_hook=<token>`, the token's SHA-256 only.
+    pub webhooks: Vec<HookUrl>,
 }
+
+/// One webhook URL of a preview's ([`Access::webhooks`]).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct HookUrl {
+    pub path: String,
+    #[serde(rename = "token_sha256")]
+    pub token_hash: String,
+}
+
+/// The most webhook URLs a preview environment has.
+pub const MAX_HOOK_URLS: usize = 20;
 
 /// A cold start in parts (Cloud Run's startup latency): the runtime bringing the container up, then
 /// the app until it answered.
@@ -2063,6 +2077,9 @@ pub struct Environment {
     /// Other services of the project let in with roll's token for them (`access.callers`).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub callers: Vec<String>,
+    /// The paths a preview's webhook URLs open (`access.webhooks`; their tokens never shown).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub webhook_paths: Vec<String>,
     /// Visitors may type its password (`access.password`; never returned).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub password: bool,
@@ -2760,6 +2777,53 @@ pub struct Check {
     /// A public check's host: one of the environment's custom domains (none: its own URL's).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<String>,
+    /// Its request's method (Better Stack's, Checkly's): GET (the default), HEAD, POST, PUT,
+    /// PATCH, DELETE or OPTIONS.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
+    /// Its request's headers (at most 10): a value's `${NAME}` is the environment's own variable
+    /// of that name as its live deployment has it, so a token is never in the settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headers: Option<std::collections::BTreeMap<String, String>>,
+    /// Its request's body (at most 4 KiB), with a method that takes one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+}
+
+/// The methods a check may send ([`Check::method`]).
+pub const CHECK_METHODS: [&str; 7] = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"];
+
+impl Check {
+    /// Its method, GET unless it says.
+    pub fn method(&self) -> &str {
+        self.method.as_deref().unwrap_or("GET")
+    }
+
+    /// Its headers with each `${NAME}` the variable's value in `vars`; the name of one it names that
+    /// isn't set, if any.
+    pub fn headers_with(&self, vars: &[(String, String)]) -> std::result::Result<Vec<(String, String)>, String> {
+        let mut out = Vec::new();
+        for (k, v) in self.headers.iter().flatten() {
+            let mut value = String::new();
+            let mut rest = v.as_str();
+            while let Some(i) = rest.find("${") {
+                value.push_str(&rest[..i]);
+                let after = &rest[i + 2..];
+                let Some(end) = after.find('}') else {
+                    value.push_str(&rest[i..]);
+                    rest = "";
+                    break;
+                };
+                let name = &after[..end];
+                let found = vars.iter().find(|(n, _)| n == name).map(|(_, v)| v.as_str()).ok_or_else(|| format!("its header {k} names ${{{name}}}, which this environment doesn't set"))?;
+                value.push_str(found);
+                rest = &after[end + 1..];
+            }
+            value.push_str(rest);
+            out.push((k.clone(), value));
+        }
+        Ok(out)
+    }
 }
 
 /// A browser check's budgets, each optional: its largest contentful paint, cumulative layout
@@ -2838,6 +2902,31 @@ impl Check {
         }
         if self.status.is_some_and(|s| !(100..=599).contains(&s)) || self.contains.as_ref().is_some_and(|c| c.is_empty() || c.len() > 200) {
             return bad("status is an HTTP status, contains 1–200 characters");
+        }
+        if let Some(m) = &self.method {
+            let up = m.to_ascii_uppercase();
+            if !CHECK_METHODS.contains(&up.as_str()) {
+                return bad("method is GET, HEAD, POST, PUT, PATCH, DELETE or OPTIONS");
+            }
+            self.method = Some(up);
+        }
+        if (self.headers.is_some() || self.body.is_some() || self.method.is_some()) && self.browser.is_some() {
+            return bad("method, headers and body are an HTTP check's (a browser check's script makes its own requests)");
+        }
+        if let Some(h) = &self.headers {
+            let token = |n: &str| !n.is_empty() && n.len() <= 64 && n.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b));
+            let reserved = |n: &str| { let l = n.to_ascii_lowercase(); matches!(l.as_str(), "host" | "content-length" | "transfer-encoding" | "connection" | "upgrade" | "te" | "trailer") || l.starts_with("x-roll-") };
+            if h.len() > 10 || h.iter().any(|(k, v)| !token(k) || reserved(k) || v.len() > 1000 || v.contains(['\r', '\n', '\0'])) {
+                return bad("headers are at most 10, each a name (letters, digits, - and _; not Host, Content-Length, connection headers or x-roll-*) and a value of at most 1000 characters on one line");
+            }
+        }
+        if let Some(b) = &self.body {
+            if b.len() > 4096 {
+                return bad("a check's body is at most 4 KiB");
+            }
+            if !matches!(self.method(), "POST" | "PUT" | "PATCH" | "DELETE") {
+                return bad("a body goes with method POST, PUT, PATCH or DELETE");
+            }
         }
         Ok(self)
     }

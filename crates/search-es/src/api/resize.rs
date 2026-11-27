@@ -253,6 +253,7 @@ fn resize(st: &mut ClusterState, kind: ResizeType, source: &str, target: &str, r
         rollover_info: Default::default(),
         dialect: src.dialect,
     };
+    crate::meta::shard_limit::check_putting(st, target, &idx.settings)?;
     st.metadata.indices.insert(target.to_string(), Arc::new(idx));
     st.check_write_indices()?;
     st.check_hidden_aliases()?;
@@ -286,9 +287,17 @@ pub async fn handle(ctx: &Ctx<'_>, kind: ResizeType) -> EsResult<Reply> {
     let now = ctx.now_ms;
     let source = resolve_date_math(ctx.path_param("index").unwrap_or_default(), now)?;
     let target = resolve_date_math(ctx.path_param("target").unwrap_or_default(), now)?;
+    crate::xpack::security::check_resize(ctx, &source, &target)?;
+    let mut req = req;
+    let (auth, aliases) = crate::api::indices::authorized_aliases(ctx, &mut req.aliases)?;
     let t = target.clone();
     let src_name = source.clone();
-    ctx.cluster.update(move |st| resize(st, kind, &source, &t, req, now)).await?;
+    ctx.cluster
+        .update(move |st| {
+            auth.check_new(st, &t, &aliases)?;
+            resize(st, kind, &source, &t, req, now)
+        })
+        .await?;
     // The target starts with the source's documents (Elasticsearch hard-links its segments).
     let st = ctx.state();
     if let (Some(s), Some(d)) = (st.metadata.indices.get(&src_name).cloned(), st.metadata.indices.get(&target).cloned()) {
@@ -300,10 +309,11 @@ pub async fn handle(ctx: &Ctx<'_>, kind: ResizeType) -> EsResult<Reply> {
 /// OpenSearch's resize: its own validation (`max_shard_size`, target blocks that would leave
 /// the new shards unassigned) and `wait_for_completion=false`, which runs the resize as an
 /// `indices:admin/resize` task whose outcome `_tasks` keeps.
-async fn handle_opensearch(ctx: &Ctx<'_>, kind: ResizeType, req: ResizeRequest) -> EsResult<Reply> {
+async fn handle_opensearch(ctx: &Ctx<'_>, kind: ResizeType, mut req: ResizeRequest) -> EsResult<Reply> {
     let now = ctx.now_ms;
     let source = resolve_date_math(ctx.path_param("index").unwrap_or_default(), now)?;
     let target = resolve_date_math(ctx.path_param("target").unwrap_or_default(), now)?;
+    crate::xpack::security::check_resize(ctx, &source, &target)?;
     let mut errors = Vec::new();
     if req.settings.keys().any(|k| k.starts_with("index.sort.")) {
         errors.push("can't override index sort when resizing an index".to_string());
@@ -348,9 +358,15 @@ async fn handle_opensearch(ctx: &Ctx<'_>, kind: ResizeType, req: ResizeRequest) 
     if ctx.has_query("task_execution_timeout") {
         ctx.time_param("task_execution_timeout", crate::units::TimeValue::hours(1))?;
     }
+    let (auth, aliases) = crate::api::indices::authorized_aliases(ctx, &mut req.aliases)?;
     let run = async {
         let (t, src_name) = (target.clone(), source.clone());
-        ctx.cluster.update(move |st| resize(st, kind, &source, &t, req, now)).await?;
+        ctx.cluster
+            .update(move |st| {
+                auth.check_new(st, &t, &aliases)?;
+                resize(st, kind, &source, &t, req, now)
+            })
+            .await?;
         let st = ctx.state();
         if let (Some(s), Some(d)) = (st.metadata.indices.get(&src_name).cloned(), st.metadata.indices.get(&target).cloned()) {
             crate::write::copy_index(ctx.cluster, &s, &d)?;

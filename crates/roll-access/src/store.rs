@@ -189,8 +189,10 @@ pub const OWNER_MAX_WORKLOADS: usize = 1_000;
 /// identity (roll secrets' `machine_chains`, store/bootstrap.rs), and a chain's logins are capped
 /// per chain ([`CHAIN_MAX_LOGINS`]), so a maker's 900 machines leave their own CI its 1,000.
 const COUNTED_WORKLOADS: &str = "kind = 'workload' AND revoked_at IS NULL AND expires_at > ? AND chain IS NULL";
-/// Live login tokens one machine (a chain) holds at most: one, the next it logs in for before that
-/// one ends, and a few lost answers retried.
+/// Login tokens one machine (a chain) holds at most that are live now (not revoked, not yet ended:
+/// an ended one frees its place at once): one, the next it logs in for before that one ends, and a
+/// few lost answers retried. Not one per process: roll's CLI keeps the machine's login beside its
+/// credential, and every process on the machine reuses it until a quarter of its life is left.
 pub const CHAIN_MAX_LOGINS: usize = 5;
 /// How long a workload grant lives, in minutes.
 pub const WORKLOAD_MINUTES: std::ops::RangeInclusive<u32> = 5..=60;
@@ -1305,7 +1307,7 @@ impl Store {
             if let Some(chain) = &chain {
                 let logins: i64 = c.query_row("SELECT COUNT(*) FROM grants WHERE chain = ? AND kind = 'workload' AND revoked_at IS NULL AND expires_at > ? AND rules <> '[]'", params![chain, now], |r| r.get(0))?;
                 if logins as usize >= CHAIN_MAX_LOGINS {
-                    return Err(Error::Conflict(format!("at most {CHAIN_MAX_LOGINS} live login tokens for one machine: use the one it has, or log in again once one ends (each within {} minutes)", WORKLOAD_MINUTES.end())));
+                    return Err(Error::Conflict(format!("at most {CHAIN_MAX_LOGINS} live login tokens for one machine: its processes share the one it has (roll's CLI keeps it beside the machine credential), or log in again once one ends (each within {} minutes)", WORKLOAD_MINUTES.end())));
                 }
             }
             c.execute(

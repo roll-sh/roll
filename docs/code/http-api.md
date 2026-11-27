@@ -180,6 +180,8 @@ Preview = {state: "creating" | "running" | "sleeping" | "failed", url: string | 
                           schema_changes?: string[] /* "+ …"/"- …": its Postgres schema against the parents' */,
                           schema_risks?: string[] /* what in them would hurt production when it lands */,
                           schema_overlaps?: [branch, tables[]][] /* other open changes whose schema changes touch the same tables */,
+                          release_checks?: "check" | "required" /* the project's rule for its release at each head */,
+                          rehearsal?: {ok: boolean | null, error?} /* its release rehearsed on today's data at its head (ok null while it waits) */,
                           screenshot_url?: string /* a public preview's screenshot, signed and expiring */,
                           diff_url?: string /* the same for where it differs from the default branch's, when it does */,
                           expires_at?: number /* ms: when it goes (its TTL, or a keep, running out), once a day away */,
@@ -568,10 +570,14 @@ POST  /v1/code/work/{id}/heartbeat | /release | /complete {agent?} → WorkItem
 ## Events (SSE)
 
 `GET /v1/code/repos/{owner}/{repo}/events` sends the event types `landed`, `change`, `work`, `check`,
-`preview`, `queue`, `review`, `thread`, `push` and `budget`. Repo webhooks get the same events with the same data.
+`preview`, `queue`, `review`, `thread`, `push`, `budget` and `masking`. Repo webhooks get the same events with the same data.
 A `budget` event is `{budget: {project, project_name, percent /* 80, 100 */, spent_usd_month, max_usd_month},
 dashboard_url}`: the repo's workspace project's previews passed that share of their monthly budget
-(docs/previews.md). A `preview` event is `{change, preview}`, with `preview: null` once it's gone; a
+(docs/previews.md). A `masking` event is `{masking: {project, project_name, resources: [{resource,
+columns}]}, dashboard_url}`: how many columns of each of the project's parents its previews masked by
+default (they look like people's data and the rules don't name them), each column counted once
+(docs/previews.md, "Safe by default"); never their names (the repo's readers may not read the
+resource's schema): the dashboard names them. A `preview` event is `{change, preview}`, with `preview: null` once it's gone; a
 preview environment that went with the project's `teardown` failing adds `teardown` (what the job
 said: its exit code and its output's tail, the change's code's words), and the pull request's
 comment says so too. `became` lists what the update reached that the change's preview wasn't
@@ -618,7 +624,7 @@ GET    /v1/code/repos/{owner}/{repo}/leaks?history= → {head, files, found: [{k
 GET    /v1/code/repos/{owner}/{repo}/webhooks → Webhook[]                       writers (401 anonymous, 403 others)
 POST   /v1/code/repos/{owner}/{repo}/webhooks {url, events?, secret?, active?}
        → 201 {webhook: Webhook, ping: delivery id, secret? /* only when roll generated it: shown once */}
-       events: any of landed, change, review, thread, check, queue, work, preview, push, budget, or ["*"] (default
+       events: any of landed, change, review, thread, check, queue, work, preview, push, budget, masking, or ["*"] (default
        ["landed"]); secret: 16-200 characters (default: generated, rlw_…); 400 bad url/events/secret, or
        no ROLL_SECRET_KEY on the server (also for PATCH); at most 20 per repo (422)
 GET    /v1/code/repos/{owner}/{repo}/webhooks/{id} → Webhook · PATCH {url?, events?, secret?, active?} → Webhook
@@ -1262,8 +1268,9 @@ POST /v1/code/github/webhook          X-Hub-Signature-256 verified; 401 on a bad
 GET  /v1/code/github/setup            the App's setup URL: 302 to {web}/dashboard/code?github=installed
 ```
 
-`Repo.github` also has `remote_head` (GitHub's default branch as last seen) and `connected` (it's
-`false` once the App loses access). With `ROLL_CODE_TOKEN` set, listing installations and
+`Repo.github` also has `remote_head` (GitHub's default branch as last seen), `connected` (it's
+`false` once the App loses access) and `private` (whether the GitHub repository is private, as
+connecting and each delivery about it last said; absent on links from before it was kept). With `ROLL_CODE_TOKEN` set, listing installations and
 connecting a repository need the admin token: an installation isn't tied to a roll owner, so an
 owner token could otherwise import another account's repositories.
 

@@ -346,6 +346,13 @@ async fn check(State(a): S, ext: Extensions, Json(c): Json<Check>) -> crate::Res
     };
     let row = found.row;
     let params = found.params.unwrap_or_default();
+    if !row.body_shape_ok(c.body.as_ref()) {
+        return Ok(Json(json!({ "decision": "deny", "why": "the body isn't the JSON this route reads" })));
+    }
+    // A folder the gate refuses before deciding is refused here too.
+    if let Some(why) = crate::evaluate::bad_folder(row, uri.query()) {
+        return Ok(Json(json!({ "decision": "deny", "why": why })));
+    }
     // Decided as the gate decides: the request's headers (a create's `X-Roll-Project`), the
     // project a create's body names, the copy a body asks for, and "ask for anything else".
     let mut headers = axum::http::HeaderMap::new();
@@ -360,9 +367,19 @@ async fn check(State(a): S, ext: Extensions, Json(c): Json<Check>) -> crate::Res
         .await
         .map_err(|e| Error::Internal(e.to_string()))?;
     crate::evaluate::project_from_body(row, &mut target, c.body.as_ref()).map_err(Error::BadRequest)?;
+    if let Err(why) = crate::evaluate::folder_from_body(row, &mut target, c.body.as_ref()) {
+        return Ok(Json(json!({ "decision": "deny", "why": why })));
+    }
     let mut action = row.action_with(&method, &params, c.body.as_ref(), &headers);
     let asked = action;
     let mut outcome = if matches!(row.target, catalog::Tgt::AnyGrant) { Outcome::Allow } else { scope.outcome(&target, action) };
+    // What else its body needs, as the gate asks it: the weakest decides.
+    for more in row.needs_too.zip(c.body.as_ref()).map(|(f, b)| f(b)).unwrap_or_default() {
+        let o = scope.outcome(&target, more);
+        if crate::evaluate::rank(o) < crate::evaluate::rank(outcome) {
+            (outcome, action) = (o, more);
+        }
+    }
     if let Some((copied, _, _)) = crate::evaluate::copy_outcome(&a, row, &params, &target, (c.body.as_ref(), uri.query()), &scope).await
         && crate::evaluate::rank(copied) < crate::evaluate::rank(outcome)
     {
@@ -1154,13 +1171,24 @@ async fn remembered(a: &Arc<Access>, id: &str, remember: Option<&str>) -> crate:
         return Err(Error::BadRequest("this route spans every environment: approve it once".into()));
     }
     // The indices it was about stay part of it (`cl_1/logs-a` is cluster `cl_1`, index `logs-a`);
-    // a secrets request names one key, and a name that isn't one would remember as a pattern.
+    // a secrets request names one key, and a name that isn't one would remember as a pattern; a
+    // search request that excluded indices would remember as a rule reaching them.
     if found.scope_index.as_deref().is_some_and(|ix| !roll_auth::scope::rememberable_part(&found.product, ix)) {
-        return Err(Error::BadRequest("this request names no single encryption key: approve it once".into()));
+        let why = if found.product == "secrets" { "this request names no single encryption key" } else { "this request excludes indices, which a rule can't" };
+        return Err(Error::BadRequest(format!("{why}: approve it once")));
+    }
+    // A secret lent to another product's route (apps' DNS token, search's rotated password) at an
+    // environment's root: remembered, every later call would reveal every key there, so it's
+    // approved once; one in a folder of its own is remembered for that folder.
+    if found.product == "secrets"
+        && found.scope_path.as_deref().is_none_or(roll_auth::scope::is_root)
+        && catalog::find(&found.method, &found.route, &found.path).is_some_and(|f| f.row.product != "secrets" && f.row.lends.is_some())
+    {
+        return Err(Error::BadRequest("this lends a whole environment's secrets: approve it once, or keep the token in a folder of its own".into()));
     }
     // A folder's rule reaches every folder under it, so one at a secrets environment's root (or with
     // no folder) is the whole environment, or more: remembered for 8 hours at most.
-    if found.product == "secrets" && found.scope_path.as_deref().is_none_or(|p| p == "/") && until.is_none_or(|u| u > code_sql::now_ms() + 8 * 3_600_000) {
+    if found.product == "secrets" && found.scope_path.as_deref().is_none_or(roll_auth::scope::is_root) && until.is_none_or(|u| u > code_sql::now_ms() + 8 * 3_600_000) {
         return Err(Error::BadRequest("this reaches every folder of the environment: remember it for an hour or 8 hours at most, or approve it once".into()));
     }
     let rule = rule_of(&found)?;
@@ -1293,7 +1321,7 @@ async fn request_access(State(a): S, ext: Extensions, Json(r): Json<AccessReques
     // A folder's rule reaches every folder under it: one at a secrets environment's root (or with
     // no folder) is all of it, or every environment's, so it lasts 8 hours at most, as a
     // remembered approval of one does.
-    if r.product == "secrets" && r.path.as_deref().is_none_or(|p| p == "/") && lasts > 8 * 3_600_000 {
+    if r.product == "secrets" && r.path.as_deref().is_none_or(roll_auth::scope::is_root) && lasts > 8 * 3_600_000 {
         return Err(Error::BadRequest("this reaches every folder of the environment (name a folder in path for longer): for 15m, 1h or 8h".into()));
     }
     // Tokens and approvals are changed by people, never asked for: a token that could manage

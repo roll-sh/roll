@@ -574,6 +574,26 @@ Task results: on the Elasticsearch dialect `.tasks` is a hidden, restricted syst
 roles name. Known gap: on the OpenSearch dialect a `wait_for_completion=false` by-query creates
 `.tasks` but stores no result document in it, where OpenSearch stores one.
 
+Aliases, where roll differs on purpose: three places are stricter than Elasticsearch 9.5.5,
+which on each is looser in a way that reads or takes over what the caller's grants don't reach
+(each checked on the 9.5.5 image).
+- An alias over a data stream may not reach a failure store the caller can't read: its
+  `::failures` component is compared too, as its plain one is (`Adding an alias is not allowed
+  when the alias has more permissions than any of the indices`). On 9.5.5, `read_failure_store`
+  on the alias's name without it on the data stream adds the alias (200), and
+  `<alias>::failures/_search` then reads the data stream's failure documents.
+- A resize's and a rollover's body aliases are authorized as an alias request is (indices:admin/aliases
+  on the new index and the alias names, no alias wider than its index, none over document or
+  field level security), as a create index's are on both. 9.5.5 lets them through: a clone of an
+  index the caller manages but can't read, made with an alias its read grant reaches, reads the
+  index; a rollover's alias takes over another index's write alias. The resize target itself
+  needs no privilege, as on 9.5.5, and can't hold more than its source.
+- `DELETE /{pattern}/_alias/{name}` (and an `_aliases` `add` or `remove_index` over a pattern)
+  answers 403 when the pattern reaches an index the caller can't change aliases on, open or
+  closed (`DELETE /*/_alias/mine-o` over another's index, and `DELETE /o*/_alias/mine-o` where
+  `o*` matches only a closed index the caller holds nothing on, are both 403); 9.5.5 narrows the
+  pattern to the indices the caller may change (404 `aliases [...] missing` when none is left).
+
 Watch records (`.watcher-history-*`) are reached only by a grant that names them (`.watch*`,
 `.watcher-history-*`, Elasticsearch's watcher roles) or that allows restricted indices, through an
 alias too: on Elasticsearch a grant of `*` reaches them. `_update_by_query` drops a
@@ -1188,9 +1208,7 @@ Checked against Elasticsearch 9.5.5 (captures in
   `suppressed`, as Elasticsearch prints it), the request's other items unaffected. An update by
   query reads as the caller, as Elasticsearch's scroll does: only the documents it sees, their
   `_source` without the fields it can't see, and it writes them back so: those fields are
-  dropped from the documents (a script reading one gets `null`). Difference: Elasticsearch
-  refreshes a by-query `refresh=true` as the caller (403 without `maintenance`); roll refreshes
-  it as the cluster. A
+  dropped from the documents (a script reading one gets `null`). A
   stored result (async search, ES|QL, EQL, SQL, and SQL cursors) is its opener's (the API key, or
   the user and realm): anyone else gets 404 for it, its status and its delete (a cursor: unknown),
   except that `cancel_task` may delete it. One stored before owners were recorded is the

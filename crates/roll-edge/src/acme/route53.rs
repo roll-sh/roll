@@ -1,13 +1,23 @@
 //! Amazon Route 53 for DNS-01 ([`DnsProvider`]): the hosted zone of each name by
-//! `ListHostedZonesByName`, the `_acme-challenge` TXT record set UPSERTed (and DELETEd) with
-//! `ChangeResourceRecordSets`, and each change waited on with `GetChange` until it's `INSYNC`
+//! `ListHostedZonesByName`, the `_acme-challenge` TXT record set read (`ListResourceRecordSets`) and
+//! written back with `ChangeResourceRecordSets`, and each change waited on with `GetChange` until it's `INSYNC`
 //! ([`DnsProvider::settle`]), within a bound. Requests are signed with SigV4 (`aws-sigv4`, service
 //! `route53`, `us-east-1`: Route 53 is global). The caller's HTTP client must not follow redirects
 //! (rolld's also resolves public addresses only); answers are read up to [`Route53::MAX_RESPONSE`].
 //!
-//! A record set holds every value of its name, so a wildcard and its apex (`*.example.com` and
-//! `example.com`, one `_acme-challenge.example.com`) are one set of two values: this client keeps
-//! the values it wrote per name and writes the whole set each time. It's made per order.
+//! A record set holds every value of its name: a wildcard and its apex (`*.example.com` and
+//! `example.com`, one `_acme-challenge.example.com`) are one set of two values, and another ACME
+//! client (cert-manager, Caddy, another roll order for an overlapping name) may have its own value
+//! there at the same time. So each change reads the set as it stands and adds or removes only this
+//! client's own value: UPSERT the set with it added, UPSERT the rest without it, and DELETE only when
+//! nothing else is left (with the values and TTL just read, which DELETE must match exactly). A
+//! DELETE that no longer matches (someone wrote in between) is read and tried again once. Route 53
+//! has no compare-and-swap for an UPSERT, so another writer that read the set before our UPSERT can
+//! write it back without our value: [`DnsProvider::settle`] reads each set again once the changes
+//! are `INSYNC`, adds a missing value back and waits again (once), and fails the order if it's
+//! still gone, before the CA looks. (roll's own orders don't race each other: roll secrets claims
+//! each record name in its shared database for an order.) The client is made per order: the values
+//! it removes are only the ones it wrote.
 
 use super::{DnsProvider, read_bounded, short};
 use anyhow::Context as _;
@@ -36,7 +46,7 @@ pub struct Route53 {
     http: reqwest::Client,
     /// Zone name → id (`Z…`).
     zones: Mutex<HashMap<String, String>>,
-    /// Record name → its zone and the values this client wrote there, as the set stands now.
+    /// Record name → its zone, and the values this client wrote there (others' aren't in it).
     records: Mutex<HashMap<String, (String, Vec<String>)>>,
     /// Changes not seen `INSYNC` yet.
     pending: Mutex<Vec<String>>,
@@ -74,15 +84,23 @@ impl Route53 {
 
     /// One signed call: its answer's body on a 2xx, else Route 53's error code and message.
     async fn call(&self, method: &str, path_and_query: &str, body: Option<String>, what: &str) -> anyhow::Result<String> {
+        match self.call_retried(method, path_and_query, body.as_deref(), what).await? {
+            Ok(text) => Ok(text),
+            Err((code, message)) => anyhow::bail!("Route 53: {what}: {code}: {message}"),
+        }
+    }
+
+    /// [`Route53::call`], with Route 53's refusal (its code and message) as a value; throttled
+    /// calls tried again.
+    async fn call_retried(&self, method: &str, path_and_query: &str, body: Option<&str>, what: &str) -> anyhow::Result<Result<String, (String, String)>> {
         let mut attempt = 0;
         loop {
-            match self.call_once(method, path_and_query, body.as_deref(), what).await? {
-                Ok(text) => return Ok(text),
+            match self.call_once(method, path_and_query, body, what).await? {
                 Err((code, _)) if attempt < RETRIES && matches!(code.as_str(), "Throttling" | "PriorRequestNotComplete") => {
                     attempt += 1;
                     tokio::time::sleep(Duration::from_millis(500 << attempt)).await;
                 }
-                Err((code, message)) => anyhow::bail!("Route 53: {what}: {code}: {message}"),
+                answer => return Ok(answer),
             }
         }
     }
@@ -162,22 +180,68 @@ impl Route53 {
         anyhow::bail!("Route 53: no public hosted zone for {name} (do the credentials see it?)")
     }
 
-    /// Write `name`'s TXT set as `values` (`action`: UPSERT or DELETE), and remember the change.
-    async fn change(&self, zone: &str, action: &str, name: &str, values: &[String]) -> anyhow::Result<()> {
-        let records: String = values.iter().map(|v| format!("<ResourceRecord><Value>&quot;{}&quot;</Value></ResourceRecord>", escape(v))).collect();
+    /// Whether these credentials reach `name` (an `_acme-challenge` record) as an order needs: its
+    /// public hosted zone, and its TXT set read. Nothing is written.
+    pub async fn check(&self, name: &str) -> anyhow::Result<()> {
+        let zone = self.zone_for(name).await?;
+        self.read_set(&zone, name).await.map(drop)
+    }
+
+    /// `name`'s TXT set as it stands: its TTL and values (as Route 53 has them, quoted), or `None`.
+    async fn read_set(&self, zone: &str, name: &str) -> anyhow::Result<Option<(u32, Vec<String>)>> {
+        // The sets from `name` on, in name and type order: the first may be another name's.
+        let xml = self.call("GET", &format!("/{VERSION}/hostedzone/{zone}/rrset?name={name}.&type=TXT&maxitems=1"), None, &format!("read TXT {name}")).await?;
+        let want = format!("{name}.");
+        let Some(set) = blocks(&xml, "ResourceRecordSet").into_iter().find(|s| first(s, "Name").is_some_and(|n| n.eq_ignore_ascii_case(&want)) && first(s, "Type").as_deref() == Some("TXT")) else { return Ok(None) };
+        let ttl = first(set, "TTL").and_then(|t| t.parse().ok()).unwrap_or(TTL);
+        Ok(Some((ttl, blocks(set, "Value").iter().map(|v| unescape(v)).collect())))
+    }
+
+    /// Add (`add`) or take out this client's `value` in `name`'s TXT set, keeping every other value
+    /// in it: read, then UPSERT the set changed, or DELETE it when nothing else is left. Read and
+    /// tried again once when the set moved before the DELETE.
+    async fn edit(&self, zone: &str, name: &str, value: &str, add: bool) -> anyhow::Result<()> {
+        let ours = format!("\"{value}\"");
+        let mut attempt = 0;
+        loop {
+            let (ttl, mut values) = self.read_set(zone, name).await?.unwrap_or((TTL, vec![]));
+            let before = values.len();
+            values.retain(|v| *v != ours);
+            let (action, values) = match (add, values.is_empty()) {
+                (true, _) => ("UPSERT", values.into_iter().chain([ours.clone()]).collect::<Vec<_>>()),
+                // Gone already (someone took it down): nothing to write.
+                (false, _) if values.len() == before => return Ok(()),
+                (false, false) => ("UPSERT", values),
+                (false, true) => ("DELETE", vec![ours.clone()]),
+            };
+            match self.change(zone, action, name, ttl, &values).await? {
+                Ok(()) => return Ok(()),
+                Err((code, _)) if attempt == 0 && code == "InvalidChangeBatch" && action == "DELETE" => attempt += 1,
+                Err((code, message)) => anyhow::bail!("Route 53: {} TXT {name}: {code}: {message}", action.to_ascii_lowercase()),
+            }
+        }
+    }
+
+    /// Write `name`'s TXT set as `values` (each quoted, as Route 53 holds it) with `ttl` (`action`:
+    /// UPSERT or DELETE), and remember the change; Route 53's refusal is its code and message.
+    async fn change(&self, zone: &str, action: &str, name: &str, ttl: u32, values: &[String]) -> anyhow::Result<Result<(), (String, String)>> {
+        let records: String = values.iter().map(|v| format!("<ResourceRecord><Value>{}</Value></ResourceRecord>", escape(v))).collect();
         let body = format!(
-            r#"<?xml version="1.0" encoding="UTF-8"?><ChangeResourceRecordSetsRequest xmlns="https://route53.amazonaws.com/doc/{VERSION}/"><ChangeBatch><Comment>roll ACME challenge</Comment><Changes><Change><Action>{action}</Action><ResourceRecordSet><Name>{}.</Name><Type>TXT</Type><TTL>{TTL}</TTL><ResourceRecords>{records}</ResourceRecords></ResourceRecordSet></Change></Changes></ChangeBatch></ChangeResourceRecordSetsRequest>"#,
+            r#"<?xml version="1.0" encoding="UTF-8"?><ChangeResourceRecordSetsRequest xmlns="https://route53.amazonaws.com/doc/{VERSION}/"><ChangeBatch><Comment>roll ACME challenge</Comment><Changes><Change><Action>{action}</Action><ResourceRecordSet><Name>{}.</Name><Type>TXT</Type><TTL>{ttl}</TTL><ResourceRecords>{records}</ResourceRecords></ResourceRecordSet></Change></Changes></ChangeBatch></ChangeResourceRecordSetsRequest>"#,
             escape(name)
         );
         let what = format!("{} TXT {name}", action.to_ascii_lowercase());
-        let xml = self.call("POST", &format!("/{VERSION}/hostedzone/{zone}/rrset"), Some(body), &what).await?;
+        let xml = match self.call_retried("POST", &format!("/{VERSION}/hostedzone/{zone}/rrset"), Some(&body), &what).await? {
+            Ok(xml) => xml,
+            Err(refused) => return Ok(Err(refused)),
+        };
         let change = first(&xml, "Id").unwrap_or_default();
         let change = change.trim_start_matches("/change/");
         anyhow::ensure!(!change.is_empty() && change.chars().all(|c| c.is_ascii_alphanumeric()), "Route 53: {what}: an odd change id");
         if first(&xml, "Status").as_deref() != Some("INSYNC") {
             self.pending.lock().unwrap().push(change.to_string());
         }
-        Ok(())
+        Ok(Ok(()))
     }
 }
 
@@ -185,63 +249,84 @@ impl DnsProvider for Route53 {
     fn create_txt<'a>(&'a self, name: &'a str, value: &'a str) -> BoxFuture<'a, anyhow::Result<String>> {
         Box::pin(async move {
             let zone = self.zone_for(name).await?;
-            let values = {
-                let mut records = self.records.lock().unwrap();
-                let set = records.entry(name.to_string()).or_insert_with(|| (zone.clone(), vec![]));
-                set.1.push(value.to_string());
-                set.1.clone()
-            };
-            if let Err(e) = self.change(&zone, "UPSERT", name, &values).await {
-                // Not written: nothing of this value to take down.
-                if let Some(set) = self.records.lock().unwrap().get_mut(name) {
-                    set.1.retain(|v| v != value);
-                }
-                return Err(e);
-            }
+            self.edit(&zone, name, value, true).await?;
+            self.records.lock().unwrap().entry(name.to_string()).or_insert_with(|| (zone, vec![])).1.push(value.to_string());
             Ok(value.to_string())
         })
     }
 
     fn delete_txt<'a>(&'a self, name: &'a str, id: &'a str) -> BoxFuture<'a, anyhow::Result<()>> {
         Box::pin(async move {
-            let (zone, live, rest) = {
+            let zone = {
                 let records = self.records.lock().unwrap();
-                let (zone, live) = records.get(name).cloned().context("Route 53: a record this client didn't write")?;
-                let rest: Vec<String> = live.iter().filter(|v| *v != id).cloned().collect();
-                (zone, live, rest)
+                let (zone, ours) = records.get(name).context("Route 53: a record this client didn't write")?;
+                anyhow::ensure!(ours.iter().any(|v| v == id), "Route 53: a record this client didn't write");
+                zone.clone()
             };
-            // DELETE names the set exactly as it stands; with values left, the set shrinks instead.
-            match rest.is_empty() {
-                true => self.change(&zone, "DELETE", name, &live).await?,
-                false => self.change(&zone, "UPSERT", name, &rest).await?,
+            self.edit(&zone, name, id, false).await?;
+            if let Some((_, ours)) = self.records.lock().unwrap().get_mut(name) {
+                ours.retain(|v| v != id);
             }
-            self.records.lock().unwrap().insert(name.to_string(), (zone, rest));
             Ok(())
         })
     }
 
+    /// Every change `INSYNC`, then every value this client wrote read back: one missing (another
+    /// writer's UPSERT from an older read) is added again and waited on once more, and still
+    /// missing fails, so the CA never looks at a set without it.
     fn settle(&self) -> BoxFuture<'_, anyhow::Result<()>> {
         Box::pin(async move {
-            let started = Instant::now();
+            let mut again = false;
             loop {
-                let pending = std::mem::take(&mut *self.pending.lock().unwrap());
-                let mut left = vec![];
-                for change in pending {
-                    let xml = self.call("GET", &format!("/{VERSION}/change/{change}"), None, &format!("change {change}")).await?;
-                    if first(&xml, "Status").as_deref() != Some("INSYNC") {
-                        left.push(change);
-                    }
+                self.insync().await?;
+                let missing = self.missing().await?;
+                let Some((_, name, _)) = missing.first() else { return Ok(()) };
+                if again {
+                    anyhow::bail!("Route 53: roll's challenge value in TXT {name} was gone after its change was INSYNC, twice (another client keeps writing the set without it)");
                 }
-                if left.is_empty() {
-                    return Ok(());
+                again = true;
+                tracing::warn!(%name, "Route 53: roll's challenge value was gone after its change was INSYNC; adding it again");
+                for (zone, name, value) in &missing {
+                    self.edit(zone, name, value, true).await?;
                 }
-                if started.elapsed() + self.poll > self.within {
-                    anyhow::bail!("Route 53: change {} wasn't INSYNC within {} s", left[0], self.within.as_secs());
-                }
-                self.pending.lock().unwrap().extend(left);
-                tokio::time::sleep(self.poll).await;
             }
         })
+    }
+}
+
+impl Route53 {
+    /// Wait until every change made so far is `INSYNC`, within the bound.
+    async fn insync(&self) -> anyhow::Result<()> {
+        let started = Instant::now();
+        loop {
+            let pending = std::mem::take(&mut *self.pending.lock().unwrap());
+            let mut left = vec![];
+            for change in pending {
+                let xml = self.call("GET", &format!("/{VERSION}/change/{change}"), None, &format!("change {change}")).await?;
+                if first(&xml, "Status").as_deref() != Some("INSYNC") {
+                    left.push(change);
+                }
+            }
+            if left.is_empty() {
+                return Ok(());
+            }
+            if started.elapsed() + self.poll > self.within {
+                anyhow::bail!("Route 53: change {} wasn't INSYNC within {} s", left[0], self.within.as_secs());
+            }
+            self.pending.lock().unwrap().extend(left);
+            tokio::time::sleep(self.poll).await;
+        }
+    }
+
+    /// The values this client wrote that their sets, read now, don't hold: (zone, name, value).
+    async fn missing(&self) -> anyhow::Result<Vec<(String, String, String)>> {
+        let ours: Vec<(String, String, Vec<String>)> = self.records.lock().unwrap().iter().filter(|(_, (_, v))| !v.is_empty()).map(|(n, (z, v))| (z.clone(), n.clone(), v.clone())).collect();
+        let mut out = vec![];
+        for (zone, name, values) in ours {
+            let set = self.read_set(&zone, &name).await?.map(|(_, v)| v).unwrap_or_default();
+            out.extend(values.into_iter().filter(|v| !set.contains(&format!("\"{v}\""))).map(|v| (zone.clone(), name.clone(), v)));
+        }
+        Ok(out)
     }
 }
 
@@ -284,12 +369,19 @@ mod tests {
     use std::sync::Arc;
 
     /// Route 53 as much as DNS-01 uses: zones by name (a private twin and a neighbour first), record
-    /// sets UPSERTed and DELETEd whole, each change PENDING once before it's INSYNC.
+    /// sets listed from a name on, UPSERTed whole and DELETEd only as they stand (TTL and values),
+    /// each change PENDING once before it's INSYNC.
+    /// Name (with its dot) → TTL and values (quoted).
+    type Sets = std::collections::BTreeMap<String, (u32, Vec<String>)>;
+
     #[derive(Clone, Default)]
     struct Fake {
-        sets: Arc<Mutex<HashMap<String, Vec<String>>>>,
+        sets: Arc<Mutex<Sets>>,
         log: Arc<Mutex<Vec<String>>>,
         polled: Arc<Mutex<HashMap<String, u32>>>,
+        /// How many more changes another writer follows, once INSYNC, with an UPSERT of every set
+        /// as it read it before (only `"foreign"` in it).
+        clobber: Arc<Mutex<u32>>,
     }
 
     fn signed(h: &HeaderMap) -> bool {
@@ -310,18 +402,35 @@ mod tests {
         (StatusCode::OK, format!("<ListHostedZonesByNameResponse><HostedZones>{body}</HostedZones></ListHostedZonesByNameResponse>"))
     }
 
+    /// `ListResourceRecordSets`: the sets from `name` on (here: TXT only), `maxitems` of them.
+    async fn list(State(f): State<Fake>, h: HeaderMap, Path(zone): Path<String>, Query(q): Query<HashMap<String, String>>) -> String {
+        assert!(signed(&h));
+        assert_eq!((zone.as_str(), q["type"].as_str(), q["maxitems"].as_str()), ("ZPUBLIC", "TXT", "1"));
+        let sets = f.sets.lock().unwrap();
+        let body: String = sets
+            .range(q["name"].clone()..)
+            .take(1)
+            .map(|(name, (ttl, values))| {
+                let records: String = values.iter().map(|v| format!("<ResourceRecord><Value>{}</Value></ResourceRecord>", escape(v))).collect();
+                format!("<ResourceRecordSet><Name>{name}</Name><Type>TXT</Type><TTL>{ttl}</TTL><ResourceRecords>{records}</ResourceRecords></ResourceRecordSet>")
+            })
+            .collect();
+        format!("<ListResourceRecordSetsResponse><ResourceRecordSets>{body}</ResourceRecordSets><IsTruncated>false</IsTruncated></ListResourceRecordSetsResponse>")
+    }
+
     async fn rrset(State(f): State<Fake>, h: HeaderMap, Path(zone): Path<String>, body: String) -> (StatusCode, String) {
         assert!(signed(&h));
         assert_eq!(zone, "ZPUBLIC");
         let (action, name) = (first(&body, "Action").unwrap(), first(&body, "Name").unwrap());
+        let ttl: u32 = first(&body, "TTL").unwrap().parse().unwrap();
         let values: Vec<String> = blocks(&body, "Value").iter().map(|v| unescape(v)).collect();
         let mut sets = f.sets.lock().unwrap();
-        if action == "DELETE" && sets.get(&name) != Some(&values) {
+        if action == "DELETE" && sets.get(&name) != Some(&(ttl, values.clone())) {
             return (StatusCode::BAD_REQUEST, "<ErrorResponse><Error><Code>InvalidChangeBatch</Code><Message>it doesn't match</Message></Error></ErrorResponse>".into());
         }
         match action.as_str() {
             "DELETE" => sets.remove(&name),
-            _ => sets.insert(name.clone(), values.clone()),
+            _ => sets.insert(name.clone(), (ttl, values.clone())),
         };
         let n = f.log.lock().unwrap().len();
         f.log.lock().unwrap().push(format!("{action} {name} {}", values.join(" ")));
@@ -333,38 +442,86 @@ mod tests {
         let n = polled.entry(id.clone()).or_default();
         *n += 1;
         let status = if *n > 1 { "INSYNC" } else { "PENDING" };
+        let mut clobber = f.clobber.lock().unwrap();
+        if status == "INSYNC" && *clobber > 0 {
+            *clobber -= 1;
+            f.sets.lock().unwrap().values_mut().for_each(|s| s.1 = vec!["\"foreign\"".into()]);
+        }
         format!("<GetChangeResponse><ChangeInfo><Id>/change/{id}</Id><Status>{status}</Status></ChangeInfo></GetChangeResponse>")
     }
 
-    #[tokio::test]
-    async fn a_wildcard_and_its_apex_share_one_record_set_written_whole_and_waited_on() {
-        let fake = Fake::default();
+    /// The fake on a port of its own: its address and a client for it.
+    async fn serve(fake: &Fake) -> (String, reqwest::Client, AwsKeys) {
         let app = axum::Router::new()
             .route("/2013-04-01/hostedzonesbyname", get(zones))
-            .route("/2013-04-01/hostedzone/{zone}/rrset", post(rrset))
+            .route("/2013-04-01/hostedzone/{zone}/rrset", post(rrset).get(list))
             .route("/2013-04-01/change/{id}", get(change))
             .with_state(fake.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let api = format!("http://{}", listener.local_addr().unwrap());
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let http = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap();
-        let keys = AwsKeys { access_key_id: "AKIDROLLTEST".into(), secret_access_key: "secret".into(), session_token: Some("session-token".into()) };
+        (api, http, AwsKeys { access_key_id: "AKIDROLLTEST".into(), secret_access_key: "secret".into(), session_token: Some("session-token".into()) })
+    }
+
+    #[tokio::test]
+    async fn a_wildcard_and_its_apex_share_one_record_set_and_other_clients_values_stay() {
+        let fake = Fake::default();
+        let (api, http, keys) = serve(&fake).await;
         let r53 = Route53::new(keys.clone(), &api, http.clone()).unwrap().with_poll(Duration::from_millis(10), Duration::from_secs(5));
 
         assert_eq!(r53.zone_for("_acme-challenge.www.example.com").await.unwrap(), "ZPUBLIC", "the public zone, past a neighbour and a private twin");
+        r53.check("_acme-challenge.www.example.com").await.unwrap();
+        // A name only this order uses: both values in one set, then the set deleted as it stood.
         let name = "_acme-challenge.example.com";
         let apex = r53.create_txt(name, "apex-value").await.unwrap();
         let wild = r53.create_txt(name, "wild-value").await.unwrap();
         r53.settle().await.unwrap();
-        assert_eq!(fake.sets.lock().unwrap()[&format!("{name}.")], ["\"apex-value\"", "\"wild-value\""], "both values in one set");
+        assert_eq!(fake.sets.lock().unwrap()[&format!("{name}.")], (60, vec!["\"apex-value\"".to_string(), "\"wild-value\"".to_string()]), "both values in one set");
         assert!(fake.polled.lock().unwrap().values().all(|n| *n == 2), "each change waited on until INSYNC");
         r53.delete_txt(name, &apex).await.unwrap();
-        assert_eq!(fake.sets.lock().unwrap()[&format!("{name}.")], ["\"wild-value\""]);
+        assert_eq!(fake.sets.lock().unwrap()[&format!("{name}.")].1, ["\"wild-value\""]);
         r53.delete_txt(name, &wild).await.unwrap();
         assert!(fake.sets.lock().unwrap().is_empty(), "the set deleted as it stood: {:?}", fake.log.lock().unwrap());
+
+        // Another ACME client's value already there, and a second order on the same name: each
+        // order adds and removes only its own value, and the foreign one (and its TTL) stays.
+        let shared = "_acme-challenge.shop.example.com";
+        let foreign = "\"cert-manager-value\"".to_string();
+        fake.sets.lock().unwrap().insert(format!("{shared}."), (300, vec![foreign.clone()]));
+        let other = Route53::new(keys.clone(), &api, http.clone()).unwrap().with_poll(Duration::from_millis(10), Duration::from_secs(5));
+        let mine = r53.create_txt(shared, "order-one").await.unwrap();
+        let theirs = other.create_txt(shared, "order-two").await.unwrap();
+        assert_eq!(fake.sets.lock().unwrap()[&format!("{shared}.")], (300, vec![foreign.clone(), "\"order-one\"".into(), "\"order-two\"".into()]), "the union, not this order's values alone");
+        r53.delete_txt(shared, &mine).await.unwrap();
+        assert!(other.delete_txt(shared, &mine).await.is_err(), "a value another client wrote isn't this one's to remove");
+        assert_eq!(fake.sets.lock().unwrap()[&format!("{shared}.")], (300, vec![foreign.clone(), "\"order-two\"".into()]));
+        other.delete_txt(shared, &theirs).await.unwrap();
+        assert_eq!(fake.sets.lock().unwrap()[&format!("{shared}.")], (300, vec![foreign]), "the foreign value kept: {:?}", fake.log.lock().unwrap());
 
         let bad = Route53::new(AwsKeys { session_token: None, ..keys }, &api, http).unwrap();
         let e = bad.zone_for("_acme-challenge.example.com").await.unwrap_err().to_string();
         assert!(e.contains("InvalidSignatureException") && !e.contains("secret"), "{e}");
+    }
+
+    /// Another writer's UPSERT from a read before ours lands after it: settle reads the set back,
+    /// adds roll's value again and waits once more, so the CA finds it; gone again, the order fails
+    /// saying so, before the CA looks.
+    #[tokio::test]
+    async fn a_value_another_writer_dropped_is_added_again_before_the_ca_looks() {
+        let fake = Fake::default();
+        let (api, http, keys) = serve(&fake).await;
+        let name = "_acme-challenge.example.com";
+        let r53 = Route53::new(keys.clone(), &api, http.clone()).unwrap().with_poll(Duration::from_millis(10), Duration::from_secs(5));
+        r53.create_txt(name, "ours").await.unwrap();
+        *fake.clobber.lock().unwrap() = 1;
+        r53.settle().await.unwrap();
+        assert_eq!(fake.sets.lock().unwrap()[&format!("{name}.")].1, ["\"foreign\"", "\"ours\""], "added again, the other writer's value kept");
+
+        let r53 = Route53::new(keys, &api, http).unwrap().with_poll(Duration::from_millis(10), Duration::from_secs(5));
+        r53.create_txt(name, "lost").await.unwrap();
+        *fake.clobber.lock().unwrap() = 2;
+        let e = r53.settle().await.unwrap_err().to_string();
+        assert!(e.contains("TXT _acme-challenge.example.com was gone"), "{e}");
     }
 }

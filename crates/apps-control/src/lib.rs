@@ -81,6 +81,7 @@ pub mod edge;
 pub mod password;
 pub mod freeze;
 pub mod board;
+pub mod silences;
 pub mod status_page;
 pub mod vulns;
 pub mod checks;
@@ -287,6 +288,8 @@ pub struct Apps {
     preview_router: std::sync::OnceLock<Arc<dyn integrations::PreviewRouter>>,
     /// What writes a customer's DNS records with their token (`…/domains/{host}/configure`).
     dns_writer: std::sync::OnceLock<Arc<dyn integrations::DnsWriter>>,
+    /// roll previews' snapshots from a team's tests (`POST /__roll/snapshot` on a preview).
+    pub(crate) preview_snapshots: std::sync::OnceLock<Arc<dyn integrations::PreviewSnapshots>>,
     /// roll previews' branch pushes ([`Apps::set_git_pushes`]).
     pub(crate) pushes: std::sync::OnceLock<Arc<dyn integrations::GitPushes>>,
     /// roll's GitHub App ([`Apps::set_github_app`]).
@@ -703,6 +706,7 @@ impl Apps {
             shares: std::sync::OnceLock::new(),
             preview_router: std::sync::OnceLock::new(),
             dns_writer: std::sync::OnceLock::new(),
+            preview_snapshots: std::sync::OnceLock::new(),
             pushes: std::sync::OnceLock::new(),
             github: std::sync::OnceLock::new(),
             mail: std::sync::OnceLock::new(),
@@ -1892,6 +1896,7 @@ impl Apps {
         let sso = gate.as_ref().and_then(|a| a.sso.clone());
         let preflight = gate.as_ref().map(|a| a.preflight.clone()).unwrap_or_default();
         let callers = gate.as_ref().map(|a| a.callers.clone()).unwrap_or_default();
+        let webhook_paths = gate.as_ref().map(|a| a.webhooks.iter().map(|h| h.path.clone()).collect()).unwrap_or_default();
         let (sid, e) = (r.service.clone(), r.name.clone());
         let waiting_for_ci = self.db(move |s| s.ci_waits()).await?.into_iter().find(|(w, _)| w.service == sid && w.env == e).map(|(w, _)| w.sha);
         let (sid, e) = (r.service.clone(), r.name.clone());
@@ -1926,6 +1931,7 @@ impl Apps {
             last_cold_start,
             preflight,
             callers,
+            webhook_paths,
             password,
             next_run_at,
             schedules: self.schedule_states(&svc, &r).await,
@@ -2439,7 +2445,7 @@ impl Apps {
             None => None,
             Some(Value::Null) => Some(None),
             Some(Value::Object(a)) => {
-                if let Some(k) = a.keys().find(|k| !["token", "bypass_sha256", "signed_in", "password", "sso", "callers"].contains(&k.as_str())) {
+                if let Some(k) = a.keys().find(|k| !["token", "bypass_sha256", "signed_in", "password", "sso", "callers", "webhooks"].contains(&k.as_str())) {
                     return Err(Error::BadRequest(format!("access.{k} isn't a field")));
                 }
                 let signed_in = match a.get("signed_in") {
@@ -2483,10 +2489,26 @@ impl Apps {
                     Some(Value::String(h)) if h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()) => Some(h.to_ascii_lowercase()),
                     Some(_) => return Err(Error::BadRequest("access.bypass_sha256 is a SHA-256 in hex".into())),
                 };
+                // A preview's webhook URLs (roll previews' `roll_hook`): one exact path each, only on
+                // a preview (ephemeral) environment, the tokens' SHA-256 only.
+                let webhooks: Vec<crate::model::HookUrl> = match a.get("webhooks") {
+                    None | Some(Value::Null) => Vec::new(),
+                    Some(v) => serde_json::from_value(v.clone()).map_err(|_| Error::BadRequest("access.webhooks is [{path, token_sha256}]".into()))?,
+                };
+                let path_ok = |p: &str| p.starts_with('/') && p.len() <= 512 && !p.contains(['?', '#', '%', '\\']) && !p.split('/').any(|s| s == "." || s == "..") && p.bytes().all(|b| b.is_ascii_graphic());
+                if webhooks.len() > crate::model::MAX_HOOK_URLS || webhooks.iter().any(|h| !path_ok(&h.path) || h.token_hash.len() != 64 || !h.token_hash.bytes().all(|b| b.is_ascii_hexdigit())) {
+                    return Err(Error::BadRequest(format!("access.webhooks is at most {} of {{path: an absolute path (no query, no . or .., no %), token_sha256: a SHA-256 in hex}}", crate::model::MAX_HOOK_URLS)));
+                }
+                let webhooks: Vec<crate::model::HookUrl> = webhooks.into_iter().map(|h| crate::model::HookUrl { path: h.path, token_hash: h.token_hash.to_ascii_lowercase() }).collect();
+                // roll previews' `pv-` environments only (the gate honours them nowhere else, whatever
+                // `ephemeral` says later).
+                if !webhooks.is_empty() && !env.starts_with("pv-") {
+                    return Err(Error::BadRequest("access.webhooks is a preview's (a pv- environment roll previews makes)".into()));
+                }
                 // A new way in keeps the paths whose preflights pass (`preflight`, set on its own).
                 let (sid, e) = (service.to_string(), env.to_string());
                 let preflight = self.db(move |s| s.access(&sid, &e)).await.ok().flatten().map(|a| a.preflight).unwrap_or_default();
-                Some(Some(Access { token_hash: token.map(crate::public::token_hash), bypass_hash: bypass, signed_in, password_hash: password, sso, preflight, callers }))
+                Some(Some(Access { token_hash: token.map(crate::public::token_hash), bypass_hash: bypass, signed_in, password_hash: password, sso, preflight, callers, webhooks }))
             }
             Some(_) => return Err(Error::BadRequest("access is {token?, signed_in?, password?, sso?, callers?, bypass_sha256?} or null".into())),
         };
@@ -4643,8 +4665,12 @@ impl Apps {
         self.shares.get().cloned()
     }
 
-    /// Where names under a project's preview domain that no environment holds go (roll previews'
-    /// router, for its previews on roll's own runtime). Set once.
+    /// roll previews' snapshots from a team's tests (`POST /__roll/snapshot`). Set once.
+    pub fn set_preview_snapshots(&self, s: Arc<dyn integrations::PreviewSnapshots>) {
+        let _ = self.preview_snapshots.set(s);
+    }
+
+    /// What writes a customer's DNS records with their token (`…/domains/{host}/configure`). Set once.
     pub fn set_dns_writer(&self, w: Arc<dyn integrations::DnsWriter>) {
         let _ = self.dns_writer.set(w);
     }
@@ -4682,7 +4708,7 @@ impl Apps {
         }
         let (sid, e) = (service.to_string(), env.to_string());
         let svc = self.db(move |s| s.service(&sid)).await?;
-        let token = self.deps.secrets.use_once(who, &svc.project, &e, service, reference, "writing a domain's records at Cloudflare").await.map_err(|why| Error::Forbidden(format!("{reference}: {why:#} (it must be a key you may reveal, and not marked sensitive)")))?;
+        let token = self.deps.secrets.use_once(who, &svc.project, &e, service, reference, "writing a domain's records at Cloudflare", Some(writer.api())).await.map_err(|why| Error::Forbidden(format!("{reference}: {why:#} (it must be a key you may reveal)")))?;
         // The TXT challenge first where `record` asks for it (it proves the name, whatever the
         // CNAME meets), then the CNAME to its target (Cloudflare flattens one at a zone's apex,
         // which plain DNS can't hold).
@@ -4697,6 +4723,8 @@ impl Apps {
         self.verify_domain(service, env, &h).await
     }
 
+    /// Where names under a project's preview domain that no environment holds go (roll previews'
+    /// router, for its previews on roll's own runtime). Set once.
     pub fn set_preview_router(&self, router: Arc<dyn integrations::PreviewRouter>) {
         let _ = self.preview_router.set(router);
     }

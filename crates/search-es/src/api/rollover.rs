@@ -490,6 +490,11 @@ async fn rollover_failure_store(ctx: &Ctx<'_>, target: &str, req: &Request, dry_
         }
         return Err(EsError::resource_not_found(format!("rollover target [{target}] does not exist")));
     };
+    // As a data stream's own rollover (`MetadataRolloverService`): the new failure index takes
+    // the data stream's template, nothing of the request's.
+    if req.has_create_parts {
+        return Err(EsError::illegal_argument("aliases, mappings, and index settings may not be specified when rolling over a data stream"));
+    }
     let now = ctx.now_ms;
     let source = ds.failure_write_index().unwrap_or("_none_").to_string();
     if ds.failure_indices.is_empty() && !req.conditions.is_empty() {
@@ -648,10 +653,21 @@ pub async fn rollover(ctx: &Ctx<'_>) -> EsResult<Reply> {
         return Reply::ok(rollover_response(&source, &trial_name, false, dry_run, false, false, results));
     }
     let met = met_conditions(&req.conditions, &results);
-    let create = req.create;
+    let mut create = req.create;
+    let (auth, mut aliases) = crate::api::indices::authorized_aliases(ctx, &mut create.aliases)?;
+    // The rolled-over alias moves on its own terms (`apply` drops it from the body's aliases).
+    aliases.retain(|a| *a != target);
     let t = target.clone();
     let ni = new_index.clone();
-    let (old, new) = ctx.cluster.update(move |st| apply(st, &t, ni.as_deref(), create, met, now)).await?;
+    let (old, new) = ctx
+        .cluster
+        .update(move |st| {
+            let (old, new) = apply(st, &t, ni.as_deref(), create, met, now)?;
+            // On the index the rollover made (its name is the state's), before the state is kept.
+            auth.check_new(st, &new, &aliases)?;
+            Ok((old, new))
+        })
+        .await?;
     Reply::ok(rollover_response(&old, &new, true, false, false, true, results))
 }
 

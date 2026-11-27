@@ -4,6 +4,20 @@ The ranked work list and the log of roll secrets' review rounds. It's internal: 
 
 ## Next
 
+**State, 2026-11-27 05:00.** The forty-second review is done, except item 9, which roll MCP has (docs/permissions.md's lend wording and the approval screen's remembered scope). Landed since 22:40, each with main's CI green and after a check of the merged tree wherever main had moved under it:
+- #1167 (fb06af79e): item 8. The guides' step 0 runs one rolld on SQLite for an evaluation, moving-from covers Kubernetes Secrets, SOPS and CI variables, and `roll secrets import --from … --check` compares a source with roll by fingerprint without writing.
+- #1172 (d1feb5b5a): item 1's rest and item 5. A break-glass login is bound to the hook token that named it (`alice@token:<id>`), and a token's total is its scan budget, so invented pushers buy nothing.
+- #1173 (ef3430284): items 3 and 4. `Secrets::use_once` reads a reference nothing keeps, once, as the caller; roll apps' Cloudflare DNS token uses it, and the gate lends its folder. Machines' logins count per chain, off their maker's token cap.
+- #1174 (e734da5c6): items 2, 6 and 7. Route 53 keeps other clients' `_acme-challenge` values, the panel replaces a certificate's DNS credential, and a certificate's AWS session is named `roll-public-cert-…` and limited by an inline session policy.
+
+In flight:
+- SaaS rotation for Palo Alto and the other vendors AWS added, and Paddle's self-rotating keys;
+- the forty-third review.
+
+Left:
+- rolld isn't released as a binary or an image, so an evaluator needs Rust (#1167 found it);
+- Health's public-repo hint.
+
 **State, 2026-11-26 22:40.** The forty-first review is done. The forty-second (2026-11-26, cold, read only) found one live bug, which is fixed, and its other items are in flight. Landed since 08:40, each with main's CI green and after a check of the merged tree wherever main had moved under it:
 - #1098 (ed973e153): the fortieth's item 1, follow-up. A token's backup carries no sync credentials or encryption key bytes.
 - #1101 (5e5b346ef): the thirty-ninth's item 11, part 3. The guide moved to `docs/secrets/` (getting started, moving from another manager, platforms); docs/secrets.md is the reference. A citation check: 443 citations, none broken.
@@ -27,11 +41,14 @@ In flight (the forty-second's items):
 - 2, 6 and 7: Route 53 keeps other clients' challenge values, the panel replaces a DNS credential, and a certificate's AWS session is tagged;
 - 3 and 4: a one-off read as the caller for a reference nothing keeps, and machines' logins off their maker's token cap.
 
+In flight (`feature/secrets-saas-palo-alto-paddle`):
+- Palo Alto rotation, as Prisma Cloud access keys of a service account (System Admin credential, each new key signed in with before it's kept);
+- Paddle's model: a self-rotating vendor whose registration is the key itself. Each rotation is made with it and replaces it there, and Paddle ends the old secret (roll can't, before Paddle's grace ends). `leaks.rotate` rotates it with no grace, so the leaked one ends at once.
+- Not built, with why in docs/secrets.md's SaaS section: Netskope (no API to make a token), Cisco Security Cloud Control (the rotating value is a refresh token every consumer spends) and AWS's self-rotating Palo Alto tenant key (no public API documents one).
+
 Left:
 - the forty-second's items 8 and 9 (the guides' 15-minute path with no server, and docs/permissions.md's lend wording);
-- Palo Alto rotation;
-- Health's public-repo hint;
-- Paddle's model.
+- Health's public-repo hint.
 
 **State, 2026-11-26 08:40.** The thirty-ninth and fortieth reviews are done. Landed since 2026-11-25 15:00, each with main's CI green and after a check of the merged tree wherever main had moved under it:
 - #1019 (dd7420791): the thirty-ninth's item 6. `roll secrets scan --pre-receive`, and a match-only `scan` right for scanner tokens.
@@ -108,7 +125,6 @@ In flight:
 
 Left:
 - item 6's other vendors (Salesforce, Paddle, Palo Alto);
-- Health's "public repo with `leaks.rotate` off" (needs a repo-visibility port);
 - DNS providers for ACME beyond Cloudflare and Route 53.
 
 **State, 2026-11-24 06:10.** The thirty-sixth review is done: #830 (99cb3b05e; Cloudflare, Databricks, Confluent) and #825 (the fresh-project production test) landed.

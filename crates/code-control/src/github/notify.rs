@@ -50,6 +50,19 @@ pub(super) async fn change_landed(code: &Code, hub: &Hub, c: &Change) -> Result<
     set_mark(code, &key, "done")
 }
 
+impl Code {
+    /// An issue on the repo's GitHub mirror, made by roll's App (Issues: read and write), when the
+    /// repo is connected: its number and page. GitHub's `issues` webhook then makes it the repo's
+    /// work item, as any issue there. `None` when the repo isn't connected or there's no App.
+    pub async fn open_github_issue(&self, r: &RepoRow, title: &str, body: &str, labels: &[String]) -> Result<Option<(u64, String)>> {
+        let (Some(hub), Some((_, l))) = (self.github_hub().cloned(), connected(self, &r.id)) else { return Ok(None) };
+        let gh = |e: code_github::Error| crate::Error::Internal(e.into());
+        let issue = hub.client.create_issue(l.installation_id, &l.owner, &l.repo, title, body, labels).await.map_err(gh)?;
+        let url = issue.html_url.unwrap_or_else(|| format!("{}/{}/issues/{}", hub.config.web_base, l.full_name(), issue.number));
+        Ok(Some((issue.number, url)))
+    }
+}
+
 pub(super) async fn work_finished(code: &Code, hub: &Hub, w: &WorkItem) -> Result<()> {
     let Some(number) = w.source.strip_prefix("github#").and_then(|n| n.parse::<u64>().ok()) else { return Ok(()) };
     let Some((r, l)) = connected(code, &w.repo_id) else { return Ok(()) };
@@ -474,6 +487,26 @@ fn release_line(e: &crate::model::PreviewEnvironment) -> Option<String> {
         .collect();
     let held = if locks.is_empty() { String::new() } else { format!(" It held {}: on production it would hold them as long.", locks.join(", ")) };
     Some(format!("Its release (migrations) took {} on the preview's data{}.{held}\n\n", ms_words(ms), before.map(|w| format!(", {w}")).unwrap_or_default()))
+}
+
+/// Main's code on a copy of the change's migrated data: the pages that broke there, or that none
+/// did. While the change deploys, the version before it serves on the new schema.
+fn main_on_change_line(e: &crate::model::PreviewEnvironment) -> Option<String> {
+    let crate::model::PreviewMainOnChange { asked, broke } = e.main_on_change.as_ref()?;
+    if broke.is_empty() {
+        return (*asked > 0).then(|| format!("Main's code still answers on this change's migrated data ({asked} {}), so the version serving while it deploys keeps working.\n\n", if *asked == 1 { "page" } else { "pages" }));
+    }
+    let said = |s: u16| if s == 0 { "no answer".to_string() } else { s.to_string() };
+    let pages: Vec<String> = broke
+        .iter()
+        .take(5)
+        .map(|(path, status, main)| {
+            let path: String = path.chars().filter(|c| !c.is_control()).map(|c| if c == '`' { '\'' } else { c }).take(120).collect();
+            format!("`{path}` answers {} (on main's data, {})", said(*status), said(*main))
+        })
+        .collect();
+    let more = if broke.len() > 5 { format!(" and {} more", broke.len() - 5) } else { String::new() };
+    Some(format!("**Main's code breaks on this change's migrated data:** {}{more}. While it deploys, the version before it serves on this schema: expand first and contract in a later change.\n\n", pages.join(", ")))
 }
 
 /// The `roll/regressions` status, with the project's `regressions` rule: how many routes are
@@ -990,6 +1023,9 @@ pub fn preview_comment_for(p: Option<&Preview>, marker: &str, teardown: Option<&
             if let Some(line) = release_line(e) {
                 out.push_str(&line);
             }
+            if let Some(line) = main_on_change_line(e) {
+                out.push_str(&line);
+            }
             out.push_str(&notes_block(&e.notes));
             out.push_str(&format!(
                 "Costs about ${:.2} a month asleep and ${:.3} an hour in use. It sleeps when nobody visits; the first request wakes it.\n",
@@ -1256,6 +1292,9 @@ mod preview_tests {
             release_ms: None,
             release_locks: Vec::new(),
             release_before_ms: None,
+            main_on_change: None,
+            release_checks: None,
+            rehearsal: None,
             screenshot_url: None,
             expires_at: None,
             earlier: Vec::new(),
