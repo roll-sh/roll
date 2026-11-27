@@ -32,6 +32,39 @@
     },
     "params": {}
   },
+  "roll.otlp.metrics": {
+    "documentation": {
+      "url": "https://roll.sh/docs/search/guides/logs",
+      "description": "OpenTelemetry metrics over OTLP/HTTP (protobuf or JSON): data points as OTel-native documents in metrics-<dataset>.otel-<namespace> time series data streams"
+    },
+    "stability": "experimental",
+    "visibility": "public",
+    "headers": {
+      "accept": [
+        "application/json",
+        "application/x-protobuf"
+      ],
+      "content_type": [
+        "application/json",
+        "application/x-protobuf"
+      ]
+    },
+    "url": {
+      "paths": [
+        {
+          "path": "/_otlp/v1/metrics",
+          "methods": [
+            "POST"
+          ]
+        }
+      ]
+    },
+    "body": {
+      "description": "An OTLP ExportMetricsServiceRequest",
+      "required": true
+    },
+    "params": {}
+  },
   "roll.otlp.traces": {
     "documentation": {
       "url": "https://roll.sh/docs/search/guides/logs",

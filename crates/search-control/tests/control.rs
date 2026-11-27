@@ -7873,8 +7873,8 @@ async fn evaluate_scores_an_applications_variant_offline() {
 }
 
 /// The OTLP intake: an `otel` key writes logs over OTLP/HTTP in JSON and in protobuf (gzip'd, as
-/// a Collector sends them) into OpenTelemetry's data streams, as OTel-native documents, and can't
-/// read them back; a read key's records are refused with the cluster's 403.
+/// a Collector sends them), traces and metrics into OpenTelemetry's data streams, as OTel-native
+/// documents, and can't read them back; a read key's records are refused with the cluster's 403.
 #[tokio::test]
 async fn otlp_logs_land_in_otel_data_streams_with_an_otel_key() {
     use reqwest::Method;
@@ -7957,8 +7957,30 @@ async fn otlp_logs_land_in_otel_data_streams_with_an_otel_key() {
     assert_eq!((&v["hits"]["hits"][0]["_source"]["duration"], &v["hits"]["hits"][0]["_source"]["kind"]), (&json!(250000000), &json!("Server")), "{v}");
     let (_, v) = e.es(&u, &p, Method::POST, "/logs-*.otel-*/_search", Some(json!({"query": {"term": {"event_name": "exception"}}}))).await;
     assert_eq!(v["hits"]["hits"][0]["_source"]["trace_id"], "abababababababababababababababab", "{v}");
+    // Metrics: a gauge and a counter of one series and timestamp share a document; a delta
+    // histogram is its own (another unit), at its buckets' midpoints. Each value is mapped by its
+    // dynamic template in the time series data stream (its timestamps near now).
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() as u64 - 60_000_000_000;
+    let (t, start, attrs) = (now.to_string(), (now - 10_000_000_000).to_string(), json!([{"key": "host.name", "value": {"stringValue": "web-1"}}]));
+    let metrics = json!({"resourceMetrics": [{"resource": {"attributes": [{"key": "service.name", "value": {"stringValue": "checkout"}}]}, "scopeMetrics": [{"scope": {"name": "app"}, "metrics": [
+        {"name": "cpu.utilization", "unit": "1", "gauge": {"dataPoints": [{"startTimeUnixNano": start, "timeUnixNano": t, "asDouble": 0.25, "attributes": attrs}]}},
+        {"name": "orders", "unit": "1", "sum": {"aggregationTemporality": 2, "isMonotonic": true, "dataPoints": [{"startTimeUnixNano": start, "timeUnixNano": t, "asInt": "42", "attributes": attrs}]}},
+        {"name": "latency", "unit": "ms", "histogram": {"aggregationTemporality": 1, "dataPoints": [{"startTimeUnixNano": start, "timeUnixNano": t, "count": "4", "sum": 50,
+            "bucketCounts": ["1", "3", "0"], "explicitBounds": [10, 20]}]}}]}]}]});
+    let r = e.http.post(format!("{}/_otlp/v1/metrics", e.es)).header("authorization", format!("ApiKey {key}")).json(&metrics).send().await.unwrap();
+    assert_eq!((r.status().as_u16(), r.text().await.unwrap()), (200, "{}".to_string()));
+    assert_eq!(e.es(&u, &p, Method::POST, "/metrics-*.otel-*/_refresh", None).await.0, 200);
+    let (_, v) = e.es(&u, &p, Method::POST, "/metrics-generic.otel-default/_search", Some(json!({"sort": [{"unit": "asc"}]}))).await;
+    let hits = &v["hits"]["hits"];
+    assert_eq!((&hits[0]["_source"]["metrics"], &hits[0]["_source"]["attributes"]["host.name"]), (&json!({"cpu.utilization": 0.25, "orders": 42}), &json!("web-1")), "{v}");
+    assert_eq!(hits[1]["_source"]["metrics"]["latency"], json!({"counts": [1, 3], "values": [5.0, 15.0]}), "{v}");
+    let (_, v) = e.es(&u, &p, Method::GET, "/metrics-*.otel-*/_field_caps?fields=metrics.*", None).await;
+    let types: Vec<_> = ["metrics.cpu.utilization", "metrics.orders", "metrics.latency"].iter().map(|f| v["fields"][f].as_object().and_then(|o| o.keys().next().cloned())).collect();
+    assert_eq!(types, [Some("double".to_string()), Some("long".into()), Some("histogram".into())], "{v}");
     // The key writes and never reads (a wildcard would just find nothing it may read).
     let (s, v) = as_key(&e, &key, Method::POST, "/logs-generic.otel-default/_search", None).await;
+    assert_eq!(s, 403, "{v}");
+    let (s, v) = as_key(&e, &key, Method::POST, "/metrics-generic.otel-default/_search", None).await;
     assert_eq!(s, 403, "{v}");
     // A read key's records are refused, not half-written.
     let (_, v) = e.call(Method::POST, &format!("/v1/search/clusters/{id}/keys"), Some(json!({"name": "reader", "access": "read"}))).await;

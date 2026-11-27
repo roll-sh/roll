@@ -635,7 +635,7 @@ async fn handle_inner(cluster: &Cluster, req: &EsRequest, admitted: Option<Admit
         match neg.content.as_ref().and_then(|m| m.xcontent()) {
             Some(t) => body_type = Some(t),
             // OTLP's protobuf, which its intake reads itself (`crate::otlp`).
-            None if matches!(route.api, Api::RollOtlpLogs | Api::RollOtlpTraces) && crate::otlp::is_protobuf(ct_headers.first().copied()) => {}
+            None if matches!(route.api, Api::RollOtlpLogs | Api::RollOtlpTraces | Api::RollOtlpMetrics) && crate::otlp::is_protobuf(ct_headers.first().copied()) => {}
             None => {
                 let msg = if ct_headers.is_empty() {
                     "Content-Type header is missing".to_string()

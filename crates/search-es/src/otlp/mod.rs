@@ -1,5 +1,5 @@
 //! An OTLP/HTTP intake on the cluster's own endpoint (docs/search/logs-end-to-end.md, section 1):
-//! `POST /_otlp/v1/logs` takes an `ExportLogsServiceRequest` in protobuf
+//! `POST /_otlp/v1/logs` (and `/v1/traces`, `/v1/metrics`) takes an `ExportLogsServiceRequest` in protobuf
 //! (`application/x-protobuf`) or JSON (`application/json`, at most [`MAX_JSON_BODY`]), gzip
 //! allowed (the node inflates it within its body limits), so an OpenTelemetry SDK or Collector's
 //! `otlphttp` exporter can point at a cluster with an API key header.
@@ -21,6 +21,7 @@
 
 #[macro_use]
 pub mod logs;
+pub mod metrics;
 pub mod traces;
 pub mod wire;
 
@@ -29,14 +30,25 @@ pub mod wire;
 pub enum Signal {
     Logs,
     Traces,
+    Metrics,
 }
 
 impl Signal {
-    /// The JSON answer's count field (`ExportLogsPartialSuccess`, `ExportTracePartialSuccess`).
+    /// The JSON answer's count field (`ExportLogsPartialSuccess`, `ExportTracePartialSuccess`,
+    /// `ExportMetricsPartialSuccess`).
     fn rejected_field(self) -> &'static str {
         match self {
             Signal::Logs => "rejectedLogRecords",
             Signal::Traces => "rejectedSpans",
+            Signal::Metrics => "rejectedDataPoints",
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Signal::Logs => "logs",
+            Signal::Traces => "traces",
+            Signal::Metrics => "metrics",
         }
     }
 }
@@ -123,6 +135,11 @@ pub async fn traces(ctx: &Ctx<'_>) -> EsResult<Reply> {
     export(ctx, Signal::Traces).await
 }
 
+/// `POST /_otlp/v1/metrics`: data points into `metrics-*.otel-*`, grouped into documents.
+pub async fn metrics(ctx: &Ctx<'_>) -> EsResult<Reply> {
+    export(ctx, Signal::Metrics).await
+}
+
 async fn export(ctx: &Ctx<'_>, signal: Signal) -> EsResult<Reply> {
     let content_type = ctx.request.header("content-type");
     let proto = is_protobuf(content_type);
@@ -149,12 +166,14 @@ async fn export(ctx: &Ctx<'_>, signal: Signal) -> EsResult<Reply> {
             match signal {
                 Signal::Logs => logs::from_protobuf(&body, now, &mut held),
                 Signal::Traces => traces::from_protobuf(&body, now, &mut held),
+                Signal::Metrics => metrics::from_protobuf(&body, now, &mut held),
             }
         } else {
             match crate::json::parse(&body) {
                 Ok(Some(v)) => match signal {
                     Signal::Logs => logs::from_json(&v, now, &mut held),
                     Signal::Traces => traces::from_json(&v, now, &mut held),
+                    Signal::Metrics => metrics::from_json(&v, now, &mut held),
                 },
                 Ok(None) => Ok(logs::Batch::default()),
                 Err(e) => Err(logs::Fail::Malformed(format!("the OTLP/JSON body isn't JSON: {e}"))),
@@ -168,10 +187,11 @@ async fn export(ctx: &Ctx<'_>, signal: Signal) -> EsResult<Reply> {
     let mut batch = match batch {
         Ok(b) => b,
         Err(logs::Fail::Tripped(e)) => return Err(busy(ctx, e)),
-        Err(logs::Fail::Malformed(why)) => return Err(EsError::illegal_argument(format!("an OTLP logs request that doesn't decode: {why}"))),
+        Err(logs::Fail::Malformed(why)) => return Err(EsError::illegal_argument(format!("an OTLP {} request that doesn't decode: {why}", signal.name()))),
     };
     let caller = internal::Caller::client(ctx);
-    let (mut items, mut failed) = (0u64, 0u64);
+    // Documents sent and refused; `failed_records`, the records (data points) those held.
+    let (mut items, mut failed, mut failed_records) = (0u64, 0u64, 0u64);
     let mut first: Option<(i64, Value)> = None;
     let mut same_status = true;
     for chunk in std::mem::take(&mut batch.chunks) {
@@ -180,11 +200,13 @@ async fn export(ctx: &Ctx<'_>, signal: Signal) -> EsResult<Reply> {
         held.sent(len);
         let v = out.map_err(|e| busy(ctx, e))?;
         for i in v.get("items").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default() {
+            let weight = batch.weights.get(items as usize).copied().unwrap_or(1);
             items += 1;
             let Some(c) = i.get("create") else { continue };
             let status = c.get("status").and_then(Value::as_i64).unwrap_or(200);
             if status >= 300 {
                 failed += 1;
+                failed_records += weight;
                 match &first {
                     None => first = Some((status, c.get("error").cloned().unwrap_or(Value::Null))),
                     Some((s, _)) if *s != status => same_status = false,
@@ -208,7 +230,7 @@ async fn export(ctx: &Ctx<'_>, signal: Signal) -> EsResult<Reply> {
         .clone()
         .or_else(|| first.as_ref().and_then(|(_, e)| e.get("reason").and_then(Value::as_str)).map(str::to_string))
         .or_else(|| (batch.truncated > 0).then(|| format!("{} values were cut at {} bytes", batch.truncated, logs::MAX_VALUE_BYTES)));
-    Ok(answer(signal, proto, batch.rejected + failed, reason.as_deref()))
+    Ok(answer(signal, proto, batch.rejected + failed_records, reason.as_deref()))
 }
 
 #[cfg(test)]

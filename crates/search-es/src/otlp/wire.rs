@@ -27,7 +27,8 @@ impl<'a> Fields<'a> {
     }
 }
 
-fn varint(b: &mut &[u8]) -> Result<u64, Malformed> {
+/// A varint, taken off the front of `b`.
+pub(super) fn varint(b: &mut &[u8]) -> Result<u64, Malformed> {
     let mut v = 0u64;
     for i in 0..10 {
         let Some((&byte, rest)) = b.split_first() else { return Err(Malformed("a varint ends early".into())) };

@@ -294,7 +294,7 @@ pub fn action_of(api: &str) -> (Scope, String) {
         "roll.search_application.promote_experiment" => Some((Cluster, "cluster:admin/xpack/application/search_application/put")),
         // OTLP's intake (`crate::otlp`) writes through one `_bulk` as its client: each target
         // data stream is authorized there, as any write's.
-        "roll.otlp.logs" | "roll.otlp.traces" => Some((Any, "indices:data/write/bulk")),
+        "roll.otlp.logs" | "roll.otlp.traces" | "roll.otlp.metrics" => Some((Any, "indices:data/write/bulk")),
         "sql.query" | "sql.translate" => Some((Any, "indices:data/read/sql")),
         "index" | "create" => Some((Index, "indices:data/write/index")),
         "update" => Some((Index, "indices:data/write/update")),
