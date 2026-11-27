@@ -515,6 +515,12 @@ pub struct RecoveryStats {
     /// Replayed operations the engine refused (logged; their seq_nos count as no-ops).
     pub failed_records: u64,
     pub orphans: usize,
+    /// Reading the shards' manifests and WAL ranges (`Store::recover_shards`).
+    pub manifests: std::time::Duration,
+    /// Opening every shard's segments (fetching or starting to fetch the uncached ones).
+    pub segments_time: std::time::Duration,
+    /// Opening the indices and replaying the WAL past each shard's checkpoint.
+    pub replay: std::time::Duration,
 }
 
 fn es_internal(e: impl std::fmt::Display) -> EsError {
@@ -678,8 +684,9 @@ impl ClusterData {
     pub async fn recover(self: &Arc<Self>, cluster: &Cluster) -> anyhow::Result<RecoveryStats> {
         let st = cluster.state();
         let live: HashSet<&str> = st.metadata.indices.values().map(|i| i.uuid.as_str()).collect();
+        let t = Instant::now();
         let recs = self.store.recover_shards(&self.cluster).await?;
-        let mut stats = RecoveryStats::default();
+        let mut stats = RecoveryStats { manifests: t.elapsed(), ..Default::default() };
         let mut todo = Vec::new();
         for rec in recs {
             if !live.contains(rec.shard.index_uuid.as_str()) {
@@ -694,7 +701,9 @@ impl ClusterData {
         for rec in todo {
             futs.push(self.recover_shard(rec));
         }
+        let t = Instant::now();
         let opened = futures::future::join_all(futs).await;
+        stats.segments_time = t.elapsed();
         {
             let mut prepared = self.prepared.lock();
             for p in opened {
@@ -706,10 +715,12 @@ impl ClusterData {
             }
             self.has_prepared.store(!prepared.is_empty(), Ordering::SeqCst);
         }
+        let t = Instant::now();
         let (records, failed) = self.ready(cluster).await.map_err(|e| match e {
             PersistError::Failed(e) => e,
             other => anyhow::anyhow!("{}", other.to_es(&self.cluster).reason()),
         })?;
+        stats.replay = t.elapsed();
         stats.records = records;
         stats.failed_records = failed;
         Ok(stats)
