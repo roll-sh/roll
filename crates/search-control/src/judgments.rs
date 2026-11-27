@@ -30,7 +30,9 @@ const PAGE: usize = 5_000;
 pub const SOURCES: &[&str] = &["manual", "import", "clicks"];
 
 /// The index of list `name`: 1 to 64 of `a-z`, `0-9`, `_` and `-`, starting with a letter or
-/// digit.
+/// digit. So `roll-judgments-<name>` is always one plain index name, never an expression: no
+/// `,` list, `*` pattern, leading `-` exclusion, `:` remote cluster or `<…>` date math, whatever
+/// the cluster or a grant's index patterns would make of one.
 pub fn index_name(name: &str) -> std::result::Result<String, String> {
     let ok = (1..=64).contains(&name.len()) && name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-') && name.as_bytes()[0].is_ascii_alphanumeric();
     if ok { Ok(format!("{PREFIX}{name}")) } else { Err(format!("a judgment list's name is 1 to 64 of a-z, 0-9, _ and -, starting with a letter or digit, not [{name}]")) }
@@ -514,7 +516,7 @@ mod tests {
     #[test]
     fn names_and_keys() {
         assert_eq!(index_name("shop-v2").unwrap(), "roll-judgments-shop-v2");
-        for bad in ["", "-x", "Shop", "a/b", "a*", &"x".repeat(65)] {
+        for bad in ["", "-x", "Shop", "a/b", "a*", "a,b", "a:b", "<a-{now/d}>", "_a", &"x".repeat(65)] {
             assert!(index_name(bad).is_err(), "{bad}");
         }
         // Each part is length-prefixed: shifting a byte between parts is another key.
