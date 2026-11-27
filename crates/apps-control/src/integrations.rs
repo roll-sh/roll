@@ -264,14 +264,14 @@ pub struct Note {
     pub at: i64,
 }
 
-/// What answers a name under a project's preview domain that no roll apps environment holds (a
 /// roll previews' snapshots from a team's own tests (a Playwright test's PNG for the visual
 /// review): `POST /__roll/snapshot?name=` on a preview's host, with the project's bypass secret.
-/// rolld fills it with roll previews' engine. Its answer is the snapshot's (`{page, head}`); a
-/// bad name is a `BadRequest`, a preview that can't take one (full, going) a `Conflict`.
+/// rolld fills it with roll previews' engine, which checks the preview (`env`, `pv-<id>`) runs on
+/// `service` before taking anything. Its answer is the snapshot's (`{page, head}`); a bad name is
+/// a `BadRequest`, a preview that can't take one (full, going, another service's) a `Conflict`.
 #[async_trait]
 pub trait PreviewSnapshots: Send + Sync {
-    async fn snapshot(&self, env: &str, name: &str, png: bytes::Bytes) -> crate::Result<serde_json::Value>;
+    async fn snapshot(&self, service: &str, env: &str, name: &str, png: bytes::Bytes) -> crate::Result<serde_json::Value>;
 }
 
 /// Writes a custom domain's records at the customer's DNS provider with a token of theirs (rolld:
@@ -283,6 +283,7 @@ pub trait DnsWriter: Send + Sync {
     async fn put_record(&self, token: &str, kind: &str, name: &str, content: &str, replace: bool) -> anyhow::Result<Vec<String>>;
 }
 
+/// What answers a name under a project's preview domain that no roll apps environment holds (a
 /// preview on roll's own runtime, from roll.toml's `[preview]`): rolld fills it with roll
 /// previews' router, called in process with the request as it came (its Host unchanged).
 /// Unset: those names are a 404.

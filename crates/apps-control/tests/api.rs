@@ -1777,16 +1777,22 @@ async fn a_preview_environment_deploys_a_revision_and_tears_down() {
     let body: Value = serde_json::from_slice(&r.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert!(!body.to_string().contains(bypass), "the app never sees the bypass");
     assert_eq!(with("not-the-secret").await.unwrap().status(), StatusCode::UNAUTHORIZED);
-    // A webhook URL (roll previews' `roll_hook`, for Stripe's and GitHub's): its exact path with
-    // its token, any method, no cookie, the token out of the query the app sees.
+    // A webhook URL (roll previews' `roll_hook`, for Stripe's and GitHub's), on a pv- environment
+    // only: its exact path with its token, any method, no cookie, the token out of the query the
+    // app sees.
     let hook = "whsec-preview-0123456789";
     let hsha = { use sha2::Digest; sha2::Sha256::digest(hook.as_bytes()).iter().map(|b| format!("{b:02x}")).collect::<String>() };
-    assert_eq!(call(&w.api, "PUT", &base, Some(json!({"access": {"token": token, "webhooks": [{"path": "/hooks/../admin", "token_sha256": hsha}]}}))).await.0, StatusCode::BAD_REQUEST);
-    let (st, e2) = call(&w.api, "PUT", &base, Some(json!({"access": {"token": token, "webhooks": [{"path": "/hooks/stripe", "token_sha256": hsha}]}}))).await;
+    let webhooks = |path: &str| json!({"ephemeral": true, "access": {"token": token, "webhooks": [{"path": path, "token_sha256": hsha}]}});
+    assert_eq!(call(&w.api, "PUT", &base, Some(webhooks("/hooks/stripe"))).await.0, StatusCode::BAD_REQUEST, "a pv- environment's only");
+    let pv = format!("/v1/apps/services/{id}/environments/pv-7");
+    assert_eq!(call(&w.api, "PUT", &pv, Some(webhooks("/hooks/../admin"))).await.0, StatusCode::BAD_REQUEST);
+    let (st, e2) = call(&w.api, "PUT", &pv, Some(webhooks("/hooks/stripe"))).await;
     assert_eq!((st, e2["webhook_paths"].clone()), (StatusCode::OK, json!(["/hooks/stripe"])), "{e2}");
     assert!(!e2.to_string().contains(&hsha), "never its hash");
+    let (_, pd) = call(&w.api, "POST", &format!("{pv}/deploys"), Some(json!({}))).await;
+    settled(&w, &id, "pv-7", pd["id"].as_str().unwrap()).await;
     let post = |path: &str| {
-        let r = Request::builder().method("POST").uri(path).header("host", host(&env["url"])).body(Body::from("{}")).unwrap();
+        let r = Request::builder().method("POST").uri(path).header("host", host(&e2["url"])).body(Body::from("{}")).unwrap();
         w.public.clone().oneshot(r)
     };
     let r = post(&format!("/hooks/stripe?a=1&roll_hook={hook}")).await.unwrap();
@@ -3506,7 +3512,7 @@ async fn a_previews_snapshot_goes_to_roll_previews_with_the_bypass() {
     struct Snaps(Mutex<Vec<(String, String, usize)>>);
     #[async_trait]
     impl apps_control::integrations::PreviewSnapshots for Snaps {
-        async fn snapshot(&self, env: &str, name: &str, png: bytes::Bytes) -> apps_control::Result<Value> {
+        async fn snapshot(&self, _service: &str, env: &str, name: &str, png: bytes::Bytes) -> apps_control::Result<Value> {
             if name.is_empty() {
                 return Err(apps_control::Error::BadRequest("a snapshot has a name".into()));
             }
