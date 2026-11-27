@@ -3081,24 +3081,28 @@ variables roll makes from a branch's URL too (it could run on the preview's own 
 change becoming queued wakes its settled preview, a rehearsal shows only at its head, and schema
 overlaps stay within a repo.
 
-1. **Webhooks into private previews, in review** (roll's runtime); roll apps' gate next (agreed:
+1. **The twelfth review's fixes, in review**: masking by default fails closed (the columns read on
+   the branch just made), the `masking` event says counts, main's code runs on copies of every
+   branch named by the head, a webhook URL opens its own service only (and reaches roll apps'
+   gate); the snapshot and note fixes ride their own pull requests.
+2. **Webhooks into private previews, in review** (roll's runtime); roll apps' gate next (agreed:
    `access.webhooks`, on their Next).
-2. **Snapshots from the team's own Playwright or Cypress suite** (Argos's, Percy's SDKs; M):
+3. **Snapshots from the team's own Playwright or Cypress suite** (Argos's, Percy's SDKs; M):
    a step in their tests sends a page's picture to the preview's visual review.
-3. **Notes to Jira, GitHub Issues or Asana** (Marker.io, Netlify's Drawer; S).
-4. **Replaying recorded traffic against the preview and main** (Signadot, Speedscale; L): writes
+4. **Notes to Jira, GitHub Issues or Asana** (Marker.io, Netlify's Drawer; S).
+5. **Replaying recorded traffic against the preview and main** (Signadot, Speedscale; L): writes
    replay safely on branched data; capturing production's requests needs its privacy designed
    first.
-5. **A rehearsal that holds a change back** (a required rule): rehearsed at each head, so the
+6. **A rehearsal that holds a change back** (a required rule): rehearsed at each head, so the
    landing blocker never waits on the queue that would ask for it.
-6. **Older pushes past the last three, started on demand**; **what a note's reviewer saw, from
+7. **Older pushes past the last three, started on demand**; **what a note's reviewer saw, from
    their own browser** (Jam, Marker.io).
-7. **Restore points for search and buckets**: search's once roll search's `reset {from}` is in
+8. **Restore points for search and buckets**: search's once roll search's `reset {from}` is in
    (its Next 32); buckets need a put-back on roll storage's side.
-8. **Previews for the members thread's next products**: once roll apps' and roll search's routes
+9. **Previews for the members thread's next products**: once roll apps' and roll search's routes
    become member routes (docs/members.md, v1.1).
-9. **Watches on pg-control**: the data step's Postgres compute start; cheap branches on ext4
-   through overlay volumes; recovery to a time seconds old (unowned).
+10. **Watches on pg-control**: the data step's Postgres compute start; cheap branches on ext4
+    through overlay volumes; recovery to a time seconds old (unowned).
 
 Not to build: more lab checks on the first page (each adds noise to every pull request), or a
 Kubernetes cluster per preview (roll apps' Compose import covers multi-service apps, and a
