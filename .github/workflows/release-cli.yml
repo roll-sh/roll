@@ -247,5 +247,5 @@ jobs:
             gh release upload "$TAG" artifacts/* --clobber
           else
             gh release create "$TAG" artifacts/* --title "roll CLI ${TAG#cli-v}" \
-              --notes "Install with \`curl -fsSL https://roll.sh/install.sh | sh\`, or on Windows \`irm https://roll.sh/install.ps1 | iex\` (both check SHA256SUMS; install.sh also checks each download's build provenance with \`gh attestation verify\` when gh is logged in), or download a tarball or zip below. \`rolld-*.tar.gz\` is the roll daemon for Linux and Apple silicon macOS (\`curl -fsSL https://roll.sh/install.sh | sh -s -- --with-rolld\` installs it too). \`roll.json\` is the Scoop manifest (\`scoop install <its URL>\`); \`roll-winget.zip\` holds the winget manifests."
+              --notes "Install with \`curl -fsSL https://roll.sh/install.sh | sh\`, or on Windows \`irm https://roll.sh/install.ps1 | iex\` (both check SHA256SUMS, and each download's build provenance with \`gh attestation verify\` when gh is logged in), or download a tarball or zip below. \`rolld-*.tar.gz\` is the roll daemon for Linux and Apple silicon macOS (\`curl -fsSL https://roll.sh/install.sh | sh -s -- --with-rolld\` installs it too). \`roll.json\` is the Scoop manifest (\`scoop install <its URL>\`); \`roll-winget.zip\` holds the winget manifests."
           fi
