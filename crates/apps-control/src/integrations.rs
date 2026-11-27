@@ -255,6 +255,7 @@ pub trait SecretSource: Send + Sync {
     /// Cloudflare token), read as them that once and kept by nothing: refused unless they may
     /// reveal it now (an approval of an `ask` there is enough), and a sensitive key only when `to`
     /// names the fixed host the value is sent to. Audited as their use, for `purpose`, to `to`.
+    #[allow(clippy::too_many_arguments)]
     async fn use_once(&self, _who: Asker<'_>, _project: &str, _env: &str, _service: &str, _reference: &str, _purpose: &str, _to: Option<&'static str>) -> anyhow::Result<String> {
         anyhow::bail!("roll secrets isn't on this node")
     }
