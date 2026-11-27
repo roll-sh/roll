@@ -86,6 +86,13 @@ async fn as_person(mut req: axum::extract::Request, next: axum::middleware::Next
             req.extensions_mut().insert(roll_auth::Capable(vec![roll_auth::scope::Action::Reveal]));
         }
         req.extensions_mut().insert(roll_auth::Operator);
+        // The gate's decision in another index of the route's cluster.
+        let cluster = req.uri().path().strip_prefix("/v1/search/clusters/").and_then(|r| r.split('/').next()).map(str::to_string);
+        let r = rules.clone();
+        req.extensions_mut().insert(roll_auth::OtherIndex(Arc::new(move |index: &str, act: roll_auth::scope::Action| {
+            let res = roll_auth::scope::Resource { product: "search".into(), id: cluster.clone(), index: Some(index.into()), ..Default::default() };
+            r.outcome(&roll_auth::scope::Target::One(res), act) == roll_auth::scope::Outcome::Allow
+        })));
         req.extensions_mut().insert(roll_auth::Grant { id: "tok_t".into(), name: "t".into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(rules), user: None, ask_otherwise: false });
     }
     let who = req.headers().get("x-test-as").and_then(|v| v.to_str().ok()).map(str::to_string);
@@ -7546,6 +7553,29 @@ async fn evaluate_compares_two_configurations_on_judged_queries() {
     assert_eq!(s, 400, "the cluster's own refusal: {v}");
     let (s, v) = e.call(Method::POST, &path, Some(json!({"judgments": judgments, "configurations": configs, "size": 3}))).await;
     assert!(s == 400 && v.to_string().contains("no field [size]"), "{s} {v}");
+
+    // Kept as a list (an index of the cluster), the same judgments score the same by name.
+    let list = format!("/v1/search/clusters/{id}/judgments/couches");
+    let (s, v) = e.call(Method::PUT, &list, Some(json!({"judgments": judgments}))).await;
+    assert_eq!((s, &v["index"], &v["ratings"]), (200, &json!("roll-judgments-couches"), &json!(3)), "{v}");
+    let (s, v) = e.call(Method::GET, &list, None).await;
+    assert_eq!((s, &v["judgments"][0]["query"], &v["meta"]["source"]), (200, &json!("couch"), &json!("manual")), "{v}");
+    let (s, by_name) = e.call(Method::POST, &path, Some(json!({"judgments_list": "couches", "configurations": configs}))).await;
+    assert_eq!((s, &by_name["comparison"]["better"], &by_name["judgments_list"]), (200, &json!(1), &json!("couches")), "{by_name}");
+    // A token limited to the evaluated index doesn't read the list's.
+    let goods_only = json!([{"product": "search", "resources": [{"id": id, "index": "goods"}], "actions": {"read": "allow"}}]).to_string();
+    let r = e.http.post(format!("{}{path}", e.api)).header("x-test-grant", &goods_only).json(&json!({"judgments_list": "couches", "configurations": configs})).send().await.unwrap();
+    assert_eq!(r.status().as_u16(), 403, "{}", r.text().await.unwrap_or_default());
+    let r = e.http.post(format!("{}{path}", e.api)).header("x-test-grant", &goods_only).json(&json!({"judgments": judgments, "configurations": configs})).send().await.unwrap();
+    assert_eq!(r.status().as_u16(), 200, "inline judgments need only the index: {}", r.text().await.unwrap_or_default());
+    // An index that merely has a list's name is never replaced or read as one.
+    assert_eq!(e.es(&u, &p, Method::PUT, "/roll-judgments-mine", Some(json!({}))).await.0, 200);
+    let (s, v) = e.call(Method::PUT, &format!("/v1/search/clusters/{id}/judgments/mine"), Some(json!({"judgments": judgments}))).await;
+    assert_eq!(s, 409, "{v}");
+    let (s, v) = e.call(Method::GET, &format!("/v1/search/clusters/{id}/judgments"), None).await;
+    assert_eq!((s, v["lists"].as_array().map(Vec::len)), (200, Some(1)), "{v}");
+    assert_eq!(e.call(Method::DELETE, &list, None).await.0, 200);
+    assert_eq!(e.call(Method::POST, &path, Some(json!({"judgments_list": "couches", "configurations": configs}))).await.0, 404);
 }
 
 /// An application's configuration renders each judged query through the application's own

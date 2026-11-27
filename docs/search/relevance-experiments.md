@@ -209,10 +209,13 @@ system indices: a client can read and write them directly.
 
 1. **Judgment lists are plain indices, `roll-judgments-<name>`, on both flavors.**
    - `<name>` is 1 to 64 characters of `a-z0-9_-`.
-   - Each rating is one flat document `{query, index, doc_id, rating, source}`. `rating` is a
-     float, `source` is `manual`, `import` or `clicks`, and a click rating also carries
-     `searches, impressions, clicks, expected_clicks`.
-   - `_id` is a hash of `(query, index, doc_id)`, so a document is rated once.
+   - Each rating is one flat document `{key, query, index?, doc_id, rating, source}`. `rating` is
+     a whole number from 0 to 100, as `_rank_eval` takes it. `source` is `manual`, `import` or
+     `clicks`. A click rating is COEC graded 0 to 3 (0 without a click, else COEC rounded up, at
+     most 3), with the raw value in `coec` and the counts it used: `searches, impressions, clicks,
+     expected_clicks`.
+   - `_id` (and `key`, which reads sort on) is a hash of `(query, index, doc_id)`, so a document
+     is rated once.
    - The index's `_meta.roll_judgments` says how the list was built.
    - Flat documents, not SRW's nested one, so a list is searchable, exportable as CSV, and
      branched, snapshotted and restored like any index. Nothing new stores tenant data outside

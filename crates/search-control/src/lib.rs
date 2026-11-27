@@ -16,6 +16,7 @@
 
 pub mod analytics;
 pub mod evaluate;
+pub mod judgments;
 pub mod api;
 pub mod cluster;
 pub mod control;

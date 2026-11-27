@@ -1028,6 +1028,17 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
         user: ctx.grant.user.as_deref().map(Into::into),
         ask_otherwise: ctx.grant.ask_otherwise,
     });
+    // The route's own resource in another of its indices: the same decision, the index changed
+    // (search's evaluate reads a judgment list's index beside the one it evaluates).
+    if let Target::One(r) = &target
+        && r.id.is_some()
+    {
+        let (r, s, w) = (r.clone(), scope.clone(), within_scope.clone());
+        parts.extensions.insert(roll_auth::OtherIndex(Arc::new(move |index: &str, act: Action| {
+            let t = Target::One(roll_auth::scope::Resource { index: Some(index.to_string()), ..r.clone() });
+            s.outcome(&t, act) == Outcome::Allow && w.as_ref().is_none_or(|w| w.outcome(&t, act) == Outcome::Allow)
+        })));
+    }
     // A person's request: the product may ask this same decision about its other resources (a
     // list narrowed before it's built, a second cluster), resolved as a person's are.
     if as_user {

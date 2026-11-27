@@ -1481,6 +1481,12 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/search/clusters/{id}/synonyms/{set}/{rule}", "search", R, one(PG, "cluster")),
     row("PUT", "/v1/search/clusters/{id}/synonyms/{set}/{rule}", "search", W, one(PG, "cluster")),
     row("DELETE", "/v1/search/clusters/{id}/synonyms/{set}/{rule}", "search", W, one(PG, "cluster")),
+    // Judgment lists are indices of the cluster (`roll-judgments-<name>`); their routes name no
+    // index, so they're for a grant on the whole cluster.
+    row("GET", "/v1/search/clusters/{id}/judgments", "search", R, one(PG, "cluster")),
+    row("GET", "/v1/search/clusters/{id}/judgments/{name}", "search", R, one(PG, "cluster")),
+    row("PUT", "/v1/search/clusters/{id}/judgments/{name}", "search", W, one(PG, "cluster")),
+    row("DELETE", "/v1/search/clusters/{id}/judgments/{name}", "search", D, one(PG, "cluster")),
     row("GET", "/v1/search/clusters/{id}/query_rules", "search", R, one(PG, "cluster")),
     row("GET", "/v1/search/clusters/{id}/query_rules/{ruleset}", "search", R, one(PG, "cluster")),
     row("PUT", "/v1/search/clusters/{id}/query_rules/{ruleset}", "search", W, one(PG, "cluster")),

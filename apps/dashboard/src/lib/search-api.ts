@@ -9,7 +9,7 @@
 import { apiHeaders, call, onApiStatus, ROLL_API } from "./roll-api";
 import { withSession } from "./code-token";
 import { analyticsQuery, type AnalyticsRange, type SearchAnalytics } from "./search-analytics";
-import type { EvalConfiguration, Evaluation, Judgment } from "./search-evaluate";
+import type { EvalConfiguration, Evaluation, Judgment, JudgmentList } from "./search-evaluate";
 import type { SuggestionsStatus } from "./search-suggestions";
 import type { MetricsRange, SearchMetrics, SearchSlowLog } from "./search-performance";
 import type { AuditPage } from "./search-audit";
@@ -409,8 +409,14 @@ export const searchApi = {
   slowlog: (id: string) => call<SearchSlowLog>("GET", `${cl(id)}/slowlog`),
   analytics: (id: string, index: string | null, range: AnalyticsRange) => call<SearchAnalytics>("GET", `${cl(id)}/analytics?${analyticsQuery(index, range)}`),
   /** One or two search configurations scored against judged queries (`_rank_eval`) on an index. */
-  evaluate: (id: string, index: string, body: { judgments: Judgment[]; configurations: EvalConfiguration[]; metric?: unknown }) =>
+  evaluate: (id: string, index: string, body: ({ judgments: Judgment[] } | { judgments_list: string }) & { configurations: EvalConfiguration[]; metric?: unknown }) =>
     call<Evaluation>("POST", `${cl(id)}/indices/${encodeURIComponent(index)}/evaluate`, body),
+  /** The cluster's stored judgment lists (indices `roll-judgments-<name>`). */
+  judgmentLists: (id: string) => call<{ lists: JudgmentList[] }>("GET", `${cl(id)}/judgments`),
+  /** Makes or replaces a stored judgment list with these judged queries. */
+  putJudgmentList: (id: string, name: string, judgments: Judgment[], source: "manual" | "import" = "manual") =>
+    call<JudgmentList>("PUT", `${cl(id)}/judgments/${encodeURIComponent(name)}`, { judgments, source }),
+  deleteJudgmentList: (id: string, name: string) => call<{ deleted: string }>("DELETE", `${cl(id)}/judgments/${encodeURIComponent(name)}`),
   /** An index's query suggestions: settings, last build, heaviest suggestions (never wakes the cluster). */
   suggestions: (id: string, index: string) => call<SuggestionsStatus>("GET", `${cl(id)}/indices/${encodeURIComponent(index)}/suggestions`),
   rebuildSuggestions: (id: string, index: string) => call<SuggestionsStatus>("POST", `${cl(id)}/indices/${encodeURIComponent(index)}/suggestions/rebuild`, {}),

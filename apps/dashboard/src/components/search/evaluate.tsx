@@ -1,8 +1,9 @@
 /**
  * The Relevance tab's "Evaluate" (OpenSearch's Search Relevance Workbench, Quepid, Elastic's
- * `_rank_eval`): judged queries, pasted or dropped as JSON or CSV, score one search configuration,
- * or two side by side, on an index; with two, the queries that got better or worse, the largest
- * change first. The same run is one `roll search index evaluate` line for CI.
+ * `_rank_eval`): judged queries, pasted or dropped as JSON or CSV or picked from the lists stored in
+ * the cluster, score one search configuration, or two side by side, on an index; with two, the
+ * queries that got better or worse, the largest change first. Pasted judgments can be kept as a
+ * list. The same run is one `roll search index evaluate` line for CI.
  *
  * Nothing animates but the busy line's shimmer. Scores are mono, changes signed, and the accent
  * marks only the primary action.
@@ -12,13 +13,16 @@ import { useEffect, useState } from "react";
 import { searchApi, type SearchCluster } from "@/lib/search-api";
 import {
   changeText,
+  LIST_PREFIX,
   matchConfiguration,
   MAX_QUERIES,
   parseConfiguration,
   parseJudgments,
   scoreText,
+  validListName,
   type EvalChange,
   type Evaluation,
+  type JudgmentList,
 } from "@/lib/search-evaluate";
 import { btn, CopyButton, input, Panel, primary, useCopy } from "../ui";
 import { errText } from "./relevance-shared";
@@ -39,6 +43,11 @@ export function EvaluatePanel({ cluster }: { cluster: SearchCluster }) {
   const [indices, setIndices] = useState<string[] | null>(null);
   const [index, setIndex] = useState("");
   const [judgments, setJudgments] = useState("");
+  const [lists, setLists] = useState<JudgmentList[]>([]);
+  // The stored list the run reads ("": the pasted judgments).
+  const [list, setList] = useState("");
+  const [saveAs, setSaveAs] = useState("");
+  const [saved, setSaved] = useState<string | null>(null);
   const [metric, setMetric] = useState<(typeof METRICS)[number]["value"]>("ndcg");
   const [base, setBase] = useState({ name: "baseline", text: pretty(matchConfiguration("baseline", "title").request) });
   const [cand, setCand] = useState<{ name: string; text: string } | null>(null);
@@ -52,11 +61,15 @@ export function EvaluatePanel({ cluster }: { cluster: SearchCluster }) {
     searchApi.indices(cluster.id).then(
       (list) => {
         if (!alive) return;
-        const names = list.map((i) => i.index).filter((i) => !i.startsWith(".")).sort();
+        const names = list.map((i) => i.index).filter((i) => !i.startsWith(".") && !i.startsWith(LIST_PREFIX)).sort();
         setIndices(names);
         setIndex((cur) => cur || names[0] || "");
       },
       (e) => alive && setError(errText(e)),
+    );
+    searchApi.judgmentLists(cluster.id).then(
+      (v) => alive && setLists(v.lists),
+      () => {},
     );
     return () => {
       alive = false;
@@ -67,11 +80,10 @@ export function EvaluatePanel({ cluster }: { cluster: SearchCluster }) {
     setError(null);
     let body;
     try {
-      const js = parseJudgments(judgments);
-      if (js.length > MAX_QUERIES) throw new Error(`${js.length} judged queries: at most ${MAX_QUERIES} a run.`);
       const configurations = [parseConfiguration(base.name || "baseline", base.text)];
       if (cand) configurations.push(parseConfiguration(cand.name || "candidate", cand.text));
-      body = { judgments: js, configurations, metric: METRICS.find((m) => m.value === metric)!.metric };
+      const m = METRICS.find((x) => x.value === metric)!.metric;
+      body = list ? { judgments_list: list, configurations, metric: m } : { judgments: pasted(), configurations, metric: m };
     } catch (e) {
       setError(errText(e));
       return;
@@ -87,14 +99,33 @@ export function EvaluatePanel({ cluster }: { cluster: SearchCluster }) {
     }
   };
 
+  const pasted = () => {
+    const js = parseJudgments(judgments);
+    if (js.length > MAX_QUERIES) throw new Error(`${js.length} judged queries: at most ${MAX_QUERIES} a run.`);
+    return js;
+  };
+
+  const save = async () => {
+    setError(null);
+    setSaved(null);
+    try {
+      const kept = await searchApi.putJudgmentList(cluster.id, saveAs, pasted());
+      setLists((await searchApi.judgmentLists(cluster.id)).lists);
+      setSaved(`Kept as ${kept.name} (${kept.queries} queries, ${kept.ratings} ratings).`);
+    } catch (e) {
+      setError(errText(e));
+    }
+  };
+
   const load = async (f: File | undefined) => {
     if (f) setJudgments(await f.text());
   };
+  const chosen = lists.find((l) => l.name === list);
 
   if (indices && indices.length === 0) return null;
   const cli = [
     `roll search index evaluate ${cluster.name} ${index || "<index>"}`,
-    "--judgments @judgments.csv",
+    list ? `--judgments-list ${list}` : "--judgments @judgments.csv",
     `--config @${base.name || "baseline"}.json`,
     cand ? `--config @${cand.name || "candidate"}.json --fail-on-worse` : "--fail-below 0.8",
   ].join(" ");
@@ -122,32 +153,72 @@ export function EvaluatePanel({ cluster }: { cluster: SearchCluster }) {
             ))}
           </select>
         </div>
-        <label className="block space-y-1">
-          <span className="flex items-center justify-between text-[12px] text-subtle">
-            Judged queries: JSON or CSV (query, _id, rating)
-            <span className="flex gap-2">
-              <button type="button" className="text-subtle hover:text-fg" onClick={() => setJudgments(SAMPLE)}>
-                Example
-              </button>
-              <label className="cursor-pointer text-subtle hover:text-fg">
-                Open a file
-                <input type="file" accept=".csv,.json,text/csv,application/json" className="hidden" onChange={(e) => void load(e.target.files?.[0])} />
-              </label>
+        <div className="space-y-1">
+          <div className="flex flex-wrap items-center justify-between gap-2 text-[12px] text-subtle">
+            <span className="flex items-center gap-2">
+              Judged queries
+              {lists.length > 0 && (
+                <select className={`${input} py-0.5 font-mono text-[12px]`} value={list} onChange={(e) => setList(e.target.value)} aria-label="Judgment list">
+                  <option value="">pasted below</option>
+                  {lists.map((l) => (
+                    <option key={l.name} value={l.name}>
+                      {l.name}
+                    </option>
+                  ))}
+                </select>
+              )}
+              {!list && <span>JSON or CSV (query, _id, rating)</span>}
             </span>
-          </span>
-          <textarea
-            className={`${input} h-28 w-full resize-y font-mono text-[12px]`}
-            value={judgments}
-            onChange={(e) => setJudgments(e.target.value)}
-            onDragOver={(e) => e.preventDefault()}
-            onDrop={(e) => {
-              e.preventDefault();
-              void load(e.dataTransfer.files[0]);
-            }}
-            placeholder={SAMPLE}
-            spellCheck={false}
-          />
-        </label>
+            {!list && (
+              <span className="flex gap-2">
+                <button type="button" className="text-subtle hover:text-fg" onClick={() => setJudgments(SAMPLE)}>
+                  Example
+                </button>
+                <label className="cursor-pointer text-subtle hover:text-fg">
+                  Open a file
+                  <input type="file" accept=".csv,.json,text/csv,application/json" className="hidden" onChange={(e) => void load(e.target.files?.[0])} />
+                </label>
+              </span>
+            )}
+          </div>
+          {chosen ? (
+            <p className="rounded-lg border border-line bg-bg px-3 py-2 text-[12px] text-muted">
+              <span className="font-mono text-fg">{chosen.index}</span> · {(chosen.queries ?? 0).toLocaleString("en-US")} queries ·{" "}
+              {(chosen.ratings ?? 0).toLocaleString("en-US")} ratings · {chosen.source ?? "manual"}
+              {chosen.built_at ? ` · ${new Date(chosen.built_at).toISOString().slice(0, 16).replace("T", " ")} UTC` : ""}
+            </p>
+          ) : (
+            <>
+              <textarea
+                className={`${input} h-28 w-full resize-y font-mono text-[12px]`}
+                value={judgments}
+                onChange={(e) => setJudgments(e.target.value)}
+                onDragOver={(e) => e.preventDefault()}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  void load(e.dataTransfer.files[0]);
+                }}
+                placeholder={SAMPLE}
+                spellCheck={false}
+                aria-label="Judged queries"
+              />
+              <div className="flex flex-wrap items-center gap-2 text-[12px] text-subtle">
+                Keep in the cluster as
+                <input
+                  className={`${input} w-40 py-0.5 font-mono text-[12px]`}
+                  value={saveAs}
+                  onChange={(e) => setSaveAs(e.target.value.toLowerCase())}
+                  placeholder="list-name"
+                  aria-label="List name"
+                />
+                <button className={btn} disabled={!validListName(saveAs) || !judgments.trim()} onClick={() => void save()}>
+                  Save list
+                </button>
+                {saved && <span className="text-muted">{saved}</span>}
+              </div>
+            </>
+          )}
+        </div>
         <div className={`grid gap-3 ${cand ? "md:grid-cols-2" : ""}`}>
           <ConfigEditor label="Baseline" value={base} onChange={setBase} />
           {cand ? (
@@ -161,7 +232,7 @@ export function EvaluatePanel({ cluster }: { cluster: SearchCluster }) {
           )}
         </div>
         <div className="flex flex-wrap items-center gap-3">
-          <button className={primary} disabled={busy || !index || !judgments.trim()} onClick={() => void run()}>
+          <button className={primary} disabled={busy || !index || (!list && !judgments.trim())} onClick={() => void run()}>
             {busy ? "Scoring…" : cand ? "Compare" : "Score"}
           </button>
           {busy && <span className="shimmer text-[13px] text-muted">Running each judged query through {cand ? "both searches" : "the search"}…</span>}

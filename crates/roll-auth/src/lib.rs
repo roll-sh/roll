@@ -194,6 +194,39 @@ pub struct Reach(pub ReachFn);
 /// [`Reach`]'s decision: whether `action` is allowed on the resource `id`.
 pub type ReachFn = Arc<dyn Fn(&str, scope::Action) -> bool + Send + Sync>;
 
+/// In a grant's request about one resource: whether the same decision allows an action on that
+/// resource in another of its indices (search's clusters), for a second index one request reads.
+/// It is resolved as the route's own resource is, projects included. A grant's request without it
+/// reaches no other index. Its decision is a [`ReachFn`] of the index.
+#[derive(Clone)]
+pub struct OtherIndex(pub ReachFn);
+
+impl OtherIndex {
+    pub fn on(extensions: &axum::http::Extensions) -> Option<&OtherIndex> {
+        extensions.get::<OtherIndex>()
+    }
+
+    pub fn allows(&self, index: &str, action: scope::Action) -> bool {
+        (self.0)(index, action)
+    }
+
+    /// Whether a request may `action` index `index` of the route's resource as well: always
+    /// without a grant (the operator, an open daemon, a person on what they own), else only as
+    /// the gate's decision says.
+    pub fn reaches(extensions: &axum::http::Extensions, index: &str, action: scope::Action) -> bool {
+        match OtherIndex::on(extensions) {
+            Some(o) => o.allows(index, action),
+            None => Grant::on(extensions).is_none() && SessionGrant::on(extensions).is_none(),
+        }
+    }
+}
+
+impl fmt::Debug for OtherIndex {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("OtherIndex")
+    }
+}
+
 impl Reach {
     pub fn on(extensions: &axum::http::Extensions) -> Option<&Reach> {
         extensions.get::<Reach>()

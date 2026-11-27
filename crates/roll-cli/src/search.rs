@@ -29,6 +29,10 @@ pub enum Search {
     /// Query rulesets: pin or exclude documents when a query matches (`rule` queries).
     #[command(subcommand, alias = "query-rules")]
     Rules(Rules),
+    /// Judgment lists: judged queries kept in the cluster (index `roll-judgments-<name>`) for
+    /// `index evaluate --judgments-list`.
+    #[command(subcommand)]
+    Judgments(Judgments),
     /// Why a document matches a query (or doesn't), and how its score is made.
     Explain {
         cluster: String,
@@ -413,8 +417,11 @@ pub enum Index {
         index: String,
         /// Judged queries: JSON (`[{query, ratings: [{_id, rating}]}]`) or CSV with a header
         /// (`query,_id,rating`, `doc_id` or `docid` for `_id`), as `@file` or `-`.
+        #[arg(long, required_unless_present = "judgments_list", conflicts_with = "judgments_list")]
+        judgments: Option<String>,
+        /// Or a judgment list stored in the cluster (`roll search judgments put`).
         #[arg(long)]
-        judgments: String,
+        judgments_list: Option<String>,
         /// A configuration (repeat once to compare): `{name?, request | template, query_param?}`,
         /// a search body with `{{query}}` where each query goes, or a search template.
         #[arg(long = "config", required = true, num_args = 1)]
@@ -468,6 +475,28 @@ pub enum Synonyms {
     /// Delete a set (refused while an index uses it).
     #[command(alias = "rm")]
     Delete { cluster: String, set: String },
+}
+
+#[derive(Subcommand)]
+pub enum Judgments {
+    /// The cluster's judgment lists: source, queries, ratings, when built.
+    #[command(alias = "ls")]
+    List { cluster: String },
+    /// A list's judged queries, as `index evaluate --judgments` takes them.
+    Get { cluster: String, name: String },
+    /// Make or replace a list from JSON or CSV (`query,_id,rating`, as `index evaluate
+    /// --judgments` reads), inline, `@file` or `-`.
+    Put {
+        cluster: String,
+        name: String,
+        judgments: String,
+        /// `manual` (the default) or `import`.
+        #[arg(long)]
+        source: Option<String>,
+    },
+    /// Delete a list and its index.
+    #[command(alias = "rm")]
+    Delete { cluster: String, name: String },
 }
 
 #[derive(Subcommand)]
@@ -944,11 +973,15 @@ pub async fn run(api: &Api, as_json: bool, cmd: Search) -> anyhow::Result<()> {
                     index_call(api, as_json, Method::POST, &cluster, &index, "/bulk", (refresh(r), Some(("application/x-ndjson", read_body(&body)?)))).await
                 }
                 Index::DeleteByQuery { cluster, index, body } => index_call(api, as_json, Method::POST, &cluster, &index, "/delete_by_query", (vec![], Some(json_body(body)?))).await,
-                Index::Evaluate { cluster, index, judgments, configs, metric, fail_below, fail_on_worse } => {
+                Index::Evaluate { cluster, index, judgments, judgments_list, configs, metric, fail_below, fail_on_worse } => {
                     if configs.len() > 2 {
                         bail!("--config takes one configuration, or two to compare");
                     }
-                    let mut body = json!({ "judgments": judgments_arg(&read_body(&judgments)?)? });
+                    let mut body = match (judgments, judgments_list) {
+                        (Some(j), None) => json!({ "judgments": judgments_arg(&read_body(&j)?)? }),
+                        (None, Some(l)) => json!({ "judgments_list": l }),
+                        _ => bail!("give --judgments or --judgments-list, one of them"),
+                    };
                     let mut confs = Vec::new();
                     for (i, c) in configs.iter().enumerate() {
                         let mut v: Value = serde_json::from_str(&read_body(c)?).with_context(|| format!("--config {c} isn't JSON"))?;
@@ -994,6 +1027,24 @@ pub async fn run(api: &Api, as_json: bool, cmd: Search) -> anyhow::Result<()> {
             let query = q.map(|q| vec![("q", q)]).unwrap_or_default();
             let rest = format!("/explain/{}", urlencoding::encode(&id));
             return index_call(api, as_json, Method::POST, &cluster, &index, &rest, (query, body.map(json_body).transpose()?)).await;
+        }
+        Search::Judgments(cmd) => {
+            let c = |cluster: String| async move { find(api, &cluster).await.map(|c| format!("/v1/search/clusters/{}/judgments", urlencoding::encode(&s(&c["id"])))) };
+            let list = |name: &str| format!("/{}", urlencoding::encode(name));
+            let v = match cmd {
+                Judgments::List { cluster } => api.get(&c(cluster).await?).await?,
+                Judgments::Get { cluster, name } => api.get(&format!("{}{}", c(cluster).await?, list(&name))).await?,
+                Judgments::Put { cluster, name, judgments, source } => {
+                    let mut body = json!({ "judgments": judgments_arg(&read_body(&judgments)?)? });
+                    if let Some(s) = source {
+                        body["source"] = json!(s);
+                    }
+                    api.call(Method::PUT, &format!("{}{}", c(cluster).await?, list(&name)), Some(body)).await?
+                }
+                Judgments::Delete { cluster, name } => api.call(Method::DELETE, &format!("{}{}", c(cluster).await?, list(&name)), None).await?,
+            };
+            println!("{}", if as_json { serde_json::to_string(&v)? } else { serde_json::to_string_pretty(&v)? });
+            return Ok(());
         }
         Search::Synonyms(cmd) => {
             let set = |id: &str| format!("/synonyms/{}", urlencoding::encode(id));
