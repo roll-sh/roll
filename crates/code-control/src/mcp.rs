@@ -344,13 +344,19 @@ async fn modern_answer(m: &Mcp, headers: &HeaderMap, lockdown: bool, msg: &Value
         // The revision has no handshake: every request carries its version and capabilities.
         "initialize" | "ping" => rpc_error(id, -32601, format!("{method} isn't a 2026-07-28 method: that revision has no handshake, and every request carries its version and capabilities in _meta")),
         "server/discover" => rpc_result(id, roll_auth::mcp::discover(&PROTOCOL_VERSIONS, capabilities(), Value::String(instructions(lockdown)))),
+        // No tool asks for input, but a retry's answers are still checked (SEP-2322): an object of
+        // answer objects, keyed by input request.
+        "tools/call" if msg["params"].get("inputResponses").is_some_and(|r| r.as_object().is_none_or(|o| o.values().any(|a| !a.is_object()))) => {
+            rpc_error(id, -32602, "inputResponses is an object of the answers (each an object), keyed by each input request's name")
+        }
         _ => process(m, headers, lockdown, vec![msg.clone()]).await.0.pop().unwrap_or_else(|| rpc_error(id, -32600, "nothing to answer")),
     };
     roll_auth::mcp::finish(method, resp, server_info())
 }
 
+/// What the server offers: tools, and the (empty) resource and prompt lists it answers.
 fn capabilities() -> Value {
-    json!({ "tools": { "listChanged": false } })
+    json!({ "tools": { "listChanged": false }, "resources": { "subscribe": false, "listChanged": false }, "prompts": { "listChanged": false } })
 }
 
 fn server_info() -> Value {
@@ -406,8 +412,16 @@ async fn process(m: &Mcp, headers: &HeaderMap, lockdown: bool, messages: Vec<Val
                     rpc_result(id, call_tool(m, headers, name, &args, lockdown).await)
                 }
             }
+            // No resources or prompts: the lists are empty, and reading one is "not found" (which
+            // one, as SEP-2164 asks).
             "resources/list" => rpc_result(id, json!({ "resources": [] })),
+            "resources/templates/list" => rpc_result(id, json!({ "resourceTemplates": [] })),
+            "resources/read" => {
+                let uri = params.get("uri").and_then(Value::as_str).unwrap_or("");
+                json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32002, "message": format!("resource not found: {uri}"), "data": { "uri": uri } } })
+            }
             "prompts/list" => rpc_result(id, json!({ "prompts": [] })),
+            "prompts/get" => rpc_error(id, -32602, format!("no prompt named {:?}", params.get("name").and_then(Value::as_str).unwrap_or(""))),
             other => rpc_error(id, -32601, format!("method not found: {other}")),
         };
         responses.push(resp);

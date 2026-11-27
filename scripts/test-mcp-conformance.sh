@@ -95,4 +95,5 @@ for t in "${TARGETS[@]}"; do
   fi
 done
 [[ $failed == 0 ]] || exit 1
-[[ -z $only ]] && echo "$hash" > "$STAMP"
+# A green run of both is what the stamp says.
+if [[ -z $only ]]; then echo "$hash" > "$STAMP"; fi

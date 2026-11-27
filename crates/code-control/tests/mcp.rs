@@ -388,6 +388,9 @@ async fn protocol_edges() {
     // No resources or prompts, but the methods answer.
     assert_eq!(c.rpc("resources/list", json!({})).await["result"]["resources"], json!([]));
     assert_eq!(c.rpc("prompts/list", json!({})).await["result"]["prompts"], json!([]));
+    assert_eq!(c.rpc("resources/templates/list", json!({})).await["result"]["resourceTemplates"], json!([]));
+    assert_eq!(c.rpc("resources/read", json!({ "uri": "x://y" })).await["error"]["data"]["uri"], "x://y");
+    assert_eq!(c.rpc("prompts/get", json!({ "name": "p" })).await["error"]["code"], -32602);
     // tools/call: no arguments means {} (the tool's own error); no name is an unknown tool.
     let v = c.rpc("tools/call", json!({ "name": "queue_status" })).await;
     assert_eq!(v["result"]["isError"], true);

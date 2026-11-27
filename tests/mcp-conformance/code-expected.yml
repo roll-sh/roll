@@ -1,3 +1,80 @@
-# Checks of the official MCP conformance suite known not to pass against roll code's own
-# /v1/code/mcp (scripts/test-mcp-conformance.sh), and why. Each line is `<scenario>:<check-id>`.
-server: []
+# Checks of the official MCP conformance suite (scripts/test-mcp-conformance.sh) known not to
+# pass against roll code's own MCP server, /v1/code/mcp, and why. Each line is
+# `<scenario>:<check-id>`, so a scenario's other checks still hold. A listed check passing fails the
+# run (remove its line); one failing that isn't listed is a regression. roll's /v1/mcp has its own
+# baseline (expected.yml); roll code's tools are served there too, with the extensions below.
+server:
+  # calls a fixture of the suite's reference server (its test tools, prompts or resources, or an
+  # elicitation, sampling or input request one of them makes), which roll code doesn't have
+  - completion-complete:completion-complete
+  - elicitation-sep1034-defaults:elicitation-sep1034-general
+  - elicitation-sep1330-enums:elicitation-sep1330-general
+  - input-required-result-missing-input-response:sep-2322-missing-response-rerequests
+  - input-required-result-basic-elicitation:sep-2322-elicitation-incomplete
+  - input-required-result-basic-list-roots:sep-2322-list-roots-incomplete
+  - input-required-result-basic-sampling:sep-2322-sampling-incomplete
+  - input-required-result-capability-check:sep-2322-respect-client-capabilities
+  - input-required-result-multi-round:sep-2322-multi-round-r1
+  - input-required-result-multiple-input-requests:sep-2322-multiple-inputs-incomplete
+  - input-required-result-non-tool-request:sep-2322-non-tool-incomplete
+  - input-required-result-request-state:sep-2322-request-state-incomplete
+  - input-required-result-result-type:sep-2322-result-type-included
+  - input-required-result-tampered-state:sep-2322-reject-tampered-state
+  - json-schema-2020-12:json-schema-2020-12-tool-found
+  - prompts-get-embedded-resource:prompts-get-embedded-resource
+  - prompts-get-simple:prompts-get-simple
+  - prompts-get-with-args:prompts-get-with-args
+  - prompts-get-with-image:prompts-get-with-image
+  - resources-read-binary:resources-read-binary
+  - resources-read-text:resources-read-text
+  - resources-templates-read:resources-templates-read
+  - server-stateless:sep-2575-server-rejects-undeclared-capability
+  - server-stateless:sep-2575-missing-capability-http-400
+  - tools-call-audio:tools-call-audio
+  - tools-call-elicitation:tools-call-elicitation
+  - tools-call-embedded-resource:tools-call-embedded-resource
+  - tools-call-image:tools-call-image
+  - tools-call-mixed-content:tools-call-mixed-content
+  - tools-call-sampling:tools-call-sampling
+  - tools-call-with-progress:tools-call-with-progress
+  # the tasks extension (SEP-2663): roll code's tools answer inline, and it doesn't offer tasks
+  # (roll's /v1/mcp?toolsets=code does, for the same tools), so tasks/* is method not found and
+  # every check that needs a task, the extension advertised, or its fixture tools can't pass
+  - tasks-capability-negotiation:tasks-extension-advertised
+  - tasks-capability-negotiation:sep-2663-tasks-methods-non-declaring
+  - tasks-capability-negotiation:tasks-per-request-meta-opt-in
+  - tasks-dispatch-and-envelope:tasks-server-directed-creation-no-hint
+  - tasks-dispatch-and-envelope:sep-2663-durable-create-strong-consistency
+  - tasks-dispatch-and-envelope:sep-2663-tasks-get-invalid-task-id-32602
+  - tasks-lifecycle:sep-2663-result-type-task-on-create
+  - tasks-lifecycle:sep-2663-tasks-get-status-working
+  - tasks-lifecycle:sep-2663-tasks-get-status-completed
+  - tasks-lifecycle:sep-2663-tool-error-uses-completed-status
+  - tasks-lifecycle:sep-2663-tasks-get-status-failed
+  - tasks-lifecycle:sep-2663-cancel-ack-empty-result
+  - tasks-lifecycle:tasks-cancel-terminal-idempotent-ack
+  - tasks-mrtr-composition:sep-2663-mrtr-synchronous-before-task-creation
+  - tasks-mrtr-input:sep-2663-tasks-get-status-input-required
+  - tasks-mrtr-input:tasks-mrtr-tasks-update-resumes
+  - tasks-mrtr-input:tasks-mrtr-partial-fulfillment
+  - tasks-request-headers:tasks-headers-tolerate-mcp-method-on-tools-call
+  - tasks-request-headers:sep-2663-routing-headers-accepted-on-tasks-get
+  - tasks-request-headers:sep-2663-server-rejects-mismatched-mcp-name-on-tasks-get
+  - tasks-request-state-removal:tasks-request-state-removal-setup
+  - tasks-required-task-error:sep-2663-server-returns-missing-capability-when-required
+  - tasks-wire-fields:tasks-wire-field-renames
+  - tasks-wire-fields:tasks-no-early-ttl-expiry
+  - tasks-wire-fields:tasks-no-related-task-meta-on-inlined-result
+  # SEP-2243's custom headers: roll code's tools have no argument a gateway routes on (no
+  # x-mcp-header), so there's nothing for these to exercise
+  - http-custom-header-server-validation:sep-2243-server-no-xmcp-tool
+  - http-custom-header-server-validation:sep-2243-server-decode-base64
+  - http-custom-header-server-validation:sep-2243-server-validate-param-match
+  - http-custom-header-server-validation:sep-2243-server-reject-invalid-param-chars
+  - http-custom-header-server-validation:sep-2243-server-reject-param-mismatch
+  # roll code declares no `logging` capability (and 2026-07-28 removed logging/setLevel): method not found is right
+  - logging-set-level:logging-set-level
+  - tools-call-with-logging:tools-call-with-logging
+  # roll code declares `resources.subscribe: false`: method not found is right
+  - resources-subscribe:resources-subscribe
+  - resources-unsubscribe:resources-unsubscribe
