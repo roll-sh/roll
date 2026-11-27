@@ -575,7 +575,7 @@ async fn recent_requests_are_replayed_against_mains_preview() {
     let p = e.engine.store.row_by_change("chg_rp").unwrap().unwrap();
     let main = e.engine.store.rows(Some(&e.project)).unwrap().into_iter().find(|r| r.change_id.is_none()).unwrap();
     let line = |method: &str, path: &str| roll_previews::RequestLine { at: 1, service: "web".into(), method: method.into(), path: path.into(), status: 200, ms: 3 };
-    e.apps.request_log.lock().insert(p.id.clone(), vec![line("GET", "/api/cart"), line("GET", "/__roll/feedback.js"), line("POST", "/api/pay")]);
+    e.apps.request_log.lock().insert(p.id.clone(), vec![line("GET", "/api/cart"), line("GET", "/__roll/feedback.js"), line("POST", "/api/pay"), line("GET", "/account/logout")]);
     e.apps.request_log.lock().insert(main.id.clone(), vec![line("GET", "/api/items"), line("GET", "/api/cart")]);
     let url = e.engine.store.services(&p.id).unwrap().into_iter().find(|s| s.name == "web").unwrap().url;
     e.apps.fetched.lock().insert(format!("web {url}/api/cart"), 500);
@@ -593,7 +593,7 @@ async fn recent_requests_are_replayed_against_mains_preview() {
     }
     let done = done.expect("replayed");
     let got: Vec<(&str, u16, u16, Vec<String>)> = done.requests.iter().map(|q| (q.path.as_str(), q.status, q.main_status, q.removed.clone())).collect();
-    assert_eq!(got, vec![("/api/cart", 500, 200, vec![]), ("/api/items", 200, 200, vec!["price".to_string()])], "GETs only, each once, never roll's own paths");
+    assert_eq!(got, vec![("/api/cart", 500, 200, vec![]), ("/api/items", 200, 200, vec!["price".to_string()])], "GETs only, each once, never roll's own paths or one that signs out");
     assert!(done.requests.iter().all(|q| q.differs()), "a lost field differs as a status does");
     assert_eq!(done.ok, Some(false));
     e.engine.store.update(&p.id, |r| r.trusted = false).unwrap();

@@ -41,7 +41,6 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route("/v1/previews/{id}/notes", get(notes))
         .route("/v1/previews/{id}/notes/{note}/resolve", post(resolve_note))
         .route("/v1/previews/{id}/notes/{note}/work", post(note_work))
-        .route("/v1/previews/{id}/replay", post(replay))
         .route("/v1/previews/{id}/notes/{note}/crop", get(note_crop))
         .route("/v1/previews/{id}/mail", get(mails))
         .route("/v1/previews/{id}/mail/{mail}", get(mail_raw))
@@ -62,6 +61,8 @@ pub fn router(engine: Arc<Engine>) -> Router {
                 .route("/v1/previews/{id}/wake", post(wake))
                 .route("/v1/previews/{id}/logs", get(logs))
                 .route("/v1/previews/{id}/requests", get(requests))
+                // Its request log is kept on its holder too, and the replay asks through it.
+                .route("/v1/previews/{id}/replay", post(replay))
                 .route("/v1/previews/{id}/metrics", get(metrics))
                 .route("/v1/previews/{id}/errors", get(errors))
                 .route("/v1/previews/{id}/errors/count", get(error_count))
