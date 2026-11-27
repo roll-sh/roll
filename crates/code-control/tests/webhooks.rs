@@ -1022,8 +1022,8 @@ async fn every_event_is_the_same_on_the_stream_and_in_webhooks() {
     let budget = json!({ "budget": { "project": "prj_1", "project_name": "shop", "percent": 80, "spent_usd_month": 8.1, "max_usd_month": 10.0 }, "dashboard_url": null });
     a.code.emit_project(&a.code.find_repo("acme", "api").unwrap().id, "budget", budget.clone()).unwrap();
     assert_eq!(ev.next("budget").await, budget);
-    // masking = {masking: {project, project_name, columns: [{resource, column, why}]}, dashboard_url}
-    let masking = json!({ "masking": { "project": "prj_1", "project_name": "shop", "columns": [{ "resource": "postgres:pg_1", "column": "public.users.phone", "why": "a phone number" }] }, "dashboard_url": null });
+    // masking = {masking: {project, project_name, resources: [{resource, columns}]}, dashboard_url}
+    let masking = json!({ "masking": { "project": "prj_1", "project_name": "shop", "resources": [{ "resource": "postgres:pg_1", "columns": 2 }] }, "dashboard_url": null });
     a.code.emit_project(&a.code.find_repo("acme", "api").unwrap().id, "masking", masking.clone()).unwrap();
     assert_eq!(ev.next("masking").await, masking);
 
