@@ -1493,19 +1493,51 @@ impl Apps {
         self.run_once(tpl, cmd, "pre-deploy", self.cfg.build_timeout, log, cancel).await.map_err(|e| anyhow::anyhow!("{e:#}: nothing was switched"))
     }
 
-    /// `run.teardown` before a preview environment goes: once, in a container of its live
-    /// deployment's image, at most ten minutes. Said in the log and as a `job.failed` when it
-    /// fails; the delete goes on either way.
-    pub(crate) async fn teardown_command(self: &Arc<Self>, service: &str, env: &str) {
-        let Ok(live) = self.load_live(service, env).await else { return };
-        let Some(tpl) = live.template() else { return };
-        let Some(cmd) = tpl.run.teardown.clone() else { return };
-        let log = self.logs.sink(format!("env:{service}/{env}"), Stream::System);
-        if let Err(e) = self.run_once(&tpl, &cmd, "teardown", Duration::from_secs(600), &log, &CancellationToken::new()).await {
-            warn!(service, env, error = %e, "apps: a preview's teardown command failed");
-            let (sid, en, dep, data) = (service.to_string(), env.to_string(), tpl.deployment.clone(), serde_json::json!({ "command": "teardown", "error": format!("{e:#}") }));
-            let _ = self.db(move |s| s.add_event("job.failed", &sid, &en, Some(&dep), &data)).await;
+    /// `GET …/deploys/{dep}/image`: the deployment's image as `docker save`'s tar, for `docker
+    /// load` here (Fly's `fly auth docker`, Artifact Registry's pull). Only a built one, still
+    /// kept (not pruned), and where the runtime can hand it out.
+    pub async fn export_deployment_image(self: &Arc<Self>, service: &str, env: &str, dep: &str) -> Result<(String, Box<dyn tokio::io::AsyncRead + Send + Unpin>)> {
+        let d = self.deployment(service, env, dep).await?;
+        let (Some(image), None) = (d.image.clone(), d.pruned_at) else {
+            return Err(Error::Conflict(format!("{dep} has no image kept to hand out (never built, or pruned)")));
+        };
+        match self.deps.runtime.export_image(&image).await {
+            Ok(Some(r)) => Ok((image, r)),
+            Ok(None) => Err(Error::BadRequest("this node's runtime can't hand out an image (its registry holds it)".into())),
+            Err(e) => Err(Error::Conflict(format!("{e:#}"))),
         }
+    }
+
+    /// `run.teardown` before a preview environment goes: once per deployment (a retried delete
+    /// doesn't run it again), in a container of its live deployment's image, at most
+    /// [`TEARDOWN_LIMIT`] (well under what a deleting client waits: roll previews' ten minutes),
+    /// in a task of its own, so a caller that gives up never leaves its container behind. Said in
+    /// the log and as a `job.failed` when it fails; the delete goes on either way.
+    pub(crate) async fn teardown_command(self: &Arc<Self>, service: &str, env: &str) {
+        let (sid, e) = (service.to_string(), env.to_string());
+        let Ok(row) = self.db(move |s| s.environment(&sid, &e)).await else { return };
+        let Some(active) = row.active.clone() else { return };
+        let (aid, svc_id) = (active.clone(), service.to_string());
+        // Read from the live deployment without loading the environment's live state (which
+        // could adopt and roll instances a moment before they go).
+        let Ok(dep) = self.db(move |s| s.deployment(&aid)).await else { return };
+        let Some(cmd) = dep.run.teardown.clone() else { return };
+        let key = format!("teardown:{service}/{env}:{active}");
+        if !self.db(move |s| s.claim_state(&key, "1")).await.unwrap_or(false) {
+            return;
+        }
+        let Ok(live) = self.load_live(&svc_id, env).await else { return };
+        let Some(tpl) = live.template() else { return };
+        let (this, sid, en) = (self.clone(), service.to_string(), env.to_string());
+        let run = tokio::spawn(async move {
+            let log = this.logs.sink(format!("env:{sid}/{en}"), Stream::System);
+            if let Err(e) = this.run_once(&tpl, &cmd, "teardown", TEARDOWN_LIMIT, &log, &CancellationToken::new()).await {
+                warn!(service = %sid, env = %en, error = %e, "apps: a preview's teardown command failed");
+                let (dep, data) = (tpl.deployment.clone(), serde_json::json!({ "command": "teardown", "error": format!("{e:#}") }));
+                let _ = this.db(move |s| s.add_event("job.failed", &sid, &en, Some(&dep), &data)).await;
+            }
+        });
+        let _ = run.await;
     }
 
     /// `cmd` once in a container of `tpl`'s image with its variables and the project network (no
@@ -3760,6 +3792,9 @@ fn with_derived(patterns: &[String], plan: Option<&serde_json::Value>) -> Vec<St
     out.extend(plan.and_then(|p| p["watch_derived"].as_array()).into_iter().flatten().filter_map(|v| v.as_str().map(str::to_string)));
     out
 }
+
+/// The longest a preview's teardown command runs ([`Apps::teardown_command`]).
+pub const TEARDOWN_LIMIT: Duration = Duration::from_secs(120);
 
 /// Whether a canary step fails: the new deployment answered `error_pct` or more of at least
 /// [`Rollout::MIN_REQUESTS`] requests with a 5xx, and more often than the old one (an outage

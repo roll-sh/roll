@@ -1968,6 +1968,16 @@ fn refusal(body: &Value) -> Option<String> {
         }
         _ => {}
     }
+    // Elasticsearch's answer for a document that isn't there says nothing but where it looked:
+    // `{_index, _id, found: false}` (a get) or `result: "not_found"` (a delete).
+    if (body["found"] == false || body["result"] == "not_found")
+        && let Some(id) = said(body["_id"].as_str())
+    {
+        return Some(match said(body["_index"].as_str()) {
+            Some(index) => format!("no document {id} in index {index}"),
+            None => format!("no document {id}"),
+        });
+    }
     said(body["message"].as_str())
 }
 
@@ -2019,6 +2029,9 @@ mod refusal_tests {
         assert_eq!(text, "mapper_parsing_exception: Failed to parse mapping: no type [x]", "a cause that repeats the reason is left out");
         let (text, _) = refused(StatusCode::NOT_FOUND, json!({ "error": { "type": "index_not_found_exception", "reason": "no such index [nope]" }, "status": 404 })).await;
         assert_eq!(text, "not found: index_not_found_exception: no such index [nope]");
+        // A document that isn't there: where it looked, not just the status.
+        let (text, _) = refused(StatusCode::NOT_FOUND, json!({ "_index": "logs", "_id": "d1", "found": false })).await;
+        assert_eq!(text, "not found: no document d1 in index logs");
         // axum's refusal of a body: the part about the argument.
         let (text, _) = refused(StatusCode::UNPROCESSABLE_ENTITY, json!({ "error": "Failed to deserialize the JSON body into the target type: action: unknown variant `go`, expected one of `advance`, `all`, `abort` at line 1 column 24" })).await;
         assert_eq!(text, "action: unknown variant `go`, expected one of `advance`, `all`, `abort`");

@@ -388,6 +388,22 @@ async fn roll_run_injects_an_environments_secrets_and_refuses_unresolved_referen
     ok(&api, &env, &[&at[..], &["import", "--from", "vault", "--source", "secret/shop"]].concat(), None).await;
     let got = ok(&api, &[], &["run", "-p", "shop", "-e", "production", "--allow-unresolved", "--", "sh", "-c", "echo $FROM_VAULT $RETRIES"], None).await;
     assert_eq!(got.trim(), "v-1 3");
+    // Checking the copy reads the source again and compares by fingerprint: names only, nothing
+    // written, a failure while a key is missing or differs.
+    let check = [&at[..], &["import", "--from", "vault", "--source", "secret/shop", "--check"]].concat();
+    let matching = roll(&api, &env, &check, None).await;
+    assert!(matching.code == Some(0) && matching.stdout.contains("+ HOST") && matching.stdout.contains("2 the same") && matching.stderr.contains("The copy is complete"), "{}{}", matching.stdout, matching.stderr);
+    // A key roll can't compare (a reference here) isn't counted as the same: exit 2, named.
+    ok(&api, &[], &[&at[..], &["set", "RETRIES=${HOST}"]].concat(), None).await;
+    let unchecked = roll(&api, &env, &check, None).await;
+    assert!(unchecked.code == Some(2) && unchecked.stdout.contains("? RETRIES") && unchecked.stderr.contains("1 key wasn't compared"), "{}{}", unchecked.stdout, unchecked.stderr);
+    ok(&api, &[], &[&at[..], &["set", "FROM_VAULT=fake-changed"]].concat(), None).await;
+    ok(&api, &[], &[&at[..], &["rm", "RETRIES"]].concat(), None).await;
+    let drifted = roll(&api, &env, &check, None).await;
+    let shown = format!("{}{}", drifted.stdout, drifted.stderr);
+    assert!(drifted.code != Some(0) && drifted.stdout.contains("- RETRIES") && drifted.stdout.contains("~ FROM_VAULT") && !shown.contains("v-1") && !shown.contains("fake-changed"), "{shown}");
+    let still = ok(&api, &[], &["run", "-p", "shop", "-e", "production", "--allow-unresolved", "--", "sh", "-c", "echo $FROM_VAULT ${RETRIES:-unset}"], None).await;
+    assert_eq!(still.trim(), "fake-changed unset", "a check writes nothing");
     // Several environments at once: each source path into its environment.
     let mapped = ok(&api, &env, &["secrets", "-p", "shop", "import", "--from", "vault", "--source", "secret/shop", "--map", "stg=staging"], None).await;
     assert!(mapped.contains("stg → staging: 1 value"), "{mapped}");
@@ -1006,7 +1022,12 @@ async fn a_pre_receive_hook_refuses_a_push_adding_a_production_value_with_a_scan
     let alice = [("GITHUB_USER_LOGIN", "alice")];
     let (passed, said) = push_as(&["-o", "breakglass"], &alice);
     assert!(!passed && said.contains("break glass refused"), "no one may until an admin says: {said}");
-    assert!(ok(&api, &[], &["secrets", "-p", "shop", "breakglass", "alice"], None).await.contains("alice"));
+    // A login is the pusher as a hook's token names it: bound to the hook once it has named alice.
+    assert!(roll(&api, &[], &["secrets", "-p", "shop", "breakglass", "alice"], None).await.code != Some(0), "no hook has named alice yet");
+    let (passed, _) = push_as(&[], &alice);
+    assert!(!passed, "refused, and the hook named alice");
+    let bound = ok(&api, &[], &["secrets", "-p", "shop", "breakglass", "alice"], None).await;
+    assert!(bound.contains("alice@token:"), "{bound}");
     let (passed, said) = push_as(&["-o", "breakglass"], &[("GITHUB_USER_LOGIN", "alice"), ("ROLL_API_URL", "http://127.0.0.1:9")]);
     assert!(!passed && said.contains("couldn't"), "{said}");
     let (passed, said) = push_as(&["-o", "breakglass"], &alice);
@@ -1014,12 +1035,12 @@ async fn a_pre_receive_hook_refuses_a_push_adding_a_production_value_with_a_scan
     let audit: serde_json::Value = reqwest::get(format!("{api}/v1/secrets/projects/{prj}/audit?action=secrets.scan.breakglass")).await.unwrap().json().await.unwrap();
     assert_eq!(audit[0]["keys"], serde_json::json!(["API_KEY", "DATABASE_URL"]), "{audit}");
     let summary = audit[0]["summary"].as_str().unwrap_or_default();
-    assert!(summary.contains("by alice to refs/heads/main"), "{audit}");
+    assert!(summary.contains("by alice (as token:") && summary.contains("says) to refs/heads/main"), "the pusher is the hook's word: {audit}");
     // What it let through is leaked and reported as such. The hook's token may only scan, so it
     // rotates nothing: the leak waits on Health for someone who may write there.
     let leaked: serde_json::Value = reqwest::get(format!("{api}/v1/secrets/projects/{prj}/audit?action=secrets.leaked")).await.unwrap().json().await.unwrap();
     assert_eq!(leaked[0]["keys"], serde_json::json!(["API_KEY", "DATABASE_URL"]), "{leaked}");
-    assert!(leaked[0]["summary"].as_str().unwrap_or_default().contains("let through with break glass by alice"), "{leaked}");
+    assert!(leaked[0]["summary"].as_str().unwrap_or_default().contains("let through with break glass by alice (as token:"), "{leaked}");
     let now = ok(&api, &[], &["secrets", "-p", "shop", "-e", "production", "get", "API_KEY", "--raw"], None).await;
     assert_eq!(now.trim(), managed, "a scan-only hook's break glass rotates nothing, even under leaks.rotate = managed");
     assert!(!leaked.to_string().contains(value) && !leaked.to_string().contains(&managed), "never a value: {leaked}");

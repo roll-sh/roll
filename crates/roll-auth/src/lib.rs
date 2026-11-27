@@ -569,6 +569,18 @@ impl Gate {
 /// The middleware: `router.layer(axum::middleware::from_fn_with_state(gate, roll_auth::check))`.
 /// It reads the matched route, so it goes on the router whose routes it guards.
 pub async fn check(State(gate): State<Arc<Gate>>, mut req: Request, next: Next) -> Response {
+    // Open (no operator token, loopback only): a page anywhere could reach the API by rebinding a
+    // name of its own to 127.0.0.1, so only a loopback name (or the API's or the dashboard's own)
+    // is answered, and a write from another site's page is refused.
+    if gate.token.is_none() {
+        let authority = req.uri().authority().map(|a| a.as_str().to_string());
+        if !open_host_ok(&gate, req.headers(), authority.as_deref()) {
+            return error(StatusCode::MISDIRECTED_REQUEST, "this rolld runs without ROLL_ADMIN_TOKEN, so it answers only requests to localhost, 127.0.0.1 or [::1]", "misdirected");
+        }
+        if !open_origin_ok(&gate, req.headers()) {
+            return error(StatusCode::FORBIDDEN, "this rolld runs without ROLL_ADMIN_TOKEN, so it answers only local pages", "cross_origin");
+        }
+    }
     // The client's address, once, for whoever asks after (a session's networks, a product's log).
     if let Some(ip) = gate.client_ip.get().and_then(|f| f(&req))
         && req.extensions().get::<ClientIp>().is_none()
@@ -781,6 +793,28 @@ impl Origins {
     }
 }
 
+/// Whether a request to an open gate names a host it answers: a loopback name, or the API's own
+/// or a dashboard origin's host. A browser always sends `Host`; a request with none (roll's own,
+/// in process) isn't a page's.
+fn open_host_ok(gate: &Gate, headers: &HeaderMap, authority: Option<&str>) -> bool {
+    let host = headers.get(header::HOST).and_then(|h| h.to_str().ok()).or(authority);
+    let Some(host) = host else { return true };
+    let host = host.to_ascii_lowercase();
+    let named = |o: &HeaderValue| o.to_str().ok().and_then(|o| o.split_once("://")).is_some_and(|(_, h)| h == host);
+    HeaderValue::from_str(&format!("http://{host}")).is_ok_and(|o| is_local(&o))
+        || gate.own_origin.as_ref().is_some_and(named)
+        || matches!(&gate.origins, Origins::List(list) if list.iter().any(named))
+}
+
+/// Whether a request to an open gate may come from where its `Origin` says: a local page, the
+/// API's own or a dashboard's (or no `Origin`: a navigation, an image, or not a browser). Every
+/// method, a WebSocket upgrade's GET included: CORS never guards a socket, so a page elsewhere
+/// could otherwise open a shell or a tunnel on a loopback name.
+fn open_origin_ok(gate: &Gate, headers: &HeaderMap) -> bool {
+    let Some(o) = headers.get(header::ORIGIN) else { return true };
+    is_local(o) || gate.own_origin.as_ref() == Some(o) || matches!(&gate.origins, Origins::List(list) if list.contains(o))
+}
+
 fn is_local(origin: &HeaderValue) -> bool {
     let Ok(o) = origin.to_str() else { return false };
     let Some(rest) = o.strip_prefix("http://").or_else(|| o.strip_prefix("https://")) else { return false };
@@ -814,6 +848,39 @@ pub fn cors(origins: &Origins) -> CorsLayer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An open gate answers only loopback names (a rebound name is refused), and takes writes
+    /// only from local pages.
+    #[test]
+    fn an_open_gate_answers_loopback_hosts_only() {
+        let gate = Gate::new(None, Vec::new());
+        let host = |h: &'static str| {
+            let mut m = HeaderMap::new();
+            m.insert(header::HOST, HeaderValue::from_static(h));
+            m
+        };
+        for (h, ok) in [
+            ("127.0.0.1:7070", true),
+            ("localhost", true),
+            ("[::1]:7070", true),
+            ("LOCALHOST:7070", true),
+            ("attacker.example:7070", false),
+            ("localhost.attacker.example", false),
+            ("127.0.0.1.nip.io:7070", false),
+        ] {
+            assert_eq!(open_host_ok(&gate, &host(h), None), ok, "{h}");
+        }
+        assert!(open_host_ok(&gate, &HeaderMap::new(), None), "no Host: not a page's");
+        assert!(!open_host_ok(&gate, &HeaderMap::new(), Some("attacker.example")), "HTTP/2's authority counts");
+        // A page elsewhere is refused whatever it sends, a WebSocket upgrade (a GET) included.
+        let mut from = host("127.0.0.1:7070");
+        from.insert(header::UPGRADE, HeaderValue::from_static("websocket"));
+        from.insert(header::ORIGIN, HeaderValue::from_static("http://attacker.example"));
+        assert!(!open_origin_ok(&gate, &from));
+        from.insert(header::ORIGIN, HeaderValue::from_static("http://localhost:3000"));
+        assert!(open_origin_ok(&gate, &from));
+        assert!(open_origin_ok(&gate, &host("127.0.0.1:7070")), "no Origin: a navigation, or not a browser");
+    }
 
     /// The loopback default can't be met by a look-alike host, and the token never prints.
     #[test]

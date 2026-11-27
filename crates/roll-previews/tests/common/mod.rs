@@ -41,6 +41,7 @@ pub struct FakeCode {
     pub teardowns: Mutex<Vec<(String, String)>>,
     /// Budget alerts sent: (the repos told, the alert).
     pub budgets: Mutex<Vec<(Vec<String>, roll_previews::ports::BudgetAlert)>>,
+    pub maskings: Mutex<Vec<(Vec<String>, roll_previews::ports::MaskingNotice)>>,
 }
 
 impl FakeCode {
@@ -128,6 +129,10 @@ impl Source for FakeCode {
         self.budgets.lock().push((repos.to_vec(), alert.clone()));
         Ok(())
     }
+    async fn masking(&self, repos: &[String], notice: &roll_previews::ports::MaskingNotice) -> anyhow::Result<()> {
+        self.maskings.lock().push((repos.to_vec(), notice.clone()));
+        Ok(())
+    }
     fn nudges(&self) -> Option<tokio::sync::broadcast::Receiver<()>> {
         None
     }
@@ -164,6 +169,8 @@ pub struct FakeData {
     pub from: Mutex<HashMap<String, String>>,
     /// How many masks to fail next.
     pub fail_masks: AtomicUsize,
+    /// The locks other sessions hold on its branches' tables (as `pg_locks` would say).
+    pub locks: Mutex<Vec<(String, String)>>,
 }
 
 impl FakeData {
@@ -186,6 +193,7 @@ impl FakeData {
             renames_on_reset: AtomicUsize::new(0),
             from: Mutex::new(HashMap::new()),
             fail_masks: AtomicUsize::new(0),
+            locks: Mutex::new(Vec::new()),
         })
     }
 }
@@ -235,6 +243,9 @@ impl Brancher for FakeData {
     }
     fn branches_from_base(&self) -> bool {
         self.kind == Kind::Postgres
+    }
+    async fn locks(&self, _parent: &str, _branch: &str) -> anyhow::Result<Vec<(String, String)>> {
+        Ok(self.locks.lock().clone())
     }
     async fn branch_from(&self, parent: &str, from: &str, name: &str, _mode: Mode) -> anyhow::Result<Option<Branched>> {
         anyhow::ensure!(self.branches.lock().contains(from), "no branch {from} to branch from");
@@ -349,6 +360,14 @@ pub struct FakeApps {
     pub browser: Mutex<HashMap<String, Vec<roll_previews::ports::BrowserCheckResult>>>,
     /// Builds started again on an earlier push's copy: (service, deployment, the variables).
     pub views: Mutex<Vec<(String, String, Vars)>>,
+    /// What `fetch` answers for a service, URL and path (`<service> <url><path>`; unset: 200).
+    pub fetched: Mutex<HashMap<String, u16>>,
+    /// Whether services run on roll's runtime here (`can_swap`).
+    pub runtime: std::sync::atomic::AtomicBool,
+    /// The engine, for a fetch that starts a service as the runtime does (its `EnvSource`), and
+    /// what each such start was given: (preview, service, revision, variables).
+    pub env_source: Mutex<Option<std::sync::Weak<dyn roll_previews::ports::EnvSource>>>,
+    pub started: Mutex<Vec<(String, String, String, Vars)>>,
     /// What a service answers on its health path (unset: the backend can't tell).
     pub answers: Mutex<Option<(u16, String)>>,
     /// How many health checks find the service still starting (asked again later).
@@ -474,6 +493,21 @@ impl Apps for FakeApps {
     }
     async fn memory_mb(&self, _: &str, _: &str) -> Option<u32> {
         *self.memory.lock()
+    }
+    async fn can_swap(&self, _: &str, _: &str) -> anyhow::Result<bool> {
+        Ok(self.runtime.load(Ordering::SeqCst))
+    }
+    async fn fetch(&self, preview: &str, service: &str, url: &str, _: Option<&str>, path: &str, _: bool) -> anyhow::Result<Option<roll_previews::ports::Fetched>> {
+        // A runtime service that isn't up starts first, with what the engine gives it.
+        if self.runtime.load(Ordering::SeqCst) {
+            let source = self.env_source.lock().as_ref().and_then(|w| w.upgrade());
+            if let Some(source) = source {
+                let (t, vars) = source.env(preview, service).await?;
+                self.started.lock().push((preview.to_string(), service.to_string(), t.revision, vars));
+            }
+        }
+        let status = self.fetched.lock().get(&format!("{service} {url}{path}")).copied().unwrap_or(200);
+        Ok(Some(roll_previews::ports::Fetched { status, headers: Vec::new(), body: Vec::new(), truncated: false }))
     }
     async fn probe(&self, _: &str, _: &str, _path: &str) -> anyhow::Result<Option<(u16, String)>> {
         if self.starting.load(Ordering::SeqCst) > 0 {

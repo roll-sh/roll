@@ -142,6 +142,24 @@ Reproduce the YAML numbers with `scripts/search-yaml-suites.sh roll` (set `ROLL_
   (`ism_run` steps). Not run: shrink, rollup, transform, search_only, convert_index_to_remote
   and stop_replication (their steps fail with a cause saying so), and notification
   destinations and channels (roll sends no notifications: the step fails with that cause). An unloaded serverless cluster runs its due jobs when it wakes.
+- Snapshot management (`_plugins/_sm/policies`: create, update with `if_seq_no` and
+  `if_primary_term`, get, list with `from`/`size`/`sortField`/`sortOrder`/`queryString`, delete,
+  `_start`, `_stop` and `_explain` over name lists and patterns): the plugin's stored form
+  (`<name>-sm-policy` in `.opendistro-ism-config`, sharing ISM's sequence numbers; a deletion
+  without a schedule takes the creation's; `min_count` defaults to 1; `snapshot_config` in Java
+  `HashMap` order), every validation message (cron, time zone, counts, `max_age`,
+  `time_limit`, repository, notification channel, the strict mapping of `schedule`) and the
+  config index's absence, pinned by `os_sm.json` (90 steps from a fresh OpenSearch 3.9.0).
+  Policies run on SLM's scheduler, waking only for the ticks of the plugin's one-minute job
+  that have work: creation `CREATION_START` → `CREATING` (the snapshot
+  `<name>-<date_format in timezone>-<8 characters>`, lowercase, with `metadata.sm_policy`) →
+  back with `latest_execution` `SUCCESS`; deletion of the policy's snapshots past `max_count`,
+  or older than `max_age` beyond `min_count`, through `DELETING`; a failing step `RETRYING` on
+  the next three ticks (`retry.count`), then `FAILED`; messages and the explain fields as
+  OpenSearch 3.9.0 writes them (watched against it tick by tick). Snapshots are taken and
+  deleted as the user who stored the policy. Not run: `time_limit` (stored and returned) and
+  notifications (none are sent). OpenSearch's YAML suites have no snapshot management tests
+  (the index-management plugin tests it in Kotlin).
 - OpenSearch search request extras (`os_search_ext.json`, 21 steps): `phase_took`,
   `cancel_after_time_interval`, the bundled plugins' `ext` sections (`rerank`, `ml_inference`,
   `ubi` with its response `query_id`; other names fail as OpenSearch fails them), the `template`
@@ -520,6 +538,8 @@ never a secret:
 - an ILM step moves to `ERROR` with the reason in `step_info`, and doesn't retry while the
   principal can't act;
 - an SLM run records a failure in `last_failure` and in the SLM history;
+- an OpenSearch snapshot management step is `RETRYING` and then `FAILED` in `_explain`, the
+  refusal as its `cause`;
 - a watch's execution is `failed`, with a `security_exception` in the record;
 - a rollup job is `stopped`, counts a search failure and shows the reason as `status.reason`,
   which Elasticsearch's status doesn't have. Starting the job again clears it.
@@ -531,7 +551,8 @@ transform `_update`, a policy or watch `PUT`, a new rollup job).
 A branch (README, "Branches and what they inherit") differs from the cluster it copies, which
 Elasticsearch has no counterpart of: its inherited bucket repositories (`s3`, `gcs`, `azure`)
 are registered with `readonly: true`, as Elastic Cloud registers another deployment's
-repository; its inherited SLM policies don't run and record why in `last_failure` (no
+repository; its inherited SLM policies (and OpenSearch snapshot management policies, until put
+again) don't run and record why in `last_failure` (no
 `next_execution`; `_execute` is a 409 `illegal_state_exception`, and an ILM `wait_for_snapshot`
 on one names the pause in `step_info`); its inherited watches are inactive. Cloning a snapshot into any read-only
 repository is refused as on Elasticsearch ("cannot create snapshot in a readonly repository").
@@ -1167,9 +1188,7 @@ Checked against Elasticsearch 9.5.5 (captures in
   `suppressed`, as Elasticsearch prints it), the request's other items unaffected. An update by
   query reads as the caller, as Elasticsearch's scroll does: only the documents it sees, their
   `_source` without the fields it can't see, and it writes them back so: those fields are
-  dropped from the documents (a script reading one gets `null`). Difference: Elasticsearch
-  refreshes a by-query `refresh=true` as the caller (403 without `maintenance`); roll refreshes
-  it as the cluster. A
+  dropped from the documents (a script reading one gets `null`). A
   stored result (async search, ES|QL, EQL, SQL, and SQL cursors) is its opener's (the API key, or
   the user and realm): anyone else gets 404 for it, its status and its delete (a cursor: unknown),
   except that `cancel_task` may delete it. One stored before owners were recorded is the
