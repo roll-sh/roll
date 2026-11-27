@@ -346,6 +346,10 @@ async fn check(State(a): S, ext: Extensions, Json(c): Json<Check>) -> crate::Res
     };
     let row = found.row;
     let params = found.params.unwrap_or_default();
+    // A folder the gate refuses before deciding is refused here too.
+    if let Some(why) = crate::evaluate::bad_folder(row, uri.query()) {
+        return Ok(Json(json!({ "decision": "deny", "why": why })));
+    }
     // Decided as the gate decides: the request's headers (a create's `X-Roll-Project`), the
     // project a create's body names, the copy a body asks for, and "ask for anything else".
     let mut headers = axum::http::HeaderMap::new();

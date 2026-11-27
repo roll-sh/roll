@@ -1086,13 +1086,15 @@ async fn a_products_lifetime_cap_binds_consents_and_remembered_approvals() {
     // A folder roll secrets would refuse (`//` reads as every folder) is refused before anyone is asked.
     let (s, out) = d.call(&token, Method::GET, "/v1/secrets/projects/pa/environments/development/secrets?path=//", None).await;
     assert_eq!((s, out["code"].as_str()), (StatusCode::BAD_REQUEST, Some("bad_request")), "{out}");
-    let (_, pending) = d.call(&token, Method::GET, "/v1/secrets/projects/pa/environments/development/secrets?path=/api", None).await;
+    // Taken as roll secrets spells it: `/api/` is remembered as `/api`.
+    let (_, pending) = d.call(&token, Method::GET, "/v1/secrets/projects/pa/environments/development/secrets?path=/api/", None).await;
     let apr = pending["approval"].as_str().unwrap_or_else(|| panic!("{pending}")).to_string();
     let (s, out) = d.call(OPERATOR, Method::POST, &format!("/v1/access/approvals/{apr}/approve"), Some(json!({ "remember": "always" }))).await;
     assert_eq!(s, StatusCode::OK, "{out}");
     let (_, g) = d.call(OPERATOR, Method::GET, &format!("/v1/access/tokens/{id}"), None).await;
     assert_eq!((g["rules"].as_array().map(Vec::len), g["expires_at"].is_null()), (Some(1), true), "{g}");
     assert!(within(&g["temporary"][0]["until"]), "{g}");
+    assert_eq!(g["temporary"][0]["rule"]["paths"], json!(["/api"]), "{g}");
 }
 
 /// The policy's `oauth_clients`: a client it leaves out can't be consented to, sign a device in,
