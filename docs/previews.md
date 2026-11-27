@@ -2565,9 +2565,12 @@ type Settings = {
     screenshot of the first page. A name is 1 to 80 of `a-z A-Z 0-9 -
     _ . /`; 40 a preview. A screenshot run at that head keeps them; the first at a new head
     drops the earlier head's, so the review only shows what this head's tests sent. A fork's
-    preview has no bypass secret, so it takes none. Services on roll apps don't take them yet
-    (their proxy serves `/__roll/` paths itself)
-    (`engine.rs::the_teams_snapshots_join_the_visual_review`):
+    preview has no bypass secret, so it takes none. On a service roll apps runs, its proxy
+    takes the same request on the `pv-` host of a private preview (the environment holds the
+    secret's hash) and hands it to roll previews (its `PreviewSnapshots` hook, roll apps #1205),
+    which takes it only once that preview is known to run on that service: an environment's
+    name alone proves nothing (`engine.rs::the_teams_snapshots_join_the_visual_review`,
+    `scripts/preview-apps.sh`'s snapshot step):
 
     ```js
     // playwright: a fixture next to the bypass one above
@@ -3113,21 +3116,23 @@ variables roll makes from a branch's URL too (it could run on the preview's own 
 change becoming queued wakes its settled preview, a rehearsal shows only at its head, and schema
 overlaps stay within a repo.
 
-1. **Snapshots from the team's own Playwright or Cypress suite, in review** (roll's runtime);
+1. **Snapshots on roll apps services, in review**: roll apps' `PreviewSnapshots` hook, the preview
+   checked to run on that service.
+2. **Snapshots from the team's own Playwright or Cypress suite, in review** (roll's runtime);
    roll apps' proxy next (agreed: its `PreviewSnapshots` hook, with the service checked).
-2. **Notes to Jira, GitHub Issues or Asana** (Marker.io, Netlify's Drawer; S).
-3. **Replaying recorded traffic against the preview and main** (Signadot, Speedscale; L): writes
+3. **Notes to Jira, GitHub Issues or Asana** (Marker.io, Netlify's Drawer; S).
+4. **Replaying recorded traffic against the preview and main** (Signadot, Speedscale; L): writes
    replay safely on branched data; capturing production's requests needs its privacy designed
    first.
-4. **A rehearsal that holds a change back** (a required rule): rehearsed at each head, so the
+5. **A rehearsal that holds a change back** (a required rule): rehearsed at each head, so the
    landing blocker never waits on the queue that would ask for it.
-5. **Older pushes past the last three, started on demand**; **what a note's reviewer saw, from
+6. **Older pushes past the last three, started on demand**; **what a note's reviewer saw, from
    their own browser** (Jam, Marker.io).
-6. **Restore points for search and buckets**: search's once roll search's `reset {from}` is in
+7. **Restore points for search and buckets**: search's once roll search's `reset {from}` is in
    (its Next 32); buckets need a put-back on roll storage's side.
-7. **Previews for the members thread's next products**: once roll apps' and roll search's routes
+8. **Previews for the members thread's next products**: once roll apps' and roll search's routes
    become member routes (docs/members.md, v1.1).
-8. **Watches on pg-control**: the data step's Postgres compute start; cheap branches on ext4
+9. **Watches on pg-control**: the data step's Postgres compute start; cheap branches on ext4
    through overlay volumes; recovery to a time seconds old (unowned).
 
 Not to build: more lab checks on the first page (each adds noise to every pull request), or a

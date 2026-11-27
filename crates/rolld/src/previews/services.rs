@@ -806,6 +806,42 @@ impl apps_control::integrations::FeedbackNotes for Notes {
     }
 }
 
+/// roll apps' proxy hands a team's snapshot (`POST /__roll/snapshot` on a `pv-` host, its bypass
+/// secret checked there) to the engine (`Engine::snapshot`), once the preview is known to run on
+/// that service: a `pv-` environment's name alone proves nothing (its own lookup, as a deploy's).
+pub struct Snapshots {
+    pub engine: std::sync::Weak<roll_previews::Engine>,
+    pub apps: RollApps,
+}
+
+#[async_trait]
+impl apps_control::integrations::PreviewSnapshots for Snapshots {
+    async fn snapshot(&self, service: &str, env: &str, name: &str, png: bytes::Bytes) -> apps_control::Result<Value> {
+        let conflict = |m: &str| apps_control::Error::Conflict(m.to_string());
+        let engine = self.engine.upgrade().ok_or_else(|| conflict("roll previews is stopping"))?;
+        let preview = roll_previews::Engine::preview_of_env(env).ok_or_else(|| conflict("not a preview's environment"))?;
+        let services = engine.store.services(&preview).map_err(|_| conflict("no such preview"))?;
+        let mut runs = false;
+        for s in &services {
+            if let Ok(Some((id, e))) = self.apps.find(&preview, &s.name).await
+                && id == service
+                && e == env
+            {
+                runs = true;
+                break;
+            }
+        }
+        if !runs {
+            return Err(conflict("this service doesn't run that preview"));
+        }
+        match engine.snapshot(&preview, name, None, png.to_vec()).await {
+            Ok(head) => Ok(json!({ "page": format!("snap:{name}"), "head": head })),
+            Err(roll_previews::Error::BadRequest(m)) => Err(apps_control::Error::BadRequest(m)),
+            Err(e) => Err(conflict(&e.to_string())),
+        }
+    }
+}
+
 /// roll apps' proxy takes a preview's share links through the engine, as previews' own does
 /// (`Engine::share_visit`, the maker asked again as often).
 pub struct Shares(pub std::sync::Weak<roll_previews::Engine>);
