@@ -1980,8 +1980,9 @@ impl apps_control::integrations::SecretSource for ForApps {
     }
 
     /// A reference read once for the asker's request on the service (`Secrets::use_once`: as
-    /// them, no maker kept; untrusted in an untrusted preview, as `resolve_as`).
-    async fn use_once(&self, who: apps_control::integrations::Asker<'_>, project: &str, env: &str, service: &str, reference: &str, purpose: &str) -> anyhow::Result<String> {
+    /// them, no maker kept, a sensitive key only for `to`, the fixed host it goes to; untrusted
+    /// in an untrusted preview, as `resolve_as`).
+    async fn use_once(&self, who: apps_control::integrations::Asker<'_>, project: &str, env: &str, service: &str, reference: &str, purpose: &str, to: Option<&'static str>) -> anyhow::Result<String> {
         let (secrets, _) = self.0.get().cloned().ok_or_else(|| anyhow::anyhow!("roll secrets is starting: try again in a moment"))?;
         let caller = secrets.caller_of(who.operator, who.user, who.grant).map_err(|e| anyhow::anyhow!("{e}"))?;
         let (project, env, service, reference, purpose) = (project.to_string(), env.to_string(), service.to_string(), reference.to_string(), purpose.to_string());
@@ -1991,7 +1992,7 @@ impl apps_control::integrations::SecretSource for ForApps {
             if untrusted {
                 r = r.untrusted();
             }
-            secrets.use_once(&r, &reference, &caller, &purpose).map(|v| v.value.expose().to_string()).map_err(|e| anyhow::anyhow!("{e}"))
+            secrets.use_once(&r, &reference, &caller, &purpose, to).map(|v| v.value.expose().to_string()).map_err(|e| anyhow::anyhow!("{e}"))
         })
         .await?
     }

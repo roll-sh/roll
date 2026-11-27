@@ -253,9 +253,9 @@ pub trait SecretSource: Send + Sync {
     }
     /// `reference`'s value for one request of `who`'s on `service` in `env` (a domain's
     /// Cloudflare token), read as them that once and kept by nothing: refused unless they may
-    /// reveal it now (an approval of an `ask` there is enough), never a sensitive key. Audited as
-    /// their use, for `purpose`.
-    async fn use_once(&self, _who: Asker<'_>, _project: &str, _env: &str, _service: &str, _reference: &str, _purpose: &str) -> anyhow::Result<String> {
+    /// reveal it now (an approval of an `ask` there is enough), and a sensitive key only when `to`
+    /// names the fixed host the value is sent to. Audited as their use, for `purpose`, to `to`.
+    async fn use_once(&self, _who: Asker<'_>, _project: &str, _env: &str, _service: &str, _reference: &str, _purpose: &str, _to: Option<&'static str>) -> anyhow::Result<String> {
         anyhow::bail!("roll secrets isn't on this node")
     }
 }
@@ -279,6 +279,8 @@ pub trait DnsWriter: Send + Sync {
     /// Make `name`'s `kind` record (`CNAME` or `TXT`) say `content`. A CNAME beside the name's A or
     /// AAAA records: with `replace` they're deleted, else nothing is written and they're answered.
     async fn put_record(&self, token: &str, kind: &str, name: &str, content: &str, replace: bool) -> anyhow::Result<Vec<String>>;
+    /// The one API it sends the token to (rolld: `roll_edge::acme::Cloudflare::API`), fixed in code.
+    fn api(&self) -> &'static str;
 }
 
 /// preview on roll's own runtime, from roll.toml's `[preview]`): rolld fills it with roll

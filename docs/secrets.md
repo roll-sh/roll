@@ -5026,14 +5026,19 @@ Agent's templates do).
     token. The audit row is still the resource's, naming the maker
     (`resolved KEY for search:search:logs, for usr_… (who chose it)`).
   - **A person or a token, for one request, and nothing keeps it** (roll apps' Cloudflare token,
-    writing a domain's records): `Secrets::use_once(resource, reference, caller, purpose)`. The
-    checks `bind_ref` makes, as the caller now: the one project that holds and stands for the
-    resource, reveal on the folder, no sensitive key, no protected environment for an untrusted
-    copy, and no untrusted caller. No `Maker` is recorded, since nothing reads it later, so an
-    approval of an `ask` there stands in for reveal: the permissions catalogue lends the
-    reference's folder (`Lend::Each`), and the gate asks a person about that folder. Audited as
-    `secrets.use` by the caller, naming the resource and the purpose
-    (`used KEY once for apps:service:web (writing a domain's records at Cloudflare), as usr_…`).
+    writing a domain's records): `Secrets::use_once(resource, reference, caller, purpose, to)`.
+    The checks `bind_ref` makes, as the caller now: the one project that holds and stands for the
+    resource, reveal on the folder, no protected environment for an untrusted copy, and no
+    untrusted caller. A sensitive key only with `to`, the one host the product sends the value
+    to, fixed in its code (roll apps: `roll_edge::acme::Cloudflare::API`): the value goes from
+    roll's process to that host and never to the caller, so the best-kept token (a sensitive one)
+    still works; without `to`, a person or a token never reads one.
+    No `Maker` is recorded, since nothing reads it later, so an approval of an `ask` there stands
+    in for reveal: the permissions catalogue lends the reference's folder (`Lend::Each`), and the
+    gate asks a person about that folder. Audited as `secrets.use` by the caller, naming the
+    resource, the purpose and the host (`used KEY once for apps:service:web (writing a domain's
+    records at Cloudflare), as usr_…, a sensitive key sent only to
+    https://api.cloudflare.com/client/v4`).
   - **A deployer, for the resource's own runtime** (roll apps' git login: a person pastes a deploy
     token, tagged sensitive, and the service's login refers to it):
     `Secrets::bind_ref_runtime(resource, reference, caller, runtime_env)`. The contract is the

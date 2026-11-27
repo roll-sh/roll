@@ -3526,8 +3526,9 @@ async fn a_domains_records_are_written_with_the_customers_token() {
             Ok(vec![])
         }
         // Read once as the caller: nothing bound, no maker kept.
-        async fn use_once(&self, _: apps_control::integrations::Asker<'_>, _: &str, env: &str, _: &str, reference: &str, _: &str) -> anyhow::Result<String> {
+        async fn use_once(&self, _: apps_control::integrations::Asker<'_>, _: &str, env: &str, _: &str, reference: &str, _: &str, to: Option<&'static str>) -> anyhow::Result<String> {
             anyhow::ensure!((env, reference) == ("production", "roll://production/CF_TOKEN"), "you may not reveal {reference}");
+            assert_eq!(to, Some("https://dns.example/v4"), "the writer's own API");
             Ok("cf-secret".into())
         }
     }
@@ -3543,6 +3544,9 @@ async fn a_domains_records_are_written_with_the_customers_token() {
             self.1.lock().push((kind.to_string(), name.to_string()));
             self.0.add(name, if kind == "TXT" { "TXT" } else { "CNAME" }, content);
             Ok(Vec::new())
+        }
+        fn api(&self) -> &'static str {
+            "https://dns.example/v4"
         }
     }
     let w = world_full(|_| {}, false, |d| d.secrets = Arc::new(Cf)).await;

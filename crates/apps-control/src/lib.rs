@@ -4683,7 +4683,7 @@ impl Apps {
         }
         let (sid, e) = (service.to_string(), env.to_string());
         let svc = self.db(move |s| s.service(&sid)).await?;
-        let token = self.deps.secrets.use_once(who, &svc.project, &e, service, reference, "writing a domain's records at Cloudflare").await.map_err(|why| Error::Forbidden(format!("{reference}: {why:#} (it must be a key you may reveal, and not marked sensitive)")))?;
+        let token = self.deps.secrets.use_once(who, &svc.project, &e, service, reference, "writing a domain's records at Cloudflare", Some(writer.api())).await.map_err(|why| Error::Forbidden(format!("{reference}: {why:#} (it must be a key you may reveal)")))?;
         // The TXT challenge first where `record` asks for it (it proves the name, whatever the
         // CNAME meets), then the CNAME to its target (Cloudflare flattens one at a zone's apex,
         // which plain DNS can't hold).
