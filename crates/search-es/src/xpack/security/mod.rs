@@ -1622,23 +1622,6 @@ pub fn check_resize(ctx: &Ctx, source: &str, target: &str) -> EsResult<()> {
     Ok(())
 }
 
-/// The `indices:admin/aliases` check of an alias the request creates on `indices` for its
-/// principal (a search application's alias): the indices first, then the alias name.
-pub fn check_alias_privileges(ctx: &Ctx, indices: &[String], alias: &str) -> EsResult<()> {
-    let Some(p) = ctx.principal.get().filter(|p| !p.is_superuser()) else { return Ok(()) };
-    const ACTION: &str = "indices:admin/aliases";
-    let eff = effective(&file_roles(ctx.cluster), &ctx.state(), p);
-    let denied_on: Vec<String> = indices.iter().filter(|i| !eff.allows_index(ACTION, i)).cloned().collect();
-    if !denied_on.is_empty() {
-        return Err(denied(p, ACTION, Some(&denied_on)));
-    }
-    if !eff.allows_index(ACTION, alias) {
-        let by = privileges::granted_by(ACTION, false).join(",");
-        return Err(EsError::security(403, format!("action [{ACTION}] is unauthorized for {}, this action is granted by the index privileges [{by}]", who(p))));
-    }
-    Ok(())
-}
-
 /// The properties `set_security_user` records.
 pub const INGEST_USER_PROPERTIES: &[&str] = &["username", "roles", "full_name", "email", "metadata", "api_key", "realm", "authentication_type"];
 

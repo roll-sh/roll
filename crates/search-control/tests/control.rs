@@ -4211,7 +4211,7 @@ async fn names_are_authorized_as_resolved() {
         (Method::PUT, "/_index_template/logs", json!({"index_patterns": ["logs-*"], "data_stream": {}, "template": {"data_stream_options": {"failure_store": {"enabled": true}}}})),
         (Method::PUT, "/_data_stream/logs-a", Value::Null),
         (Method::POST, "/mine/_async_search?keep_on_completion=true&wait_for_completion_timeout=0", json!({})),
-        (Method::PUT, "/_security/role/limited", json!({"indices": [{"names": ["mine*", "secret"], "privileges": ["manage"]}, {"names": ["mine*"], "privileges": ["read"]}]})),
+        (Method::PUT, "/_security/role/limited", json!({"cluster": ["manage_search_application"], "indices": [{"names": ["mine*", "secret"], "privileges": ["manage"]}, {"names": ["mine*"], "privileges": ["read"]}]})),
         (Method::PUT, "/_security/user/lim", json!({"password": "lim-pass-1", "roles": ["limited"]})),
         (Method::PUT, "/_security/role/reader", json!({"indices": [{"names": ["*"], "privileges": ["read"]}]})),
         (Method::PUT, "/_security/user/rd", json!({"password": "rd-pass-1", "roles": ["reader"]})),
@@ -4274,6 +4274,9 @@ async fn names_are_authorized_as_resolved() {
     // An alias over a data stream can't give more on its failure store either: `mine-fx::failures`
     // would read logs-a's failure documents.
     let (s, v) = e.es("fsr@rn", "fsr-pass-1", Method::POST, "/_aliases", Some(json!({"actions": [{"add": {"index": "logs-a", "alias": "mine-fx"}}]}))).await;
+    assert!(s == 403 && v.to_string().contains("more permissions than any of the indices"), "{s} {v}");
+    // Nor can a search application, which reads through an alias of its name.
+    let (s, v) = lim(Method::PUT, "/_application/search_application/mine-app", Some(json!({"indices": ["secret"]}))).await;
     assert!(s == 403 && v.to_string().contains("more permissions than any of the indices"), "{s} {v}");
     // A multi get's and multi term vectors' items too.
     for path in ["/_mget", "/_mtermvectors"] {
