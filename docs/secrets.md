@@ -626,7 +626,11 @@ server](secrets/platforms.md#a-vm-or-a-server).
   tokens a minute. Its
   machines' credentials and their logins' tokens don't count toward the workload token caps that
   every project's logins share (docs/permissions.md): a machine holds at most 5 live login tokens
-  of its own. The bootstrap tokens and credentials are roll-access grants (docs/permissions.md,
+  of its own (live now: an ended one frees its place). So `roll` keeps the login's token in the
+  same 0600 file, under the same lock, and every process on the machine (`roll run`s started
+  together at boot, a cron job a minute, `roll secrets agent`) reuses it until a quarter of its
+  life, and at least two minutes, is left; only then does one log in again. A token the server
+  refuses (revoked) isn't handed out again. The bootstrap tokens and credentials are roll-access grants (docs/permissions.md,
   "Bootstrap tokens and machine credentials"), looked up on every use, and open nothing but these
   logins. A unit that enrolls on its first start: [Bare metal and on
   premises](secrets/platforms.md#bare-metal-and-on-premises).
@@ -4313,12 +4317,17 @@ refuses any push whose new commits add a value of the project, whoever pushes it
   audited as `scan.breakglass`; roll secrets' policy can rule it out everywhere with
   `no_breakglass`, "Guardrails"). A login is the pusher as one hook names it, so it's kept as
   `alice@token:<id>`: any token that may scan could name alice, and only the hook's token
-  vouches for her. `roll secrets breakglass alice` binds alice to each token whose hook has named
-  her in an ordinary scan (so push once through the hook first: a login no hook has named is
-  refused, 400), and `alice@token:<id>` is taken once that token's hook has named a pusher. A
-  list set before logins were bound keeps its bare logins, each counting only through a token
-  whose hook named that login in an earlier scan; `roll secrets breakglass` shows them, and
-  setting the same list again binds them. The hook asks roll
+  vouches for her. `roll secrets breakglass alice` binds alice to the hook's token that has
+  named her in an ordinary scan: a token that may only scan (every rule `scan`, made by an
+  admin, not a person's own). A token that may do more (a person's reveal and scan, an admin
+  role) could name anyone, so its word binds no bare login. So push once through the hook first:
+  a login no hook has named is refused (400), and so is one that several hooks' tokens have
+  named, until it's named as `alice@token:<id>`. `alice@token:<id>` is taken once that token's
+  hook has named a pusher. The answer, and `roll secrets breakglass`, print each binding with
+  its token's name (`alice@token:tok_… (git-hook)`), so a token that isn't the hook stands out. A
+  list set before logins were bound keeps its bare logins, each counting only through a
+  scan-only token whose hook named that login in an earlier scan; `roll secrets breakglass` shows
+  them, and setting the same list again binds them. The hook asks roll
   first: roll refuses a pusher the list doesn't name through this token (403, audited), and records the push as
   `secrets.scan.breakglass` with the pusher and refs before anything is read. It's still scanned,
   and the keys it found go in the same log. What it lets through is leaked: the value is in the
@@ -5103,14 +5112,19 @@ Agent's templates do).
     token. The audit row is still the resource's, naming the maker
     (`resolved KEY for search:search:logs, for usr_… (who chose it)`).
   - **A person or a token, for one request, and nothing keeps it** (roll apps' Cloudflare token,
-    writing a domain's records): `Secrets::use_once(resource, reference, caller, purpose)`. The
-    checks `bind_ref` makes, as the caller now: the one project that holds and stands for the
-    resource, reveal on the folder, no sensitive key, no protected environment for an untrusted
-    copy, and no untrusted caller. No `Maker` is recorded, since nothing reads it later, so an
-    approval of an `ask` there stands in for reveal: the permissions catalogue lends the
-    reference's folder (`Lend::Each`), and the gate asks a person about that folder. Audited as
-    `secrets.use` by the caller, naming the resource and the purpose
-    (`used KEY once for apps:service:web (writing a domain's records at Cloudflare), as usr_…`).
+    writing a domain's records): `Secrets::use_once(resource, reference, caller, purpose, to)`.
+    The checks `bind_ref` makes, as the caller now: the one project that holds and stands for the
+    resource, reveal on the folder, no protected environment for an untrusted copy, and no
+    untrusted caller. A sensitive key only with `to`, the one host the product sends the value
+    to, fixed in its code (roll apps: `roll_edge::acme::Cloudflare::API`): the value goes from
+    roll's process to that host and never to the caller, so the best-kept token (a sensitive one)
+    still works; without `to`, a person or a token never reads one.
+    No `Maker` is recorded, since nothing reads it later, so an approval of an `ask` there stands
+    in for reveal: the permissions catalogue lends the reference's folder (`Lend::Each`), and the
+    gate asks a person about that folder. Audited as `secrets.use` by the caller, naming the
+    resource, the purpose and the host (`used KEY once for apps:service:web (writing a domain's
+    records at Cloudflare), as usr_…, a sensitive key sent only to
+    https://api.cloudflare.com/client/v4`).
   - **A deployer, for the resource's own runtime** (roll apps' git login: a person pastes a deploy
     token, tagged sensitive, and the service's login refers to it):
     `Secrets::bind_ref_runtime(resource, reference, caller, runtime_env)`. The contract is the
@@ -7050,7 +7064,7 @@ isn't in the workspace is 404.
 | `GET /v1/secrets/health` | | `{ok, key: "env"\|"kms"\|"file"\|"shares"\|"missing", resealed: "all"\|number\|null, customer_managed, issuer_pulled: {kid, pulled_at, detail}[], links: string[], syncs: string[]}` (`links`, `syncs`: the kinds registered; `issuer_pulled`: issuer keys an emergency rotation pulled in the last 30 days) |
 | `GET`, `POST /v1/secrets/unseal` | `{share}` (`POST`) | `{sealed, have?, need?, error?}`: a sealed node's progress (public; see "Starting sealed"); 429 with `Retry-After` past the limits |
 | `GET` | | `{project, environments: Environment[], previews: number, history_days: number \| null, validity_checks: "on" \| "off", leaks: {rotate: "managed" \| "off"}, breakglass: string[], deletion: {window_days, holds: string \| null}}` (`deletion`: what deleting the workspace project takes with it, as its refusal says it, and how many days it stays recoverable; `leaks.rotate`: "When a value leaks") |
-| `PATCH` | `{history_days?, validity_checks?: "on" \| "off", leaks?: {rotate: "managed" \| "off"}, breakglass?: string[]}` (`breakglass`: who may push past a pre-receive hook, at most 100 of a pusher's login through one hook's token, `alice@token:<id>` (taken once that token's hook has named a pusher), a bare `alice` (bound to each token whose hook has named alice; 400 when none has), `token:<id>` and `*`; `[]` no one; the answer is the list as stored) | what changed, as given (`admin`; validity checks audited as `validity.checks`, leak rotation as `leaks.rotate`, break glass as `scan.breakglass`) |
+| `PATCH` | `{history_days?, validity_checks?: "on" \| "off", leaks?: {rotate: "managed" \| "off"}, breakglass?: string[]}` (`breakglass`: who may push past a pre-receive hook, at most 100 of a pusher's login through one hook's token, `alice@token:<id>` (taken once that token's hook has named a pusher), a bare `alice` (bound to the one scan-only token whose hook has named alice; 400 when none has, or several have), `token:<id>` and `*`; `[]` no one; the answer is the list as stored, and `breakglass_hooks: {"token:<id>": name}`, each bound token's name as its hook last scanned) | what changed, as given (`admin`; validity checks audited as `validity.checks`, leak rotation as `leaks.rotate`, break glass as `scan.breakglass`) |
 | `GET /grid?path=` | | `Grid` |
 | `GET /environments` | | `Environment[]` in order |
 | `POST /environments` | `NewEnvironment` | 201 `Environment` |

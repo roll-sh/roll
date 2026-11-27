@@ -557,6 +557,8 @@ async fn a_call_waiting_for_approval_is_a_task_polled_to_its_result() {
     let made = send(asker.clone(), "tools/call", json!({ "name": "postgres_delete_project", "arguments": { "project": "pa" } }), true).await;
     let task = &made["result"];
     assert_eq!(task["resultType"], "task", "{made}");
+    // Held while a person decides, it says so (SEP-2643's out-of-band interaction), on every poll.
+    assert_eq!(task["_meta"]["io.modelcontextprotocol/authorization"]["remediationHints"][0]["type"], "task", "{made}");
     let id = task["taskId"].as_str().unwrap().to_string();
     // It shows where a person decides.
     let mut got = json!(null);
@@ -571,6 +573,8 @@ async fn a_call_waiting_for_approval_is_a_task_polled_to_its_result() {
     let requests = got["result"]["inputRequests"].as_object().cloned().unwrap_or_default();
     assert_eq!(requests.len(), 1, "{got}");
     assert!(requests.keys().all(|k| k.starts_with("apr_")) && requests.values().all(|r| r["params"]["mode"] == "url"), "{got}");
+    let said = &got["result"]["_meta"]["io.modelcontextprotocol/authorization"];
+    assert_eq!((said["remediation"].as_str(), said["authorizationContextId"].as_str(), said["remediationHints"].as_array().map(Vec::len)), (Some("available"), requests.keys().next().map(String::as_str), Some(2)), "{got}");
     // Nobody else's poll finds it, and a client that didn't declare the extension can't ask.
     assert_eq!(send(reader.clone(), "tasks/get", json!({ "taskId": id }), true).await["error"]["code"], -32602);
     assert_eq!(send(asker.clone(), "tasks/get", json!({ "taskId": id }), false).await["error"]["code"], -32021);
@@ -586,6 +590,7 @@ async fn a_call_waiting_for_approval_is_a_task_polled_to_its_result() {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
     assert_eq!((got["result"]["status"].as_str(), got["result"]["result"]["isError"].as_bool()), (Some("completed"), Some(false)), "{got}");
+    assert!(got["result"]["_meta"].get("io.modelcontextprotocol/authorization").is_none(), "done: {got}");
 }
 
 /// A tool that waits for something (a run) up to its limit per request waits on as a task, asked

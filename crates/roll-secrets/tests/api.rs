@@ -2729,22 +2729,26 @@ async fn one_pusher_spends_its_share_and_made_up_pushers_only_the_tokens_budget(
 }
 
 /// A login on the break-glass list is a pusher as one hook's token names it: `alice` is refused
-/// until a hook has named alice, then bound to that hook's token, so another scan token naming
-/// alice can't break glass; and the leak says the pusher is the hook's word.
+/// until a hook has named alice, then bound to that hook's token (a scan-only one), not to a
+/// reveal+scan token that named alice too, so that token can't break glass; the answer names the
+/// hook's token; and the leak says the pusher is the hook's word.
 #[tokio::test]
 async fn a_break_glass_login_is_bound_to_the_hook_token_that_named_it() {
     let api = Api::new().await;
     let value = "fake-Kq8mZ3vT9xLr2WbN";
     api.set("production", "API_KEY", value).await;
-    let (hook, other) = (api.token(json!({ "actions": ["scan"] })), api.token(json!({ "actions": ["reveal", "scan"] })));
-    let (s, e) = api.call(Method::PATCH, "", Some(json!({ "breakglass": ["alice"] }))).await;
-    assert_eq!(s, StatusCode::BAD_REQUEST, "no hook has named alice yet: {e}");
+    let (hook, other) = (api.token(json!({ "actions": ["scan"], "name": "git-hook" })), api.token(json!({ "actions": ["reveal", "scan"] })));
     let push = |breakglass: bool| json!({ "candidates": [value], "breakglass": breakglass, "pusher": "alice", "refs": ["refs/heads/main"] });
+    let named = json!({ "candidates": [], "pusher": "alice", "refs": ["refs/heads/main"] });
+    assert_eq!(api.req(Method::POST, "/scan", Some(named), Some(&other)).await.0, StatusCode::OK);
+    let (s, e) = api.call(Method::PATCH, "", Some(json!({ "breakglass": ["alice"] }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "only a token that may do more has named alice: {e}");
     assert_eq!(api.req(Method::POST, "/scan", Some(push(false)), Some(&hook)).await.0, StatusCode::OK);
     let set = api.ok(Method::PATCH, "", Some(json!({ "breakglass": ["alice"] }))).await;
     let bound = set["breakglass"][0].as_str().unwrap_or_default().to_string();
     let principal = bound.strip_prefix("alice@").filter(|t| t.starts_with("token:")).unwrap_or_else(|| panic!("{set}")).to_string();
     assert_eq!(set["breakglass"].as_array().map(Vec::len), Some(1), "only the hook that named alice: {set}");
+    assert_eq!(set["breakglass_hooks"], json!({ principal.clone(): "git-hook" }), "{set}");
 
     let (s, e) = api.req(Method::POST, "/scan", Some(push(true)), Some(&other)).await;
     assert_eq!(s, StatusCode::FORBIDDEN, "another token naming alice isn't her hook: {e}");
@@ -7026,7 +7030,8 @@ async fn a_frozen_folder_answers_423_to_readers_and_lets_its_admins_through() {
 
 /// A reference named for one request and kept by nothing (roll apps' Cloudflare token): read
 /// once as the caller, audited as their use of it naming the resource, under `bind_ref`'s checks
-/// (reveal there, no sensitive key, no untrusted caller), with no maker recorded.
+/// (reveal there, no untrusted caller), with no maker recorded; a sensitive key only when the
+/// product names the fixed host it goes to, audited with it, and never for an untrusted copy.
 #[tokio::test]
 async fn a_reference_read_once_reads_as_the_caller_and_is_audited_as_theirs() {
     use roll_secrets::{Refusal, ResourceRef};
@@ -7042,15 +7047,21 @@ async fn a_reference_read_once_reads_as_the_caller_and_is_audited_as_theirs() {
         (s.caller_of(false, None, Some(&grant)).unwrap(), id)
     };
     let (prod, id) = token("production");
-    let once = s.use_once(&web, "roll://production/CF_TOKEN", &prod, "writing a domain's records").unwrap();
+    let once = s.use_once(&web, "roll://production/CF_TOKEN", &prod, "writing a domain's records", None).unwrap();
     assert_eq!(once.value.expose(), "fake-cf");
     let audit = api.ok(Method::GET, "/audit?action=secrets.use", None).await;
     assert_eq!(audit[0]["actor"].as_str(), Some(format!("token:{id}").as_str()), "{audit}");
     assert!(audit[0]["summary"].as_str().unwrap().contains("apps:service:web"), "{audit}");
-    for (caller, reference) in [(&token("staging").0, "roll://production/CF_TOKEN"), (&prod, "roll://production/CF_SENSITIVE"), (&s.untrusted(&api.project, &prod).unwrap(), "roll://production/CF_TOKEN")] {
-        let refused = s.use_once(&web, reference, caller, "writing a domain's records").unwrap_err();
+    let untrusted = s.untrusted(&api.project, &prod).unwrap();
+    let cf = Some("https://api.cloudflare.com/client/v4");
+    for (caller, reference, to) in [(&token("staging").0, "roll://production/CF_TOKEN", cf), (&prod, "roll://production/CF_SENSITIVE", None), (&untrusted, "roll://production/CF_TOKEN", None), (&untrusted, "roll://production/CF_SENSITIVE", cf)] {
+        let refused = s.use_once(&web, reference, caller, "writing a domain's records", to).unwrap_err();
         assert!(matches!(refused, Refusal::NotAllowed(_) | Refusal::Unusable(_)) && !refused.to_string().contains("fake-"), "{refused}");
     }
+    let kept = s.use_once(&web, "roll://production/CF_SENSITIVE", &prod, "writing a domain's records", cf).unwrap();
+    assert_eq!(kept.value.expose(), "fake-cf-kept", "a sensitive key, to its fixed host");
+    let audit = api.ok(Method::GET, "/audit?action=secrets.use", None).await;
+    assert!(audit[0]["summary"].as_str().unwrap().ends_with("a sensitive key sent only to https://api.cloudflare.com/client/v4"), "{audit}");
 }
 
 #[tokio::test]

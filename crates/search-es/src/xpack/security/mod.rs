@@ -500,8 +500,6 @@ pub struct Effective {
     /// Failure store indices by their data streams: reached only with the failure store's own
     /// privileges ([`Effective::allows_index`]).
     pub failure_parents: std::collections::HashMap<String, String>,
-    /// The cluster's data streams: each has a failure store component ([`Effective::no_wider`]).
-    pub streams: std::collections::HashSet<String>,
     /// The cluster's dialect ([`Effective::restricted`]).
     pub dialect: crate::cluster::Dialect,
 }
@@ -522,9 +520,10 @@ impl Effective {
     /// or OpenSearch action groups is held to it too ([`privileges::PROBE_ACTIONS`]). A data
     /// stream's failure store is compared too: an alias over one reaches it as `<alias>::failures`,
     /// so it can't give more there either (a `read_failure_store` the data stream lacks).
-    pub fn no_wider(&self, wider: &str, narrower: &str) -> bool {
+    /// `stream`: whether `narrower` is a data stream in the state the change applies to.
+    pub fn no_wider(&self, wider: &str, narrower: &str, stream: bool) -> bool {
         let subset = |w: &str, n: &str| privileges::PROBE_ACTIONS.iter().all(|a| !self.allows_index(a, w) || self.allows_index(a, n));
-        subset(wider, narrower) && (!self.streams.contains(narrower) || subset(&format!("{wider}::failures"), &format!("{narrower}::failures")))
+        subset(wider, narrower) && (!stream || subset(&format!("{wider}::failures"), &format!("{narrower}::failures")))
     }
 
     /// Whether `index` is restricted ([`privileges::is_restricted`]: a role must allow restricted
@@ -533,7 +532,11 @@ impl Effective {
     /// it as an ordinary index, which its roles name (`kibana_server`, `kibana_user`): the plugin
     /// has no restricted indices.
     pub fn restricted(&self, index: &str) -> bool {
-        privileges::is_restricted(index) || (self.dialect == crate::cluster::Dialect::Elasticsearch && index == crate::api::tasks::RESULTS_INDEX)
+        privileges::is_restricted(index)
+            || (self.dialect == crate::cluster::Dialect::Elasticsearch && index == crate::api::tasks::RESULTS_INDEX)
+            // A restricted data stream's failure store indices, named directly (or as a wildcard
+            // resolves `*::failures`), are as restricted as the data stream.
+            || self.failure_parents.get(index).is_some_and(|ds| self.restricted(ds))
     }
 
     fn allows(&self, f: impl Fn(&Permission) -> bool) -> bool {
@@ -715,8 +718,7 @@ pub fn effective(file: &FileRoles, st: &crate::meta::ClusterState, p: &Principal
         }
     }
     let failure_parents = st.metadata.data_streams.values().flat_map(|d| d.failure_indices.iter().map(|i| (i.clone(), d.name.clone()))).collect();
-    let streams = st.metadata.data_streams.keys().cloned().collect();
-    Effective { own, limited_by, also, parents, history_aliases, failure_parents, streams, dialect: st.metadata.dialect }
+    Effective { own, limited_by, also, parents, history_aliases, failure_parents, dialect: st.metadata.dialect }
 }
 
 /// Read APIs whose wildcard index expressions Elasticsearch expands to the indices the user
@@ -1577,7 +1579,8 @@ impl AliasAuth {
         self.who.as_ref().is_none_or(|(_, eff)| eff.allows_index(Self::ACTION, name))
     }
 
-    pub fn check(&self, adding: bool, indices: &[String], aliases: &[String]) -> EsResult<()> {
+    /// `st`: the state the change applies to (which of `indices` are data streams).
+    pub fn check(&self, st: &crate::meta::ClusterState, adding: bool, indices: &[String], aliases: &[String]) -> EsResult<()> {
         let Some((p, eff)) = &self.who else { return Ok(()) };
         let denied_on: Vec<String> = indices.iter().filter(|n| !eff.allows_index(Self::ACTION, n)).cloned().collect();
         if !denied_on.is_empty() {
@@ -1596,15 +1599,15 @@ impl AliasAuth {
         {
             return Err(EsError::security(403, "Alias requests are not allowed for users who have field or document level security enabled on one of the indices"));
         }
-        if indices.iter().any(|i| aliases.iter().any(|a| !eff.no_wider(a, i))) {
+        if indices.iter().any(|i| aliases.iter().any(|a| !eff.no_wider(a, i, st.metadata.data_streams.contains_key(i)))) {
             return Err(EsError::security(403, "Adding an alias is not allowed when the alias has more permissions than any of the indices"));
         }
         Ok(())
     }
 
     /// The aliases a request makes `index` with (a create, a resize, a rollover), as adding them.
-    pub fn check_new(&self, index: &str, aliases: &[String]) -> EsResult<()> {
-        if aliases.is_empty() { Ok(()) } else { self.check(true, &[index.to_string()], aliases) }
+    pub fn check_new(&self, st: &crate::meta::ClusterState, index: &str, aliases: &[String]) -> EsResult<()> {
+        if aliases.is_empty() { Ok(()) } else { self.check(st, true, &[index.to_string()], aliases) }
     }
 
     /// Removing indices through `_aliases` (`remove_index`): `indices:admin/delete` on each.
@@ -1623,11 +1626,12 @@ impl AliasAuth {
 /// (an index no role names reads nothing); aliases the body gives it are [`AliasAuth`]'s.
 pub fn check_resize(ctx: &Ctx, source: &str, target: &str) -> EsResult<()> {
     let Some(p) = ctx.principal.get().filter(|p| !p.is_superuser()) else { return Ok(()) };
-    let eff = effective(&file_roles(ctx.cluster), &ctx.state(), p);
+    let st = ctx.state();
+    let eff = effective(&file_roles(ctx.cluster), &st, p);
     if dls::ReadSecurity::of(ctx).is_some_and(|r| r.restricts("indices:data/read/search", source)) {
         return Err(EsError::security(403, "Resize requests are not allowed for users when field or document level security is enabled on the source index"));
     }
-    if !eff.no_wider(target, source) {
+    if !eff.no_wider(target, source, st.metadata.data_streams.contains_key(source)) {
         return Err(EsError::security(403, "Resizing an index is not allowed when the target index has more permissions than the source index"));
     }
     Ok(())
