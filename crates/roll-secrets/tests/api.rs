@@ -6639,8 +6639,9 @@ async fn a_revoked_machine_holds_its_place_until_its_credential_would_have_ended
     api.call(Method::DELETE, &format!("/identities/{id}/machines/{}", first["chain"].as_str().unwrap()), None).await;
     assert_eq!(boot().await.0, StatusCode::BAD_REQUEST, "revoked, it holds its place until it would have ended");
     assert_eq!(api.ok(Method::POST, &format!("/identities/{id}/machines/prune"), None).await["pruned"], 0, "and isn't forgotten before then");
-    // Its credential's end passes.
+    // Its credential's end passes: roll-access's word, and the row's.
     let chain = first["chain"].as_str().unwrap().to_string();
+    api.gate.chains.lock().unwrap().get_mut(&chain).unwrap().0 = 1;
     api.db.write(move |c| c.execute("UPDATE machine_chains SET live_until = 1 WHERE chain = ?", [chain.as_str()])).unwrap();
     let (s, second) = boot().await;
     assert_eq!(s, StatusCode::CREATED, "{second}");
