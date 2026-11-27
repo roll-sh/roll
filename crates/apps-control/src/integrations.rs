@@ -304,23 +304,25 @@ pub trait PreviewRouter: Send + Sync {
 #[async_trait]
 pub trait FeedbackNotes: Send + Sync {
     /// `env` (`pv-<id>`)'s notes on `path`, oldest first; none for a name that isn't a live
-    /// preview's.
-    async fn notes(&self, env: &str, path: &str) -> anyhow::Result<Vec<Note>>;
+    /// preview's, or one that doesn't run on `service` (roll apps' service id: a preview found by
+    /// its environment's name alone could be someone else's).
+    async fn notes(&self, service: &str, env: &str, path: &str) -> anyhow::Result<Vec<Note>>;
 }
 
 /// roll previews' share links (someone outside the team, until the link ends) for a preview
 /// environment's own host (rolld fills it from `roll_previews::Engine`). Unset: none taken. Every
-/// call checks the link again, so a revoked or ended one stops at once.
+/// call checks the link again, so a revoked or ended one stops at once. Each is told the roll apps
+/// service the request came to, and refuses a preview that doesn't run on it.
 #[async_trait]
 pub trait PreviewShares: Send + Sync {
     /// Link `token` to `env` (`pv-<id>`)'s preview, if it's live. `followed`: the link itself was
     /// followed (previews counts that once a day).
-    async fn live(&self, env: &str, token: &str, followed: bool) -> Option<Share>;
+    async fn live(&self, service: &str, env: &str, token: &str, followed: bool) -> Option<Share>;
     /// A guest's note from the page's button (its JSON body) through link `token`: the note's id,
     /// or why not (an HTTP status and a line).
-    async fn note(&self, env: &str, token: &str, body: &[u8]) -> Result<String, (u16, String)>;
+    async fn note(&self, service: &str, env: &str, token: &str, body: &[u8]) -> Result<String, (u16, String)>;
     /// The notes on `path` left through link `token`: all its guests see.
-    async fn notes(&self, env: &str, token: &str, path: &str) -> Vec<Note>;
+    async fn notes(&self, service: &str, env: &str, token: &str, path: &str) -> Vec<Note>;
 }
 
 /// A live share link.
