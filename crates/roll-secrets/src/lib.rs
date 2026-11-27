@@ -655,6 +655,8 @@ impl Secrets {
         db.ensure_schema(rotators::SCHEMA)?;
         db.ensure_schema(saas::SCHEMA)?;
         db.add_column("saas_rotators", "credential_expires_at", "INTEGER")?;
+        // A self-rotating vendor's rotation in progress (saas.rs, `Provider::self_rotate`).
+        db.add_column("saas_rotators", "rotating_at", "INTEGER")?;
         db.ensure_schema(transit::SCHEMA)?;
         db.ensure_schema(pki::SCHEMA)?;
         // An intermediate CA (pki.rs): its CSR while it's pending, then the certificates above it.

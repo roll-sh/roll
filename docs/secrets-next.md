@@ -41,11 +41,14 @@ In flight (the forty-second's items):
 - 2, 6 and 7: Route 53 keeps other clients' challenge values, the panel replaces a DNS credential, and a certificate's AWS session is tagged;
 - 3 and 4: a one-off read as the caller for a reference nothing keeps, and machines' logins off their maker's token cap.
 
+In flight (`feature/secrets-saas-palo-alto-paddle`):
+- Palo Alto rotation, as Prisma Cloud access keys of a service account (System Admin credential, each new key signed in with before it's kept);
+- Paddle's model: a self-rotating vendor whose registration is the key itself. Each rotation is made with it and replaces it there, and Paddle ends the old secret (roll can't, before Paddle's grace ends). `leaks.rotate` rotates it with no grace, so the leaked one ends at once.
+- Not built, with why in docs/secrets.md's SaaS section: Netskope (no API to make a token), Cisco Security Cloud Control (the rotating value is a refresh token every consumer spends) and AWS's self-rotating Palo Alto tenant key (no public API documents one).
+
 Left:
 - the forty-second's items 8 and 9 (the guides' 15-minute path with no server, and docs/permissions.md's lend wording);
-- Palo Alto rotation;
-- Health's public-repo hint;
-- Paddle's model.
+- Health's public-repo hint.
 
 **State, 2026-11-26 08:40.** The thirty-ninth and fortieth reviews are done. Landed since 2026-11-25 15:00, each with main's CI green and after a check of the merged tree wherever main had moved under it:
 - #1019 (dd7420791): the thirty-ninth's item 6. `roll secrets scan --pre-receive`, and a match-only `scan` right for scanner tokens.

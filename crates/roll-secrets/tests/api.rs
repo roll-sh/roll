@@ -208,7 +208,39 @@ struct FakeKeyVendors {
     jenkins_tokens: Mutex<BTreeMap<String, String>>,
     jenkins_unverified: std::sync::atomic::AtomicBool,
     salesforce: Mutex<FakeSalesforce>,
+    prisma: Mutex<FakePrisma>,
+    paddle: Mutex<FakePaddle>,
 }
+
+/// A Prisma Cloud tenant on `api2.eu.prismacloud.io`: its access keys by id as (secret, service
+/// account, name), and the sessions it signed in. The System Admin's key is
+/// `FAKEPRISMAADMIN:fake-prisma-admin`; a service account has two keys at most.
+#[derive(Default)]
+struct FakePrisma {
+    keys: BTreeMap<String, (String, String, String)>,
+    sessions: Vec<String>,
+}
+
+/// A Paddle sandbox account's one rotatable API key, as Paddle's docs describe it: the secret in
+/// use, a pending rotation (activated by the first request made with its secret), the old secret
+/// and the grace it was given at its rotation, and every rotation's body.
+#[derive(Default)]
+struct FakePaddle {
+    current: String,
+    pending: Option<(String, String, u64)>,
+    old: Option<(String, u64)>,
+    made: u32,
+    bodies: Vec<Value>,
+}
+
+/// A made-up Paddle sandbox key, written in pieces: secret scanners take the whole shape for a
+/// real one.
+const PADDLE_KEY_ID: &str = concat!("apikey_", "01jrollfake", "paddlekey00000a");
+fn paddle_secret(n: u32) -> String {
+    format!("{}{}_fakesecret{n}", concat!("pdl_", "sdbx_", "apikey_"), PADDLE_KEY_ID.trim_start_matches("apikey_"))
+}
+const PRISMA: &str = "https://api2.eu.prismacloud.io/";
+const PADDLE: &str = "https://sandbox-api.paddle.com/api-keys/";
 
 /// A Salesforce org's external client app `0xIRollFakeApp1` and its OAuth consumer: the consumer's
 /// current key (`FAKESFKEY0` until a set is promoted), and its staged sets as (id, key, active).
@@ -271,6 +303,87 @@ fn cloudflare_policies(named: bool) -> Value {
 }
 
 impl FakeKeyVendors {
+    /// Prisma Cloud's login (an access key's pair for a session) and its access keys, each call
+    /// signed in with a session.
+    fn prisma(&self, method: &str, rest: &str, auth: &str, body: Value) -> (u16, Value) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let mut p = self.prisma.lock().unwrap();
+        if (method, rest) == ("POST", "login") {
+            let (user, pass) = (body["username"].as_str().unwrap_or_default(), body["password"].as_str().unwrap_or_default());
+            let ok = !self.refuse.load(Relaxed) && ((user, pass) == ("FAKEPRISMAADMIN", "fake-prisma-admin") || p.keys.get(user).is_some_and(|k| k.0 == pass));
+            if !ok {
+                return (401, json!({ "message": "invalid_credentials" }));
+            }
+            let token = format!("fake-prisma-jwt-{}-{user}", p.sessions.len());
+            p.sessions.push(token.clone());
+            return (200, json!({ "token": token, "message": "login_successful", "customerNames": [{ "customerName": "Roll Fake", "prismaId": "123456789", "tosAccepted": true }] }));
+        }
+        // Only the System Admin manages access keys.
+        if !p.sessions.iter().any(|s| s == auth && s.ends_with("-FAKEPRISMAADMIN")) {
+            return (401, Value::Null);
+        }
+        match (method, rest) {
+            ("GET", "access_keys") => (200, json!(p.keys.iter().map(|(id, k)| json!({ "id": id, "name": k.2, "status": "active", "role": { "name": "Build and Deploy Security" } })).collect::<Vec<_>>())),
+            ("POST", "access_keys") => {
+                let (account, name) = (body["serviceAccountName"].as_str().unwrap_or_default().to_string(), body["name"].as_str().unwrap_or_default().to_string());
+                if p.keys.values().filter(|k| k.1 == account).count() >= 2 {
+                    return (400, json!({ "message": "already_have_two_access_keys" }));
+                }
+                if p.keys.values().any(|k| k.2 == name) {
+                    return (409, json!({ "message": "duplicate_access_key_name" }));
+                }
+                let n = self.made.fetch_add(1, Relaxed) + 1;
+                self.bodies.lock().unwrap().push(body.clone());
+                let id = format!("00000000-0000-4000-9000-{n:012}");
+                p.keys.insert(id.clone(), (format!("fake-prisma-secret-{n}"), account, name));
+                self.live.lock().unwrap().push(id.clone());
+                (200, json!({ "id": id, "secretKey": format!("fake-prisma-secret-{n}") }))
+            }
+            ("DELETE", r) => {
+                let id = r.trim_start_matches("access_keys/");
+                self.live.lock().unwrap().retain(|k| k != id);
+                if p.keys.remove(id).is_some() { (200, Value::Null) } else { (404, Value::Null) }
+            }
+            _ => (404, Value::Null),
+        }
+    }
+
+    /// Paddle's API for its one key: a request made with a pending rotation's secret activates
+    /// it, and the old secret then works for its grace (here: while that grace isn't 0).
+    fn paddle(&self, method: &str, rest: &str, auth: &str, body: Value) -> (u16, Value) {
+        let mut p = self.paddle.lock().unwrap();
+        if p.current.is_empty() {
+            p.current = paddle_secret(0);
+        }
+        let key = auth.strip_prefix("Bearer ").unwrap_or_default().to_string();
+        if let Some((rotation, secret, grace)) = p.pending.clone().filter(|pending| pending.1 == key) {
+            let _ = rotation;
+            let old = std::mem::replace(&mut p.current, secret);
+            p.old = Some((old, grace));
+            p.pending = None;
+        }
+        let works = key == p.current || p.pending.as_ref().is_some_and(|x| x.1 == key) || p.old.as_ref().is_some_and(|(old, grace)| *old == key && *grace > 0);
+        if !works {
+            return (401, json!({ "error": { "type": "request_error", "code": "authentication_malformed" } }));
+        }
+        let Some(rest) = rest.strip_prefix(&format!("{PADDLE_KEY_ID}/")) else { return (403, json!({ "error": { "code": "forbidden" } })) };
+        let rotation = |id: &str, secret: Option<&str>, grace: u64| json!({ "id": id, "api_key_id": PADDLE_KEY_ID, "new_key": secret.unwrap_or("pdl_sdbx_apikey_****"), "grace_period_seconds": grace, "status": "pending", "expires_at": null });
+        match (method, rest) {
+            ("GET", "rotations") => (200, json!({ "data": [], "meta": { "request_id": "fake" } })),
+            ("POST", "rotations") => {
+                // A new rotation cancels a pending one.
+                p.made += 1;
+                let n = p.made;
+                let (id, secret, grace) = (format!("apkrot_fake{n}"), paddle_secret(n), body["grace_period_seconds"].as_u64().unwrap());
+                p.bodies.push(body);
+                p.pending = Some((id.clone(), secret.clone(), grace));
+                (201, json!({ "data": rotation(&id, Some(&secret), grace), "meta": { "request_id": "fake" } }))
+            }
+            ("GET", r) if r.starts_with("rotations/apkrot_fake") => (200, json!({ "data": rotation(r.trim_start_matches("rotations/"), None, 0) })),
+            _ => (404, Value::Null),
+        }
+    }
+
     /// A Jenkins controller with one user, `roll-bot`, signing in with its API tokens; its POSTs
     /// take the CSRF crumb.
     fn jenkins(&self, method: &str, rest: &str, auth: &str, crumb: &str, body: Value) -> (u16, Value) {
@@ -367,6 +480,12 @@ impl FakeKeyVendors {
         }
         if let Some(rest) = url.strip_prefix(JENKINS) {
             return Some(self.jenkins(method, rest, &header("authorization"), &header("jenkins-crumb"), body.map(|(_, b)| form_json(b.expose())).unwrap_or(Value::Null)));
+        }
+        if let Some(rest) = url.strip_prefix(PRISMA) {
+            return Some(self.prisma(method, rest, &header("x-redlock-auth"), body.map(|(_, b)| serde_json::from_str(b.expose()).unwrap()).unwrap_or(Value::Null)));
+        }
+        if let Some(rest) = url.strip_prefix(PADDLE) {
+            return Some(self.paddle(method, rest, &header("authorization"), body.map(|(_, b)| serde_json::from_str(b.expose()).unwrap()).unwrap_or(Value::Null)));
         }
         let (vendor, rest, authorized) = if let Some(rest) = url.strip_prefix(GITLAB_TOKENS) {
             self.gitlab_admins.lock().unwrap().push(header("private-token"));
@@ -4176,6 +4295,66 @@ async fn jenkins_api_tokens_are_verified_before_the_old_one_is_revoked() {
     assert!(events["events"][0]["key"] == "JENKINS_API_TOKEN" && events.to_string().contains("jenkins answered 401 verifying the new token"), "{events}");
     assert_eq!(api.values("production", "/").await["values"]["JENKINS_API_TOKEN"], "fake-jenkins-token-2", "the token in use stays");
     assert_eq!(*api.sent.10.live.lock().unwrap(), [second], "the unverified token was revoked");
+}
+
+#[tokio::test]
+async fn prisma_cloud_access_keys_are_verified_and_the_old_one_is_deleted_after_the_grace_period() {
+    let api = Api::new().await;
+    let (s, _) = api.call(Method::POST, "/saas", Some(json!({ "name": "pc", "vendor": "prismacloud", "target": { "api": "api.prismacloud.example", "service_account": "roll-ci" }, "credential": "a:b" }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "only Prisma Cloud's own API hosts");
+    let target = json!({ "api": "api2.eu.prismacloud.io", "service_account": "roll-ci", "expires_days": 90 });
+    let r = key_vendor(&api, "prismacloud", target, "FAKEPRISMAADMIN:fake-prisma-admin", "PRISMA_CLOUD_SECRET_KEY", json!({ "rotate_days": 60 })).await;
+    api.ok(Method::PUT, "/environments/production/secrets/PRISMA_CLOUD_ACCESS_KEY", Some(json!({ "link": { "kind": "saas", "ref": r["id"], "field": "id", "mode": "managed", "options": { "rotate_days": 60 } } }))).await;
+    let pair = |v: Value| (v["values"]["PRISMA_CLOUD_ACCESS_KEY"].clone(), v["values"]["PRISMA_CLOUD_SECRET_KEY"].clone());
+    let (first, second) = ("00000000-0000-4000-9000-000000000001", "00000000-0000-4000-9000-000000000002");
+    assert_eq!(pair(api.values("production", "/").await), (json!(first), json!("fake-prisma-secret-1")));
+    let body = api.sent.10.bodies.lock().unwrap()[0].clone();
+    assert!(body["serviceAccountName"] == "roll-ci" && body["expiresOn"].as_i64().is_some_and(|t| t > code_sql::now_ms()), "{body}");
+    // The new key signed in before it was kept; the old one works through the grace period.
+    api.ok(Method::POST, "/environments/production/secrets/PRISMA_CLOUD_SECRET_KEY/rotate", None).await;
+    assert_eq!(pair(api.values("production", "/").await), (json!(second), json!("fake-prisma-secret-2")));
+    assert!(api.sent.10.prisma.lock().unwrap().sessions.iter().any(|s| s.ends_with(second)), "the new key was checked");
+    assert_eq!(*api.sent.10.live.lock().unwrap(), [first, second]);
+    end_grace(&api).await;
+    assert_eq!(*api.sent.10.live.lock().unwrap(), [second]);
+}
+
+/// Paddle's model: the registration is the key itself, each rotation is made with it and replaces
+/// it there, and Paddle ends the old secret after the grace roll asks for (none for a leak).
+#[tokio::test]
+async fn paddle_keys_rotate_themselves_and_a_leaked_one_ends_at_once() {
+    let api = Api::new().await;
+    let other = concat!("pdl_", "sdbx_", "apikey_", "01jrollfakeotherkey000000a_x");
+    let (s, e) = api.call(Method::POST, "/saas", Some(json!({ "name": "paddle", "vendor": "paddle", "target": { "api_key_id": PADDLE_KEY_ID }, "credential": other }))).await;
+    assert!(s == StatusCode::BAD_REQUEST && !e.to_string().contains(other), "the credential is the key the target names: {e}");
+    let r = key_vendor(&api, "paddle", json!({ "api_key_id": PADDLE_KEY_ID }), &paddle_secret(0), "PADDLE_API_KEY", json!({})).await;
+    let (s, e) = api.call(Method::PUT, "/environments/production/secrets/PADDLE_API_KEY_ID", Some(json!({ "link": { "kind": "saas", "ref": r["id"], "field": "id", "mode": "managed", "options": { "grace_minutes": 2000 } } }))).await;
+    assert!(s == StatusCode::BAD_REQUEST && e.to_string().contains("1440"), "Paddle keeps an old secret a day at most: {e}");
+    let paddle = || {
+        let p = api.sent.10.paddle.lock().unwrap();
+        (p.current.clone(), p.old.clone(), p.bodies.iter().map(|b| b["grace_period_seconds"].as_u64().unwrap()).collect::<Vec<_>>())
+    };
+    // Linking rotated the registered key with itself, and checking the new secret activated it:
+    // the old one has the link's hour of grace at Paddle.
+    assert_eq!(api.values("production", "/").await["values"]["PADDLE_API_KEY"], paddle_secret(1));
+    assert_eq!(paddle(), (paddle_secret(1), Some((paddle_secret(0), 3600)), vec![3600]));
+
+    // The next rotation is made with the key the registration holds now.
+    api.ok(Method::POST, "/environments/production/secrets/PADDLE_API_KEY/rotate", None).await;
+    assert_eq!(api.values("production", "/").await["values"]["PADDLE_API_KEY"], paddle_secret(2));
+    assert_eq!(paddle(), (paddle_secret(2), Some((paddle_secret(1), 3600)), vec![3600, 3600]));
+    // Nothing to revoke after the grace period: Paddle ends the old secret by itself.
+    end_grace(&api).await;
+    assert_eq!(paddle().0, paddle_secret(2));
+
+    // A leak (leaks.rotate managed): rotated with no grace, so the leaked secret ends at once.
+    api.ok(Method::PATCH, "", Some(json!({ "leaks": { "rotate": "managed" } }))).await;
+    let writer = api.token(json!({ "name": "deploy", "actions": ["read", "reveal", "write"] }));
+    api.req(Method::POST, "/leaks", Some(json!({ "candidates": [paddle_secret(2)], "leaked": true })), Some(writer.as_str())).await;
+    assert_eq!(api.values("production", "/").await["values"]["PADDLE_API_KEY"], paddle_secret(3));
+    assert_eq!(paddle(), (paddle_secret(3), Some((paddle_secret(2), 0)), vec![3600, 3600, 0]));
+    let audit = api.ok(Method::GET, "/audit", None).await.to_string();
+    assert!(!audit.contains("fakesecret"), "never a key: {audit}");
 }
 
 #[tokio::test]

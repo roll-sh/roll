@@ -1355,14 +1355,19 @@ pub enum SaasCmd {
     /// `[--account-id] --template`; databricks `--host [--lifetime-days]`; confluent `--owner
     /// [--resource [--confluent-environment]]`; sonarqube `[--host] [--sonar-kind] [--sonar-project]
     /// [--expires-days]`; jenkins `--host --jenkins-user`; salesforce `--domain --app-id
-    /// --consumer-id`. Datadog's credential is `<API key>:<application key>`, Confluent's
-    /// `KEY:SECRET`, Jenkins' an API token of the user, Salesforce's another external client app's
-    /// `KEY:SECRET`. `--credential-expires` is when the credential itself ends at the vendor: health
-    /// warns two weeks before.
+    /// --consumer-id`; prismacloud `--prisma-api --service-account [--prisma-id] [--expires-days]`;
+    /// paddle `--api-key-id [--expires-days]`. Datadog's credential is `<API key>:<application
+    /// key>`, Confluent's `KEY:SECRET`, Jenkins' an API token of the user, Salesforce's another
+    /// external client app's `KEY:SECRET`, Prisma Cloud's a System Admin's access key as
+    /// `ACCESS_KEY_ID:SECRET`. Paddle's is the rotatable API key itself: Paddle can only rotate a
+    /// key with itself, so the registration holds the key, every rotation replaces it there, and
+    /// Paddle ends the old secret after the link's grace (a day at most; roll can't end it sooner).
+    /// `--credential-expires` is when the credential itself ends at the vendor: health warns two
+    /// weeks before.
     Add {
         name: String,
         /// sendgrid, twilio, okta, entra, auth0, gitlab, openai, datadog, cloudflare, databricks,
-        /// confluent, sonarqube, jenkins or salesforce.
+        /// confluent, sonarqube, jenkins, salesforce, prismacloud or paddle.
         #[arg(long)]
         vendor: String,
         /// A scope each key gets: SendGrid's (none: full access), GitLab's (one at least) or a
@@ -1403,7 +1408,8 @@ pub enum SaasCmd {
         /// default), 50 owner (groups).
         #[arg(long)]
         access_level: Option<u8>,
-        /// Each GitLab token's lifetime in days (default 365), or a SonarQube token's (none: no end).
+        /// Each GitLab token's lifetime in days (default 365), or a SonarQube token's, a Prisma Cloud
+        /// access key's or a Paddle secret's (none: no end, or the Paddle key's own).
         #[arg(long)]
         expires_days: Option<u16>,
         /// The OpenAI project (proj_…) whose service account keys rotate.
@@ -1446,6 +1452,18 @@ pub enum SaasCmd {
         /// The Salesforce app's OAuth consumer whose key and secret rotate.
         #[arg(long = "consumer-id")]
         consumer_id: Option<String>,
+        /// Prisma Cloud's API host for the tenant (api.prismacloud.io, api2.eu.prismacloud.io…).
+        #[arg(long = "prisma-api")]
+        prisma_api: Option<String>,
+        /// The Prisma Cloud service account whose access keys rotate.
+        #[arg(long = "service-account")]
+        service_account: Option<String>,
+        /// The Prisma Cloud tenant's Prisma id (for an access key that reaches several tenants).
+        #[arg(long = "prisma-id")]
+        prisma_id: Option<String>,
+        /// The Paddle API key (apikey_…) that rotates itself.
+        #[arg(long = "api-key-id")]
+        api_key_id: Option<String>,
         /// When the registered credential ends at the vendor: a date (2027-03-31), RFC 3339 or how
         /// long from now (90d).
         #[arg(long = "credential-expires")]
@@ -3554,7 +3572,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                     println!("{}  {:<16} {:<9} {}{ends}", s(&r["id"]), s(&r["name"]), s(&r["vendor"]), target.join(" "));
                 }
             }
-            SaasCmd::Add { name, vendor, scopes, account_sid, domain, app_id, tenant, client_id, object_id, app_client_id, host, gitlab_project, gitlab_group, access_level, expires_days, openai_project, site, key, account_id, template, lifetime_days, owner, resource, confluent_environment, sonar_kind, sonar_project, jenkins_user, consumer_id, credential_expires } => {
+            SaasCmd::Add { name, vendor, scopes, account_sid, domain, app_id, tenant, client_id, object_id, app_client_id, host, gitlab_project, gitlab_group, access_level, expires_days, openai_project, site, key, account_id, template, lifetime_days, owner, resource, confluent_environment, sonar_kind, sonar_project, jenkins_user, consumer_id, prisma_api, service_account, prisma_id, api_key_id, credential_expires } => {
                 let credential_expires_at = match credential_expires.as_deref().map(expiry).transpose()? {
                     Some(None) => anyhow::bail!("--credential-expires is when the credential ends: a date, RFC 3339 or how long from now"),
                     Some(Some(t)) => Some(t),
@@ -3564,7 +3582,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 if !scopes.is_empty() {
                     target.insert("scopes".into(), json!(scopes));
                 }
-                for (k, v) in [("account_sid", account_sid), ("domain", domain), ("app_id", app_id), ("tenant", tenant), ("client_id", client_id), ("object_id", object_id), ("app_client_id", app_client_id), ("host", host), ("project", gitlab_project), ("group", gitlab_group), ("project_id", openai_project), ("site", site), ("key", key), ("account_id", account_id), ("template", template), ("owner", owner), ("resource", resource), ("environment", confluent_environment), ("kind", sonar_kind), ("project", sonar_project), ("user", jenkins_user), ("consumer_id", consumer_id)] {
+                for (k, v) in [("account_sid", account_sid), ("domain", domain), ("app_id", app_id), ("tenant", tenant), ("client_id", client_id), ("object_id", object_id), ("app_client_id", app_client_id), ("host", host), ("project", gitlab_project), ("group", gitlab_group), ("project_id", openai_project), ("site", site), ("key", key), ("account_id", account_id), ("template", template), ("owner", owner), ("resource", resource), ("environment", confluent_environment), ("kind", sonar_kind), ("project", sonar_project), ("user", jenkins_user), ("consumer_id", consumer_id), ("api", prisma_api), ("service_account", service_account), ("prisma_id", prisma_id), ("api_key_id", api_key_id)] {
                     if let Some(v) = v {
                         target.insert(k.into(), json!(v));
                     }

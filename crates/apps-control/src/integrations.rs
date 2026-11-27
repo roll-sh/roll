@@ -272,7 +272,16 @@ pub struct Note {
     pub at: i64,
 }
 
-/// What answers a name under a project's preview domain that no roll apps environment holds (a
+/// roll previews' snapshots from a team's own tests (a Playwright test's PNG for the visual
+/// review): `POST /__roll/snapshot?name=` on a preview's host, with the project's bypass secret.
+/// rolld fills it with roll previews' engine, which checks the preview (`env`, `pv-<id>`) runs on
+/// `service` before taking anything. Its answer is the snapshot's (`{page, head}`); a bad name is
+/// a `BadRequest`, a preview that can't take one (full, going, another service's) a `Conflict`.
+#[async_trait]
+pub trait PreviewSnapshots: Send + Sync {
+    async fn snapshot(&self, service: &str, env: &str, name: &str, png: bytes::Bytes) -> crate::Result<serde_json::Value>;
+}
+
 /// Writes a custom domain's records at the customer's DNS provider with a token of theirs (rolld:
 /// Cloudflare, through roll-edge's client). The token is used for one call and never kept.
 #[async_trait]
@@ -284,6 +293,7 @@ pub trait DnsWriter: Send + Sync {
     fn api(&self) -> &'static str;
 }
 
+/// What answers a name under a project's preview domain that no roll apps environment holds (a
 /// preview on roll's own runtime, from roll.toml's `[preview]`): rolld fills it with roll
 /// previews' router, called in process with the request as it came (its Host unchanged).
 /// Unset: those names are a 404.
@@ -297,23 +307,25 @@ pub trait PreviewRouter: Send + Sync {
 #[async_trait]
 pub trait FeedbackNotes: Send + Sync {
     /// `env` (`pv-<id>`)'s notes on `path`, oldest first; none for a name that isn't a live
-    /// preview's.
-    async fn notes(&self, env: &str, path: &str) -> anyhow::Result<Vec<Note>>;
+    /// preview's, or one that doesn't run on `service` (roll apps' service id: a preview found by
+    /// its environment's name alone could be someone else's).
+    async fn notes(&self, service: &str, env: &str, path: &str) -> anyhow::Result<Vec<Note>>;
 }
 
 /// roll previews' share links (someone outside the team, until the link ends) for a preview
 /// environment's own host (rolld fills it from `roll_previews::Engine`). Unset: none taken. Every
-/// call checks the link again, so a revoked or ended one stops at once.
+/// call checks the link again, so a revoked or ended one stops at once. Each is told the roll apps
+/// service the request came to, and refuses a preview that doesn't run on it.
 #[async_trait]
 pub trait PreviewShares: Send + Sync {
     /// Link `token` to `env` (`pv-<id>`)'s preview, if it's live. `followed`: the link itself was
     /// followed (previews counts that once a day).
-    async fn live(&self, env: &str, token: &str, followed: bool) -> Option<Share>;
+    async fn live(&self, service: &str, env: &str, token: &str, followed: bool) -> Option<Share>;
     /// A guest's note from the page's button (its JSON body) through link `token`: the note's id,
     /// or why not (an HTTP status and a line).
-    async fn note(&self, env: &str, token: &str, body: &[u8]) -> Result<String, (u16, String)>;
+    async fn note(&self, service: &str, env: &str, token: &str, body: &[u8]) -> Result<String, (u16, String)>;
     /// The notes on `path` left through link `token`: all its guests see.
-    async fn notes(&self, env: &str, token: &str, path: &str) -> Vec<Note>;
+    async fn notes(&self, service: &str, env: &str, token: &str, path: &str) -> Vec<Note>;
 }
 
 /// A live share link.
