@@ -4519,7 +4519,19 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 None => println!("No one may push past a pre-receive hook: `git push -o breakglass` is refused"),
                 Some(a) => {
                     let who: Vec<&str> = a.iter().filter_map(Value::as_str).collect();
-                    println!("May push past a pre-receive hook (audited): {}", who.join(", "));
+                    // Each binding with its hook token's name (a set's answer has them), so a token
+                    // that isn't the hook stands out.
+                    let named: Vec<String> = who
+                        .iter()
+                        .map(|w| {
+                            let token = w.find("@token:").map_or(*w, |i| &w[i + 1..]);
+                            match v["breakglass_hooks"][token].as_str() {
+                                Some(name) => format!("{w} ({name})"),
+                                None => w.to_string(),
+                            }
+                        })
+                        .collect();
+                    println!("May push past a pre-receive hook (audited): {}", named.join(", "));
                     // A list from before logins were bound: each bare login counts only through a
                     // token whose hook named it, until the list is set again.
                     if who.iter().any(|w| *w != "*" && !w.starts_with("token:") && !w.contains("@token:")) {
@@ -5675,12 +5687,13 @@ fn write_private(path: &std::path::Path, text: &str) -> anyhow::Result<()> {
 /// metadata server (`ROLL_IDENTITY_KIND=gcp` or `azure`); a machine identity's credential
 /// (`ROLL_IDENTITY_KIND=machine`, or a bootstrap token set: vm_login.rs); without any (or with
 /// `ROLL_IDENTITY_KIND=aws`), a `GetCallerIdentity` signed with the machine's AWS credentials
-/// (aws_login.rs). A short-lived secrets token and when it ends (ms).
-pub async fn identity_login(api: &Api, identity: &str) -> anyhow::Result<(String, i64)> {
+/// (aws_login.rs). A short-lived secrets token and when it ends (ms). `stale`: the token in use
+/// (refused, or being renewed), which a machine's kept login mustn't hand back.
+pub async fn identity_login(api: &Api, identity: &str, stale: Option<&str>) -> anyhow::Result<(String, i64)> {
     let env = |k: &str| std::env::var(k).ok().filter(|t| !t.trim().is_empty());
     let kind = env("ROLL_IDENTITY_KIND").map(|k| k.trim().to_string());
     if vm_login::is_machine(kind.as_deref()) {
-        return vm_login::machine_login(api, identity).await;
+        return vm_login::machine_login(api, identity, stale).await;
     }
     let oidc_source = ["ROLL_OIDC_TOKEN", "ROLL_OIDC_TOKEN_FILE", "ACTIONS_ID_TOKEN_REQUEST_URL", "SYSTEM_OIDCREQUESTURI"].iter().any(|k| env(k).is_some());
     let aws = match kind.as_deref() {
@@ -5813,9 +5826,9 @@ fn now_ms() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
 }
 
-/// A login with a deadline.
-async fn login_within(api: &Api, identity: &str) -> anyhow::Result<(String, i64)> {
-    match tokio::time::timeout(LOGIN_TIMEOUT, identity_login(api, identity)).await {
+/// A login with a deadline, never handing back `stale` (the token it replaces).
+async fn login_within(api: &Api, identity: &str, stale: &str) -> anyhow::Result<(String, i64)> {
+    match tokio::time::timeout(LOGIN_TIMEOUT, identity_login(api, identity, Some(stale).filter(|s| !s.is_empty()))).await {
         Ok(r) => r,
         Err(elapsed) => Err(anyhow::Error::new(elapsed).context(format!("no answer in {} s", LOGIN_TIMEOUT.as_secs()))),
     }
@@ -5823,7 +5836,7 @@ async fn login_within(api: &Api, identity: &str) -> anyhow::Result<(String, i64)
 
 impl Relogin {
     pub async fn new(api: &Api, identity: &str) -> anyhow::Result<Relogin> {
-        let (token, expires_at) = identity_login(api, identity).await?;
+        let (token, expires_at) = identity_login(api, identity, None).await?;
         Ok(Relogin { identity: identity.to_string(), first: token.clone(), held: tokio::sync::Mutex::new(Held::new(token, expires_at)) })
     }
 
@@ -5841,13 +5854,13 @@ impl Relogin {
         if now >= held.ends {
             // Ended (or refused): nothing to go on with. Log in now.
             // The cause is kept: `--fallback` tells no answer from a refusal by it.
-            let (token, expires_at) = login_within(api, &self.identity).await.with_context(|| format!("logging in again as {} failed", self.identity))?;
+            let (token, expires_at) = login_within(api, &self.identity, &held.token).await.with_context(|| format!("logging in again as {} failed", self.identity))?;
             held.store(token, expires_at);
         } else if now >= held.renew && held.retry.is_none_or(|r| now >= r) && held.renewing.as_ref().is_none_or(|h| h.is_finished()) {
             let (me, anon) = (self.clone(), Api { base: api.base.clone(), http: api.http.clone(), key: None, headers: api.headers.clone(), login: None });
-            let started = held.generation;
+            let (started, stale) = (held.generation, held.token.clone());
             held.renewing = Some(tokio::spawn(async move {
-                let got = login_within(&anon, &me.identity).await;
+                let got = login_within(&anon, &me.identity, &stale).await;
                 let mut held = me.held.lock().await;
                 if held.generation != started {
                     // A newer login was stored meanwhile (one in the foreground): it stays.

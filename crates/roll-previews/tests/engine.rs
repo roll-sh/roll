@@ -506,6 +506,15 @@ async fn a_change_queued_to_land_is_rehearsed_where_the_project_asks() {
     quiet.engine.pass().await.unwrap();
     let q = quiet.engine.store.row_by_change("chg_rq2").unwrap().unwrap();
     assert!(quiet.engine.store.preview(&q.id).unwrap().rehearsal.is_none());
+    // Where the project checks its releases: at every head, queued or not, and the change is told
+    // the rule with how it went (its landing blocker reads both).
+    let checked = env(json!({ "enabled": true, "release": { "image": "node:22", "run": "npm run migrate" }, "release_checks": "required" }));
+    checked.code.open(change("chg_rc", 4));
+    checked.engine.pass().await.unwrap();
+    let c = checked.engine.store.row_by_change("chg_rc").unwrap().unwrap();
+    let v = checked.engine.store.preview(&c.id).unwrap();
+    assert_eq!((v.rehearsal.as_ref().and_then(|x| x.ok), v.release_checks.as_deref()), (Some(true), Some("required")), "rehearsed at its head, not queued");
+    assert!(checked.engine.store.settings(&checked.project).unwrap().patched(&json!({ "release": null })).is_err(), "a rule needs a release");
 }
 
 /// Snapshots from the team's own tests (Argos's and Percy's SDKs): a picture sent to a change's

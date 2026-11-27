@@ -4141,6 +4141,15 @@ impl Store {
             crate::settings::RegressionsRule::Check => Some("check".to_string()),
             crate::settings::RegressionsRule::Required => Some("required".to_string()),
         };
+        // Only where there's a Postgres branch to rehearse on: a rule that could never be met
+        // holds nothing back.
+        let rehearsable = self.resources(&r.id)?.iter().any(|x| x.kind == crate::Kind::Postgres && x.r#ref.is_some());
+        let release_checks = match settings.release_checks {
+            _ if !rehearsable => None,
+            crate::settings::ReleaseChecksRule::Off => None,
+            crate::settings::ReleaseChecksRule::Check => Some("check".to_string()),
+            crate::settings::ReleaseChecksRule::Required => Some("required".to_string()),
+        };
         // An acceptance counts at its head, for what it accepted (more at that head asks again), and
         // for a required rule only a person's.
         let showing = crate::RegressionsAccepted::of(slower_routes.as_ref(), new_errors.as_ref());
@@ -4231,6 +4240,7 @@ impl Store {
             served_secrets,
             skipped,
             regressions,
+            release_checks,
             regressions_accepted,
             regressions_compared,
             intercepted,

@@ -173,6 +173,8 @@ export interface Preview {
   browser_checks_rule?: "check" | "required" | null;
   /** The project's rule for regressions against main (`check`, `required`). */
   regressions?: "check" | "required" | null;
+  /** The project's rule for its release at each head (where there's a Postgres branch to rehearse on). */
+  release_checks?: "check" | "required" | null;
   /** Who accepted its regressions at its head. */
   regressions_accepted?: { head: string; by: string; at: number } | null;
   /** Compared with main's preview at its head (errors; routes too with traces): until then nothing says it has no regressions. */
@@ -526,6 +528,8 @@ export interface PreviewSettings {
   release?: PreviewJob | null;
   /** When a change is queued to land, its release is rehearsed on today's data (`…/rehearse`, by roll). */
   rehearse_when_queued?: boolean;
+  /** check: its release rehearsed on today's data at every head; required: also a landing blocker. */
+  release_checks?: "off" | "check" | "required";
   /** Run once when the preview is deleted, before its services and branches go (cleanup outside roll). */
   teardown?: PreviewJob | null;
   /** NoSQL column masks: `"nosql:<ref>"` → `{"keyspace.table.column": "mask_default()"}`. */

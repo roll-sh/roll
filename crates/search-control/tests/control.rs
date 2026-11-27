@@ -4227,6 +4227,37 @@ async fn a_wildcard_key_reaches_no_watch_history() {
     assert!(v["hits"]["hits"][0]["_source"].get("leaked").is_none(), "{v}");
 }
 
+/// A restricted data stream's failure store stays restricted whichever name reaches it: the
+/// stream's `::failures`, a failure index named directly, or `*::failures`. A failure store's
+/// rollover takes nothing from its body, as a data stream's doesn't.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restricted_streams_failure_store_needs_allow_restricted_indices() {
+    use reqwest::Method;
+    let e = env().await;
+    let c = e.post("/v1/search/clusters", json!({"name": "fsx"})).await;
+    let (u, p) = creds(&c);
+    for (m, path, body) in [
+        (Method::PUT, "/_index_template/fleet-x", json!({"index_patterns": [".fleet-x*"], "data_stream": {}, "template": {"data_stream_options": {"failure_store": {"enabled": true}}}})),
+        (Method::PUT, "/_data_stream/.fleet-x", Value::Null),
+        (Method::POST, "/.fleet-x/_doc?refresh=true", json!({"@timestamp": "not a date"})),
+        (Method::PUT, "/_security/role/everything", json!({"indices": [{"names": ["*"], "privileges": ["read", "read_failure_store"]}]})),
+        (Method::PUT, "/_security/user/ev", json!({"password": "ev-pass-1", "roles": ["everything"]})),
+    ] {
+        let (s, v) = e.es(&u, &p, m, path, Some(body).filter(|b| !b.is_null())).await;
+        assert!(s < 300, "{path}: {v}");
+    }
+    let (_, v) = e.es(&u, &p, Method::GET, "/_data_stream/.fleet-x", None).await;
+    let failures = v["data_streams"][0]["failure_store"]["indices"][0]["index_name"].as_str().unwrap_or_else(|| panic!("a failure index: {v}")).to_string();
+    for path in ["/.fleet-x::failures/_search".to_string(), format!("/{failures}/_search")] {
+        let (s, v) = e.es("ev@fsx", "ev-pass-1", Method::POST, &path, Some(json!({}))).await;
+        assert_eq!(s, 403, "{path}: {v}");
+    }
+    let (s, v) = e.es("ev@fsx", "ev-pass-1", Method::POST, "/*::failures/_search?expand_wildcards=all", Some(json!({}))).await;
+    assert!(s == 200 && !v.to_string().contains("not a date"), "{s} {v}");
+    let (s, v) = e.es(&u, &p, Method::POST, "/.fleet-x::failures/_rollover", Some(json!({"aliases": {"fx": {}}}))).await;
+    assert_eq!(s, 400, "{v}");
+}
+
 /// Names are authorized as the request resolves them. An alias's index comes from wherever
 /// the request names it (the body's `index` too), and an alias can't reach more than its index
 /// grants; date math (`<.async-search>`) and `::failures` are resolved before the check; a

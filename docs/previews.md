@@ -359,6 +359,15 @@ state. A pass of the reconciler:
        says how it went beside the release's time, at the head it's for only (one asked at an
        earlier head never runs, and an earlier head's outcome isn't shown); a failure is said
        (masked, one line), never the converge's, and it runs once a head. With
+       `release_checks` (`check` or `required`, off by default) roll rehearses it at every head of
+       a change instead, queued or not, and with `required` the change can't land in roll until,
+       at its head, the rehearsal passed and main's code didn't break on its migrated data (step
+       4e; `release` on the change's blockers: "its release hasn't been rehearsed on today's data
+       at its head yet", "its release failed on today's data: …", "main's code breaks on its
+       migrated data: /orders (500): expand first, contract in a later change"). Rehearsed at each
+       head before it's queued, the blocker never waits on the queue that would ask for it; a
+       preview with no Postgres branch has nothing to rehearse, so the rule holds nothing back
+       there (`queue.rs::blockers_keep_changes_out_of_the_queue`, the `release` case). With
        `rehearse_when_queued` (off by default: each is a fresh branch, its masking and a release
        run) roll asks for one itself when the change is queued to land in roll code, at that
        head: the change becoming queued wakes a settled preview at once, before the queue lands it
@@ -2234,6 +2243,7 @@ type Preview = {
   served_secrets?: { key: string; path: string }[]; // its secret values its pages serve at its head: names and where, never values
   skipped?: { pages?: string[]; stories?: number; first_stories?: string[]; by_files?: true }; // what its latest screenshot run left out at its head: pages past a run's ten, stories it didn't take (the first 10 by id); by_files: it chose them by the change's files alone, its Storybook serving no module graph (--stats-json)
   regressions?: "check" | "required" | null;
+  release_checks?: "check" | "required" | null; // the project's rule for its release at each head, where it has a Postgres branch to rehearse on
   regressions_accepted?: { head: string; by: string; at: number } | null;
   regressions_compared?: boolean;     // compared with main's preview at its head (errors; routes too with traces)
   timeline?: { head: string; started_at: number; steps: { step: "data" | "copies" | "setup" | "deploy" | "checks" | "ready"; at: number }[] };
@@ -2289,6 +2299,7 @@ type Settings = {
   seed: Job | null;                   // once on fresh data
   release: Job | null;                // at each new head, before services deploy (migrations)
   rehearse_when_queued?: boolean;      // when a change is queued to land, its release rehearsed on today's data by roll (false)
+  release_checks?: "off" | "check" | "required"; // check: its release rehearsed on today's data at every head; required: also keeps it from landing until, at its head, that passed and main's code didn't break on its migrated data (needs release; "off")
   teardown: Job | null;               // once when the preview goes, before its services and branches
   masking: Record<string, Record<string, string>>; // "postgres:<ref>" → {"schema.table.column": "email"}, "nosql:<ref>" → {"ks.table.column": "mask_default()"}, "search:<ref>" → {"index.field": "redact" | "remove" | "email"} (redact and email only on a text-like field of the parent's: a number, a date or a vector is refused when set, use remove; an index whose name has dots, `logs.2024.user.email`, is split off at the longest name the cluster has)
 };
@@ -2309,6 +2320,15 @@ type Settings = {
   with how its pages compare with main's; attaching the same link again updates it. A name that
   isn't an issue of the workspace fails that run's step and nothing else.
   `a_changes_linear_issues_from_its_title_and_branch`, `linear-templates.test.ts`.
+- **Jira and Asana** (Marker.io's notes to a tracker): the gallery's "Preview notes as Jira issues"
+  and "Preview notes as Asana tasks" (`preview-note-to-jira`, `preview-note-to-asana`) take each
+  note left on a change's preview (the `review` trigger, a body that's a note's, not a reply's)
+  to the team's tracker with automations' `webhook` step: public addresses only, no redirects,
+  the answer read up to 1 MiB, and the credential an automation secret (`{{ secrets.jira }}`,
+  base64 of email:API token; `{{ secrets.asana }}`, a personal access token), never in the
+  spec. The owner sets their site or project; the issue's summary and description are the note
+  with its page and element (`automation-templates.test.ts`). A GitHub-mirrored repo's own
+  GitHub Issues take notes natively (a note's work item).
 - **GitHub PR**, through roll code's GitHub outbox (durable, retried, sent on the repo's owner):
   - one comment, edited in place, with a table of services, URLs, status, data branches and cost;
   - a commit status `roll/preview` on the head. A preview removed before it was ready (the change
@@ -3132,29 +3152,25 @@ variables roll makes from a branch's URL too (it could run on the preview's own 
 change becoming queued wakes its settled preview, a rehearsal shows only at its head, and schema
 overlaps stay within a repo.
 
-1. **Snapshots, notes and share links on roll apps services, in review**: roll apps' hooks, the
-   preview checked to run on that service.
-2. **Notes to Jira, GitHub Issues or Asana** (Marker.io, Netlify's Drawer; S): a GitHub issue on a
-   mirrored repo, in review (a note's work item by roll landed, #1196); Jira and Asana next.
-3. **Replaying recorded traffic against the preview and main** (Signadot, Speedscale; L): writes
+1. **Notes to Jira and Asana, in review**: the gallery's templates (GitHub Issues and roll's work items
+   landed, #1196, #1209).
+2. **Replaying recorded traffic against the preview and main** (Signadot, Speedscale; L): writes
    replay safely on branched data; capturing production's requests needs its privacy designed
    first.
-4. **A rehearsal that holds a change back** (a required rule): rehearsed at each head, so the
-   landing blocker never waits on the queue that would ask for it.
-5. **Older pushes past the last three, started on demand**; **what a note's reviewer saw, from
+3. **Older pushes past the last three, started on demand**; **what a note's reviewer saw, from
    their own browser** (Jam, Marker.io).
-6. **Restore points for search and buckets**: search's once roll search's `reset {from}` is in
+4. **Restore points for search and buckets**: search's once roll search's `reset {from}` is in
    (its Next 32); buckets need a put-back on roll storage's side.
-7. **Previews for the members thread's next products**: once roll apps' and roll search's routes
+5. **Previews for the members thread's next products**: once roll apps' and roll search's routes
    become member routes (docs/members.md, v1.1).
-8. **Watches on pg-control**: the data step's Postgres compute start; cheap branches on ext4
+6. **Watches on pg-control**: the data step's Postgres compute start; cheap branches on ext4
    through overlay volumes; recovery to a time seconds old (unowned).
 
 Not to build: more lab checks on the first page (each adds noise to every pull request), or a
 Kubernetes cluster per preview (roll apps' Compose import covers multi-service apps, and a
 cluster would break "costs nothing asleep").
 
-Landed 2026-11-27, early: a failed story shard's share of the touched stories counted as untaken (#1175), and masking that's safe by default for NoSQL and search, with the project told of each column masked by default (#1177), and main's code on a copy of a change's migrated data, on roll apps (#1183) and roll's runtime (#1185), webhook URLs into private previews (#1187), the twelfth review's fixes (#1200), snapshots from the team's own tests (#1192), a note's work item made by roll (#1196), and a team note opening a GitHub issue on a mirrored repo (#1209).
+Landed 2026-11-27, early: a failed story shard's share of the touched stories counted as untaken (#1175), and masking that's safe by default for NoSQL and search, with the project told of each column masked by default (#1177), and main's code on a copy of a change's migrated data, on roll apps (#1183) and roll's runtime (#1185), webhook URLs into private previews (#1187), the twelfth review's fixes (#1200), snapshots from the team's own tests (#1192), a note's work item made by roll (#1196), a team note opening a GitHub issue on a mirrored repo (#1209), and snapshots, notes and share links on roll apps services checked by service (#1212), and release_checks (#1204).
 
 Landed 2026-11-26, midday: restore points for streams (#1112), the TurboSnap test's race under
 load (#1114), the tenth review's fixes (#1119), the visual review holding on stories a change
