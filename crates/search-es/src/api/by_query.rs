@@ -989,11 +989,11 @@ fn run_doc_script(ctx: &Ctx, bound: &crate::scripting::Bound, kind: CtxKind, d: 
 }
 
 /// `refresh`: the written indices, by uuid.
-/// `written_only` (a reindex): the refresh OpenSearch runs as the user is of the indices written
-/// to, not of the request's.
+/// `written_only` (a reindex): the refresh that runs as the caller is of the indices written to,
+/// not of the request's.
 fn refresh_touched(ctx: &Ctx<'_>, refresh: bool, touched: &[String], written_only: bool) -> EsResult<()> {
     if refresh {
-        // OpenSearch runs the refresh as the user, once the documents are written.
+        // The refresh runs as the caller, once the documents are written.
         let written: Option<Vec<String>> = written_only.then(|| {
             let st = ctx.state();
             st.metadata.indices.values().filter(|i| touched.contains(&i.uuid)).map(|i| i.name.clone()).collect()

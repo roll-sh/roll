@@ -802,10 +802,10 @@ fn meta_of(target: &Target, args: &WriteArgs, id: &str) -> Map {
 /// pipeline ends. Failures record the target their pipeline started from (whose failure store
 /// takes the document).
 #[allow(clippy::too_many_arguments)]
-pub async fn run_write(cluster: &Cluster, target: Target, args: &WriteArgs, id: &str, value: Value, first: Option<String>, fin: Option<String>, now_ms: i64, source_len: usize) -> EsResult<Outcome> {
+pub async fn run_write(cluster: &Cluster, target: Target, args: &WriteArgs, id: &str, value: Value, first: Option<String>, fin: Option<String>, now_ms: i64, source_len: usize, moved: Option<&super::MoveCheck<'_>>) -> EsResult<Outcome> {
     let started = std::time::Instant::now();
     let mut first_metrics = None;
-    let out = run_write_counted(cluster, target, args, id, value, first, fin, now_ms, source_len, &mut first_metrics).await;
+    let out = run_write_counted(cluster, target, args, id, value, first, fin, now_ms, source_len, &mut first_metrics, moved).await;
     cluster.ingest.total.record(started, out.is_err());
     if let (Some(m), Ok(Outcome::Index(_, _, source, Some(i)))) = (&first_metrics, &out) {
         m.produced.fetch_add(request_bytes(i.args.id.as_deref(), source.len()), Ordering::Relaxed);
@@ -833,6 +833,7 @@ async fn run_write_counted(
     now_ms: i64,
     source_len: usize,
     first_metrics: &mut Option<Arc<Metric>>,
+    moved: Option<&super::MoveCheck<'_>>,
 ) -> EsResult<Outcome> {
     let Value::Obj(src) = value else { return Ok(Outcome::Index(target, Value::Obj(Map::new()), Bytes::new(), None)) };
     // Enrich processors read in-memory tables of the enrich indices.
@@ -918,6 +919,11 @@ async fn run_write_counted(
         let mut a = args.clone();
         a.pipeline = None;
         let existed = crate::write::resolve_existing(&cluster.state(), &new_index).is_some();
+        // The write is authorized where it now goes, and its creation there when it would
+        // create it, before anything is created.
+        if let Some(check) = moved {
+            check(&new_index, !existed).map_err(|e| fail(e, vec![pid.clone()]).with_hidden("item_index", Value::Str(new_index.clone())))?;
+        }
         current = crate::write::resolve_target(cluster, &new_index, &a, now_ms).await?;
         if !existed {
             created.push(new_index.clone());

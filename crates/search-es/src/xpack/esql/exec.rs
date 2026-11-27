@@ -4804,6 +4804,8 @@ pub(super) async fn load_resources(cluster: &Cluster, text: &str, cmds: &[Cmd], 
                     continue;
                 }
                 let Some(fields_in_order) = policy_fields(&cluster.state(), &name) else { continue };
+                // Its table is read here, as the system: the caller must be allowed it first.
+                super::enrich_allowed(cluster, &name)?;
                 if !warmed {
                     crate::xpack::enrich::warm(cluster).await;
                     warmed = true;
@@ -4826,6 +4828,17 @@ pub(super) async fn load_resources(cluster: &Cluster, text: &str, cmds: &[Cmd], 
             }
             Cmd::LookupJoin { index, index_at, .. } => {
                 if res.lookup.contains_key(index) {
+                    continue;
+                }
+                // What the caller can't read is an unknown index to it ("Unknown index" when the
+                // join compiles): nothing about its mode or what it resolves to first. Its field
+                // caps, read as the caller, say which indices it may read.
+                let readable = internal::call(cluster, "GET", &format!("/{}/_field_caps?fields=_id&ignore_unavailable=true&allow_no_indices=true", encode(index)), None)
+                    .await
+                    .ok()
+                    .and_then(|v| v.get("indices").and_then(Value::as_array).map(|a| !a.is_empty()))
+                    .unwrap_or(false);
+                if !readable {
                     continue;
                 }
                 // The name may be an index, an alias or a data stream: it must resolve to one

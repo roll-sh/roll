@@ -886,14 +886,22 @@ pub(crate) fn denied_lookup(eff: &Effective, st: &crate::meta::ClusterState, now
 }
 
 /// A write an ingest pipeline moved to `index` (`_index`, `reroute`): authorized there as an
-/// index write, as Elasticsearch authorizes each bulk item at the index it finally goes to.
-pub fn check_moved_write(ctx: &Ctx, index: &str) -> EsResult<()> {
+/// index write, as Elasticsearch authorizes each bulk item at the index it finally goes to, and
+/// (`creates`: nothing is there yet) its creation, as an item that creates its index is
+/// ([`check_writes`]), before the index is created.
+pub fn check_moved_write(ctx: &Ctx, index: &str, creates: bool) -> EsResult<()> {
     const ACTION: &str = "indices:data/write/index";
     let Some(p) = ctx.principal.get() else { return Ok(()) };
     if p.is_superuser() {
         return Ok(());
     }
     let eff = effective(&file_roles(ctx.cluster), &ctx.state(), p);
+    if creates {
+        let create = if p.os().is_some() { "indices:admin/create" } else { "indices:admin/auto_create" };
+        if !eff.allows_index(create, index) {
+            return Err(denied(p, create, Some(&[index.to_string()])));
+        }
+    }
     if eff.allows_index(ACTION, index) { Ok(()) } else { Err(denied(p, ACTION, Some(&[index.to_string()]))) }
 }
 
@@ -1025,18 +1033,21 @@ fn authorize_action(ctx: &Ctx) -> EsResult<Option<String>> {
     }
 }
 
-/// The `indices:admin/refresh` an OpenSearch user's `refresh=true` by-query request runs as the
-/// user once its documents are written (the plugin denies it then, after the writes): on the
+/// The `indices:admin/refresh` a `refresh=true` by-query request runs as its caller once its
+/// documents are written (Elasticsearch's `AbstractAsyncBulkByScrollAction` refreshes with the
+/// caller's client, the OpenSearch plugin denies it then too: after the writes): on the
 /// request's indices, or on `written` (a reindex: the indices it wrote to).
 pub fn check_refresh(ctx: &Ctx, written: Option<&[String]>) -> EsResult<()> {
     const REFRESH: &str = "indices:admin/refresh";
-    let Some(p) = ctx.principal.get().filter(|p| !p.is_superuser() && p.os().is_some()) else { return Ok(()) };
+    let Some(p) = ctx.principal.get().filter(|p| !p.is_superuser()) else { return Ok(()) };
     let eff = effective(&file_roles(ctx.cluster), &ctx.state(), p);
     let indices = match written {
         Some(w) => w.to_vec(),
         None => request_indices(ctx),
     };
-    if indices.iter().all(|i| eff.allows_index(REFRESH, i)) { Ok(()) } else { Err(denied(p, REFRESH, None)) }
+    // Elasticsearch's 403 names the indices; the plugin's names none.
+    let denied_on: Vec<String> = indices.into_iter().filter(|i| !eff.allows_index(REFRESH, i)).collect();
+    if denied_on.is_empty() { Ok(()) } else { Err(denied(p, REFRESH, Some(&denied_on))) }
 }
 
 /// APIs Elasticsearch authorizes by action name only (`RBACEngine.shouldAuthorizeIndexActionNameOnly`):
@@ -1568,6 +1579,24 @@ pub fn check_cluster_action_of(cluster: &crate::Cluster, p: &Principal, action: 
     Err(denied(p, action, None))
 }
 
+/// Refuses unless the request's principal may run `action` on index `index` (a name, as given).
+pub fn check_index_action(ctx: &Ctx, action: &str, index: &str) -> EsResult<()> {
+    if allows_indices(ctx, action, std::slice::from_ref(&index.to_string())) {
+        return Ok(());
+    }
+    Err(denied(principal(ctx), action, Some(&[index.to_string()])))
+}
+
+/// Whether the request's principal may run `action` on every index of `indices` (names).
+pub fn allows_indices(ctx: &Ctx, action: &str, indices: &[String]) -> bool {
+    let p = principal(ctx);
+    if p.is_superuser() {
+        return true;
+    }
+    let eff = effective(&file_roles(ctx.cluster), &ctx.state(), p);
+    indices.iter().all(|i| eff.allows_index(action, i))
+}
+
 /// Elasticsearch's 403 for an action the principal's roles don't grant.
 fn denied(p: &Principal, action: &str, indices: Option<&[String]>) -> EsError {
     audit::access_denied(p, action, indices);
@@ -1610,11 +1639,11 @@ fn request_indices(ctx: &Ctx) -> Vec<String> {
     if api == "search_application.search" {
         exprs.extend(ctx.path_param("name").map(str::to_string));
     }
-    // Wildcards as the request expands them (`expand_wildcards=all` reaches hidden indices);
-    // no index is `_all`, dot-prefixed indices that aren't hidden included, as Elasticsearch
-    // resolves it (and [`check_all`]).
-    let default = crate::meta::resolve::IndicesOptions::LENIENT_EXPAND_OPEN;
-    let opts = ctx.indices_options(default).unwrap_or(default);
+    // Wildcards as the API expands them: its handler's defaults, then the request's parameters
+    // (`expand_wildcards=all` reaches hidden indices). Naming none, the API acts on `_all` as its
+    // handler expands it, dot-prefixed indices that aren't hidden included, as Elasticsearch
+    // resolves it (and [`check_all`]): `PUT /_settings` reaches closed ones too.
+    let opts = handler_expansion(ctx);
     if exprs.is_empty() {
         return crate::meta::resolve::resolve(&st, &["_all".to_string()], &opts, ctx.now_ms).unwrap_or_default();
     }
@@ -1631,6 +1660,25 @@ fn request_indices(ctx: &Ctx) -> Vec<String> {
     out.sort();
     out.dedup();
     out
+}
+
+/// How an index API that isn't narrowed expands its wildcards, as its handler does: the
+/// indices it authorizes are every index the API then acts on. An API that expanded more than
+/// this (closed or hidden indices) would act on indices nothing authorized: `_open` reaches
+/// closed ones by default, `PUT _settings`, `PUT _mapping` and index deletes open and closed
+/// ones, and ILM's index APIs every index whatever the request says. Only the expansion is the
+/// handler's; resolution stays lenient (a strict handler fails on its own).
+fn handler_expansion(ctx: &Ctx) -> crate::meta::resolve::IndicesOptions {
+    use crate::meta::resolve::IndicesOptions;
+    let lenient = IndicesOptions::LENIENT_EXPAND_OPEN;
+    let defaults = match ctx.api.name() {
+        // `/{index}/_settings/index.uuid?expand_wildcards=open,closed,hidden` (`ilm::resolve`).
+        "ilm.remove_policy" | "ilm.retry" | "ilm.explain_lifecycle" => return IndicesOptions { expand_closed: true, expand_hidden: true, ..lenient },
+        "indices.open" => IndicesOptions { expand_open: false, expand_closed: true, ..lenient },
+        "indices.put_settings" | "indices.put_mapping" | "indices.delete" | "indices.shard_stores" | "indices.delete_alias" => IndicesOptions { expand_closed: true, ..lenient },
+        _ => lenient,
+    };
+    ctx.indices_options(defaults).unwrap_or(defaults)
 }
 
 /// The expressions naming a request's targets: its `{index}`, the `{name}` of the data

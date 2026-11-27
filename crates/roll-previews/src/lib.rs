@@ -450,6 +450,9 @@ pub struct Preview {
     /// check against today's production): asked for at a head, then how it went.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rehearsal: Option<Rehearsal>,
+    /// Main's code on a copy of its migrated data, at its head (see [`MainOnChange`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub main_on_change: Option<MainOnChange>,
     /// Columns its branches were masked with by default (they look like people's data, and no
     /// rule names them): a rule, or `keep`, says otherwise.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1338,6 +1341,39 @@ pub enum VisualState {
     /// Someone refused a page at this head (Chromatic's Deny): it fails until a new head, or
     /// until someone accepts that page.
     Refused,
+}
+
+/// Main's code on a copy of a change's migrated data, at a head (pgroll's expand/contract,
+/// tested): main's live builds on copies of the change's Postgres branches, its pages read there
+/// and on main's preview.
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+pub struct MainOnChange {
+    pub head: String,
+    pub at: i64,
+    pub ms: i64,
+    #[serde(default)]
+    pub pages: Vec<MainOnChangePage>,
+    /// Why it couldn't run (one line, masked): no preview of main, no build that can run on a
+    /// copy, a branch that can't be copied.
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// One page main's code was asked for on the change's data (`status`) and on main's
+/// (`main_status`); 0 is no answer.
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+pub struct MainOnChangePage {
+    pub service: String,
+    pub path: String,
+    pub status: u16,
+    pub main_status: u16,
+}
+
+impl MainOnChangePage {
+    /// It answers on main's data but fails on the change's (a 5xx, or no answer).
+    pub fn broke(&self) -> bool {
+        (1..500).contains(&self.main_status) && (self.status == 0 || self.status >= 500)
+    }
 }
 
 /// A change's release run again on fresh branches of its Postgres parents, as they are now
