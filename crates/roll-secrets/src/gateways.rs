@@ -48,6 +48,7 @@ pub fn rule(gateway: &str) -> roll_auth::scope::Rule {
         environments: None,
         paths: None,
         unprotected: false,
+        keys: None,
         actions: std::collections::BTreeMap::from([(scope::Action::Write, scope::Effect::Allow)]),
     }
 }

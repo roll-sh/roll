@@ -359,6 +359,7 @@ type Rule = {
   resources: "*" | Selector[];      // "*": every resource, including ones made later
   environments?: string[];          // only resources in these environments
   paths?: string[];                 // only resources under these paths (secrets' folders)
+  keys?: string[];                  // secrets only: only these keys of those folders (exact names)
   actions: Partial<Record<Action, "allow" | "ask">>;
 };
 
@@ -651,6 +652,37 @@ key-limited token gets a 403 there), and roll secrets asks the grant about each 
 (`Grants::reaches_key`); with none reachable it's a 403. Creating a key stays the project's
 (`roll_auth::scope::sub_resources` lists the products that have such names; secrets' rows name
 `{name}` with `.index("name")`).
+
+### Secrets' keys
+
+A secrets rule can reach only some keys of the folders it names: `keys: ["STRIPE_KEY"]`, 1–64
+exact key names (no patterns: `STRIPE_*` is refused), on product `secrets` only. 1Password and
+Doppler grant one item or secret the same way; before, the smallest grant was a folder.
+
+- **Matching** (`Rule::matches`): a request about one key (`…/secrets/{key}` and everything under
+  it: its value, versions, TOTP code, rotation, hosts, purge; the row's `.key("key")`) matches when
+  the key is one of `keys`, and environments and folders still narrow it. A request about no key
+  matches only where the row answers or writes key by key (`filters_keys`: the folder's list, its
+  values, a resolve, a batch of changes), and roll secrets asks the grant again per key, so it
+  answers those keys alone and refuses a batch naming another (it names them). Anything else
+  about the folder (a digest, a watch's delta, a `.env` import or diff, a promote, health and
+  leaks, which filter only by environment and folder) is a 403. A list, a create or the product as
+  a whole never matches a rule with keys.
+- **Covering**: a rule with keys covers another only if the other's keys are a subset of its own;
+  one without keys covers a keyed one, never the reverse. Remembering, tighten and step-ups go by
+  this, so a keyed approval can't be remembered as a rule over the folder.
+- **Inside roll secrets**: `Scope::key` names the key a check is about, and `Scope::by_key` a
+  folder answered key by key; what imports and bases show through needs the key in both folders.
+  A person's reference to one key (`bind_ref`, `resolve_as`, `use_once`) is checked at that key,
+  so a maker limited to it can bind it; its digest is then the key's own.
+- **Clients**: `roll secrets tokens create … --key STRIPE_KEY` (repeatable), `roll token create
+  --product secrets --key …`, the builder's Keys field on the secrets row, the Secrets page's
+  token form, and Terraform's `roll_secrets_token` `keys`.
+- **Older nodes** refuse a rule field they don't know, so during a rolling restart a node from
+  before `keys` reads such a grant as no rules (`Store::get` parses rules with
+  `unwrap_or_default`): every request is denied there, or asks when `ask_otherwise` is set; never
+  wider. A remember written by such a node would drop the grant's rules; restart every node before
+  making keyed tokens.
 
 ### Presets
 

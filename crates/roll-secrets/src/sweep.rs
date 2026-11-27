@@ -385,7 +385,7 @@ impl Secrets {
     #[allow(clippy::too_many_arguments)]
     fn rotate_now(&self, project: &str, slug: &str, path: &str, key: &str, caller: &Caller, leak: bool, stored: bool) -> Result<Applied> {
         let path = names::path(path)?;
-        caller.need(Action::Write, &Scope::at(project, slug, &path))?;
+        caller.need(Action::Write, &Scope::at(project, slug, &path).key(key))?;
         let dek = self.project(project)?;
         let (env, link, state) = self.db.read(|c| {
             let env = envs::by_slug(c, project, slug)?;
