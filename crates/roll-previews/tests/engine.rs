@@ -1708,6 +1708,14 @@ async fn columns_that_look_like_peoples_data_are_masked_by_default() {
     let (masked, by_default) = masks_of(json!({ "public.users.email": "email", "public.users.phone": "keep" })).await;
     assert_eq!(masked.keys().cloned().collect::<Vec<_>>(), ["public.users.email"], "keep leaves it, and isn't sent as a mask");
     assert!(by_default.is_empty());
+    // A search cluster's fields the same way: an index's `user.email` that has no rule.
+    let e = env_with_search(json!({ "enabled": true, "masking": { "search:srch_logs": { "logs.ip": "redact" } } }));
+    e.search.columns.lock().insert("srch_logs".into(), Ok(vec![col("logs.ip", "keyword"), col("logs.user.email", "keyword"), col("logs.status", "long")]));
+    e.code.open(change("chg_ms", 1));
+    e.engine.pass().await.unwrap();
+    let masked = e.search.masks.lock().last().map(|(_, c)| c.clone()).unwrap_or_default();
+    assert_eq!(masked.get("logs.user.email").map(String::as_str), Some("email"), "the search field too: {masked:?}");
+    assert!(!masked.contains_key("logs.status"));
 }
 
 /// Masked branches come from one masked base per parent and rules (Neon's anonymized branches):

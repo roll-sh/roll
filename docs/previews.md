@@ -1137,8 +1137,12 @@ thirty-fourth review found them in the clear.
       activity names them, and `masked_by_default` (`[{resource, column, why}]`) has them for the
       sheet. `keep` is a rule that leaves a column as it is (the project's word that it isn't
       people's data); it's never sent as a mask. A parent with no rules hands over its data as its
-      `data` says (`real`). Columns that can't be read (10 s) leave only the rules, and the
-      activity says so. Masked bases are masked the same way when they're made
+      `data` says (`real`). NoSQL and search parents the same way: a NoSQL table's columns
+      outside its keys and its views' keys (`mask_default()`, a secret's `mask_null()`), and a
+      search index's fields (`email` or `redact` into a text-like field, `remove` otherwise). A
+      NoSQL column masked by default is a mask like any other, so a query that compares it is
+      refused: `keep` it if the app filters on it. Columns that can't be read (10 s) leave only
+      the rules, and the activity says so. Masked bases are masked the same way when they're made
       (`engine.rs::columns_that_look_like_peoples_data_are_masked_by_default`).
     - **Masked once, branched many** (Neon's anonymized branches): a masked Postgres branch comes
       from its parent's masked base, a branch of the parent masked once by the rules (the rewrite
@@ -3025,8 +3029,9 @@ variables roll makes from a branch's URL too (it could run on the preview's own 
 change becoming queued wakes its settled preview, a rehearsal shows only at its head, and schema
 overlaps stay within a repo.
 
-1. **Masking that's safe by default, for NoSQL and search too** (Postgres's landed, #1166), and
-   the project told when production gains such a column (not only the preview's activity).
+1. **The project told when production gains a column masked by default** (masking that's safe
+   by default landed for Postgres, #1166, and NoSQL and search, in review): once per column, to
+   the project's repos (webhooks, the event stream, automations), not only the preview's activity.
 2. **Main's code on the change's migrated data** (pgroll and Reshape's expand/contract; M): main's
    preview run once against a copy of the change's branch after its release (its pages and
    endpoints), so a migration that breaks the version still running while it deploys is caught on
