@@ -761,6 +761,9 @@ project, is theirs to make).
     call; a value that isn't an id is refused. Other clients get the call's own answer. Checked
     live with the official TypeScript SDK v2 (`live/sdk2/ask.mjs`: its elicitation handler picks
     from the form, and it retries by itself).
+  - **Structured authorization denials** (`roll_mcp::denials`,
+    `io.modelcontextprotocol/structured-authorization-denials`, SEP-2643, a draft): every refusal
+    by the gate says in `_meta` whether there's a way forward ("With a scoped token" has the table).
   - **MCP Apps** (`roll_mcp::ui`, `io.modelcontextprotocol/ui`, SEP-1865): for a host that
     declares HTML views (`mimeTypes: ["text/html;profile=mcp-app"]`), the read-only tools that
     answer rows (lists, queries, logs, reads, usage) point at `ui://roll/table` (`_meta.ui`). The
