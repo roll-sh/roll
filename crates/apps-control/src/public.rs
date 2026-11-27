@@ -1780,6 +1780,14 @@ pub(crate) async fn proxy(apps: Arc<Apps>, service: &str, env: &str, deployment:
                 }
             }
         }
+        // Strict-Transport-Security over HTTPS, on by default (Vercel's, Netlify's), unless the
+        // app or the headers above sent their own.
+        if apps.cfg.scheme == "https"
+            && let Some(v) = &g.hsts
+            && !r.headers().contains_key(header::STRICT_TRANSPORT_SECURITY)
+        {
+            r.headers_mut().insert(header::STRICT_TRANSPORT_SECURITY, v.clone());
+        }
     }
     if deployment.is_some() || gate.as_ref().is_some_and(|g| g.preview) {
         r.headers_mut().insert("x-robots-tag", HeaderValue::from_static("noindex"));

@@ -359,7 +359,7 @@ async fn settled(w: &World, svc: &str, env: &str, dep: &str) -> Value {
 }
 
 fn host(url: &Value) -> String {
-    url.as_str().unwrap().trim_start_matches("http://").split(':').next().unwrap().to_string()
+    url.as_str().unwrap().trim_start_matches("https://").trim_start_matches("http://").split(':').next().unwrap().to_string()
 }
 
 async fn image_service(w: &World, name: &str, run: Value) -> (Value, Value) {
@@ -1468,6 +1468,38 @@ async fn one_instance_is_restarted_without_the_rest() {
     watch.1.store(true, Ordering::SeqCst);
     assert!(!running(&after).contains(&old), "{after}");
     assert_eq!(watch.0.load(Ordering::SeqCst), 1, "never two instances on the volume");
+}
+
+/// HSTS by default over HTTPS (Vercel's, Netlify's): two years unless the environment sets its
+/// own or turns it off, and never over one its headers or the app send.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn https_answers_carry_hsts_by_default() {
+    let w = world_with(|c| c.scheme = "https".into()).await;
+    let (svc, _) = image_service(&w, "web", json!({"port": 80, "min_instances": 1})).await;
+    let base = format!("/v1/apps/services/{}/environments/production", svc["id"].as_str().unwrap());
+    let (_, env) = call(&w.api, "GET", &base, None).await;
+    assert_eq!(env["hsts"], json!({"max_age": 63072000}), "{env}");
+    let h = host(&env["url"]);
+    let sts = || {
+        let req = Request::builder().uri("/").header("host", h.as_str()).body(Body::empty()).unwrap();
+        let public = w.public.clone();
+        async move { public.oneshot(req).await.unwrap().headers().get("strict-transport-security").map(|v| v.to_str().unwrap().to_string()) }
+    };
+    assert_eq!(sts().await.as_deref(), Some("max-age=63072000"));
+    let put = |b: Value| call(&w.api, "PUT", &base, Some(b));
+    assert_eq!(put(json!({"hsts": {"max_age": 31536000, "include_subdomains": true, "preload": true}})).await.0, StatusCode::OK);
+    assert_eq!(sts().await.as_deref(), Some("max-age=31536000; includeSubDomains; preload"));
+    assert_eq!(put(json!({"hsts": {"max_age": 600, "preload": true}})).await.0, StatusCode::BAD_REQUEST, "preload needs a year and subdomains");
+    assert_eq!(put(json!({"hsts": false})).await.0, StatusCode::OK);
+    assert_eq!(sts().await, None, "off");
+    // Synced to another environment, off stays off (a PUT's null would be the default).
+    let staging = base.replace("/production", "/staging");
+    assert_eq!(call(&w.api, "PUT", &staging, Some(json!({}))).await.0, StatusCode::OK);
+    let diff = call(&w.api, "GET", &format!("{staging}/diff?from=production"), None).await.1;
+    let row = diff["settings"].as_array().unwrap().iter().find(|r| r["field"] == "hsts").cloned().unwrap_or_default();
+    assert_eq!(row["put"], json!({"hsts": false}), "{diff}");
+    put(json!({"hsts": null, "headers": [{"set": {"Strict-Transport-Security": "max-age=1"}}]})).await;
+    assert_eq!(sts().await.as_deref(), Some("max-age=1"), "its own header wins");
 }
 
 /// An environment's own headers (HSTS, a CSP) on its answers, by path; the app's own header of

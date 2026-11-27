@@ -675,6 +675,12 @@ export interface EnvironmentDiff {
   settings: { field: string; from: unknown; to: unknown; put: EnvironmentPut }[];
 }
 
+export interface Hsts {
+  max_age: number;
+  include_subdomains?: boolean;
+  preload?: boolean;
+}
+
 export interface EnvironmentPut {
   /** Attack mode by itself: once a minute's requests reach per_minute, a challenge for every visitor without a pass for minutes; null: never by itself. */
   attack_mode?: { per_minute: number; minutes?: number } | null;
@@ -707,6 +713,8 @@ export interface EnvironmentPut {
   traces?: boolean;
   /** Its pages measure their Web Vitals (a tag roll adds). */
   vitals?: boolean;
+  /** Strict-Transport-Security over HTTPS: its own, false (none) or null (the default, two years). */
+  hsts?: Hsts | false | null;
   /** How long its logs are kept (null: 7 days). */
   log_retention_days?: 7 | 30 | 90 | null;
   /** Days its built deployments stay to roll back to past the newest ten (1–90); null: only those. */
@@ -838,6 +846,8 @@ export interface Environment extends EnvironmentSummary {
   traces?: boolean;
   /** Its pages measure their Web Vitals for roll. */
   vitals?: boolean;
+  /** Its Strict-Transport-Security over HTTPS (null: none sent). */
+  hsts?: Hsts | null;
   /** Days its logs are kept: 7 (default), 30 or 90; a preview's are 7. */
   log_retention_days?: number;
   /** Days its built deployments stay to roll back to past the newest ten. */
