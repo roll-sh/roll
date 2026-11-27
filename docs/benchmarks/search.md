@@ -2109,6 +2109,60 @@ same `curl` on the woken cluster took 15.0 ms on this loaded machine), so roll's
 about 5 ms over a warm request. Elasticsearch cannot unload an index; its comparable cold
 start is a node start (JVM, cluster state, shard recovery).
 
+## Cold start at size (2026-11-27, item 16)
+
+`~/.cache/rsearch/coldstart/run.sh` on lane b (server on CPUs 10,11,28,29; client and MinIO on
+12,13,30,31): 1,000,000 nyc_taxis documents (Rally's corpus; 173-177 MB stored, 3 to 10
+segments depending on merges) in a `search-dev` whose objects are in MinIO in Docker on the same
+host. Then:
+- (a) a wake after idle unload, with the local cache;
+- (b) a fresh node with an empty data directory, so everything comes from object storage (what a
+  takeover on another node, or a replaced node, does).
+
+Each case times the first request after the wake and the one after it, three runs, with the
+node's own phase timings (`cluster load phases` at debug: claim, state, open, fix-ups, manifests,
+segments, replay, and the MB read from object storage during the wake). Other sessions loaded the
+host (1-minute load 32 to 100), so the spreads are wide. MinIO on the same host has far more
+bandwidth and less latency than S3, so (b) is a lower bound.
+
+| case | first query | second query | first write |
+|---|---:|---:|---:|
+| (a) local cache, wake after idle unload | 17.6 / 23.9 / 18.8 ms | 1.6-2.4 ms | 31.8 / 35.5 / 52.5 ms |
+| (b) empty local disk, from object storage (7-10 segments) | 245 / 330 / 365 ms | 2.5-5.2 ms | 438 / 458 / 463 ms |
+| (b), a later load with 3 segments, quieter host | 180 / 196 / 210 ms | 2.3-7.7 ms | 226 / 297 / 334 ms |
+
+Where (b)'s wake goes: claiming, reading the state, opening the cluster and listing manifests
+take about 20 ms together; opening the segments and the indices take the rest. The whole index
+arrives before the wake ends.
+
+What limits it: a waking shard waits for what its readers parse at open. On this numeric index
+that is mostly every field's doc values (44 MB) and points (45 MB) of the 176 MB; stored fields
+(72 MB) and postings were already lazy. Leaving doc values and points for first use isn't enough
+on its own: the rest of what the open reads (term dictionaries, metadata, the internal fields'
+values, about 4 MB a segment) is spread over every 8 MiB part of every segment, so fetching whole
+parts for it fetches the whole file.
+
+Tried, kept out (`feature/search-cold-start-at-size` has them):
+
+- reads someone waits for on a lane of their own: in a unit test a reader's range came after
+  0.6 MB of other downloads instead of 8.5 MB, but the wake didn't change;
+- smaller parts (1 MiB, 256 KiB): the segments open sooner, the indices later (more round trips);
+- doc values and points opened on first use, the ranges readers wait for fetched exactly (64 KiB
+  units, nearby ones merged), a 256 KiB first read, and bulk downloads capped at two while a
+  cluster wakes. Against the same build without any of it, on the 3-segment load:
+
+  | (b) | before | after |
+  |---|---:|---:|
+  | first query | 180 / 196 / 210 ms | 160 / 153 / 179 ms (median -18%) |
+  | first write | 297 / 226 / 334 ms | 118 / 154 / 196 ms (median -48%) |
+  | wake | 176-225 ms | 86-160 ms |
+  | MB read during the wake | ~173 | 53-129 |
+
+  The first query, the measure that counts here, came out 18% faster: not enough for the
+  correctness work lazy sections need (every query, aggregation and sort loading the doc values
+  and points it touches before it runs, with a clean error when a download fails). After a short
+  wake the first query still waits about 90 ms for its own ranges once the bulk downloads resume.
+
 ## Vector search (2026-11-14)
 
 `scripts/bench-search-vectors.py` generates the corpus, computes the exact answers and drives
