@@ -19,6 +19,13 @@
 //!   background work. Their metrics are the plugin's (`Coverage`, `Precision`, `Recall`, `MAP`,
 //!   `MRR`, `DCG`, `NDCG`; `jaccard`, `rbo50`, `rbo90`, `frequencyWeighted`), not `_rank_eval`'s.
 //!
+//! **Stats** (`…/stats`, [`Stats`]): the plugin's seven counters, since the cluster loaded, as its
+//! node's `timestamped_event_counter`s (`include_metadata`), and the cluster version.
+//!
+//! **An experiment a node stopped running** (unloaded, or taken over) stays `PROCESSING` on the
+//! plugin. roll marks it `ERROR` when its cluster loads again ([`fail_interrupted`]): nothing runs
+//! it any more.
+//!
 //! **Left out** (400, saying so): `LLM_JUDGMENT` (an ML Commons model; documents would go to a
 //! model provider), `HYBRID_OPTIMIZER` (neural-search hybrid pipelines), scheduled experiments.
 //! SRW's own quirks aren't copied: storing a `PUT` query set it refuses, a 500 null pointer for a
@@ -96,6 +103,7 @@ pub fn implemented(api: Api) -> bool {
             | Api::SearchRelevanceGetExperiments
             | Api::SearchRelevanceDeleteExperiments
             | Api::SearchRelevanceSearchExperiments
+            | Api::SearchRelevanceStats
     )
 }
 
@@ -121,6 +129,7 @@ pub async fn dispatch(ctx: &Ctx<'_>) -> EsResult<Reply> {
         Api::SearchRelevanceSearchSearchConfigurations => search(ctx, CONFIGS).await,
         Api::SearchRelevanceSearchJudgments => search(ctx, JUDGMENTS).await,
         Api::SearchRelevanceSearchExperiments => search(ctx, EXPERIMENTS).await,
+        Api::SearchRelevanceStats => stats(ctx),
         other => Err(EsError::not_implemented(other.name())),
     }
 }
@@ -386,6 +395,7 @@ async fn put_judgment(ctx: &Ctx<'_>) -> EsResult<Reply> {
         "IMPORT_JUDGMENT" => {
             let ratings = m.get("judgmentRatings").cloned().ok_or_else(|| missing("judgmentRatings"))?;
             write(ctx.cluster, Some(JUDGMENTS), JUDGMENTS.index, &id, &base("COMPLETED", obj! {}, ratings)).await?;
+            ctx.cluster.srw.count(Stat::ImportJudgments);
         }
         "UBI_JUDGMENT" => {
             let model = text(&m, "clickModel").unwrap_or_default();
@@ -407,6 +417,7 @@ async fn put_judgment(ctx: &Ctx<'_>) -> EsResult<Reply> {
             }
             let ratings = ubi_ratings(ctx.cluster, &index, max_rank, &start, &end).await?;
             write(ctx.cluster, Some(JUDGMENTS), JUDGMENTS.index, &id, &base("COMPLETED", metadata, ratings)).await?;
+            ctx.cluster.srw.count(Stat::UbiJudgments);
         }
         "LLM_JUDGMENT" => return Err(iae("LLM_JUDGMENT isn't run by roll: it needs an ML Commons model, and it would send documents to a model provider")),
         _ => {
@@ -564,6 +575,8 @@ async fn put_experiment(ctx: &Ctx<'_>) -> EsResult<Reply> {
         "isScheduled" => false, "scheduledExperimentJobId" => Value::Null, "results" => Value::Arr(Vec::new()), "inputSignature" => signature,
     };
     write(ctx.cluster, Some(EXPERIMENTS), EXPERIMENTS.index, &id, &doc).await?;
+    ctx.cluster.srw.count(Stat::Experiments);
+    ctx.cluster.srw.count(if ty == "PAIRWISE_COMPARISON" { Stat::Pairwise } else { Stat::Pointwise });
     let run = Run {
         id: id.clone(),
         ty,
@@ -783,6 +796,167 @@ async fn pairwise(cluster: &Cluster, run: &Run) -> EsResult<Value> {
     Ok(Value::Arr(results))
 }
 
+// ------------------------------------------------------------------------------ stats
+
+/// One of the plugin's counters, in the order its stats answer lists them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stat {
+    ImportJudgments,
+    LlmJudgments,
+    UbiJudgments,
+    HybridOptimizer,
+    Pairwise,
+    Experiments,
+    Pointwise,
+}
+
+/// (group, name) of each [`Stat`].
+const STATS: [(Stat, &str, &str); 7] = [
+    (Stat::ImportJudgments, "judgments", "import_judgment_rating_generations"),
+    (Stat::LlmJudgments, "judgments", "llm_judgment_rating_generations"),
+    (Stat::UbiJudgments, "judgments", "ubi_judgment_rating_generations"),
+    (Stat::HybridOptimizer, "experiments", "experiment_hybrid_optimizer_executions"),
+    (Stat::Pairwise, "experiments", "experiment_pairwise_comparison_executions"),
+    (Stat::Experiments, "experiments", "experiment_executions"),
+    (Stat::Pointwise, "experiments", "experiment_pointwise_evaluation_executions"),
+];
+/// The info statistic.
+const CLUSTER_VERSION: &str = "cluster_version";
+/// The window a counter's `trailing_interval_value` counts (its last complete one).
+const INTERVAL_MS: i64 = 5 * 60_000;
+/// The setting that turns the stats route off.
+const STATS_ENABLED: &str = "plugins.search_relevance.stats_enabled";
+
+/// One `timestamped_event_counter`: its value, its last event, and the events of its current and
+/// previous windows.
+#[derive(Clone, Copy, Debug, Default)]
+struct Counter {
+    value: u64,
+    last_ms: Option<i64>,
+    window: i64,
+    in_window: u64,
+    in_previous: u64,
+}
+
+/// The Workbench's counters since the cluster loaded.
+#[derive(Debug, Default)]
+pub struct Stats {
+    counters: parking_lot::Mutex<[Counter; 7]>,
+}
+
+impl Stats {
+    pub fn count(&self, stat: Stat) {
+        let now = crate::time::now_millis();
+        let i = STATS.iter().position(|(s, _, _)| *s == stat).unwrap_or(0);
+        let mut c = self.counters.lock();
+        let c = &mut c[i];
+        let window = now.div_euclid(INTERVAL_MS);
+        if window != c.window {
+            c.in_previous = if window == c.window + 1 { c.in_window } else { 0 };
+            c.in_window = 0;
+            c.window = window;
+        }
+        c.value += 1;
+        c.in_window += 1;
+        c.last_ms = Some(now);
+    }
+
+    /// (value, events in the last complete window, minutes since the last event) of each counter.
+    fn read(&self, now: i64) -> [(u64, u64, i64); 7] {
+        let c = self.counters.lock();
+        let window = now.div_euclid(INTERVAL_MS);
+        std::array::from_fn(|i| {
+            let c = c[i];
+            let trailing = if c.window == window { c.in_previous } else if c.window + 1 == window { c.in_window } else { 0 };
+            (c.value, trailing, (now - c.last_ms.unwrap_or(0)).max(0) / 60_000)
+        })
+    }
+}
+
+/// `GET …/stats[/{stat}]` and `GET …/{node_id}/stats[/{stat}]`: the counters of this node (the
+/// only one), under `all_nodes` and the node's id; `stat` keeps only those named.
+fn stats(ctx: &Ctx<'_>) -> EsResult<Reply> {
+    if ctx.state().metadata.cluster_setting(STATS_ENABLED) == Some("false") {
+        return Ok(Reply::Raw(403, "text/plain; charset=UTF-8".into(), bytes::Bytes::from_static(b"Search Relevance Workbench stats is disabled")));
+    }
+    let wanted: Option<Vec<String>> = ctx.path_param("stat").map(|s| s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect());
+    if let Some(w) = &wanted {
+        let known: std::collections::BTreeSet<String> = STATS.iter().map(|(_, _, n)| n.to_string()).chain([CLUSTER_VERSION.to_string()]).collect();
+        let unknown: std::collections::BTreeSet<String> = w.iter().filter(|x| !known.contains(*x)).cloned().collect();
+        if !unknown.is_empty() {
+            return Err(iae(crate::rest::params::unrecognized(&ctx.path, &unknown, &known, "stat")));
+        }
+    }
+    let keep = |name: &str| wanted.as_ref().is_none_or(|w| w.iter().any(|x| x == name));
+    let flag = |k: &str| matches!(ctx.query(k), Some("true") | Some(""));
+    let (metadata, flat) = (flag("include_metadata"), flag("flat_stat_paths"));
+    let now = crate::time::now_millis();
+    let values = ctx.cluster.srw.read(now);
+    let mut groups = Map::new();
+    for (i, (_, group, name)) in STATS.iter().enumerate() {
+        if !keep(name) {
+            continue;
+        }
+        let (value, trailing, minutes) = values[i];
+        let v = if metadata {
+            obj! { "value" => value, "stat_type" => "timestamped_event_counter", "trailing_interval_value" => trailing, "minutes_since_last_event" => minutes }
+        } else {
+            Value::from(value)
+        };
+        if flat {
+            groups.insert(format!("{group}.{name}"), v);
+        } else if let Some(Value::Obj(g)) = groups.get_mut(*group) {
+            g.insert(name.to_string(), v);
+        } else {
+            let mut g = Map::new();
+            g.insert(name.to_string(), v);
+            groups.insert(group.to_string(), Value::Obj(g));
+        }
+    }
+    let mut info = Map::new();
+    if keep(CLUSTER_VERSION) {
+        let version = Value::from(crate::version::OPENSEARCH_VERSION);
+        info.insert(CLUSTER_VERSION.into(), if metadata { obj! { "value" => version, "stat_type" => "info_string" } } else { version });
+    }
+    let mut nodes = Map::new();
+    nodes.insert(ctx.cluster.node.id.clone(), Value::Obj(groups.clone()));
+    Reply::ok(obj! {
+        "_nodes" => obj! { "total" => 1, "successful" => 1, "failed" => 0 },
+        "cluster_name" => ctx.cluster.name.clone(),
+        "info" => Value::Obj(info),
+        "all_nodes" => Value::Obj(groups),
+        "nodes" => Value::Obj(nodes),
+    })
+}
+
+// ------------------------------------------------------------------------------ interrupted runs
+
+/// Marks `ERROR` the experiments still `PROCESSING` when the cluster loads: their runs ended with
+/// the node that ran them (behind the answer), and nothing runs them again.
+pub fn fail_interrupted(cluster: &Cluster) {
+    if cluster.dialect != crate::cluster::Dialect::OpenSearch || !cluster.state().metadata.indices.contains_key(EXPERIMENTS.index) {
+        return;
+    }
+    let Some(c) = cluster.handle() else { return };
+    tokio::spawn(async move {
+        let _ = fail_interrupted_now(&c).await;
+    });
+}
+
+/// [`fail_interrupted`]'s work: how many it marked.
+pub async fn fail_interrupted_now(cluster: &Cluster) -> EsResult<usize> {
+    let body = obj! { "size" => LIST_SIZE, "query" => obj! { "term" => obj! { "status" => "PROCESSING" } } };
+    let v = internal::call_system(cluster, "POST", &format!("/{}/_search", EXPERIMENTS.index), Some(&body)).await?;
+    let mut n = 0;
+    for h in v.pointer(&["hits", "hits"]).and_then(Value::as_array).cloned().unwrap_or_default() {
+        let (Some(id), Some(Value::Obj(mut doc))) = (h.get("_id").and_then(Value::as_str).map(str::to_string), h.get("_source").cloned()) else { continue };
+        doc.insert("status".into(), Value::from("ERROR"));
+        write(cluster, None, EXPERIMENTS.index, &id, &Value::Obj(doc)).await?;
+        n += 1;
+    }
+    Ok(n)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -803,6 +977,22 @@ mod tests {
         assert_eq!(v.iter().map(|(_, x)| *x).collect::<Vec<_>>(), [0.67, 0.33, 1.0, 0.5, 0.5, 1.45, 0.76]);
         let v = get(&["1", "2", "3"], &[("1", 3.0), ("2", 2.9), ("3", 1.0)], 3);
         assert_eq!(v.iter().map(|(_, x)| *x).collect::<Vec<_>>(), [1.0, 0.33, 1.0, 1.0, 1.0, 11.58, 1.0]);
+    }
+
+    /// A run its node stopped (left `PROCESSING`) is marked `ERROR` when the cluster loads; a
+    /// finished one isn't touched.
+    #[tokio::test]
+    async fn an_interrupted_experiment_is_marked_error() {
+        let cfg = crate::ClusterConfig { dialect: crate::cluster::Dialect::OpenSearch, unsealed_secrets: true, ..crate::ClusterConfig::new("t") };
+        let c = Cluster::open(cfg, std::sync::Arc::new(crate::MemoryStore::new())).await.unwrap();
+        for (id, status) in [("a", "PROCESSING"), ("b", "COMPLETED")] {
+            write(&c, Some(EXPERIMENTS), EXPERIMENTS.index, id, &obj! { "id" => id, "status" => status, "type" => "POINTWISE_EVALUATION" }).await.unwrap();
+        }
+        assert_eq!(fail_interrupted_now(&c).await.unwrap(), 1);
+        for (id, status) in [("a", "ERROR"), ("b", "COMPLETED")] {
+            let doc = read(&c, EXPERIMENTS, id).await.unwrap().unwrap();
+            assert_eq!(doc.get("status").and_then(Value::as_str), Some(status), "{id}");
+        }
     }
 
     #[test]
