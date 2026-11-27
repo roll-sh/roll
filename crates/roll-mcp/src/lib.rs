@@ -562,7 +562,7 @@ async fn handle(State(m): State<Mcp>, uri: axum::http::Uri, ext: Extensions, hea
             // A method the revision doesn't have is a 404 (with its JSON-RPC error), so a client
             // tells it from a server that has no MCP endpoint here.
             Some(r) if modern && r["error"]["code"] == -32601 => (StatusCode::NOT_FOUND, Json(r)).into_response(),
-            Some(r) if modern && r["error"]["code"] == modern::HEADER_MISMATCH => (StatusCode::BAD_REQUEST, Json(r)).into_response(),
+            Some(r) if modern && (r["error"]["code"] == modern::HEADER_MISMATCH || r["error"]["code"] == tasks::MISSING_CAPABILITY) => (StatusCode::BAD_REQUEST, Json(r)).into_response(),
             Some(r) if !batch => Json(r).into_response(),
             last => {
                 responses.extend(last);
@@ -855,6 +855,9 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
         let (Some(method), Some(id)) = (msg.get("method").and_then(Value::as_str), msg.get("id").cloned()) else { continue };
         let params = msg.get("params").cloned().unwrap_or(Value::Null);
         let resp = match method {
+            // 2026-07-28 is stateless: it has neither (removed with the handshake), so a request of
+            // that revision asking for them is a method it doesn't have (404).
+            "initialize" | "ping" if ctx.modern => rpc_error(id, -32601, format!("{method} isn't a 2026-07-28 method: that revision has no handshake, and every request carries its version and capabilities in _meta")),
             "initialize" => rpc_result(id, initialize(ctx, &params)),
             "server/discover" => {
                 // Events (SEP-3415) are this revision's: only discovery offers them.
@@ -985,6 +988,10 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
             }
             "tasks/get" | "tasks/update" | "tasks/cancel" => match tasks::method(ctx, method, &params).await {
                 Ok(v) => rpc_result(id, v),
+                // What it needs, as 2026-07-28's MissingRequiredClientCapabilityError says it.
+                Err((code, message)) if code == tasks::MISSING_CAPABILITY => {
+                    json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message, "data": { "requiredCapabilities": { "extensions": { tasks::EXT: {} } } } } })
+                }
                 Err((code, message)) => rpc_error(id, code, message),
             },
             "resources/list" => {
