@@ -138,20 +138,20 @@ fn listed(mut list: Vec<crate::integrations::Note>) -> Response {
 
 /// The notes on the page `query`'s `path` names, from roll previews: `no-store`, at most
 /// [`MAX_NOTES`]; 404 without previews, 502 when it fails (the button then shows no list).
-pub async fn notes(notes: Option<std::sync::Arc<dyn crate::integrations::FeedbackNotes>>, env: &str, query: Option<&str>) -> Response {
+pub async fn notes(notes: Option<std::sync::Arc<dyn crate::integrations::FeedbackNotes>>, service: &str, env: &str, query: Option<&str>) -> Response {
     let Some(n) = notes else { return StatusCode::NOT_FOUND.into_response() };
     let Some(path) = page_path(query) else { return (StatusCode::BAD_REQUEST, "path is the page's path").into_response() };
-    match tokio::time::timeout(std::time::Duration::from_secs(5), n.notes(env, &path)).await {
+    match tokio::time::timeout(std::time::Duration::from_secs(5), n.notes(service, env, &path)).await {
         Ok(Ok(list)) => listed(list),
         _ => StatusCode::BAD_GATEWAY.into_response(),
     }
 }
 
 /// What a share link's guest sees on the page: the notes left through their link only.
-pub async fn guest_notes(shares: Option<std::sync::Arc<dyn crate::integrations::PreviewShares>>, env: &str, token: &str, query: Option<&str>) -> Response {
+pub async fn guest_notes(shares: Option<std::sync::Arc<dyn crate::integrations::PreviewShares>>, service: &str, env: &str, token: &str, query: Option<&str>) -> Response {
     let Some(s) = shares else { return StatusCode::NOT_FOUND.into_response() };
     let Some(path) = page_path(query) else { return (StatusCode::BAD_REQUEST, "path is the page's path").into_response() };
-    match tokio::time::timeout(std::time::Duration::from_secs(5), s.notes(env, token, &path)).await {
+    match tokio::time::timeout(std::time::Duration::from_secs(5), s.notes(service, env, token, &path)).await {
         Ok(list) => listed(list),
         Err(_) => StatusCode::BAD_GATEWAY.into_response(),
     }
@@ -159,7 +159,7 @@ pub async fn guest_notes(shares: Option<std::sync::Arc<dyn crate::integrations::
 
 /// A share link's guest's note from the page's button (`POST /__roll/notes`): JSON from the
 /// preview's own pages (its origin), 64 KiB at most, posted on the change by roll previews.
-pub async fn guest_note(shares: Option<std::sync::Arc<dyn crate::integrations::PreviewShares>>, env: &str, token: &str, req: axum::extract::Request) -> Response {
+pub async fn guest_note(shares: Option<std::sync::Arc<dyn crate::integrations::PreviewShares>>, service: &str, env: &str, token: &str, req: axum::extract::Request) -> Response {
     let Some(s) = shares else { return StatusCode::NOT_FOUND.into_response() };
     let host = req.headers().get(header::HOST).and_then(|h| h.to_str().ok()).unwrap_or("").to_string();
     let origin = req.headers().get(header::ORIGIN).and_then(|h| h.to_str().ok()).unwrap_or("");
@@ -168,7 +168,7 @@ pub async fn guest_note(shares: Option<std::sync::Arc<dyn crate::integrations::P
         return (StatusCode::FORBIDDEN, "notes come from the preview's own pages").into_response();
     }
     let Ok(body) = axum::body::to_bytes(req.into_body(), GUEST_NOTE_MAX).await else { return (StatusCode::PAYLOAD_TOO_LARGE, "a note is 64 KiB at most").into_response() };
-    match s.note(env, token, &body).await {
+    match s.note(service, env, token, &body).await {
         Ok(id) => (StatusCode::CREATED, axum::Json(serde_json::json!({ "id": id }))).into_response(),
         Err((status, why)) => (StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY), why).into_response(),
     }
