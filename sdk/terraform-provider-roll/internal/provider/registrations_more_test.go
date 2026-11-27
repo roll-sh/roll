@@ -42,6 +42,7 @@ func (n noneOf) CheckPlan(_ context.Context, req plancheck.CheckPlanRequest, res
 // and no credential sent in (the App's private key, the SIEM's token, the token in the rotator's
 // URL) in the plan or the state.
 func TestMoreRegistrationsAsCode(t *testing.T) {
+	t.Parallel()
 	f := &fakeRolld{envs: map[string]*environment{}, keys: map[string]map[string]any{}, identities: map[string]map[string]any{}, syncs: map[string]map[string]any{}, tokens: map[string]map[string]any{}}
 	srv := httptest.NewServer(f)
 	defer srv.Close()

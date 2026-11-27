@@ -560,6 +560,7 @@ func (f *fakeRolld) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func TestEnvironmentsAndKeysAsCode(t *testing.T) {
+	t.Parallel()
 	f := &fakeRolld{envs: map[string]*environment{}, keys: map[string]map[string]any{}, identities: map[string]map[string]any{}, syncs: map[string]map[string]any{}, tokens: map[string]map[string]any{}}
 	srv := httptest.NewServer(f)
 	defer srv.Close()
@@ -668,6 +669,7 @@ resource "roll_secrets_sync" "deploys" {
 // A value from an ephemeral read, written write-only: it reaches roll secrets and never Terraform's
 // state, and the run's dynamic credential is revoked when it closes.
 func TestValuesStayOutOfTheState(t *testing.T) {
+	t.Parallel()
 	f := &fakeRolld{envs: map[string]*environment{"production": {Slug: "production", Name: "production"}, "staging": {Slug: "staging", Name: "staging"}}, keys: map[string]map[string]any{"production:/DB_URL": {"value": "postgres://db/shop", "version": float64(1), "comment": ""}}, identities: map[string]map[string]any{}, syncs: map[string]map[string]any{}, tokens: map[string]map[string]any{}}
 	srv := httptest.NewServer(f)
 	defer srv.Close()
@@ -718,6 +720,7 @@ resource "roll_secret" "copy" {
 // A machine client for CI: made trusting GitHub Actions' identity, its rules changed in place on
 // its grant, its subject changed by a rotate (the client id stays), imported by its id, revoked.
 func TestMachineClientAsCode(t *testing.T) {
+	t.Parallel()
 	f := &fakeRolld{envs: map[string]*environment{}, keys: map[string]map[string]any{}, tokens: map[string]map[string]any{}, clients: map[string]map[string]any{}}
 	srv := httptest.NewServer(f)
 	defer srv.Close()
@@ -833,6 +836,7 @@ resource "roll_machine_client" "ci" {
 // What a project registers itself, as code: a CA, an SSH CA, an encryption key and a database
 // outside roll, whose admin URL is write-only (sent once, never in the state).
 func TestRegistrationsAsCode(t *testing.T) {
+	t.Parallel()
 	f := &fakeRolld{envs: map[string]*environment{}, keys: map[string]map[string]any{}, identities: map[string]map[string]any{}, syncs: map[string]map[string]any{}, tokens: map[string]map[string]any{}}
 	srv := httptest.NewServer(f)
 	defer srv.Close()
