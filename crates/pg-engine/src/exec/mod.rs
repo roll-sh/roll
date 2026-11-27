@@ -2120,6 +2120,17 @@ pub fn collect(plan: &Arc<Plan>, ctx: &ExecCtx, limit: Option<usize>) -> Result<
     }
 }
 
+/// `collect`'s run of `plan` with its node handed to `f`, which reads the rows as they come
+/// (a hashed UNION's arms), none kept.
+pub fn for_rows(plan: &Arc<Plan>, ctx: &ExecCtx, f: impl FnOnce(&mut BoxNode) -> Result<()>) -> Result<()> {
+    let run = || ctx.statement(|| f(&mut nodes::open_bounded(plan, None, ctx)?));
+    if let crate::sql::plan::Plan::Context { frame, .. } = plan.as_ref() {
+        ctx.temp_cleanup.statement_framed(ctx, frame.clone(), run)
+    } else {
+        ctx.temp_cleanup.run(run)
+    }
+}
+
 /// `collect` with each row dropped as it comes, none kept: EXPLAIN ANALYZE's run (its
 /// DestNone receiver; holding the rows, a million-row window's held 55 MB more than its plain
 /// run).

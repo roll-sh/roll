@@ -92,6 +92,8 @@ pub struct HashSpill {
     /// The node's tape set (its block numbers: the file's size), and the most of it.
     tapes: workmem::TapeSet,
     pub disk_peak: i64,
+    /// The bucket array last counted (`distinct_group`).
+    slots: u64,
 }
 
 impl HashSpill {
@@ -113,6 +115,7 @@ impl HashSpill {
             types,
             tapes: workmem::TapeSet::default(),
             disk_peak: 0,
+            slots: 0,
         };
         s.set_limits();
         s
@@ -160,6 +163,23 @@ impl HashSpill {
         if self.mem.new_group(tuple_len) {
             self.spilling = true;
         }
+    }
+
+    /// `new_group` of a HashAggregate without transition states (a hashed DISTINCT): the
+    /// bucket array counted again only when the table grew. (`HashAggMem::new_group`'s count
+    /// without its states, written here: a second caller of it would compile the GROUP BY's
+    /// `AggNode::run` otherwise.)
+    #[inline]
+    pub fn distinct_group(&mut self, tuple_len: i64, slots: u64) -> bool {
+        if slots != self.slots {
+            self.slots = slots;
+            self.mem.table(slots);
+        }
+        let m = &mut self.mem;
+        debug_assert!(m.trans_chunks.is_empty() && m.additional == 0);
+        m.entries.alloc(workmem::maxalign(tuple_len));
+        m.ngroups += 1;
+        m.total() > m.mem_limit || m.ngroups > m.ngroups_limit
     }
 
     /// hashagg_spill_tuple: a row of a group not in the table, its key hashing to `hash`.

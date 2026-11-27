@@ -85,6 +85,50 @@ pub fn minimal_tuple_len_order(row: &[Value], types: &[DataType], order: &[usize
     hoff + data_len(order.iter().map(|&i| (&row[i], &types[i])), ctx)
 }
 
+/// `minimal_tuple_len` of rows of the same columns counted one after another (a hashed
+/// DISTINCT's groups): ints, floats, dates, times, bools, text and bytea laid out inline,
+/// any other value by `minimal_tuple_len`.
+pub struct TupleLen {
+    types: Vec<DataType>,
+    /// Per column: whether a string is a text / varchar (`data_len`'s varlena case).
+    text: Vec<bool>,
+}
+
+impl TupleLen {
+    pub fn new(types: Vec<DataType>) -> TupleLen {
+        let text = types.iter().map(|t| matches!(t, DataType::Text | DataType::Varchar(_))).collect();
+        TupleLen { types, text }
+    }
+
+    #[inline(always)]
+    pub fn of(&self, row: &[Value], ctx: &super::ExecCtx) -> i64 {
+        let mut off: i64 = 0;
+        let mut nulls = false;
+        for (v, &text) in row.iter().zip(&self.text) {
+            off += match v {
+                Value::Null => {
+                    nulls = true;
+                    0
+                }
+                Value::Int4(_) | Value::Date(_) | Value::Oid(_) | Value::Float4(_) => align(off, 4) - off + 4,
+                Value::Int8(_) | Value::Float8(_) | Value::Timestamp(_) | Value::Timestamptz(_) | Value::Time(_) => {
+                    align(off, 8) - off + 8
+                }
+                Value::Int2(_) => align(off, 2) - off + 2,
+                Value::Bool(_) | Value::Char(_) => 1,
+                Value::Text(s) if text => varlena(off, s.len() as i64),
+                Value::Bytea(b) => varlena(off, b.len() as i64),
+                _ => return minimal_tuple_len(row, &self.types, ctx),
+            };
+        }
+        if row.len() > self.text.len() {
+            return minimal_tuple_len(row, &self.types, ctx);
+        }
+        let bitmap = if nulls { self.types.len().div_ceil(8) as i64 } else { 0 };
+        maxalign(15 + bitmap + 8) - 8 + off
+    }
+}
+
 /// The values' bytes as a heap tuple lays them out (NULLs take none).
 fn data_len<'a>(vals: impl Iterator<Item = (&'a Value, &'a DataType)>, ctx: &super::ExecCtx) -> i64 {
     let mut off: i64 = 0;
