@@ -1096,6 +1096,15 @@ async fn a_products_lifetime_cap_binds_consents_and_remembered_approvals() {
     assert_eq!((g["rules"].as_array().map(Vec::len), g["expires_at"].is_null()), (Some(1), true), "{g}");
     assert!(within(&g["temporary"][0]["until"]), "{g}");
     assert_eq!(g["temporary"][0]["rule"]["paths"], json!(["/api"]), "{g}");
+    // The root is the whole environment: 8 hours at most.
+    let (_, pending) = d.call(&token, Method::GET, "/v1/secrets/projects/pa/environments/development/secrets?path=/", None).await;
+    let root = pending["approval"].as_str().unwrap_or_else(|| panic!("{pending}")).to_string();
+    let approve = |remember: &str| {
+        let (d, url, body) = (&d, format!("/v1/access/approvals/{root}/approve"), json!({ "remember": remember }));
+        async move { d.call(OPERATOR, Method::POST, &url, Some(body)).await.0 }
+    };
+    assert_eq!(approve("always").await, StatusCode::BAD_REQUEST);
+    assert_eq!(approve("8h").await, StatusCode::OK);
 }
 
 /// A secrets folder is the one the product reads (a body's when resolving, comparing or importing,
@@ -3484,15 +3493,15 @@ async fn a_secret_written_as_the_caller_is_asked_for_and_only_it_is_allowed() {
     root["secret"]["path"] = json!("/");
     let (s, out) = d.call(&asks, Method::POST, path, Some(root)).await;
     assert_eq!((s, out["code"].as_str()), (StatusCode::FORBIDDEN, Some("approval_pending")), "{out}");
-    // The root folder reaches every folder under it: the whole environment, remembered for 8 hours
-    // at most.
+    // The root folder reaches every folder under it: lent to search's route, the whole environment
+    // is approved once only.
     let root_id = out["approval"].as_str().unwrap().to_string();
-    let approve = |remember: &str| {
-        let (d, url, body) = (&d, format!("/v1/access/approvals/{root_id}/approve"), json!({ "remember": remember }));
-        async move { d.call(OPERATOR, Method::POST, &url, Some(body)).await.0 }
+    let approve = |remember: Option<&str>| {
+        let (d, url, body) = (&d, format!("/v1/access/approvals/{root_id}/approve"), remember.map(|r| json!({ "remember": r })));
+        async move { d.call(OPERATOR, Method::POST, &url, body).await.0 }
     };
-    assert_eq!(approve("1d").await, StatusCode::BAD_REQUEST);
-    assert_eq!(approve("8h").await, StatusCode::OK);
+    assert_eq!(approve(Some("8h")).await, StatusCode::BAD_REQUEST);
+    assert_eq!(approve(None).await, StatusCode::OK);
     let (allows, _) = d.token(json!([search("allow"), { "product": "secrets", "resources": [{ "project": project }], "actions": { "write": "allow" } }]), json!({})).await;
     let (s, seen) = d.call(&allows, Method::POST, path, Some(body("production"))).await;
     assert_eq!((s, seen["here"].as_bool()), (StatusCode::OK, Some(true)), "{seen}");
