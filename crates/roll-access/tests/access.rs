@@ -1083,6 +1083,9 @@ async fn a_products_lifetime_cap_binds_consents_and_remembered_approvals() {
     // folder remembered for good is remembered for the cap's 30 days, its rules unchanged (the
     // root's, every folder, is 8 hours at most whatever the cap).
     let (token, id) = d.token(json!([{ "product": "workspace", "resources": "*", "actions": { "read": "allow" } }]), json!({ "ask_otherwise": true })).await;
+    // A folder roll secrets would refuse (`//` reads as every folder) is refused before anyone is asked.
+    let (s, out) = d.call(&token, Method::GET, "/v1/secrets/projects/pa/environments/development/secrets?path=//", None).await;
+    assert_eq!((s, out["code"].as_str()), (StatusCode::BAD_REQUEST, Some("bad_request")), "{out}");
     let (_, pending) = d.call(&token, Method::GET, "/v1/secrets/projects/pa/environments/development/secrets?path=/api", None).await;
     let apr = pending["approval"].as_str().unwrap_or_else(|| panic!("{pending}")).to_string();
     let (s, out) = d.call(OPERATOR, Method::POST, &format!("/v1/access/approvals/{apr}/approve"), Some(json!({ "remember": "always" }))).await;
@@ -1490,6 +1493,8 @@ async fn a_token_asks_for_access_for_a_while() {
     let secrets = |path: Option<&str>| json!({ "product": "secrets", "action": "read", "resource": "web", "environment": "production", "path": path, "for": "1d", "reason": "look into the outage" });
     assert_eq!(d.call(&token, Method::POST, "/v1/access/requests", Some(secrets(None))).await.0, StatusCode::BAD_REQUEST);
     assert_eq!(d.call(&token, Method::POST, "/v1/access/requests", Some(secrets(Some("/api")))).await.0, StatusCode::ACCEPTED);
+    // The root spelled another way is the root: `//` would reach every folder.
+    assert_eq!(d.call(&token, Method::POST, "/v1/access/requests", Some(secrets(Some("//")))).await.0, StatusCode::BAD_REQUEST);
     let (s, apr) = d.call(&token, Method::POST, "/v1/access/requests", Some(ask.clone())).await;
     assert_eq!((s, apr["state"].as_str(), apr["args"]["reason"].as_str()), (StatusCode::ACCEPTED, Some("pending"), Some("drop the scratch database I made")), "{apr}");
     assert!(apr["summary"].as_str().is_some_and(|s| s.contains("every environment")), "the person reads its whole reach: {apr}");
