@@ -183,11 +183,15 @@ pub const MAX_WORKLOADS: usize = 10_000;
 /// Live workload grants one owner's identities hold at most, so one busy pipeline doesn't take
 /// everyone's room.
 pub const OWNER_MAX_WORKLOADS: usize = 1_000;
-/// The workload grants those two caps count: live ones, apart from bootstrap tokens and machine
-/// credentials (a chain's grants with no rules, which open nothing). Those live until their
-/// machine is gone, so they'd fill the room every CI login shares; their caller caps them per
-/// identity instead (roll secrets' `machine_chains`, store/bootstrap.rs).
-const COUNTED_WORKLOADS: &str = "kind = 'workload' AND revoked_at IS NULL AND expires_at > ? AND (chain IS NULL OR rules <> '[]')";
+/// The workload grants those two caps count: live ones outside any machine's chain. A chain's
+/// bootstrap token and credentials live until their machine is gone, and a fleet's machines log in
+/// for good, so they'd fill the room every CI login shares: their caller caps the chains per
+/// identity (roll secrets' `machine_chains`, store/bootstrap.rs), and a chain's logins are capped
+/// per chain ([`CHAIN_MAX_LOGINS`]), so a maker's 900 machines leave their own CI its 1,000.
+const COUNTED_WORKLOADS: &str = "kind = 'workload' AND revoked_at IS NULL AND expires_at > ? AND chain IS NULL";
+/// Live login tokens one machine (a chain) holds at most: one, the next it logs in for before that
+/// one ends, and a few lost answers retried.
+pub const CHAIN_MAX_LOGINS: usize = 5;
 /// How long a workload grant lives, in minutes.
 pub const WORKLOAD_MINUTES: std::ops::RangeInclusive<u32> = 5..=60;
 pub const ACCESS_PREFIX: &str = "rlo_";
@@ -1269,7 +1273,9 @@ impl Store {
     }
 
     /// A workload grant (`Access::mint_workload`): a token for `minutes`, whose secret dies with it.
-    /// `via`: the live machine credential whose login it is, whose chain it joins.
+    /// `via`: the live machine credential whose login it is, whose chain it joins: it counts toward
+    /// that chain's [`CHAIN_MAX_LOGINS`], not the shared [`MAX_WORKLOADS`] and
+    /// [`OWNER_MAX_WORKLOADS`], in the same write.
     pub fn create_workload(&self, new: &NewGrant, minutes: u32, created_by: &str, user: Option<&str>, via: Option<&str>) -> Result<(Grant, String)> {
         check_name(&new.name)?;
         check_rules(&new.rules)?;
@@ -1284,15 +1290,24 @@ impl Store {
         let rules = serde_json::to_string(&new.rules).map_err(|e| Error::Internal(e.to_string()))?;
         let ip = serde_json::to_string(&new.ip_allow).map_err(|e| Error::Internal(e.to_string()))?;
         self.db.write(|c| {
-            let live: i64 = c.query_row(&format!("SELECT COUNT(*) FROM grants WHERE {COUNTED_WORKLOADS}"), [now], |r| r.get(0))?;
-            if live as usize >= MAX_WORKLOADS {
-                return Err(Error::Conflict(format!("at most {MAX_WORKLOADS} live workload tokens")));
-            }
-            let theirs: i64 = c.query_row(&format!("SELECT COUNT(*) FROM grants WHERE {COUNTED_WORKLOADS} AND created_by = ?"), params![now, created_by], |r| r.get(0))?;
-            if theirs as usize >= OWNER_MAX_WORKLOADS {
-                return Err(Error::Conflict(format!("at most {OWNER_MAX_WORKLOADS} live workload tokens for one owner's identities")));
+            // A machine's login counts toward its chain below, not the room CI logins share.
+            if via.is_none() {
+                let live: i64 = c.query_row(&format!("SELECT COUNT(*) FROM grants WHERE {COUNTED_WORKLOADS}"), [now], |r| r.get(0))?;
+                if live as usize >= MAX_WORKLOADS {
+                    return Err(Error::Conflict(format!("at most {MAX_WORKLOADS} live workload tokens")));
+                }
+                let theirs: i64 = c.query_row(&format!("SELECT COUNT(*) FROM grants WHERE {COUNTED_WORKLOADS} AND created_by = ?"), params![now, created_by], |r| r.get(0))?;
+                if theirs as usize >= OWNER_MAX_WORKLOADS {
+                    return Err(Error::Conflict(format!("at most {OWNER_MAX_WORKLOADS} live workload tokens for one owner's identities")));
+                }
             }
             let chain = via.map(|v| bootstrap::chain_via(c, v, now)).transpose()?;
+            if let Some(chain) = &chain {
+                let logins: i64 = c.query_row("SELECT COUNT(*) FROM grants WHERE chain = ? AND kind = 'workload' AND revoked_at IS NULL AND expires_at > ? AND rules <> '[]'", params![chain, now], |r| r.get(0))?;
+                if logins as usize >= CHAIN_MAX_LOGINS {
+                    return Err(Error::Conflict(format!("at most {CHAIN_MAX_LOGINS} live login tokens for one machine: use the one it has, or log in again once one ends (each within {} minutes)", WORKLOAD_MINUTES.end())));
+                }
+            }
             c.execute(
                 "INSERT INTO grants (id, name, kind, rules, expires_at, ip_allow, created_by, created_at, client_id, rate_per_minute, user_id, ask_otherwise, chain) VALUES (?, ?, 'workload', ?, ?, ?, ?, ?, NULL, ?, ?, 0, ?)",
                 params![id, new.name.trim(), rules, until, ip, created_by, now, new.rate_per_minute.map(i64::from), user, chain],
