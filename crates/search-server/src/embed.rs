@@ -198,9 +198,16 @@ impl EmbedConfig {
     }
 }
 
+/// The largest CPU set [`parse_cpus`] takes: a `cpu_set_t`'s on Linux, the same 1,024 elsewhere
+/// (where [`pin`] is a no-op and the list only sizes the pool).
+#[cfg(target_os = "linux")]
+const CPU_SETSIZE: usize = libc::CPU_SETSIZE as usize;
+#[cfg(not(target_os = "linux"))]
+const CPU_SETSIZE: usize = 1024;
+
 /// Parses a CPU list (`0-5,18-23`); every CPU must fit a `cpu_set_t`.
 pub fn parse_cpus(s: &str) -> anyhow::Result<Vec<usize>> {
-    let max = libc::CPU_SETSIZE as usize;
+    let max = CPU_SETSIZE;
     let mut out = Vec::new();
     for part in s.split(',').map(str::trim).filter(|p| !p.is_empty()) {
         match part.split_once('-') {
@@ -418,7 +425,9 @@ fn thread_cpu() -> Duration {
     Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32)
 }
 
-/// Pins the calling thread to `cpus` (each below `CPU_SETSIZE`: [`parse_cpus`]).
+/// Pins the calling thread to `cpus` (each below `CPU_SETSIZE`: [`parse_cpus`]). Linux only:
+/// elsewhere the thread isn't pinned.
+#[cfg(target_os = "linux")]
 fn pin(cpus: &[usize]) {
     if cpus.is_empty() {
         return;
@@ -434,6 +443,15 @@ fn pin(cpus: &[usize]) {
     };
     if !ok {
         tracing::warn!(?cpus, "pinning an embedding worker failed");
+    }
+}
+
+/// Off Linux a configured list starts the pool as usual, unpinned, and says so once.
+#[cfg(not(target_os = "linux"))]
+fn pin(cpus: &[usize]) {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    if !cpus.is_empty() {
+        ONCE.call_once(|| tracing::warn!(?cpus, "pinning embedding workers to CPUs is Linux-only: they run unpinned here"));
     }
 }
 
