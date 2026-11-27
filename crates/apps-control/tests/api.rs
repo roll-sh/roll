@@ -8818,6 +8818,11 @@ async fn a_public_git_url_deploys_its_branch_and_follows_new_commits() {
     assert_eq!((st, d["environment"].as_str(), d["revision"].as_str(), d["message"].as_str()), (StatusCode::ACCEPTED, Some("staging"), Some(api.as_str()), Some("tag v2")), "{d}");
     settled(&w, &id, "staging", d["id"].as_str().unwrap()).await;
     assert!(call(&w.api, "POST", &hook, Some(tag("v2"))).await.1["ignored"].as_str().unwrap().contains("already"), "once");
+    // A second tag on the same commit (an rc, then the release) is a deploy of its own.
+    git.tags.lock().insert("v2-final".into(), api.parse().unwrap());
+    let (st, d2) = call(&w.api, "POST", &hook, Some(tag("v2-final"))).await;
+    assert!(st == StatusCode::ACCEPTED && d2["id"] != d["id"] && d2["message"] == "tag v2-final", "{d2}");
+    settled(&w, &id, "staging", d2["id"].as_str().unwrap()).await;
     assert_eq!(call(&w.api, "POST", &hook, Some(tag("release-1"))).await.1["ignored"].as_str().map(|s| s.contains("no environment deploys it")), Some(true));
     // Pull requests go to previews with their number, title and page: a same-repository one on
     // its branch, a fork's as `pull/N` once `refs/pull/N/head` agrees, a close with no commit.

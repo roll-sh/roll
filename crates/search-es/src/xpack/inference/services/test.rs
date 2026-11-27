@@ -260,6 +260,7 @@ impl Kind {
                             }
                         })
                         .collect(),
+                    Default::default(),
                 ))
             }
             Kind::Streaming => {
@@ -267,7 +268,7 @@ impl Kind {
                     return Err(intentional_failure());
                 }
                 match ep.task {
-                    TaskType::Completion => Ok(Results::Completion(req.input.iter().map(|s| s.to_uppercase()).collect())),
+                    TaskType::Completion => Ok(Results::Completion(req.input.iter().map(|s| s.to_uppercase()).collect(), Default::default())),
                     // Creating a sparse endpoint validates with a dense answer, so the suites can
                     // check that streaming one fails.
                     TaskType::SparseEmbedding => Ok(Results::Floats(req.input.iter().map(|_| (0..5).map(|_| rand::random::<f32>()).collect()).collect())),

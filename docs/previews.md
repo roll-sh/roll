@@ -1118,6 +1118,17 @@ thirty-fourth review found them in the clear.
     another table and nothing fires outward. Then each masked table's `VACUUM (FULL, ANALYZE)`
     (maintenance runs as the table's owner with a safe `search_path`), every materialized view
     refreshed (as its owner), and a checkpoint.
+    - **Safe by default** (Tonic flags new sensitive columns, Neosync needs a rule for each): where
+      a parent has rules, every column of it that looks like people's data (the suggestions'
+      reading, `mask::suggest`: emails, names, phones, addresses, dates of birth, IPs, national
+      ids, bank and card numbers, secrets) and has none is masked too, with the rule suggested for
+      it, so a column production gains never reaches a preview in the clear. The preview's
+      activity names them, and `masked_by_default` (`[{resource, column, why}]`) has them for the
+      sheet. `keep` is a rule that leaves a column as it is (the project's word that it isn't
+      people's data); it's never sent as a mask. A parent with no rules hands over its data as its
+      `data` says (`real`). Columns that can't be read (10 s) leave only the rules, and the
+      activity says so. Masked bases are masked the same way when they're made
+      (`engine.rs::columns_that_look_like_peoples_data_are_masked_by_default`).
     - **Masked once, branched many** (Neon's anonymized branches): a masked Postgres branch comes
       from its parent's masked base, a branch of the parent masked once by the rules (the rewrite
       and `VACUUM (FULL)` above, once; with no role of its own, which would take the tables, so
@@ -2124,6 +2135,7 @@ type Preview = {
   // Checks against main's preview (types as in apps/dashboard/src/lib/previews-api.ts):
   release?: { head: string; ms: number; before_ms: number | null } | null;
   rehearsal?: { head: string; by: string; at: number; ok: boolean | null; ms: number | null; error: string | null } | null; // its release on today's data (POST …/rehearse)
+  masked_by_default?: { resource: string; column: string; why: string }[]; // columns masked as they look like people's data and no rule names them
   reaches?: "open" | "roll";
   visual_change?: { since: string; percent: number; phone_percent?: number | null } | null;
   phone_screenshot?: boolean;
@@ -3002,10 +3014,10 @@ variables roll makes from a branch's URL too (it could run on the preview's own 
 change becoming queued wakes its settled preview, a rehearsal shows only at its head, and schema
 overlaps stay within a repo.
 
-1. **Masking that's safe by default** (Tonic flags new sensitive columns, Neosync needs a rule for
-   each; M): a column production gains that looks like people's data (the suggestions' rules) is
-   masked until someone says otherwise, and the project is told; a branch reads `masked` only
-   when every such column has a rule.
+1. **Masking that's safe by default, in review** (Tonic, Neosync): a Postgres parent's columns
+   that look like people's data and have no rule are masked too, `keep` says otherwise. Next:
+   the same for NoSQL and search, and the project told when production gains one (not only the
+   preview's activity).
 2. **Main's code on the change's migrated data** (pgroll and Reshape's expand/contract; M): main's
    preview run once against a copy of the change's branch after its release (its pages and
    endpoints), so a migration that breaks the version still running while it deploys is caught on
@@ -3043,7 +3055,7 @@ load (#1114), the tenth review's fixes (#1119), the visual review holding on sto
 touched that its run didn't take (#1120), a visual change refused (#1125), masked bases (#1130), more stories per run (#1135), open
 changes that change the same tables named on each other (#1136), the toolbar's Main (#1138), a release
 rehearsed on today's data (#1140), and roll apps previews' feedback button for team access
-(#1151), and a rehearsal when a change is queued to land (#1155).
+(#1151), a rehearsal when a change is queued to land (#1155), and the eleventh review's fixes (#1160).
 
 Landed 2026-11-26, morning: stories' interaction tests (#1087), what a failed one threw (#1091), both in the other browsers (#1100), the step a failed one stopped at (#1105), and restore points for Redis (#1109).
 

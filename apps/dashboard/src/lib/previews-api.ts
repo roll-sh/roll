@@ -119,6 +119,8 @@ export interface Preview {
   release?: { head: string; ms: number; before_ms: number | null } | null;
   /** Its release rehearsed on the parents' data as it is now: asked at `head` (`ok` null while it waits), then how it went. */
   rehearsal?: { head: string; by: string; at: number; ok: boolean | null; ms: number | null; error: string | null } | null;
+  /** Columns its branches were masked with by default: they look like people's data and no rule names them (`keep` leaves one as it is). */
+  masked_by_default?: { resource: string; column: string; why: string }[];
   /** Kept past its TTL until then (epoch ms). */
   kept_until?: number | null;
   /** What its code may reach: a fork's preview is `roll` by default though the project's reach anything (`egress_forks`). */

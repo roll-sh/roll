@@ -3867,6 +3867,7 @@ impl Store {
         // Only at the head it's for: one asked at an earlier head never runs, and an earlier
         // head's outcome isn't this one's.
         let rehearsal = self.runtime_fact::<crate::Rehearsal>(&r.id, "rehearsal")?.filter(|x| x.head == r.build());
+        let masked_by_default: Vec<crate::MaskedByDefault> = self.runtime_fact(&r.id, "masked_by_default")?.unwrap_or_default();
         let schema_overlaps = self.schema_overlaps(&r, schema_changes.as_deref())?;
         let kept_until = self.kept_until(&r.id)?;
         // Its page as a link only when it's `https://` (it's kept whole to tell its repository).
@@ -4008,6 +4009,7 @@ impl Store {
             schema_changes,
             schema_overlaps,
             rehearsal,
+            masked_by_default,
             release,
             kept_until,
             pull,
