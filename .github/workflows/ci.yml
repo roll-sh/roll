@@ -107,18 +107,15 @@ jobs:
             sdk/csi-provider/go.mod
             sdk/lambda-extension/go.mod
       - name: Go client, operator, CSI provider, Lambda extension
-        # The four modules at once (the runner has 4 CPUs; a cold cache is mostly compiling), each
-        # one's output kept apart and printed after.
+        # One go command over the four modules (a go.work made here, not committed), so a cold
+        # cache compiles the race-enabled standard library and the client once, not per module.
         run: |
-          pids=()
-          for d in sdk/go/secrets sdk/kubernetes-operator sdk/csi-provider sdk/lambda-extension; do
-            (cd "$d" && test -z "$(gofmt -l .)" && go vet ./... && go test -race -count=1 ./...) > "$RUNNER_TEMP/${d//\//_}.log" 2>&1 &
-            pids+=("$!")
-          done
-          rc=0
-          for p in "${pids[@]}"; do wait "$p" || rc=1; done
-          cat "$RUNNER_TEMP"/sdk_*.log
-          exit $rc
+          mods="sdk/go/secrets sdk/kubernetes-operator sdk/csi-provider sdk/lambda-extension"
+          test -z "$(gofmt -l $mods)"
+          go work init $mods
+          pkgs=$(for d in $mods; do echo "./$d/..."; done)
+          go vet $pkgs
+          go test -race -count=1 $pkgs
       - uses: azure/setup-helm@v4
         with:
           version: v3.16.4
