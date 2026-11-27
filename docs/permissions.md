@@ -906,7 +906,9 @@ database asks once, rather than being refused or asking at every call.
 
 - `POST /v1/access/requests {product, action, resource?, environment?, path?, index?, for, reason}`
   with the token itself (`access_request_access` over MCP; `roll token request --product … --allow …
-  --for 1h --reason … --wait` with `ROLL_TOKEN`, which waits for the decision); `for` is `15m`, `1h`, `8h` or `1d`, and
+  --for 1h --reason … --wait` with `ROLL_TOKEN`, which waits for the decision); `for` is `15m`, `1h`, `8h` or `1d`
+  (a whole environment's secrets, no folder or `/`, 8 hours at most: a folder's rule reaches every
+  folder under it, as for a remembered approval), and
   `reason` (up to 500 characters) is what the person reads. It answers `202` with the pending
   approval (method `GRANT`, `args: {for, reason}`); the same request again is the one waiting.
   Only a token asks, never the operator or a person (they change rules directly), and only one made
