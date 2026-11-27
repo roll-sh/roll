@@ -15237,6 +15237,89 @@ objects) is returned inline by every expression evaluation; boxing it would make
 `Error { .. }` literally; the rest go through constructors. A row is still a `Vec<Value>`: 24 bytes
 of header plus the allocator's rounding over n x 24; `Box<[Value]>` would save 8 a row.
 
+## Query memory, round 9: DISTINCT aggregates presorted as PostgreSQL's plan sorts them, a GroupAggregate over a Sort streamed, an Incremental Sort group past work_mem, extsort's Disk through merge passes; grouping sets' PGO gate settled: dropped (agent 346)
+
+BENCH.md "Query memory, round 9" has the tables. Plain dist builds (`tools/dist.sh`): **b0**
+`68ec346cb` (the first base), **n1** b0 with this round's first form; **b1** origin's
+`19c7a8758` (the base the coordinator named), **n2 ... n5** the candidate's code on b1 as it
+was corrected (n5: `cand/a346`'s code but its last commit, the shared transition state of
+two presorted user-defined aggregates, which no measured query runs). PGO builds (`tools/dist-pgo.sh`, each trained on its own
+commit, staleness 0 of ~3,000 hot functions): **base-pgo** b1, **gs-pgo** b1 with agent 338's
+grouping-sets patch. One candidate, `cand/a346` on `19c7a8758`.
+
+**What changed:**
+- **A grouping over a Sort, streamed** (`exec/agg.rs`, `AggNode::sorted_stream`, chosen once in
+  `start_stream`; `run` is untouched: `nm -S` 72,801 -> 72,833 bytes, no helper of it
+  outlined). Where `run` sorts its input for a DISTINCT / ORDER BY aggregate it held every
+  group to the end, then sorted the groups again; now its groups go up one at a time over the
+  same Sort (`Stream`, nodeAgg's agg_retrieve_direct), in the same order. A GroupAggregate over
+  a Sort whose `run` hashes (enable_hashagg off, order-insensitive aggregates) is streamed over
+  the Sort when its groups may pass work_mem (hash_agg_entry_size of the estimated groups; a
+  bound without agg_transitions' matching first, which formats each aggregate's
+  expressions: ~100k instructions a query).
+- **DISTINCT aggregates as PostgreSQL's plan runs them** (`pg_presorted`,
+  adjust_group_pathkeys_for_groupagg's passes): where the input's estimated rows (every
+  group's together: PostgreSQL's group estimates of computed keys are no bound, `a % 3` over
+  20,000 rows estimates 7,000) times a value's sort size pass work_mem, or beside an aggregate
+  whose result depends on its rows' order, the input is sorted once on the group keys and the
+  order that suits the most DISTINCT / ORDER BY aggregates, those read it as it comes
+  (presorted), every other DISTINCT aggregate sorts its own values (`Buffered::Sort`); no hash
+  set. Also under GROUP BY, over a join and over any input (agent 330's `sorted_distinct`, a
+  plain aggregation over a table scan only, decided at open, is replaced). Fitting queries keep
+  the hash sets. The order-sensitive case is a correctness fix: `SELECT a % 3, count(DISTINCT
+  t), string_agg(t, ',') ... GROUP BY 1` fed string_agg in input order, PostgreSQL in the
+  presort's (t).
+- **An Incremental Sort's prefix group past work_mem** (`exec/nodes.rs` `IncrSortNode`,
+  `pgsort::IncrSort<_, true>`): a group being loaded is counted as tuplesort counts it once it
+  has 1,024 rows, then at checkpoints (half the room left at its rows' average size; the
+  loop's only test is the row count against the checkpoint, and only in the node's sorter:
+  windows' `pgsort::incremental_sort` compiles without it); past work_mem its rows and the
+  rest of it go to an ExtSort (runs on disk, merged), read back as its batch. EXPLAIN ANALYZE
+  shows `Pre-sorted Groups: N  Sort Method: external merge  Average Disk / Peak Disk` as
+  show_incremental_sort_group_info does (tuplesort_get_stats' maxSpace: every later prefix
+  group shows the most on disk so far).
+- **extsort's Disk figure** (`exec/extsort.rs` `TapeSim`): roll counted the initial runs'
+  blocks; PostgreSQL's (LogicalTapeSetBlocks) is the most blocks logtape ever handed out, which a
+  merge pass grows when its output takes a block before its inputs' read buffers
+  (merge_read_buffer_size of tape_buffer_mem) have freed one. Each run row carries its tape
+  bytes in the temporary file; merge passes replay the reads and writes block by block. Every
+  Disk figure compared now equals PostgreSQL 18.6's (13 sorts: 1008 / 976 / 2400 kB where roll
+  showed 1000 / 952 / 2392).
+- **Hashed DISTINCT's group accounting** (`HashSpill::distinct_group`): the memory total is
+  tested only when a bump block is taken or the bucket array grew (else unchanged from the last
+  test, which passed); the group count every group.
+
+**Measured:** BENCH "Query memory, round 9". 1M rows, work_mem 4 MB, peak anon+shmem over the
+level before, MB, b1 -> n5 (PostgreSQL 18.6): count(DISTINCT s), count(DISTINCT a) 46.8 -> 16.6 (14.3), its 2 files and 62.2 MB PostgreSQL's; sum / avg(DISTINCT a) 32.0 -> 19.8 (10.2), 2 files -> 1 (PostgreSQL's 1, 12.1 MB); GROUP BY id % 10 with count(DISTINCT s) 86.5 -> 16.8 (10.3); the same with max(md5(s || a)) beside it 88.3 -> 17.2 (30.5); over a 1M-row join 35.2 -> 46.1 (68.3: it now sorts, as PostgreSQL does); the GroupAggregate over a Sort (enable_hashagg off, GROUP BY a % 100000) 36.0 -> 13.3 (10.4); the Incremental Sort of 400,000-row prefix groups 219.2 -> 87.8 (16.7), 3 files of 47.1 MB as PostgreSQL's (the 87.8 is its index scan's, below). Measured on n4 (n4 -> n5 changes no held row). Result hashes and order PostgreSQL's
+in every cell. Fitting queries (20,000 rows, user instructions, 40 runs, two alternating pairs,
+foreign load 2-4 cores in the perf windows, so cycles aren't compared), b1 -> n5: plain GROUP BY -0.02 / +0.01%, enable_hashagg off GROUP BY -0.02 / +0.01%, string_agg(... ORDER BY a) under GROUP BY -1.57 / -1.57% (streamed: no hash table, no second sort of the groups), count(DISTINCT) pair -0.04 / +0.04%, grouped count(DISTINCT) +0.01 / +0.04%, over a join +0.03 / -0.02%, SELECT DISTINCT s -0.17 / -0.14%, Incremental Sort +0.02 / +0.02%, two windows +0.06 / +0.06% and +0.06 / +0.05% (`run_windows` 50,918 -> 50,950 bytes); DISTINCT a % 1000, id % 7, a Unique over a Sort, EXCEPT and grouping sets within 0.04% (n4). Three earlier forms failed it and were corrected: n3's grouped count(DISTINCT) +0.11 / +0.14% (agg_transitions' formatting, then the planner estimate `run` never makes for it: ~100k instructions a query each), windows +0.12% (the pause test in `pgsort::incremental_sort`, which `run_windows` inlines); n1 / n2's `run` compiled 672-704 bytes smaller (`shows_alike`, `key_equal_apart` and `order_insensitive` outlined by second callers: the path no longer calls the first two, the last is `#[inline(always)]`).
+TPC-H SF1, the 22 queries once each in a perf window, two alternating pairs, b1 -> n5: every query within +0.1% on one pair at least and none above it on both: q18 -0.12 / -0.22% (an n4 form +0.18 / +0.17%: a wrapper on a part's group states, 1.5M groups; restored), q16 +0.12 / +0.26% on the pairs but its count is bimodal (2.860 / 2.868 G, its parallel scan's split; b1 itself moved 0.25% between pairs): ten runs an arm, medians 2.8607 / 2.8607 G; q01 -0.01 / -0.01%, q13 +0.01 / +0.01%; result hashes equal. On n5.
+
+**Grouping sets past work_mem: dropped** (agent 338's `grouping-sets-out-of-run.diff`, rebased:
+`~/.cache/a346/patches/grouping-sets-out-of-run-on-19c7a8758.diff`). The PGO question agent 340
+left open, settled with both arms trained on their own commits (base-pgo, gs-pgo; BUILD.txt
+of each in the patches directory): two alternating pairs, two hashed sets +0.43 / +0.13%, a
+set and () +0.24 / +0.17%, plain GROUP BY +0.40 / +0.47% user instructions. The shipped build
+loses on both, so the plain build's +0.11-0.18% wasn't layout noise. What's left is
+grouping sets' memory (268 / 35 MB): it needs a form that leaves `AggNode::run`'s compile
+alone (a node of its own chosen at open, the plan's grouping sets never reaching `run`).
+
+**Found, not changed:** the Incremental Sort query's peak (90 MB against PostgreSQL's 17) is
+its index scan's: `SELECT k, s FROM u2 ORDER BY k` (index scan, no sort) alone peaks +114 MB
+with the block cache warm (scan code: agents 311 / 345's area). `SET enable_hashagg = off;
+SELECT a % 50, count(*) c, string_agg(t, ',') ... ORDER BY c DESC` at work_mem 64kB comes out
+in another order than PostgreSQL's in b0 and n5 alike: the upper Sort over 13 kB string_agg
+values (every count a tie) spills differently; its lower Sort and the groups are equal.
+
+**Verification:** `tools/quick-check.sh` with `QC_CHECKED=1` and `QC_TESTS=query_spill` on `b0cb9b282` (the five code and test commits on `8c8c5127a`; this section's commit adds docs only): Clippy 16 warnings, none new in a changed file; 423 tests in 13 binaries passed, again built `--profile verify-checked` (423 passed); regress 51,148 / 51,150, 0 newly differing (a first run on the commit before the last found aggregates:420, two presorted user aggregates' shared transition state: fixed); isolation 1,647 / 1,648; pg_dump_tap 14,609 passed. New query_spill cases: in `distinct_aggregates_spill`, sum / avg (DISTINCT), three DISTINCT aggregates, a grouped count(DISTINCT) and a GroupAggregate over a Sort with PostgreSQL 18.6's temp file counts (1, 2, 1, 1); `incremental_sort_groups_spill` (3 files, EXPLAIN ANALYZE's `Pre-sorted Groups: 3  Sort Method: external merge  Average Disk: 400kB  Peak Disk: 400kB`, the result's hash, all PostgreSQL 18.6's); `sorted_setops_spill` asserts the Sorts' Disk (336kB, 1008kB) and two plain Sorts' (976kB, 280kB).
+
+**Left** (MB over PostgreSQL's, 1M rows): grouping sets (above); sum / avg (DISTINCT a) 21 /
+10 and count(DISTINCT s), count(DISTINCT a) 19 / 14 (the Sorts' `Value` rows: agent 342's 24-byte
+`Value`); the index scan's 114 MB; the GroupAggregate's spilled tuple (54.2 MB of temp files
+against 47.1: the held row is the scan's (a, s), PostgreSQL's ((a % 100000), s), same widths:
+not found); a DISTINCT aggregate over a misestimated input (decided on the planner's rows,
+not when its set passes work_mem: a set that grows past it isn't moved to a sort).
+
 ## Query memory, round 8: the DISTINCT spill's cost paid back, spilled batches and UNION's arms streamed, DISTINCT's group estimate over computed columns, a sorted SetOp's Sorts under EXPLAIN ANALYZE; bounded window frames streamed past 4 MB dropped (agent 343)
 
 BENCH.md "Query memory, round 8" has the tables. Plain dist builds (`tools/dist.sh`): **n1**

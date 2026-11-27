@@ -916,6 +916,108 @@ dist 681 both); `Block::seek` 5,477 / 5,428 / 5,428. Range read profile shares (
 `ScanNode::each_picked` 34.36 -> 32.34. Range read pair 1 and the TPC-B pair read 0.3-1.3 foreign
 cores; the rest 1.7-3.3 in their windows.
 
+## Query memory, round 9: DISTINCT aggregates presorted, a GroupAggregate over a Sort streamed, an Incremental Sort group past work_mem, extsort's Disk; grouping sets' PGO gate (2026-11-27, agent 346)
+
+HANDOFF "Query memory, round 9" has what changed. Plain dist builds (`tools/dist.sh`): **b0**
+`68ec346cb` and **n1** this round's first form on it (the Disk table); **b1**
+origin's `19c7a8758`; **n4** / **n5** `cand/a346`'s code on it (n5 the candidate; n4 without its
+last two corrections, which change no held row: memory measured on n4). PGO builds
+(`tools/dist-pgo.sh`, each trained on its own commit, staleness 0): **base-pgo** b1, **gs-pgo** b1
+with agent 338's grouping-sets patch. PostgreSQL 18.6 by digest. Harness: agent 343's copied to
+`~/.cache/a346/bench` (lane C; `mem.sh` with `mem-a346b.txt`, `U2=1` for the Incremental Sort's
+table; `fpair.sh` with `ga`, `oagg`, `gdist`, `jdist` added; `tpair.sh`). Foreign load on lane C
+was 5-7.5 cores in every hold (2-4 in the perf windows): instruction counts only, walls and
+cycles not compared.
+
+### Peak memory a query (MB of the server cgroup's anon+shmem over the level before; 1M rows, work_mem 4 MB)
+
+Result hashes, in order and sorted, PostgreSQL's in every cell (b1's `dsens` order too: only
+its string_agg's argument order differs in fitting queries, below).
+
+| query | b1 | n4 | PostgreSQL 18.6 | temp files: b1 / n4 / PostgreSQL |
+|---|---:|---:|---:|---|
+| `count(DISTINCT s), count(DISTINCT a)` | 46.8 | 16.6 | 14.3 | 2, 49.1 MB / 2, 62.2 MB / 2, 62.2 MB |
+| `sum(DISTINCT a), avg(DISTINCT a)` | 32.0 | 19.8 | 10.2 | 2, 24.1 MB / 1, 12.1 MB / 1, 12.1 MB |
+| `id % 10, count(DISTINCT s) ... GROUP BY 1` | 86.5 | 16.8 | 10.3 | 0 / 1, 54.2 MB / 1, 47.1 MB |
+| `id % 10, count(DISTINCT s), max(md5(s \|\| a)) ... GROUP BY 1` | 88.3 | 17.2 | 30.5 | 1 / 1 / 3 |
+| `count(DISTINCT t.s) FROM t JOIN u ON u.k = t.id` (1M joined rows, 1,000 values) | 35.2 | 46.1 | 68.3 | 30 / 31 / 96 (parallel hash join) |
+| `SET enable_hashagg = off; ... GROUP BY a % 100000` (GroupAggregate over a Sort) | 36.0 | 13.3 | 10.4 | 1, 54.2 MB / 1, 54.2 MB / 1, 47.1 MB |
+| `SELECT k, s FROM u2 ORDER BY k, s` (Incremental Sort, prefix groups of 400,000) | 219.2 | 87.8 | 16.7 | 0 / 3, 47.1 MB / 3, 47.1 MB |
+
+The Incremental Sort's 87.8 is its index scan's: `ORDER BY k` alone (no sort) peaks +114 MB
+with the cache warm.
+
+### extsort's Disk figure (EXPLAIN ANALYZE, kB; serial, 20,000 rows unless noted)
+
+| sort | work_mem | b0 | n1 | PostgreSQL 18.6 |
+|---|---|---:|---:|---:|
+| `SELECT s, a FROM w ORDER BY s` | 64kB | 1000 | 1008 | 1008 |
+| `SELECT * FROM cd ORDER BY a, t` | 64kB | 952 | 976 | 976 |
+| `SELECT x FROM i8 ORDER BY x DESC` (200,000 int8) | 64kB | 2392 | 2400 | 2400 |
+| the same | 1MB | 2384 | 2384 | 2384 |
+| `SELECT s, a FROM t ORDER BY s` (1M rows) | 4MB | 49008 | 49008 | 49008 |
+| 8 other plain Sorts, the sorted INTERSECT ALL's two | 64kB-4MB | equal | equal | |
+
+### When the input fits (G user instructions, 40 runs, 20,000 rows; two alternating pairs; results equal)
+
+| query | b1 | new | new / b1 |
+|---|---:|---:|---|
+| plain GROUP BY `a % 1000` (hashed; `run`) | 2.6054 / 2.6049 | n5 2.6047 / 2.6051 | -0.02%, +0.01% |
+| `SET enable_hashagg = off`, GROUP BY `a % 1000`, `max(s)` (`run` sorts) | 2.4956 / 2.4952 | n5 2.4951 / 2.4955 | -0.02%, +0.01% |
+| `string_agg(s, ',' ORDER BY a)` GROUP BY `id % 10` (streamed now) | 6.8780 / 6.8780 | n5 6.7699 / 6.7700 | -1.57%, -1.57% |
+| `count(DISTINCT s), count(DISTINCT a)` | 3.7144 / 3.7113 | n5 3.7129 / 3.7126 | -0.04%, +0.04% |
+| `id % 10, count(DISTINCT s)` GROUP BY 1 | 3.9047 / 3.9031 | n5 3.9053 / 3.9045 | +0.01%, +0.04% |
+| `count(DISTINCT w.s)` over a join | 7.6873 / 7.6885 | n5 7.6893 / 7.6870 | +0.03%, -0.02% |
+| `SELECT DISTINCT s` (HashAggregate) | 3.8787 / 3.8780 | n5 3.8721 / 3.8724 | -0.17%, -0.14% |
+| Incremental Sort, groups of 100 | 8.7894 / 8.7893 | n5 8.7911 / 8.7911 | +0.02%, +0.02% |
+| window: sum, lag, rank by `id % 10` (agent 320's) | 7.7833 / 7.7833 | n5 7.7879 / 7.7878 | +0.06%, +0.06% |
+| `sum(id)`, `last_value(s)` over ROWS 5 / 5 | 6.9859 / 6.9861 | n5 6.9898 / 6.9897 | +0.06%, +0.05% |
+| `SELECT DISTINCT a % 1000, id % 7` | 4.1311 / 4.1315 | n4 4.1300 / 4.1296 | -0.03%, -0.04% |
+| `SELECT DISTINCT s`, enable_hashagg off (Unique over a Sort) | 4.7397 / 4.7402 | n4 4.7407 / 4.7405 | +0.02%, +0.01% |
+| EXCEPT, enable_hashagg off | 7.3466 / 7.3469 | n4 7.3467 / 7.3470 | +0.00%, +0.00% |
+| two hashed grouping sets | 5.6751 / 5.6755 | n4 5.6754 / 5.6750 | +0.01%, -0.01% |
+
+### TPC-H SF1 (G user instructions, each query once in its own perf window; two alternating pairs)
+
+| query | b1 | n5 | n5 / b1 |
+|---|---:|---:|---|
+| q01 | 7.317 / 7.317 | 7.316 / 7.316 | -0.005%, -0.011% |
+| q02 | 2.258 / 2.256 | 2.257 / 2.257 | -0.022%, +0.073% |
+| q03 | 4.089 / 4.088 | 4.086 / 4.089 | -0.060%, +0.021% |
+| q04 | 1.342 / 1.342 | 1.342 / 1.342 | -0.013%, -0.013% |
+| q05 | 2.768 / 2.767 | 2.768 / 2.768 | -0.024%, +0.060% |
+| q06 | 3.376 / 3.376 | 3.376 / 3.376 | -0.001%, -0.001% |
+| q07 | 3.455 / 3.454 | 3.455 / 3.454 | -0.003%, +0.019% |
+| q08 | 1.348 / 1.348 | 1.347 / 1.347 | -0.024%, -0.062% |
+| q09 | 7.618 / 7.620 | 7.621 / 7.621 | +0.034%, +0.006% |
+| q10 | 5.546 / 5.546 | 5.537 / 5.546 | -0.167%, -0.002% |
+| q11 | 0.823 / 0.825 | 0.822 / 0.823 | -0.181%, -0.211% |
+| q12 | 5.878 / 5.878 | 5.878 / 5.878 | -0.008%, -0.003% |
+| q13 | 4.106 / 4.105 | 4.106 / 4.106 | +0.008%, +0.011% |
+| q14 | 1.381 / 1.380 | 1.381 / 1.380 | +0.039%, +0.024% |
+| q15 | 2.306 / 2.306 | 2.306 / 2.306 | -0.006%, -0.007% |
+| q16 | 2.875 / 2.868 | 2.879 / 2.875 | +0.124%, +0.264% |
+| q17 | 2.851 / 2.851 | 2.852 / 2.852 | +0.043%, +0.029% |
+| q18 | 15.461 / 15.458 | 15.444 / 15.423 | -0.115%, -0.224% |
+| q19 | 0.471 / 0.471 | 0.471 / 0.471 | +0.004%, -0.023% |
+| q20 | 0.880 / 0.880 | 0.880 / 0.880 | +0.036%, -0.026% |
+| q21 | 5.239 / 5.239 | 5.238 / 5.237 | -0.016%, -0.025% |
+| q22 | 0.623 / 0.623 | 0.623 / 0.623 | -0.028%, -0.071% |
+
+q16 again, ten runs an arm: b1 median 2.8607 G (2.8590-2.8680), n5 2.8607 G (2.8596-2.8678).
+
+### Grouping sets out of `AggNode::run` (agent 338's patch) on PGO builds, each trained on its own commit
+
+G user instructions, 40 runs, two alternating pairs:
+
+| query | base-pgo | gs-pgo | gs / base |
+|---|---:|---:|---|
+| two hashed grouping sets | 4.7497 / 4.7498 | 4.7701 / 4.7558 | +0.43%, +0.13% |
+| a hashed set and () | 3.5182 / 3.5205 | 3.5264 / 3.5265 | +0.24%, +0.17% |
+| plain GROUP BY | 2.1306 / 2.1293 | 2.1391 / 2.1393 | +0.40%, +0.47% |
+
+Dropped (HANDOFF).
+
 ## Query memory, round 8: hashed DISTINCT / UNION paid back and streamed, DISTINCT's estimate over computed columns, sorted SetOp's Sorts; windows streamed past 4 MB dropped (2026-11-27, agent 343)
 
 HANDOFF "Query memory, round 8" has what changed. Plain dist builds (`tools/dist.sh`): **n1**
