@@ -304,6 +304,26 @@ TPC-H SF 0.1 in process (lane C, the 22 once): 17.0522 G user instructions base,
 candidate, every query's rows and hash equal. short_txn moved +5.6% / -2.1% (its data's state).
 Lanes A, B and C read 5.5-8 foreign cores throughout: no cycle numbers.
 
+## Statistics views: session columns, checkpointer writes, pg_stat_statements' file (2026-11-27, agent 339)
+
+HANDOFF "Statistics views: the columns roll never counted, pg_stat_statements across a restart" has
+what changed. Plain dist `bench`, base `2c916efcf` (tree of `2e8c18864`), the candidate's code on
+it; in process, 1 client, 100,000 rows; user instructions per op from perf stat pairs ((I30 s - I10
+s) / (ops30 - ops10), `~/.cache/a339/inproc/`; Intel PT failed on the loaded lane), one pair each,
+lane A at 6.7-7.5 foreign cores (no cycle numbers):
+
+| case | base | candidate | |
+|---|---|---|---|
+| point select, extended | 32,018.5 | 31,992.0 | -0.08% |
+| point select, simple protocol | 34,670.9 | 34,701.2 | +0.09% |
+| range_scan_100 | 388,157.8 | 388,164.7 | +0.00% |
+| short_txn | 253,873.4 | 252,311.7 | -0.6% |
+
+TPC-H SF 0.1 in process (lane C, the 22 once): 17.0539 G -> 17.0545 G, every hash equal.
+TPC-B-like, agent 333's warmed measure (scale 32, 8 clients, 160,000 counted, enable_seqscan=off,
+lane A at 6.0 foreign cores, one pair): 364,853 -> 359,969 user instructions a transaction
+(connection threads 292,850 -> 286,261).
+
 ## Point selects, outside the session: lock keys, portals and pgstat (2026-11-26, agent 329)
 
 HANDOFF "Point selects, outside the session: lock keys, portals and pgstat" has what changed. Plain

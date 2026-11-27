@@ -25752,3 +25752,148 @@ candidate's roll-engine (plain dist, cand/a336 under it): `--seed 1` 7 rounds ok
 - `ExecCtx::with_search_path`'s other allocations: `temp_cleanup`'s `Rc<TempCleanup>`, `txn_time`'s
   `Rc<Cell>`, the `CatalogNames` `Arc` (each ~60-100 instructions with the free); a new lock's key
   hashed twice in `TxnState::lock` (one hash, ~30-40).
+
+## Statistics views: the columns roll never counted, pg_stat_statements across a restart (agent 339, 2026-11-27)
+
+Agent 335's "Left" items 2 and 3 (its column-by-column comparison of every cumulative view). Probes
+in `~/.cache/a339/scripts/` (`probe-views.py` / `cmpviews.py`, 335's with this agent's names;
+`sessions.py`: sessions ending each way and pg_stat_statements across a clean restart, an
+immediate shutdown and a kill; `active.py`: one session kind at a time), outputs in
+`~/.cache/a339/probe/` and `~/.cache/a339/sessions-*.json`. PostgreSQL 18.6 in my own `a339-pg`
+(the 18.6 image, `shared_preload_libraries = pg_stat_statements`).
+
+### What PostgreSQL 18.6 does (checked on `a339-pg`)
+
+- **pg_stat_statements' file** `pg_stat/pg_stat_statements.stat` is written by the postmaster's
+  exit callback (pgss_shmem_shutdown) when it exits normally: at a smart / fast shutdown **and at
+  an immediate one** (`pg_ctl stop -m immediate`: 3 calls before, 5 after, kept), not when the
+  postmaster is killed (`docker kill -s KILL`: the entries gone, a new stats_reset). It is read and
+  removed at the start (pg_stat/ is empty while running). Sticky entries (never planned or run)
+  aren't loaded. With `pg_stat_statements.save = off` at the start the file is neither read nor
+  removed.
+- A damaged file: one cut short is "could not read file \"pg_stat/pg_stat_statements.stat\": No
+  such file or directory" (a short fread leaves the errno of the start's unlink of the absent
+  query-text file); one with another header "ignoring invalid data in file ...". Either is
+  removed, the statistics start empty with this start as stats_reset, the LOG line comes
+  **before** "starting PostgreSQL" (shared memory is set up first). A 9-byte junk file is the
+  short case (the header, version and count are read before any is checked).
+- **pg_stat_database's session columns** (client backends only: pgstat_should_report_connstat):
+  session_time grows at each flush by the time since the last one (and at the session's end);
+  active_time / idle_in_transaction_time by the time spent in the state left at each state change
+  (pgstat_report_activity: active and fastpath, idle in transaction and its aborted form);
+  sessions_abandoned: the client went away without a Terminate message; sessions_fatal: a FATAL
+  (idle_session_timeout's, a protocol violation, the connection lost while writing);
+  sessions_killed: pg_terminate_backend, a fast shutdown's SIGTERM. Measured: one each, a
+  300 ms pg_sleep's active_time 300+, a 400 ms wait in a block 401 ms idle in transaction.
+- **pg_stat_checkpointer** buffers_written / write_time / sync_time: the checkpoint's buffer
+  writes and the milliseconds writing and syncing (rounded up), the shutdown checkpoint's in the
+  statistics file.
+
+### What changed (`cand/a339`)
+
+- `ext/pg_stat_statements/file.rs` (new) and `store.rs` (`Store::dump` / `restore`): the file. Every
+  entry in the order they were made (key, text, every counter, stats_since, minmax_stats_since),
+  then the deallocation count and the last full reset, little-endian (agent 335's `W` / `R`,
+  now `pub(crate)`), a CRC-32. `Engine::save_statements` writes it through
+  `storage::durable::replace` with pg_stat_statements.save as the server has it now (command line,
+  else the configuration files): from `Engine::shutdown` (smart / fast) and from roll-engine's
+  immediate shutdown before it exits, as PostgreSQL's postmaster does both. `Engine::open` loads
+  it (save on) into the new store: sticky entries skipped, the least used deallocated past
+  `pg_stat_statements.max` (now read at the start; it was 5000 always), the file's deallocation
+  count and reset time; then removes it. A file that ends early or doesn't check is removed with
+  PostgreSQL's LOG line, written before "starting PostgreSQL" (`StartupReport::pgss_log`).
+- Session columns: `Pending` keeps a client backend's `session_from` (its start, then each
+  flush; 0 for an autovacuum worker, `Pending::not_a_session`), `conn_times` (active, idle in a
+  transaction block, microseconds) and how it ended (`SessionEnd`, `pgstat::session_end`);
+  `Unflushed` carries them; `flush` adds session_time (flush time minus `session_from`, then
+  re-armed at that time, also by a reader's idle-timeout flush), the two times and the three
+  end counts to the database's entry. The server counts the times in `state_time` at each state
+  change of pg_stat_activity, where the clock is already read (`statement_done_activity`,
+  `start_activity`); the end cause: EOF / a read error ClientEof, then a termination Killed, a FATAL
+  sent or an error out of the message loop Fatal unless a cause is known (errfinish's rule).
+  `session_ends` always flushes a client backend's last report (pgstat_report_disconnect puts the
+  database entry in the pending list). `pg_stat_get_db_session_time` / `active_time` /
+  `idle_in_transaction_time` (ms, 0 without an entry) and `sessions_abandoned` / `fatal` /
+  `killed`. `DbEntry` carries the six, so the statistics file's format is 2.
+- Checkpointer: `pgstat::checkpoint` counts what its measured flush did (`storage::fileio`, the
+  numbers the log_checkpoints line already printed): buffers_written (8 kB blocks of table files
+  written), write_time and sync_time (ms, rounded up). The shutdown checkpoint's counts so far go
+  into the statistics file it writes (`Fixed::shutdown_checkpoint`, `saved`), as PostgreSQL's file
+  has its times. A CHECKPOINT writes only frozen memtables (`Store::flush_all`), so it mostly
+  writes 0 buffers. pg_stat_io's checkpointer writes and fsyncs stay 1 each a checkpoint, as before:
+  counted from the flush they read 0 after a CHECKPOINT, and the regression suite's stats test
+  (units 376, 377: shared writes and fsyncs grow across a CHECKPOINT after writes) differed. The
+  real fix is a CHECKPOINT that writes the active memtables, as PostgreSQL's writes every dirty
+  buffer: storage's change, left (below).
+
+Nothing here runs per row; per statement only `state_time` (two subtractions where a state
+changes) and, per report, two adds.
+
+### Compared
+
+`sessions.py` (`sessions-pg.json`, `sessions-base.json`, `sessions-new.json`):
+
+| | PostgreSQL 18.6 | base | candidate |
+|---|---|---|---|
+| sessions_abandoned / fatal / killed (one each) | 1 / 1 / 1 | 0 / 0 / 0 | 1 / 1 / 1 |
+| active_time of a 300 ms pg_sleep (`active.py`) | 300+ | 0 | 304 |
+| idle_in_transaction_time of a 400 ms wait in a block | 401 | 0 | 427-433 |
+| session_time | grows at flushes and ends | 0 | the same |
+| pg_stat_statements after a clean restart / an immediate shutdown / a kill | kept / kept / gone, new stats_reset | gone / - / gone | kept / kept / gone, new stats_reset |
+
+(roll's idle in transaction reads ~30 ms more than the client's sleep: the server's own time
+between BEGIN's end and COMMIT's start.) `probe-views.py` / `cmpviews.py` against PostgreSQL with
+pg_stat_statements loaded (`cmp-new1.txt`): 122 differing cells (335's list was 181 against a
+PostgreSQL without it). Gone from the list: every session column, checkpointer buffers_written /
+write_time / sync_time (the clean restart keeps them; after a kill they are 0 and the
+end-of-recovery checkpoint counts its own: 0 buffers, roll replays into the memtable).
+
+### Measured
+
+Plain dist builds (`tools/dist.sh --example bench`), base `2c916efcf` (the same tree as
+`2e8c18864`, the candidate's parent then; `0fa8e55bd` since brought 338's window and EXPLAIN
+changes only) against the candidate. Agent 329's Intel PT recipe failed on a lane at 7-8
+foreign cores (after its first attempt `perf record -p` found no process; the copies are in
+`~/.cache/a339/inproc/`), so instructions come from agent 335's perf stat pairs, (I30 s - I10 s)
+/ (ops30 - ops10), user instructions of the in-process bench, one pair each through
+`tools/lane.sh a` (6.7-7.5 foreign cores: instructions only, A/A about ±0.15%):
+
+| case | base | candidate | |
+|---|---|---|---|
+| point select, extended | 32,018.5 | 31,992.0 | -0.08% |
+| point select, simple | 34,670.9 | 34,701.2 | +0.09% |
+| range_scan_100 | 388,157.8 | 388,164.7 | +0.00% |
+| short_txn | 253,873.4 | 252,311.7 | -0.6% (the data's state) |
+
+TPC-H SF 0.1 in process (lane C, 7.3 foreign cores, the 22 once): 17.0539 G -> 17.0545 G user
+instructions (+0.003%), every query's rows and hash equal. TPC-B-like over the wire by agent
+333's measure (`~/.cache/a339/w333`, scale 32, 160,000 warm-up then 160,000 counted with
+enable_seqscan=off, 8 clients, lane A at 6.0 foreign cores, one pair): user instructions a
+transaction 364,853 -> 359,969 (connection threads 292,850 -> 286,261): level within this
+measure's spread under that load (the session's `state_time` is a few instructions a statement).
+
+### Left
+
+1. Block counts. pg_statio_* heap / index / toast blks_read and blks_hit, pg_stat_database
+   blks_read / blks_hit, pg_stat_io client backend reads and hits, pg_stat_bgwriter
+   buffers_alloc. The real events roll has: a block cache miss (a read from the file, on the
+   query's thread: `Sst::block_with` with `fill`) and the scans' modelled pages (already counted
+   as hits: seq scans' modelled pages, one index block a scan). A plan that costs nothing on the
+   hit path: a thread-local list of (table, index id) and bytes appended only on a miss (the
+   block's last key names its relation: `keys::index_prefix`), folded into the relation's
+   blocks_fetched in 8 kB units at the transaction's end (one thread-local check), pg_stat_io's
+   reads and buffers_alloc with it. Not done: no time left in this round. PostgreSQL also counts a
+   heap and index block hit for every row an INSERT / UPDATE writes and every heap tuple an index
+   scan fetches; roll has no buffer access there and the per-row count is what the cost rule
+   forbids, so those stay below PostgreSQL's.
+2. No event in roll, left 0: tup_returned / tup_fetched / blks_* of catalog reads (the catalog is
+   in memory), pg_stat_checkpointer num_timed (no timed checkpoints) and slru_written (no SLRUs
+   written), pg_stat_wal wal_fpi and wal_buffers_full (no full-page images, no WAL buffers),
+   pg_stat_slru but notify's blks_zeroed, pg_stat_recovery_prefetch, pg_stat_io's I/O times
+   (track_io_timing), writebacks, pg_stat_database blk_read_time / blk_write_time.
+3. CHECKPOINT writing the active memtables (PostgreSQL writes all dirty buffers; roll's writes
+   frozen memtables only, the WAL holds the rest): then buffers_written and pg_stat_io's
+   checkpointer writes both count what it wrote, and the 1-a-checkpoint pg_stat_io counts go.
+   It changes what a CHECKPOINT costs and the start state harnesses take after one (agent 333's
+   measure runs one before counting), so not done here.
+4. idx_tup_read 66 for 67 and a slot's total_bytes (test_decoding's bytes) as 335 found.
