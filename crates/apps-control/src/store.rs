@@ -527,6 +527,10 @@ CREATE TABLE IF NOT EXISTS domains (
 CREATE INDEX IF NOT EXISTS domains_env ON domains (service, env);
 -- A project's own preview domain (`*.preview.acme.dev`, roll previews' preview deployment
 -- suffix), and the label each preview environment answers to under it.
+CREATE TABLE IF NOT EXISTS deploy_git_tags (
+    deployment TEXT PRIMARY KEY,
+    tag TEXT NOT NULL
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS env_deploy_tags (
     service TEXT NOT NULL,
     env TEXT NOT NULL,
@@ -1478,6 +1482,7 @@ impl Store {
             c.execute("DELETE FROM deploy_steps WHERE deployment IN (SELECT id FROM deployments WHERE service = ?)", [id])?;
             c.execute("DELETE FROM deploy_closed WHERE deployment IN (SELECT id FROM deployments WHERE service = ?)", [id])?;
             c.execute("DELETE FROM deploy_overrides WHERE deployment IN (SELECT id FROM deployments WHERE service = ?)", [id])?;
+            c.execute("DELETE FROM deploy_git_tags WHERE deployment IN (SELECT id FROM deployments WHERE service = ?)", [id])?;
             c.execute("DELETE FROM state WHERE key LIKE ?", [format!("%:{id}/%")])?;
             c.execute("DELETE FROM status_days WHERE key LIKE ?", [format!("%:{id}/%")])?;
             for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "variable_runtime_only", "visit_tickets", "visit_sessions", "variable_files", "error_groups", "variables", "links", "domains", "preview_hosts", "runs", "jobs", "metrics", "usage", "form_submissions", "deploy_scans", "env_data", "env_branches", "udp_ports", "env_unscheduled", "sandboxes", "env_peering", "volume_hours", "env_deploy_tags"] {
@@ -2991,6 +2996,22 @@ impl Store {
         Ok(())
     }
 
+    /// Every environment's tag list of a service forgotten (its source moved to another repository).
+    pub fn clear_deploy_tags(&self, service: &str) -> Result<()> {
+        self.db.execute("UPDATE env_deploy_tags SET seen = '[]' WHERE service = ?", [service])?;
+        Ok(())
+    }
+
+    /// The Git tag a deployment was made for (`ROLL_GIT_TAG`).
+    pub fn set_deploy_git_tag(&self, deployment: &str, tag: &str) -> Result<()> {
+        self.db.execute("INSERT INTO deploy_git_tags (deployment, tag) VALUES (?, ?) ON CONFLICT (deployment) DO NOTHING", params![deployment, tag])?;
+        Ok(())
+    }
+
+    pub fn deploy_git_tag(&self, deployment: &str) -> Result<Option<String>> {
+        Ok(self.db.query_row("SELECT tag FROM deploy_git_tags WHERE deployment = ?", [deployment], |r| r.get(0)).optional()?)
+    }
+
     /// `tag` marked as acted on: false when it already was (each tag deploys once). The newest
     /// [`crate::tags::MAX_SEEN`] are kept.
     pub fn mark_tag_seen(&self, service: &str, env: &str, tag: &str) -> Result<bool> {
@@ -3033,8 +3054,13 @@ impl Store {
             let holder: Option<(String, String)> = c.query_row("SELECT service, env FROM domains WHERE hostname = ? AND kind = 'custom'", [host], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
             let Some((hs, he)) = holder.filter(|_| ok).filter(|(s, e)| (s.as_str(), e.as_str()) != (service, env)) else { return Ok(None) };
             let per_service: i64 = c.query_row("SELECT COUNT(*) FROM domains WHERE service = ? AND kind = 'custom'", [service], |r| r.get(0))?;
-            if per_service >= MAX_DOMAINS_PER_SERVICE {
-                return Err(Error::Conflict(format!("at most {MAX_DOMAINS_PER_SERVICE} custom domains a service")));
+            let per_project: i64 = c.query_row(
+                "SELECT COUNT(*) FROM domains d JOIN services s ON s.id = d.service WHERE d.kind = 'custom' AND s.project = (SELECT project FROM services WHERE id = ?)",
+                [service],
+                |r| r.get(0),
+            )?;
+            if per_service >= MAX_DOMAINS_PER_SERVICE || per_project >= MAX_DOMAINS_PER_PROJECT {
+                return Err(Error::Conflict(format!("at most {MAX_DOMAINS_PER_SERVICE} custom domains a service and {MAX_DOMAINS_PER_PROJECT} a project")));
             }
             c.execute("DELETE FROM domains WHERE hostname = ?", [host])?;
             insert_event(c, now, "domain.expired", &hs, &he, None, &serde_json::json!({ "hostname": host, "reason": "claimed" }))?;

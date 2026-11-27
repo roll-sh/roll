@@ -556,7 +556,10 @@ whole. The environment's log
   `pr-predestroy`): once before a preview (ephemeral) environment is deleted, whether a person,
   roll previews' adapter or a closed pull request deletes it, in a container of its live
   deployment's image with its variables on the project network, as the pre-deploy command runs:
-  a preview's own data cleaned up, its webhooks or OAuth clients removed. Ten minutes at most; a
+  a preview's own data cleaned up, its webhooks or OAuth clients removed. Two minutes at most
+  (well under what a deleting client waits: roll previews' ten), once per deployment (a retried
+  delete doesn't run it again), in a task a dropped request doesn't stop, so its container always
+  goes; a
   non-zero exit or a timeout is said in the log and as `job.failed` (`command: teardown`), and
   the delete goes on either way. Never for a lasting environment. `api.rs`'s pre-deploy test.
 - **Deploy another revision once** (Render's, Railway's and Vercel's manual deploys; Deploy's
@@ -3704,7 +3707,10 @@ value is said, as it only resolves inside roll. It exits with the command's exit
 
 `roll apps vars --pull [FILE]` (`vercel env pull`, `heroku config -s`) writes the same values to
 a `.env` file here instead (default `.env.local`), for a framework's own dev server: each line as
-`--reveal` prints it (what `--from-file` reads back exactly), `PORT` and `ROLL_*` left out, the
+`--reveal` prints it, `PORT`, `ROLL_*` and roll's own values (`WEB_CONCURRENCY`, `OTEL_*`, an
+agent's `JAVA_TOOL_OPTIONS`: the instance's, wrong here) left out, links' and secrets' kept (a
+local server needs `DATABASE_URL`; the file says never to read it back with `--from-file`, which
+would freeze them as the service's own), the
 sealed ones named in its first lines and on the terminal, the file this user's only (0600, a
 wider one narrowed), and a warning when git doesn't ignore it. A read of values, audited as
 `--reveal` is. `roll-cli/tests/apps.rs::variables_and_an_environment_through_the_cli`.
@@ -3926,8 +3932,14 @@ push (GitHub's, Gitea's and GitLab's `refs/tags/…`, GitLab's Tag Push Hook, Bi
 changes); each matching tag deploys once, at the commit the repository's own refs say it names
 (peeled, for an annotated tag), never what the body says, so a leaked hook URL can't put an old
 commit live. The tags already in the repository when `deploy_tags` is set are marked as seen and
-never deploy; at most 1,000 are remembered. It goes through everything a push does: paused,
-held (built to `ready`), a freeze, approvals, a gradual rollout. `null` stops it.
+never deploy (a pattern matching more than 10,000 already is refused; moving the service to
+another repository forgets them all); a tag counts as done once its deploy is queued, so one a
+spend cap or a freeze refused is tried again by the next delivery, and two tags on one commit are
+two deploys (Bitbucket's push of a branch with its tag deploys both). It goes through what a push
+does, `wait_for_ci` included (a tag whose checks fail never goes out): paused, held (built to
+`ready`), a freeze, approvals, a gradual rollout; watch paths and `[skip ci]` don't apply, since
+tagging is the decision. Its instances have `ROLL_GIT_TAG` (Cloud Build's `$TAG_NAME`), for an
+error tracker's release. `null` stops it.
 `api.rs::a_public_git_url_deploys_its_branch_and_follows_new_commits`.
 
 ## Links on one node

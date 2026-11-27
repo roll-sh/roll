@@ -4624,9 +4624,12 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             let svc = service(api, &target).await?;
             let base = env_path(&svc, &target.env);
             let (values, listed) = (api.get(&format!("{base}/variables/values")).await?, api.get(&format!("{base}/variables")).await?);
-            let vars: Vec<(String, String)> = values.as_object().into_iter().flatten().filter(|(k, _)| k.as_str() != "PORT" && !k.starts_with("ROLL_")).filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string()))).collect();
+            // roll's own (`WEB_CONCURRENCY`, `OTEL_*`, an agent's `JAVA_TOOL_OPTIONS`) are the
+            // instance's, wrong on this machine: left out, as `PORT` and `ROLL_*` are.
+            let roll_made: Vec<String> = listed["vars"].as_array().into_iter().flatten().filter(|v| v["source"] == "roll").map(|v| s(&v["name"])).collect();
+            let vars: Vec<(String, String)> = values.as_object().into_iter().flatten().filter(|(k, _)| k.as_str() != "PORT" && !k.starts_with("ROLL_") && !roll_made.contains(k)).filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string()))).collect();
             let sealed: Vec<String> = listed["vars"].as_array().into_iter().flatten().filter(|v| v["sealed"] == true).map(|v| s(&v["name"])).collect();
-            let text = dotenv(&format!("{} {} (roll apps vars --pull)", s(&svc["name"]), target.env), &vars, &sealed);
+            let text = dotenv(&format!("{} {} (roll apps vars --pull): for this machine; never read it back with --from-file (links' and secrets' values would stop following their source)", s(&svc["name"]), target.env), &vars, &sealed);
             write_private(&file, &text)?;
             if !json_out {
                 eprintln!("wrote {} {} to {}", vars.len(), if vars.len() == 1 { "variable" } else { "variables" }, file.display());

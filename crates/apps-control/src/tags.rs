@@ -14,8 +14,10 @@ use serde_json::json;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-/// The most tags an environment remembers acting on (its `deploy_tags`), newest kept.
-pub const MAX_SEEN: usize = 1000;
+/// The most tags an environment remembers (its `deploy_tags`: those there when it was set and
+/// those it acted on since); a pattern matching more already is refused, so none is dropped
+/// before a release cadence of thousands.
+pub const MAX_SEEN: usize = 10_000;
 
 /// Whether `pattern` (`v*`, `release-*`, `v1.*.*`: `*` any run of characters, `/` too) matches
 /// the tag `name` whole.

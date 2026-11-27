@@ -664,7 +664,7 @@ pub struct Run {
     pub pre_deploy: Option<String>,
     /// Runs once in a container of the live deployment's image before a preview (ephemeral)
     /// environment is deleted (Heroku's `pr-predestroy`): its data cleaned up, its webhooks
-    /// removed. Ten minutes at most; a failure is said, never holding the delete.
+    /// removed. Two minutes at most; a failure is said, never holding the delete.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub teardown: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

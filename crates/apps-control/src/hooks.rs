@@ -155,67 +155,12 @@ impl Apps {
             }
             Push::Tags(tags) => {
                 let Source::Git { url, .. } = &svc.source else { unreachable!("matched above") };
-                let sid = service.to_string();
-                let envs = self.db(move |s| s.environments(&sid)).await?;
-                let remote = self.git_remote(service, url).await;
-                let (mut said, mut deployed, mut failed) = (Vec::new(), Vec::new(), Vec::new());
-                let mut refs = None;
-                for tag in tags.iter().take(20) {
-                    for e in envs.iter().filter(|e| !e.ephemeral) {
-                        let (sid, en) = (service.to_string(), e.name.clone());
-                        let Some((pattern, seen)) = self.db(move |s| s.deploy_tags(&sid, &en)).await? else { continue };
-                        if !crate::tags::tag_matches(&pattern, tag) {
-                            continue;
-                        }
-                        if seen.iter().any(|t| t == tag) {
-                            said.push(format!("{}: {tag} was deployed (or there) already", e.name));
-                            continue;
-                        }
-                        if e.paused {
-                            said.push(format!("{} is paused", e.name));
-                            continue;
-                        }
-                        let hold = crate::deploy::hold_of(svc, e);
-                        if let crate::deploy::Held::Skip(why) = &hold {
-                            said.push(format!("{}: {why}", e.name));
-                            continue;
-                        }
-                        // Where the tag points per the repository, never the body: a leaked hook
-                        // URL can't name a commit, and an old tag deploys at most once.
-                        if refs.is_none() {
-                            refs = Some(remote.ls_refs().await.map_err(|e| format!("{e:#}")));
-                        }
-                        let sha = match refs.as_ref().expect("read above") {
-                            Ok(r) => match r.get(&format!("refs/tags/{tag}")) {
-                                Some(r) => r.peeled.unwrap_or(r.oid).to_string(),
-                                None => {
-                                    said.push(format!("the repository has no tag {tag}: not deployed"));
-                                    continue;
-                                }
-                            },
-                            Err(err) => {
-                                said.push(format!("{tag} couldn't be checked against the repository ({err}): not deployed"));
-                                continue;
-                            }
-                        };
-                        let (sid, en, t) = (service.to_string(), e.name.clone(), tag.clone());
-                        if !self.db(move |s| s.mark_tag_seen(&sid, &en, &t)).await? {
-                            continue;
-                        }
-                        let body = hold.body(json!({ "revision": sha, "message": format!("tag {tag}") }));
-                        let by = By { trigger: Trigger::Push, actor: Some(actor.into()) };
-                        match self.deploy(service, &e.name, body, by, None, Some(&format!("git-tag:{}:{sha}", e.name))).await {
-                            Ok(d) => deployed.push(d),
-                            Err(err) => {
-                                said.push(format!("{}: {err}", e.name));
-                                failed.push(err);
-                            }
-                        }
-                    }
-                }
+                let (said, deployed, failed) = self.deploy_pushed_tags(service, svc, url, &tags, actor).await?;
+                let mut said = said;
                 if deployed.is_empty() && failed.is_empty() && said.is_empty() {
                     said.push(format!("a push of {}: no environment deploys it", tags.join(", ")));
                 }
+                let mut deployed = deployed;
                 deployed.sort_by_key(|d| Some(d.environment.as_str()) != env);
                 match (deployed.into_iter().next(), failed.into_iter().next()) {
                     (Some(d), _) => Ok(HookOutcome::Deployed(Box::new(d))),
@@ -223,7 +168,7 @@ impl Apps {
                     (None, None) => Ok(HookOutcome::Ignored(said.join("; "))),
                 }
             }
-            Push::Branches(moved) => {
+            Push::Branches(moved, tags) => {
                 let Source::Git { url, .. } = &svc.source else { unreachable!("matched above") };
                 // One webhook for every environment (Render's, Railway's): each branch the push
                 // moved deploys every environment that follows it, whichever environment's hook
@@ -310,6 +255,13 @@ impl Apps {
                         }
                     }
                 }
+                // The tags the same push made (Bitbucket's push of a branch and its tag).
+                if !tags.is_empty() {
+                    let (s2, d2, f2) = self.deploy_pushed_tags(service, svc, url, &tags, actor).await?;
+                    said.extend(s2);
+                    deployed.extend(d2);
+                    failed.extend(f2);
+                }
                 // The answer is this environment's deploy when it made one, else another's; a
                 // deploy that failed with none made is the answer's error (the platform shows
                 // a failed delivery), never a quiet `ignored`.
@@ -321,6 +273,97 @@ impl Apps {
                 }
             }
         }
+    }
+}
+
+impl Apps {
+    /// The tags a push made or moved, each deployed to the environments whose `deploy_tags`
+    /// matches it: once, where the repository's own refs say it points (never the body), through
+    /// a hold, `wait_for_ci` and everything a deploy does, `ROLL_GIT_TAG` its name. A tag is marked
+    /// as done only once its deploy is queued (or waits for its checks): a refused one (a spend
+    /// cap, a freeze) is tried again by the next delivery. What it said, made and failed.
+    async fn deploy_pushed_tags(self: &Arc<Self>, service: &str, svc: &crate::store::ServiceRow, url: &str, tags: &[String], actor: &str) -> Result<(Vec<String>, Vec<Deployment>, Vec<Error>)> {
+        let sid = service.to_string();
+        let envs = self.db(move |s| s.environments(&sid)).await?;
+        let remote = self.git_remote(service, url).await;
+        let (mut said, mut deployed, mut failed) = (Vec::new(), Vec::new(), Vec::new());
+        let mut refs = None;
+        for tag in tags.iter().take(20) {
+            for e in envs.iter().filter(|e| !e.ephemeral) {
+                let (sid, en) = (service.to_string(), e.name.clone());
+                let Some((pattern, seen)) = self.db(move |s| s.deploy_tags(&sid, &en)).await? else { continue };
+                if !crate::tags::tag_matches(&pattern, tag) {
+                    continue;
+                }
+                if seen.iter().any(|t| t == tag) {
+                    said.push(format!("{}: {tag} was deployed (or there) already", e.name));
+                    continue;
+                }
+                if e.paused {
+                    said.push(format!("{} is paused", e.name));
+                    continue;
+                }
+                let hold = crate::deploy::hold_of(svc, e);
+                if let crate::deploy::Held::Skip(why) = &hold {
+                    said.push(format!("{}: {why}", e.name));
+                    continue;
+                }
+                // Where the tag points per the repository, never the body: a leaked hook URL
+                // can't name a commit, and an old tag deploys at most once.
+                if refs.is_none() {
+                    refs = Some(remote.ls_refs().await.map_err(|e| format!("{e:#}")));
+                }
+                let sha = match refs.as_ref().expect("read above") {
+                    Ok(r) => match r.get(&format!("refs/tags/{tag}")) {
+                        Some(r) => r.peeled.unwrap_or(r.oid).to_string(),
+                        None => {
+                            said.push(format!("the repository has no tag {tag}: not deployed"));
+                            continue;
+                        }
+                    },
+                    Err(err) => {
+                        said.push(format!("{tag} couldn't be checked against the repository ({err}): not deployed"));
+                        continue;
+                    }
+                };
+                let message = format!("tag {tag}");
+                let done = if e.wait_for_ci {
+                    // Its checks first, as a push's (a red tag never goes out).
+                    match self.wait_for_git_ci(svc, &e.name, &sha, &message, actor).await {
+                        Ok(()) => {
+                            said.push(format!("{} waits for {tag}'s checks", e.name));
+                            true
+                        }
+                        Err(err) => {
+                            said.push(format!("{}: {err}", e.name));
+                            false
+                        }
+                    }
+                } else {
+                    let body = hold.body(json!({ "revision": sha, "message": message }));
+                    let by = By { trigger: Trigger::Push, actor: Some(actor.into()) };
+                    // Keyed by the tag too: two tags on one commit are two deploys, one each.
+                    match self.deploy(service, &e.name, body, by, None, Some(&format!("git-tag:{}:{tag}:{sha}", e.name))).await {
+                        Ok(d) => {
+                            let (did, t) = (d.id.clone(), tag.clone());
+                            let _ = self.db(move |s| s.set_deploy_git_tag(&did, &t)).await;
+                            deployed.push(d);
+                            true
+                        }
+                        Err(err) => {
+                            said.push(format!("{}: {err}", e.name));
+                            failed.push(err);
+                            false
+                        }
+                    }
+                };
+                if done {
+                    let (sid, en, t) = (service.to_string(), e.name.clone(), tag.clone());
+                    self.db(move |s| s.mark_tag_seen(&sid, &en, &t)).await?;
+                }
+            }
+        }
+        Ok((said, deployed, failed))
     }
 }
 
@@ -426,8 +469,9 @@ enum Push {
     Ping,
     /// A pull request opened, moved, reopened or closed.
     Pull(PullEvent),
-    /// The branches it moved (one, but for Bitbucket's that move several).
-    Branches(Vec<BranchPush>),
+    /// The branches it moved (one, but for Bitbucket's that move several), and the tags the
+    /// same push made (Bitbucket's `--follow-tags`).
+    Branches(Vec<BranchPush>, Vec<String>),
     /// The tags it made or moved, by name (an environment's `deploy_tags` takes them; the
     /// repository's own refs say where each points, never the body).
     Tags(Vec<String>),
@@ -473,7 +517,7 @@ fn push_of(w: &Webhook) -> Push {
             moved.push(BranchPush { branch, sha, message: new["target"]["message"].as_str().unwrap_or("").to_string(), pusher: actor_of(p) });
         }
         return match (moved.is_empty(), tags.is_empty()) {
-            (false, _) => Push::Branches(moved),
+            (false, _) => Push::Branches(moved, tags),
             (true, false) => Push::Tags(tags),
             (true, true) => Push::Ignored(format!("a push of a {}, not a branch", kinds.join(", "))),
         };
@@ -489,7 +533,7 @@ fn push_of(w: &Webhook) -> Push {
     let Some(branch) = r.strip_prefix("refs/heads/") else { return Push::Ignored(format!("a push of {r}, not a branch")) };
     let sha = p["after"].as_str().or(p["checkout_sha"].as_str()).filter(|s| hex(s));
     let message = p["head_commit"]["message"].as_str().or_else(|| p["commits"].as_array().and_then(|c| c.last()).and_then(|c| c["message"].as_str())).unwrap_or("");
-    Push::Branches(vec![BranchPush { branch: branch.to_string(), sha: sha.map(str::to_ascii_lowercase), message: message.to_string(), pusher: actor_of(p) }])
+    Push::Branches(vec![BranchPush { branch: branch.to_string(), sha: sha.map(str::to_ascii_lowercase), message: message.to_string(), pusher: actor_of(p) }], Vec::new())
 }
 
 /// GitHub's `pull_request` or GitLab's `Merge Request Hook` event as a [`Push::Pull`]; None

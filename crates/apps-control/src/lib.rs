@@ -1518,6 +1518,8 @@ impl Apps {
             }
             if forget_git {
                 s.delete_git_login(&r.id)?;
+                // Another repository's tags are none of what was seen in this one.
+                s.clear_deploy_tags(&r.id)?;
                 s.delete_git_github(&r.id)?;
             }
             Ok(())
@@ -2512,6 +2514,26 @@ impl Apps {
         };
         let sid = service.to_string();
         let svc = self.db(move |s| s.service(&sid)).await?;
+        // The Git tags it deploys (Cloud Build's tag triggers): a Git URL service's, from its hook.
+        // The tags already there are read now, before anything is written (a host that doesn't
+        // answer is a 400 that changes nothing), and kept as seen: only one made from now on deploys.
+        let deploy_tags: Option<Option<(String, Vec<String>)>> = match o.get("deploy_tags") {
+            None => None,
+            Some(Value::Null) => Some(None),
+            Some(Value::String(p)) => {
+                crate::tags::check_tag_pattern(p).map_err(Error::BadRequest)?;
+                let Source::Git { url, .. } = &svc.source else {
+                    return Err(Error::BadRequest("deploy_tags is for a Git URL service (its repository's hook sends the tags)".into()));
+                };
+                let refs = self.git_remote(service, url).await.ls_refs().await.map_err(|e| Error::BadRequest(format!("its repository's tags couldn't be read: {e:#}")))?;
+                let seen: Vec<String> = refs.refs.iter().filter_map(|r| r.name.strip_prefix("refs/tags/")).filter(|t| crate::tags::tag_matches(p, t)).map(str::to_string).collect();
+                if seen.len() > crate::tags::MAX_SEEN {
+                    return Err(Error::BadRequest(format!("{p} matches {} tags already: narrow it (at most {})", seen.len(), crate::tags::MAX_SEEN)));
+                }
+                Some(Some((p.clone(), seen)))
+            }
+            Some(_) => return Err(Error::BadRequest("deploy_tags is a tag pattern like v*, or null".into())),
+        };
         let pname = {
             let this = self.clone();
             let p = svc.project.clone();
@@ -2835,26 +2857,10 @@ impl Apps {
             }
             _ => {}
         }
-        // The Git tags it deploys (Cloud Build's tag triggers): a Git URL service's, from its hook;
-        // the tags already there are marked as seen, so only one made from now on deploys.
-        match o.get("deploy_tags") {
-            None => {}
-            Some(Value::Null) => {
-                let (sid, e) = (service.to_string(), env.to_string());
-                self.db(move |s| s.set_deploy_tags(&sid, &e, None)).await?;
-            }
-            Some(Value::String(p)) => {
-                crate::tags::check_tag_pattern(p).map_err(Error::BadRequest)?;
-                let Source::Git { url, .. } = &svc.source else {
-                    return Err(Error::BadRequest("deploy_tags is for a Git URL service (its repository's hook sends the tags)".into()));
-                };
-                let refs = self.git_remote(service, url).await.ls_refs().await.map_err(|e| Error::BadRequest(format!("its repository's tags couldn't be read: {e:#}")))?;
-                let seen: Vec<String> = refs.refs.iter().filter_map(|r| r.name.strip_prefix("refs/tags/")).filter(|t| crate::tags::tag_matches(p, t)).map(str::to_string).collect();
-                let skip = seen.len().saturating_sub(crate::tags::MAX_SEEN);
-                let (sid, e, p) = (service.to_string(), env.to_string(), p.clone());
-                self.db(move |s| s.set_deploy_tags(&sid, &e, Some((&p, &seen[skip..])))).await?;
-            }
-            Some(_) => return Err(Error::BadRequest("deploy_tags is a tag pattern like v*, or null".into())),
+        // The Git tags it deploys, read and checked above.
+        if let Some(set) = deploy_tags {
+            let (sid, e) = (service.to_string(), env.to_string());
+            self.db(move |s| s.set_deploy_tags(&sid, &e, set.as_ref().map(|(p, seen)| (p.as_str(), seen.as_slice())))).await?;
         }
         match o.get("follow_tag") {
             None | Some(Value::Null) => {}
@@ -3277,6 +3283,14 @@ impl Apps {
             }
             if let Some(b) = &env.branch {
                 vars.insert("ROLL_GIT_BRANCH".into(), (b.clone(), "roll"));
+            }
+            // A tag's deploy (`deploy_tags`): its name, for a tracker's release (Cloud Build's
+            // `$TAG_NAME`).
+            if !deployment.is_empty() {
+                let d = deployment.to_string();
+                if let Ok(Some(tag)) = self.db(move |s| s.deploy_git_tag(&d)).await {
+                    vars.insert("ROLL_GIT_TAG".into(), (tag, "roll"));
+                }
             }
             vars.insert("ROLL_GIT_URL".into(), (url.clone(), "roll"));
         }
@@ -5043,7 +5057,7 @@ impl ResolvedVars {
             .iter()
             // `ROLL_AWAKE_URL` is roll's own on every web service: its arrival isn't a change of
             // the service's to deploy (each deployment gets it).
-            .filter(|(k, _)| !matches!(k.as_str(), "ROLL_DEPLOYMENT" | "ROLL_GIT_COMMIT" | "ROLL_GIT_BRANCH" | "ROLL_AWAKE_URL"))
+            .filter(|(k, _)| !matches!(k.as_str(), "ROLL_DEPLOYMENT" | "ROLL_GIT_COMMIT" | "ROLL_GIT_BRANCH" | "ROLL_GIT_TAG" | "ROLL_AWAKE_URL"))
             // roll's `WEB_CONCURRENCY` follows `cpu` and `memory_mb`, settings a deploy already says;
             // the service's own value is a change like any.
             .filter(|(k, _)| !(k == "WEB_CONCURRENCY" && self.sources.get(k.as_str()).copied() == Some("roll")))
