@@ -4,6 +4,20 @@ The ranked work list and the log of roll secrets' review rounds. It's internal: 
 
 ## Next
 
+**State, 2026-11-27 05:00.** The forty-second review is done, except item 9, which roll MCP has (docs/permissions.md's lend wording and the approval screen's remembered scope). Landed since 22:40, each with main's CI green and after a check of the merged tree wherever main had moved under it:
+- #1167 (fb06af79e): item 8. The guides' step 0 runs one rolld on SQLite for an evaluation, moving-from covers Kubernetes Secrets, SOPS and CI variables, and `roll secrets import --from … --check` compares a source with roll by fingerprint without writing.
+- #1172 (d1feb5b5a): item 1's rest and item 5. A break-glass login is bound to the hook token that named it (`alice@token:<id>`), and a token's total is its scan budget, so invented pushers buy nothing.
+- #1173 (ef3430284): items 3 and 4. `Secrets::use_once` reads a reference nothing keeps, once, as the caller; roll apps' Cloudflare DNS token uses it, and the gate lends its folder. Machines' logins count per chain, off their maker's token cap.
+- #1174 (e734da5c6): items 2, 6 and 7. Route 53 keeps other clients' `_acme-challenge` values, the panel replaces a certificate's DNS credential, and a certificate's AWS session is named `roll-public-cert-…` and limited by an inline session policy.
+
+In flight:
+- SaaS rotation for Palo Alto and the other vendors AWS added, and Paddle's self-rotating keys;
+- the forty-third review.
+
+Left:
+- rolld isn't released as a binary or an image, so an evaluator needs Rust (#1167 found it);
+- Health's public-repo hint.
+
 **State, 2026-11-26 22:40.** The forty-first review is done. The forty-second (2026-11-26, cold, read only) found one live bug, which is fixed, and its other items are in flight. Landed since 08:40, each with main's CI green and after a check of the merged tree wherever main had moved under it:
 - #1098 (ed973e153): the fortieth's item 1, follow-up. A token's backup carries no sync credentials or encryption key bytes.
 - #1101 (5e5b346ef): the thirty-ninth's item 11, part 3. The guide moved to `docs/secrets/` (getting started, moving from another manager, platforms); docs/secrets.md is the reference. A citation check: 443 citations, none broken.

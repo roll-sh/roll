@@ -106,6 +106,7 @@ pub fn router(control: Arc<Control>) -> Router {
         .route("/v1/search/clusters/{id}/indices/{index}/bulk", post(index_bulk))
         .route("/v1/search/clusters/{id}/indices/{index}/delete_by_query", post(index_delete_by_query))
         .route("/v1/search/clusters/{id}/indices/{index}/update_by_query", post(index_update_by_query))
+        .route("/v1/search/clusters/{id}/indices/{index}/evaluate", post(index_evaluate))
         .route("/v1/search/clusters/{id}/tasks/{task}", get(cluster_task))
         .route("/v1/search/clusters/{id}/indices/{index}/suggestions", get(suggestions))
         .route("/v1/search/clusters/{id}/indices/{index}/suggestions/rebuild", post(rebuild_suggestions))
@@ -853,6 +854,84 @@ index_route!(index_search, "POST", "/search", "/_search", true, EsBody::Json);
 index_route!(doc_create, "POST", "/docs", "/_doc", false, EsBody::Json);
 index_route!(index_bulk, "POST", "/bulk", "/_bulk", false, EsBody::Ndjson);
 index_route!(index_delete_by_query, "POST", "/delete_by_query", "/_delete_by_query", true, EsBody::Json);
+
+/// `POST …/indices/{index}/evaluate`: one or two search configurations scored against a judgment
+/// list by the cluster's `_rank_eval` on that index, run as the index's routes run (the owner
+/// narrowed to the index), and compared query by query ([`crate::evaluate`]). A configuration the
+/// cluster refuses answers the cluster's own error.
+async fn index_evaluate(State(c): State<AppState>, Path((id, index)): Path<(String, String)>, headers: HeaderMap, body: Body) -> Result<Response, ControlError> {
+    let seg = index_segment(&index, true)?;
+    let cluster = c.get(&id).await?;
+    let mut held = Reservation::none();
+    let bytes = read_limited(body, (cluster.max_body_mb.max(1) as usize) << 20, declared(&headers), c.node.body_budget(), &mut held).await.map_err(|e| read_error(&cluster, e))?;
+    let spec = crate::evaluate::parse(&bytes).map_err(ControlError::Invalid)?;
+    crate::evaluate::check_ratings_name(&spec, &index).map_err(ControlError::Invalid)?;
+    drop(held);
+    let mut answers = Vec::with_capacity(spec.configurations.len());
+    for conf in &spec.configurations {
+        let body = match &conf.application {
+            None => crate::evaluate::rank_eval_body(&spec, conf, &index),
+            Some(app) => match evaluate_application(&c, &id, &index, &spec, conf, &app.name).await? {
+                Ok(body) => body,
+                Err(refused) => return Ok(refused),
+            },
+        };
+        let req = serde_json::to_vec(&body).unwrap_or_default();
+        let (status, ct, out) = c.es(&id, "POST", &format!("/{seg}/_rank_eval"), Some(index.as_str()), Some("application/json"), bytes::Bytes::from(req)).await?;
+        if status != 200 {
+            let code = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
+            return Ok((code, [(axum::http::header::CONTENT_TYPE, ct)], out).into_response());
+        }
+        answers.push(serde_json::from_slice::<Value>(&out).map_err(|e| ControlError::Internal(anyhow::anyhow!("rank_eval answered no JSON: {e}")))?);
+    }
+    Ok(Json(crate::evaluate::answer(&spec, &answers)).into_response())
+}
+
+/// An application's configuration as `_rank_eval` takes it: each judged query rendered by the
+/// application's own `_render_query` (its dictionary and defaults, a variant's params over them),
+/// at most 8 at a time. It evaluates on the application's own name (its alias), so the caller's
+/// read of that name is what covers it. A rendering the cluster refuses is the answer (`Err`).
+async fn evaluate_application(c: &Control, id: &str, index: &str, spec: &crate::evaluate::Spec, conf: &crate::evaluate::Configuration, app: &str) -> Result<Result<Value, Response>, ControlError> {
+    use futures::StreamExt;
+    if index != app {
+        return Err(ControlError::Invalid(format!("an application's configuration evaluates on the application's own name: …/indices/{app}/evaluate")));
+    }
+    let base = format!("/_application/search_application/{}", urlencoding::encode(app));
+    let passthrough = |status: u16, ct: String, out: bytes::Bytes| (StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY), [(axum::http::header::CONTENT_TYPE, ct)], out).into_response();
+    let (status, ct, out) = c.es(id, "GET", &base, None, None, bytes::Bytes::new()).await?;
+    if status != 200 {
+        return Ok(Err(passthrough(status, ct, out)));
+    }
+    let stored: Value = serde_json::from_slice(&out).map_err(|e| ControlError::Internal(anyhow::anyhow!("the application answered no JSON: {e}")))?;
+    // Hits come back under the application's indices' own names: a rating without an `_index` is
+    // about its one index, and needs one when it searches several.
+    let indices: Vec<&str> = stored["indices"].as_array().map(|a| a.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+    let unnamed = spec.judgments.iter().any(|j| j.ratings.iter().any(|r| r.0.is_empty()));
+    let default_index = match indices.as_slice() {
+        [one] => one.to_string(),
+        _ if unnamed => return Err(ControlError::Invalid(format!("[{app}] searches {} indices: each rating names its document's [_index]", indices.len()))),
+        _ => String::new(),
+    };
+    let params: Vec<_> = spec.judgments.iter().map(|j| crate::evaluate::application_params(conf, &stored, &j.query)).collect::<Result<_, _>>().map_err(ControlError::Invalid)?;
+    let render = format!("{base}/_render_query");
+    let rendered: Vec<_> = futures::stream::iter(params)
+        .map(|p| {
+            let body = bytes::Bytes::from(serde_json::to_vec(&json!({ "params": p })).unwrap_or_default());
+            c.es(id, "POST", &render, None, Some("application/json"), body)
+        })
+        .buffered(8)
+        .collect()
+        .await;
+    let mut bodies = Vec::with_capacity(rendered.len());
+    for r in rendered {
+        let (status, ct, out) = r?;
+        if status != 200 {
+            return Ok(Err(passthrough(status, ct, out)));
+        }
+        bodies.push(serde_json::from_slice::<Value>(&out).map_err(|e| ControlError::Internal(anyhow::anyhow!("_render_query answered no JSON: {e}")))?);
+    }
+    Ok(Ok(crate::evaluate::rank_eval_rendered(spec, bodies, &default_index)))
+}
 
 /// What `…/update_by_query`'s body may hold: `_update_by_query`'s own, plus `slices` (Elasticsearch
 /// takes it in the URL; it's moved there).

@@ -239,6 +239,14 @@ impl DnsCredential {
     }
 }
 
+/// The inline session policy of every session a public certificate takes of a project AWS role
+/// (STS's `Policy`): whatever else the role may do, the session may only find the zone, read and
+/// write `_acme-challenge` TXT records, and wait on the change. Its name is
+/// `roll-public-cert-<id>` (`roll-public-cert-check` for a check), which a trust policy's
+/// `sts:RoleSessionName` and a permission's `aws:userid` can match (docs/secrets.md, "Publicly
+/// trusted certificates").
+pub const ROUTE53_SESSION_POLICY: &str = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["route53:ListHostedZonesByName","route53:ListResourceRecordSets","route53:GetChange"],"Resource":"*"},{"Effect":"Allow","Action":"route53:ChangeResourceRecordSets","Resource":"*","Condition":{"ForAllValues:StringLike":{"route53:ChangeResourceRecordSetsNormalizedRecordNames":["_acme-challenge.*"]},"ForAllValues:StringEquals":{"route53:ChangeResourceRecordSetsRecordTypes":["TXT"]}}}]}"#;
+
 /// An AWS access key given as `ACCESS_KEY_ID:SECRET_ACCESS_KEY` (an id is letters and digits; a
 /// secret has no colon).
 fn aws_key(v: &Value) -> Result<DnsCredential> {
@@ -1182,7 +1190,7 @@ impl Secrets {
             (DnsProvider::Cloudflare, _, _) => Err(Error::BadRequest("a Cloudflare dns_credential is an API token with Zone DNS edit on the names' zones (aws_role is Route 53's)".into())),
             (DnsProvider::Route53, Some(k), None) => aws_key(k),
             (DnsProvider::Route53, None, Some(role)) => {
-                let s = self.aws_role_session(project, role, label)?;
+                let s = self.aws_role_session(project, role, label, Some(ROUTE53_SESSION_POLICY))?;
                 Ok(DnsCredential::Route53 { access_key_id: s.access_key_id.expose().to_string(), secret_access_key: s.secret_access_key, session_token: Some(s.session_token) })
             }
             (DnsProvider::Route53, _, _) => Err(Error::BadRequest("Route 53 takes aws_role (one of the project's AWS roles: no key stored) or dns_credential (an access key as ACCESS_KEY_ID:SECRET_ACCESS_KEY), not both".into())),

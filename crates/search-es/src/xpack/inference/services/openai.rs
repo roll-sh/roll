@@ -226,7 +226,7 @@ pub async fn infer(cluster: &Cluster, ep: &Endpoint, req: &Request) -> EsResult<
                 .and_then(|c| c.pointer(&["message", "content"]))
                 .and_then(Value::as_str)
                 .ok_or_else(|| missing_field("choices", "OpenAI chat completions"))?;
-            Ok(Results::Completion(vec![content.to_string()]))
+            Ok(Results::completion(vec![content.to_string()], &v))
         }
         other => Err(crate::xpack::inference::unsupported_task(other, "openai")),
     }

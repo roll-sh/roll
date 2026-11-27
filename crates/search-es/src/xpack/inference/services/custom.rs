@@ -464,8 +464,8 @@ pub async fn infer(cluster: &Cluster, ep: &Endpoint, req: &Request) -> EsResult<
         TaskType::Completion => {
             let v = call(cluster, ep, req).await?;
             match selected(ep, &v, "completion_result")? {
-                Some(Value::Str(s)) => Ok(Results::Completion(vec![s])),
-                Some(Value::Arr(a)) => Ok(Results::Completion(a.iter().map(Value::to_es_string).collect())),
+                Some(Value::Str(s)) => Ok(Results::completion(vec![s], &v)),
+                Some(Value::Arr(a)) => Ok(Results::completion(a.iter().map(Value::to_es_string).collect(), &v)),
                 _ => Err(parse_failed("completion_result")),
             }
         }

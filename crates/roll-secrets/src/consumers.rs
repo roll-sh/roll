@@ -13,6 +13,9 @@
 //!   imports and bases only where the maker may reveal, no protected environment for an untrusted
 //!   copy. Otherwise anyone who may write a product's settings could send any value the project's
 //!   runtime reads to a host of their choosing.
+//! - A person or a token names it for one request and nothing keeps it (roll apps' Cloudflare
+//!   token, writing a domain's records): [`Secrets::use_once`] with the request's caller, read as
+//!   them that once (an approved `ask` is enough) and audited as `secrets.use` by them. No maker.
 //! - A deployer chose it for the resource's own runtime (roll apps' git login, a deploy token a
 //!   person pasted, tagged sensitive): [`Secrets::bind_ref_runtime`] with the one environment the
 //!   product checked they may deploy to. A reference to exactly that environment is a runtime
@@ -46,8 +49,8 @@
 //! sensitive key as unusable. The hint only narrows; nothing widens a resource past its project's
 //! runtime.
 //!
-//! Every read is audited as `secrets.resolve` by the resource (`storage:bucket:<ref>`, with
-//! ` (untrusted)` after it for an untrusted copy). Nothing is cached here: a product polls
+//! Every read but a one-off is audited as `secrets.resolve` by the resource (`storage:bucket:<ref>`,
+//! with ` (untrusted)` after it for an untrusted copy). Nothing is cached here: a product polls
 //! [`Secrets::digest_for`] (no value, not audited; refused exactly as the resolve would be) and
 //! resolves again when it moves.
 
@@ -293,7 +296,31 @@ impl Secrets {
     /// as `secrets.resolve` by the resource, naming the maker.
     pub fn resolve_as(&self, resource: &ResourceRef, reference: &str, maker: &Maker) -> Result<Resolved, Refusal> {
         let (project, r, caller) = self.as_maker(resource, reference, maker)?;
-        self.resolve_one(&project, &r.env, &r.path, &r.key, &caller, resource.untrusted, resource)
+        self.resolve_one(&project, &r.env, &r.path, &r.key, &caller, resource.untrusted, resource, None)
+    }
+
+    /// `reference`'s value for one request of `caller`'s on `resource` (roll apps writing a
+    /// domain's records with a Cloudflare token): read once, as the caller, and nothing kept, so no
+    /// [`Maker`] is recorded and nothing re-checks them later. The checks [`Secrets::bind_ref`]
+    /// makes: the one project that holds and stands for `resource`, `reveal` on the folder for the
+    /// caller (an approval of an `ask` there is enough, since it's this request's: the gate lends
+    /// it), no sensitive key (a person or a token never reads one), no protected environment for
+    /// an untrusted copy, and no caller that's itself untrusted. Audited as `secrets.use` by the
+    /// caller, naming the resource and `purpose` (a fixed phrase of the product's, never a value).
+    pub fn use_once(&self, resource: &ResourceRef, reference: &str, caller: &Caller, purpose: &str) -> Result<Resolved, Refusal> {
+        let r = required(reference)?;
+        let project = self.project_for(resource, r.project.as_deref())?;
+        if caller.grants.untrusted() {
+            return Err(Refusal::NotAllowed(format!("{} runs code nobody vetted, so it reads no roll:// reference", caller.principal)));
+        }
+        self.may_reveal_for(&project, &r, caller)?;
+        // Read with the caller's rights, never as a runtime, and named for the resource (with a `:`,
+        // so no person's own overrides are read: `Caller::personal`).
+        let by = caller.made_by().to_string();
+        let mut reader = caller.clone().not_runtime().acting_as(format!("{} for {by}", resource.consumer()));
+        reader.maker = Some(by);
+        let resource = &ResourceRef { placeholders: false, ..resource.clone() };
+        self.resolve_one(&project, &r.env, &r.path, &r.key, &reader, resource.untrusted, resource, Some((caller, purpose)))
     }
 
     /// The digest of the folder `reference` reads, as `maker` may now: refused exactly as
@@ -353,7 +380,7 @@ impl Secrets {
     pub fn resolve_for(&self, resource: &ResourceRef, reference: &str) -> Result<Resolved, Refusal> {
         let r = required(reference)?;
         let project = self.project_for(resource, r.project.as_deref())?;
-        self.resolve_one(&project, &r.env, &r.path, &r.key, &Caller::consumer(&resource.consumer()), resource.untrusted, resource)
+        self.resolve_one(&project, &r.env, &r.path, &r.key, &Caller::consumer(&resource.consumer()), resource.untrusted, resource, None)
     }
 
     /// The digest of the folder `reference` reads, under the same rules (no value, not audited):

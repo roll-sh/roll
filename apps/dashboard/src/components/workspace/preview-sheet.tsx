@@ -357,6 +357,20 @@ export function PreviewSheet({
                 </button>
               )}
             </Label>
+            {p.masked_by_default && p.masked_by_default.length > 0 && (
+              <p className="mb-1.5 text-[11.5px] break-words text-soft">
+                Masked by default, as they look like people's data and no rule names them:{" "}
+                {p.masked_by_default.map((m, i) => (
+                  <span key={`${m.resource}:${m.column}`}>
+                    {i > 0 ? ", " : ""}
+                    <span className="font-mono text-[11px] text-fg" title={m.why}>
+                      {m.column}
+                    </span>
+                  </span>
+                ))}
+                . A rule in the masking settings, or <code className="font-mono text-[11px]">keep</code>, says otherwise.
+              </p>
+            )}
             {p.resources.length ? (
               <div className="rounded-lg border border-line-2 bg-raised inset-shadow-highlight">
                 {p.resources.map((r) => {
@@ -426,6 +440,14 @@ export function PreviewSheet({
                   release {duration(p.release.ms)}
                   {p.release.before_ms != null ? ` · ${thanMain(p.release.ms, p.release.before_ms, "the push before") ?? "as before"}` : ""}
                 </p>
+                {p.release.locks && p.release.locks.length > 0 && (
+                  <p className="min-w-0 break-words font-mono text-[11px] text-danger tabular-nums" title="Locks the release held that made others wait, sampled while it ran: on production it would hold them as long">
+                    {p.release.locks
+                      .slice(0, 3)
+                      .map((l) => `${l.mode === "AccessExclusiveLock" ? "ACCESS EXCLUSIVE" : l.mode.replace(/Lock$/, "").replace(/([a-z])([A-Z])/g, "$1 $2").toUpperCase()} on ${l.table} ${duration(l.ms)}`)
+                      .join(" · ")}
+                  </p>
+                )}
                 {p.rehearsal && p.rehearsal.ok === null ? (
                   <span className="text-[11px] text-subtle">rehearsing on today's data…</span>
                 ) : p.rehearsal ? (
@@ -433,6 +455,7 @@ export function PreviewSheet({
                     on today's data {p.rehearsal.ok ? `passed in ${duration(p.rehearsal.ms ?? 0)}` : `failed: ${p.rehearsal.error ?? "see the activity"}`}
                   </span>
                 ) : null}
+                {p.main_on_change && <MainOnChangeLine m={p.main_on_change} />}
                 {p.change && (
                   <button
                     type="button"
@@ -2564,5 +2587,19 @@ export function ThreadPopup({ preview, review, close = () => window.close() }: {
         <NoteThread previewId={p.id} change={p.change} review={review} where={p} onDone={() => setTimeout(close, 900)} />
       )}
     </div>
+  );
+}
+
+/** Main's code on a copy of this head's migrated data: the pages that broke there, or that none did. */
+function MainOnChangeLine({ m }: { m: NonNullable<Preview["main_on_change"]> }) {
+  const said = (s: number) => (s === 0 ? "no answer" : String(s));
+  const broke = m.pages.filter((x) => (x.main_status > 0 && x.main_status < 500) && (x.status === 0 || x.status >= 500));
+  const title = "Main's live build, taking no traffic, on a copy of this change's branches as its release left them: while the change deploys, the version before it serves on this schema";
+  if (m.error) return <span className="min-w-0 break-words text-[11px] text-subtle" title={title}>main's code on this data: {m.error}</span>;
+  if (broke.length === 0) return <span className="text-[11px] text-subtle" title={title}>main's code still answers on this data ({m.pages.length} {m.pages.length === 1 ? "page" : "pages"})</span>;
+  return (
+    <span className="min-w-0 break-words font-mono text-[11px] text-danger tabular-nums" title={title}>
+      main's code breaks on this data: {broke.slice(0, 3).map((x) => `${x.path} ${said(x.status)} (main ${said(x.main_status)})`).join(" · ")}
+    </span>
   );
 }

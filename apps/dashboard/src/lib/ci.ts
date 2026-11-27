@@ -30,6 +30,7 @@ export const WEBHOOK_EVENT_HINT: Record<WebhookEvent, string> = {
   preview: "a preview starts, sleeps or fails",
   push: "a branch is pushed over git (accepted or not)",
   budget: "the project's previews pass 80% or 100% of their monthly budget",
+  masking: "the project's previews mask a column that looks like people's data and no rule names",
 };
 
 export const emptyWebhookForm = (): WebhookForm => ({ url: "", all: false, events: ["landed"], secret: "", active: true });

@@ -330,7 +330,7 @@ pub async fn infer(cluster: &Cluster, ep: &Endpoint, req: &Request) -> EsResult<
                     .caused_by(EsError::new(500, "exception", format!("org.elasticsearch.ElasticsearchException: {reason}")).caused_by(EsError::new(500, "exception", reason).caused_by(cause)))
             })?;
             let content = answer.pointer(&["output", "message", "content"]).and_then(Value::as_array).ok_or_else(|| missing_field("output", "Amazon Bedrock converse"))?;
-            Ok(Results::Completion(vec![content.iter().filter_map(|c| c.get("text").and_then(Value::as_str)).collect()]))
+            Ok(Results::completion(vec![content.iter().filter_map(|c| c.get("text").and_then(Value::as_str)).collect()], &answer))
         }
         other => Err(crate::xpack::inference::unsupported_task(other, "amazonbedrock")),
     }

@@ -251,6 +251,13 @@ pub trait SecretSource: Send + Sync {
     async fn resolve_as(&self, _project: &str, _env: &str, _service: &str, _reference: &str, _maker: &str) -> anyhow::Result<String> {
         anyhow::bail!("roll secrets isn't on this node")
     }
+    /// `reference`'s value for one request of `who`'s on `service` in `env` (a domain's
+    /// Cloudflare token), read as them that once and kept by nothing: refused unless they may
+    /// reveal it now (an approval of an `ask` there is enough), never a sensitive key. Audited as
+    /// their use, for `purpose`.
+    async fn use_once(&self, _who: Asker<'_>, _project: &str, _env: &str, _service: &str, _reference: &str, _purpose: &str) -> anyhow::Result<String> {
+        anyhow::bail!("roll secrets isn't on this node")
+    }
 }
 
 /// What's been said about a preview's page (roll previews' notes: docs/previews.md, "Feedback on

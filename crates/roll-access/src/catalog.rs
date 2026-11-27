@@ -141,7 +141,7 @@ fn search_secret_write(b: &Value) -> Vec<Lent> {
 }
 
 /// A folder as roll secrets' `names::path` normalizes it, or `None` where it refuses it.
-fn secret_path(p: &str) -> Option<String> {
+pub(crate) fn secret_path(p: &str) -> Option<String> {
     let p = if p.is_empty() { "/" } else { p };
     let rest = p.strip_prefix('/').filter(|r| !r.starts_with('/'))?;
     let rest = rest.strip_suffix('/').unwrap_or(rest);
@@ -174,6 +174,16 @@ fn apps_push(b: &Value) -> Vec<Lent> {
 /// A drain into a roll storage bucket (`bucket`): apps mints a key that writes there for it.
 fn apps_drain_bucket(b: &Value) -> Vec<Lent> {
     b.get("bucket").and_then(Value::as_str).map(|r| Lent { kind: "bucket".into(), r#ref: r.into(), action: Action::Write, folder: None }).into_iter().collect()
+}
+
+/// A domain's `cloudflare_token`, a `roll://` reference apps reads once as the caller to write the
+/// records (roll secrets' `use_once`, nothing kept): reveal on its folder, so an `ask` there is an
+/// approval naming it. Its project is the one the reference names, else the service's. Anything
+/// else lends nothing: apps refuses it before reading anything (400, "a reference, never the
+/// token").
+fn apps_dns_token(b: &Value) -> Vec<Lent> {
+    let Some(Ok(Some(r))) = b.get("cloudflare_token").and_then(Value::as_str).map(roll_secrets_ref::Reference::parse) else { return Vec::new() };
+    vec![Lent { kind: "secret".into(), r#ref: r.project.unwrap_or_default(), action: Action::Reveal, folder: Some((r.env, r.path)) }]
 }
 
 /// The roll code repos the body names, which apps reads for the caller (`repo` for a plan or an
@@ -1455,6 +1465,8 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/search/clusters/{id}/indices/{index}/search", "search", R, one(PG, "cluster")).index("index"),
     // Analyzing text with an index's analyzers reads the index.
     row("POST", "/v1/search/clusters/{id}/indices/{index}/analyze", "search", R, one(PG, "cluster")).index("index"),
+    // Scoring search configurations against judgments runs searches of the index, nothing else.
+    row("POST", "/v1/search/clusters/{id}/indices/{index}/evaluate", "search", R, one(PG, "cluster")).index("index"),
     row("POST", "/v1/search/clusters/{id}/indices/{index}/delete_by_query", "search", D, one(PG, "cluster")).index("index"),
     // Each document indexed again (embedding a field added since): write; a script can delete
     // (`ctx.op = 'delete'`), so with one it's delete, as a bulk's script is.
@@ -1883,10 +1895,15 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/apps/services/{id}/environments/{env}/domains/{host}/verify", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
     // Writing a domain's records at the customer's Cloudflare with their token (a `roll://`
     // reference roll secrets checks they may reveal): what pointing the domain here is.
-    row("POST", "/v1/apps/services/{id}/environments/{env}/domains/{host}/configure", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")),
-    // Taking a hostname another environment holds, once DNS proves it's the caller's: what
-    // adding the domain is.
-    row("POST", "/v1/apps/services/{id}/environments/{env}/domains/{host}/claim", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")),
+    row("POST", "/v1/apps/services/{id}/environments/{env}/domains/{host}/configure", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")).lends(Lend::Each(apps_dns_token)),
+    // Quieting an environment's alerts for a while: what changing its alerts is (deploy on
+    // production, else write); ending one only lets them out again.
+    row("GET", "/v1/apps/services/{id}/environments/{env}/silences", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
+    row("POST", "/v1/apps/services/{id}/environments/{env}/silences", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")),
+    row("DELETE", "/v1/apps/services/{id}/environments/{env}/silences/{sid}", "apps", W, one(PG, "service")).env(EnvFrom::Param("env")),
+    // Taking a hostname another environment holds (production's, maybe), once DNS proves it's the
+    // caller's: the holder's environment isn't in the path, so it's the project's admin's call.
+    row("POST", "/v1/apps/services/{id}/environments/{env}/domains/{host}/claim", "apps", ADMIN, one(PG, "service")).env(EnvFrom::Param("env")),
     row("GET", "/v1/apps", "apps", R, Tgt::Product),
     // A plan or an import of a roll code repo reads it: read there too.
     row("POST", "/v1/apps/plan", "apps", R, Tgt::AnyGrant).lends(Lend::Each(apps_repo)),

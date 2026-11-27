@@ -1,0 +1,3461 @@
+{
+  "description": "OpenSearch 3.9.0's snapshot management API (_plugins/_sm): policies created, read, listed, updated, started, stopped, explained and deleted, and its validation errors; every step before the plugin's first job run (a minute), so explain shows no workflow state yet",
+  "dialect": "opensearch",
+  "steps": [
+    {
+      "req": "GET /_plugins/_sm/policies",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "status": 200,
+      "response": {
+        "policies": [],
+        "total_policies": 0
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_plugins/_sm/policies/esm-a",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "status": 404,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "status_exception",
+              "reason": "Snapshot management config index not found"
+            }
+          ],
+          "type": "status_exception",
+          "reason": "Snapshot management config index not found"
+        },
+        "status": 404
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_plugins/_sm/policies/esm-a/_explain",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "status": 404,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "status_exception",
+              "reason": "Snapshot management config index not found"
+            }
+          ],
+          "type": "status_exception",
+          "reason": "Snapshot management config index not found"
+        },
+        "status": 404
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "DELETE /_plugins/_sm/policies/esm-a",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "status": 404,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "status_exception",
+              "reason": "Snapshot management config index not found"
+            }
+          ],
+          "type": "status_exception",
+          "reason": "Snapshot management config index not found"
+        },
+        "status": 404
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /_plugins/_sm/policies/esm-a/_start",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "status": 404,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "status_exception",
+              "reason": "Snapshot management config index not found"
+            }
+          ],
+          "type": "status_exception",
+          "reason": "Snapshot management config index not found"
+        },
+        "status": 404
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "PUT /_snapshot/esm-repo",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "body": {
+        "type": "fs",
+        "settings": {
+          "location": "esm-repo"
+        }
+      },
+      "status": 200,
+      "response": {
+        "acknowledged": true
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /_plugins/_sm/policies/esm-a",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "body": {
+        "description": "Daily snapshot policy",
+        "creation": {
+          "schedule": {
+            "cron": {
+              "expression": "0 8 * * *",
+              "timezone": "UTC"
+            }
+          },
+          "time_limit": "1h"
+        },
+        "deletion": {
+          "schedule": {
+            "cron": {
+              "expression": "0 1 * * *",
+              "timezone": "America/Los_Angeles"
+            }
+          },
+          "condition": {
+            "max_age": "7d",
+            "max_count": 21,
+            "min_count": 7
+          },
+          "time_limit": "1h"
+        },
+        "snapshot_config": {
+          "date_format": "yyyy-MM-dd-HH:mm",
+          "timezone": "America/Los_Angeles",
+          "indices": "*",
+          "repository": "esm-repo",
+          "ignore_unavailable": "true",
+          "include_global_state": "false",
+          "partial": "true",
+          "metadata": {
+            "any_key": "any_value"
+          }
+        },
+        "notification": {
+          "channel": {
+            "id": "NC3OpoEBzEoHMX183R3f"
+          },
+          "conditions": {
+            "creation": true,
+            "deletion": false,
+            "failure": false,
+            "time_limit_exceeded": false
+          }
+        }
+      },
+      "status": 201,
+      "response": {
+        "_id": "esm-a-sm-policy",
+        "_version": 1,
+        "_seq_no": 0,
+        "_primary_term": 1,
+        "sm_policy": {
+          "name": "esm-a",
+          "description": "Daily snapshot policy",
+          "schema_version": 31,
+          "creation": {
+            "schedule": {
+              "cron": {
+                "expression": "0 8 * * *",
+                "timezone": "UTC"
+              }
+            },
+            "time_limit": "1h"
+          },
+          "deletion": {
+            "schedule": {
+              "cron": {
+                "expression": "0 1 * * *",
+                "timezone": "America/Los_Angeles"
+              }
+            },
+            "condition": {
+              "max_age": "7d",
+              "min_count": 7,
+              "max_count": 21
+            },
+            "time_limit": "1h"
+          },
+          "snapshot_config": {
+            "indices": "*",
+            "metadata": {
+              "any_key": "any_value"
+            },
+            "ignore_unavailable": "true",
+            "timezone": "America/Los_Angeles",
+            "include_global_state": "false",
+            "date_format": "yyyy-MM-dd-HH:mm",
+            "repository": "esm-repo",
+            "partial": "true"
+          },
+          "schedule": {
+            "interval": {
+              "start_time": 1795710866893,
+              "period": 1,
+              "unit": "Minutes"
+            }
+          },
+          "enabled": true,
+          "last_updated_time": 1795710866911,
+          "enabled_time": 1795710866892,
+          "notification": {
+            "channel": {
+              "id": "NC3OpoEBzEoHMX183R3f"
+            },
+            "conditions": {
+              "creation": true,
+              "deletion": false,
+              "failure": false,
+              "time_limit_exceeded": false
+            }
+          }
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /_plugins/_sm/policies/esm-a",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "body": {
+        "description": "Daily snapshot policy",
+        "creation": {
+          "schedule": {
+            "cron": {
+              "expression": "0 8 * * *",
+              "timezone": "UTC"
+            }
+          },
+          "time_limit": "1h"
+        },
+        "deletion": {
+          "schedule": {
+            "cron": {
+              "expression": "0 1 * * *",
+              "timezone": "America/Los_Angeles"
+            }
+          },
+          "condition": {
+            "max_age": "7d",
+            "max_count": 21,
+            "min_count": 7
+          },
+          "time_limit": "1h"
+        },
+        "snapshot_config": {
+          "date_format": "yyyy-MM-dd-HH:mm",
+          "timezone": "America/Los_Angeles",
+          "indices": "*",
+          "repository": "esm-repo",
+          "ignore_unavailable": "true",
+          "include_global_state": "false",
+          "partial": "true",
+          "metadata": {
+            "any_key": "any_value"
+          }
+        },
+        "notification": {
+          "channel": {
+            "id": "NC3OpoEBzEoHMX183R3f"
+          },
+          "conditions": {
+            "creation": true,
+            "deletion": false,
+            "failure": false,
+            "time_limit_exceeded": false
+          }
+        }
+      },
+      "status": 409,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "version_conflict_engine_exception",
+              "reason": "[esm-a-sm-policy]: version conflict, document already exists (current version [1])",
+              "index": ".opendistro-ism-config",
+              "shard": "0",
+              "index_uuid": "HgKsb_lOQ22mM5pzTi94CA"
+            }
+          ],
+          "type": "version_conflict_engine_exception",
+          "reason": "[esm-a-sm-policy]: version conflict, document already exists (current version [1])",
+          "index": ".opendistro-ism-config",
+          "shard": "0",
+          "index_uuid": "HgKsb_lOQ22mM5pzTi94CA"
+        },
+        "status": 409
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_plugins/_sm/policies/esm-a",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "status": 200,
+      "response": {
+        "_id": "esm-a-sm-policy",
+        "_version": 1,
+        "_seq_no": 0,
+        "_primary_term": 1,
+        "sm_policy": {
+          "name": "esm-a",
+          "description": "Daily snapshot policy",
+          "schema_version": 31,
+          "creation": {
+            "schedule": {
+              "cron": {
+                "expression": "0 8 * * *",
+                "timezone": "UTC"
+              }
+            },
+            "time_limit": "1h"
+          },
+          "deletion": {
+            "schedule": {
+              "cron": {
+                "expression": "0 1 * * *",
+                "timezone": "America/Los_Angeles"
+              }
+            },
+            "condition": {
+              "max_age": "7d",
+              "min_count": 7,
+              "max_count": 21
+            },
+            "time_limit": "1h"
+          },
+          "snapshot_config": {
+            "indices": "*",
+            "metadata": {
+              "any_key": "any_value"
+            },
+            "ignore_unavailable": "true",
+            "timezone": "America/Los_Angeles",
+            "include_global_state": "false",
+            "date_format": "yyyy-MM-dd-HH:mm",
+            "repository": "esm-repo",
+            "partial": "true"
+          },
+          "schedule": {
+            "interval": {
+              "start_time": 1795710866893,
+              "period": 1,
+              "unit": "Minutes"
+            }
+          },
+          "enabled": true,
+          "last_updated_time": 1795710866911,
+          "enabled_time": 1795710866892,
+          "notification": {
+            "channel": {
+              "id": "NC3OpoEBzEoHMX183R3f"
+            },
+            "conditions": {
+              "creation": true,
+              "deletion": false,
+              "failure": false,
+              "time_limit_exceeded": false
+            }
+          }
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /_plugins/_sm/policies/esm-b",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "body": {
+        "creation": {
+          "schedule": {
+            "cron": {
+              "expression": "0 8 * * *",
+              "timezone": "UTC"
+            }
+          }
+        },
+        "snapshot_config": {
+          "repository": "esm-repo"
+        },
+        "description": "b"
+      },
+      "status": 201,
+      "response": {
+        "_id": "esm-b-sm-policy",
+        "_version": 1,
+        "_seq_no": 1,
+        "_primary_term": 1,
+        "sm_policy": {
+          "name": "esm-b",
+          "description": "b",
+          "schema_version": 31,
+          "creation": {
+            "schedule": {
+              "cron": {
+                "expression": "0 8 * * *",
+                "timezone": "UTC"
+              }
+            }
+          },
+          "snapshot_config": {
+            "repository": "esm-repo"
+          },
+          "schedule": {
+            "interval": {
+              "start_time": 1795710867950,
+              "period": 1,
+              "unit": "Minutes"
+            }
+          },
+          "enabled": true,
+          "last_updated_time": 1795710867951,
+          "enabled_time": 1795710867950
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_plugins/_sm/policies",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "status": 200,
+      "response": {
+        "policies": [
+          {
+            "_id": "esm-a-sm-policy",
+            "_seq_no": 0,
+            "_primary_term": 1,
+            "sm_policy": {
+              "name": "esm-a",
+              "description": "Daily snapshot policy",
+              "schema_version": 31,
+              "creation": {
+                "schedule": {
+                  "cron": {
+                    "expression": "0 8 * * *",
+                    "timezone": "UTC"
+                  }
+                },
+                "time_limit": "1h"
+              },
+              "deletion": {
+                "schedule": {
+                  "cron": {
+                    "expression": "0 1 * * *",
+                    "timezone": "America/Los_Angeles"
+                  }
+                },
+                "condition": {
+                  "max_age": "7d",
+                  "min_count": 7,
+                  "max_count": 21
+                },
+                "time_limit": "1h"
+              },
+              "snapshot_config": {
+                "indices": "*",
+                "metadata": {
+                  "any_key": "any_value"
+                },
+                "ignore_unavailable": "true",
+                "timezone": "America/Los_Angeles",
+                "include_global_state": "false",
+                "date_format": "yyyy-MM-dd-HH:mm",
+                "repository": "esm-repo",
+                "partial": "true"
+              },
+              "schedule": {
+                "interval": {
+                  "start_time": 1795710866893,
+                  "period": 1,
+                  "unit": "Minutes"
+                }
+              },
+              "enabled": true,
+              "last_updated_time": 1795710866911,
+              "enabled_time": 1795710866892,
+              "notification": {
+                "channel": {
+                  "id": "NC3OpoEBzEoHMX183R3f"
+                },
+                "conditions": {
+                  "creation": true,
+                  "deletion": false,
+                  "failure": false,
+                  "time_limit_exceeded": false
+                }
+              }
+            }
+          },
+          {
+            "_id": "esm-b-sm-policy",
+            "_seq_no": 1,
+            "_primary_term": 1,
+            "sm_policy": {
+              "name": "esm-b",
+              "description": "b",
+              "schema_version": 31,
+              "creation": {
+                "schedule": {
+                  "cron": {
+                    "expression": "0 8 * * *",
+                    "timezone": "UTC"
+                  }
+                }
+              },
+              "snapshot_config": {
+                "repository": "esm-repo"
+              },
+              "schedule": {
+                "interval": {
+                  "start_time": 1795710867950,
+                  "period": 1,
+                  "unit": "Minutes"
+                }
+              },
+              "enabled": true,
+              "last_updated_time": 1795710867951,
+              "enabled_time": 1795710867950
+            }
+          }
+        ],
+        "total_policies": 2
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_plugins/_sm/policies?sortOrder=desc&size=1",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "status": 200,
+      "response": {
+        "policies": [
+          {
+            "_id": "esm-b-sm-policy",
+            "_seq_no": 1,
+            "_primary_term": 1,
+            "sm_policy": {
+              "name": "esm-b",
+              "description": "b",
+              "schema_version": 31,
+              "creation": {
+                "schedule": {
+                  "cron": {
+                    "expression": "0 8 * * *",
+                    "timezone": "UTC"
+                  }
+                }
+              },
+              "snapshot_config": {
+                "repository": "esm-repo"
+              },
+              "schedule": {
+                "interval": {
+                  "start_time": 1795710867950,
+                  "period": 1,
+                  "unit": "Minutes"
+                }
+              },
+              "enabled": true,
+              "last_updated_time": 1795710867951,
+              "enabled_time": 1795710867950
+            }
+          }
+        ],
+        "total_policies": 2
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_plugins/_sm/policies?from=1",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "status": 200,
+      "response": {
+        "policies": [
+          {
+            "_id": "esm-b-sm-policy",
+            "_seq_no": 1,
+            "_primary_term": 1,
+            "sm_policy": {
+              "name": "esm-b",
+              "description": "b",
+              "schema_version": 31,
+              "creation": {
+                "schedule": {
+                  "cron": {
+                    "expression": "0 8 * * *",
+                    "timezone": "UTC"
+                  }
+                }
+              },
+              "snapshot_config": {
+                "repository": "esm-repo"
+              },
+              "schedule": {
+                "interval": {
+                  "start_time": 1795710867950,
+                  "period": 1,
+                  "unit": "Minutes"
+                }
+              },
+              "enabled": true,
+              "last_updated_time": 1795710867951,
+              "enabled_time": 1795710867950
+            }
+          }
+        ],
+        "total_policies": 2
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_plugins/_sm/policies?queryString=esm-b",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "status": 200,
+      "response": {
+        "policies": [
+          {
+            "_id": "esm-b-sm-policy",
+            "_seq_no": 1,
+            "_primary_term": 1,
+            "sm_policy": {
+              "name": "esm-b",
+              "description": "b",
+              "schema_version": 31,
+              "creation": {
+                "schedule": {
+                  "cron": {
+                    "expression": "0 8 * * *",
+                    "timezone": "UTC"
+                  }
+                }
+              },
+              "snapshot_config": {
+                "repository": "esm-repo"
+              },
+              "schedule": {
+                "interval": {
+                  "start_time": 1795710867950,
+                  "period": 1,
+                  "unit": "Minutes"
+                }
+              },
+              "enabled": true,
+              "last_updated_time": 1795710867951,
+              "enabled_time": 1795710867950
+            }
+          }
+        ],
+        "total_policies": 1
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_plugins/_sm/policies?sortField=sm_policy.name&sortOrder=desc",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "status": 200,
+      "response": {
+        "policies": [
+          {
+            "_id": "esm-b-sm-policy",
+            "_seq_no": 1,
+            "_primary_term": 1,
+            "sm_policy": {
+              "name": "esm-b",
+              "description": "b",
+              "schema_version": 31,
+              "creation": {
+                "schedule": {
+                  "cron": {
+                    "expression": "0 8 * * *",
+                    "timezone": "UTC"
+                  }
+                }
+              },
+              "snapshot_config": {
+                "repository": "esm-repo"
+              },
+              "schedule": {
+                "interval": {
+                  "start_time": 1795710867950,
+                  "period": 1,
+                  "unit": "Minutes"
+                }
+              },
+              "enabled": true,
+              "last_updated_time": 1795710867951,
+              "enabled_time": 1795710867950
+            }
+          },
+          {
+            "_id": "esm-a-sm-policy",
+            "_seq_no": 0,
+            "_primary_term": 1,
+            "sm_policy": {
+              "name": "esm-a",
+              "description": "Daily snapshot policy",
+              "schema_version": 31,
+              "creation": {
+                "schedule": {
+                  "cron": {
+                    "expression": "0 8 * * *",
+                    "timezone": "UTC"
+                  }
+                },
+                "time_limit": "1h"
+              },
+              "deletion": {
+                "schedule": {
+                  "cron": {
+                    "expression": "0 1 * * *",
+                    "timezone": "America/Los_Angeles"
+                  }
+                },
+                "condition": {
+                  "max_age": "7d",
+                  "min_count": 7,
+                  "max_count": 21
+                },
+                "time_limit": "1h"
+              },
+              "snapshot_config": {
+                "indices": "*",
+                "metadata": {
+                  "any_key": "any_value"
+                },
+                "ignore_unavailable": "true",
+                "timezone": "America/Los_Angeles",
+                "include_global_state": "false",
+                "date_format": "yyyy-MM-dd-HH:mm",
+                "repository": "esm-repo",
+                "partial": "true"
+              },
+              "schedule": {
+                "interval": {
+                  "start_time": 1795710866893,
+                  "period": 1,
+                  "unit": "Minutes"
+                }
+              },
+              "enabled": true,
+              "last_updated_time": 1795710866911,
+              "enabled_time": 1795710866892,
+              "notification": {
+                "channel": {
+                  "id": "NC3OpoEBzEoHMX183R3f"
+                },
+                "conditions": {
+                  "creation": true,
+                  "deletion": false,
+                  "failure": false,
+                  "time_limit_exceeded": false
+                }
+              }
+            }
+          }
+        ],
+        "total_policies": 2
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "PUT /_plugins/_sm/policies/esm-a",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "body": {
+        "description": "Daily snapshot policy",
+        "creation": {
+          "schedule": {
+            "cron": {
+              "expression": "0 8 * * *",
+              "timezone": "UTC"
+            }
+          },
+          "time_limit": "1h"
+        },
+        "deletion": {
+          "schedule": {
+            "cron": {
+              "expression": "0 1 * * *",
+              "timezone": "America/Los_Angeles"
+            }
+          },
+          "condition": {
+            "max_age": "7d",
+            "max_count": 21,
+            "min_count": 7
+          },
+          "time_limit": "1h"
+        },
+        "snapshot_config": {
+          "date_format": "yyyy-MM-dd-HH:mm",
+          "timezone": "America/Los_Angeles",
+          "indices": "*",
+          "repository": "esm-repo",
+          "ignore_unavailable": "true",
+          "include_global_state": "false",
+          "partial": "true",
+          "metadata": {
+            "any_key": "any_value"
+          }
+        },
+        "notification": {
+          "channel": {
+            "id": "NC3OpoEBzEoHMX183R3f"
+          },
+          "conditions": {
+            "creation": true,
+            "deletion": false,
+            "failure": false,
+            "time_limit_exceeded": false
+          }
+        }
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "action_request_validation_exception",
+              "reason": "Validation Failed: 1: Sequence number and primary term must be provided when updating a snapshot management policy;"
+            }
+          ],
+          "type": "action_request_validation_exception",
+          "reason": "Validation Failed: 1: Sequence number and primary term must be provided when updating a snapshot management policy;"
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "PUT /_plugins/_sm/policies/esm-a?if_seq_no=99&if_primary_term=1",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "body": {
+        "description": "Daily snapshot policy",
+        "creation": {
+          "schedule": {
+            "cron": {
+              "expression": "0 8 * * *",
+              "timezone": "UTC"
+            }
+          },
+          "time_limit": "1h"
+        },
+        "deletion": {
+          "schedule": {
+            "cron": {
+              "expression": "0 1 * * *",
+              "timezone": "America/Los_Angeles"
+            }
+          },
+          "condition": {
+            "max_age": "7d",
+            "max_count": 21,
+            "min_count": 7
+          },
+          "time_limit": "1h"
+        },
+        "snapshot_config": {
+          "date_format": "yyyy-MM-dd-HH:mm",
+          "timezone": "America/Los_Angeles",
+          "indices": "*",
+          "repository": "esm-repo",
+          "ignore_unavailable": "true",
+          "include_global_state": "false",
+          "partial": "true",
+          "metadata": {
+            "any_key": "any_value"
+          }
+        },
+        "notification": {
+          "channel": {
+            "id": "NC3OpoEBzEoHMX183R3f"
+          },
+          "conditions": {
+            "creation": true,
+            "deletion": false,
+            "failure": false,
+            "time_limit_exceeded": false
+          }
+        }
+      },
+      "status": 409,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "version_conflict_engine_exception",
+              "reason": "[esm-a-sm-policy]: version conflict, required seqNo [99], primary term [1]. current document has seqNo [0] and primary term [1]",
+              "index": ".opendistro-ism-config",
+              "shard": "0",
+              "index_uuid": "HgKsb_lOQ22mM5pzTi94CA"
+            }
+          ],
+          "type": "version_conflict_engine_exception",
+          "reason": "[esm-a-sm-policy]: version conflict, required seqNo [99], primary term [1]. current document has seqNo [0] and primary term [1]",
+          "index": ".opendistro-ism-config",
+          "shard": "0",
+          "index_uuid": "HgKsb_lOQ22mM5pzTi94CA"
+        },
+        "status": 409
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "PUT /_plugins/_sm/policies/esm-a?if_seq_no=0&if_primary_term=1",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "body": {
+        "creation": {
+          "schedule": {
+            "cron": {
+              "expression": "0 8 * * *",
+              "timezone": "UTC"
+            }
+          }
+        },
+        "snapshot_config": {
+          "repository": "esm-repo"
+        }
+      },
+      "status": 200,
+      "response": {
+        "_id": "esm-a-sm-policy",
+        "_version": 2,
+        "_seq_no": 2,
+        "_primary_term": 1,
+        "sm_policy": {
+          "name": "esm-a",
+          "schema_version": 31,
+          "creation": {
+            "schedule": {
+              "cron": {
+                "expression": "0 8 * * *",
+                "timezone": "UTC"
+              }
+            }
+          },
+          "snapshot_config": {
+            "repository": "esm-repo"
+          },
+          "schedule": {
+            "interval": {
+              "start_time": 1795710868745,
+              "period": 1,
+              "unit": "Minutes"
+            }
+          },
+          "enabled": true,
+          "last_updated_time": 1795710868746,
+          "enabled_time": 1795710868745
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "PUT /_plugins/_sm/policies/esm-nope?if_seq_no=0&if_primary_term=1",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "body": {
+        "creation": {
+          "schedule": {
+            "cron": {
+              "expression": "0 8 * * *",
+              "timezone": "UTC"
+            }
+          }
+        },
+        "snapshot_config": {
+          "repository": "esm-repo"
+        }
+      },
+      "status": 409,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "version_conflict_engine_exception",
+              "reason": "[esm-nope-sm-policy]: version conflict, required seqNo [0], primary term [1]. but no document was found",
+              "index": ".opendistro-ism-config",
+              "shard": "0",
+              "index_uuid": "HgKsb_lOQ22mM5pzTi94CA"
+            }
+          ],
+          "type": "version_conflict_engine_exception",
+          "reason": "[esm-nope-sm-policy]: version conflict, required seqNo [0], primary term [1]. but no document was found",
+          "index": ".opendistro-ism-config",
+          "shard": "0",
+          "index_uuid": "HgKsb_lOQ22mM5pzTi94CA"
+        },
+        "status": 409
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_plugins/_sm/policies/esm-a",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "status": 200,
+      "response": {
+        "_id": "esm-a-sm-policy",
+        "_version": 2,
+        "_seq_no": 2,
+        "_primary_term": 1,
+        "sm_policy": {
+          "name": "esm-a",
+          "schema_version": 31,
+          "creation": {
+            "schedule": {
+              "cron": {
+                "expression": "0 8 * * *",
+                "timezone": "UTC"
+              }
+            }
+          },
+          "snapshot_config": {
+            "repository": "esm-repo"
+          },
+          "schedule": {
+            "interval": {
+              "start_time": 1795710868745,
+              "period": 1,
+              "unit": "Minutes"
+            }
+          },
+          "enabled": true,
+          "last_updated_time": 1795710868746,
+          "enabled_time": 1795710868745
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_plugins/_sm/policies/esm-a/_explain",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "status": 200,
+      "response": {
+        "policies": [
+          {
+            "name": "esm-a",
+            "enabled": true
+          }
+        ]
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_plugins/_sm/policies/esm-a,esm-b/_explain",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "status": 200,
+      "response": {
+        "policies": [
+          {
+            "name": "esm-b",
+            "enabled": true
+          },
+          {
+            "name": "esm-a",
+            "enabled": true
+          }
+        ]
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_plugins/_sm/policies/esm-*/_explain",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "status": 200,
+      "response": {
+        "policies": [
+          {
+            "name": "esm-b",
+            "enabled": true
+          },
+          {
+            "name": "esm-a",
+            "enabled": true
+          }
+        ]
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /_plugins/_sm/policies/esm-b/_stop",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "status": 200,
+      "response": {
+        "acknowledged": true
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_plugins/_sm/policies/esm-b",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "status": 200,
+      "response": {
+        "_id": "esm-b-sm-policy",
+        "_version": 2,
+        "_seq_no": 3,
+        "_primary_term": 1,
+        "sm_policy": {
+          "name": "esm-b",
+          "description": "b",
+          "schema_version": 31,
+          "creation": {
+            "schedule": {
+              "cron": {
+                "expression": "0 8 * * *",
+                "timezone": "UTC"
+              }
+            }
+          },
+          "snapshot_config": {
+            "repository": "esm-repo"
+          },
+          "schedule": {
+            "interval": {
+              "start_time": 1795710867950,
+              "period": 1,
+              "unit": "Minutes"
+            }
+          },
+          "enabled": false,
+          "last_updated_time": 1795710869417,
+          "enabled_time": null
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /_plugins/_sm/policies/esm-b/_stop",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "status": 200,
+      "response": {
+        "acknowledged": true
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_plugins/_sm/policies/esm-b/_explain",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "status": 200,
+      "response": {
+        "policies": [
+          {
+            "name": "esm-b",
+            "enabled": true
+          }
+        ]
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /_plugins/_sm/policies/esm-b/_start",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "status": 200,
+      "response": {
+        "acknowledged": true
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /_plugins/_sm/policies/esm-b/_start",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "status": 200,
+      "response": {
+        "acknowledged": true
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_plugins/_sm/policies/esm-b",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "status": 200,
+      "response": {
+        "_id": "esm-b-sm-policy",
+        "_version": 3,
+        "_seq_no": 4,
+        "_primary_term": 1,
+        "sm_policy": {
+          "name": "esm-b",
+          "description": "b",
+          "schema_version": 31,
+          "creation": {
+            "schedule": {
+              "cron": {
+                "expression": "0 8 * * *",
+                "timezone": "UTC"
+              }
+            }
+          },
+          "snapshot_config": {
+            "repository": "esm-repo"
+          },
+          "schedule": {
+            "interval": {
+              "start_time": 1795710867950,
+              "period": 1,
+              "unit": "Minutes"
+            }
+          },
+          "enabled": true,
+          "last_updated_time": 1795710869659,
+          "enabled_time": 1795710869659
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /_plugins/_sm/policies/esm-Bad",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "body": {
+        "creation": {
+          "schedule": {
+            "cron": {
+              "expression": "0 8 * * *",
+              "timezone": "UTC"
+            }
+          }
+        },
+        "snapshot_config": {
+          "repository": "esm-repo"
+        }
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "Policy name must be lowercase."
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "Policy name must be lowercase."
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /_plugins/_sm/policies/esm-e1",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "body": {
+        "snapshot_config": {
+          "repository": "esm-repo"
+        }
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "Must provide either creation or deletion configuration."
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "Must provide either creation or deletion configuration."
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /_plugins/_sm/policies/esm-e2",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "body": {
+        "creation": {
+          "schedule": {
+            "cron": {
+              "expression": "0 8 * * *",
+              "timezone": "UTC"
+            }
+          }
+        }
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "snapshot_config field must not be null"
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "snapshot_config field must not be null"
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /_plugins/_sm/policies/esm-e3",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "body": {
+        "creation": {
+          "schedule": {
+            "cron": {
+              "expression": "bogus",
+              "timezone": "UTC"
+            }
+          }
+        },
+        "snapshot_config": {
+          "repository": "esm-repo"
+        }
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "Cron expression contains 1 parts but we expect one of [5]"
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "Cron expression contains 1 parts but we expect one of [5]"
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /_plugins/_sm/policies/esm-e4",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "body": {
+        "creation": {
+          "schedule": {
+            "cron": {
+              "expression": "61 * * * *",
+              "timezone": "UTC"
+            }
+          }
+        },
+        "snapshot_config": {
+          "repository": "esm-repo"
+        }
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "Failed to parse cron expression. Value 61 not in range [0, 59]"
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "Failed to parse cron expression. Value 61 not in range [0, 59]",
+          "caused_by": {
+            "type": "illegal_argument_exception",
+            "reason": "Value 61 not in range [0, 59]"
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /_plugins/_sm/policies/esm-e5",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "body": {
+        "creation": {
+          "schedule": {
+            "cron": {
+              "expression": "0 8 * * *",
+              "timezone": "Nowhere/X"
+            }
+          }
+        },
+        "snapshot_config": {
+          "repository": "esm-repo"
+        }
+      },
+      "status": 500,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "zone_rules_exception",
+              "reason": "Unknown time-zone ID: Nowhere/X"
+            }
+          ],
+          "type": "zone_rules_exception",
+          "reason": "Unknown time-zone ID: Nowhere/X"
+        },
+        "status": 500
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /_plugins/_sm/policies/esm-e6",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "body": {
+        "creation": {
+          "schedule": {
+            "cron": {
+              "expression": "0 8 * * *",
+              "timezone": "UTC"
+            }
+          }
+        },
+        "snapshot_config": {
+          "repository": "esm-repo"
+        },
+        "deletion": {
+          "condition": {
+            "max_count": 1
+          }
+        }
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "max_count should be bigger than min_count."
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "max_count should be bigger than min_count."
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /_plugins/_sm/policies/esm-e7",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "body": {
+        "creation": {
+          "schedule": {
+            "cron": {
+              "expression": "0 8 * * *",
+              "timezone": "UTC"
+            }
+          }
+        },
+        "snapshot_config": {
+          "repository": "esm-repo"
+        },
+        "deletion": {
+          "condition": {
+            "max_count": 2
+          }
+        }
+      },
+      "status": 201,
+      "response": {
+        "_id": "esm-e7-sm-policy",
+        "_version": 1,
+        "_seq_no": 5,
+        "_primary_term": 1,
+        "sm_policy": {
+          "name": "esm-e7",
+          "schema_version": 31,
+          "creation": {
+            "schedule": {
+              "cron": {
+                "expression": "0 8 * * *",
+                "timezone": "UTC"
+              }
+            }
+          },
+          "deletion": {
+            "schedule": {
+              "cron": {
+                "expression": "0 8 * * *",
+                "timezone": "UTC"
+              }
+            },
+            "condition": {
+              "min_count": 1,
+              "max_count": 2
+            }
+          },
+          "snapshot_config": {
+            "repository": "esm-repo"
+          },
+          "schedule": {
+            "interval": {
+              "start_time": 1795710869834,
+              "period": 1,
+              "unit": "Minutes"
+            }
+          },
+          "enabled": true,
+          "last_updated_time": 1795710869837,
+          "enabled_time": 1795710869834
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /_plugins/_sm/policies/esm-e8",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "body": {
+        "creation": {
+          "schedule": {
+            "cron": {
+              "expression": "0 8 * * *",
+              "timezone": "UTC"
+            }
+          }
+        },
+        "snapshot_config": {
+          "repository": "esm-repo"
+        },
+        "deletion": {
+          "condition": {
+            "min_count": 0,
+            "max_count": 3
+          }
+        }
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "min_count should be bigger than 0."
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "min_count should be bigger than 0."
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /_plugins/_sm/policies/esm-e9",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "body": {
+        "creation": {
+          "schedule": {
+            "cron": {
+              "expression": "0 8 * * *",
+              "timezone": "UTC"
+            }
+          }
+        },
+        "snapshot_config": {
+          "repository": "esm-repo"
+        },
+        "deletion": {
+          "condition": {
+            "max_age": "7x"
+          }
+        }
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "failed to parse setting [max_age] with value [7x] as a time value: unit is missing or unrecognized"
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "failed to parse setting [max_age] with value [7x] as a time value: unit is missing or unrecognized"
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /_plugins/_sm/policies/esm-e10",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "body": {
+        "creation": {
+          "schedule": {
+            "interval": {
+              "period": 1,
+              "unit": "Minutes",
+              "start_time": 1
+            }
+          }
+        },
+        "snapshot_config": {
+          "repository": "esm-repo"
+        }
+      },
+      "status": 500,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "status_exception",
+              "reason": "mapping set to strict, dynamic introduction of [interval] within [sm_policy.creation.schedule] is not allowed"
+            }
+          ],
+          "type": "status_exception",
+          "reason": "mapping set to strict, dynamic introduction of [interval] within [sm_policy.creation.schedule] is not allowed"
+        },
+        "status": 500
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /_plugins/_sm/policies/esm-e11",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "body": {
+        "creation": {
+          "schedule": {
+            "cron": {
+              "expression": "0 8 * * *"
+            }
+          }
+        },
+        "snapshot_config": {
+          "repository": "esm-repo"
+        }
+      },
+      "status": 500,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "null_pointer_exception",
+              "reason": "zone"
+            }
+          ],
+          "type": "null_pointer_exception",
+          "reason": "zone"
+        },
+        "status": 500
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /_plugins/_sm/policies/esm-e12",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "body": {
+        "creation": {
+          "schedule": {
+            "cron": {
+              "expression": "0 8 * * *",
+              "timezone": "UTC"
+            }
+          },
+          "time_limit": "1x"
+        },
+        "snapshot_config": {
+          "repository": "esm-repo"
+        }
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "failed to parse setting [time_limit] with value [1x] as a time value: unit is missing or unrecognized"
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "failed to parse setting [time_limit] with value [1x] as a time value: unit is missing or unrecognized"
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /_plugins/_sm/policies/esm-e13",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "body": {
+        "creation": {
+          "schedule": {
+            "cron": {
+              "expression": "0 8 * * *",
+              "timezone": "UTC"
+            }
+          }
+        },
+        "snapshot_config": {}
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "Must provide the repository in snapshot config."
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "Must provide the repository in snapshot config."
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /_plugins/_sm/policies/esm-e14",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "body": {
+        "creation": {
+          "schedule": {
+            "cron": {
+              "expression": "0 8 * * *",
+              "timezone": "UTC"
+            }
+          }
+        },
+        "snapshot_config": {
+          "repository": "esm-repo"
+        },
+        "notification": {
+          "conditions": {
+            "creation": true
+          }
+        }
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "Snapshot Management notification channel must not be null"
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "Snapshot Management notification channel must not be null"
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /_plugins/_sm/policies/esm-e15",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "body": {
+        "creation": {
+          "schedule": {
+            "cron": {
+              "expression": "0 8 * * *",
+              "timezone": "UTC"
+            }
+          }
+        },
+        "snapshot_config": {
+          "repository": "esm-repo"
+        },
+        "description": 5
+      },
+      "status": 201,
+      "response": {
+        "_id": "esm-e15-sm-policy",
+        "_version": 1,
+        "_seq_no": 6,
+        "_primary_term": 1,
+        "sm_policy": {
+          "name": "esm-e15",
+          "description": "5",
+          "schema_version": 31,
+          "creation": {
+            "schedule": {
+              "cron": {
+                "expression": "0 8 * * *",
+                "timezone": "UTC"
+              }
+            }
+          },
+          "snapshot_config": {
+            "repository": "esm-repo"
+          },
+          "schedule": {
+            "interval": {
+              "start_time": 1795710870146,
+              "period": 1,
+              "unit": "Minutes"
+            }
+          },
+          "enabled": true,
+          "last_updated_time": 1795710870146,
+          "enabled_time": 1795710870146
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /_plugins/_sm/policies/esm-e16",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "body": {
+        "deletion": {
+          "schedule": {
+            "cron": {
+              "expression": "0 1 * * *",
+              "timezone": "UTC"
+            }
+          },
+          "condition": {
+            "max_count": 3
+          }
+        },
+        "snapshot_config": {
+          "repository": "esm-repo"
+        }
+      },
+      "status": 201,
+      "response": {
+        "_id": "esm-e16-sm-policy",
+        "_version": 1,
+        "_seq_no": 7,
+        "_primary_term": 1,
+        "sm_policy": {
+          "name": "esm-e16",
+          "schema_version": 31,
+          "deletion": {
+            "schedule": {
+              "cron": {
+                "expression": "0 1 * * *",
+                "timezone": "UTC"
+              }
+            },
+            "condition": {
+              "min_count": 1,
+              "max_count": 3
+            }
+          },
+          "snapshot_config": {
+            "repository": "esm-repo"
+          },
+          "schedule": {
+            "interval": {
+              "start_time": 1795710870284,
+              "period": 1,
+              "unit": "Minutes"
+            }
+          },
+          "enabled": true,
+          "last_updated_time": 1795710870284,
+          "enabled_time": 1795710870284
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /_plugins/_sm/policies/esm-e17",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "body": {
+        "creation": {
+          "schedule": {
+            "cron": {
+              "expression": "0 8 * * *",
+              "timezone": "UTC"
+            }
+          }
+        },
+        "snapshot_config": {
+          "repository": "esm-repo"
+        },
+        "deletion": {
+          "condition": {
+            "max_age": "1d"
+          }
+        }
+      },
+      "status": 201,
+      "response": {
+        "_id": "esm-e17-sm-policy",
+        "_version": 1,
+        "_seq_no": 8,
+        "_primary_term": 1,
+        "sm_policy": {
+          "name": "esm-e17",
+          "schema_version": 31,
+          "creation": {
+            "schedule": {
+              "cron": {
+                "expression": "0 8 * * *",
+                "timezone": "UTC"
+              }
+            }
+          },
+          "deletion": {
+            "schedule": {
+              "cron": {
+                "expression": "0 8 * * *",
+                "timezone": "UTC"
+              }
+            },
+            "condition": {
+              "max_age": "1d",
+              "min_count": 1
+            }
+          },
+          "snapshot_config": {
+            "repository": "esm-repo"
+          },
+          "schedule": {
+            "interval": {
+              "start_time": 1795710870388,
+              "period": 1,
+              "unit": "Minutes"
+            }
+          },
+          "enabled": true,
+          "last_updated_time": 1795710870388,
+          "enabled_time": 1795710870388
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /_plugins/_sm/policies/esm-e18",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "body": {
+        "creation": {
+          "schedule": {
+            "cron": {
+              "expression": "0 8 * * *",
+              "timezone": "UTC"
+            }
+          }
+        },
+        "snapshot_config": {
+          "repository": "esm-repo"
+        },
+        "deletion": {}
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "condition must not be null."
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "condition must not be null."
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /_plugins/_sm/policies/esm-e19",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "body": {
+        "creation": {},
+        "snapshot_config": {
+          "repository": "esm-repo"
+        }
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "schedule field must not be null"
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "schedule field must not be null"
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /_plugins/_sm/policies/esm-e20",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "body": {
+        "creation": {
+          "schedule": {
+            "cron": {
+              "expression": "0 8 * * *",
+              "timezone": "UTC"
+            }
+          }
+        },
+        "snapshot_config": {
+          "repository": "esm-repo"
+        },
+        "bogus": 1
+      },
+      "status": 201,
+      "response": {
+        "_id": "esm-e20-sm-policy",
+        "_version": 1,
+        "_seq_no": 9,
+        "_primary_term": 1,
+        "sm_policy": {
+          "name": "esm-e20",
+          "schema_version": 31,
+          "creation": {
+            "schedule": {
+              "cron": {
+                "expression": "0 8 * * *",
+                "timezone": "UTC"
+              }
+            }
+          },
+          "snapshot_config": {
+            "repository": "esm-repo"
+          },
+          "schedule": {
+            "interval": {
+              "start_time": 1795710870653,
+              "period": 1,
+              "unit": "Minutes"
+            }
+          },
+          "enabled": true,
+          "last_updated_time": 1795710870653,
+          "enabled_time": 1795710870653
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /_plugins/_sm/policies/esm-e21",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "body": {
+        "creation": {
+          "schedule": {
+            "cron": {
+              "expression": "0 8 * * *",
+              "timezone": "UTC"
+            }
+          }
+        },
+        "snapshot_config": {
+          "repository": "esm-repo",
+          "indices": [
+            "a",
+            "b"
+          ]
+        }
+      },
+      "status": 201,
+      "response": {
+        "_id": "esm-e21-sm-policy",
+        "_version": 1,
+        "_seq_no": 10,
+        "_primary_term": 1,
+        "sm_policy": {
+          "name": "esm-e21",
+          "schema_version": 31,
+          "creation": {
+            "schedule": {
+              "cron": {
+                "expression": "0 8 * * *",
+                "timezone": "UTC"
+              }
+            }
+          },
+          "snapshot_config": {
+            "indices": [
+              "a",
+              "b"
+            ],
+            "repository": "esm-repo"
+          },
+          "schedule": {
+            "interval": {
+              "start_time": 1795710870826,
+              "period": 1,
+              "unit": "Minutes"
+            }
+          },
+          "enabled": true,
+          "last_updated_time": 1795710870826,
+          "enabled_time": 1795710870826
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /_plugins/_sm/policies/esm-e22",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "raw": "",
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "parse_exception",
+              "reason": "request body is required"
+            }
+          ],
+          "type": "parse_exception",
+          "reason": "request body is required"
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /_plugins/_sm/policies/esm-e23",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "raw": "notjson",
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "json_parse_exception",
+              "reason": "Unrecognized token 'notjson': was expecting (JSON String, Number, Array, Object or token 'null', 'true' or 'false')\n at [Source: REDACTED (`StreamReadFeature.INCLUDE_SOURCE_IN_LOCATION` disabled); byte offset: #0]"
+            }
+          ],
+          "type": "json_parse_exception",
+          "reason": "Unrecognized token 'notjson': was expecting (JSON String, Number, Array, Object or token 'null', 'true' or 'false')\n at [Source: REDACTED (`StreamReadFeature.INCLUDE_SOURCE_IN_LOCATION` disabled); byte offset: #0]",
+          "caused_by": {
+            "type": "stream_read_exception",
+            "reason": "Unrecognized token 'notjson': was expecting (JSON String, Number, Array, Object or token 'null', 'true' or 'false')\n at [Source: REDACTED (`StreamReadFeature.INCLUDE_SOURCE_IN_LOCATION` disabled); byte offset: #0]"
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /_plugins/_sm/policies/esm-e24",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "raw": "[]",
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "parsing_exception",
+              "reason": "Failed to parse object: expecting token of type [START_OBJECT] but found [START_ARRAY]",
+              "line": 1,
+              "col": 1
+            }
+          ],
+          "type": "parsing_exception",
+          "reason": "Failed to parse object: expecting token of type [START_OBJECT] but found [START_ARRAY]",
+          "line": 1,
+          "col": 1
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_plugins/_sm/policies/esm-e7",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "status": 200,
+      "response": {
+        "_id": "esm-e7-sm-policy",
+        "_version": 1,
+        "_seq_no": 5,
+        "_primary_term": 1,
+        "sm_policy": {
+          "name": "esm-e7",
+          "schema_version": 31,
+          "creation": {
+            "schedule": {
+              "cron": {
+                "expression": "0 8 * * *",
+                "timezone": "UTC"
+              }
+            }
+          },
+          "deletion": {
+            "schedule": {
+              "cron": {
+                "expression": "0 8 * * *",
+                "timezone": "UTC"
+              }
+            },
+            "condition": {
+              "min_count": 1,
+              "max_count": 2
+            }
+          },
+          "snapshot_config": {
+            "repository": "esm-repo"
+          },
+          "schedule": {
+            "interval": {
+              "start_time": 1795710869834,
+              "period": 1,
+              "unit": "Minutes"
+            }
+          },
+          "enabled": true,
+          "last_updated_time": 1795710869837,
+          "enabled_time": 1795710869834
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_plugins/_sm/policies/esm-e8",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "status": 404,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "status_exception",
+              "reason": "Snapshot management policy not found"
+            }
+          ],
+          "type": "status_exception",
+          "reason": "Snapshot management policy not found"
+        },
+        "status": 404
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_plugins/_sm/policies/esm-e16",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "status": 200,
+      "response": {
+        "_id": "esm-e16-sm-policy",
+        "_version": 1,
+        "_seq_no": 7,
+        "_primary_term": 1,
+        "sm_policy": {
+          "name": "esm-e16",
+          "schema_version": 31,
+          "deletion": {
+            "schedule": {
+              "cron": {
+                "expression": "0 1 * * *",
+                "timezone": "UTC"
+              }
+            },
+            "condition": {
+              "min_count": 1,
+              "max_count": 3
+            }
+          },
+          "snapshot_config": {
+            "repository": "esm-repo"
+          },
+          "schedule": {
+            "interval": {
+              "start_time": 1795710870284,
+              "period": 1,
+              "unit": "Minutes"
+            }
+          },
+          "enabled": true,
+          "last_updated_time": 1795710870284,
+          "enabled_time": 1795710870284
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_plugins/_sm/policies/esm-e17",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "status": 200,
+      "response": {
+        "_id": "esm-e17-sm-policy",
+        "_version": 1,
+        "_seq_no": 8,
+        "_primary_term": 1,
+        "sm_policy": {
+          "name": "esm-e17",
+          "schema_version": 31,
+          "creation": {
+            "schedule": {
+              "cron": {
+                "expression": "0 8 * * *",
+                "timezone": "UTC"
+              }
+            }
+          },
+          "deletion": {
+            "schedule": {
+              "cron": {
+                "expression": "0 8 * * *",
+                "timezone": "UTC"
+              }
+            },
+            "condition": {
+              "max_age": "1d",
+              "min_count": 1
+            }
+          },
+          "snapshot_config": {
+            "repository": "esm-repo"
+          },
+          "schedule": {
+            "interval": {
+              "start_time": 1795710870388,
+              "period": 1,
+              "unit": "Minutes"
+            }
+          },
+          "enabled": true,
+          "last_updated_time": 1795710870388,
+          "enabled_time": 1795710870388
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_plugins/_sm/policies/esm-e18",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "status": 404,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "status_exception",
+              "reason": "Snapshot management policy not found"
+            }
+          ],
+          "type": "status_exception",
+          "reason": "Snapshot management policy not found"
+        },
+        "status": 404
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_plugins/_sm/policies/esm-e20",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "status": 200,
+      "response": {
+        "_id": "esm-e20-sm-policy",
+        "_version": 1,
+        "_seq_no": 9,
+        "_primary_term": 1,
+        "sm_policy": {
+          "name": "esm-e20",
+          "schema_version": 31,
+          "creation": {
+            "schedule": {
+              "cron": {
+                "expression": "0 8 * * *",
+                "timezone": "UTC"
+              }
+            }
+          },
+          "snapshot_config": {
+            "repository": "esm-repo"
+          },
+          "schedule": {
+            "interval": {
+              "start_time": 1795710870653,
+              "period": 1,
+              "unit": "Minutes"
+            }
+          },
+          "enabled": true,
+          "last_updated_time": 1795710870653,
+          "enabled_time": 1795710870653
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_plugins/_sm/policies/esm-e21",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "status": 200,
+      "response": {
+        "_id": "esm-e21-sm-policy",
+        "_version": 1,
+        "_seq_no": 10,
+        "_primary_term": 1,
+        "sm_policy": {
+          "name": "esm-e21",
+          "schema_version": 31,
+          "creation": {
+            "schedule": {
+              "cron": {
+                "expression": "0 8 * * *",
+                "timezone": "UTC"
+              }
+            }
+          },
+          "snapshot_config": {
+            "indices": [
+              "a",
+              "b"
+            ],
+            "repository": "esm-repo"
+          },
+          "schedule": {
+            "interval": {
+              "start_time": 1795710870826,
+              "period": 1,
+              "unit": "Minutes"
+            }
+          },
+          "enabled": true,
+          "last_updated_time": 1795710870826,
+          "enabled_time": 1795710870826
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "DELETE /_plugins/_sm/policies/esm-a",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "status": 200,
+      "response": {
+        "_index": ".opendistro-ism-config",
+        "_id": "esm-a-sm-policy",
+        "_version": 3,
+        "result": "deleted",
+        "forced_refresh": true,
+        "_shards": {
+          "total": 2,
+          "successful": 1,
+          "failed": 0
+        },
+        "_seq_no": 11,
+        "_primary_term": 1
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "DELETE /_plugins/_sm/policies/esm-b",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "status": 200,
+      "response": {
+        "_index": ".opendistro-ism-config",
+        "_id": "esm-b-sm-policy",
+        "_version": 4,
+        "result": "deleted",
+        "forced_refresh": true,
+        "_shards": {
+          "total": 2,
+          "successful": 1,
+          "failed": 0
+        },
+        "_seq_no": 12,
+        "_primary_term": 1
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "DELETE /_plugins/_sm/policies/esm-Bad",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "status": 404,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "status_exception",
+              "reason": "Snapshot management policy not found"
+            }
+          ],
+          "type": "status_exception",
+          "reason": "Snapshot management policy not found"
+        },
+        "status": 404
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "DELETE /_plugins/_sm/policies/esm-e1",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "status": 404,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "status_exception",
+              "reason": "Snapshot management policy not found"
+            }
+          ],
+          "type": "status_exception",
+          "reason": "Snapshot management policy not found"
+        },
+        "status": 404
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "DELETE /_plugins/_sm/policies/esm-e2",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "status": 404,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "status_exception",
+              "reason": "Snapshot management policy not found"
+            }
+          ],
+          "type": "status_exception",
+          "reason": "Snapshot management policy not found"
+        },
+        "status": 404
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "DELETE /_plugins/_sm/policies/esm-e3",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "status": 404,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "status_exception",
+              "reason": "Snapshot management policy not found"
+            }
+          ],
+          "type": "status_exception",
+          "reason": "Snapshot management policy not found"
+        },
+        "status": 404
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "DELETE /_plugins/_sm/policies/esm-e4",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "status": 404,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "status_exception",
+              "reason": "Snapshot management policy not found"
+            }
+          ],
+          "type": "status_exception",
+          "reason": "Snapshot management policy not found"
+        },
+        "status": 404
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "DELETE /_plugins/_sm/policies/esm-e5",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "status": 404,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "status_exception",
+              "reason": "Snapshot management policy not found"
+            }
+          ],
+          "type": "status_exception",
+          "reason": "Snapshot management policy not found"
+        },
+        "status": 404
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "DELETE /_plugins/_sm/policies/esm-e6",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "status": 404,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "status_exception",
+              "reason": "Snapshot management policy not found"
+            }
+          ],
+          "type": "status_exception",
+          "reason": "Snapshot management policy not found"
+        },
+        "status": 404
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "DELETE /_plugins/_sm/policies/esm-e7",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "status": 200,
+      "response": {
+        "_index": ".opendistro-ism-config",
+        "_id": "esm-e7-sm-policy",
+        "_version": 2,
+        "result": "deleted",
+        "forced_refresh": true,
+        "_shards": {
+          "total": 2,
+          "successful": 1,
+          "failed": 0
+        },
+        "_seq_no": 13,
+        "_primary_term": 1
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "DELETE /_plugins/_sm/policies/esm-e8",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "status": 404,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "status_exception",
+              "reason": "Snapshot management policy not found"
+            }
+          ],
+          "type": "status_exception",
+          "reason": "Snapshot management policy not found"
+        },
+        "status": 404
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "DELETE /_plugins/_sm/policies/esm-e9",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "status": 404,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "status_exception",
+              "reason": "Snapshot management policy not found"
+            }
+          ],
+          "type": "status_exception",
+          "reason": "Snapshot management policy not found"
+        },
+        "status": 404
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "DELETE /_plugins/_sm/policies/esm-e10",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "status": 404,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "status_exception",
+              "reason": "Snapshot management policy not found"
+            }
+          ],
+          "type": "status_exception",
+          "reason": "Snapshot management policy not found"
+        },
+        "status": 404
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "DELETE /_plugins/_sm/policies/esm-e11",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "status": 404,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "status_exception",
+              "reason": "Snapshot management policy not found"
+            }
+          ],
+          "type": "status_exception",
+          "reason": "Snapshot management policy not found"
+        },
+        "status": 404
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "DELETE /_plugins/_sm/policies/esm-e12",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "status": 404,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "status_exception",
+              "reason": "Snapshot management policy not found"
+            }
+          ],
+          "type": "status_exception",
+          "reason": "Snapshot management policy not found"
+        },
+        "status": 404
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "DELETE /_plugins/_sm/policies/esm-e13",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "status": 404,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "status_exception",
+              "reason": "Snapshot management policy not found"
+            }
+          ],
+          "type": "status_exception",
+          "reason": "Snapshot management policy not found"
+        },
+        "status": 404
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "DELETE /_plugins/_sm/policies/esm-e14",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "status": 404,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "status_exception",
+              "reason": "Snapshot management policy not found"
+            }
+          ],
+          "type": "status_exception",
+          "reason": "Snapshot management policy not found"
+        },
+        "status": 404
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "DELETE /_plugins/_sm/policies/esm-e15",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "status": 200,
+      "response": {
+        "_index": ".opendistro-ism-config",
+        "_id": "esm-e15-sm-policy",
+        "_version": 2,
+        "result": "deleted",
+        "forced_refresh": true,
+        "_shards": {
+          "total": 2,
+          "successful": 1,
+          "failed": 0
+        },
+        "_seq_no": 14,
+        "_primary_term": 1
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "DELETE /_plugins/_sm/policies/esm-e16",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "status": 200,
+      "response": {
+        "_index": ".opendistro-ism-config",
+        "_id": "esm-e16-sm-policy",
+        "_version": 2,
+        "result": "deleted",
+        "forced_refresh": true,
+        "_shards": {
+          "total": 2,
+          "successful": 1,
+          "failed": 0
+        },
+        "_seq_no": 15,
+        "_primary_term": 1
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "DELETE /_plugins/_sm/policies/esm-e17",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "status": 200,
+      "response": {
+        "_index": ".opendistro-ism-config",
+        "_id": "esm-e17-sm-policy",
+        "_version": 2,
+        "result": "deleted",
+        "forced_refresh": true,
+        "_shards": {
+          "total": 2,
+          "successful": 1,
+          "failed": 0
+        },
+        "_seq_no": 16,
+        "_primary_term": 1
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "DELETE /_plugins/_sm/policies/esm-e18",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "status": 404,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "status_exception",
+              "reason": "Snapshot management policy not found"
+            }
+          ],
+          "type": "status_exception",
+          "reason": "Snapshot management policy not found"
+        },
+        "status": 404
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "DELETE /_plugins/_sm/policies/esm-e19",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "status": 404,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "status_exception",
+              "reason": "Snapshot management policy not found"
+            }
+          ],
+          "type": "status_exception",
+          "reason": "Snapshot management policy not found"
+        },
+        "status": 404
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "DELETE /_plugins/_sm/policies/esm-e20",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "status": 200,
+      "response": {
+        "_index": ".opendistro-ism-config",
+        "_id": "esm-e20-sm-policy",
+        "_version": 2,
+        "result": "deleted",
+        "forced_refresh": true,
+        "_shards": {
+          "total": 2,
+          "successful": 1,
+          "failed": 0
+        },
+        "_seq_no": 17,
+        "_primary_term": 1
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "DELETE /_plugins/_sm/policies/esm-e21",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "status": 200,
+      "response": {
+        "_index": ".opendistro-ism-config",
+        "_id": "esm-e21-sm-policy",
+        "_version": 2,
+        "result": "deleted",
+        "forced_refresh": true,
+        "_shards": {
+          "total": 2,
+          "successful": 1,
+          "failed": 0
+        },
+        "_seq_no": 18,
+        "_primary_term": 1
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "DELETE /_plugins/_sm/policies/esm-a",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "status": 404,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "status_exception",
+              "reason": "Snapshot management policy not found"
+            }
+          ],
+          "type": "status_exception",
+          "reason": "Snapshot management policy not found"
+        },
+        "status": 404
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_plugins/_sm/policies/esm-a/_explain",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "status": 200,
+      "response": {
+        "policies": []
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_plugins/_sm/policies",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "status": 200,
+      "response": {
+        "policies": [],
+        "total_policies": 0
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "DELETE /_snapshot/esm-repo",
+      "mask": [
+        "start_time",
+        "last_updated_time",
+        "enabled_time"
+      ],
+      "status": 200,
+      "response": {
+        "acknowledged": true
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    }
+  ],
+  "node_settings": {
+    "path.repo": "/repo"
+  }
+}
