@@ -820,7 +820,9 @@ async fn approvals_are_posted_to_chat_and_decided_there() {
     let seen = |what: String| {
         let chat = chat.clone();
         async move {
-            for _ in 0..100 {
+            // Up to 15 s (it returns as soon as it's there): the delivery is a background task, slow
+            // when the machine is loaded.
+            for _ in 0..750 {
                 if chat.0.lock().unwrap().iter().any(|l| l.starts_with(&what)) {
                     return;
                 }
