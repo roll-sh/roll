@@ -364,6 +364,9 @@ async fn check(State(a): S, ext: Extensions, Json(c): Json<Check>) -> crate::Res
         .await
         .map_err(|e| Error::Internal(e.to_string()))?;
     crate::evaluate::project_from_body(row, &mut target, c.body.as_ref()).map_err(Error::BadRequest)?;
+    if let Err(why) = crate::evaluate::folder_from_body(row, &mut target, c.body.as_ref()) {
+        return Ok(Json(json!({ "decision": "deny", "why": why })));
+    }
     let mut action = row.action_with(&method, &params, c.body.as_ref(), &headers);
     let asked = action;
     let mut outcome = if matches!(row.target, catalog::Tgt::AnyGrant) { Outcome::Allow } else { scope.outcome(&target, action) };

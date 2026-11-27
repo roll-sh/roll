@@ -192,6 +192,7 @@ fn postgres() -> Router {
         .route("/v1/secrets/projects/{project}/transit/{name}/encrypt", axum::routing::post(|| async { axum::Json(json!({ "ciphertext": "roll:v1:x" })) }))
         .route("/v1/secrets/projects/{project}/environments/{env}/values", get(|| async { axum::Json(json!({})) }))
         .route("/v1/secrets/projects/{project}/environments/{env}/promote", axum::routing::post(|| async { axum::Json(json!({})) }))
+        .route("/v1/secrets/projects/{project}/environments/{env}/resolve", axum::routing::post(|| async { axum::Json(json!({})) }))
         .route("/v1/secrets/projects/{project}/environments/{env}/imports", axum::routing::put(|| async { axum::Json(json!({})) }))
 }
 
@@ -1095,6 +1096,22 @@ async fn a_products_lifetime_cap_binds_consents_and_remembered_approvals() {
     assert_eq!((g["rules"].as_array().map(Vec::len), g["expires_at"].is_null()), (Some(1), true), "{g}");
     assert!(within(&g["temporary"][0]["until"]), "{g}");
     assert_eq!(g["temporary"][0]["rule"]["paths"], json!(["/api"]), "{g}");
+}
+
+/// A secrets folder is the one the product reads (a body's when resolving, comparing or importing,
+/// never `?path=`), spelled as roll secrets spells it (`/api/` is `/api`), or refused before
+/// anyone is asked.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_secrets_folder_is_the_one_the_request_reads() {
+    let d = Daemon::new(50);
+    let (token, _) = d.token(json!([{ "product": "secrets", "resources": "*", "paths": ["/api/"], "actions": { "reveal": "allow" } }]), json!({})).await;
+    let resolve = "/v1/secrets/projects/pa/environments/development/resolve";
+    let (s, out) = d.call(&token, Method::POST, resolve, Some(json!({ "path": "/api/stripe", "text": "x" }))).await;
+    assert_eq!(s, StatusCode::OK, "{out}");
+    let (s, out) = d.call(&token, Method::POST, &format!("{resolve}?path=/api"), Some(json!({ "text": "x" }))).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "the body's folder (none: /), not the query's: {out}");
+    let (s, out) = d.call(&token, Method::POST, resolve, Some(json!({ "path": "//", "text": "x" }))).await;
+    assert_eq!((s, out["code"].as_str()), (StatusCode::BAD_REQUEST, Some("bad_request")), "{out}");
 }
 
 /// The policy's `oauth_clients`: a client it leaves out can't be consented to, sign a device in,

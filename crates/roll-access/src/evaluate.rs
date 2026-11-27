@@ -169,6 +169,19 @@ pub(crate) fn project_from_body(row: &Row, target: &mut Target, body: Option<&Va
     }
 }
 
+/// A row whose body names its secrets folder ([`Row::path_body`]): the folder, as roll secrets reads
+/// it (absent is `/`), or why the request is refused before anyone is asked.
+pub(crate) fn folder_from_body(row: &Row, target: &mut Target, body: Option<&Value>) -> Result<(), String> {
+    let (Some(field), Target::One(r)) = (row.path_body, target) else { return Ok(()) };
+    let named = match body.and_then(|b| b.get(field)) {
+        None | Some(Value::Null) => "/",
+        Some(Value::String(p)) => p.as_str(),
+        Some(_) => return Err(format!("{field} is a folder: / or /folder/…")),
+    };
+    r.path = Some(catalog::secret_path(named).ok_or_else(|| format!("{field} is / or /folder/… with up to {} folders of A-Z, a-z, 0-9, _ and -", roll_secrets_ref::DEPTH_MAX))?);
+    Ok(())
+}
+
 /// What a request is about, from its row and path. `person`: a person's grant decides it (their
 /// session, or a token of theirs), which a canvas's project reaches only where it trusts the
 /// resource ([`Access::resource_as`]).
@@ -696,7 +709,7 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
     }
     let json_body = buffered.as_ref().and_then(|b| serde_json::from_slice::<Value>(b).ok());
     // A create that names its project in its body is decided by it (and by nothing else).
-    if let Err(why) = project_from_body(row, &mut target, json_body.as_ref()) {
+    if let Err(why) = project_from_body(row, &mut target, json_body.as_ref()).and_then(|()| folder_from_body(row, &mut target, json_body.as_ref())) {
         ctx.audit(Some(row), None, None, "deny", None, StatusCode::BAD_REQUEST);
         return deny(StatusCode::BAD_REQUEST, "bad_request", why, json!({}));
     }

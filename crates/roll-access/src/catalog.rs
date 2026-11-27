@@ -92,6 +92,9 @@ pub struct Row {
     /// `X-Roll-Project`: the gate decides it by that project, and refuses a body and a header
     /// that name two (previews' `project`).
     pub project_in_body: Option<&'static str>,
+    /// A secrets folder its JSON body names (this top-level field; absent is `/`), as
+    /// [`path_query`](Row::path_query) is one its query names: the folder the product reads.
+    pub path_body: Option<&'static str>,
     /// A JSON body field whose presence makes it `admin` (apps' `freeze`: setting or lifting a
     /// freeze is the same call as going past one).
     pub admin_if_field: Option<&'static [&'static str]>,
@@ -140,16 +143,10 @@ fn search_secret_write(b: &Value) -> Vec<Lent> {
     vec![Lent { kind: "secret".into(), r#ref: s["project"].as_str().unwrap_or("").into(), action: Action::Write, folder }]
 }
 
-/// A folder as roll secrets' `names::path` normalizes it, or `None` where it refuses it.
+/// A folder as roll secrets' `names::path` normalizes it, or `None` where it refuses it (one
+/// function for both: [`roll_secrets_ref::folder`]).
 pub(crate) fn secret_path(p: &str) -> Option<String> {
-    let p = if p.is_empty() { "/" } else { p };
-    let rest = p.strip_prefix('/').filter(|r| !r.starts_with('/'))?;
-    let rest = rest.strip_suffix('/').unwrap_or(rest);
-    if rest.is_empty() {
-        return Some("/".into());
-    }
-    let segments: Vec<&str> = rest.split('/').collect();
-    (segments.len() <= roll_secrets_ref::DEPTH_MAX && segments.iter().all(|s| roll_secrets_ref::is_segment(s))).then(|| format!("/{rest}"))
+    roll_secrets_ref::folder(p)
 }
 
 /// A worker's `run.scale.stream`: apps reads that stream group's lag for it (read on the stream).
@@ -274,7 +271,7 @@ pub type Sources = Vec<(String, Option<String>)>;
 
 impl Row {
     pub fn needs_body(&self) -> bool {
-        self.admin_if_field.is_some() || self.project_in_body.is_some() || matches!(self.act, Act::Body(_) | Act::Raw(_)) || matches!(self.copies_from, Some(CopyFrom::Body(_) | CopyFrom::Each(_))) || matches!(self.lends, Some(Lend::Each(_)))
+        self.admin_if_field.is_some() || self.project_in_body.is_some() || self.path_body.is_some() || matches!(self.act, Act::Body(_) | Act::Raw(_)) || matches!(self.copies_from, Some(CopyFrom::Body(_) | CopyFrom::Each(_))) || matches!(self.lends, Some(Lend::Each(_)))
     }
 
     pub fn action(&self, method: &str, params: &[(String, String)], body: Option<&Value>) -> Action {
@@ -298,7 +295,7 @@ impl Row {
 }
 
 const fn row(method: &'static str, route: &'static str, product: &'static str, act: Act, target: Tgt) -> Row {
-    Row { method, route, product, act, target, env: EnvFrom::None, path_query: None, reveals: &[], copies_from: None, index: None, lends: None, filters_itself: false, filters_index: false, admin_if: None, admin_if_field: None, capable: &[], project_in_body: None }
+    Row { method, route, product, act, target, env: EnvFrom::None, path_query: None, reveals: &[], copies_from: None, index: None, lends: None, filters_itself: false, filters_index: false, admin_if: None, admin_if_field: None, capable: &[], project_in_body: None, path_body: None }
 }
 
 const R: Act = Act::Is(Action::Read);
@@ -335,6 +332,10 @@ impl Row {
     }
     const fn path_query(mut self, q: &'static str) -> Row {
         self.path_query = Some(q);
+        self
+    }
+    const fn path_body(mut self, field: &'static str) -> Row {
+        self.path_body = Some(field);
         self
     }
     const fn project_in_body(mut self, field: &'static str) -> Row {
@@ -961,6 +962,11 @@ fn secrets_import_sources(b: &Value) -> Sources {
         .filter(|i| i.get("project").is_none_or(Value::is_null))
         .filter_map(|i| Some((i.get("environment")?.as_str()?.to_string(), i.get("path").and_then(Value::as_str).map(str::to_string))))
         .collect()
+}
+
+/// A .env import: `delete` when it replaces the folder (keys the file lacks go), else `write`.
+fn secrets_import_action(b: &Value) -> Action {
+    if b["replace"] == true { Action::Delete } else { Action::Write }
 }
 
 /// A service's Git login: `deploy` when it names a project secret (`secret`): the service's
@@ -1741,10 +1747,14 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/purge", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     // A change request's current and proposed values, for its approvers.
     row("GET", "/v1/secrets/projects/{project}/environments/{env}/requests/{id}/values", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
-    row("POST", "/v1/secrets/projects/{project}/environments/{env}/resolve", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
+    // Resolving and comparing read the folder their body names (never `?path=`).
+    row("POST", "/v1/secrets/projects/{project}/environments/{env}/resolve", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_body("path"),
     // Comparing a local copy with a folder's values (by fingerprint, names only) tests a guess:
     // reveal there, as reading the values is.
-    row("POST", "/v1/secrets/projects/{project}/environments/{env}/diff", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
+    row("POST", "/v1/secrets/projects/{project}/environments/{env}/diff", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_body("path"),
+    // A .env import writes into the folder its body names; with `replace` it deletes that folder's
+    // keys the file lacks.
+    row("POST", "/v1/secrets/projects/{project}/environments/{env}/import", "secrets", Act::Body(secrets_import_action), one(&["project"], "project")).env(EnvFrom::Param("env")).path_body("path"),
     // ── apps (feature/roll-apps, docs/apps/http-api.md) ──
     row("GET", "/v1/apps/services", "apps", R, list("id")),
     // A service from a repo or an image deploys production at once; an upload one waits for `roll up`.
