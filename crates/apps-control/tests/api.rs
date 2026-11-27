@@ -3522,6 +3522,17 @@ async fn a_previews_snapshot_goes_to_roll_previews_with_the_bypass() {
     }
     let w = world().await;
     let (svc, _) = image_service(&w, "web", json!({"port": 80})).await;
+    // A pv- environment is roll previews' own (its preview by that name): nobody but the
+    // operator (roll previews, in process) makes one, by a PUT or a deploy.
+    let as_person = |method: &str, path: String, body: Value| {
+        let mut r = Request::builder().method(method).uri(path).header("content-type", "application/json").body(Body::from(body.to_string())).unwrap();
+        r.extensions_mut().insert(roll_auth::SignedIn { user: "usr_ada".into(), handle: "ada".into(), admin: false, code_owner: None, session: "ses_1".into() });
+        let api = w.api.clone();
+        async move { api.oneshot(r).await.unwrap().status() }
+    };
+    let envs = format!("/v1/apps/services/{}/environments", svc["id"].as_str().unwrap());
+    assert_eq!(as_person("PUT", format!("{envs}/pv-someone"), json!({"ephemeral": true})).await, StatusCode::FORBIDDEN);
+    assert_eq!(as_person("POST", format!("{envs}/pv-someone/deploys"), json!({})).await, StatusCode::NOT_FOUND);
     let pv = format!("/v1/apps/services/{}/environments/pv-1", svc["id"].as_str().unwrap());
     let bypass = "ci-bypass-secret-0123456789";
     let sha = { use sha2::Digest; sha2::Sha256::digest(bypass.as_bytes()).iter().map(|b| format!("{b:02x}")).collect::<String>() };
