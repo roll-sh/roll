@@ -1005,7 +1005,7 @@ mod tests {
     fn a_requests_charge_is_its_ndjson_and_its_contexts_once() {
         // A large resource and many records: each record's values go back once it's written, and
         // the resource is charged once, not once per record.
-        let big = "r".repeat(200_000);
+        let big = "r".repeat(20_000);
         let recs: Vec<Vec<u8>> = (0..500).map(|i| field(5, &field(1, format!("record {i}").as_bytes()))).collect();
         let body = request(&[("service.name", &big)], &recs);
         let limit = MemoryBudget::new(u64::MAX);
