@@ -26,8 +26,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub const POLICIES: &str = "enrich.policy";
-/// The indices each policy's table was last built from ([`sources_of`]).
-pub const SOURCES: &str = "enrich.sources";
+/// The indices each enrich index was built from, by its name ([`sources_of`]): written before
+/// the policy's alias moves to it, so a table read from it always has its record.
+pub const BUILT_FROM: &str = "enrich.built_from";
 const TYPES: [&str; 3] = ["match", "range", "geo_match"];
 const README: &str = "This index is managed by Elasticsearch and should not be modified in any way.";
 
@@ -157,7 +158,9 @@ pub async fn delete_policy(ctx: &Ctx<'_>) -> EsResult<Reply> {
     ctx.cluster
         .update(move |st| {
             store::remove(st, POLICIES, &name);
-            store::remove(st, SOURCES, &name);
+            for i in &indices {
+                store::remove(st, BUILT_FROM, i);
+            }
             Ok(())
         })
         .await?;
@@ -258,7 +261,8 @@ async fn execute(cluster: &Cluster, name: &str, policy: &Value, now: i64) -> EsR
     if let (Some(q), Value::Obj(m)) = (cfg.get("query"), &mut src) {
         m.insert("query".into(), q.clone());
     }
-    let built_from = crate::meta::resolve::resolve(&cluster.state(), &indices, &crate::meta::resolve::IndicesOptions::LENIENT_EXPAND_OPEN, now).unwrap_or_default();
+    let resolve_sources = || crate::meta::resolve::resolve(&cluster.state(), &indices, &crate::meta::resolve::IndicesOptions::LENIENT_EXPAND_OPEN, now).unwrap_or_default();
+    let mut built_from = resolve_sources();
     let reindex = obj! { "source" => src, "dest" => obj! { "index" => index.clone() } };
     // Source values the enrich mapping rejects (a `{lat, lon}` point into the `geo_shape`
     // match field) fail the execution as Elasticsearch's `EnrichPolicyRunner` does.
@@ -267,6 +271,16 @@ async fn execute(cluster: &Cluster, name: &str, policy: &Value, now: i64) -> EsR
         let _ = internal::call(cluster, "DELETE", &format!("/{}", enc(&index)), None).await;
         return Err(EsError::new(500, "exception", "Encountered bulk failures during reindex process"));
     }
+    // What the reindex may have read: the sources as they resolved before it and after it. Kept
+    // before the alias moves to the index, so no table is ever read from it without it.
+    for i in resolve_sources() {
+        if !built_from.contains(&i) {
+            built_from.push(i);
+        }
+    }
+    let built: Vec<Value> = built_from.into_iter().map(Value::from).collect();
+    let rec = index.clone();
+    cluster.update(move |st| store::put(st, BUILT_FROM, &rec, Value::Arr(built), now).map(|_| ())).await?;
     internal::call(cluster, "PUT", &format!("/{}/_settings", enc(&index)), Some(&obj! { "index.blocks.write" => true })).await?;
     // Move the alias and drop the previous enrich indices.
     let alias = alias_of(name);
@@ -279,30 +293,35 @@ async fn execute(cluster: &Cluster, name: &str, policy: &Value, now: i64) -> EsR
     let _ = internal::call(cluster, "POST", "/_aliases", Some(&obj! { "actions" => Value::Arr(actions) })).await;
     if !old.is_empty() {
         let _ = internal::call(cluster, "DELETE", &format!("/{}?expand_wildcards=all", enc(&old.join(","))), None).await;
+        cluster
+            .update(move |st| {
+                for o in &old {
+                    store::remove(st, BUILT_FROM, o);
+                }
+                Ok(())
+            })
+            .await?;
     }
     load(cluster, name, &index).await?;
-    // The indices the table was built from, for whoever is checked against them later
-    // ([`sources_of`]): a source deleted since still holds rows in it.
-    let built: Vec<Value> = built_from.into_iter().map(Value::from).collect();
-    let name_owned = name.to_string();
-    cluster.update(move |st| store::put(st, SOURCES, &name_owned, Value::Arr(built), now).map(|_| ())).await?;
     Ok(())
 }
 
-/// The indices policy `name`'s table was built from, as its last execute resolved them; for a
-/// table built before they were recorded, its sources as they resolve now, `None` when one it
-/// names explicitly is gone (what it held can't be checked).
-pub fn sources_of(st: &crate::meta::ClusterState, name: &str, now: i64) -> Option<Vec<String>> {
-    if let Some(Value::Arr(a)) = st.metadata.xpack.get(SOURCES, name) {
+/// The indices enrich index `index` (policy `name`'s table) was built from ([`BUILT_FROM`]): a
+/// source deleted since still holds rows in it. For a table built before they were recorded,
+/// the policy's sources as they resolve now, unless that can't vouch for what it holds: `None`
+/// when a source is a pattern (an index it matched then may be gone) or an explicit one is gone.
+pub fn sources_of(st: &crate::meta::ClusterState, name: &str, index: &str, now: i64) -> Option<Vec<String>> {
+    if let Some(Value::Arr(a)) = st.metadata.xpack.get(BUILT_FROM, index) {
         return Some(a.iter().map(Value::to_es_string).collect());
     }
     let p = st.metadata.xpack.get(POLICIES, name)?;
     let (_, cfg) = kind_of(p)?;
     let indices: Vec<String> = cfg.get("indices").and_then(Value::as_array).into_iter().flatten().map(Value::to_es_string).collect();
-    if indices.iter().any(|i| !i.contains('*') && crate::meta::resolve::resolve(st, std::slice::from_ref(i), &crate::meta::resolve::IndicesOptions::LENIENT_EXPAND_OPEN, now).map_or(true, |r| r.is_empty())) {
+    let opts = crate::meta::resolve::IndicesOptions::LENIENT_EXPAND_OPEN;
+    if indices.iter().any(|i| crate::meta::resolve::is_wildcard(i) || crate::meta::resolve::resolve(st, std::slice::from_ref(i), &opts, now).map_or(true, |r| r.is_empty())) {
         return None;
     }
-    Some(crate::meta::resolve::resolve(st, &indices, &crate::meta::resolve::IndicesOptions::LENIENT_EXPAND_OPEN, now).unwrap_or_default())
+    Some(crate::meta::resolve::resolve(st, &indices, &opts, now).unwrap_or_default())
 }
 
 fn set_prop(props: &mut Map, path: &str, mapping: Value) {

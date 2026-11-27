@@ -1580,16 +1580,34 @@ pub fn check_cluster_action_of(cluster: &crate::Cluster, p: &Principal, action: 
 }
 
 /// An index scope's names as a role grants them: as given, unless it excludes some
-/// (`logs-*,-logs-secret`), which a role's names can't say. Then the concrete indices the
-/// expression names now (open, closed and hidden), so the exclusion holds.
+/// (`logs-*,-logs-secret`), which a role's names can't say. Then each wildcard becomes the names
+/// it matches now, at the name level (indices, aliases, data streams and their aliases, as
+/// Elasticsearch's index abstractions are), explicit names stay as written, and each exclusion
+/// takes out what it matches of the names before it. An alias is never replaced by the indices
+/// behind it: a grant on an alias reaches them only through it (its filter included).
 fn scope_names(ctx: &Ctx, scope: &str) -> String {
     let exprs = crate::meta::resolve::split_expressions(scope);
     if !exprs.iter().any(|e| e.starts_with('-')) {
         return scope.to_string();
     }
-    let opts = crate::meta::resolve::IndicesOptions { expand_closed: true, expand_hidden: true, ..crate::meta::resolve::IndicesOptions::LENIENT_EXPAND_OPEN };
-    let names = crate::meta::resolve::resolve(&ctx.state(), &exprs, &opts, ctx.now_ms).unwrap_or_default();
-    // Nothing matches: a name no index has, so the scope still reaches none.
+    let st = ctx.state();
+    let md = &st.metadata;
+    let mut all: Vec<&str> = md.indices.keys().map(String::as_str).collect();
+    all.extend(md.indices.values().flat_map(|i| i.aliases.keys().map(String::as_str)));
+    all.extend(md.data_streams.keys().map(String::as_str));
+    all.extend(md.data_stream_aliases.keys().map(String::as_str));
+    all.sort_unstable();
+    all.dedup();
+    let mut names: Vec<String> = Vec::new();
+    for e in &exprs {
+        match e.strip_prefix('-') {
+            Some(x) => names.retain(|n| !(n == x || (crate::meta::resolve::is_wildcard(x) && crate::xcontent::filter::glob_match(x, n)))),
+            None if crate::meta::resolve::is_wildcard(e) => names.extend(all.iter().filter(|n| crate::xcontent::filter::glob_match(e, n) && !names.iter().any(|m| m == **n)).map(|n| n.to_string()).collect::<Vec<_>>()),
+            None if !names.contains(e) => names.push(e.clone()),
+            None => {}
+        }
+    }
+    // Nothing left: a name nothing has, so the scope still reaches none.
     if names.is_empty() { "\u{0}".to_string() } else { names.join(",") }
 }
 

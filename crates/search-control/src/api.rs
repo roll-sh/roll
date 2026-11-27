@@ -842,7 +842,10 @@ const ESQL_PARAMS: &[&str] = &["format", "delimiter", "drop_null_columns"];
 /// cluster). The operator's, with no grant, runs as the cluster's own.
 async fn esql(State(c): State<AppState>, Path(id): Path<String>, method: Method, uri: axum::http::Uri, headers: HeaderMap, ext: Extensions, body: Body) -> Result<Response, ControlError> {
     let scope = match roll_auth::IndexScope::on(&ext) {
-        None => None,
+        // No grant's decision: the operator's (or an open daemon's, `Caller::of`) runs as the
+        // cluster's own. A grant or a person without one is refused, never the cluster's own.
+        None if matches!(Caller::of(&ext), Caller::All) && roll_auth::Grant::on(&ext).is_none() => None,
+        None => return Err(ControlError::Forbidden("this route runs only for the operator or a grant the gate decided".into())),
         Some(roll_auth::IndexScope(None)) => Some("*".to_string()),
         Some(roll_auth::IndexScope(Some(p))) if p.is_empty() => return Err(ControlError::Forbidden("the grant reaches no index of this cluster".into())),
         Some(roll_auth::IndexScope(Some(p))) => Some(p.join(",")),

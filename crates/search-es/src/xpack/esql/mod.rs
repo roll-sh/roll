@@ -310,14 +310,18 @@ tokio::task_local! {
 /// indices) holds no cluster privilege: the table is its policy's source indices, read here, so it
 /// needs `read` on every index the table was built from instead. A view's `ENRICH` is checked
 /// so too: views are spliced in before their policies load.
-pub(super) fn enrich_allowed(cluster: &crate::Cluster, name: &str) -> EsResult<()> {
+///
+/// Called twice: before the tables load (`table` `None`: the cluster privilege, as the resolver
+/// checks it first), and with the enrich index about to be read (the sources check).
+pub(super) fn enrich_allowed(cluster: &crate::Cluster, name: &str, table: Option<&str>) -> EsResult<()> {
     let check = |p: &crate::xpack::security::Principal| {
         if !p.is_index_scoped() {
             return crate::xpack::security::check_cluster_action_of(cluster, p, ccs::RESOLVE_POLICY);
         }
-        // The indices the table was built from, a source deleted since included
-        // ([`crate::xpack::enrich::sources_of`]).
-        let built = crate::xpack::enrich::sources_of(&cluster.state(), name, crate::time::now_millis()).unwrap_or_default();
+        let Some(table) = table else { return Ok(()) };
+        // The indices the table about to be read (enrich index `table`) was built from, a
+        // source deleted since included ([`crate::xpack::enrich::sources_of`]).
+        let built = crate::xpack::enrich::sources_of(&cluster.state(), name, table, crate::time::now_millis()).unwrap_or_default();
         if !built.is_empty() && crate::xpack::security::allows_indices_of(cluster, p, "indices:data/read/esql", &built) {
             Ok(())
         } else {

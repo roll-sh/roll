@@ -7519,6 +7519,36 @@ async fn esql_reads_only_the_indices_the_grant_reaches() {
     // The path's exclusion holds too.
     let (s, v) = on_index("tenant-*,-tenant-b", "FROM tenant-b").await;
     assert!((s == 400 || s == 403) && !v.contains("s-of-b"), "an excluded index: {s} {v}");
+
+    // A filtered alias over a shared index, and a policy over an index of the grant's.
+    for (m, path, body) in [
+        (Method::PUT, "/shared", json!({"mappings": {"properties": {"tenant": {"type": "keyword"}, "secret": {"type": "keyword"}}}})),
+        (Method::PUT, "/shared/_doc/1?refresh=true", json!({"tenant": "a"})),
+        (Method::PUT, "/shared/_doc/2?refresh=true", json!({"tenant": "b", "secret": "s-of-b"})),
+        (Method::POST, "/_aliases", json!({"actions": [{"add": {"index": "shared", "alias": "pub-a", "filter": {"term": {"tenant": "a"}}}}]})),
+        (Method::PUT, "/tenant-a-2/_doc/1?refresh=true", json!({"t": "x", "label": "lab-a"})),
+        (Method::PUT, "/_enrich/policy/pa", json!({"match": {"indices": "tenant-a-2", "match_field": "t", "enrich_fields": ["label"]}})),
+        (Method::POST, "/_enrich/policy/pa/_execute", Value::Null),
+    ] {
+        let (s, v) = e.es(&owner, &pw, m.clone(), path, Some(body).filter(|b| !b.is_null())).await;
+        assert!(s < 300, "{m} {path}: {s} {v}");
+    }
+    // An `ENRICH` whose table the grant reaches runs.
+    let (s, v) = esql(json!({"query": "FROM tenant-a-1 | ENRICH pa ON t | KEEP label"})).await;
+    assert_eq!((s, &v["values"]), (200, &json!([["lab-a"]])), "{v}");
+    // A grant on the alias reads the rows its filter lets through, by the alias or not at all:
+    // never the index behind it (a path's exclusion doesn't make it one).
+    let alias_rules = json!([{"product": "search", "resources": [{"id": c["id"], "index": "pub-a"}], "actions": {"read": "allow"}}]).to_string();
+    let (s, v) = {
+        let r = e.http.post(format!("{}/v1/search/clusters/esql/esql", e.api)).header("x-test-grant", alias_rules.clone()).header("x-test-index-scope", "pub-a").json(&json!({"query": "FROM pub-a METADATA _source | KEEP tenant, _source"})).send().await.unwrap();
+        (r.status().as_u16(), r.text().await.unwrap())
+    };
+    assert!(s == 200 && v.contains("\"a\"") && !v.contains("s-of-b") && !v.contains("\"b\""), "{s} {v}");
+    for (index, query) in [("pub-a,-zz", "FROM shared METADATA _source"), ("pub-a", "FROM shared"), ("pub-a,-zz", "FROM pub-a METADATA _source")] {
+        let r = e.http.post(format!("{}/v1/search/clusters/esql/indices/{index}/esql", e.api)).header("x-test-grant", alias_rules.clone()).json(&json!({"query": query})).send().await.unwrap();
+        let (s, v) = (r.status().as_u16(), r.text().await.unwrap());
+        assert!(!v.contains("s-of-b"), "{index} {query}: {s} {v}");
+    }
 }
 
 /// `…/indices/{index}/update_by_query` re-embeds an index's own documents: a `semantic_text`

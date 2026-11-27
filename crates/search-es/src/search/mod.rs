@@ -453,53 +453,9 @@ pub fn resolve_targets(cluster: &Cluster, st: &ClusterState, req: &SearchRequest
             }
             return Err(EsError::closed_index(&idx.name, &idx.uuid));
         }
-        // Alias filters apply when the index is reached only through filtered aliases.
-        let mut direct = all;
-        let mut filters: Vec<crate::query::Query> = Vec::new();
-        let mut routing: Option<String> = None;
-        let mut via_alias = false;
-        for e in &req.indices {
-            if e == &n || (resolve::is_wildcard(e) && crate::xcontent::filter::glob_match(e, &n)) || st.metadata.data_streams.get(e.as_str()).is_some_and(|d| d.indices.contains(&n)) {
-                direct = true;
-            }
-            // Data stream aliases filter per data stream.
-            for (a, dsa) in &st.metadata.data_stream_aliases {
-                if !(a == e || (resolve::is_wildcard(e) && crate::xcontent::filter::glob_match(e, a))) {
-                    continue;
-                }
-                for ds in &dsa.data_streams {
-                    if !st.metadata.data_streams.get(ds).is_some_and(|d| d.contains(&n)) {
-                        continue;
-                    }
-                    via_alias = true;
-                    match dsa.filters.get(ds) {
-                        Some(f) => filters.push(crate::query::parse_stored(f)?),
-                        None => direct = true,
-                    }
-                }
-            }
-            for (a, members) in aliases.iter() {
-                if !(a == e || (resolve::is_wildcard(e) && crate::xcontent::filter::glob_match(e, a))) {
-                    continue;
-                }
-                if let Some((_, am)) = members.iter().find(|(i, _)| i.name == n) {
-                    via_alias = true;
-                    match &am.filter {
-                        Some(f) => filters.push(crate::query::parse_stored(f)?),
-                        None => direct = true,
-                    }
-                    if let Some(r) = &am.search_routing {
-                        routing = Some(match routing {
-                            Some(prev) => format!("{prev},{r}"),
-                            None => r.clone(),
-                        });
-                    }
-                }
-            }
-        }
-        let alias = if direct || !via_alias || filters.is_empty() {
-            None
-        } else if filters.len() == 1 {
+        let (stored, routing) = alias_reach(st, &aliases, &req.indices, all, &n);
+        let mut filters = stored.unwrap_or_default().iter().map(crate::query::parse_stored).collect::<EsResult<Vec<_>>>()?;
+        let alias = if filters.len() <= 1 {
             filters.pop()
         } else {
             let b = crate::query::compound::Bool { should: filters, ..Default::default() };
@@ -510,6 +466,59 @@ pub fn resolve_targets(cluster: &Cluster, st: &ClusterState, req: &SearchRequest
     }
     out.sort_by(|a, b| a.0.name.cmp(&b.0.name));
     Ok(out)
+}
+
+/// How expressions `exprs` reach index `n` through aliases (`buildAliasFilter`): the stored
+/// filters of the filtered aliases (and data stream aliases) that reach it, `None` when it's
+/// reached unfiltered too (by its name, a wildcard over it, its data stream, an alias without a
+/// filter, or `all`), with the aliases' search routing. Searches and ES|QL alike filter by them.
+#[allow(clippy::type_complexity)]
+pub fn alias_reach(st: &ClusterState, aliases: &std::collections::BTreeMap<&str, Vec<(&IndexMeta, &crate::meta::AliasMeta)>>, exprs: &[String], all: bool, n: &str) -> (Option<Vec<Value>>, Option<String>) {
+    let mut direct = all;
+    let mut filters: Vec<Value> = Vec::new();
+    let mut routing: Option<String> = None;
+    let mut via_alias = false;
+    for e in exprs {
+        if e == n || (resolve::is_wildcard(e) && crate::xcontent::filter::glob_match(e, n)) || st.metadata.data_streams.get(e.as_str()).is_some_and(|d| d.indices.iter().any(|i| i == n)) {
+            direct = true;
+        }
+        // Data stream aliases filter per data stream.
+        for (a, dsa) in &st.metadata.data_stream_aliases {
+            if !(a == e || (resolve::is_wildcard(e) && crate::xcontent::filter::glob_match(e, a))) {
+                continue;
+            }
+            for ds in &dsa.data_streams {
+                if !st.metadata.data_streams.get(ds).is_some_and(|d| d.contains(n)) {
+                    continue;
+                }
+                via_alias = true;
+                match dsa.filters.get(ds) {
+                    Some(f) => filters.push(f.clone()),
+                    None => direct = true,
+                }
+            }
+        }
+        for (a, members) in aliases.iter() {
+            if !(*a == e.as_str() || (resolve::is_wildcard(e) && crate::xcontent::filter::glob_match(e, a))) {
+                continue;
+            }
+            if let Some((_, am)) = members.iter().find(|(i, _)| i.name == n) {
+                via_alias = true;
+                match &am.filter {
+                    Some(f) => filters.push(f.clone()),
+                    None => direct = true,
+                }
+                if let Some(r) = &am.search_routing {
+                    routing = Some(match routing {
+                        Some(prev) => format!("{prev},{r}"),
+                        None => r.clone(),
+                    });
+                }
+            }
+        }
+    }
+    let filters = (!direct && via_alias && !filters.is_empty()).then_some(filters);
+    (filters, routing)
 }
 
 /// The documents of `index` `req`'s reader may read ([`SearchRequest::security`], the caller's

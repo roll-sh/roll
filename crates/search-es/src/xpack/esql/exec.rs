@@ -2881,6 +2881,10 @@ struct Source {
     flattened_in: Vec<(String, Option<Vec<String>>)>,
     /// A remote cluster's part: the alias its `_index` values are named with (`alias:index`).
     index_prefix: Option<String>,
+    /// The filters of the aliases the source reaches its indices through, as one query (`None`:
+    /// every index is reached unfiltered), so no row an alias filters out is read, whatever
+    /// names the scan is given ([`alias_query`]).
+    alias_filter: Option<Value>,
 }
 
 impl Source {
@@ -3110,7 +3114,7 @@ async fn resolve_source(cluster: &Cluster, src: &str, sources: &[String], metada
     if caps.get("indices").and_then(Value::as_array).is_none_or(|a| a.is_empty()) {
         // Patterns that match nothing are an empty result with no columns.
         if sources.iter().all(|s| s.contains('*')) {
-            return Ok(Source { index, cols: vec![Col { name: "<no-fields>".into(), ty: DataType::Null }], fields: Vec::new(), metadata: Vec::new(), needed: None, ft: Vec::new(), load: Vec::new(), source_order: Default::default(), floats: Default::default(), constants: Default::default(), indices: Vec::new(), original_types: Vec::new(), unions: HashMap::new(), unsupported: HashMap::new(), flattened: Vec::new(), flattened_in: Vec::new(), dimensions: Default::default(), ts_meta: TsMeta::default(), index_prefix: None });
+            return Ok(Source { index, cols: vec![Col { name: "<no-fields>".into(), ty: DataType::Null }], fields: Vec::new(), metadata: Vec::new(), needed: None, ft: Vec::new(), load: Vec::new(), source_order: Default::default(), floats: Default::default(), constants: Default::default(), indices: Vec::new(), original_types: Vec::new(), unions: HashMap::new(), unsupported: HashMap::new(), flattened: Vec::new(), flattened_in: Vec::new(), dimensions: Default::default(), ts_meta: TsMeta::default(), index_prefix: None, alias_filter: None });
         }
         return Err(verification_plain(&format!("Unknown index [{}]", sources.iter().map(|s| part_named(s)).collect::<Vec<_>>().join(","))));
     }
@@ -3269,7 +3273,31 @@ async fn resolve_source(cluster: &Cluster, src: &str, sources: &[String], metada
     // A client that may read only some indices reads the ones its field caps resolved to (its
     // wildcards expanded to authorized indices only), never the expression again.
     let index = if internal::caller().is_some() { indices.join(",") } else { index };
-    Ok(Source { index, cols, fields, metadata: metadata.to_vec(), needed: None, ft: Vec::new(), load: Vec::new(), source_order, floats, constants, indices, original_types, unions, unsupported, flattened, flattened_in, dimensions, ts_meta, index_prefix: None })
+    let alias_filter = alias_query(&st, sources, &indices);
+    Ok(Source { index, cols, fields, metadata: metadata.to_vec(), needed: None, ft: Vec::new(), load: Vec::new(), source_order, floats, constants, indices, original_types, unions, unsupported, flattened, flattened_in, dimensions, ts_meta, index_prefix: None, alias_filter })
+}
+
+/// What the aliases `sources` names filter (`search::alias_reach`, as a search filters them):
+/// for each index reached only through filtered aliases, its rows matching one of their filters;
+/// the other indices whole. `None` when no index is filtered.
+fn alias_query(st: &crate::meta::ClusterState, sources: &[String], indices: &[String]) -> Option<Value> {
+    let aliases = st.aliases();
+    let all = crate::meta::resolve::is_all(sources);
+    let mut filtered = Vec::new();
+    let mut whole = Vec::new();
+    for i in indices {
+        match crate::search::alias_reach(st, &aliases, sources, all, i).0 {
+            Some(fs) => filtered.push(obj! { "bool" => obj! { "filter" => crate::arr![obj! { "term" => obj! { "_index" => i.as_str() } }], "should" => Value::Arr(fs), "minimum_should_match" => 1 } }),
+            None => whole.push(Value::from(i.as_str())),
+        }
+    }
+    if filtered.is_empty() {
+        return None;
+    }
+    if !whole.is_empty() {
+        filtered.push(obj! { "terms" => obj! { "_index" => Value::Arr(whole) } });
+    }
+    Some(obj! { "bool" => obj! { "should" => Value::Arr(filtered), "minimum_should_match" => 1 } })
 }
 
 /// An index as a remote part's coordinating cluster names it (`alias:index`).
@@ -3283,7 +3311,9 @@ fn part_named(s: &str) -> String {
 /// Whether `s` may be read straight from the shards ([`super::columnar`]): not when the client
 /// has document or field level security on one of its indices (searches apply those).
 fn direct_read(s: &Source) -> bool {
-    internal::caller().and_then(|c| c.security).is_none_or(|sec| !s.indices.iter().any(|i| sec.restricts(crate::xpack::security::dls::READ, i)))
+    // Alias filters run through the search API.
+    s.alias_filter.is_none()
+        && internal::caller().and_then(|c| c.security).is_none_or(|sec| !s.indices.iter().any(|i| sec.restricts(crate::xpack::security::dls::READ, i)))
 }
 
 fn verification_plain(msg: &str) -> EsError {
@@ -3589,6 +3619,11 @@ fn needed_columns(cmds: &[Cmd], cols: &[Col]) -> Option<std::collections::HashSe
 /// Scans the source in batches, calling `sink` with each batch of rows; `sink` returns `false`
 /// to stop.
 async fn scan(cluster: &Cluster, s: &Source, query: Option<Value>, limit: Option<usize>, stats: &mut Stats, mut sink: impl FnMut(Vec<Vec<V>>) -> EsResult<bool>) -> EsResult<()> {
+    // The aliases' filters narrow every read, scores unchanged.
+    let query = match (&s.alias_filter, query) {
+        (None, q) => q,
+        (Some(f), q) => Some(obj! { "bool" => obj! { "must" => crate::arr![q.unwrap_or_else(|| obj! { "match_all" => obj! {} })], "filter" => crate::arr![f.clone()] } }),
+    };
     // Doc values straight from the shards when every needed column has them.
     if s.load.is_empty() && (!s.fields.is_empty() || !s.metadata.is_empty()) {
         let now = crate::time::now_millis();
@@ -4805,14 +4840,16 @@ pub(super) async fn load_resources(cluster: &Cluster, text: &str, cmds: &[Cmd], 
                     continue;
                 }
                 let Some(fields_in_order) = policy_fields(&cluster.state(), &name) else { continue };
-                // Its table is read here, as the system: the caller must be allowed it first.
-                super::enrich_allowed(cluster, &name)?;
+                // Its table is read here, as the system: the caller must be allowed the policy,
+                // and then this table (what it was built from).
+                super::enrich_allowed(cluster, &name, None)?;
                 if !warmed {
                     crate::xpack::enrich::warm(cluster).await;
                     warmed = true;
                 }
                 let table = cluster.xpack.enrich.tables.read().get(&name).cloned();
                 let Some(table) = table else { continue };
+                super::enrich_allowed(cluster, &name, Some(&table.index))?;
                 // The policy's own index: read by the system, as Elasticsearch's enrich lookups are.
                 let caps = internal::call_system(cluster, "GET", &format!("/{}/_field_caps?fields=*", encode(&table.index)), None).await.unwrap_or(Value::Null);
                 if table.kind == "range"
