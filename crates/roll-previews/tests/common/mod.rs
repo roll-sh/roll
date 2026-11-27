@@ -12,6 +12,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+/// A work item the fake made: (change, title, body, labels, outside).
+pub type MadeWork = (String, String, String, Vec<String>, bool);
+
 #[derive(Default)]
 pub struct FakeCode {
     pub changes: Mutex<HashMap<String, ChangeInfo>>,
@@ -28,8 +31,8 @@ pub struct FakeCode {
     pub feedback: Mutex<HashMap<String, Vec<roll_previews::notes::Note>>>,
     /// Comments made on changes: (change, body, by, outside).
     pub comments: Mutex<Vec<(String, String, String, bool)>>,
-    /// Work items made on changes' repos: (change, title, body, labels, outside).
-    pub works: Mutex<Vec<(String, String, String, Vec<String>, bool)>>,
+    /// Work items made on changes' repos.
+    pub works: Mutex<Vec<MadeWork>>,
     /// The `health` path every service says it has.
     pub health: Mutex<Option<String>>,
     /// The page states every service's `roll.toml` names (`[[preview.states]]`).
