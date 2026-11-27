@@ -917,6 +917,17 @@ async fn check_access(apps: &Arc<Apps>, service: &str, env: &str, req: &mut Requ
     {
         return None;
     }
+    // A preview's webhook URL (roll previews' `roll_hook`: Stripe's, GitHub's, which can't send a
+    // header): its exact path with its token, any method, no cookie, no redirect, the token taken
+    // out of the query before the app sees it. Anything else falls to the gate as it would.
+    if env.starts_with("pv-")
+        && !access.webhooks.is_empty()
+        && let Some(given) = query_value(req, "roll_hook")
+        && access.webhooks.iter().any(|h| h.path == req.uri().path() && same(&token_hash(&given), &h.token_hash))
+    {
+        drop_query_param(req, "roll_hook");
+        return None;
+    }
     // A roll previews share link (someone outside the team, until it ends) on a preview's
     // environment: asked of previews at every request, so a revoked one stops at once. Its cookie
     // never reaches the app, and its guest is no visitor session (`…/visitors` is people's).
@@ -1105,6 +1116,50 @@ fn set_state_cookie(apps: &Arc<Apps>, env: &str, state: &str, r: &mut Response) 
 /// tenant's app on `up.roll.site`) can't set one for this host.
 pub(crate) fn host_only(apps: &Apps, name: String) -> String {
     if apps.cfg.scheme == "https" { format!("__Host-{name}") } else { name }
+}
+
+/// Where a preview's snapshots from the team's tests come in ([`snapshot`]).
+pub const SNAPSHOT_PATH: &str = "/__roll/snapshot";
+
+/// `POST /__roll/snapshot?name=` on a preview: with `x-roll-preview-bypass` matching the
+/// environment's bypass secret, its PNG (at most 2 MiB) to roll previews. Without the hook here or
+/// a bypass set it's a 404, as an app's own path would be.
+async fn snapshot(apps: &Arc<Apps>, service: &str, env: &str, req: Request) -> Response {
+    const MAX: usize = 2 << 20;
+    let Some(hook) = apps.preview_snapshots.get().cloned() else { return page(StatusCode::NOT_FOUND, "Not found", "There's nothing here.") };
+    let (sid, e) = (service.to_string(), env.to_string());
+    let Some(bypass) = apps.db(move |s| s.access(&sid, &e)).await.ok().flatten().and_then(|a| a.bypass_hash) else { return page(StatusCode::NOT_FOUND, "Not found", "There's nothing here.") };
+    let given = req.headers().get("x-roll-preview-bypass").and_then(|v| v.to_str().ok()).map(str::to_string);
+    if !given.is_some_and(|g| same(&token_hash(&g), &bypass)) {
+        return (StatusCode::UNAUTHORIZED, axum::Json(serde_json::json!({ "error": "a snapshot takes the project's bypass secret (x-roll-preview-bypass)" }))).into_response();
+    }
+    let name = query_value(&req, "name").unwrap_or_default();
+    let body = match axum::body::to_bytes(req.into_body(), MAX).await {
+        Ok(b) => b,
+        Err(_) => return (StatusCode::PAYLOAD_TOO_LARGE, axum::Json(serde_json::json!({ "error": "a snapshot is at most 2 MiB" }))).into_response(),
+    };
+    if !body.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return (StatusCode::BAD_REQUEST, axum::Json(serde_json::json!({ "error": "a snapshot is a PNG" }))).into_response();
+    }
+    match hook.snapshot(service, env, &name, body).await {
+        Ok(v) => (StatusCode::CREATED, axum::Json(v)).into_response(),
+        Err(crate::Error::Conflict(m)) => (StatusCode::CONFLICT, axum::Json(serde_json::json!({ "error": m }))).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, axum::Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
+    }
+}
+
+/// `param` taken out of the request's query (every one of it), the rest left as it was.
+fn drop_query_param(req: &mut Request, param: &str) {
+    let prefix = format!("{param}=");
+    let rest: Vec<&str> = req.uri().query().unwrap_or("").split('&').filter(|p| !p.is_empty() && !p.starts_with(prefix.as_str()) && *p != param).collect();
+    let pq = if rest.is_empty() { req.uri().path().to_string() } else { format!("{}?{}", req.uri().path(), rest.join("&")) };
+    let mut parts = req.uri().clone().into_parts();
+    if let Ok(p) = pq.parse() {
+        parts.path_and_query = Some(p);
+        if let Ok(u) = axum::http::Uri::from_parts(parts) {
+            *req.uri_mut() = u;
+        }
+    }
 }
 
 /// A query parameter's value, decoded (the last, when it's there more than once).
@@ -1866,6 +1921,12 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
             Some(k) => ([(header::CONTENT_TYPE, "application/json"), (header::CACHE_CONTROL, "public, max-age=300")], k.to_string()).into_response(),
             None => page(StatusCode::SERVICE_UNAVAILABLE, "Unavailable", "Try again in a few seconds."),
         };
+    }
+    // roll previews' snapshot from the team's own tests: the project's bypass secret only (on a
+    // public preview too; never a visitor's cookie), a PNG of at most 2 MiB, handed to roll
+    // previews; never the app's.
+    if env.starts_with("pv-") && req.uri().path() == SNAPSHOT_PATH && req.method() == axum::http::Method::POST {
+        return snapshot(&apps, service, env, req).await;
     }
     if !rewritten && !ours && let Some(turned_away) = check_access(&apps, service, env, &mut req).await {
         // The access link's own redirect is a way in, not a refusal.
