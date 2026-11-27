@@ -84,6 +84,10 @@ struct Args {
     /// S3 region (default: the AWS environment's).
     #[arg(long, requires = "s3_bucket")]
     s3_region: Option<String>,
+    /// The ranged-read size of segment downloads (benchmarks: docs/benchmarks/search.md, "Cold
+    /// start"; default 8 MiB).
+    #[arg(long, hide = true)]
+    fetch_part_bytes: Option<u64>,
     /// Run the `.multilingual-e5-small-elasticsearch` inference endpoint on this machine, with
     /// the model's files (`model.safetensors`, `tokenizer.json` of the pinned revision) from
     /// this directory (no fetching).
@@ -203,6 +207,9 @@ async fn run() -> anyhow::Result<()> {
             let objects = search_store::Objects::new(&storage)?;
             let mut scfg = search_store::StoreConfig { verify: Some(search_server::persist::segment_verifier()), ..Default::default() };
             scfg.wal.sync_objects = args.sync_objects;
+            if let Some(b) = args.fetch_part_bytes {
+                scfg.fetch_part_bytes = b;
+            }
             let store = search_store::Store::open(objects, dir.join("cache"), scfg).await?;
             Arc::new(search_server::ObjectStores::new(store))
         }
