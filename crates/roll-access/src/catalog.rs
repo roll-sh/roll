@@ -1390,9 +1390,10 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/search/clusters/{id}/password", "search", ADMIN, one(PG, "cluster")).capable(&[Action::Reveal]).lends(Lend::Each(search_secret_write)),
     // A deleted cluster back (its id still resolves while it is kept): a write, like a create.
     row("POST", "/v1/search/clusters/{id}/restore", "search", W, one(PG, "cluster")),
-    // A branch's indices back to a copy of it (roll previews' restore points): a write of the
-    // branch; the copy named in the body is one the caller may read (search checks it).
-    row("POST", "/v1/search/clusters/{id}/reset", "search", W, one(PG, "cluster")),
+    // A branch's indices back to a copy of it (roll previews' restore points): it discards what
+    // was written since, so a delete, as every reset is; the copy named in the body is one the
+    // caller may write (search checks it).
+    row("POST", "/v1/search/clusters/{id}/reset", "search", D, one(PG, "cluster")),
     // Any request as the cluster's owner. One that answers or sets a credential (decided by
     // search on the API the cluster routes it to) needs reveal too: the gate says whether the
     // grant has it (`capable`), without reading the body.

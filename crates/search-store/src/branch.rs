@@ -38,6 +38,10 @@ impl Store {
         if self.cluster_exists(child).await? {
             bail!("cluster [{child}] already exists");
         }
+        // Its stored state isn't what it holds until its next load carries the reset out.
+        if self.reset_pending(parent).await? {
+            return Err(crate::Refused(format!("cluster [{parent}] has a reset in progress; load it first")).into());
+        }
         let now = now_ms();
         let cut = at_ms.map_or(now, |t| t.min(now));
         // The parent's recent operations must be readable from object storage by whichever

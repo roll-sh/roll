@@ -302,6 +302,17 @@ pub fn reset_state_key(cluster: &str) -> String {
     format!("{CLUSTER_PREFIX}{cluster}/state/reset-state.zst")
 }
 
+/// The commit points a reset in progress applies, copied under the cluster it resets.
+pub fn reset_copies_prefix(cluster: &str) -> String {
+    format!("{CLUSTER_PREFIX}{cluster}/reset/")
+}
+
+/// One shard's commit point a reset in progress applies (garbage collection keeps what it names,
+/// WAL ranges included, as for a shard's latest commit point).
+pub fn reset_copy_key(cluster: &str, shard: &ShardId) -> String {
+    format!("{CLUSTER_PREFIX}{cluster}/reset/{}/{}.json", shard.index_uuid, shard.shard)
+}
+
 pub fn shards_prefix(cluster: &str) -> String {
     format!("{CLUSTER_PREFIX}{cluster}/i/")
 }
@@ -443,6 +454,8 @@ pub enum ClusterObject<'a> {
     Manifest { cluster: &'a str, index_uuid: &'a str, shard: u32, version: Version, deleted: bool },
     /// A pinned commit point (`crate::Store::write_pin`).
     Pin { cluster: &'a str, name: &'a str, shard: u32 },
+    /// A commit point a reset in progress applies (`crate::Store::begin_reset`).
+    ResetCopy { cluster: &'a str, index_uuid: &'a str, shard: u32 },
 }
 
 pub fn parse_cluster_key(key: &str) -> Option<ClusterObject<'_>> {
@@ -461,6 +474,14 @@ pub fn parse_cluster_key(key: &str) -> Option<ClusterObject<'_>> {
             return None;
         }
         return Some(ClusterObject::Pin { cluster, name, shard: shard.parse().ok()? });
+    }
+    if let Some(rest) = rest.strip_prefix("reset/") {
+        let (index_uuid, file) = rest.split_once('/')?;
+        let shard = file.strip_suffix(".json")?;
+        if index_uuid.is_empty() || shard.is_empty() || !shard.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        return Some(ClusterObject::ResetCopy { cluster, index_uuid, shard: shard.parse().ok()? });
     }
     let rest = rest.strip_prefix("i/")?;
     let mut parts = rest.split('/');

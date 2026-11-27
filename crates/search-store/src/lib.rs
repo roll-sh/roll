@@ -55,7 +55,7 @@ mod reset;
 
 pub use audit::AuditObject;
 pub use cache::{CacheStats, SegmentData, SegmentFetch, Verifier};
-pub use error::{Fenced, WalFull};
+pub use error::{Fenced, Refused, WalFull};
 pub use gc::GcStats;
 pub use keys::{LiveGen, SegmentId, SegmentKey, ShardId, ShardVersion, Version};
 pub use manifest::{BranchBase, ClusterState, INSTANCE_DATA_PREFIX, NO_OPS_PERFORMED, SegmentRef, ShardManifest, WalHead};

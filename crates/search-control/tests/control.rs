@@ -729,7 +729,8 @@ async fn people_are_held_to_their_cluster_caps() {
 /// A branch reset to a copy of it (roll previews' restore points) holds what the copy held
 /// again, in place: the same id and password, its API key and browser key still work; an index
 /// made since is gone, one deleted since is back, and it writes on from there. A cluster outside
-/// the branch's line is refused.
+/// the branch's line is refused, and a reset runs alone: a second one or a delete meanwhile is a
+/// 409.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_branch_resets_to_its_copy() {
     use reqwest::Method;
@@ -782,6 +783,23 @@ async fn a_branch_resets_to_its_copy() {
     assert_eq!(e.es(&cu, &cp, Method::GET, "/docs/_count", None).await.1["count"], 1);
     let (pu, ppw) = creds(&p);
     assert_eq!(e.es(&pu, &ppw, Method::GET, "/_cat/indices?h=index&format=json", None).await.1, json!([{"index": "seed"}]));
+    // One operation at a time: while a reset runs (its load held up), a second reset and a
+    // delete answer 409; once it's done, the delete goes through.
+    e.control.set_wake_delay(Duration::from_millis(800));
+    let reset = format!("{branch}/reset");
+    let first = {
+        let req = e.http.post(format!("{}{reset}", e.api)).json(&json!({"from": copy["id"]}));
+        tokio::spawn(async move { req.send().await.unwrap().status().as_u16() })
+    };
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let (s, v) = e.call(Method::POST, &reset, Some(json!({"from": copy["id"]}))).await;
+    assert_eq!(s, 409, "a second reset: {v}");
+    let (s, v) = e.call(Method::DELETE, &branch, None).await;
+    assert_eq!(s, 409, "a delete: {v}");
+    assert_eq!(first.await.unwrap(), 200);
+    e.control.set_wake_delay(Duration::ZERO);
+    let (s, v) = e.call(Method::DELETE, &branch, None).await;
+    assert_eq!(s, 200, "{v}");
 }
 
 #[tokio::test]

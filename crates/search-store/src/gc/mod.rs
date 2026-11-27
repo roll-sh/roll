@@ -168,7 +168,7 @@ impl Store {
             .await?
             .into_iter()
             .map(|(k, _)| k)
-            .filter(|k| matches!(keys::parse_cluster_key(k), Some(ClusterObject::Manifest { .. } | ClusterObject::Pin { .. })))
+            .filter(|k| matches!(keys::parse_cluster_key(k), Some(ClusterObject::Manifest { .. } | ClusterObject::Pin { .. } | ClusterObject::ResetCopy { .. })))
             .collect();
         self.load_marks_snapshot().await;
         let missing: Vec<String> = {
@@ -218,6 +218,29 @@ impl Store {
                 match keys::parse_cluster_key(key) {
                     Some(ClusterObject::Manifest { cluster, index_uuid, shard, version, deleted }) => {
                         shards.entry((cluster, index_uuid, shard)).or_default().push(Gen { version, deleted, key, marks: m });
+                    }
+                    // A reset's copy is a latest commit point the reset will write: its segments,
+                    // live docs and WAL ranges (the copy's unflushed operations) stay.
+                    Some(ClusterObject::ResetCopy { .. }) => {
+                        st.pins += 1;
+                        for &(id, live) in m.segments.iter() {
+                            keep_segments.insert(id);
+                            if let Some(g) = live {
+                                keep_live.insert((id, g));
+                            }
+                        }
+                        for s in m.wal.iter() {
+                            let to = match s.to {
+                                Some(to) => to,
+                                None => {
+                                    open_from.entry(s.node.clone()).or_default().push(s.from);
+                                    runs.get(&s.node).and_then(|r| crate::wal::run_end(r, s.from)).unwrap_or(u64::MAX)
+                                }
+                            };
+                            if to >= s.from {
+                                ranges.entry(s.node.clone()).or_default().push((s.from, to));
+                            }
+                        }
                     }
                     // A pin keeps its segments and live docs, never WAL.
                     Some(ClusterObject::Pin { .. }) => {

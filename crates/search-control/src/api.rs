@@ -505,10 +505,14 @@ async fn update(State(c): State<AppState>, caller: Caller, Path(id): Path<String
     Ok(Json(view(&c, &caller, d, false).await?))
 }
 
-async fn remove(State(c): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
+async fn remove(State(c): State<AppState>, Path(id): Path<String>, method: Method, headers: HeaderMap) -> Result<Response, ControlError> {
     let d = c.get(&id).await?;
+    // On its owner, where a reset of it runs too: one operation at a time ([`Control::delete`]).
+    if let Some(resp) = forward(&c, &d.name, method, &format!("/v1/search/clusters/{id}"), &headers, bytes::Bytes::new()).await {
+        return Ok(resp);
+    }
     c.delete(&d.id).await?;
-    Ok(Json(json!({ "deleted": d.id, "name": d.name })))
+    Ok(Json(json!({ "deleted": d.id, "name": d.name })).into_response())
 }
 
 #[derive(Deserialize)]
@@ -544,9 +548,11 @@ struct ResetReq {
 async fn reset(State(c): State<AppState>, caller: Caller, Path(id): Path<String>, method: Method, headers: HeaderMap, body: bytes::Bytes) -> Result<Response, ControlError> {
     let r: ResetReq = serde_json::from_slice(&body).map_err(|e| ControlError::Invalid(format!("invalid request: {e}")))?;
     let b = c.get(&id).await?;
-    // The copy is one the caller may read, like the branch (whose check is the gate's).
+    // The copy is one the caller may write, as branching it needs (the branch's check is the
+    // gate's); one it can't see is a 404.
     let from = match c.get(&r.from).await {
-        Ok(f) if caller.sees(&f).await => f,
+        Ok(f) if caller.may(&f, roll_auth::scope::Action::Write).await => f,
+        Ok(f) if caller.sees(&f).await => return Err(ControlError::Forbidden(format!("resetting from {} needs write on it", f.name))),
         Ok(_) | Err(ControlError::NotFound(_)) => return Err(ControlError::NotFound(format!("no search cluster {}", r.from))),
         Err(e) => return Err(e),
     };

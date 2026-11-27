@@ -1477,3 +1477,54 @@ async fn pins_keep_snapshot_segments_through_merges_deletion_and_branches() {
         st.close().await.unwrap();
     }
 }
+
+/// A reset carries everything it applies under the cluster it resets: begun, it applies at the
+/// next load even once its source is deleted (a shard the cluster deleted since comes back, one
+/// only the cluster has goes). One the cluster outgrew (written after it was asked for, by an
+/// owner that didn't see it) is dropped, and the cluster stays as it is. Copying a cluster with a
+/// reset waiting is refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_reset_needs_nothing_of_its_source_and_a_stale_one_is_dropped() {
+    let objects = test_objects("reset");
+    let mut cfg = fast_config("n1");
+    cfg.manifest_retain_ms = 3_600_000;
+    let store = open(&objects, &temp_dir("reset"), cfg).await;
+    let m = |cp: i64| ShardManifest { max_seq_no: cp, local_checkpoint: cp, ..Default::default() };
+    let (a, b, c) = (shard("idxA", 0), shard("idxB", 0), shard("idxC", 0));
+    store.write_cluster("tgt", &ClusterState::new("{\"v\":\"t\"}")).await.unwrap();
+    for (s, cp) in [(&a, 5), (&b, 1), (&c, 4)] {
+        store.write_manifest("tgt", s, &m(cp)).await.unwrap();
+    }
+    store.delete_shard("tgt", &c).await.unwrap();
+    store.write_cluster("src", &ClusterState::new("{\"v\":\"s\"}")).await.unwrap();
+    for (s, cp) in [(&a, 2), (&c, 3)] {
+        store.write_manifest("src", s, &m(cp)).await.unwrap();
+    }
+    store
+        .begin_reset("tgt", "src", 0, |t, f| {
+            assert_eq!((t, f), (&b"{\"v\":\"t\"}"[..], Some(&b"{\"v\":\"s\"}"[..])));
+            Ok(b"{\"v\":\"merged\"}".to_vec())
+        })
+        .await
+        .unwrap();
+    let e = store.branch("tgt", "copy", None).await.unwrap_err();
+    assert!(e.downcast_ref::<search_store::Refused>().is_some(), "{e}");
+    store.delete_cluster("src").await.unwrap();
+    let st = store.load_cluster("tgt").await.unwrap().unwrap();
+    assert_eq!(&st.json[..], b"{\"v\":\"merged\"}");
+    assert_eq!(store.read_manifest("tgt", &a).await.unwrap().unwrap().local_checkpoint, 2);
+    assert_eq!(store.read_manifest("tgt", &c).await.unwrap().unwrap().local_checkpoint, 3, "deleted since, back");
+    assert!(store.read_manifest("tgt", &b).await.unwrap().is_none(), "only the cluster had it");
+    assert!(!store.reset_pending("tgt").await.unwrap());
+    // Loading again changes nothing.
+    assert_eq!(&store.load_cluster("tgt").await.unwrap().unwrap().json[..], b"{\"v\":\"merged\"}");
+
+    store.write_cluster("src2", &ClusterState::new("{}")).await.unwrap();
+    store.write_manifest("src2", &a, &m(9)).await.unwrap();
+    store.begin_reset("tgt", "src2", 0, |_, _| Ok(b"{\"v\":\"stale\"}".to_vec())).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    store.write_cluster("tgt", &ClusterState::new("{\"v\":\"served\"}")).await.unwrap();
+    assert_eq!(&store.load_cluster("tgt").await.unwrap().unwrap().json[..], b"{\"v\":\"served\"}");
+    assert_eq!(store.read_manifest("tgt", &a).await.unwrap().unwrap().local_checkpoint, 2, "as it was");
+    assert!(!store.reset_pending("tgt").await.unwrap());
+}
