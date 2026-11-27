@@ -114,6 +114,24 @@ const VENDORS: Record<SaasVendor, { label: string; credential: string; fields: T
       { name: "consumer_id", label: "OAuth consumer id", placeholder: "888…" },
     ],
   },
+  prismacloud: {
+    label: "Prisma Cloud (Palo Alto Networks)",
+    credential: "System Admin's access key as ACCESS_KEY_ID:SECRET",
+    fields: [
+      { name: "api", label: "API host", placeholder: "api.prismacloud.io" },
+      { name: "service_account", label: "Service account", placeholder: "deploy-bot" },
+      { name: "prisma_id", label: "Prisma id (optional)", placeholder: "123456789", optional: true },
+      { name: "expires_days", label: "Key lifetime in days (optional)", placeholder: "90", optional: true, kind: "number" },
+    ],
+  },
+  paddle: {
+    label: "Paddle",
+    credential: "The rotatable API key itself (it rotates itself)",
+    fields: [
+      { name: "api_key_id", label: "API key id", placeholder: "apikey_…" },
+      { name: "expires_days", label: "Secret lifetime in days (optional)", placeholder: "90", optional: true, kind: "number" },
+    ],
+  },
 };
 
 /** What's shown of a target: its values, never the credential (the API doesn't have it to give). */
@@ -205,7 +223,7 @@ export function SaasRotators() {
       }
     >
       <p className="mb-2 text-[11.5px] text-muted">
-        roll issues keys at SendGrid, Twilio, Okta, Entra, Auth0, GitLab, OpenAI, Datadog, Cloudflare, Databricks, Confluent, SonarQube, Jenkins or Salesforce itself, with a credential you register here, and revokes the old key after the grace period. Auth0 replaces a secret at once, so it has no grace period; Salesforce ends the old key when it promotes the new one, at the end of the grace period. Link a key to one from Link a resource. GitLab, Databricks and Entra end their keys by themselves (SonarQube too, with an expiry, and Salesforce a staged key after 30 days): a link to one rotates at least two weeks before that.
+        roll issues keys at SendGrid, Twilio, Okta, Entra, Auth0, GitLab, OpenAI, Datadog, Cloudflare, Databricks, Confluent, SonarQube, Jenkins, Salesforce or Prisma Cloud itself, with a credential you register here, and revokes the old key after the grace period. Paddle can only rotate a key with itself: register the key, and each rotation replaces it here; Paddle ends the old secret after the grace period (a day at most), and roll can't end it sooner. Auth0 replaces a secret at once, so it has no grace period; Salesforce ends the old key when it promotes the new one, at the end of the grace period. Link a key to one from Link a resource. GitLab, Databricks and Entra end their keys by themselves (SonarQube too, with an expiry, and Salesforce a staged key after 30 days): a link to one rotates at least two weeks before that.
       </p>
       <ErrorNote error={error ?? list.error} onDismiss={error ? () => setError(null) : undefined} className="mb-2" />
       {adding && (

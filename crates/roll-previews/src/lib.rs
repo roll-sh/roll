@@ -453,6 +453,9 @@ pub struct Preview {
     /// Main's code on a copy of its migrated data, at its head (see [`MainOnChange`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub main_on_change: Option<MainOnChange>,
+    /// Its recent requests replayed against main's preview, at its head (see [`Replay`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay: Option<Replay>,
     /// Columns its branches were masked with by default (they look like people's data, and no
     /// rule names them): a rule, or `keep`, says otherwise.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -529,6 +532,9 @@ pub struct Preview {
     /// The project's rule for regressions against main's (`check`, `required`), when it has one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub regressions: Option<String>,
+    /// The project's rule for its release at each head (`check`, `required`), when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_checks: Option<String>,
     /// Who accepted its regressions at its head (`POST …/regressions/accept`); a new head asks again.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub regressions_accepted: Option<RegressionsAccepted>,
@@ -1160,6 +1166,24 @@ pub struct Share {
     pub notes: bool,
 }
 
+/// A webhook URL of a private preview (Vercel's bypass in a query parameter): one path, its
+/// token in the URL (shown once), for a Stripe or GitHub webhook. It sets no cookie.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Webhook {
+    /// `whk_…`
+    pub id: String,
+    /// The service it opens `path` of (the preview's first, when it was made).
+    pub service: String,
+    pub path: String,
+    pub label: String,
+    pub created_by: String,
+    pub created_at: i64,
+    pub revoked: bool,
+    /// Requests it let in, and the last one's time.
+    pub hits: i64,
+    pub last_at: Option<i64>,
+}
+
 /// How much a preview's page changed between the screenshots of two heads.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct VisualChange {
@@ -1341,6 +1365,43 @@ pub enum VisualState {
     /// Someone refused a page at this head (Chromatic's Deny): it fails until a new head, or
     /// until someone accepts that page.
     Refused,
+}
+
+/// A change's preview's recent GETs replayed against main's preview (`POST …/replay`), at a head.
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+pub struct Replay {
+    pub head: String,
+    pub by: String,
+    pub at: i64,
+    /// `None` while it runs; then whether every request answered as main's did.
+    #[serde(default)]
+    pub ok: Option<bool>,
+    #[serde(default)]
+    pub requests: Vec<ReplayedRequest>,
+    /// Why it couldn't (one line, masked): no preview of main, nothing served lately.
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// One request asked of both previews: its status on each (0: no answer), and a JSON answer's
+/// top-level fields main's has and this one hasn't (`removed`) or the other way (`added`).
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+pub struct ReplayedRequest {
+    pub service: String,
+    pub path: String,
+    pub status: u16,
+    pub main_status: u16,
+    #[serde(default)]
+    pub removed: Vec<String>,
+    #[serde(default)]
+    pub added: Vec<String>,
+}
+
+impl ReplayedRequest {
+    /// It answers differently: another status, or fields main's answer has gone.
+    pub fn differs(&self) -> bool {
+        self.status != self.main_status || !self.removed.is_empty()
+    }
 }
 
 /// Main's code on a copy of a change's migrated data, at a head (pgroll's expand/contract,

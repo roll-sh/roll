@@ -212,6 +212,27 @@ async fn with_screenshots_a_baseline_of_the_default_branch_is_kept_to_compare_ch
     assert_eq!(e.engine.store.row_by_change("chg_1").unwrap().map(|r| r.desired), Some(Desired::Active), "the change's preview came back with its repo");
 }
 
+/// A webhook URL of a service roll apps serves reaches roll apps' own gate: made, the service is
+/// deployed again with its path and its token's SHA-256 (never the token); revoked, without it.
+#[tokio::test]
+async fn a_webhook_url_reaches_roll_apps_gate() {
+    let e = env(json!({ "enabled": true, "access": "link" }));
+    *e.apps.catalog.lock() = Some(vec![roll_previews::ports::CatalogService { name: "web".into(), repo: Some("acme/web".into()), root: String::new(), memory_mb: 512 }]);
+    e.code.open(change("chg_wh", 1));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_wh").unwrap().unwrap();
+    let (hook, url) = e.engine.webhook(&p.id, "/api/stripe", "ada", None, "Stripe").await.unwrap();
+    let token = url.split("roll_hook=").nth(1).unwrap().to_string();
+    e.engine.pass().await.unwrap();
+    let sent = e.apps.hooks.lock().get(&(p.id.clone(), "web".into())).cloned().unwrap_or_default();
+    assert_eq!(sent, vec![("/api/stripe".to_string(), roll_previews::store::bypass_hash(&token))], "its path and hash, never the token");
+    assert!(e.engine.webhook(&p.id, "/__roll/notes", "ada", None, "").await.is_err() && e.engine.webhook(&p.id, "/a/../b", "ada", None, "").await.is_err(), "roll's own paths and dot segments refused");
+    e.engine.store.revoke_webhook(&p.id, &hook.id).unwrap();
+    e.engine.store.update(&p.id, |r| r.next_at = 0).unwrap();
+    e.engine.pass().await.unwrap();
+    assert!(e.apps.hooks.lock().get(&(p.id.clone(), "web".into())).is_some_and(|h| h.is_empty()), "revoked: told again without it");
+}
+
 /// A preview's browsers' containers cost what services' do, by their GiB-hours: its screenshot
 /// runs (every container's own time) are in its month's cost, and so in the project's budget.
 #[tokio::test]
@@ -485,6 +506,98 @@ async fn a_change_queued_to_land_is_rehearsed_where_the_project_asks() {
     quiet.engine.pass().await.unwrap();
     let q = quiet.engine.store.row_by_change("chg_rq2").unwrap().unwrap();
     assert!(quiet.engine.store.preview(&q.id).unwrap().rehearsal.is_none());
+    // Where the project checks its releases: at every head, queued or not, and the change is told
+    // the rule with how it went (its landing blocker reads both).
+    let checked = env(json!({ "enabled": true, "release": { "image": "node:22", "run": "npm run migrate" }, "release_checks": "required" }));
+    checked.code.open(change("chg_rc", 4));
+    checked.engine.pass().await.unwrap();
+    let c = checked.engine.store.row_by_change("chg_rc").unwrap().unwrap();
+    let v = checked.engine.store.preview(&c.id).unwrap();
+    assert_eq!((v.rehearsal.as_ref().and_then(|x| x.ok), v.release_checks.as_deref()), (Some(true), Some("required")), "rehearsed at its head, not queued");
+    assert!(checked.engine.store.settings(&checked.project).unwrap().patched(&json!({ "release": null })).is_err(), "a rule needs a release");
+}
+
+/// Snapshots from the team's own tests (Argos's and Percy's SDKs): a picture sent to a change's
+/// preview and one by the same name to main's are a page of the visual review, compared like any
+/// other; a screenshot run at that head keeps it, one at a new head drops it.
+#[tokio::test]
+async fn the_teams_snapshots_join_the_visual_review() {
+    let e = env(json!({ "enabled": true, "visual_review": "check", "github": { "screenshot": true } }));
+    let png = |v: u8| {
+        let mut out = Vec::new();
+        image::RgbaImage::from_pixel(8, 8, image::Rgba([v, v, v, 255])).write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png).unwrap();
+        out
+    };
+    *e.apps.shot.lock() = Some(png(0));
+    e.code.open(change("chg_sn", 1));
+    e.engine.pass().await.unwrap();
+    e.engine.pass().await.unwrap();
+    let chg = e.engine.store.row_by_change("chg_sn").unwrap().unwrap();
+    let review = || e.engine.store.preview(&chg.id).unwrap().visual_review;
+    for _ in 0..3000 {
+        if review().is_some() && !e.engine.shooting() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let base = e.engine.store.rows(Some(&e.project)).unwrap().into_iter().find(|r| r.change_id.is_none()).unwrap();
+    assert!(e.engine.snapshot(&chg.id, "../x", None, png(0)).await.is_err(), "a name of its own grammar");
+    assert!(matches!(e.engine.snapshot(&chg.id, "checkout", Some("cs_other"), png(0)).await, Err(roll_previews::Error::Conflict(_))), "a test of another head");
+    e.engine.snapshot(&base.id, "checkout", None, png(0)).await.unwrap();
+    let head = e.engine.snapshot(&chg.id, "checkout", Some(chg.build()), png(255)).await.unwrap();
+    // The owner's next converge compares them, once, and the change is told.
+    e.engine.pass().await.unwrap();
+    e.engine.pass().await.unwrap();
+    let page = review().unwrap().pages.into_iter().find(|p| p.path == "snap:checkout");
+    assert!(page.as_ref().is_some_and(|p| p.percent > 50.0), "compared with main's, under review: {page:?}");
+    assert!(e.code.last_report("chg_sn").visual_review.is_some_and(|v| v.pages.iter().any(|p| p.path == "snap:checkout")), "the change is told");
+    // Accepted, then another picture by that name: the acceptance was for the one before.
+    e.engine.accept_visual(&chg.id, "ada", &[], true, None, Some(&head), Some("snap:checkout")).await.unwrap();
+    assert!(review().unwrap().pages.iter().any(|p| p.path == "snap:checkout" && p.by.is_some()));
+    e.engine.snapshot(&chg.id, "checkout", None, png(128)).await.unwrap();
+    e.engine.pass().await.unwrap();
+    assert!(review().unwrap().pages.iter().any(|p| p.path == "snap:checkout" && p.by.is_none()), "a new picture asks again");
+    e.engine.store.set_page_shots(&chg.id, &head, &[], &[]).unwrap();
+    assert!(e.engine.store.page_checks(&chg.id).unwrap().iter().any(|p| p.path == "snap:checkout"), "a run at its head keeps it");
+    e.engine.store.set_page_shots(&chg.id, "cs_next", &[], &[]).unwrap();
+    assert!(!e.engine.store.page_checks(&chg.id).unwrap().iter().any(|p| p.path == "snap:checkout"), "a new head's run drops it");
+}
+
+/// A change's preview's recent requests replayed against main's preview (Signadot's SmartTests):
+/// the GETs both served lately, asked of each again; one that answers with another status, or
+/// whose JSON lost a field main's has, differs. A fork's preview isn't replayed.
+#[tokio::test]
+async fn recent_requests_are_replayed_against_mains_preview() {
+    let e = env(json!({ "enabled": true, "github": { "screenshot": true } }));
+    e.code.open(change("chg_rp", 1));
+    e.engine.pass().await.unwrap();
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_rp").unwrap().unwrap();
+    let main = e.engine.store.rows(Some(&e.project)).unwrap().into_iter().find(|r| r.change_id.is_none()).unwrap();
+    let line = |method: &str, path: &str| roll_previews::RequestLine { at: 1, service: "web".into(), method: method.into(), path: path.into(), status: 200, ms: 3 };
+    e.apps.request_log.lock().insert(p.id.clone(), vec![line("GET", "/api/cart"), line("GET", "/__roll/feedback.js"), line("POST", "/api/pay")]);
+    e.apps.request_log.lock().insert(main.id.clone(), vec![line("GET", "/api/items"), line("GET", "/api/cart")]);
+    let url = e.engine.store.services(&p.id).unwrap().into_iter().find(|s| s.name == "web").unwrap().url;
+    e.apps.fetched.lock().insert(format!("web {url}/api/cart"), 500);
+    e.apps.json.lock().insert(format!("{} /api/items", p.id), r#"{"id":1}"#.into());
+    e.apps.json.lock().insert(format!("{} /api/items", main.id), r#"{"id":1,"price":2}"#.into());
+    let asked = e.engine.replay(&p.id, "ada").await.unwrap();
+    assert_eq!(asked.ok, None, "asked, replayed in the background");
+    let mut done = None;
+    for _ in 0..500 {
+        done = e.engine.store.preview(&p.id).unwrap().replay.filter(|x| x.ok.is_some());
+        if done.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let done = done.expect("replayed");
+    let got: Vec<(&str, u16, u16, Vec<String>)> = done.requests.iter().map(|q| (q.path.as_str(), q.status, q.main_status, q.removed.clone())).collect();
+    assert_eq!(got, vec![("/api/cart", 500, 200, vec![]), ("/api/items", 200, 200, vec!["price".to_string()])], "GETs only, each once, never roll's own paths");
+    assert!(done.requests.iter().all(|q| q.differs()), "a lost field differs as a status does");
+    assert_eq!(done.ok, Some(false));
+    e.engine.store.update(&p.id, |r| r.trusted = false).unwrap();
+    assert!(matches!(e.engine.replay(&p.id, "ada").await, Err(roll_previews::Error::Conflict(_))), "a fork's paths aren't sent to main's");
 }
 
 /// A visual change refused (Chromatic's Deny): the review fails at that head, the change is told at
@@ -1484,9 +1597,9 @@ async fn mains_code_runs_on_a_copy_of_the_changes_migrated_data() {
     assert_eq!(broke, ["/orders"], "/orders fails on the change's data only: {:?}", m.pages);
     assert_eq!(e.code.last_report("chg_mc").main_on_change.as_ref(), Some(&m), "the change (and its pull request) get it");
     let views = e.apps.views.lock().clone();
-    let copy = format!("fake://prj_db~{}-m", roll_previews::branch_name(&p.id));
-    assert!(views.iter().any(|(svc, dep, vars)| svc == "web" && dep == "dep_abc123" && vars.iter().any(|(k, v)| k == "DATABASE_URL" && *v == copy)), "main's build, on the copy: {views:?}");
-    assert!(!e.pg.branches.lock().iter().any(|b| b.ends_with("-m")), "the copy goes after");
+    let copy = format!("fake://prj_db~{}-m{}", roll_previews::branch_name(&p.id), roll_previews::label_part(p.build().trim_start_matches("cs_"), 8));
+    assert!(views.iter().any(|(svc, dep, vars)| svc == "web" && dep == "dep_abc123" && vars.iter().any(|(k, v)| k == "DATABASE_URL" && *v == copy) && vars.iter().any(|(k, v)| k == "REDIS_URL" && v.contains("-m"))), "main's build, on copies of every branch: {views:?}");
+    assert!(!e.pg.branches.lock().iter().chain(e.redis.branches.lock().iter()).any(|b| b.contains(&format!("{}-m", roll_previews::branch_name(&p.id)))), "the copies go after");
 
     // On roll's runtime: main's revision runs in the change's preview (`web@main`), started with
     // the copy's variables in place of the preview's branch, and stopped after.
@@ -1503,7 +1616,7 @@ async fn mains_code_runs_on_a_copy_of_the_changes_migrated_data() {
     let main = e.engine.store.rows(Some(&e.project)).unwrap().into_iter().find(|x| x.change_id.is_none()).unwrap();
     let main_rev = e.engine.store.services(&main.id).unwrap().into_iter().find(|x| x.name == "web").and_then(|x| x.revision).unwrap();
     let started = e.apps.started.lock().clone();
-    let copy = format!("fake://prj_db~{}-m", roll_previews::branch_name(&p.id));
+    let copy = format!("fake://prj_db~{}-m{}", roll_previews::branch_name(&p.id), roll_previews::label_part(p.build().trim_start_matches("cs_"), 8));
     assert!(started.iter().any(|(id, svc, rev, vars)| *id == p.id && svc == "web@main" && *rev == main_rev && vars.iter().any(|(k, v)| k == "DATABASE_URL" && *v == copy)), "main's revision on the copy: {started:?}");
     let m = e.engine.store.view(e.engine.store.row(&p.id).unwrap()).unwrap().main_on_change.expect("tried");
     assert_eq!(m.pages.iter().filter(|x| x.broke()).map(|x| x.path.as_str()).collect::<Vec<_>>(), ["/"], "{m:?}");
@@ -1753,6 +1866,9 @@ async fn columns_that_look_like_peoples_data_are_masked_by_default() {
         e.engine.pass().await.unwrap();
         e.engine.pass().await.unwrap();
         let told: Vec<String> = e.code.maskings.lock().iter().flat_map(|(_, n)| n.columns.iter().map(|m| format!("{}/{}", m.resource, m.column))).collect();
+        // Sent as counts only: a repo's events reach people who may not read the schema.
+        let sent: Vec<serde_json::Value> = e.code.maskings.lock().iter().map(|(_, n)| serde_json::to_value(n).unwrap()).collect();
+        assert!(sent.iter().all(|v| v.get("columns").is_none() && !v.to_string().contains("phone")), "{sent:?}");
         (masked, e.engine.store.preview(&p.id).unwrap().masked_by_default, told)
     };
     let (masked, by_default, told) = masks_of(json!({ "public.users.email": "email" })).await;
@@ -1762,6 +1878,13 @@ async fn columns_that_look_like_peoples_data_are_masked_by_default() {
     let (masked, by_default, told) = masks_of(json!({ "public.users.email": "email", "public.users.phone": "keep" })).await;
     assert_eq!(masked.keys().cloned().collect::<Vec<_>>(), ["public.users.email"], "keep leaves it, and isn't sent as a mask");
     assert!(by_default.is_empty() && told.is_empty());
+    // Columns that can't be read fail it (Neosync's, Tonic's): nothing is handed over unmasked.
+    let e = env(json!({ "enabled": true, "masking": { "postgres:prj_db": { "public.users.email": "email" } } }));
+    e.pg.columns.lock().insert("prj_db".into(), Err(roll_previews::ports::Asleep));
+    e.code.open(change("chg_mz", 3));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_mz").unwrap().unwrap();
+    assert!(p.state == State::Failed && p.error.as_deref().is_some_and(|x| x.contains("nothing is handed over")), "{:?} {:?}", p.state, p.error);
     // A search cluster's fields the same way: an index's `user.email` that has no rule.
     let e = env_with_search(json!({ "enabled": true, "masking": { "search:srch_logs": { "logs.ip": "redact" } } }));
     e.search.columns.lock().insert("srch_logs".into(), Ok(vec![col("logs.ip", "keyword"), col("logs.user.email", "keyword"), col("logs.status", "long")]));
@@ -2685,12 +2808,23 @@ async fn a_storybooks_stories_are_pages_kept_while_its_service_doesnt_change() {
     let mut png = Vec::new();
     image::RgbaImage::new(4, 4).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
     *e.apps.shot.lock() = Some(png);
-    let runs = |svc: &str| e.apps.shot_services.lock().iter().filter(|s| *s == svc).count();
     let mut c = change("chg_sb", 3);
     c.repo = "acme/api".into();
     e.code.open(c);
     e.engine.pass().await.unwrap();
     let p = e.engine.store.row_by_change("chg_sb").unwrap().unwrap();
+    // This preview's own runs of web: main's preview takes the change's stories too (a baseline
+    // on demand), whenever its run comes.
+    let runs = |svc: &str| e.apps.shots_of.lock().iter().filter(|(pv, s)| *pv == p.id && s == svc).count();
+    // Every screenshot run settled (this one's, and main's it asked for), so none lands later.
+    let settled = || async {
+        for _ in 0..3000 {
+            if !e.engine.shooting() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    };
     let stories = |e: &Env| e.engine.store.preview(&p.id).unwrap().pages.iter().filter(|x| x.path.starts_with("story:")).map(|x| x.path.clone()).collect::<Vec<_>>();
     for _ in 0..3000 {
         if stories(&e).len() == 2 {
@@ -2699,6 +2833,7 @@ async fn a_storybooks_stories_are_pages_kept_while_its_service_doesnt_change() {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
     assert_eq!(stories(&e), ["story:button--primary", "story:button--secondary"]);
+    settled().await;
     let web_before = runs("web");
     // A push to api: web runs what it ran, so its stories are kept, not taken again.
     e.code.edit("chg_sb", |c| c.head = "cs_4b".into());
@@ -2709,6 +2844,7 @@ async fn a_storybooks_stories_are_pages_kept_while_its_service_doesnt_change() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
+    settled().await;
     assert_eq!((runs("web"), stories(&e).len()), (web_before, 2), "kept with web's other pages");
 }
 
@@ -2722,7 +2858,7 @@ async fn a_notes_element_is_cropped_by_the_next_screenshot() {
     let mut png = Vec::new();
     image::RgbaImage::new(4, 4).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
     *e.apps.shot.lock() = Some(png.clone());
-    let note = |id: &str, selector: &str| roll_previews::notes::Note { id: id.into(), path: "/".into(), selector: selector.into(), note: "look".into(), by: "ada".into(), at: 1, replies: Vec::new(), crop: false, crop_as: None, seen: Default::default(), outside: false };
+    let note = |id: &str, selector: &str| roll_previews::notes::Note { id: id.into(), path: "/".into(), selector: selector.into(), note: "look".into(), by: "ada".into(), at: 1, replies: Vec::new(), crop: false, crop_as: None, seen: Default::default(), outside: false, work: None };
     e.code.feedback.lock().insert("chg_cr".into(), vec![note("rv_h1", "body > h1"), note("rv_gone", "#missing"), note("rv_bad", "h1 { color: red }")]);
     e.code.open(change("chg_cr", 4));
     e.engine.pass().await.unwrap();
@@ -2965,7 +3101,7 @@ async fn a_pages_notes_by_its_environment_name() {
     e.code.open(change("chg_n", 4));
     e.engine.pass().await.unwrap();
     let p = e.engine.store.row_by_change("chg_n").unwrap().unwrap();
-    let note = |path: &str, text: &str| roll_previews::notes::Note { id: format!("rv_{text}"), path: path.into(), selector: "h1".into(), note: text.into(), by: "ada".into(), at: 1, replies: Vec::new(), crop: false, crop_as: None, seen: Default::default(), outside: false };
+    let note = |path: &str, text: &str| roll_previews::notes::Note { id: format!("rv_{text}"), path: path.into(), selector: "h1".into(), note: text.into(), by: "ada".into(), at: 1, replies: Vec::new(), crop: false, crop_as: None, seen: Default::default(), outside: false, work: None };
     e.code.feedback.lock().insert("chg_n".into(), vec![note("/", "Too big"), note("/about", "Typo")]);
     let env_name = roll_previews::branch_name(&p.id);
     let got = e.engine.notes_for(&env_name, "/").await.unwrap();
@@ -3146,12 +3282,42 @@ async fn a_share_links_guest_leaves_notes_as_a_guest() {
     }
     assert!(matches!(e.engine.guest_note(&p.id, &open, &note).await, Err(roll_previews::Error::Conflict(_))), "ten an hour per link");
     // What a guest sees: their link's notes only.
-    let theirs = roll_previews::notes::Note { id: "rv_c1".into(), path: "/pricing".into(), selector: "button.buy".into(), note: "Too small".into(), by: "guest:Ada".into(), at: 1, replies: Vec::new(), crop: false, crop_as: None, seen: Default::default(), outside: false };
+    let theirs = roll_previews::notes::Note { id: "rv_c1".into(), path: "/pricing".into(), selector: "button.buy".into(), note: "Too small".into(), by: "guest:Ada".into(), at: 1, replies: Vec::new(), crop: false, crop_as: None, seen: Default::default(), outside: false, work: None };
     let team = roll_previews::notes::Note { id: "rv_team".into(), by: "bob".into(), ..theirs.clone() };
     e.code.feedback.lock().insert("chg_g".into(), vec![theirs, team]);
     let seen: Vec<String> = e.engine.guest_notes_of(&p.id, &open.id, "/pricing").await.unwrap().into_iter().map(|n| n.id).collect();
     assert_eq!(seen, ["rv_c1"]);
     assert!(e.engine.guest_notes_of(&p.id, &closed.id, "/pricing").await.unwrap().is_empty());
+}
+
+/// A note made a work item on its change's repo (Marker.io's notes to a tracker; roll code's
+/// work items, which an agent can claim): its words and where it was left, a guest's marked as
+/// someone's outside the team, once a note, said on the change and shown with the note.
+#[tokio::test]
+async fn a_note_becomes_a_work_item_once() {
+    let e = env(json!({ "enabled": true }));
+    e.code.open(change("chg_nw", 1));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_nw").unwrap().unwrap();
+    let note = roll_previews::notes::Note { id: "rv_n1".into(), path: "/cart".into(), selector: "button.pay".into(), note: "The Pay button is cut off\non a phone".into(), by: "guest:Ada".into(), at: 1, replies: Vec::new(), crop: false, crop_as: None, seen: Default::default(), outside: true, work: None };
+    e.code.feedback.lock().insert("chg_nw".into(), vec![note]);
+    assert!(matches!(e.engine.note_to_work(&p.id, "rv_none", "bob").await, Err(roll_previews::Error::NotFound(_))));
+    // Two at once (two clicks, the sheet and the CLI): one item.
+    let (a, b) = tokio::join!(e.engine.note_to_work(&p.id, "rv_n1", "bob"), e.engine.note_to_work(&p.id, "rv_n1", "ann"));
+    let w = a.or(b).unwrap();
+    assert_eq!(e.engine.note_to_work(&p.id, "rv_n1", "bob").await.unwrap(), w, "asked again: the same one");
+    let works = e.code.works.lock().clone();
+    assert_eq!(works.len(), 1, "made once");
+    let (change, title, body, labels, outside) = &works[0];
+    assert!(change == "chg_nw" && title == "Preview feedback: The Pay button is cut off" && labels == &["preview-feedback"] && *outside, "{works:?}");
+    assert!(body.contains("on a phone") && body.contains("/cart") && body.contains("button.pay"), "{body}");
+    assert!(e.code.comments.lock().iter().any(|(c, b, _, _)| c == "chg_nw" && b.contains(&format!("work item #{}", w.number))), "said on the change");
+    assert_eq!(e.engine.open_notes(&p.id).await.unwrap()[0].work.as_ref(), Some(&w), "shown with the note");
+    // A token that may write previews but not the repo's code makes none: it's roll code's.
+    use tower::ServiceExt;
+    let mut req = axum::http::Request::post(format!("/v1/previews/{}/notes/rv_n1/work", p.id)).body(axum::body::Body::empty()).unwrap();
+    req.extensions_mut().insert(roll_auth::Grant { id: "tok_p".into(), name: "previews".into(), kind: roll_auth::GrantKind::Token, scope: std::sync::Arc::new(roll_auth::scope::Scope(Vec::new())), user: None, ask_otherwise: false });
+    assert_eq!(roll_previews::api::router(e.engine.clone()).oneshot(req).await.unwrap().status().as_u16(), 403);
 }
 
 /// A start's dynamic credentials (roll secrets' leases) live as long as it runs: renewed near

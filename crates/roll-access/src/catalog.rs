@@ -92,6 +92,15 @@ pub struct Row {
     /// `X-Roll-Project`: the gate decides it by that project, and refuses a body and a header
     /// that name two (previews' `project`).
     pub project_in_body: Option<&'static str>,
+    /// A secrets folder its JSON body names (this top-level field; absent is `/`), as
+    /// [`path_query`](Row::path_query) is one its query names: the folder the product reads.
+    pub path_body: Option<&'static str>,
+    /// Its body is a JSON array (secrets' imports), not the object every other row decided from its
+    /// body reads by field name.
+    pub array_body: bool,
+    /// More actions its body needs beside the row's (a `.env` import that replaces: delete, and the
+    /// write it also does).
+    pub needs_too: Option<fn(&Value) -> Vec<Action>>,
     /// A JSON body field whose presence makes it `admin` (apps' `freeze`: setting or lifting a
     /// freeze is the same call as going past one).
     pub admin_if_field: Option<&'static [&'static str]>,
@@ -117,12 +126,14 @@ pub struct Lent {
     /// caller, whose `ref` is its workspace project ("" for the one the route's own resource is on,
     /// as the route picks it). `None` on a `secret`: a folder roll secrets can't name, refused.
     pub folder: Option<(String, String)>,
+    /// Kind `secret` only: the one key it lends, when the body names it (an approval card says it).
+    pub key: Option<String>,
 }
 
 /// Apps' `links: [{kind, ref}]`: each linked resource's credentials go to the service (reveal).
 /// An entry that isn't `{kind, ref}` names a kind roll doesn't know, so it's refused.
 fn apps_links(b: &Value) -> Vec<Lent> {
-    b.get("links").and_then(Value::as_array).into_iter().flatten().map(|l| Lent { kind: l["kind"].as_str().unwrap_or("").into(), r#ref: l["ref"].as_str().unwrap_or("").into(), action: Action::Reveal, folder: None }).collect()
+    b.get("links").and_then(Value::as_array).into_iter().flatten().map(|l| Lent { kind: l["kind"].as_str().unwrap_or("").into(), r#ref: l["ref"].as_str().unwrap_or("").into(), action: Action::Reveal, folder: None, key: None }).collect()
 }
 
 /// A roll secret a search route writes once as the caller, named by the body's
@@ -137,24 +148,20 @@ fn search_secret_write(b: &Value) -> Vec<Lent> {
     let Some(env) = s["environment"].as_str() else { return Vec::new() };
     let path = secret_path(s["path"].as_str().unwrap_or(""));
     let folder = path.filter(|_| roll_secrets_ref::is_slug(env)).map(|p| (env.to_string(), p));
-    vec![Lent { kind: "secret".into(), r#ref: s["project"].as_str().unwrap_or("").into(), action: Action::Write, folder }]
+    // Named on the approval card: only a key as roll secrets names one.
+    let key = s["key"].as_str().filter(|k| roll_secrets_ref::is_key(k)).map(str::to_string);
+    vec![Lent { kind: "secret".into(), r#ref: s["project"].as_str().unwrap_or("").into(), action: Action::Write, folder, key }]
 }
 
-/// A folder as roll secrets' `names::path` normalizes it, or `None` where it refuses it.
+/// A folder as roll secrets' `names::path` normalizes it, or `None` where it refuses it (one
+/// function for both: [`roll_secrets_ref::folder`]).
 pub(crate) fn secret_path(p: &str) -> Option<String> {
-    let p = if p.is_empty() { "/" } else { p };
-    let rest = p.strip_prefix('/').filter(|r| !r.starts_with('/'))?;
-    let rest = rest.strip_suffix('/').unwrap_or(rest);
-    if rest.is_empty() {
-        return Some("/".into());
-    }
-    let segments: Vec<&str> = rest.split('/').collect();
-    (segments.len() <= roll_secrets_ref::DEPTH_MAX && segments.iter().all(|s| roll_secrets_ref::is_segment(s))).then(|| format!("/{rest}"))
+    roll_secrets_ref::folder(p)
 }
 
 /// A worker's `run.scale.stream`: apps reads that stream group's lag for it (read on the stream).
 fn apps_scale(b: &Value) -> Vec<Lent> {
-    b.pointer("/run/scale/stream").and_then(Value::as_str).map(|s| Lent { kind: "stream".into(), r#ref: s.into(), action: Action::Read, folder: None }).into_iter().collect()
+    b.pointer("/run/scale/stream").and_then(Value::as_str).map(|s| Lent { kind: "stream".into(), r#ref: s.into(), action: Action::Read, folder: None, key: None }).into_iter().collect()
 }
 
 /// A web service's `run.push`: apps reads each stream for it as a consumer group (read on it), and
@@ -166,14 +173,14 @@ fn apps_push(b: &Value) -> Vec<Lent> {
         .filter_map(|r| {
             let s = r.get("stream").and_then(Value::as_str)?;
             let action = if r.get("dead_letter").is_some_and(|d| !d.is_null()) { Action::Write } else { Action::Read };
-            Some(Lent { kind: "stream".into(), r#ref: s.into(), action, folder: None })
+            Some(Lent { kind: "stream".into(), r#ref: s.into(), action, folder: None, key: None })
         })
         .collect()
 }
 
 /// A drain into a roll storage bucket (`bucket`): apps mints a key that writes there for it.
 fn apps_drain_bucket(b: &Value) -> Vec<Lent> {
-    b.get("bucket").and_then(Value::as_str).map(|r| Lent { kind: "bucket".into(), r#ref: r.into(), action: Action::Write, folder: None }).into_iter().collect()
+    b.get("bucket").and_then(Value::as_str).map(|r| Lent { kind: "bucket".into(), r#ref: r.into(), action: Action::Write, folder: None, key: None }).into_iter().collect()
 }
 
 /// A domain's `cloudflare_token`, a `roll://` reference apps reads once as the caller to write the
@@ -183,7 +190,7 @@ fn apps_drain_bucket(b: &Value) -> Vec<Lent> {
 /// token").
 fn apps_dns_token(b: &Value) -> Vec<Lent> {
     let Some(Ok(Some(r))) = b.get("cloudflare_token").and_then(Value::as_str).map(roll_secrets_ref::Reference::parse) else { return Vec::new() };
-    vec![Lent { kind: "secret".into(), r#ref: r.project.unwrap_or_default(), action: Action::Reveal, folder: Some((r.env, r.path)) }]
+    vec![Lent { kind: "secret".into(), r#ref: r.project.unwrap_or_default(), action: Action::Reveal, folder: Some((r.env, r.path)), key: Some(r.key) }]
 }
 
 /// The roll code repos the body names, which apps reads for the caller (`repo` for a plan or an
@@ -193,7 +200,7 @@ fn apps_dns_token(b: &Value) -> Vec<Lent> {
 fn apps_repo(b: &Value) -> Vec<Lent> {
     let from_source = (b.pointer("/source/kind").and_then(Value::as_str) == Some("repo")).then(|| b.pointer("/source/repo").and_then(Value::as_str)).flatten();
     let subs = b.pointer("/build/submodule_repos").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str);
-    b.get("repo").and_then(Value::as_str).or(from_source).into_iter().chain(subs).map(|r| Lent { kind: "repo".into(), r#ref: r.into(), action: Action::Read, folder: None }).collect()
+    b.get("repo").and_then(Value::as_str).or(from_source).into_iter().chain(subs).map(|r| Lent { kind: "repo".into(), r#ref: r.into(), action: Action::Read, folder: None, key: None }).collect()
 }
 
 /// A new service: its links, its scaling and pushed streams and the repo it's built from.
@@ -216,7 +223,7 @@ fn apps_patch_lends(b: &Value) -> Vec<Lent> {
 /// A search cluster made as a branch of `parent` (a body field, unlike `…/{id}/branches`): it
 /// copies the parent's indices, so it needs what branching there does, `write` on the parent.
 fn search_parent(b: &Value) -> Vec<Lent> {
-    b.get("parent").and_then(Value::as_str).map(|p| Lent { kind: "search".into(), r#ref: p.into(), action: Action::Write, folder: None }).into_iter().collect()
+    b.get("parent").and_then(Value::as_str).map(|p| Lent { kind: "search".into(), r#ref: p.into(), action: Action::Write, folder: None, key: None }).into_iter().collect()
 }
 
 /// A search API key's action, by what the key may do: `reveal` for a `read` key; `write` for an
@@ -226,7 +233,8 @@ fn search_parent(b: &Value) -> Vec<Lent> {
 fn search_key_action(b: &Value) -> Action {
     match b.get("access").and_then(Value::as_str) {
         Some("read") => Action::Reveal,
-        Some("append") => Action::Write,
+        // An `otel` key adds documents to OpenTelemetry's data streams and reads nothing.
+        Some("append" | "otel") => Action::Write,
         Some("data") => Action::Delete,
         _ => Action::Admin,
     }
@@ -235,7 +243,7 @@ fn search_key_action(b: &Value) -> Action {
 /// A search cluster linked as another's remote (`cluster`): roll issues a cross-cluster API key
 /// of it, so the link needs `admin` on it too, as making its keys does.
 fn search_remote(b: &Value) -> Vec<Lent> {
-    b.get("cluster").and_then(Value::as_str).map(|p| Lent { kind: "search".into(), r#ref: p.into(), action: Action::Admin, folder: None }).into_iter().collect()
+    b.get("cluster").and_then(Value::as_str).map(|p| Lent { kind: "search".into(), r#ref: p.into(), action: Action::Admin, folder: None, key: None }).into_iter().collect()
 }
 
 /// What an apps link's kind is, as a rule names it: its product and the resource kind its ids are.
@@ -274,7 +282,14 @@ pub type Sources = Vec<(String, Option<String>)>;
 
 impl Row {
     pub fn needs_body(&self) -> bool {
-        self.admin_if_field.is_some() || self.project_in_body.is_some() || matches!(self.act, Act::Body(_) | Act::Raw(_)) || matches!(self.copies_from, Some(CopyFrom::Body(_) | CopyFrom::Each(_))) || matches!(self.lends, Some(Lend::Each(_)))
+        self.admin_if_field.is_some() || self.project_in_body.is_some() || self.path_body.is_some() || matches!(self.act, Act::Body(_) | Act::Raw(_)) || matches!(self.copies_from, Some(CopyFrom::Body(_) | CopyFrom::Each(_))) || matches!(self.lends, Some(Lend::Each(_)))
+    }
+
+    /// Whether a JSON body has the shape this row decides from: an object (an array where the row
+    /// says so). A product parsing into a typed struct takes an array too, field by field in order,
+    /// where the gate's reads by name find nothing: a `links` or `replace` the gate never saw.
+    pub fn body_shape_ok(&self, body: Option<&Value>) -> bool {
+        !self.needs_body() || matches!(self.act, Act::Raw(_) | Act::GitPush) || body.is_none_or(|b| b.is_object() || (self.array_body && b.is_array()))
     }
 
     pub fn action(&self, method: &str, params: &[(String, String)], body: Option<&Value>) -> Action {
@@ -298,7 +313,7 @@ impl Row {
 }
 
 const fn row(method: &'static str, route: &'static str, product: &'static str, act: Act, target: Tgt) -> Row {
-    Row { method, route, product, act, target, env: EnvFrom::None, path_query: None, reveals: &[], copies_from: None, index: None, lends: None, filters_itself: false, filters_index: false, admin_if: None, admin_if_field: None, capable: &[], project_in_body: None }
+    Row { method, route, product, act, target, env: EnvFrom::None, path_query: None, reveals: &[], copies_from: None, index: None, lends: None, filters_itself: false, filters_index: false, admin_if: None, admin_if_field: None, capable: &[], project_in_body: None, path_body: None, array_body: false, needs_too: None }
 }
 
 const R: Act = Act::Is(Action::Read);
@@ -335,6 +350,18 @@ impl Row {
     }
     const fn path_query(mut self, q: &'static str) -> Row {
         self.path_query = Some(q);
+        self
+    }
+    const fn array_body(mut self) -> Row {
+        self.array_body = true;
+        self
+    }
+    const fn needs_too(mut self, f: fn(&Value) -> Vec<Action>) -> Row {
+        self.needs_too = Some(f);
+        self
+    }
+    const fn path_body(mut self, field: &'static str) -> Row {
+        self.path_body = Some(field);
         self
     }
     const fn project_in_body(mut self, field: &'static str) -> Row {
@@ -963,6 +990,16 @@ fn secrets_import_sources(b: &Value) -> Sources {
         .collect()
 }
 
+/// A .env import: `delete` when it replaces the folder (keys the file lacks go), else `write`.
+fn secrets_import_action(b: &Value) -> Action {
+    if b["replace"] == true { Action::Delete } else { Action::Write }
+}
+
+/// A replacing import writes the file's keys too.
+fn secrets_import_also(b: &Value) -> Vec<Action> {
+    if b["replace"] == true { vec![Action::Write] } else { Vec::new() }
+}
+
 /// A service's Git login: `deploy` when it names a project secret (`secret`): the service's
 /// fetches then send that production secret to its source's host, which only someone who may
 /// change what production runs gets to decide; `write` for a password the caller gives itself.
@@ -1540,6 +1577,7 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/secrets/projects/{project}/environments/{env}/decoys", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")),
     // Imports: write, reveal on each in-project source, admin for another project's folder.
     row("PUT", "/v1/secrets/projects/{project}/environments/{env}/imports", "secrets", Act::Body(secrets_imports_action), one(&["project"], "project"))
+        .array_body()
         .env(EnvFrom::Param("env"))
         .path_query("path")
         .copies_from(CopyFrom::Each(secrets_import_sources)),
@@ -1745,10 +1783,14 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/purge", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     // A change request's current and proposed values, for its approvers.
     row("GET", "/v1/secrets/projects/{project}/environments/{env}/requests/{id}/values", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
-    row("POST", "/v1/secrets/projects/{project}/environments/{env}/resolve", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
+    // Resolving and comparing read the folder their body names (never `?path=`).
+    row("POST", "/v1/secrets/projects/{project}/environments/{env}/resolve", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_body("path"),
     // Comparing a local copy with a folder's values (by fingerprint, names only) tests a guess:
     // reveal there, as reading the values is.
-    row("POST", "/v1/secrets/projects/{project}/environments/{env}/diff", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
+    row("POST", "/v1/secrets/projects/{project}/environments/{env}/diff", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_body("path"),
+    // A .env import writes into the folder its body names; with `replace` it deletes that folder's
+    // keys the file lacks.
+    row("POST", "/v1/secrets/projects/{project}/environments/{env}/import", "secrets", Act::Body(secrets_import_action), one(&["project"], "project")).env(EnvFrom::Param("env")).path_body("path").needs_too(secrets_import_also),
     // ── apps (feature/roll-apps, docs/apps/http-api.md) ──
     row("GET", "/v1/apps/services", "apps", R, list("id")),
     // A service from a repo or an image deploys production at once; an upload one waits for `roll up`.
@@ -1844,6 +1886,8 @@ static ROWS: &[Row] = &[
     // A folder upload's files as deployed (never the environment a bundle carries, nor a file
     // named as a secret): source can hold credentials all the same, so it's revealed, not read.
     row("GET", "/v1/apps/services/{id}/environments/{env}/deploys/{dep}/source", "apps", REVEAL, one(PG, "service")).env(EnvFrom::Param("env")),
+    // Its image's layers can hold what its build had: reveal, as its source.
+    row("GET", "/v1/apps/services/{id}/environments/{env}/deploys/{dep}/image", "apps", REVEAL, one(PG, "service")).env(EnvFrom::Param("env")),
     // A static build's files as served (what anyone can fetch from its URL, unless it's gated).
     row("GET", "/v1/apps/services/{id}/environments/{env}/deploys/{dep}/output", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
     // Keeping a deployment from pruning changes nothing that runs.
@@ -1970,6 +2014,7 @@ static ROWS: &[Row] = &[
     // A share link lets someone outside the team in, its token only in the answer: reveal, as the
     // bypass secret is. Listing (no tokens) is read and revoking one is delete, by the prefix.
     row("POST", "/v1/previews/{id}/shares", "previews", REVEAL, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    row("POST", "/v1/previews/{id}/webhooks", "previews", REVEAL, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
     // A preview's own variables come back with their values: reveal (setting them is write, by
     // the prefix).
     row("GET", "/v1/previews/{id}/env", "previews", REVEAL, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
@@ -2286,7 +2331,7 @@ mod tests {
         // Without `admin`, pg-control runs it as the database's owner role, never the superuser.
         assert_eq!(by_path("POST", "/v1/endpoints/ep_x/query").map(|f| f.row.capable), Some(&[Action::Admin, Action::Delete][..]));
         // A repo apps reads for the caller needs read on it: a plan's, an import's, a source's.
-        let repo = |r: &str| vec![Lent { kind: "repo".into(), r#ref: r.into(), action: Action::Read, folder: None }];
+        let repo = |r: &str| vec![Lent { kind: "repo".into(), r#ref: r.into(), action: Action::Read, folder: None, key: None }];
         assert_eq!(apps_repo(&serde_json::json!({ "repo": "acme/web", "revision": "main" })), repo("acme/web"));
         assert_eq!(apps_repo(&serde_json::json!({ "build": { "submodule_repos": ["acme/lib"] } })), repo("acme/lib"));
         assert_eq!(apps_repo(&serde_json::json!({ "source": { "kind": "repo", "repo": "acme/api" } })), repo("acme/api"));

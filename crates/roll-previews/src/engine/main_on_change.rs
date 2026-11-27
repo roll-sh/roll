@@ -30,7 +30,7 @@ impl Engine {
     /// (never the converge's failure).
     pub(super) async fn main_on_change(&self, r: &Row, s: &Settings) -> anyhow::Result<()> {
         let started = std::time::Instant::now();
-        let mut made: Vec<(Arc<dyn Brancher>, String, String, String)> = Vec::new();
+        let mut made: Vec<Copy> = Vec::new();
         let mut ran_here: Vec<String> = Vec::new();
         let ran = self.main_on_copies(r, s, &mut made, &mut ran_here).await;
         // What ran on roll's runtime stops (its variables go with it), then the copies go.
@@ -40,8 +40,10 @@ impl Engine {
                 warn!(preview = %r.id, error = %e, "previews: stopping main's code on the copy");
             }
         }
-        for (b, parent, branch, name) in made {
-            if let Err(e) = b.delete(&parent, &branch, &name).await {
+        for Copy { b, parent, from, r#ref, kept, name } in made {
+            // A copy of the preview's own branch: deleted as an earlier push's copy is (a product
+            // whose guard checks the direct parent checks `from`).
+            if let Err(e) = b.delete_snapshot(&parent, &from, &r#ref, kept.as_deref(), &name).await {
                 warn!(preview = %r.id, error = %e, "previews: deleting the copy main's code ran on");
             }
         }
@@ -61,7 +63,7 @@ impl Engine {
         Ok(())
     }
 
-    async fn main_on_copies(&self, r: &Row, s: &Settings, made: &mut Vec<(Arc<dyn Brancher>, String, String, String)>, ran_here: &mut Vec<String>) -> anyhow::Result<Vec<crate::MainOnChangePage>> {
+    async fn main_on_copies(&self, r: &Row, s: &Settings, made: &mut Vec<Copy>, ran_here: &mut Vec<String>) -> anyhow::Result<Vec<crate::MainOnChangePage>> {
         let main = self.main_preview(r).await?.ok_or_else(|| anyhow::anyhow!("the project has no preview of main"))?;
         // Each of main's services: its roll apps build, or, on roll's runtime, its revision run in
         // the change's preview as `<name>@main` (only the change's repo's: the others run main's
@@ -82,16 +84,20 @@ impl Engine {
         // The change's branches as its release left them, copied; the branches' variables in
         // main's environment and in the change's swapped for the copy's by value (the names roll
         // makes from them too: `PGHOST`…).
-        let name = format!("{}-m", branch_name(&r.id));
+        // Named by the head, so a copy a crash left behind is never an earlier head's.
+        let name = format!("{}-m{}", branch_name(&r.id), crate::label_part(r.build().trim_start_matches("cs_"), 8));
         let mut mains = self.resource_env(&main.id).await?;
         let mut changes = self.resource_env(&r.id).await?;
         let mut branches: Vec<crate::ports::BranchVars> = Vec::new();
         let ours = self.store.resources(&main.id)?;
-        for res in self.store.resources(&r.id)?.into_iter().filter(|x| x.kind == Kind::Postgres) {
+        // Every branch the change's services get, copied: main's code never runs on the change's
+        // own (a second consumer on its queue, writes to its bucket). One a product can't copy
+        // stops it, saying which.
+        for res in self.store.resources(&r.id)? {
             let Some(branch) = &res.r#ref else { continue };
             let b = self.brancher(res.kind)?.clone();
-            let copy = b.snapshot(&res.parent, branch, &name).await?.ok_or_else(|| anyhow::anyhow!("postgres:{} can't be copied", res.parent))?;
-            made.push((b.clone(), res.parent.clone(), copy.r#ref.clone(), name.clone()));
+            let copy = b.snapshot(&res.parent, branch, &name).await?.ok_or_else(|| anyhow::anyhow!("{}:{} can't be copied, so main's code would share the change's own", res.kind.as_str(), res.parent))?;
+            made.push(Copy { b: b.clone(), parent: res.parent.clone(), from: branch.clone(), r#ref: copy.r#ref.clone(), kept: copy.kept.clone(), name: name.clone() });
             let new = b.connect(&res.parent, &copy.r#ref, copy.kept.as_deref()).await?;
             let swapped = crate::names::with_standard(res.kind, new.clone());
             swap(&mut changes, &crate::names::with_standard(res.kind, b.connect(&res.parent, branch, res.kept.as_deref()).await?), &swapped);
@@ -102,7 +108,7 @@ impl Engine {
             }
             branches.push((res.kind, res.parent.clone(), new));
         }
-        anyhow::ensure!(!branches.is_empty(), "the change has no Postgres branch");
+        anyhow::ensure!(branches.iter().any(|(k, _, _)| *k == Kind::Postgres), "the change has no Postgres branch");
         let main_access = self.store.access(&main.id)?.filter(|a| a.required()).map(|a| a.token);
         let own_access = self.store.access(&r.id)?.filter(|a| a.required()).map(|a| a.token);
         let mut paths = vec!["/".to_string()];
@@ -136,6 +142,17 @@ impl Engine {
     async fn status_of(&self, preview: &str, service: &str, url: &str, access: Option<&str>, path: &str) -> Option<u16> {
         self.apps.fetch(preview, service, url, access, path, false).await.map(|f| f.map(|f| f.status)).unwrap_or(Some(0))
     }
+}
+
+/// A copy of one of the change's branches main's code ran on, to delete after.
+struct Copy {
+    b: Arc<dyn Brancher>,
+    parent: String,
+    /// The preview's branch it was copied from.
+    from: String,
+    r#ref: String,
+    kept: Option<String>,
+    name: String,
 }
 
 /// Where main's code runs on the copy: its roll apps deployment again (by id), or its revision on

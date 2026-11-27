@@ -88,21 +88,7 @@ pub fn labels(l: &BTreeMap<String, String>) -> Result<()> {
 /// A folder path in its one spelling: `/`, or `/a/b` with 1–8 segments of `[A-Za-z0-9_-]`.
 /// A trailing `/` is dropped.
 pub fn path(p: &str) -> Result<String> {
-    let p = if p.is_empty() { "/" } else { p };
-    let err = || bad(format!("a path is / or /folder/… with up to {DEPTH_MAX} folders of A-Z, a-z, 0-9, _ and - (got {:?})", truncate(p, 80)));
-    let rest = p.strip_prefix('/').ok_or_else(err)?;
-    if rest.starts_with('/') {
-        return Err(err());
-    }
-    let rest = rest.strip_suffix('/').unwrap_or(rest);
-    if rest.is_empty() {
-        return Ok("/".into());
-    }
-    let segs: Vec<&str> = rest.split('/').collect();
-    if segs.len() > DEPTH_MAX || !segs.iter().all(|s| segment(s)) {
-        return Err(err());
-    }
-    Ok(format!("/{}", segs.join("/")))
+    roll_secrets_ref::folder(p).ok_or_else(|| bad(format!("a path is / or /folder/… with up to {DEPTH_MAX} folders of A-Z, a-z, 0-9, _ and - (got {:?})", truncate(p, 80))))
 }
 
 pub fn segment(s: &str) -> bool {

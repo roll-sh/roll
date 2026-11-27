@@ -52,6 +52,8 @@ DELETE /v1/previews/projects/{project}/bypass                                  a
 GET /v1/previews/projects/{project}/bypass                                     answers or sets a credential
 POST /v1/previews/projects/{project}/bypass                                    answers or sets a credential
 POST /v1/previews/projects/{project}/hooks                                     answers or sets a credential (a deploy hook's secret)
+POST /v1/previews/{id}/replay                                                  no tool yet
+POST /v1/previews/{id}/webhooks                                                answers or sets a credential (a webhook URL's token)
 POST /v1/previews/{id}/approve                                                 a person's call (approving, accepting, cutting off)
 PUT /v1/previews/{id}/env                                                      answers or sets a credential (a preview's env is reveal)
 GET /v1/previews/{id}/errors/count                                             the dashboard's (a row's count; previews_errors has the groups)
@@ -234,3 +236,4 @@ DELETE /v1/workspace/projects/{id}/members/me                                  a
 GET /v1/apps/services/{id}/environments/{env}/sandboxes/{sbx}/files            raw bytes, not JSON: apps_sandbox_exec reads and writes files (cat, a heredoc)
 GET /v1/apps/services/{id}/environments/{env}/checks/{check}/trace             a Playwright trace archive, not JSON: for `npx playwright show-trace`
 PUT /v1/apps/services/{id}/environments/{env}/sandboxes/{sbx}/files            raw bytes, not JSON: apps_sandbox_exec reads and writes files (cat, a heredoc)
+GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}/image              an image archive, not JSON: for `docker load` on a person's own machine

@@ -283,7 +283,13 @@ export function approvalWhere(a: Pick<Approval, "environment" | "scope_path">): 
 }
 
 /** Whether approving it can be remembered: it's about one resource, and roll's policy doesn't ask several people for it. */
-export const rememberable = (a: Pick<Approval, "resource" | "gates"> & { method?: string; args?: unknown }) => Boolean(a.resource && !a.resource.startsWith("new in ")) && !a.gates?.length && !accessRequest(a);
+export const rememberable = (a: Pick<Approval, "resource" | "gates"> & { method?: string; args?: unknown; product?: string; scope_path?: string | null; route?: string }) =>
+  Boolean(a.resource && !a.resource.startsWith("new in ")) && !a.gates?.length && !accessRequest(a) && !lendsWholeEnvironment(a);
+
+/** Whether `a` lends a whole environment's secrets to another product's route (apps' DNS token as `roll://production/KEY`): approved once, never remembered (the server refuses), since every later call would reveal every key there. */
+export function lendsWholeEnvironment(a: { product?: string; scope_path?: string | null; route?: string }): boolean {
+  return a.product === "secrets" && isRoot(a.scope_path) && Boolean(a.route) && !a.route!.startsWith("/v1/secrets");
+}
 
 /** An access request (a token asking for one more rule for a while): how long and why, or null for a request waiting to run. */
 export function accessRequest(a: { method?: string; args?: unknown }): { for: string; reason: string } | null {

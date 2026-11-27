@@ -20,8 +20,8 @@
 //!   vector within the threshold, scored exactly.
 //! - **Source** ([`derive_source`]): with `index.knn` (and `index.knn.derived_source.enabled`,
 //!   on by default) `_source` vectors come back as the plugin stores them: floats (normalized
-//!   for `cosinesimil`, rounded to half precision for `half_float`), or integers for byte and
-//!   binary vectors.
+//!   for `cosinesimil` on the faiss engine, which stores them so, but as given on lucene; rounded
+//!   to half precision for `half_float`), or integers for byte and binary vectors.
 
 use crate::error::{EsError, EsResult};
 use crate::json::{Map, Value};
@@ -671,6 +671,9 @@ fn derive_in(idx: &crate::meta::IndexMeta, ctx: &MappingCtx, m: &mut Map, prefix
 
 fn derived_value(r: &Resolved, v: &Value) -> Option<Value> {
     let Value::Arr(items) = v else { return None };
+    // faiss keeps cosine vectors normalized, so that's what its source derives; lucene keeps
+    // them as given (roll's codec stores them normalized either way, for the dot product).
+    let r = &Resolved { space: if r.space == Space::Cosine && r.engine != Engine::Faiss { Space::L2 } else { r.space }, ..*r };
     let mut nums = Vec::with_capacity(items.len());
     for it in items {
         nums.push(match it {
@@ -1549,5 +1552,25 @@ mod tests {
         assert_eq!(v.to_json(), "[0.1,2.0,3.0]");
         let h = resolved(DataType::HalfFloat, Space::L2, 2);
         assert_eq!(derived_value(&h, &Value::Arr(vec![Value::from(1.1), Value::from(2.2)])).unwrap().to_json(), "[1.0996094,2.1992188]");
+    }
+
+    /// What OpenSearch 3.9.0's `_source` held for [0.1, 1.0, 0.5] and [3, 4, 0] (captured, GET and
+    /// search alike): normalized only for `cosinesimil` on faiss (the default engine, `on_disk`
+    /// included); as given on lucene and for `l2` and `innerproduct` on either.
+    #[test]
+    fn only_faiss_derives_cosine_vectors_normalized() {
+        let vec_of = |v: &[f64]| Value::Arr(v.iter().map(|x| Value::from(*x)).collect());
+        let (a, b) = (vec_of(&[0.1, 1.0, 0.5]), vec_of(&[3.0, 4.0, 0.0]));
+        for (engine, space, want_a, want_b) in [
+            (Engine::Faiss, Space::Cosine, "[0.089087084,0.8908708,0.4454354]", "[0.6,0.8,0.0]"),
+            (Engine::Lucene, Space::Cosine, "[0.1,1.0,0.5]", "[3.0,4.0,0.0]"),
+            (Engine::Faiss, Space::L2, "[0.1,1.0,0.5]", "[3.0,4.0,0.0]"),
+            (Engine::Lucene, Space::L2, "[0.1,1.0,0.5]", "[3.0,4.0,0.0]"),
+            (Engine::Faiss, Space::InnerProduct, "[0.1,1.0,0.5]", "[3.0,4.0,0.0]"),
+            (Engine::Lucene, Space::InnerProduct, "[0.1,1.0,0.5]", "[3.0,4.0,0.0]"),
+        ] {
+            let r = Resolved { engine, ..resolved(DataType::Float, space, 3) };
+            assert_eq!((derived_value(&r, &a).unwrap().to_json(), derived_value(&r, &b).unwrap().to_json()), (want_a.to_string(), want_b.to_string()), "{engine:?} {space:?}");
+        }
     }
 }

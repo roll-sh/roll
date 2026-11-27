@@ -280,6 +280,17 @@ impl Brancher for Postgres {
         Ok(rows.iter().filter_map(|r| column(r[0].as_str()?)).collect())
     }
 
+    /// [`Self::columns`] on a branch of the parent (one just made from it): read on the branch's
+    /// own compute, so a parent that sleeps isn't woken for it.
+    async fn branch_columns(&self, parent: &str, branch: &str, _kept: Option<&str>, max: usize) -> anyhow::Result<Vec<roll_previews::mask::Column>> {
+        let p = self.0.get(&format!("/v1/projects/{}", seg(parent))).await?;
+        let b = p["branches"].as_array().and_then(|bs| bs.iter().find(|b| b["id"] == branch).cloned()).ok_or_else(|| anyhow::anyhow!("no Postgres branch {branch}"))?;
+        let ep = s(&b["endpoint"]["id"]).ok_or_else(|| anyhow::anyhow!("{branch} has no endpoint"))?;
+        let v = self.0.post(&format!("/v1/endpoints/{}/query", seg(&ep)), json!({ "sql": columns_sql(max) })).await?;
+        let rows = v["results"].as_array().and_then(|r| r.last()).and_then(|r| r["rows"].as_array()).cloned().unwrap_or_default();
+        Ok(rows.iter().filter_map(|r| column(r[0].as_str()?)).collect())
+    }
+
     /// A branch's own bytes (its local data directory, else its objects), at Postgres's rates.
     async fn usage(&self, parent: &str, branch: &str) -> anyhow::Result<Usage> {
         let p = self.0.get(&format!("/v1/projects/{}", seg(parent))).await?;

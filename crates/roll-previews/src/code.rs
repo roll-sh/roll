@@ -170,6 +170,8 @@ impl CodeSource {
                         .collect(),
                     seo_added: b.seo_added }),
                 regressions: p.regressions.clone(),
+                release_checks: p.release_checks.clone(),
+                rehearsal: p.rehearsal.as_ref().map(|x| code_control::model::PreviewRehearsal { ok: x.ok, error: x.error.clone() }),
                 regressions_accepted_by: p.regressions_accepted.as_ref().map(|a| a.by.clone()),
                 speed_budget: Some(code_control::model::PreviewSpeedBudget { load_ms: s.github.budget.load_ms, bytes: s.github.budget.bytes, lcp_ms: s.github.budget.lcp_ms, cls: s.github.budget.cls })
                     .filter(|b| b.load_ms > 0 || b.bytes > 0 || b.lcp_ms > 0 || b.cls > 0.0),
@@ -410,6 +412,18 @@ impl Source for CodeSource {
         let origin = code_control::review::Origin { outside, ..code_control::review::Origin::ROLL };
         let review = self.code.submit_review(&r, &c, &code_control::review::Reviewer::user(by), &input, &origin).await?;
         Ok(Some(review.id))
+    }
+
+    async fn work_item(&self, change: &str, title: &str, body: &str, labels: &[&str], outside: bool) -> anyhow::Result<Option<(u64, String)>> {
+        let Some(c) = self.code.db.change(change)? else { return Ok(None) };
+        let Some(r) = self.code.db.repo_by_id(&c.repo_id)? else { return Ok(None) };
+        let labels_owned: Vec<String> = labels.iter().map(|l| l.to_string()).collect();
+        if !outside && let Some(made) = self.code.open_github_issue(&r, title, body, &labels_owned).await? {
+            return Ok(Some(made));
+        }
+        let w = self.code.create_work_from(&r, &serde_json::json!({ "title": title, "body": body, "labels": labels }), outside)?;
+        let web = self.code.config.web_url.trim_end_matches('/');
+        Ok(Some((w.number, format!("{web}/{}/work", r.full_name()))))
     }
 
     async fn git_commit(&self, repo: &str, revision: &str) -> anyhow::Result<Option<String>> {

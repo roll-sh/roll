@@ -359,6 +359,15 @@ state. A pass of the reconciler:
        says how it went beside the release's time, at the head it's for only (one asked at an
        earlier head never runs, and an earlier head's outcome isn't shown); a failure is said
        (masked, one line), never the converge's, and it runs once a head. With
+       `release_checks` (`check` or `required`, off by default) roll rehearses it at every head of
+       a change instead, queued or not, and with `required` the change can't land in roll until,
+       at its head, the rehearsal passed and main's code didn't break on its migrated data (step
+       4e; `release` on the change's blockers: "its release hasn't been rehearsed on today's data
+       at its head yet", "its release failed on today's data: …", "main's code breaks on its
+       migrated data: /orders (500): expand first, contract in a later change"). Rehearsed at each
+       head before it's queued, the blocker never waits on the queue that would ask for it; a
+       preview with no Postgres branch has nothing to rehearse, so the rule holds nothing back
+       there (`queue.rs::blockers_keep_changes_out_of_the_queue`, the `release` case). With
        `rehearse_when_queued` (off by default: each is a fresh branch, its masking and a release
        run) roll asks for one itself when the change is queued to land in roll code, at that
        head: the change becoming queued wakes a settled preview at once, before the queue lands it
@@ -375,9 +384,12 @@ state. A pass of the reconciler:
        main's revision of each of the change's repo's services, in the change's preview as
        `<name>@main` (the other repos' services run main's code there already), at a host no
        visitor reaches (`?dpl=` and skew cookies name pinned pushes only), its variables held in
-       memory while it runs (they're the copy's credentials) and stopped after. Both run on a copy of each of the change's Postgres
-       branches as the release left them (`<preview>-m`, copy-on-write, masked as the branch is),
-       with main's own branches' variables swapped for the copy's by value (and the ones roll
+       memory while it runs (they're the copy's credentials) and stopped after. Both run on a copy of every one of the change's
+       branches as the release left them (`<preview>-m<head>`, copy-on-write, masked as the branch
+       is; named by the head, so a copy a crash left is never an earlier head's), never on the
+       change's own (a second consumer on its queue, writes to its bucket): a branch its product
+       can't copy stops it, saying which. Main's own branches' variables are swapped for the
+       copies' by value (and the ones roll
        makes from them). Its pages, `/` and the project's `github.pages` (10 at most; the other
        services `/`), are read there and on main's preview; a page that answers on main's data
        (below 500) but not on the change's (a 5xx, or no answer) broke. The copies go after,
@@ -1161,15 +1173,19 @@ thirty-fourth review found them in the clear.
       sheet. The project's repos are told of each such column once, the first time a preview masks
       it (production gained it, or the project's first rules), as their `masking` event
       (webhooks, the event stream, automations; docs/code/http-api.md), so a person who can write
-      its rule hears of it. `keep` is a rule that leaves a column as it is (the project's word that it isn't
+      its rule hears of it: how many each resource has, never their names (a repo's readers may
+      not read the resource's schema), with the dashboard's link, which names them. `keep` is a rule that leaves a column as it is (the project's word that it isn't
       people's data); it's never sent as a mask. A parent with no rules hands over its data as its
       `data` says (`real`). NoSQL and search parents the same way: a NoSQL table's columns
       outside its keys and its views' keys (`mask_default()`, a secret's `mask_null()`), and a
       search index's fields (`email` or `redact` into a text-like field, `remove` otherwise). A
       NoSQL column masked by default is a mask like any other, so a query that compares it is
-      refused: `keep` it if the app filters on it. Columns that can't be read (10 s) leave only
-      the rules, and the activity says so. Masked bases are masked the same way when they're made
-      (`engine.rs::columns_that_look_like_peoples_data_are_masked_by_default`).
+      refused: `keep` it if the app filters on it. The columns are read on the branch (or masked
+      base) just made from the parent, so a production database that sleeps isn't woken for it.
+      Columns that can't be read (or not within 10 s) fail it, as Neosync's and Tonic's do:
+      what's masked by default isn't known, so the preview fails with why and tries again rather
+      than hand anything over, and a masked base isn't made. Masked bases are masked the same way
+      when they're made (`engine.rs::columns_that_look_like_peoples_data_are_masked_by_default`).
     - **Masked once, branched many** (Neon's anonymized branches): a masked Postgres branch comes
       from its parent's masked base, a branch of the parent masked once by the rules (the rewrite
       and `VACUUM (FULL)` above, once; with no role of its own, which would take the tables, so
@@ -1481,6 +1497,22 @@ thirty-fourth review found them in the clear.
               ROLL_PREVIEW_BYPASS: ${{ secrets.ROLL_PREVIEW_BYPASS }}
     ```
 
+  - **Webhooks** (Vercel's bypass in a query parameter, for what takes a URL and no header:
+    Stripe's, GitHub's, Slack's): `POST …/webhooks {path, label}` (`roll preview webhook <id>
+    /api/stripe --label Stripe`, the sheet's Webhooks) makes a URL of the preview's own, the
+    first service's at `path` with `?roll_hook=<token>`, that lets requests to exactly that path
+    of that service in (not another service's host, nor an earlier push's), whatever their
+    method, with no cookie or redirect; the service gets the request without
+    the token (the rest of the query kept). It lasts as long as the preview, until revoked; only
+    its SHA-256 is kept, checked at every request, so a revoked one stops at once, and like a
+    share link it acts at its maker's rights now (one who may no longer open the project's
+    previews ends it). Its token is never a share link's (a `roll_share` with it opens
+    nothing), the project's bypass never comes into it, and how many requests it let in and when
+    last are kept (`hits`, `last_at`). Only a private, trusted preview takes one: a fork's code
+    would get what's sent to it. A service on roll apps gets them on its `pv-` environment's
+    access (`webhooks: [{path, token_sha256}]`, never the token; roll apps' gate checks them the
+    same way, roll apps #1198), sent again at the next converge when one is made or revoked
+    (`engine.rs::a_webhook_url_reaches_roll_apps_gate`, (`runtime.rs::service_hosts_reach_their_containers`).
     Services on roll apps get the secret's SHA-256 with the link's token (`access: {token,
     bypass_sha256}`, or `{signed_in: true, bypass_sha256}` under team access); their proxy checks
     it the same way. Rotating or removing the secret makes
@@ -1488,6 +1520,12 @@ thirty-fourth review found them in the clear.
   - Services on roll apps get the same token (`PUT …/environments/pv-… {access: {token}}`), and
     roll apps' waking proxy checks it the same way: the token once, then a host-only cookie,
     else 401 without waking anything.
+  - roll apps' proxy asks roll previews, through its hooks, for a `pv-` environment's notes
+    (`…/feedback.json`), share links, guests' notes and team snapshots, naming its own service.
+    roll previews answers only for a preview it knows runs on that service (rolld's
+    `services::preview_on`, the lookup a deploy makes): an environment's name alone proves
+    nothing (roll apps lets only roll previews make `pv-` environments now, #1205; one a tenant
+    named after another's preview before that gets no notes, no share link and no snapshot).
 - **Who.** `/v1/previews` sits behind the operator token like every product's API. Scoped tokens
   (`feature/roll-mcp`) classify these routes: `GET` is `read`; create, refresh, sleep and wake are
   `write`; reset and `DELETE` are `delete`. `Store::environment_of(kind, ref)` tells the
@@ -1929,11 +1967,20 @@ land on the change.
   form until this fixed it (`form.card`).
 - A note or an error becomes a fix to make (Vercel Comments' "Create issue", Netlify's drawer):
   the note's sheet (opened from its Reply or Resolve) and each error group on the sheet's Errors
-  tab have "Make a work item". It's made in the preview's repo as the person looking (roll code's
-  `POST …/work`; someone without write on the repo gets its refusal), where roll's agents claim
-  work too. A note's item takes the note's first line as its title and its whole review as its
-  body (the page and its link, the element, the note, what went wrong on the page), labelled
-  `preview-feedback`, and the note gets a reply naming the item. An error's item takes its service
+  tab have "Make a work item", where roll's agents claim work too. A note's is made by roll
+  (`POST …/notes/{note}/work`, `roll preview notes <id> --work <note>`): on a repo mirrored to
+  GitHub, a team member's note opens an issue there, by roll's App (Marker.io's and Jam's notes
+  to GitHub Issues), which GitHub's `issues` webhook makes the repo's work item as any issue;
+  elsewhere, and always for a guest's note (its words are never published to GitHub, and stay
+  marked as outside the team's), a work item in the change's repo,
+  titled by the note's first line, its body the note with its page, element and link, labelled
+  `preview-feedback`, once a note (kept, shown with the note as `work`), and the note gets a
+  reply naming it. A guest's note (a share link's) makes an item marked as someone outside the
+  team's words, so MCP's lockdown withholds them from an agent that claims it; made from the
+  browser as the person, it wasn't. It's roll code's resource, so the caller must write the
+  repo's code too (their grant asked inside the request) (`engine.rs::a_note_becomes_a_work_item_once`). An error's
+  item is made in the preview's repo as the person looking (roll code's `POST …/work`; someone
+  without write on the repo gets its refusal). It takes its service
   and title, and its sample as the preview shows it (masked), in a block nothing in it can close,
   labelled `preview-error` (`lib/preview-work.ts`).
 - A note is resolved from the page too (Vercel Comments): its Resolve opens roll
@@ -2088,13 +2135,16 @@ previews in it), the operator and admins see every project.
 | `GET /v1/previews/{id}/screenshot.png?exp=&sig=` | | `image/png` behind a signed, expiring link, without credentials (403 otherwise): the pull request comment's image; `&diff=base` under its own signature, the diff against main |
 | `GET`/`POST /v1/previews/{id}/shares` | `{hours, label?, notes?}` (1–720 hours; `label` who it's for, one line of 60 characters at most; `notes` its visitors may leave notes as guests) for a new one | `Share[]` (never a token), or 201 `Share` with `url`, the only time the link is shown; 409 for a public preview or past 20 live ones. A link works only while its maker (the person, or the person behind the token, that made it; not the operator's) may still open the project's previews: an account that still signs in, with a role that reveals a preview. Asked again at most every few minutes while it's used; one whose maker may not ends at once ("ada's share link ended: …" in the activity). `visit::tests::a_signed_in_person_gets_into_a_team_preview` |
 | `DELETE /v1/previews/{id}/shares/{share}` | | 204: the link stops at the visitor's next request |
+| `GET`/`POST /v1/previews/{id}/webhooks` | `{path, label?}` (`path` its first service's own: no query, `#`, `%`, `\`, `.` or `..` segment, nor `/__roll/`; `label` what it's for, 60 characters at most) | `GET`: `[{id, service, path, label, created_by, created_at, revoked, hits, last_at}]` (never the URL); `POST`: 201 with `url` (`<first service's URL><path>?roll_hook=<token>`), shown only here; 409 for a public preview, a fork's, or 20 already |
+| `DELETE /v1/previews/{id}/webhooks/{webhook}` | | 204: it lets nothing in from the next request |
 | `GET`/`PUT /v1/previews/{id}/env` | `{vars: {NAME: value \| null}}` (`null` removes; at most 100, 32 KiB each; a value may be `roll://ENV[/folder]/KEY`) | `{vars}`: the preview's own variables; its services redeploy with them. 403 for a reference to an environment other than the base without the caller's reveal on its folder; 400 for a malformed one or a look-alike |
 | `POST /v1/previews/{id}/approve` | `{head}` (the head looked at) | `Preview`: that head of a fork's pull request on a Git URL service runs (`pull.approved_head`); the next push waits again. 409 when the preview moved on to another head or isn't a fork's pull request. Admin in the permissions catalogue, and no MCP tool: letting outside code run with the project's data is a person's call |
 | `POST /v1/previews/{id}/visit` | `{to}` (a URL at one of the preview's service hosts) | `{url}`: a one-use way into a team-access preview (`access: "team"`) at `to`, good for a minute, for a person signed in to roll (a session; a token is a 403). 400 when the project's previews aren't `team` or `to` isn't the preview's; 403 for a person who may not open the project. Operator-only in the permissions catalogue: no grant ever gives one |
 | `POST /v1/previews/{id}/keep` | `{hours}` (0–720; 0 releases) | `Preview`: kept past its TTL until then (`kept_until`); a landed or closed change still ends it |
-| `GET /v1/previews/{id}/notes` | | `{notes: [{id, path, selector, note, by, at, replies: [{id, note, by, at}], crop}]}`: the notes left on its pages that nobody has resolved, every page's (the latest 500); `crop`: a picture of its element is kept |
+| `GET /v1/previews/{id}/notes` | | `{notes: [{id, path, selector, note, by, at, replies: [{id, note, by, at}], crop, work?: {number, url}}]}`: the notes left on its pages that nobody has resolved, every page's (the latest 500); `crop`: a picture of its element is kept |
 | `GET /v1/previews/{id}/notes/{note}/crop` | | `image/png`: the note's element as a screenshot run cropped it from its page (`X-Roll-Crop-As`: how, when as its reviewer saw it); 404 until one has |
 | `POST /v1/previews/{id}/notes/{note}/resolve` | | `{resolved}`: a note on the preview's page (its review's id) resolved, so the page stops listing it; 404 for a note that isn't the change's |
+| `POST /v1/previews/{id}/notes/{note}/work` | | `{number, url}`: the note made a work item on its change's repo by roll (a GitHub issue on a repo mirrored there, a guest's note excepted; labelled `preview-feedback`, a guest's words marked as outside the team's), said on the change; once a note (asked again, the same one; two callers at once make one, the second a 409 while it's made); 403 when the caller's grant (or a person's token's session) doesn't write the change's repo's code; 404 for a note that isn't the change's |
 | `GET /v1/previews/{id}/mail` | | `{mail: [{id, at, from, to, subject, size}]}`: what its services sent, caught (newest first, the last 50) |
 | `GET /v1/previews/{id}/mail/{mail}` | | One caught message as sent, as `text/plain` (never rendered) |
 | `GET /v1/previews/{id}/connect` | | `{branches: [{kind, parent, vars}]}`: each data branch's connection as its services get it, the branch's own credentials (a Postgres branch's role, never the parent's or a superuser's), read from the products each time; 409 while it's being deleted |
@@ -2121,6 +2171,7 @@ previews in it), the operator and admins see every project.
 | `GET /v1/previews/{id}/routes?minutes=` | | `{ minutes, main, routes: [{ name, count, p50_ms, p95_ms, main_p50_ms, main_count, slower, repeated?, grew?, budget_ms, over_budget }] }`: each route's time from its traces (a trace's root span's name, as an SDK names a request by its route), against the same route on main's preview (the repo's default branch's, else the project's baseline; `main` its id), the slower ones first: `slower` with at least 5 traces on both sides and a p50 half again main's and 100 ms more. Names masked |
 | `PUT /v1/previews/{id}/files?service=&path=` | a tar, at most 100 MiB | `{ service, path }`: its files written under the directory `path`, said in the activity. Admin |
 | `GET /v1/previews/{id}/requests` | | `{requests: [{at, service, method, path, status, ms}]}`: its latest 200 requests through roll's runtime, newest first (Vercel's request log): never the query, which can carry a token, and the path masked as its logs are (a path is its code's to choose); `ms` until the answer's headers. Kept in memory on the preview's holder (runs there) and gone with its last service; a roll apps instance's requests are roll apps' own. The sheet's Requests tab, errors at a glance; `roll preview requests <id> [--errors]` |
+| `POST /v1/previews/{id}/replay` | | 202 `{head, by, at, ok: null, requests: []}`: its recent GETs (its own and main's preview's request logs, newest first, each once, 40 at most, never roll's `/__roll/` paths) asked of it and of main's preview again, in the background; `replay` on the preview has them at its head once done (`{…, ok, requests: [{service, path, status, main_status, removed, added}], error}`: `removed`/`added` a JSON answer's top-level fields main's has and its hasn't, or the other way; 0 is no answer); 409 for a fork's preview, or one already replaying; 400 for a branch's (`roll preview replay <id>`, the Requests tab's Replay) |
 | `GET /v1/previews/{id}/metrics` | | `{services: [{service, cpu, memory_bytes, memory_mb}]}`: what its running services use right now (Render's and Railway's metrics): cores of CPU and resident memory, against the memory each runs with. It comes from `docker stats` for roll's runtime. For roll apps' instances it's their last finished minute (`…/environments/pv-…/metrics`), with memory per instance. A sleeping service isn't listed. 404 for no such preview. It runs on the preview's holder, and is read again at most every 10 s, however many sheets ask. The sheet shows it on each running service, read every 15 s while it's open |
 | `GET /v1/previews/{id}/errors?minutes=` | | `{minutes, groups: [{service, fingerprint, kind, title, count, first_seen, last_seen, sample, trace?}]}`: its services' errors in the last `minutes` (5–1,440, 60 by default, rounded up to a 15-minute step), grouped as roll apps groups an environment's (Sentry's issues and Vercel's runtime logs, from the output alone; docs/apps/http-api.md): a stack trace (Python, JVM, Node, Go) joined from its lines, or an error line, by what it is (its type and first frames with numbers and ids taken out). `fingerprint` names a group (keyed under a random key per process, so it says nothing of the error and changes on a restart); `kind` is `python`, `java`, `node`, `go` or `line`; `sample` is the newest one whole (8 KiB at most); newest first; `trace` the kept trace its sample names, if any. Title and sample are masked as its logs are, a value a cut split included (its start at a line's end is `***` too): its code can print its secrets. Its values are read (an audited read) only when there's an error. A roll apps service's are roll apps' own (`…/environments/pv-…/errors`, its 50 most frequent); a `roll.toml` service's are read from its container's last 2,000 lines in the span (`docker logs --timestamps --since`, at most 4 MiB a stream for at most 10 s), masked before they're grouped, its newest 50. A runtime that doesn't stamp lines gives none (its tail's old crash would read as new). 404 for no such preview. It runs on the preview's holder and is read again at most every 10 s for a span, however many ask. The sheet's Errors tab |
 | `GET /v1/previews/{id}/errors/count?minutes=` | | `{minutes, count}`: how many errors those groups hold. Nothing in them leaves, so nothing is masked and no values are read. Kept as long. A row of the Previews tab shows the last hour's once it's on screen, three rows at a time |
@@ -2177,6 +2228,7 @@ type Preview = {
   release?: { head: string; ms: number; before_ms: number | null; locks?: { table: string; mode: string; ms: number }[] } | null;
   rehearsal?: { head: string; by: string; at: number; ok: boolean | null; ms: number | null; error: string | null } | null; // its release on today's data (POST …/rehearse)
   main_on_change?: { head: string; at: number; ms: number; pages: { service: string; path: string; status: number; main_status: number }[]; error: string | null } | null; // main's code on a copy of this head's migrated data (0: no answer)
+  replay?: { head: string; by: string; at: number; ok: boolean | null; requests: { service: string; path: string; status: number; main_status: number; removed: string[]; added: string[] }[]; error: string | null } | null; // its recent GETs replayed against main's preview, at its head
   masked_by_default?: { resource: string; column: string; why: string }[]; // columns masked as they look like people's data and no rule names them
   reaches?: "open" | "roll";
   visual_change?: { since: string; percent: number; phone_percent?: number | null } | null;
@@ -2193,6 +2245,7 @@ type Preview = {
   served_secrets?: { key: string; path: string }[]; // its secret values its pages serve at its head: names and where, never values
   skipped?: { pages?: string[]; stories?: number; first_stories?: string[]; by_files?: true }; // what its latest screenshot run left out at its head: pages past a run's ten, stories it didn't take (the first 10 by id); by_files: it chose them by the change's files alone, its Storybook serving no module graph (--stats-json)
   regressions?: "check" | "required" | null;
+  release_checks?: "check" | "required" | null; // the project's rule for its release at each head, where it has a Postgres branch to rehearse on
   regressions_accepted?: { head: string; by: string; at: number } | null;
   regressions_compared?: boolean;     // compared with main's preview at its head (errors; routes too with traces)
   timeline?: { head: string; started_at: number; steps: { step: "data" | "copies" | "setup" | "deploy" | "checks" | "ready"; at: number }[] };
@@ -2248,6 +2301,7 @@ type Settings = {
   seed: Job | null;                   // once on fresh data
   release: Job | null;                // at each new head, before services deploy (migrations)
   rehearse_when_queued?: boolean;      // when a change is queued to land, its release rehearsed on today's data by roll (false)
+  release_checks?: "off" | "check" | "required"; // check: its release rehearsed on today's data at every head; required: also keeps it from landing until, at its head, that passed and main's code didn't break on its migrated data (needs release; "off")
   teardown: Job | null;               // once when the preview goes, before its services and branches
   masking: Record<string, Record<string, string>>; // "postgres:<ref>" → {"schema.table.column": "email"}, "nosql:<ref>" → {"ks.table.column": "mask_default()"}, "search:<ref>" → {"index.field": "redact" | "remove" | "email"} (redact and email only on a text-like field of the parent's: a number, a date or a vector is refused when set, use remove; an index whose name has dots, `logs.2024.user.email`, is split off at the longest name the cluster has)
 };
@@ -2268,6 +2322,25 @@ type Settings = {
   with how its pages compare with main's; attaching the same link again updates it. A name that
   isn't an issue of the workspace fails that run's step and nothing else.
   `a_changes_linear_issues_from_its_title_and_branch`, `linear-templates.test.ts`.
+- **Jira and Asana** (Marker.io's notes to a tracker): the gallery's "Preview notes as Jira issues"
+  and "Preview notes as Asana tasks" (`preview-note-to-jira`, `preview-note-to-asana`) take each
+  note left on a change's preview (the `review` trigger, a body that's a note's, not a reply's)
+  to the team's tracker with automations' `webhook` step: public addresses only, no redirects,
+  the answer read up to 1 MiB, and the credential an automation secret (`{{ secrets.jira }}`,
+  base64 of email:API token; `{{ secrets.asana }}`, a personal access token), never in the
+  spec. The owner sets their site or project; the issue's summary and description are the note
+  with its page and element (`automation-templates.test.ts`). A GitHub-mirrored repo's own
+  GitHub Issues take notes natively (a note's work item).
+- **Replay** (Signadot's SmartTests, Speedscale's replays, without capturing production): `POST
+  …/replay` asks the GETs a change's preview and main's have served lately (their own request
+  logs, roll's runtime's: paths only, never a query) of each again, in the background, and keeps
+  how each answered: another status, or a JSON object answer whose top-level fields main's has
+  and the change's hasn't, is a difference ("/api/items 200 (main 200) · lost price"). The
+  Requests tab and `roll preview replay` say them. Only GETs (a write would act twice), only a
+  trusted change's preview (a fork's visitors and code choose its paths, and main's preview
+  answers with main's secrets), and only what the previews themselves served: replaying
+  production's traffic needs its capture's privacy designed first
+  (`engine.rs::recent_requests_are_replayed_against_mains_preview`).
 - **GitHub PR**, through roll code's GitHub outbox (durable, retried, sent on the repo's owner):
   - one comment, edited in place, with a table of services, URLs, status, data branches and cost;
   - a commit status `roll/preview` on the head. A preview removed before it was ready (the change
@@ -2523,6 +2596,41 @@ type Settings = {
     service's pages while it runs what it ran (TurboSnap), and taken at once when the rule is
     turned on (checked in the screenshot image: a docs entry and a bad id skipped, a 600 by 120
     card captured as 616 by 136 with its console error counted).
+  - **Snapshots from the team's own tests** (Argos's and Percy's SDKs): a Playwright or Cypress
+    test sends a picture to the preview it runs against, `POST /__roll/snapshot?name=<name>` on
+    the preview's own host with the project's bypass secret (`x-roll-preview-bypass`, the one CI
+    already has; a public preview's too, and never a visitor's cookie) and a PNG of 2 MiB at most
+    as the body (201 `{page, head}`; `&head=<changeset or git commit>`, which Playwright's run
+    knows, is a 409 unless it's what the preview serves, so a test of another head isn't filed
+    as this one's). It's page `snap:<name>` of the visual review at the head the preview serves
+    ("checkout (your tests)" on the sheet): compared with the one it replaces at an earlier
+    head, and with main's preview's `snap:<name>`, which main's own CI run sends the same way.
+    The preview's owner compares them at its next converge, once for every picture sent since
+    (a change's against main's, then reported; main's kept by head, then the changes waiting on
+    it compared again), so a suite of 40 is one comparison, not 40. Accepted, refused and
+    grouped like any page; another picture by the same name asks again (an acceptance was for
+    the one before). With `github.screenshot` on only: the review starts from roll's own
+    screenshot of the first page. A name is 1 to 80 of `a-z A-Z 0-9 -
+    _ . /`; 40 a preview. A screenshot run at that head keeps them; the first at a new head
+    drops the earlier head's, so the review only shows what this head's tests sent. A fork's
+    preview has no bypass secret, so it takes none. On a service roll apps runs, its proxy
+    takes the same request on the `pv-` host of a private preview (the environment holds the
+    secret's hash) and hands it to roll previews (its `PreviewSnapshots` hook, roll apps #1205),
+    which takes it only once that preview is known to run on that service: an environment's
+    name alone proves nothing (`engine.rs::the_teams_snapshots_join_the_visual_review`,
+    `scripts/preview-apps.sh`'s snapshot step):
+
+    ```js
+    // playwright: a fixture next to the bypass one above
+    export async function snapshot(page, name) {
+      await fetch(new URL(`/__roll/snapshot?name=${encodeURIComponent(name)}&head=${process.env.GITHUB_SHA}`, page.url()), {
+        method: 'POST',
+        headers: { 'x-roll-preview-bypass': process.env.ROLL_PREVIEW_BYPASS, 'content-type': 'image/png' },
+        body: await page.screenshot({ fullPage: true, animations: 'disabled' }),
+      });
+    }
+    // cypress: cy.screenshot(name) then, in an after:screenshot plugin, the same POST of its file
+    ```
     Page states too (Chromatic's interaction tests, Percy's scripted snapshots): much of what a
     change touches shows only after a click (a cart open, a dialog, a form's errors). A project
     names up to 3 (`github.states`: a name, a page of the first service's, and 1 to 10 steps:
@@ -3056,32 +3164,24 @@ variables roll makes from a branch's URL too (it could run on the preview's own 
 change becoming queued wakes its settled preview, a rehearsal shows only at its head, and schema
 overlaps stay within a repo.
 
-1. **Main's code on the change's migrated data on roll's runtime, in review** (`<name>@main` in
-   the change's preview; roll apps services landed, #1183).
-2. **Webhooks into private previews** (Vercel's bypass in a query parameter; S): a per-preview,
-   per-path bypass that fits in a Stripe or GitHub webhook URL, never the project-wide secret.
-3. **Snapshots from the team's own Playwright or Cypress suite** (Argos's, Percy's SDKs; M):
-   a step in their tests sends a page's picture to the preview's visual review.
-4. **Notes to Jira, GitHub Issues or Asana** (Marker.io, Netlify's Drawer; S).
-5. **Replaying recorded traffic against the preview and main** (Signadot, Speedscale; L): writes
+1. **Replaying recorded traffic against the preview and main** (Signadot, Speedscale; L): writes
    replay safely on branched data; capturing production's requests needs its privacy designed
-   first.
-6. **A rehearsal that holds a change back** (a required rule): rehearsed at each head, so the
-   landing blocker never waits on the queue that would ask for it.
-7. **Older pushes past the last three, started on demand**; **what a note's reviewer saw, from
+   first. The previews' own GETs replayed
+   against main's, in review.
+2. **Older pushes past the last three, started on demand**; **what a note's reviewer saw, from
    their own browser** (Jam, Marker.io).
-8. **Restore points for search and buckets**: search's once roll search's `reset {from}` is in
+3. **Restore points for search and buckets**: search's once roll search's `reset {from}` is in
    (its Next 32); buckets need a put-back on roll storage's side.
-9. **Previews for the members thread's next products**: once roll apps' and roll search's routes
+4. **Previews for the members thread's next products**: once roll apps' and roll search's routes
    become member routes (docs/members.md, v1.1).
-10. **Watches on pg-control**: the data step's Postgres compute start; cheap branches on ext4
-    through overlay volumes; recovery to a time seconds old (unowned).
+5. **Watches on pg-control**: the data step's Postgres compute start; cheap branches on ext4
+   through overlay volumes; recovery to a time seconds old (unowned).
 
 Not to build: more lab checks on the first page (each adds noise to every pull request), or a
 Kubernetes cluster per preview (roll apps' Compose import covers multi-service apps, and a
 cluster would break "costs nothing asleep").
 
-Landed 2026-11-27, early: a failed story shard's share of the touched stories counted as untaken (#1175), and masking that's safe by default for NoSQL and search, with the project told of each column masked by default (#1177), and main's code on a copy of a change's migrated data, on roll apps (#1183).
+Landed 2026-11-27, early: a failed story shard's share of the touched stories counted as untaken (#1175), and masking that's safe by default for NoSQL and search, with the project told of each column masked by default (#1177), and main's code on a copy of a change's migrated data, on roll apps (#1183) and roll's runtime (#1185), webhook URLs into private previews (#1187), the twelfth review's fixes (#1200), snapshots from the team's own tests (#1192), a note's work item made by roll (#1196), a team note opening a GitHub issue on a mirrored repo (#1209), and snapshots, notes and share links on roll apps services checked by service (#1212), release_checks (#1204), and preview notes to Jira and Asana (#1220).
 
 Landed 2026-11-26, midday: restore points for streams (#1112), the TurboSnap test's race under
 load (#1114), the tenth review's fixes (#1119), the visual review holding on stories a change

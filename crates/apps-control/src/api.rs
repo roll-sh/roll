@@ -98,6 +98,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/deploys/{{dep}}"), get(get_deploy))
         .route(&format!("{env}/deploys/{{dep}}/logs"), get(deploy_logs))
         .route(&format!("{env}/deploys/{{dep}}/commits"), get(deploy_commits))
+        .route(&format!("{env}/deploys/{{dep}}/image"), get(deploy_image))
         .route(&format!("{env}/deploys/{{dep}}/vulnerabilities"), get(deploy_vulnerabilities))
         .route(&format!("{env}/deploys/{{dep}}/sbom"), get(deploy_sbom))
         .route(&format!("{env}/deploys/{{dep}}/provenance"), get(deploy_provenance))
@@ -866,10 +867,22 @@ async fn rotate_config(State(apps): S, Path((id, env)): Path<(String, String)>, 
 
 async fn put_env(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, b: Bytes) -> R {
     let put = body(&b)?;
+    let operator = roll_auth::Grant::on(&ext).is_none() && ext.get::<roll_auth::SignedIn>().is_none() && (roll_auth::Operator::on(&ext) || apps.cfg.open);
     // Naming another maker is the operator's (roll previews in process), never anyone else's.
     // No token names one, even the operator's own: it would make another's reach its code's.
-    if put.get("closed_by").is_some() && (roll_auth::Grant::on(&ext).is_some() || ext.get::<roll_auth::SignedIn>().is_some() || !(roll_auth::Operator::on(&ext) || apps.cfg.open)) {
+    if put.get("closed_by").is_some() && !operator {
         return Err(Error::Forbidden("closed_by is the operator's to set (roll previews names its rules' maker)".into()));
+    }
+    // A `pv-<id>` environment is roll previews' preview `pv_<id>` (its share links, notes and
+    // snapshots find it by that name): only roll previews (the operator, in process) makes one,
+    // so no tenant can name an environment after another's preview. A token's or a person's
+    // request is a tenant's (rolld's gate lets nothing else in but the operator).
+    let tenant = roll_auth::Grant::on(&ext).is_some() || ext.get::<roll_auth::SignedIn>().is_some();
+    if env.starts_with("pv-") && tenant {
+        let (sid, e) = (id.clone(), env.clone());
+        if apps.db(move |s| s.environment(&sid, &e)).await.is_err() {
+            return Err(Error::Forbidden(format!("{env}: a pv- environment is roll previews' own (it makes one for each preview)")));
+        }
     }
     let e = apps.put_environment_by(&id, &env, put.clone(), maker(&ext)).await?;
     apps.settings_changed();
@@ -951,6 +964,17 @@ async fn create_deploy(State(apps): S, Path((id, env)): Path<(String, String)>, 
     apps.note_deploy_person(&d.id, person(&ext)).await;
     apps.lift_hold(&id, &env).await;
     Ok((StatusCode::ACCEPTED, Json(d)).into_response())
+}
+
+/// `GET …/deploys/{dep}/image`: its image as a tar for `docker load`. Layers can hold what the
+/// build had (a value baked in): roll secrets' reveal rule, as reading an instance's files.
+async fn deploy_image(State(apps): S, Path((id, env, dep)): Path<(String, String, String)>, ext: Extensions) -> R {
+    apps.check_secret_reveal(&id, &env, asker(&ext)).await?;
+    let (image, tar) = apps.export_deployment_image(&id, &env, &dep).await?;
+    apps.audit("image.exported", &id, &env, actor(&ext), json!({ "deployment": dep, "image": image })).await;
+    let body = axum::body::Body::from_stream(tokio_util::io::ReaderStream::new(tar));
+    let file = format!("attachment; filename=\"{dep}.tar\"");
+    Ok(([(header::CONTENT_TYPE, "application/x-tar".to_string()), (header::CONTENT_DISPOSITION, file)], body).into_response())
 }
 
 async fn deploy_commits(State(apps): S, Path((id, env, dep)): Path<(String, String, String)>) -> R {

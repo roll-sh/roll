@@ -47,8 +47,9 @@ pub struct NewKey {
     #[serde(flatten)]
     pub binding: Binding,
     pub key_id: String,
-    /// The HMAC key, base64url (cert-manager's `keySecretRef`, certbot's `--eab-hmac-key`).
-    pub hmac_key: String,
+    /// The HMAC key, base64url (cert-manager's `keySecretRef`, certbot's `--eab-hmac-key`): in
+    /// the answer, never in a `Debug`.
+    pub hmac_key: Value,
     pub directory: String,
 }
 
@@ -191,7 +192,7 @@ impl Secrets {
             audit::record(c, self.keys()?, project, caller, "ca.acme.eab.add", None, None, &[], &format!("{ca_name}: made ACME binding {id}{label} for {scope}"), now)
         })?;
         let binding = Binding { id: id.clone(), label, names, expires_at, created_at: now, created_by: caller.principal.clone(), revoked_at: None, revoked_by: None, used_at: None, accounts: 0 };
-        Ok(NewKey { binding, key_id: id, hmac_key: key.expose().to_string(), directory: format!("{}/directory", self.acme_base(ca)?) })
+        Ok(NewKey { binding, key_id: id, hmac_key: key, directory: format!("{}/directory", self.acme_base(ca)?) })
     }
 
     /// Revoke a binding (admin, audited): every account made with it stops at once.

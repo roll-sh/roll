@@ -114,7 +114,9 @@ impl Apps {
         let (svc, row) = self.db(move |s| Ok((s.service(&sid)?, s.environment(&sid, &e).ok()))).await?;
         let row = match row {
             Some(r) => r,
-            // Deploying into an environment makes it (previews: PUT first is optional).
+            // Deploying into an environment makes it; never a `pv-` one, which is roll previews' own
+            // (made by its PUT first, as the operator: no tenant can name one after another's preview).
+            None if env.starts_with("pv-") => return Err(Error::NotFound(format!("no environment {env}: a pv- environment is roll previews' own (it makes one for each preview)"))),
             None => {
                 self.put_environment(service, env, Value::Object(Default::default())).await?;
                 let (sid, e) = (service.to_string(), env.to_string());
@@ -1491,6 +1493,21 @@ impl Apps {
     /// still be using it) and without a port. Removed afterwards, whatever happened.
     async fn pre_deploy(self: &Arc<Self>, tpl: &Template, cmd: &str, log: &LogSink, cancel: &CancellationToken) -> anyhow::Result<()> {
         self.run_once(tpl, cmd, "pre-deploy", self.cfg.build_timeout, log, cancel).await.map_err(|e| anyhow::anyhow!("{e:#}: nothing was switched"))
+    }
+
+    /// `GET …/deploys/{dep}/image`: the deployment's image as `docker save`'s tar, for `docker
+    /// load` here (Fly's `fly auth docker`, Artifact Registry's pull). Only a built one, still
+    /// kept (not pruned), and where the runtime can hand it out.
+    pub async fn export_deployment_image(self: &Arc<Self>, service: &str, env: &str, dep: &str) -> Result<(String, Box<dyn tokio::io::AsyncRead + Send + Unpin>)> {
+        let d = self.deployment(service, env, dep).await?;
+        let (Some(image), None) = (d.image.clone(), d.pruned_at) else {
+            return Err(Error::Conflict(format!("{dep} has no image kept to hand out (never built, or pruned)")));
+        };
+        match self.deps.runtime.export_image(&image).await {
+            Ok(Some(r)) => Ok((image, r)),
+            Ok(None) => Err(Error::BadRequest("this node's runtime can't hand out an image (its registry holds it)".into())),
+            Err(e) => Err(Error::Conflict(format!("{e:#}"))),
+        }
     }
 
     /// `run.teardown` before a preview environment goes: once per deployment (a retried delete
