@@ -387,18 +387,7 @@ impl Apps {
             if self.silenced(&svc, &env, &e.kind, now).await {
                 continue;
             }
-            // Closed since? The events after it of its environment, a few pages at most.
-            let key = oncall_of(&e).map(|(_, k, _)| k);
-            let (mut after, mut closed) = (seq, false);
-            for _ in 0..10 {
-                let Ok(page) = self.db(move |s| s.events(after, 200)).await else { break };
-                let Some(last) = page.last().map(|x| x.seq) else { break };
-                closed = page.iter().any(|x| x.service == svc && x.environment == env && oncall_of(x).is_some_and(|(open, k, _)| !open && Some(&k) == key.as_ref()));
-                if closed {
-                    break;
-                }
-                after = last;
-            }
+            let closed = self.closed_since(&e).await;
             let mut rows = Vec::new();
             if !closed {
                 let sid = svc.clone();
@@ -417,6 +406,49 @@ impl Apps {
                 tracing::warn!(seq, error = %err, "apps: a held alert wasn't let go; tried again");
             }
         }
+    }
+
+    /// Whether an alert that opens an incident was closed by a later event of its environment
+    /// (the events after it, a few pages at most).
+    async fn closed_since(self: &Arc<Self>, e: &Event) -> bool {
+        let Some((true, key, _)) = oncall_of(e) else { return false };
+        let mut after = e.seq;
+        for _ in 0..10 {
+            let Ok(page) = self.db(move |s| s.events(after, 200)).await else { return false };
+            let Some(last) = page.last().map(|x| x.seq) else { return false };
+            if page.iter().any(|x| x.service == e.service && x.environment == e.environment && oncall_of(x).is_some_and(|(open, k, _)| !open && k == key)) {
+                return true;
+            }
+            after = last;
+        }
+        false
+    }
+
+    /// `POST …/deliveries/{did}/redeliver`: a delivered or failed one sent again from its first
+    /// try. Not an on-call target's page that has been resolved since: it would open again.
+    pub async fn redeliver(self: &Arc<Self>, project: &str, target: &str, id: &str) -> Result<Delivery> {
+        let p = project.to_string();
+        let Some(t) = self.db(move |s| s.targets(&p)).await?.into_iter().find(|t| t.id == target) else {
+            return Err(Error::NotFound(format!("no notification target {target}")));
+        };
+        let (ti, di) = (target.to_string(), id.to_string());
+        let Some(d) = self.db(move |s| s.delivery(&ti, &di)).await? else {
+            return Err(Error::NotFound(format!("no delivery {id}")));
+        };
+        if matches!(t.kind.as_str(), "pagerduty" | "opsgenie") {
+            let seq = d.event;
+            if let Some(e) = self.db(move |s| s.event(seq)).await? {
+                if self.closed_since(&e).await {
+                    return Err(Error::Conflict("this alert was resolved since: sent again, it would open the incident again".into()));
+                }
+            }
+        }
+        let (ti, di) = (target.to_string(), id.to_string());
+        if !self.db(move |s| s.redeliver(&ti, &di)).await? {
+            return Err(Error::Conflict("this delivery is still being tried".into()));
+        }
+        let (ti, di) = (target.to_string(), id.to_string());
+        self.db(move |s| s.delivery(&ti, &di)).await?.ok_or_else(|| Error::NotFound(format!("no delivery {id}")))
     }
 
     /// What's due, a few at a time (one slow target doesn't hold up the others), each try's

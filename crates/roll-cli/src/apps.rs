@@ -1334,6 +1334,10 @@ pub enum AppsCmd {
         /// A target's latest deliveries, newest first: what was sent, how it answered, the tries.
         #[arg(long, value_name = "ID", conflicts_with_all = ["add", "remove", "edit", "test"])]
         deliveries: Option<String>,
+        /// With `--deliveries ID`: send that delivery's event again, from its first try (a
+        /// delivered or failed one; not an on-call page resolved since).
+        #[arg(long, value_name = "DELIVERY", requires = "deliveries")]
+        redeliver: Option<String>,
         /// Email the project's owner (at their account's address; a project's first service
         /// adds this once, so it's for one removed before).
         #[arg(long, conflicts_with_all = ["add", "remove", "edit", "test", "deliveries"])]
@@ -5285,7 +5289,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 v
             }
         }
-        AppsCmd::Notifications { target, add, kind, region, events, only_env, only_service, previews, every_env, every_service, remove, test, edit, deliveries, email } => {
+        AppsCmd::Notifications { target, add, kind, region, events, only_env, only_service, previews, every_env, every_service, remove, test, edit, deliveries, redeliver, email } => {
             if add.is_none() && edit.is_none() && !email && (events.is_some() || !only_env.is_empty() || !only_service.is_empty() || previews.is_some()) {
                 bail!("--events, --only-env, --only-service and --previews go with --add, --email or --edit");
             }
@@ -5357,6 +5361,13 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             } else if let Some(id) = remove {
                 api.call(reqwest::Method::DELETE, &format!("{path}/{}", enc(&id)), None).await?;
                 json!({ "deleted": id })
+            } else if let (Some(id), Some(did)) = (&deliveries, redeliver) {
+                let d = api.post(&format!("{path}/{}/deliveries/{}/redeliver", enc(id), enc(&did)), json!({})).await?;
+                if !json_out {
+                    println!("{} {} queued again", s(&d["id"]), s(&d["kind"]));
+                    return Ok(());
+                }
+                d
             } else if let Some(id) = deliveries {
                 let v = api.get(&format!("{path}/{}/deliveries", enc(&id))).await?;
                 if !json_out {
@@ -5364,7 +5375,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                         let t = d["at"].as_i64().and_then(chrono::DateTime::from_timestamp_millis).map(|t| t.format("%Y-%m-%d %H:%M").to_string()).unwrap_or_default();
                         let how = d["error"].as_str().map(str::to_string).or(d["code"].as_u64().map(|c| format!("answered {c}"))).unwrap_or_default();
                         let tries = d["attempts"].as_u64().unwrap_or(0);
-                        println!("{t}  {:<9} {:<24} {tries} {}  {how}", s(&d["status"]), s(&d["kind"]), if tries == 1 { "try " } else { "tries" });
+                        println!("{}  {t}  {:<9} {:<24} {tries} {}  {how}", s(&d["id"]), s(&d["status"]), s(&d["kind"]), if tries == 1 { "try " } else { "tries" });
                     }
                     return Ok(());
                 }

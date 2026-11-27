@@ -1778,6 +1778,9 @@ export const appsApi = {
   removeNotifyTarget: (project: string, id: string) => call<null>("DELETE", `/v1/apps/projects/${enc(project)}/notifications/${enc(id)}`),
   testNotifyTarget: (project: string, id: string) => call<{ ok: boolean; code: number | null; error: string | null }>("POST", `/v1/apps/projects/${enc(project)}/notifications/${enc(id)}/test`),
   notifyDeliveries: (project: string, id: string) => call<NotifyDelivery[]>("GET", `/v1/apps/projects/${enc(project)}/notifications/${enc(id)}/deliveries`),
+  /** A delivered or failed one sent again from its first try (409 for a page resolved since). */
+  redeliver: (project: string, id: string, delivery: string) =>
+    call<NotifyDelivery>("POST", `/v1/apps/projects/${enc(project)}/notifications/${enc(id)}/deliveries/${enc(delivery)}/redeliver`),
   putRegistry: (id: string, body: { username: string; password: string; server?: string }) => call<Service>("PUT", `${svc(id)}/registry`, body),
   deleteRegistry: (id: string) => call<Service>("DELETE", `${svc(id)}/registry`),
   putGitLogin: (id: string, body: { username: string; password: string } | { username: string; secret: string }) => call<Service>("PUT", `${svc(id)}/git-login`, body),
