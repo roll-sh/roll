@@ -82,15 +82,19 @@ impl Engine {
         // The change's branches as its release left them, copied; the branches' variables in
         // main's environment and in the change's swapped for the copy's by value (the names roll
         // makes from them too: `PGHOST`…).
-        let name = format!("{}-m", branch_name(&r.id));
+        // Named by the head, so a copy a crash left behind is never an earlier head's.
+        let name = format!("{}-m{}", branch_name(&r.id), crate::label_part(r.build().trim_start_matches("cs_"), 8));
         let mut mains = self.resource_env(&main.id).await?;
         let mut changes = self.resource_env(&r.id).await?;
         let mut branches: Vec<crate::ports::BranchVars> = Vec::new();
         let ours = self.store.resources(&main.id)?;
-        for res in self.store.resources(&r.id)?.into_iter().filter(|x| x.kind == Kind::Postgres) {
+        // Every branch the change's services get, copied: main's code never runs on the change's
+        // own (a second consumer on its queue, writes to its bucket). One a product can't copy
+        // stops it, saying which.
+        for res in self.store.resources(&r.id)? {
             let Some(branch) = &res.r#ref else { continue };
             let b = self.brancher(res.kind)?.clone();
-            let copy = b.snapshot(&res.parent, branch, &name).await?.ok_or_else(|| anyhow::anyhow!("postgres:{} can't be copied", res.parent))?;
+            let copy = b.snapshot(&res.parent, branch, &name).await?.ok_or_else(|| anyhow::anyhow!("{}:{} can't be copied, so main's code would share the change's own", res.kind.as_str(), res.parent))?;
             made.push((b.clone(), res.parent.clone(), copy.r#ref.clone(), name.clone()));
             let new = b.connect(&res.parent, &copy.r#ref, copy.kept.as_deref()).await?;
             let swapped = crate::names::with_standard(res.kind, new.clone());
@@ -102,7 +106,7 @@ impl Engine {
             }
             branches.push((res.kind, res.parent.clone(), new));
         }
-        anyhow::ensure!(!branches.is_empty(), "the change has no Postgres branch");
+        anyhow::ensure!(branches.iter().any(|(k, _, _)| *k == Kind::Postgres), "the change has no Postgres branch");
         let main_access = self.store.access(&main.id)?.filter(|a| a.required()).map(|a| a.token);
         let own_access = self.store.access(&r.id)?.filter(|a| a.required()).map(|a| a.token);
         let mut paths = vec!["/".to_string()];

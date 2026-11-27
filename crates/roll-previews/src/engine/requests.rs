@@ -464,8 +464,11 @@ impl Engine {
     /// cookie, and the service never sees the token. Only a private, trusted preview's: a fork's
     /// code would be handed what's sent to it. The URL is shown only here.
     pub async fn webhook(&self, id: &str, path: &str, by: &str, maker: Option<&str>, label: &str) -> Result<(crate::Webhook, String)> {
-        if !crate::settings::page_path_ok(path) || path.contains('?') {
-            return Err(Error::BadRequest("path: a path of the service's own, starting with / (up to 200 characters, no query, #, quotes or spaces)".into()));
+        // As roll apps' gate takes them too: no `.` or `..` segment, `%`, `?`, `#` or `\`, and
+        // never roll's own `/__roll/` paths.
+        let odd = path.split('/').any(|seg| seg == "." || seg == "..") || path.contains(['%', '?', '#', '\\']) || path == "/__roll" || path.starts_with("/__roll/");
+        if !crate::settings::page_path_ok(path) || odd {
+            return Err(Error::BadRequest("path: a path of the service's own, starting with / (up to 200 characters; no query, #, %, \\, quotes, spaces, . or .. segments, nor /__roll/)".into()));
         }
         let label = label.trim();
         if label.chars().count() > 60 || label.chars().any(char::is_control) {
@@ -487,7 +490,7 @@ impl Engine {
             return Err(Error::Conflict(format!("{} runs on roll apps, whose gate doesn't take webhook URLs yet", svc.name)));
         }
         let url = svc.url;
-        let (hook, token) = self.store.create_webhook(id, path, by, maker, label)?;
+        let (hook, token) = self.store.create_webhook(id, &svc.name, path, by, maker, label)?;
         self.store.log(id, &format!("a webhook URL for {path} made by {by} ({}{})", hook.id, if label.is_empty() { String::new() } else { format!(", \"{label}\"") }))?;
         Ok((hook, format!("{}{path}?roll_hook={token}", url.trim_end_matches('/'))))
     }

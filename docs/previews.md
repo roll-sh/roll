@@ -375,9 +375,12 @@ state. A pass of the reconciler:
        main's revision of each of the change's repo's services, in the change's preview as
        `<name>@main` (the other repos' services run main's code there already), at a host no
        visitor reaches (`?dpl=` and skew cookies name pinned pushes only), its variables held in
-       memory while it runs (they're the copy's credentials) and stopped after. Both run on a copy of each of the change's Postgres
-       branches as the release left them (`<preview>-m`, copy-on-write, masked as the branch is),
-       with main's own branches' variables swapped for the copy's by value (and the ones roll
+       memory while it runs (they're the copy's credentials) and stopped after. Both run on a copy of every one of the change's
+       branches as the release left them (`<preview>-m<head>`, copy-on-write, masked as the branch
+       is; named by the head, so a copy a crash left is never an earlier head's), never on the
+       change's own (a second consumer on its queue, writes to its bucket): a branch its product
+       can't copy stops it, saying which. Main's own branches' variables are swapped for the
+       copies' by value (and the ones roll
        makes from them). Its pages, `/` and the project's `github.pages` (10 at most; the other
        services `/`), are read there and on main's preview; a page that answers on main's data
        (below 500) but not on the change's (a 5xx, or no answer) broke. The copies go after,
@@ -1489,7 +1492,8 @@ thirty-fourth review found them in the clear.
     Stripe's, GitHub's, Slack's): `POST …/webhooks {path, label}` (`roll preview webhook <id>
     /api/stripe --label Stripe`, the sheet's Webhooks) makes a URL of the preview's own, the
     first service's at `path` with `?roll_hook=<token>`, that lets requests to exactly that path
-    in, whatever their method, with no cookie or redirect; the service gets the request without
+    of that service in (not another service's host, nor an earlier push's), whatever their
+    method, with no cookie or redirect; the service gets the request without
     the token (the rest of the query kept). It lasts as long as the preview, until revoked; only
     its SHA-256 is kept, checked at every request, so a revoked one stops at once, and like a
     share link it acts at its maker's rights now (one who may no longer open the project's
@@ -2106,7 +2110,7 @@ previews in it), the operator and admins see every project.
 | `GET /v1/previews/{id}/screenshot.png?exp=&sig=` | | `image/png` behind a signed, expiring link, without credentials (403 otherwise): the pull request comment's image; `&diff=base` under its own signature, the diff against main |
 | `GET`/`POST /v1/previews/{id}/shares` | `{hours, label?, notes?}` (1–720 hours; `label` who it's for, one line of 60 characters at most; `notes` its visitors may leave notes as guests) for a new one | `Share[]` (never a token), or 201 `Share` with `url`, the only time the link is shown; 409 for a public preview or past 20 live ones. A link works only while its maker (the person, or the person behind the token, that made it; not the operator's) may still open the project's previews: an account that still signs in, with a role that reveals a preview. Asked again at most every few minutes while it's used; one whose maker may not ends at once ("ada's share link ended: …" in the activity). `visit::tests::a_signed_in_person_gets_into_a_team_preview` |
 | `DELETE /v1/previews/{id}/shares/{share}` | | 204: the link stops at the visitor's next request |
-| `GET`/`POST /v1/previews/{id}/webhooks` | `{path, label?}` (`path` its service's own, no query; `label` what it's for, 60 characters at most) | `GET`: `[{id, path, label, created_by, created_at, revoked, hits, last_at}]` (never the URL); `POST`: 201 with `url` (`<first service's URL><path>?roll_hook=<token>`), shown only here; 409 for a public preview, a fork's, one whose first service is on roll apps, or 20 already |
+| `GET`/`POST /v1/previews/{id}/webhooks` | `{path, label?}` (`path` its first service's own: no query, `#`, `%`, `\`, `.` or `..` segment, nor `/__roll/`; `label` what it's for, 60 characters at most) | `GET`: `[{id, service, path, label, created_by, created_at, revoked, hits, last_at}]` (never the URL); `POST`: 201 with `url` (`<first service's URL><path>?roll_hook=<token>`), shown only here; 409 for a public preview, a fork's, one whose first service is on roll apps, or 20 already |
 | `DELETE /v1/previews/{id}/webhooks/{webhook}` | | 204: it lets nothing in from the next request |
 | `GET`/`PUT /v1/previews/{id}/env` | `{vars: {NAME: value \| null}}` (`null` removes; at most 100, 32 KiB each; a value may be `roll://ENV[/folder]/KEY`) | `{vars}`: the preview's own variables; its services redeploy with them. 403 for a reference to an environment other than the base without the caller's reveal on its folder; 400 for a malformed one or a look-alike |
 | `POST /v1/previews/{id}/approve` | `{head}` (the head looked at) | `Preview`: that head of a fork's pull request on a Git URL service runs (`pull.approved_head`); the next push waits again. 409 when the preview moved on to another head or isn't a fork's pull request. Admin in the permissions catalogue, and no MCP tool: letting outside code run with the project's data is a person's call |

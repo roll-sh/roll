@@ -1484,9 +1484,9 @@ async fn mains_code_runs_on_a_copy_of_the_changes_migrated_data() {
     assert_eq!(broke, ["/orders"], "/orders fails on the change's data only: {:?}", m.pages);
     assert_eq!(e.code.last_report("chg_mc").main_on_change.as_ref(), Some(&m), "the change (and its pull request) get it");
     let views = e.apps.views.lock().clone();
-    let copy = format!("fake://prj_db~{}-m", roll_previews::branch_name(&p.id));
-    assert!(views.iter().any(|(svc, dep, vars)| svc == "web" && dep == "dep_abc123" && vars.iter().any(|(k, v)| k == "DATABASE_URL" && *v == copy)), "main's build, on the copy: {views:?}");
-    assert!(!e.pg.branches.lock().iter().any(|b| b.ends_with("-m")), "the copy goes after");
+    let copy = format!("fake://prj_db~{}-m{}", roll_previews::branch_name(&p.id), roll_previews::label_part(p.build().trim_start_matches("cs_"), 8));
+    assert!(views.iter().any(|(svc, dep, vars)| svc == "web" && dep == "dep_abc123" && vars.iter().any(|(k, v)| k == "DATABASE_URL" && *v == copy) && vars.iter().any(|(k, v)| k == "REDIS_URL" && v.contains("-m"))), "main's build, on copies of every branch: {views:?}");
+    assert!(!e.pg.branches.lock().iter().chain(e.redis.branches.lock().iter()).any(|b| b.contains(&format!("{}-m", roll_previews::branch_name(&p.id)))), "the copies go after");
 
     // On roll's runtime: main's revision runs in the change's preview (`web@main`), started with
     // the copy's variables in place of the preview's branch, and stopped after.
@@ -1503,7 +1503,7 @@ async fn mains_code_runs_on_a_copy_of_the_changes_migrated_data() {
     let main = e.engine.store.rows(Some(&e.project)).unwrap().into_iter().find(|x| x.change_id.is_none()).unwrap();
     let main_rev = e.engine.store.services(&main.id).unwrap().into_iter().find(|x| x.name == "web").and_then(|x| x.revision).unwrap();
     let started = e.apps.started.lock().clone();
-    let copy = format!("fake://prj_db~{}-m", roll_previews::branch_name(&p.id));
+    let copy = format!("fake://prj_db~{}-m{}", roll_previews::branch_name(&p.id), roll_previews::label_part(p.build().trim_start_matches("cs_"), 8));
     assert!(started.iter().any(|(id, svc, rev, vars)| *id == p.id && svc == "web@main" && *rev == main_rev && vars.iter().any(|(k, v)| k == "DATABASE_URL" && *v == copy)), "main's revision on the copy: {started:?}");
     let m = e.engine.store.view(e.engine.store.row(&p.id).unwrap()).unwrap().main_on_change.expect("tried");
     assert_eq!(m.pages.iter().filter(|x| x.broke()).map(|x| x.path.as_str()).collect::<Vec<_>>(), ["/"], "{m:?}");
