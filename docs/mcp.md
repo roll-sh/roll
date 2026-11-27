@@ -1429,6 +1429,9 @@ previews are listed once those products are on.
 | `apps_delete_environment` | Delete an environment with its deploys and domains. | `DELETE /v1/apps/services/{id}/environments/{env}` |
 | `apps_link` | Give a service a roll resource's connection variables (reveal on the resource). | `PUT /v1/apps/services/{id}/links/{kind}/{ref}` |
 | `apps_unlink` | Stop giving a service a linked resource's variables. | `DELETE /v1/apps/services/{id}/links/{kind}/{ref}` |
+| `apps_list_silences` | An environment's alert silences open now. | `GET /v1/apps/services/{id}/environments/{env}/silences` |
+| `apps_silence_alerts` | Quiet an environment's alerts until a time (events kept, resolves still sent). | `POST /v1/apps/services/{id}/environments/{env}/silences` |
+| `apps_end_silence` | End an alert silence early. | `DELETE /v1/apps/services/{id}/environments/{env}/silences/{sid}` |
 | `apps_claim_domain` | Take a hostname another environment holds by proving it with a TXT record. | `POST /v1/apps/services/{id}/environments/{env}/domains/{host}/claim` |
 | `apps_configure_domain` | Write a custom domain's records at the customer's Cloudflare with their token (a `roll://` reference), then check it. | `POST /v1/apps/services/{id}/environments/{env}/domains/{host}/configure` |
 | `apps_verify_domain` | Check a custom domain's DNS now. | `POST /v1/apps/services/{id}/environments/{env}/domains/{host}/verify` |
