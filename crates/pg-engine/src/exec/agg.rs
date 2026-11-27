@@ -54,6 +54,11 @@ pub trait Accum {
     /// An ordered-set aggregate is about to be fed its sorted values, `n` of them not NULL
     /// (it keeps only the ones its result reads).
     fn sorted_count(&mut self, _n: u64) {}
+    /// sum / avg of numeric's exact sum, which takes an argument computed as an exact number
+    /// (`kernel::expr_num`) without its value being made (`feed`).
+    fn sum_num(&mut self) -> Option<&mut super::partial::SumNum> {
+        None
+    }
 }
 
 pub type MakeAccum = fn(&AggInit) -> Result<Box<dyn Accum>>;
@@ -309,6 +314,9 @@ impl Accum for SumNum {
             self.st.merge(o);
         }
         Ok(())
+    }
+    fn sum_num(&mut self) -> Option<&mut super::partial::SumNum> {
+        Some(&mut self.st)
     }
 }
 
@@ -2531,6 +2539,16 @@ pub fn feed(call: &AggCall, st: &mut AggState, row: &[Value], ctx: &ExecCtx) -> 
                     return Ok(());
                 }
                 return st.acc.add(std::slice::from_ref(v), ctx);
+            }
+            // (numeric's sum of a computed number: its exact value added, none made.)
+            if call.def.skip_nulls
+                && let Some(sum) = st.acc.sum_num()
+                && let Some(n) = super::kernel::expr_num(&call.args[0], row)
+            {
+                if let Some((v, scale)) = n {
+                    sum.add_wide(v, scale);
+                }
+                return Ok(());
             }
             let v = eval(&call.args[0], row, ctx)?;
             if call.def.skip_nulls && v.is_null() {

@@ -315,6 +315,28 @@ fn fill(sel: &[u32], out: &mut [Tri], t: Tri) {
     }
 }
 
+/// `VB::Like` over the selected rows of a string column (out of line: `VB::eval`'s other
+/// kernels keep their code). A pattern of literals and `%` only is matched on the stored
+/// bytes as they are (`LikePattern::matches_bytes`: a stored string was valid when written).
+#[inline(never)]
+fn like_rows(c: &Col, b: &ColBatch, pat: &crate::sql::func::string::LikePattern, neg: bool, sel: &[u32], out: &mut [Tri]) {
+    let bytes = pat.by_bytes();
+    for &r in sel {
+        let r = r as usize;
+        out[r] = if c.nulls[r] {
+            Tri::N
+        } else {
+            let s = c.bytes(b, r);
+            let m = if bytes { pat.matches_bytes(s) } else { std::str::from_utf8(s).ok().and_then(|s| pat.matches(s).ok()) };
+            match m {
+                Some(m) if m != neg => Tri::T,
+                Some(_) => Tri::F,
+                None => Tri::Out,
+            }
+        };
+    }
+}
+
 /// Two exact numbers compared at the larger scale (None: past an i128: `K::NumCmp` then
 /// calls its function).
 #[inline]
@@ -720,18 +742,7 @@ impl VB {
                 if !matches!(c.data, ColData::Bytes(_)) {
                     return fill(sel, out, Tri::Out);
                 }
-                for &r in sel {
-                    let r = r as usize;
-                    out[r] = if c.nulls[r] {
-                        Tri::N
-                    } else {
-                        match std::str::from_utf8(c.bytes(b, r)).ok().map(|s| pat.matches(s)) {
-                            Some(Ok(m)) if m != *neg => Tri::T,
-                            Some(Ok(_)) => Tri::F,
-                            _ => Tri::Out,
-                        }
-                    };
-                }
+                like_rows(c, b, pat, *neg, sel, out);
             }
             VB::NumIn { col, items, neg } => {
                 let Some(c) = col_at(b, *col) else { return fill(sel, out, Tri::Out) };

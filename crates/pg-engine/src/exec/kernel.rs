@@ -186,6 +186,37 @@ pub(super) fn num_op(op: NumOp, x: i128, sx: u32, y: i128, sy: u32) -> Option<(i
     })
 }
 
+/// Expression `e` over `row` as an exact number, as `K::num` computes it, without compiling
+/// it (an aggregate's argument, row by row: `agg::feed`): columns and constants
+/// (`small_num`), an integer cast to numeric without a typmod, and numeric + − × (`num_op`),
+/// strict as their calls are. Some(None): NULL; None: anything else, a value past an i128 or
+/// a product past numeric's scale (`eval` computes it then).
+pub fn expr_num(e: &Expr, row: &[Value]) -> Option<Option<(i128, u32)>> {
+    let leaf = |v: &Value| if v.is_null() { Some(None) } else { small_num(v).map(Some) };
+    match e {
+        Expr::Col(i, _) => leaf(row.get(*i)?),
+        Expr::Const(v, _) => leaf(v),
+        Expr::Relabel(e, _) => expr_num(e, row),
+        // (numeric's own value of the integer: scale 0, no typmod to apply.)
+        Expr::Cast(a, DataType::Int2 | DataType::Int4 | DataType::Int8, DataType::Numeric(m), _) if *m < 4 => {
+            match expr_num(a, row)? {
+                None => Some(None),
+                Some((x, 0)) => Some(Some((x, 0))),
+                Some(_) => None,
+            }
+        }
+        Expr::Call(def, args, DataType::Numeric(_)) if args.len() == 2 && def.strict => {
+            let op = crate::sql::func::ops::num_op(def.imp)?;
+            let (a, b) = (expr_num(&args[0], row)?, expr_num(&args[1], row)?);
+            let (Some((x, sx)), Some((y, sy))) = (a, b) else {
+                return Some(None);
+            };
+            num_op(op, x, sx, y, sy).map(Some)
+        }
+        _ => None,
+    }
+}
+
 pub(super) fn small_num(v: &Value) -> Option<(i128, u32)> {
     match v {
         Value::Numeric(n) => match &**n {

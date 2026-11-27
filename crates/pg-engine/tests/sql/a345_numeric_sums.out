@@ -1,0 +1,116 @@
+> CREATE TABLE a345_s (k int, g int, n int, b bigint)
+-- CREATE TABLE
+
+> CREATE TABLE a345_p (k int, x numeric(15,2), y numeric, z numeric(20,10))
+-- CREATE TABLE
+
+> INSERT INTO a345_s SELECT i, i % 3, CASE WHEN i % 7 = 0 THEN NULL ELSE i * 37 - 500 END, i::bigint * 1000000007 FROM generate_series(1, 60) i
+-- INSERT 0 60
+
+> INSERT INTO a345_p SELECT i % 60 + 1, (i * 13 % 1000) / 7.0, CASE WHEN i % 11 = 0 THEN NULL ELSE i * 0.001 - 0.5 END, i / 3.0 FROM generate_series(1, 240) i
+-- INSERT 0 240
+
+> INSERT INTO a345_p VALUES (5, 9999999999999.99, 123456789012345678901234567890.123, 1.5), (6, -9999999999999.99, -98765432109876543210987654321.98765, -2.25)
+-- INSERT 0 2
+
+> ANALYZE a345_s, a345_p
+-- ANALYZE
+
+> SET enable_hashjoin = off
+-- SET
+
+> SET enable_mergejoin = off
+-- SET
+
+> SELECT s.g, sum(p.x * s.n), sum(p.x * p.y), avg(p.x * s.n), sum(p.y + s.n), sum(p.x - p.z), avg(p.z * 3), count(*)
+> FROM a345_s s JOIN a345_p p ON p.k = s.k GROUP BY s.g ORDER BY s.g
+g:int4 | sum:numeric | sum:numeric | avg:numeric | sum:numeric | sum:numeric | avg:numeric | count:int8
+0 | 2780000003163328.92 | 987654321098764444455555444454444390121589.4578435 | 38082191824155.1907 | -98765432109876543210987611977.58165 | -9999999997736.7833333360 | 118.9290123457777778 | 81
+1 | 2537735.29 | -1870.13679 | 37319.636617647059 | 36316.458 | 2239.9800000000 | 121.5000000000000000 | 80
+2 | -3149999997289604.16 | 1234567890123455554444455555444440987652444.30285 | -45652173873762.3791 | 123456789012345678901234606980.057 | 10000000002280.4133333360 | 118.0802469134814815 | 81
+-- SELECT 3
+
+> SELECT s.g, sum(s.b * p.y), sum(p.y * p.y * p.y), sum(p.z * p.z * p.z * p.z), avg(s.b * p.x)
+> FROM a345_s s JOIN a345_p p ON p.k = s.k GROUP BY s.g ORDER BY s.g
+g:int4 | sum:numeric | sum:numeric | sum:numeric | avg:numeric
+0 | -592592596807407407880740741636149387422.67530 | -963418328982521107774371943489811536565512041563538789136889245408469844890415120784233.585441691347125 | 662129330.6179372105925937374518518523279012345680 | -740740743843388133570.38
+1 | -801284005608.988 | -4.391429408 | 676010664.0000000000000000000000000000000000000000 | 1951641763661.4923
+2 | 617283949382716009938271600164058870345.943 | 1881676372353657772546716040595265868817422360610342210934275258408069807576943069432553.295661524 | 648476924.8636152509629640935999999995279012345680 | 617283956927270507750.15
+-- SELECT 3
+
+> SELECT sum(p.y * NULL::int), avg(p.x * s.n) FILTER (WHERE s.n IS NULL), sum(p.x * s.n) FILTER (WHERE false)
+> FROM a345_s s JOIN a345_p p ON p.k = s.k
+sum:numeric | avg:numeric | sum:numeric
+NULL | NULL | NULL
+-- SELECT 1
+
+> SELECT s.g, sum(p.x * v), avg(p.x + v) FROM a345_s s JOIN a345_p p ON p.k = s.k
+> CROSS JOIN (VALUES ('Infinity'::numeric), ('-Infinity'), ('NaN'), (1)) w(v) WHERE s.k <= 6 GROUP BY s.g ORDER BY s.g
+g:int4 | sum:numeric | avg:numeric
+0 | NaN | NaN
+1 | NaN | NaN
+2 | NaN | NaN
+-- SELECT 3
+
+> RESET enable_hashjoin
+-- RESET
+
+> RESET enable_mergejoin
+-- RESET
+
+> CREATE TABLE a345_t (id int, s text, v varchar(20))
+-- CREATE TABLE
+
+> INSERT INTO a345_t SELECT i, (ARRAY['forest green', 'forestry', 'Forest', 'deep forest', 'éclair forest', 'forest é', 'for', NULL])[i % 8 + 1] || CASE WHEN i % 3 = 0 THEN '' ELSE ' ' || i END, 'PROMO' || i % 4 FROM generate_series(1, 400) i
+-- INSERT 0 400
+
+> ANALYZE a345_t
+-- ANALYZE
+
+> SELECT count(*) FILTER (WHERE s LIKE 'forest%'), count(*) FILTER (WHERE s LIKE '%forest'), count(*) FILTER (WHERE s LIKE '%est%re%'),
+>   count(*) FILTER (WHERE s NOT LIKE 'forest%'), count(*) FILTER (WHERE s LIKE 'é%'), count(*) FILTER (WHERE s LIKE '%é%3%')
+> FROM a345_t
+count:int8 | count:int8 | count:int8 | count:int8 | count:int8 | count:int8
+150 | 34 | 50 | 200 | 50 | 25
+-- SELECT 1
+
+> SELECT id, s FROM a345_t WHERE s LIKE 'forest%' AND id < 40 ORDER BY id
+id:int4 | s:text
+1 | forestry 1
+5 | forest é 5
+8 | forest green 8
+9 | forestry
+13 | forest é 13
+16 | forest green 16
+17 | forestry 17
+21 | forest é
+24 | forest green
+25 | forestry 25
+29 | forest é 29
+32 | forest green 32
+33 | forestry
+37 | forest é 37
+-- SELECT 14
+
+> SELECT id, s FROM a345_t WHERE s LIKE '%forest' AND v LIKE 'PROMO%' ORDER BY id LIMIT 10
+id:int4 | s:text
+3 | deep forest
+12 | éclair forest
+27 | deep forest
+36 | éclair forest
+51 | deep forest
+60 | éclair forest
+75 | deep forest
+84 | éclair forest
+99 | deep forest
+108 | éclair forest
+-- SELECT 10
+
+> SELECT count(*) FROM a345_t WHERE s NOT LIKE '%r%es%'
+count:int8
+50
+-- SELECT 1
+
+> DROP TABLE a345_s, a345_p, a345_t
+-- DROP TABLE
+

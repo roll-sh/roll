@@ -1099,22 +1099,23 @@ impl LikeSegs {
         Some(LikeSegs { head, mid, tail })
     }
 
-    fn matches(&self, mut s: &str) -> bool {
+    /// (A string's bytes: each run is compared as bytes, so a valid string's match is the
+    /// same as its characters'.)
+    fn matches(&self, mut b: &[u8]) -> bool {
         if let Some(h) = &self.head {
-            match s.strip_prefix(&**h) {
-                Some(r) => s = r,
+            match b.strip_prefix(h.as_bytes()) {
+                Some(r) => b = r,
                 None => return false,
             }
         }
         if let Some(t) = &self.tail {
-            match s.strip_suffix(&**t) {
-                Some(r) => s = r,
+            match b.strip_suffix(t.as_bytes()) {
+                Some(r) => b = r,
                 None => return false,
             }
         }
         // (A run's bytes are whole characters: where it is found, and after it, are
         // character boundaries.)
-        let mut b = s.as_bytes();
         for m in &self.mid {
             match m.find(b) {
                 Some(at) => b = &b[at + m.needle().len()..],
@@ -1135,7 +1136,7 @@ impl LikePattern {
     /// `st LIKE pattern` (an error where `like_match`'s would be).
     pub fn matches(&self, st: &str) -> Result<bool> {
         if let Some(segs) = &self.1 {
-            return Ok(segs.matches(st));
+            return Ok(segs.matches(st.as_bytes()));
         }
         if st.is_ascii() {
             let b = st.as_bytes();
@@ -1143,6 +1144,19 @@ impl LikePattern {
         }
         let chars: Vec<char> = st.chars().collect();
         like_tokens_match(&self.0, chars.len(), |i| chars[i])
+    }
+
+    /// Whether the pattern is of literals and `%` only: matched by bytes (`matches_bytes`).
+    pub fn by_bytes(&self) -> bool {
+        self.1.is_some()
+    }
+
+    /// `matches` of a string's bytes for a pattern of literals and `%` only (`by_bytes`; a
+    /// valid string's match by bytes is its match by characters): a stored string, not
+    /// checked as UTF-8 first (it was valid when written). None for another pattern.
+    #[inline]
+    pub fn matches_bytes(&self, b: &[u8]) -> Option<bool> {
+        Some(self.1.as_ref()?.matches(b))
     }
 }
 
