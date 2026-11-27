@@ -1513,7 +1513,16 @@ impl Apps {
             row.build.submodule_repos = None;
         }
         row.build.check()?;
+        let was_tcp = row.run.tcp;
         row.run = row.run.merged(o.get("run"))?;
+        // A TCP service's checks connect to its port, another's are HTTP: a switch with checks of
+        // the old kind waits until they're changed.
+        if row.run.tcp != was_tcp {
+            let sid = id.to_string();
+            if let Some(e) = self.db(move |s| s.environments(&sid)).await?.into_iter().find(|e| e.checks.iter().any(|c| c.tcp != row.run.tcp)) {
+                return Err(Error::Conflict(format!("{}'s uptime checks are {} checks: remove them (checks: null) or make them {} checks first", e.name, if was_tcp { "TCP" } else { "HTTP" }, if was_tcp { "HTTP" } else { "TCP" })));
+            }
+        }
         let r = row.clone();
         self.db(move |s| {
             s.update_service(&r)?;

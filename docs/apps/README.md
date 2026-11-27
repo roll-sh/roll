@@ -899,8 +899,9 @@ service"), and a call the issuer gives no token for is `cron.failed` saying so. 
   settings and `roll apps notifications --deliveries ID`. One delivered or failed is sent again
   from its first try with Redeliver (`POST …/deliveries/{did}/redeliver`, `--deliveries ID
   --redeliver DELIVERY`; GitHub's, Stripe's): its `X-Roll-Delivery` id is kept, so a receiver
-  that dedupes on it sees one event, and a page resolved since isn't sent again to PagerDuty or
-  Opsgenie (it would open the incident again).
+  that dedupes on it sees one event. To PagerDuty or Opsgenie, an event of an alert that a later
+  event opened or closed since isn't sent again (409): a trigger would open a resolved incident,
+  a resolve close an open one.
   - **Why this, not roll code's webhooks or chat ops** (decided 2026-11-13; reversible): roll
     code's delivery queue is per repository, and an upload or image service has none; chat ops
     drives roll from chat through installed apps and bound threads, more than an alert needs,
@@ -981,8 +982,8 @@ service"), and a call the issuer gives no token for is `cron.failed` saying so. 
   there", `roll domains verify <host> --cloudflare-token roll://…`): the token is a roll secret
   the caller names by its `roll://` reference, scoped to Zone:DNS:Edit on that one zone, bound to
   them for this call only (roll secrets' `use_once`: refused unless they may reveal it, where an
-  approved `ask` is enough; a sensitive key too, since it goes only to Cloudflare's fixed API
-  host), audited as theirs and never kept, so it stops
+  approved `ask` is enough; never a `sensitive` key, which roll secrets keeps for runtimes:
+  the token is a plain key the person may reveal), audited as theirs (sent only to Cloudflare's API host) and never kept, so it stops
   working the moment they lose the project. The TXT
   challenge is written first where the domain needs one, then its CNAME, unproxied (flattened at
   an apex); a name still holding A or AAAA records (its old host) answers a 409 naming them, and
@@ -1675,7 +1676,9 @@ timezone?}` (the pause schedule's windows; 1–14, the time zone's daylight savi
 year, or until its `until` within one: a nightly backup's load alerts, a weekly maintenance's
 checks (Settings' "every week, in a window", `roll apps silence --every "sat 02:00-sat 04:00"
 --timezone Europe/Berlin --reason backups`). An alert held back in a window is sent as it closes,
-as a snooze's end does. `api.rs::on_call_targets_open_and_close_incidents`,
+as a snooze's end does. A held alert keeps its event until it goes out, past the week events are
+kept, and one environment's held alerts never wait behind another's (one still quiet is looked at
+again within 30 s, at once when a silence is ended early). `api.rs::on_call_targets_open_and_close_incidents`,
 `silences::tests::a_repeating_silence_quiets_only_in_its_windows`.
 
 ## Commit statuses and waiting for CI
@@ -2827,7 +2830,7 @@ DELETE or OPTIONS), `headers` (at most 10) and `body` (at most 4 KiB, with a met
 one) make its request, from roll or from outside: an API's health route that wants a token, a
 GraphQL query. A header value's `${NAME}` is the environment's own variable of that name as its
 live deployment has it, read at each try, so `Authorization: Bearer ${HEALTH_TOKEN}` keeps the
-token out of the settings (and a name the environment doesn't set fails the check, saying which).
+token out of the settings (and a name the environment doesn't set fails the check, saying which). Only a check from roll fills them in: one from outside sends its headers as written, so a value never goes over the internet to wherever a domain's DNS points.
 `Host`, `Content-Length`, connection headers and roll's own `x-roll-*` aren't a check's to set.
 `checks::tests::a_checks_request_takes_a_method_headers_and_a_body`.
 
@@ -2837,7 +2840,7 @@ connection does: an instance is woken and leased, through its own network, past 
 and rate limit, as an HTTP check is past its gates. With `contains`, it reads what the app says
 first (a banner, at most 64 KiB) until that text appears, so a server that accepts but never
 greets fails with "no answer in Ns". A TCP service has only TCP checks, and only a TCP service
-has them. Status, method, headers, body, browser scripts and `from: "public"` are HTTP's.
+has them. Switching `run.tcp` waits until the environments' checks of the old kind are changed or removed (409). Status, method, headers, body, browser scripts and `from: "public"` are HTTP's.
 `tests/api.rs::a_tcp_service_answers_on_its_own_port`.
 
 **From outside** (Cloud Monitoring's checks from six regions, Checkly's, Better Stack's): with

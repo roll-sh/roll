@@ -2930,6 +2930,11 @@ impl Check {
         if (self.headers.is_some() || self.body.is_some() || self.method.is_some()) && self.browser.is_some() {
             return bad("method, headers and body are an HTTP check's (a browser check's script makes its own requests)");
         }
+        // A value's `${NAME}` is the environment's own variable: from roll only, never over the
+        // internet to wherever a domain's DNS points at the time.
+        if self.from.as_deref() == Some("public") && self.headers.as_ref().is_some_and(|h| h.values().any(|v| v.contains("${"))) {
+            return bad("a check from outside sends its headers as written: ${NAME} (the environment's own variable) is a check from roll's");
+        }
         if let Some(h) = &self.headers {
             let token = |n: &str| !n.is_empty() && n.len() <= 64 && n.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b));
             let reserved = |n: &str| { let l = n.to_ascii_lowercase(); matches!(l.as_str(), "host" | "content-length" | "transfer-encoding" | "connection" | "upgrade" | "te" | "trailer") || l.starts_with("x-roll-") };
