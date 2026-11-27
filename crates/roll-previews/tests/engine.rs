@@ -585,6 +585,7 @@ async fn recent_requests_are_replayed_against_mains_preview() {
     let done = done.expect("replayed");
     let got: Vec<(&str, u16, u16, Vec<String>)> = done.requests.iter().map(|q| (q.path.as_str(), q.status, q.main_status, q.removed.clone())).collect();
     assert_eq!(got, vec![("/api/cart", 500, 200, vec![]), ("/api/items", 200, 200, vec!["price".to_string()])], "GETs only, each once, never roll's own paths");
+    assert!(done.requests.iter().all(|q| q.differs()), "a lost field differs as a status does");
     assert_eq!(done.ok, Some(false));
     e.engine.store.update(&p.id, |r| r.trusted = false).unwrap();
     assert!(matches!(e.engine.replay(&p.id, "ada").await, Err(roll_previews::Error::Conflict(_))), "a fork's paths aren't sent to main's");
