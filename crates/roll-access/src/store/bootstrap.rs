@@ -21,6 +21,8 @@
 //!
 //! These grants don't count toward [`super::MAX_WORKLOADS`] or [`super::OWNER_MAX_WORKLOADS`]
 //! (they open nothing, and live as long as their machine): roll secrets caps them per identity.
+//! Nor do their logins' tokens: a machine holds at most [`super::CHAIN_MAX_LOGINS`] live, counted
+//! in the write that mints one (`Store::create_workload`).
 
 use super::{Store, parse_ip_allow};
 use crate::{Error, Result, hash, new_id, new_secret};

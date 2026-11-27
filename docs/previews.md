@@ -336,6 +336,17 @@ state. A pass of the reconciler:
        parent's: a migration that's slow here holds its locks on production as long
        (PlanetScale's deploy requests show this before a merge). The time is the whole job's,
        container start included (live: the change carries it).
+       The locks it held that make others wait are said beside it (PlanetScale's safe migrations,
+       squawk's lint, measured instead of guessed): while the release runs, each Postgres branch's
+       `pg_locks` is read every half second (`Brancher::locks`, as the superuser, the catalog's
+       names only, other sessions' granted locks on user tables), and the strongest per table from
+       `SHARE` up (writes wait; `ACCESS EXCLUSIVE`, reads too) is kept with how long it was seen
+       (`release.locks`, `[{table, mode, ms}]`, 10 at most): "It held ACCESS EXCLUSIVE (reads and
+       writes wait) on `public.orders` for 41 s: on production it would hold them as long", in the
+       comment and on the sheet (`engine.rs::a_releases_blocking_locks_are_said_with_its_time`;
+       `LOCKS_SQL` checked against `postgres:18-alpine` with a session holding `LOCK TABLE …
+       ACCESS EXCLUSIVE`. The live script's release doesn't take one: on ai-server a job's
+       container can't reach the host's Postgres, ufw drops Docker's bridge to the host).
        A preview's data is as old as its branch (days, on a long-lived change), so the release
        can be rehearsed on today's: `POST …/rehearse` (`roll preview rehearse`, the sheet's
        "Rehearse on today's data", 202) asks the next converge, at the change's head, to branch
@@ -1124,10 +1135,17 @@ thirty-fourth review found them in the clear.
       ids, bank and card numbers, secrets) and has none is masked too, with the rule suggested for
       it, so a column production gains never reaches a preview in the clear. The preview's
       activity names them, and `masked_by_default` (`[{resource, column, why}]`) has them for the
-      sheet. `keep` is a rule that leaves a column as it is (the project's word that it isn't
+      sheet. The project's repos are told of each such column once, the first time a preview masks
+      it (production gained it, or the project's first rules), as their `masking` event
+      (webhooks, the event stream, automations; docs/code/http-api.md), so a person who can write
+      its rule hears of it. `keep` is a rule that leaves a column as it is (the project's word that it isn't
       people's data); it's never sent as a mask. A parent with no rules hands over its data as its
-      `data` says (`real`). Columns that can't be read (10 s) leave only the rules, and the
-      activity says so. Masked bases are masked the same way when they're made
+      `data` says (`real`). NoSQL and search parents the same way: a NoSQL table's columns
+      outside its keys and its views' keys (`mask_default()`, a secret's `mask_null()`), and a
+      search index's fields (`email` or `redact` into a text-like field, `remove` otherwise). A
+      NoSQL column masked by default is a mask like any other, so a query that compares it is
+      refused: `keep` it if the app filters on it. Columns that can't be read (10 s) leave only
+      the rules, and the activity says so. Masked bases are masked the same way when they're made
       (`engine.rs::columns_that_look_like_peoples_data_are_masked_by_default`).
     - **Masked once, branched many** (Neon's anonymized branches): a masked Postgres branch comes
       from its parent's masked base, a branch of the parent masked once by the rules (the rewrite
@@ -2133,7 +2151,7 @@ type Preview = {
   created_by: string; created_at: number; updated_at: number;
   baseline: boolean;                  // roll keeps it to compare the project's changes with (github.baseline)
   // Checks against main's preview (types as in apps/dashboard/src/lib/previews-api.ts):
-  release?: { head: string; ms: number; before_ms: number | null } | null;
+  release?: { head: string; ms: number; before_ms: number | null; locks?: { table: string; mode: string; ms: number }[] } | null;
   rehearsal?: { head: string; by: string; at: number; ok: boolean | null; ms: number | null; error: string | null } | null; // its release on today's data (POST …/rehearse)
   masked_by_default?: { resource: string; column: string; why: string }[]; // columns masked as they look like people's data and no rule names them
   reaches?: "open" | "roll";
@@ -2422,7 +2440,7 @@ type Settings = {
     `stories.json` before), and takes 40 stories (with `github.story_runs`, 1 to 4 screenshot
     containers side by side, 40 each: every k-th of the order below, so each takes its share of
     the ones that matter first, merged back in that order; each billed as a browser run, their
-    times added; `STORIES_SHARD`), those the change touched first (Chromatic's
+    times added; `STORIES_SHARD`; a share whose run fails leaves the others' stories standing, and its share of the stories the change touched, what the others neither took nor left as each knows the whole touched set, counts as untaken: the visual review holds on it, `runtime.rs::tests::shards_stories_come_back_in_the_order_they_were_dealt`), those the change touched first (Chromatic's
     TurboSnap: a story whose own file the change changed since the default branch, then one that
     imports a changed file from anywhere, then one beside a file it changed, its component or its
     styles, then the rest in the index's order; a repo's path matches a story's `importPath` and a
@@ -3014,48 +3032,44 @@ variables roll makes from a branch's URL too (it could run on the preview's own 
 change becoming queued wakes its settled preview, a rehearsal shows only at its head, and schema
 overlaps stay within a repo.
 
-1. **Masking that's safe by default, in review** (Tonic, Neosync): a Postgres parent's columns
-   that look like people's data and have no rule are masked too, `keep` says otherwise. Next:
-   the same for NoSQL and search, and the project told when production gains one (not only the
-   preview's activity).
+1. **Masking that's safe by default for NoSQL and search, and the project told of each column
+   masked by default, in review**: once per column, as its repos' `masking` event.
 2. **Main's code on the change's migrated data** (pgroll and Reshape's expand/contract; M): main's
    preview run once against a copy of the change's branch after its release (its pages and
    endpoints), so a migration that breaks the version still running while it deploys is caught on
    real data.
-3. **Locks measured during the release** (PlanetScale's safe migrations, squawk; S–M): the
-   strongest lock each table held and for how long (`pg_locks` sampled while the release runs),
-   beside its time: "held ACCESS EXCLUSIVE on public.orders for 41 s".
-4. **Webhooks into private previews** (Vercel's bypass in a query parameter; S): a per-preview,
+3. **Webhooks into private previews** (Vercel's bypass in a query parameter; S): a per-preview,
    per-path bypass that fits in a Stripe or GitHub webhook URL, never the project-wide secret.
-5. **Snapshots from the team's own Playwright or Cypress suite** (Argos's, Percy's SDKs; M):
+4. **Snapshots from the team's own Playwright or Cypress suite** (Argos's, Percy's SDKs; M):
    a step in their tests sends a page's picture to the preview's visual review.
-6. **Notes to Jira, GitHub Issues or Asana** (Marker.io, Netlify's Drawer; S).
-7. **A failed story shard counted as untaken** (S): its share of the touched stories holds the
-   visual review, as the ones left out do.
-8. **Replaying recorded traffic against the preview and main** (Signadot, Speedscale; L): writes
+5. **Notes to Jira, GitHub Issues or Asana** (Marker.io, Netlify's Drawer; S).
+6. **Replaying recorded traffic against the preview and main** (Signadot, Speedscale; L): writes
    replay safely on branched data; capturing production's requests needs its privacy designed
    first.
-9. **A rehearsal that holds a change back** (a required rule): rehearsed at each head, so the
+7. **A rehearsal that holds a change back** (a required rule): rehearsed at each head, so the
    landing blocker never waits on the queue that would ask for it.
-10. **Older pushes past the last three, started on demand**; **what a note's reviewer saw, from
-    their own browser** (Jam, Marker.io).
-11. **Restore points for search and buckets**: search's once roll search's `reset {from}` is in
-    (its Next 32); buckets need a put-back on roll storage's side.
-12. **Previews for the members thread's next products**: once roll apps' and roll search's routes
+8. **Older pushes past the last three, started on demand**; **what a note's reviewer saw, from
+   their own browser** (Jam, Marker.io).
+9. **Restore points for search and buckets**: search's once roll search's `reset {from}` is in
+   (its Next 32); buckets need a put-back on roll storage's side.
+10. **Previews for the members thread's next products**: once roll apps' and roll search's routes
     become member routes (docs/members.md, v1.1).
-13. **Watches on pg-control**: the data step's Postgres compute start; cheap branches on ext4
+11. **Watches on pg-control**: the data step's Postgres compute start; cheap branches on ext4
     through overlay volumes; recovery to a time seconds old (unowned).
 
 Not to build: more lab checks on the first page (each adds noise to every pull request), or a
 Kubernetes cluster per preview (roll apps' Compose import covers multi-service apps, and a
 cluster would break "costs nothing asleep").
 
+Landed 2026-11-27, early: a failed story shard's share of the touched stories counted as untaken (#1175).
+
 Landed 2026-11-26, midday: restore points for streams (#1112), the TurboSnap test's race under
 load (#1114), the tenth review's fixes (#1119), the visual review holding on stories a change
 touched that its run didn't take (#1120), a visual change refused (#1125), masked bases (#1130), more stories per run (#1135), open
 changes that change the same tables named on each other (#1136), the toolbar's Main (#1138), a release
 rehearsed on today's data (#1140), and roll apps previews' feedback button for team access
-(#1151), a rehearsal when a change is queued to land (#1155), and the eleventh review's fixes (#1160).
+(#1151), a rehearsal when a change is queued to land (#1155), the eleventh review's fixes (#1160), masking that's safe by default (#1166), and the locks a
+release holds, measured (#1169).
 
 Landed 2026-11-26, morning: stories' interaction tests (#1087), what a failed one threw (#1091), both in the other browsers (#1100), the step a failed one stopped at (#1105), and restore points for Redis (#1109).
 

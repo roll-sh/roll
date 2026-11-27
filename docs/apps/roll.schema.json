@@ -39,7 +39,7 @@
         },
         "teardown": {
           "type": "string",
-          "description": "Runs once before a preview environment is deleted (its data cleaned up); at most 10 minutes, never holding the delete."
+          "description": "Runs once before a preview environment is deleted (its data cleaned up); at most 2 minutes, never holding the delete."
         },
         "schedule": {
           "type": "string",

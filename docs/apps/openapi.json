@@ -3082,7 +3082,7 @@
     },
     "/v1/apps/services/{id}/environments/{env}/domains/{host}/claim": {
       "post": {
-        "description": "Answers `{ claimed: false, txt: { name, value } }` (the `_roll-challenge` TXT to add, beside any value there: a token of this environment's own, kept a week) or, once DNS has it, `{ claimed: true, domain: Domain }`: the domain moved here in one write, verified, its certificate asked again, and the holder's `domain.expired` (`reason: claimed`); 400 when no other environment's custom domain holds the name, 409 when it moved meanwhile.",
+        "description": "Answers `{ claimed: false, txt: { name, value } }` (the `_roll-challenge` TXT to add, beside any value there: a token of this environment's own, kept a week) or, once DNS has it, `{ claimed: true, domain: Domain }`: the domain moved here in one write, verified, its certificate asked again, and the holder's `domain.expired` (`reason: claimed`); 400 when no other environment's custom domain holds the name, 409 when it moved meanwhile or the service's or project's domain cap is reached.",
         "operationId": "postServicesIdEnvironmentsEnvDomainsHostClaim",
         "parameters": [
           {
@@ -3112,7 +3112,7 @@
         ],
         "responses": {
           "200": {
-            "description": "`{ claimed: false, txt: { name, value } }` (the `_roll-challenge` TXT to add, beside any value there: a token of this environment's own, kept a week) or, once DNS has it, `{ claimed: true, domain: Domain }`: the domain moved here in one write, verified, its certificate asked again, and the holder's `domain.expired` (`reason: claimed`); 400 when no other environment's custom domain holds the name, 409 when it moved meanwhile"
+            "description": "`{ claimed: false, txt: { name, value } }` (the `_roll-challenge` TXT to add, beside any value there: a token of this environment's own, kept a week) or, once DNS has it, `{ claimed: true, domain: Domain }`: the domain moved here in one write, verified, its certificate asked again, and the holder's `domain.expired` (`reason: claimed`); 400 when no other environment's custom domain holds the name, 409 when it moved meanwhile or the service's or project's domain cap is reached"
           },
           "4XX": {
             "$ref": "#/components/responses/Error"
@@ -3122,7 +3122,7 @@
         "tags": [
           "services"
         ],
-        "x-roll-action": "deploy on production, else write"
+        "x-roll-action": "admin (the holder may be production)"
       }
     },
     "/v1/apps/services/{id}/environments/{env}/domains/{host}/configure": {

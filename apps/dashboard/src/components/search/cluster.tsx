@@ -34,6 +34,7 @@ import { BrowserSearch } from "./browser";
 import { AuditLog } from "./audit-log";
 import { SearchConsole } from "./console";
 import { DiscoverTab } from "./discover";
+import { WatcherTab } from "./watcher";
 import { IndexBrowser } from "./index-browser";
 import { PerformanceTab } from "./performance";
 import { Playground } from "./playground";
@@ -45,7 +46,7 @@ import { SnapshotsTab } from "./snapshots";
 import { CredentialsOnce, SearchStateDot, settingsOf, SettingsFields, stateLabel, useAction, useSearchClusters, type Run } from "./shared";
 import { presentSamples, type SampleId } from "@/lib/search-samples";
 
-const TABS = ["overview", "indices", "discover", "console", "playground", "analyze", "relevance", "inference", "pipelines", "snapshots", "connectors", "branches", "performance", "usage", "settings"] as const;
+const TABS = ["overview", "indices", "discover", "console", "playground", "analyze", "relevance", "inference", "pipelines", "alerts", "snapshots", "connectors", "branches", "performance", "usage", "settings"] as const;
 type Tab = (typeof TABS)[number];
 
 /** Placeholder while the route's params resolve. */
@@ -204,7 +205,7 @@ export function SearchClusterPage({ id }: { id: string }) {
       {/* overflow-x-auto turns overflow-y to auto too: a tab overlapping the hairline (-mb-px)
           would make the bar scroll by a pixel and show a scrollbar on classic-scrollbar systems. */}
       <nav className="mt-6 flex gap-1 overflow-x-auto overflow-y-hidden border-b border-line" aria-label="Cluster sections">
-        {TABS.map((t) => (
+        {TABS.filter((t) => t !== "alerts" || cluster.flavor !== "opensearch").map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
@@ -259,6 +260,7 @@ export function SearchClusterPage({ id }: { id: string }) {
             onOpenConsole={openConsole}
           />
         )}
+        {tab === "alerts" && cluster.flavor !== "opensearch" && <WatcherTab key={cluster.id} cluster={cluster} onOpenConsole={openConsole} />}
         {tab === "snapshots" && (
           <SnapshotsTab
             key={cluster.id}

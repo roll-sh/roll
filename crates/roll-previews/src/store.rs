@@ -290,6 +290,13 @@ CREATE TABLE IF NOT EXISTS budget_alerts (
     at INTEGER NOT NULL,
     PRIMARY KEY (project_id, month, max_usd, level)
 );
+CREATE TABLE IF NOT EXISTS masking_notices (
+    project_id TEXT NOT NULL,
+    resource TEXT NOT NULL,
+    col TEXT NOT NULL,
+    at INTEGER NOT NULL,
+    PRIMARY KEY (project_id, resource, col)
+);
 CREATE TABLE IF NOT EXISTS hooks (
     id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL,
@@ -1192,6 +1199,27 @@ impl Store {
         })
     }
 
+    /// The columns masked by default (`kind:parent`, column) `project` was told of.
+    pub fn noticed_masks(&self, project: &str) -> Result<std::collections::BTreeSet<(String, String)>> {
+        Ok(self.db.read(|c| {
+            let mut q = c.prepare("SELECT resource, col FROM masking_notices WHERE project_id = ?")?;
+            let rows = q.query_map([project], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            rows.collect::<std::result::Result<_, _>>()
+        })?)
+    }
+
+    /// Record that `project` was told of `columns` (after it was: a crash repeats one, never
+    /// loses one).
+    pub fn set_noticed_masks(&self, project: &str, columns: &[crate::MaskedByDefault]) -> Result<()> {
+        let now = self.now_ms()?;
+        self.db.write(|c| {
+            for m in columns {
+                c.execute("INSERT INTO masking_notices (project_id, resource, col, at) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING", params![project, m.resource, m.column, now])?;
+            }
+            Ok::<_, Error>(())
+        })
+    }
+
     /// A service's deploy fingerprint (what it was deployed with: variables, access).
     pub fn service_config(&self, id: &str, name: &str) -> Result<Option<String>> {
         Ok(self.db.read(|c| c.query_row("SELECT config FROM services WHERE preview_id = ? AND name = ?", [id, name], |r| r.get::<_, Option<String>>(0)).optional())?.flatten())
@@ -1381,6 +1409,7 @@ impl Store {
             c.execute("DELETE FROM project_domains WHERE project_id = ?", [project])?;
             c.execute("DELETE FROM git_skips WHERE project_id = ?", [project])?;
             c.execute("DELETE FROM budget_alerts WHERE project_id = ?", [project])?;
+            c.execute("DELETE FROM masking_notices WHERE project_id = ?", [project])?;
             c.execute("DELETE FROM visit_sessions WHERE project_id = ?", [project])?;
             c.execute("DELETE FROM visit_tickets WHERE project_id = ?", [project])?;
             Ok::<_, Error>(())
@@ -2929,7 +2958,8 @@ impl Store {
             c.query_row("SELECT schema_changes, schema_risks, released, release_ms, prev_release_ms FROM previews WHERE id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))).optional()
         })?;
         let Some((changes, risks, head, ms, before)) = raw else { return Ok((None, Vec::new(), None)) };
-        let run = head.zip(ms).map(|(head, ms)| crate::ReleaseRun { head, ms, before_ms: before });
+        let locks = |head: &str| self.runtime_fact::<crate::ReleaseLocksAt>(id, "release_locks").ok().flatten().filter(|l| l.head == head).map(|l| l.locks).unwrap_or_default();
+        let run = head.zip(ms).map(|(head, ms)| crate::ReleaseRun { locks: locks(&head), head, ms, before_ms: before });
         Ok((changes.and_then(|j| serde_json::from_str(&j).ok()), risks.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default(), run))
     }
 

@@ -1111,16 +1111,16 @@ async fn approve(State(a): S, ext: Extensions, Path(id): Path<String>, body: axu
     let decided = blocking(a.clone(), move |a| a.decide(&id, true, &by, None)).await?;
     a.changed(&decided);
     // Checked again now it's decided: a gate added meanwhile means it was approved once.
-    if let Some((grant, rule, until)) = remembered.filter(|_| decided.state == "approved" && a.policy().gates(&decided).is_empty()) {
+    if let Some((grant, rules, until)) = remembered.filter(|_| decided.state == "approved" && a.policy().gates(&decided).is_empty()) {
         let apr = decided.id.clone();
-        blocking(a.clone(), move |a| a.store.remember(&grant, &rule, until, &apr)).await?;
+        blocking(a.clone(), move |a| a.store.remember(&grant, &rules, until, &apr)).await?;
     }
     Ok(Json(json!(decided)))
 }
 
 /// What approving `id` with `remember` would also allow: the grant, the rule (the request's action
 /// on its one resource) and until when (`None`: for good). Checked before anything is decided.
-async fn remembered(a: &Arc<Access>, id: &str, remember: Option<&str>) -> crate::Result<Option<(String, roll_auth::scope::Rule, Option<i64>)>> {
+async fn remembered(a: &Arc<Access>, id: &str, remember: Option<&str>) -> crate::Result<Option<(String, Vec<roll_auth::scope::Rule>, Option<i64>)>> {
     let hours = |h: i64| Some(Some(code_sql::now_ms() + h * 3_600_000));
     let until: Option<Option<i64>> = match remember {
         None | Some("once") => None,
@@ -1168,22 +1168,43 @@ async fn remembered(a: &Arc<Access>, id: &str, remember: Option<&str>) -> crate:
     if let Some(p) = roll_auth::scope::Scope(vec![rule.clone()]).problems().first() {
         return Err(Error::BadRequest(format!("this request can't be remembered ({p}): approve it once")));
     }
+    let g = found.grant_id.clone();
+    let grant = blocking(a.clone(), move |a| a.store.get(&g)).await?;
+    // A lend's approval (a secret a route writes as the caller) covers the route's own action too
+    // when that asked as well: remembered with it, so the next call doesn't ask about half of it.
+    let mut rules = vec![rule];
+    if let Some(own) = own_rule(a, &found, &grant) {
+        // What roll's policy asks several people for (or asks again) is approved once each time,
+        // the route's own rule too.
+        if a.policy().asks_again(&own) {
+            return Err(Error::BadRequest(format!("roll's policy asks again for {} on {}: approve it once", own.actions.keys().map(|a| a.as_str()).collect::<Vec<_>>().join(", "), own.product)));
+        }
+        rules.push(own);
+    }
     // A rule a product caps (roll secrets' `max_token_days`) is remembered for that long at most:
     // for good becomes until then.
-    let one = roll_auth::scope::Scope(vec![rule.clone()]);
-    let until = match a.within_cap(&one, until) {
+    let all = roll_auth::scope::Scope(rules.clone());
+    let until = match a.within_cap(&all, until) {
         capped @ Some(_) => capped,
         None => {
-            // For good is a change to the token: it meets the policy as it is now, with the rule.
-            let g = found.grant_id.clone();
-            let grant = blocking(a.clone(), move |a| a.store.get(&g)).await?;
-            let mut rules = grant.rules.clone();
-            rules.0.push(rule.clone());
-            a.meets_policy(&rules, grant.expires_at)?;
+            // For good is a change to the token: it meets the policy as it is now, with the rules.
+            let mut with = grant.rules.clone();
+            with.0.extend(rules.iter().cloned());
+            a.meets_policy(&with, grant.expires_at)?;
             None
         }
     };
-    Ok(Some((found.grant_id, rule, until)))
+    Ok(Some((found.grant_id, rules, until)))
+}
+
+/// The route's own rule a lend's approval covers too, as the gate recorded it when it asked (never
+/// worked out again from the token as it is now): none when the token allows it already, its
+/// temporary rules included.
+fn own_rule(a: &Access, found: &crate::store::Approval, grant: &crate::store::Grant) -> Option<roll_auth::scope::Rule> {
+    let own = found.also.clone()?;
+    let policy = a.policy_now();
+    let now = grant.effective_rules(code_sql::now_ms(), |r| policy.asks_again(r));
+    (!now.covers(&roll_auth::scope::Scope(vec![own.clone()]))).then_some(own)
 }
 
 /// The rule an approval is about: its action on its one resource (or the product's every resource
@@ -1266,8 +1287,14 @@ async fn request_access(State(a): S, ext: Extensions, Json(r): Json<AccessReques
         }
         return Err(Error::Forbidden("this token was made never to ask a person: its owner changes its rules instead".into()));
     }
-    if request_duration(&r.for_).is_none() {
+    let Some(lasts) = request_duration(&r.for_) else {
         return Err(Error::BadRequest("for: 15m, 1h, 8h or 1d".into()));
+    };
+    // A folder's rule reaches every folder under it: one at a secrets environment's root (or with
+    // no folder) is all of it, or every environment's, so it lasts 8 hours at most, as a
+    // remembered approval of one does.
+    if r.product == "secrets" && r.path.as_deref().is_none_or(|p| p == "/") && lasts > 8 * 3_600_000 {
+        return Err(Error::BadRequest("this reaches every folder of the environment (name a folder in path for longer): for 15m, 1h or 8h".into()));
     }
     // Tokens and approvals are changed by people, never asked for: a token that could manage
     // tokens could widen itself past any approval.
@@ -1323,6 +1350,7 @@ async fn request_access(State(a): S, ext: Extensions, Json(r): Json<AccessReques
             scope_path: path.as_deref(),
             scope_index: index.as_deref(),
             wait_ms,
+            also: None,
         })
     })
     .await?;

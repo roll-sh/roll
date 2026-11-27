@@ -1384,16 +1384,15 @@ filtered listing; and the auth matrix's probe of storage's nested route (also br
 
 Ranked; the top item is in progress. Updated as work lands (the watchdog reads this list).
 
-Working order (2026-11-26, evening): the fourth sweep's last fixes first (item 4: #1096 in its
-re-check after round 2, #1084 in its second round; each a HIGH or MED on main), then the work
-in review (item 11's RAG phase 2, #1068 in its third round; item 30's read-only ES|QL, #1111 in
-its second; item 1's derived-key follow-ups, #1127 in its second; item 31's re-embed route,
-#1132, landing), then item 32 (resetting a branch from a copy for previews' restore points; in
-progress), item 33's second slice (saved searches, surrounding documents, a field's chart; in
-progress), item 15's offline evaluation of applications and variants (in review; judgment lists from clicks next), item 14 (semantic search on OpenSearch-flavor
-clusters; resumes after #1111), item 16 (cold start at size; resumes after #1127), OpenSearch's
-`_plugins/_sm` (item 9; in progress), item 5's OpenSearch links (designed), and chat token
-metering (item 11's follow-up; in progress).
+Working order (2026-11-27, night): the fourth sweep's last fixes first (item 4: #1096 in its
+third round, #1084 in its second; each a HIGH or MED on main), then the work in review (item
+11's RAG phase 2, #1068 in its fourth round; item 30's read-only ES|QL, #1111 in its second;
+item 1's derived-key follow-ups and OpenSearch links, #1127 in its second; item 32's branch
+reset, #1149, in review), then item 33's second slice (saved searches, surrounding documents, a
+field's chart; in its gate), item 15's judgment lists (kept as indices, built from clicks, and
+OpenSearch's Search Relevance Workbench; in progress), item 14 (semantic search on
+OpenSearch-flavor clusters; resumes after #1111), item 16 (cold start at size; resumes after
+#1127) and item 18 (logs end to end: OTLP intake, alerting; the top open item).
 Landed 2026-11-26: the PIT and caches fix (#1021), a cluster's admin password kept in roll
 secrets and the MCP sweep's person flow (#1097), Terraform for synonyms sets and rulesets
 (#1071), inference endpoints from a secret answered redacted and limited to `api_key` services
@@ -1403,6 +1402,10 @@ per-server politeness and parallel fetches (#1075), A/B tests on search applicat
 (#1090 and #1126, item 15's first two slices), names authorized as they resolve in lookups (#1059), an API
 key's `encoded` that works at the shared address (#1115), and a Discover screen (#1133, item
 33's first slice).
+Landed 2026-11-26 (night) and 27: re-embedding an index's own documents (#1132, item 31); 95%
+intervals on A/B results and promoting from the Relevance tab (#1145); offline relevance
+evaluation (#1159), of a search application and its variants too (#1163); chat and completion
+tokens metered per cluster (#1141); OpenSearch's snapshot management policies (#1153, item 9).
 
 Landed 2026-11-17: per-person cluster caps (#162: 50 clusters and 2 always-on per person,
 rolld flags, 409 past a cap, counted in the write's own transaction); the search playground (#159); the Relevance tab for
@@ -1767,8 +1770,9 @@ deterministic (#396).
    difference from the baseline, and promoting from the Relevance tab
    (#1145). Offline evaluation landed in #1159 (`…/indices/{index}/evaluate`,
    `roll search index evaluate` for CI, `search_evaluate`, the Relevance tab's Evaluate); a
-   search application's template and its experiment's variants scored the same way are in review
-   (`feature/search-evaluate-apps`). Next: judgment lists kept as indices and built from clicks. Left: the `roll_` rule types and
+   search application's template and its experiment's variants scored the same way landed in
+   #1163. Next: judgment lists kept as indices, built from clicks, and OpenSearch's Search
+   Relevance Workbench (in progress). Left: the `roll_` rule types and
    dynamic re-ranking.
 16. **Cold start at size**: the 19.8 ms cold start is a 50k-document index from local cache;
    nothing measures the first query and p99 on a node with an empty cache for 1, 10 and 50 GB

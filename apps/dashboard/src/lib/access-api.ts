@@ -318,6 +318,8 @@ export function gateProgress(a: Pick<Approval, "gates" | "approved_by">): string
 export type ApprovalState = "pending" | "approved" | "denied" | "expired" | "used";
 
 export interface Approval {
+  /** The route's own rule a lend's approval covers too (its own action asked as well): approving covers it, remembering keeps it. */
+  also?: Rule | null;
   id: string;
   grant_id: string;
   grant_name: string;

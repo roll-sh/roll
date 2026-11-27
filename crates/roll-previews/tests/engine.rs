@@ -415,6 +415,20 @@ async fn the_toolbars_main_is_the_same_page_on_mains_preview() {
     assert_eq!(e.engine.main_page_url(&chg.id, "web", "//evil.example/").await.unwrap(), None, "only a path on main's host");
 }
 
+/// The locks a release holds that make others wait (PlanetScale's safe migrations) are said with
+/// its time: the strongest per table, sampled while it runs; ordinary writes' locks aren't.
+#[tokio::test]
+async fn a_releases_blocking_locks_are_said_with_its_time() {
+    let e = env(json!({ "enabled": true, "release": { "image": "node:22", "run": "npm run migrate" } }));
+    *e.pg.locks.lock() = vec![("public.orders".into(), "AccessExclusiveLock".into()), ("public.users".into(), "RowExclusiveLock".into()), ("public.orders".into(), "RowExclusiveLock".into())];
+    e.code.open(change("chg_lk", 1));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_lk").unwrap().unwrap();
+    let release = e.engine.store.preview(&p.id).unwrap().release.expect("its release ran");
+    assert_eq!(release.locks.iter().map(|l| (l.table.as_str(), l.mode.as_str())).collect::<Vec<_>>(), [("public.orders", "AccessExclusiveLock")]);
+    assert!(release.locks[0].ms >= 500);
+}
+
 /// A release rehearsed on today's data (PlanetScale's deploy requests): at the next converge,
 /// the release runs once more on a fresh branch of the parent, masked by the rules before it
 /// runs, and the branch goes after; how it went is on the preview.
@@ -1686,14 +1700,28 @@ async fn columns_that_look_like_peoples_data_are_masked_by_default() {
         e.engine.pass().await.unwrap();
         let p = e.engine.store.row_by_change("chg_md").unwrap().unwrap();
         let masked = e.pg.masks.lock().last().map(|(_, c)| c.clone()).unwrap_or_default();
-        (masked, e.engine.store.preview(&p.id).unwrap().masked_by_default)
+        // The project is told once: a second preview with the same column says nothing more.
+        e.code.open(change("chg_md2", 2));
+        e.engine.pass().await.unwrap();
+        e.engine.pass().await.unwrap();
+        let told: Vec<String> = e.code.maskings.lock().iter().flat_map(|(_, n)| n.columns.iter().map(|m| format!("{}/{}", m.resource, m.column))).collect();
+        (masked, e.engine.store.preview(&p.id).unwrap().masked_by_default, told)
     };
-    let (masked, by_default) = masks_of(json!({ "public.users.email": "email" })).await;
+    let (masked, by_default, told) = masks_of(json!({ "public.users.email": "email" })).await;
     assert_eq!(masked.keys().cloned().collect::<Vec<_>>(), ["public.users.email", "public.users.phone"], "the phone too, orders' total not");
     assert_eq!(by_default.iter().map(|m| m.column.as_str()).collect::<Vec<_>>(), ["public.users.phone"], "said on the preview");
-    let (masked, by_default) = masks_of(json!({ "public.users.email": "email", "public.users.phone": "keep" })).await;
+    assert_eq!(told, ["postgres:prj_db/public.users.phone"], "and to the project's repos, once");
+    let (masked, by_default, told) = masks_of(json!({ "public.users.email": "email", "public.users.phone": "keep" })).await;
     assert_eq!(masked.keys().cloned().collect::<Vec<_>>(), ["public.users.email"], "keep leaves it, and isn't sent as a mask");
-    assert!(by_default.is_empty());
+    assert!(by_default.is_empty() && told.is_empty());
+    // A search cluster's fields the same way: an index's `user.email` that has no rule.
+    let e = env_with_search(json!({ "enabled": true, "masking": { "search:srch_logs": { "logs.ip": "redact" } } }));
+    e.search.columns.lock().insert("srch_logs".into(), Ok(vec![col("logs.ip", "keyword"), col("logs.user.email", "keyword"), col("logs.status", "long")]));
+    e.code.open(change("chg_ms", 1));
+    e.engine.pass().await.unwrap();
+    let masked = e.search.masks.lock().last().map(|(_, c)| c.clone()).unwrap_or_default();
+    assert_eq!(masked.get("logs.user.email").map(String::as_str), Some("email"), "the search field too: {masked:?}");
+    assert!(!masked.contains_key("logs.status"));
 }
 
 /// Masked branches come from one masked base per parent and rules (Neon's anonymized branches):

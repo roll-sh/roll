@@ -41,6 +41,7 @@ pub struct FakeCode {
     pub teardowns: Mutex<Vec<(String, String)>>,
     /// Budget alerts sent: (the repos told, the alert).
     pub budgets: Mutex<Vec<(Vec<String>, roll_previews::ports::BudgetAlert)>>,
+    pub maskings: Mutex<Vec<(Vec<String>, roll_previews::ports::MaskingNotice)>>,
 }
 
 impl FakeCode {
@@ -128,6 +129,10 @@ impl Source for FakeCode {
         self.budgets.lock().push((repos.to_vec(), alert.clone()));
         Ok(())
     }
+    async fn masking(&self, repos: &[String], notice: &roll_previews::ports::MaskingNotice) -> anyhow::Result<()> {
+        self.maskings.lock().push((repos.to_vec(), notice.clone()));
+        Ok(())
+    }
     fn nudges(&self) -> Option<tokio::sync::broadcast::Receiver<()>> {
         None
     }
@@ -164,6 +169,8 @@ pub struct FakeData {
     pub from: Mutex<HashMap<String, String>>,
     /// How many masks to fail next.
     pub fail_masks: AtomicUsize,
+    /// The locks other sessions hold on its branches' tables (as `pg_locks` would say).
+    pub locks: Mutex<Vec<(String, String)>>,
 }
 
 impl FakeData {
@@ -186,6 +193,7 @@ impl FakeData {
             renames_on_reset: AtomicUsize::new(0),
             from: Mutex::new(HashMap::new()),
             fail_masks: AtomicUsize::new(0),
+            locks: Mutex::new(Vec::new()),
         })
     }
 }
@@ -235,6 +243,9 @@ impl Brancher for FakeData {
     }
     fn branches_from_base(&self) -> bool {
         self.kind == Kind::Postgres
+    }
+    async fn locks(&self, _parent: &str, _branch: &str) -> anyhow::Result<Vec<(String, String)>> {
+        Ok(self.locks.lock().clone())
     }
     async fn branch_from(&self, parent: &str, from: &str, name: &str, _mode: Mode) -> anyhow::Result<Option<Branched>> {
         anyhow::ensure!(self.branches.lock().contains(from), "no branch {from} to branch from");

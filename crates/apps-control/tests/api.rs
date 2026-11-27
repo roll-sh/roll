@@ -3513,7 +3513,7 @@ async fn a_held_domain_is_claimed_by_proving_its_dns() {
 }
 
 /// A custom domain's records written at the customer's Cloudflare (Vercel's own DNS): the token a
-/// `roll://` reference the caller may reveal, read as them for the call; then it's verified.
+/// `roll://` reference the caller may reveal, read once as them (nothing bound); then it's verified.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_domains_records_are_written_with_the_customers_token() {
     struct Cf;
@@ -3525,12 +3525,9 @@ async fn a_domains_records_are_written_with_the_customers_token() {
         async fn resolve(&self, _: &str, _: &str, _: &str) -> anyhow::Result<Vec<apps_control::integrations::SecretVar>> {
             Ok(vec![])
         }
-        async fn bind_ref(&self, _: apps_control::integrations::Asker<'_>, _: &str, _: &str, reference: &str) -> anyhow::Result<String> {
-            anyhow::ensure!(reference == "roll://production/CF_TOKEN", "you may not reveal {reference}");
-            Ok("usr_ada".into())
-        }
-        async fn resolve_as(&self, _: &str, _: &str, _: &str, reference: &str, maker: &str) -> anyhow::Result<String> {
-            assert_eq!((reference, maker), ("roll://production/CF_TOKEN", "usr_ada"));
+        // Read once as the caller: nothing bound, no maker kept.
+        async fn use_once(&self, _: apps_control::integrations::Asker<'_>, _: &str, env: &str, _: &str, reference: &str, _: &str) -> anyhow::Result<String> {
+            anyhow::ensure!((env, reference) == ("production", "roll://production/CF_TOKEN"), "you may not reveal {reference}");
             Ok("cf-secret".into())
         }
     }
@@ -8385,6 +8382,8 @@ struct GitHost {
     login: Mutex<Option<(String, String)>>,
     /// Pull requests' heads (`refs/pull/N/head`), by number.
     pulls: Mutex<std::collections::BTreeMap<u64, code_git::ObjectId>>,
+    /// Tags (lightweight), by name.
+    tags: Mutex<std::collections::BTreeMap<String, code_git::ObjectId>>,
 }
 
 /// roll previews' side of a Git URL's pushes: what it was handed.
@@ -8461,6 +8460,7 @@ impl code_git::GitBackend for GitHost {
         let mut refs: Vec<code_git::Ref> = self.main.lock().iter().map(|oid| code_git::Ref { name: "refs/heads/main".into(), oid: *oid, peeled: None }).collect();
         refs.extend(self.branches.lock().iter().map(|(b, oid)| code_git::Ref { name: format!("refs/heads/{b}"), oid: *oid, peeled: None }));
         refs.extend(self.pulls.lock().iter().map(|(n, oid)| code_git::Ref { name: format!("refs/pull/{n}/head"), oid: *oid, peeled: None }));
+        refs.extend(self.tags.lock().iter().map(|(t, oid)| code_git::Ref { name: format!("refs/tags/{t}"), oid: *oid, peeled: None }));
         Ok(code_git::RefList { head: Some("refs/heads/main".into()), refs })
     }
     async fn read_object(&self, _repo: &str, oid: &code_git::ObjectId) -> code_git::GitResult<Option<code_git::Object>> {
@@ -8725,7 +8725,7 @@ async fn a_public_git_url_deploys_its_branch_and_follows_new_commits() {
         }
     };
     let (st, v) = answer(raw("application/json", Some("push"), json!({ "ref": "refs/tags/v1", "after": third }).to_string())).await;
-    assert!(st == StatusCode::OK && v["ignored"].as_str().unwrap().contains("not a branch"), "{v}");
+    assert!(st == StatusCode::OK && v["ignored"].as_str().unwrap().contains("no environment deploys it"), "{v}");
     let (st, v) = answer(raw("application/json", Some("issues"), json!({ "action": "opened" }).to_string())).await;
     assert!(st == StatusCode::OK && v["ignored"].as_str().unwrap().contains("isn't a push"), "{v}");
     let (st, v) = answer(raw("application/json", None, json!({ "star": true }).to_string())).await;
@@ -8800,6 +8800,27 @@ async fn a_public_git_url_deploys_its_branch_and_follows_new_commits() {
     let skip = git.commit_saying(&[pkg, ("server.js", "require('http') // v6"), ("README.md", "even more docs"), toml, ("api.js", "y")], "wip [skip ci]");
     let (_, v) = call(&w.api, "POST", &hook, Some(json!({ "ref": "refs/heads/main", "after": skip, "head_commit": { "message": "ship it" } }))).await;
     assert!(v["ignored"].as_str().unwrap().contains("[skip ci]"), "{v}");
+    // Tags by pattern (Cloud Build's tag triggers): a tag there when it's set never deploys; a new
+    // one deploys where the repository says it points, once, whatever the body names.
+    git.tags.lock().insert("v1".into(), code.parse().unwrap());
+    let staging = format!("/v1/apps/services/{id}/environments/staging");
+    assert_eq!(call(&w.api, "PUT", &staging, Some(json!({"deploy_tags": "*"}))).await.0, StatusCode::BAD_REQUEST);
+    let (st, e) = call(&w.api, "PUT", &staging, Some(json!({"deploy_tags": "v*"}))).await;
+    assert_eq!((st, e["deploy_tags"].as_str()), (StatusCode::OK, Some("v*")), "{e}");
+    let tag = |t: &str| json!({ "ref": format!("refs/tags/{t}"), "after": first });
+    let (_, v) = call(&w.api, "POST", &hook, Some(tag("v1"))).await;
+    assert!(v["ignored"].as_str().unwrap().contains("already"), "{v}");
+    git.tags.lock().insert("v2".into(), api.parse().unwrap());
+    let (st, d) = call(&w.api, "POST", &hook, Some(tag("v2"))).await;
+    assert_eq!((st, d["environment"].as_str(), d["revision"].as_str(), d["message"].as_str()), (StatusCode::ACCEPTED, Some("staging"), Some(api.as_str()), Some("tag v2")), "{d}");
+    settled(&w, &id, "staging", d["id"].as_str().unwrap()).await;
+    assert!(call(&w.api, "POST", &hook, Some(tag("v2"))).await.1["ignored"].as_str().unwrap().contains("already"), "once");
+    // A second tag on the same commit (an rc, then the release) is a deploy of its own.
+    git.tags.lock().insert("v2-final".into(), api.parse().unwrap());
+    let (st, d2) = call(&w.api, "POST", &hook, Some(tag("v2-final"))).await;
+    assert!(st == StatusCode::ACCEPTED && d2["id"] != d["id"] && d2["message"] == "tag v2-final", "{d2}");
+    settled(&w, &id, "staging", d2["id"].as_str().unwrap()).await;
+    assert_eq!(call(&w.api, "POST", &hook, Some(tag("release-1"))).await.1["ignored"].as_str().map(|s| s.contains("no environment deploys it")), Some(true));
     // Pull requests go to previews with their number, title and page: a same-repository one on
     // its branch, a fork's as `pull/N` once `refs/pull/N/head` agrees, a close with no commit.
     let pr = |action: &str, n: u64, branch: &str, sha: &str, head_repo: u64| {

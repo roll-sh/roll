@@ -289,6 +289,12 @@ pub struct Skipped {
     /// the visual review holds on them ([`UNTAKEN_STORIES`]).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub touched_stories: u32,
+    /// A run's own count of the stories the change touched in all, and of those it took (every
+    /// share of a sharded run knows the whole touched set): what a failed share leaves out.
+    #[serde(skip)]
+    pub touched_total: u32,
+    #[serde(skip)]
+    pub touched_taken: u32,
     /// The change's stories were chosen by its files alone: its Storybook served no module graph
     /// (`preview-stats.json`, `--stats-json`; a `storybook dev` server has none), so a story that
     /// imports a changed file from elsewhere may be among those left.
@@ -1639,6 +1645,30 @@ pub struct ReleaseRun {
     pub ms: i64,
     /// The run before's (the push before, or a reset's).
     pub before_ms: Option<i64>,
+    /// The locks it held that make others wait (`SHARE` and stronger: writes wait; `ACCESS
+    /// EXCLUSIVE`: reads too), the strongest per table and how long it was seen, as sampled every
+    /// half second while it ran: what it holds on production as long (PlanetScale's safe
+    /// migrations). At most 10.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub locks: Vec<ReleaseLock>,
+}
+
+/// A table a release held a lock on that made others wait.
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+pub struct ReleaseLock {
+    /// `schema.table` (`postgres:<ref>`'s, when the preview has several).
+    pub table: String,
+    /// Postgres's name for it: `AccessExclusiveLock`, `ExclusiveLock`, `ShareRowExclusiveLock`, `ShareLock`.
+    pub mode: String,
+    /// How long it was seen held (to the half second the samples are apart).
+    pub ms: i64,
+}
+
+/// [`ReleaseRun::locks`] at a head (`release_locks`, a runtime fact).
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+pub struct ReleaseLocksAt {
+    pub head: String,
+    pub locks: Vec<ReleaseLock>,
 }
 
 /// What of a parent's data a branch hands the preview's code: said wherever the branch is, so
