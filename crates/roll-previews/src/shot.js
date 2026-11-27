@@ -666,7 +666,10 @@ const stories = async (sessionId) => {
   const left = listed.filter((e) => !out.some((o) => o.id === e.id)).map((e) => e.id);
   // Of those, the ones the change touched: unreviewed, so the visual review holds on them.
   const touched_left = left.filter((id) => touched.has(id)).length;
-  fs.writeFileSync(process.env.OUT + ".stories.json", JSON.stringify({ stories: out, left: left.length, first_left: left.slice(0, 10), touched_left, by_files: CHANGED.length > 0 && !stats }));
+  // And how many the change touched in all, and of those this run took: a share that failed is
+  // what the others neither took nor left.
+  const touched_taken = out.filter((o) => touched.has(o.id)).length;
+  fs.writeFileSync(process.env.OUT + ".stories.json", JSON.stringify({ stories: out, left: left.length, first_left: left.slice(0, 10), touched_left, touched_total: touched.size, touched_taken, by_files: CHANGED.length > 0 && !stats }));
 };
 // A run an agent asked for ($TRY: {path, steps}; roll previews' `…/try`): the page loaded, its
 // steps taken as a page state's are (10 at most, 15 s), then its picture to $OUT, and to
