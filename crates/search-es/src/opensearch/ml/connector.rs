@@ -55,7 +55,8 @@ const POST: &[&str] = &[
 pub const MAX_CALLS: usize = 32;
 
 /// A connector's calls a minute when nothing lowers it (the `custom` service's default), per
-/// model, through the inference client's limiter.
+/// connector (its key: every model on it shares the limit), through the inference client's
+/// limiter.
 const PER_MINUTE: i64 = 10_000;
 
 /// `ConnectorAction.ActionType`.
@@ -241,7 +242,9 @@ pub fn moves_credential(before: &Value, after: &Value) -> bool {
     if tb != ta {
         return true;
     }
-    let named: Vec<String> = ta.iter().flat_map(|(u, h)| [u.to_json(), h.to_json()]).flat_map(|t| t.split("${parameters.").skip(1).filter_map(|r| r.split_once('}').map(|(n, _)| n.to_string())).collect::<Vec<_>>()).collect();
+    // The templates as written: the URL, and each header's value.
+    let texts: Vec<&str> = ta.iter().flat_map(|(u, h)| u.as_str().into_iter().chain(h.as_object().into_iter().flat_map(|m| m.values().filter_map(Value::as_str)))).collect();
+    let named: Vec<String> = texts.iter().flat_map(|t| t.split("${parameters.").skip(1).filter_map(|r| r.split_once('}').map(|(n, _)| n.to_string()))).collect();
     let param = |v: &Value, n: &str| v.get("parameters").and_then(|p| p.get(n)).cloned();
     named.iter().any(|n| param(before, n) != param(after, n))
 }
@@ -388,8 +391,8 @@ pub struct Answer {
     pub embeddings: Option<Vec<Vec<f32>>>,
 }
 
-/// Calls the connector's predict action for `model` (rate limits and errors name it).
-pub async fn predict(cluster: &Cluster, model: &str, c: &Connector, input: Input<'_>, timeout: Duration) -> EsResult<Vec<Answer>> {
+/// Calls the connector's predict action (rate limits and errors name the connector).
+pub async fn predict(cluster: &Cluster, c: &Connector, input: Input<'_>, timeout: Duration) -> EsResult<Vec<Answer>> {
     // Bedrock's pre-process takes one text a call.
     let calls: Vec<Map> = match input {
         Input::Parameters(p) => vec![p.clone()],
@@ -433,7 +436,8 @@ pub async fn predict(cluster: &Cluster, model: &str, c: &Connector, input: Input
             headers.extend(sign(&url, &bytes, &c.parameters, &cred)?);
         }
         let estimate = (c.post.is_none()).then(|| crate::xpack::inference::tokens::estimate(&String::from_utf8_lossy(&bytes)));
-        let call = Call { inference_id: model, url, headers, body: bytes, timeout, retry: http::retry_server_errors, per_minute: Some(PER_MINUTE) };
+        // The rate is the connector's (its key's), however many models call it.
+        let call = Call { inference_id: &c.secret_id, url, headers, body: bytes, timeout, retry: http::retry_server_errors, per_minute: Some(PER_MINUTE) };
         let answer = http::post(cluster, &call).await?;
         if !answer.ok() {
             let text = String::from_utf8_lossy(&answer.body[..answer.body.len().min(1024)]).into_owned();

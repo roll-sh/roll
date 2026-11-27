@@ -825,7 +825,9 @@ pub async fn embed(cluster: &Cluster, id: &str, texts: &[String], p: Option<&Pri
     drop(st);
     // A remote model calls a provider on the owner's key: as OpenSearch's plugins call the
     // predict action as the user, the caller needs it (roll's own E5 needs nothing more).
-    if let (Runner::Remote(_), Some(p)) = (&run, p) {
+    // Nobody to check (a caller-less path): a remote model doesn't run on the owner's key.
+    if let Runner::Remote(_) = &run {
+        let Some(p) = p else { return Err(iae(format!("model [{id}] calls a provider, which roll does only for a caller it can check"))) };
         crate::xpack::security::check_cluster_action_of(cluster, p, PREDICT)?;
     }
     let timeout = Duration::from_secs(30);
@@ -841,7 +843,7 @@ pub async fn embed(cluster: &Cluster, id: &str, texts: &[String], p: Option<&Pri
         }
         Runner::Remote(c) => {
             ensure_deployed(cluster, id, &m, crate::time::now_millis()).await?;
-            let answers = connector::predict(cluster, id, &c, connector::Input::Texts(texts), timeout).await?;
+            let answers = connector::predict(cluster, &c, connector::Input::Texts(texts), timeout).await?;
             let mut out = Vec::new();
             for a in answers {
                 out.extend(a.embeddings.ok_or_else(|| iae(format!("model [{id}]'s connector has no embedding post_process_function, so its answer holds no embeddings")))?);
@@ -887,7 +889,7 @@ async fn predict(ctx: &Ctx<'_>) -> EsResult<Reply> {
             ensure_deployed(ctx.cluster, &id, &m, ctx.now_ms).await?;
             // A remote model reads `parameters`; `text_docs` alone fills none of them.
             let params = body.get("parameters").and_then(Value::as_object).cloned().unwrap_or_default();
-            let answers = connector::predict(ctx.cluster, &id, &c, connector::Input::Parameters(&params), Duration::from_secs(30)).await?;
+            let answers = connector::predict(ctx.cluster, &c, connector::Input::Parameters(&params), Duration::from_secs(30)).await?;
             answers
                 .into_iter()
                 .map(|a| {

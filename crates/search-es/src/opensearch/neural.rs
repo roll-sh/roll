@@ -7,9 +7,10 @@
 //! The embedding runs on the coordinator before any shard ([`rewrite_request`]), once per
 //! distinct (model, text) of the request, as the searcher (a model group's access mode applies).
 //! A search pipeline's `neural_query_enricher` fills a missing `model_id` first ([`fill_models`]).
-//! A browser key embeds only with the models its `limits.inference_endpoints` name, within its
-//! `max_inference` texts and rate limits. Not served in phase 1: `query_image` (multimodal) and
-//! the `semantic` field.
+//! A remote model runs only for a caller holding `cluster:admin/opensearch/ml/predict`, which a
+//! browser key never does: a browser key embeds only with roll's E5, and only when its
+//! `limits.inference_endpoints` name it, within its `max_inference` texts and rate limits. Not
+//! served in phase 1: `query_image` (multimodal) and the `semantic` field.
 
 use crate::error::{EsError, EsResult};
 use crate::json::{Map, Value};
@@ -223,6 +224,10 @@ pub async fn rewrite_request(ctx: &Ctx<'_>, req: &mut crate::search::SearchReque
         return Ok(());
     }
     admit(ctx, &wanted)?;
+    // One request embeds at most `MAX_TEXTS` texts, over all its `neural` queries.
+    if wanted.len() > crate::opensearch::ml::MAX_TEXTS {
+        return Err(EsError::illegal_argument(format!("[{}] neural texts in one request, more than roll's [{}]", wanted.len(), crate::opensearch::ml::MAX_TEXTS)));
+    }
     let p = crate::xpack::security::principal(ctx);
     let mut vectors: Vec<((String, String), Vec<f32>)> = Vec::new();
     for (model, text) in wanted {

@@ -69,6 +69,12 @@ pub fn collect(model_id: &str, field_map: &[(String, String)], d: &mut IngestDoc
 /// Embeds what the pipeline's `text_embedding` processors read and writes the vectors to
 /// their targets: one call per processor for all its texts.
 pub async fn settle(cluster: &Cluster, d: &mut IngestDoc) -> EsResult<()> {
+    // One document embeds at most `MAX_TEXTS` texts, over all its processors, before any call.
+    let n: usize = d.embeddings.iter().flat_map(|p| p.items.iter()).map(|(_, _, t)| t.len()).sum();
+    if n > super::MAX_TEXTS {
+        d.embeddings.clear();
+        return Err(EsError::illegal_argument(format!("[{n}] texts to embed in one document, more than roll's [{}]", super::MAX_TEXTS)));
+    }
     for p in std::mem::take(&mut d.embeddings) {
         let texts: Vec<String> = p.items.iter().flat_map(|(_, _, t)| t.iter().cloned()).collect();
         let vectors = super::embed(cluster, &p.model_id, &texts, d.user.as_deref(), false).await?;

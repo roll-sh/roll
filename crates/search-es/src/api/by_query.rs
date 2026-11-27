@@ -1165,16 +1165,16 @@ fn count_failure(s: &mut Status, proceed: bool, index: &str, id: &str, e: &EsErr
     Flow::Stop
 }
 
-/// `wait_for_active_shards` of a by-query write: the shard's bulk request waits for its
-/// copies. The failure names the request (`BulkShardRequest [[index][shard]] containing
-/// [<item>]`, the item as `IndexRequest` / `DeleteRequest.toString` print it: `source` is
-/// `None` for a delete) and, as a bulk item's cause, carries no index metadata.
 /// The by-query request's caller, as its writes' writer: a pipeline's `text_embedding` runs its
 /// model as them (model access), and `set_security_user` records them.
 fn writer(ctx: &Ctx) -> Option<std::sync::Arc<crate::xpack::security::Principal>> {
     Some(std::sync::Arc::new(crate::xpack::security::principal(ctx).clone()))
 }
 
+/// `wait_for_active_shards` of a by-query write: the shard's bulk request waits for its
+/// copies. The failure names the request (`BulkShardRequest [[index][shard]] containing
+/// [<item>]`, the item as `IndexRequest` / `DeleteRequest.toString` print it: `source` is
+/// `None` for a delete) and, as a bulk item's cause, carries no index metadata.
 async fn check_copies(ctx: &Ctx<'_>, idx: &IndexMeta, id: &str, routing: Option<&str>, source: Option<&[u8]>) -> EsResult<()> {
     let shard = crate::meta::routing::shard_for(idx, id, routing);
     let item = match source {
