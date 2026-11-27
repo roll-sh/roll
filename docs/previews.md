@@ -3221,14 +3221,16 @@ In progress, each in a pull request of its own:
    clusters the project trusts, which every member role reads; the columns are read as the
    operator behind that filter). Teardown is previews' own: the operator changes the password,
    then deletes. A branch that fails, a 503 included, fails the converge with the product's
-   error and is tried again on the backoff. Not yet: the preview's branch is in no project.
+   error and is tried again on the backoff. By design, the preview's branch is in no project:
    roll search homes only a person's branches (`Control::branched`), so through `/v1/search` it's
-   a 404 to every member, a developer too. Members reach it only through previews' own routes,
-   by role. Homing it waits on two changes outside previews:
-   - roll-access must find a cluster's project from its home and not only from canvases.
-     Previews' copies can't go on the canvas: the next preview would branch them.
-   - search's project-delete hooks must skip previews' branches. Previews deletes them only
-     after the project is gone.
+   a 404 to every member, and members reach it through previews' own routes, by role (its
+   credentials are `reveal`). Homing it would take two changes outside previews:
+   - roll-access finding a cluster's project from its home, not only from canvases (previews'
+     copies can't go on the canvas, or the next preview would branch them);
+   - search's project-delete hooks skipping previews' branches (previews deletes them only after
+     the project is gone).
+
+   That isn't worth it while previews' own routes cover what members need.
 
    roll apps follows once its routes become member routes.
 8. **Watches on pg-control**: the data step's Postgres compute start; cheap branches on ext4
