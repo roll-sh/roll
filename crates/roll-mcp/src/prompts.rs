@@ -430,7 +430,10 @@ const PROMPTS: &[Prompt] = &[
                  tell me why. If it's awaiting_approval, a writer has to approve-run its head first: say so and stop. Once \
                  it's ready: previews_get for what it branched and its schema_changes (flag a dropped table or column, \
                  or a NOT NULL column with no default on a table that has rows; previews_tables on a table it changed, if you \
-                 have it, for what the rows hold now); previews_errors for errors in it; \
+                 have it, for what the rows hold now) and its main_on_change (main's code on a copy of the change's \
+                 migrated data, the version that still serves while it deploys: call out a page whose status is a 5xx \
+                 or 0 there but below 500 in main_status, and suggest expanding the schema first and contracting it in a \
+                 later change); previews_errors for errors in it; \
                  previews_routes for routes slower than in main's preview (call out a p95 more than 20% slower, and \
                  open one of its slow traces with previews_get_trace if you have it); previews_screenshot with diff=base \
                  on the pages the change touches, and look at each image; previews_fetch on those pages (and the API \
