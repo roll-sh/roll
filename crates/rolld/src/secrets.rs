@@ -271,7 +271,7 @@ impl RollSts {
 }
 
 impl roll_secrets::aws::Sts for RollSts {
-    fn assume(&self, role_arn: &str, external_id: &str, session_name: &str, seconds: i32) -> Result<roll_secrets::aws::Session, String> {
+    fn assume(&self, role_arn: &str, external_id: &str, session_name: &str, seconds: i32, policy: Option<&str>) -> Result<roll_secrets::aws::Session, String> {
         // The store calls from its blocking threads (and nothing else may): wait for STS there.
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
@@ -282,6 +282,7 @@ impl roll_secrets::aws::Sts for RollSts {
                     .external_id(external_id)
                     .role_session_name(session_name)
                     .duration_seconds(seconds)
+                    .set_policy(policy.map(String::from))
                     .send()
                     .await
                     .map_err(|e| aws_sdk_sts::error::ProvideErrorMetadata::code(&e).unwrap_or("no answer").to_string())?;
@@ -298,7 +299,7 @@ impl roll_secrets::aws::Sts for RollSts {
 
     /// AssumeRoleWithWebIdentity isn't signed: AWS trusts roll's issuer's token, not a credential
     /// of roll's (none is needed on the server).
-    fn assume_web_identity(&self, role_arn: &str, token: &str, session_name: &str, seconds: i32) -> Result<roll_secrets::aws::Session, String> {
+    fn assume_web_identity(&self, role_arn: &str, token: &str, session_name: &str, seconds: i32, policy: Option<&str>) -> Result<roll_secrets::aws::Session, String> {
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
                 let conf = self.conf.get_or_init(|| aws_config::load_defaults(aws_config::BehaviorVersion::latest())).await;
@@ -317,6 +318,7 @@ impl roll_secrets::aws::Sts for RollSts {
                     .web_identity_token(token)
                     .role_session_name(session_name)
                     .duration_seconds(seconds)
+                    .set_policy(policy.map(String::from))
                     .send()
                     .await
                     .map_err(|e| sts_failure(&e))?;
@@ -369,7 +371,7 @@ impl RollSts {
     /// global: us-east-1).
     fn iam(&self, role_arn: &str, external_id: &str) -> Result<aws_sdk_iam::Client, String> {
         use roll_secrets::aws::Sts;
-        let s = self.assume(role_arn, external_id, "roll-iam", 900)?;
+        let s = self.assume(role_arn, external_id, "roll-iam", 900, None)?;
         let conf = Self::wait(async { Ok(self.conf.get_or_init(|| aws_config::load_defaults(aws_config::BehaviorVersion::latest())).await.clone()) })?;
         let creds = aws_sdk_iam::config::Credentials::new(s.access_key_id.expose(), s.secret_access_key.expose(), Some(s.session_token.expose().to_string()), None, "roll-secrets");
         Ok(aws_sdk_iam::Client::from_conf(aws_sdk_iam::config::Builder::from(&conf).credentials_provider(creds).region(aws_sdk_iam::config::Region::new("us-east-1")).build()))
@@ -3574,11 +3576,11 @@ mod tests {
             .credentials_provider(aws_sdk_sts::config::SharedCredentialsProvider::new(aws_sdk_sts::config::Credentials::new("AKIATEST", "secret", None, None, "test")))
             .build();
         let sts = super::RollSts::new(Some(conf));
-        let s = sts.assume("arn:aws:iam::123456789012:role/roll", "roll-secrets:prj_a", "roll-app-web", 1200).unwrap();
+        let s = sts.assume("arn:aws:iam::123456789012:role/roll", "roll-secrets:prj_a", "roll-app-web", 1200, Some(r#"{"Version":"2012-10-17"}"#)).unwrap();
         assert_eq!((s.access_key_id.expose(), s.session_token.expose(), s.expires_at), ("ASIATEST", "token", 1_893_456_000_000));
         let form = seen.lock().unwrap()[0].clone();
-        assert!(form.contains("RoleSessionName=roll-app-web") && form.contains("DurationSeconds=1200"), "{form}");
-        assert_eq!(sts.assume("arn:aws:iam::123456789012:role/roll", "roll-secrets:prj_other", "x", 900).err().as_deref(), Some("AccessDenied"));
+        assert!(form.contains("RoleSessionName=roll-app-web") && form.contains("DurationSeconds=1200") && form.contains("Policy=%7B%22Version%22%3A%222012-10-17%22%7D"), "{form}");
+        assert_eq!(sts.assume("arn:aws:iam::123456789012:role/roll", "roll-secrets:prj_other", "x", 900, None).err().as_deref(), Some("AccessDenied"));
     }
 
     /// A KMS that decrypts one ciphertext, and only with roll secrets' encryption context.

@@ -5209,6 +5209,133 @@
         "x-roll-action": "admin (a shell runs anything with the environment's variables, as agents' shells)"
       }
     },
+    "/v1/apps/services/{id}/environments/{env}/silences": {
+      "get": {
+        "description": "Answers `Silence[]` open now: `{ id, until /* ms */, alerts: string[] /* none: all */, reason, created_at }`.",
+        "operationId": "getServicesIdEnvironmentsEnvSilences",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`Silence[]` open now: `{ id, until /* ms */, alerts: string[] /* none: all */, reason, created_at }`"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "List silences",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "read"
+      },
+      "post": {
+        "description": "Answers 201 `Silence`: until then those events reach no notification target (on-call included); they're still kept, and an `alert.resolved` always goes out; at most 20 open (409); `audit.silence`.",
+        "operationId": "postServicesIdEnvironmentsEnvSilences",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "description": "`{ until: number /* ms, in the next 30 days */, reason: string /* 1–200 */, alerts?: (\"check.down\" | \"heartbeat.missed\" | \"crash_loop\" | \"alert.memory\" | \"alert.cpu\" | \"alert.metric\" | \"alert.errors\" | \"alert.latency\" | \"alert.capacity\" | \"alert.log\" | \"alert.route\" | \"alert.slo\" | \"alert.anomaly\" | \"cron.failed\" | \"deploy.failed\")[] /* none: all */ }`"
+        },
+        "responses": {
+          "201": {
+            "description": "201 `Silence`: until then those events reach no notification target (on-call included); they're still kept, and an `alert.resolved` always goes out; at most 20 open (409); `audit.silence`"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Create silence",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "deploy on production, else write"
+      }
+    },
+    "/v1/apps/services/{id}/environments/{env}/silences/{sid}": {
+      "delete": {
+        "description": "Answers 204: alerts go out again from now.",
+        "operationId": "deleteServicesIdEnvironmentsEnvSilencesSid",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "sid",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "204: alerts go out again from now"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Delete silence",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "write"
+      }
+    },
     "/v1/apps/services/{id}/environments/{env}/sleep": {
       "post": {
         "description": "Answers `Environment`.",

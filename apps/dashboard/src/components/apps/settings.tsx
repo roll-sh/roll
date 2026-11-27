@@ -15,6 +15,7 @@ import { SidecarsPanel } from "./sidecars";
 import { ChecksPanel } from "./checks";
 import { HeartbeatsPanel } from "./heartbeats";
 import { SplitPanel } from "./split";
+import { Silences } from "./silences";
 
 
 /** The form's values, as text (empty: the default). */
@@ -1032,6 +1033,7 @@ export function SettingsTab({
               </Field>
             )}
           </Grid>
+          {env && <Silences service={service.id} env={env.name} runner={runner} />}
         </Section>
 
         {web && (
