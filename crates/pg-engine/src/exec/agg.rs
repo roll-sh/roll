@@ -2405,6 +2405,13 @@ pub fn hash_distinct(a: &AggCall) -> bool {
 /// takes j's state.
 /// (With DISTINCT / ORDER BY only the presorted aggregate's state is there to share.)
 pub fn shared_states(aggs: &[AggCall], presorted: Option<usize>) -> Vec<Option<usize>> {
+    shared_with(aggs, |j| presorted == Some(j))
+}
+
+/// `shared_states` where the aggregates `presorted` says are fed presorted (several: a sorted
+/// stream's, `pg_presorted`).
+#[inline(always)]
+fn shared_with(aggs: &[AggCall], presorted: impl Fn(usize) -> bool) -> Vec<Option<usize>> {
     let mut share: Vec<Option<usize>> = vec![None; aggs.len()];
     for i in 0..aggs.len() {
         let a = &aggs[i];
@@ -2416,7 +2423,7 @@ pub fn shared_states(aggs: &[AggCall], presorted: Option<usize>) -> Vec<Option<u
         share[i] = (0..i).find(|&j| {
             let b = &aggs[j];
             share[j].is_none()
-                && (!sorted || presorted == Some(j))
+                && (!sorted || presorted(j))
                 && b.distinct == a.distinct
                 && format!("{:?}", b.order_by) == format!("{:?}", a.order_by)
                 && b.user.as_ref().is_some_and(|ub| {
@@ -4244,7 +4251,7 @@ impl AggNode {
         let input = self.input.take().unwrap();
         let types = crate::sql::paths::analyzejoins::col_types(plan_in);
         let input = super::nodes::sort_all(input, &keys, types, self.sort_held(), ctx)?;
-        let share = shared_states(&self.aggs, if presorted.len() == 1 { presorted.first().copied() } else { None });
+        let share = shared_with(&self.aggs, |j| presorted.contains(&j));
         // (No groups: the one group open from the start, so empty input still makes its row.)
         let open = if n == 0 { Some((Vec::new(), self.stream_states(&[], &presorted, ctx)?)) } else { None };
         Ok(Some(Stream { input, parts: false, share, presorted, key: Vec::new(), open, pending: None, ready: Default::default(), done: false }))
