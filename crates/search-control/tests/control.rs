@@ -6215,6 +6215,117 @@ async fn the_embedding_pool_takes_turns_caps_queues_and_meters_cpu() {
     let _ = std::fs::remove_dir_all(&model);
 }
 
+/// Health alerts: a rule fires and recovers once each, delivered to a signed webhook and a chat
+/// channel of the maker's own install (never another's), each change once whatever the passes;
+/// and with private addresses refused, a webhook at one is refused when made by address and
+/// never reached when made by a name that resolves to one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn health_alerts_fire_and_recover_once_each() {
+    use hmac::Mac;
+    use reqwest::Method;
+    use std::sync::Mutex;
+    type Seen = Arc<Mutex<Vec<(axum::http::HeaderMap, String)>>>;
+    async fn receiver() -> (u16, Seen) {
+        let seen: Seen = Arc::default();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let keep = seen.clone();
+        let router = axum::Router::new().fallback(move |headers: axum::http::HeaderMap, body: String| {
+            keep.lock().unwrap().push((headers, body));
+            async { "ok" }
+        });
+        tokio::spawn(async move { axum::serve(listener, router).await });
+        (port, seen)
+    }
+    #[derive(Default)]
+    struct Chat(Mutex<Vec<(String, String)>>);
+    #[async_trait::async_trait]
+    impl search_control::alerts::AlertChat for Chat {
+        async fn may_use(&self, _made_by: &str, platform: &str, install: &str) -> Result<bool, String> {
+            Ok(platform == "slack" && install == "chi_mine")
+        }
+        async fn post(&self, _install: &str, channel: &str, text: &str) -> Result<(), String> {
+            self.0.lock().unwrap().push((channel.to_string(), text.to_string()));
+            Ok(())
+        }
+    }
+    let (port, seen) = receiver().await;
+    let e = env_with(|c| c.alerts_allow_private = true).await;
+    let chat = Arc::new(Chat::default());
+    e.control.set_alert_chat(chat.clone());
+    let c = e.post("/v1/search/clusters", json!({"name": "watched"})).await;
+    let id = c["id"].as_str().unwrap().to_string();
+    let (u, p) = creds(&c);
+    let secret = "a-receivers-secret-0123";
+    let webhook = json!({"type": "webhook", "url": format!("http://127.0.0.1:{port}/hooks/roll"), "secret": secret});
+    let rule = json!({"name": "traffic stopped", "metric": "request_rate", "op": "<", "threshold": 0.05, "window": "2m", "targets": [webhook, {"type": "slack", "install": "chi_mine", "channel": "C1"}]});
+    // Someone else's install, a copied URL as a chat target, a bad window: refused.
+    let theirs = json!({"metric": "request_rate", "op": "<", "threshold": 1, "window": "2m", "targets": [{"type": "slack", "install": "chi_theirs", "channel": "C1"}]});
+    for bad in [theirs, json!({"metric": "p99_ms", "op": ">", "threshold": 1, "window": "5s", "targets": [webhook.clone()]}), json!({"metric": "p99_ms", "op": ">", "threshold": 1, "window": "5m", "targets": [{"type": "slack", "url": "https://hooks.slack.com/x"}]})] {
+        let (s, v) = e.call(Method::POST, &format!("/v1/search/clusters/{id}/alerts"), Some(bad)).await;
+        assert_eq!(s, 400, "{v}");
+    }
+    let (s, r) = e.call(Method::POST, &format!("/v1/search/clusters/{id}/alerts"), Some(rule)).await;
+    assert_eq!(s, 201, "{r}");
+    assert_eq!((&r["state"], &r["targets"][0]["url"]), (&json!("ok"), &json!(format!("http://127.0.0.1:{port}/…"))), "the path and secret never shown: {r}");
+    assert!(!r.to_string().contains(secret));
+    let rule_id = r["id"].as_str().unwrap().to_string();
+
+    // No requests yet: it fires, once.
+    e.control.sample().await.unwrap();
+    e.control.sample().await.unwrap();
+    let state = |v: &Value| v["rules"][0]["state"].as_str().unwrap_or_default().to_string();
+    assert_eq!(state(&e.get(&format!("/v1/search/clusters/{id}/alerts")).await), "firing");
+    // Traffic again: it recovers, once.
+    for _ in 0..10 {
+        assert_eq!(e.es(&u, &p, Method::GET, "/", None).await.0, 200);
+    }
+    e.control.sample().await.unwrap();
+    e.control.sample().await.unwrap();
+    assert_eq!(state(&e.get(&format!("/v1/search/clusters/{id}/alerts")).await), "ok");
+
+    let got = seen.lock().unwrap().clone();
+    let events: Vec<String> = got.iter().map(|(_, b)| serde_json::from_str::<Value>(b).unwrap()["event"].as_str().unwrap().to_string()).collect();
+    assert_eq!(events, ["search.alert.firing", "search.alert.resolved"]);
+    for (h, body) in &got {
+        let ts = h["x-roll-timestamp"].to_str().unwrap();
+        let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(format!("{ts}.{body}").as_bytes());
+        assert_eq!(h["x-roll-signature-256"].to_str().unwrap(), format!("sha256={}", hex::encode(mac.finalize().into_bytes())));
+        let v: Value = serde_json::from_str(body).unwrap();
+        assert_eq!((&v["cluster"]["id"], &v["rule"]["id"], &v["rule"]["window"]), (&json!(id), &json!(rule_id), &json!("2m")), "{v}");
+    }
+    let posted = chat.0.lock().unwrap().clone();
+    assert_eq!(posted.len(), 2, "{posted:?}");
+    assert!(posted[0].1.contains("firing") && posted[1].1.contains("resolved") && posted.iter().all(|(ch, t)| ch == "C1" && t.contains("watched")), "{posted:?}");
+    let d = e.get(&format!("/v1/search/clusters/{id}/alerts/{rule_id}/deliveries")).await;
+    assert_eq!(d["deliveries"].as_array().unwrap().iter().filter(|d| d["status"] == "delivered").count(), 4, "{d}");
+
+    // Private addresses refused: by address when made, by name when sent (nothing arrives).
+    let (port, seen) = receiver().await;
+    let e = env().await;
+    let c = e.post("/v1/search/clusters", json!({"name": "guarded"})).await;
+    let id = c["id"].as_str().unwrap().to_string();
+    let hook = |host: &str| json!({"metric": "month_cost_usd", "op": ">", "threshold": 1000, "targets": [{"type": "webhook", "url": format!("http://{host}:{port}/"), "secret": secret}]});
+    let (s, v) = e.call(Method::POST, &format!("/v1/search/clusters/{id}/alerts"), Some(hook("127.0.0.1"))).await;
+    assert!(s == 400 && v.to_string().contains("private"), "{s} {v}");
+    let (s, r) = e.call(Method::POST, &format!("/v1/search/clusters/{id}/alerts"), Some(hook("localhost"))).await;
+    assert_eq!(s, 201, "{r}");
+    let rule_id = r["id"].as_str().unwrap();
+    let (s, v) = e.call(Method::POST, &format!("/v1/search/clusters/{id}/alerts/{rule_id}/test"), Some(json!({}))).await;
+    assert_eq!(s, 202, "{v}");
+    let mut tried = Value::Null;
+    for _ in 0..100 {
+        tried = e.get(&format!("/v1/search/clusters/{id}/alerts/{rule_id}/deliveries")).await["deliveries"][0].clone();
+        if tried["attempts"].as_i64().unwrap_or(0) >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(tried["attempts"] == 1 && tried["status"] == "pending" && tried["last_error"].is_string(), "{tried}");
+    assert!(seen.lock().unwrap().is_empty(), "a private address was reached");
+}
+
 /// Provider tokens are metered per cluster (not priced: the provider bills them): an answered
 /// completion's and a streamed one's, the provider's own figures, reach the cluster's usage on
 /// the next metering pass, the first's although the cluster unloaded in between, each once.

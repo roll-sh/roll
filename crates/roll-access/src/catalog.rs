@@ -1440,6 +1440,14 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/search/clusters/{id}/remotes", "search", R, one(PG, "cluster")),
     row("PUT", "/v1/search/clusters/{id}/remotes/{alias}", "search", ADMIN, one(PG, "cluster")).lends(Lend::Each(search_remote)),
     row("DELETE", "/v1/search/clusters/{id}/remotes/{alias}", "search", ADMIN, one(PG, "cluster")),
+    // Health alerts (search-control's `alerts`): a rule makes roll send what it observes of the
+    // cluster to a URL or a channel (write); their secrets are never answered.
+    row("GET", "/v1/search/clusters/{id}/alerts", "search", R, one(PG, "cluster")),
+    row("POST", "/v1/search/clusters/{id}/alerts", "search", W, one(PG, "cluster")),
+    row("GET", "/v1/search/clusters/{id}/alerts/{rule}", "search", R, one(PG, "cluster")),
+    row("DELETE", "/v1/search/clusters/{id}/alerts/{rule}", "search", D, one(PG, "cluster")),
+    row("POST", "/v1/search/clusters/{id}/alerts/{rule}/test", "search", W, one(PG, "cluster")),
+    row("GET", "/v1/search/clusters/{id}/alerts/{rule}/deliveries", "search", R, one(PG, "cluster")),
     // Inference endpoints keyed by a project's secret: making one changes the cluster as the
     // console does; roll secrets checks `reveal` on the secret itself, as the caller.
     row("GET", "/v1/search/clusters/{id}/inference/secrets", "search", R, one(PG, "cluster")),
