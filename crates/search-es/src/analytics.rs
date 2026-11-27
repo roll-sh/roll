@@ -60,6 +60,9 @@ pub const MAX_RANK: u32 = 20;
 pub const MAX_CELLS: usize = 32;
 /// Bytes of a document id a cell takes (a longer id isn't counted).
 pub const MAX_DOC_ID: usize = 512;
+/// What a cell costs beyond its document id, against [`MAX_PENDING_BYTES`] (its position,
+/// counts and the map's own share).
+const CELL_BYTES: usize = 48;
 
 /// What one query saw in a bucket.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -116,11 +119,13 @@ impl QueryStats {
 pub struct TopQueries {
     cap: usize,
     map: HashMap<Box<str>, QueryStats>,
+    /// The query the last [`TopQueries::slot`] evicted, for the bucket to forget its cells.
+    evicted: Option<Box<str>>,
 }
 
 impl TopQueries {
     pub fn new(cap: usize) -> TopQueries {
-        TopQueries { cap, map: HashMap::new() }
+        TopQueries { cap, map: HashMap::new(), evicted: None }
     }
 
     pub fn len(&self) -> usize {
@@ -153,6 +158,7 @@ impl TopQueries {
                     self.map.remove(&k);
                     *bytes = bytes.saturating_sub(k.len());
                     fresh.searches = searches;
+                    self.evicted = Some(k);
                 }
             }
             *bytes += q.len();
@@ -242,7 +248,7 @@ impl Shown {
             if cells.len() >= MAX_CELLS || *bytes >= MAX_PENDING_BYTES {
                 return None;
             }
-            *bytes += doc.len();
+            *bytes += doc.len() + CELL_BYTES;
             cells.insert(k.clone(), Cell::default());
         }
         cells.get_mut(&k)
@@ -280,7 +286,33 @@ impl Shown {
     }
 
     fn text_bytes(&self) -> usize {
-        self.map.iter().map(|(q, cells)| q.len() + cells.keys().map(|(d, _)| d.len()).sum::<usize>()).sum()
+        self.map.iter().map(|(q, cells)| q.len() + cells.keys().map(|(d, _)| d.len() + CELL_BYTES).sum::<usize>()).sum()
+    }
+
+    /// Forgets query `q`'s cells (its top entry was evicted), giving their bytes back.
+    fn forget(&mut self, q: &str, bytes: &mut usize) {
+        if let Some(cells) = self.map.remove(q) {
+            let freed = q.len() + cells.keys().map(|(d, _)| d.len() + CELL_BYTES).sum::<usize>();
+            *bytes = bytes.saturating_sub(freed);
+        }
+    }
+
+    /// A click on `doc` for `q`: counted only on a cell a search showed it in (at `position`, or
+    /// where it was shown most), and never past that cell's impressions, so a click alone makes
+    /// no cell and can't raise a rating past what was shown. Whether it counted.
+    fn click(&mut self, q: &str, doc: &str, position: Option<u32>) -> bool {
+        let Some(cells) = self.map.get_mut(q) else { return false };
+        let key = match position {
+            Some(p) => cells.keys().find(|(d, x)| &**d == doc && *x == p).cloned(),
+            None => cells.iter().filter(|((d, _), c)| &**d == doc && c.impressions > 0).max_by_key(|((_, p), c)| (c.impressions, std::cmp::Reverse(*p))).map(|(k, _)| k.clone()),
+        };
+        match key.and_then(|k| cells.get_mut(&k)) {
+            Some(c) if c.clicks < c.impressions => {
+                c.clicks += 1;
+                true
+            }
+            _ => false,
+        }
     }
 }
 
@@ -310,6 +342,10 @@ pub fn coec<'a>(cells: impl IntoIterator<Item = (&'a str, &'a str, u32, u64, u64
             e.0 += i;
             e.1 += c;
         }
+    }
+    // A cell's clicks never count past what it showed.
+    for (i, c) in summed.values_mut() {
+        *c = (*c).min(*i);
     }
     let mut at = vec![(0u64, 0u64); max_rank as usize + 1];
     for ((_, _, p), (i, c)) in &summed {
@@ -399,6 +435,7 @@ impl Bucket {
                 s.no_hits += 1;
             }
         }
+        self.forget_evicted(bytes);
         if hits == 0
             && let Some(s) = self.empty.slot(q, bytes)
         {
@@ -406,22 +443,29 @@ impl Bucket {
         }
     }
 
-    fn click(&mut self, q: &str, doc: Option<&str>, position: Option<u32>, bytes: &mut usize) {
+    /// A click on a result of a search for `q`: in the totals and the query's row, and on its
+    /// document's cell when this hour showed it there ([`Shown::click`]). Whether the cell counted it.
+    fn click(&mut self, q: &str, doc: Option<&str>, position: Option<u32>, bytes: &mut usize) -> bool {
         self.clicks += 1;
-        if let Some(s) = self.top.slot(q, bytes) {
-            s.clicks += 1;
-            if let Some(p) = position {
-                s.position_sum += u64::from(p);
-                s.positioned += 1;
+        let listed = match self.top.slot(q, bytes) {
+            Some(s) => {
+                s.clicks += 1;
+                if let Some(p) = position {
+                    s.position_sum += u64::from(p);
+                    s.positioned += 1;
+                }
+                true
             }
-        } else {
-            return;
-        }
-        let Some(doc) = doc else { return };
-        // Without a position: where this hour showed the document most.
-        let at = position.or_else(|| self.shown.map.get(q)?.iter().filter(|((d, _), _)| &**d == doc).max_by_key(|((_, p), c)| (c.impressions, std::cmp::Reverse(*p))).map(|((_, p), _)| *p));
-        if let Some(c) = at.and_then(|p| self.shown.cell(q, doc, p, bytes)) {
-            c.clicks += 1;
+            None => false,
+        };
+        self.forget_evicted(bytes);
+        listed && doc.is_some_and(|d| self.shown.click(q, d, position))
+    }
+
+    /// Drops the cells of the query the top list just evicted.
+    fn forget_evicted(&mut self, bytes: &mut usize) {
+        if let Some(q) = self.top.evicted.take() {
+            self.shown.forget(&q, bytes);
         }
     }
 
@@ -433,6 +477,7 @@ impl Bucket {
             s.conversions += 1;
             s.value_milli = s.value_milli.saturating_add(value_milli);
         }
+        self.forget_evicted(bytes);
     }
 
     /// Adds `other` (each list then keeps its own capacity).
@@ -475,7 +520,7 @@ impl Bucket {
                 .map
                 .iter()
                 .filter(|(q, _)| self.top.map.contains_key(*q))
-                .flat_map(|(q, cells)| cells.iter().map(move |((d, p), c)| serde_json::json!([&**q, &**d, p, c.impressions, c.clicks])))
+                .map(|(q, cells)| serde_json::json!([&**q, cells.iter().map(|((d, p), c)| serde_json::json!([&**d, p, c.impressions, c.clicks])).collect::<Vec<_>>()]))
                 .collect::<Vec<_>>(),
         })
         .to_string()
@@ -505,9 +550,15 @@ impl Bucket {
         b.top.trim();
         b.empty.trim();
         for e in v.get("p").and_then(serde_json::Value::as_array).into_iter().flatten() {
-            let (Some(q), Some(d), Some(p), Some(i), Some(c)) = (e[0].as_str(), e[1].as_str(), e[2].as_u64(), e[3].as_u64(), e[4].as_u64()) else { continue };
-            if b.top.map.contains_key(q) && (1..=u64::from(MAX_RANK)).contains(&p) && !d.is_empty() && d.len() <= MAX_DOC_ID {
-                b.shown.map.entry(q.into()).or_default().insert((d.into(), p as u32), Cell { impressions: i, clicks: c });
+            let (Some(q), Some(cells)) = (e[0].as_str(), e[1].as_array()) else { continue };
+            if !b.top.map.contains_key(q) {
+                continue;
+            }
+            for cell in cells {
+                let (Some(d), Some(p), Some(i), Some(c)) = (cell[0].as_str(), cell[1].as_u64(), cell[2].as_u64(), cell[3].as_u64()) else { continue };
+                if (1..=u64::from(MAX_RANK)).contains(&p) && !d.is_empty() && d.len() <= MAX_DOC_ID {
+                    b.shown.map.entry(q.into()).or_default().insert((d.into(), p as u32), Cell { impressions: i, clicks: c.min(i) });
+                }
             }
         }
         b.shown.trim(&b.top);
@@ -804,11 +855,20 @@ impl Analytics {
 
     /// Records a click on a result of a search of index `index` (with analytics on) for `query`
     /// (normalized): document `doc` when the event names it, at 1-based `position` when known.
+    ///
+    /// The document's cell is the one of this hour that showed it, else of the hour before while
+    /// that one still waits here (a click just after the hour turned).
     pub fn record_click(&self, index: &str, query: &str, doc: Option<&str>, position: Option<u32>) {
         let hour = unix_hour();
         let mut p = self.pending.lock();
         let (b, bytes) = p.hour(index, hour);
-        b.click(query, doc, position, bytes);
+        if b.click(query, doc, position, bytes) {
+            return;
+        }
+        let Some(doc) = doc else { return };
+        if let Some((_, prev)) = p.hours.get_mut(index).and_then(|hs| hs.iter_mut().rev().find(|(h, _)| *h + 1 == hour)) {
+            prev.shown.click(query, doc, position);
+        }
     }
 
     /// Records a search of experiment variant `v` by trial `key` (a hash of the experiment, the

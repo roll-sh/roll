@@ -980,7 +980,7 @@ origins (browser search), once they're on main.
 | GET | `/v1/search/clusters/{id}/judgments/{name}` | One list: `{name, index, meta, judgments}`, `judgments` in `evaluate`'s shape (sorted by query, then document). A document that isn't a rating (the index is the owner's, so anything may be written into it) answers 400 naming it, and a list holding a different number of ratings than it was written with (`_meta.roll_judgments.ratings`: being replaced right now, or a write that stopped partway) answers 409. A read |
 | PUT | `/v1/search/clusters/{id}/judgments/{name}` | Makes or replaces list `name` (1 to 64 of `a-z0-9_-`): `{judgments, source?}` (`manual`, the default, or `import`), up to 500 queries of 200 ratings; a repeated rating keeps the last. An existing list's index is deleted and made again, so replacing a list needs only write, as replacing a synonyms set does (deleting one needs delete); an index of that name that isn't a list is refused (409). Answers `{name, index, source, queries, ratings}`. A write |
 | DELETE | `/v1/search/clusters/{id}/judgments/{name}` | Deletes the list's index (404 for no such list, 409 for an index that isn't one). A delete |
-| POST | `/v1/search/clusters/{id}/judgments/{name}/_from_clicks` | Makes or replaces list `name` from an index's click analytics: `{index, min_searches?, max_rank?, days?}` (defaults 10, 20, 30). CTR at each position is its clicks over its impressions over every query of the window (the daily ring, plus what the owner counted since the last pass); each document shown for a query with at least `min_searches` searches is rated its clicks over Σ impressions × CTR(position) (COEC, as OpenSearch's `UBI_JUDGMENT` rates it, three decimals) in `coec`, graded 0 to 3 in `rating` (0 without a click, else COEC rounded up), with `searches`, `impressions`, `clicks` and `expected_clicks` beside it, `source: clicks`, and the window in `_meta.roll_judgments.clicks`. 400 for an index without analytics on, or when no query qualifies. A write |
+| POST | `/v1/search/clusters/{id}/judgments/{name}/_from_clicks` | Makes or replaces list `name` from an index's click analytics: `{index, min_searches?, max_rank?, days?}` (defaults 10, 20, 30; `min_searches` at least 5). CTR at each position is its clicks over its impressions over every cell kept for the window (the most searched queries') (the daily ring, plus what the owner counted since the last pass); each document shown for a query with at least `min_searches` searches is rated its clicks over Σ impressions × CTR(position) (COEC, as OpenSearch's `UBI_JUDGMENT` rates it, three decimals) in `coec`, graded 0 to 3 in `rating` (0 without a click, else COEC rounded up: any click is some evidence of relevance, and 1 means "clicked, below what its position expects"), with `searches`, `impressions`, `clicks` and `expected_clicks` beside it and no `index` (it's about the document whichever copy is evaluated: a reindexed `-v2`, an alias), `source: clicks`, and the window in `_meta.roll_judgments.clicks`. 400 for an index without analytics on, or when no query qualifies. A write |
 | POST | `/v1/search/clusters/{id}/indices/{index}/search` | `POST /<index>/_search` (reads take index expressions: `logs-*`, `a,b`) |
 | POST | `/v1/search/clusters/{id}/indices/{index}/docs` | `POST /<index>/_doc`: index a document under a new id |
 | GET, PUT, DELETE | `/v1/search/clusters/{id}/indices/{index}/docs/{doc}` | `/<index>/_doc/<id>` |
@@ -1186,10 +1186,13 @@ query-rule editors prefilled with it (`query, ` as a rule; an `exact` `query_str
 - **Shown and clicked by position**, for judgments from clicks
   ([relevance-experiments.md](relevance-experiments.md), section 1): a search that records counts an
   impression for each of its first 20 hits by 1-based position (`from` included), in the hit's own
-  index's bucket, and a `search_click` naming a document counts on that document's cell at its
-  position (without one, where the hour showed it most). Cells are `(query, document id,
-  position) → (impressions, clicks)`, only for queries the bucket's top list holds, at most 32 a
-  query (document ids over 512 bytes aren't counted, and count toward the 4 MiB between passes).
+  index's bucket (a `search_after` page counts none), and a `search_click` naming a document
+  counts on that document's cell at its position (without one, where the hour showed it most),
+  only on a cell a search made, in that hour or the one before, and never past its impressions: a
+  click alone (a browser key's visitor making ids up) makes no cell and raises no rating. Cells are `(query, document id,
+  position) → (impressions, clicks)`, only for queries the bucket's top list holds (a query the list
+  evicts takes its cells with it), at most 32 a query (document ids over 512 bytes aren't counted;
+  each cell counts its id and 48 bytes toward the 4 MiB between passes).
   The daily ring keeps them for its 100 most searched queries a day; the hourly ring keeps none.
 - **Aggregated in place.** Each index keeps one bucket per hour: exact totals and two bounded
   heavy-hitter lists (Space-Saving: 256 queries and 128 no-result queries per hour on the node; a
@@ -1224,8 +1227,13 @@ position cells add document ids and counts beside the query text, never a user, 
 address: the click event's `user` and `session` are not read for them, so a judgment list built
 from clicks (`…/judgments/{name}/_from_clicks`) holds counts per query and document, only for
 queries with at least `min_searches` searches (10 by default), and nothing that names a person.
-The cells follow the rest exactly (the same opt-in, the same 30 days, deleted with it); a list
-built from them is the owner's own index and stays until the owner deletes it. Query
+The cells follow the rest exactly (the same opt-in, the same 30 days, deleted with it), and so do
+the lists built from them: the metering pass that deletes an index's analytics deletes the lists
+built from that index (its name and uuid are in the list's `_meta`), and a list built from clicks
+expires 30 days after its window ends unless the owner saves it again as `manual` or `import`
+(then it's theirs, like any list). `min_searches` is at least 5. This keeps one person's unusual
+searches out of a list; it is not an anonymity guarantee (a query searched by five people is still
+their text, and a small site's visitors may be few). Query
 text is kept only aggregated as above, only while the index has analytics on, and for at most 30
 days. Turning it off (or deleting the index, or replacing it with another of the same name)
 deletes everything kept for it: reads stop showing it at once, the node drops what it holds, and

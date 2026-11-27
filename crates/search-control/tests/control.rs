@@ -7921,13 +7921,20 @@ async fn judgments_are_built_from_clicks() {
         click("red shoe", "2", &red).await;
     }
     click("red shoe", "1", &red).await;
-    // What the node counted, then what the catalog keeps after the metering pass.
+    // A click on a document no search showed (a made-up id, at a position nothing filled)
+    // counts nowhere: the ratings and CTR below are OpenSearch's for the events above alone.
+    click("red shoe", "9", &["9"]).await;
+    click("red shoe", "4", &["4"]).await;
+    let (s, v) = build(json!({"index": "products", "min_searches": 2})).await;
+    assert!(s == 400 && v.to_string().contains("from 5"), "one person's searches never make a rating: {s} {v}");
+    // What the node counted, then what the catalog keeps after the metering pass. "model 3"
+    // (2 searches) isn't judged, yet its cells count toward CTR at each position.
     for pass in [false, true] {
         if pass {
             e.control.sample().await.unwrap();
         }
-        let (s, v) = build(json!({"index": "products", "min_searches": 2})).await;
-        assert_eq!((s, &v["source"], &v["ratings"]), (200, &json!("clicks"), &json!(6)), "{v}");
+        let (s, v) = build(json!({"index": "products", "min_searches": 5})).await;
+        assert_eq!((s, &v["source"], &v["ratings"]), (200, &json!("clicks"), &json!(4)), "{v}");
         let mut rows: Vec<(String, String, f64, i64)> = Vec::new();
         let hits = es(Method::POST, "/roll-judgments-clicked/_search", Some(json!({"size": 20}))).await;
         for h in hits["hits"]["hits"].as_array().unwrap() {
@@ -7935,7 +7942,7 @@ async fn judgments_are_built_from_clicks() {
             rows.push((s["query"].as_str().unwrap().into(), s["doc_id"].as_str().unwrap().into(), s["coec"].as_f64().unwrap(), s["rating"].as_i64().unwrap()));
         }
         rows.sort_by(|a, b| (&b.0, &a.1).cmp(&(&a.0, &b.1)));
-        let want: Vec<(String, String, f64, i64)> = [("red shoe", "1", 0.467, 1), ("red shoe", "2", 1.4, 2), ("red shoe", "3", 0.0, 0), ("red shoe", "4", 0.0, 0), ("model 3", "1", 0.0, 0), ("model 3", "3", 2.333, 3)]
+        let want: Vec<(String, String, f64, i64)> = [("red shoe", "1", 0.467, 1), ("red shoe", "2", 1.4, 2), ("red shoe", "3", 0.0, 0), ("red shoe", "4", 0.0, 0)]
             .iter()
             .map(|(q, d, v, r)| (q.to_string(), d.to_string(), *v, *r))
             .collect();
@@ -7943,6 +7950,11 @@ async fn judgments_are_built_from_clicks() {
     }
     let (s, v) = build(json!({"index": "products", "min_searches": 6})).await;
     assert!(s == 400 && v.to_string().contains("searched 6 times"), "{s} {v}");
+    // Turning analytics off deletes the lists built from them in the next pass.
+    es(Method::PUT, "/products/_settings", Some(json!({"index.roll.analytics.enabled": false}))).await;
+    e.control.sample().await.unwrap();
+    let (s, _) = e.call(Method::GET, &format!("/v1/search/clusters/{id}/judgments/clicked"), None).await;
+    assert_eq!(s, 404);
 }
 
 /// An application's configuration renders each judged query through the application's own

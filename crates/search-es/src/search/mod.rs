@@ -4195,6 +4195,10 @@ pub(crate) fn analytics_record(ctx: &Ctx, watch: Option<Watch>, req: &SearchRequ
     let on = a.named(&req.indices).unwrap_or_else(|| a.filter(&resolve::resolve(&ctx.state(), &req.indices, &req.opts, req.now_ms).unwrap_or_default()));
     let hits = out.total.map_or(out.hits.len() as u64, |(n, _)| n);
     a.record_search(&on, &w.text, hits, w.from.elapsed());
+    // A `search_after` page's hits don't sit at positions counted from the first: no impressions.
+    if req.source.search_after.is_some() {
+        return;
+    }
     let from = req.source.from.unwrap_or(0).max(0) as u32;
     a.record_impressions(&on, &w.text, from, out.hits.iter().filter_map(|h| Some((h.get("_index")?.as_str()?, h.get("_id")?.as_str()?))));
 }
