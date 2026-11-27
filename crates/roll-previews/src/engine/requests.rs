@@ -45,7 +45,9 @@ impl Engine {
         let skip = here.len().saturating_sub(500);
         here.drain(..skip);
         let cropped = self.store.cropped_notes(preview)?;
+        let work = self.store.note_work(preview)?;
         for n in &mut here {
+            n.work = work.get(&n.id).map(|(number, url)| crate::notes::NoteWork { number: *number, url: url.clone() });
             n.crop = cropped.contains_key(&n.id);
             n.crop_as = cropped.get(&n.id).cloned().flatten();
         }
@@ -70,6 +72,56 @@ impl Engine {
             tracing::warn!(preview = %id, error = %e, "previews: saying a note was resolved on its change");
         }
         Ok(())
+    }
+
+    /// `POST …/{id}/notes/{note}/work`: the note made a work item on its change's repo (roll
+    /// code's issues, which an agent can claim; Vercel Comments' "Create issue"), labelled
+    /// `preview-feedback`, its words as they are (a guest's marked as someone's outside the team,
+    /// so MCP's lockdown withholds them from an agent that claims it), with where it was left;
+    /// said on the change. Once a note: asked again, the same one.
+    pub async fn note_to_work(&self, id: &str, note: &str, by: &str) -> Result<crate::notes::NoteWork> {
+        let r = self.store.row(id)?;
+        let change = r.change_id.as_deref().ok_or_else(|| Error::BadRequest("only a change's preview has notes".into()))?;
+        if let Some((number, url)) = self.store.note_work(id)?.remove(note) {
+            return Ok(crate::notes::NoteWork { number, url });
+        }
+        let notes = self.source.feedback(change).await.map_err(|e| Error::Internal(format!("{e:#}")))?;
+        let n = notes.into_iter().find(|n| n.id == note).ok_or_else(|| Error::NotFound(format!("no note {note} on this preview's change")))?;
+        // One caller makes it: two at once (two clicks, the sheet and the CLI) make one item.
+        match self.store.claim_note_work(id, note, by)? {
+            crate::store::NoteWorkClaim::Made(number, url) => return Ok(crate::notes::NoteWork { number, url }),
+            crate::store::NoteWorkClaim::Busy => return Err(Error::Conflict("its work item is being made: ask again in a moment".into())),
+            crate::store::NoteWorkClaim::Mine => {}
+        }
+        let first = n.note.lines().find(|l| !l.trim().is_empty()).unwrap_or("A note").trim();
+        let first = format!("Preview feedback: {}", first.replace('`', " "));
+        let title: String = if first.chars().count() > 100 { format!("{}…", first.chars().take(99).collect::<String>()) } else { first };
+        let url = self.store.services(id)?.into_iter().next().map(|s| format!("{}{}", s.url.trim_end_matches('/'), n.path)).unwrap_or_default();
+        let place = if n.path.is_empty() { "/" } else { n.path.as_str() };
+        let on = if n.selector.is_empty() { String::new() } else { format!(", on `{}`", n.selector.replace('`', "'")) };
+        let mut body = format!("{}\n\nLeft by {} on {place} of preview {id} (change {change}){on}; made a work item by {by}.", n.note.trim(), n.by);
+        if !url.is_empty() {
+            body.push_str(&format!("\n\n{url}"));
+        }
+        let made = match self.source.work_item(change, &title, &body, &["preview-feedback"], n.outside).await {
+            Ok(Some(made)) => made,
+            Ok(None) => {
+                self.store.set_note_work(id, note, None)?;
+                return Err(Error::Conflict("this preview's change has no repo to make work items on".into()));
+            }
+            Err(e) => {
+                self.store.set_note_work(id, note, None)?;
+                return Err(Error::Internal(format!("{e:#}")));
+            }
+        };
+        let (number, at) = made;
+        self.store.set_note_work(id, note, Some((number, &at)))?;
+        self.store.log(id, &format!("{by} made a note work item #{number}"))?;
+        let said = code_control::review::preview_note::reply_body(note, &format!("Made work item #{number} from this note."));
+        if let Err(e) = self.source.comment(change, &said, by, false).await {
+            tracing::warn!(preview = %id, error = %e, "previews: saying a note became a work item");
+        }
+        Ok(crate::notes::NoteWork { number, url: at })
     }
 
     /// [`Engine::notes_of`] by the preview's environment name (`pv-<id>`, as roll apps knows it).
