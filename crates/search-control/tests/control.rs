@@ -6309,7 +6309,8 @@ async fn health_alerts_fire_and_recover_once_each() {
     let hook = |host: &str| json!({"metric": "month_cost_usd", "op": ">", "threshold": 1000, "targets": [{"type": "webhook", "url": format!("http://{host}:{port}/"), "secret": secret}]});
     let (s, v) = e.call(Method::POST, &format!("/v1/search/clusters/{id}/alerts"), Some(hook("127.0.0.1"))).await;
     assert!(s == 400 && v.to_string().contains("private"), "{s} {v}");
-    let (s, r) = e.call(Method::POST, &format!("/v1/search/clusters/{id}/alerts"), Some(hook("localhost"))).await;
+    // `localhost.` isn't a literal the check knows, so only the resolver can refuse it.
+    let (s, r) = e.call(Method::POST, &format!("/v1/search/clusters/{id}/alerts"), Some(hook("localhost."))).await;
     assert_eq!(s, 201, "{r}");
     let rule_id = r["id"].as_str().unwrap();
     let (s, v) = e.call(Method::POST, &format!("/v1/search/clusters/{id}/alerts/{rule_id}/test"), Some(json!({}))).await;
@@ -6322,7 +6323,7 @@ async fn health_alerts_fire_and_recover_once_each() {
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    assert!(tried["attempts"] == 1 && tried["status"] == "pending" && tried["last_error"].is_string(), "{tried}");
+    assert!(tried["attempts"] == 1 && tried["status"] == "pending" && tried["last_error"].as_str().is_some_and(|e| e.contains("private")), "{tried}");
     assert!(seen.lock().unwrap().is_empty(), "a private address was reached");
 }
 

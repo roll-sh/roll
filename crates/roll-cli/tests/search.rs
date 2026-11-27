@@ -255,6 +255,15 @@ async fn clusters_and_requests() {
     assert_eq!(u["requests"], 17, "the node's request counts are metered: {u}");
     assert!(u["loaded_seconds"].as_i64().unwrap() >= 1, "{u}");
 
+    // health alerts: a rule made here gets a webhook secret made here, shown once and never again
+    let out = e.roll(&["search", "alerts", "create", "app", "--metric", "p99_ms", "--op", ">", "--threshold", "500", "--window", "5m", "--webhook", "https://hooks.example.test/roll/T0"]).await;
+    let secret = out.lines().find_map(|l| l.split_once("it: ").map(|(_, s)| s.to_string())).unwrap_or_else(|| panic!("{out}"));
+    assert_eq!(secret.len(), 48, "{out}");
+    let list = e.roll(&["search", "alerts", "list", "app"]).await;
+    assert!(list.contains("ok      p99_ms > 500 over 5m") && !list.contains(&secret), "{list}");
+    let rules = e.roll_json(&["search", "alerts", "list", "app"]).await;
+    assert_eq!(rules["rules"][0]["targets"][0]["url"], "https://hooks.example.test/…", "{rules}");
+
     // delete
     let out = e.roll(&["search", "clusters", "delete", "app-past"]).await;
     assert!(out.starts_with("deleted app-past"), "{out}");
