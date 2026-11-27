@@ -87,11 +87,15 @@ fn url_ahead(word: &str) -> bool {
         return false;
     }
     // `//host` may follow anything (`src=//evil…`): a word holding `//`, or ending in `/`, waits.
+    // A scheme may start after any punctuation (`\https:`, `src=https:`): its tail counts too.
+    let tail = w.rsplit(|c: char| !(c.is_ascii_alphanumeric() || ":/.".contains(c))).next().unwrap_or_default();
     w.contains("//")
         || w.ends_with('/')
         || w.contains('@')
-        || ["www.", "mailto:", "xmpp:"].iter().any(|p| w.starts_with(p))
-        || ["https://", "http://", "ftp://", "www.", "mailto:", "xmpp:"].iter().any(|p| p.starts_with(w.as_str()))
+        || [w.as_str(), tail].iter().any(|w| {
+            ["www.", "mailto:", "xmpp:"].iter().any(|p| w.starts_with(p))
+                || (!w.is_empty() && ["https://", "http://", "ftp://", "www.", "mailto:", "xmpp:"].iter().any(|p| p.starts_with(w)))
+        })
 }
 
 /// Where the last word of `s` starts (after its last whitespace).
