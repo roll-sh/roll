@@ -5272,6 +5272,17 @@ async fn on_call_targets_open_and_close_incidents() {
     assert!(after.iter().any(|c| c.contains("deploy.failed")) && !after.iter().any(|c| c.contains("alert.memory")), "the silenced alert paged no one: {after:?}");
     assert_eq!(call(&w.api, "DELETE", &format!("{silences}/{}", sil["id"].as_str().unwrap()), None).await.0, StatusCode::NO_CONTENT);
     assert_eq!(call(&w.api, "GET", &silences, None).await.1, json!([]));
+    // Ended with its alert still open (no resolve since): it pages now, as a snooze's end does.
+    let mut paged = false;
+    for _ in 0..400 {
+        seen = got.lock().clone();
+        if seen[before..].iter().any(|(u, _, b)| u == "/pd" && b["dedup_key"] == key("alert.memory").as_str() && b["event_action"] == "trigger") {
+            paged = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(paged, "the held alert went out when the silence ended");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

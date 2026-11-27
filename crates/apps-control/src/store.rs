@@ -527,6 +527,11 @@ CREATE TABLE IF NOT EXISTS domains (
 CREATE INDEX IF NOT EXISTS domains_env ON domains (service, env);
 -- A project's own preview domain (`*.preview.acme.dev`, roll previews' preview deployment
 -- suffix), and the label each preview environment answers to under it.
+CREATE TABLE IF NOT EXISTS held_alerts (
+    seq INTEGER PRIMARY KEY,
+    service TEXT NOT NULL,
+    env TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS alert_silences (
     id TEXT PRIMARY KEY,
     service TEXT NOT NULL,
@@ -1497,7 +1502,7 @@ impl Store {
             c.execute("DELETE FROM deploy_git_tags WHERE deployment IN (SELECT id FROM deployments WHERE service = ?)", [id])?;
             c.execute("DELETE FROM state WHERE key LIKE ?", [format!("%:{id}/%")])?;
             c.execute("DELETE FROM status_days WHERE key LIKE ?", [format!("%:{id}/%")])?;
-            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "variable_runtime_only", "visit_tickets", "visit_sessions", "variable_files", "error_groups", "variables", "links", "domains", "preview_hosts", "runs", "jobs", "metrics", "usage", "form_submissions", "deploy_scans", "env_data", "env_branches", "udp_ports", "env_unscheduled", "sandboxes", "env_peering", "volume_hours", "env_deploy_tags", "alert_silences"] {
+            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "variable_runtime_only", "visit_tickets", "visit_sessions", "variable_files", "error_groups", "variables", "links", "domains", "preview_hosts", "runs", "jobs", "metrics", "usage", "form_submissions", "deploy_scans", "env_data", "env_branches", "udp_ports", "env_unscheduled", "sandboxes", "env_peering", "volume_hours", "env_deploy_tags", "alert_silences", "held_alerts"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ?"), [id])?;
             }
             match c.execute("DELETE FROM services WHERE id = ?", [id])? {
@@ -1637,7 +1642,7 @@ impl Store {
             if n == 0 {
                 return Err(Error::NotFound(format!("service {service} has no environment {env}")));
             }
-            for t in ["variables", "variable_files", "error_groups", "domains", "preview_hosts", "runs", "jobs", "metrics", "deploy_keys", "env_access", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "variable_runtime_only", "visit_tickets", "visit_sessions", "form_submissions", "env_data", "udp_ports", "env_unscheduled", "sandboxes", "env_peering", "env_deploy_tags", "alert_silences"] {
+            for t in ["variables", "variable_files", "error_groups", "domains", "preview_hosts", "runs", "jobs", "metrics", "deploy_keys", "env_access", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "variable_runtime_only", "visit_tickets", "visit_sessions", "form_submissions", "env_data", "udp_ports", "env_unscheduled", "sandboxes", "env_peering", "env_deploy_tags", "alert_silences", "held_alerts"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ? AND env = ?"), [service, env])?;
             }
             // Its schedules', challenge's and base images' state goes with it.
@@ -1787,12 +1792,17 @@ impl Store {
     /// Queue events' deliveries and move the notifier's cursor from `from` to `to`, in one
     /// transaction, only if the cursor is still at `from` (another node that held the notifier
     /// may have moved it): false when it wasn't. A (target, event) is queued once whatever runs.
-    pub fn queue_deliveries(&self, deliveries: &[(String, i64, String)], from: i64, to: i64) -> Result<bool> {
+    /// `held`: the alerts a silence held back in the same page (event seq, service, env), kept
+    /// for [`crate::Apps`]'s release when it ends.
+    pub fn queue_deliveries(&self, deliveries: &[(String, i64, String)], held: &[(i64, String, String)], from: i64, to: i64) -> Result<bool> {
         let now = self.now()?;
         self.db.write(|c| {
             let at: Option<String> = c.query_row("SELECT value FROM state WHERE key = 'notify'", (), |r| r.get(0)).optional()?;
             if at.and_then(|v| v.parse::<i64>().ok()) != Some(from) {
                 return Ok(false);
+            }
+            for (seq, svc, env) in held {
+                c.execute("INSERT INTO held_alerts (seq, service, env) VALUES (?, ?, ?) ON CONFLICT (seq) DO NOTHING", params![seq, svc, env])?;
             }
             for (target, event, kind) in deliveries {
                 c.execute(
@@ -1803,6 +1813,26 @@ impl Store {
             }
             c.execute("UPDATE state SET value = ? WHERE key = 'notify'", [to.to_string()])?;
             Ok(true)
+        })
+    }
+
+    /// The alerts silences held back, oldest first, at most `limit`: (event seq, service, env).
+    pub fn held_alerts(&self, limit: usize) -> Result<Vec<(i64, String, String)>> {
+        Ok(self.db.query("SELECT seq, service, env FROM held_alerts ORDER BY seq LIMIT ?", [limit as i64], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?)
+    }
+
+    /// A held alert let go: its deliveries (if any are due) queued and it forgotten, in one write.
+    pub fn release_held(&self, seq: i64, deliveries: &[(String, i64, String)]) -> Result<()> {
+        let now = self.now()?;
+        self.db.write(|c| {
+            for (target, event, kind) in deliveries {
+                c.execute(
+                    "INSERT INTO notify_deliveries (id, target, event, kind, status, attempts, next_at, code, error, at) VALUES (?, ?, ?, ?, 'pending', 0, ?, NULL, NULL, ?) ON CONFLICT (target, event) DO NOTHING",
+                    params![new_id("dlv"), target, event, kind, now, now],
+                )?;
+            }
+            c.execute("DELETE FROM held_alerts WHERE seq = ?", [seq])?;
+            Ok(())
         })
     }
 
@@ -5323,9 +5353,9 @@ mod tests {
         let s = Store::new(db, Sealer::new(&"k".repeat(32)).unwrap()).unwrap();
         s.set_state("notify", "0").unwrap();
         let page = [("ntf_a".to_string(), 1, "deploy.failed".to_string()), ("ntf_a".to_string(), 2, "crash_loop".to_string())];
-        assert!(s.queue_deliveries(&page, 0, 2).unwrap());
-        assert!(!s.queue_deliveries(&page, 0, 2).unwrap(), "the cursor moved: the second notifier queues nothing");
-        assert!(s.queue_deliveries(&page, 2, 2).unwrap());
+        assert!(s.queue_deliveries(&page, &[], 0, 2).unwrap());
+        assert!(!s.queue_deliveries(&page, &[], 0, 2).unwrap(), "the cursor moved: the second notifier queues nothing");
+        assert!(s.queue_deliveries(&page, &[], 2, 2).unwrap());
         let due = s.due_deliveries(50, 60_000).unwrap();
         assert_eq!(due.len(), 2, "one per (target, event), whatever ran: {due:?}");
         assert!(s.due_deliveries(50, 60_000).unwrap().is_empty(), "claimed: no other node sends them meanwhile");

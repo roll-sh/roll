@@ -346,6 +346,7 @@ fn create_planned(st: &mut ClusterState, req: &Request, snapshot_uuid: &str, p: 
         },
     );
     idx.recovery_source = Some(Arc::new(rs));
+    crate::meta::shard_limit::check_putting(st, &p.target, &idx.settings)?;
     st.metadata.indices.insert(p.target.clone(), Arc::new(idx));
     st.check_unique_names()?;
     Ok(())

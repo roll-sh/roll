@@ -304,6 +304,7 @@ impl Apps {
         loop {
             if self.deps.cluster.singleton("apps:notify") {
                 self.queue_page().await;
+                self.release_held().await;
                 self.deliver_due().await;
             }
             tokio::select! {
@@ -326,7 +327,7 @@ impl Apps {
         };
         let Ok(events) = self.db(move |s| s.events(cursor, 200)).await else { return };
         let Some(last) = events.last().map(|e| e.seq) else { return };
-        let mut queued = Vec::new();
+        let (mut queued, mut held) = (Vec::new(), Vec::new());
         // Whether an environment is a preview's, looked up once per pass.
         let mut ephemeral: std::collections::HashMap<(String, String), bool> = std::collections::HashMap::new();
         for e in &events {
@@ -353,8 +354,10 @@ impl Apps {
                     b
                 }
             };
-            // A silence open when it happened: kept, never sent (a resolve always is).
+            // A silence open when it happened: held back, never sent while it's quiet (a resolve
+            // always is); one still open when the silence ends goes out then ([`Self::release_held`]).
             if self.silenced(&e.service, &e.environment, &e.kind, e.at).await {
+                held.push((e.seq, e.service.clone(), e.environment.clone()));
                 continue;
             }
             for t in self.db(move |s| s.targets(&p)).await.unwrap_or_default() {
@@ -363,10 +366,56 @@ impl Apps {
                 }
             }
         }
-        match self.db(move |s| s.queue_deliveries(&queued, cursor, last)).await {
+        match self.db(move |s| s.queue_deliveries(&queued, &held, cursor, last)).await {
             Ok(true) => {}
             Ok(false) => tracing::info!("apps: another node moved the notifications cursor; reading from there"),
             Err(e) => tracing::warn!(error = %e, "apps: queueing notifications failed; tried again"),
+        }
+    }
+
+    /// The alerts silences held back whose silence is over (Cloud Monitoring's and Better Stack's
+    /// notifying on what's still open when a snooze ends): one resolved since (a later event
+    /// closing its key) is dropped, one still open queued to its targets as it would have been.
+    async fn release_held(self: &Arc<Self>) {
+        let Ok(held) = self.db(|s| s.held_alerts(50)).await else { return };
+        let now = code_sql::now_ms();
+        for (seq, svc, env) in held {
+            let Ok(Some(e)) = self.db(move |s| s.event(seq)).await else {
+                let _ = self.db(move |s| s.release_held(seq, &[])).await;
+                continue;
+            };
+            if self.silenced(&svc, &env, &e.kind, now).await {
+                continue;
+            }
+            // Closed since? The events after it of its environment, a few pages at most.
+            let key = oncall_of(&e).map(|(_, k, _)| k);
+            let (mut after, mut closed) = (seq, false);
+            for _ in 0..10 {
+                let Ok(page) = self.db(move |s| s.events(after, 200)).await else { break };
+                let Some(last) = page.last().map(|x| x.seq) else { break };
+                closed = page.iter().any(|x| x.service == svc && x.environment == env && oncall_of(x).is_some_and(|(open, k, _)| !open && Some(&k) == key.as_ref()));
+                if closed {
+                    break;
+                }
+                after = last;
+            }
+            let mut rows = Vec::new();
+            if !closed {
+                let sid = svc.clone();
+                let project = self.db(move |s| s.service_any(&sid).map(|(s, _)| s.project)).await.ok();
+                let (sid, en) = (svc.clone(), env.clone());
+                let preview = self.db(move |s| s.environment(&sid, &en)).await.map_or(env.starts_with("pv-"), |r| r.ephemeral);
+                if let Some(p) = project {
+                    for t in self.db(move |s| s.targets(&p)).await.unwrap_or_default() {
+                        if wants(&t.events, &e.kind, &e.data, matches!(t.kind.as_str(), "pagerduty" | "opsgenie")) && t.follows(&e.service, &e.environment, preview) {
+                            rows.push((t.id.clone(), e.seq, e.kind.clone()));
+                        }
+                    }
+                }
+            }
+            if let Err(err) = self.db(move |s| s.release_held(seq, &rows)).await {
+                tracing::warn!(seq, error = %err, "apps: a held alert wasn't let go; tried again");
+            }
         }
     }
 

@@ -7922,3 +7922,47 @@ async fn otlp_logs_land_in_otel_data_streams_with_an_otel_key() {
     let (_, v) = e.es(&u, &p, Method::POST, "/logs-*.otel-*/_count", None).await;
     assert_eq!((status, &v["count"]), (403, &json!(2)), "the read key's write: {text}");
 }
+
+/// `cluster.max_shards_per_node`: creating or opening past it is refused with Elasticsearch's
+/// error, closed indices don't count, and a key that may only create documents (an `otel` key
+/// through OTLP) can't add data streams past it.
+#[tokio::test]
+async fn the_shard_limit_holds_for_creates_opens_and_otel_keys() {
+    use reqwest::Method;
+    let e = env().await;
+    let c = e.post("/v1/search/clusters", json!({"name": "shards"})).await;
+    let (u, p) = creds(&c);
+    let id = c["id"].as_str().unwrap().to_string();
+    // The key first: whatever system index it needs is made before the limit is reached.
+    let (_, v) = e.call(Method::POST, &format!("/v1/search/clusters/{id}/keys"), Some(json!({"name": "collector", "access": "otel"}))).await;
+    let key = v["api_key"].as_str().unwrap().to_string();
+    // Shards open now (system indices included), then room for exactly two more indices.
+    let (_, v) = e.es(&u, &p, Method::GET, "/_cat/indices?format=json&expand_wildcards=all&h=pri,rep,status", None).await;
+    let open: u64 = v.as_array().unwrap().iter().filter(|i| i["status"] == "open").map(|i| {
+        let n = |k: &str| i[k].as_str().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+        n("pri") * (1 + n("rep"))
+    }).sum();
+    let max = open + 4;
+    let (s, v) = e.es(&u, &p, Method::PUT, "/_cluster/settings", Some(json!({"persistent": {"cluster.max_shards_per_node": max}}))).await;
+    assert_eq!(s, 200, "{v}");
+    // One primary and one replica each: two indices fill it.
+    for name in ["a", "b"] {
+        assert_eq!(e.es(&u, &p, Method::PUT, &format!("/{name}"), None).await.0, 200, "{name}");
+    }
+    let (s, v) = e.es(&u, &p, Method::PUT, "/c", None).await;
+    assert_eq!((s, &v["error"]["type"]), (400, &json!("validation_exception")), "{v}");
+    let expected = format!("this action would add [2] shards, but this cluster currently has [{max}]/[{max}] maximum normal shards open");
+    assert!(v["error"]["reason"].as_str().unwrap().contains(&expected), "{v}");
+    // A closed index's shards don't count; opening it again would pass the limit.
+    assert_eq!(e.es(&u, &p, Method::POST, "/a/_close", None).await.0, 200);
+    assert_eq!(e.es(&u, &p, Method::PUT, "/c", None).await.0, 200);
+    let (s, v) = e.es(&u, &p, Method::POST, "/a/_open", None).await;
+    assert_eq!((s, &v["error"]["type"]), (400, &json!("validation_exception")), "{v}");
+    // The otel key's records for a new data stream are refused, not created.
+    let logs = json!({"resourceLogs": [{"scopeLogs": [{"logRecords": [{"body": {"stringValue": "x"}}]}]}]});
+    let r = e.http.post(format!("{}/_otlp/v1/logs", e.es)).header("authorization", format!("ApiKey {key}")).json(&logs).send().await.unwrap();
+    let (status, text) = (r.status().as_u16(), r.text().await.unwrap());
+    assert!(status == 200 && text.contains("maximum normal shards open"), "{status} {text}");
+    let (_, v) = e.es(&u, &p, Method::GET, "/_data_stream/logs-*", None).await;
+    assert_eq!(v["data_streams"], json!([]), "no data stream was made: {v}");
+}

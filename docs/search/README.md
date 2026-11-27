@@ -1788,10 +1788,10 @@ deterministic (#396).
    every value charged as it's built) and Watcher's Alerts tab (#1180). In progress: alerts on a
    cluster's own p99, 5xx and 429s (`feature/search-health-alerts`) and Discover's saved searches
    (item 33). Left:
-   - **The shard limit on auto-create.** `cluster.max_shards_per_node` isn't enforced when an index
-     is made, so an `otel` (or `data`) key can create data streams without bound. Enforce it with
-     Elasticsearch's error ("this action would add [n] shards, but this cluster currently has
-     [x]/[y] maximum normal shards open").
+   - **The shard limit** (in review, `feature/search-shard-limit`): `cluster.max_shards_per_node`
+     enforced, as Elasticsearch and OpenSearch do, on every create (explicit, auto-create, a data
+     stream's backing index, rollover), on opening closed indices, and on restore, resize and
+     downsample targets, so an `otel` key can't add data streams past it.
    - OTLP traces and metrics, and OTLP over gRPC.
    - `_plugins/_alerting` on OpenSearch-flavor clusters.
    - Visualizations.
