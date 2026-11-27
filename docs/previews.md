@@ -3182,24 +3182,29 @@ variables roll makes from a branch's URL too (it could run on the preview's own 
 change becoming queued wakes its settled preview, a rehearsal shows only at its head, and schema
 overlaps stay within a repo.
 
-1. **`@roll/previews` for a team's tests, in review**: the bypass on the preview's own origin and
-   `snapshot()` (Argos's and Percy's SDKs), instead of a copied snippet.
-2. **Replaying recorded traffic against the preview and main** (Signadot, Speedscale; L): writes
-   replay safely on branched data; capturing production's requests needs its privacy designed
-   first. The previews' own GETs replayed
-   against main's, in review.
-3. **Older pushes past the last three, started on demand, in review** (roll's runtime); **what a
-   note's reviewer saw, from their own browser** (Jam, Marker.io).
-4. **Restore points for search and buckets**: search's once roll search's `reset {from}` is in
-   (its Next 32); buckets need a put-back on roll storage's side.
-5. **Previews for the members thread's next products**: once roll apps' and roll search's routes
-   become member routes (docs/members.md, v1.1).
-6. **Watches on pg-control**: the data step's Postgres compute start; cheap branches on ext4
+Ranked again on 2026-11-27, evening, after `@roll/previews` (#1240) and older pushes on demand
+(#1232) landed:
+
+1. **What a note's reviewer saw, from their own browser** (Jam, Marker.io), in progress: a
+   picture of their own tab, taken only on their click, kept with the note as roll's crop is.
+2. **Writes replayed safely** (Signadot, Speedscale; L), in progress: the previews' own writes
+   (bodies captured only where the project opts in, sealed, bounded, never a fork's) replayed on
+   fresh copies of both previews' data, never on the branches they serve from. Capturing
+   production's requests still needs its privacy designed first.
+3. **Restore points for search and buckets**: search's on roll search's reset from a copy (#1149;
+   its shape is agreed: 200 put back, 409 dropped or busy, 503 recorded); buckets need a put-back
+   on roll storage's side.
+4. **Previews for the members thread's next products**: search is a member product (#808), so a
+   member's preview of a project with a cluster is checked end to end (its branch homed in the
+   project, reached by role); roll apps once its routes become member routes.
+5. **Watches on pg-control**: the data step's Postgres compute start; cheap branches on ext4
    through overlay volumes; recovery to a time seconds old (unowned).
 
 Not to build: more lab checks on the first page (each adds noise to every pull request), or a
 Kubernetes cluster per preview (roll apps' Compose import covers multi-service apps, and a
 cluster would break "costs nothing asleep").
+
+Landed 2026-11-27, evening: the thirteenth review's fixes (#1237), `@roll/previews` (#1240), older pushes started on demand (#1232), and lean tests with SQLite's allocations no longer counted under one process-wide lock (#1248: 188 Rust tests to 87, the engine suite 33 s to 4 s).
 
 Landed 2026-11-27, early: a failed story shard's share of the touched stories counted as untaken (#1175), and masking that's safe by default for NoSQL and search, with the project told of each column masked by default (#1177), and main's code on a copy of a change's migrated data, on roll apps (#1183) and roll's runtime (#1185), webhook URLs into private previews (#1187), the twelfth review's fixes (#1200), snapshots from the team's own tests (#1192), a note's work item made by roll (#1196), a team note opening a GitHub issue on a mirrored repo (#1209), and snapshots, notes and share links on roll apps services checked by service (#1212), release_checks (#1204), and preview notes to Jira and Asana (#1220).
 
