@@ -2331,6 +2331,16 @@ type Settings = {
   spec. The owner sets their site or project; the issue's summary and description are the note
   with its page and element (`automation-templates.test.ts`). A GitHub-mirrored repo's own
   GitHub Issues take notes natively (a note's work item).
+- **Replay** (Signadot's SmartTests, Speedscale's replays, without capturing production): `POST
+  …/replay` asks the GETs a change's preview and main's have served lately (their own request
+  logs, roll's runtime's: paths only, never a query) of each again, in the background, and keeps
+  how each answered: another status, or a JSON object answer whose top-level fields main's has
+  and the change's hasn't, is a difference ("/api/items 200 (main 200) · lost price"). The
+  Requests tab and `roll preview replay` say them. Only GETs (a write would act twice), only a
+  trusted change's preview (a fork's visitors and code choose its paths, and main's preview
+  answers with main's secrets), and only what the previews themselves served: replaying
+  production's traffic needs its capture's privacy designed first
+  (`engine.rs::recent_requests_are_replayed_against_mains_preview`).
 - **GitHub PR**, through roll code's GitHub outbox (durable, retried, sent on the repo's owner):
   - one comment, edited in place, with a table of services, URLs, status, data branches and cost;
   - a commit status `roll/preview` on the head. A preview removed before it was ready (the change
