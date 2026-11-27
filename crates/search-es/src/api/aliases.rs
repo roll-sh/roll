@@ -745,13 +745,13 @@ fn authorize(auth: &AliasAuth, st: &ClusterState, actions: &mut [Action], now: i
         match a {
             Action::Add { indices, aliases, .. } => {
                 let names: Vec<String> = aliases.iter().map(|a| resolve::resolve_date_math(a, now).unwrap_or_else(|_| a.clone())).collect();
-                auth.check(true, &targets(indices), &names)?;
+                auth.check(st, true, &targets(indices), &names)?;
             }
             Action::Remove { indices, aliases, only, .. } => {
                 let named: Vec<String> = indices.iter().filter(spelled).cloned().collect();
                 let mut strict = targets(&named);
                 strict.extend(named.iter().map(|e| resolve::resolve_date_math(e, now).unwrap_or_else(|_| e.clone())));
-                auth.check(false, &strict, &aliases.iter().filter(spelled).cloned().collect::<Vec<_>>())?;
+                auth.check(st, false, &strict, &aliases.iter().filter(spelled).cloned().collect::<Vec<_>>())?;
                 if !auth.limited() {
                     continue;
                 }
@@ -901,7 +901,7 @@ pub async fn delete_alias(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let spelled: Vec<String> = names.iter().filter(|n| !resolve::is_wildcard(n) && *n != "_all" && !n.starts_with('-')).cloned().collect();
     ctx.cluster
         .update(move |st| {
-            auth.check(false, &[], &spelled)?;
+            auth.check(st, false, &[], &spelled)?;
             let opts = IndicesOptions { expand_closed: true, allow_aliases: false, ..IndicesOptions::STRICT_EXPAND_OPEN };
             let mut resolved = resolve::resolve(st, &indices, &opts, now)?;
             // Closed ones too, which the request's own check (open indices) didn't see: only those

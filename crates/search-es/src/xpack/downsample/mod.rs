@@ -233,6 +233,7 @@ async fn create_target(ctx: &Ctx<'_>, src: &Arc<IndexMeta>, target: &str, mappin
             t.set("index.downsample.source.name", source.name.clone());
             t.set("index.downsample.source.uuid", source.uuid.clone());
             idx.settings_version += 1;
+            crate::meta::shard_limit::check_putting(st, &target, &idx.settings)?;
             st.metadata.indices.insert(target.clone(), Arc::new(idx));
             Ok(w)
         })
