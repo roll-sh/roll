@@ -1,8 +1,8 @@
 name: release-cli
 
-# Builds the `roll` CLI for Linux, macOS and Windows (x86_64 and aarch64) and `rolld` for Linux and
-# macOS (x86_64 and aarch64) when a `cli-v*` tag is pushed, and publishes the tarballs, the Windows
-# zips and one SHA256SUMS over all of them as a GitHub release, which
+# Builds the `roll` CLI for Linux, macOS and Windows (x86_64 and aarch64) and `rolld` for Linux
+# (x86_64 and aarch64) and Apple silicon macOS when a `cli-v*` tag is pushed, and publishes the
+# tarballs, the Windows zips and one SHA256SUMS over all of them as a GitHub release, which
 # apps/dashboard/public/install.sh (https://roll.sh/install.sh; rolld with `--with-rolld`) and
 # install.ps1 (https://roll.sh/install.ps1) install from, with the winget and Scoop manifests filled
 # in for it (deploy/cli/render.sh).
@@ -137,8 +137,10 @@ jobs:
           path: roll-${{ matrix.target }}.*
           if-no-files-found: error
 
-  # rolld for Linux and macOS: the same runners, caching and release profile as the CLI, no
-  # features. Its smoke test starts it as docs/secrets/getting-started.md's step 0 does.
+  # rolld for Linux and Apple silicon macOS: the same runners, caching and release profile as the
+  # CLI, no features. Its smoke test starts it as docs/secrets/getting-started.md's step 0 does.
+  # No Intel macOS build: on macos-15-intel the release build didn't finish in 150 minutes (rolld's
+  # own crate alone ran past 100 minutes of thin LTO), so Intel Macs build it from a clone.
   rolld:
     if: github.event_name != 'pull_request'
     strategy:
@@ -149,8 +151,6 @@ jobs:
             runner: ubuntu-22.04
           - target: aarch64-unknown-linux-gnu
             runner: ubuntu-22.04-arm
-          - target: x86_64-apple-darwin
-            runner: macos-15-intel
           - target: aarch64-apple-darwin
             runner: macos-15
     runs-on: ${{ matrix.runner }}
@@ -230,5 +230,5 @@ jobs:
             gh release upload "$TAG" artifacts/* --clobber
           else
             gh release create "$TAG" artifacts/* --title "roll CLI ${TAG#cli-v}" \
-              --notes "Install with \`curl -fsSL https://roll.sh/install.sh | sh\`, or on Windows \`irm https://roll.sh/install.ps1 | iex\` (both check SHA256SUMS), or download a tarball or zip below. \`rolld-*.tar.gz\` is the roll daemon for Linux and macOS (\`curl -fsSL https://roll.sh/install.sh | sh -s -- --with-rolld\` installs it too). \`roll.json\` is the Scoop manifest (\`scoop install <its URL>\`); \`roll-winget.zip\` holds the winget manifests."
+              --notes "Install with \`curl -fsSL https://roll.sh/install.sh | sh\`, or on Windows \`irm https://roll.sh/install.ps1 | iex\` (both check SHA256SUMS), or download a tarball or zip below. \`rolld-*.tar.gz\` is the roll daemon for Linux and Apple silicon macOS (\`curl -fsSL https://roll.sh/install.sh | sh -s -- --with-rolld\` installs it too). \`roll.json\` is the Scoop manifest (\`scoop install <its URL>\`); \`roll-winget.zip\` holds the winget manifests."
           fi

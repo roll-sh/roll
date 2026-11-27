@@ -164,8 +164,8 @@ tarballs, and checks the x86_64 build on every pull request that touches `crates
   (`scoop install https://github.com/roll-sh/roll/releases/download/cli-v<version>/roll.json`) and
   winget's manifests (`roll-winget.zip`, `RollSh.Roll`, from the templates in `deploy/cli`).
 - **rolld** has no Windows build (it and its stores call Unix APIs directly): run it in WSL or on a
-  Linux server. Its Linux and macOS tarballs are in the same release, and `install.sh --with-rolld`
-  installs one.
+  Linux server. Its Linux and Apple silicon macOS tarballs are in the same release (no Intel
+  macOS one: build it from a clone there), and `install.sh --with-rolld` installs one.
 - **What works as on Linux**: `roll login` (the logins in `%APPDATA%\roll\logins.json`, which
   only you and the Administrators may open), `roll run` with masking and `--watch`, `roll secrets
   scan` and `render`, every other `roll secrets` command, and `roll secrets agent`, which can be a

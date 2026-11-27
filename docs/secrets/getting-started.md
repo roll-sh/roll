@@ -20,8 +20,8 @@ To try roll secrets, run one rolld on your own machine. It keeps everything in S
 directory, listens on `127.0.0.1` only, and asks for a token of its own, so neither another user of
 the machine nor a web page you open can use it.
 
-Download rolld with the CLI (Linux and macOS, x86_64 and ARM64). The install script checks both
-against the release's `SHA256SUMS` and puts them in `~/.local/bin`:
+Download rolld with the CLI (Linux on x86_64 and ARM64, macOS on Apple silicon). The install script
+checks both against the release's `SHA256SUMS` and puts them in `~/.local/bin`:
 
 ```sh
 curl -fsSL https://roll.sh/install.sh | sh -s -- --with-rolld
@@ -38,7 +38,8 @@ ROLL_SECRET_KEY="$(cat ~/roll-eval/secrets.key)" ROLL_ADMIN_TOKEN="$(cat ~/roll-
 ```
 
 If `~/.local/bin` isn't on your `PATH` yet, run `~/.local/bin/rolld` instead (the script tells you
-what to add to your profile). On Windows, run rolld in WSL: it has no Windows build.
+what to add to your profile). On Windows, run rolld in WSL: it has no Windows build. On an Intel
+Mac, build it from a clone (below): it has no Intel macOS build.
 
 And in the shell you'll use the CLI from:
 

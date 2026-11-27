@@ -5,7 +5,8 @@
 #
 # It picks the build for this OS and CPU, checks it against the release's SHA256SUMS, and puts
 # `roll` in ~/.local/bin. With `--with-rolld` (or ROLL_INSTALL_ROLLD=1) it puts the roll daemon,
-# `rolld`, next to it too (Linux and macOS), checked the same way; never without one of them:
+# `rolld`, next to it too (Linux, and macOS on Apple silicon), checked the same way; never without
+# one of them:
 #
 #   curl -fsSL https://roll.sh/install.sh | sh -s -- --with-rolld
 #
@@ -61,6 +62,9 @@ if [ "$os" = apple-darwin ] && [ "$arch" = x86_64 ] && [ "$(sysctl -n sysctl.pro
   arch=aarch64
 fi
 target=$arch-$os
+if [ "$rolld" = 1 ] && [ "$target" = x86_64-apple-darwin ]; then
+  die "rolld has no Intel macOS build: build it from a clone (cargo build --release -p rolld; docs/secrets/getting-started.md, step 0), or run this without --with-rolld for the CLI alone"
+fi
 
 tmp=$(mktemp -d 2>/dev/null || mktemp -d -t roll)
 trap 'rm -rf "$tmp"' EXIT INT TERM
