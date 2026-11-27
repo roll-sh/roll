@@ -784,6 +784,7 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
     let mut lent_folder: Option<(String, String)> = None;
     // The request's own action, when a lend decided its approval and it asked too.
     let mut lent_also: Option<String> = None;
+    let mut lent_also_rule: Option<roll_auth::scope::Rule> = None;
     let mut lent_rules: Vec<roll_auth::scope::Rule> = Vec::new();
     if let Some(l) = lend_outcome(&access, row, &params, json_body.as_ref(), &target, &scope, as_user).await {
         seconds.extend(l.all.into_iter().map(|(p, a, r)| (p, a, Some(r))));
@@ -797,6 +798,19 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
             lent_folder = l.folder;
             lent_rules = l.grants.into_iter().chain(l.reads).collect();
             lent_also = (own_outcome != Outcome::Allow).then(|| format!("{} {}{}", own.0, row.product, own.1.as_deref().map(|r| format!(" {r}")).unwrap_or_default()));
+            // The same, as the rule remembering the approval would add: recorded with it, so what
+            // is remembered is what was asked, never worked out again later.
+            lent_also_rule = match (&target, own_outcome != Outcome::Allow) {
+                (Target::One(r), true) => r.id.clone().map(|id| roll_auth::scope::Rule {
+                    product: row.product.to_string(),
+                    resources: Resources::Some(vec![roll_auth::scope::Selector::Id { id, index: r.index.clone() }]),
+                    environments: r.environment.clone().map(|e| vec![e]),
+                    paths: None,
+                    unprotected: false,
+                    actions: [(own.0, roll_auth::scope::Effect::Allow)].into_iter().collect(),
+                }),
+                _ => None,
+            };
         } else if l.outcome == Outcome::Allow {
             // Allowed outright (the token's rules, or an approval remembered as one): only the
             // reading the product does to find the secret.
@@ -983,7 +997,7 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
                 let via = ctx.mcp.as_ref().map(|m| format!(", tool {}", m.tool)).unwrap_or_default();
                 format!("{action} {p} {id}{at}{also} ({} {}{via})", ctx.method, row.route)
             });
-            let asked = Asked { headers: &parts.headers, path: original.path(), body: &bytes, request_hash, args: ctx.args.clone(), environment, scope_path, scope_index, product: about, summary };
+            let asked = Asked { headers: &parts.headers, path: original.path(), body: &bytes, request_hash, args: ctx.args.clone(), environment, scope_path, scope_index, product: about, summary, also: lent_also_rule.clone() };
             match ask(&ctx, row, action, resource.clone(), asked).await {
                 Ok(a) => approved = Some(roll_auth::Approved { by: approvers(&a), id: a.id.into(), until: None }),
                 Err(resp) => return *resp,
@@ -1382,6 +1396,8 @@ struct Asked<'a> {
     product: &'static str,
     /// What the approval says it covers, when the route's own row doesn't say it (a lend's).
     summary: Option<String>,
+    /// The route's own rule a lend's approval covers too.
+    also: Option<roll_auth::scope::Rule>,
 }
 
 /// Wait for a person: an approval sent with the request (`X-Roll-Approval`), or a new one.
@@ -1390,7 +1406,7 @@ async fn ask(ctx: &Ctx, row: &Row, action: Action, resource: Option<String>, req
     if ctx.mcp.as_ref().is_some_and(|m| m.quiet || m.unattended) {
         return Err(Box::new(deny(StatusCode::FORBIDDEN, "would_ask", "this would ask a person, and roll's own work for a connection never does".into(), json!({}))));
     }
-    let Asked { headers, path, body, request_hash, args, environment, scope_path, scope_index, product: about, summary: lent_summary } = req;
+    let Asked { headers, path, body, request_hash, args, environment, scope_path, scope_index, product: about, summary: lent_summary, also } = req;
     let access = &ctx.access;
     let mut existing = headers.get(APPROVAL_HEADER).and_then(|v| v.to_str().ok()).map(|v| v.trim().to_string());
     // The same request again (a client retrying after the person opened the approval, an agent
@@ -1441,6 +1457,7 @@ async fn ask(ctx: &Ctx, row: &Row, action: Action, resource: Option<String>, req
                     scope_path: scope_path.as_deref(),
                     scope_index: scope_index.as_deref(),
                     wait_ms,
+                    also: also.as_ref(),
                 })
             })
             .await
