@@ -235,23 +235,39 @@ export function NotificationsPanel({ project, projectName, runner }: { project: 
 
 function Deliveries({ project, target }: { project: string; target: string }) {
   const [list, setList] = useState<NotifyDelivery[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
   useEffect(() => {
     appsApi.notifyDeliveries(project, target).then(setList, () => setList([]));
   }, [project, target]);
   if (!list) return null;
   if (!list.length) return <p className="mt-2 text-[12px] text-subtle">Nothing sent yet.</p>;
+  const redeliver = (id: string) => {
+    setError(null);
+    appsApi.redeliver(project, target, id).then(
+      (d) => setList((l) => l && l.map((x) => (x.id === d.id ? d : x))),
+      (e: unknown) => setError(e instanceof Error ? e.message : String(e)),
+    );
+  };
   return (
-    <ul className="mt-2 space-y-1 font-mono text-[11.5px]">
-      {list.slice(0, 10).map((d) => (
-        <li key={d.id} className="flex gap-3">
-          <span className={d.status === "failed" ? "text-danger" : d.status === "pending" ? "text-accent" : "text-muted"}>{d.status}</span>
-          <span className="text-fg">{d.kind}</span>
-          <span className="text-subtle">{d.code ?? "—"}</span>
-          <span className="min-w-0 flex-1 truncate text-subtle">{d.error ?? ""}</span>
-          <span className="text-subtle">{since(d.at)}</span>
-        </li>
-      ))}
-    </ul>
+    <>
+      <ul className="mt-2 space-y-1 font-mono text-[11.5px]">
+        {list.slice(0, 10).map((d) => (
+          <li key={d.id} className="flex items-center gap-3">
+            <span className={d.status === "failed" ? "text-danger" : d.status === "pending" ? "text-accent" : "text-muted"}>{d.status}</span>
+            <span className="text-fg">{d.kind}</span>
+            <span className="text-subtle">{d.code ?? "—"}</span>
+            <span className="min-w-0 flex-1 truncate text-subtle">{d.error ?? ""}</span>
+            <span className="text-subtle">{since(d.at)}</span>
+            {d.status !== "pending" && (
+              <button type="button" className="font-sans text-[11.5px] text-muted hover:text-fg" onClick={() => redeliver(d.id)}>
+                Redeliver
+              </button>
+            )}
+          </li>
+        ))}
+      </ul>
+      {error && <p className="mt-1 text-[12px] text-danger">{error}</p>}
+    </>
   );
 }
 
