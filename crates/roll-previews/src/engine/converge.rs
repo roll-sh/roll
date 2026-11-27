@@ -1495,7 +1495,7 @@ impl Engine {
         want.iter().any(|id| !asked.contains(id))
     }
 
-    async fn compare_with_default_branch(&self, r: &Row) {
+    pub(super) async fn compare_with_default_branch(&self, r: &Row) {
         let Ok(Some(default)) = self.source.default_branch(&r.repo).await else { return };
         let Ok(rows) = self.store.rows(Some(&r.project_id)) else { return };
         let rows: Vec<Row> = rows.into_iter().filter(|x| x.change_id.is_none() && x.desired == Desired::Active).collect();
@@ -1516,7 +1516,7 @@ impl Engine {
 
     /// After branch preview `b`'s screenshot: the project's changes not compared with the default
     /// branch yet (their screenshots came first, as a new baseline's does) are now, and say so.
-    async fn compare_waiting(&self, b: &Row) {
+    pub(super) async fn compare_waiting(&self, b: &Row) {
         let Ok(rows) = self.store.rows(Some(&b.project_id)) else { return };
         // Every change again, not only those not compared yet: a change's screenshot run may
         // have compared it while this baseline's was half kept (its first page in, its other

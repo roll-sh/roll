@@ -487,6 +487,41 @@ async fn a_change_queued_to_land_is_rehearsed_where_the_project_asks() {
     assert!(quiet.engine.store.preview(&q.id).unwrap().rehearsal.is_none());
 }
 
+/// Snapshots from the team's own tests (Argos's and Percy's SDKs): a picture sent to a change's
+/// preview and one by the same name to main's are a page of the visual review, compared like any
+/// other; a screenshot run at that head keeps it, one at a new head drops it.
+#[tokio::test]
+async fn the_teams_snapshots_join_the_visual_review() {
+    let e = env(json!({ "enabled": true, "visual_review": "check", "github": { "screenshot": true } }));
+    let png = |v: u8| {
+        let mut out = Vec::new();
+        image::RgbaImage::from_pixel(8, 8, image::Rgba([v, v, v, 255])).write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png).unwrap();
+        out
+    };
+    *e.apps.shot.lock() = Some(png(0));
+    e.code.open(change("chg_sn", 1));
+    e.engine.pass().await.unwrap();
+    e.engine.pass().await.unwrap();
+    let chg = e.engine.store.row_by_change("chg_sn").unwrap().unwrap();
+    let review = || e.engine.store.preview(&chg.id).unwrap().visual_review;
+    for _ in 0..3000 {
+        if review().is_some() && !e.engine.shooting() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let base = e.engine.store.rows(Some(&e.project)).unwrap().into_iter().find(|r| r.change_id.is_none()).unwrap();
+    assert!(e.engine.snapshot(&chg.id, "../x", png(0)).await.is_err(), "a name of its own grammar");
+    e.engine.snapshot(&base.id, "checkout", png(0)).await.unwrap();
+    let head = e.engine.snapshot(&chg.id, "checkout", png(255)).await.unwrap();
+    let page = review().unwrap().pages.into_iter().find(|p| p.path == "snap:checkout");
+    assert!(page.as_ref().is_some_and(|p| p.percent > 50.0), "compared with main's, under review: {page:?}");
+    e.engine.store.set_page_shots(&chg.id, &head, &[], &[]).unwrap();
+    assert!(e.engine.store.page_checks(&chg.id).unwrap().iter().any(|p| p.path == "snap:checkout"), "a run at its head keeps it");
+    e.engine.store.set_page_shots(&chg.id, "cs_next", &[], &[]).unwrap();
+    assert!(!e.engine.store.page_checks(&chg.id).unwrap().iter().any(|p| p.path == "snap:checkout"), "a new head's run drops it");
+}
+
 /// A visual change refused (Chromatic's Deny): the review fails at that head, the change is told at
 /// once, an accept of the pages clears it, and a new head asks again.
 #[tokio::test]

@@ -458,6 +458,34 @@ impl Engine {
         Ok((share, format!("{}/?roll_share={token}", url.trim_end_matches('/'))))
     }
 
+    /// A picture the team's own tests sent (`POST /__roll/snapshot?name=` on the preview's host,
+    /// with the project's bypass secret; Argos's and Percy's SDKs): page `snap:<name>` of the
+    /// visual review at the head the preview serves, compared with main's preview's `snap:<name>`
+    /// like any page (a change's against main's; main's against the changes waiting on it). The
+    /// head it was kept at.
+    pub async fn snapshot(self: &Arc<Self>, id: &str, name: &str, png: Vec<u8>) -> Result<String> {
+        if !crate::settings::snapshot_name_ok(name) {
+            return Err(Error::BadRequest("name: 1 to 80 of a-z, A-Z, 0-9, -, _, . and /".into()));
+        }
+        let r = self.store.row(id)?;
+        if r.desired == Desired::Deleted {
+            return Err(Error::Conflict("the preview is being deleted".into()));
+        }
+        let head = r.build().to_string();
+        // Compared with the picture it replaces: CPU work, off the runtime's workers.
+        let (store, pid, h, n) = (self.store.clone(), id.to_string(), head.clone(), name.to_string());
+        tokio::task::spawn_blocking(move || store.put_snapshot(&pid, &h, &n, &png)).await.map_err(|e| Error::Internal(e.to_string()))??;
+        if r.change_id.is_some() {
+            self.compare_with_default_branch(&r).await;
+        } else {
+            // A baseline's pictures are kept by head, its snapshots with them.
+            self.store.keep_base_history(id, &head)?;
+            self.compare_waiting(&r).await;
+        }
+        self.store.log(id, &format!("a snapshot from the team's tests: {name}"))?;
+        Ok(head)
+    }
+
     /// A note a guest left through share link `share` (its `notes` on): posted on the change as
     /// `guest:<name>`, its text made inert for a pull request (no mention, image or HTML), at most
     /// [`crate::notes::GUEST_PER_HOUR`] an hour per link. Its review's id.

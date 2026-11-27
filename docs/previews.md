@@ -2523,6 +2523,32 @@ type Settings = {
     service's pages while it runs what it ran (TurboSnap), and taken at once when the rule is
     turned on (checked in the screenshot image: a docs entry and a bad id skipped, a 600 by 120
     card captured as 616 by 136 with its console error counted).
+  - **Snapshots from the team's own tests** (Argos's and Percy's SDKs): a Playwright or Cypress
+    test sends a picture to the preview it runs against, `POST /__roll/snapshot?name=<name>` on
+    the preview's own host with the project's bypass secret (`x-roll-preview-bypass`, the one CI
+    already has; a public preview's too, and never a visitor's cookie) and a PNG of 2 MiB at most
+    as the body (201 `{page, head}`). It's page `snap:<name>` of the visual review at the head
+    the preview serves ("checkout (your tests)" on the sheet): compared with the one it replaces
+    at an earlier head, and with main's preview's `snap:<name>`, which main's own CI run sends
+    the same way (a change's against main's; main's sent later compares the changes waiting on
+    it again), accepted, refused and grouped like any page. A name is 1 to 80 of `a-z A-Z 0-9 -
+    _ . /`; 40 a preview. A screenshot run at that head keeps them; the first at a new head
+    drops the earlier head's, so the review only shows what this head's tests sent. A fork's
+    preview has no bypass secret, so it takes none. Services on roll apps don't take them yet
+    (their proxy serves `/__roll/` paths itself)
+    (`engine.rs::the_teams_snapshots_join_the_visual_review`):
+
+    ```js
+    // playwright: a fixture next to the bypass one above
+    export async function snapshot(page, name) {
+      await fetch(new URL(`/__roll/snapshot?name=${encodeURIComponent(name)}`, page.url()), {
+        method: 'POST',
+        headers: { 'x-roll-preview-bypass': process.env.ROLL_PREVIEW_BYPASS, 'content-type': 'image/png' },
+        body: await page.screenshot({ fullPage: true, animations: 'disabled' }),
+      });
+    }
+    // cypress: cy.screenshot(name) then, in an after:screenshot plugin, the same POST of its file
+    ```
     Page states too (Chromatic's interaction tests, Percy's scripted snapshots): much of what a
     change touches shows only after a click (a cart open, a dialog, a form's errors). A project
     names up to 3 (`github.states`: a name, a page of the first service's, and 1 to 10 steps:
@@ -3060,8 +3086,8 @@ overlaps stay within a repo.
    the change's preview; roll apps services landed, #1183).
 2. **Webhooks into private previews** (Vercel's bypass in a query parameter; S): a per-preview,
    per-path bypass that fits in a Stripe or GitHub webhook URL, never the project-wide secret.
-3. **Snapshots from the team's own Playwright or Cypress suite** (Argos's, Percy's SDKs; M):
-   a step in their tests sends a page's picture to the preview's visual review.
+3. **Snapshots from the team's own Playwright or Cypress suite, in review** (roll's runtime);
+   roll apps' proxy next.
 4. **Notes to Jira, GitHub Issues or Asana** (Marker.io, Netlify's Drawer; S).
 5. **Replaying recorded traffic against the preview and main** (Signadot, Speedscale; L): writes
    replay safely on branched data; capturing production's requests needs its privacy designed

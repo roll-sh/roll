@@ -400,6 +400,17 @@ CREATE TABLE IF NOT EXISTS restore_points (
 type PageShotRow = (String, String, i64, Option<(String, String)>, Option<i64>, Option<String>);
 
 fn write_page_shots(c: &Conn<'_>, id: &str, head: &str, rows: &[PageShotRow], wanted: &[String]) -> Result<()> {
+    upsert_page_shots(c, id, head, rows)?;
+    let paths: Vec<String> = c.query("SELECT path FROM page_shots WHERE preview_id = ?", [id], |r| r.get(0))?;
+    for gone in paths.iter().filter(|p| !wanted.contains(p)) {
+        // The team's own snapshots at this head stay (sent from their tests, not taken by this
+        // run); an earlier head's go.
+        c.execute("DELETE FROM page_shots WHERE preview_id = ? AND path = ? AND NOT (path LIKE 'snap:%' AND head = ?)", [id, gone.as_str(), head])?;
+    }
+    Ok(())
+}
+
+fn upsert_page_shots(c: &Conn<'_>, id: &str, head: &str, rows: &[PageShotRow]) -> Result<()> {
     for (path, png, errors, before, change_bp, report) in rows {
         match before {
             Some((prev_head, prev_png)) => c.execute(
@@ -414,10 +425,6 @@ fn write_page_shots(c: &Conn<'_>, id: &str, head: &str, rows: &[PageShotRow], wa
                 params![id, path, head, png, errors, report],
             )?,
         };
-    }
-    let paths: Vec<String> = c.query("SELECT path FROM page_shots WHERE preview_id = ?", [id], |r| r.get(0))?;
-    for gone in paths.iter().filter(|p| !wanted.contains(p)) {
-        c.execute("DELETE FROM page_shots WHERE preview_id = ? AND path = ?", [id, gone.as_str()])?;
     }
     Ok(())
 }
@@ -2447,6 +2454,21 @@ impl Store {
         self.db.write(|c| write_page_shots(c, id, head, &rows, wanted))
     }
 
+    /// A picture the team's own tests sent (`snap:<name>`, Argos's and Percy's SDKs) at `head`:
+    /// a page of the visual review like any other, compared with the one it replaces at an
+    /// earlier head. At most [`SNAPSHOTS_MAX`] a preview.
+    pub fn put_snapshot(&self, id: &str, head: &str, name: &str, png: &[u8]) -> Result<()> {
+        let path = format!("snap:{name}");
+        let rows = self.prepare_page_shots(id, head, &[crate::ports::PageShot { path: path.clone(), png: png.to_vec(), errors: 0, report: Default::default() }])?;
+        self.db.write(|c| {
+            let others: i64 = c.query_row("SELECT COUNT(*) FROM page_shots WHERE preview_id = ? AND path LIKE 'snap:%' AND path <> ?", params![id, path], |r| r.get(0))?;
+            if others as usize >= SNAPSHOTS_MAX {
+                return Err(Error::Conflict(format!("the preview has {SNAPSHOTS_MAX} snapshots")));
+            }
+            upsert_page_shots(c, id, head, &rows)
+        })
+    }
+
     /// What [`Store::set_page_shots`] writes, read and compared first (outside the write).
     fn prepare_page_shots(&self, id: &str, head: &str, pages: &[crate::ports::PageShot]) -> Result<Vec<PageShotRow>> {
         use base64::Engine as _;
@@ -4146,6 +4168,8 @@ pub struct BaseRow {
 
 /// Live share links a preview may have at once.
 pub const SHARES_MAX: usize = 20;
+/// The most snapshots the team's tests keep on a preview.
+pub const SNAPSHOTS_MAX: usize = 40;
 
 /// Earlier pushes kept reachable per service.
 /// How long after it was replaced an earlier push still answers requests that name it (skew
