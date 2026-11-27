@@ -1,8 +1,10 @@
 # Logs end to end: design
 
-`## Next` item 18 in [README.md](README.md). Status: the OTLP/HTTP logs intake and `otel` keys are
-built (`feature/search-otlp`: `crates/search-es/src/otlp/`, [guides/logs.md](guides/logs.md));
-traces, metrics, gRPC, the Watcher page and the rest are design.
+`## Next` item 18 in [README.md](README.md). Status: the OTLP/HTTP logs intake and `otel` keys landed in #1178 and #1213, the shard limit
+in #1224, and Watcher's Alerts tab in #1180. OTLP traces are in review (`feature/search-otlp-traces`:
+`otlp/traces.rs`): spans become `traces-*.otel-*` documents, and their events log documents
+beside them, as Elastic's exporter writes them, on the same budget and limits as logs. Metrics,
+gRPC, health alerts (in progress) and the rest are design.
 
 As built, where the design left a choice: protobuf is read by a decoder of its own
 (`otlp/wire.rs`, the wire format OTLP needs, every length checked against the bytes present)
