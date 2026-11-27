@@ -800,8 +800,8 @@ impl Settings {
                 if col.split('.').count() != 3 || col.split('.').any(str::is_empty) || col.len() > 200 || f.trim().is_empty() || f.len() > 200 {
                     return bad(format!("masking: {key}: {col:?} → {f:?} isn't \"schema.table.column\" → a rule"));
                 }
-                if postgres && !crate::mask::is_rule(f) {
-                    return bad(format!("masking: {key}: {col}: {f:?} isn't a rule ({})", crate::mask::RULES));
+                if postgres && f.trim() != crate::mask::KEEP && !crate::mask::is_rule(f) {
+                    return bad(format!("masking: {key}: {col}: {f:?} isn't a rule ({}, or keep)", crate::mask::RULES));
                 }
             }
         }

@@ -112,9 +112,12 @@ With two, the second is compared against the first: the difference in score, how
 got better, worse or stayed, and the 50 that moved most each way. `roll search index evaluate`
 reads judgments as JSON or CSV (`query,_id,rating`, Quepid's export) and fails a CI run with
 `--fail-below` or `--fail-on-worse`; MCP's `search_evaluate` maps the route; the Relevance tab's
-Evaluate panel takes a paste or a file and prints the CI line. Next: judgment lists kept as
-indices and built from clicks (below), and evaluating a search application's own template and
-its experiment's variants.
+Evaluate panel takes a paste or a file and prints the CI line. A configuration may also be a
+search application (`application`, on the application's own name), each query rendered by its
+`_render_query` (dictionary and defaults kept), or one of its experiment's variants
+(`variant: {experiment, variant}`, the variant's params over the query): a variant is scored on
+the judgments before it takes traffic. Next: judgment lists kept as indices and built from
+clicks (below).
 
 - **Judgment lists.** A judgment list is an ordinary index the owner names
   (`roll-judgments-<name>`): documents `{query, index, doc_id, rating, source}`, with `source`

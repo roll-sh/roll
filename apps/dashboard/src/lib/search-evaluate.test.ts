@@ -12,6 +12,7 @@ test("judged queries come from CSV grouped by query, or from JSON as the route t
   assert.throws(() => parseJudgments("query,_id\nx,1\n"), /rating/);
   assert.throws(() => parseJudgments("query,_id,rating\nx,1,high\n"), /Line 2/);
   assert.deepEqual(parseJudgments('{"judgments":[{"query":"x","ratings":[]}]}'), [{ query: "x", ratings: [] }]);
-  // A bare search body is the request.
+  // A bare search body is the request; an application stays one.
+  assert.deepEqual(parseConfiguration("b", '{"application":"shop"}'), { name: "b", application: "shop" });
   assert.deepEqual(parseConfiguration("a", '{"query":{"match":{"t":"{{query}}"}}}'), { name: "a", request: { query: { match: { t: "{{query}}" } } } });
 });
