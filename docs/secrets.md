@@ -1302,7 +1302,15 @@ it carried and what to do, re-issue a CA, rotate a credential; only for its admi
 writes a `backup.left` audit row saying the same, and that a schedule they set up stops),
 `unplaced` (a key bound to hosts without a `header` or `query`, from before a placement
 was required: a trusted reader's placeholder may ride in any header, and an untrusted consumer's
-doesn't swap; see "Using a key without seeing it"), `expiring` (within two weeks: a key's
+doesn't swap; see "Using a key without seeing it"), `public_repo_no_leak_rotation` (a warning: a
+repository the project stands for, `counts_for_repo`, that anyone may read, while its
+`leaks.rotate` is `off`, so a value pushed there is world-readable at once and roll only reports
+it; `key` is the repository, `environment` empty, and the detail says where it's public, roll code
+or the GitHub repository it mirrors, and what to do, `roll secrets leaks managed` or the dashboard's
+"Leaked keys"; roll code says where from what it already keeps, a repository's visibility and its
+GitHub link's `private` as connecting and each delivery last said, never by asking GitHub; for
+whoever reads the whole project; under a policy that keeps `leaks.rotate` managed it's the
+`off_policy` finding instead, never both), `expiring` (within two weeks: a key's
 `expires_at`, so a vendor's key roll hasn't rotated in time, or a SaaS rotator's
 `credential_expires_at`, listed by its name with `environment` empty, never with the credential),
 `certificate_expiring` (a certificate a project CA signed for a CSR that ends

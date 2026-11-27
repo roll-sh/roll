@@ -109,8 +109,8 @@ fn code_event(kind: &str) -> EventInfo {
             json!({ "budget": { "project": "prj_0123456789ab", "project_name": "shop", "percent": 80, "spent_usd_month": 8.1, "max_usd_month": 10.0 }, "dashboard_url": null }),
         ),
         "masking" => (
-            &["masking.project", "masking.columns"],
-            json!({ "masking": { "project": "prj_0123456789ab", "project_name": "shop", "columns": [{ "resource": "postgres:pg_0123456789ab", "column": "public.users.phone", "why": "a phone number" }] }, "dashboard_url": null }),
+            &["masking.project", "masking.resources"],
+            json!({ "masking": { "project": "prj_0123456789ab", "project_name": "shop", "resources": [{ "resource": "postgres:pg_0123456789ab", "columns": 2 }] }, "dashboard_url": null }),
         ),
         "push" => (
             &["ref", "pusher", "accepted"],

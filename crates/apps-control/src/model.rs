@@ -289,7 +289,21 @@ pub struct Access {
     /// Other services of the project let in with roll's own token for them (Cloud Run's invoker,
     /// [`Access::callers`] entries: `api`, `api/production`, or an id): `x-roll-caller`.
     pub callers: Vec<String>,
+    /// A preview's webhook URLs (roll previews': a provider that can't send a header, Stripe's,
+    /// GitHub's): one exact path each, in with `?roll_hook=<token>`, the token's SHA-256 only.
+    pub webhooks: Vec<HookUrl>,
 }
+
+/// One webhook URL of a preview's ([`Access::webhooks`]).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct HookUrl {
+    pub path: String,
+    #[serde(rename = "token_sha256")]
+    pub token_hash: String,
+}
+
+/// The most webhook URLs a preview environment has.
+pub const MAX_HOOK_URLS: usize = 20;
 
 /// A cold start in parts (Cloud Run's startup latency): the runtime bringing the container up, then
 /// the app until it answered.
@@ -2063,6 +2077,9 @@ pub struct Environment {
     /// Other services of the project let in with roll's token for them (`access.callers`).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub callers: Vec<String>,
+    /// The paths a preview's webhook URLs open (`access.webhooks`; their tokens never shown).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub webhook_paths: Vec<String>,
     /// Visitors may type its password (`access.password`; never returned).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub password: bool,

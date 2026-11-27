@@ -1044,6 +1044,20 @@ impl Store {
         if !db.has_column("shares", "opened_day")? {
             db.add_column("shares", "opened_day", "INTEGER")?;
         }
+        // A webhook URL (one path, no cookie) is a share row with its path; a share link has none.
+        if !db.has_column("shares", "path")? {
+            db.add_column("shares", "path", "TEXT")?;
+        }
+        // A webhook URL's service: its token opens its path there only.
+        if !db.has_column("shares", "service")? {
+            db.add_column("shares", "service", "TEXT")?;
+        }
+        if !db.has_column("shares", "hits")? {
+            db.add_column("shares", "hits", "INTEGER NOT NULL DEFAULT 0")?;
+        }
+        if !db.has_column("shares", "last_at")? {
+            db.add_column("shares", "last_at", "INTEGER")?;
+        }
         Ok(Store { db, rates: Rates::default(), signing: std::sync::OnceLock::new(), sealer: std::sync::OnceLock::new() })
     }
 
@@ -3580,7 +3594,7 @@ impl Store {
         let sid = format!("shr_{}", &new_token()[..12]);
         let hash = bypass_hash(&token);
         self.db.write(|c| {
-            let live: i64 = c.query_row("SELECT COUNT(*) FROM shares WHERE preview_id = ? AND revoked = 0 AND expires_at > ?", params![id, now], |r| r.get(0))?;
+            let live: i64 = c.query_row("SELECT COUNT(*) FROM shares WHERE preview_id = ? AND path IS NULL AND revoked = 0 AND expires_at > ?", params![id, now], |r| r.get(0))?;
             if live as usize >= SHARES_MAX {
                 return Err(Error::Conflict(format!("the preview has {SHARES_MAX} live share links: revoke one first")));
             }
@@ -3596,7 +3610,7 @@ impl Store {
     /// The preview's share links, newest first (never their tokens).
     pub fn shares(&self, id: &str) -> Result<Vec<crate::Share>> {
         Ok(self.db.read(|c| {
-            c.query("SELECT id, expires_at, created_by, created_at, revoked, label, notes FROM shares WHERE preview_id = ? ORDER BY created_at DESC", [id], |r| {
+            c.query("SELECT id, expires_at, created_by, created_at, revoked, label, notes FROM shares WHERE preview_id = ? AND path IS NULL ORDER BY created_at DESC", [id], |r| {
                 Ok(crate::Share { id: r.get(0)?, expires_at: r.get(1)?, created_by: r.get(2)?, created_at: r.get(3)?, revoked: r.get::<_, i64>(4)? != 0, label: r.get(5)?, notes: r.get::<_, i64>(6)? != 0 })
             })
         })?)
@@ -3610,12 +3624,74 @@ impl Store {
         Ok(())
     }
 
+    /// A webhook URL for `path` of preview `id` (Stripe's or GitHub's, into a private preview):
+    /// that path only, for the preview's life, its token in the query. Shown once.
+    pub fn create_webhook(&self, id: &str, service: &str, path: &str, by: &str, maker: Option<&str>, label: &str) -> Result<(crate::Webhook, String)> {
+        let now = self.now_ms()?;
+        let token = format!("rph_{}", new_token());
+        let wid = format!("whk_{}", &new_token()[..12]);
+        let hash = bypass_hash(&token);
+        self.db.write(|c| {
+            let live: i64 = c.query_row("SELECT COUNT(*) FROM shares WHERE preview_id = ? AND path IS NOT NULL AND revoked = 0", [id], |r| r.get(0))?;
+            if live as usize >= WEBHOOKS_MAX {
+                return Err(Error::Conflict(format!("the preview has {WEBHOOKS_MAX} webhook URLs: revoke one first")));
+            }
+            c.execute(
+                "INSERT INTO shares (id, preview_id, hash, expires_at, created_by, created_at, maker, maker_checked, label, notes, path, service) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
+                params![wid, id, hash, i64::MAX, by, now, maker, now, label, path, service],
+            )?;
+            Ok::<_, Error>(())
+        })?;
+        Ok((crate::Webhook { id: wid, service: service.to_string(), path: path.to_string(), label: label.to_string(), created_by: by.to_string(), created_at: now, revoked: false, hits: 0, last_at: None }, token))
+    }
+
+    /// The preview's webhook URLs, newest first (never their tokens).
+    pub fn webhooks(&self, id: &str) -> Result<Vec<crate::Webhook>> {
+        Ok(self.db.read(|c| {
+            c.query("SELECT id, path, label, created_by, created_at, revoked, hits, last_at, service FROM shares WHERE preview_id = ? AND path IS NOT NULL ORDER BY created_at DESC", [id], |r| {
+                Ok(crate::Webhook { id: r.get(0)?, service: r.get::<_, Option<String>>(8)?.unwrap_or_default(), path: r.get(1)?, label: r.get(2)?, created_by: r.get(3)?, created_at: r.get(4)?, revoked: r.get::<_, i64>(5)? != 0, hits: r.get(6)?, last_at: r.get(7)? })
+            })
+        })?)
+    }
+
+    pub fn revoke_webhook(&self, id: &str, webhook: &str) -> Result<()> {
+        let n = self.db.write(|c| Ok::<_, Error>(c.execute("UPDATE shares SET revoked = 1 WHERE preview_id = ? AND id = ? AND path IS NOT NULL", params![id, webhook])?))?;
+        if n == 0 {
+            return Err(Error::NotFound(format!("no webhook URL {webhook}")));
+        }
+        Ok(())
+    }
+
+    /// A live webhook URL `token` of preview `id` for exactly `path` of `service` (as a share
+    /// link's row, for its maker's check: [`crate::visit::share_visit`]).
+    pub fn webhook_live(&self, id: &str, token: &str, service: &str, path: &str) -> Result<Option<LiveShare>> {
+        Ok(self.db.read(|c| {
+            c.query_row(
+                "SELECT id, expires_at, maker, maker_checked, label, notes FROM shares WHERE preview_id = ? AND hash = ? AND service = ? AND path = ? AND revoked = 0",
+                params![id, bypass_hash(token), service, path],
+                |r| Ok(LiveShare { id: r.get(0)?, ends: r.get(1)?, maker: r.get(2)?, maker_checked: r.get(3)?, label: r.get(4)?, notes: false }),
+            )
+            .optional()
+        })?)
+    }
+
+    /// The live webhook URLs' (service, path, token SHA-256), for a backend whose gate checks them.
+    pub fn webhook_hashes(&self, id: &str) -> Result<Vec<(String, String, String)>> {
+        Ok(self.db.read(|c| c.query("SELECT service, path, hash FROM shares WHERE preview_id = ? AND path IS NOT NULL AND service IS NOT NULL AND revoked = 0 ORDER BY created_at", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))))?)
+    }
+
+    /// A request came in by webhook URL `webhook` (how many, and when last: a relaxed write).
+    pub fn webhook_hit(&self, webhook: &str, now: i64) -> Result<()> {
+        self.db.write(|c| c.execute("UPDATE shares SET hits = hits + 1, last_at = ? WHERE id = ?", params![now, webhook]).map(drop))?;
+        Ok(())
+    }
+
     /// A live share link `token` of preview `id` (not revoked, not past).
     pub fn share_live(&self, id: &str, token: &str) -> Result<Option<LiveShare>> {
         let now = self.now_ms()?;
         Ok(self.db.read(|c| {
             c.query_row(
-                "SELECT id, expires_at, maker, maker_checked, label, notes FROM shares WHERE preview_id = ? AND hash = ? AND revoked = 0 AND expires_at > ?",
+                "SELECT id, expires_at, maker, maker_checked, label, notes FROM shares WHERE preview_id = ? AND hash = ? AND path IS NULL AND revoked = 0 AND expires_at > ?",
                 params![id, bypass_hash(token), now],
                 |r| Ok(LiveShare { id: r.get(0)?, ends: r.get(1)?, maker: r.get(2)?, maker_checked: r.get(3)?, label: r.get(4)?, notes: r.get::<_, i64>(5)? != 0 }),
             )
@@ -3714,7 +3790,7 @@ impl Store {
     pub fn share_ends(&self, id: &str, token: &str) -> Result<Option<i64>> {
         let now = self.now_ms()?;
         Ok(self.db.read(|c| {
-            c.query_row("SELECT expires_at FROM shares WHERE preview_id = ? AND hash = ? AND revoked = 0 AND expires_at > ?", params![id, bypass_hash(token), now], |r| r.get(0)).optional()
+            c.query_row("SELECT expires_at FROM shares WHERE preview_id = ? AND hash = ? AND path IS NULL AND revoked = 0 AND expires_at > ?", params![id, bypass_hash(token), now], |r| r.get(0)).optional()
         })?)
     }
 
@@ -4146,6 +4222,8 @@ pub struct BaseRow {
 
 /// Live share links a preview may have at once.
 pub const SHARES_MAX: usize = 20;
+/// The most live webhook URLs a preview has.
+pub const WEBHOOKS_MAX: usize = 20;
 
 /// Earlier pushes kept reachable per service.
 /// How long after it was replaced an earlier push still answers requests that name it (skew

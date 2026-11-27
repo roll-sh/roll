@@ -14,6 +14,20 @@ pub const SEGMENT_MAX: usize = 64;
 /// The most folders in a path.
 pub const DEPTH_MAX: usize = 8;
 
+/// A folder in its one spelling, or `None` for one roll secrets refuses: `""` is `/`, one trailing
+/// `/` is dropped, then 1–8 folders of [`is_segment`] (`/api/` is `/api`; `//`, `/a//b`, `..` none).
+/// roll secrets' `names::path` and roll-access's gate both read folders through it.
+pub fn folder(p: &str) -> Option<String> {
+    let p = if p.is_empty() { "/" } else { p };
+    let rest = p.strip_prefix('/').filter(|r| !r.starts_with('/'))?;
+    let rest = rest.strip_suffix('/').unwrap_or(rest);
+    if rest.is_empty() {
+        return Some("/".into());
+    }
+    let segments: Vec<&str> = rest.split('/').collect();
+    (segments.len() <= DEPTH_MAX && segments.iter().all(|s| is_segment(s))).then(|| format!("/{rest}"))
+}
+
 /// 1–32 characters of `[a-z0-9-]`, not starting or ending with `-`.
 pub fn is_slug(s: &str) -> bool {
     (1..=SLUG_MAX).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') && !s.starts_with('-') && !s.ends_with('-')
