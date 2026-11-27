@@ -437,7 +437,7 @@ pub fn decode_value(b: &[u8], pos: &mut usize) -> Result<Value> {
             let days = le!(i32, 4);
             Value::Interval(Interval::new(months, days, le!(i64, 8)))
         }
-        tag::UUID => Value::Uuid(u128::from_be_bytes(take(b, pos, 16)?.try_into().unwrap())),
+        tag::UUID => Value::Uuid(crate::types::Uuid128::from_be_bytes(take(b, pos, 16)?.try_into().unwrap())),
         tag::OID => Value::Oid(le!(u32, 4)),
         tag::ARRAY => {
             let elem = decode_type(b, pos)?;
@@ -1085,7 +1085,7 @@ mod tests {
                 vec![Value::Int4(1), Value::Null],
             ))),
             Value::Jsonb(Arc::new(parse_jsonb(r#"{"a": [1, 2]}"#).unwrap())),
-            Value::Uuid(0x1234),
+            Value::Uuid(crate::types::Uuid128::new(0x1234)),
             Value::Char(b'x'),
             Value::Date(5),
             Value::Timetz(1, -2),

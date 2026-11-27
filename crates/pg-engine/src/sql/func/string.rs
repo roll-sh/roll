@@ -2114,7 +2114,7 @@ fn gen_random_uuid(_: &[Value], c: &FnCtx) -> Result<Value> {
     c.exec.random_bytes(&mut b);
     b[6] = (b[6] & 0x0f) | 0x40;
     b[8] = (b[8] & 0x3f) | 0x80;
-    Ok(Value::Uuid(u128::from_be_bytes(b)))
+    Ok(Value::Uuid(crate::types::Uuid128::from_be_bytes(b)))
 }
 /// Unix-epoch nanoseconds, strictly increasing within the process
 /// (get_real_time_ns_ascending).
@@ -2144,7 +2144,7 @@ fn generate_uuidv7(c: &FnCtx, unix_ts_ms: u64, sub_ms_ns: u32) -> Value {
     b[6] = 0x70 | ((frac >> 8) as u8 & 0x0f);
     b[7] = frac as u8;
     b[8] = (b[8] & 0x3f) | 0x80;
-    Value::Uuid(u128::from_be_bytes(b))
+    Value::Uuid(crate::types::Uuid128::from_be_bytes(b))
 }
 
 const UNIX_TO_PG_EPOCH_US: i64 = 946_684_800_000_000;

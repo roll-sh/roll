@@ -483,7 +483,7 @@ pub fn decode_index_value(
                 _ => Value::Timestamptz(i),
             }
         }
-        (UUID, T::Uuid) => Value::Uuid(u128::from_be_bytes(fixed(&mut p, 16)?.try_into().ok()?)),
+        (UUID, T::Uuid) => Value::Uuid(crate::types::Uuid128::from_be_bytes(fixed(&mut p, 16)?.try_into().ok()?)),
         (BYTES, T::Text | T::Varchar(_) | T::Bpchar(_) | T::Name) => {
             // `put_bytes`: a 0 byte as 0 0xFF, the end as 0 1.
             let mut out = Vec::new();
@@ -587,7 +587,7 @@ mod tests {
             (Value::Date(-12), T::Date),
             (Value::Timestamp(1_234_567), T::Timestamp(-1)),
             (Value::Timestamptz(-9), T::Timestamptz(-1)),
-            (Value::Uuid(0x0123_4567_89ab_cdef_0011_2233_4455_6677), T::Uuid),
+            (Value::Uuid(crate::types::Uuid128::new(0x0123_4567_89ab_cdef_0011_2233_4455_6677)), T::Uuid),
             (Value::text(""), T::Text),
             (Value::text("a\0b\u{ff}é"), T::Varchar(14)),
             (Value::Null, T::Int4),

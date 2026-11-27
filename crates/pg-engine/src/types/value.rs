@@ -71,6 +71,56 @@ impl Ord for Interval {
     }
 }
 
+/// A uuid's 128 bits as two words, so `Value` keeps 8-byte alignment (a `u128` forces 16 and
+/// makes every `Value` 32 bytes where 24 hold every other variant). Ordered, compared and
+/// hashed exactly as the `u128` it holds: the high word (the first 8 bytes, big-endian) first.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+pub struct Uuid128 {
+    hi: u64,
+    lo: u64,
+}
+
+impl Uuid128 {
+    #[inline]
+    pub const fn new(u: u128) -> Self {
+        Self {
+            hi: (u >> 64) as u64,
+            lo: u as u64,
+        }
+    }
+
+    #[inline]
+    pub const fn get(self) -> u128 {
+        ((self.hi as u128) << 64) | self.lo as u128
+    }
+
+    #[inline]
+    pub const fn to_be_bytes(self) -> [u8; 16] {
+        self.get().to_be_bytes()
+    }
+
+    #[inline]
+    pub const fn from_be_bytes(b: [u8; 16]) -> Self {
+        Self::new(u128::from_be_bytes(b))
+    }
+}
+
+impl std::fmt::Debug for Uuid128 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&self.get(), f)
+    }
+}
+
+impl Hash for Uuid128 {
+    #[inline]
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.get().hash(state)
+    }
+}
+
+const _: () = assert!(std::mem::size_of::<Value>() == 24);
+const _: () = assert!(std::mem::size_of::<Option<Value>>() == 24);
+
 #[derive(Clone, Debug)]
 pub enum Value {
     Null,
@@ -96,7 +146,7 @@ pub enum Value {
     /// Microseconds since 2000-01-01 00:00:00 UTC.
     Timestamptz(i64),
     Interval(Interval),
-    Uuid(u128),
+    Uuid(Uuid128),
     /// json keeps the input text verbatim.
     Json(Arc<str>),
     Jsonb(Arc<Jsonb>),
@@ -494,6 +544,32 @@ fn hash_jsonb_here<H: Hasher>(j: &Jsonb, state: &mut H) {
             for (k, v) in m {
                 k.hash(state);
                 hash_jsonb(v, state);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Uuid128;
+
+    /// Ordered and hashed as the `u128` it replaced (uuid order is bytewise, PostgreSQL's
+    /// uuid_cmp; in-memory hash tables keep their placement).
+    #[test]
+    fn uuid128_as_u128() {
+        let hash = |h: &dyn Fn(&mut std::collections::hash_map::DefaultHasher)| {
+            let mut s = std::collections::hash_map::DefaultHasher::new();
+            h(&mut s);
+            std::hash::Hasher::finish(&s)
+        };
+        let edges = [0, 1, u64::MAX as u128, 1 << 64, (1 << 64) + 1, (1 << 127) - 1, 1 << 127, u128::MAX - 1, u128::MAX];
+        for &a in &edges {
+            let u = Uuid128::new(a);
+            assert_eq!(u.get(), a);
+            assert_eq!(Uuid128::from_be_bytes(a.to_be_bytes()).to_be_bytes(), a.to_be_bytes());
+            assert_eq!(hash(&|s| std::hash::Hash::hash(&u, s)), hash(&|s| std::hash::Hash::hash(&a, s)));
+            for &b in &edges {
+                assert_eq!(u.cmp(&Uuid128::new(b)), a.cmp(&b));
             }
         }
     }

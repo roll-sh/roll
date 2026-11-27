@@ -187,7 +187,7 @@ pub fn decode(
         T::Name => Value::Text(Arc::from(
             std::str::from_utf8(&b[..b.iter().position(|c| *c == 0).unwrap_or(b.len())]).ok()?,
         )),
-        T::Uuid => Value::Uuid(u128::from_be_bytes(b.get(..16)?.try_into().ok()?)),
+        T::Uuid => Value::Uuid(crate::types::Uuid128::from_be_bytes(b.get(..16)?.try_into().ok()?)),
         T::Interval(_) => Value::Interval(Interval {
             micros: i64_at(b, 8),
             days: i64_at(&b[8..], 4) as i32,

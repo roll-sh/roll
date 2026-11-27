@@ -26,7 +26,7 @@ pub mod value;
 pub mod xml;
 
 pub use numeric::Numeric;
-pub use value::{Interval, Value};
+pub use value::{Interval, Uuid128, Value};
 
 use crate::error::{Result, code};
 use crate::{bail, err};

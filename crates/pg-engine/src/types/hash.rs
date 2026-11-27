@@ -334,7 +334,7 @@ mod tests {
         );
         let u = u128::from_str_radix("a0eebc999c0b4ef8bb6d6bb9bd380a11", 16).unwrap();
         assert_eq!(
-            value_hash(&Value::Uuid(u), &DataType::Uuid, s).unwrap() as i64,
+            value_hash(&Value::Uuid(crate::types::Uuid128::new(u)), &DataType::Uuid, s).unwrap() as i64,
             424513190990560493
         );
         assert_eq!(

@@ -194,7 +194,7 @@ pub fn encode(v: &Value, ty: &DataType, ctx: &FormatCtx, out: &mut BytesMut) -> 
             out.put_i32(i.days);
             out.put_i32(i.months);
         }
-        (Value::Uuid(u), _) => out.put_u128(*u),
+        (Value::Uuid(u), _) => out.put_u128(u.get()),
         (Value::TsVector(v), _) => {
             let mut b = Vec::new();
             super::tsearch::tsvector_send(v, &mut b);
@@ -975,7 +975,7 @@ pub fn decode(b: &[u8], ty: &DataType, ctx: &FormatCtx) -> Result<Value> {
         }
         T::Uuid => {
             need(16)?;
-            Value::Uuid(r.get_u128())
+            Value::Uuid(crate::types::Uuid128::new(r.get_u128()))
         }
         T::Array(elem) => decode_array(b, elem, ctx)?,
         T::Row(fields) => {

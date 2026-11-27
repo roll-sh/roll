@@ -198,5 +198,5 @@ fn pg_random_uuid(_: &[Value], c: &FnCtx) -> Result<Value> {
     c.exec.random_bytes(&mut b);
     b[6] = (b[6] & 0x0f) | 0x40;
     b[8] = (b[8] & 0x3f) | 0x80;
-    Ok(Value::Uuid(u128::from_be_bytes(b)))
+    Ok(Value::Uuid(crate::types::Uuid128::from_be_bytes(b)))
 }

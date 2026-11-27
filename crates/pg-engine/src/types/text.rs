@@ -2073,7 +2073,7 @@ pub fn parse_value_ex(s: &str, ty: &DataType, ctx: &FormatCtx, explicit: bool) -
         T::Interval(m) => {
             Value::Interval(datetime::parse_interval_ex(s, ctx.interval_style, *m)?)
         }
-        T::Uuid => Value::Uuid(parse_uuid(s)?),
+        T::Uuid => Value::Uuid(crate::types::Uuid128::new(parse_uuid(s)?)),
         T::Json => {
             validate_json(s)?;
             Value::Json(s.into())
@@ -2690,7 +2690,7 @@ pub fn format_plain(v: &Value, ctx: &FormatCtx) -> String {
         Value::Timestamp(t) => datetime::format_timestamp_styled(*t, ctx.date_style),
         Value::Timestamptz(t) => datetime::format_timestamptz_styled(*t, &ctx.tz, ctx.date_style),
         Value::Interval(i) => format_interval(i, ctx),
-        Value::Uuid(u) => format_uuid(*u),
+        Value::Uuid(u) => format_uuid(u.get()),
         Value::Jsonb(j) => j.to_string(),
         Value::Array(a) => format_array(a, ctx),
         Value::Record(fields) => format_record(fields, |_, f| format_plain(f, ctx)),

@@ -9,11 +9,11 @@ use md5::Digest as _;
 
 pub(super) fn symbol(sym: &str) -> Option<Native> {
     Some(Native::scalar(match sym {
-        "uuid_nil" => |_, _| Ok(Value::Uuid(0)),
-        "uuid_ns_dns" => |_, _| Ok(Value::Uuid(0x6ba7b810_9dad_11d1_80b4_00c04fd430c8)),
-        "uuid_ns_url" => |_, _| Ok(Value::Uuid(0x6ba7b811_9dad_11d1_80b4_00c04fd430c8)),
-        "uuid_ns_oid" => |_, _| Ok(Value::Uuid(0x6ba7b812_9dad_11d1_80b4_00c04fd430c8)),
-        "uuid_ns_x500" => |_, _| Ok(Value::Uuid(0x6ba7b814_9dad_11d1_80b4_00c04fd430c8)),
+        "uuid_nil" => |_, _| Ok(Value::Uuid(crate::types::Uuid128::new(0))),
+        "uuid_ns_dns" => |_, _| Ok(Value::Uuid(crate::types::Uuid128::new(0x6ba7b810_9dad_11d1_80b4_00c04fd430c8))),
+        "uuid_ns_url" => |_, _| Ok(Value::Uuid(crate::types::Uuid128::new(0x6ba7b811_9dad_11d1_80b4_00c04fd430c8))),
+        "uuid_ns_oid" => |_, _| Ok(Value::Uuid(crate::types::Uuid128::new(0x6ba7b812_9dad_11d1_80b4_00c04fd430c8))),
+        "uuid_ns_x500" => |_, _| Ok(Value::Uuid(crate::types::Uuid128::new(0x6ba7b814_9dad_11d1_80b4_00c04fd430c8))),
         "uuid_generate_v1" => v1,
         "uuid_generate_v1mc" => v1mc,
         "uuid_generate_v3" => v3,
@@ -74,7 +74,7 @@ fn time_uuid(c: &FnCtx, node: Option<[u8; 6]>) -> u128 {
 }
 
 fn v1(_: &[Value], c: &FnCtx) -> Result<Value> {
-    Ok(Value::Uuid(time_uuid(c, None)))
+    Ok(Value::Uuid(crate::types::Uuid128::new(time_uuid(c, None))))
 }
 
 /// A random node with the IEEE 802 multicast and local-admin bits set.
@@ -82,7 +82,7 @@ fn v1mc(_: &[Value], c: &FnCtx) -> Result<Value> {
     let mut node = [0u8; 6];
     c.exec.random_bytes(&mut node);
     node[0] |= 0x03;
-    Ok(Value::Uuid(time_uuid(c, Some(node))))
+    Ok(Value::Uuid(crate::types::Uuid128::new(time_uuid(c, Some(node)))))
 }
 
 /// A name-based UUID: the hash of the namespace's bytes and the name, with `version`.
@@ -91,12 +91,12 @@ fn named(hash: &[u8], version: u8) -> Value {
     b.copy_from_slice(&hash[..16]);
     b[6] = (b[6] & 0x0f) | (version << 4);
     b[8] = (b[8] & 0x3f) | 0x80;
-    Value::Uuid(u128::from_be_bytes(b))
+    Value::Uuid(crate::types::Uuid128::from_be_bytes(b))
 }
 
 fn ns_and_name(a: &[Value]) -> (u128, &str) {
     let ns = match &a[0] {
-        Value::Uuid(u) => *u,
+        Value::Uuid(u) => u.get(),
         _ => 0,
     };
     (ns, crate::sql::func::text_arg(&a[1]))
@@ -115,7 +115,7 @@ fn v4(_: &[Value], c: &FnCtx) -> Result<Value> {
     c.exec.random_bytes(&mut b);
     b[6] = (b[6] & 0x0f) | 0x40;
     b[8] = (b[8] & 0x3f) | 0x80;
-    Ok(Value::Uuid(u128::from_be_bytes(b)))
+    Ok(Value::Uuid(crate::types::Uuid128::from_be_bytes(b)))
 }
 
 fn v5(a: &[Value], _: &FnCtx) -> Result<Value> {
@@ -138,11 +138,11 @@ mod tests {
         h.update(dns.to_be_bytes());
         h.update(b"www.widgets.com");
         let Value::Uuid(u) = named(&h.finalize(), 3) else { panic!() };
-        assert_eq!(format!("{u:032x}"), "3d813cbb47fb32ba91df831e1593ac29");
+        assert_eq!(format!("{:032x}", u.get()), "3d813cbb47fb32ba91df831e1593ac29");
         let mut h = sha1::Sha1::new();
         sha1::Digest::update(&mut h, dns.to_be_bytes());
         sha1::Digest::update(&mut h, b"www.widgets.com");
         let Value::Uuid(u) = named(&sha1::Digest::finalize(h), 5) else { panic!() };
-        assert_eq!(format!("{u:032x}"), "21f7f8de80515b8986800195ef798b6a");
+        assert_eq!(format!("{:032x}", u.get()), "21f7f8de80515b8986800195ef798b6a");
     }
 }
