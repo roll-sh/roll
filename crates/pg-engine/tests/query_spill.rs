@@ -639,8 +639,17 @@ fn sorted_setops() {
         assert_eq!(f1 - f0, 2, "{sql}: the two Sorts' files");
     }
     // EXPLAIN ANALYZE: each Sort's own rows (the second input read as far as the first's
-    // groups go) and tuplesort's method, PostgreSQL 18.6's. (Its Disk figures are extsort's
-    // model's, a plain Sort's: 1000kB where PostgreSQL shows 1008kB.)
+    // groups go) and tuplesort's method and Disk (its merge passes' blocks), PostgreSQL 18.6's.
+    let analyzed_disk = |s: &mut Session, sql: &str| -> Vec<String> {
+        let plan = q(s, &format!("EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) {sql}")).unwrap();
+        plan.iter()
+            .map(|r| match &r[0] {
+                Value::Text(t) => t.trim().to_string(),
+                v => format!("{v:?}"),
+            })
+            .filter(|l| l.starts_with("->  Sort") || l.starts_with("Sort Method"))
+            .collect()
+    };
     let analyzed = |s: &mut Session, sql: &str| -> Vec<String> {
         let plan = q(s, &format!("EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) {sql}")).unwrap();
         plan.iter()
@@ -652,16 +661,23 @@ fn sorted_setops() {
             .map(|l| l.split("  Disk").next().unwrap_or_default().to_string())
             .collect()
     };
-    let got = analyzed(&mut s, "SELECT t, a FROM so INTERSECT ALL SELECT t, a FROM so WHERE a % 3 = 0");
+    q(&mut s, "SET work_mem = '64kB'").unwrap();
+    let got = analyzed_disk(&mut s, "SELECT t, a FROM so INTERSECT ALL SELECT t, a FROM so WHERE a % 3 = 0");
     assert_eq!(
         got,
         [
             "->  Sort (actual rows=6666.00 loops=1)",
-            "Sort Method: external merge",
+            "Sort Method: external merge  Disk: 336kB",
             "->  Sort (actual rows=19988.00 loops=1)",
-            "Sort Method: external merge",
+            "Sort Method: external merge  Disk: 1008kB",
         ]
     );
+    // (Plain Sorts whose runs take merge passes: the blocks logtape hands out through them.)
+    q(&mut s, "SET max_parallel_workers_per_gather = 0").unwrap();
+    let got = analyzed_disk(&mut s, "SELECT * FROM so ORDER BY a, t");
+    assert_eq!(got, ["Sort Method: external merge  Disk: 976kB"]);
+    let got = analyzed_disk(&mut s, "SELECT a FROM so ORDER BY a DESC");
+    assert_eq!(got, ["Sort Method: external merge  Disk: 280kB"]);
     q(&mut s, "SET work_mem = '4MB'").unwrap();
     let got = analyzed(&mut s, "SELECT t, a FROM so WHERE a > 8000 EXCEPT ALL SELECT t, a FROM so WHERE a > 100");
     assert_eq!(got[0], "->  Sort (actual rows=1998.00 loops=1)");
@@ -736,10 +752,17 @@ fn distinct_aggregates() {
     ] {
         q(&mut s, sql).unwrap();
     }
-    for (sql, files) in [
-        ("SELECT count(DISTINCT t), count(DISTINCT a) FROM cd", 2),
-        ("SELECT count(DISTINCT t) FROM cd WHERE a > 10", 1),
+    // (Aggregates sharing an order read the input sorted once, the others sort their own
+    // values: PostgreSQL 18.6's files; a sorted grouping's groups streamed over its Sort.)
+    for (set, sql, files) in [
+        ("on", "SELECT count(DISTINCT t), count(DISTINCT a) FROM cd", 2),
+        ("on", "SELECT count(DISTINCT t) FROM cd WHERE a > 10", 1),
+        ("on", "SELECT sum(DISTINCT a), avg(DISTINCT a) FROM cd", 1),
+        ("on", "SELECT count(DISTINCT t), sum(DISTINCT a), avg(DISTINCT a) FROM cd", 2),
+        ("on", "SELECT a % 3, count(DISTINCT t) FROM cd GROUP BY a % 3 ORDER BY 1", 1),
+        ("off", "SELECT count(*), sum(c), max(m) FROM (SELECT a % 1000, count(*) c, max(t) m FROM cd GROUP BY a % 1000) z", 1),
     ] {
+        q(&mut s, &format!("SET enable_hashagg = {set}")).unwrap();
         q(&mut s, "SET work_mem = '256MB'").unwrap();
         let want = q(&mut s, sql).unwrap();
         q(&mut s, "SET work_mem = '64kB'").unwrap();
@@ -755,6 +778,49 @@ fn distinct_aggregates() {
     eng.shutdown();
 }
 
+
+/// An Incremental Sort's prefix groups past work_mem: each sorted as tuplesort sorts it then,
+/// runs on disk merged ("external merge"), one temporary file a group; EXPLAIN ANALYZE's
+/// Pre-sorted Groups line and the file count PostgreSQL 18.6's.
+#[test]
+fn incremental_sort_groups_spill() {
+    std::thread::Builder::new().stack_size(64 << 20).spawn(incremental_groups).unwrap().join().unwrap();
+}
+
+fn incremental_groups() {
+    let dir = tempfile::tempdir().unwrap();
+    let eng = open(dir.path());
+    let mut s = eng.connect(1, "postgres", "postgres", "postgres").unwrap();
+    for sql in [
+        "CREATE TABLE ig (k int NOT NULL, s text)",
+        "INSERT INTO ig SELECT g / 8000, md5(g::text) FROM generate_series(1, 20000) g",
+        "CREATE INDEX ig_k ON ig (k)",
+        "ANALYZE ig",
+        "SET enable_seqscan = off",
+    ] {
+        q(&mut s, sql).unwrap();
+    }
+    let sql = "SELECT md5(string_agg(k || s, ',')) FROM (SELECT k, s FROM ig ORDER BY k, s) x";
+    q(&mut s, "SET work_mem = '256MB'").unwrap();
+    let want = one(&mut s, sql);
+    assert_eq!(want, Value::Text("01b1e616018bcfe9213927b7c48f4cf7".into()), "PostgreSQL 18.6's");
+    q(&mut s, "SET work_mem = '64kB'").unwrap();
+    q(&mut s, "SELECT pg_stat_force_next_flush()").unwrap();
+    let f0 = int(&mut s, "SELECT temp_files FROM pg_stat_database WHERE datname = current_database()");
+    assert_eq!(one(&mut s, sql), want);
+    assert_eq!(temp_files(dir.path()), 0);
+    q(&mut s, "SELECT pg_stat_force_next_flush()").unwrap();
+    let f1 = int(&mut s, "SELECT temp_files FROM pg_stat_database WHERE datname = current_database()");
+    assert_eq!(f1 - f0, 3, "a file a prefix group");
+    let plan = q(&mut s, "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) SELECT k, s FROM ig ORDER BY k, s").unwrap();
+    let lines: Vec<String> = plan.iter().map(|r| match &r[0] { Value::Text(t) => t.trim().to_string(), v => format!("{v:?}") }).collect();
+    assert!(
+        lines.iter().any(|l| l == "Pre-sorted Groups: 3  Sort Method: external merge  Average Disk: 400kB  Peak Disk: 400kB"),
+        "{lines:#?}"
+    );
+    drop(s);
+    eng.shutdown();
+}
 
 /// A hashed DISTINCT and UNION (enable_sort off) past hash_mem: nodeAgg's spilling, the rows of
 /// groups not in the table to partitions read back as batches, one temporary file and 21 batches
