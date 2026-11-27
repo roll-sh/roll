@@ -708,6 +708,10 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
         }
     }
     let json_body = buffered.as_ref().and_then(|b| serde_json::from_slice::<Value>(b).ok());
+    if !row.body_shape_ok(json_body.as_ref()) {
+        ctx.audit(Some(row), None, None, "deny", None, StatusCode::BAD_REQUEST);
+        return deny(StatusCode::BAD_REQUEST, "bad_request", if row.array_body { "the body is a JSON array".into() } else { "the body is a JSON object".into() }, json!({}));
+    }
     // A create that names its project in its body is decided by it (and by nothing else).
     if let Err(why) = project_from_body(row, &mut target, json_body.as_ref()).and_then(|()| folder_from_body(row, &mut target, json_body.as_ref())) {
         ctx.audit(Some(row), None, None, "deny", None, StatusCode::BAD_REQUEST);
@@ -718,6 +722,9 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
         catalog::Act::Raw(f) => f(buffered.as_deref().unwrap_or_default()),
         _ => row.action_with(&ctx.method, &params, json_body.as_ref(), &parts.headers),
     }];
+    if let (Some(more), Some(b)) = (row.needs_too, json_body.as_ref()) {
+        needs.extend(more(b));
+    }
     // A git push: its ref updates come first; the pack after them streams on untouched.
     let mut git_commands: Option<bytes::Bytes> = None;
     if matches!(row.act, catalog::Act::GitPush) {

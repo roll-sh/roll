@@ -346,6 +346,9 @@ async fn check(State(a): S, ext: Extensions, Json(c): Json<Check>) -> crate::Res
     };
     let row = found.row;
     let params = found.params.unwrap_or_default();
+    if !row.body_shape_ok(c.body.as_ref()) {
+        return Ok(Json(json!({ "decision": "deny", "why": "the body isn't the JSON this route reads" })));
+    }
     // A folder the gate refuses before deciding is refused here too.
     if let Some(why) = crate::evaluate::bad_folder(row, uri.query()) {
         return Ok(Json(json!({ "decision": "deny", "why": why })));
@@ -370,6 +373,13 @@ async fn check(State(a): S, ext: Extensions, Json(c): Json<Check>) -> crate::Res
     let mut action = row.action_with(&method, &params, c.body.as_ref(), &headers);
     let asked = action;
     let mut outcome = if matches!(row.target, catalog::Tgt::AnyGrant) { Outcome::Allow } else { scope.outcome(&target, action) };
+    // What else its body needs, as the gate asks it: the weakest decides.
+    for more in row.needs_too.zip(c.body.as_ref()).map(|(f, b)| f(b)).unwrap_or_default() {
+        let o = scope.outcome(&target, more);
+        if crate::evaluate::rank(o) < crate::evaluate::rank(outcome) {
+            (outcome, action) = (o, more);
+        }
+    }
     if let Some((copied, _, _)) = crate::evaluate::copy_outcome(&a, row, &params, &target, (c.body.as_ref(), uri.query()), &scope).await
         && crate::evaluate::rank(copied) < crate::evaluate::rank(outcome)
     {
