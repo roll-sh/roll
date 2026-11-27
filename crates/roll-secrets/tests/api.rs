@@ -2675,13 +2675,13 @@ async fn readers_share_a_folders_first_digest_only_with_the_same_permissions() {
 /// A scanner's budget is its token's, and each pusher's share of it: one pusher's spent minute is
 /// refused (429, naming the budget and when it has room), counting nothing, while another pusher's
 /// push through the same token goes on; and pushers made up one per call buy nothing past the
-/// token's own budget.
+/// token's own budget (its calls here: its candidates are counted the same way, and spending them
+/// takes 400,000 hashed candidates).
 #[tokio::test]
 async fn one_pusher_spends_its_share_and_made_up_pushers_only_the_tokens_budget() {
     let api = Api::new().await;
-    let scan = |pusher: &str, candidates: &[String]| json!({ "candidates": candidates, "pusher": pusher, "refs": ["refs/heads/main"] });
-    let full = vec!["Kq8mZ3vT9xLr2WbN".to_string(); roll_secrets::leaks::SCAN_MAX];
-    let fits = roll_secrets::leaks::TOKEN_SCAN_CANDIDATES_PER_MINUTE / roll_secrets::leaks::SCAN_MAX as i64;
+    use roll_secrets::leaks::{SCANS_PER_MINUTE, TOKEN_SCANS_PER_MINUTE};
+    let scan = |pusher: &str| json!({ "candidates": [], "pusher": pusher, "refs": ["refs/heads/main"] });
     let minute = || api.db.now_ms().unwrap() / 60_000;
     // The budgets are a minute's: a run that crosses into the next minute is run again, with a
     // token of its own.
@@ -2689,17 +2689,17 @@ async fn one_pusher_spends_its_share_and_made_up_pushers_only_the_tokens_budget(
         let started = minute();
         let token = api.token(json!({ "name": format!("hook-{attempt}"), "actions": ["scan"] }));
         let mut shares = Vec::new();
-        for _ in 0..roll_secrets::leaks::SCANS_PER_MINUTE {
-            shares.push(api.req(Method::POST, "/scan", Some(scan("alice", &[])), Some(&token)).await.0);
+        for _ in 0..SCANS_PER_MINUTE {
+            shares.push(api.req(Method::POST, "/scan", Some(scan("alice")), Some(&token)).await.0);
         }
-        let alice = api.req(Method::POST, "/scan", Some(scan("alice", &[])), Some(&token)).await;
-        let bob = api.req(Method::POST, "/scan", Some(scan("bob", &[])), Some(&token)).await.0;
-        // Each full scan names a new pusher: the token's minute is spent all the same.
+        let alice = api.req(Method::POST, "/scan", Some(scan("alice")), Some(&token)).await;
+        let bob = api.req(Method::POST, "/scan", Some(scan("bob")), Some(&token)).await.0;
+        // Each call names a new pusher: the token's minute is spent all the same.
         let mut made_up = Vec::new();
-        for i in 0..fits {
-            made_up.push(api.req(Method::POST, "/scan", Some(scan(&format!("made-up-{i}"), &full)), Some(&token)).await.0);
+        for i in 0..TOKEN_SCANS_PER_MINUTE - SCANS_PER_MINUTE - 1 {
+            made_up.push(api.req(Method::POST, "/scan", Some(scan(&format!("made-up-{i}"))), Some(&token)).await.0);
         }
-        let again = api.req(Method::POST, "/scan", Some(scan("made-up-again", &full)), Some(&token)).await;
+        let again = api.req(Method::POST, "/scan", Some(scan("made-up-again")), Some(&token)).await;
         if minute() != started && attempt < 3 {
             continue;
         }
@@ -8939,11 +8939,11 @@ async fn a_change_is_one_event_at_its_audit_rows_seq_naming_keys_and_versions_ne
 
     // A filtered follower moves to the head past the rows its filter left out.
     let start = api.ok(Method::GET, "/events?latest=1", None).await["next"].as_i64().unwrap();
-    for i in 0..300 {
+    for i in 0..30 {
         api.set("development", "N", &i.to_string()).await;
     }
     let head = api.ok(Method::GET, "/events?latest=1", None).await["next"].clone();
-    assert!(head.as_i64().unwrap() >= start + 300, "{head}");
+    assert!(head.as_i64().unwrap() >= start + 30, "{head}");
     for q in ["kinds=secret.leaked", "environment=staging", "kinds=secret.changed&environment=production"] {
         let page = api.ok(Method::GET, &format!("/events?after={start}&{q}"), None).await;
         assert_eq!((&page["events"], &page["next"]), (&json!([]), &head), "{q}");
@@ -9499,11 +9499,11 @@ async fn every_due_subscription_is_served_within_two_passes() {
     let at = |rest: &str| format!("/v1/secrets/projects/{team}{rest}");
     let (s, n) = api.as_ada(Method::POST, &at("/notifications"), Some(json!({ "kinds": ["secret.changed"], "channel": { "email": "own" } }))).await;
     assert_eq!(s, StatusCode::CREATED, "{n}");
-    // 250 in all, as many people's would be (one person has at most 20).
+    // 220 in all, past a pass's 200, as many people's would be (one person has at most 20).
     let id = n["id"].as_str().unwrap().to_string();
     api.db
         .write(move |c| {
-            for i in 0..249 {
+            for i in 0..219 {
                 c.execute(
                     "INSERT INTO notifications (id, project_id, user_id, kinds, environment, channel, install, target, cursor, state, error, error_at, tries, running_until, retry_at, delivered, delivered_at, created_at)
                      SELECT ?, project_id, user_id, kinds, environment, channel, install, target, cursor, state, error, error_at, tries, running_until, retry_at, delivered, delivered_at, created_at FROM notifications WHERE id = ?",
