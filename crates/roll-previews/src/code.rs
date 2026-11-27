@@ -59,6 +59,23 @@ impl CodeSource {
         Ok(self.code.find_repo(owner, name)?)
     }
 
+    /// A project's own event (`kind`: `budget`, `masking`) as `{<kind>: data, dashboard_url}`,
+    /// to each of its repos. A repo gone from roll code has nobody to tell; anything else fails,
+    /// to be tried again.
+    fn project_event(&self, repos: &[String], project: &str, kind: &'static str, data: serde_json::Value) -> anyhow::Result<()> {
+        let web = self.code.config.web_url.trim_end_matches('/');
+        let dashboard = (!web.is_empty()).then(|| format!("{web}/dashboard/projects/{project}/previews"));
+        for full in repos {
+            let repo = match self.repo(full) {
+                Ok(r) => r,
+                Err(e) if e.downcast_ref::<code_control::Error>().is_some_and(|e| matches!(e, code_control::Error::NotFound(_))) => continue,
+                Err(e) => return Err(e),
+            };
+            self.code.emit_project(&repo.id, kind, serde_json::json!({ kind: data, "dashboard_url": dashboard }))?;
+        }
+        Ok(())
+    }
+
     fn info(&self, repo: &RepoRow, c: &code_control::model::Change) -> ChangeInfo {
         let head = self.code.store.resolve(&repo.id, &c.head).ok().flatten().map(|cs| cs.to_string()).unwrap_or_else(|| c.head.clone());
         ChangeInfo {
@@ -409,18 +426,11 @@ impl Source for CodeSource {
     }
 
     async fn budget(&self, repos: &[String], alert: &crate::ports::BudgetAlert) -> anyhow::Result<()> {
-        let web = self.code.config.web_url.trim_end_matches('/');
-        let dashboard = (!web.is_empty()).then(|| format!("{web}/dashboard/projects/{}/previews", alert.project));
-        for full in repos {
-            // A repo gone from roll code has nobody to tell; anything else is tried again.
-            let repo = match self.repo(full) {
-                Ok(r) => r,
-                Err(e) if e.downcast_ref::<code_control::Error>().is_some_and(|e| matches!(e, code_control::Error::NotFound(_))) => continue,
-                Err(e) => return Err(e),
-            };
-            self.code.emit_budget(&repo.id, serde_json::json!({ "budget": alert, "dashboard_url": dashboard }))?;
-        }
-        Ok(())
+        self.project_event(repos, &alert.project, "budget", serde_json::json!(alert))
+    }
+
+    async fn masking(&self, repos: &[String], notice: &crate::ports::MaskingNotice) -> anyhow::Result<()> {
+        self.project_event(repos, &notice.project, "masking", serde_json::json!(notice))
     }
 
     fn git_report_body(&self, p: &Preview, s: &Settings, deleted: Option<Option<&str>>) -> Option<crate::ports::GitReportBody> {

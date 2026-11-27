@@ -1814,8 +1814,9 @@ impl Engine {
     }
 
     /// The masks a branch of `kind:parent` gets under its rules `rules`: the rules (but `keep`),
-    /// and, for Postgres, every column of the parent that looks like people's data
-    /// ([`crate::mask::suggest`]) and has no rule, with the rule suggested for it: masked until
+    /// and every column (a NoSQL table's outside its keys, a search index's field) of the parent
+    /// that looks like people's data ([`crate::mask::suggest`]) and has no rule, with the rule
+    /// suggested for it: masked until
     /// someone says otherwise (Tonic flags new sensitive columns, Neosync needs a rule for each),
     /// so a column production gains doesn't reach a preview in the clear. Only where the project
     /// has rules for the parent (one that masks nothing hands over its data as it says). Second,
@@ -1824,7 +1825,7 @@ impl Engine {
     pub(super) async fn effective_masks(&self, id: &str, b: &Arc<dyn Brancher>, kind: Kind, parent: &str, rules: &BTreeMap<String, String>) -> (BTreeMap<String, String>, Vec<(String, String)>) {
         let mut cols: BTreeMap<String, String> = rules.iter().filter(|(_, r)| r.trim() != crate::mask::KEEP).map(|(c, r)| (c.clone(), r.clone())).collect();
         let mut by_default = Vec::new();
-        if kind != Kind::Postgres || rules.is_empty() {
+        if !matches!(kind, Kind::Postgres | Kind::Nosql | Kind::Search) || rules.is_empty() {
             return (cols, by_default);
         }
         match tokio::time::timeout(SUGGEST_READ_FOR, b.columns(parent, crate::mask::SUGGEST_COLUMNS_MAX)).await {
@@ -1837,10 +1838,10 @@ impl Engine {
                 }
             }
             Ok(Err(e)) => {
-                let _ = self.store.log(id, &format!("postgres:{parent}: its columns couldn't be read, so only its rules mask it: {e:#}"));
+                let _ = self.store.log(id, &format!("{}:{parent}: its columns couldn't be read, so only its rules mask it: {e:#}", kind.as_str()));
             }
             Err(_) => {
-                let _ = self.store.log(id, &format!("postgres:{parent}: its columns weren't read within {} s, so only its rules mask it", SUGGEST_READ_FOR.as_secs()));
+                let _ = self.store.log(id, &format!("{}:{parent}: its columns weren't read within {} s, so only its rules mask it", kind.as_str(), SUGGEST_READ_FOR.as_secs()));
             }
         }
         (cols, by_default)

@@ -1246,6 +1246,31 @@
             "repo_id": "rep_0123456789abcd"
           },
           "title": "budget"
+        },
+        {
+          "fields": [
+            "repo",
+            "masking.project",
+            "masking.columns"
+          ],
+          "kind": "masking",
+          "sample": {
+            "dashboard_url": null,
+            "masking": {
+              "columns": [
+                {
+                  "column": "public.users.phone",
+                  "resource": "postgres:pg_0123456789ab",
+                  "why": "a phone number"
+                }
+              ],
+              "project": "prj_0123456789ab",
+              "project_name": "shop"
+            },
+            "repo": "acme/app",
+            "repo_id": "rep_0123456789abcd"
+          },
+          "title": "masking"
         }
       ],
       "source": "code",
