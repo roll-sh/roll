@@ -47,6 +47,13 @@ impl RollApps {
         RollApps { api, ids: Default::default(), started: Default::default(), misses: Default::default(), feedback: false }
     }
 
+    /// What [`RollApps::find`] cached of `preview`'s service `name`, dropped (it's looked up again).
+    fn forget(&self, preview: &str, name: &str) {
+        let key = (preview.to_string(), name.to_string());
+        self.ids.lock().unwrap_or_else(|p| p.into_inner()).remove(&key);
+        self.misses.lock().unwrap_or_else(|p| p.into_inner()).remove(&key);
+    }
+
 
     /// The roll apps service `name` of `project`.
     async fn service_in(&self, project: &str, name: &str) -> anyhow::Result<Option<String>> {
@@ -798,11 +805,17 @@ impl apps_control::integrations::PreviewRouter for DomainRouter {
 async fn preview_on(engine: &roll_previews::Engine, apps: &RollApps, service: &str, env: &str) -> Option<String> {
     let preview = roll_previews::Engine::preview_of_env(env)?;
     for s in engine.store.services(&preview).ok()? {
-        if let Ok(Some((id, e))) = apps.find(&preview, &s.name).await
-            && id == service
-            && e == env
-        {
-            return Some(preview);
+        // An id this lookup cached may be a service since deleted and made again (a new id):
+        // asked once more, uncached, before it's another's.
+        for fresh in [false, true] {
+            if fresh {
+                apps.forget(&preview, &s.name);
+            }
+            match apps.find(&preview, &s.name).await {
+                Ok(Some((id, e))) if id == service && e == env => return Some(preview),
+                Ok(Some(_)) => continue,
+                _ => break,
+            }
         }
     }
     None

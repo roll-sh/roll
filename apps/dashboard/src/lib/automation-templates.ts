@@ -518,7 +518,15 @@ export const TEMPLATES: AutomationTemplate[] = [
           }),
         ],
         // A note only (its body says it), not a reply to one or another review.
-        { filters: [{ field: "event.data.body", op: "contains", value: "**Feedback on the preview** · " }] },
+        {
+          filters: [
+            { field: "event.data.body", op: "contains", value: "**Feedback on the preview** · " },
+            // Never someone's outside the team (a share link's guest, a stranger's review on a
+            // public mirror): their words stay in roll. Nor a dismissal of a note.
+            { field: "event.data.outside", op: "equals", value: false },
+            { field: "event.data.dismissed", op: "equals", value: false },
+          ],
+        },
       );
     },
   },
@@ -543,7 +551,15 @@ export const TEMPLATES: AutomationTemplate[] = [
             ok_statuses: [201],
           }),
         ],
-        { filters: [{ field: "event.data.body", op: "contains", value: "**Feedback on the preview** · " }] },
+        {
+          filters: [
+            { field: "event.data.body", op: "contains", value: "**Feedback on the preview** · " },
+            // Never someone's outside the team (a share link's guest, a stranger's review on a
+            // public mirror): their words stay in roll. Nor a dismissal of a note.
+            { field: "event.data.outside", op: "equals", value: false },
+            { field: "event.data.dismissed", op: "equals", value: false },
+          ],
+        },
       );
     },
   },

@@ -390,6 +390,7 @@ func held(f *fakeSearch, name string, check func(*fakeCluster) error) resource.T
 // switched to another flavor in place (its key made again), imported, destroyed. The keys'
 // secrets stay out of the plan.
 func TestSearchAsCode(t *testing.T) {
+	t.Parallel()
 	f := newFakeSearch()
 	srv := httptest.NewServer(f)
 	defer srv.Close()
@@ -578,6 +579,7 @@ data "roll_search_cluster" "shop" {
 
 // Past a person's cap the create's 409 is a diagnostic that names the cap and the flag.
 func TestSearchClusterCap(t *testing.T) {
+	t.Parallel()
 	f := newFakeSearch()
 	f.capClusters, f.capAlwaysOn = 1, 1
 	f.clusters["srch_old"] = &fakeCluster{id: "srch_old", name: "old", flavor: "elasticsearch", idle: 0}
@@ -603,6 +605,7 @@ resource "roll_search_cluster" "more" {
 // An ephemeral key for the run: a provisioner uses it, it's never in the state, and it's revoked
 // as the run closes.
 func TestSearchKeyEphemeral(t *testing.T) {
+	t.Parallel()
 	f := newFakeSearch()
 	f.clusters["srch_1"] = &fakeCluster{id: "srch_1", name: "shop", flavor: "elasticsearch", idle: 900, maxInFlight: 64, maxBody: 100, allow: []map[string]any{}, keys: map[string]bool{}}
 	srv := httptest.NewServer(f)
@@ -665,6 +668,7 @@ func mustDecode(s string) string {
 // spacing, which roll answers sorted and compact: the plan after each apply is empty. A rule
 // change elsewhere is seen, and both import by `<cluster id>/<name>`.
 func TestSearchRelevanceAsCode(t *testing.T) {
+	t.Parallel()
 	f := newFakeSearch()
 	srv := httptest.NewServer(f)
 	defer srv.Close()

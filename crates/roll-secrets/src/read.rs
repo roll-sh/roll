@@ -988,14 +988,28 @@ impl Secrets {
     #[allow(clippy::too_many_arguments)]
     fn view_of(&self, project: &str, slug: &str, path: &str, caller: &Caller, shared: bool, action: Action, only: Option<&str>) -> Result<Vec<Entry>> {
         let principal = (!shared && caller.personal()).then_some(caller.principal.as_str());
-        let through = |e: &str, p: &str| caller.allows(action, &Scope::at(project, e, p));
+        // Key by key: what a rule limited to some keys reaches is kept below.
+        let through = |e: &str, p: &str| caller.allows(action, &Scope::at(project, e, p).by_key());
         let passes = |p: &str, e: &str, at: &str| caller.passes_freeze(p, e, at);
         let pass: Pass<'_> = (action == Action::Reveal).then_some(&passes);
         let dead = self.dead_exports("x.to_project = ?", project)?;
-        self.db.read(|c| {
+        let entries = self.db.read(|c| {
             let env = envs::by_slug(c, project, slug)?;
             view_in(c, &env, path, principal, &through, pass, caller.grants.untrusted(), ROW_COLUMNS, only, 0, &mut HashSet::new(), &dead)
-        })
+        })?;
+        if !caller.grants.limits_keys() {
+            return Ok(entries);
+        }
+        // A rule limited to some keys: each key here, and, through an import or the base, in the
+        // folder it comes from too (another project's share stands in for access there).
+        let here = Scope::at(project, slug, path);
+        Ok(entries
+            .into_iter()
+            .filter(|e| {
+                let k = e.row.key.as_str();
+                caller.allows(action, &here.key(k)) && (e.row.project_id != project || (e.env == slug && e.row.path == path) || caller.allows(action, &Scope::at(project, &e.env, &e.row.path).key(k)))
+            })
+            .collect())
     }
 
     /// `e` as the API shows it. Its fingerprint only to a caller who may reveal it: a writer
@@ -1047,7 +1061,7 @@ impl Secrets {
     /// A folder's effective secrets, without values.
     pub fn secrets(&self, project: &str, slug: &str, path: &str, caller: &Caller) -> Result<Vec<Secret>> {
         let path = names::path(path)?;
-        caller.need(Action::Read, &Scope::at(project, slug, &path))?;
+        caller.need(Action::Read, &Scope::at(project, slug, &path).by_key())?;
         let dek = self.project(project)?;
         let entries = self.view(project, slug, &path, caller, false, Action::Read)?;
         let mut list: Vec<Secret> = entries.into_iter().map(|e| self.secret_of(&dek, project, e, caller)).collect();
@@ -1059,7 +1073,7 @@ impl Secrets {
     /// one (default: whichever the caller reads).
     pub fn secret(&self, project: &str, slug: &str, path: &str, key: &str, kind: Option<SecretType>, caller: &Caller) -> Result<Secret> {
         let path = names::path(path)?;
-        caller.need(Action::Read, &Scope::at(project, slug, &path))?;
+        caller.need(Action::Read, &Scope::at(project, slug, &path).key(key))?;
         let dek = self.project(project)?;
         let entries = self.view(project, slug, &path, caller, kind == Some(SecretType::Shared), Action::Read)?;
         let e = entries.into_iter().find(|e| e.row.key == key).ok_or_else(|| Error::NotFound(format!("no secret {key} in {slug}:{path}")))?;
@@ -1075,7 +1089,7 @@ impl Secrets {
     /// One secret's value, resolved unless `resolve` is false. Audited.
     pub fn reveal(&self, project: &str, slug: &str, path: &str, key: &str, resolve: bool, caller: &Caller) -> Result<(Value, Vec<Problem>)> {
         let path = names::path(path)?;
-        caller.need(Action::Reveal, &Scope::at(project, slug, &path))?;
+        caller.need(Action::Reveal, &Scope::at(project, slug, &path).key(key))?;
         self.read_quota(caller)?;
         let narrowed = self.caller_for(project, slug, caller)?;
         let (v, problems, leases) = self.reveal_entry(project, slug, &path, key, resolve, &narrowed)?;
@@ -1126,7 +1140,7 @@ impl Secrets {
             Some(maker) if !caller.runtime => format!("{maker} chose the reference, and a person's or a token's choice never reads a sensitive key (an operator-written target does)"),
             _ => why.clone(),
         };
-        if !narrowed.allows(Action::Reveal, &Scope::at(project, slug, path)) {
+        if !narrowed.allows(Action::Reveal, &Scope::at(project, slug, path).key(key)) {
             return Err(Refusal::Protected(format!("{slug} is a protected environment, and {why}")));
         }
         let entries = self.view(project, slug, path, &narrowed, false, Action::Reveal).map_err(missing)?;
@@ -1194,7 +1208,6 @@ impl Secrets {
         match once {
             Some(Once { by, purpose, to }) => {
                 let to = match to {
-                    Some(t) if names::sensitive(&e.row.tags) => format!(", a sensitive key sent only to {t}"),
                     Some(t) => format!(", sent only to {t}"),
                     None => String::new(),
                 };
@@ -1274,7 +1287,7 @@ impl Secrets {
             _ => None,
         };
         let path = names::path(path)?;
-        caller.need(Action::Reveal, &Scope::at(project, slug, &path))?;
+        caller.need(Action::Reveal, &Scope::at(project, slug, &path).by_key())?;
         self.read_quota(caller)?;
         let narrowed = self.caller_for(project, slug, caller)?;
         let caller = &narrowed;
@@ -1391,7 +1404,7 @@ impl Secrets {
     /// is audited like an export.
     pub fn values_at(&self, project: &str, slug: &str, path: &str, seq: Option<i64>, at: Option<i64>, caller: &Caller) -> Result<(i64, Values)> {
         let path = names::path(path)?;
-        caller.need(Action::Reveal, &Scope::at(project, slug, &path))?;
+        caller.need(Action::Reveal, &Scope::at(project, slug, &path).by_key())?;
         let dek = self.project(project)?;
         let passes = |p: &str, e: &str, at: &str| caller.passes_freeze(p, e, at);
         let (seq, state, branches) = self.db.read(|c| {
@@ -1417,7 +1430,8 @@ impl Secrets {
         } else {
             self.db.read(|c| c.query("SELECT id, tags FROM secrets WHERE project_id = ?", [project], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))))?.into_iter().filter(|(_, t)| names::sensitive(&crate::from_json::<Vec<String>>(t))).map(|(id, _)| id).collect()
         };
-        for v in state.into_iter().filter(|v| v.owner.is_empty() && v.path == path) {
+        let here = Scope::at(project, slug, &path);
+        for v in state.into_iter().filter(|v| v.owner.is_empty() && v.path == path && crate::access::reaches(caller, Action::Reveal, &here, &v.key)) {
             // A version of a key sensitive now, or written while it was, stays out of reach.
             if !caller.runtime && (now_sensitive.contains(&v.secret_id) || names::sensitive(&crate::from_json::<Vec<String>>(&v.tags))) {
                 withheld.push(v.key);
@@ -1878,7 +1892,7 @@ impl Secrets {
 
     pub fn versions(&self, project: &str, slug: &str, path: &str, key: &str, kind: Option<SecretType>, caller: &Caller) -> Result<Vec<Version>> {
         let path = names::path(path)?;
-        caller.need(Action::Read, &Scope::at(project, slug, &path))?;
+        caller.need(Action::Read, &Scope::at(project, slug, &path).key(key))?;
         self.project(project)?;
         let owner = self.owner_of(kind, caller);
         self.db.read(|c| {
@@ -1914,7 +1928,7 @@ impl Secrets {
     #[allow(clippy::too_many_arguments)]
     pub fn version_value(&self, project: &str, slug: &str, path: &str, key: &str, version: i64, kind: Option<SecretType>, caller: &Caller) -> Result<Value> {
         let path = names::path(path)?;
-        caller.need(Action::Reveal, &Scope::at(project, slug, &path))?;
+        caller.need(Action::Reveal, &Scope::at(project, slug, &path).key(key))?;
         let dek = self.project(project)?;
         let owner = self.owner_of(kind, caller);
         let passes = |p: &str, e: &str, at: &str| caller.passes_freeze(p, e, at);
@@ -2367,7 +2381,7 @@ impl<'a> Resolver<'a> {
                         None => (env.to_string(), path.to_string()),
                         Some(e) => (e.clone(), r.path.clone()),
                     };
-                    let got = if !self.caller.allows(Action::Reveal, &Scope::at(self.project, &env, &path)) {
+                    let got = if !self.caller.allows(Action::Reveal, &Scope::at(self.project, &env, &path).key(&r.key)) {
                         Err(format!("{}: no access to {env}", r.display()))
                     } else if self.env(&env).is_none() {
                         if self.s.db.read(|c| crate::deleted_envs::deleted(c, self.project, &env)).unwrap_or(false) {
