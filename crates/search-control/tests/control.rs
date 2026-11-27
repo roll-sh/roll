@@ -7516,8 +7516,9 @@ async fn index_apis_authorize_the_indices_their_wildcards_reach() {
 
 /// Elasticsearch: what reads or writes beyond the request's own indices takes the caller's
 /// privileges there. A local ES|QL `ENRICH` needs `monitor_enrich` (its policy's table is read
-/// by the system); a connector aimed at another index needs write there (its syncs write as
-/// whoever aimed it); SQL's `SHOW TABLES` lists only what the caller may read.
+/// by the system); a connector aimed at another index takes only `manage_connector`, as in
+/// Elasticsearch, and its syncs then write as whoever aimed it (so as them, refused where they
+/// may not write); SQL's `SHOW TABLES` lists only what the caller may read.
 #[tokio::test]
 async fn enrich_connectors_and_show_tables_take_the_callers_privileges() {
     use reqwest::Method;
@@ -7544,12 +7545,16 @@ async fn enrich_connectors_and_show_tables_take_the_callers_privileges() {
     let (s, v) = e.es(user, "u-password-1", Method::POST, "/_query", Some(enrich)).await;
     assert_eq!(s, 403, "{v}");
     assert!(v.to_string().contains("resolve_policy") && !v.to_string().contains("s-of-b"), "{v}");
+    let syncs_as = || {
+        let st = e.control.node.get_loaded("indirect").unwrap().cluster.state();
+        st.metadata.xpack.get(search_es::xpack::entsearch::sync::RECORDS, "c1").and_then(|r| r.pointer(&["user", "username"]).cloned())
+    };
+    assert_eq!(syncs_as(), None, "aimed by the cluster's owner: its syncs run as the cluster's own");
     let (s, v) = e.es(user, "u-password-1", Method::PUT, "/_connector/c1/_index_name", Some(json!({"index_name": "content-b"}))).await;
-    assert_eq!(s, 403, "aimed at another index: {v}");
+    assert_eq!(s, 200, "aimed at another index: {v}");
+    assert_eq!(syncs_as(), Some(search_es::json::Value::from("u")), "its syncs write as whoever aimed it");
     let (s, v) = e.es(user, "u-password-1", Method::PUT, "/_connector/c1", Some(json!({"index_name": "content-b", "is_native": false}))).await;
-    assert_eq!(s, 403, "put again, aimed at another index: {v}");
-    let (_, v) = e.es(&owner, &pw, Method::GET, "/_connector/c1", None).await;
-    assert_eq!(v["index_name"], "content-a", "{v}");
+    assert_eq!(s, 200, "put again, aimed at another index: {v}");
     let (s, v) = e.es(user, "u-password-1", Method::POST, "/_sql?format=json", Some(json!({"query": "SHOW TABLES"}))).await;
     assert_eq!(s, 200, "{v}");
     let names: Vec<&str> = v["rows"].as_array().unwrap().iter().filter_map(|r| r[1].as_str()).collect();
