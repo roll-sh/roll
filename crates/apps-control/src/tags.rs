@@ -44,6 +44,36 @@ pub fn tag_matches(pattern: &str, name: &str) -> bool {
     p[i..].iter().all(|b| *b == b'*')
 }
 
+/// Tags in version order: runs of digits compared as numbers (`v9` before `v10`, `1.2.9` before
+/// `1.2.10`), the rest as text.
+pub fn version_order(a: &str, b: &str) -> std::cmp::Ordering {
+    let parts = |s: &str| -> Vec<(bool, String)> {
+        let mut out: Vec<(bool, String)> = Vec::new();
+        for c in s.chars() {
+            let d = c.is_ascii_digit();
+            match out.last_mut() {
+                Some((was, run)) if *was == d => run.push(c),
+                _ => out.push((d, c.to_string())),
+            }
+        }
+        out
+    };
+    let (x, y) = (parts(a), parts(b));
+    for (p, q) in x.iter().zip(&y) {
+        let o = match (p.0, q.0) {
+            (true, true) => {
+                let (m, n) = (p.1.trim_start_matches('0'), q.1.trim_start_matches('0'));
+                m.len().cmp(&n.len()).then_with(|| m.cmp(n))
+            }
+            _ => p.1.cmp(&q.1),
+        };
+        if o != std::cmp::Ordering::Equal {
+            return o;
+        }
+    }
+    x.len().cmp(&y.len())
+}
+
 /// A tag pattern as `deploy_tags` takes it: 1–100 of `A–Z a–z 0–9 . _ / - + *`, with a
 /// character that isn't `*`.
 pub fn check_tag_pattern(p: &str) -> std::result::Result<(), String> {
@@ -342,6 +372,13 @@ mod tags_tests {
         assert!(tag_matches("v*", "v1.2.3") && tag_matches("v*", "v") && !tag_matches("v*", "release-v1"));
         assert!(tag_matches("v1.*.*", "v1.20.3") && !tag_matches("v1.*.*", "v1.2"));
         assert!(tag_matches("release/*", "release/2026-11") && tag_matches("*-prod", "eu-prod") && !tag_matches("*-prod", "eu-prod-2"));
+    }
+
+    #[test]
+    fn tags_sort_as_versions() {
+        let mut t = vec!["v10", "v9", "v1.2.10", "v1.2.9", "v2"];
+        t.sort_by(|a, b| super::version_order(a, b));
+        assert_eq!(t, ["v1.2.9", "v1.2.10", "v2", "v9", "v10"]);
     }
 }
 
