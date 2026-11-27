@@ -5206,7 +5206,7 @@ async fn opensearch_flavor_clusters_link_with_the_remotes_own_mappings() {
     let e = env().await;
     let near = creds(&e.post("/v1/search/clusters", json!({"name": "os-near", "flavor": "opensearch"})).await);
     let far = creds(&e.post("/v1/search/clusters", json!({"name": "os-far", "flavor": "opensearch"})).await);
-    for (p, doc) in [("/docs/_doc/1", json!({"tenant": "a"})), ("/docs/_doc/2", json!({"tenant": "b"})), ("/secret/_doc/1", json!({"tenant": "a"}))] {
+    for (p, doc) in [("/docs/_doc/1", json!({"tenant": "a", "body": "one"})), ("/docs/_doc/2", json!({"tenant": "b", "body": "two"})), ("/secret/_doc/1", json!({"tenant": "a"}))] {
         assert_eq!(es_as(&e, &far, Method::PUT, &format!("{p}?refresh=true"), Some(doc)).await.0, 201);
     }
     let api = "/_plugins/_security/api";
@@ -5267,7 +5267,7 @@ async fn opensearch_flavor_clusters_link_with_the_remotes_own_mappings() {
     };
     let loopback = |alias: &str, address: String| json!({"persistent": {format!("cluster.remote.{alias}.mode"): "proxy", format!("cluster.remote.{alias}.proxy_address"): address}});
     assert_eq!(es_as(&e, &near, Method::PUT, "/_cluster/settings", Some(loopback("loop", transport("os-near").await))).await.0, 200);
-    assert_eq!(es_as(&e, &near, Method::PUT, "/secret-near/_doc/1?refresh=true", Some(json!({"x": 1}))).await.0, 201);
+    assert_eq!(es_as(&e, &near, Method::PUT, "/secret-near/_doc/1?refresh=true", Some(json!({"x": 1, "email": "a@example.com", "note": "hidden"}))).await.0, 201);
     assert_eq!(es_as(&e, &near, Method::PUT, "/other-near/_doc/1?refresh=true", Some(json!({"x": 2}))).await.0, 201);
     assert!(es_as(&e, &near, Method::PUT, &format!("{api}/internalusers/nobody"), Some(json!({"password": "Zq7-Mountain-River-88"}))).await.0 < 300);
     for p in ["/loop:*/_search", "/loop:secret*/_count", "/loop:*/_field_caps?fields=x", "/_cat/indices/loop:*"] {
@@ -5284,8 +5284,47 @@ async fn opensearch_flavor_clusters_link_with_the_remotes_own_mappings() {
     assert_eq!((m["responses"][0]["error"]["type"].as_str(), m["responses"][1]["hits"]["total"]["value"].as_i64()), (Some("security_exception"), Some(1)), "{m}");
     let (s, v) = es_as(&e, &near, Method::GET, "/loop:secret-near/_search", None).await;
     assert_eq!((s, v["hits"]["total"]["value"].as_i64()), (200, Some(1)), "{v}");
+    // Through a loopback, a user's field and document security on the indices still apply.
+    let fls = json!({"index_permissions": [{"index_patterns": ["secret-near", "other-near"], "fls": ["x", "email"], "masked_fields": ["email"], "allowed_actions": ["read"]}]});
+    let dls = json!({"index_permissions": [{"index_patterns": ["secret-near", "other-near"], "dls": "{\"term\":{\"x\":2}}", "allowed_actions": ["read"]}]});
+    for (p, body) in [
+        ("roles/near_fls", fls),
+        ("internalusers/masky", json!({"password": "Zq7-Mountain-River-86"})),
+        ("rolesmapping/near_fls", json!({"users": ["masky"]})),
+        ("roles/near_dls", dls),
+        ("internalusers/dlsy", json!({"password": "Zq7-Mountain-River-85"})),
+        ("rolesmapping/near_dls", json!({"users": ["dlsy"]})),
+    ] {
+        assert!(es_as(&e, &near, Method::PUT, &format!("{api}/{p}"), Some(body)).await.0 < 300, "{p}");
+    }
+    let source = |user: &'static str, pw: &'static str, p: &'static str| {
+        let e = &e;
+        async move {
+            let (s, v) = e.es(user, pw, Method::GET, p, None).await;
+            assert_eq!(s, 200, "{p}: {v}");
+            v["hits"]["hits"].as_array().unwrap().iter().map(|h| h["_source"].clone()).collect::<Vec<Value>>()
+        }
+    };
+    let local = source("masky@os-near", "Zq7-Mountain-River-86", "/secret-near/_search").await;
+    assert!(local.len() == 1 && local[0].get("note").is_none() && local[0]["email"] != "a@example.com", "{local:?}");
+    assert_eq!(source("masky@os-near", "Zq7-Mountain-River-86", "/loop:secret-near/_search").await, local);
+    let local = source("dlsy@os-near", "Zq7-Mountain-River-85", "/secret-near,other-near/_search").await;
+    assert_eq!(local, vec![json!({"x": 2})]);
+    assert_eq!(source("dlsy@os-near", "Zq7-Mountain-River-85", "/loop:secret-near,loop:other-near/_search").await, local);
     // The remote's refusals below as the remote's 403 (skip_unavailable off again).
     assert_eq!(es_as(&e, &near, Method::PUT, "/_cluster/settings", Some(json!({"persistent": {"cluster.remote.r.skip_unavailable": false}}))).await.0, 200);
+    // Across a real link, the remote's field security for the user sent.
+    let far_fls = json!({"index_permissions": [{"index_patterns": ["docs"], "fls": ["tenant"], "allowed_actions": ["read"]}]});
+    for (c, p, body) in [
+        (&far, "roles/far_fls", far_fls),
+        (&far, "rolesmapping/far_fls", json!({"users": ["fran"]})),
+        (&near, "internalusers/fran", json!({"password": "Zq7-Mountain-River-84"})),
+    ] {
+        assert!(es_as(&e, c, Method::PUT, &format!("{api}/{p}"), Some(body)).await.0 < 300, "{p}");
+    }
+    let (s, v) = e.es("fran@os-near", "Zq7-Mountain-River-84", Method::GET, "/r:docs/_search", None).await;
+    let sources: Vec<Value> = v["hits"]["hits"].as_array().map(|h| h.iter().map(|h| h["_source"].clone()).collect()).unwrap_or_default();
+    assert!(s == 200 && sources.len() == 2 && sources.iter().all(|x| x.get("body").is_none() && x.get("tenant").is_some()), "{s} {v}");
     // A link's request names no further remote, the remote's loopback included.
     assert_eq!(es_as(&e, &far, Method::PUT, "/_cluster/settings", Some(loopback("back", transport("os-far").await))).await.0, 200);
     let (s, v) = es_as(&e, &near, Method::GET, "/r:back:docs/_search", None).await;
