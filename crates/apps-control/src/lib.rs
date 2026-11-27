@@ -81,6 +81,7 @@ pub mod edge;
 pub mod password;
 pub mod freeze;
 pub mod board;
+pub mod silences;
 pub mod status_page;
 pub mod vulns;
 pub mod checks;
