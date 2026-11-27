@@ -2111,8 +2111,9 @@ start is a node start (JVM, cluster state, shard recovery).
 
 ## Cold start at size (2026-11-27, item 16)
 
-`~/.cache/rsearch/coldstart/run.sh` on lane b (server on CPUs 10,11,28,29; client and MinIO on
-12,13,30,31): 1,000,000 nyc_taxis documents (Rally's corpus; 173-177 MB stored, 3 to 10
+A one-off harness on lane b (server on CPUs 10,11,28,29; client and MinIO on 12,13,30,31; a
+Python probe waits for the port without sending HTTP, then times the first and second request):
+1,000,000 nyc_taxis documents (Rally's corpus; 173-177 MB stored, 3 to 10
 segments depending on merges) in a `search-dev` whose objects are in MinIO in Docker on the same
 host. Then:
 - (a) a wake after idle unload, with the local cache;
