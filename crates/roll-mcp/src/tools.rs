@@ -1856,6 +1856,8 @@ static TOOLS: &[Tool] = &[
     t("previews_wake", "Wake a preview", "Start a sleeping preview's services again.", "previews", "POST", "/v1/previews/{id}/wake", &[req("id", "Preview id")]),
     t("previews_usage", "Previews usage", "What a project's previews used and cost this month, against its budget.", "previews", "GET", "/v1/previews/projects/{project}/usage", &[req("project", "Workspace project")]),
     t("previews_list_shares", "List a preview's share links", "Who a preview is shared with outside the team, and until when (never the links' tokens).", "previews", "GET", "/v1/previews/{id}/shares", &[req("id", "Preview id")]),
+    t("previews_list_webhooks", "A preview's webhook URLs", "The URLs that let an outside service (Stripe, GitHub, Slack) post to one path of a preview's first service: path, label, who made one and when, how often it was called and when last, whether it's revoked (never the URLs' tokens; making one is a person's).", "previews", "GET", "/v1/previews/{id}/webhooks", &[req("id", "Preview id")]),
+    t("previews_revoke_webhook", "Revoke a preview webhook URL", "Stop a preview's webhook URL letting anything in, from the next request.", "previews", "DELETE", "/v1/previews/{id}/webhooks/{webhook}", &[req("id", "Preview id"), req("webhook", "Webhook id from previews_list_webhooks")]),
     t("previews_env", "A preview's variables", "A preview's own variables, with their values (reveal).", "previews", "GET", "/v1/previews/{id}/env", &[req("id", "Preview id")]),
     t("previews_connect", "A preview's data connections", "Each data branch's connection as the preview's services get it (DATABASE_URL, REDIS_URL, a branch bucket's keys): the branches' own credentials, never production's. For querying what a preview sees.", "previews", "GET", "/v1/previews/{id}/connect", &[req("id", "Preview id")]),
     t("previews_list_mail", "A preview's mail (the emails it sent)", "The mail a preview's services sent, caught and never delivered: who to, subject, when (for checking a sign-up or receipt flow). It can hold production's data: reveal.", "previews", "GET", "/v1/previews/{id}/mail", &[req("id", "Preview id")]),
@@ -2601,6 +2603,7 @@ mod tests {
         const ADDRESSES: &[&str] = &["url", "urls", "origin", "domain", "host", "hostname", "webhook", "webhook_url", "base_url", "git", "image", "callback", "issuer", "jwks_uri", "address", "target_url"];
         const REACHES_NOTHING: &[(&str, &str)] = &[
             ("tasks_cancel_messages", "url is a filter over stored messages"),
+            ("previews_revoke_webhook", "webhook is a webhook URL's id; nothing is called"),
             ("search_verify_site", "answers what to publish; search_check_site_verification reads it"),
             ("apps_set_environment", "hostname is a setting"),
             ("apps_add_domain", "stores the domain; apps_verify_domain checks its DNS"),
@@ -2722,6 +2725,8 @@ mod tests {
             ("previews_mask_suggestions", "the project's own databases, not a branch"),
             ("previews_list_shares", "links people made"),
             ("previews_revoke_share", "a link people made"),
+            ("previews_list_webhooks", "webhook URLs people made"),
+            ("previews_revoke_webhook", "a webhook URL people made"),
             ("previews_env", "variables people set"),
             ("previews_connect", "roll's connections to its branches"),
             ("previews_resolve_note", "the note's id"),

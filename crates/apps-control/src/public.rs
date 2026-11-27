@@ -920,7 +920,8 @@ async fn check_access(apps: &Arc<Apps>, service: &str, env: &str, req: &mut Requ
     // A preview's webhook URL (roll previews' `roll_hook`: Stripe's, GitHub's, which can't send a
     // header): its exact path with its token, any method, no cookie, no redirect, the token taken
     // out of the query before the app sees it. Anything else falls to the gate as it would.
-    if !access.webhooks.is_empty()
+    if env.starts_with("pv-")
+        && !access.webhooks.is_empty()
         && let Some(given) = query_value(req, "roll_hook")
         && access.webhooks.iter().any(|h| h.path == req.uri().path() && same(&token_hash(&given), &h.token_hash))
     {
@@ -1117,7 +1118,6 @@ pub(crate) fn host_only(apps: &Apps, name: String) -> String {
     if apps.cfg.scheme == "https" { format!("__Host-{name}") } else { name }
 }
 
-/// A query parameter's value, decoded (the last, when it's there more than once).
 /// Where a preview's snapshots from the team's tests come in ([`snapshot`]).
 pub const SNAPSHOT_PATH: &str = "/__roll/snapshot";
 
@@ -1141,7 +1141,7 @@ async fn snapshot(apps: &Arc<Apps>, service: &str, env: &str, req: Request) -> R
     if !body.starts_with(b"\x89PNG\r\n\x1a\n") {
         return (StatusCode::BAD_REQUEST, axum::Json(serde_json::json!({ "error": "a snapshot is a PNG" }))).into_response();
     }
-    match hook.snapshot(env, &name, body).await {
+    match hook.snapshot(service, env, &name, body).await {
         Ok(v) => (StatusCode::CREATED, axum::Json(v)).into_response(),
         Err(crate::Error::Conflict(m)) => (StatusCode::CONFLICT, axum::Json(serde_json::json!({ "error": m }))).into_response(),
         Err(e) => (StatusCode::BAD_REQUEST, axum::Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
@@ -1162,6 +1162,7 @@ fn drop_query_param(req: &mut Request, param: &str) {
     }
 }
 
+/// A query parameter's value, decoded (the last, when it's there more than once).
 fn query_value(req: &Request, param: &str) -> Option<String> {
     let prefix = format!("{param}=");
     req.uri().query()?.split('&').rev().find_map(|p| p.strip_prefix(prefix.as_str())).map(|v| percent_encoding::percent_decode_str(v).decode_utf8_lossy().into_owned())
