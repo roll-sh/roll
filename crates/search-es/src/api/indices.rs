@@ -598,7 +598,7 @@ pub async fn create(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let warnings = ctx
         .cluster
         .update(move |st| {
-            auth.check_new(&n2, &aliases)?;
+            auth.check_new(st, &n2, &aliases)?;
             let w = create_index(st, &provided, &n2, req, now)?;
             if let Some(idx) = st.metadata.indices.get(&n2).cloned() {
                 crate::search::runtime::check_mapping_scripts(&scripts, st, &idx.mapping)?;

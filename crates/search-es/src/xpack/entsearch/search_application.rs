@@ -145,7 +145,7 @@ pub async fn put(ctx: &Ctx<'_>) -> EsResult<Reply> {
         .iter()
         .flat_map(|i| crate::meta::resolve::resolve(&st, std::slice::from_ref(i), &opts, ctx.now_ms).ok().filter(|v| !v.is_empty()).unwrap_or_else(|| vec![i.clone()]))
         .collect();
-    crate::xpack::security::AliasAuth::of(ctx).check(true, &targets, std::slice::from_ref(&name))?;
+    crate::xpack::security::AliasAuth::of(ctx).check(&st, true, &targets, std::slice::from_ref(&name))?;
     for i in &indices {
         let exists = st.metadata.indices.contains_key(i) || st.metadata.data_streams.contains_key(i) || st.metadata.indices.values().any(|x| x.aliases.contains_key(i))
             || (i.contains('*') && st.metadata.indices.keys().any(|n| crate::xcontent::filter::glob_match(i, n)));

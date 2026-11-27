@@ -294,7 +294,7 @@ pub async fn handle(ctx: &Ctx<'_>, kind: ResizeType) -> EsResult<Reply> {
     let src_name = source.clone();
     ctx.cluster
         .update(move |st| {
-            auth.check_new(&t, &aliases)?;
+            auth.check_new(st, &t, &aliases)?;
             resize(st, kind, &source, &t, req, now)
         })
         .await?;
@@ -363,7 +363,7 @@ async fn handle_opensearch(ctx: &Ctx<'_>, kind: ResizeType, mut req: ResizeReque
         let (t, src_name) = (target.clone(), source.clone());
         ctx.cluster
             .update(move |st| {
-                auth.check_new(&t, &aliases)?;
+                auth.check_new(st, &t, &aliases)?;
                 resize(st, kind, &source, &t, req, now)
             })
             .await?;
