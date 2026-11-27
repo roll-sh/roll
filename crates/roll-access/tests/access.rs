@@ -193,6 +193,8 @@ fn postgres() -> Router {
         .route("/v1/secrets/projects/{project}/environments/{env}/values", get(|| async { axum::Json(json!({})) }))
         .route("/v1/secrets/projects/{project}/environments/{env}/promote", axum::routing::post(|| async { axum::Json(json!({})) }))
         .route("/v1/secrets/projects/{project}/environments/{env}/resolve", axum::routing::post(|| async { axum::Json(json!({})) }))
+        .route("/v1/secrets/projects/{project}/environments/{env}/diff", axum::routing::post(|| async { axum::Json(json!({})) }))
+        .route("/v1/secrets/projects/{project}/environments/{env}/import", axum::routing::post(|| async { axum::Json(json!({})) }))
         .route("/v1/secrets/projects/{project}/environments/{env}/imports", axum::routing::put(|| async { axum::Json(json!({})) }))
 }
 
@@ -1120,6 +1122,20 @@ async fn a_secrets_folder_is_the_one_the_request_reads() {
     let (s, out) = d.call(&token, Method::POST, &format!("{resolve}?path=/api"), Some(json!({ "text": "x" }))).await;
     assert_eq!(s, StatusCode::FORBIDDEN, "the body's folder (none: /), not the query's: {out}");
     let (s, out) = d.call(&token, Method::POST, resolve, Some(json!({ "path": "//", "text": "x" }))).await;
+    assert_eq!((s, out["code"].as_str()), (StatusCode::BAD_REQUEST, Some("bad_request")), "{out}");
+    assert_eq!(d.call(&token, Method::POST, "/v1/secrets/projects/pa/environments/development/diff", Some(json!({ "path": "/api", "dotenv": "A=1" }))).await.0, StatusCode::OK);
+    // `/v1/access/check` says what the gate would: a folder secrets refuses is a deny.
+    let (_, c) = d.call(&token, Method::POST, "/v1/access/check", Some(json!({ "method": "GET", "path": "/v1/secrets/projects/pa/environments/development/values?path=//" }))).await;
+    assert_eq!(c["decision"], "deny", "{c}");
+    // A .env import that replaces the folder deletes its other keys: delete, and write.
+    let (writes, _) = d.token(json!([{ "product": "secrets", "resources": "*", "paths": ["/api"], "actions": { "write": "allow" } }]), json!({})).await;
+    let import = "/v1/secrets/projects/pa/environments/development/import";
+    assert_eq!(d.call(&writes, Method::POST, import, Some(json!({ "path": "/api", "dotenv": "A=1" }))).await.0, StatusCode::OK);
+    assert_eq!(d.call(&writes, Method::POST, import, Some(json!({ "path": "/api", "dotenv": "A=1", "replace": true }))).await.0, StatusCode::FORBIDDEN);
+    let (deletes, _) = d.token(json!([{ "product": "secrets", "resources": "*", "paths": ["/api"], "actions": { "delete": "allow" } }]), json!({})).await;
+    assert_eq!(d.call(&deletes, Method::POST, import, Some(json!({ "path": "/api", "dotenv": "A=1", "replace": true }))).await.0, StatusCode::FORBIDDEN, "and write");
+    // The same fields as an array (a typed body takes them in order) hide them from the gate.
+    let (s, out) = d.call(&writes, Method::POST, import, Some(json!(["A=1", null, "/api", false, null, false, true]))).await;
     assert_eq!((s, out["code"].as_str()), (StatusCode::BAD_REQUEST, Some("bad_request")), "{out}");
 }
 
