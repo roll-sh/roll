@@ -7,8 +7,9 @@
 //! `_meta["io.modelcontextprotocol/authorization-context-id"]`, read as the `approval` argument.
 //!
 //! Only the gate's own refusals are classified (its `code`s); a product's own 403 (a deploy
-//! freeze) says nothing here. Not yet: the out-of-band interaction (a task held while a person
-//! decides; roll's tasks wait on approvals but don't say so in the envelope).
+//! freeze) says nothing here. A call held as a task while a person decides says so on the task
+//! ([`waiting`]: the `CreateTaskResult` and every `tasks/get` until it ends), and its result once
+//! decided carries the call's own envelope (a denial's `unavailable`).
 
 use serde_json::{Value, json};
 
@@ -51,6 +52,17 @@ pub fn envelope(s: &Value, url: bool) -> Option<Value> {
         e["remediationHints"] = json!([{ "type": "url" }]);
     }
     Some(e)
+}
+
+/// The envelope of a task holding a call while a person decides approval `id` (the out-of-band
+/// interaction): there's a way forward, in the background; `url` when the task also shows the
+/// approval page to open.
+pub fn waiting(id: &str, url: bool) -> Value {
+    let mut hints = vec![json!({ "type": "task" })];
+    if url {
+        hints.push(json!({ "type": "url" }));
+    }
+    json!({ "reason": "insufficient_authorization", "remediation": "available", "authorizationContextId": id, "remediationHints": hints })
 }
 
 /// Puts the envelope on a `tools/call` result (from its `structuredContent`), if it's a denial.

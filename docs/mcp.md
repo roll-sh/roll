@@ -600,8 +600,12 @@ and `capabilities.extensions["io.modelcontextprotocol/structured-authorization-d
 `authorizationContextId` is the approval's id, and a retry that echoes it in
 `_meta["io.modelcontextprotocol/authorization-context-id"]` is read as the call's `approval` (the
 gate still checks it's this grant's approval of this very request). Only the gate's own refusals
-are classified: a product's own `403` (a deploy freeze) carries no envelope. Not yet: the
-out-of-band interaction (a task held while a person decides, `remediationHints: [{type: "task"}]`).
+are classified: a product's own `403` (a deploy freeze) carries no envelope. A call held as a task
+while a person decides (a client that takes tasks) is the out-of-band interaction: its
+`CreateTaskResult` and every `tasks/get` until it ends carry `remediation: "available"`, the
+approval as `authorizationContextId` and `remediationHints: [{type: "task"}]` (with `{type: "url"}`
+too while it shows the approval page), and its result, once decided, the call's own envelope (a
+denial's `unavailable`).
 
 ## Authorization
 
@@ -1605,9 +1609,9 @@ From a 2026-11-26 comparison (the spec's anniversary post, Claude's connector do
    on the repo's code too), and `review_preview` offers it for a note that asks for real work. On a
    GitHub-mirrored repo a team member's note opens a GitHub issue instead (roll previews #1209):
    the same tool, its description to say so once that lands.
-3. **Structured authorization denials (this PR):** SEP-2643's envelope on every refusal by the
-   gate, its context id echoed as the approval; the task interaction (a held call while a person
-   decides) once roll's tasks say they wait on an approval.
+3. **Structured authorization denials, on tasks too (this PR):** #1218 put SEP-2643's envelope on
+   every refusal by the gate; a call held as a task while a person decides now says so on the task
+   (`task` hint) and on every poll, and its decided result carries its own.
 4. **Watched:** SEP-1913 (`sensitiveHint`, `privateHint` and `maliciousActivityHint` annotations, close to lockdown's marks) and the files extension (Claude says uploads are "rolling out soon").
 
 5. **Paging is the products'.** No list route takes a cursor (approvals take `limit` only). History
