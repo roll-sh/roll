@@ -689,6 +689,63 @@ impl ColDir {
         Some((lo as u32, k.word.get(d, lo) == tw, !k.ver.get(d, lo)))
     }
 
+    /// Row `r`'s stored values for a test of the columns `mask` marks (a lookup's comparisons
+    /// over stored values: `StoredCmps::passes_with`), onto `out`: the row's column count, then
+    /// up to the last column marked each marked one's value (`value`), the others NULL.
+    pub fn cmp_into(&self, d: &[u8], r: usize, mask: &[bool], out: &mut Vec<u8>) {
+        put_varint(out, self.ncols as u64);
+        let last = mask.iter().rposition(|&m| m).map_or(0, |i| i + 1).min(self.ncols as usize);
+        for (c, &m) in mask[..last].iter().enumerate() {
+            match m {
+                true => self.value(d, c, r, out),
+                false => out.push(tag::NULL),
+            }
+        }
+    }
+
+    /// Column `c`'s value in row `r` decoded, as `row::decode_value` decodes what `value`
+    /// writes: from the column's layout where it is a plain one (integers, dates, timestamps,
+    /// floats, numerics of one scale, text, booleans), else through `value` (`scratch`).
+    pub fn decoded(&self, d: &[u8], c: usize, r: usize, scratch: &mut Vec<u8>) -> crate::error::Result<crate::types::Value> {
+        use crate::types::Value as V;
+        let col = &self.cols[c];
+        if is_null(d, col.nulls, r) || col.kind == Kind::Null {
+            return Ok(V::Null);
+        }
+        let at = col.at as usize;
+        let le = |w: usize| -> [u8; 8] {
+            let mut b = [0u8; 8];
+            b[..w].copy_from_slice(&d[at + r * w..at + (r + 1) * w]);
+            b
+        };
+        let text = |b: &[u8]| std::str::from_utf8(b).map(std::sync::Arc::<str>::from).map_err(|_| crate::error::internal("invalid UTF-8 in stored row"));
+        Ok(match col.kind {
+            Kind::Fixed { tag: tag::INT4, w: 4 } => V::Int4(i32::from_le_bytes(le(4)[..4].try_into().unwrap())),
+            Kind::Fixed { tag: tag::INT8, w: 8 } => V::Int8(i64::from_le_bytes(le(8))),
+            Kind::Fixed { tag: tag::INT2, w: 2 } => V::Int2(i16::from_le_bytes(le(2)[..2].try_into().unwrap())),
+            Kind::Fixed { tag: tag::DATE, w: 4 } => V::Date(i32::from_le_bytes(le(4)[..4].try_into().unwrap())),
+            Kind::Fixed { tag: tag::FLOAT8, w: 8 } => V::Float8(f64::from_le_bytes(le(8))),
+            Kind::Fixed { tag: tag::TIMESTAMP, w: 8 } => V::Timestamp(i64::from_le_bytes(le(8))),
+            Kind::Fixed { tag: tag::TIMESTAMPTZ, w: 8 } => V::Timestamptz(i64::from_le_bytes(le(8))),
+            Kind::Fixed { tag: tag::OID, w: 4 } => V::Oid(u32::from_le_bytes(le(4)[..4].try_into().unwrap())),
+            Kind::Bool if matches!(d[at + r], tag::TRUE | tag::FALSE) => V::Bool(d[at + r] == tag::TRUE),
+            Kind::Num { scale, w } if (1..=8).contains(&w) => {
+                let x = sint(d, at + r * w as usize, w);
+                V::numeric(crate::types::numeric::Numeric::from_parts(crate::types::decint::DecInt::from(x), scale))
+            }
+            Kind::Str { tag: tag::TEXT, .. } => {
+                let (a, b) = self.str_span(d, c, r);
+                V::Text(text(&d[a..b])?)
+            }
+            Kind::Dict { tag: tag::TEXT, .. } => V::Text(text(self.dict(d, c, d[at + r]))?),
+            _ => {
+                scratch.clear();
+                self.value(d, c, r, scratch);
+                super::row::decode_value(scratch, &mut 0)?
+            }
+        })
+    }
+
     /// Column `c`'s value in row `r` as the row stores it (tag and payload) onto `out`.
     #[inline]
     pub fn value(&self, d: &[u8], c: usize, r: usize, out: &mut Vec<u8>) {

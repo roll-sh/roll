@@ -119,9 +119,22 @@ impl LazyRows {
         &self.runs
     }
 
-    /// The column block of buffer `buf`.
+    /// The column block of buffer `buf`: most often the last one (a scan's rows in order),
+    /// else found by a binary search (`block_at`), where a reader of a batch's runs looked
+    /// through them from the end for each run. (Small: `row_of`, called per row, stays inlined.)
+    #[inline]
     pub fn block(&self, buf: u32) -> &Arc<super::sst::Block> {
-        &self.blocks.iter().rev().find(|(x, _)| *x == buf).expect("a column block's buffer").1
+        match self.blocks.last() {
+            Some((x, b)) if *x == buf => b,
+            _ => self.block_at(buf),
+        }
+    }
+
+    /// `block` of one not the last: the blocks are in buffer order.
+    #[inline(never)]
+    fn block_at(&self, buf: u32) -> &Arc<super::sst::Block> {
+        let i = self.blocks.binary_search_by_key(&buf, |(x, _)| *x).expect("a column block's buffer");
+        &self.blocks[i].1
     }
 
     /// The buffer of `batch` the rows of column block `blk` pushed next refer to.
@@ -133,6 +146,7 @@ impl LazyRows {
         {
             return *b;
         }
+        debug_assert!(self.blocks.last().is_none_or(|(b, _)| *b < last), "column blocks out of buffer order");
         self.blocks.push((last, blk.clone()));
         batch.bufs.push(Bytes::new());
         last

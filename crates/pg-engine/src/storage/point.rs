@@ -313,6 +313,18 @@ impl PointReader {
         self.get_sorted_in::<K, false>(keys, resolve, cols)
     }
 
+    /// `get_sorted` for a reader that decodes rows itself (a lookup join's batch, in a store
+    /// writing column blocks: `Lookup::batch_cols`): a column block's row as its block and row
+    /// (`Found::Col`), not made. (Through `get_sorted_keyed`, format 5's instance of the
+    /// multi-get: no other is made of it.)
+    #[inline(never)]
+    pub fn get_sorted_found(&mut self, keys: &[&[u8]]) -> Result<Vec<Option<Found>>> {
+        FOUND.with(|f| *f.borrow_mut() = Some((0..keys.len()).map(|_| None).collect()));
+        let out = self.get_sorted_keyed(keys, true, None);
+        let found = FOUND.with(|f| f.borrow_mut().take()).unwrap_or_default();
+        Ok(out?.into_iter().zip(found).map(|(o, f)| f.or(o.map(Found::Bytes))).collect())
+    }
+
     /// `get_sorted_cols` in a store writing column blocks: a column block's keys found in its
     /// key column (`Block::key_seek`).
     #[inline(never)]
@@ -503,7 +515,12 @@ impl PointReader {
             }
         }
         if !colrows.is_empty() {
-            make_col_rows(&colrows, &blocks, cols, &mut out);
+            // (`get_sorted_found`'s reads: the rows of column blocks handed back unmade.)
+            if C && FOUND.with(|f| f.borrow().is_some()) {
+                found_cols(&colrows, &blocks);
+            } else {
+                make_col_rows(&colrows, &blocks, cols, &mut out);
+            }
         }
         for (i, b, span) in found {
             let block = &*blocks[b].2;
@@ -522,6 +539,25 @@ impl PointReader {
         }
         Ok(out)
     }
+}
+
+thread_local! {
+    /// `get_sorted_found`'s rows of column blocks while it reads (None: not reading so): kept
+    /// here, not in the reader, so format 4's instances of the multi-get stay as they were.
+    static FOUND: std::cell::RefCell<Option<Vec<Option<Found>>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// `get_sorted_found`'s rows of column blocks (key place, block, row), unmade, into `FOUND`.
+#[cold]
+#[inline(never)]
+fn found_cols(colrows: &[(usize, usize, u32)], blocks: &[(usize, usize, Arc<super::sst::Block>)]) {
+    FOUND.with(|f| {
+        if let Some(fo) = f.borrow_mut().as_mut() {
+            for &(i, b, row) in colrows {
+                fo[i] = Some(Found::Col(blocks[b].2.clone(), row));
+            }
+        }
+    });
 }
 
 /// `get_sorted_cols`' rows of column blocks (key place, block, row) made into one buffer, a

@@ -701,7 +701,10 @@ fn gather_runs(lazy: &LazyRows, rows: &std::ops::Range<usize>, only: Option<&[u3
     covered.clear();
     covered.resize(len, false);
     let null = Value::Null;
-    for run in lazy.runs() {
+    // (The runs in batch order: from the first one reaching `rows`, to the last one in it.)
+    let runs = lazy.runs();
+    let first = runs.partition_point(|r| (r.at + r.n) as usize <= rows.start);
+    for run in runs[first..].iter().take_while(|r| (r.at as usize) < rows.end) {
         let (a, b) = ((run.at as usize).max(rows.start), (run.at as usize + run.n as usize).min(rows.end));
         if a >= b {
             continue;

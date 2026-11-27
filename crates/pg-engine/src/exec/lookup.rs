@@ -123,6 +123,23 @@ fn span_words(bytes: &[u8], n: usize, spans: impl Iterator<Item = (usize, (u32, 
     true
 }
 
+/// `span_words` for `Lookup::batch_cols` (a copy: a second caller cost its inlining in `batch`).
+fn span_words_c(bytes: &[u8], n: usize, spans: impl Iterator<Item = (usize, (u32, u32))>, words: &mut Vec<(u128, u128)>) -> bool {
+    words.clear();
+    words.resize(n, (0, 0));
+    let mut len = 0;
+    for (i, (a, b)) in spans {
+        let s = &bytes[a as usize..b as usize];
+        if !(16..=32).contains(&s.len()) || (len != 0 && len != s.len()) {
+            return false;
+        }
+        len = s.len();
+        let w = |j: usize| u128::from_be_bytes(s[j..j + 16].try_into().unwrap());
+        words[i] = (w(0), w(len - 16));
+    }
+    true
+}
+
 /// One outer row of a batch: its index key, how it is read, and its entries.
 #[derive(Clone, Copy)]
 struct Want {
@@ -197,8 +214,10 @@ pub struct Lookup {
     /// A row of a column block (storage format 5) is made of these alone, the others NULL
     /// (`PointReader::get_sorted_cols`).
     reads: Option<Arc<[bool]>>,
-    /// Its store writes column blocks (storage format 5): its single rows are decoded from
-    /// their blocks' columns (`rows_cols`).
+    /// Its store writes column blocks (storage format 5): its rows are decoded from their
+    /// blocks' columns (`rows_cols`, `batch_cols`). With comparisons over stored values
+    /// (`stored`), the columns they read: a block's row is compared over those alone
+    /// (`add_found`).
     cols: Option<Arc<[bool]>>,
 }
 
@@ -337,7 +356,15 @@ impl Lookup {
                 None => Some(Arc::from(r)),
             }
         });
-        let cols = reads.clone().filter(|_| store.colblocks());
+        let cols = match &stored {
+            Some((c, _)) => {
+                let mut m = vec![false; s.table.columns.len()];
+                c.mark_cols(&mut m);
+                Some(Arc::from(m))
+            }
+            None => reads.clone(),
+        }
+        .filter(|_| store.colblocks());
         Ok(Some(Lookup {
             cols,
             reads,
@@ -510,9 +537,7 @@ impl Lookup {
             let need = self.decode.need.as_deref();
             for i in 0..self.last.min(n) {
                 if need.is_none_or(|nd| nd[i]) {
-                    buf.clear();
-                    dir.value(d, i, row as usize, buf);
-                    put(row_out, i, crate::storage::row::decode_value(buf, &mut 0)?);
+                    put(row_out, i, dir.decoded(d, i, row as usize, buf)?);
                 }
             }
             for i in n.min(self.width)..self.width {
@@ -538,17 +563,30 @@ impl Lookup {
 
     /// `add` of a row `get_found_with` found: a column block's row decoded from its columns,
     /// then the filter and the join condition. With comparisons over stored values
-    /// (`stored`), which pass most rows over before they're decoded, its row is made of the
-    /// columns read (`reads`) and taken as `add` takes a stored row.
+    /// (`stored`, which pass most rows over before they're decoded) those first, over the
+    /// values of the columns they compare alone (`ColDir::cmp_into`); a row they leave to the
+    /// kernel is made of the columns read (`reads`) and taken as `add` takes a stored row.
     fn add_found(&self, l: &[Value], f: &Found, out: &mut Vec<Value>, buf: &mut Vec<u8>) -> Add {
         let (blk, row) = match f {
             Found::Bytes(b) => return self.add(l, b, out),
             Found::Col(blk, row) => (blk, *row),
         };
-        if self.stored.is_some() {
+        // (Over the stored values first, as `add`: the columns compared alone, from the block.)
+        let mut checked = false;
+        if let (Some((c, whole)), Some(m)) = (&self.stored, &self.cols) {
+            let dir = blk.col_dir().expect("a column block");
             buf.clear();
-            blk.rows_into(&[row], self.reads.as_deref(), buf, &mut Vec::with_capacity(1));
-            return self.add(l, buf, out);
+            dir.cmp_into(&blk.data()[..], row as usize, m, buf);
+            match c.passes_with(buf, l) {
+                Some(false) => return Add::Out,
+                Some(true) => checked = *whole,
+                // (Left to the kernel: the row made, then as `add` takes it.)
+                None => {
+                    buf.clear();
+                    blk.rows_into(&[row], self.reads.as_deref(), buf, &mut Vec::with_capacity(1));
+                    return self.add(l, buf, out);
+                }
+            }
         }
         let base = out.len();
         if self.decode_col_into(blk, row, out, buf).is_err() {
@@ -556,7 +594,8 @@ impl Lookup {
         }
         let view = Joined::Pair { l, r: super::pipe::Inner::plain(&out[base..]), keep: None };
         let mut got = Add::Kept;
-        for k in [self.filter.as_ref(), self.cond.as_ref()].into_iter().flatten() {
+        let filter = if checked { None } else { self.filter.as_ref() };
+        for k in [filter, self.cond.as_ref()].into_iter().flatten() {
             match k.passes(&view) {
                 Some(true) => {}
                 Some(false) => {
@@ -920,7 +959,13 @@ impl Lookup {
     /// (`PointReader::get_sorted`: the cache misses of different outer rows' rows overlap,
     /// where one outer row's rows, adjacent, have few to overlap), and each outer row's rows
     /// taken in its entries' order, filtered and counted as `rows` does.
+    /// (Not inlined: with its dispatch to `batch_cols` the pipe's stage inlined it, TPC-H q03 /
+    /// q07 / q09 / q19 +0.35-0.45% with the switch off.)
+    #[inline(never)]
     pub fn batch(&self, ls: &[Row], got: &mut Vec<Got>, out: &mut Vec<Value>, sc: &mut LookupScratch) {
+        if self.cols.is_some() {
+            return self.batch_cols(ls, got, out, sc);
+        }
         got.clear();
         truncate_row(out, 0);
         let mut b = std::mem::take(&mut sc.batch);
@@ -1018,6 +1063,110 @@ impl Lookup {
         sc.batch = b;
     }
 
+    /// `batch` in a store writing column blocks (storage format 5): `batch`'s text with copies of its helpers (`entry_spans_c`, `span_words_c`,
+    /// `multi_get_found`, `take_found`), a column block's rows handed back unmade by the
+    /// multi-get (`PointReader::get_sorted_found`) and decoded from their columns (`add_found`).
+    /// It calls none of `batch`'s own: each of those, given a second caller, lost its inlining
+    /// in `batch` (q03 / q07 / q09 +0.2-0.45% switch off).
+    #[inline(never)]
+    fn batch_cols(&self, ls: &[Row], got: &mut Vec<Got>, out: &mut Vec<Value>, sc: &mut LookupScratch) {
+        got.clear();
+        truncate_row(out, 0);
+        let mut b = std::mem::take(&mut sc.batch);
+        let BatchBufs { starts, wants, order, ekeys, espans, sorted, slot, words } = &mut b;
+        starts.clear();
+        wants.clear();
+        order.clear();
+        ekeys.clear();
+        espans.clear();
+        sorted.clear();
+        // The index keys.
+        for l in ls {
+            let at = starts.len() as u32;
+            starts.extend_from_slice(&self.prefix);
+            let mut how = How::Batch;
+            for (k, desc, nulls_first, coll, pad) in &self.keys {
+                let Some(v) = k.run(l) else {
+                    how = How::Left;
+                    break;
+                };
+                if v.is_null() {
+                    how = How::Null;
+                    break;
+                }
+                let v = super::scan::padded(v, *pad);
+                encode_index_value(starts, &v, *desc, *nulls_first, coll.as_ref());
+            }
+            wants.push(Want { key: (at, starts.len() as u32), how, ents: (0, 0), probed: false });
+        }
+        // The entries, in key order.
+        let span = |s: &(u32, u32)| s.0 as usize..s.1 as usize;
+        order.extend((0..wants.len() as u32).filter(|&i| wants[i as usize].how == How::Batch));
+        if span_words_c(starts, wants.len(), order.iter().map(|&i| (i as usize, wants[i as usize].key)), words) {
+            order.sort_by_key(|&i| words[i as usize]);
+        } else {
+            order.sort_by(|&x, &y| starts[span(&wants[x as usize].key)].cmp(&starts[span(&wants[y as usize].key)]));
+        }
+        let mut ok = true;
+        for &i in order.iter() {
+            let w = &mut wants[i as usize];
+            let e0 = espans.len() as u32;
+            match entry_spans_c(&self.store, self.ts, self.unique, &starts[span(&w.key)], sc, ekeys, espans) {
+                Some(probed) => {
+                    w.ents = (e0, espans.len() as u32);
+                    w.probed = probed;
+                }
+                None => {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        // Every entry's row, by one multi-get.
+        let mut rows: Vec<Option<Found>> = Vec::new();
+        if ok && !espans.is_empty() {
+            ok = self.multi_get_found(ekeys, espans, order, sorted, slot, words, &mut rows, sc);
+        }
+        // Each outer row's rows, in turn.
+        let (mut one, mut buf) = (Vec::new(), Vec::new());
+        for (l, w) in ls.iter().zip(wants.iter()) {
+            let n = out.len();
+            let mut how = w.how;
+            if how == How::Batch {
+                match ok.then(|| self.take_found(l, &rows, slot, w, out, sc, &mut buf)).flatten() {
+                    Some(true) => got.push(Got::Rows(n as u32, out.len() as u32)),
+                    Some(false) => {
+                        truncate_row(out, n);
+                        got.push(Got::Left);
+                    }
+                    // (A unique key's entry whose row the snapshot doesn't see, or a read
+                    // that failed: read as `rows` reads it.)
+                    None => {
+                        truncate_row(out, n);
+                        how = How::Alone;
+                    }
+                }
+            }
+            match how {
+                How::Batch => {}
+                How::Left => got.push(Got::Left),
+                How::Null => {
+                    // (An equality with NULL finds nothing: the scan still counts.)
+                    sc.loops += 1;
+                    got.push(Got::Rows(n as u32, n as u32));
+                }
+                How::Alone => match self.rows_cols(l, &mut one, sc) {
+                    true => {
+                        out.append(&mut one);
+                        got.push(Got::Rows(n as u32, out.len() as u32));
+                    }
+                    false => got.push(Got::Left),
+                },
+            }
+        }
+        sc.batch = b;
+    }
+
     /// The rows of the entries' row keys (`espans`, spans of `ekeys`) into `rows`, by one
     /// multi-get through the worker's reader of the distinct keys ascending (`sorted`; each
     /// entry's place there into `slot`; `order` a buffer). False: a read failed.
@@ -1081,6 +1230,82 @@ impl Lookup {
                 continue;
             };
             match self.add(l, v, out) {
+                Add::Kept | Add::Out => read += 1,
+                Add::Bad => return Some(false),
+                Add::Left => {
+                    // (Left to the executor's thread: every visible row counted, as
+                    // `rows` counts them.)
+                    sc.loops += 1;
+                    sc.fetched += ents.filter(|&e| row_of(e).is_some()).count() as u64;
+                    return Some(false);
+                }
+            }
+        }
+        sc.loops += 1;
+        sc.fetched += read;
+        Some(true)
+    }
+
+    /// `multi_get` for `batch_cols`: the rows of column blocks handed back unmade
+    /// (`PointReader::get_sorted_found`).
+    #[allow(clippy::too_many_arguments)]
+    fn multi_get_found(
+        &self,
+        ekeys: &[u8],
+        espans: &[(u32, u32)],
+        order: &mut Vec<u32>,
+        sorted: &mut Vec<(u32, u32)>,
+        slot: &mut Vec<u32>,
+        words: &mut Vec<(u128, u128)>,
+        rows: &mut Vec<Option<Found>>,
+        sc: &mut LookupScratch,
+    ) -> bool {
+        let span = |s: &(u32, u32)| &ekeys[s.0 as usize..s.1 as usize];
+        order.clear();
+        order.extend(0..espans.len() as u32);
+        let by_words = span_words_c(ekeys, espans.len(), espans.iter().copied().enumerate(), words);
+        if by_words {
+            order.sort_unstable_by_key(|&x| words[x as usize]);
+        } else {
+            order.sort_unstable_by(|&x, &y| span(&espans[x as usize]).cmp(span(&espans[y as usize])));
+        }
+        slot.clear();
+        slot.resize(espans.len(), 0);
+        let mut last: Option<usize> = None;
+        for &e in order.iter() {
+            let e = e as usize;
+            let same = last.is_some_and(|l| if by_words { words[l] == words[e] } else { span(&espans[l]) == span(&espans[e]) });
+            if !same {
+                sorted.push(espans[e]);
+                last = Some(e);
+            }
+            slot[e] = sorted.len() as u32 - 1;
+        }
+        let keys: Vec<&[u8]> = sorted.iter().map(span).collect();
+        let r = sc.reader.get_or_insert_with(|| self.store.point_reader(self.ts, false));
+        match r.get_sorted_found(&keys) {
+            Ok(r) => {
+                *rows = r;
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// `take` for `batch_cols`: a column block's row decoded from its columns (`add_found`).
+    #[allow(clippy::too_many_arguments)]
+    fn take_found(&self, l: &[Value], rows: &[Option<Found>], slot: &[u32], w: &Want, out: &mut Vec<Value>, sc: &mut LookupScratch, buf: &mut Vec<u8>) -> Option<bool> {
+        let ents = w.ents.0 as usize..w.ents.1 as usize;
+        let row_of = |e: usize| rows[slot[e] as usize].as_ref();
+        let mut read = 0u64;
+        for e in ents.clone() {
+            let Some(v) = row_of(e) else {
+                if w.probed {
+                    return None;
+                }
+                continue;
+            };
+            match self.add_found(l, v, out, buf) {
                 Add::Kept | Add::Out => read += 1,
                 Add::Bad => return Some(false),
                 Add::Left => {
@@ -1244,6 +1469,56 @@ fn entry_spans_to(store: &Arc<Store>, ts: u64, unique: bool, start: &[u8], end: 
     }
     let it = sc.entries.as_mut().expect("made above");
     while let Some(r) = it.next_value(&mut *push) {
+        r.ok()?;
+    }
+    Some(false)
+}
+
+/// `entry_spans` for `Lookup::batch_cols` (a copy, as `span_words_c`).
+fn entry_spans_c(
+    store: &Arc<Store>,
+    ts: u64,
+    unique: bool,
+    start: &[u8],
+    sc: &mut LookupScratch,
+    ekeys: &mut Vec<u8>,
+    espans: &mut Vec<(u32, u32)>,
+) -> Option<bool> {
+    let mut push = |k: &[u8]| {
+        let at = ekeys.len() as u32;
+        ekeys.extend_from_slice(k);
+        espans.push((at, ekeys.len() as u32));
+    };
+    // (The range's end in the worker's buffer: none made a key.)
+    let mut end = std::mem::take(&mut sc.end);
+    prefix_end_into(start, &mut end);
+    let r = entry_spans_to_c(store, ts, unique, start, &end, sc, &mut push);
+    sc.end = end;
+    r
+}
+
+/// `entry_spans_to` for `entry_spans_c`, through calls of its own: a unique key's probe by
+/// `Store::first_with` (out of line already) and the walk's `next_value` an instance of its own
+/// (`entry_spans_to`'s `Store::first_to` and `next_value::<(), &mut dyn FnMut>`, given this as a
+/// second caller, were no longer inlined in format 4's `batch`: q03 / q07 / q09 +0.2%).
+fn entry_spans_to_c(store: &Arc<Store>, ts: u64, unique: bool, start: &[u8], end: &[u8], sc: &mut LookupScratch, push: &mut dyn FnMut(&[u8])) -> Option<bool> {
+    if unique {
+        use crate::storage::point::First;
+        let r = sc.reader.get_or_insert_with(|| store.point_reader(ts, false));
+        match store.first_with(r, start, end, false).ok()? {
+            First::Row(_, v) => {
+                push(&v);
+                return Some(true);
+            }
+            First::None => return Some(false),
+            First::Unknown => {}
+        }
+    }
+    if !sc.entries.as_mut().is_some_and(|s| s.reseek(start, end, ts)) {
+        sc.entries = Some(store.scan(start, end, ts));
+    }
+    let it = sc.entries.as_mut().expect("made above");
+    while let Some(r) = it.next_value(|k: &[u8]| push(k)) {
         r.ok()?;
     }
     Some(false)
