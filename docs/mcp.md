@@ -1569,11 +1569,15 @@ From a 2026-11-24 gap review (every tool run as an agent would against a fresh r
 
 From a 2026-11-26 comparison (the spec's anniversary post, Claude's connector docs, Atlassian's, Stripe's and GitHub's changelogs; no core SEP went final since 2026-11-15):
 
-1. **A missing document and main's code on migrated data (this PR).** `search_get_document` and
-   `search_delete_document` said "not found: 404 Not Found" (Elasticsearch's `{_index, _id, found:
-   false}` has no message): the refusal now names the document and index. `review_preview` reads
-   `previews_get`'s `main_on_change` (roll previews #1183) and calls out a page that breaks on the
-   change's migrated data but answers on main's. Both found in the 2026-11-27 sweep report (1,255 calls).
+1. **A secret lent at an environment's root is approved once, and previews' webhook tools (this PR).**
+   From roll secrets' 43rd review (item 5): apps' `cloudflare_token` as `roll://production/CF_TOKEN`
+   lends reveal at production's root, so remembering "configure example.com's DNS" for 8 hours
+   remembered reveal on every production key. A lend at a root is now approved once only (a folder
+   of its own, `roll://production/dns/CF_TOKEN`, is remembered for that folder), and the card names
+   the lent key. A rule for one secret key needs a rule field of its own (a secrets rule's `index`
+   is a transit key): roll secrets designs it (docs/secrets-next.md). `previews_list_webhooks` and
+   `previews_revoke_webhook` map roll previews #1187's routes; making one answers its URL with a
+   token and stays tool-less.
 2. **A forwarded approved ask says so (after roll search #1111 lands).** From roll search's
    re-check of #1111: its `IndexScope` gives an approved `ask`'s indices when the owner's outcome is
    `ask`, but on a fleet the owner skips asking for a request another node decided, Allow or an
@@ -1581,9 +1585,9 @@ From a 2026-11-26 comparison (the spec's anniversary post, Claude's connector do
    suffix when it passed on an approval, and the owner counts the ask approved only then (an older
    owner in a rolling restart decides again and fails closed). roll search asked for it as a
    follow-up, not inside #1111.
-3. **Previews' webhooks as tools (after roll previews #1187 lands):** listing and revoking
-   (`GET /v1/previews/{id}/webhooks`, `DELETE …/webhooks/{webhook}`, `no tool yet` in no-tool.txt);
-   making one answers its URL with a token (a reveal) and stays tool-less.
+3. **A preview note as a work item (after roll previews #1196 lands):** `POST
+   /v1/previews/{id}/notes/{note}/work` (idempotent per note; a guest's note makes an outside-marked
+   item), next to `previews_resolve_note`; `previews_list_notes` answers carry `work`.
 4. **Watched:** SEP-1913 (`sensitiveHint`, `privateHint` and `maliciousActivityHint` annotations, close to lockdown's marks) and the files extension (Claude says uploads are "rolling out soon").
 
 5. **Paging is the products'.** No list route takes a cursor (approvals take `limit` only). History
@@ -1668,7 +1672,7 @@ From a 2026-11-26 comparison (the spec's anniversary post, Claude's connector do
    stateless and search mode (`?tools=search`) covers clients that can't take the list; "remember this browser"; a preset that reveals development's values without asking
    (#354); a connection-level `?project=` (only a token's rules bound a project; a default that
    some tools can't honour would look like a boundary).
-17. **Landed 2026-11-26 and 27:** a rule's index never holds an exclusion, which reached what it
+17. **Landed 2026-11-26 and 27:** fixes from a review of #1182 and #1186 (a rule stored with `//` reaches nothing, `/api/` is `/api`, the check endpoint and import sources take folders as the gate does) and resolve, diff and `.env` import decided by their body's folder, with one folder parser for roll secrets and the gate (#1195); a missing document names itself and its index, `review_preview` reads `main_on_change` (#1191); a rule's index never holds an exclusion, which reached what it
    excluded at the gate and in search's scoped principal (#1182, from the re-check of search #1111);
    the root folder spelled `//` is the root, so the 8-hour caps hold and a secrets folder has one
    spelling, refused at the gate where secrets would refuse it (#1186, from roll secrets' 43rd
