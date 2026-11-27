@@ -361,12 +361,15 @@ state. A pass of the reconciler:
        (masked, one line), never the converge's, and it runs once a head. With
        `release_checks` (`check` or `required`, off by default) roll rehearses it at every head of
        a change instead, queued or not, and with `required` the change can't land in roll until,
-       at its head, the rehearsal passed and main's code didn't break on its migrated data (step
+       at its head, with its preview settled there (main's code runs before it settles), the
+       rehearsal passed and main's code didn't break on its migrated data (step
        4e; `release` on the change's blockers: "its release hasn't been rehearsed on today's data
        at its head yet", "its release failed on today's data: …", "main's code breaks on its
        migrated data: /orders (500): expand first, contract in a later change"). Rehearsed at each
        head before it's queued, the blocker never waits on the queue that would ask for it; a
-       preview with no Postgres branch has nothing to rehearse, so the rule holds nothing back
+       preview with no Postgres branch has nothing to rehearse, and a check of main's code that
+       couldn't run (no preview of main, a branch that can't be copied: its `error` on the preview),
+       has nothing to say, so neither holds anything back
        there (`queue.rs::blockers_keep_changes_out_of_the_queue`, the `release` case). With
        `rehearse_when_queued` (off by default: each is a fresh branch, its masking and a release
        run) roll asks for one itself when the change is queued to land in roll code, at that
@@ -1970,7 +1973,9 @@ land on the change.
   tab have "Make a work item", where roll's agents claim work too. A note's is made by roll
   (`POST …/notes/{note}/work`, `roll preview notes <id> --work <note>`): on a repo mirrored to
   GitHub, a team member's note opens an issue there, by roll's App (Marker.io's and Jam's notes
-  to GitHub Issues), which GitHub's `issues` webhook makes the repo's work item as any issue;
+  to GitHub Issues), made the repo's work item at once (GitHub's `issues` webhook finds it), by
+  roll's own number, as the team's words (an issue roll's App opened is never someone outside
+  the team's, whatever GitHub says of its bot);
   elsewhere, and always for a guest's note (its words are never published to GitHub, and stay
   marked as outside the team's), a work item in the change's repo,
   titled by the note's first line, its body the note with its page, element and link, labelled
@@ -2324,7 +2329,9 @@ type Settings = {
   `a_changes_linear_issues_from_its_title_and_branch`, `linear-templates.test.ts`.
 - **Jira and Asana** (Marker.io's notes to a tracker): the gallery's "Preview notes as Jira issues"
   and "Preview notes as Asana tasks" (`preview-note-to-jira`, `preview-note-to-asana`) take each
-  note left on a change's preview (the `review` trigger, a body that's a note's, not a reply's)
+  note left on a change's preview (the `review` trigger, a body that's a note's, not a reply's;
+  never one someone outside the team wrote, a share link's guest or a stranger's review on a
+  public mirror, nor a dismissal)
   to the team's tracker with automations' `webhook` step: public addresses only, no redirects,
   the answer read up to 1 MiB, and the credential an automation secret (`{{ secrets.jira }}`,
   base64 of email:API token; `{{ secrets.asana }}`, a personal access token), never in the
@@ -2338,7 +2345,10 @@ type Settings = {
   and the change's hasn't, is a difference ("/api/items 200 (main 200) · lost price"). The
   Requests tab and `roll preview replay` say them. Only GETs (a write would act twice), only a
   trusted change's preview (a fork's visitors and code choose its paths, and main's preview
-  answers with main's secrets), and only what the previews themselves served: replaying
+  answers with main's secrets), never a path that acts on a GET (signing out, unsubscribing,
+  confirming), 3 minutes at most (one asked longer ago that never said how it went may be
+  asked again), and only what the previews themselves served (on the preview's holder; on a
+  fleet, main's preview's lines only where it's held there too): replaying
   production's traffic needs its capture's privacy designed first
   (`engine.rs::recent_requests_are_replayed_against_mains_preview`).
 - **GitHub PR**, through roll code's GitHub outbox (durable, retried, sent on the repo's owner):

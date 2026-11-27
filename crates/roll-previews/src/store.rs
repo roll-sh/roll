@@ -2862,12 +2862,13 @@ impl Store {
         })
     }
 
-    /// Note `review`'s work item made (`number`), or, with `None`, not: its claim let go.
-    pub fn set_note_work(&self, preview: &str, review: &str, made: Option<(u64, &str)>) -> Result<()> {
+    /// Note `review`'s work item made (`number`), or, with `None`, not: `by`'s claim let go (one
+    /// another caller took over since stays theirs).
+    pub fn set_note_work(&self, preview: &str, review: &str, by: &str, made: Option<(u64, &str)>) -> Result<()> {
         self.db.write(|c| {
             match made {
                 Some((number, url)) => c.execute("UPDATE note_work SET number = ?, url = ? WHERE preview_id = ? AND review_id = ?", params![number as i64, url, preview, review])?,
-                None => c.execute("DELETE FROM note_work WHERE preview_id = ? AND review_id = ? AND number = 0", params![preview, review])?,
+                None => c.execute("DELETE FROM note_work WHERE preview_id = ? AND review_id = ? AND number = 0 AND by = ?", params![preview, review, by])?,
             };
             Ok::<_, Error>(())
         })

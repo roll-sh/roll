@@ -1592,6 +1592,10 @@ impl Engine {
             for res in self.store.resources(&r.id)?.into_iter().filter(|x| x.kind == Kind::Postgres && x.mode == Mode::Branch) {
                 let (Some(branch), Ok(b)) = (&res.r#ref, self.brancher(res.kind)) else { continue };
                 let b = b.clone();
+                // One a crash left (named so) holds a half-run release's data: gone first.
+                if let Ok(Some(left)) = b.find(&res.parent, &name).await {
+                    b.delete(&res.parent, &left, &name).await?;
+                }
                 let fresh = b.branch(&res.parent, &name, Mode::Branch).await?;
                 made.push((b.clone(), res.parent.clone(), fresh.r#ref.clone()));
                 let key = format!("{}:{}", res.kind.as_str(), res.parent);
