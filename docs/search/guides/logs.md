@@ -195,8 +195,12 @@ them, so ES|QL and Discover read `message`, `log.level` and `service.name` as EC
 
 Limits:
 - a record keeps 128 attributes, and the rest count in its `dropped_attributes_count`;
-- a value over 32 KiB, or nested more than 8 deep, rejects its record, which the answer's
-  `partial_success` counts;
+- a value over 1 MiB is cut there, and the answer's `partial_success` says how many were;
+- a record nested more than 8 deep or holding more than 10,000 values is rejected, and
+  `partial_success` counts it;
+- one request writes at most 64 data streams;
+- an OTLP/JSON body is at most 4 MiB, while protobuf, which Collectors send, goes to the cluster's
+  `max_body_mb`;
 - a key that may not write a record's data stream gets a 403, and a busy cluster a 429 with
   `Retry-After`, which Collectors back off on.
 

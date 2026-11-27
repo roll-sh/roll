@@ -8,26 +8,381 @@
 //! schema_url}`, `scope.{name, version, attributes, dropped_attributes_count, schema_url}`,
 //! `trace_id`, `span_id` (lowercase hex), `event_name`, `data_stream.{type, dataset, namespace}`.
 //!
-//! Each record goes to `logs-<dataset>.otel-<namespace>`: `data_stream.dataset` and
-//! `data_stream.namespace` from the record's attributes, else its scope's, else its resource's,
-//! else `generic` and `default`, made valid as the exporter does (lowercase, `-` and the
-//! characters an index name can't hold become `_`, 100 bytes at most).
+//! Each record goes to `logs-<dataset>-<namespace>` with `.otel` ending the dataset:
+//! `data_stream.dataset` and `data_stream.namespace` from the record's attributes, else its
+//! scope's, else its resource's, else `generic` and `default`, made valid as the exporter does
+//! (lowercase; `-` and the characters an index name can't hold become `_`; `.otel` appended
+//! unless it's there; 100 bytes at most with it). A request writes at most [`MAX_TARGETS`] data
+//! streams; records for more are rejected in the answer's partial success.
+//!
+//! Memory ("charge what you build"): every value is charged to the request's [`Budget`] as it's
+//! built (its [`VALUE_COST`] plus its bytes) and given back once its record is written out, and
+//! the `_bulk` NDJSON is charged as it grows, in chunks of at most [`CHUNK_BYTES`]. A record
+//! holds at most [`MAX_VALUES`] values, so a wide array can't be built before the charge stops it.
 //!
 //! Limits: a record's attributes past [`MAX_ATTRIBUTES`] are dropped and counted in its
-//! `dropped_attributes_count` (as an SDK's limits do); a record with a string or bytes value past
-//! [`MAX_VALUE_BYTES`], or values nested past [`MAX_DEPTH`], is rejected and named in the
-//! answer's partial success; a malformed message fails the request.
+//! `dropped_attributes_count` (as an SDK's limits do; the routing attributes always stay); a
+//! string or bytes value past [`MAX_VALUE_BYTES`] is cut there and counted (the answer's partial
+//! success carries the count as a warning); values nested past [`MAX_DEPTH`] or a record past
+//! [`MAX_VALUES`] reject the record; trace and span ids of the wrong length are left out; a
+//! malformed message fails the request.
 
 use super::wire::{Fields, Malformed};
+use crate::breaker::Reservation;
+use crate::error::EsError;
 use crate::json::{Map, Value};
 use crate::obj;
+use std::collections::HashSet;
 
 /// Attributes kept per record, scope or resource.
 pub const MAX_ATTRIBUTES: usize = 128;
-/// A string or bytes value's longest.
-pub const MAX_VALUE_BYTES: usize = 32 * 1024;
+/// A string or bytes value's longest; longer ones are cut.
+pub const MAX_VALUE_BYTES: usize = 1024 * 1024;
 /// Arrays and key-value lists nested in one value.
 pub const MAX_DEPTH: usize = 8;
+/// Values (attributes, entries of arrays and key-value lists) one record may hold.
+pub const MAX_VALUES: usize = 10_000;
+/// Data streams one request may write.
+pub const MAX_TARGETS: usize = 64;
+/// The most NDJSON one internal `_bulk` carries.
+pub const CHUNK_BYTES: usize = 5 * 1024 * 1024;
+/// What a built value costs beyond its bytes: the `Value` and its slot in a list or map.
+pub const VALUE_COST: usize = std::mem::size_of::<Value>() + 32;
+/// Charged to the breaker at a time.
+const STEP: u64 = 64 * 1024;
+
+/// Why decoding stopped.
+#[derive(Debug)]
+pub enum Fail {
+    /// The request doesn't decode (400).
+    Malformed(String),
+    /// The breaker refused what the request builds (its error, a 429).
+    Tripped(EsError),
+}
+
+/// Why one record wasn't written; the request goes on without it.
+#[derive(Debug)]
+struct Rejected(String);
+
+/// A decoding step's outcome: a value, a rejected record, or a stopped request.
+enum Step<T> {
+    Ok(T),
+    Reject(Rejected),
+    Stop(Fail),
+}
+
+impl From<Malformed> for Fail {
+    fn from(m: Malformed) -> Fail {
+        Fail::Malformed(m.0)
+    }
+}
+
+/// A request's memory account on the request breaker: values held for the record being built,
+/// and the NDJSON written so far.
+pub struct Budget {
+    held: Reservation,
+    /// Bytes charged and not yet reserved (reserved [`STEP`] at a time).
+    owed: u64,
+    /// Bytes of the record being built.
+    record_bytes: u64,
+    record_values: usize,
+}
+
+impl Budget {
+    pub fn new(held: Reservation) -> Budget {
+        Budget { held, owed: 0, record_bytes: 0, record_values: 0 }
+    }
+
+    fn charge(&mut self, bytes: u64) -> Result<(), Fail> {
+        self.owed += bytes;
+        if self.owed >= STEP {
+            let n = std::mem::take(&mut self.owed);
+            self.held.add(n, "<otlp_request>").map_err(Fail::Tripped)?;
+        }
+        Ok(())
+    }
+
+    /// One value of the record being built, holding `bytes` of text.
+    fn value(&mut self, bytes: usize) -> Step<()> {
+        self.record_values += 1;
+        if self.record_values > MAX_VALUES {
+            return Step::Reject(Rejected(format!("a record with more than {MAX_VALUES} values")));
+        }
+        let n = (VALUE_COST + bytes) as u64;
+        self.record_bytes += n;
+        match self.charge(n) {
+            Ok(()) => Step::Ok(()),
+            Err(f) => Step::Stop(f),
+        }
+    }
+
+    /// The record was written out (or rejected): its values are given back.
+    fn record_done(&mut self) {
+        let n = std::mem::take(&mut self.record_bytes);
+        let from_owed = n.min(self.owed);
+        self.owed -= from_owed;
+        self.held.release(n - from_owed);
+        self.record_values = 0;
+    }
+
+    /// A resource's or scope's values stay for its records: they leave the record's account.
+    fn keep_record(&mut self) {
+        self.record_bytes = 0;
+        self.record_values = 0;
+    }
+
+    /// `bytes` more of NDJSON.
+    fn ndjson(&mut self, bytes: usize) -> Result<(), Fail> {
+        self.charge(bytes as u64)
+    }
+
+    /// A chunk of `bytes` was sent and dropped.
+    pub fn sent(&mut self, bytes: usize) {
+        let n = bytes as u64;
+        let from_owed = n.min(self.owed);
+        self.owed -= from_owed;
+        self.held.release(n - from_owed);
+    }
+}
+
+/// The documents of a request, as `_bulk` `create` lines in chunks, and what was left out.
+#[derive(Debug, Default)]
+pub struct Batch {
+    pub chunks: Vec<String>,
+    current: String,
+    pub accepted: u64,
+    pub rejected: u64,
+    /// Values cut at [`MAX_VALUE_BYTES`].
+    pub truncated: u64,
+    /// The first rejection's reason.
+    pub reason: Option<String>,
+    targets: HashSet<String>,
+}
+
+impl Batch {
+    fn reject(&mut self, why: String) {
+        self.rejected += 1;
+        self.reason.get_or_insert(why);
+    }
+
+    fn finish(mut self) -> Batch {
+        if !self.current.is_empty() {
+            let c = std::mem::take(&mut self.current);
+            self.chunks.push(c);
+        }
+        self
+    }
+}
+
+// --- values ---------------------------------------------------------------------------------
+
+fn hex(b: &[u8], len: usize) -> Option<String> {
+    if b.len() != len || b.iter().all(|x| *x == 0) {
+        return None;
+    }
+    Some(b.iter().map(|x| format!("{x:02x}")).collect())
+}
+
+/// `s` cut to [`MAX_VALUE_BYTES`] on a character boundary, counting a cut.
+fn bounded(s: &str, batch: &mut Batch) -> String {
+    if s.len() <= MAX_VALUE_BYTES {
+        return s.to_string();
+    }
+    batch.truncated += 1;
+    let mut end = MAX_VALUE_BYTES;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s[..end].to_string()
+}
+
+/// A short string field (names, versions, severity text) as kept.
+fn short(s: &str, batch: &mut Batch) -> String {
+    bounded(s, batch)
+}
+
+macro_rules! step {
+    ($e:expr) => {
+        match $e {
+            Step::Ok(v) => v,
+            Step::Reject(r) => return Step::Reject(r),
+            Step::Stop(f) => return Step::Stop(f),
+        }
+    };
+}
+
+macro_rules! wire {
+    ($e:expr) => {
+        match $e {
+            Ok(v) => v,
+            Err(m) => return Step::Stop(Fail::from(m)),
+        }
+    };
+}
+
+/// An `AnyValue` from protobuf.
+fn any_pb(b: &[u8], depth: usize, budget: &mut Budget, batch: &mut Batch) -> Step<Value> {
+    if depth > MAX_DEPTH {
+        return Step::Reject(Rejected(format!("values nested deeper than {MAX_DEPTH}")));
+    }
+    let mut out = Value::Null;
+    for f in Fields::new(b) {
+        let (n, w) = wire!(f);
+        out = match n {
+            1 => {
+                let s = wire!(w.string());
+                step!(budget.value(s.len().min(MAX_VALUE_BYTES)));
+                Value::from(bounded(s, batch))
+            }
+            2 => {
+                step!(budget.value(0));
+                Value::Bool(wire!(w.uint()) != 0)
+            }
+            3 => {
+                step!(budget.value(0));
+                Value::from(wire!(w.uint()) as i64)
+            }
+            4 => {
+                step!(budget.value(0));
+                let f = f64::from_bits(wire!(w.uint()));
+                if f.is_finite() { Value::from(f) } else { Value::from(f.to_string()) }
+            }
+            5 | 6 => {
+                step!(budget.value(0));
+                // ArrayValue { values = 1 } / KeyValueList { values = 1 }.
+                let mut arr = Vec::new();
+                let mut map = Map::new();
+                for g in Fields::new(wire!(w.bytes())) {
+                    let (gn, gw) = wire!(g);
+                    if gn != 1 {
+                        continue;
+                    }
+                    let inner = wire!(gw.bytes());
+                    if n == 5 {
+                        arr.push(step!(any_pb(inner, depth + 1, budget, batch)));
+                    } else if let Some((k, v)) = step!(key_value_pb(inner, depth + 1, budget, batch)) {
+                        map.insert(k, v);
+                    }
+                }
+                if n == 5 { Value::Arr(arr) } else { Value::Obj(map) }
+            }
+            7 => {
+                let raw = wire!(w.bytes());
+                let kept = &raw[..raw.len().min(MAX_VALUE_BYTES)];
+                if kept.len() < raw.len() {
+                    batch.truncated += 1;
+                }
+                step!(budget.value(kept.len() * 4 / 3 + 4));
+                Value::from(base64_encode(kept))
+            }
+            _ => continue,
+        };
+    }
+    Step::Ok(out)
+}
+
+/// A `KeyValue` from protobuf: `(key, value)`; `None` without a key.
+fn key_value_pb(b: &[u8], depth: usize, budget: &mut Budget, batch: &mut Batch) -> Step<Option<(String, Value)>> {
+    let (mut key, mut value) = (None, Value::Null);
+    for f in Fields::new(b) {
+        let (n, w) = wire!(f);
+        match n {
+            1 => {
+                let k = wire!(w.string());
+                step!(budget.value(k.len().min(MAX_VALUE_BYTES)));
+                key = Some(short(k, batch));
+            }
+            2 => value = step!(any_pb(wire!(w.bytes()), depth, budget, batch)),
+            _ => {}
+        }
+    }
+    Step::Ok(key.map(|k| (k, value)))
+}
+
+fn base64_encode(b: &[u8]) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(b)
+}
+
+/// Attributes that decide where a record goes: kept past [`MAX_ATTRIBUTES`].
+fn routing_key(k: &str) -> bool {
+    k == "data_stream.dataset" || k == "data_stream.namespace"
+}
+
+/// Adds an attribute, counting it as dropped past [`MAX_ATTRIBUTES`].
+fn add_attribute(m: &mut Map, dropped: &mut u64, k: String, v: Value) {
+    if m.len() >= MAX_ATTRIBUTES && !m.contains_key(&k) && !routing_key(&k) {
+        *dropped = dropped.saturating_add(1);
+        return;
+    }
+    m.insert(k, v);
+}
+
+/// An `AnyValue` from OTLP/JSON (`{"stringValue": …}`, `{"intValue": "12"}`, …).
+fn any_json(v: &Value, depth: usize, budget: &mut Budget, batch: &mut Batch) -> Step<Value> {
+    if depth > MAX_DEPTH {
+        return Step::Reject(Rejected(format!("values nested deeper than {MAX_DEPTH}")));
+    }
+    let Some(m) = v.as_object() else { return Step::Ok(Value::Null) };
+    let get = |a: &str, b: &str| m.get(a).or_else(|| m.get(b));
+    if let Some(s) = get("stringValue", "string_value") {
+        let s = s.as_str().unwrap_or_default();
+        step!(budget.value(s.len().min(MAX_VALUE_BYTES)));
+        return Step::Ok(Value::from(bounded(s, batch)));
+    }
+    step!(budget.value(0));
+    if let Some(b) = get("boolValue", "bool_value") {
+        return Step::Ok(Value::Bool(b.as_bool().unwrap_or(false)));
+    }
+    if let Some(i) = get("intValue", "int_value") {
+        // JSON carries 64-bit integers as strings.
+        return Step::Ok(Value::from(i.as_i64().or_else(|| i.as_str().and_then(|s| s.parse().ok())).unwrap_or(0)));
+    }
+    if let Some(d) = get("doubleValue", "double_value") {
+        return Step::Ok(d.as_f64().map(Value::from).unwrap_or(Value::Null));
+    }
+    if let Some(a) = get("arrayValue", "array_value") {
+        let mut out = Vec::new();
+        for x in a.get("values").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default() {
+            out.push(step!(any_json(x, depth + 1, budget, batch)));
+        }
+        return Step::Ok(Value::Arr(out));
+    }
+    if let Some(kv) = get("kvlistValue", "kvlist_value") {
+        let mut out = Map::new();
+        for e in kv.get("values").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default() {
+            if let Some(k) = e.get("key").and_then(Value::as_str) {
+                step!(budget.value(k.len().min(MAX_VALUE_BYTES)));
+                let v = step!(any_json(e.get("value").unwrap_or(&Value::Null), depth + 1, budget, batch));
+                out.insert(short(k, batch), v);
+            }
+        }
+        return Step::Ok(Value::Obj(out));
+    }
+    if let Some(b) = get("bytesValue", "bytes_value") {
+        let s = b.as_str().unwrap_or_default();
+        let cap = MAX_VALUE_BYTES * 4 / 3;
+        if s.len() > cap {
+            batch.truncated += 1;
+            return Step::Ok(Value::from(&s[..cap - cap % 4]));
+        }
+        return Step::Ok(Value::from(s));
+    }
+    Step::Ok(Value::Null)
+}
+
+fn attributes_json(list: Option<&Value>, out: &mut Map, dropped: &mut u64, budget: &mut Budget, batch: &mut Batch) -> Step<()> {
+    for e in list.and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default() {
+        if let Some(k) = e.get("key").and_then(Value::as_str) {
+            step!(budget.value(k.len().min(MAX_VALUE_BYTES)));
+            let v = step!(any_json(e.get("value").unwrap_or(&Value::Null), 1, budget, batch));
+            add_attribute(out, dropped, short(k, batch), v);
+        }
+    }
+    Step::Ok(())
+}
+
+// --- routing and documents ------------------------------------------------------------------
 
 /// A resource's or scope's part of its records' documents.
 #[derive(Clone, Debug, Default)]
@@ -53,192 +408,6 @@ struct Record {
     event_name: Option<String>,
 }
 
-/// Why one record wasn't written (the request goes on without it).
-#[derive(Debug)]
-struct Rejected(String);
-
-/// The documents of a request, as `_bulk` `create` lines, and what was left out.
-#[derive(Debug, Default)]
-pub struct Batch {
-    pub ndjson: String,
-    pub accepted: u64,
-    pub rejected: u64,
-    /// The first rejection's reason.
-    pub reason: Option<String>,
-}
-
-impl Batch {
-    fn reject(&mut self, why: String) {
-        self.rejected += 1;
-        self.reason.get_or_insert(why);
-    }
-}
-
-// --- values ---------------------------------------------------------------------------------
-
-fn hex(b: &[u8]) -> Option<String> {
-    if b.is_empty() || b.iter().all(|x| *x == 0) {
-        return None;
-    }
-    Some(b.iter().map(|x| format!("{x:02x}")).collect())
-}
-
-fn long_value(n: usize) -> Rejected {
-    Rejected(format!("a value of {n} bytes (at most {MAX_VALUE_BYTES})"))
-}
-
-/// An `AnyValue` from protobuf.
-fn any_pb(b: &[u8], depth: usize) -> Result<Result<Value, Rejected>, Malformed> {
-    if depth > MAX_DEPTH {
-        return Ok(Err(Rejected(format!("values nested deeper than {MAX_DEPTH}"))));
-    }
-    let mut out = Value::Null;
-    for f in Fields::new(b) {
-        let (n, w) = f?;
-        out = match n {
-            1 => {
-                let s = w.string()?;
-                if s.len() > MAX_VALUE_BYTES {
-                    return Ok(Err(long_value(s.len())));
-                }
-                Value::from(s)
-            }
-            2 => Value::Bool(w.uint()? != 0),
-            3 => Value::from(w.uint()? as i64),
-            4 => {
-                let f = f64::from_bits(w.uint()?);
-                if f.is_finite() { Value::from(f) } else { Value::from(f.to_string()) }
-            }
-            5 | 6 => {
-                // ArrayValue { values = 1 } / KeyValueList { values = 1 }.
-                let mut arr = Vec::new();
-                let mut map = Map::new();
-                for g in Fields::new(w.bytes()?) {
-                    let (gn, gw) = g?;
-                    if gn != 1 {
-                        continue;
-                    }
-                    if n == 5 {
-                        match any_pb(gw.bytes()?, depth + 1)? {
-                            Ok(v) => arr.push(v),
-                            Err(r) => return Ok(Err(r)),
-                        }
-                    } else {
-                        match key_value_pb(gw.bytes()?, depth + 1)? {
-                            Ok(Some((k, v))) => {
-                                map.insert(k, v);
-                            }
-                            Ok(None) => {}
-                            Err(r) => return Ok(Err(r)),
-                        }
-                    }
-                }
-                if n == 5 { Value::Arr(arr) } else { Value::Obj(map) }
-            }
-            7 => {
-                let b = w.bytes()?;
-                if b.len() > MAX_VALUE_BYTES {
-                    return Ok(Err(long_value(b.len())));
-                }
-                Value::from(base64_encode(b))
-            }
-            _ => continue,
-        };
-    }
-    Ok(Ok(out))
-}
-
-/// A `KeyValue` from protobuf: `(key, value)`; `None` without a key.
-fn key_value_pb(b: &[u8], depth: usize) -> Result<Result<Option<(String, Value)>, Rejected>, Malformed> {
-    let (mut key, mut value) = (None, Value::Null);
-    for f in Fields::new(b) {
-        let (n, w) = f?;
-        match n {
-            1 => key = Some(w.string()?.to_string()),
-            2 => match any_pb(w.bytes()?, depth)? {
-                Ok(v) => value = v,
-                Err(r) => return Ok(Err(r)),
-            },
-            _ => {}
-        }
-    }
-    Ok(Ok(key.map(|k| (k, value))))
-}
-
-fn base64_encode(b: &[u8]) -> String {
-    use base64::Engine;
-    base64::engine::general_purpose::STANDARD.encode(b)
-}
-
-/// Adds an attribute, counting it as dropped past [`MAX_ATTRIBUTES`].
-fn add_attribute(m: &mut Map, dropped: &mut u64, k: String, v: Value) {
-    if m.len() >= MAX_ATTRIBUTES && !m.contains_key(&k) {
-        *dropped += 1;
-        return;
-    }
-    m.insert(k, v);
-}
-
-/// An `AnyValue` from OTLP/JSON (`{"stringValue": …}`, `{"intValue": "12"}`, …).
-fn any_json(v: &Value, depth: usize) -> Result<Value, Rejected> {
-    if depth > MAX_DEPTH {
-        return Err(Rejected(format!("values nested deeper than {MAX_DEPTH}")));
-    }
-    let Some(m) = v.as_object() else { return Ok(Value::Null) };
-    let get = |a: &str, b: &str| m.get(a).or_else(|| m.get(b));
-    if let Some(s) = get("stringValue", "string_value") {
-        let s = s.as_str().unwrap_or_default();
-        if s.len() > MAX_VALUE_BYTES {
-            return Err(long_value(s.len()));
-        }
-        return Ok(Value::from(s));
-    }
-    if let Some(b) = get("boolValue", "bool_value") {
-        return Ok(Value::Bool(b.as_bool().unwrap_or(false)));
-    }
-    if let Some(i) = get("intValue", "int_value") {
-        // JSON carries 64-bit integers as strings.
-        let n = i.as_i64().or_else(|| i.as_str().and_then(|s| s.parse().ok())).unwrap_or(0);
-        return Ok(Value::from(n));
-    }
-    if let Some(d) = get("doubleValue", "double_value") {
-        return Ok(d.as_f64().map(Value::from).unwrap_or_else(|| d.clone()));
-    }
-    if let Some(a) = get("arrayValue", "array_value") {
-        let vals = a.get("values").and_then(Value::as_array).cloned().unwrap_or_default();
-        return Ok(Value::Arr(vals.iter().map(|x| any_json(x, depth + 1)).collect::<Result<_, _>>()?));
-    }
-    if let Some(kv) = get("kvlistValue", "kvlist_value") {
-        let mut out = Map::new();
-        for e in kv.get("values").and_then(Value::as_array).into_iter().flatten() {
-            if let Some(k) = e.get("key").and_then(Value::as_str) {
-                out.insert(k.to_string(), any_json(e.get("value").unwrap_or(&Value::Null), depth + 1)?);
-            }
-        }
-        return Ok(Value::Obj(out));
-    }
-    if let Some(b) = get("bytesValue", "bytes_value") {
-        let s = b.as_str().unwrap_or_default();
-        if s.len() > MAX_VALUE_BYTES * 4 / 3 + 4 {
-            return Err(long_value(s.len() * 3 / 4));
-        }
-        return Ok(Value::from(s));
-    }
-    Ok(Value::Null)
-}
-
-fn attributes_json(list: Option<&Value>, out: &mut Map, dropped: &mut u64) -> Result<(), Rejected> {
-    for e in list.and_then(Value::as_array).into_iter().flatten() {
-        if let Some(k) = e.get("key").and_then(Value::as_str) {
-            let v = any_json(e.get("value").unwrap_or(&Value::Null), 1)?;
-            add_attribute(out, dropped, k.to_string(), v);
-        }
-    }
-    Ok(())
-}
-
-// --- routing and documents ------------------------------------------------------------------
-
 /// `data_stream.dataset` or `.namespace` made valid as Elastic's exporter does.
 fn sanitize(s: &str, max: usize) -> String {
     let mut out: String = s
@@ -252,10 +421,23 @@ fn sanitize(s: &str, max: usize) -> String {
     out
 }
 
-fn routing(rec: &Record, scope: &Context, resource: &Context, key: &str, default: &str) -> String {
-    let found = [&rec.attributes, &scope.attributes, &resource.attributes].into_iter().find_map(|m| m.get(key).and_then(Value::as_str).filter(|s| !s.is_empty()));
-    let s = sanitize(found.unwrap_or(default), 100);
-    if s.is_empty() || s.starts_with(['_', '.', '+']) { sanitize(default, 100) } else { s }
+fn routing(rec: &Record, scope: &Context, resource: &Context, key: &str) -> Option<String> {
+    [&rec.attributes, &scope.attributes, &resource.attributes].into_iter().find_map(|m| m.get(key).and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_string))
+}
+
+/// `(dataset with its .otel, namespace)`.
+fn target(rec: &Record, scope: &Context, resource: &Context) -> (String, String) {
+    let raw = routing(rec, scope, resource, "data_stream.dataset").unwrap_or_else(|| "generic".into());
+    let base = raw.strip_suffix(".otel").unwrap_or(&raw);
+    let mut base = sanitize(base, 100 - ".otel".len());
+    if base.is_empty() {
+        base = "generic".into();
+    }
+    let mut namespace = sanitize(&routing(rec, scope, resource, "data_stream.namespace").unwrap_or_default(), 100);
+    if namespace.is_empty() {
+        namespace = "default".into();
+    }
+    (format!("{base}.otel"), namespace)
 }
 
 fn timestamp(nanos: u64) -> String {
@@ -275,30 +457,37 @@ fn context_json(c: &Context, scope: bool) -> Value {
         }
     }
     m.insert("attributes".into(), Value::Obj(c.attributes.clone()));
-    m.insert("dropped_attributes_count".into(), Value::from(c.dropped));
+    m.insert("dropped_attributes_count".into(), Value::from(c.dropped.min(u64::from(u32::MAX))));
     if let Some(u) = &c.schema_url {
         m.insert("schema_url".into(), Value::from(u.as_str()));
     }
     Value::Obj(m)
 }
 
-/// Appends a record's `create` line and document.
-fn emit(out: &mut Batch, rec: Record, scope: &Context, resource: &Context, now_ms: i64) {
-    let dataset = routing(&rec, scope, resource, "data_stream.dataset", "generic");
-    let namespace = routing(&rec, scope, resource, "data_stream.namespace", "default");
+/// Appends a record's `create` line and document, or rejects it past [`MAX_TARGETS`].
+fn emit(out: &mut Batch, budget: &mut Budget, rec: Record, scope: &Context, resource: &Context, now_ms: i64) -> Result<(), Fail> {
+    let (dataset, namespace) = target(&rec, scope, resource);
+    let index = format!("logs-{dataset}-{namespace}");
+    if !out.targets.contains(&index) {
+        if out.targets.len() >= MAX_TARGETS {
+            out.reject(format!("a request writes at most {MAX_TARGETS} data streams"));
+            return Ok(());
+        }
+        out.targets.insert(index.clone());
+    }
     let observed = if rec.observed > 0 { rec.observed } else { (now_ms.max(0) as u64) * 1_000_000 };
     let time = if rec.time > 0 { rec.time } else { observed };
     let mut doc = obj! {
         "@timestamp" => timestamp(time),
         "observed_timestamp" => timestamp(observed),
-        "data_stream" => obj! { "type" => "logs", "dataset" => format!("{dataset}.otel"), "namespace" => namespace.clone() },
+        "data_stream" => obj! { "type" => "logs", "dataset" => dataset, "namespace" => namespace },
     };
-    let Value::Obj(d) = &mut doc else { return };
+    let Value::Obj(d) = &mut doc else { return Ok(()) };
     if let Some(t) = rec.severity_text {
         d.insert("severity_text".into(), Value::from(t));
     }
     if let Some(n) = rec.severity_number.filter(|n| *n > 0) {
-        d.insert("severity_number".into(), Value::from(n));
+        d.insert("severity_number".into(), Value::from(n.min(24)));
     }
     match rec.body {
         Some(Value::Str(s)) => {
@@ -313,7 +502,7 @@ fn emit(out: &mut Batch, rec: Record, scope: &Context, resource: &Context, now_m
         }
     }
     d.insert("attributes".into(), Value::Obj(rec.attributes));
-    d.insert("dropped_attributes_count".into(), Value::from(rec.dropped));
+    d.insert("dropped_attributes_count".into(), Value::from(rec.dropped.min(u64::from(u32::MAX))));
     d.insert("resource".into(), context_json(resource, false));
     d.insert("scope".into(), context_json(scope, true));
     if let Some(t) = rec.trace_id {
@@ -325,131 +514,148 @@ fn emit(out: &mut Batch, rec: Record, scope: &Context, resource: &Context, now_m
     if let Some(e) = rec.event_name.filter(|e| !e.is_empty()) {
         d.insert("event_name".into(), Value::from(e));
     }
-    let index = format!("logs-{dataset}.otel-{namespace}");
-    out.ndjson.push_str(&obj! { "create" => obj! { "_index" => index } }.to_json());
-    out.ndjson.push('\n');
-    out.ndjson.push_str(&doc.to_json());
-    out.ndjson.push('\n');
+    let action = obj! { "create" => obj! { "_index" => index } }.to_json();
+    let body = doc.to_json();
+    let len = action.len() + body.len() + 2;
+    if !out.current.is_empty() && out.current.len() + len > CHUNK_BYTES {
+        let c = std::mem::take(&mut out.current);
+        out.chunks.push(c);
+    }
+    budget.ndjson(len)?;
+    out.current.push_str(&action);
+    out.current.push('\n');
+    out.current.push_str(&body);
+    out.current.push('\n');
     out.accepted += 1;
+    Ok(())
 }
 
 // --- protobuf ---------------------------------------------------------------------------------
 
 /// A `Resource` (`attributes = 1`, `dropped_attributes_count = 2`) or an `InstrumentationScope`
 /// (`name = 1`, `version = 2`, `attributes = 3`, `dropped_attributes_count = 4`).
-fn context_pb(b: &[u8], scope: bool) -> Result<Result<Context, Rejected>, Malformed> {
+fn context_pb(b: &[u8], scope: bool, budget: &mut Budget, batch: &mut Batch) -> Step<Context> {
     let mut c = Context::default();
     let (attrs, dropped) = if scope { (3, 4) } else { (1, 2) };
     for f in Fields::new(b) {
-        let (n, w) = f?;
+        let (n, w) = wire!(f);
         match n {
-            1 if scope => c.name = Some(w.string()?.to_string()),
-            2 if scope => c.version = Some(w.string()?.to_string()),
-            n if n == attrs => match key_value_pb(w.bytes()?, 1)? {
-                Ok(Some((k, v))) => add_attribute(&mut c.attributes, &mut c.dropped, k, v),
-                Ok(None) => {}
-                Err(r) => return Ok(Err(r)),
-            },
-            n if n == dropped => c.dropped = c.dropped.saturating_add(w.uint()?),
+            1 if scope => c.name = Some(short(wire!(w.string()), batch)),
+            2 if scope => c.version = Some(short(wire!(w.string()), batch)),
+            n if n == attrs => {
+                if let Some((k, v)) = step!(key_value_pb(wire!(w.bytes()), 1, budget, batch)) {
+                    add_attribute(&mut c.attributes, &mut c.dropped, k, v);
+                }
+            }
+            n if n == dropped => c.dropped = c.dropped.saturating_add(wire!(w.uint())),
             _ => {}
         }
     }
-    Ok(Ok(c))
+    Step::Ok(c)
 }
 
 /// A `LogRecord`.
-fn record_pb(b: &[u8]) -> Result<Result<Record, Rejected>, Malformed> {
+fn record_pb(b: &[u8], budget: &mut Budget, batch: &mut Batch) -> Step<Record> {
     let mut r = Record::default();
     for f in Fields::new(b) {
-        let (n, w) = f?;
+        let (n, w) = wire!(f);
         match n {
-            1 => r.time = w.uint()?,
-            11 => r.observed = w.uint()?,
-            2 => r.severity_number = Some(w.uint()? as i64),
-            3 => r.severity_text = Some(w.string()?.to_string()),
-            5 => match any_pb(w.bytes()?, 0)? {
-                Ok(v) => r.body = Some(v),
-                Err(x) => return Ok(Err(x)),
-            },
-            6 => match key_value_pb(w.bytes()?, 1)? {
-                Ok(Some((k, v))) => add_attribute(&mut r.attributes, &mut r.dropped, k, v),
-                Ok(None) => {}
-                Err(x) => return Ok(Err(x)),
-            },
-            7 => r.dropped = r.dropped.saturating_add(w.uint()?),
-            9 => r.trace_id = hex(w.bytes()?),
-            10 => r.span_id = hex(w.bytes()?),
-            12 => r.event_name = Some(w.string()?.to_string()),
+            1 => r.time = wire!(w.uint()),
+            11 => r.observed = wire!(w.uint()),
+            2 => r.severity_number = Some(wire!(w.uint()).min(24) as i64),
+            3 => r.severity_text = Some(short(wire!(w.string()), batch)),
+            5 => r.body = Some(step!(any_pb(wire!(w.bytes()), 0, budget, batch))),
+            6 => {
+                if let Some((k, v)) = step!(key_value_pb(wire!(w.bytes()), 1, budget, batch)) {
+                    add_attribute(&mut r.attributes, &mut r.dropped, k, v);
+                }
+            }
+            7 => r.dropped = r.dropped.saturating_add(wire!(w.uint())),
+            9 => r.trace_id = hex(wire!(w.bytes()), 16),
+            10 => r.span_id = hex(wire!(w.bytes()), 8),
+            12 => r.event_name = Some(short(wire!(w.string()), batch)),
             _ => {}
         }
     }
-    Ok(Ok(r))
+    Step::Ok(r)
+}
+
+/// A context step: a context, a reason its records are all rejected, or a stopped request.
+fn context_or(s: Step<Context>) -> Result<Result<Context, String>, Fail> {
+    match s {
+        Step::Ok(c) => Ok(Ok(c)),
+        Step::Reject(Rejected(why)) => Ok(Err(why)),
+        Step::Stop(f) => Err(f),
+    }
 }
 
 /// The documents of an `ExportLogsServiceRequest` in protobuf (`resource_logs = 1`; each
 /// `ResourceLogs`: `resource = 1`, `scope_logs = 2`, `schema_url = 3`; each `ScopeLogs`:
-/// `scope = 1`, `log_records = 2`, `schema_url = 3`), one record at a time. `charge` is told
-/// the NDJSON's size as it grows and may stop the request.
-pub fn from_protobuf(body: &[u8], now_ms: i64, charge: &mut dyn FnMut(usize) -> Result<(), String>) -> Result<Batch, String> {
+/// `scope = 1`, `log_records = 2`, `schema_url = 3`), one record at a time.
+pub fn from_protobuf(body: &[u8], now_ms: i64, budget: &mut Budget) -> Result<Batch, Fail> {
     let mut out = Batch::default();
-    let m = |e: Malformed| e.0;
     for f in Fields::new(body) {
-        let (n, w) = f.map_err(m)?;
+        let (n, w) = f?;
         if n != 1 {
             continue;
         }
-        let rl = w.bytes().map_err(m)?;
+        let rl = w.bytes()?;
         // The resource and the schema URL may come after the scopes: read them first.
-        let mut resource = Context::default();
-        let mut resource_bad = None;
+        let mut resource: Result<Context, String> = Ok(Context::default());
+        let mut schema = None;
         for g in Fields::new(rl) {
-            let (gn, gw) = g.map_err(m)?;
+            let (gn, gw) = g?;
             match gn {
-                1 => match context_pb(gw.bytes().map_err(m)?, false).map_err(m)? {
-                    Ok(c) => resource = Context { schema_url: resource.schema_url.take(), ..c },
-                    Err(Rejected(why)) => resource_bad = Some(why),
-                },
-                3 => resource.schema_url = Some(gw.string().map_err(m)?.to_string()),
+                1 => {
+                    resource = context_or(context_pb(gw.bytes()?, false, budget, &mut out))?;
+                    budget.keep_record();
+                }
+                3 => schema = Some(short(gw.string()?, &mut out)),
                 _ => {}
             }
         }
+        if let Ok(r) = &mut resource {
+            r.schema_url = schema;
+        }
         for g in Fields::new(rl) {
-            let (gn, gw) = g.map_err(m)?;
+            let (gn, gw) = g?;
             if gn != 2 {
                 continue;
             }
-            let sl = gw.bytes().map_err(m)?;
-            let mut scope = Context::default();
-            let mut scope_bad = resource_bad.clone();
+            let sl = gw.bytes()?;
+            let mut scope: Result<Context, String> = Ok(Context::default());
+            let mut schema = None;
             for h in Fields::new(sl) {
-                let (hn, hw) = h.map_err(m)?;
+                let (hn, hw) = h?;
                 match hn {
-                    1 => match context_pb(hw.bytes().map_err(m)?, true).map_err(m)? {
-                        Ok(c) => scope = Context { schema_url: scope.schema_url.take(), ..c },
-                        Err(Rejected(why)) => scope_bad = Some(why),
-                    },
-                    3 => scope.schema_url = Some(hw.string().map_err(m)?.to_string()),
+                    1 => {
+                        scope = context_or(context_pb(hw.bytes()?, true, budget, &mut out))?;
+                        budget.keep_record();
+                    }
+                    3 => schema = Some(short(hw.string()?, &mut out)),
                     _ => {}
                 }
             }
+            if let Ok(s) = &mut scope {
+                s.schema_url = schema;
+            }
             for h in Fields::new(sl) {
-                let (hn, hw) = h.map_err(m)?;
+                let (hn, hw) = h?;
                 if hn != 2 {
                     continue;
                 }
-                let rec = record_pb(hw.bytes().map_err(m)?).map_err(m)?;
-                match (rec, &scope_bad) {
-                    (_, Some(why)) => out.reject(why.clone()),
-                    (Err(Rejected(why)), None) => out.reject(why),
-                    (Ok(r), None) => {
-                        emit(&mut out, r, &scope, &resource, now_ms);
-                        charge(out.ndjson.len())?;
-                    }
+                let rec = record_pb(hw.bytes()?, budget, &mut out);
+                match (rec, &resource, &scope) {
+                    (Step::Stop(f), _, _) => return Err(f),
+                    (_, Err(why), _) | (_, _, Err(why)) => out.reject(why.clone()),
+                    (Step::Reject(Rejected(why)), _, _) => out.reject(why),
+                    (Step::Ok(r), Ok(res), Ok(sc)) => emit(&mut out, budget, r, sc, res, now_ms)?,
                 }
+                budget.record_done();
             }
         }
     }
-    Ok(out)
+    Ok(out.finish())
 }
 
 // --- JSON -----------------------------------------------------------------------------------
@@ -466,35 +672,45 @@ fn uint_json(v: Option<&Value>) -> u64 {
     }
 }
 
-fn context_json_in(v: Option<&Value>, schema_url: Option<&Value>, scope: bool) -> Result<Context, Rejected> {
-    let mut c = Context { schema_url: schema_url.and_then(Value::as_str).map(str::to_string), ..Context::default() };
-    let Some(v) = v else { return Ok(c) };
-    if scope {
-        c.name = v.get("name").and_then(Value::as_str).map(str::to_string);
-        c.version = v.get("version").and_then(Value::as_str).map(str::to_string);
-    }
-    attributes_json(v.get("attributes"), &mut c.attributes, &mut c.dropped)?;
-    c.dropped = c.dropped.saturating_add(uint_json(get(v, "droppedAttributesCount", "dropped_attributes_count")));
-    Ok(c)
+fn str_json(v: Option<&Value>, batch: &mut Batch) -> Option<String> {
+    v.and_then(Value::as_str).map(|s| short(s, batch))
 }
 
-fn record_json(v: &Value) -> Result<Record, Rejected> {
+fn context_json_in(v: Option<&Value>, schema_url: Option<&Value>, scope: bool, budget: &mut Budget, batch: &mut Batch) -> Step<Context> {
+    let mut c = Context { schema_url: str_json(schema_url, batch), ..Context::default() };
+    let Some(v) = v else { return Step::Ok(c) };
+    if scope {
+        c.name = str_json(v.get("name"), batch);
+        c.version = str_json(v.get("version"), batch);
+    }
+    step!(attributes_json(v.get("attributes"), &mut c.attributes, &mut c.dropped, budget, batch));
+    c.dropped = c.dropped.saturating_add(uint_json(get(v, "droppedAttributesCount", "dropped_attributes_count")));
+    Step::Ok(c)
+}
+
+/// A hex id of `len` bytes from JSON, lowercased; left out at any other length or all zeros.
+fn hex_json(v: Option<&Value>, len: usize) -> Option<String> {
+    let s = v.and_then(Value::as_str)?;
+    (s.len() == len * 2 && s.bytes().all(|b| b.is_ascii_hexdigit()) && s.bytes().any(|b| b != b'0')).then(|| s.to_ascii_lowercase())
+}
+
+fn record_json(v: &Value, budget: &mut Budget, batch: &mut Batch) -> Step<Record> {
     let mut r = Record {
         time: uint_json(get(v, "timeUnixNano", "time_unix_nano")),
         observed: uint_json(get(v, "observedTimeUnixNano", "observed_time_unix_nano")),
-        severity_number: get(v, "severityNumber", "severity_number").and_then(|s| s.as_i64().or_else(|| s.as_str().and_then(severity_by_name))),
-        severity_text: get(v, "severityText", "severity_text").and_then(Value::as_str).map(str::to_string),
-        trace_id: get(v, "traceId", "trace_id").and_then(Value::as_str).filter(|s| !s.is_empty() && s.chars().any(|c| c != '0')).map(str::to_ascii_lowercase),
-        span_id: get(v, "spanId", "span_id").and_then(Value::as_str).filter(|s| !s.is_empty() && s.chars().any(|c| c != '0')).map(str::to_ascii_lowercase),
-        event_name: get(v, "eventName", "event_name").and_then(Value::as_str).map(str::to_string),
+        severity_number: get(v, "severityNumber", "severity_number").and_then(|s| s.as_i64().or_else(|| s.as_str().and_then(severity_by_name))).map(|n| n.clamp(0, 24)),
+        severity_text: str_json(get(v, "severityText", "severity_text"), batch),
+        trace_id: hex_json(get(v, "traceId", "trace_id"), 16),
+        span_id: hex_json(get(v, "spanId", "span_id"), 8),
+        event_name: str_json(get(v, "eventName", "event_name"), batch),
         ..Record::default()
     };
     if let Some(b) = v.get("body") {
-        r.body = Some(any_json(b, 0)?);
+        r.body = Some(step!(any_json(b, 0, budget, batch)));
     }
-    attributes_json(v.get("attributes"), &mut r.attributes, &mut r.dropped)?;
+    step!(attributes_json(v.get("attributes"), &mut r.attributes, &mut r.dropped, budget, batch));
     r.dropped = r.dropped.saturating_add(uint_json(get(v, "droppedAttributesCount", "dropped_attributes_count")));
-    Ok(r)
+    Step::Ok(r)
 }
 
 /// `SEVERITY_NUMBER_INFO` and the like, as some JSON encoders write the enum.
@@ -503,33 +719,37 @@ fn severity_by_name(s: &str) -> Option<i64> {
     base("TRACE", 1).or_else(|| base("DEBUG", 5)).or_else(|| base("INFO", 9)).or_else(|| base("WARN", 13)).or_else(|| base("ERROR", 17)).or_else(|| base("FATAL", 21))
 }
 
-/// The documents of an `ExportLogsServiceRequest` in OTLP/JSON.
-pub fn from_json(body: &Value, now_ms: i64, charge: &mut dyn FnMut(usize) -> Result<(), String>) -> Result<Batch, String> {
+/// The documents of an `ExportLogsServiceRequest` in OTLP/JSON, read from its parsed tree
+/// (borrowed, never copied).
+pub fn from_json(body: &Value, now_ms: i64, budget: &mut Budget) -> Result<Batch, Fail> {
     let mut out = Batch::default();
-    let Some(list) = get(body, "resourceLogs", "resource_logs") else { return Ok(out) };
-    let Some(list) = list.as_array() else { return Err("resourceLogs isn't a list".into()) };
+    let Some(list) = get(body, "resourceLogs", "resource_logs") else { return Ok(out.finish()) };
+    let Some(list) = list.as_array() else { return Err(Fail::Malformed("resourceLogs isn't a list".into())) };
     for rl in list {
-        let resource = context_json_in(rl.get("resource"), get(rl, "schemaUrl", "schema_url"), false);
-        for sl in get(rl, "scopeLogs", "scope_logs").and_then(Value::as_array).into_iter().flatten() {
-            let scope = context_json_in(sl.get("scope"), get(sl, "schemaUrl", "schema_url"), true);
-            for r in get(sl, "logRecords", "log_records").and_then(Value::as_array).into_iter().flatten() {
-                match (&resource, &scope, record_json(r)) {
-                    (Err(Rejected(why)), _, _) | (_, Err(Rejected(why)), _) => out.reject(why.clone()),
-                    (_, _, Err(Rejected(why))) => out.reject(why),
-                    (Ok(res), Ok(sc), Ok(rec)) => {
-                        emit(&mut out, rec, sc, res, now_ms);
-                        charge(out.ndjson.len())?;
-                    }
+        let resource = context_or(context_json_in(rl.get("resource"), get(rl, "schemaUrl", "schema_url"), false, budget, &mut out))?;
+        budget.keep_record();
+        for sl in get(rl, "scopeLogs", "scope_logs").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default() {
+            let scope = context_or(context_json_in(sl.get("scope"), get(sl, "schemaUrl", "schema_url"), true, budget, &mut out))?;
+            budget.keep_record();
+            for r in get(sl, "logRecords", "log_records").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default() {
+                let rec = record_json(r, budget, &mut out);
+                match (rec, &resource, &scope) {
+                    (Step::Stop(f), _, _) => return Err(f),
+                    (_, Err(why), _) | (_, _, Err(why)) => out.reject(why.clone()),
+                    (Step::Reject(Rejected(why)), _, _) => out.reject(why),
+                    (Step::Ok(rec), Ok(res), Ok(sc)) => emit(&mut out, budget, rec, sc, res, now_ms)?,
                 }
+                budget.record_done();
             }
         }
     }
-    Ok(out)
+    Ok(out.finish())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::breaker::MemoryBudget;
 
     /// Protobuf encoders for the tests.
     fn varint(mut v: u64, out: &mut Vec<u8>) {
@@ -576,11 +796,12 @@ mod tests {
         field(1, &rl)
     }
     fn docs(b: &Batch) -> Vec<(Value, Value)> {
-        let lines: Vec<&str> = b.ndjson.lines().collect();
+        let all: String = b.chunks.concat();
+        let lines: Vec<&str> = all.lines().collect();
         lines.chunks(2).map(|c| (crate::json::parse(c[0].as_bytes()).unwrap().unwrap(), crate::json::parse(c[1].as_bytes()).unwrap().unwrap())).collect()
     }
-    fn free(_: usize) -> Result<(), String> {
-        Ok(())
+    fn budget(limit: u64) -> Budget {
+        Budget::new(Reservation::new(MemoryBudget::new(limit)))
     }
 
     #[test]
@@ -596,7 +817,7 @@ mod tests {
             field(10, &[0x01; 8]),
         ]
         .concat();
-        let pb = from_protobuf(&request(&[("service.name", "checkout")], &[rec]), 0, &mut free).unwrap();
+        let pb = from_protobuf(&request(&[("service.name", "checkout")], &[rec]), 0, &mut budget(u64::MAX)).unwrap();
         let json = crate::json::parse(
             br#"{"resourceLogs":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"checkout"}}]},
                 "scopeLogs":[{"scope":{"name":"my.lib","version":"1.2.0"},"logRecords":[{"timeUnixNano":"1700000000123456789","severityNumber":9,
@@ -605,7 +826,7 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        let js = from_json(&json, 0, &mut free).unwrap();
+        let js = from_json(&json, 0, &mut budget(u64::MAX)).unwrap();
         let (a, b) = (docs(&pb), docs(&js));
         assert_eq!(a, b);
         let (action, doc) = &a[0];
@@ -620,31 +841,79 @@ mod tests {
     }
 
     #[test]
-    fn limits_drop_attributes_reject_records_and_refuse_lies() {
-        // 200 attributes: 128 kept, 72 counted as dropped.
+    fn routing_is_made_valid_as_the_exporter_does() {
+        let route = |ds: &str, ns: &str| {
+            let rec = [field(5, &field(1, b"x")), field(6, &string_kv("data_stream.dataset", ds)), field(6, &string_kv("data_stream.namespace", ns))].concat();
+            let b = from_protobuf(&request(&[], &[rec]), 1, &mut budget(u64::MAX)).unwrap();
+            docs(&b)[0].0.pointer(&["create", "_index"]).and_then(Value::as_str).unwrap().to_string()
+        };
+        assert_eq!(route("nginx.otel", "Prod"), "logs-nginx.otel-prod");
+        assert_eq!(route("a/b:c-d", "x y"), "logs-a_b_c_d.otel-x_y");
+        assert_eq!(route("_internal", "default"), "logs-_internal.otel-default");
+        let long = "d".repeat(300);
+        assert_eq!(route(&long, "n").len(), "logs-".len() + 100 + "-n".len());
+        // The routing attribute counts even past the attribute cap.
         let mut rec = vec![field(5, &field(1, b"x"))];
         for i in 0..200 {
             rec.push(field(6, &string_kv(&format!("k{i}"), "v")));
         }
-        let b = from_protobuf(&request(&[], &[rec.concat()]), 1, &mut free).unwrap();
-        let (_, doc) = &docs(&b)[0];
-        assert_eq!(doc.get("attributes").and_then(Value::as_object).map(|m| m.len()), Some(MAX_ATTRIBUTES));
+        rec.push(field(6, &string_kv("data_stream.dataset", "late")));
+        let b = from_protobuf(&request(&[], &[rec.concat()]), 1, &mut budget(u64::MAX)).unwrap();
+        let (action, doc) = &docs(&b)[0];
+        assert_eq!(action.pointer(&["create", "_index"]).and_then(Value::as_str), Some("logs-late.otel-default"));
         assert_eq!(doc.get("dropped_attributes_count").and_then(Value::as_i64), Some(72));
-        // A value past 32 KiB and one nested 20 deep are rejected, and the others still written.
-        let long = [field(5, &field(1, &vec![b'a'; MAX_VALUE_BYTES + 1]))].concat();
+        // At most MAX_TARGETS data streams a request; the rest rejected.
+        let recs: Vec<Vec<u8>> = (0..MAX_TARGETS + 5).map(|i| [field(5, &field(1, b"x")), field(6, &string_kv("data_stream.dataset", &format!("d{i}")))].concat()).collect();
+        let b = from_protobuf(&request(&[], &recs), 1, &mut budget(u64::MAX)).unwrap();
+        assert_eq!((b.accepted, b.rejected), (MAX_TARGETS as u64, 5));
+    }
+
+    #[test]
+    fn a_wide_value_is_stopped_before_it_is_built() {
+        // One record whose body is an array of 1M empty values (2 bytes each on the wire).
+        let mut arr = Vec::new();
+        for _ in 0..1_000_000 {
+            arr.extend(field(1, &[]));
+        }
+        let rec = field(5, &field(5, &arr));
+        let body = request(&[], &[rec]);
+        // Past MAX_VALUES the record is rejected, having built at most MAX_VALUES values.
+        let mut b = budget(u64::MAX);
+        let out = from_protobuf(&body, 1, &mut b).unwrap();
+        assert_eq!((out.accepted, out.rejected), (0, 1));
+        assert!(out.reason.unwrap().contains("values"));
+        // Under a small breaker the request stops before it builds what it can't hold.
+        let small = MemoryBudget::new(64 * 1024);
+        let mut b = Budget::new(Reservation::new(small.clone()));
+        assert!(matches!(from_protobuf(&body, 1, &mut b), Err(Fail::Tripped(_))));
+        // The JSON form too, borrowed rather than copied.
+        let mut text = String::from(r#"{"resourceLogs":[{"scopeLogs":[{"logRecords":[{"body":{"arrayValue":{"values":["#);
+        for i in 0..50_000 {
+            text.push_str(if i == 0 { "{}" } else { ",{}" });
+        }
+        text.push_str("]}}}]}]}]}");
+        let v = crate::json::parse(text.as_bytes()).unwrap().unwrap();
+        let out = from_json(&v, 1, &mut budget(u64::MAX)).unwrap();
+        assert_eq!(out.rejected, 1);
+        // Values past the cut are kept cut, and counted.
+        let long = field(5, &field(1, &vec![b'a'; MAX_VALUE_BYTES + 10]));
+        let out = from_protobuf(&request(&[], &[long]), 1, &mut budget(u64::MAX)).unwrap();
+        assert_eq!((out.accepted, out.truncated), (1, 1));
+        // A length past the bytes present fails the request.
+        assert!(matches!(from_protobuf(&[0x0a, 0xff, 0x01, 0x00], 1, &mut budget(u64::MAX)), Err(Fail::Malformed(_))));
+    }
+
+    #[test]
+    fn deep_values_and_bad_ids_are_refused() {
         let mut deep = field(1, b"leaf");
         for _ in 0..20 {
             deep = field(5, &field(1, &deep));
         }
-        let ok = field(5, &field(1, b"fine"));
-        let b = from_protobuf(&request(&[], &[long, field(5, &deep), ok]), 1, &mut free).unwrap();
-        assert_eq!((b.accepted, b.rejected), (1, 2));
-        assert!(b.reason.unwrap().contains("32768"));
-        // A length past the bytes present fails the request.
-        assert!(from_protobuf(&[0x0a, 0xff, 0x01, 0x00], 1, &mut free).is_err());
-        // The charge can stop it.
-        let rec = field(5, &field(1, b"x"));
-        let mut tight = |n: usize| if n > 10 { Err("too large".to_string()) } else { Ok(()) };
-        assert!(from_protobuf(&request(&[], &[rec]), 1, &mut tight).is_err());
+        let ok = [field(5, &field(1, b"fine")), field(9, &[1; 15]), field(10, &[2; 8])].concat();
+        let b = from_protobuf(&request(&[], &[field(5, &deep), ok]), 1, &mut budget(u64::MAX)).unwrap();
+        assert_eq!((b.accepted, b.rejected), (1, 1));
+        let (_, doc) = &docs(&b)[0];
+        assert!(doc.get("trace_id").is_none(), "a 15-byte trace id is left out");
+        assert_eq!(doc.get("span_id").and_then(Value::as_str), Some("0202020202020202"));
     }
 }
