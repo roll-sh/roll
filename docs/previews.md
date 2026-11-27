@@ -2635,7 +2635,10 @@ type Settings = {
     `@roll/previews` (`packages/previews`, no dependencies) does both for a team's tests:
     `bypass(page, baseURL)` sets the project's secret on the preview's own origin only (a header
     set for the whole browser a page could send anywhere), `snapshot(page, name)` sends the
-    page's picture (whole, animations stopped) with `GITHUB_SHA` as its head, and
+    page's picture (whole, animations stopped) with the head the test ran against
+    (`ROLL_PREVIEW_HEAD`, else a pull request event's head commit, since on `pull_request`
+    workflows `GITHUB_SHA` is GitHub's merge commit and every picture would be refused, else
+    `GITHUB_SHA`), and
     `sendSnapshot(baseURL, name, png)` takes a file's bytes (Cypress' `after:screenshot`); a
     refused one fails the test, saying why (`packages/previews/test/index.test.ts`):
 
