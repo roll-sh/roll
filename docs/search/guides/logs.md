@@ -165,7 +165,7 @@ A cluster takes OTLP/HTTP logs at `/_otlp/v1/logs`, in protobuf or JSON, gzip al
 Elastic's managed OTLP endpoint does. Make a key that can only write OpenTelemetry's data streams:
 
 ```sh
-roll search keys create my-cluster collector --access otel
+roll search keys create logs collector --access otel
 ```
 
 Then point an OpenTelemetry Collector's `otlphttp` exporter at the cluster:
@@ -173,9 +173,9 @@ Then point an OpenTelemetry Collector's `otlphttp` exporter at the cluster:
 ```yaml
 exporters:
   otlphttp/roll:
-    endpoint: https://my-cluster.search.roll.sh/_otlp   # the cluster's URL
+    endpoint: ${env:ELASTICSEARCH_URL}/_otlp
     headers:
-      Authorization: "ApiKey ${env:ROLL_SEARCH_KEY}"
+      Authorization: "ApiKey ${env:OTEL_KEY}"   # the collector key's api_key
 service:
   pipelines:
     logs:
@@ -184,7 +184,7 @@ service:
 ```
 
 An SDK's OTLP/HTTP log exporter works the same way, with `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` set
-to `https://my-cluster.search.roll.sh/_otlp/v1/logs` and
+to `$ELASTICSEARCH_URL/_otlp/v1/logs` and
 `OTEL_EXPORTER_OTLP_LOGS_HEADERS=Authorization=ApiKey%20<key>`.
 
 Records land as OpenTelemetry-native documents (`body.text`, `severity_text`, `attributes.*`,
