@@ -34,6 +34,8 @@ pub fn public_router(access: Arc<Access>) -> Router {
         .route("/v1/access/oauth/token", post(token))
         .route("/v1/access/oauth/revoke", post(revoke))
         .route("/v1/access/oauth/device_authorization", post(device_authorization))
+        // Claude's express setup: its own short token, not a roll grant (so in front of the gate).
+        .route("/v1/access/enterprise/ema-setup", axum::routing::put(crate::enterprise::ema_setup))
         // GitHub's secret scanning reports: their signature is the credential.
         .route("/v1/access/leaks/github", post(crate::leaks::github))
         .with_state(access)
@@ -79,7 +81,8 @@ async fn server_metadata(State(a): S) -> Json<Value> {
         "token_endpoint_auth_methods_supported": ["none", "client_secret_basic", "client_secret_post", "private_key_jwt"],
         "token_endpoint_auth_signing_alg_values_supported": crate::client_credentials::ALGS,
         "revocation_endpoint_auth_methods_supported": ["none"],
-        "scopes_supported": SCOPES,
+        // Claude's express admin setup's scope too (an admin's consent; Claude's client only).
+        "scopes_supported": SCOPES.iter().copied().chain([crate::enterprise::EMA_SCOPE]).collect::<Vec<_>>(),
         "authorization_response_iss_parameter_supported": true,
         "client_id_metadata_document_supported": true,
         // Identity Assertion JWT Authorization Grants (ID-JAG, draft-ietf-oauth-identity-assertion-
@@ -223,6 +226,10 @@ pub struct Consent {
     pub state: Option<String>,
     #[serde(default)]
     pub resource: Option<String>,
+    /// Claude's express admin setup (`scope=ema_issuer:manage`): the email domains its issuer
+    /// vouches for, as the admin confirmed them; `rules` are the most Claude may do for a person.
+    #[serde(default)]
+    pub ema_domains: Option<Vec<String>>,
     /// Step-up: the id (`stp_…`) of the step-up roll recorded when this client's connection was
     /// refused (its `insufficient_scope` challenge). Its one rule joins that connection; the
     /// consent's other fields aren't used.
@@ -274,11 +281,14 @@ fn consented(a: &Arc<Access>, ext: &Extensions, client: &crate::store::Client, a
         }
         crate::api::Who::Grant(_) => return Err(Error::Forbidden("a token never connects an MCP client".into())),
     };
-    a.check_policy(allowed.expires_at)?;
+    // A connection a product caps (roll secrets' `max_token_days`) ends within it: the consent
+    // screen says so (the catalogue's `lifetime_caps`).
+    let expires_at = a.within_cap(&allowed.rules, allowed.expires_at);
+    a.meets_policy(&allowed.rules, expires_at)?;
     let new = NewGrant {
         name: allowed.name.clone().filter(|n| !n.trim().is_empty()).unwrap_or_else(|| client.name.clone()),
         rules: allowed.rules.clone(),
-        expires_at: allowed.expires_at,
+        expires_at,
         ip_allow: allowed.ip_allow.clone(),
         rate_per_minute: allowed.rate_per_minute,
         ask_otherwise: allowed.ask_otherwise,
@@ -314,6 +324,9 @@ pub async fn authorize(State(a): S, ext: Extensions, body: axum::body::Bytes) ->
         && r.trim_end_matches('/') != resource(&a)
     {
         return Err(Error::BadRequest(format!("resource must be {}", resource(&a))));
+    }
+    if let Some(domains) = c.ema_domains.clone() {
+        return crate::enterprise::ema_consent(&a, &ext, &c, domains).await;
     }
     let client = known_client(&a, &c.client_id).await?.ok_or_else(|| Error::BadRequest("unknown client_id".into()))?;
     if !redirect_registered(&client.redirect_uris, &c.redirect_uri) {
@@ -382,13 +395,16 @@ pub(crate) async fn own_step_up(
 /// to any widened token, and the client gets a code for that connection: its other sessions widen
 /// too and nothing new is made.
 async fn step_up(a: &Arc<Access>, ext: &Extensions, c: &Consent, client: &crate::store::Client, id: String, res: Option<String>) -> crate::Result<Response> {
-    let (g, _rule, asker) = own_step_up(a, ext, &id, Some(&client.id)).await?;
-    // The token policy as it is now, as editing the connection would meet it.
-    a.check_policy(g.expires_at)?;
+    let (g, rule, asker) = own_step_up(a, ext, &id, Some(&client.id)).await?;
+    // The token policy as it is now, as editing the connection would meet it; a product's cap on
+    // the rules it then has brings its end forward (the step-up's consent says so).
+    let rules = with_rule(&g, rule);
+    let ends = a.within_cap(&rules, g.expires_at);
+    a.meets_policy(&rules, ends)?;
     let policy = a.policy_now();
     let person = asker.is_some();
     let (a2, id2, gid) = (a.clone(), id.clone(), g.id.clone());
-    let (updated, added) = tokio::task::spawn_blocking(move || a2.store.apply_step_up(&id2, &gid, &|rules, ask| person && policy.needs_approval(rules, ask)))
+    let (updated, added) = tokio::task::spawn_blocking(move || a2.store.apply_step_up(&id2, &gid, ends, &|rules, ask| person && policy.needs_approval(rules, ask)))
         .await
         .map_err(|e| Error::Internal(e.to_string()))??;
     if added {
@@ -413,15 +429,24 @@ async fn step_up(a: &Arc<Access>, ext: &Extensions, c: &Consent, client: &crate:
     Ok(out)
 }
 
+/// A connection's rules with a step-up's rule added.
+fn with_rule(g: &crate::store::Grant, rule: roll_auth::scope::Rule) -> roll_auth::scope::Scope {
+    let mut rules = g.rules.clone();
+    rules.0.push(rule);
+    rules
+}
+
 /// `GET /v1/access/oauth/step-ups/{id}`: what a step-up proposes, for its person's consent screen
 /// (the connection and the one rule), or one "no such step-up" for anyone else.
 pub async fn step_up_view(State(a): S, ext: Extensions, axum::extract::Path(id): axum::extract::Path<String>) -> crate::Result<Json<Value>> {
     let (g, rule, asker) = own_step_up(&a, &ext, &id, None).await?;
-    a.check_policy(g.expires_at)?;
-    let mut rules = g.rules.clone();
-    rules.0.push(rule.clone());
+    let rules = with_rule(&g, rule.clone());
+    let ends = a.within_cap(&rules, g.expires_at);
+    a.meets_policy(&rules, ends)?;
     let waits = asker.is_some() && a.policy_now().needs_approval(&rules, g.ask_otherwise);
-    Ok(Json(json!({ "id": id, "connection": { "id": g.id, "name": g.name, "client_id": g.client.as_ref().map(|c| c.id.clone()) }, "rule": rule, "waits_for_admin": waits })))
+    // When adding it brings the connection's end forward (a product's cap), until when and why.
+    let capped = (ends != g.expires_at).then(|| json!({ "until": ends, "why": a.lifetime_cap.get().and_then(|cap| cap(&rules)).map(|(_, why)| why) }));
+    Ok(Json(json!({ "id": id, "connection": { "id": g.id, "name": g.name, "client_id": g.client.as_ref().map(|c| c.id.clone()) }, "rule": rule, "waits_for_admin": waits, "ends": capped })))
 }
 
 /// A metadata document is fetched at most this often (it's kept between).
@@ -603,6 +628,9 @@ async fn token(State(a): S, req: axum::extract::Request) -> Response {
             let (Some(code), Some(redirect), Some(verifier)) = (get("code"), get("redirect_uri"), get("code_verifier")) else {
                 return Error::OAuth("invalid_request", "code, redirect_uri and code_verifier are required".into()).into_response();
             };
+            if let Some(answer) = crate::enterprise::ema_token(&a, &f, &code, &client_id, &redirect, &verifier).await {
+                return answer;
+            }
             let resource = get("resource");
             // RFC 8707: the only resource roll's codes are for is its MCP server.
             if resource.as_deref().is_some_and(|r| r.trim_end_matches('/') != crate::oauth::resource(&a)) {

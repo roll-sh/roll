@@ -204,6 +204,10 @@ pub fn start(
     let engine = roll_previews::Engine::new(
         {
             let mut c = roll_previews::engine::Config { domain, port: Some(args.api.port()), mail: Some(format!("127.0.0.1:{}", args.previews_smtp.port())), otlp: Some(format!("127.0.0.1:{}", args.api.port())), ..Default::default() };
+            // A masked base serves new branches this long (0: each masks its own copy), a week at most.
+            if let Some(h) = std::env::var("ROLL_PREVIEWS_MASK_BASE_HOURS").ok().and_then(|v| v.parse::<u64>().ok()) {
+                c.mask_base_for = std::time::Duration::from_secs(h.min(168) * 3600);
+            }
             if let Some(s) = args.previews_compare_every {
                 (c.routes_every, c.new_errors_every) = (std::time::Duration::from_secs(s), std::time::Duration::from_secs(s));
             }

@@ -357,6 +357,20 @@ export function PreviewSheet({
                 </button>
               )}
             </Label>
+            {p.masked_by_default && p.masked_by_default.length > 0 && (
+              <p className="mb-1.5 text-[11.5px] break-words text-soft">
+                Masked by default, as they look like people's data and no rule names them:{" "}
+                {p.masked_by_default.map((m, i) => (
+                  <span key={`${m.resource}:${m.column}`}>
+                    {i > 0 ? ", " : ""}
+                    <span className="font-mono text-[11px] text-fg" title={m.why}>
+                      {m.column}
+                    </span>
+                  </span>
+                ))}
+                . A rule in the masking settings, or <code className="font-mono text-[11px]">keep</code>, says otherwise.
+              </p>
+            )}
             {p.resources.length ? (
               <div className="rounded-lg border border-line-2 bg-raised inset-shadow-highlight">
                 {p.resources.map((r) => {
@@ -421,10 +435,30 @@ export function PreviewSheet({
             )}
 
             {p.release && (
-              <p className="mt-1.5 font-mono text-[11px] text-subtle tabular-nums" title="The project's release (migrations), run on this preview's data before its services">
-                release {duration(p.release.ms)}
-                {p.release.before_ms != null ? ` · ${thanMain(p.release.ms, p.release.before_ms, "the push before") ?? "as before"}` : ""}
-              </p>
+              <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1">
+                <p className="font-mono text-[11px] text-subtle tabular-nums" title="The project's release (migrations), run on this preview's data before its services">
+                  release {duration(p.release.ms)}
+                  {p.release.before_ms != null ? ` · ${thanMain(p.release.ms, p.release.before_ms, "the push before") ?? "as before"}` : ""}
+                </p>
+                {p.rehearsal && p.rehearsal.ok === null ? (
+                  <span className="text-[11px] text-subtle">rehearsing on today's data…</span>
+                ) : p.rehearsal ? (
+                  <span className={`min-w-0 break-words font-mono text-[11px] tabular-nums ${p.rehearsal.ok ? "text-subtle" : "text-danger"}`} title="The release once more on fresh branches of the parents as they are now (masked as the rules say)">
+                    on today's data {p.rehearsal.ok ? `passed in ${duration(p.rehearsal.ms ?? 0)}` : `failed: ${p.rehearsal.error ?? "see the activity"}`}
+                  </span>
+                ) : null}
+                {p.change && (
+                  <button
+                    type="button"
+                    disabled={busy !== null || gone || p.rehearsal?.ok === null}
+                    onClick={() => run("rehearse", () => previewsApi.rehearse(p.id))}
+                    title="Run the release once more on fresh branches of the parents as they are now: a preview's data may be days old"
+                    className="h-6 rounded-md px-2 text-[11px] text-muted hover:text-fg disabled:opacity-40"
+                  >
+                    {busy === "rehearse" ? "Asking…" : "Rehearse on today's data"}
+                  </button>
+                )}
+              </div>
             )}
             {p.schema_changes && p.schema_changes.length > 0 && (
               <>
@@ -446,6 +480,16 @@ export function PreviewSheet({
                     </div>
                   ))}
                 </pre>
+                {p.schema_overlaps && p.schema_overlaps.length > 0 && (
+                  <ul className="mt-1.5 space-y-0.5 text-[11.5px] text-soft" aria-label="Other changes changing these tables">
+                    {p.schema_overlaps.map((o) => (
+                      <li key={o.preview} className="break-words">
+                        <span className="font-mono text-[11px] text-fg">{o.branch || o.preview}</span> also changes{" "}
+                        <span className="font-mono text-[11px]">{o.tables.join(", ")}</span>: whichever lands second migrates a table the first changed.
+                      </li>
+                    ))}
+                  </ul>
+                )}
               </>
             )}
 

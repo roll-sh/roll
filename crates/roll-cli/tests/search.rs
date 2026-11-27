@@ -244,7 +244,7 @@ async fn clusters_and_requests() {
     e.control.sample().await.unwrap();
     let out = e.roll(&["search", "clusters", "usage", "app", "--days", "7"]).await;
     assert!(out.starts_with("app — last 7 days"), "{out}");
-    for label in ["loaded", "memory", "requests", "storage", "total", "Elastic Cloud", "Amazon OpenSearch Service", "OpenSearch Serverless"] {
+    for label in ["loaded", "memory", "requests", "model tokens", "storage", "total", "Elastic Cloud", "Amazon OpenSearch Service", "OpenSearch Serverless"] {
         assert!(out.contains(&format!("  {label} ")), "{label}: {out}");
     }
     let u = e.roll_json(&["search", "clusters", "usage", "app"]).await;
@@ -473,4 +473,25 @@ async fn migrate_from_meilisearch() {
     assert!(copied.contains("items -> products: done, 2 documents"), "{copied}");
     let out = e.roll(&["search", "request", "shop", "GET", "/products/_doc/a2"]).await;
     assert!(out.contains("\"title\" : \"Teapot\""), "{out}");
+}
+
+/// Relevance in CI: judged queries from a CSV, two configurations compared, and
+/// `--fail-on-worse` failing the run when the candidate scores below the baseline.
+#[tokio::test]
+async fn evaluate_gates_a_relevance_change() {
+    let e = env().await;
+    e.roll(&["search", "clusters", "create", "judged"]).await;
+    e.roll(&["search", "docs", "put", "judged", "goods", "0", r#"{"title":"sofa","desc":"a red couch"}"#, "--refresh"]).await;
+    e.roll(&["search", "docs", "put", "judged", "goods", "1", r#"{"title":"couch","desc":"a blue chair"}"#, "--refresh"]).await;
+    let judgments = e.home.join("judgments.csv");
+    std::fs::write(&judgments, "query,doc_id,rating\ncouch,0,3\ncouch,1,0\n").unwrap();
+    let (title, desc) = (e.home.join("title.json"), e.home.join("desc.json"));
+    std::fs::write(&title, r#"{"request":{"query":{"match":{"title":"{{query}}"}}}}"#).unwrap();
+    std::fs::write(&desc, r#"{"request":{"query":{"match":{"desc":"{{query}}"}}}}"#).unwrap();
+    let at = |p: &std::path::Path| format!("@{}", p.display());
+    let (j, t, d) = (at(&judgments), at(&title), at(&desc));
+    let out = e.roll(&["search", "index", "evaluate", "judged", "goods", "--judgments", &j, "--config", &t, "--config", &d, "--fail-on-worse"]).await;
+    assert!(out.contains("desc against title: +") && out.contains("1 better"), "{out}");
+    let out = e.roll_with(&["search", "index", "evaluate", "judged", "goods", "--judgments", &j, "--config", &d, "--config", &t, "--fail-on-worse"], None).await;
+    assert!(!out.status.success(), "a worse candidate fails the run: {out:?}");
 }

@@ -78,6 +78,10 @@ pub fn postgres(columns: &BTreeMap<String, String>, salt: &str) -> Result<Plan, 
 }
 
 /// Whether `rule` is one a Postgres column can have.
+/// A Postgres column's rule that leaves it as it is, where it would be masked by default (it looks
+/// like people's data, and its parent has rules): the project's word that it isn't.
+pub const KEEP: &str = "keep";
+
 pub fn is_rule(rule: &str) -> bool {
     matches!(rule.trim(), "null" | "redact" | "hash" | "email") || rule.trim().starts_with("fixed:")
 }

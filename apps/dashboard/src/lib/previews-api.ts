@@ -113,8 +113,14 @@ export interface Preview {
   schema_changes?: string[] | null;
   /** What in `schema_changes` would hurt production when it lands (a dropped table or column, a type change, a column made NOT NULL). */
   schema_risks?: string[];
+  /** Other open changes whose previews' schema changes touch the same tables: whichever lands second migrates a table the first changed. */
+  schema_overlaps?: { preview: string; branch: string; tables: string[] }[];
   /** The project's release (migrations) at its last head: how long it took on this preview's data, and the run before's. */
   release?: { head: string; ms: number; before_ms: number | null } | null;
+  /** Its release rehearsed on the parents' data as it is now: asked at `head` (`ok` null while it waits), then how it went. */
+  rehearsal?: { head: string; by: string; at: number; ok: boolean | null; ms: number | null; error: string | null } | null;
+  /** Columns its branches were masked with by default: they look like people's data and no rule names them (`keep` leaves one as it is). */
+  masked_by_default?: { resource: string; column: string; why: string }[];
   /** Kept past its TTL until then (epoch ms). */
   kept_until?: number | null;
   /** What its code may reach: a fork's preview is `roll` by default though the project's reach anything (`egress_forks`). */
@@ -465,7 +471,7 @@ export interface PreviewSettings {
   secrets: { base: string; allow_production: boolean };
   /** A patch replaces the whole map. */
   env: Record<string, string>;
-  github: { comment: boolean; status: boolean; deployment: boolean; screenshot?: boolean; baseline?: boolean; pages?: string[]; hide?: string[]; budget?: SpeedBudget; visual_threshold?: number; widths?: number[]; openapi?: string | null; endpoints?: string[]; states?: PageState[]; browsers?: ("firefox" | "webkit" | "webkit-phone")[]; storybook?: string | null; modes?: { name: string; color_scheme?: "dark" | "light"; locale?: string; timezone?: string }[] };
+  github: { comment: boolean; status: boolean; deployment: boolean; screenshot?: boolean; baseline?: boolean; pages?: string[]; hide?: string[]; budget?: SpeedBudget; visual_threshold?: number; widths?: number[]; openapi?: string | null; endpoints?: string[]; states?: PageState[]; browsers?: ("firefox" | "webkit" | "webkit-phone")[]; storybook?: string | null; /** How many containers take the stories side by side, each up to 40 (1 to 4). */ story_runs?: number; modes?: { name: string; color_scheme?: "dark" | "light"; locale?: string; timezone?: string }[] };
   /** "link": a preview's URLs need its link (its access token once, then a cookie). "team": only people signed in to roll who may open the project (they sign in on the way; the link's token lets nobody in). */
   access: "link" | "team" | "public";
   /** Chromatic's UI Review: `check` posts `roll/visual`; `required` also keeps a change waiting for one from landing in roll. */
@@ -503,6 +509,8 @@ export interface PreviewSettings {
   seed: PreviewJob | null;
   /** Run at each new head, after the seed and before services deploy (migrations). */
   release?: PreviewJob | null;
+  /** When a change is queued to land, its release is rehearsed on today's data (`…/rehearse`, by roll). */
+  rehearse_when_queued?: boolean;
   /** Run once when the preview is deleted, before its services and branches go (cleanup outside roll). */
   teardown?: PreviewJob | null;
   /** NoSQL column masks: `"nosql:<ref>"` → `{"keyspace.table.column": "mask_default()"}`. */
@@ -654,6 +662,8 @@ export const previewsApi = {
   wake: (id: string) => call<Preview>("POST", `${one(id)}/wake`),
   /** Re-branches every resource, or the ones named (`"<kind>:<parent>"`). */
   reset: (id: string, resources?: string[]) => call<Preview>("POST", `${one(id)}/reset`, resources?.length ? { resources } : {}),
+  /** Rehearse its release on today's data (its next converge does). */
+  rehearse: (id: string) => call<Preview>("POST", `${one(id)}/rehearse`, {}),
   /** Its restore points (its Postgres data saved, to put back later), oldest first, and how many it may keep. */
   restorePoints: (id: string) => call<{ points: RestorePoint[]; max: number }>("GET", `${one(id)}/restore-points`),
   savePoint: (id: string, label: string) => call<RestorePoint>("POST", `${one(id)}/restore-points`, { label }),

@@ -296,7 +296,7 @@ fn head_of<B>(req: &Request<B>) -> EsRequest {
     for (k, v) in req.headers() {
         headers.push((k.as_str().to_string(), String::from_utf8_lossy(v.as_bytes()).into_owned()));
     }
-    EsRequest { verified: None, method: req.method().as_str().to_string(), uri, headers, body: Bytes::new() }
+    EsRequest { verified: None, own_address: false, method: req.method().as_str().to_string(), uri, headers, body: Bytes::new() }
 }
 
 /// Whether the client takes gzip: `Accept-Encoding` lists `gzip` (or `x-gzip`, or `*`) with a

@@ -4,6 +4,35 @@ The ranked work list and the log of roll secrets' review rounds. It's internal: 
 
 ## Next
 
+**State, 2026-11-26 22:40.** The forty-first review is done. The forty-second (2026-11-26, cold, read only) found one live bug, which is fixed, and its other items are in flight. Landed since 08:40, each with main's CI green and after a check of the merged tree wherever main had moved under it:
+- #1098 (ed973e153): the fortieth's item 1, follow-up. A token's backup carries no sync credentials or encryption key bytes.
+- #1101 (5e5b346ef): the thirty-ninth's item 11, part 3. The guide moved to `docs/secrets/` (getting started, moving from another manager, platforms); docs/secrets.md is the reference. A citation check: 443 citations, none broken.
+- The forty-first product review found one live local bug, low-medium. On Windows, a local user could create `%ProgramData%\roll\agent` before `--install-service` and plant the agent's token. It never shipped in a release. Landed:
+  - #1108 (846eddc79): item 1, the live fix. `trusted_dir` checks owners and access lists, and its Windows test runs on both Windows runners.
+  - #1103 (08c12e14b): item 6. No credential in a request's `Debug`, with a canary test, `no_debug_prints_a_credential`, that each type holding one gets a line in.
+  - #1117 (84ed24957): items 3 and 4. Scan budgets per token and pusher, and break glass reported as a leak.
+  - #1128 (c941bc102): items 5, 8 and 9. Machine fleets count live chains, a restore says machines need new bootstrap tokens, and MCP lists machines.
+  - #1142 (24c396d34): items 2 and 7. Guardrails' token lifetime binds every grant roll-access makes: clamped for consent, step-up and remembered approvals; refused for tokens and machine clients; a day for enterprise apps under `require_expiry`. The operator's `GET /v1/secrets/policy/report` lists what's below the policy. Reviewed by roll MCP.
+  - #1110 (eeb2236f3): a bind refused for `reveal` says why an approval can't stand in.
+- #1144 (a3b382517): public certificates in the CLI (`roll secrets public-certs`) and the dashboard, and Route 53 for their DNS challenge (a project AWS role or an access key).
+- The forty-second product review's live bug, low, came from #1117: break glass rotated a managed value for a caller with only `scan`. Fixed by #1154 (2a6771731): it rotates only where the hook's token may write, as a reported leak does.
+
+With other threads:
+- roll MCP's #1113 and #1118: a secret another product reads or writes as the caller is approved at the gate, as an exact folder allow in the grant it hands over. Binds stay refused for `ask` grants.
+- roll search's #1097 keeps a cluster's admin password in a project secret, through `check_batch` (shared with `batch`).
+- roll apps' #1131 writes a customer's Cloudflare DNS records with a `roll://` token, read once as the caller.
+
+In flight (the forty-second's items):
+- 1's rest and 5: a break-glass pusher bound to the hook's token, and no budget for invented pushers;
+- 2, 6 and 7: Route 53 keeps other clients' challenge values, the panel replaces a DNS credential, and a certificate's AWS session is tagged;
+- 3 and 4: a one-off read as the caller for a reference nothing keeps, and machines' logins off their maker's token cap.
+
+Left:
+- the forty-second's items 8 and 9 (the guides' 15-minute path with no server, and docs/permissions.md's lend wording);
+- Palo Alto rotation;
+- Health's public-repo hint;
+- Paddle's model.
+
 **State, 2026-11-26 08:40.** The thirty-ninth and fortieth reviews are done. Landed since 2026-11-25 15:00, each with main's CI green and after a check of the merged tree wherever main had moved under it:
 - #1019 (dd7420791): the thirty-ninth's item 6. `roll secrets scan --pre-receive`, and a match-only `scan` right for scanner tokens.
 - #1036 (226bc65f8): item 11, part 1. `roll secrets --help` grouped under six headings, and an address list that can't be read refuses.
@@ -80,8 +109,7 @@ In flight:
 Left:
 - item 6's other vendors (Salesforce, Paddle, Palo Alto);
 - Health's "public repo with `leaks.rotate` off" (needs a repo-visibility port);
-- Route 53 and other DNS providers for ACME;
-- a dashboard panel and CLI for public certificates.
+- DNS providers for ACME beyond Cloudflare and Route 53.
 
 **State, 2026-11-24 06:10.** The thirty-sixth review is done: #830 (99cb3b05e; Cloudflare, Databricks, Confluent) and #825 (the fresh-project production test) landed.
 

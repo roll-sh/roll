@@ -287,6 +287,10 @@ pub enum EnterpriseAppCmd {
         /// Claude's: its public client and its `/confidential_client`.
         #[arg(long)]
         claude: bool,
+        /// A trusted provider (its issuer) that may vouch for such an app besides Claude's own
+        /// issuer: an identity provider running Claude's auto-connect (repeatable).
+        #[arg(long = "issuer")]
+        issuers: Vec<String>,
     },
     /// Change an app's name or rules: its people's connections take the new rules at once.
     Update {
@@ -872,7 +876,7 @@ async fn enterprise(api: &Api, json_out: bool, cmd: Option<EnterpriseCmd>) -> an
             api.call(reqwest::Method::PUT, "/v1/access/enterprise/idps", Some(json!({ "idps": list }))).await?;
             api.get("/v1/access/enterprise").await?
         }
-        Some(EnterpriseCmd::App(EnterpriseAppCmd::Create { name, rules: r, public_key, mut metadata, claude })) => {
+        Some(EnterpriseCmd::App(EnterpriseAppCmd::Create { name, rules: r, public_key, mut metadata, claude, issuers })) => {
             let jwk = match &public_key {
                 Some(path) => Some(public_jwk(&std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?)?),
                 None => None,
@@ -881,7 +885,7 @@ async fn enterprise(api: &Api, json_out: bool, cmd: Option<EnterpriseCmd>) -> an
                 const CLAUDE: &str = "https://claude.ai/oauth/mcp-oauth-client-metadata";
                 metadata.splice(0..0, [CLAUDE.to_string(), format!("{CLAUDE}/confidential_client")]);
             }
-            let made = api.post("/v1/access/enterprise/apps", json!({ "name": name, "rules": rules(api, &r).await?, "public_jwk": jwk, "metadata": metadata })).await?;
+            let made = api.post("/v1/access/enterprise/apps", json!({ "name": name, "rules": rules(api, &r).await?, "public_jwk": jwk, "metadata": metadata, "issuers": issuers })).await?;
             if !json_out {
                 println!("client_id: {}", s(&made["client_id"]));
                 if let Some(secret) = made["client_secret"].as_str() {
