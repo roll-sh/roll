@@ -875,8 +875,10 @@ async fn put_env(State(apps): S, Path((id, env)): Path<(String, String)>, ext: E
     }
     // A `pv-<id>` environment is roll previews' preview `pv_<id>` (its share links, notes and
     // snapshots find it by that name): only roll previews (the operator, in process) makes one,
-    // so no tenant can name an environment after another's preview.
-    if env.starts_with("pv-") && !operator {
+    // so no tenant can name an environment after another's preview. A token's or a person's
+    // request is a tenant's (rolld's gate lets nothing else in but the operator).
+    let tenant = roll_auth::Grant::on(&ext).is_some() || ext.get::<roll_auth::SignedIn>().is_some();
+    if env.starts_with("pv-") && tenant {
         let (sid, e) = (id.clone(), env.clone());
         if apps.db(move |s| s.environment(&sid, &e)).await.is_err() {
             return Err(Error::Forbidden(format!("{env}: a pv- environment is roll previews' own (it makes one for each preview)")));
