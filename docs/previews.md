@@ -1263,7 +1263,7 @@ thirty-fourth review found them in the clear.
     segment that holds one is then expunged as the branch's own (`expunge_deletes_allowed` 0,
     `_forcemerge?only_expunge_deletes`), as Postgres masking's `VACUUM FULL` (live: the branch
     reads `[masked]` and its `_terms_enum` finds nothing, the parent reads `parent`; roll
-    search's `expunging_a_branch_rewrites_the_segments_it_shares` pins the sequence).
+    search's `documents` (control.rs) pins the sequence).
     A masked `semantic_text` field: a branch doesn't get its parent's inference endpoint's key
     (roll search's #988), so the masking's writes send `X-Roll-Unembedded: drop`. The masked text
     stays unembedded, and the real values' chunks and embeddings go, with no provider called. An
