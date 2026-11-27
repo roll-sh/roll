@@ -746,6 +746,57 @@ The last against PGO, select-only at 8 clients, 3 alternating pairs: user instru
 31,777 -> 32,105 / 31,587 -> 34,607 / 34,026 -> 31,978, user cycles 69,268 -> 69,872 / 68,855 ->
 72,931 / 69,927 -> 68,111 (foreign 1.25-1.88): no direction, dropped.
 
+## Query memory, round 8: hashed DISTINCT / UNION paid back and streamed, DISTINCT's estimate over computed columns, sorted SetOp's Sorts; windows streamed past 4 MB dropped (2026-11-27, agent 343)
+
+HANDOFF "Query memory, round 8" has what changed. Plain dist builds (`tools/dist.sh`): **n1**
+`cd7db221e` (340's streamed DISTINCT, before its spill); **b0** `c5d1e5dcd` (340's stack); **b1**
+origin's `e3f93d1a4` (340's stack landed); **new** b1 with `cand/a343`'s four code commits; **w3**
+new with the dropped window commit. PostgreSQL 18.6 by digest. Harness: agent 340's copied to
+`~/.cache/a343/bench` (lane C; `mem.sh` with `mem-d.txt` / `mem-w.txt`, `fpair.sh`; `bpair.sh`,
+fpair's with the table at 1M rows, for the window's CPU). Foreign load on lane C was 1.6-7.6
+cores in every hold: instruction counts only, walls not compared.
+
+### Peak memory a query (MB of the server cgroup's anon+shmem over the level before; 1M rows)
+
+Result hashes sorted equal PostgreSQL's in every cell; in order too except where noted.
+
+| query | b0 | new | w3 | PostgreSQL 18.6 |
+|---|---:|---:|---:|---:|
+| `SELECT DISTINCT s` (HashAggregate, spills at work_mem 4 MB) | 107.5 | 21.4 | | 15.8 |
+| `SELECT DISTINCT a % 1000` | 21.5 (a Unique over a parallel sort; order not PostgreSQL's) | 1.2 (HashAggregate) | | 8.1 |
+| `SELECT DISTINCT a % 1000, id % 7` | 1.4 (order not PostgreSQL's) | 1.8 | | 8.3 |
+| `SELECT a % 100000 FROM t UNION SELECT id % 100000 FROM t` | 161.1 | 10.0 | | 12.6 |
+| `count(*)`, `last_value(s)` `OVER (ORDER BY a RANGE BETWEEN 50 PRECEDING AND 50 FOLLOWING EXCLUDE CURRENT ROW)`, work_mem 1 GB | | 246.3 | 218.8 | 29.1 |
+| `sum(id)`, `lag(s)`, `rank()` `OVER (PARTITION BY id % 10 ORDER BY a)`, 1 GB | | 304.9 | 304.7 | 59.8 |
+| `row_number()`, `sum(id)` `OVER (ORDER BY a ROWS BETWEEN 5 PRECEDING AND 5 FOLLOWING)`, 1 GB | | 200.1 | 151.2 | 52.1 |
+
+### When the input fits (G user instructions, 40 runs, 20,000 rows; alternating pairs; results equal)
+
+| query | base | new | new / base |
+|---|---:|---:|---|
+| `SELECT DISTINCT s` (HashAggregate), b1 -> new | 3.9831 / 3.9841 | 3.8854 / 3.8850 | -2.45%, -2.49% |
+| `SELECT DISTINCT a % 1000, id % 7`, b1 -> new | 4.1844 / 4.1843 | 4.1311 / 4.1308 | -1.27%, -1.28% |
+| `SELECT a UNION SELECT id`, b1 -> new | 6.0705 / 6.0713 | 5.9316 / 5.9317 | -2.29%, -2.30% |
+| plain GROUP BY `a % 1000`, b1 -> new | 2.6052 / 2.6048 | 2.6039 / 2.6040 | -0.05%, -0.03% |
+| INTERSECT ALL, enable_hashagg off (a sorted plan, in memory), b1 -> new | 7.5853 / 7.5858 | 7.5888 / 7.5890 | +0.05%, +0.04% |
+| `SELECT DISTINCT s`, n1 -> new (across bases: b0 and b1 count alike) | 3.8453 / 3.8445 | 3.8854 / 3.8850 | +1.04%, +1.05% |
+| `SELECT DISTINCT a % 1000, id % 7`, n1 -> new | 4.1146 / 4.1139 | 4.1311 / 4.1308 | +0.40%, +0.41% |
+| `SELECT a UNION SELECT id`, n1 -> new | 5.9336 / 5.9332 | 5.9316 / 5.9317 | -0.03%, -0.03% |
+| six windows (agent 340's `win`, `slide`, `fv`, `rng`, `mwin`, `msum`), new -> w3, one pair | | | +0.006, +0.011, +0.010, +0.006, +0.012, -0.014% |
+
+An early form of the DISTINCT commit (c1, on b0's base) un-inlined `HashAggMem::new_group` from
+`AggNode::run` (72.8 -> 60.2 kB): plain GROUP BY +0.08 / +0.14% against n1. new has its own copy
+of the count; `AggNode::run` is 72,801 bytes (b1 72,833).
+
+### Windows streamed past 4 MB (dropped): G user instructions a run, 1M rows, work_mem 1 GB, two pairs
+
+| query | new | w3 | w3 / new |
+|---|---:|---:|---|
+| `count(*)`, `last_value(s)` over `RANGE BETWEEN 50 PRECEDING AND 50 FOLLOWING EXCLUDE CURRENT ROW` | 43.353 / 43.353 | 58.183 / 58.183 | +34.2% |
+| `row_number()`, `sum(id)` over `ROWS BETWEEN 5 PRECEDING AND 5 FOLLOWING` | 14.434 / 14.434 | 18.107 / 18.107 | +25.4% |
+
+No TPC-H query runs a DISTINCT, UNION, SetOp or window node.
+
 ## Query memory, round 7: in-memory window partitions, hashed DISTINCT / UNION read as they come and spilling; grouping sets' PGO gate (2026-11-27, agent 340)
 
 HANDOFF "Query memory, round 7" has what changed. Plain dist builds (`tools/dist.sh`): **b0**

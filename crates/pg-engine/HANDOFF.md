@@ -15046,6 +15046,119 @@ the loop. (2) The ring's per-block cost: three hash lookups a recycled block (`e
 looks the key up twice and then removes it). One `entry` would do. It is worth about 0.4% on
 scan-bound queries at small caches.
 
+## Query memory, round 8: the DISTINCT spill's cost paid back, spilled batches and UNION's arms streamed, DISTINCT's group estimate over computed columns, a sorted SetOp's Sorts under EXPLAIN ANALYZE; bounded window frames streamed past 4 MB dropped (agent 343)
+
+BENCH.md "Query memory, round 8" has the tables. Plain dist builds (`tools/dist.sh`): **n1**
+agent 340's parent (`cd7db221e`, the streamed DISTINCT without the spill); **b0** agent 340's
+stack (`c5d1e5dcd`); **c1** b0 with this round's first commit (an early form, measured once,
+then corrected: below); **b1** origin's `e3f93d1a4` (340's stack landed, with 336 / 337's);
+**new** b1 with the four commits of `cand/a343`; **w3** new with the window commit dropped below.
+One candidate, `cand/a343` on `e3f93d1a4`: DISTINCT / UNION, the estimate, the SetOp's Sorts,
+their tests, this section.
+
+**What changed:**
+- **Hashed DISTINCT / UNION, fitting** (`exec/nodes.rs`, `HashedDistinct`). 340's spill made the
+  fitting path +1.7 to +3.6%: a spill test on every row, the GROUP BY's accounting per group.
+  Now the table is a struct keyed by a type (`WholeRow` / `Normed` / `OnKeys`: a plain DISTINCT
+  has no key branch per row); its fitting loop (`absorb`) tests only a new group against the
+  limits and hands the rest of the input to `absorb_spilling`, a function of its own; the
+  group's MinimalTuple length is counted inline for ints, floats, dates, times, bools, text and
+  bytea (`workmem::TupleLen`, `minimal_tuple_len` for the rest), the bucket array again only
+  when the table grew (`HashSpill::distinct_group`). That function has its own copy of
+  `HashAggMem::new_group`'s count: a first version called it, which un-inlined it from
+  `AggNode::run` (72.8 -> 60.2 kB, GROUP BY +0.08 / +0.14%; measured in c1, then fixed).
+- **Spilled DISTINCT's rows a batch at a time** (`HashedRows::next_row`, `refill`): the table's
+  groups go up as it gives them, the next batch read into it only then (every batch's groups
+  were collected before the first row went up).
+- **UNION's arms read as they come** (`SetOpNode::hashed_union`, `exec::for_rows`, `collect`'s
+  statement frames around a node handed to a function): into the one table, where every arm was
+  collected whole first. The sorted UNION and the plan-less one are as before.
+- **DISTINCT's group estimate over computed columns** (`sql/explain.rs`): a DISTINCT whose input
+  is a projection with computed columns estimates its groups as estimate_num_groups does,
+  `group_num_groups` (GROUP BY's) over the projection's expressions and input columns (the
+  projection's node keeps them: `ExNode::proj_in`), its partial plan's too; was the columns'
+  default 200 each. `SELECT DISTINCT a % 1000` over 1M rows: 200 -> 1,000,000 groups, a
+  HashAggregate as PostgreSQL's where roll had a Unique over a parallel sort; `a % 1000, id % 7`
+  40,000 -> 1,000,000, `id % 10 > 3` 200 -> 2 (a boolean). Their rows now come out in
+  PostgreSQL's order. Only where the DISTINCT's input is the projection (a subquery's computed
+  columns PostgreSQL doesn't see through, and roll's estimate leaves them so).
+- **A sorted SetOp's Sorts under EXPLAIN ANALYZE** (`SortedSetOpNode`): each input's Sort has a
+  key of its own (the input plan's address + 1, `sorted`), so it shows its rows and tuplesort's
+  method and space (`sort_counted`; it showed the scan's rows and a width estimate); under
+  EXPLAIN ANALYZE both inputs are sorted for them (a SetOp that fits ran in memory, with no
+  Sort). The second input is read a group at a time as setop_retrieve_sorted reads it
+  (`right_group`), and the first input drives the merge (nodeSetOp's outer; it was the left one
+  after INTERSECT's swap): INTERSECT ALL's second Sort 20,000 -> 19,988 rows, an EXCEPT ALL's
+  19,698 -> 19,691, PostgreSQL's. In memory and in `SetOpNode` the inputs' rows are noted under
+  those keys (`note_sorted_input`).
+
+**Measured:** BENCH "Query memory, round 8".
+1M rows, peak anon+shmem over the level before, MB, b0 -> new (PostgreSQL
+18.6): `SELECT DISTINCT s` (spills at 4 MB) 107.5 -> 21.4 (15.8), its order and file PostgreSQL's
+in both; `SELECT DISTINCT a % 1000` 21.5 -> 1.2 (8.1), a HashAggregate now and PostgreSQL's order
+(b0's Unique over a parallel sort gave another); `a % 1000, id % 7` 1.4 -> 1.8 (8.3), PostgreSQL's
+order now; the UNION 161.1 -> 10.0 (12.6). Fitting queries (20,000 rows, user instructions, 40
+runs, two alternating pairs agreeing to 0.04%; foreign load 3-4 cores in every hold, so no
+walls or cycles), b1 -> new: `DISTINCT s` -2.45 / -2.49%, `DISTINCT a % 1000, id % 7` -1.27 /
+-1.28%, `a UNION id` -2.29 / -2.30%, plain GROUP BY -0.05 / -0.03%, a fitting INTERSECT ALL
+(sorted plan, in memory) +0.05 / +0.04%. Against n1, the parent count the brief asked for (new's
+counts against n1's from the c1 pairs, the bases counting alike: 340's tip 3.9831 G on `DISTINCT
+s` on both): the UNION -0.03%, `DISTINCT a % 1000, id % 7` +0.4%, `DISTINCT
+s` +1.0% (below). `nm -S`: `AggNode::run` 72,833 (b1) -> 72,801 bytes, `HashAggMem::new_group`
+inlined in both; `DistinctNode::next` 33,370 -> 20,989, the fitting loop `hashed_input<WholeRow>`
+6,602. No TPC-H query runs a DISTINCT, UNION or SetOp node, and the estimate changes only a
+DISTINCT over a projection: TPC-H not run. Not gated on PGO builds: the only shared function
+whose compile moved (`AggNode::run`, by the first version) is back to the base's size.
+Functional, against PostgreSQL 18.6 in a container: EXPLAIN of eight DISTINCT forms over computed
+columns, estimates and plans equal (the two other lines that differ, a filtered scan's
+selectivity from ANALYZE's sample and a Subquery Scan's cost, differ on b1 too); five sorted
+SetOps' EXPLAIN ANALYZE at 64kB and 4MB: every Sort's rows and quicksort Memory PostgreSQL's,
+external merge Disk 8 kB under (above, Left).
+
+**Dropped / not done:**
+- **Window partitions streamed past 4 MB** (item 3; `~/.cache/a343/patches/window-stream-past-4mb.patch`):
+  a partition whose calls `winstream` runs streamed once past 4 MB as tuplestore counts it (at
+  most work_mem), as PostgreSQL's WindowAgg holds only the frame, where it is held whole up to
+  work_mem. 1M rows at work_mem 1 GB: `row_number` + sliding sum 200.1 -> 151.2 MB (PostgreSQL
+  52.1), the RANGE +-50 EXCLUDE window 246.3 -> 218.8 (29.1), the partitioned chain 304.9 ->
+  304.7 (59.8: its peak is the Sort); results and EXPLAIN ANALYZE PostgreSQL's; fitting windows
+  flat (-0.014 to +0.012%). Dropped for its CPU: user instructions a run of the same 1M-row
+  queries 43.35 -> 58.18 G (+34%) and 14.43 -> 18.11 G (+25%), two pairs agreeing to 0.001%:
+  `winstream` costs more a row than the in-memory computation. Taking it needs the streamed
+  path as cheap as the in-memory one first.
+- The rest of the DISTINCT accounting: `SELECT DISTINCT s` (every row a group) is still +1.0%
+  against n1, `DISTINCT a % 1000, id % 7` +0.4% (part of it the estimate's larger table); the
+  UNION is back (-0.03%). What is left is nodeAgg's count itself (~50 instructions a new group:
+  the tuple's length, the context's bump allocation, the limits); a cheaper form would skip the
+  limit test while the bump block's free space holds (only a block allocation or the bucket
+  array growing changes the total).
+- Grouping sets past work_mem: left, as the brief says (deciding needs two PGO builds trained
+  per arm, ~3 hours each).
+- Item 6 of the brief (DISTINCT aggregates sharing a sort, an Incremental Sort group past
+  work_mem, GroupAggregate over a Sort): not started.
+
+**Verification:** `tools/quick-check.sh` with `QC_CHECKED=1` and `QC_TESTS=query_spill` on
+`a8e6459c2`, the tree of `4594105d6` (the four code and test commits on `e3f93d1a4`; this
+section's commit adds docs only):
+Clippy 16 warnings, none new in a changed file; 418 tests in 13 binaries passed, again built
+`--profile verify-checked` (418 passed); regress 51,148 / 51,150, 0 newly differing (the
+estimate change made no EXPLAIN there differ); isolation 1,647 / 1,648; pg_dump_tap 14,609
+passed. New: query_spill `sorted_setops` asserts the Sorts' EXPLAIN ANALYZE rows and methods
+(PostgreSQL 18.6's); golden `a343_distinct_groups` (five DISTINCT EXPLAINs over computed
+columns and a hashed DISTINCT's row order, recorded from PostgreSQL 18.6) passes on the engine
+and the wire.
+
+**Left** (MB over PostgreSQL's, 1M rows): the Sorts holding `Value` rows (the partitioned window
+chain 305 / 60: its peak is the Sort's 1M rows, appended key and all, before the window reads;
+the Sort under `row_number` + sliding sum already holds only (a, id), PostgreSQL's columns: there
+it is the window holding the whole partition, 200 / 52, and the RANGE window 246 / 29 (the
+streamed form above halves the excess and costs +25-34% CPU)): a compact in-memory row for big
+sorts, agent 342's 24-byte `Value`, a cheaper `winstream`; a
+spilled `SELECT DISTINCT s` 21 / 16; extsort's Disk figure for an external merge reads 8 kB under
+PostgreSQL's (1000kB / 1008kB for 20,000 rows of (text, int), a plain Sort too: one block of
+the tape model, not found); DISTINCT aggregates (44 / 14); grouping sets past work_mem; an
+Incremental Sort group past work_mem; GroupAggregate over a Sort.
+
 ## Query memory, round 7: in-memory window partitions held narrower, hashed DISTINCT / UNION read as they come and spilling past hash_mem; grouping sets' PGO gate inconclusive (agent 340)
 
 BENCH.md "Query memory, round 7" has the tables. Plain dist builds (`tools/dist.sh`): **b0** agent
