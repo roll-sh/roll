@@ -52,6 +52,7 @@ DELETE /v1/previews/projects/{project}/bypass                                  a
 GET /v1/previews/projects/{project}/bypass                                     answers or sets a credential
 POST /v1/previews/projects/{project}/bypass                                    answers or sets a credential
 POST /v1/previews/projects/{project}/hooks                                     answers or sets a credential (a deploy hook's secret)
+POST /v1/previews/{id}/replay                                                  no tool yet
 POST /v1/previews/{id}/webhooks                                                answers or sets a credential (a webhook URL's token)
 POST /v1/previews/{id}/approve                                                 a person's call (approving, accepting, cutting off)
 PUT /v1/previews/{id}/env                                                      answers or sets a credential (a preview's env is reveal)

@@ -96,13 +96,17 @@ impl Apps {
                 }
             }
             // From outside: its real URL over the internet, as a visitor's request goes.
-            None if c.from.as_deref() == Some("public") => match self.check_from_public(service, env, url, c).await {
-                Ok((s, body)) => (Some(s), passes(c, s, &body)),
+            // Its headers' `${NAME}`s from its live deployment's own variables (never the settings').
+            None => match self.live(service, env).template().map(|t| c.headers_with(&t.spec.vars)).unwrap_or_else(|| c.headers_with(&[])) {
                 Err(e) => (None, Err(e)),
-            },
-            None => match crate::public::call_check(self.clone(), service, env, host, &c.path, Duration::from_secs(c.timeout_s as u64), MAX_BODY).await {
-                Ok((s, body)) => (Some(s), passes(c, s, &body)),
-                Err(e) => (None, Err(e)),
+                Ok(headers) if c.from.as_deref() == Some("public") => match self.check_from_public(service, env, url, c, &headers).await {
+                    Ok((s, body)) => (Some(s), passes(c, s, &body)),
+                    Err(e) => (None, Err(e)),
+                },
+                Ok(headers) => match crate::public::call_check(self.clone(), service, env, host, c.method(), &c.path, &headers, c.body.clone(), Duration::from_secs(c.timeout_s as u64), MAX_BODY).await {
+                    Ok((s, body)) => (Some(s), passes(c, s, &body)),
+                    Err(e) => (None, Err(e)),
+                },
             },
         };
         let ms = began.elapsed().as_millis() as u64;
@@ -143,13 +147,13 @@ impl Apps {
         }
         if went_down {
             let why = verdict.as_ref().err().cloned().unwrap_or_default();
-            log.line(format!("uptime check {}: GET {} is down: {why}", c.name, c.path));
+            log.line(format!("uptime check {}: {} {} is down: {why}", c.name, c.method(), c.path));
             let data = json!({ "check": c.name, "path": c.path, "http_status": status, "error": why });
             if let Err(err) = self.db(move |s| s.add_event("check.down", &sid, &e, None, &data)).await {
                 tracing::warn!(service, env, error = %err, "apps: an uptime check's check.down wasn't recorded");
             }
         } else if came_up {
-            log.line(format!("uptime check {}: GET {} is up again", c.name, c.path));
+            log.line(format!("uptime check {}: {} {} is up again", c.name, c.method(), c.path));
             let data = json!({ "alert": "check.down", "check": c.name });
             if let Err(err) = self.db(move |s| s.add_event("alert.resolved", &sid, &e, None, &data)).await {
                 tracing::warn!(service, env, error = %err, "apps: an uptime check's alert.resolved wasn't recorded");
@@ -160,7 +164,7 @@ impl Apps {
     /// A public check's request (`from: public`): to the environment's own URL, or one of its
     /// active custom domains over HTTPS, through the client for URLs a tenant chose (public
     /// addresses only, no redirects, a bounded read).
-    async fn check_from_public(self: &Arc<Self>, service: &str, env: &str, url: &str, c: &Check) -> Result<(u16, Vec<u8>), String> {
+    async fn check_from_public(self: &Arc<Self>, service: &str, env: &str, url: &str, c: &Check, headers: &[(String, String)]) -> Result<(u16, Vec<u8>), String> {
         let at = match &c.host {
             None => format!("{}{}", url.trim_end_matches('/'), c.path),
             Some(h) => {
@@ -180,7 +184,14 @@ impl Apps {
             self.check_tokens.lock().insert(t.clone(), (service.to_string(), env.to_string()));
             t
         });
-        let mut get = client.get(&at).header(reqwest::header::USER_AGENT, "roll-uptime/1.0 (from outside)");
+        let method = reqwest::Method::from_bytes(c.method().as_bytes()).unwrap_or(reqwest::Method::GET);
+        let mut get = client.request(method, &at).header(reqwest::header::USER_AGENT, "roll-uptime/1.0 (from outside)");
+        for (k, v) in headers {
+            get = get.header(k.as_str(), v.as_str());
+        }
+        if let Some(b) = &c.body {
+            get = get.body(b.clone());
+        }
         if let Some(t) = &token {
             get = get.header("x-roll-check", t);
         }
@@ -223,9 +234,25 @@ impl Apps {
 mod tests {
     use super::*;
 
+    /// A check's request beyond a GET: its method and body checked, its headers' `${NAME}`s the
+    /// environment's own variables (the settings never hold the value).
+    #[test]
+    fn a_checks_request_takes_a_method_headers_and_a_body() {
+        let base = || Check { name: "api".into(), path: "/api/health".into(), every_s: 60, timeout_s: 10, status: None, contains: None, browser: None, budgets: None, from: None, host: None, method: None, headers: None, body: None };
+        let with = |m: Option<&str>, h: &[(&str, &str)], b: Option<&str>| Check { method: m.map(String::from), headers: (!h.is_empty()).then(|| h.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()), body: b.map(String::from), ..base() };
+        let c = with(Some("post"), &[("Authorization", "Bearer ${HEALTH_TOKEN}")], Some("{}")).check().unwrap();
+        assert_eq!(c.method(), "POST");
+        assert_eq!(c.headers_with(&[("HEALTH_TOKEN".into(), "s3cret".into())]).unwrap(), [("Authorization".to_string(), "Bearer s3cret".to_string())]);
+        assert!(c.headers_with(&[]).unwrap_err().contains("${HEALTH_TOKEN}"), "a variable it doesn't have is said by name");
+        assert!(with(Some("TRACE"), &[], None).check().is_err());
+        assert!(with(None, &[], Some("{}")).check().is_err(), "a GET has no body");
+        assert!(with(None, &[("Host", "evil")], None).check().is_err() && with(None, &[("x-roll-check", "x")], None).check().is_err());
+        assert!(with(None, &[("X-A", "a\r\nX-B: b")], None).check().is_err());
+    }
+
     #[test]
     fn an_answer_passes_by_its_status_and_text() {
-        let c = |status: Option<u16>, contains: Option<&str>| Check { name: "x".into(), path: "/".into(), every_s: 60, timeout_s: 10, status, contains: contains.map(String::from), browser: None, budgets: None, from: None, host: None };
+        let c = |status: Option<u16>, contains: Option<&str>| Check { name: "x".into(), path: "/".into(), every_s: 60, timeout_s: 10, status, contains: contains.map(String::from), browser: None, budgets: None, from: None, host: None, method: None, headers: None, body: None };
         assert!(passes(&c(None, None), 301, b"").is_ok(), "2xx or 3xx by default");
         assert_eq!(passes(&c(None, None), 503, b""), Err("answered 503".into()));
         assert!(passes(&c(Some(204), None), 204, b"").is_ok());

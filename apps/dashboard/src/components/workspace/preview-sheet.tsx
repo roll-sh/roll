@@ -1829,6 +1829,48 @@ function metricsText(m: ServiceMetrics): string {
 }
 
 /** Its latest requests through roll (Vercel's request log): newest first, errors at a glance. */
+/** Its recent GETs replayed against main's preview (Signadot's SmartTests): what answered differently. */
+function Replay({ preview: p }: { preview: Preview }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const r = p.replay;
+  const differs = (r?.requests ?? []).filter((q) => q.status !== q.main_status || q.removed.length > 0);
+  const said = (s: number) => (s === 0 ? "no answer" : String(s));
+  return (
+    <div className="mb-3 flex flex-col gap-1.5 rounded-lg border border-line-2 bg-canvas px-2.5 py-2 text-[11.5px]">
+      <div className="flex items-center gap-2">
+        <span className="min-w-0 flex-1 text-muted">
+          {!r ? "Replay its recent requests against main's preview." : r.ok === null ? "Replaying against main's preview…" : r.error ? `Couldn't replay: ${r.error}` : differs.length ? `${differs.length} of ${r.requests.length} answered differently from main's` : `All ${r.requests.length} answered as main's did`}
+        </span>
+        <button
+          type="button"
+          disabled={busy || r?.ok === null}
+          onClick={async () => {
+            setBusy(true);
+            try {
+              await previewsApi.replay(p.id);
+              setError(null);
+            } catch (e) {
+              setError(errorText(e));
+            } finally {
+              setBusy(false);
+            }
+          }}
+          className="h-6 rounded-md border border-line-2 px-2 text-[11.5px] text-fg hover:bg-white/[0.05] disabled:opacity-40"
+        >
+          {r ? "Replay again" : "Replay"}
+        </button>
+      </div>
+      {differs.slice(0, 8).map((q) => (
+        <p key={`${q.service}${q.path}`} className="min-w-0 break-words font-mono text-[10.5px] text-danger">
+          {q.path} {said(q.status)} (main {said(q.main_status)}){q.removed.length ? ` · lost ${q.removed.slice(0, 4).join(", ")}` : ""}
+        </p>
+      ))}
+      {error && <p className="text-danger">{error}</p>}
+    </div>
+  );
+}
+
 function Requests({ preview: p }: { preview: Preview }) {
   const [list, setList] = useState<RequestLine[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -1849,6 +1891,7 @@ function Requests({ preview: p }: { preview: Preview }) {
   const several = p.services.length > 1;
   return (
     <>
+      {p.change && <Replay preview={p} />}
       <div className="mb-2 flex items-center gap-2">
         <label className="flex flex-1 items-center gap-1.5 text-[11.5px] text-muted">
           <input type="checkbox" checked={errorsOnly} onChange={(e) => setErrorsOnly(e.target.checked)} className="accent-accent" />
