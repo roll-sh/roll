@@ -413,6 +413,12 @@ pub enum Secrets {
         /// Print the folders and keys it would import (never a value), and import nothing.
         #[arg(long, requires = "from")]
         dry_run: bool,
+        /// Check the copy after an import: read the source as an import would and compare it
+        /// with the environment by fingerprint, writing nothing. Prints, by name only, the keys
+        /// missing here, the ones whose value differs, and the ones only here; fails when a key
+        /// is missing or differs.
+        #[arg(long, requires = "from", conflicts_with_all = ["dry_run", "overwrite", "request", "sensitive", "create_environments"])]
+        check: bool,
         /// Tag what the source keeps secret `sensitive` (for good: no person or token reads it
         /// back): Parameter Store's SecureStrings, 1Password's concealed fields, every value of
         /// the other managers.
@@ -635,6 +641,11 @@ pub enum Secrets {
     /// The project's SSH CAs: list, add, print one's public key (for TrustedUserCAKeys), remove.
     #[command(subcommand, name = "ssh-cas")]
     SshCas(SshCasCmd),
+    /// Publicly trusted certificates from Let's Encrypt, ZeroSSL or Google (ACME, dns-01 through
+    /// Cloudflare or Route 53): list, add (the DNS credential on stdin), show, change, renew,
+    /// revoke, remove.
+    #[command(subcommand, name = "public-certs", alias = "public-cert")]
+    PublicCerts(PublicCertsCmd),
     /// GCP and Azure accounts that trust roll's token for this project: list (with the issuer and
     /// subject to trust), add, remove.
     #[command(subcommand)]
@@ -836,9 +847,11 @@ pub enum Secrets {
         #[arg(value_parser = ["managed", "off"])]
         rotate: Option<String>,
     },
-    /// Who may push past the project's pre-receive hooks (`git push -o breakglass`): pushers'
-    /// logins as the git server names them, `token:<id>` for every push through one hook's
-    /// token, `*` for anyone; `off` for no one (the default). Without any: who may now.
+    /// Who may push past the project's pre-receive hooks (`git push -o breakglass`): a pusher's
+    /// login through one hook's token (`alice@token:<id>`; `alice` binds to each token whose hook
+    /// has named alice), `token:<id>` for every push through one hook's token, `*` for anyone;
+    /// `off` for no one (the default). Without any: who may now. Setting a list again binds the
+    /// bare logins it kept from before logins were bound.
     Breakglass { who: Vec<String> },
     /// When each key was last read and changed, and which are stale or unused.
     Insights {
@@ -927,7 +940,7 @@ pub(crate) const HELP_GROUPS: &[(&str, &[&str])] = &[
     (
         "Resources and rotation",
         &[
-            "rotate", "rotations", "leases", "databases", "aws-roles", "aws-users", "clouds", "saas", "cas", "ssh-cas", "transit", "github-apps", "kubernetes-clusters", "directories", "snowflake", "atlas",
+            "rotate", "rotations", "leases", "databases", "aws-roles", "aws-users", "clouds", "saas", "cas", "ssh-cas", "public-certs", "transit", "github-apps", "kubernetes-clusters", "directories", "snowflake", "atlas",
             "gateways",
         ],
     ),
@@ -970,7 +983,8 @@ pub fn grouped_help(cmd: clap::Command) -> clap::Command {
 
 #[derive(Subcommand)]
 pub enum PolicyCmd {
-    /// The floors, and who set them when.
+    /// The floors, who set them when, and every exception: each project below them, and grants
+    /// with a secrets rule that outlive `max_token_days`.
     Get,
     /// Replace the policy: a floor left out has none. Nothing existing is rewritten; Health lists
     /// each project's distance (`off_policy`).
@@ -1729,6 +1743,74 @@ pub enum CasCmd {
 }
 
 #[derive(Subcommand)]
+pub enum PublicCertsCmd {
+    /// Each one's names, status, end, next renewal and the renewal caps.
+    #[command(alias = "list")]
+    Ls,
+    /// Register a certificate for these names; roll orders it in the background (minutes) and
+    /// renews it. The DNS provider's credential comes on stdin (asked for without echo on a
+    /// terminal): Cloudflare's API token, or Route 53's ACCESS_KEY_ID:SECRET_ACCESS_KEY unless
+    /// --aws-role names one of the project's AWS roles (no key kept). With --eab-kid, the EAB HMAC
+    /// key comes next (another line).
+    Add {
+        name: String,
+        /// A DNS name or a wildcard (*.example.com); repeatable.
+        #[arg(long = "domain", required = true, value_name = "NAME")]
+        domains: Vec<String>,
+        #[arg(long, value_parser = ["cloudflare", "route53"])]
+        dns: String,
+        /// Route 53 as this project AWS role (`roll secrets aws-roles`) instead of an access key.
+        #[arg(long, value_name = "ROLE")]
+        aws_role: Option<String>,
+        /// letsencrypt (the default), letsencrypt-staging, zerossl, google, google-test, or a
+        /// directory URL the operator allows.
+        #[arg(long, default_value = "letsencrypt")]
+        ca: String,
+        /// External Account Binding's key id (ZeroSSL and Google ask for one).
+        #[arg(long)]
+        eab_kid: Option<String>,
+        /// Days from issue to renewal (two thirds of the certificate's lifetime by default).
+        #[arg(long)]
+        rotate_days: Option<u64>,
+    },
+    /// One certificate in full: CA, names, DNS provider, serials, dates, revocations, last error.
+    Show { id: String },
+    /// Change its name, names or renewal days, or replace its DNS credential (--credential, on
+    /// stdin) or Route 53 role (--aws-role). New names or a new credential order at once.
+    Set {
+        id: String,
+        #[arg(long)]
+        name: Option<String>,
+        /// Every name it should have (replaces them); repeatable.
+        #[arg(long = "domain", value_name = "NAME")]
+        domains: Vec<String>,
+        /// Days from issue to renewal, or `default`.
+        #[arg(long)]
+        rotate_days: Option<String>,
+        /// Read a new DNS credential from stdin.
+        #[arg(long, conflicts_with = "aws_role")]
+        credential: bool,
+        #[arg(long, value_name = "ROLE")]
+        aws_role: Option<String>,
+    },
+    /// Order a new certificate now (one an hour, three a week: each spends the CA's limit for the
+    /// names); every linked key rotates once it's issued.
+    Renew { id: String },
+    /// Revoke the current certificate at the CA (a new one is ordered at once), or --previous, the
+    /// one the last renewal replaced.
+    Revoke {
+        id: String,
+        #[arg(long)]
+        previous: bool,
+        #[arg(long, value_parser = ["unspecified", "keyCompromise", "affiliationChanged", "superseded", "cessationOfOperation"])]
+        reason: Option<String>,
+    },
+    /// Remove a registration no key links to (its certificates stay valid until they end).
+    #[command(alias = "remove")]
+    Rm { id: String },
+}
+
+#[derive(Subcommand)]
 pub enum AcmeCmd {
     /// External Account Bindings: the key id and HMAC key an ACME client makes its account with.
     #[command(subcommand)]
@@ -2268,8 +2350,12 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
     }
     // roll secrets' policy binds every project.
     if let Secrets::Policy { cmd } = &cmd {
-        let v = match cmd {
-            PolicyCmd::Get => api.get("/v1/secrets/policy").await?,
+        // Get: the floors and every exception to them (the report).
+        let (v, report) = match cmd {
+            PolicyCmd::Get => {
+                let r = api.get("/v1/secrets/policy/report").await?;
+                (r["policy"].clone(), Some(r))
+            }
             PolicyCmd::Set { production_approvals, leaks_managed, sync_kinds, no_stored_cloud_keys, max_token_days, no_breakglass } => {
                 let kinds = sync_kinds.as_ref().map(|ks| ks.iter().map(|k| k.trim()).filter(|k| !k.is_empty()).collect::<Vec<_>>());
                 let body = json!({
@@ -2280,11 +2366,11 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                     "max_token_days": max_token_days,
                     "no_breakglass": no_breakglass,
                 });
-                api.call(Method::PUT, "/v1/secrets/policy", Some(body)).await?
+                (api.call(Method::PUT, "/v1/secrets/policy", Some(body)).await?, None)
             }
         };
         if json_out {
-            println!("{}", serde_json::to_string_pretty(&v)?);
+            println!("{}", serde_json::to_string_pretty(report.as_ref().unwrap_or(&v))?);
             return Ok(());
         }
         let mut floors = vec![];
@@ -2316,6 +2402,23 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
         }
         if let (Some(by), Some(at)) = (v["updated_by"].as_str(), v["updated_at"].as_i64()) {
             println!("Set by {by} on {}", day(at));
+        }
+        if let Some(r) = report {
+            let none = vec![];
+            for p in r["projects"].as_array().unwrap_or(&none) {
+                println!("\n{} ({}) is below the policy:", s(&p["project_name"]), s(&p["project"]));
+                for f in p["findings"].as_array().unwrap_or(&none) {
+                    println!("  {}", s(&f["detail"]));
+                }
+            }
+            let grants = r["grants"].as_array().unwrap_or(&none);
+            if !grants.is_empty() {
+                println!("\n{} grant{} with a secrets rule outlive{} max_token_days (made before it):", grants.len(), if grants.len() == 1 { "" } else { "s" }, if grants.len() == 1 { "s" } else { "" });
+                for g in grants {
+                    let ends = g["expires_at"].as_i64().map_or("never expires".to_string(), |e| format!("expires {}", day(e)));
+                    println!("  {} {} ({}, {}), {ends}", s(&g["kind"]), s(&g["name"]), s(&g["id"]), g["user"].as_str().unwrap_or("operator"));
+                }
+            }
         }
         return Ok(());
     }
@@ -2572,10 +2675,11 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             write(&c, &env, ops, None, request, json_out).await?;
         }
         Secrets::Edit { request } => edit(&c, &env, request, json_out).await?,
-        Secrets::Import { file, from, source, map, all_environments, create_environments, recursive, overwrite, request, dry_run, sensitive } => {
+        Secrets::Import { file, from, source, map, all_environments, create_environments, recursive, overwrite, request, dry_run, check, sensitive } => {
             if let Some(from) = from {
                 let source = source.unwrap_or_default();
                 let o = ImportOpts { overwrite, request, sensitive, dry_run, message: format!("imported from {from} {}", source.chars().take(200).collect::<String>()) };
+                let mut copy = CopyCheck::default();
                 if let Some(vendor) = crate::import_tree::Vendor::parse(&from) {
                     anyhow::ensure!(!recursive || vendor == crate::import_tree::Vendor::Infisical, "--recursive reads Vault's and Infisical's folders");
                     let pairs = map.iter().map(|p| p.split_once('=').map(|(a, b)| (a.to_string(), b.to_string())).with_context(|| format!("{p}: --map is source=environment"))).collect::<anyhow::Result<Vec<_>>>()?;
@@ -2586,21 +2690,32 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                     };
                     let one = matches!(which, crate::import_tree::Which::One { .. });
                     let plan = crate::import_tree::read(&crate::import_tree::Request { vendor, source, which, recursive, into_path: c.at.path.clone() }).await?;
+                    if check {
+                        return check_plan(&c, &plan, one, &mut copy).await;
+                    }
                     return import_plan(&c, &plan, &o, create_environments, one, json_out).await;
                 }
                 anyhow::ensure!(!all_environments && !create_environments, "--all-environments and --create-environments read Doppler and Infisical projects");
                 anyhow::ensure!(!recursive || (from == "vault" && map.is_empty()), "--recursive reads a Vault KV v2 tree (--from vault --source mount/path) or Infisical's folders");
                 if map.is_empty() {
                     let folders = read_source(&from, &source, recursive).await?;
+                    if check {
+                        check_folders(&c, &env, &c.at.env, &folders, &mut copy).await?;
+                        return copy.done();
+                    }
                     return import_folders(&c, &env, &folders, &o, None, json_out).await;
                 }
                 let base = source.trim_end_matches('/');
                 for pair in &map {
                     let (src, dst) = pair.split_once('=').with_context(|| format!("{pair}: --map is source=environment"))?;
                     let folders = read_source(&from, &format!("{base}/{src}"), false).await.with_context(|| format!("reading {base}/{src}"))?;
-                    import_folders(&c, &c.env(dst), &folders, &o, Some(&format!("{src} → {dst}")), json_out).await?;
+                    if check {
+                        check_folders(&c, &c.env(dst), dst, &folders, &mut copy).await?;
+                    } else {
+                        import_folders(&c, &c.env(dst), &folders, &o, Some(&format!("{src} → {dst}")), json_out).await?;
+                    }
                 }
-                return Ok(());
+                return if check { copy.done() } else { Ok(()) };
             }
             let text = match file.as_deref() {
                 Some("-") => {
@@ -3770,6 +3885,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             }
             CasCmd::Acme(cmd) => acme(&c, cmd, json_out).await?,
         },
+        Secrets::PublicCerts(cmd) => public_certs(&c, cmd, json_out).await?,
         Secrets::Transit(t) => match t {
             TransitCmd::Ls => {
                 let v = c.call(Method::GET, &format!("{}/transit", c.base()), None).await?;
@@ -4372,7 +4488,15 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             }
             match v["breakglass"].as_array().filter(|a| !a.is_empty()) {
                 None => println!("No one may push past a pre-receive hook: `git push -o breakglass` is refused"),
-                Some(a) => println!("May push past a pre-receive hook (audited): {}", a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")),
+                Some(a) => {
+                    let who: Vec<&str> = a.iter().filter_map(Value::as_str).collect();
+                    println!("May push past a pre-receive hook (audited): {}", who.join(", "));
+                    // A list from before logins were bound: each bare login counts only through a
+                    // token whose hook named it, until the list is set again.
+                    if who.iter().any(|w| *w != "*" && !w.starts_with("token:") && !w.contains("@token:")) {
+                        println!("Bare logins aren't bound to a hook's token yet: `roll secrets breakglass {}` binds them", who.join(" "));
+                    }
+                }
             }
         }
         Secrets::Leaks { rotate } => {
@@ -4882,6 +5006,80 @@ async fn import_folders(c: &Client<'_>, env: &str, folders: &crate::managers::Fo
         println!("Dry run: nothing imported ({keys} key{} in {} change{}).", plural(keys), folders.len(), plural(folders.len()));
     }
     Ok(())
+}
+
+/// What `import --check` found so far: keys the source has that are missing here or differ.
+#[derive(Default)]
+struct CopyCheck {
+    missing: usize,
+    changed: usize,
+    folders: usize,
+}
+
+impl CopyCheck {
+    fn done(&self) -> anyhow::Result<()> {
+        let plural = |n: usize| if n == 1 { "" } else { "s" };
+        match self.missing + self.changed {
+            0 => {
+                eprintln!("The copy is complete: every key of the source is here with the same value ({} folder{}).", self.folders, plural(self.folders));
+                Ok(())
+            }
+            _ => bail!("the copy isn't complete: {} key{} missing and {} different here; import again (--overwrite replaces the different ones)", self.missing, plural(self.missing), self.changed),
+        }
+    }
+}
+
+/// `import --check`: what another manager gave, compared with `env` (its API base; `name` its
+/// slug) folder by folder through the same comparison as `diff --file` (by fingerprint, on the
+/// server). Names only, never a value, and nothing written.
+async fn check_folders(c: &Client<'_>, env: &str, name: &str, folders: &crate::managers::Folders, copy: &mut CopyCheck) -> anyhow::Result<()> {
+    for (folder, entries) in folders {
+        let path = under(&c.at.path, folder);
+        let items: Vec<Value> = entries.iter().map(|e| json!({ "key": e.key, "value": e.value })).collect();
+        let v = c.call(Method::POST, &format!("{env}/diff"), Some(json!({ "json": items, "path": path }))).await.map_err(approval_hint).with_context(|| format!("comparing {name}:{path}"))?;
+        let list = |k: &str| v[k].as_array().into_iter().flatten().map(|x| s(x).to_string()).collect::<Vec<_>>();
+        // A sensitive key the caller can't see is never compared (that would test a guess).
+        let seen: std::collections::HashSet<String> = ["added", "changed", "same", "references", "linked"].into_iter().flat_map(list).collect();
+        let unseen: Vec<String> = entries.iter().map(|e| e.key.clone()).filter(|k| !seen.contains(k)).collect();
+        println!("{name}:{path}");
+        for (names, mark, what) in [(list("added"), "-", "missing here"), (list("changed"), "~", "different here"), (list("missing"), "+", "only here"), (list("references"), "?", "has references here: not compared"), (list("linked"), "?", "linked here: not compared"), (unseen, "?", "sensitive: not compared")] {
+            for k in names {
+                println!("  {mark} {k:<32} {what}");
+            }
+        }
+        let same = list("same").len();
+        println!("  {same} the same");
+        copy.missing += list("added").len();
+        copy.changed += list("changed").len();
+        copy.folders += 1;
+    }
+    Ok(())
+}
+
+/// `import --check` for a Doppler or Infisical project read with its structure: each environment
+/// it maps to compared folder by folder (a missing environment counts all its keys as missing).
+async fn check_plan(c: &Client<'_>, plan: &crate::import_tree::Plan, one: bool, copy: &mut CopyCheck) -> anyhow::Result<()> {
+    let listed = c.call(Method::GET, &format!("{}/environments", c.base()), None).await?;
+    let have: Vec<&str> = listed.as_array().into_iter().flatten().filter_map(|e| e["slug"].as_str()).collect();
+    for e in &plan.environments {
+        if !one {
+            println!("{} → {}", e.source, e.target);
+        }
+        let folders: crate::managers::Folders = e
+            .folders
+            .iter()
+            .filter(|f| !f.keys.is_empty())
+            .map(|f| (f.folder.clone(), f.keys.iter().map(|k| crate::managers::Entry { key: k.key.clone(), value: k.value.clone(), secret: true, comment: String::new() }).collect()))
+            .collect();
+        if !have.contains(&e.target.as_str()) {
+            let keys: usize = folders.iter().map(|f| f.1.len()).sum();
+            println!("{}: not in this project ({keys} keys missing)", e.target);
+            copy.missing += keys;
+            continue;
+        }
+        check_folders(c, &c.env(&e.target), &e.target, &folders, copy).await?;
+    }
+    copy.done()
 }
 
 /// A Doppler or Infisical import read with its structure (import_tree.rs), written: missing roll
@@ -7337,6 +7535,179 @@ async fn stop(child: &mut tokio::process::Child) {
 }
 
 /// `roll secrets cas acme …`: a CA's ACME directory, bindings and pre-authorization.
+/// The public CAs by short name (docs/secrets.md, "Publicly trusted certificates").
+const PUBLIC_CAS: &[(&str, &str)] = &[
+    ("letsencrypt", "https://acme-v02.api.letsencrypt.org/directory"),
+    ("letsencrypt-staging", "https://acme-staging-v02.api.letsencrypt.org/directory"),
+    ("zerossl", "https://acme.zerossl.com/v2/DV90"),
+    ("google", "https://dv.acme-v02.api.pki.goog/directory"),
+    ("google-test", "https://dv.acme-v02.test-api.pki.goog/directory"),
+];
+
+/// A credential from stdin, never argv: asked for without echo on a terminal, else the next line.
+fn credential_line(prompt: &str) -> anyhow::Result<zeroize::Zeroizing<String>> {
+    use std::io::BufRead as _;
+    let line = if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        read_hidden(prompt)?
+    } else {
+        let mut l = String::new();
+        std::io::stdin().lock().read_line(&mut l).context("reading the credential from stdin")?;
+        l
+    };
+    let line = zeroize::Zeroizing::new(line.trim().to_string());
+    anyhow::ensure!(!line.is_empty(), "{} (on stdin)", prompt.trim_end_matches([':', ' ']));
+    Ok(line)
+}
+
+async fn public_cert_id(c: &Client<'_>, id: &str) -> anyhow::Result<String> {
+    let list = c.call(Method::GET, &format!("{}/public-certs", c.base()), None).await?;
+    let p = list.as_array().into_iter().flatten().find(|p| p["id"] == id || p["name"] == id).ok_or_else(|| anyhow::anyhow!("no public certificate {id}"))?;
+    Ok(s(&p["id"]))
+}
+
+/// What the renewal caps allow now: `3 of 3 asked this week` and when the next may come.
+fn caps(p: &Value) -> String {
+    let asked = p["renewals_asked"].as_u64().unwrap_or_default();
+    match p["renew_after"].as_i64() {
+        Some(t) => format!("renewals held until {} ({asked} of 3 asked this week)", chrono::DateTime::from_timestamp_millis(t).map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string()).unwrap_or_default()),
+        None => format!("{asked} of 3 renewals asked this week"),
+    }
+}
+
+async fn public_certs(c: &Client<'_>, cmd: PublicCertsCmd, json_out: bool) -> anyhow::Result<()> {
+    let base = format!("{}/public-certs", c.base());
+    let print = |v: &Value| -> anyhow::Result<()> {
+        println!("{}", serde_json::to_string_pretty(v)?);
+        Ok(())
+    };
+    let names = |p: &Value| p["domains"].as_array().into_iter().flatten().filter_map(Value::as_str).collect::<Vec<_>>().join(",");
+    let renews = |p: &Value| match (p["status"].as_str(), p["renews_at"].as_i64()) {
+        (_, Some(0)) => "renewing now".to_string(),
+        (_, Some(t)) => format!("renews {}", day(t)),
+        (Some("failing"), None) => "retried hourly".to_string(),
+        _ => "ordering".to_string(),
+    };
+    match cmd {
+        PublicCertsCmd::Ls => {
+            let v = c.call(Method::GET, &base, None).await?;
+            if json_out {
+                return print(&v);
+            }
+            for p in v.as_array().into_iter().flatten() {
+                let until = p["not_after"].as_i64().map(|t| format!("until {}  ", day(t))).unwrap_or_default();
+                println!("{}  {:<16} {:<8} {}  {until}{}  {}", s(&p["id"]), s(&p["name"]), s(&p["status"]), names(p), renews(p), caps(p));
+            }
+        }
+        PublicCertsCmd::Add { name, domains, dns, aws_role, ca, eab_kid, rotate_days } => {
+            let directory = PUBLIC_CAS.iter().find(|(n, _)| *n == ca).map_or(ca.clone(), |(_, url)| url.to_string());
+            let mut body = json!({ "name": name, "directory_url": directory, "domains": domains, "dns_provider": dns });
+            match (&aws_role, dns.as_str()) {
+                (Some(_), "cloudflare") => bail!("--aws-role is Route 53's"),
+                (Some(role), _) => body["aws_role"] = json!(role),
+                (None, "route53") => body["dns_credential"] = json!(*credential_line("Route 53 access key (ACCESS_KEY_ID:SECRET_ACCESS_KEY): ")?),
+                (None, _) => body["dns_credential"] = json!(*credential_line("Cloudflare API token (Zone DNS edit on the names' zones): ")?),
+            }
+            if let Some(kid) = eab_kid {
+                body["eab_kid"] = json!(kid);
+                body["eab_hmac_key"] = json!(*credential_line("EAB HMAC key: ")?);
+            }
+            if let Some(d) = rotate_days {
+                body["rotate_days"] = json!(d);
+            }
+            let v = c.call(Method::POST, &base, Some(body)).await?;
+            if json_out {
+                return print(&v);
+            }
+            println!("Registered {} ({}) for {}: roll orders it in the background; link TLS_CERT, TLS_KEY and TLS_FULLCHAIN to it once `roll secrets public-certs show {}` says issued.", s(&v["name"]), s(&v["id"]), names(&v), s(&v["name"]));
+        }
+        PublicCertsCmd::Show { id } => {
+            let id = public_cert_id(c, &id).await?;
+            let v = c.call(Method::GET, &base, None).await?;
+            let p = v.as_array().into_iter().flatten().find(|p| p["id"] == id.as_str()).cloned().unwrap_or_default();
+            if json_out {
+                return print(&p);
+            }
+            let dns = match p["aws_role"].as_str() {
+                Some(role) => format!("route53 as AWS role {role}"),
+                None => s(&p["dns_provider"]),
+            };
+            println!("{}  {}  {}", s(&p["id"]), s(&p["name"]), s(&p["status"]));
+            println!("  names     {}", names(&p).replace(',', ", "));
+            println!("  CA        {}", s(&p["directory_url"]));
+            println!("  DNS       {dns}");
+            if let Some(serial) = p["serial"].as_str() {
+                println!("  serial    {serial}, issued {}, until {}", day(p["issued_at"].as_i64().unwrap_or_default()), day(p["not_after"].as_i64().unwrap_or_default()));
+            }
+            if let Some(serial) = p["previous_serial"].as_str() {
+                println!("  previous  {serial} (revocable until it ends)");
+            }
+            println!("  renewal   {}; {}", renews(&p), caps(&p));
+            for r in p["revocations"].as_array().into_iter().flatten() {
+                let why = r["last_error"].as_str().map(|e| format!(": {e}")).unwrap_or_default();
+                println!("  revoked   {} ({}) {}{why}", s(&r["serial"]), s(&r["reason"]), s(&r["state"]));
+            }
+            if let Some(e) = p["last_error"].as_str() {
+                println!("  failing   {e}");
+            }
+            println!("  made by   {}, {}", s(&p["created_by"]), day(p["created_at"].as_i64().unwrap_or_default()));
+        }
+        PublicCertsCmd::Set { id, name, domains, rotate_days, credential, aws_role } => {
+            let id = public_cert_id(c, &id).await?;
+            let mut body = json!({});
+            if let Some(n) = name {
+                body["name"] = json!(n);
+            }
+            if !domains.is_empty() {
+                body["domains"] = json!(domains);
+            }
+            match rotate_days.as_deref() {
+                Some("default") => body["rotate_days"] = Value::Null,
+                Some(d) => body["rotate_days"] = json!(d.parse::<u64>().map_err(|_| anyhow::anyhow!("--rotate-days is a number of days or default"))?),
+                None => {}
+            }
+            if let Some(role) = aws_role {
+                body["aws_role"] = json!(role);
+            }
+            if credential {
+                body["dns_credential"] = json!(*credential_line("The DNS provider's new credential: ")?);
+            }
+            anyhow::ensure!(body.as_object().is_some_and(|b| !b.is_empty()), "nothing to change: --name, --domain, --rotate-days, --credential or --aws-role");
+            let v = c.call(Method::PATCH, &format!("{base}/{}", enc(&id)), Some(body)).await?;
+            if json_out {
+                return print(&v);
+            }
+            println!("Changed {}: {}, {}", s(&v["name"]), names(&v), renews(&v));
+        }
+        PublicCertsCmd::Renew { id } => {
+            let id = public_cert_id(c, &id).await?;
+            let v = c.call(Method::POST, &format!("{base}/{}/renew", enc(&id)), None).await?;
+            if json_out {
+                return print(&v);
+            }
+            println!("Ordering a new certificate for {}: linked keys rotate once the CA issues it ({}).", s(&v["name"]), caps(&v));
+        }
+        PublicCertsCmd::Revoke { id, previous, reason } => {
+            let id = public_cert_id(c, &id).await?;
+            let mut body = json!({ "serial": if previous { "previous" } else { "current" } });
+            if let Some(r) = reason {
+                body["reason"] = json!(r);
+            }
+            let v = c.call(Method::POST, &format!("{base}/{}/revoke", enc(&id)), Some(body)).await?;
+            if json_out {
+                return print(&v);
+            }
+            let r = &v["revocations"][0];
+            println!("Revoked {} of {} ({}){}", s(&r["serial"]), s(&v["name"]), s(&r["reason"]), if previous { "" } else { "; a new certificate is on its way" });
+        }
+        PublicCertsCmd::Rm { id } => {
+            let id = public_cert_id(c, &id).await?;
+            c.call(Method::DELETE, &format!("{base}/{}", enc(&id)), None).await?;
+            println!("Removed {id}");
+        }
+    }
+    Ok(())
+}
+
 async fn acme(c: &Client<'_>, cmd: AcmeCmd, json_out: bool) -> anyhow::Result<()> {
     let at = |ca: &str| format!("{}/cas/{}/acme", c.base(), enc(ca));
     let print = |v: &Value| -> anyhow::Result<()> {

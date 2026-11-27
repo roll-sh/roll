@@ -102,6 +102,7 @@ pub(crate) const ADDED: &[(&str, &str)] = &[
     ("rolled_serial", "TEXT"),
     ("rolled_at", "INTEGER"),
     ("linked_at", "INTEGER"),
+    ("aws_role", "TEXT"),
 ];
 
 pub(crate) const KIND: &str = "public_cert";
@@ -191,18 +192,23 @@ impl RevokeReason {
 pub enum DnsProvider {
     /// Cloudflare's API, with a token that may edit DNS in the names' zones.
     Cloudflare,
+    /// Amazon Route 53, as one of the project's AWS roles (`aws_role`: no key stored) or with an
+    /// access key (`ACCESS_KEY_ID:SECRET_ACCESS_KEY`).
+    Route53,
 }
 
 impl DnsProvider {
     pub fn as_str(self) -> &'static str {
         match self {
             DnsProvider::Cloudflare => "cloudflare",
+            DnsProvider::Route53 => "route53",
         }
     }
 
     pub(crate) fn parse(s: &str) -> Option<DnsProvider> {
         match s {
             "cloudflare" => Some(DnsProvider::Cloudflare),
+            "route53" => Some(DnsProvider::Route53),
             _ => None,
         }
     }
@@ -210,9 +216,46 @@ impl DnsProvider {
     /// Whether it can prove a wildcard (dns-01 can; an http-01 solver couldn't).
     fn wildcards(self) -> bool {
         match self {
-            DnsProvider::Cloudflare => true,
+            DnsProvider::Cloudflare | DnsProvider::Route53 => true,
         }
     }
+}
+
+/// What rolld's client proves the names with, opened for one check or order.
+pub enum DnsCredential {
+    /// A Cloudflare API token.
+    Cloudflare(Value),
+    /// AWS credentials for Route 53: a session of the project's role (with its token), or the
+    /// access key the registration holds.
+    Route53 { access_key_id: String, secret_access_key: Value, session_token: Option<Value> },
+}
+
+impl DnsCredential {
+    pub fn provider(&self) -> DnsProvider {
+        match self {
+            DnsCredential::Cloudflare(_) => DnsProvider::Cloudflare,
+            DnsCredential::Route53 { .. } => DnsProvider::Route53,
+        }
+    }
+}
+
+/// The inline session policy of every session a public certificate takes of a project AWS role
+/// (STS's `Policy`): whatever else the role may do, the session may only find the zone, read and
+/// write `_acme-challenge` TXT records, and wait on the change. Its name is
+/// `roll-public-cert-<id>` (`roll-public-cert-check` for a check), which a trust policy's
+/// `sts:RoleSessionName` and a permission's `aws:userid` can match (docs/secrets.md, "Publicly
+/// trusted certificates").
+pub const ROUTE53_SESSION_POLICY: &str = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["route53:ListHostedZonesByName","route53:ListResourceRecordSets","route53:GetChange"],"Resource":"*"},{"Effect":"Allow","Action":"route53:ChangeResourceRecordSets","Resource":"*","Condition":{"ForAllValues:StringLike":{"route53:ChangeResourceRecordSetsNormalizedRecordNames":["_acme-challenge.*"]},"ForAllValues:StringEquals":{"route53:ChangeResourceRecordSetsRecordTypes":["TXT"]}}}]}"#;
+
+/// An AWS access key given as `ACCESS_KEY_ID:SECRET_ACCESS_KEY` (an id is letters and digits; a
+/// secret has no colon).
+fn aws_key(v: &Value) -> Result<DnsCredential> {
+    let bad = || Error::BadRequest("a Route 53 dns_credential is an AWS access key as ACCESS_KEY_ID:SECRET_ACCESS_KEY (or give aws_role, one of the project's AWS roles, and store no key)".into());
+    let (id, secret) = v.expose().trim().split_once(':').ok_or_else(bad)?;
+    if !(16..=128).contains(&id.len()) || !id.chars().all(|c| c.is_ascii_alphanumeric()) || secret.is_empty() || secret.contains(':') || secret.chars().any(char::is_whitespace) {
+        return Err(bad());
+    }
+    Ok(DnsCredential::Route53 { access_key_id: id.to_string(), secret_access_key: Value::new(secret.to_string()), session_token: None })
 }
 
 /// What rolld's ACME client is asked for.
@@ -223,8 +266,7 @@ pub struct Order<'a> {
     pub account: Option<&'a Value>,
     /// External Account Binding for a new account: the key id and the HMAC key (base64url).
     pub eab: Option<(&'a str, &'a Value)>,
-    pub dns: DnsProvider,
-    pub credential: &'a Value,
+    pub dns: &'a DnsCredential,
 }
 
 /// A certificate the CA issued.
@@ -253,8 +295,8 @@ pub struct Revoke<'a> {
 pub trait PublicCa: Send + Sync {
     /// Whether roll may order from `directory`: [`PUBLIC_CAS`] and the operator's list.
     fn allows(&self, directory: &str) -> bool;
-    /// Check the DNS credential before it's kept, read only: it may edit each name's zone.
-    fn check(&self, dns: DnsProvider, credential: &Value, names: &[String]) -> std::result::Result<(), String>;
+    /// Check the DNS credential before it's kept, read only: it sees each name's zone.
+    fn check(&self, dns: &DnsCredential, names: &[String]) -> std::result::Result<(), String>;
     /// Order a certificate (blocks, minutes at most). Errors never hold a credential.
     fn order(&self, order: Order<'_>) -> std::result::Result<Ordered, String>;
     /// Revoke a certificate the account ordered (blocks; one already revoked counts as revoked),
@@ -271,6 +313,9 @@ pub struct PublicCert {
     pub directory_url: String,
     pub domains: Vec<String>,
     pub dns_provider: DnsProvider,
+    /// Route 53 as this project AWS role (no key stored); none: the key it was given.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub aws_role: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub eab_kid: Option<String>,
     /// As set; none: two thirds of the certificate's lifetime.
@@ -287,6 +332,11 @@ pub struct PublicCert {
     /// When the next renewal is due (now, if one was asked for).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub renews_at: Option<i64>,
+    /// Renewals asked for (and leaks') in the last 7 days, of the 3 a week the caps allow.
+    pub renewals_asked: usize,
+    /// While the caps hold a renewal asked for now (one an hour, three a week): when one may come.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub renew_after: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -334,7 +384,12 @@ pub struct NewPublicCert {
     pub directory_url: String,
     pub domains: Vec<String>,
     pub dns_provider: String,
-    pub dns_credential: Value,
+    /// Cloudflare's API token, or Route 53's `ACCESS_KEY_ID:SECRET_ACCESS_KEY`; none with `aws_role`.
+    #[serde(default)]
+    pub dns_credential: Option<Value>,
+    /// Route 53 only: the project's AWS role (`…/aws-roles`) roll writes the records as.
+    #[serde(default)]
+    pub aws_role: Option<String>,
     #[serde(default)]
     pub eab_kid: Option<String>,
     #[serde(default)]
@@ -354,6 +409,9 @@ pub struct PublicCertChange {
     pub domains: Option<Vec<String>>,
     #[serde(default)]
     pub dns_credential: Option<Value>,
+    /// Route 53 only: write the records as this project AWS role from now on, instead of a key.
+    #[serde(default)]
+    pub aws_role: Option<String>,
     /// `null` goes back to the default.
     #[serde(default, deserialize_with = "some")]
     pub rotate_days: Option<Option<u64>>,
@@ -576,9 +634,12 @@ struct Row {
     created_by: String,
     previous_serial: Option<String>,
     previous_not_after: Option<i64>,
+    aws_role: Option<String>,
+    /// Renewals asked for: (when, for a leak).
+    asked: Vec<(i64, bool)>,
 }
 
-const COLUMNS: &str = "id, project_id, name, directory, domains, dns_provider, eab_kid, rotate_days, CASE WHEN certificate IS NULL THEN 0 ELSE 1 END, serial, not_before, not_after, issued_at, renew_requested, last_error, failed_at, created_at, created_by, previous_serial, previous_not_after";
+const COLUMNS: &str = "id, project_id, name, directory, domains, dns_provider, eab_kid, rotate_days, CASE WHEN certificate IS NULL THEN 0 ELSE 1 END, serial, not_before, not_after, issued_at, renew_requested, last_error, failed_at, created_at, created_by, previous_serial, previous_not_after, aws_role, asked_renewals";
 
 fn row(r: &code_sql::Row<'_>) -> code_sql::Result<Row> {
     let domains: String = r.get(4)?;
@@ -604,6 +665,8 @@ fn row(r: &code_sql::Row<'_>) -> code_sql::Result<Row> {
         created_by: r.get(17)?,
         previous_serial: r.get(18)?,
         previous_not_after: r.get(19)?,
+        aws_role: r.get(20)?,
+        asked: r.get::<_, Option<String>>(21)?.and_then(|a| serde_json::from_str(&a).ok()).unwrap_or_default(),
     })
 }
 
@@ -638,6 +701,7 @@ impl Row {
             directory_url: self.directory.clone(),
             domains: self.domains.clone(),
             dns_provider: self.dns,
+            aws_role: self.aws_role.clone(),
             eab_kid: self.eab_kid.clone(),
             rotate_days: self.rotate_days,
             status,
@@ -645,6 +709,8 @@ impl Row {
             not_after: self.not_after,
             issued_at: self.issued_at,
             renews_at: self.has_cert.then(|| self.due_at()),
+            renewals_asked: self.asked.iter().filter(|(at, _)| *at > now - WEEK_MS).count(),
+            renew_after: renewal_cap(&self.asked, now, false),
             last_error: self.last_error.clone(),
             failed_at: self.failed_at,
             previous_serial: self.previous(now).map(String::from),
@@ -706,6 +772,14 @@ pub(crate) fn leak_held_why(name: &str, next: i64) -> String {
 fn day_time(ms: i64) -> String {
     let t = time::OffsetDateTime::from_unix_timestamp(ms.div_euclid(1000)).unwrap_or(time::OffsetDateTime::UNIX_EPOCH);
     format!("{} {:02}:{:02} UTC", t.date(), t.hour(), t.minute())
+}
+
+/// A credential that couldn't be used, as the request's fault (a check before anything is kept).
+fn as_bad_request(e: Error) -> Error {
+    match e {
+        Error::Link(m) => Error::BadRequest(m),
+        e => e,
+    }
 }
 
 /// The leaf's DER from its PEM.
@@ -787,21 +861,22 @@ impl Secrets {
         if !ca.allows(&directory) {
             return Err(Error::BadRequest(format!("{directory} isn't a CA roll orders from: one of {} (the operator adds others with ROLL_SECRETS_ACME_ALLOW)", PUBLIC_CAS.join(", "))));
         }
-        let dns = DnsProvider::parse(&n.dns_provider).ok_or_else(|| Error::BadRequest(format!("dns_provider is cloudflare, not {:?}", n.dns_provider)))?;
+        let dns = DnsProvider::parse(&n.dns_provider).ok_or_else(|| Error::BadRequest(format!("dns_provider is cloudflare or route53, not {:?}", n.dns_provider)))?;
         let domains = check_domains(&n.domains, dns)?;
         check_rotate_days(n.rotate_days)?;
-        if n.dns_credential.expose().trim().is_empty() {
-            return Err(Error::BadRequest("dns_credential is the DNS provider's API token".into()));
-        }
+        let role = n.aws_role.as_deref().map(str::trim);
         let eab = match (&n.eab_kid, &n.eab_hmac_key) {
             (None, None) => None,
             (Some(kid), Some(key)) if !kid.trim().is_empty() && base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(key.expose().trim().trim_end_matches('=')).is_ok_and(|k| !k.is_empty()) => Some((kid.trim().to_string(), key)),
             _ => return Err(Error::BadRequest("External Account Binding is eab_kid and eab_hmac_key (base64url), both or neither".into())),
         };
         let dek = self.project(project)?;
-        ca.check(dns, &n.dns_credential, &domains).map_err(|e| Error::BadRequest(format!("roll couldn't use this {} credential: {e}", dns.as_str())))?;
+        let cred = self.resolve_dns(project, dns, n.dns_credential.as_ref(), role, "public-cert-check").map_err(as_bad_request)?;
+        ca.check(&cred, &domains).map_err(|e| Error::BadRequest(format!("roll couldn't use this {} credential: {e}", dns.as_str())))?;
         let id = names::new_id("pcr", 16);
-        let credential = dek.seal(&aad(project, &id, &format!("dns:{}", dns.as_str())), &n.dns_credential);
+        // A role's registration holds no key: its sealed credential is empty.
+        let kept = if role.is_some() { Value::new(String::new()) } else { n.dns_credential.clone().unwrap_or_else(|| Value::new(String::new())) };
+        let credential = dek.seal(&aad(project, &id, &format!("dns:{}", dns.as_str())), &kept);
         let eab_key = eab.as_ref().map(|(_, k)| dek.seal(&aad(project, &id, &format!("eab:{directory}")), &Value::new(k.expose().trim().to_string())));
         let by = self.maker_of(caller)?;
         let now = self.db.now_ms()?;
@@ -811,8 +886,8 @@ impl Secrets {
                 return Err(Error::Conflict("exists", format!("a public certificate named {} exists", n.name)));
             }
             c.execute(
-                "INSERT INTO public_certs (id, project_id, name, directory, domains, dns_provider, dns_credential, eab_kid, eab_key, rotate_days, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                params![id, project, n.name, directory, domains_json, dns.as_str(), credential, eab.as_ref().map(|(k, _)| k.clone()), eab_key, n.rotate_days.map(|d| d as i64), now, by],
+                "INSERT INTO public_certs (id, project_id, name, directory, domains, dns_provider, dns_credential, aws_role, eab_kid, eab_key, rotate_days, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![id, project, n.name, directory, domains_json, dns.as_str(), credential, role, eab.as_ref().map(|(k, _)| k.clone()), eab_key, n.rotate_days.map(|d| d as i64), now, by],
             )?;
             audit::record(c, self.keys()?, project, caller, "public_cert.add", None, None, &[], &format!("added public certificate {} for {} from {directory}", n.name, domains.join(", ")), now)
         })?;
@@ -843,18 +918,23 @@ impl Secrets {
                 }
             }
         }
-        let replacer = ch.dns_credential.as_ref().map(|_| self.replacer(caller)).transpose()?;
-        let credential = match &ch.dns_credential {
-            Some(cred) => {
+        let role = ch.aws_role.as_deref().map(str::trim);
+        let fresh = ch.dns_credential.is_some() || role.is_some();
+        let replacer = fresh.then(|| self.replacer(caller)).transpose()?;
+        // A new credential (a token, a key, or a role instead): sealed, with the role it names.
+        let credential = match fresh {
+            true => {
+                let cred = self.resolve_dns(project, r.dns, ch.dns_credential.as_ref(), role, "public-cert-check").map_err(as_bad_request)?;
                 let names = domains.as_deref().unwrap_or(r.domains.as_slice());
-                ca.check(r.dns, cred, names).map_err(|e| Error::BadRequest(format!("roll couldn't use this {} credential: {e}", r.dns.as_str())))?;
-                Some(dek.seal(&aad(project, id, &format!("dns:{}", r.dns.as_str())), cred))
+                ca.check(&cred, names).map_err(|e| Error::BadRequest(format!("roll couldn't use this {} credential: {e}", r.dns.as_str())))?;
+                let kept = if role.is_some() { Value::new(String::new()) } else { ch.dns_credential.clone().unwrap_or_else(|| Value::new(String::new())) };
+                Some((dek.seal(&aad(project, id, &format!("dns:{}", r.dns.as_str())), &kept), role.map(String::from)))
             }
-            None => {
+            false => {
                 if let Some(d) = &domains {
                     // The credential in use must reach the new names' zones too.
-                    let cred = self.public_cert_credential(&dek, &r)?;
-                    ca.check(r.dns, &cred, d).map_err(|e| Error::BadRequest(format!("roll couldn't use {}'s {} credential for these names: {e}", r.name, r.dns.as_str())))?;
+                    let cred = self.dns_credential(&dek, &r, "public-cert-check").map_err(as_bad_request)?;
+                    ca.check(&cred, d).map_err(|e| Error::BadRequest(format!("roll couldn't use {}'s {} credential for these names: {e}", r.name, r.dns.as_str())))?;
                 }
                 None
             }
@@ -876,10 +956,10 @@ impl Secrets {
                 changed.push("domains");
             }
             let mut moved = String::new();
-            if let (Some(sealed), Some(by)) = (&credential, &replacer) {
+            if let (Some((sealed, role)), Some(by)) = (&credential, &replacer) {
                 moved = replace_registration_credential(c, Registration::PublicCertDns, id, sealed, by)?;
-                c.execute("UPDATE public_certs SET renew_requested = 1, failed_at = NULL WHERE id = ?", [id])?;
-                changed.push("DNS credential");
+                c.execute("UPDATE public_certs SET aws_role = ?, renew_requested = 1, failed_at = NULL WHERE id = ?", params![role, id])?;
+                changed.push(if role.is_some() { "AWS role" } else { "DNS credential" });
             }
             if let Some(d) = ch.rotate_days.filter(|d| *d != r.rotate_days) {
                 c.execute("UPDATE public_certs SET rotate_days = ? WHERE id = ?", params![d.map(|d| d as i64), id])?;
@@ -1090,9 +1170,31 @@ impl Secrets {
         self.db.read(|c| Ok(c.query("SELECT id, name FROM public_certs WHERE project_id = ? ORDER BY name", [project], |r| Ok((r.get(0)?, r.get(1)?)))?))
     }
 
-    fn public_cert_credential(&self, dek: &Dek, r: &Row) -> Result<Value> {
+    /// Registration `r`'s DNS credential, opened: its token or key, or a session of its AWS role
+    /// (`label` names the session).
+    fn dns_credential(&self, dek: &Dek, r: &Row, label: &str) -> Result<DnsCredential> {
+        if r.aws_role.is_some() {
+            return self.resolve_dns(&r.project, r.dns, None, r.aws_role.as_deref(), label);
+        }
         let sealed: Vec<u8> = self.db.read(|c| c.query_row("SELECT dns_credential FROM public_certs WHERE id = ?", [&r.id], |x| x.get(0)))?;
-        Ok(dek.open(&aad(&r.project, &r.id, &format!("dns:{}", r.dns.as_str())), &sealed)?)
+        let key = dek.open(&aad(&r.project, &r.id, &format!("dns:{}", r.dns.as_str())), &sealed)?;
+        self.resolve_dns(&r.project, r.dns, Some(&key), None, label)
+    }
+
+    /// `dns`'s credential from the token or key given, or a session of the project's AWS role
+    /// `role` (Route 53's, which needs no stored key: #945's roles, through roll's issuer or an
+    /// ExternalId). Exactly one of them.
+    fn resolve_dns(&self, project: &str, dns: DnsProvider, key: Option<&Value>, role: Option<&str>, label: &str) -> Result<DnsCredential> {
+        match (dns, key, role) {
+            (DnsProvider::Cloudflare, Some(t), None) if !t.expose().trim().is_empty() => Ok(DnsCredential::Cloudflare(Value::new(t.expose().to_string()))),
+            (DnsProvider::Cloudflare, _, _) => Err(Error::BadRequest("a Cloudflare dns_credential is an API token with Zone DNS edit on the names' zones (aws_role is Route 53's)".into())),
+            (DnsProvider::Route53, Some(k), None) => aws_key(k),
+            (DnsProvider::Route53, None, Some(role)) => {
+                let s = self.aws_role_session(project, role, label, Some(ROUTE53_SESSION_POLICY))?;
+                Ok(DnsCredential::Route53 { access_key_id: s.access_key_id.expose().to_string(), secret_access_key: s.secret_access_key, session_token: Some(s.session_token) })
+            }
+            (DnsProvider::Route53, _, _) => Err(Error::BadRequest("Route 53 takes aws_role (one of the project's AWS roles: no key stored) or dns_credential (an access key as ACCESS_KEY_ID:SECRET_ACCESS_KEY), not both".into())),
+        }
     }
 
     /// The background job: every public certificate that's due (never issued, asked for, or at its
@@ -1211,13 +1313,13 @@ impl Secrets {
         if !self.registration_reaches(&r.created_by, &[(Action::Admin, Scope::whole(&r.project))])? {
             return Err(Error::Link(format!("public certificate {} was registered by {}, who may no longer manage this project: an admin registers it again", r.name, r.created_by)));
         }
-        let credential = self.public_cert_credential(&dek, r)?;
+        let dns = self.dns_credential(&dek, r, &format!("public-cert-{}", r.id))?;
         let eab_key: Option<Vec<u8>> = self.db.read(|c| c.query_row("SELECT eab_key FROM public_certs WHERE id = ?", [&r.id], |x| x.get(0)))?;
         let eab_key = eab_key.map(|k| dek.open(&aad(&r.project, &r.id, &format!("eab:{}", r.directory)), &k)).transpose()?;
         let account: Option<Vec<u8>> = self.db.read(|c| c.query_row("SELECT credentials FROM public_cert_accounts WHERE project_id = ? AND directory = ?", [&r.project, &r.directory], |x| x.get(0)).optional())?;
         let account = account.map(|a| dek.open(&account_aad(&r.project, &r.directory), &a)).transpose()?;
         let ordered = ca
-            .order(Order { directory: &r.directory, names: &r.domains, account: account.as_ref(), eab: r.eab_kid.as_deref().zip(eab_key.as_ref()), dns: r.dns, credential: &credential })
+            .order(Order { directory: &r.directory, names: &r.domains, account: account.as_ref(), eab: r.eab_kid.as_deref().zip(eab_key.as_ref()), dns: &dns })
             .map_err(Error::Link)?;
         let now = self.db.now_ms()?;
         // The account first: a certificate kept without it would make the next order a new account.

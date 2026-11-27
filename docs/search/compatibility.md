@@ -142,6 +142,24 @@ Reproduce the YAML numbers with `scripts/search-yaml-suites.sh roll` (set `ROLL_
   (`ism_run` steps). Not run: shrink, rollup, transform, search_only, convert_index_to_remote
   and stop_replication (their steps fail with a cause saying so), and notification
   destinations and channels (roll sends no notifications: the step fails with that cause). An unloaded serverless cluster runs its due jobs when it wakes.
+- Snapshot management (`_plugins/_sm/policies`: create, update with `if_seq_no` and
+  `if_primary_term`, get, list with `from`/`size`/`sortField`/`sortOrder`/`queryString`, delete,
+  `_start`, `_stop` and `_explain` over name lists and patterns): the plugin's stored form
+  (`<name>-sm-policy` in `.opendistro-ism-config`, sharing ISM's sequence numbers; a deletion
+  without a schedule takes the creation's; `min_count` defaults to 1; `snapshot_config` in Java
+  `HashMap` order), every validation message (cron, time zone, counts, `max_age`,
+  `time_limit`, repository, notification channel, the strict mapping of `schedule`) and the
+  config index's absence, pinned by `os_sm.json` (90 steps from a fresh OpenSearch 3.9.0).
+  Policies run on SLM's scheduler, waking only for the ticks of the plugin's one-minute job
+  that have work: creation `CREATION_START` → `CREATING` (the snapshot
+  `<name>-<date_format in timezone>-<8 characters>`, lowercase, with `metadata.sm_policy`) →
+  back with `latest_execution` `SUCCESS`; deletion of the policy's snapshots past `max_count`,
+  or older than `max_age` beyond `min_count`, through `DELETING`; a failing step `RETRYING` on
+  the next three ticks (`retry.count`), then `FAILED`; messages and the explain fields as
+  OpenSearch 3.9.0 writes them (watched against it tick by tick). Snapshots are taken and
+  deleted as the user who stored the policy. Not run: `time_limit` (stored and returned) and
+  notifications (none are sent). OpenSearch's YAML suites have no snapshot management tests
+  (the index-management plugin tests it in Kotlin).
 - OpenSearch search request extras (`os_search_ext.json`, 21 steps): `phase_took`,
   `cancel_after_time_interval`, the bundled plugins' `ext` sections (`rerank`, `ml_inference`,
   `ubi` with its response `query_id`; other names fail as OpenSearch fails them), the `template`
@@ -190,7 +208,9 @@ Reproduce the YAML numbers with `scripts/search-yaml-suites.sh roll` (set `ROLL_
   filters without adding OpenSearch's +1.0 to scores; masked fields are unmapped for queries
   and aggregations (OpenSearch aggregates and matches their hashes); mappings by `hosts` never
   match (roll doesn't see the client's address); `hash`es given by clients are bcrypt (as the
-  plugin's) up to cost 14. Not yet: `nodesdn`, `allowlist`, API tokens and
+  plugin's) up to cost 14; a DLS query with a terms lookup (or any query reading another
+  document) fails the request, where the plugin's filter-level DLS runs the lookup (roll's DLS
+  queries read nothing as anyone, as Elasticsearch's role queries can't). Not yet: `nodesdn`, `allowlist`, API tokens and
   multi-tenancy itself (tenants are stored and listed; no tenant indices).
 
 
@@ -487,7 +507,19 @@ only the clusters named in the node setting `roll.security.service_token_file.cl
 (a dev-mode `search-dev` node serves one cluster, which always does). An API key whose role descriptors
 carry `restriction.workflows` runs only requests of those workflows (`search_application_query`:
 a search application's `_search`, with the searches it makes), anything else fails with
-`role_restriction_exception` ("access restricted by workflow"), `_authenticate` included. A search with `ignore_unavailable`
+`role_restriction_exception` ("access restricted by workflow"), `_authenticate` included.
+A new API key's `encoded` (create, grant and cross-cluster keys) is Elasticsearch's
+`base64(<id>:<api_key>)` when the request came to the cluster's own address (its host name, or a
+node serving only it, as the YAML suites' does), which is where a bare id works. Made anywhere
+else (a node's shared address such as `http://127.0.0.1:59200`, roll's console) it's
+`base64(<id>@<cluster>:<api_key>)`: roll's nodes route `<id>@<cluster>` to that cluster at any
+address, so the copied value works at the shared address and the cluster's own host alike. `id`
+and `api_key` are Elasticsearch's either way. A qualifier names one cluster: only that cluster
+accepts it, and a cluster's own host refuses another cluster's (`<id>@<other>`, a Basic
+`<user>@<other>`, a derived key or `<cluster>_<secret>` token naming another) with a 401; host
+names are matched case-insensitively. APIs that take a key's id (`GET _security/api_key?id=`,
+`DELETE _security/api_key` `ids`, updates) take the `id` field, never the id decoded out of
+`encoded`, which may carry `@<cluster>`. A search with `ignore_unavailable`
 leaves out the explicitly named indices its user may not read (without it they are refused);
 ES|QL and SQL name their indices strictly either way.
 Background jobs run as the user or API key that set them up, and roll checks that user or key
@@ -506,6 +538,8 @@ never a secret:
 - an ILM step moves to `ERROR` with the reason in `step_info`, and doesn't retry while the
   principal can't act;
 - an SLM run records a failure in `last_failure` and in the SLM history;
+- an OpenSearch snapshot management step is `RETRYING` and then `FAILED` in `_explain`, the
+  refusal as its `cause`;
 - a watch's execution is `failed`, with a `security_exception` in the record;
 - a rollup job is `stopped`, counts a search failure and shows the reason as `status.reason`,
   which Elasticsearch's status doesn't have. Starting the job again clears it.
@@ -517,7 +551,8 @@ transform `_update`, a policy or watch `PUT`, a new rollup job).
 A branch (README, "Branches and what they inherit") differs from the cluster it copies, which
 Elasticsearch has no counterpart of: its inherited bucket repositories (`s3`, `gcs`, `azure`)
 are registered with `readonly: true`, as Elastic Cloud registers another deployment's
-repository; its inherited SLM policies don't run and record why in `last_failure` (no
+repository; its inherited SLM policies (and OpenSearch snapshot management policies, until put
+again) don't run and record why in `last_failure` (no
 `next_execution`; `_execute` is a 409 `illegal_state_exception`, and an ILM `wait_for_snapshot`
 on one names the pause in `step_info`); its inherited watches are inactive. Cloning a snapshot into any read-only
 repository is refused as on Elasticsearch ("cannot create snapshot in a readonly repository").
@@ -1698,6 +1733,8 @@ APIs ([relevance-experiments.md](relevance-experiments.md), "First slice as buil
   (`page_view`, `search` and `search_click` as Elasticsearch has them).
 - A browser key with `limits.events` may post `search_click` and `roll_conversion` events, which
   are counted and not stored.
+- `POST _application/search_application/{name}/_roll/experiments/{id}/_promote` writes a
+  variant into the application and ends the experiment (roll's own route, under `_roll`).
 
 ## Connectors (`_connector`)
 

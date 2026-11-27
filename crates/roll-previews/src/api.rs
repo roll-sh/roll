@@ -26,6 +26,7 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route("/v1/previews/{id}/refresh", post(refresh))
         .route("/v1/previews/{id}/keep", post(keep))
         .route("/v1/previews/{id}/visual/accept", post(accept_visual))
+        .route("/v1/previews/{id}/visual/refuse", post(refuse_visual))
         .route("/v1/previews/{id}/regressions/accept", post(accept_regressions))
         .route("/v1/previews/{id}/approve", post(approve))
         .route("/v1/previews/{id}/visit", post(visit))
@@ -45,6 +46,7 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route("/v1/previews/{id}/restore-points", get(restore_points).post(save_point))
         .route("/v1/previews/{id}/restore-points/{point}", axum::routing::delete(delete_point))
         .route("/v1/previews/{id}/restore-points/{point}/restore", post(restore_point))
+        .route("/v1/previews/{id}/rehearse", post(rehearse))
         .route("/v1/previews/{id}/data/{resource}", get(browse_data))
         // roll's word for a preview's own service: the address is its credential (rolld's gate
         // lets it through, as the trace intake).
@@ -418,6 +420,35 @@ async fn accept_visual(AxState(e): S, Path(id): Path<String>, who: Option<axum::
 
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
+struct RefuseBody {
+    /// As [`AcceptBody`]'s.
+    head: Option<String>,
+    path: Option<String>,
+    group: Option<String>,
+    /// Why (one line, 200 characters at most).
+    #[serde(default)]
+    reason: String,
+}
+
+async fn refuse_visual(AxState(e): S, Path(id): Path<String>, who: Option<axum::Extension<roll_auth::SignedIn>>, grant: Option<axum::Extension<roll_auth::Grant>>, b: Bytes) -> crate::Result<Json<Preview>> {
+    check_id(&id)?;
+    let RefuseBody { head: seen, path, group, reason } = if b.is_empty() { RefuseBody::default() } else { body::<RefuseBody>(&b)? };
+    let path = match (path, group) {
+        (Some(_), Some(_)) => return Err(Error::BadRequest("a page or a group, not both".into())),
+        (None, Some(g)) => Some(format!("group:{g}")),
+        (p, None) => p,
+    };
+    let writer = who.as_ref().filter(|u| grant.is_none() && !u.admin).map(|u| u.code_owner.clone());
+    let by = match (who, grant) {
+        (Some(axum::Extension(u)), None) => u.handle,
+        (_, Some(axum::Extension(g))) => format!("token:{}", g.name),
+        (None, None) => "operator".into(),
+    };
+    e.refuse_visual(&id, &by, writer.as_ref().map(|o| o.as_deref()), seen.as_deref(), path.as_deref(), &reason).await.map(Json)
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 struct AcceptRegressionsBody {
     /// The head that was looked at: refused (409) when a newer push came in.
     head: Option<String>,
@@ -766,6 +797,14 @@ async fn save_point(AxState(e): S, Path(id): Path<String>, who: Option<axum::Ext
     let b: SavePointBody = if b.is_empty() { SavePointBody::default() } else { body(&b)? };
     let point = e.save_point(&id, &b.label, &asker(who, grant)).await?;
     Ok((axum::http::StatusCode::CREATED, Json(point)).into_response())
+}
+
+/// `POST …/rehearse`: the change's release once more on its Postgres parents as they are now
+/// (its next converge does it; `rehearsal` says how it went).
+async fn rehearse(AxState(e): S, Path(id): Path<String>, who: Option<axum::Extension<roll_auth::SignedIn>>, grant: Option<axum::Extension<roll_auth::Grant>>) -> crate::Result<(axum::http::StatusCode, Json<Preview>)> {
+    check_id(&id)?;
+    let by = asker(who, grant);
+    blocking(e, move |e| e.rehearse(&id, &by)).await.map(|p| (axum::http::StatusCode::ACCEPTED, Json(p)))
 }
 
 async fn restore_point(AxState(e): S, Path((id, point)): Path<(String, String)>, who: Option<axum::Extension<roll_auth::SignedIn>>, grant: Option<axum::Extension<roll_auth::Grant>>) -> crate::Result<Json<Preview>> {

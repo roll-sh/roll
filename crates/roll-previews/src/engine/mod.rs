@@ -91,6 +91,9 @@ pub struct Config {
     /// errors from their output (a read of their logs).
     pub routes_every: Duration,
     pub new_errors_every: Duration,
+    /// How long a masked base serves new branches before the next one is made from the parent as
+    /// it is then (`ROLL_PREVIEWS_MASK_BASE_HOURS`; zero: every masked branch masks its own copy).
+    pub mask_base_for: Duration,
 }
 
 impl Default for Config {
@@ -106,6 +109,7 @@ impl Default for Config {
             otlp: None,
             routes_every: Duration::from_secs(60),
             new_errors_every: Duration::from_secs(300),
+            mask_base_for: Duration::from_secs(24 * 3600),
         }
     }
 }
@@ -160,6 +164,13 @@ type ErrorCountsRead = HashMap<(String, i64), (i64, u64)>;
 /// Agents' runs' pictures, by run: (preview, when, PNG).
 type TriedPictures = HashMap<String, (String, i64, Vec<u8>)>;
 type OidcIssued = HashMap<(String, String, String), (i64, crate::OidcToken)>;
+
+/// How often the leader looks for masked bases to delete.
+const BASES_SWEPT_EVERY: Duration = Duration::from_secs(600);
+
+/// Main's code running on a copy of a change's data on roll's runtime: main's revision, and the
+/// copy's variables (main_on_change.rs).
+type MainRun = (String, Vec<(String, String)>);
 
 pub struct Engine {
     pub cfg: Config,
@@ -263,6 +274,10 @@ pub struct Engine {
     secrets_told: Mutex<HashMap<String, Vec<String>>>,
     /// The rules' references last left out per preview, their writers unable to now (told once).
     refs_told: Mutex<HashMap<String, Vec<String>>>,
+    /// Main's code run on roll's runtime in a change's preview (`web@main`), by (preview,
+    /// service): main's revision and the copy's variables, only while it runs (held in memory:
+    /// they're credentials).
+    main_runs: Mutex<HashMap<(String, String), MainRun>>,
     /// Keys bound to hosts its egress doesn't allow, last told per preview.
     bound_told: Mutex<HashMap<String, Vec<String>>>,
     /// What ends a preview's interception when it's torn down (rolld, over roll secrets).
@@ -275,6 +290,8 @@ pub struct Engine {
     paths_seen: Mutex<HashMap<(String, String), HeadPaths>>,
     /// One pass at a time.
     passing: tokio::sync::Mutex<()>,
+    /// When old masked bases were last looked for (every [`BASES_SWEPT_EVERY`]).
+    bases_swept: parking_lot::Mutex<Option<std::time::Instant>>,
 }
 
 /// The variables a branch of `kind` is reached by (the first of a kind takes the plain names).
@@ -333,6 +350,7 @@ impl Engine {
             },
             secrets_told: Mutex::new(HashMap::new()),
             refs_told: Mutex::new(HashMap::new()),
+            main_runs: Mutex::new(HashMap::new()),
             bound_told: Mutex::new(HashMap::new()),
             intercepts: std::sync::OnceLock::new(),
             domain_read: Mutex::new(HashMap::new()),
@@ -348,6 +366,7 @@ impl Engine {
             warm_wanted: Mutex::new(Vec::new()),
             deploying_since: Mutex::new(HashMap::new()),
             passing: tokio::sync::Mutex::new(()),
+            bases_swept: parking_lot::Mutex::new(None),
             drains: std::sync::OnceLock::new(),
             issuer: std::sync::OnceLock::new(),
             oidc_issued: Mutex::new(HashMap::new()),
@@ -445,6 +464,16 @@ impl Engine {
             for (project, settings) in &enabled {
                 if let Err(e) = self.discover(project, settings).await {
                     warn!(%project, error = %e, "previews: discovering");
+                }
+            }
+            // Masked bases no longer branched from, once nothing comes from them.
+            let sweep = { let mut at = self.bases_swept.lock(); let due = at.is_none_or(|t| t.elapsed() >= BASES_SWEPT_EVERY); if due { *at = Some(std::time::Instant::now()); } due };
+            if sweep {
+                for (kind, parent) in self.store.mask_base_parents()? {
+                    if let Ok(b) = self.brancher(kind) {
+                        let b = b.clone();
+                        self.drop_old_mask_bases(&b, kind, &parent).await;
+                    }
                 }
             }
             // Previews turned off: the project's previews go (never for rules that don't parse).
@@ -986,6 +1015,7 @@ mod converge;
 mod discover;
 mod drains;
 mod env;
+mod main_on_change;
 mod masks;
 mod points;
 pub use points::MAX_POINTS;
@@ -1014,6 +1044,7 @@ mod tests {
             branch: Some("feat/x".into()),
             head: "cs_1".into(),
             open: true,
+            queued: false,
             draft: false,
             labels: Vec::new(),
             trusted: true,

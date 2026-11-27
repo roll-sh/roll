@@ -119,6 +119,21 @@ pub enum Preview {
         #[arg(long)]
         group: Option<String>,
     },
+    /// Refuse how a change's pages look at its latest screenshot (Chromatic's Deny): every page,
+    /// --page one, --first the first page, or --group those changed the same way. Its visual
+    /// review fails until a new push, or until someone accepts them.
+    Refuse {
+        preview: String,
+        /// Why (one line, 200 characters at most).
+        #[arg(long, default_value = "")]
+        reason: String,
+        #[arg(long, conflicts_with_all = ["first", "group"])]
+        page: Option<String>,
+        #[arg(long, conflicts_with = "group")]
+        first: bool,
+        #[arg(long)]
+        group: Option<String>,
+    },
     /// Save its screenshot (a PNG) to --out: the first page, --page another of `github.pages`,
     /// --phone at a phone's width, --base the default branch's it was compared with, --previous
     /// the one before, or --diff base|previous where it differs from those.
@@ -195,6 +210,10 @@ pub enum Preview {
         #[arg(long, conflicts_with_all = ["save", "restore"])]
         delete: Option<String>,
     },
+    /// Rehearse the change's release (migrations) on its Postgres parents as they are now:
+    /// fresh branches, masked as the rules say, the release run on them, then deleted. Its next
+    /// converge does it; `show` says how it went.
+    Rehearse { preview: String },
     /// Re-branch its data from the parents (every resource, or the ones named).
     Reset {
         preview: String,
@@ -1104,6 +1123,16 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
             };
             api.post(&format!("/v1/previews/{preview}/visual/accept"), body).await?
         }
+        Preview::Refuse { preview, reason, page, first, group } => {
+            let mut body = match (page, first, group) {
+                (_, _, Some(g)) => json!({ "group": g }),
+                (Some(p), _, None) => json!({ "path": p }),
+                (None, true, None) => json!({ "path": "" }),
+                (None, false, None) => json!({}),
+            };
+            body["reason"] = json!(reason);
+            api.post(&format!("/v1/previews/{preview}/visual/refuse"), body).await?
+        }
         Preview::Keep { preview, hours, release } => api.post(&format!("/v1/previews/{preview}/keep"), json!({ "hours": if release { 0 } else { hours } })).await?,
         Preview::Share { preview, hours, label, notes, list, revoke } => {
             let path = format!("/v1/previews/{preview}/shares");
@@ -1225,6 +1254,7 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
             v
         }
         Preview::Reset { preview, resources } => api.post(&format!("/v1/previews/{preview}/reset"), json!({ "resources": resources })).await?,
+        Preview::Rehearse { preview } => api.post(&format!("/v1/previews/{preview}/rehearse"), json!({})).await?,
         Preview::Points { preview, save, restore, delete } => {
             let base = format!("/v1/previews/{preview}/restore-points");
             let (v, said) = match (save, restore, delete) {

@@ -2698,6 +2698,9 @@ impl Control {
         for (id, cpu) in self.node.take_inference_cpu() {
             self.meter.count_inference(&id, cpu);
         }
+        for (id, (input, output)) in self.node.take_tokens() {
+            self.meter.count_tokens(&id, input, output);
+        }
         for (id, o) in self.node.take_observations() {
             // Lost if the catalog can't take them now: they are a picture, not a bill.
             if let Err(e) = self.meter.observe(&id, o).await {

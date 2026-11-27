@@ -527,6 +527,35 @@ CREATE TABLE IF NOT EXISTS domains (
 CREATE INDEX IF NOT EXISTS domains_env ON domains (service, env);
 -- A project's own preview domain (`*.preview.acme.dev`, roll previews' preview deployment
 -- suffix), and the label each preview environment answers to under it.
+CREATE TABLE IF NOT EXISTS alert_silences (
+    id TEXT PRIMARY KEY,
+    service TEXT NOT NULL,
+    env TEXT NOT NULL,
+    until_ms INTEGER NOT NULL,
+    alerts TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS alert_silences_env ON alert_silences (service, env);
+CREATE TABLE IF NOT EXISTS deploy_git_tags (
+    deployment TEXT PRIMARY KEY,
+    tag TEXT NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS env_deploy_tags (
+    service TEXT NOT NULL,
+    env TEXT NOT NULL,
+    pattern TEXT NOT NULL,
+    seen TEXT NOT NULL,
+    PRIMARY KEY (service, env)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS domain_claims (
+    hostname TEXT NOT NULL,
+    service TEXT NOT NULL,
+    env TEXT NOT NULL,
+    token TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (hostname, service, env)
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS project_boards (
     project TEXT PRIMARY KEY,
     panels TEXT NOT NULL,
@@ -1260,7 +1289,62 @@ impl Store {
         db.add_column("domains", "redirect_to", "TEXT")?;
         let store = Store { db, sealer };
         store.mark_references()?;
+        store.quote_log_patterns()?;
         Ok(store)
+    }
+
+    /// Once (`state`'s `log-patterns-quoted`): log alerts' and log metrics' patterns saved while
+    /// they matched a substring (before they took the Logs search, #1121) quoted, so each matches
+    /// what it did (`connection refused` the phrase, `-ERR` the text, not every line without it).
+    /// One word was already the same either way. Services', environments' and deployments' runs.
+    fn quote_log_patterns(&self) -> Result<()> {
+        if self.get_state("log-patterns-quoted")?.is_some() {
+            return Ok(());
+        }
+        let quote = |p: &mut serde_json::Value| {
+            if let Some(t) = p.as_str()
+                && !t.contains('"')
+                && (t.contains(char::is_whitespace) || t.starts_with('-') || t == "OR")
+            {
+                *p = serde_json::Value::String(format!("\"{t}\""));
+            }
+        };
+        let fix = |run: &str| -> Option<String> {
+            let mut v: serde_json::Value = serde_json::from_str(run).ok()?;
+            let before = v.clone();
+            if let Some(m) = v.pointer_mut("/alerts/log_match") {
+                quote(m);
+            }
+            if let Some(ms) = v.get_mut("log_metrics").and_then(serde_json::Value::as_array_mut) {
+                for m in ms {
+                    if let Some(p) = m.get_mut("pattern") {
+                        quote(p);
+                    }
+                }
+            }
+            (v != before).then(|| v.to_string())
+        };
+        self.db.write(|c| {
+            // Another node may have just done it: once, in the same write as the mark.
+            if c.execute("INSERT INTO state (key, value) VALUES ('log-patterns-quoted', '1') ON CONFLICT (key) DO NOTHING", ())? == 0 {
+                return Ok(());
+            }
+            for (table, key) in [("services", "id"), ("deployments", "id")] {
+                let rows: Vec<(String, String)> = c.query(&format!("SELECT {key}, run FROM {table} WHERE run LIKE '%log_match%' OR run LIKE '%log_metrics%'"), (), |r| Ok((r.get(0)?, r.get(1)?)))?;
+                for (id, run) in rows {
+                    if let Some(new) = fix(&run) {
+                        c.execute(&format!("UPDATE {table} SET run = ? WHERE {key} = ?"), params![new, id])?;
+                    }
+                }
+            }
+            let rows: Vec<(String, String, String)> = c.query("SELECT service, name, run FROM environments WHERE run LIKE '%log_match%' OR run LIKE '%log_metrics%'", (), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            for (svc, name, run) in rows {
+                if let Some(new) = fix(&run) {
+                    c.execute("UPDATE environments SET run = ? WHERE service = ? AND name = ?", params![new, svc, name])?;
+                }
+            }
+            Ok(())
+        })
     }
 
     pub fn now(&self) -> Result<i64> {
@@ -1408,9 +1492,10 @@ impl Store {
             c.execute("DELETE FROM deploy_steps WHERE deployment IN (SELECT id FROM deployments WHERE service = ?)", [id])?;
             c.execute("DELETE FROM deploy_closed WHERE deployment IN (SELECT id FROM deployments WHERE service = ?)", [id])?;
             c.execute("DELETE FROM deploy_overrides WHERE deployment IN (SELECT id FROM deployments WHERE service = ?)", [id])?;
+            c.execute("DELETE FROM deploy_git_tags WHERE deployment IN (SELECT id FROM deployments WHERE service = ?)", [id])?;
             c.execute("DELETE FROM state WHERE key LIKE ?", [format!("%:{id}/%")])?;
             c.execute("DELETE FROM status_days WHERE key LIKE ?", [format!("%:{id}/%")])?;
-            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "variable_runtime_only", "visit_tickets", "visit_sessions", "variable_files", "error_groups", "variables", "links", "domains", "preview_hosts", "runs", "jobs", "metrics", "usage", "form_submissions", "deploy_scans", "env_data", "env_branches", "udp_ports", "env_unscheduled", "sandboxes", "env_peering", "volume_hours"] {
+            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "variable_runtime_only", "visit_tickets", "visit_sessions", "variable_files", "error_groups", "variables", "links", "domains", "preview_hosts", "runs", "jobs", "metrics", "usage", "form_submissions", "deploy_scans", "env_data", "env_branches", "udp_ports", "env_unscheduled", "sandboxes", "env_peering", "volume_hours", "env_deploy_tags", "alert_silences"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ?"), [id])?;
             }
             match c.execute("DELETE FROM services WHERE id = ?", [id])? {
@@ -1550,7 +1635,7 @@ impl Store {
             if n == 0 {
                 return Err(Error::NotFound(format!("service {service} has no environment {env}")));
             }
-            for t in ["variables", "variable_files", "error_groups", "domains", "preview_hosts", "runs", "jobs", "metrics", "deploy_keys", "env_access", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "variable_runtime_only", "visit_tickets", "visit_sessions", "form_submissions", "env_data", "udp_ports", "env_unscheduled", "sandboxes", "env_peering"] {
+            for t in ["variables", "variable_files", "error_groups", "domains", "preview_hosts", "runs", "jobs", "metrics", "deploy_keys", "env_access", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "variable_runtime_only", "visit_tickets", "visit_sessions", "form_submissions", "env_data", "udp_ports", "env_unscheduled", "sandboxes", "env_peering", "env_deploy_tags", "alert_silences"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ? AND env = ?"), [service, env])?;
             }
             // Its schedules', challenge's and base images' state goes with it.
@@ -2820,6 +2905,11 @@ impl Store {
                 return Err(Error::Conflict(format!("{host} is already a domain of roll apps")));
             }
             let was: Option<String> = c.query_row("SELECT hostname FROM status_domains WHERE project = ?", [project], |r| r.get(0)).optional()?;
+            // The same name again changes nothing: its proof, its token and its week stand (a
+            // re-post can't keep an unproven claim alive, nor take a verified one off its name).
+            if was.as_deref() == Some(host) {
+                return Ok(None);
+            }
             c.execute(
                 "INSERT INTO status_domains (project, hostname, status, token, error, tls, tls_error, created_at) VALUES (?, ?, 'pending', ?, NULL, ?, NULL, ?) \
                  ON CONFLICT (project) DO UPDATE SET hostname = excluded.hostname, status = 'pending', token = excluded.token, error = NULL, tls = excluded.tls, tls_error = NULL, created_at = excluded.created_at",
@@ -2873,7 +2963,7 @@ impl Store {
                 || c.query_row("SELECT 1 FROM environments WHERE slug = ?", [host], |_| Ok(())).optional()?.is_some()
                 || c.query_row("SELECT 1 FROM status_domains WHERE hostname = ?", [host], |_| Ok(())).optional()?.is_some();
             if taken {
-                return Err(Error::Conflict(format!("{host} is already a domain of a service")));
+                return Err(Error::Conflict(format!("{host} is already a domain of a service: if it's yours, POST …/domains/{host}/claim (`roll domains claim {host}`) says how to prove it and take it")));
             }
             // A tenant's domains are bounded: certificates and their orders are shared by all.
             let per_service: i64 = c.query_row("SELECT COUNT(*) FROM domains WHERE service = ? AND kind = 'custom'", [service], |r| r.get(0))?;
@@ -2892,6 +2982,144 @@ impl Store {
             Ok(())
         })?;
         Ok(Domain { hostname: host.into(), record: "none", kind: DomainKind::Custom, status: DomainStatus::Pending, target: String::new(), token, error: None, tls, tls_error: None, created_at: now, redirect_to: None, port: None })
+    }
+
+    /// The tag pattern an environment deploys (`deploy_tags`) and the tags it has acted on.
+    pub fn deploy_tags(&self, service: &str, env: &str) -> Result<Option<(String, Vec<String>)>> {
+        Ok(self
+            .db
+            .query_row("SELECT pattern, seen FROM env_deploy_tags WHERE service = ? AND env = ?", [service, env], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .optional()?
+            .map(|(p, s)| (p, serde_json::from_str(&s).unwrap_or_default())))
+    }
+
+    /// An environment's tag pattern set, its tags already there marked as acted on (never
+    /// deployed: only a tag made from now on is), or (None) removed.
+    pub fn set_deploy_tags(&self, service: &str, env: &str, set: Option<(&str, &[String])>) -> Result<()> {
+        match set {
+            Some((pattern, seen)) => self.db.execute(
+                "INSERT INTO env_deploy_tags (service, env, pattern, seen) VALUES (?, ?, ?, ?) ON CONFLICT (service, env) DO UPDATE SET pattern = excluded.pattern, seen = excluded.seen",
+                params![service, env, pattern, serde_json::to_string(seen).expect("tags serialize")],
+            )?,
+            None => self.db.execute("DELETE FROM env_deploy_tags WHERE service = ? AND env = ?", [service, env])?,
+        };
+        Ok(())
+    }
+
+    /// A silence of an environment's alerts until `until` (ms): `alerts` the kinds (none: every
+    /// alert). At most [`crate::silences::MAX_OPEN`] open at once; ended ones are dropped here.
+    pub fn add_silence(&self, service: &str, env: &str, until: i64, alerts: &[String], reason: &str) -> Result<crate::silences::Silence> {
+        let (now, id) = (self.now()?, format!("sil_{}", random(12).to_ascii_lowercase()));
+        let j = serde_json::to_string(alerts).expect("kinds serialize");
+        self.db.write(|c| {
+            c.execute("DELETE FROM alert_silences WHERE service = ? AND env = ? AND until_ms <= ?", params![service, env, now])?;
+            let open: i64 = c.query_row("SELECT COUNT(*) FROM alert_silences WHERE service = ? AND env = ?", [service, env], |r| r.get(0))?;
+            if open >= crate::silences::MAX_OPEN {
+                return Err(Error::Conflict(format!("at most {} silences are open in an environment: end one first", crate::silences::MAX_OPEN)));
+            }
+            c.execute("INSERT INTO alert_silences (id, service, env, until_ms, alerts, reason, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)", params![id, service, env, until, j, reason, now])?;
+            Ok(())
+        })?;
+        Ok(crate::silences::Silence { id, until, alerts: alerts.to_vec(), reason: reason.into(), created_at: now })
+    }
+
+    /// An environment's silences still open at `now`.
+    pub fn silences(&self, service: &str, env: &str, now: i64) -> Result<Vec<crate::silences::Silence>> {
+        Ok(self.db.query("SELECT id, until_ms, alerts, reason, created_at FROM alert_silences WHERE service = ? AND env = ? AND until_ms > ? ORDER BY until_ms", params![service, env, now], |r| {
+            Ok(crate::silences::Silence { id: r.get(0)?, until: r.get(1)?, alerts: serde_json::from_str(&r.get::<_, String>(2)?).unwrap_or_default(), reason: r.get(3)?, created_at: r.get(4)? })
+        })?)
+    }
+
+    pub fn end_silence(&self, service: &str, env: &str, id: &str) -> Result<bool> {
+        Ok(self.db.execute("DELETE FROM alert_silences WHERE service = ? AND env = ? AND id = ?", [service, env, id])? > 0)
+    }
+
+    /// When a scheduled maintenance ends, if it's one.
+    pub fn maintenance_until(&self, project: &str, id: &str) -> Result<Option<i64>> {
+        Ok(self.db.query_row("SELECT scheduled_until FROM status_incidents WHERE project = ? AND id = ?", [project, id], |r| r.get::<_, Option<i64>>(0)).optional()?.flatten())
+    }
+
+    /// Every environment's tag list of a service forgotten (its source moved to another repository).
+    pub fn clear_deploy_tags(&self, service: &str) -> Result<()> {
+        self.db.execute("UPDATE env_deploy_tags SET seen = '[]' WHERE service = ?", [service])?;
+        Ok(())
+    }
+
+    /// The Git tag a deployment was made for (`ROLL_GIT_TAG`).
+    pub fn set_deploy_git_tag(&self, deployment: &str, tag: &str) -> Result<()> {
+        self.db.execute("INSERT INTO deploy_git_tags (deployment, tag) VALUES (?, ?) ON CONFLICT (deployment) DO NOTHING", params![deployment, tag])?;
+        Ok(())
+    }
+
+    pub fn deploy_git_tag(&self, deployment: &str) -> Result<Option<String>> {
+        Ok(self.db.query_row("SELECT tag FROM deploy_git_tags WHERE deployment = ?", [deployment], |r| r.get(0)).optional()?)
+    }
+
+    /// `tag` marked as acted on: false when it already was (each tag deploys once). The newest
+    /// [`crate::tags::MAX_SEEN`] are kept.
+    pub fn mark_tag_seen(&self, service: &str, env: &str, tag: &str) -> Result<bool> {
+        self.db.write(|c| {
+            let Some(seen): Option<String> = c.query_row("SELECT seen FROM env_deploy_tags WHERE service = ? AND env = ?", [service, env], |r| r.get(0)).optional()? else { return Ok(false) };
+            let mut seen: Vec<String> = serde_json::from_str(&seen).unwrap_or_default();
+            if seen.iter().any(|t| t == tag) {
+                return Ok(false);
+            }
+            seen.push(tag.to_string());
+            let skip = seen.len().saturating_sub(crate::tags::MAX_SEEN);
+            c.execute("UPDATE env_deploy_tags SET seen = ? WHERE service = ? AND env = ?", params![serde_json::to_string(&seen[skip..]).expect("tags serialize"), service, env])?;
+            Ok(true)
+        })
+    }
+
+    /// The token `service`'s `env` proves it holds `host` with (Vercel's "linked to another team"),
+    /// made the first time it's asked: None when no other environment's custom domain holds the
+    /// name (it's free to add, or isn't a custom domain at all).
+    pub fn claim_token(&self, host: &str, service: &str, env: &str) -> Result<Option<String>> {
+        let (now, fresh) = (self.now()?, random(24));
+        self.db.write(|c| {
+            let holder: Option<(String, String)> = c.query_row("SELECT service, env FROM domains WHERE hostname = ? AND kind = 'custom'", [host], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+            if !holder.is_some_and(|(s, e)| (s.as_str(), e.as_str()) != (service, env)) {
+                return Ok(None);
+            }
+            c.execute("INSERT INTO domain_claims (hostname, service, env, token, created_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (hostname, service, env) DO NOTHING", params![host, service, env, fresh, now])?;
+            Ok(Some(c.query_row("SELECT token FROM domain_claims WHERE hostname = ? AND service = ? AND env = ?", params![host, service, env], |r| r.get(0))?))
+        })
+    }
+
+    /// `host` moved to `service`'s `env`, proven by `token` (its claim's): in one write, the
+    /// holder's domain removed (its `domain.expired`, `reason: claimed`) and the claimant's made
+    /// verified, with the claim's token as its own. The holder's (service, env), or None when
+    /// nothing holds it any more or the claim is gone.
+    pub fn take_domain(&self, host: &str, service: &str, env: &str, token: &str, tls: TlsStatus) -> Result<Option<(String, String)>> {
+        let now = self.now()?;
+        self.db.write(|c| {
+            let ok = c.query_row("SELECT 1 FROM domain_claims WHERE hostname = ? AND service = ? AND env = ? AND token = ?", params![host, service, env, token], |_| Ok(())).optional()?.is_some();
+            let holder: Option<(String, String)> = c.query_row("SELECT service, env FROM domains WHERE hostname = ? AND kind = 'custom'", [host], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+            let Some((hs, he)) = holder.filter(|_| ok).filter(|(s, e)| (s.as_str(), e.as_str()) != (service, env)) else { return Ok(None) };
+            let per_service: i64 = c.query_row("SELECT COUNT(*) FROM domains WHERE service = ? AND kind = 'custom'", [service], |r| r.get(0))?;
+            let per_project: i64 = c.query_row(
+                "SELECT COUNT(*) FROM domains d JOIN services s ON s.id = d.service WHERE d.kind = 'custom' AND s.project = (SELECT project FROM services WHERE id = ?)",
+                [service],
+                |r| r.get(0),
+            )?;
+            if per_service >= MAX_DOMAINS_PER_SERVICE || per_project >= MAX_DOMAINS_PER_PROJECT {
+                return Err(Error::Conflict(format!("at most {MAX_DOMAINS_PER_SERVICE} custom domains a service and {MAX_DOMAINS_PER_PROJECT} a project")));
+            }
+            c.execute("DELETE FROM domains WHERE hostname = ?", [host])?;
+            insert_event(c, now, "domain.expired", &hs, &he, None, &serde_json::json!({ "hostname": host, "reason": "claimed" }))?;
+            c.execute(
+                "INSERT INTO domains (hostname, service, env, kind, status, token, error, created_at, tls, verified_at) VALUES (?, ?, ?, 'custom', 'active', ?, NULL, ?, ?, ?)",
+                params![host, service, env, token, now, tls.as_str(), now],
+            )?;
+            c.execute("DELETE FROM domain_claims WHERE hostname = ?", [host])?;
+            Ok(Some((hs, he)))
+        })
+    }
+
+    /// Claims older than `cutoff` (ms) forgotten: one asked again gets a new token.
+    pub fn expire_claim_tokens(&self, cutoff: i64) -> Result<()> {
+        self.db.execute("DELETE FROM domain_claims WHERE created_at < ?", [cutoff])?;
+        Ok(())
     }
 
     /// A domain's DNS state; the first time it's `active` is kept (the claim no longer expires).
@@ -5054,6 +5282,29 @@ fn insert_event(c: &code_sql::Conn<'_>, now: i64, kind: &str, service: &str, env
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Patterns saved as substrings keep their meaning under the Logs search: quoted once, on
+    /// the next open, one word left alone.
+    #[test]
+    fn saved_log_patterns_are_quoted_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("apps.db");
+        let s = Store::new(Db::open_sqlite(&path, Default::default()).unwrap(), Sealer::new(&"k".repeat(32)).unwrap()).unwrap();
+        let run = r#"{"alerts":{"log_match":"connection refused"},"log_metrics":[{"name":"a","pattern":"-ERR"},{"name":"b","pattern":"panic"}]}"#;
+        s.db.execute("INSERT INTO environments (service, name, ephemeral, slug, created_at, run) VALUES ('svc_x', 'production', 0, 'x', 0, ?)", [run]).unwrap();
+        s.db.execute("DELETE FROM state WHERE key = 'log-patterns-quoted'", ()).unwrap();
+        drop(s);
+        let s = Store::new(Db::open_sqlite(&path, Default::default()).unwrap(), Sealer::new(&"k".repeat(32)).unwrap()).unwrap();
+        let got: String = s.db.query_row("SELECT run FROM environments WHERE service = 'svc_x'", (), |r| r.get(0)).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&got).unwrap();
+        assert_eq!((v["alerts"]["log_match"].as_str(), v["log_metrics"][0]["pattern"].as_str(), v["log_metrics"][1]["pattern"].as_str()), (Some("\"connection refused\""), Some("\"-ERR\""), Some("panic")), "{got}");
+        // Once: a search saved since stays as it was written.
+        s.db.execute("UPDATE environments SET run = ? WHERE service = 'svc_x'", [r#"{"alerts":{"log_match":"timeout OR refused"}}"#]).unwrap();
+        drop(s);
+        let s = Store::new(Db::open_sqlite(&path, Default::default()).unwrap(), Sealer::new(&"k".repeat(32)).unwrap()).unwrap();
+        let got: String = s.db.query_row("SELECT run FROM environments WHERE service = 'svc_x'", (), |r| r.get(0)).unwrap();
+        assert!(got.contains("\"timeout OR refused\"") && !got.contains("\\\""), "{got}");
+    }
 
     /// Two notifiers (a handover) never queue an event twice for a target, the one whose
     /// cursor moved under it queues nothing, and a claimed delivery isn't handed out again.

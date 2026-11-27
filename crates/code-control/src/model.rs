@@ -301,6 +301,16 @@ impl Preview {
     }
 }
 
+/// Main's code on a copy of a change's migrated data: how many pages it was asked for, and the
+/// ones that answered on main's data but not on the change's, `(path, status, main's status)` (0:
+/// no answer; the paths are the project's settings).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct PreviewMainOnChange {
+    pub asked: u32,
+    #[serde(default)]
+    pub broke: Vec<(String, u16, u16)>,
+}
+
 /// What a change shows of its preview environment (roll previews' `Preview`, summed up).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PreviewEnvironment {
@@ -333,12 +343,23 @@ pub struct PreviewEnvironment {
     /// `schema::risks`); untrusted text too.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub schema_risks: Vec<String>,
+    /// Other open changes whose previews' schema changes touch the same tables: `(branch,
+    /// tables)`; untrusted text too.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub schema_overlaps: Vec<(String, Vec<String>)>,
     /// How long the project's release (migrations) took on the preview's data at `head`, and at
     /// the run before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub release_ms: Option<i64>,
+    /// The locks that release held that made others wait: `(table, mode, ms)` (roll previews'
+    /// sampling; untrusted names: a fork's migrations make the tables).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub release_locks: Vec<(String, String, i64)>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub release_before_ms: Option<i64>,
+    /// Main's code on a copy of this head's migrated data (roll previews).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub main_on_change: Option<PreviewMainOnChange>,
     /// A signed, expiring link to the first service's screenshot (public previews only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screenshot_url: Option<String>,
@@ -446,7 +467,8 @@ pub struct PreviewSpeedBudget {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PreviewVisualReview {
-    /// `unchanged`, `changed` (waiting for someone to accept it) or `accepted`.
+    /// `unchanged`, `changed` (waiting for someone to accept it), `accepted`, or `refused`
+    /// (someone refused a page at this head; `by` is who, `reason` why).
     pub state: String,
     pub branch: String,
     pub percent: f64,
@@ -464,6 +486,9 @@ pub struct PreviewVisualReview {
     /// Stories the change touched that its preview's run didn't take: unreviewed.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub untaken: u32,
+    /// Refused: why (one line).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// A visual review's entry (`pages[].path`) for the stories the change touched that the run

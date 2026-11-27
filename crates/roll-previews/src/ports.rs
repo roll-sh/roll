@@ -75,6 +75,38 @@ pub trait Brancher: Send + Sync {
         Ok(None)
     }
 
+    /// The locks other sessions hold now on `branch`'s tables, `(table, mode)` (Postgres's
+    /// `pg_locks` names, `AccessExclusiveLock`…), sampled while the release runs so its strongest
+    /// is said (PlanetScale's safe migrations). Empty where the product has none to say.
+    async fn locks(&self, _parent: &str, _branch: &str) -> anyhow::Result<Vec<(String, String)>> {
+        Ok(Vec::new())
+    }
+
+    /// Whether masked branches can come from one masked base per parent (Neon's anonymized
+    /// branches): [`Self::branch_from`] a branch of the parent the engine masked once, and
+    /// [`Self::children`] to know when an old base is no longer used.
+    fn branches_from_base(&self) -> bool {
+        false
+    }
+
+    /// A masked base's branch of `parent` named `name`, made (or found again after a crash): one
+    /// nobody connects to, so with no credentials of its own (where a product's credentials
+    /// would take what its branches need, as Postgres's role takes the tables it's given).
+    async fn make_base(&self, parent: &str, name: &str) -> anyhow::Result<Branched> {
+        self.branch(parent, name, Mode::Branch).await
+    }
+
+    /// A branch named `name` of `from`, itself a branch of `parent` (a masked base): copy-on-write,
+    /// with credentials of its own, as [`Self::branch`] makes one.
+    async fn branch_from(&self, _parent: &str, _from: &str, _name: &str, _mode: Mode) -> anyhow::Result<Option<Branched>> {
+        Ok(None)
+    }
+
+    /// How many branches `branch` has (a masked base still in use has some).
+    async fn children(&self, _parent: &str, _branch: &str) -> anyhow::Result<usize> {
+        Ok(0)
+    }
+
     /// Whether [`Self::restore`] can put a branch back: restore points keep only these products'.
     fn restores(&self) -> bool {
         false
@@ -209,6 +241,8 @@ pub struct ChangeInfo {
     pub branch: Option<String>,
     pub head: String,
     pub open: bool,
+    /// In roll code's merge queue, waiting to land (`queued`).
+    pub queued: bool,
     pub draft: bool,
     /// Its labels (`preview` asks for one, `no-preview` skips it, as the title words do).
     pub labels: Vec<String>,
@@ -446,6 +480,9 @@ pub struct ShotOptions {
     /// Story ids to take before the rest (a default branch's preview: those the project's open
     /// changes took and it hasn't, so each has a main to be compared with).
     pub stories_first: Vec<String>,
+    /// How many containers take the stories side by side (`github.story_runs`; 0 is 1).
+    #[serde(default)]
+    pub story_runs: usize,
     pub changed: Vec<String>,
     /// The app's sign-in before the pages (`github.login`, a trusted preview's), its typed
     /// variables resolved.
@@ -547,6 +584,12 @@ pub trait Source: Send + Sync {
     /// who follow its repos (roll code: each repo's `budget` event). `Err` when it couldn't be
     /// queued: the engine tries again on its next pass.
     async fn budget(&self, _repos: &[String], _alert: &BudgetAlert) -> anyhow::Result<()> {
+        Ok(())
+    }
+    /// Columns of the project's parents that previews masked by default and the project hadn't
+    /// been told of (roll code: each repo's `masking` event). `Err` when it couldn't be queued:
+    /// the engine tries again on its next pass.
+    async fn masking(&self, _repos: &[String], _notice: &MaskingNotice) -> anyhow::Result<()> {
         Ok(())
     }
     /// A receiver that fires when roll code changed something (a nudge to converge sooner).
@@ -658,6 +701,15 @@ pub struct BudgetAlert {
     pub percent: u32,
     pub spent_usd_month: f64,
     pub max_usd_month: f64,
+}
+
+/// The columns of a project's parents masked by default that it's told of: each once, when a
+/// preview's branch was first masked with it (production gained it, or masking by default began).
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct MaskingNotice {
+    pub project: String,
+    pub project_name: String,
+    pub columns: Vec<crate::MaskedByDefault>,
 }
 
 /// What's at a path in a service, as a tar, as it's read.

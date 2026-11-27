@@ -83,6 +83,8 @@ pub(crate) struct StatusCache {
     /// Active own domains → their project, as last read (when, under which `hosts_gen`): every
     /// request with a Host asks, so it's one read a second at most, never one a request.
     own: parking_lot::Mutex<Option<(std::time::Instant, u64, OwnHosts)>>,
+    /// One request reads the map again; the others keep the last answer meanwhile.
+    refreshing: std::sync::atomic::AtomicBool,
     pages: parking_lot::Mutex<std::collections::HashMap<String, (std::time::Instant, Arc<Shown>)>>,
 }
 
@@ -140,8 +142,45 @@ impl Apps {
             let (from, text) = if next == "maintenance" { ("scheduled", "The scheduled maintenance has begun.") } else { ("maintenance", "The scheduled maintenance is over.") };
             // One that hasn't begun yet and is already over goes straight to resolved.
             let from = if next == "resolved" { None } else { Some(from) };
+            let (p2, i2) = (project.clone(), id.clone());
             if self.db(move |s| s.advance_maintenance(&project, &id, from, next, text, now)).await.unwrap_or(false) {
                 self.status_cache.forget();
+                // Its window quiets the alerts of what the page shows (a planned restart pages no one).
+                if next == "maintenance" {
+                    self.silence_for_maintenance(&p2, &i2).await;
+                }
+            }
+        }
+    }
+
+    /// A silence, until a maintenance's window ends, for each environment its page shows.
+    async fn silence_for_maintenance(self: &Arc<Self>, project: &str, id: &str) {
+        let (p, i) = (project.to_string(), id.to_string());
+        let Ok(Some(until)) = self.db(move |s| s.maintenance_until(&p, &i)).await else { return };
+        let p = project.to_string();
+        let Ok((Some(page), services, envs)) = self
+            .db(move |s| {
+                let services = s.services(Some(&p))?;
+                let mut envs = Vec::new();
+                for svc in &services {
+                    envs.extend(s.environments(&svc.id)?);
+                }
+                Ok((s.status_page(&p)?, services, envs))
+            })
+            .await
+        else {
+            return;
+        };
+        let mut done = std::collections::BTreeSet::new();
+        for (key, _, _) in shown(&page, &services, &envs, false) {
+            // `check:<service>/<env>/<name>` or `hb:…`: the environment, once.
+            let Some((svc, env)) = key.split_once(':').and_then(|(_, r)| r.split_once('/')).and_then(|(s, r)| r.split_once('/').map(|(e, _)| (s.to_string(), e.to_string()))) else { continue };
+            if !done.insert((svc.clone(), env.clone())) {
+                continue;
+            }
+            let (s2, e2, reason) = (svc.clone(), env.clone(), format!("scheduled maintenance {id}"));
+            if let Err(e) = self.db(move |s| s.add_silence(&s2, &e2, until, &[], &reason)).await {
+                tracing::warn!(service = %svc, env = %env, error = %e, "apps: a maintenance's silence wasn't made");
             }
         }
     }
@@ -331,14 +370,33 @@ impl Apps {
 
     async fn own_status_hosts(self: &Arc<Self>) -> OwnHosts {
         let generation = self.hosts_gen.load(std::sync::atomic::Ordering::SeqCst);
-        if let Some((at, g, m)) = self.status_cache.own.lock().clone()
-            && g == generation
+        use std::sync::atomic::Ordering::SeqCst;
+        let last = self.status_cache.own.lock().clone();
+        if let Some((at, g, m)) = &last
+            && *g == generation
             && at.elapsed() < std::time::Duration::from_secs(1)
         {
-            return m;
+            return m.clone();
         }
-        // A failed read answers nothing this time and keeps nothing.
-        let Ok(rows) = self.db(|s| s.active_status_domains()).await else { return Default::default() };
+        // Someone is reading it already: the last answer until theirs is in.
+        if let Some((_, _, m)) = &last
+            && self.status_cache.refreshing.swap(true, SeqCst)
+        {
+            return m.clone();
+        }
+        // Cleared however this ends (a request dropped mid-read too), or the map would stay old.
+        struct Done<'a>(&'a std::sync::atomic::AtomicBool);
+        impl Drop for Done<'_> {
+            fn drop(&mut self) {
+                self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        let read = {
+            let _done = Done(&self.status_cache.refreshing);
+            self.db(|s| s.active_status_domains()).await
+        };
+        // A failed read answers what was there (nothing, the first time) and keeps nothing.
+        let Ok(rows) = read else { return last.map(|(_, _, m)| m).unwrap_or_default() };
         let m = Arc::new(rows.into_iter().collect::<std::collections::HashMap<_, _>>());
         *self.status_cache.own.lock() = Some((std::time::Instant::now(), generation, m.clone()));
         m

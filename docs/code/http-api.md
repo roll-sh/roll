@@ -179,6 +179,7 @@ Preview = {state: "creating" | "running" | "sleeping" | "failed", url: string | 
                           head?: string /* the changeset it's for: statuses are about it (after pushes that touched only ignored paths its services run an earlier one) */,
                           schema_changes?: string[] /* "+ …"/"- …": its Postgres schema against the parents' */,
                           schema_risks?: string[] /* what in them would hurt production when it lands */,
+                          schema_overlaps?: [branch, tables[]][] /* other open changes whose schema changes touch the same tables */,
                           screenshot_url?: string /* a public preview's screenshot, signed and expiring */,
                           diff_url?: string /* the same for where it differs from the default branch's, when it does */,
                           expires_at?: number /* ms: when it goes (its TTL, or a keep, running out), once a day away */,
@@ -194,7 +195,7 @@ Preview = {state: "creating" | "running" | "sleeping" | "failed", url: string | 
                           base_change?: {branch, percent, phone_percent: number | null, head?: string | null, load_ms?: number, a11y_added?: number, errors_added?: number, text?: TextDiff, links_added?: number, seo_added?: number, api?: TextDiff /* its API operations against the branch's */, api_breaking?: string[] /* what it breaks inside the operations both keep */, endpoints?: {path, ms, status, main_ms: number | null, slower, shape_changes?: {path, main, now: string | null}[]}[] /* github.endpoints' times against the branch's */} /* how much the page differs from the project's preview of the default branch */,
                           pages?: [{path, errors, percent: number | null, base_percent: number | null}] /* the project's other pages (github.pages): errors while each loaded, its change since the push before, against the default branch */,
                           speed_budget?: {load_ms, bytes} /* the project's github.budget (0: no limit), for roll/speed */,
-                          visual_review?: {state: 'unchanged' | 'changed' | 'accepted', branch, percent, by: string | null, required, head?, pages?: {path /* '': the first page; 'stories:untaken': the stories below */, percent, by: string | null}[] /* each page that differs, accepted per page */, untaken? /* stories the change touched its preview's run didn't take: under review until accepted as not taken */} /* the roll/visual status (the project's visual_review; required: a visual blocker too) */,
+                          visual_review?: {state: 'unchanged' | 'changed' | 'accepted' | 'refused' /* refused: by is who, reason why; roll/visual fails */, branch, percent, by: string | null, required, head?, pages?: {path /* '': the first page; 'stories:untaken': the stories below */, percent, by: string | null}[] /* each page that differs, accepted per page */, untaken? /* stories the change touched its preview's run didn't take: under review until accepted as not taken */} /* the roll/visual status (the project's visual_review; required: a visual blocker too) */,
                           notes?: {path, note, by, crop_url?}[] /* the preview page's open notes, newest first, at most 10; untrusted text; crop_url: a public preview's signed picture of the note's element */, issues?: string[] /* the Linear issues the change names: `ENG-123` in its title, or at the start of its branch's last part (`ada/eng-123-fix`); at most 3 */} /* roll previews (docs/previews.md) */}
 Change  = {id, repo_id, repo /* full name */, number /* per-repo, from 1 */, title, body, author,
            state: "open" | "queued" | "landed" | "conflict" | "closed",
@@ -567,10 +568,13 @@ POST  /v1/code/work/{id}/heartbeat | /release | /complete {agent?} → WorkItem
 ## Events (SSE)
 
 `GET /v1/code/repos/{owner}/{repo}/events` sends the event types `landed`, `change`, `work`, `check`,
-`preview`, `queue`, `review`, `thread`, `push` and `budget`. Repo webhooks get the same events with the same data.
+`preview`, `queue`, `review`, `thread`, `push`, `budget` and `masking`. Repo webhooks get the same events with the same data.
 A `budget` event is `{budget: {project, project_name, percent /* 80, 100 */, spent_usd_month, max_usd_month},
 dashboard_url}`: the repo's workspace project's previews passed that share of their monthly budget
-(docs/previews.md). A `preview` event is `{change, preview}`, with `preview: null` once it's gone; a
+(docs/previews.md). A `masking` event is `{masking: {project, project_name, columns: [{resource,
+column, why}]}, dashboard_url}`: columns of the project's parents that its previews masked by default
+(they look like people's data and the rules don't name them), each said once (docs/previews.md,
+"Safe by default"). A `preview` event is `{change, preview}`, with `preview: null` once it's gone; a
 preview environment that went with the project's `teardown` failing adds `teardown` (what the job
 said: its exit code and its output's tail, the change's code's words), and the pull request's
 comment says so too. `became` lists what the update reached that the change's preview wasn't
@@ -617,7 +621,7 @@ GET    /v1/code/repos/{owner}/{repo}/leaks?history= → {head, files, found: [{k
 GET    /v1/code/repos/{owner}/{repo}/webhooks → Webhook[]                       writers (401 anonymous, 403 others)
 POST   /v1/code/repos/{owner}/{repo}/webhooks {url, events?, secret?, active?}
        → 201 {webhook: Webhook, ping: delivery id, secret? /* only when roll generated it: shown once */}
-       events: any of landed, change, review, thread, check, queue, work, preview, push, budget, or ["*"] (default
+       events: any of landed, change, review, thread, check, queue, work, preview, push, budget, masking, or ["*"] (default
        ["landed"]); secret: 16-200 characters (default: generated, rlw_…); 400 bad url/events/secret, or
        no ROLL_SECRET_KEY on the server (also for PATCH); at most 20 per repo (422)
 GET    /v1/code/repos/{owner}/{repo}/webhooks/{id} → Webhook · PATCH {url?, events?, secret?, active?} → Webhook

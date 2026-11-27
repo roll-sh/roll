@@ -37,6 +37,10 @@
           "type": "string",
           "description": "Runs once before each deployment goes live (a migration); a failure stops the deploy."
         },
+        "teardown": {
+          "type": "string",
+          "description": "Runs once before a preview environment is deleted (its data cleaned up); at most 2 minutes, never holding the delete."
+        },
         "schedule": {
           "type": "string",
           "description": "A cron's schedule (five fields, or @hourly, @daily\u2026)."

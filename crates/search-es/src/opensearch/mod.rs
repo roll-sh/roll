@@ -30,6 +30,7 @@ pub mod pit;
 pub mod ppl;
 pub mod profile;
 pub mod search_pipeline;
+pub mod sm;
 pub mod upgrade;
 pub mod wlm;
 
@@ -59,6 +60,7 @@ pub fn implemented(api: Api) -> bool {
             | Api::PplGrammar
             | Api::QuerySettings
     ) || ism::implemented(api)
+        || sm::implemented(api)
         || crate::xpack::security::opensearch::api::implemented(api)
 }
 
@@ -88,6 +90,7 @@ async fn dispatch_api(ctx: &Ctx<'_>) -> EsResult<Reply> {
         Api::PplGrammar => ppl::grammar(ctx),
         Api::QuerySettings => ppl::settings(ctx).await,
         api if ism::implemented(api) => ism::dispatch(ctx).await,
+        api if sm::implemented(api) => sm::dispatch(ctx).await,
         api if crate::xpack::security::opensearch::api::implemented(api) => crate::xpack::security::opensearch::api::dispatch(ctx).await,
         other => Err(crate::error::EsError::not_implemented(other.name())),
     }
@@ -349,9 +352,12 @@ pub fn add_reduce_phases(ctx: &Ctx, out: &crate::search::SearchOutcome, req: &cr
 
 /// OpenSearch's terms lookup by query: the `path` values of every document of `l.index` the
 /// lookup's query matches (`TermsQueryBuilder.fetch`), refused when more documents match than
-/// one fetch may return (`min(max_terms_count, max_result_window, max_clause_count)`).
+/// one fetch may return (`min(max_terms_count, max_result_window, max_clause_count)`). The
+/// search is the reader's (the plugin authorizes it as the user's `indices:data/read/search`),
+/// under its document and field level security.
 pub fn lookup_by_query(ctx: &crate::search::query::QueryCtx, l: &crate::query::term_level::TermsLookup, q: &crate::query::Query) -> EsResult<Vec<crate::json::Value>> {
     use crate::json::Value;
+    let security = ctx.security.read_lookup(ctx.st, ctx.now_ms, "indices:data/read/search", &l.index)?.cloned();
     let st = ctx.st;
     let setting = |idx: Option<&crate::meta::IndexMeta>, key: &str, default: i64| {
         idx.and_then(|i| i.settings.get(key)).and_then(|v| v.parse::<i64>().ok()).unwrap_or(default)
@@ -382,7 +388,7 @@ pub fn lookup_by_query(ctx: &crate::search::query::QueryCtx, l: &crate::query::t
         now_ms: ctx.now_ms,
         fused: None,
         rank_only: false,
-        security: None,
+        security,
     };
     let out = crate::search::execute(ctx.cluster, &req)?;
     let total = out.total.map(|(t, _)| t as i64).unwrap_or(0);

@@ -1528,6 +1528,137 @@ async fn filtered_api_key(e: &Env) -> String {
     base64::engine::general_purpose::STANDARD.encode(format!("{}@shop:{}", v["id"].as_str().unwrap(), v["api_key"].as_str().unwrap()))
 }
 
+/// Lookups are authorized where they run, as the reader, whatever hides them from the body's
+/// scan: a reader of `mine` reads nothing of `secret` through a `lookup` runtime field named
+/// `document` or a terms lookup in an aggregation named `document` or `params`, nor through its
+/// own API key's templated role query; an alias filter can't hold a lookup. A lookup into
+/// `mine` still works. Both dialects, where they have the feature.
+#[tokio::test]
+async fn lookups_are_authorized_where_they_run() {
+    use base64::Engine;
+    use reqwest::Method;
+    let e = env().await;
+    let lookup = |index: &str| json!({"terms": {"n": {"index": index, "id": "1", "path": "ids"}}});
+    for (name, flavor) in [("lk", "elasticsearch"), ("lk-os", "opensearch")] {
+        let c = e.post("/v1/search/clusters", json!({"name": name, "flavor": flavor})).await;
+        let (admin, pw) = creds(&c);
+        let (role_path, role, user_path, user) = match flavor {
+            "elasticsearch" => (
+                "/_security/role/m",
+                json!({"cluster": ["manage_own_api_key"], "indices": [{"names": ["mine", "mine-*"], "privileges": ["read", "manage"]}]}),
+                "/_security/user/ann",
+                json!({"password": "ann-password-1", "roles": ["m"]}),
+            ),
+            _ => (
+                "/_plugins/_security/api/roles/m",
+                json!({"index_permissions": [{"index_patterns": ["mine", "mine-*"], "allowed_actions": ["indices_all"]}]}),
+                "/_plugins/_security/api/internalusers/ann",
+                json!({"password": "Zq9#vLx2!pRt7mWk", "opendistro_security_roles": ["m"]}),
+            ),
+        };
+        for (path, body) in [
+            ("/secret/_doc/1?refresh=true", json!({"k": "a", "v": "hidden-value", "ids": ["1"]})),
+            ("/mine", json!({"mappings": {"properties": {"k": {"type": "keyword"}, "n": {"type": "keyword"}}}})),
+            ("/mine/_doc/1?refresh=true", json!({"k": "a", "n": "1", "ids": ["1"]})),
+            (role_path, role),
+            (user_path, user.clone()),
+        ] {
+            let (s, v) = e.es(&admin, &pw, Method::PUT, path, Some(body)).await;
+            assert!(s == 200 || s == 201, "{name} {path}: {v}");
+        }
+        let ann = format!("ann@{name}");
+        let ann_pw = user["password"].as_str().unwrap();
+        let search = |body: Value| e.es(&ann, ann_pw, Method::POST, "/mine/_search", Some(body));
+        let refused = |what: &str, s: u16, v: &Value| assert!(s >= 400 && !v.to_string().contains("hidden-value"), "{name} {what}: {s} {v}");
+
+        let (s, v) = search(json!({"query": lookup("mine")})).await;
+        assert_eq!((s, v["hits"]["total"]["value"].as_i64()), (200, Some(1)), "{name}: a lookup into the reader's own index: {v}");
+        let (s, v) = search(json!({"query": lookup("_all")})).await;
+        refused("a lookup into _all", s, &v);
+        // The request cache holds no lookup's answer: the owner's cached aggregation isn't
+        // served to a reader who may not make its lookup.
+        let cached = json!({"size": 0, "aggs": {"params": {"filter": lookup("secret")}}});
+        let (s, v) = e.es(&admin, &pw, Method::POST, "/mine/_search?request_cache=true", Some(cached.clone())).await;
+        assert_eq!((s, v["aggregations"]["params"]["doc_count"].as_i64()), (200, Some(1)), "{name}: {v}");
+        let (s, v) = e.es(&ann, ann_pw, Method::POST, "/mine/_search?request_cache=true", Some(cached)).await;
+        refused("the owner's cached lookup", s, &v);
+        // Nor through a `wrapper`, whose base64 query hides the lookup from the request's text.
+        let wrapped = json!({"size": 0, "query": {"wrapper": {"query": base64::engine::general_purpose::STANDARD.encode(lookup("secret").to_string())}}});
+        let (s, v) = e.es(&admin, &pw, Method::POST, "/mine/_search?request_cache=true", Some(wrapped.clone())).await;
+        assert_eq!((s, v["hits"]["total"]["value"].as_i64()), (200, Some(1)), "{name}: {v}");
+        let (s, v) = e.es(&ann, ann_pw, Method::POST, "/mine/_search?request_cache=true", Some(wrapped)).await;
+        refused("the owner's cached wrapped lookup", s, &v);
+        for agg in ["document", "params"] {
+            let (s, v) = search(json!({"size": 0, "aggs": {agg: {"filter": lookup("secret")}}})).await;
+            refused(&format!("an aggregation named {agg}"), s, &v);
+        }
+        let (s, v) = e.es(&ann, ann_pw, Method::PUT, "/mine/_alias/mine-f", Some(json!({"filter": lookup("secret")}))).await;
+        assert_eq!((s, v["error"]["reason"].as_str()), (400, Some("failed to parse filter for alias [mine-f]")), "{name}: {v}");
+        if flavor != "elasticsearch" {
+            // OpenSearch's terms lookup by `query` is the reader's search of the index it names.
+            let by_query = json!({"terms": {"n": {"index": "secret", "path": "v", "query": {"match_all": {}}}}});
+            let (s, v) = search(json!({"size": 0, "aggs": {"params": {"filter": by_query}}})).await;
+            refused("a terms lookup by query", s, &v);
+            continue;
+        }
+        // A `more_like_this` document of the searched index is read under the search's document
+        // level security, even for a role that grants searches alone: a hidden document lends
+        // no terms (`2` would make `1` match).
+        for (path, body) in [
+            ("/pub", json!({"mappings": {"properties": {"body": {"type": "text"}, "public": {"type": "boolean"}}}})),
+            ("/pub/_doc/1", json!({"public": true, "body": "alpha beta"})),
+            ("/pub/_doc/3?refresh=true", json!({"public": true, "body": "beta gamma"})),
+            ("/pub/_doc/2?refresh=true", json!({"public": false, "body": "alpha zeta"})),
+            ("/_security/role/searcher", json!({"indices": [{"names": ["pub"], "privileges": ["indices:data/read/search*"], "query": {"term": {"public": true}}}]})),
+            ("/_security/user/sam", json!({"password": "sam-password-1", "roles": ["searcher"]})),
+        ] {
+            let (s, v) = e.es(&admin, &pw, Method::PUT, path, Some(body)).await;
+            assert!(s == 200 || s == 201, "{path}: {v}");
+        }
+        let sam = format!("sam@{name}");
+        let like = |id: &str| json!({"query": {"more_like_this": {"fields": ["body"], "like": [{"_id": id}], "min_term_freq": 1, "min_doc_freq": 1}}});
+        let (s, v) = e.es(&sam, "sam-password-1", Method::POST, "/pub/_search", Some(like("1"))).await;
+        assert_eq!((s, v["hits"]["total"]["value"].as_i64()), (200, Some(1)), "a visible document's terms: {v}");
+        let (s, v) = e.es(&sam, "sam-password-1", Method::POST, "/pub/_search", Some(like("2"))).await;
+        assert_eq!((s, v["hits"]["total"]["value"].as_i64()), (200, Some(0)), "a hidden document lent its terms: {v}");
+        // A lookup's name is checked as resolved: a failure store needs its own privilege, which
+        // `read` on `mine-*` doesn't give.
+        for (path, body) in [
+            ("/_index_template/mine-ds", Some(json!({"index_patterns": ["mine-ds*"], "data_stream": {}, "template": {"data_stream_options": {"failure_store": {"enabled": true}}}}))),
+            ("/_data_stream/mine-ds", None),
+        ] {
+            let (s, v) = e.es(&admin, &pw, Method::PUT, path, body).await;
+            assert_eq!(s, 200, "{path}: {v}");
+        }
+        let (s, v) = search(json!({"query": lookup("mine-ds::failures")})).await;
+        assert_eq!((s, v["error"]["type"].as_str()), (403, Some("security_exception")), "a failure store lookup: {v}");
+        let runtime = json!({"runtime_mappings": {"document": {"type": "lookup", "target_index": "secret", "input_field": "k", "target_field": "k", "fetch_fields": ["v"]}}, "fields": ["document"]});
+        let (s, v) = search(runtime).await;
+        refused("a lookup runtime field named document", s, &v);
+        let template = json!({"template": {"source": lookup("secret").to_string()}});
+        let (s, k) = e.es(&ann, ann_pw, Method::POST, "/_security/api_key", Some(json!({"name": "t", "role_descriptors": {"r": {"indices": [{"names": ["mine"], "privileges": ["read"], "query": template}]}}}))).await;
+        assert_eq!(s, 200, "{k}");
+        let key = base64::engine::general_purpose::STANDARD.encode(format!("{}@{name}:{}", k["id"].as_str().unwrap(), k["api_key"].as_str().unwrap()));
+        let (s, v) = as_key(&e, &key, Method::POST, "/mine/_search", Some(json!({}))).await;
+        refused("a templated role query's lookup", s, &v);
+        assert!(v.to_string().contains("terms query with terms lookup isn't supported as part of a role query"), "{v}");
+        // However it's nested, a role query reads no other document: refused when stored, and
+        // when a template renders it, a get (which evaluates it) fails too.
+        let mlt = json!({"more_like_this": {"fields": ["k"], "like": [{"_index": "secret", "_id": "1"}], "min_term_freq": 1, "min_doc_freq": 1}});
+        let role_key = |q: Value| e.es(&ann, ann_pw, Method::POST, "/_security/api_key", Some(json!({"name": "q", "role_descriptors": {"r": {"indices": [{"names": ["mine"], "privileges": ["read"], "query": q}]}}})));
+        for q in [mlt.clone(), json!({"nested": {"path": "p", "query": lookup("secret")}})] {
+            let (s, v) = role_key(q.clone()).await;
+            assert_eq!(s, 400, "{q}: {v}");
+        }
+        let (s, k) = role_key(json!({"template": {"source": mlt.to_string()}})).await;
+        assert_eq!(s, 200, "{k}");
+        let key = base64::engine::general_purpose::STANDARD.encode(format!("{}@{name}:{}", k["id"].as_str().unwrap(), k["api_key"].as_str().unwrap()));
+        let (s, v) = as_key(&e, &key, Method::GET, "/mine/_doc/1", None).await;
+        refused("a get under a templated more_like_this role query", s, &v);
+        assert!(v.to_string().contains("more_like_this query with documents isn't supported as part of a role query"), "{v}");
+    }
+}
+
 /// An update reads the whole document and writes it back, so where a key's document or field
 /// level security restricts the index it isn't run (Elasticsearch 400, OpenSearch 500), in a
 /// bulk request too. An update by query reads as the key: only the documents it sees, without
@@ -1840,6 +1971,61 @@ async fn browser_keys_pay_per_item_and_leave_the_owner_permits() {
     }
     let (s, v) = e.call(reqwest::Method::POST, "/v1/search/clusters/shop/browser-keys", Some(json!({"name": "k20", "indices": ["products"]}))).await;
     assert_eq!(s, 409, "{v}");
+}
+
+/// An API key made anywhere but the cluster's own host (the shared address, roll's console)
+/// answers an `encoded` that names its cluster (`<id>@<cluster>:<secret>`), so a copied value
+/// works at the shared address as at the cluster's own host; made at its own host it's
+/// Elasticsearch's. No other cluster, and no other cluster's host, accepts it.
+#[tokio::test]
+async fn an_api_keys_encoded_works_at_the_shared_address_and_only_on_its_cluster() {
+    use base64::Engine;
+    let e = env_with(|c| c.domain = Some("search.example.test".into())).await;
+    let (user, pw) = creds(&e.post("/v1/search/clusters", json!({"name": "shop"})).await);
+    let (_, opw) = creds(&e.post("/v1/search/clusters", json!({"name": "other"})).await);
+    let r = e.post("/v1/search/clusters/shop/request", json!({"method": "POST", "path": "/_security/api_key", "body": {"name": "app"}})).await;
+    let k = body(&r);
+    let (id, secret, encoded) = (k["id"].as_str().unwrap(), k["api_key"].as_str().unwrap(), k["encoded"].as_str().unwrap());
+    let b64 = |s: String| base64::engine::general_purpose::STANDARD.encode(s);
+    assert_eq!(encoded, b64(format!("{id}@shop:{secret}")));
+    let auth = |key: String, host: Option<&'static str>| {
+        let mut r = e.http.get(format!("{}/_security/_authenticate", e.es)).header("authorization", format!("ApiKey {key}"));
+        if let Some(h) = host {
+            r = r.header("host", h);
+        }
+        async move { r.send().await.unwrap().status().as_u16() }
+    };
+    let (shop, other) = (Some("shop.search.example.test"), Some("other.search.example.test"));
+    // At the shared address and the cluster's own host, with the cluster's own credentials.
+    let made_at = |host: Option<&'static str>| {
+        let mut r = e.http.post(format!("{}/_security/api_key", e.es)).basic_auth(&user, Some(&pw)).json(&json!({"name": "copied"}));
+        if let Some(h) = host {
+            r = r.header("host", h);
+        }
+        async move {
+            let k: Value = r.send().await.unwrap().json().await.unwrap();
+            let (id, secret) = (k["id"].as_str().unwrap().to_string(), k["api_key"].as_str().unwrap().to_string());
+            (k["encoded"].as_str().unwrap().to_string(), id, secret)
+        }
+    };
+    let (shared, sid, ssecret) = made_at(None).await;
+    assert_eq!(shared, b64(format!("{sid}@shop:{ssecret}")));
+    let (own, oid, osecret) = made_at(shop).await;
+    assert_eq!(own, b64(format!("{oid}:{osecret}")));
+    // The shared address: the qualified key only (a bare id names no cluster there).
+    assert_eq!(auth(encoded.to_string(), None).await, 200);
+    assert_eq!(auth(b64(format!("{id}:{secret}")), None).await, 401);
+    assert_eq!(auth(b64(format!("{id}@other:{secret}")), None).await, 401);
+    // The cluster's own host: bare or its own qualifier; another cluster's host: neither.
+    assert_eq!(auth(encoded.to_string(), shop).await, 200);
+    assert_eq!(auth(b64(format!("{id}:{secret}")), shop).await, 200);
+    assert_eq!(auth(encoded.to_string(), other).await, 401);
+    assert_eq!(auth(b64(format!("{id}:{secret}")), other).await, 401);
+    // Host names are case-insensitive.
+    assert_eq!(auth(encoded.to_string(), Some("Shop.Search.Example.test")).await, 200);
+    // Another cluster's own token at this one's host: refused, not run on the other cluster.
+    let r = e.http.post(format!("{}/_security/api_key", e.es)).header("host", "shop.search.example.test").bearer_auth(format!("other_{opw}")).json(&json!({"name": "x"})).send().await.unwrap();
+    assert_eq!(r.status().as_u16(), 401);
 }
 
 #[tokio::test]
@@ -2847,6 +3033,34 @@ async fn a_due_slm_run_wakes_its_sleeping_cluster() {
         assert!(tokio::time::Instant::now() < deadline, "the policy never took its snapshot: {v}");
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
+}
+
+/// OpenSearch's snapshot management policies on an OpenSearch-flavor cluster, through the
+/// cluster's API and the console route the dashboard's Snapshots tab uses: a policy is stored
+/// with its job and its deletion's schedule taken from its creation's, listed, explained (before
+/// its job's first run: its name alone), stopped and deleted. Its runs are tested tick by tick
+/// in search-es (`opensearch::sm`), where the job's minutes can be run by hand.
+#[tokio::test]
+async fn opensearch_snapshot_management_policies_are_served() {
+    use reqwest::Method;
+    let e = env().await;
+    let c = e.post("/v1/search/clusters", json!({"name": "smc", "flavor": "opensearch"})).await;
+    let (user, pw) = creds(&c);
+    let policy = json!({"creation": {"schedule": {"cron": {"expression": "30 1 * * *", "timezone": "UTC"}}}, "deletion": {"condition": {"max_count": 7}}, "snapshot_config": {"repository": "found-snapshots", "indices": "*"}});
+    let (s, v) = e.es(&user, &pw, Method::POST, "/_plugins/_sm/policies/nightly", Some(policy)).await;
+    let schedule = &v["sm_policy"]["deletion"]["schedule"]["cron"]["expression"];
+    assert_eq!((s, &v["_id"], schedule, &v["sm_policy"]["enabled"]), (201, &json!("nightly-sm-policy"), &json!("30 1 * * *"), &json!(true)), "{v}");
+    let console = |m: &str, p: &str| e.post("/v1/search/clusters/smc/request", json!({"method": m, "path": p, "body": null}));
+    let listed = body(&console("GET", "/_plugins/_sm/policies").await);
+    assert_eq!((&listed["total_policies"], &listed["policies"][0]["sm_policy"]["name"]), (&json!(1), &json!("nightly")), "{listed}");
+    let explained = body(&console("GET", "/_plugins/_sm/policies/*/_explain").await);
+    assert_eq!(explained["policies"], json!([{"name": "nightly", "enabled": true}]), "{explained}");
+    assert_eq!(body(&console("POST", "/_plugins/_sm/policies/nightly/_stop").await), json!({"acknowledged": true}));
+    let (_, v) = e.es(&user, &pw, Method::GET, "/_plugins/_sm/policies/nightly", None).await;
+    assert_eq!((&v["_version"], &v["sm_policy"]["enabled"], &v["sm_policy"]["enabled_time"]), (&json!(2), &json!(false), &Value::Null), "{v}");
+    assert_eq!(e.es(&user, &pw, Method::DELETE, "/_plugins/_sm/policies/nightly", None).await.0, 200);
+    let (s, v) = e.es(&user, &pw, Method::GET, "/_plugins/_sm/policies/nightly", None).await;
+    assert_eq!((s, &v["error"]["reason"]), (404, &json!("Snapshot management policy not found")), "{v}");
 }
 
 /// An S3-compatible bucket in memory (path-style requests): objects with ETags, `If-None-Match:
@@ -6006,6 +6220,61 @@ async fn the_embedding_pool_takes_turns_caps_queues_and_meters_cpu() {
     let _ = std::fs::remove_dir_all(&model);
 }
 
+/// Provider tokens are metered per cluster (not priced: the provider bills them): an answered
+/// completion's and a streamed one's, the provider's own figures, reach the cluster's usage on
+/// the next metering pass, the first's although the cluster unloaded in between, each once.
+/// With `ROLL_CODE_TEST_DATABASE` the catalog is a fresh Postgres schema (`Store::open`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn completion_tokens_are_metered() {
+    use axum::response::IntoResponse;
+    use reqwest::Method;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let router = axum::Router::new().route(
+        "/v1/chat/completions",
+        axum::routing::post(|axum::Json(b): axum::Json<Value>| async move {
+            if b["stream"] == true {
+                let sse = [
+                    json!({"choices": [{"index": 0, "delta": {"content": "Hel"}}]}),
+                    json!({"choices": [{"index": 0, "delta": {"content": "lo"}}]}),
+                    json!({"choices": [], "usage": {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18}}),
+                ]
+                .iter()
+                .map(|c| format!("data: {c}\n\n"))
+                .collect::<String>()
+                    + "data: [DONE]\n\n";
+                ([("content-type", "text/event-stream")], sse).into_response()
+            } else {
+                axum::Json(json!({"choices": [{"index": 0, "message": {"role": "assistant", "content": "Hello"}}], "usage": {"prompt_tokens": 20, "completion_tokens": 5, "total_tokens": 25}})).into_response()
+            }
+        }),
+    );
+    tokio::spawn(async move { axum::serve(listener, router).await });
+    let e = env_with(|c| {
+        c.node_settings.push((search_control::INFERENCE_ALLOW_PRIVATE.into(), "true".into()));
+        c.node_settings.push(("xpack.inference.skip_validate_and_start".into(), "true".into()));
+    })
+    .await;
+    let c = e.post("/v1/search/clusters", json!({"name": "chatty"})).await;
+    let id = c["id"].as_str().unwrap().to_string();
+    let (u, p) = creds(&c);
+    let endpoint = json!({"service": "openai", "service_settings": {"api_key": "sk-1", "model_id": "gpt", "url": format!("http://127.0.0.1:{port}/v1/chat/completions")}});
+    let (s, v) = e.es(&u, &p, Method::PUT, "/_inference/completion/chat", Some(endpoint)).await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = e.es(&u, &p, Method::POST, "/_inference/completion/chat", Some(json!({"input": "hi"}))).await;
+    assert_eq!((s, &v["completion"][0]["result"]), (200, &json!("Hello")), "{v}");
+    assert_eq!(e.post(&format!("/v1/search/clusters/{id}/unload"), json!({})).await["unloaded"], true);
+    let (s, v) = e.es(&u, &p, Method::POST, "/_inference/completion/chat/_stream", Some(json!({"input": "hi"}))).await;
+    assert!(s == 200 && v.as_str().is_some_and(|t| t.contains("Hel") && t.ends_with("data: [DONE]\n\n")), "{s} {v}");
+
+    e.control.sample().await.unwrap();
+    let usage = e.get(&format!("/v1/search/clusters/{id}/usage")).await;
+    assert_eq!((&usage["input_tokens"], &usage["output_tokens"]), (&json!(31), &json!(12)), "{usage}");
+    e.control.sample().await.unwrap();
+    let usage = e.get(&format!("/v1/search/clusters/{id}/usage")).await;
+    assert_eq!((&usage["input_tokens"], &usage["output_tokens"]), (&json!(31), &json!(12)), "counted once: {usage}");
+}
+
 /// A migration's bounds: a host that isn't a name or an address (`https://*`) is refused and
 /// nothing is whitelisted; one migration call runs per cluster at a time (another gets a 429);
 /// and copies past the free task slots wait (`queued`), with nothing created for them.
@@ -7146,6 +7415,7 @@ async fn search_application_experiments() {
     };
     es(Method::PUT, "/products", json!({"mappings": {"properties": {"title": {"type": "text"}}}})).await;
     es(Method::PUT, "/products/_doc/1?refresh=true", json!({"title": "red shoes"})).await;
+    es(Method::PUT, "/products/_settings", json!({"index.roll.analytics.enabled": true})).await;
     let app = json!({
         "indices": ["products"],
         "template": {"script": {"source": {"query": {"match": {"title": "{{query}}"}}}, "params": {"query": ""}}},
@@ -7232,10 +7502,176 @@ async fn search_application_experiments() {
         }
         let value: f64 = ex["variants"].as_array().unwrap().iter().map(|v| v["value"].as_f64().unwrap()).sum();
         assert_eq!(value, 125.0, "{a}");
+        // Every search found the shoes; each variant's searches were timed.
+        for v in ex["variants"].as_array().unwrap() {
+            assert!(v["no_hit_rate"] == json!(0.0) && v["p95_latency_ms"].as_u64().is_some(), "{v}");
+        }
+        // The index's own analytics count every conversion (the one without a search too).
+        let idx = &a["totals"];
+        assert_eq!((idx["conversions"].as_u64(), idx["value"].as_f64()), (Some(11), Some(224.0)), "{a}");
     };
     check(&e.get("/v1/search/clusters/ab/analytics").await);
     e.control.sample().await.unwrap();
     check(&e.get("/v1/search/clusters/ab/analytics").await);
     // The browser key's events weren't stored with the owner's.
     assert_eq!(count().await, stored);
+
+    // Promoting the phrase variant: the application takes its template, the experiment ends, and
+    // searches get no variant any more. Once only, and never by a browser key.
+    let promote = "/_application/search_application/shop/_roll/experiments/ranking/_promote";
+    let r = e.http.post(format!("{}{promote}", e.es)).header("authorization", &key).json(&json!({"variant": "phrase"})).send().await.unwrap();
+    assert!(matches!(r.status().as_u16(), 400 | 403), "{}", r.status());
+    let done = es(Method::POST, promote, json!({"variant": "phrase"})).await;
+    assert_eq!((done["variant"].as_str(), done["ended_at"].is_i64()), (Some("phrase"), true), "{done}");
+    let (s, _) = e.es(&user, &pw, Method::POST, promote, Some(json!({"variant": "phrase"}))).await;
+    assert_eq!(s, 409);
+    let app = es(Method::GET, "/_application/search_application/shop", Value::Null).await;
+    assert!(app["template"]["script"]["source"].to_string().contains("match_phrase"), "{app}");
+    assert_eq!(app["experiments"][0]["promoted"]["variant"], "phrase", "{app}");
+    let r = e.http.post(format!("{}/_application/search_application/shop/_search", e.es)).header("authorization", &owner).header("x-roll-user", "v1").json(&json!({"params": {"query": "shoes"}})).send().await.unwrap();
+    assert_eq!(r.status().as_u16(), 200);
+    assert!(r.headers().get("x-roll-variant").is_none());
+}
+
+/// `…/indices/{index}/update_by_query` re-embeds an index's own documents: a `semantic_text`
+/// field (fed by `copy_to`) added after the documents is filled by indexing each again in place,
+/// in the background (202 and a task the tasks route follows), and a semantic query then finds
+/// them. The body takes only `_update_by_query`'s fields.
+#[tokio::test]
+async fn update_by_query_re_embeds_an_indexs_documents() {
+    use reqwest::Method;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    // An OpenAI-style embeddings endpoint on loopback: one 3-dimensional vector per input.
+    let inputs = Arc::new(AtomicUsize::new(0));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let seen = inputs.clone();
+    let router = axum::Router::new().route(
+        "/v1/embeddings",
+        axum::routing::post(move |axum::Json(body): axum::Json<Value>| {
+            let n = match &body["input"] {
+                Value::Array(a) => a.len(),
+                _ => 1,
+            };
+            seen.fetch_add(n, Ordering::SeqCst);
+            let data: Vec<Value> = (0..n).map(|i| json!({"object": "embedding", "index": i, "embedding": [1.0, 0.5, 0.25]})).collect();
+            async move { axum::Json(json!({"object": "list", "data": data, "model": "emb", "usage": {"prompt_tokens": n, "total_tokens": n}})) }
+        }),
+    );
+    tokio::spawn(async move { axum::serve(listener, router).await });
+    let e = env_with(|c| {
+        c.node_settings.push((search_control::INFERENCE_ALLOW_PRIVATE.into(), "true".into()));
+        c.node_settings.push(("xpack.inference.skip_validate_and_start".into(), "true".into()));
+    })
+    .await;
+    let c = e.post("/v1/search/clusters", json!({"name": "embeds"})).await;
+    let (u, p) = creds(&c);
+    let id = c["id"].as_str().unwrap().to_string();
+    let endpoint = json!({"service": "openai", "service_settings": {"api_key": "sk-1", "model_id": "emb", "dimensions": 3, "url": format!("http://127.0.0.1:{port}/v1/embeddings")}});
+    assert_eq!(e.es(&u, &p, Method::PUT, "/_inference/text_embedding/emb", Some(endpoint)).await.0, 200);
+    assert_eq!(e.es(&u, &p, Method::PUT, "/docs", Some(json!({"mappings": {"properties": {"title": {"type": "text"}}}}))).await.0, 200);
+    for (i, t) in ["red sofa", "blue chair", "green lamp"].iter().enumerate() {
+        assert_eq!(e.es(&u, &p, Method::PUT, &format!("/docs/_doc/{i}?refresh=true"), Some(json!({"title": t}))).await.0, 201);
+    }
+    let mapping = json!({"properties": {"title": {"type": "text", "copy_to": ["body"]}, "body": {"type": "semantic_text", "inference_id": "emb"}}});
+    let (s, v) = e.es(&u, &p, Method::PUT, "/docs/_mapping", Some(mapping)).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(inputs.load(Ordering::SeqCst), 0, "nothing embedded yet");
+
+    let base = format!("/v1/search/clusters/{id}/indices/docs/update_by_query");
+    let (s, v) = e.call(Method::POST, &base, Some(json!({"size": 1}))).await;
+    assert!(s == 400 && v.to_string().contains("no field [size]"), "{s} {v}");
+    assert_eq!(e.call(Method::POST, &format!("/v1/search/clusters/{id}/indices/doc*/update_by_query"), None).await.0, 400, "one index by its name");
+    let (s, v) = e.call(Method::POST, &format!("{base}?wait_for_completion=false&refresh=true"), Some(json!({"slices": 1}))).await;
+    assert_eq!(s, 202, "{v}");
+    let task = v["task"].as_str().unwrap_or_else(|| panic!("{v}")).to_string();
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let done = loop {
+        let (s, v) = e.call(Method::GET, &format!("/v1/search/clusters/{id}/tasks/{task}"), None).await;
+        assert_eq!(s, 200, "{v}");
+        if v["completed"] == true {
+            break v;
+        }
+        assert!(std::time::Instant::now() < deadline, "the task didn't finish: {v}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    assert_eq!((&done["response"]["updated"], &done["response"]["failures"]), (&json!(3), &json!([])), "{done}");
+    assert_eq!(inputs.load(Ordering::SeqCst), 3, "each document embedded once");
+    let (s, v) = e.es(&u, &p, Method::POST, "/docs/_search", Some(json!({"query": {"semantic": {"field": "body", "query": "a seat"}}}))).await;
+    assert_eq!((s, &v["hits"]["total"]["value"]), (200, &json!(3)), "{v}");
+}
+
+/// `…/indices/{index}/evaluate` scores two configurations against judged queries with the
+/// cluster's `_rank_eval` and compares them query by query; a configuration the cluster refuses
+/// answers the cluster's error, and the body takes only its own fields.
+#[tokio::test]
+async fn evaluate_compares_two_configurations_on_judged_queries() {
+    use reqwest::Method;
+    let e = env().await;
+    let c = e.post("/v1/search/clusters", json!({"name": "judged"})).await;
+    let (u, p) = creds(&c);
+    let id = c["id"].as_str().unwrap().to_string();
+    // The title says one thing, the description another: matching on the description finds
+    // what the judgments call relevant.
+    for (i, (title, desc)) in [("sofa", "a red couch"), ("couch", "a blue chair"), ("lamp", "a green light")].iter().enumerate() {
+        assert_eq!(e.es(&u, &p, Method::PUT, &format!("/goods/_doc/{i}?refresh=true"), Some(json!({"title": title, "desc": desc}))).await.0, 201);
+    }
+    let judgments = json!([
+        {"query": "couch", "ratings": [{"_id": "0", "rating": 3}, {"_id": "1", "rating": 0}]},
+        {"query": "lamp", "ratings": [{"_id": "2", "rating": 3}]},
+    ]);
+    let configs = json!([
+        {"name": "title", "request": {"query": {"match": {"title": "{{query}}"}}}},
+        {"name": "desc", "request": {"query": {"match": {"desc": "{{query}}"}}}},
+    ]);
+    let path = format!("/v1/search/clusters/{id}/indices/goods/evaluate");
+    let (s, v) = e.call(Method::POST, &path, Some(json!({"judgments": judgments, "configurations": configs}))).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["metric"], json!({"dcg": {"k": 10, "normalize": true}}));
+    let cmp = &v["comparison"];
+    assert_eq!((&cmp["baseline"], &cmp["candidate"]), (&json!("title"), &json!("desc")), "{v}");
+    // "couch": the title finds the chair (rated 0), the description the sofa (rated 3);
+    // "lamp": the title finds it, the description doesn't.
+    assert_eq!(cmp["better_queries"][0]["query"], "couch", "{v}");
+    assert_eq!(cmp["worse_queries"][0]["query"], "lamp", "{v}");
+    assert_eq!((cmp["better"].as_u64(), cmp["worse"].as_u64()), (Some(1), Some(1)), "{v}");
+    assert_eq!(v["configurations"][0]["queries"][1]["score"], 1.0, "{v}");
+
+    let (s, v) = e.call(Method::POST, &path, Some(json!({"judgments": judgments, "configurations": [{"name": "x", "request": {"query": {"nope": {}}}}]}))).await;
+    assert_eq!(s, 400, "the cluster's own refusal: {v}");
+    let (s, v) = e.call(Method::POST, &path, Some(json!({"judgments": judgments, "configurations": configs, "size": 3}))).await;
+    assert!(s == 400 && v.to_string().contains("no field [size]"), "{s} {v}");
+}
+
+/// An application's configuration renders each judged query through the application's own
+/// template, and a variant's through its experiment's params, so a variant is scored offline
+/// before it takes traffic.
+#[tokio::test]
+async fn evaluate_scores_an_applications_variant_offline() {
+    use reqwest::Method;
+    let e = env().await;
+    let c = e.post("/v1/search/clusters", json!({"name": "apps-judged"})).await;
+    let (u, p) = creds(&c);
+    let id = c["id"].as_str().unwrap().to_string();
+    for (i, (title, desc)) in [("sofa", "a red couch"), ("couch", "a blue chair")].iter().enumerate() {
+        assert_eq!(e.es(&u, &p, Method::PUT, &format!("/goods/_doc/{i}?refresh=true"), Some(json!({"title": title, "desc": desc}))).await.0, 201);
+    }
+    let app = json!({
+        "indices": ["goods"],
+        "template": {"script": {"source": {"query": {"match": {"{{field}}": "{{query_string}}"}}}, "params": {"field": "title", "query_string": "*"}}},
+        "experiments": [{"id": "e1", "variants": [{"name": "control", "weight": 1}, {"name": "desc", "weight": 1, "params": {"field": "desc"}}]}],
+    });
+    let (s, v) = e.es(&u, &p, Method::PUT, "/_application/search_application/shop", Some(app)).await;
+    assert!(s == 200 || s == 201, "{s} {v}");
+    let judgments = json!([{"query": "couch", "ratings": [{"_id": "0", "rating": 3}, {"_id": "1", "rating": 0}]}]);
+    let configs = json!([{"name": "live", "application": "shop"}, {"name": "desc", "application": "shop", "variant": {"experiment": "e1", "variant": "desc"}}]);
+    let (s, v) = e.call(Method::POST, &format!("/v1/search/clusters/{id}/indices/shop/evaluate"), Some(json!({"judgments": judgments, "configurations": configs}))).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!((v["configurations"][0]["score"].as_f64(), v["configurations"][1]["score"].as_f64()), (Some(0.0), Some(1.0)), "{v}");
+    assert_eq!(v["comparison"]["better_queries"][0]["query"], "couch", "{v}");
+    // On another name, and with a variant the experiment lacks: refused with what's wrong.
+    let (s, v) = e.call(Method::POST, &format!("/v1/search/clusters/{id}/indices/goods/evaluate"), Some(json!({"judgments": judgments, "configurations": [{"name": "live", "application": "shop"}]}))).await;
+    assert!(s == 400 && v.to_string().contains("indices/shop/evaluate"), "{s} {v}");
+    let (s, v) = e.call(Method::POST, &format!("/v1/search/clusters/{id}/indices/shop/evaluate"), Some(json!({"judgments": judgments, "configurations": [{"name": "x", "application": "shop", "variant": {"experiment": "e1", "variant": "nope"}}]}))).await;
+    assert!(s == 400 && v.to_string().contains("no variant [nope]"), "{s} {v}");
 }

@@ -134,6 +134,10 @@ pub struct Settings {
     /// and again after a reset): migrations, Heroku's release phase. A failure fails the preview,
     /// and its services stay on what they ran.
     pub release: Option<Seed>,
+    /// When a change is queued to land in roll code, its release is rehearsed on its Postgres
+    /// parents as they are now (`POST …/rehearse`, asked by roll at that head; off by default:
+    /// each is a fresh branch, its masking and a release run).
+    pub rehearse_when_queued: bool,
     /// A command run once when the preview is deleted, before its services, secrets environment
     /// and branches go (Heroku's `pr-predestroy`): what its code made outside roll (a test-mode
     /// webhook, an OAuth redirect URI, a DNS record) cleaned up with the preview's own variables.
@@ -302,6 +306,11 @@ pub struct GithubRule {
     /// main's and reviewed like a page (`story:<id>`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storybook: Option<String>,
+    /// How many screenshot containers take the stories side by side (1 to [`MAX_STORY_RUNS`]),
+    /// each up to [`MAX_STORIES`] of them: every k-th of the change's touched-first order, so
+    /// each takes its share of the ones that matter first (Chromatic's parallel snapshots).
+    #[serde(default = "one", skip_serializing_if = "is_one")]
+    pub story_runs: u8,
     /// The first page in more modes (Chromatic's Modes): a dark color scheme, another language,
     /// another time zone, each a page of its own (`mode:<name>`), compared with main's and reviewed
     /// like a page. Up to 3.
@@ -389,7 +398,18 @@ pub fn page_key_ok(p: &str) -> bool {
         })
 }
 
-/// The most stories a Storybook's run takes (`github.storybook`).
+/// The most screenshot containers that take a Storybook's stories side by side (`github.story_runs`).
+pub const MAX_STORY_RUNS: usize = 4;
+
+fn one() -> u8 {
+    1
+}
+
+fn is_one(n: &u8) -> bool {
+    *n == 1
+}
+
+/// The most stories one of a Storybook's runs takes (`github.storybook`).
 pub const MAX_STORIES: usize = 40;
 
 /// `github.storybook`'s service and where it serves Storybook (a path ending in `/`).
@@ -589,6 +609,7 @@ impl Default for Settings {
             crons: false,
             seed: None,
             release: None,
+            rehearse_when_queued: false,
             teardown: None,
             masking: BTreeMap::new(),
         }
@@ -603,7 +624,7 @@ impl Default for SecretsRule {
 
 impl Default for GithubRule {
     fn default() -> Self {
-        GithubRule { comment: true, status: true, deployment: true, screenshot: false, baseline: true, pages: Vec::new(), hide: Vec::new(), budget: Budget::default(), visual_threshold: 0.0, widths: Vec::new(), openapi: None, endpoints: Vec::new(), states: Vec::new(), browsers: Vec::new(), storybook: None, modes: Vec::new(), login: None }
+        GithubRule { comment: true, status: true, deployment: true, screenshot: false, baseline: true, pages: Vec::new(), hide: Vec::new(), budget: Budget::default(), visual_threshold: 0.0, widths: Vec::new(), openapi: None, endpoints: Vec::new(), states: Vec::new(), browsers: Vec::new(), storybook: None, story_runs: 1, modes: Vec::new(), login: None }
     }
 }
 
@@ -779,8 +800,8 @@ impl Settings {
                 if col.split('.').count() != 3 || col.split('.').any(str::is_empty) || col.len() > 200 || f.trim().is_empty() || f.len() > 200 {
                     return bad(format!("masking: {key}: {col:?} → {f:?} isn't \"schema.table.column\" → a rule"));
                 }
-                if postgres && !crate::mask::is_rule(f) {
-                    return bad(format!("masking: {key}: {col}: {f:?} isn't a rule ({})", crate::mask::RULES));
+                if postgres && f.trim() != crate::mask::KEEP && !crate::mask::is_rule(f) {
+                    return bad(format!("masking: {key}: {col}: {f:?} isn't a rule ({}, or keep)", crate::mask::RULES));
                 }
             }
         }
@@ -856,6 +877,9 @@ impl Settings {
         let modes = &self.github.modes;
         if modes.len() > 3 || modes.iter().enumerate().any(|(i, m)| !m.ok() || modes[..i].iter().any(|n| n.name == m.name)) {
             return bad("github.modes: up to 3, each a name (a-z, 0-9, -) and a color_scheme (dark or light), a locale (de-DE) or a timezone (Europe/Berlin)".into());
+        }
+        if !(1..=MAX_STORY_RUNS as u8).contains(&self.github.story_runs) {
+            return bad(format!("github.story_runs: 1 to {MAX_STORY_RUNS} screenshot containers taking the stories side by side"));
         }
         if self.github.storybook.as_deref().is_some_and(|s| storybook_entry(s).is_none()) {
             return bad("github.storybook: the name of the service that serves Storybook (web), and the path it's under when not / (web:/storybook/, ending in /)".into());

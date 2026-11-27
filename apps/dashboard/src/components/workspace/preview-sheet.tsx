@@ -14,6 +14,43 @@ import { Head, Label, Rows, Stat, Tabs } from "./inspector";
 import { FeedbackForm, replyBody, replyOf, type PreviewFeedback } from "./preview-feedback";
 import { errorText, host, money, previewOf, since, STATE_LABEL, StateDot } from "./previews-common";
 
+/** Refuse a visual change (Chromatic's Deny): asks why in one line first, then refuses every page. */
+function RefuseButton({ disabled, busy, onRefuse }: { disabled: boolean; busy: boolean; onRefuse: (why: string) => void }) {
+  const [asking, setAsking] = useState(false);
+  const [why, setWhy] = useState("");
+  if (!asking) {
+    return (
+      <button type="button" disabled={disabled} onClick={() => setAsking(true)} className="h-6 shrink-0 rounded-md px-2 text-[11.5px] text-muted hover:text-fg disabled:opacity-40">
+        Refuse
+      </button>
+    );
+  }
+  return (
+    <form
+      className="flex shrink-0 items-center gap-1"
+      onSubmit={(ev) => {
+        ev.preventDefault();
+        onRefuse(why.trim());
+        setAsking(false);
+        setWhy("");
+      }}
+    >
+      <input
+        autoFocus
+        value={why}
+        maxLength={200}
+        onChange={(ev) => setWhy(ev.target.value)}
+        placeholder="Why, for the change's author"
+        aria-label="Why it's refused"
+        className="h-6 w-48 rounded-md border border-line-2 bg-transparent px-2 text-[11.5px] text-fg placeholder:text-subtle"
+      />
+      <button type="submit" disabled={disabled} className="h-6 rounded-md border border-line-2 px-2 text-[11.5px] text-danger hover:bg-white/[0.05] disabled:opacity-40">
+        {busy ? "Refusing…" : "Refuse"}
+      </button>
+    </form>
+  );
+}
+
 /** "1 story", "3 stories". */
 const storiesUntaken = (n: number) => (n === 1 ? "1 story" : `${n} stories`);
 
@@ -320,6 +357,20 @@ export function PreviewSheet({
                 </button>
               )}
             </Label>
+            {p.masked_by_default && p.masked_by_default.length > 0 && (
+              <p className="mb-1.5 text-[11.5px] break-words text-soft">
+                Masked by default, as they look like people's data and no rule names them:{" "}
+                {p.masked_by_default.map((m, i) => (
+                  <span key={`${m.resource}:${m.column}`}>
+                    {i > 0 ? ", " : ""}
+                    <span className="font-mono text-[11px] text-fg" title={m.why}>
+                      {m.column}
+                    </span>
+                  </span>
+                ))}
+                . A rule in the masking settings, or <code className="font-mono text-[11px]">keep</code>, says otherwise.
+              </p>
+            )}
             {p.resources.length ? (
               <div className="rounded-lg border border-line-2 bg-raised inset-shadow-highlight">
                 {p.resources.map((r) => {
@@ -384,10 +435,39 @@ export function PreviewSheet({
             )}
 
             {p.release && (
-              <p className="mt-1.5 font-mono text-[11px] text-subtle tabular-nums" title="The project's release (migrations), run on this preview's data before its services">
-                release {duration(p.release.ms)}
-                {p.release.before_ms != null ? ` · ${thanMain(p.release.ms, p.release.before_ms, "the push before") ?? "as before"}` : ""}
-              </p>
+              <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1">
+                <p className="font-mono text-[11px] text-subtle tabular-nums" title="The project's release (migrations), run on this preview's data before its services">
+                  release {duration(p.release.ms)}
+                  {p.release.before_ms != null ? ` · ${thanMain(p.release.ms, p.release.before_ms, "the push before") ?? "as before"}` : ""}
+                </p>
+                {p.release.locks && p.release.locks.length > 0 && (
+                  <p className="min-w-0 break-words font-mono text-[11px] text-danger tabular-nums" title="Locks the release held that made others wait, sampled while it ran: on production it would hold them as long">
+                    {p.release.locks
+                      .slice(0, 3)
+                      .map((l) => `${l.mode === "AccessExclusiveLock" ? "ACCESS EXCLUSIVE" : l.mode.replace(/Lock$/, "").replace(/([a-z])([A-Z])/g, "$1 $2").toUpperCase()} on ${l.table} ${duration(l.ms)}`)
+                      .join(" · ")}
+                  </p>
+                )}
+                {p.rehearsal && p.rehearsal.ok === null ? (
+                  <span className="text-[11px] text-subtle">rehearsing on today's data…</span>
+                ) : p.rehearsal ? (
+                  <span className={`min-w-0 break-words font-mono text-[11px] tabular-nums ${p.rehearsal.ok ? "text-subtle" : "text-danger"}`} title="The release once more on fresh branches of the parents as they are now (masked as the rules say)">
+                    on today's data {p.rehearsal.ok ? `passed in ${duration(p.rehearsal.ms ?? 0)}` : `failed: ${p.rehearsal.error ?? "see the activity"}`}
+                  </span>
+                ) : null}
+                {p.main_on_change && <MainOnChangeLine m={p.main_on_change} />}
+                {p.change && (
+                  <button
+                    type="button"
+                    disabled={busy !== null || gone || p.rehearsal?.ok === null}
+                    onClick={() => run("rehearse", () => previewsApi.rehearse(p.id))}
+                    title="Run the release once more on fresh branches of the parents as they are now: a preview's data may be days old"
+                    className="h-6 rounded-md px-2 text-[11px] text-muted hover:text-fg disabled:opacity-40"
+                  >
+                    {busy === "rehearse" ? "Asking…" : "Rehearse on today's data"}
+                  </button>
+                )}
+              </div>
             )}
             {p.schema_changes && p.schema_changes.length > 0 && (
               <>
@@ -409,6 +489,16 @@ export function PreviewSheet({
                     </div>
                   ))}
                 </pre>
+                {p.schema_overlaps && p.schema_overlaps.length > 0 && (
+                  <ul className="mt-1.5 space-y-0.5 text-[11.5px] text-soft" aria-label="Other changes changing these tables">
+                    {p.schema_overlaps.map((o) => (
+                      <li key={o.preview} className="break-words">
+                        <span className="font-mono text-[11px] text-fg">{o.branch || o.preview}</span> also changes{" "}
+                        <span className="font-mono text-[11px]">{o.tables.join(", ")}</span>: whichever lands second migrates a table the first changed.
+                      </li>
+                    ))}
+                  </ul>
+                )}
               </>
             )}
 
@@ -418,6 +508,21 @@ export function PreviewSheet({
               <div className="mt-1.5 flex items-center gap-2 text-[11.5px]">
                 {p.visual_review.state === "accepted" ? (
                   <span className="text-subtle">Accepted by {p.visual_review.by ?? "someone"} at this push.</span>
+                ) : p.visual_review.state === "refused" ? (
+                  <>
+                    <span className="min-w-0 break-words text-danger">
+                      Refused by {p.visual_review.by ?? "someone"}
+                      {p.visual_review.reason ? `: ${p.visual_review.reason}` : ""}. A new push asks again{p.visual_review.required ? "; it can't land meanwhile" : ""}.
+                    </span>
+                    <button
+                      type="button"
+                      disabled={busy !== null || gone}
+                      onClick={() => run("accept", () => previewsApi.acceptVisual(p.id, p.visual_review?.head))}
+                      className="ml-auto h-6 shrink-0 rounded-md border border-line-2 px-2 text-[11.5px] text-fg hover:bg-white/[0.05] disabled:opacity-40"
+                    >
+                      {busy === "accept" ? "Accepting…" : "Accept anyway"}
+                    </button>
+                  </>
                 ) : (
                   <>
                     <span className="text-soft">
@@ -434,6 +539,7 @@ export function PreviewSheet({
                     >
                       {busy === "accept" ? "Accepting…" : p.visual_review.pages.length > 1 ? "Accept all" : "Accept"}
                     </button>
+                    <RefuseButton disabled={busy !== null || gone} busy={busy === "refuse"} onRefuse={(why) => run("refuse", () => previewsApi.refuseVisual(p.id, p.visual_review?.head, why))} />
                   </>
                 )}
               </div>
@@ -2481,5 +2587,19 @@ export function ThreadPopup({ preview, review, close = () => window.close() }: {
         <NoteThread previewId={p.id} change={p.change} review={review} where={p} onDone={() => setTimeout(close, 900)} />
       )}
     </div>
+  );
+}
+
+/** Main's code on a copy of this head's migrated data: the pages that broke there, or that none did. */
+function MainOnChangeLine({ m }: { m: NonNullable<Preview["main_on_change"]> }) {
+  const said = (s: number) => (s === 0 ? "no answer" : String(s));
+  const broke = m.pages.filter((x) => (x.main_status > 0 && x.main_status < 500) && (x.status === 0 || x.status >= 500));
+  const title = "Main's live build, taking no traffic, on a copy of this change's branches as its release left them: while the change deploys, the version before it serves on this schema";
+  if (m.error) return <span className="min-w-0 break-words text-[11px] text-subtle" title={title}>main's code on this data: {m.error}</span>;
+  if (broke.length === 0) return <span className="text-[11px] text-subtle" title={title}>main's code still answers on this data ({m.pages.length} {m.pages.length === 1 ? "page" : "pages"})</span>;
+  return (
+    <span className="min-w-0 break-words font-mono text-[11px] text-danger tabular-nums" title={title}>
+      main's code breaks on this data: {broke.slice(0, 3).map((x) => `${x.path} ${said(x.status)} (main ${said(x.main_status)})`).join(" · ")}
+    </span>
   );
 }

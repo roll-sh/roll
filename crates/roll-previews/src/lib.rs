@@ -289,6 +289,12 @@ pub struct Skipped {
     /// the visual review holds on them ([`UNTAKEN_STORIES`]).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub touched_stories: u32,
+    /// A run's own count of the stories the change touched in all, and of those it took (every
+    /// share of a sharded run knows the whole touched set): what a failed share leaves out.
+    #[serde(skip)]
+    pub touched_total: u32,
+    #[serde(skip)]
+    pub touched_taken: u32,
     /// The change's stories were chosen by its files alone: its Storybook served no module graph
     /// (`preview-stats.json`, `--stats-json`; a `storybook dev` server has none), so a story that
     /// imports a changed file from elsewhere may be among those left.
@@ -432,10 +438,25 @@ pub struct Preview {
     /// `release` (or seed) ran at `head`: `+ …` added, `- …` removed (`schema::diff`). `None`:
     /// not known (no Postgres branch, or not read yet).
     pub schema_changes: Option<Vec<String>>,
+    /// The project's other open changes whose schema changes touch the same tables (PlanetScale's
+    /// conflicting deploy requests): whichever lands second migrates a table the first changed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub schema_overlaps: Vec<SchemaOverlap>,
     /// What in `schema_changes` would hurt production when the change lands (`schema::risks`:
     /// a dropped table or column, a type change, a column made NOT NULL).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub schema_risks: Vec<String>,
+    /// Its release rehearsed on the parents' data as it is now (PlanetScale's deploy requests
+    /// check against today's production): asked for at a head, then how it went.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rehearsal: Option<Rehearsal>,
+    /// Main's code on a copy of its migrated data, at its head (see [`MainOnChange`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub main_on_change: Option<MainOnChange>,
+    /// Columns its branches were masked with by default (they look like people's data, and no
+    /// rule names them): a rule, or `keep`, says otherwise.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub masked_by_default: Vec<MaskedByDefault>,
     /// The project's `release` (migrations) at its last head: how long it took on this
     /// preview's data, which is the parent's (PlanetScale's deploy requests show this before a
     /// merge: what's slow here locks production as long).
@@ -1276,7 +1297,13 @@ pub struct VisualReview {
     /// its time): nobody saw them, so they're under review too (Chromatic captures every story).
     #[serde(skip_serializing_if = "is_zero")]
     pub untaken: u32,
+    /// Refused: why (the latest refusal's, one line; `by` and `at` are its).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
+
+/// What a masked base's branch is named after (`pvbase-<rules>-<when>`): no preview's name starts so.
+pub const MASK_BASE_PREFIX: &str = "pvbase-";
 
 /// The visual review's entry for the stories a change touched that its run didn't take.
 pub use code_control::model::UNTAKEN_STORIES;
@@ -1298,6 +1325,9 @@ pub struct PageReview {
     /// shares it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
+    /// Refused at this head: by whom, when, why.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refused: Option<Refusal>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -1308,6 +1338,88 @@ pub enum VisualState {
     /// They differ, and nobody has accepted them at this head.
     Changed,
     Accepted,
+    /// Someone refused a page at this head (Chromatic's Deny): it fails until a new head, or
+    /// until someone accepts that page.
+    Refused,
+}
+
+/// Main's code on a copy of a change's migrated data, at a head (pgroll's expand/contract,
+/// tested): main's live builds on copies of the change's Postgres branches, its pages read there
+/// and on main's preview.
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+pub struct MainOnChange {
+    pub head: String,
+    pub at: i64,
+    pub ms: i64,
+    #[serde(default)]
+    pub pages: Vec<MainOnChangePage>,
+    /// Why it couldn't run (one line, masked): no preview of main, no build that can run on a
+    /// copy, a branch that can't be copied.
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// One page main's code was asked for on the change's data (`status`) and on main's
+/// (`main_status`); 0 is no answer.
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+pub struct MainOnChangePage {
+    pub service: String,
+    pub path: String,
+    pub status: u16,
+    pub main_status: u16,
+}
+
+impl MainOnChangePage {
+    /// It answers on main's data but fails on the change's (a 5xx, or no answer).
+    pub fn broke(&self) -> bool {
+        (1..500).contains(&self.main_status) && (self.status == 0 || self.status >= 500)
+    }
+}
+
+/// A change's release run again on fresh branches of its Postgres parents, as they are now
+/// (`POST …/rehearse`): its preview's data may be days old, production's isn't.
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+pub struct Rehearsal {
+    /// The head it's for.
+    pub head: String,
+    pub by: String,
+    /// When it was asked for.
+    pub at: i64,
+    /// `None` while it waits for the next converge; then whether the release passed.
+    #[serde(default)]
+    pub ok: Option<bool>,
+    #[serde(default)]
+    pub ms: Option<i64>,
+    /// What it failed with (one line, masked).
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// A column a branch was masked with by default: it looks like people's data and its parent's
+/// rules don't name it (`keep` leaves it as it is).
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+pub struct MaskedByDefault {
+    /// `kind:parent`.
+    pub resource: String,
+    pub column: String,
+    pub why: String,
+}
+
+/// Another open change's preview whose schema changes touch the same tables as this one's.
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+pub struct SchemaOverlap {
+    pub preview: String,
+    pub branch: String,
+    /// The tables both change (`schema.table`).
+    pub tables: Vec<String>,
+}
+
+/// Who refused a page of a visual review at its head, when, and why (one line).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Refusal {
+    pub by: String,
+    pub at: i64,
+    pub reason: String,
 }
 
 /// How much a change's page differs from the default branch's (Chromatic's baseline).
@@ -1569,6 +1681,30 @@ pub struct ReleaseRun {
     pub ms: i64,
     /// The run before's (the push before, or a reset's).
     pub before_ms: Option<i64>,
+    /// The locks it held that make others wait (`SHARE` and stronger: writes wait; `ACCESS
+    /// EXCLUSIVE`: reads too), the strongest per table and how long it was seen, as sampled every
+    /// half second while it ran: what it holds on production as long (PlanetScale's safe
+    /// migrations). At most 10.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub locks: Vec<ReleaseLock>,
+}
+
+/// A table a release held a lock on that made others wait.
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+pub struct ReleaseLock {
+    /// `schema.table` (`postgres:<ref>`'s, when the preview has several).
+    pub table: String,
+    /// Postgres's name for it: `AccessExclusiveLock`, `ExclusiveLock`, `ShareRowExclusiveLock`, `ShareLock`.
+    pub mode: String,
+    /// How long it was seen held (to the half second the samples are apart).
+    pub ms: i64,
+}
+
+/// [`ReleaseRun::locks`] at a head (`release_locks`, a runtime fact).
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+pub struct ReleaseLocksAt {
+    pub head: String,
+    pub locks: Vec<ReleaseLock>,
 }
 
 /// What of a parent's data a branch hands the preview's code: said wherever the branch is, so

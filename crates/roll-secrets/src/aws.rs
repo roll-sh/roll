@@ -46,12 +46,13 @@ pub struct Session {
 }
 
 /// STS, and IAM as a role roll assumed (rolld: the AWS SDK, with roll's own credentials). Calls
-/// block; errors are AWS's code or reason, never a credential.
+/// block; errors are AWS's code or reason, never a credential. `policy`: an inline session policy
+/// (STS's `Policy`), so the session may do only what both it and the role allow.
 pub trait Sts: Send + Sync {
-    fn assume(&self, role_arn: &str, external_id: &str, session_name: &str, seconds: i32) -> std::result::Result<Session, String>;
+    fn assume(&self, role_arn: &str, external_id: &str, session_name: &str, seconds: i32, policy: Option<&str>) -> std::result::Result<Session, String>;
     /// AssumeRoleWithWebIdentity with `token` (roll's issuer's): no AWS credential of roll's.
-    fn assume_web_identity(&self, role_arn: &str, token: &str, session_name: &str, seconds: i32) -> std::result::Result<Session, String> {
-        let _ = (role_arn, token, session_name, seconds);
+    fn assume_web_identity(&self, role_arn: &str, token: &str, session_name: &str, seconds: i32, policy: Option<&str>) -> std::result::Result<Session, String> {
+        let _ = (role_arn, token, session_name, seconds, policy);
         Err("web identity isn't on this server".into())
     }
     /// An IAM user's access key ids, as `role_arn` (iam.rs).
@@ -94,15 +95,16 @@ pub(crate) struct Issuing {
     pub keys: crate::crypto::Keyring,
 }
 
-/// A session for `project` as role `arn`, the way the role trusts roll.
+/// A session for `project` as role `arn`, the way the role trusts roll (`policy`: STS's inline
+/// session policy, narrowing it).
 #[allow(clippy::too_many_arguments)]
-fn session(sts: &dyn Sts, db: &Db, issuing: Option<&Issuing>, project: &str, arn: &str, trust: &str, session_name: &str, seconds: i32) -> std::result::Result<Session, String> {
+fn session(sts: &dyn Sts, db: &Db, issuing: Option<&Issuing>, project: &str, arn: &str, trust: &str, session_name: &str, seconds: i32, policy: Option<&str>) -> std::result::Result<Session, String> {
     if trust != "oidc" {
-        return sts.assume(arn, &external_id(project), session_name, seconds);
+        return sts.assume(arn, &external_id(project), session_name, seconds, policy);
     }
     let i = issuing.ok_or("roll's issuer isn't on this server (it needs a public URL)")?;
     let token = crate::issuer::Issuer { url: i.url.clone() }.sign(db, &i.keys, project, AWS_AUDIENCE).map_err(|e| e.to_string())?;
-    sts.assume_web_identity(arn, token.expose(), session_name, seconds)
+    sts.assume_web_identity(arn, token.expose(), session_name, seconds, policy)
 }
 
 /// An IAM role's ARN: `arn:aws:iam::<12 digits>:role/<path/name>`.
@@ -210,7 +212,7 @@ impl LinkProvider for Provider {
         let (project, name, arn, trust) = self.role(r#ref)?;
         // The lease's TTL and a few minutes' margin should a revoke be late; STS's own bounds.
         let seconds = ((ttl_minutes.unwrap_or(60) + 5) * 60).clamp(900, 43_200) as i32;
-        let s = session(&*self.sts, &self.db, self.issuing.as_ref(), &project, &arn, &trust, &session_name(label), seconds).map_err(|why| Error::Link(format!("AWS didn't let roll assume {name}: {why}")))?;
+        let s = session(&*self.sts, &self.db, self.issuing.as_ref(), &project, &arn, &trust, &session_name(label), seconds, None).map_err(|why| Error::Link(format!("AWS didn't let roll assume {name}: {why}")))?;
         let parts = BTreeMap::from([("access_key_id".to_string(), s.access_key_id), ("secret_access_key".to_string(), s.secret_access_key), ("session_token".to_string(), s.session_token)]);
         Ok(Issued { expires_at: None, parts, handle: json!({ "expires_at": s.expires_at }) })
     }
@@ -291,6 +293,8 @@ impl Secrets {
             if c.execute("UPDATE aws_roles SET name = ?, role_arn = ?, trust = ? WHERE id = ? AND project_id = ?", params![name, role_arn, trust, id, project])? == 0 {
                 return Err(Error::NotFound(format!("no AWS role {id}")));
             }
+            // Public certificates name the role they write Route 53's records as: renamed with it.
+            c.execute("UPDATE public_certs SET aws_role = ? WHERE project_id = ? AND aws_role = ?", params![name, project, old.name])?;
             audit::record(c, self.keys()?, project, caller, "aws_role.update", None, None, &[], &format!("changed AWS role {name} ({role_arn}, trust {trust})"), now)
         })?;
         Ok(AwsRole { name, role_arn, trust, ..old })
@@ -315,14 +319,14 @@ impl Secrets {
             format!("roll's role with sts:ExternalId = {}", external_id(project))
         };
         let probe = format!("prj_probe_{}", names::new_id("p", 12));
-        match session(&*sts, &self.db, issuing.as_ref(), &probe, role_arn, &trust, "roll-check", 900) {
+        match session(&*sts, &self.db, issuing.as_ref(), &probe, role_arn, &trust, "roll-check", 900, None) {
             Ok(_) => return Err(Error::BadRequest(format!("{}'s trust takes any of roll's projects: trust {pinned}, so roll assumes it for this project and nobody else's", role_arn))),
             // Only AWS refusing the made-up project shows the trust pins this one: any other error
             // (throttling, AWS unable to fetch roll's keys) proves nothing, and nothing is registered.
             Err(why) if !refused(&why) => return Err(Error::BadRequest(format!("roll couldn't check {}'s trust: {why}; try again", role_arn))),
             Err(_) => {}
         }
-        session(&*sts, &self.db, issuing.as_ref(), project, role_arn, &trust, "roll-check", 900).map_err(|why| Error::BadRequest(format!("roll couldn't assume {}: {why} (its trust policy must trust {pinned})", role_arn)))?;
+        session(&*sts, &self.db, issuing.as_ref(), project, role_arn, &trust, "roll-check", 900, None).map_err(|why| Error::BadRequest(format!("roll couldn't assume {}: {why} (its trust policy must trust {pinned})", role_arn)))?;
         Ok(())
     }
 
@@ -342,6 +346,10 @@ impl Secrets {
             if !users.is_empty() {
                 return Err(Error::Conflict("in_use", format!("{name} still rotates the keys of {}: delete those first", users.join(", "))));
             }
+            let certs: Vec<String> = c.query("SELECT name FROM public_certs WHERE project_id = ? AND aws_role = ? ORDER BY name LIMIT 5", [project, name.as_str()], |r| r.get(0))?;
+            if !certs.is_empty() {
+                return Err(Error::Conflict("in_use", format!("{name} still proves the names of public certificates {} in Route 53: give them another role or key first", certs.join(", "))));
+            }
             c.execute("DELETE FROM aws_roles WHERE id = ?", [id])?;
             audit::record(c, self.keys()?, project, caller, "aws_role.delete", None, None, &[], &format!("deleted AWS role {name}"), now)
         })
@@ -351,6 +359,14 @@ impl Secrets {
     /// [`crate::syncs::SyncTarget::aws_role`]): the shortest STS gives, as a link's issue would,
     /// and only while the role's maker may still manage the project.
     pub(crate) fn sync_aws_session(&self, project: &str, name: &str, sync: &str) -> Result<Session> {
+        self.aws_role_session(project, name, &format!("sync-{sync}"), None)
+    }
+
+    /// A session of the project's role `name` for one use `label` names (a sync's push, a public
+    /// certificate's Route 53 records; the session name is `roll-<label>`, which IAM conditions can
+    /// match): the shortest STS gives, narrowed by `policy` (STS's inline session policy), and only
+    /// while the role's maker may still manage the project.
+    pub(crate) fn aws_role_session(&self, project: &str, name: &str, label: &str, policy: Option<&str>) -> Result<Session> {
         let id: String = self
             .db
             .read(|c| c.query_row("SELECT id FROM aws_roles WHERE project_id = ? AND name = ?", [project, name], |r| r.get(0)).optional())?
@@ -362,7 +378,7 @@ impl Secrets {
             (Some(c), Ok(keys)) => Some(Issuing { url: c.issuer.clone(), keys: keys.clone() }),
             _ => None,
         };
-        session(&*sts, &self.db, issuing.as_ref(), project, &arn, &trust, &session_name(&format!("sync-{sync}")), 900).map_err(|why| Error::Link(format!("AWS didn't let roll assume {name}: {why}")))
+        session(&*sts, &self.db, issuing.as_ref(), project, &arn, &trust, &session_name(label), 900, policy).map_err(|why| Error::Link(format!("AWS didn't let roll assume {name}: {why}")))
     }
 
     /// The project's roles, as link targets' (kind, ref).

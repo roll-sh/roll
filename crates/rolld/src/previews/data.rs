@@ -6,6 +6,7 @@ use reqwest::Method;
 use roll_previews::Kind;
 use roll_previews::Mode;
 use roll_previews::ports::{Branched, Brancher, Usage};
+use roll_previews::MASK_BASE_PREFIX;
 use serde_json::{Value, json};
 
 // ── Postgres: a branch of the project's main ──
@@ -76,6 +77,46 @@ impl Brancher for Postgres {
     /// earlier push's data, copy-on-write.
     async fn snapshot(&self, parent: &str, branch: &str, name: &str) -> anyhow::Result<Option<Branched>> {
         self.create_from(parent, Some(branch), name, Mode::Branch, None).await.map(Some)
+    }
+
+    fn branches_from_base(&self) -> bool {
+        true
+    }
+
+    /// The granted locks other sessions hold on the branch's user tables (as the superuser, the
+    /// catalog's names only; nothing of the preview's code runs).
+    async fn locks(&self, parent: &str, branch: &str) -> anyhow::Result<Vec<(String, String)>> {
+        let p = self.0.get(&format!("/v1/projects/{}", seg(parent))).await?;
+        let b = p["branches"].as_array().and_then(|bs| bs.iter().find(|b| b["id"] == branch).cloned()).ok_or_else(|| anyhow::anyhow!("no Postgres branch {branch}"))?;
+        let ep = s(&b["endpoint"]["id"]).ok_or_else(|| anyhow::anyhow!("Postgres branch {branch} has no endpoint"))?;
+        let v = self.0.post(&format!("/v1/endpoints/{}/query", seg(&ep)), json!({ "sql": LOCKS_SQL })).await?;
+        let rows = v["results"].as_array().and_then(|r| r.last()).and_then(|r| r["rows"].as_array()).cloned().unwrap_or_default();
+        Ok(rows.iter().filter_map(|r| Some((r[0].as_str()?.to_string(), r[1].as_str()?.to_string()))).take(200).collect())
+    }
+
+    /// A branch of `parent` with no role of its own: pg-control gives a branch's role the objects
+    /// the superuser owns, so a base with one would keep the tables, and its branches' roles none.
+    async fn make_base(&self, parent: &str, name: &str) -> anyhow::Result<Branched> {
+        let id = match self.find(parent, name).await? {
+            Some(b) => s(&b["id"]).unwrap_or_default(),
+            None => match self.0.post(&format!("/v1/projects/{}/branches", seg(parent)), json!({ "name": name, "app_role": false })).await {
+                Ok(v) => s(&v["branch"]["id"]).ok_or_else(|| anyhow::anyhow!("a branch without an id"))?,
+                Err(e) if conflict_is_ours(&e) => self.find(parent, name).await?.and_then(|b| s(&b["id"])).ok_or(e)?,
+                Err(e) => return Err(e),
+            },
+        };
+        Ok(Branched { r#ref: id, kept: None })
+    }
+
+    /// A branch of the project's branch `from` (pg-control's `parent`), with a role of its own.
+    async fn branch_from(&self, parent: &str, from: &str, name: &str, mode: Mode) -> anyhow::Result<Option<Branched>> {
+        self.create_from(parent, Some(from), name, mode, None).await.map(Some)
+    }
+
+    /// The project's branches whose parent is `branch`.
+    async fn children(&self, parent: &str, branch: &str) -> anyhow::Result<usize> {
+        let p = self.0.get(&format!("/v1/projects/{}", seg(parent))).await?;
+        Ok(p["branches"].as_array().map_or(0, |bs| bs.iter().filter(|b| b["parent_id"] == branch).count()))
     }
 
     fn restores(&self) -> bool {
@@ -178,7 +219,11 @@ impl Brancher for Postgres {
         let p = self.0.get(&format!("/v1/projects/{}", seg(parent))).await?;
         let branches = p["branches"].as_array().cloned().unwrap_or_default();
         let b = branches.iter().find(|b| b["id"] == branch).ok_or_else(|| anyhow::anyhow!("no Postgres branch {branch}"))?;
-        let from = branches.iter().find(|x| x["id"] == b["parent_id"]).ok_or_else(|| anyhow::anyhow!("Postgres branch {branch} has no parent"))?;
+        let mut from = branches.iter().find(|x| x["id"] == b["parent_id"]).ok_or_else(|| anyhow::anyhow!("Postgres branch {branch} has no parent"))?;
+        // A branch of a masked base is compared with the parent the base was made from, as it is now.
+        while from["name"].as_str().is_some_and(|n| n.starts_with(MASK_BASE_PREFIX)) {
+            from = branches.iter().find(|x| x["id"] == from["parent_id"]).ok_or_else(|| anyhow::anyhow!("Postgres branch {branch}'s masked base has no parent"))?;
+        }
         // pg-control names a branch's role after the branch.
         let role = b["app_connection_uri"].is_string().then(|| s(&b["id"])).flatten();
         Ok(Some((pg_schema_lines(&self.0, s(&from["endpoint"]["id"]), None).await?, pg_schema_lines(&self.0, s(&b["endpoint"]["id"]), role).await?)))
@@ -338,6 +383,12 @@ SELECT line FROM (
   UNION ALL
   SELECT format('extension %I %s', e.extname, e.extversion) FROM pg_extension e
 ) x ORDER BY line";
+
+/// The granted locks other sessions hold on user tables, `(schema.table, mode)`.
+const LOCKS_SQL: &str = r"SET search_path = pg_catalog, pg_temp; SELECT format('%I.%I', n.nspname, c.relname), l.mode
+  FROM pg_locks l JOIN pg_class c ON c.oid = l.relation JOIN pg_namespace n ON n.oid = c.relnamespace
+  WHERE l.granted AND l.pid <> pg_backend_pid() AND c.relkind IN ('r', 'p', 'm')
+    AND n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg\_%'";
 
 // ── Redis ──
 

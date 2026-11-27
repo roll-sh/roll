@@ -227,7 +227,7 @@ pub async fn infer(cluster: &Cluster, ep: &Endpoint, req: &Request) -> EsResult<
                 .iter()
                 .filter_map(|c| c.get("text").and_then(Value::as_str))
                 .collect();
-            Ok(Results::Completion(vec![text]))
+            Ok(Results::completion(vec![text], &v))
         }
         other => Err(crate::xpack::inference::unsupported_task(other, "cohere")),
     }

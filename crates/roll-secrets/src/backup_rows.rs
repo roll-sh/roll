@@ -87,7 +87,7 @@ pub(crate) const REGISTRATIONS: &[Table] = &[
         what: "public certificate",
         prefix: "pcr",
         len: 16,
-        plain: &["name", "directory", "domains", "dns_provider", "eab_kid", "rotate_days", "serial", "not_before", "not_after", "issued_at", "previous_serial", "previous_not_after", "asked_renewals"],
+        plain: &["name", "directory", "domains", "dns_provider", "aws_role", "eab_kid", "rotate_days", "serial", "not_before", "not_after", "issued_at", "previous_serial", "previous_not_after", "asked_renewals"],
         sealed: &[
             ("dns_credential", |p, id, c| crate::public_certs::aad(p, id, &format!("dns:{}", text(c, "dns_provider")))),
             ("eab_key", |p, id, c| crate::public_certs::aad(p, id, &format!("eab:{}", text(c, "directory")))),

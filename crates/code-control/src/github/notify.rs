@@ -457,7 +457,43 @@ fn cls_words(c: f64) -> String {
 fn release_line(e: &crate::model::PreviewEnvironment) -> Option<String> {
     let ms = u32::try_from(e.release_ms?).unwrap_or(u32::MAX);
     let before = e.release_before_ms.and_then(|b| u32::try_from(b).ok()).and_then(|b| than_main(ms, b, "the push before"));
-    Some(format!("Its release (migrations) took {} on the preview's data{}.\n\n", ms_words(ms), before.map(|w| format!(", {w}")).unwrap_or_default()))
+    let locks: Vec<String> = e
+        .release_locks
+        .iter()
+        .take(3)
+        .map(|(table, mode, held)| {
+            let table: String = table.chars().filter(|c| !c.is_control()).map(|c| if c == '`' { '\'' } else { c }).take(120).collect();
+            let what = match mode.as_str() {
+                "AccessExclusiveLock" => "ACCESS EXCLUSIVE (reads and writes wait)",
+                "ExclusiveLock" => "EXCLUSIVE (writes wait)",
+                "ShareRowExclusiveLock" => "SHARE ROW EXCLUSIVE (writes wait)",
+                _ => "SHARE (writes wait)",
+            };
+            format!("{what} on `{table}` for {}", ms_words(u32::try_from(*held).unwrap_or(u32::MAX)))
+        })
+        .collect();
+    let held = if locks.is_empty() { String::new() } else { format!(" It held {}: on production it would hold them as long.", locks.join(", ")) };
+    Some(format!("Its release (migrations) took {} on the preview's data{}.{held}\n\n", ms_words(ms), before.map(|w| format!(", {w}")).unwrap_or_default()))
+}
+
+/// Main's code on a copy of the change's migrated data: the pages that broke there, or that none
+/// did. While the change deploys, the version before it serves on the new schema.
+fn main_on_change_line(e: &crate::model::PreviewEnvironment) -> Option<String> {
+    let crate::model::PreviewMainOnChange { asked, broke } = e.main_on_change.as_ref()?;
+    if broke.is_empty() {
+        return (*asked > 0).then(|| format!("Main's code still answers on this change's migrated data ({asked} {}), so the version serving while it deploys keeps working.\n\n", if *asked == 1 { "page" } else { "pages" }));
+    }
+    let said = |s: u16| if s == 0 { "no answer".to_string() } else { s.to_string() };
+    let pages: Vec<String> = broke
+        .iter()
+        .take(5)
+        .map(|(path, status, main)| {
+            let path: String = path.chars().filter(|c| !c.is_control()).map(|c| if c == '`' { '\'' } else { c }).take(120).collect();
+            format!("`{path}` answers {} (on main's data, {})", said(*status), said(*main))
+        })
+        .collect();
+    let more = if broke.len() > 5 { format!(" and {} more", broke.len() - 5) } else { String::new() };
+    Some(format!("**Main's code breaks on this change's migrated data:** {}{more}. While it deploys, the version before it serves on this schema: expand first and contract in a later change.\n\n", pages.join(", ")))
 }
 
 /// The `roll/regressions` status, with the project's `regressions` rule: how many routes are
@@ -537,8 +573,29 @@ fn review_line(v: &crate::model::PreviewVisualReview, dashboard: Option<&str>) -
             unstable_line(v),
         )),
         "accepted" => Some(format!("Visual review: accepted by {by}.\n\n")),
+        "refused" => Some(format!(
+            "**Visual review:** refused by {by}{}{required}. A new push asks again, or someone accepts it.{link}\n\n",
+            v.reason.as_deref().map(one_line).filter(|r| !r.is_empty()).map(|r| format!(": \"{r}\"")).unwrap_or_default()
+        )),
         _ => None,
     }
+}
+
+/// A reason a person wrote, as one line of plain text for a comment or a status (no markdown
+/// that could link, mention or break out of the quote).
+fn one_line(s: &str) -> String {
+    s.chars().filter(|c| !c.is_control()).map(|c| if matches!(c, '`' | '"' | '[' | ']' | '<' | '>' | '@' | '*' | '_' | '\\') { ' ' } else { c }).take(200).collect::<String>().trim().to_string()
+}
+
+/// Other open changes that change the same tables (PlanetScale's conflicting deploy requests):
+/// whichever lands second migrates a table the first changed. Names as code, never markup.
+fn overlaps_line(overlaps: &[(String, Vec<String>)]) -> String {
+    if overlaps.is_empty() {
+        return String::new();
+    }
+    let code = |s: &str| format!("`{}`", s.chars().filter(|c| !c.is_control()).map(|c| if c == '`' { '\'' } else { c }).take(120).collect::<String>());
+    let each: Vec<String> = overlaps.iter().take(5).map(|(b, t)| format!("{} ({})", code(&branch_name(b)), t.iter().take(5).map(|t| code(t)).collect::<Vec<_>>().join(", "))).collect();
+    format!("**Also changing these tables:** {}. Whichever lands second migrates a table the first one changed: rebase it, and look at its preview again.\n\n", each.join("; "))
 }
 
 fn stories(n: u32) -> String {
@@ -596,6 +653,7 @@ fn visual_status(v: &crate::model::PreviewVisualReview) -> (&'static str, String
     let by: String = v.by.as_deref().unwrap_or("someone").chars().filter(|c| c.is_ascii_alphanumeric() || "-_.".contains(*c)).take(40).collect();
     match v.state.as_str() {
         "accepted" => ("success", format!("Accepted by {by}: differs from {branch} by {:.1}%", v.percent.max(0.1))),
+        "refused" => ("failure", format!("Refused by {by}{}", v.reason.as_deref().map(one_line).filter(|r| !r.is_empty()).map(|r| format!(": {r}")).unwrap_or_default()).chars().take(140).collect()),
         "changed" if !v.pages_waiting() && v.untaken_waiting().is_some() => {
             let n = v.untaken_waiting().unwrap_or(0);
             ("pending", format!("{} the change touched {} taken: accept {} as not taken in roll", stories(n), if n == 1 { "wasn't" } else { "weren't" }, if n == 1 { "it" } else { "them" }))
@@ -947,8 +1005,12 @@ pub fn preview_comment_for(p: Option<&Preview>, marker: &str, teardown: Option<&
             if let Some(lines) = e.schema_changes.as_ref().filter(|l| !l.is_empty()) {
                 out.push_str(&risks_line(&e.schema_risks));
                 out.push_str(&schema_block(lines));
+                out.push_str(&overlaps_line(&e.schema_overlaps));
             }
             if let Some(line) = release_line(e) {
+                out.push_str(&line);
+            }
+            if let Some(line) = main_on_change_line(e) {
                 out.push_str(&line);
             }
             out.push_str(&notes_block(&e.notes));
@@ -1213,8 +1275,11 @@ mod preview_tests {
             head: None,
             schema_changes: None,
             schema_risks: Vec::new(),
+            schema_overlaps: Vec::new(),
             release_ms: None,
+            release_locks: Vec::new(),
             release_before_ms: None,
+            main_on_change: None,
             screenshot_url: None,
             expires_at: None,
             earlier: Vec::new(),
@@ -1346,7 +1411,7 @@ mod preview_tests {
             step: None,
         };
         e.pages = vec![page("/pricing", Some(40.0), Some(2.0), 1), page("/about", Some(0.0), None, 0)];
-        let review = |state: &str, by: Option<&str>| crate::model::PreviewVisualReview { state: state.into(), branch: "main".into(), percent: 8.04, by: by.map(Into::into), required: false, head: None, pages: Vec::new(), untaken: 0 };
+        let review = |state: &str, by: Option<&str>| crate::model::PreviewVisualReview { state: state.into(), branch: "main".into(), percent: 8.04, by: by.map(Into::into), required: false, head: None, pages: Vec::new(), untaken: 0, reason: None };
         assert_eq!(visual_status(&review("changed", None)), ("pending", "Differs from main by 8.0%: accept it in roll".into()));
         // Only stories the change touched that its run didn't take: said as that, not as a difference.
         let mut untaken = review("changed", None);
@@ -1354,6 +1419,11 @@ mod preview_tests {
         untaken.pages = vec![crate::model::PreviewPageReview { path: crate::model::UNTAKEN_STORIES.into(), percent: 0.0, by: None, unstable: false }];
         assert_eq!(visual_status(&untaken), ("pending", "3 stories the change touched weren't taken: accept them as not taken in roll".into()));
         assert!(review_line(&untaken, None).is_some_and(|l| l.contains("3 stories this change touched weren't taken")), "{:?}", review_line(&untaken, None));
+        // Refused: the status fails, with why as plain text (no link or mention gets through).
+        let mut refused = review("refused", Some("ada"));
+        refused.reason = Some("the [Pay](https://evil.example) button @carol hides".into());
+        assert_eq!(visual_status(&refused), ("failure", "Refused by ada: the  Pay (https://evil.example) button  carol hides".into()));
+        assert!(review_line(&refused, None).is_some_and(|l| l.starts_with("**Visual review:** refused by ada: \"the  Pay ") && !l.contains('@') && !l.contains("](")), "{:?}", review_line(&refused, None));
         let mut partly = review("changed", None);
         partly.pages = [("", Some("ada")), ("/pricing", None)].map(|(path, by)| crate::model::PreviewPageReview { path: path.into(), percent: 8.0, by: by.map(Into::into), unstable: path == "/pricing" }).to_vec();
         assert_eq!(visual_status(&partly), ("pending", "Differs from main by 8.0%: 1 of 2 pages accepted, accept the rest in roll".into()));
