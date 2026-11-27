@@ -927,7 +927,9 @@ impl Runtime {
         if !matches!((&want, given), (Some(want), Some(given)) if same(&crate::store::bypass_hash(given), want)) {
             return (StatusCode::UNAUTHORIZED, "send the project's bypass secret in x-roll-preview-bypass").into_response();
         }
-        let name = req.uri().query().unwrap_or("").split('&').filter_map(|kv| kv.split_once('=')).find(|(k, _)| *k == "name").map(|(_, v)| percent_decode(v)).unwrap_or_default();
+        let query = req.uri().query().unwrap_or("").to_string();
+        let param = |k: &str| query.split('&').filter_map(|kv| kv.split_once('=')).find(|(n, _)| *n == k).map(|(_, v)| percent_decode(v));
+        let (name, head) = (param("name").unwrap_or_default(), param("head"));
         let Ok(png) = axum::body::to_bytes(req.into_body(), SCREENSHOT_MAX).await else { return (StatusCode::PAYLOAD_TOO_LARGE, "a PNG of 2 MiB at most").into_response() };
         if !png.starts_with(b"\x89PNG\r\n\x1a\n") {
             return (StatusCode::BAD_REQUEST, "the body is a PNG").into_response();
@@ -936,7 +938,7 @@ impl Runtime {
             Ok(e) => e,
             Err(_) => return (StatusCode::SERVICE_UNAVAILABLE, "try again").into_response(),
         };
-        match e.snapshot(preview, &name, png.to_vec()).await {
+        match e.snapshot(preview, &name, head.as_deref(), png.to_vec()).await {
             Ok(head) => (StatusCode::CREATED, axum::Json(serde_json::json!({ "page": format!("snap:{name}"), "head": head }))).into_response(),
             Err(err) => err.into_response(),
         }

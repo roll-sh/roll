@@ -1017,6 +1017,19 @@ impl Engine {
         }
         self.store.mark_step(&r.id, &r.head, "checks")?;
 
+        // 4d. The team's snapshots sent since the last converge: compared once for them all (a
+        // change's with main's; main's kept by head, then the changes waiting on it compared).
+        if self.store.runtime_fact::<bool>(&r.id, "snapshots_due")?.unwrap_or(false) {
+            self.store.set_runtime_fact::<bool>(&r.id, "snapshots_due", None)?;
+            if r.change_id.is_some() {
+                self.compare_with_default_branch(r).await;
+                let threshold = self.store.settings(&r.project_id).map_or(0.0, |s| s.github.visual_threshold);
+                let _ = self.store.carry_acceptance(&r.id, threshold);
+            } else {
+                self.store.keep_base_history(&r.id, r.build())?;
+                self.compare_waiting(r).await;
+            }
+        }
         // 5. Settled.
         let running = self.store.services(&r.id)?.iter().any(|x| x.state == ServiceState::Running);
         let error = (!problems.is_empty()).then(|| problems.join("; "));

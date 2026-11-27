@@ -2470,10 +2470,18 @@ impl Store {
     pub fn put_snapshot(&self, id: &str, head: &str, name: &str, png: &[u8]) -> Result<()> {
         let path = format!("snap:{name}");
         let rows = self.prepare_page_shots(id, head, &[crate::ports::PageShot { path: path.clone(), png: png.to_vec(), errors: 0, report: Default::default() }])?;
+        use base64::Engine as _;
+        let new = base64::engine::general_purpose::STANDARD.encode(png);
         self.db.write(|c| {
             let others: i64 = c.query_row("SELECT COUNT(*) FROM page_shots WHERE preview_id = ? AND path LIKE 'snap:%' AND path <> ?", params![id, path], |r| r.get(0))?;
             if others as usize >= SNAPSHOTS_MAX {
                 return Err(Error::Conflict(format!("the preview has {SNAPSHOTS_MAX} snapshots")));
+            }
+            // Another picture by the same name: what was accepted or refused isn't this one.
+            let was: Option<String> = c.query_row("SELECT png FROM page_shots WHERE preview_id = ? AND path = ?", params![id, path], |r| r.get(0)).optional()?;
+            if was.is_some_and(|w| w != new) {
+                c.execute("DELETE FROM visual_page_accepts WHERE preview_id = ? AND path = ?", params![id, path])?;
+                c.execute("DELETE FROM visual_page_refusals WHERE preview_id = ? AND path = ?", params![id, path])?;
             }
             upsert_page_shots(c, id, head, &rows)
         })

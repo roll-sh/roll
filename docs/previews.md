@@ -2543,11 +2543,17 @@ type Settings = {
     test sends a picture to the preview it runs against, `POST /__roll/snapshot?name=<name>` on
     the preview's own host with the project's bypass secret (`x-roll-preview-bypass`, the one CI
     already has; a public preview's too, and never a visitor's cookie) and a PNG of 2 MiB at most
-    as the body (201 `{page, head}`). It's page `snap:<name>` of the visual review at the head
-    the preview serves ("checkout (your tests)" on the sheet): compared with the one it replaces
-    at an earlier head, and with main's preview's `snap:<name>`, which main's own CI run sends
-    the same way (a change's against main's; main's sent later compares the changes waiting on
-    it again), accepted, refused and grouped like any page. A name is 1 to 80 of `a-z A-Z 0-9 -
+    as the body (201 `{page, head}`; `&head=<changeset or git commit>`, which Playwright's run
+    knows, is a 409 unless it's what the preview serves, so a test of another head isn't filed
+    as this one's). It's page `snap:<name>` of the visual review at the head the preview serves
+    ("checkout (your tests)" on the sheet): compared with the one it replaces at an earlier
+    head, and with main's preview's `snap:<name>`, which main's own CI run sends the same way.
+    The preview's owner compares them at its next converge, once for every picture sent since
+    (a change's against main's, then reported; main's kept by head, then the changes waiting on
+    it compared again), so a suite of 40 is one comparison, not 40. Accepted, refused and
+    grouped like any page; another picture by the same name asks again (an acceptance was for
+    the one before). With `github.screenshot` on only: the review starts from roll's own
+    screenshot of the first page. A name is 1 to 80 of `a-z A-Z 0-9 -
     _ . /`; 40 a preview. A screenshot run at that head keeps them; the first at a new head
     drops the earlier head's, so the review only shows what this head's tests sent. A fork's
     preview has no bypass secret, so it takes none. Services on roll apps don't take them yet
@@ -2557,7 +2563,7 @@ type Settings = {
     ```js
     // playwright: a fixture next to the bypass one above
     export async function snapshot(page, name) {
-      await fetch(new URL(`/__roll/snapshot?name=${encodeURIComponent(name)}`, page.url()), {
+      await fetch(new URL(`/__roll/snapshot?name=${encodeURIComponent(name)}&head=${process.env.GITHUB_SHA}`, page.url()), {
         method: 'POST',
         headers: { 'x-roll-preview-bypass': process.env.ROLL_PREVIEW_BYPASS, 'content-type': 'image/png' },
         body: await page.screenshot({ fullPage: true, animations: 'disabled' }),
