@@ -1959,7 +1959,11 @@ land on the change.
 - A note or an error becomes a fix to make (Vercel Comments' "Create issue", Netlify's drawer):
   the note's sheet (opened from its Reply or Resolve) and each error group on the sheet's Errors
   tab have "Make a work item", where roll's agents claim work too. A note's is made by roll
-  (`POST …/notes/{note}/work`, `roll preview notes <id> --work <note>`): in the change's repo,
+  (`POST …/notes/{note}/work`, `roll preview notes <id> --work <note>`): on a repo mirrored to
+  GitHub, a team member's note opens an issue there, by roll's App (Marker.io's and Jam's notes
+  to GitHub Issues), which GitHub's `issues` webhook makes the repo's work item as any issue;
+  elsewhere, and always for a guest's note (its words are never published to GitHub, and stay
+  marked as outside the team's), a work item in the change's repo,
   titled by the note's first line, its body the note with its page, element and link, labelled
   `preview-feedback`, once a note (kept, shown with the note as `work`), and the note gets a
   reply naming it. A guest's note (a share link's) makes an item marked as someone outside the
@@ -2131,7 +2135,7 @@ previews in it), the operator and admins see every project.
 | `GET /v1/previews/{id}/notes` | | `{notes: [{id, path, selector, note, by, at, replies: [{id, note, by, at}], crop, work?: {number, url}}]}`: the notes left on its pages that nobody has resolved, every page's (the latest 500); `crop`: a picture of its element is kept |
 | `GET /v1/previews/{id}/notes/{note}/crop` | | `image/png`: the note's element as a screenshot run cropped it from its page (`X-Roll-Crop-As`: how, when as its reviewer saw it); 404 until one has |
 | `POST /v1/previews/{id}/notes/{note}/resolve` | | `{resolved}`: a note on the preview's page (its review's id) resolved, so the page stops listing it; 404 for a note that isn't the change's |
-| `POST /v1/previews/{id}/notes/{note}/work` | | `{number, url}`: the note made a work item on its change's repo by roll (labelled `preview-feedback`, a guest's words marked as outside the team's), said on the change; once a note (asked again, the same one; two callers at once make one, the second a 409 while it's made); 403 when the caller's grant (or a person's token's session) doesn't write the change's repo's code; 404 for a note that isn't the change's |
+| `POST /v1/previews/{id}/notes/{note}/work` | | `{number, url}`: the note made a work item on its change's repo by roll (a GitHub issue on a repo mirrored there, a guest's note excepted; labelled `preview-feedback`, a guest's words marked as outside the team's), said on the change; once a note (asked again, the same one; two callers at once make one, the second a 409 while it's made); 403 when the caller's grant (or a person's token's session) doesn't write the change's repo's code; 404 for a note that isn't the change's |
 | `GET /v1/previews/{id}/mail` | | `{mail: [{id, at, from, to, subject, size}]}`: what its services sent, caught (newest first, the last 50) |
 | `GET /v1/previews/{id}/mail/{mail}` | | One caught message as sent, as `text/plain` (never rendered) |
 | `GET /v1/previews/{id}/connect` | | `{branches: [{kind, parent, vars}]}`: each data branch's connection as its services get it, the branch's own credentials (a Postgres branch's role, never the parent's or a superuser's), read from the products each time; 409 while it's being deleted |
@@ -3130,8 +3134,8 @@ overlaps stay within a repo.
 
 1. **Snapshots, notes and share links on roll apps services, in review**: roll apps' hooks, the
    preview checked to run on that service.
-2. **Notes to Jira, GitHub Issues or Asana** (Marker.io, Netlify's Drawer; S): a note's work item
-   made by roll, a guest's marked as outside the team's words, in review; a tracker outside roll next.
+2. **Notes to Jira, GitHub Issues or Asana** (Marker.io, Netlify's Drawer; S): a GitHub issue on a
+   mirrored repo, in review (a note's work item by roll landed, #1196); Jira and Asana next.
 3. **Replaying recorded traffic against the preview and main** (Signadot, Speedscale; L): writes
    replay safely on branched data; capturing production's requests needs its privacy designed
    first.
@@ -3150,7 +3154,7 @@ Not to build: more lab checks on the first page (each adds noise to every pull r
 Kubernetes cluster per preview (roll apps' Compose import covers multi-service apps, and a
 cluster would break "costs nothing asleep").
 
-Landed 2026-11-27, early: a failed story shard's share of the touched stories counted as untaken (#1175), and masking that's safe by default for NoSQL and search, with the project told of each column masked by default (#1177), and main's code on a copy of a change's migrated data, on roll apps (#1183) and roll's runtime (#1185), webhook URLs into private previews (#1187), the twelfth review's fixes (#1200), and snapshots from the team's own tests (#1192).
+Landed 2026-11-27, early: a failed story shard's share of the touched stories counted as untaken (#1175), and masking that's safe by default for NoSQL and search, with the project told of each column masked by default (#1177), and main's code on a copy of a change's migrated data, on roll apps (#1183) and roll's runtime (#1185), webhook URLs into private previews (#1187), the twelfth review's fixes (#1200), snapshots from the team's own tests (#1192), a note's work item made by roll (#1196), and a team note opening a GitHub issue on a mirrored repo (#1209).
 
 Landed 2026-11-26, midday: restore points for streams (#1112), the TurboSnap test's race under
 load (#1114), the tenth review's fixes (#1119), the visual review holding on stories a change
