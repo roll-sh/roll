@@ -16,6 +16,7 @@ use crate::meta::{AliasMeta, ClusterState, IndexMeta, IndexState, templates};
 use crate::obj;
 use crate::rest::{Ctx, Reply};
 use crate::xcontent::filter::glob_match;
+use crate::xpack::security::AliasAuth;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -571,19 +572,31 @@ fn finish_create(
     Ok(warnings)
 }
 
+/// The aliases a request creates an index with (a create, a resize, a rollover), their date math
+/// resolved once so the names authorized are the names made, and what authorizes them on the new
+/// index ([`AliasAuth::check`], inside the update that makes it).
+pub fn authorized_aliases(ctx: &Ctx, aliases: &mut [(String, AliasMeta)]) -> EsResult<(AliasAuth, Vec<String>)> {
+    for (name, _) in aliases.iter_mut() {
+        *name = resolve::resolve_date_math(name, ctx.now_ms)?;
+    }
+    Ok((AliasAuth::of(ctx), aliases.iter().map(|(n, _)| n.clone()).collect()))
+}
+
 pub async fn create(ctx: &Ctx<'_>) -> EsResult<Reply> {
     ctx.validate_timeouts()?;
     let provided = ctx.path_param("index").unwrap_or_default().to_string();
     let name = resolve::resolve_date_math(&provided, ctx.now_ms)?;
     let body = ctx.body_map()?;
-    let req = parse_create_body(body)?;
+    let mut req = parse_create_body(body)?;
     let hidden = req.settings.get("index.hidden") == Some("true");
     let now = ctx.now_ms;
     let n2 = name.clone();
     let scripts = ctx.cluster.scripts.clone();
+    let (auth, aliases) = authorized_aliases(ctx, &mut req.aliases)?;
     let warnings = ctx
         .cluster
         .update(move |st| {
+            auth.check_new(&n2, &aliases)?;
             let w = create_index(st, &provided, &n2, req, now)?;
             if let Some(idx) = st.metadata.indices.get(&n2).cloned() {
                 crate::search::runtime::check_mapping_scripts(&scripts, st, &idx.mapping)?;

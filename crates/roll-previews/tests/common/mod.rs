@@ -370,6 +370,8 @@ pub struct FakeApps {
     pub browser: Mutex<HashMap<String, Vec<roll_previews::ports::BrowserCheckResult>>>,
     /// Builds started again on an earlier push's copy: (service, deployment, the variables).
     pub views: Mutex<Vec<(String, String, Vars)>>,
+    /// The webhook URLs each service was last deployed with: (path, token SHA-256).
+    pub hooks: Mutex<HashMap<(String, String), Vars>>,
     /// What `fetch` answers for a service, URL and path (`<service> <url><path>`; unset: 200).
     pub fetched: Mutex<HashMap<String, u16>>,
     /// Whether services run on roll's runtime here (`can_swap`).
@@ -477,6 +479,7 @@ impl Apps for FakeApps {
         }
         // What the backend was sent, whatever it answers.
         self.vars.lock().insert((t.preview.clone(), t.service.clone()), t.vars.clone());
+        self.hooks.lock().insert((t.preview.clone(), t.service.clone()), t.webhooks.clone());
         if self.still.load(Ordering::SeqCst) > 0 {
             self.still.fetch_sub(1, Ordering::SeqCst);
             return Err(roll_previews::ports::StillDeploying("building".into()).into());

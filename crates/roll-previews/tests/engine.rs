@@ -212,6 +212,27 @@ async fn with_screenshots_a_baseline_of_the_default_branch_is_kept_to_compare_ch
     assert_eq!(e.engine.store.row_by_change("chg_1").unwrap().map(|r| r.desired), Some(Desired::Active), "the change's preview came back with its repo");
 }
 
+/// A webhook URL of a service roll apps serves reaches roll apps' own gate: made, the service is
+/// deployed again with its path and its token's SHA-256 (never the token); revoked, without it.
+#[tokio::test]
+async fn a_webhook_url_reaches_roll_apps_gate() {
+    let e = env(json!({ "enabled": true, "access": "link" }));
+    *e.apps.catalog.lock() = Some(vec![roll_previews::ports::CatalogService { name: "web".into(), repo: Some("acme/web".into()), root: String::new(), memory_mb: 512 }]);
+    e.code.open(change("chg_wh", 1));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_wh").unwrap().unwrap();
+    let (hook, url) = e.engine.webhook(&p.id, "/api/stripe", "ada", None, "Stripe").await.unwrap();
+    let token = url.split("roll_hook=").nth(1).unwrap().to_string();
+    e.engine.pass().await.unwrap();
+    let sent = e.apps.hooks.lock().get(&(p.id.clone(), "web".into())).cloned().unwrap_or_default();
+    assert_eq!(sent, vec![("/api/stripe".to_string(), roll_previews::store::bypass_hash(&token))], "its path and hash, never the token");
+    assert!(e.engine.webhook(&p.id, "/__roll/notes", "ada", None, "").await.is_err() && e.engine.webhook(&p.id, "/a/../b", "ada", None, "").await.is_err(), "roll's own paths and dot segments refused");
+    e.engine.store.revoke_webhook(&p.id, &hook.id).unwrap();
+    e.engine.store.update(&p.id, |r| r.next_at = 0).unwrap();
+    e.engine.pass().await.unwrap();
+    assert!(e.apps.hooks.lock().get(&(p.id.clone(), "web".into())).is_some_and(|h| h.is_empty()), "revoked: told again without it");
+}
+
 /// A preview's browsers' containers cost what services' do, by their GiB-hours: its screenshot
 /// runs (every container's own time) are in its month's cost, and so in the project's budget.
 #[tokio::test]
@@ -485,6 +506,52 @@ async fn a_change_queued_to_land_is_rehearsed_where_the_project_asks() {
     quiet.engine.pass().await.unwrap();
     let q = quiet.engine.store.row_by_change("chg_rq2").unwrap().unwrap();
     assert!(quiet.engine.store.preview(&q.id).unwrap().rehearsal.is_none());
+}
+
+/// Snapshots from the team's own tests (Argos's and Percy's SDKs): a picture sent to a change's
+/// preview and one by the same name to main's are a page of the visual review, compared like any
+/// other; a screenshot run at that head keeps it, one at a new head drops it.
+#[tokio::test]
+async fn the_teams_snapshots_join_the_visual_review() {
+    let e = env(json!({ "enabled": true, "visual_review": "check", "github": { "screenshot": true } }));
+    let png = |v: u8| {
+        let mut out = Vec::new();
+        image::RgbaImage::from_pixel(8, 8, image::Rgba([v, v, v, 255])).write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png).unwrap();
+        out
+    };
+    *e.apps.shot.lock() = Some(png(0));
+    e.code.open(change("chg_sn", 1));
+    e.engine.pass().await.unwrap();
+    e.engine.pass().await.unwrap();
+    let chg = e.engine.store.row_by_change("chg_sn").unwrap().unwrap();
+    let review = || e.engine.store.preview(&chg.id).unwrap().visual_review;
+    for _ in 0..3000 {
+        if review().is_some() && !e.engine.shooting() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let base = e.engine.store.rows(Some(&e.project)).unwrap().into_iter().find(|r| r.change_id.is_none()).unwrap();
+    assert!(e.engine.snapshot(&chg.id, "../x", None, png(0)).await.is_err(), "a name of its own grammar");
+    assert!(matches!(e.engine.snapshot(&chg.id, "checkout", Some("cs_other"), png(0)).await, Err(roll_previews::Error::Conflict(_))), "a test of another head");
+    e.engine.snapshot(&base.id, "checkout", None, png(0)).await.unwrap();
+    let head = e.engine.snapshot(&chg.id, "checkout", Some(chg.build()), png(255)).await.unwrap();
+    // The owner's next converge compares them, once, and the change is told.
+    e.engine.pass().await.unwrap();
+    e.engine.pass().await.unwrap();
+    let page = review().unwrap().pages.into_iter().find(|p| p.path == "snap:checkout");
+    assert!(page.as_ref().is_some_and(|p| p.percent > 50.0), "compared with main's, under review: {page:?}");
+    assert!(e.code.last_report("chg_sn").visual_review.is_some_and(|v| v.pages.iter().any(|p| p.path == "snap:checkout")), "the change is told");
+    // Accepted, then another picture by that name: the acceptance was for the one before.
+    e.engine.accept_visual(&chg.id, "ada", &[], true, None, Some(&head), Some("snap:checkout")).await.unwrap();
+    assert!(review().unwrap().pages.iter().any(|p| p.path == "snap:checkout" && p.by.is_some()));
+    e.engine.snapshot(&chg.id, "checkout", None, png(128)).await.unwrap();
+    e.engine.pass().await.unwrap();
+    assert!(review().unwrap().pages.iter().any(|p| p.path == "snap:checkout" && p.by.is_none()), "a new picture asks again");
+    e.engine.store.set_page_shots(&chg.id, &head, &[], &[]).unwrap();
+    assert!(e.engine.store.page_checks(&chg.id).unwrap().iter().any(|p| p.path == "snap:checkout"), "a run at its head keeps it");
+    e.engine.store.set_page_shots(&chg.id, "cs_next", &[], &[]).unwrap();
+    assert!(!e.engine.store.page_checks(&chg.id).unwrap().iter().any(|p| p.path == "snap:checkout"), "a new head's run drops it");
 }
 
 /// A visual change refused (Chromatic's Deny): the review fails at that head, the change is told at
@@ -1484,9 +1551,9 @@ async fn mains_code_runs_on_a_copy_of_the_changes_migrated_data() {
     assert_eq!(broke, ["/orders"], "/orders fails on the change's data only: {:?}", m.pages);
     assert_eq!(e.code.last_report("chg_mc").main_on_change.as_ref(), Some(&m), "the change (and its pull request) get it");
     let views = e.apps.views.lock().clone();
-    let copy = format!("fake://prj_db~{}-m", roll_previews::branch_name(&p.id));
-    assert!(views.iter().any(|(svc, dep, vars)| svc == "web" && dep == "dep_abc123" && vars.iter().any(|(k, v)| k == "DATABASE_URL" && *v == copy)), "main's build, on the copy: {views:?}");
-    assert!(!e.pg.branches.lock().iter().any(|b| b.ends_with("-m")), "the copy goes after");
+    let copy = format!("fake://prj_db~{}-m{}", roll_previews::branch_name(&p.id), roll_previews::label_part(p.build().trim_start_matches("cs_"), 8));
+    assert!(views.iter().any(|(svc, dep, vars)| svc == "web" && dep == "dep_abc123" && vars.iter().any(|(k, v)| k == "DATABASE_URL" && *v == copy) && vars.iter().any(|(k, v)| k == "REDIS_URL" && v.contains("-m"))), "main's build, on copies of every branch: {views:?}");
+    assert!(!e.pg.branches.lock().iter().chain(e.redis.branches.lock().iter()).any(|b| b.contains(&format!("{}-m", roll_previews::branch_name(&p.id)))), "the copies go after");
 
     // On roll's runtime: main's revision runs in the change's preview (`web@main`), started with
     // the copy's variables in place of the preview's branch, and stopped after.
@@ -1503,7 +1570,7 @@ async fn mains_code_runs_on_a_copy_of_the_changes_migrated_data() {
     let main = e.engine.store.rows(Some(&e.project)).unwrap().into_iter().find(|x| x.change_id.is_none()).unwrap();
     let main_rev = e.engine.store.services(&main.id).unwrap().into_iter().find(|x| x.name == "web").and_then(|x| x.revision).unwrap();
     let started = e.apps.started.lock().clone();
-    let copy = format!("fake://prj_db~{}-m", roll_previews::branch_name(&p.id));
+    let copy = format!("fake://prj_db~{}-m{}", roll_previews::branch_name(&p.id), roll_previews::label_part(p.build().trim_start_matches("cs_"), 8));
     assert!(started.iter().any(|(id, svc, rev, vars)| *id == p.id && svc == "web@main" && *rev == main_rev && vars.iter().any(|(k, v)| k == "DATABASE_URL" && *v == copy)), "main's revision on the copy: {started:?}");
     let m = e.engine.store.view(e.engine.store.row(&p.id).unwrap()).unwrap().main_on_change.expect("tried");
     assert_eq!(m.pages.iter().filter(|x| x.broke()).map(|x| x.path.as_str()).collect::<Vec<_>>(), ["/"], "{m:?}");
@@ -1753,6 +1820,9 @@ async fn columns_that_look_like_peoples_data_are_masked_by_default() {
         e.engine.pass().await.unwrap();
         e.engine.pass().await.unwrap();
         let told: Vec<String> = e.code.maskings.lock().iter().flat_map(|(_, n)| n.columns.iter().map(|m| format!("{}/{}", m.resource, m.column))).collect();
+        // Sent as counts only: a repo's events reach people who may not read the schema.
+        let sent: Vec<serde_json::Value> = e.code.maskings.lock().iter().map(|(_, n)| serde_json::to_value(n).unwrap()).collect();
+        assert!(sent.iter().all(|v| v.get("columns").is_none() && !v.to_string().contains("phone")), "{sent:?}");
         (masked, e.engine.store.preview(&p.id).unwrap().masked_by_default, told)
     };
     let (masked, by_default, told) = masks_of(json!({ "public.users.email": "email" })).await;
@@ -1762,6 +1832,13 @@ async fn columns_that_look_like_peoples_data_are_masked_by_default() {
     let (masked, by_default, told) = masks_of(json!({ "public.users.email": "email", "public.users.phone": "keep" })).await;
     assert_eq!(masked.keys().cloned().collect::<Vec<_>>(), ["public.users.email"], "keep leaves it, and isn't sent as a mask");
     assert!(by_default.is_empty() && told.is_empty());
+    // Columns that can't be read fail it (Neosync's, Tonic's): nothing is handed over unmasked.
+    let e = env(json!({ "enabled": true, "masking": { "postgres:prj_db": { "public.users.email": "email" } } }));
+    e.pg.columns.lock().insert("prj_db".into(), Err(roll_previews::ports::Asleep));
+    e.code.open(change("chg_mz", 3));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_mz").unwrap().unwrap();
+    assert!(p.state == State::Failed && p.error.as_deref().is_some_and(|x| x.contains("nothing is handed over")), "{:?} {:?}", p.state, p.error);
     // A search cluster's fields the same way: an index's `user.email` that has no rule.
     let e = env_with_search(json!({ "enabled": true, "masking": { "search:srch_logs": { "logs.ip": "redact" } } }));
     e.search.columns.lock().insert("srch_logs".into(), Ok(vec![col("logs.ip", "keyword"), col("logs.user.email", "keyword"), col("logs.status", "long")]));

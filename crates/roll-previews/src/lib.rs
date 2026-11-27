@@ -1160,6 +1160,24 @@ pub struct Share {
     pub notes: bool,
 }
 
+/// A webhook URL of a private preview (Vercel's bypass in a query parameter): one path, its
+/// token in the URL (shown once), for a Stripe or GitHub webhook. It sets no cookie.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Webhook {
+    /// `whk_…`
+    pub id: String,
+    /// The service it opens `path` of (the preview's first, when it was made).
+    pub service: String,
+    pub path: String,
+    pub label: String,
+    pub created_by: String,
+    pub created_at: i64,
+    pub revoked: bool,
+    /// Requests it let in, and the last one's time.
+    pub hits: i64,
+    pub last_at: Option<i64>,
+}
+
 /// How much a preview's page changed between the screenshots of two heads.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct VisualChange {
