@@ -1135,10 +1135,17 @@ thirty-fourth review found them in the clear.
       ids, bank and card numbers, secrets) and has none is masked too, with the rule suggested for
       it, so a column production gains never reaches a preview in the clear. The preview's
       activity names them, and `masked_by_default` (`[{resource, column, why}]`) has them for the
-      sheet. `keep` is a rule that leaves a column as it is (the project's word that it isn't
+      sheet. The project's repos are told of each such column once, the first time a preview masks
+      it (production gained it, or the project's first rules), as their `masking` event
+      (webhooks, the event stream, automations; docs/code/http-api.md), so a person who can write
+      its rule hears of it. `keep` is a rule that leaves a column as it is (the project's word that it isn't
       people's data); it's never sent as a mask. A parent with no rules hands over its data as its
-      `data` says (`real`). Columns that can't be read (10 s) leave only the rules, and the
-      activity says so. Masked bases are masked the same way when they're made
+      `data` says (`real`). NoSQL and search parents the same way: a NoSQL table's columns
+      outside its keys and its views' keys (`mask_default()`, a secret's `mask_null()`), and a
+      search index's fields (`email` or `redact` into a text-like field, `remove` otherwise). A
+      NoSQL column masked by default is a mask like any other, so a query that compares it is
+      refused: `keep` it if the app filters on it. Columns that can't be read (10 s) leave only
+      the rules, and the activity says so. Masked bases are masked the same way when they're made
       (`engine.rs::columns_that_look_like_peoples_data_are_masked_by_default`).
     - **Masked once, branched many** (Neon's anonymized branches): a masked Postgres branch comes
       from its parent's masked base, a branch of the parent masked once by the rules (the rewrite
@@ -3025,8 +3032,8 @@ variables roll makes from a branch's URL too (it could run on the preview's own 
 change becoming queued wakes its settled preview, a rehearsal shows only at its head, and schema
 overlaps stay within a repo.
 
-1. **Masking that's safe by default, for NoSQL and search too** (Postgres's landed, #1166), and
-   the project told when production gains such a column (not only the preview's activity).
+1. **Masking that's safe by default for NoSQL and search, and the project told of each column
+   masked by default, in review**: once per column, as its repos' `masking` event.
 2. **Main's code on the change's migrated data** (pgroll and Reshape's expand/contract; M): main's
    preview run once against a copy of the change's branch after its release (its pages and
    endpoints), so a migration that breaks the version still running while it deploys is caught on
@@ -3036,25 +3043,25 @@ overlaps stay within a repo.
 4. **Snapshots from the team's own Playwright or Cypress suite** (Argos's, Percy's SDKs; M):
    a step in their tests sends a page's picture to the preview's visual review.
 5. **Notes to Jira, GitHub Issues or Asana** (Marker.io, Netlify's Drawer; S).
-6. **A failed story shard counted as untaken, in review**: its share of the touched stories
-   holds the visual review, as the ones left out do.
-7. **Replaying recorded traffic against the preview and main** (Signadot, Speedscale; L): writes
+6. **Replaying recorded traffic against the preview and main** (Signadot, Speedscale; L): writes
    replay safely on branched data; capturing production's requests needs its privacy designed
    first.
-8. **A rehearsal that holds a change back** (a required rule): rehearsed at each head, so the
+7. **A rehearsal that holds a change back** (a required rule): rehearsed at each head, so the
    landing blocker never waits on the queue that would ask for it.
-9. **Older pushes past the last three, started on demand**; **what a note's reviewer saw, from
-    their own browser** (Jam, Marker.io).
-10. **Restore points for search and buckets**: search's once roll search's `reset {from}` is in
-    (its Next 32); buckets need a put-back on roll storage's side.
-11. **Previews for the members thread's next products**: once roll apps' and roll search's routes
+8. **Older pushes past the last three, started on demand**; **what a note's reviewer saw, from
+   their own browser** (Jam, Marker.io).
+9. **Restore points for search and buckets**: search's once roll search's `reset {from}` is in
+   (its Next 32); buckets need a put-back on roll storage's side.
+10. **Previews for the members thread's next products**: once roll apps' and roll search's routes
     become member routes (docs/members.md, v1.1).
-12. **Watches on pg-control**: the data step's Postgres compute start; cheap branches on ext4
+11. **Watches on pg-control**: the data step's Postgres compute start; cheap branches on ext4
     through overlay volumes; recovery to a time seconds old (unowned).
 
 Not to build: more lab checks on the first page (each adds noise to every pull request), or a
 Kubernetes cluster per preview (roll apps' Compose import covers multi-service apps, and a
 cluster would break "costs nothing asleep").
+
+Landed 2026-11-27, early: a failed story shard's share of the touched stories counted as untaken (#1175).
 
 Landed 2026-11-26, midday: restore points for streams (#1112), the TurboSnap test's race under
 load (#1114), the tenth review's fixes (#1119), the visual review holding on stories a change
