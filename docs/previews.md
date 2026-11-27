@@ -366,6 +366,29 @@ state. A pass of the reconciler:
        `engine.rs::a_rehearsal_runs_the_release_on_a_fresh_masked_branch_then_drops_it`).
    4d. Once per head, the Postgres branches' schema is compared with their parents' (see
        "Schema changes").
+   4e. Main's code on the change's migrated data (pgroll's and Reshape's expand/contract,
+       tested on real data instead of assumed): while a change deploys, the version before it
+       still serves, on the schema its release just changed. So once per head of a trusted change
+       whose release changed the schema, after its services are up and healthy, main's code runs
+       again, taking no traffic: on roll apps, main's live build of each of main's services (roll
+       apps' rollback with variables, as an earlier push's own copy does); on roll's runtime,
+       main's revision of each of the change's repo's services, in the change's preview as
+       `<name>@main` (the other repos' services run main's code there already), at a host no
+       visitor reaches (`?dpl=` and skew cookies name pinned pushes only), its variables held in
+       memory while it runs (they're the copy's credentials) and stopped after. Both run on a copy of each of the change's Postgres
+       branches as the release left them (`<preview>-m`, copy-on-write, masked as the branch is),
+       with main's own branches' variables swapped for the copy's by value (and the ones roll
+       makes from them). Its pages, `/` and the project's `github.pages` (10 at most; the other
+       services `/`), are read there and on main's preview; a page that answers on main's data
+       (below 500) but not on the change's (a 5xx, or no answer) broke. The copies go after,
+       whatever happened. `main_on_change` (`{head, at, ms, pages: [{service, path, status,
+       main_status}], error}`) has it at that head, the sheet and the pull request comment say it
+       ("Main's code breaks on this change's migrated data: `/orders` answers 500 (on main's
+       data, 200)… expand first and contract in a later change"), and the activity too. Only a
+       trusted change: main's build reads the copy with main's (or the preview's) secrets. Where it
+       can't run (no preview of main, a branch that can't be copied) `error` says
+       why and nothing is said on the pull request
+       (`engine.rs::mains_code_runs_on_a_copy_of_the_changes_migrated_data`).
    5. The secrets environment `pv-<preview id>` is ensured (base, overrides, resource URLs).
    6. Every service whose revision is not the one it should run is redeployed (the change's head
       for its repo; for the others their branch of the same name, else their default head), all
@@ -2153,6 +2176,7 @@ type Preview = {
   // Checks against main's preview (types as in apps/dashboard/src/lib/previews-api.ts):
   release?: { head: string; ms: number; before_ms: number | null; locks?: { table: string; mode: string; ms: number }[] } | null;
   rehearsal?: { head: string; by: string; at: number; ok: boolean | null; ms: number | null; error: string | null } | null; // its release on today's data (POST …/rehearse)
+  main_on_change?: { head: string; at: number; ms: number; pages: { service: string; path: string; status: number; main_status: number }[]; error: string | null } | null; // main's code on a copy of this head's migrated data (0: no answer)
   masked_by_default?: { resource: string; column: string; why: string }[]; // columns masked as they look like people's data and no rule names them
   reaches?: "open" | "roll";
   visual_change?: { since: string; percent: number; phone_percent?: number | null } | null;
@@ -3032,36 +3056,32 @@ variables roll makes from a branch's URL too (it could run on the preview's own 
 change becoming queued wakes its settled preview, a rehearsal shows only at its head, and schema
 overlaps stay within a repo.
 
-1. **Masking that's safe by default for NoSQL and search, and the project told of each column
-   masked by default, in review**: once per column, as its repos' `masking` event.
-2. **Main's code on the change's migrated data** (pgroll and Reshape's expand/contract; M): main's
-   preview run once against a copy of the change's branch after its release (its pages and
-   endpoints), so a migration that breaks the version still running while it deploys is caught on
-   real data.
-3. **Webhooks into private previews** (Vercel's bypass in a query parameter; S): a per-preview,
+1. **Main's code on the change's migrated data on roll's runtime, in review** (`<name>@main` in
+   the change's preview; roll apps services landed, #1183).
+2. **Webhooks into private previews** (Vercel's bypass in a query parameter; S): a per-preview,
    per-path bypass that fits in a Stripe or GitHub webhook URL, never the project-wide secret.
-4. **Snapshots from the team's own Playwright or Cypress suite** (Argos's, Percy's SDKs; M):
+3. **Snapshots from the team's own Playwright or Cypress suite** (Argos's, Percy's SDKs; M):
    a step in their tests sends a page's picture to the preview's visual review.
-5. **Notes to Jira, GitHub Issues or Asana** (Marker.io, Netlify's Drawer; S).
-6. **Replaying recorded traffic against the preview and main** (Signadot, Speedscale; L): writes
+4. **Notes to Jira, GitHub Issues or Asana** (Marker.io, Netlify's Drawer; S).
+5. **Replaying recorded traffic against the preview and main** (Signadot, Speedscale; L): writes
    replay safely on branched data; capturing production's requests needs its privacy designed
    first.
-7. **A rehearsal that holds a change back** (a required rule): rehearsed at each head, so the
+6. **A rehearsal that holds a change back** (a required rule): rehearsed at each head, so the
    landing blocker never waits on the queue that would ask for it.
-8. **Older pushes past the last three, started on demand**; **what a note's reviewer saw, from
+7. **Older pushes past the last three, started on demand**; **what a note's reviewer saw, from
    their own browser** (Jam, Marker.io).
-9. **Restore points for search and buckets**: search's once roll search's `reset {from}` is in
+8. **Restore points for search and buckets**: search's once roll search's `reset {from}` is in
    (its Next 32); buckets need a put-back on roll storage's side.
-10. **Previews for the members thread's next products**: once roll apps' and roll search's routes
-    become member routes (docs/members.md, v1.1).
-11. **Watches on pg-control**: the data step's Postgres compute start; cheap branches on ext4
+9. **Previews for the members thread's next products**: once roll apps' and roll search's routes
+   become member routes (docs/members.md, v1.1).
+10. **Watches on pg-control**: the data step's Postgres compute start; cheap branches on ext4
     through overlay volumes; recovery to a time seconds old (unowned).
 
 Not to build: more lab checks on the first page (each adds noise to every pull request), or a
 Kubernetes cluster per preview (roll apps' Compose import covers multi-service apps, and a
 cluster would break "costs nothing asleep").
 
-Landed 2026-11-27, early: a failed story shard's share of the touched stories counted as untaken (#1175).
+Landed 2026-11-27, early: a failed story shard's share of the touched stories counted as untaken (#1175), and masking that's safe by default for NoSQL and search, with the project told of each column masked by default (#1177), and main's code on a copy of a change's migrated data, on roll apps (#1183).
 
 Landed 2026-11-26, midday: restore points for streams (#1112), the TurboSnap test's race under
 load (#1114), the tenth review's fixes (#1119), the visual review holding on stories a change

@@ -1010,6 +1010,11 @@ impl Engine {
             }
         }
 
+        // 4c. Main's code on a copy of this head's migrated data, once (its live builds, taking
+        // no traffic): what the version still serving while the change deploys would answer.
+        if problems.is_empty() && self.main_on_change_due(r, &s)? {
+            self.main_on_change(r, &s).await?;
+        }
         self.store.mark_step(&r.id, &r.head, "checks")?;
 
         // 5. Settled.

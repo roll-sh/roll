@@ -148,6 +148,7 @@ impl CodeSource {
                 release_ms: p.release.as_ref().map(|x| x.ms),
                 release_locks: p.release.as_ref().map(|x| x.locks.iter().map(|l| (l.table.clone(), l.mode.clone(), l.ms)).collect()).unwrap_or_default(),
                 release_before_ms: p.release.as_ref().and_then(|x| x.before_ms),
+                main_on_change: p.main_on_change.as_ref().filter(|m| m.error.is_none()).map(|m| code_control::model::PreviewMainOnChange { asked: m.pages.len() as u32, broke: m.pages.iter().filter(|x| x.broke()).map(|x| (x.path.clone(), x.status, x.main_status)).collect() }),
                 expires_at: p.goes_at,
                 base_change: p.base_change.as_ref().map(|b| code_control::model::PreviewBaseChange { branch: b.branch.clone(), percent: b.percent, phone_percent: b.phone_percent, load_ms: b.load_ms, lcp_ms: b.lcp_ms, a11y_added: b.a11y_added, errors_added: b.errors_added,
                     text: b.text.as_ref().map(|t| code_control::model::PreviewTextDiff { added: t.added.clone(), removed: t.removed.clone(), added_n: t.added_n, removed_n: t.removed_n }),

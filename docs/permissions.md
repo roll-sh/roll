@@ -611,9 +611,15 @@ A rule can grant some indices of a search cluster: `{id: "cl_1", index: "logs-*,
 - It covers the index routes (`/v1/search/clusters/{id}/indices/{index}/…`: search, documents,
   bulk, mappings, the index itself) when every name or pattern in `{index}` is covered: a name
   listed, or one starting with what's before a listed pattern's trailing `*` (`logs-*` covers
-  `logs-2025` and `logs-2025-*`, not `logs` or `l*`). Exclusions (`-logs-old`) only narrow, so they
-  needn't be covered; `_all` is `*`; date math only by `*`; another cluster's indices
-  (`remote:logs`) never.
+  `logs-2025` and `logs-2025-*`, not `logs` or `l*`). A request's exclusions (`-logs-old`) only
+  narrow, so they needn't be covered; `_all` is `*`; date math only by `*`; another cluster's
+  indices (`remote:logs`) never.
+- A rule's own `index` lists names and patterns only, never an exclusion
+  (`logs-*,-logs-secret` is refused when the token is made). Elasticsearch's role `names` have
+  none either, and the index routes and search's scoped principal read only the names. A rule
+  stored with one before this was refused covers nothing. A request that excluded indices is
+  approved once, never remembered (the rule would reach them), and tightening writes its
+  patterns (`logs-*`).
 - The cluster's own routes stay the cluster's: the index list, the console (`request`, any method
   and path as the cluster's owner), keys, branches and settings need a rule for the whole cluster.
 - Search checks the rest at query time as the caller: a query's reads of other indices (terms
