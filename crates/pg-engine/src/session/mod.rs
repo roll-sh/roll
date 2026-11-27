@@ -347,9 +347,13 @@ pub struct Session {
     /// statement_timestamp(): when the client message being run came (PostgreSQL's
     /// SetCurrentStatementStartTimestamp at each Query, Parse, Bind, Execute and fastpath
     /// call, `message_starts`), read once and shared by pg_stat_activity's query_start, the
-    /// statements' contexts and a transaction the message starts. 0: no message yet (a
-    /// session run in-process reads the clock per statement).
+    /// statements' contexts and a transaction the message starts. 0: no message yet. A
+    /// session run through the embedding API reads it once for each call that runs or binds a
+    /// statement instead (`api_starts`).
     stmt_start: std::cell::Cell<i64>,
+    /// A client's messages time the session's statements (`message_starts` ran): the embedding
+    /// API's calls leave the time alone.
+    timed_by_messages: std::cell::Cell<bool>,
     /// When the first message since the last transaction ended came (start_xact_command's
     /// StartTransaction, whose start is that message's statement timestamp): the start of
     /// the transaction `ensure_txn` or BEGIN opens (now(), xact_start), however many
@@ -564,6 +568,7 @@ impl Session {
             txn_opts: None,
             txn_time: 0,
             stmt_start: std::cell::Cell::new(0),
+            timed_by_messages: std::cell::Cell::new(false),
             xact_from: std::cell::Cell::new(None),
             touched: std::cell::Cell::new(0),
             prepared: Default::default(),
@@ -793,6 +798,35 @@ impl Session {
     /// read once for it (`stmt_start`), and, when no transaction is open, for the one it
     /// starts (`xact_from`). Returns it.
     pub fn message_starts(&self) -> i64 {
+        self.timed_by_messages.set(true);
+        self.starts_at()
+    }
+
+    /// A call of the embedding API that runs or binds a statement, in a session no client
+    /// message times: the clock read once for it, as for a message (the statement's
+    /// timestamp, the transaction it starts, the database's last use), not by each reader.
+    /// Returns whether it did (`api_ends` then).
+    fn api_starts(&self) -> bool {
+        let api = !self.timed_by_messages.get();
+        if api {
+            self.starts_at();
+        }
+        api
+    }
+
+    /// The end of a call `api_starts` timed, as of a message (finish_xact_command): outside a
+    /// transaction block the transaction it began is over, and what runs outside such a call
+    /// reads the clock itself again.
+    fn api_ends(&self, api: bool) {
+        if api {
+            self.stmt_start.set(0);
+            if self.txn.is_none() && self.status == TxnStatus::Idle {
+                self.xact_from.set(None);
+            }
+        }
+    }
+
+    fn starts_at(&self) -> i64 {
         let now = Self::now();
         self.stmt_start.set(now);
         if self.txn.is_none() && self.status == TxnStatus::Idle && self.xact_from.get().is_none() {
@@ -1401,6 +1435,14 @@ impl Session {
 
     /// Run one statement of a simple query.
     pub fn execute(&mut self, p: &Arc<Prepared>) -> Result<Outcome> {
+        let api = self.api_starts();
+        let r = self.execute_here(p);
+        self.api_ends(api);
+        r
+    }
+
+    /// `execute`, timed by the call or message it is part of.
+    pub(crate) fn execute_here(&mut self, p: &Arc<Prepared>) -> Result<Outcome> {
         self.waits_armed = false;
         self.execute_with(p, &[], 0)
     }
@@ -1429,7 +1471,10 @@ impl Session {
     /// `query`, with `copy_data` as the input of a COPY FROM STDIN.
     pub fn query_copy(&mut self, sql: &str, copy_data: &[u8]) -> Result<Vec<QueryResult>> {
         // (Every entry runs with the red zone below it: an embedder's thread may be small.)
-        crate::stack::grow(|| self.query_copy_here(sql, copy_data))
+        let api = self.api_starts();
+        let r = crate::stack::grow(|| self.query_copy_here(sql, copy_data));
+        self.api_ends(api);
+        r
     }
 
     /// A reload published new configuration values: take them before the next message, as a
@@ -1467,7 +1512,7 @@ impl Session {
         sql: &str,
     ) -> Result<()> {
         for s in stmts {
-            match self.execute(s) {
+            match self.execute_here(s) {
                 Ok(Outcome::Done(r)) => out.push(r),
                 Ok(Outcome::CopyIn(c)) => match self.copy_in_finish(c, copy_data) {
                     Ok(r) => out.push(r),
@@ -3039,11 +3084,13 @@ impl Session {
         result_formats: Vec<i16>,
         trailing: bool,
     ) -> Result<()> {
+        let api = self.api_starts();
         self.waits_armed = false;
         let r = crate::stack::grow(|| self.bind_inner(portal, stmt, params, formats, result_formats, trailing));
         if r.is_err() {
             self.on_error();
         }
+        self.api_ends(api);
         r
     }
 
@@ -3286,9 +3333,12 @@ impl Session {
 
     /// Execute message. Returns the outcome and whether the portal was suspended (more rows).
     pub fn execute_portal(&mut self, portal: &str, max_rows: usize) -> Result<(Outcome, bool)> {
+        let api = self.api_starts();
         self.waits_armed = false;
         self.extended = true;
-        crate::stack::grow(|| self.execute_portal_here(portal, max_rows))
+        let r = crate::stack::grow(|| self.execute_portal_here(portal, max_rows));
+        self.api_ends(api);
+        r
     }
 
     fn execute_portal_here(&mut self, portal: &str, max_rows: usize) -> Result<(Outcome, bool)> {
@@ -4306,8 +4356,9 @@ fn default_txn_opts(state: &SessionState) -> (Isolation, bool) {
 fn txn_settings(state: &SessionState, iso: Isolation, ro: bool) {
     let mut s = state.settings.borrow_mut();
     s.start_transaction(iso.name(), ro);
-    s.changed
-        .retain(|n| n != "transaction_isolation" && n != "transaction_read_only");
+    if !s.changed.is_empty() {
+        s.changed.retain(|n| n != "transaction_isolation" && n != "transaction_read_only");
+    }
 }
 
 /// COMMIT / ROLLBACK [AND CHAIN] inside a procedure or DO block run non-atomically: end the

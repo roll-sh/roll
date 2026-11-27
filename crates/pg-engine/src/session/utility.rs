@@ -1327,7 +1327,7 @@ impl Session {
             let before = self.notices.len();
             let sql = format!("DROP TABLE IF EXISTS {} CASCADE", names.join(", "));
             for p in self.parse(&sql)? {
-                self.execute(&p)?;
+                self.execute_here(&p)?;
             }
             self.end_batch()?;
             self.notices.truncate(before);
@@ -1382,7 +1382,7 @@ impl Session {
             let held = self.state.notice_hold.replace(self.state.notice_hold.get() + 1);
             let r = (|| {
                 for p in self.parse(&sql)? {
-                    self.execute(&p)?;
+                    self.execute_here(&p)?;
                 }
                 self.end_batch()
             })();

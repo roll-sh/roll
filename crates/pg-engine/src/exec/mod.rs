@@ -336,22 +336,33 @@ fn reopen(plan: &Arc<Plan>, node: Option<BoxNode>, ctx: &ExecCtx) -> Result<BoxN
 }
 
 thread_local! {
-    /// The notice lists of the statement contexts alive on this thread, outermost first.
-    static LIVE_NOTICES: RefCell<Vec<std::rc::Weak<RefCell<Vec<Error>>>>> =
-        const { RefCell::new(Vec::new()) };
+    /// The notice lists of the statement contexts alive on this thread, outermost first; the
+    /// ones after the last alive are free (only this list holds them), taken again by the next
+    /// contexts: no list allocated and freed per statement.
+    static LIVE_NOTICES: RefCell<Vec<Rc<RefCell<Vec<Error>>>>> = const { RefCell::new(Vec::new()) };
     /// Where notices go out before the statement ends (a server connection's socket).
     static NOTICE_SINK: RefCell<Option<Box<dyn FnMut(&[Error])>>> = const { RefCell::new(None) };
 }
 
 /// A context's notice list, registered so a lock wait can send it.
 fn live_notices() -> Rc<RefCell<Vec<Error>>> {
-    let n = Rc::new(RefCell::new(Vec::new()));
     LIVE_NOTICES.with(|l| {
         let mut l = l.borrow_mut();
-        l.retain(|w| w.strong_count() > 0);
-        l.push(Rc::downgrade(&n));
-    });
-    n
+        let next = l.iter().rposition(|n| Rc::strong_count(n) > 1).map_or(0, |i| i + 1);
+        match l.get(next) {
+            // (What a context that ended in an error left unread goes with it, as when its
+            // list was dropped.)
+            Some(n) => {
+                n.borrow_mut().clear();
+                n.clone()
+            }
+            None => {
+                let n = Rc::new(RefCell::new(Vec::new()));
+                l.push(n.clone());
+                n
+            }
+        }
+    })
 }
 
 /// Send the notices raised so far, as Postgres has by the time a statement waits (it
@@ -362,10 +373,9 @@ pub fn flush_live_notices() {
         return;
     }
     let pending: Vec<Error> = LIVE_NOTICES.with(|l| {
-        let mut l = l.borrow_mut();
-        l.retain(|w| w.strong_count() > 0);
-        l.iter()
-            .filter_map(|w| w.upgrade())
+        l.borrow()
+            .iter()
+            .filter(|n| Rc::strong_count(n) > 1)
             .flat_map(|n| n.try_borrow_mut().map(|mut v| std::mem::take(&mut *v)).unwrap_or_default())
             .collect()
     });
