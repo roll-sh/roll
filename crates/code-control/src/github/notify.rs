@@ -457,7 +457,23 @@ fn cls_words(c: f64) -> String {
 fn release_line(e: &crate::model::PreviewEnvironment) -> Option<String> {
     let ms = u32::try_from(e.release_ms?).unwrap_or(u32::MAX);
     let before = e.release_before_ms.and_then(|b| u32::try_from(b).ok()).and_then(|b| than_main(ms, b, "the push before"));
-    Some(format!("Its release (migrations) took {} on the preview's data{}.\n\n", ms_words(ms), before.map(|w| format!(", {w}")).unwrap_or_default()))
+    let locks: Vec<String> = e
+        .release_locks
+        .iter()
+        .take(3)
+        .map(|(table, mode, held)| {
+            let table: String = table.chars().filter(|c| !c.is_control()).map(|c| if c == '`' { '\'' } else { c }).take(120).collect();
+            let what = match mode.as_str() {
+                "AccessExclusiveLock" => "ACCESS EXCLUSIVE (reads and writes wait)",
+                "ExclusiveLock" => "EXCLUSIVE (writes wait)",
+                "ShareRowExclusiveLock" => "SHARE ROW EXCLUSIVE (writes wait)",
+                _ => "SHARE (writes wait)",
+            };
+            format!("{what} on `{table}` for {}", ms_words(u32::try_from(*held).unwrap_or(u32::MAX)))
+        })
+        .collect();
+    let held = if locks.is_empty() { String::new() } else { format!(" It held {}: on production it would hold them as long.", locks.join(", ")) };
+    Some(format!("Its release (migrations) took {} on the preview's data{}.{held}\n\n", ms_words(ms), before.map(|w| format!(", {w}")).unwrap_or_default()))
 }
 
 /// The `roll/regressions` status, with the project's `regressions` rule: how many routes are
@@ -1238,6 +1254,7 @@ mod preview_tests {
             schema_risks: Vec::new(),
             schema_overlaps: Vec::new(),
             release_ms: None,
+            release_locks: Vec::new(),
             release_before_ms: None,
             screenshot_url: None,
             expires_at: None,

@@ -2929,7 +2929,8 @@ impl Store {
             c.query_row("SELECT schema_changes, schema_risks, released, release_ms, prev_release_ms FROM previews WHERE id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))).optional()
         })?;
         let Some((changes, risks, head, ms, before)) = raw else { return Ok((None, Vec::new(), None)) };
-        let run = head.zip(ms).map(|(head, ms)| crate::ReleaseRun { head, ms, before_ms: before });
+        let locks = |head: &str| self.runtime_fact::<crate::ReleaseLocksAt>(id, "release_locks").ok().flatten().filter(|l| l.head == head).map(|l| l.locks).unwrap_or_default();
+        let run = head.zip(ms).map(|(head, ms)| crate::ReleaseRun { locks: locks(&head), head, ms, before_ms: before });
         Ok((changes.and_then(|j| serde_json::from_str(&j).ok()), risks.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default(), run))
     }
 
