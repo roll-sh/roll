@@ -1497,6 +1497,7 @@ impl Node {
         epoch: u64,
     ) -> anyhow::Result<(Arc<Cluster>, Arc<crate::meta_guard::CheckedMeta>, Option<Arc<ClusterData>>, persist::RecoveryStats)> {
         let ms = |t: Instant| t.elapsed().as_secs_f64() * 1e3;
+        let received = data_store.as_ref().map_or(0, |ds| ds.received_bytes());
         let t = Instant::now();
         if let Some(ds) = &data_store
             && epoch > 0
@@ -1620,6 +1621,7 @@ impl Node {
             data_ms = ms(t),
             segments = stats.segments,
             fetching = stats.fetching,
+            received_mb = self.stores.data().map_or(0, |ds| ds.received_bytes().saturating_sub(received)) as f64 / 1e6,
             "cluster load phases"
         );
         Ok((cluster, meta, data, stats))

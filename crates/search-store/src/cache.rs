@@ -492,6 +492,7 @@ struct Counters {
     hits: AtomicU64,
     misses: AtomicU64,
     fetched_bytes: AtomicU64,
+    received_bytes: AtomicU64,
     evictions: AtomicU64,
     evicted_bytes: AtomicU64,
     over_budget: AtomicU64,
@@ -514,6 +515,9 @@ pub struct CacheStats {
     pub hits: u64,
     pub misses: u64,
     pub fetched_bytes: u64,
+    /// Bytes downloads read from object storage so far, finished or not (`fetched_bytes`
+    /// counts finished files).
+    pub received_bytes: u64,
     pub evictions: u64,
     pub evicted_bytes: u64,
     /// Times an insert left the cache over budget because everything else was mapped.
@@ -801,6 +805,7 @@ impl Cache {
             // contents): the urgent lane.
             let _permit = self.urgent.acquire().await?;
             let r = self.objects.get_suffix(key, part).await?.ok_or_else(|| anyhow::anyhow!("object {key} is missing"))?;
+            self.counters.received_bytes.fetch_add(r.0.len() as u64, Relaxed);
             self.throttled(r.0.len() as u64).await;
             r
         };
@@ -837,6 +842,7 @@ impl Cache {
         };
         let fetch = |k: usize, range: std::ops::Range<u64>| async move {
             let (data, now) = self.objects.get_range_sized(key, range.clone()).await?.ok_or_else(|| anyhow::anyhow!("object {key} is missing"))?;
+            self.counters.received_bytes.fetch_add(data.len() as u64, Relaxed);
             self.throttled(data.len() as u64).await;
             anyhow::ensure!(now == size && data.len() as u64 == range.end - range.start, "{key} changed while being read");
             write_at(file, data, range.start).await?;
@@ -1020,6 +1026,10 @@ impl Cache {
         doomed
     }
 
+    pub(crate) fn received_bytes(&self) -> u64 {
+        self.counters.received_bytes.load(Relaxed)
+    }
+
     pub(crate) fn stats(&self) -> CacheStats {
         let st = self.st.lock();
         let (mut mapped_files, mut mapped_bytes) = (0, 0);
@@ -1040,6 +1050,7 @@ impl Cache {
             hits: c.hits.load(Relaxed),
             misses: c.misses.load(Relaxed),
             fetched_bytes: c.fetched_bytes.load(Relaxed),
+            received_bytes: c.received_bytes.load(Relaxed),
             evictions: c.evictions.load(Relaxed),
             evicted_bytes: c.evicted_bytes.load(Relaxed),
             over_budget: c.over_budget.load(Relaxed),
