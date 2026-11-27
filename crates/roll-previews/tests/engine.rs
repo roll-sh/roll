@@ -1673,6 +1673,29 @@ async fn masked_postgres_is_masked_before_it_serves_and_new_rules_reach_it() {
     assert_eq!(e.engine.store.row(&p.id).unwrap().state, State::Ready);
 }
 
+/// Masking that's safe by default (Tonic, Neosync): where a parent has rules, a column of it that
+/// looks like people's data and has none is masked with the rule suggested for it, and the preview
+/// says so; `keep` leaves it as it is (and is never sent as a mask).
+#[tokio::test]
+async fn columns_that_look_like_peoples_data_are_masked_by_default() {
+    let col = |path: &str, ty: &str| roll_previews::mask::Column { path: path.into(), r#type: Some(ty.into()), ..Default::default() };
+    let masks_of = |rules: serde_json::Value| async move {
+        let e = env(json!({ "enabled": true, "masking": { "postgres:prj_db": rules } }));
+        e.pg.columns.lock().insert("prj_db".into(), Ok(vec![col("public.users.email", "text"), col("public.users.phone", "text"), col("public.orders.total", "numeric")]));
+        e.code.open(change("chg_md", 1));
+        e.engine.pass().await.unwrap();
+        let p = e.engine.store.row_by_change("chg_md").unwrap().unwrap();
+        let masked = e.pg.masks.lock().last().map(|(_, c)| c.clone()).unwrap_or_default();
+        (masked, e.engine.store.preview(&p.id).unwrap().masked_by_default)
+    };
+    let (masked, by_default) = masks_of(json!({ "public.users.email": "email" })).await;
+    assert_eq!(masked.keys().cloned().collect::<Vec<_>>(), ["public.users.email", "public.users.phone"], "the phone too, orders' total not");
+    assert_eq!(by_default.iter().map(|m| m.column.as_str()).collect::<Vec<_>>(), ["public.users.phone"], "said on the preview");
+    let (masked, by_default) = masks_of(json!({ "public.users.email": "email", "public.users.phone": "keep" })).await;
+    assert_eq!(masked.keys().cloned().collect::<Vec<_>>(), ["public.users.email"], "keep leaves it, and isn't sent as a mask");
+    assert!(by_default.is_empty());
+}
+
 /// Masked branches come from one masked base per parent and rules (Neon's anonymized branches):
 /// the base is masked once and each preview branches from it, masked as it is; new rules make a
 /// new base, and the old one goes once no branch comes from it.
