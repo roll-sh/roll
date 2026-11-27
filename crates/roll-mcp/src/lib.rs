@@ -30,6 +30,7 @@
 
 pub mod ask;
 pub mod card;
+pub mod denials;
 pub mod events;
 pub mod find;
 pub mod guard;
@@ -561,7 +562,7 @@ async fn handle(State(m): State<Mcp>, uri: axum::http::Uri, ext: Extensions, hea
             // A method the revision doesn't have is a 404 (with its JSON-RPC error), so a client
             // tells it from a server that has no MCP endpoint here.
             Some(r) if modern && r["error"]["code"] == -32601 => (StatusCode::NOT_FOUND, Json(r)).into_response(),
-            Some(r) if modern && r["error"]["code"] == modern::HEADER_MISMATCH => (StatusCode::BAD_REQUEST, Json(r)).into_response(),
+            Some(r) if modern && (r["error"]["code"] == modern::HEADER_MISMATCH || r["error"]["code"] == tasks::MISSING_CAPABILITY) => (StatusCode::BAD_REQUEST, Json(r)).into_response(),
             Some(r) if !batch => Json(r).into_response(),
             last => {
                 responses.extend(last);
@@ -745,7 +746,7 @@ impl Ctx {
         // What it lends or copies from another product is decided on that product too: any rule.
         let rules = || g.scope.0.iter().filter(|r| scope.others || r.product == "*" || r.product == product);
         let asks = rules().any(|r| actions.iter().any(|a| r.actions.get(a) == Some(&Effect::Ask)) || (scope.others && r.actions.values().any(|e| *e == Effect::Ask)));
-        let everywhere = |a: &Action| g.scope.0.iter().filter(|r| r.product == "*" || r.product == product).any(|r| r.actions.get(a) == Some(&Effect::Allow) && r.resources == Resources::All && r.environments.is_none() && r.paths.is_none() && !r.unprotected);
+        let everywhere = |a: &Action| g.scope.0.iter().filter(|r| r.product == "*" || r.product == product).any(|r| r.actions.get(a) == Some(&Effect::Allow) && r.resources == Resources::All && r.environments.is_none() && r.paths.is_none() && !r.unprotected && r.keys.is_none());
         let otherwise = g.ask_otherwise && (scope.others || !actions.iter().all(everywhere));
         let held = policy.is_some_and(|p| if scope.others { !p.agents_ask.is_empty() } else { actions.iter().any(|a| p.agent_asks(product, *a, None)) });
         asks || otherwise || held
@@ -854,6 +855,9 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
         let (Some(method), Some(id)) = (msg.get("method").and_then(Value::as_str), msg.get("id").cloned()) else { continue };
         let params = msg.get("params").cloned().unwrap_or(Value::Null);
         let resp = match method {
+            // 2026-07-28 is stateless: it has neither (removed with the handshake), so a request of
+            // that revision asking for them is a method it doesn't have (404).
+            "initialize" | "ping" if ctx.modern => rpc_error(id, -32601, format!("{method} isn't a 2026-07-28 method: that revision has no handshake, and every request carries its version and capabilities in _meta")),
             "initialize" => rpc_result(id, initialize(ctx, &params)),
             "server/discover" => {
                 // Events (SEP-3415) are this revision's: only discovery offers them.
@@ -923,8 +927,14 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
                         Err(r) => unwrapped = Some(r),
                     }
                 }
+                // A retry echoing a denial's context id (SEP-2643) is a call with that approval.
+                denials::echo(&params, &mut args);
                 if let Some(r) = unwrapped {
                     rpc_result(id, r)
+                } else if ctx.modern && params.get("inputResponses").is_some_and(|r| r.as_object().is_none_or(|o| o.values().any(|a| !a.is_object()))) {
+                    // A retry's answers to an input request are an object keyed by request, each an
+                    // answer object (SEP-2322).
+                    rpc_error(id, -32602, "inputResponses is an object of the answers (each an object), keyed by each input request's name")
                 } else if ctx.search && name == search::FIND {
                     rpc_result(id, search::find(&ctx.tools(), &args))
                 } else if !args.is_object() {
@@ -964,15 +974,28 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
                         Ok(Some(r)) if ctx.url_elicitation && waiting_approval(&r["structuredContent"]).is_some() && r["structuredContent"]["url"].as_str().is_some_and(|u| !u.is_empty()) => {
                             // 2026-07-28 asks for it in the result (Multi Round-Trip Requests);
                             // earlier revisions as URL elicitation's error.
-                            if ctx.modern { rpc_result(id, modern::approval_input_required(&r)) } else { approval_elicitation(id, &r) }
+                            // Either way it says there's a way forward, at a URL (SEP-2643).
+                            if ctx.modern {
+                                let mut asked = modern::approval_input_required(&r);
+                                if let Some(e) = denials::envelope(&r["structuredContent"], true) {
+                                    asked["_meta"][denials::KEY] = e;
+                                }
+                                rpc_result(id, asked)
+                            } else {
+                                denials::on_error(approval_elicitation(id, &r), &r, true)
+                            }
                         }
-                        Ok(Some(r)) => rpc_result(id, r),
+                        Ok(Some(r)) => rpc_result(id, denials::on_result(r, false)),
                         Ok(None) => rpc_result(id, unknown_tool(ctx, &name)),
                     }
                 }
             }
             "tasks/get" | "tasks/update" | "tasks/cancel" => match tasks::method(ctx, method, &params).await {
                 Ok(v) => rpc_result(id, v),
+                // What it needs, as 2026-07-28's MissingRequiredClientCapabilityError says it.
+                Err((code, message)) if code == tasks::MISSING_CAPABILITY => {
+                    json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message, "data": { "requiredCapabilities": { "extensions": { tasks::EXT: {} } } } } })
+                }
                 Err((code, message)) => rpc_error(id, code, message),
             },
             "resources/list" => {
@@ -1013,7 +1036,7 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
                             let message: String = r["content"][0]["text"].as_str().unwrap_or("not read").chars().take(300).collect();
                             json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message, "data": r["structuredContent"] } })
                         }
-                        None => rpc_error(id, -32002, format!("resource not found: {uri}")),
+                        None => json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32002, "message": format!("resource not found: {uri}"), "data": { "uri": uri } } }),
                     }
                 }
                 Some(uri) if uri.starts_with("skill://") => match skills::read(uri, &tool_names(ctx)) {
@@ -1021,7 +1044,8 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
                     // The Skills extension's answer for a file roll doesn't serve.
                     None => rpc_error(id, -32602, format!("No skill file is served at {uri}")),
                 },
-                other => rpc_error(id, -32002, format!("resource not found: {}", other.unwrap_or(""))),
+                // Which one, as SEP-2164 asks (`data.uri`).
+                other => json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32002, "message": format!("resource not found: {}", other.unwrap_or("")), "data": { "uri": other.unwrap_or("") } } }),
             },
             "skills/list" => rpc_result(id, skills::list(&tool_names(ctx))),
             "skills/get" => match skills::get(params.get("uri").and_then(Value::as_str).unwrap_or(""), &tool_names(ctx)) {
@@ -1327,6 +1351,8 @@ fn capabilities(tasks: bool) -> Value {
     });
     // MCP Apps: HTML views for the hosts that render them.
     c["extensions"][ui::EXT] = json!({});
+    // Structured authorization denials (SEP-2643, draft): a refused call says if there's a way on.
+    c["extensions"][denials::EXT] = json!({});
     // 2026-07-28's tasks extension, where results can be sealed (tasks::on).
     if tasks {
         c["extensions"][tasks::EXT] = json!({});
@@ -1968,6 +1994,16 @@ fn refusal(body: &Value) -> Option<String> {
         }
         _ => {}
     }
+    // Elasticsearch's answer for a document that isn't there says nothing but where it looked:
+    // `{_index, _id, found: false}` (a get) or `result: "not_found"` (a delete).
+    if (body["found"] == false || body["result"] == "not_found")
+        && let Some(id) = said(body["_id"].as_str())
+    {
+        return Some(match said(body["_index"].as_str()) {
+            Some(index) => format!("no document {id} in index {index}"),
+            None => format!("no document {id}"),
+        });
+    }
     said(body["message"].as_str())
 }
 
@@ -2019,6 +2055,9 @@ mod refusal_tests {
         assert_eq!(text, "mapper_parsing_exception: Failed to parse mapping: no type [x]", "a cause that repeats the reason is left out");
         let (text, _) = refused(StatusCode::NOT_FOUND, json!({ "error": { "type": "index_not_found_exception", "reason": "no such index [nope]" }, "status": 404 })).await;
         assert_eq!(text, "not found: index_not_found_exception: no such index [nope]");
+        // A document that isn't there: where it looked, not just the status.
+        let (text, _) = refused(StatusCode::NOT_FOUND, json!({ "_index": "logs", "_id": "d1", "found": false })).await;
+        assert_eq!(text, "not found: no document d1 in index logs");
         // axum's refusal of a body: the part about the argument.
         let (text, _) = refused(StatusCode::UNPROCESSABLE_ENTITY, json!({ "error": "Failed to deserialize the JSON body into the target type: action: unknown variant `go`, expected one of `advance`, `all`, `abort` at line 1 column 24" })).await;
         assert_eq!(text, "action: unknown variant `go`, expected one of `advance`, `all`, `abort`");

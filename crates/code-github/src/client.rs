@@ -404,6 +404,26 @@ impl GitHub {
         .await
     }
 
+    /// Open an issue with `labels` (GitHub makes a label it hasn't yet).
+    pub async fn create_issue(
+        &self,
+        installation: u64,
+        owner: &str,
+        repo: &str,
+        title: &str,
+        body: &str,
+        labels: &[String],
+    ) -> Result<Issue> {
+        let path = repo_path(owner, repo, "/issues");
+        self.send_json(
+            Who::Installation(installation),
+            Method::POST,
+            &path,
+            &json!({ "title": title, "body": body, "labels": labels }),
+        )
+        .await
+    }
+
     /// Comment on an issue or a pull request.
     pub async fn create_comment(
         &self,

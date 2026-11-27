@@ -609,6 +609,19 @@ mod tests {
         (status, resp.into_body().collect().await.ok().map(|b| String::from_utf8(b.to_bytes().to_vec()).unwrap()))
     }
 
+    /// rolld's dial connects only to public addresses: a name or literal for this host (or the
+    /// fleet, or the cloud's metadata) reaches nothing, though something listens there.
+    #[tokio::test]
+    async fn intercepted_connections_dial_public_addresses_only() {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        for host in ["127.0.0.1", "localhost"] {
+            let e = public_dial()(host.into(), port).await.expect_err(host);
+            assert_eq!(e.kind(), std::io::ErrorKind::PermissionDenied, "{host}: {e}");
+        }
+        assert!(any_dial()("127.0.0.1".into(), port).await.is_ok(), "something listens there");
+    }
+
     #[tokio::test]
     async fn a_handoff_names_one_host_and_port_and_nothing_more() {
         let read = |b: &'static [u8]| async move { read_handoff(&mut &b[..]).await.map_err(|e| e.to_string()) };

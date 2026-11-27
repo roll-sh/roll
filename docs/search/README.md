@@ -951,7 +951,7 @@ origins (browser search), once they're on main.
 | GET | `/v1/search/clusters/{id}/metrics?range=1h\|24h\|14d` | request metrics (architecture.md, "Observability"): `{range, step_s, from, to, points, totals}`; each point (`at`, the start of its step: a minute for `1h`, 15 minutes for `24h`, 2 hours for `14d`; only steps with requests) and `totals` hold `all`, `search`, `index` and `other`, each `{requests, rate, 2xx, 4xx, 5xx, rejected, p50_ms, p95_ms, p99_ms}` (`rate` per second; `rejected`: 429s; percentiles `null` when nothing ran). Includes what the cluster's node recorded since the last metering pass |
 | GET | `/v1/search/clusters/{id}/slowlog` | the search and indexing slow logs, newest first, at most 500: `{entries, max_entries}`, each entry Elasticsearch's JSON slow log line (`@timestamp`, `log.level`, `log.logger`, `elasticsearch.index.name`, `elasticsearch.shard.id`, `elasticsearch.slowlog.{message,took,took_millis,source,total_hits,stats,search_type,total_shards,id,routing}`) |
 | GET | `/v1/search/clusters/{id}/audit?from=&to=&event=&size=` | the cluster's security audit log (below), newest first: `{flavor, retention_days, entries: [{at_ms, event, entry}], more}`. `from` (inclusive) and `to` (exclusive) are Unix milliseconds; `event` takes names or categories, comma-separated (an Elasticsearch `event.action` such as `put_user` too); `size` up to 1,000 (100). Never wakes the cluster. A read in roll's permissions, not a reveal: entries hold no secret |
-| POST | `/v1/search/clusters/{id}/keys` | a new API key of the cluster `{name, expires_in_s?, access?, indices?}`: `reveal` at the gate for a `read` key, `write` for an `append` key (it adds documents), `delete` for a `data` key (its role deletes indices), `admin` for an `admin` one; each refused (403) to a grant that can't also reveal (`access`: `admin`, the default, everything the cluster's own user may do; `data`: a link's role, every index's data plus the cluster's templates, pipelines and lifecycle policies, without security, or with `indices` given those indices' data only (and `monitor`): templates, pipelines and lifecycle policies are the whole cluster's, so a narrowed key gets none; either way `post_behavioral_analytics_event`, so an app records its clicks (`_application/analytics/{collection}/event/search_click`) with the key it searches with (a cluster privilege in Elasticsearch too: a narrowed key may post to any collection); `read`: `read` and `view_index_metadata` on the indices, no cluster privilege; `append`: `create_doc` and `auto_configure` on exactly the named indices, no cluster privilege, so a log drain adds to its data streams and reads nothing. `indices`: the index names or patterns it reaches, default every index (`["*"]`); not with `admin`; no remote (`alias:…`), hidden or system (`.…`) names; `append` takes names only. An OpenSearch-flavor cluster has no `append`, its index action also overwrites, and its `read` role holds `cluster_composite_ops_ro`, which OpenSearch needs for `_msearch`, `_mget` and scrolls. roll secrets' and apps' search links ask for these through their `permission` (`read`, `append`; left out, `data`) and `names` options) → `{id, name, access, indices?, api_key, url, expires_at?}` (`access` and `indices`: what the key was made with): `api_key` is `base64(<key id>@<cluster>:<key>)` for `Authorization: ApiKey …`, in this answer only (roll secrets' managed links use it instead of sharing the password); on an OpenSearch-flavor cluster (whose clients sign in with a user) the key is an internal user of its own: `{id, name, access, username, password, url, expires_at?}` without `api_key`, `username` being `<user>@<cluster>`, refused once `expires_in_s` passes |
+| POST | `/v1/search/clusters/{id}/keys` | a new API key of the cluster `{name, expires_in_s?, access?, indices?}`: `reveal` at the gate for a `read` key, `write` for an `append` key (it adds documents), `delete` for a `data` key (its role deletes indices), `admin` for an `admin` one; each refused (403) to a grant that can't also reveal (`access`: `admin`, the default, everything the cluster's own user may do; `data`: a link's role, every index's data plus the cluster's templates, pipelines and lifecycle policies, without security, or with `indices` given those indices' data only (and `monitor`): templates, pipelines and lifecycle policies are the whole cluster's, so a narrowed key gets none; either way `post_behavioral_analytics_event`, so an app records its clicks (`_application/analytics/{collection}/event/search_click`) with the key it searches with (a cluster privilege in Elasticsearch too: a narrowed key may post to any collection); `read`: `read` and `view_index_metadata` on the indices, no cluster privilege; `append`: `create_doc` and `auto_configure` on exactly the named indices, no cluster privilege, so a log drain adds to its data streams and reads nothing; `otel`: `create_doc` and `auto_configure` on OpenTelemetry's own data streams (`logs-*.otel-*`, `traces-*.otel-*`, `metrics-*.otel-*`) and nothing else, an OpenTelemetry Collector's key for the OTLP intake (`write` at the gate, as `append`; it takes no `indices`). `indices`: the index names or patterns it reaches, default every index (`["*"]`); not with `admin`; no remote (`alias:…`), hidden or system (`.…`) names; `append` takes names only. An OpenSearch-flavor cluster has no `append` or `otel`, its index action also overwrites, and its `read` role holds `cluster_composite_ops_ro`, which OpenSearch needs for `_msearch`, `_mget` and scrolls. roll secrets' and apps' search links ask for these through their `permission` (`read`, `append`; left out, `data`) and `names` options) → `{id, name, access, indices?, api_key, url, expires_at?}` (`access` and `indices`: what the key was made with): `api_key` is `base64(<key id>@<cluster>:<key>)` for `Authorization: ApiKey …`, in this answer only (roll secrets' managed links use it instead of sharing the password); on an OpenSearch-flavor cluster (whose clients sign in with a user) the key is an internal user of its own: `{id, name, access, username, password, url, expires_at?}` without `api_key`, `username` being `<user>@<cluster>`, refused once `expires_in_s` passes |
 | DELETE | `/v1/search/clusters/{id}/keys/{key}` | revoke it (204; 404 when it's gone). On a deleted cluster (by its id) the revoke is kept and applied by its restore (204) |
 | GET | `/v1/search/clusters/{id}/browser-keys` | `{keys}`: the browser keys that still work, newest first, each `{id, name, indices or application, filter?, rate_limit, created_at, expires_at, usage_24h: {requests, throttled, refused, reasons}}` (no secret; `usage_24h` covers the hour in progress and the 23 before). Wakes the cluster |
 | GET | `/v1/search/clusters/{id}/browser-keys/{key}/usage?window=1h\|24h\|14d` | one browser key's usage (above; 24h by default): `{key, window, step_s, from, to, points: [{at, requests, throttled, refused, reasons}], totals: {requests, throttled, refused, reasons, users: [{user, requests, throttled}], origins: [{origin, refused}]}}`. `throttled` counts 429s, `refused` the other refusals, `reasons` both by name (`key_rate`, `address_rate`, `user_rate`, `concurrency`, `cluster_ceiling`, `origin`, `policy`, `body_too_large`, `invalid_key`); points only where the key made requests. 404 for a key that isn't one of the cluster's browser keys; 400 for another window |
@@ -977,10 +977,10 @@ origins (browser search), once they're on main.
 | POST | `/v1/search/clusters/{id}/indices/{index}/analyze` | `POST /<index>/_analyze` (a read) |
 | POST | `/v1/search/clusters/{id}/indices/{index}/evaluate` | Offline relevance evaluation ([relevance-experiments.md](relevance-experiments.md), section 1): `{judgments: [{query, ratings: [{_id, rating, _index?}]}] | judgments_list, configurations: [{name, request | template, query_param?}], metric?}`, one or two configurations, each a search body with `{{query}}` where each judged query goes (`request`), a search template (`template`: `{id}` or `{source}`, with `params`; the query goes in `query_param`, by default `query`), or a search application's own (`application`, evaluated on the application's name: each query rendered by its `_render_query` with `query_param` `query_string` unless said, and `variant: {experiment, variant}` puts that variant's params over it, so an A/B variant is scored before it takes traffic; a variant with a template of its own is a `template` configuration), up to 500 queries of 200 ratings (a rating's `_index` defaults to `{index}`; for a pattern or list each names its own, and for an alias each names its concrete index), `metric` one of `_rank_eval`'s (nDCG@10 by default). `judgments_list` names a stored list (below), read from its index, so the caller's grant must read `roll-judgments-<name>` too. Each configuration is one `_rank_eval` on the index, run as the index's routes run. Answers `{metric, queries, configurations: [{name, score, failed, queries: [{query, score, unrated, failure?}]}], comparison?}`, with two the second against the first: `{baseline, candidate, difference, better, worse, unchanged, better_queries, worse_queries}` (50 each, the largest change first). A configuration the cluster refuses answers the cluster's error. A read |
 | GET | `/v1/search/clusters/{id}/judgments` | The cluster's judgment lists ([relevance-experiments.md](relevance-experiments.md), section 1): `{lists: [{name, index, source, queries, ratings, built_at}]}`. A list is an ordinary index, `roll-judgments-<name>` (one shard; a document per rating `{key, query, index?, doc_id, rating, source}`, `_id` a hash of query, index and document; its mapping's `_meta.roll_judgments` marks it and says how it was built), so it branches, snapshots, restores and exports with the cluster. The list routes name no index: they're for a grant on the whole cluster. A read |
-| GET | `/v1/search/clusters/{id}/judgments/{name}` | One list: `{name, index, meta, judgments}`, `judgments` in `evaluate`'s shape (sorted by query, then document). A document that isn't a rating (the index is the owner's, so anything may be written into it) answers 400 naming it. A read |
-| PUT | `/v1/search/clusters/{id}/judgments/{name}` | Makes or replaces list `name` (1 to 64 of `a-z0-9_-`): `{judgments, source?}` (`manual`, the default, or `import`), up to 500 queries of 200 ratings; a repeated rating keeps the last. An existing list's index is deleted and made again; an index of that name that isn't a list is refused (409). Answers `{name, index, source, queries, ratings}`. A write |
+| GET | `/v1/search/clusters/{id}/judgments/{name}` | One list: `{name, index, meta, judgments}`, `judgments` in `evaluate`'s shape (sorted by query, then document). A document that isn't a rating (the index is the owner's, so anything may be written into it) answers 400 naming it, and a list holding a different number of ratings than it was written with (`_meta.roll_judgments.ratings`: being replaced right now, or a write that stopped partway) answers 409. A read |
+| PUT | `/v1/search/clusters/{id}/judgments/{name}` | Makes or replaces list `name` (1 to 64 of `a-z0-9_-`): `{judgments, source?}` (`manual`, the default, or `import`), up to 500 queries of 200 ratings; a repeated rating keeps the last. An existing list's index is deleted and made again, so replacing a list needs only write, as replacing a synonyms set does (deleting one needs delete); an index of that name that isn't a list is refused (409). Answers `{name, index, source, queries, ratings}`. A write |
 | DELETE | `/v1/search/clusters/{id}/judgments/{name}` | Deletes the list's index (404 for no such list, 409 for an index that isn't one). A delete |
-| POST | `/v1/search/clusters/{id}/judgments/{name}/_from_clicks` | Makes or replaces list `name` from an index's click analytics: `{index, min_searches?, max_rank?, days?}` (defaults 10, 20, 30). CTR at each position is its clicks over its impressions over every query of the window (the daily ring, plus what the owner counted since the last pass); each document shown for a query with at least `min_searches` searches is rated its clicks over Σ impressions × CTR(position) (COEC, as OpenSearch's `UBI_JUDGMENT` rates it, three decimals) in `coec`, graded 0 to 3 in `rating` (0 without a click, else COEC rounded up), with `searches`, `impressions`, `clicks` and `expected_clicks` beside it, `source: clicks`, and the window in `_meta.roll_judgments.clicks`. 400 for an index without analytics on, or when no query qualifies. A write |
+| POST | `/v1/search/clusters/{id}/judgments/{name}/_from_clicks` | Makes or replaces list `name` from an index's click analytics: `{index, min_searches?, max_rank?, days?}` (defaults 10, 20, 30; `min_searches` at least 5). CTR at each position is its clicks over its impressions over every cell kept for the window (the most searched queries') (the daily ring, plus what the owner counted since the last pass); each document shown for a query with at least `min_searches` searches is rated its clicks over Σ impressions × CTR(position) (COEC, as OpenSearch's `UBI_JUDGMENT` rates it, three decimals) in `coec`, graded 0 to 3 in `rating` (0 without a click, else COEC rounded up: any click is some evidence of relevance, and 1 means "clicked, below what its position expects"), with `searches`, `impressions`, `clicks` and `expected_clicks` beside it and no `index` (it's about the document whichever copy is evaluated: a reindexed `-v2`, an alias), `source: clicks`, and the window in `_meta.roll_judgments.clicks`. 400 for an index without analytics on, or when no query qualifies. A write |
 | POST | `/v1/search/clusters/{id}/indices/{index}/search` | `POST /<index>/_search` (reads take index expressions: `logs-*`, `a,b`) |
 | POST | `/v1/search/clusters/{id}/indices/{index}/docs` | `POST /<index>/_doc`: index a document under a new id |
 | GET, PUT, DELETE | `/v1/search/clusters/{id}/indices/{index}/docs/{doc}` | `/<index>/_doc/<id>` |
@@ -1186,10 +1186,13 @@ query-rule editors prefilled with it (`query, ` as a rule; an `exact` `query_str
 - **Shown and clicked by position**, for judgments from clicks
   ([relevance-experiments.md](relevance-experiments.md), section 1): a search that records counts an
   impression for each of its first 20 hits by 1-based position (`from` included), in the hit's own
-  index's bucket, and a `search_click` naming a document counts on that document's cell at its
-  position (without one, where the hour showed it most). Cells are `(query, document id,
-  position) → (impressions, clicks)`, only for queries the bucket's top list holds, at most 32 a
-  query (document ids over 512 bytes aren't counted, and count toward the 4 MiB between passes).
+  index's bucket (a `search_after` page counts none), and a `search_click` naming a document
+  counts on that document's cell at its position (without one, where the hour showed it most),
+  only on a cell a search made, in that hour or the one before, and never past its impressions: a
+  click alone (a browser key's visitor making ids up) makes no cell and raises no rating. Cells are `(query, document id,
+  position) → (impressions, clicks)`, only for queries the bucket's top list holds (a query the list
+  evicts takes its cells with it), at most 32 a query (document ids over 512 bytes aren't counted;
+  each cell counts its id and 48 bytes toward the 4 MiB between passes).
   The daily ring keeps them for its 100 most searched queries a day; the hourly ring keeps none.
 - **Aggregated in place.** Each index keeps one bucket per hour: exact totals and two bounded
   heavy-hitter lists (Space-Saving: 256 queries and 128 no-result queries per hour on the node; a
@@ -1224,8 +1227,13 @@ position cells add document ids and counts beside the query text, never a user, 
 address: the click event's `user` and `session` are not read for them, so a judgment list built
 from clicks (`…/judgments/{name}/_from_clicks`) holds counts per query and document, only for
 queries with at least `min_searches` searches (10 by default), and nothing that names a person.
-The cells follow the rest exactly (the same opt-in, the same 30 days, deleted with it); a list
-built from them is the owner's own index and stays until the owner deletes it. Query
+The cells follow the rest exactly (the same opt-in, the same 30 days, deleted with it), and so do
+the lists built from them: the metering pass that deletes an index's analytics deletes the lists
+built from that index (its name and uuid are in the list's `_meta`), and a list built from clicks
+expires 30 days after its window ends unless the owner saves it again as `manual` or `import`
+(then it's theirs, like any list). `min_searches` is at least 5. This keeps one person's unusual
+searches out of a list; it is not an anonymity guarantee (a query searched by five people is still
+their text, and a small site's visitors may be few). Query
 text is kept only aggregated as above, only while the index has analytics on, and for at most 30
 days. Turning it off (or deleting the index, or replacing it with another of the same name)
 deletes everything kept for it: reads stop showing it at once, the node drops what it holds, and
@@ -1399,15 +1407,23 @@ filtered listing; and the auth matrix's probe of storage's nested route (also br
 
 Ranked; the top item is in progress. Updated as work lands (the watchdog reads this list).
 
-Working order (2026-11-27, night): the fourth sweep's last fixes first (item 4: #1096 in its
-third round, #1084 in its second; each a HIGH or MED on main), then the work in review (item
-11's RAG phase 2, #1068 in its fourth round; item 30's read-only ES|QL, #1111 in its second;
-item 1's derived-key follow-ups and OpenSearch links, #1127 in its second; item 32's branch
-reset, #1149, in review), then item 33's second slice (saved searches, surrounding documents, a
-field's chart; in its gate), item 15's judgment lists (kept as indices, built from clicks, and
-OpenSearch's Search Relevance Workbench; in progress), item 14 (semantic search on
-OpenSearch-flavor clusters; resumes after #1111), item 16 (cold start at size; resumes after
-#1127) and item 18 (logs end to end: OTLP intake, alerting; the top open item).
+Working order (2026-11-27, afternoon). Work in review or fixing first:
+- `ent-search` back to its minimum: #1084's API-time write check on connectors (fix in
+  progress);
+- item 32's branch reset (#1149, its third round: a dropped request's lock-out, clock-free
+  staleness);
+- item 30's read-only ES|QL (#1111, its third round in re-check);
+- item 14's semantic search on OpenSearch-flavor clusters (#1165, its second round in re-check);
+- item 11's RAG sanitizer, redesigned in its fifth round (#1068);
+- item 1's OpenSearch links (#1127, in re-check);
+- item 15's judgment lists, lists from clicks and OpenSearch's Search Relevance Workbench (#1189,
+  #1194, #1207, in review).
+
+Then:
+- item 33's second slice (saved searches, surrounding documents, a field's chart; in its gate);
+- item 18's health alerts (in progress);
+- item 16 (cold start at size: one deciding A/B, in progress);
+- item 18's OTLP traces and metrics (the top open item).
 Landed 2026-11-26: the PIT and caches fix (#1021), a cluster's admin password kept in roll
 secrets and the MCP sweep's person flow (#1097), Terraform for synonyms sets and rulesets
 (#1071), inference endpoints from a secret answered redacted and limited to `api_key` services
@@ -1420,7 +1436,11 @@ key's `encoded` that works at the shared address (#1115), and a Discover screen 
 Landed 2026-11-26 (night) and 27: re-embedding an index's own documents (#1132, item 31); 95%
 intervals on A/B results and promoting from the Relevance tab (#1145); offline relevance
 evaluation (#1159), of a search application and its variants too (#1163); chat and completion
-tokens metered per cluster (#1141); OpenSearch's snapshot management policies (#1153, item 9).
+tokens metered per cluster (#1141); OpenSearch's snapshot management policies (#1153, item 9);
+the fourth sweep's MEDs (#1084); names authorized as they resolve, aliases and resizes (#1096)
+with its follow-ups (#1216); an OTLP/HTTP logs intake and `otel` keys (#1178, #1213);
+`cluster.max_shards_per_node` enforced (#1224); Watcher's Alerts tab (#1180); `cosinesimil`
+vectors' `_source` as OpenSearch derives it (#1197).
 
 Landed 2026-11-17: per-person cluster caps (#162: 50 clusters and 2 always-on per person,
 rolld flags, 409 past a cap, counted in the write's own transaction); the search playground (#159); the Relevance tab for
@@ -1788,12 +1808,20 @@ deterministic (#396).
    search application's template and its experiment's variants scored the same way landed in
    #1163. Phase 1 of judgments is in review: lists kept as indices and evaluated by name
    (#1189), lists built from clicks with COEC (#1194), and OpenSearch's Search Relevance
-   Workbench on OpenSearch-flavor clusters (`feature/search-relevance-workbench`). Left: the `roll_` rule types and
+   Workbench on OpenSearch-flavor clusters (`feature/search-relevance-workbench`). Then: classify
+   the judgment-list routes by the list's index (`roll-judgments-<name>`) instead of the whole
+   cluster, so a grant limited to some indices can manage its lists; `_from_clicks` then needs read
+   on its body's `index` too, through `OtherIndex`. Left: the `roll_` rule types and
    dynamic re-ranking.
-16. **Cold start at size**: the 19.8 ms cold start is a 50k-document index from local cache;
-   nothing measures the first query and p99 on a node with an empty cache for 1, 10 and 50 GB
-   indices loaded from object storage, or on Graviton. Buyers comparing always-on Typesense or Algolia
-   will ask (benchmark lane).
+16. **Cold start at size**: the 19.8 ms cold start is a 50k-document index from local cache.
+   Measured at 1M documents (docs/benchmarks/search.md, "Cold start at size"): a wake from the
+   local cache answers its first query in 18-24 ms; a node with an empty disk, reading everything
+   from object storage (MinIO on the same host, so a lower bound), in 180-365 ms, the whole index
+   downloaded before the first query because what a shard reads at open is spread over every part
+   of every segment. Making doc values and points lazy, fetching waited-for ranges exactly and
+   holding bulk downloads during the wake took 18% off the first query (48% off the first write):
+   kept out for now. Left: the same on S3 and for 10 and 50 GB indices, p99, Graviton, and the
+   first query's own ranges after a short wake.
 17. **Private networking and customer keys** (design in
    [private-networking.md](private-networking.md); Elastic Cloud PrivateLink traffic filters and BYOK,
    AWS OpenSearch VPC domains and KMS): the data plane is public with IP allowlists; roll apps and
@@ -1803,10 +1831,19 @@ deterministic (#396).
 18. **Logs end to end** (design in [logs-end-to-end.md](logs-end-to-end.md); roll apps' drain
    landed in #735, ECS documents into `logs-roll.apps-*` through an `append` key; Elastic
    Observability's managed OTLP intake, OpenSearch Ingestion and the
-   Alerting plugin): no OTLP intake in search, `_plugins/_alerting` isn't served, Watcher has no UI,
-   nothing alerts on a cluster's own p99, 5xx or 429s, and Discover has no saved searches or
-   visualizations. An OTLP logs and traces intake into data streams also gives roll apps' log drains a
-   home in roll search.
+   Alerting plugin). Landed: the OTLP/HTTP logs intake and `otel` keys (#1178:
+   `POST /_otlp/v1/logs`, protobuf or JSON, OTel-native documents in `logs-*.otel-*` data streams,
+   every value charged as it's built) and Watcher's Alerts tab (#1180). In progress: alerts on a
+   cluster's own p99, 5xx and 429s (`feature/search-health-alerts`) and Discover's saved searches
+   (item 33). Left:
+   - **The shard limit** (landed in #1224): `cluster.max_shards_per_node`
+     enforced, as Elasticsearch and OpenSearch do, on every create (explicit, auto-create, a data
+     stream's backing index, rollover), on opening closed indices, and on restore, resize and
+     downsample targets, so an `otel` key can't add data streams past it.
+   - OTLP metrics and OTLP over gRPC. Traces are in review (`feature/search-otlp-traces`: spans into
+     `traces-*.otel-*`, their events as log lines, on the logs intake's machinery).
+   - `_plugins/_alerting` on OpenSearch-flavor clusters.
+   - Visualizations.
 19. **Vector search's footprint** (docs/benchmarks/search.md, "Vector search": 1M × 384 against
    Elasticsearch 9.5.5 and OpenSearch 3.9). Roll leads on indexing (4,735 docs/s against 3,585
    and 2,978 at 8 clients), merged `knn` (1.9 ms CPU against 6.1 and 4.9), `rrf` (3.2 against 13.8

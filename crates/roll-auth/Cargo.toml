@@ -14,6 +14,7 @@ flate2.workspace = true
 getrandom.workspace = true
 qrcode.workspace = true
 ring.workspace = true
+roll-secrets-ref.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

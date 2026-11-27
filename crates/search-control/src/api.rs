@@ -845,7 +845,7 @@ async fn index_evaluate(State(c): State<AppState>, Path((id, index)): Path<(Stri
     if let Some(name) = spec.list.clone() {
         let list_index = crate::judgments::index_name(&name).map_err(ControlError::Invalid)?;
         if !roll_auth::OtherIndex::reaches(&ext, &list_index, roll_auth::scope::Action::Read) {
-            return Err(ControlError::Forbidden(format!("this grant doesn't read [{list_index}], the judgment list's index: pass the judgments inline, or grant read on it too")));
+            return Err(ControlError::Forbidden(format!("this grant doesn't read [{list_index}], the judgment list's index: pass the judgments inline, or allow read on it too (a rule that asks doesn't ask here: it refuses)")));
         }
         spec.judgments = c.judgment_list(&id, &name).await?.1;
         if spec.judgments.is_empty() {
@@ -1135,7 +1135,7 @@ async fn put_repository(State(c): State<AppState>, Path((id, name)): Path<(Strin
 struct NewKey {
     name: String,
     expires_in_s: Option<i64>,
-    /// `admin` (default), `data`, `read` or `append` ([`crate::control::KeyAccess`]).
+    /// `admin` (default), `data`, `read`, `append` or `otel` ([`crate::control::KeyAccess`]).
     access: Option<String>,
     /// Index names or patterns the key reaches (default every index; not with `admin`).
     indices: Option<Vec<String>>,

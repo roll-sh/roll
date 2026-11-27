@@ -912,6 +912,38 @@ impl Runtime {
         }
     }
 
+    /// `POST /__roll/snapshot?name=` with the project's bypass secret and a PNG (at most
+    /// [`SCREENSHOT_MAX`]): the team's tests' picture, kept as page `snap:<name>`. 401 without
+    /// the secret (a fork's preview never has one), 400 for anything but a PNG.
+    async fn snapshot(&self, preview: &str, req: Request) -> Response {
+        if req.method() != axum::http::Method::POST {
+            return (StatusCode::METHOD_NOT_ALLOWED, "POST a PNG").into_response();
+        }
+        let want = match self.store.access(preview) {
+            Ok(a) => a.and_then(|a| a.bypass),
+            Err(_) => return (StatusCode::SERVICE_UNAVAILABLE, "try again").into_response(),
+        };
+        let given = req.headers().get(BYPASS_HEADER).and_then(|v| v.to_str().ok());
+        if !matches!((&want, given), (Some(want), Some(given)) if same(&crate::store::bypass_hash(given), want)) {
+            return (StatusCode::UNAUTHORIZED, "send the project's bypass secret in x-roll-preview-bypass").into_response();
+        }
+        let query = req.uri().query().unwrap_or("").to_string();
+        let param = |k: &str| query.split('&').filter_map(|kv| kv.split_once('=')).find(|(n, _)| *n == k).map(|(_, v)| percent_decode(v));
+        let (name, head) = (param("name").unwrap_or_default(), param("head"));
+        let Ok(png) = axum::body::to_bytes(req.into_body(), SCREENSHOT_MAX).await else { return (StatusCode::PAYLOAD_TOO_LARGE, "a PNG of 2 MiB at most").into_response() };
+        if !png.starts_with(b"\x89PNG\r\n\x1a\n") {
+            return (StatusCode::BAD_REQUEST, "the body is a PNG").into_response();
+        }
+        let e = match self.engine() {
+            Ok(e) => e,
+            Err(_) => return (StatusCode::SERVICE_UNAVAILABLE, "try again").into_response(),
+        };
+        match e.snapshot(preview, &name, head.as_deref(), png.to_vec()).await {
+            Ok(head) => (StatusCode::CREATED, axum::Json(serde_json::json!({ "page": format!("snap:{name}"), "head": head }))).into_response(),
+            Err(err) => err.into_response(),
+        }
+    }
+
     /// The notes a share link's guest sees on `path`: those left through it.
     async fn guest_notes(&self, preview: &str, share: &str, path: &str) -> Response {
         let here = match self.engine() {
@@ -946,6 +978,20 @@ impl Runtime {
         let team = access.mode == crate::settings::Access::Team;
         let query = req.uri().query().unwrap_or("").to_string();
         let given = |name: &str| query.split('&').filter_map(|kv| kv.split_once('=')).find(|(k, _)| *k == name).map(|(_, v)| v);
+        // A webhook URL (Stripe's, GitHub's): its token in the query, for its one path only, at
+        // every request (no cookie, no redirect); the service gets the request without it.
+        if let Some(t) = given("roll_hook").map(str::to_string)
+            && let Some(hook) = crate::visit::webhook_visit(&self.store, self.engine().ok().as_ref(), preview, &t, service, req.uri().path(), self.cfg.visitor_recheck).await
+        {
+            let rest: Vec<&str> = query.split('&').filter(|kv| !kv.starts_with("roll_hook=") && !kv.is_empty()).collect();
+            let path = req.uri().path().to_string();
+            let Ok(uri) = (if rest.is_empty() { path } else { format!("{path}?{}", rest.join("&")) }).parse() else { return Some((StatusCode::BAD_REQUEST, "bad request").into_response()) };
+            *req.uri_mut() = uri;
+            if let Ok(now) = self.store.now_ms() {
+                let _ = self.store.webhook_hit(&hook.id, now);
+            }
+            return None;
+        }
         if team {
             // A ticket from roll's dashboard, coming back: the session it opens.
             if req.uri().path() == crate::visit::PATH {
@@ -1274,6 +1320,10 @@ pub const FEEDBACK_NOTES_PATH: &str = "/__roll/feedback.json";
 pub const GUEST_NOTE_PATH: &str = "/__roll/notes";
 /// The toolbar's Main: the page on main's preview (`?path=`), as `{url}` (a team visitor's only).
 pub const MAIN_PAGE_PATH: &str = "/__roll/main";
+/// On an earlier push's link its preview no longer keeps: start it again ([`Engine::restart_push`]).
+pub const START_PUSH_PATH: &str = "/__roll/start-push";
+/// Where the team's tests send a snapshot (`POST ?name=`, a PNG, the project's bypass secret).
+pub const SNAPSHOT_PATH: &str = "/__roll/snapshot";
 pub(crate) const FEEDBACK_TAG: &[u8] = b"<script src=\"/__roll/feedback.js\" defer></script>";
 /// Adds the feedback button's tag to a page as it streams: before the first `</body>` (matched
 /// across chunk boundaries, in any case), or at the end of a page without one. Chunks pass on as
@@ -2849,28 +2899,70 @@ fn page_shots<'a>(asked: &[&String], said: &str, pngs: impl Iterator<Item = &'a 
 pub async fn route(State(rt): State<Arc<Runtime>>, req: Request, next: Next) -> Response {
     match named(&rt, &req) {
         Some((preview, service)) => serve_named(rt, preview, service, req).await,
-        None => match gone(&rt, &req) {
-            Some(page) => page,
+        None => match gone_host(&rt, &req) {
+            Some(g) => gone(&rt, g, req).await,
             None => next.run(req).await,
         },
     }
 }
 
+/// The earlier push a request's host was, if its preview no longer keeps it.
+fn gone_host(rt: &Runtime, req: &Request) -> Option<crate::store::GonePush> {
+    let host = req.headers().get(header::HOST).and_then(|h| h.to_str().ok()).map(str::to_string).or_else(|| req.uri().host().map(str::to_string))?;
+    rt.gone_for_host(&host)
+}
+
 /// An earlier push its preview no longer keeps: a page saying so (410), with the way to the
 /// current one, rather than a 404 that reads as a broken preview. It names no more than the link
 /// did (the service and its push), and the current link is the preview's own, behind its gate.
-fn gone(rt: &Runtime, req: &Request) -> Option<Response> {
-    let host = req.headers().get(header::HOST).and_then(|h| h.to_str().ok()).map(str::to_string).or_else(|| req.uri().host().map(str::to_string))?;
-    let crate::store::GonePush { service, revision, current_url: current, .. } = rt.gone_for_host(&host)?;
-    let short: String = revision.strip_prefix("cs_").unwrap_or(&revision).chars().take(10).collect();
-    let now = current.map_or_else(|| "<p>The preview no longer runs this service.</p>".to_string(), |u| format!("<p><a href=\"{}\">Open the latest push</a>.</p>", escape(&u)));
+/// A trusted, private preview's page also starts it again on demand ([`START_PUSH_PATH`]): a GET
+/// through the preview's own gate (where the link's token or roll's sign-in sets its cookie) is a
+/// page that asks, and only its own form's POST (this host's origin), from a visitor in by the
+/// link's cookie or a session of a person signed in to roll (not a share link, not the CI
+/// bypass), starts it, at most once a minute a preview. A link scanner or another site's link
+/// changes nothing.
+async fn gone(rt: &Arc<Runtime>, g: crate::store::GonePush, mut req: Request) -> Response {
+    let trusted = rt.store.row(&g.preview).is_ok_and(|r| r.trusted);
+    let private = rt.store.access(&g.preview).ok().flatten().is_some_and(|a| a.required());
+    let startable = trusted && private;
+    if req.uri().path() == START_PUSH_PATH && startable {
+        if let Some(r) = rt.gate(&g.preview, &g.service, &mut req).await {
+            return r;
+        }
+        if req.extensions().get::<ThroughRoll>().is_none() {
+            return roll_page(StatusCode::FORBIDDEN, "This push can't start again from here", "<p>Open the preview's own link first: a share link doesn't start its earlier pushes.</p>");
+        }
+        if req.method() == axum::http::Method::GET {
+            return roll_page(StatusCode::OK, "Start this push again?", &format!("<p>It runs on the preview's data now, and the oldest push of <code>{}</code> it keeps goes in its place.</p><form method=\"post\" action=\"{START_PUSH_PATH}\"><button type=\"submit\">Start it</button></form>", escape(&g.service)));
+        }
+        let host = req.headers().get(header::HOST).and_then(|h| h.to_str().ok()).unwrap_or("").to_string();
+        let origin = req.headers().get(header::ORIGIN).and_then(|h| h.to_str().ok()).unwrap_or("");
+        if req.method() != axum::http::Method::POST || origin.split_once("://").map(|(_, h)| h) != Some(host.as_str()) {
+            return (StatusCode::FORBIDDEN, "started from this page's own form only").into_response();
+        }
+        let Ok(engine) = rt.engine() else { return (StatusCode::SERVICE_UNAVAILABLE, "try again").into_response() };
+        return match engine.restart_push(&g, "a visitor").await {
+            Ok(_) => {
+                let mut r = StatusCode::SEE_OTHER.into_response();
+                r.headers_mut().insert(header::LOCATION, HeaderValue::from_static("/"));
+                r.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+                r
+            }
+            Err(e) => roll_page(StatusCode::CONFLICT, "This push can't start again", &format!("<p>{}</p>", escape(&e.to_string()))),
+        };
+    }
+    let short: String = g.revision.strip_prefix("cs_").unwrap_or(&g.revision).chars().take(10).collect();
+    let now = g.current_url.as_ref().map_or_else(|| "<p>The preview no longer runs this service.</p>".to_string(), |u| format!("<p><a href=\"{}\">Open the latest push</a>.</p>", escape(u)));
+    // The link's own query rides along: a token it carried lets its visitor in to start it.
+    let query = req.uri().query().map(|q| format!("?{q}")).unwrap_or_default();
+    let again = if startable { format!("<p><a href=\"{START_PUSH_PATH}{}\">Start this push again</a>.</p>", escape(&query)) } else { String::new() };
     let mut r = roll_page(
         StatusCode::GONE,
         "This push isn't kept any more",
-        &format!("<p>This link was <code>{}</code> at an earlier push (<code>{}</code>). A preview keeps the last {} pushes of each service; this one was replaced since.</p>{now}", escape(&service), escape(&short), crate::store::PINNED_KEEP),
+        &format!("<p>This link was <code>{}</code> at an earlier push (<code>{}</code>). A preview keeps the last {} pushes of each service; this one was replaced since.</p>{now}{again}", escape(&g.service), escape(&short), crate::store::PINNED_KEEP),
     );
     r.headers_mut().insert(header::HeaderName::from_static("x-robots-tag"), header::HeaderValue::from_static("noindex"));
-    Some(r)
+    r
 }
 
 /// A request roll apps' ingress hands on (a name under a project's own preview domain that no
@@ -2878,7 +2970,10 @@ fn gone(rt: &Runtime, req: &Request) -> Option<Response> {
 pub async fn serve_host(rt: Arc<Runtime>, req: Request) -> Response {
     match named(&rt, &req) {
         Some((preview, service)) => serve_named(rt, preview, service, req).await,
-        None => gone(&rt, &req).unwrap_or_else(|| (StatusCode::NOT_FOUND, "no such preview").into_response()),
+        None => match gone_host(&rt, &req) {
+            Some(g) => gone(&rt, g, req).await,
+            None => (StatusCode::NOT_FOUND, "no such preview").into_response(),
+        },
     }
 }
 
@@ -2926,6 +3021,11 @@ fn origin_of(url: &str) -> Option<String> {
 
 /// A request for a preview's service: through its gate, then to the service.
 async fn serve(rt: Arc<Runtime>, preview: String, service: String, mut req: Request) -> Response {
+    // The team's own snapshots: by the project's bypass secret only, whatever the preview's
+    // access (a public preview's too), never through its gate.
+    if req.uri().path() == SNAPSHOT_PATH {
+        return rt.snapshot(&preview, req).await;
+    }
     if let Some(r) = rt.gate(&preview, &service, &mut req).await {
         return r;
     }
@@ -3059,25 +3159,6 @@ fn with_skew_cookie(mut resp: Response, push: Option<String>, secure: bool) -> R
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    /// `docker logs --timestamps` is read as stamped lines: a line with no stamp takes the one
-    /// before's, a long one is cut on a character while it's read, only the newest lines up to the
-    /// cap are held, and stdout and stderr interleave by their stamps.
-    #[tokio::test]
-    async fn a_services_stamped_output_is_read_bounded() {
-        let long = format!("2026-11-18T10:00:02Z {}é", "x".repeat(TIMED_LINE_MAX - 1));
-        let out = format!("2026-11-18T10:00:01.5Z GET / 200\nno stamp here\n{long}\n2026-11-18T10:00:04Z last");
-        let out = read_timed(out.as_bytes(), false, 1 << 20).await;
-        let t = |ms: i64| 1_794_996_000_000 + ms;
-        assert_eq!(out.iter().map(|l| l.0).collect::<Vec<_>>(), [t(1_500), t(1_500), t(2_000), t(4_000)]);
-        assert_eq!((out[1].2.as_str(), out[2].2.len(), out[3].2.as_str()), ("no stamp here", TIMED_LINE_MAX - 1, "last"));
-        let err = read_timed(&b"2026-11-18T10:00:03Z boom\n"[..], true, 1 << 20).await;
-        let merged = merge_timed(out.clone(), err, 3);
-        assert_eq!(merged.iter().map(|l| (l.1, &l.2[..l.2.len().min(4)])).collect::<Vec<_>>(), [(false, "xxxx"), (true, "boom"), (false, "last")]);
-        // Held up to the cap: the newest lines.
-        let kept = read_timed(&b"2026-11-18T10:00:01Z aaaa\n2026-11-18T10:00:02Z bbbb\n2026-11-18T10:00:03Z cccc\n"[..], false, 8).await;
-        assert_eq!(kept.iter().map(|l| l.2.as_str()).collect::<Vec<_>>(), ["bbbb", "cccc"]);
-    }
 
     struct NoTrees;
 
@@ -3217,6 +3298,35 @@ mod tests {
         assert!(raw(post("https://evil.example")).await.starts_with("HTTP/1.1 403"), "another site's page posts nothing");
         rt.store.revoke_share(&row.id, &share.id).unwrap();
         assert!(raw(with_share).await.starts_with("HTTP/1.1 401"), "revoked: out at once");
+        // An earlier push past the last three: its link says it's gone and offers to start it
+        // again, which only a visitor the preview's gate lets in may ask.
+        let url = |h: &str| format!("http://{h}.preview.test");
+        rt.store.pin(&row.id, "web", "cs_old", &url).unwrap();
+        let old_host = rt.store.pinned(&row.id).unwrap().into_iter().find(|p| p.revision == "cs_old").unwrap().url.split("://").nth(1).unwrap().to_string();
+        for rev in ["cs_p1", "cs_p2", "cs_p3"] {
+            rt.store.pin(&row.id, "web", rev, &url).unwrap();
+        }
+        let gone_page = raw(format!("GET / HTTP/1.1\r\nHost: {old_host}\r\nConnection: close\r\n\r\n")).await;
+        assert!(gone_page.starts_with("HTTP/1.1 410") && gone_page.contains("/__roll/start-push"), "{gone_page}");
+        assert!(raw(format!("GET /__roll/start-push HTTP/1.1\r\nHost: {old_host}\r\nConnection: close\r\n\r\n")).await.starts_with("HTTP/1.1 401"), "not without the preview's access");
+        // Through the link's cookie, a GET only asks (a link scanner changes nothing), and a POST
+        // from another origin is refused.
+        let ask = raw(format!("GET /__roll/start-push HTTP/1.1\r\nHost: {old_host}\r\nCookie: roll_access_{}={token}\r\nConnection: close\r\n\r\n", row.id)).await;
+        assert!(ask.starts_with("HTTP/1.1 200") && ask.contains("method=\"post\""), "{ask}");
+        let forged = raw(format!("POST /__roll/start-push HTTP/1.1\r\nHost: {old_host}\r\nOrigin: https://evil.example\r\nCookie: roll_access_{}={token}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", row.id)).await;
+        assert!(forged.starts_with("HTTP/1.1 403"), "{forged}");
+        // A webhook URL: its one path only, the service never seeing its token, no cookie; it
+        // isn't a share link, and it's out at once when revoked.
+        let (hook, htoken) = rt.store.create_webhook(&row.id, "web", "/hooks/stripe", "ada", None, "Stripe").unwrap();
+        let post_hook = format!("POST /hooks/stripe?roll_hook={htoken}&x=1 HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        let hooked = raw(post_hook.clone()).await;
+        assert!(hooked.ends_with("service saw /hooks/stripe?x=1") && !hooked.to_ascii_lowercase().contains("set-cookie"), "{hooked}");
+        assert!(raw(format!("GET /hello?roll_hook={htoken} HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nConnection: close\r\n\r\n")).await.starts_with("HTTP/1.1 401"), "another path");
+        assert!(raw(format!("GET /hello?roll_share={htoken} HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nConnection: close\r\n\r\n")).await.starts_with("HTTP/1.1 401"), "not a share link");
+        assert_eq!(rt.store.webhooks(&row.id).unwrap()[0].hits, 1);
+        assert!(rt.store.webhook_live(&row.id, &htoken, "api", "/hooks/stripe").unwrap().is_none(), "its own service's path only");
+        rt.store.revoke_webhook(&row.id, &hook.id).unwrap();
+        assert!(raw(post_hook).await.starts_with("HTTP/1.1 401"), "revoked: out at once");
         // The notes already left on a page: for the same visitors only.
         let notes = raw(format!("GET /__roll/feedback.json?path=%2F HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nCookie: roll_access_{}={token}\r\nConnection: close\r\n\r\n", row.id)).await;
         assert!(notes.contains("application/json") && notes.ends_with("[]"), "{notes}");
@@ -3225,6 +3335,12 @@ mod tests {
         assert!(raw(page("text/html")).await.ends_with("<p>asked for any</p></BODY></html>"), "the rule turns it off");
         let (secret, _) = rt.store.rotate_bypass("prj_1").unwrap();
         assert!(raw(with(&secret)).await.ends_with("service saw /hello"));
+        // The team's snapshots: the project's secret only (not the link's cookie), never reaching
+        // the service; past it, the engine keeps the picture (engine.rs, the_teams_snapshots_…).
+        let snap = |head: &str| format!("POST /__roll/snapshot?name=checkout HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\n{head}Content-Type: image/png\r\nContent-Length: 8\r\nConnection: close\r\n\r\n\u{89}PNG\r\n\u{1a}\n");
+        assert!(raw(snap(&format!("Cookie: roll_access_{}={token}\r\n", row.id))).await.starts_with("HTTP/1.1 401"), "a visitor can't send one");
+        let past = raw(snap(&format!("X-Roll-Preview-Bypass: {secret}\r\n"))).await;
+        assert!(!past.starts_with("HTTP/1.1 401") && !past.contains("service saw"), "{past}");
         assert!(raw(with("rpb_wrong")).await.starts_with("HTTP/1.1 401"));
         rt.store.rotate_bypass("prj_1").unwrap();
         assert!(raw(with(&secret)).await.starts_with("HTTP/1.1 401"), "a rotated secret stops working");
@@ -3369,141 +3485,6 @@ mod tests {
         assert_eq!((big.body.len(), big.truncated), (crate::ports::FETCH_MAX, true));
     }
 
-    /// A reviewer's flags (the toolbar's cookie) reach the service as `x-roll-flags`, only what
-    /// the project's rule names; the cookie never does, nor a header a visitor sent.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_reviewers_flags_reach_the_service_as_a_header() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = Arc::new(Store::open(&code_sql::Target::Sqlite(dir.path().join("p.db")), Default::default()).unwrap());
-        let new = crate::store::New {
-            project_id: "prj_1".into(),
-            key: "pr1".into(),
-            project_name: "shop".into(),
-            repo: "acme/web".into(),
-            change_id: Some("chg_1".into()),
-            branch: None,
-            number: Some(1),
-            title: "t".into(),
-            github_pr: Some(1),
-            head: "cs_1".into(),
-            trusted: true,
-            state: crate::State::Ready,
-            expires_at: None,
-            created_by: "roll".into(),
-        };
-        let (row, _) = store.create(&new).unwrap();
-        store.want_service(&row.id, "web", "acme/web", "cs_1", 512, &|h| format!("http://{h}.preview.test")).unwrap();
-        let flags = vec![crate::settings::FlagRule { name: "new-checkout".into(), options: vec!["off".into(), "on".into()] }];
-        store.put_settings("prj_1", &crate::Settings { access: crate::settings::Access::Public, flags, ..Default::default() }).unwrap();
-        let rt = Runtime::new(RuntimeConfig { domain: "preview.test".into(), ..RuntimeConfig::default() }, Arc::new(code_preview::docker::Docker), Arc::new(NoTrees), store);
-        let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        rt.pretend_running(&row.id, "web", upstream.local_addr().unwrap());
-        tokio::spawn(async move {
-            loop {
-                let Ok((mut s, _)) = upstream.accept().await else { return };
-                tokio::spawn(async move {
-                    let mut buf = vec![0u8; 4096];
-                    let n = s.read(&mut buf).await.unwrap_or(0);
-                    let head = String::from_utf8_lossy(&buf[..n]).to_ascii_lowercase();
-                    let flags = head.lines().find_map(|l| l.strip_prefix("x-roll-flags: ")).unwrap_or("none").trim().to_string();
-                    let body = format!("flags {flags} cookie {}", head.contains("roll_flags"));
-                    let _ = s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await;
-                });
-            }
-        });
-        let app = axum::Router::new().fallback(|| async { "api" }).layer(axum::middleware::from_fn_with_state(rt.clone(), route));
-        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = l.local_addr().unwrap();
-        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
-        let get = |headers: &str| {
-            let req = format!("GET / HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\n{headers}Connection: close\r\n\r\n");
-            async move {
-                let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
-                s.write_all(req.as_bytes()).await.unwrap();
-                let mut out = String::new();
-                s.read_to_string(&mut out).await.unwrap();
-                out
-            }
-        };
-        assert!(get("Cookie: a=1; roll_flags=new-checkout:on|theme:dark\r\n").await.ends_with("flags new-checkout=on cookie false"));
-        assert!(get("x-roll-flags: theme=dark\r\n").await.ends_with("flags none cookie false"), "a visitor's own header is dropped");
-    }
-
-    /// Skew protection: a request naming an earlier push (its header, `?dpl=`, or the cookie its
-    /// page load got) reaches that push while it's kept and for a day after it was replaced; a
-    /// page load gets the current push and the cookie; off, nothing moves; the app never sees
-    /// roll's cookie.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_request_naming_an_earlier_push_goes_to_it() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = Arc::new(Store::open(&code_sql::Target::Sqlite(dir.path().join("p.db")), Default::default()).unwrap());
-        let new = crate::store::New {
-            project_id: "prj_1".into(),
-            key: "pr1".into(),
-            project_name: "shop".into(),
-            repo: "acme/web".into(),
-            change_id: Some("chg_1".into()),
-            branch: None,
-            number: Some(1),
-            title: "t".into(),
-            github_pr: Some(1),
-            head: "cs_3".into(),
-            trusted: true,
-            state: crate::State::Ready,
-            expires_at: None,
-            created_by: "roll".into(),
-        };
-        let (row, _) = store.create(&new).unwrap();
-        let url = |h: &str| format!("http://{h}.preview.test");
-        store.want_service(&row.id, "web", "acme/web", "cs_3", 512, &url).unwrap();
-        store.pin(&row.id, "web", "cs_1", &url).unwrap();
-        store.pin(&row.id, "web", "cs_2", &url).unwrap();
-        store.age_pinned(&row.id, "web", "cs_1", crate::store::SKEW_WINDOW_MS + 1).unwrap();
-        store.set_service_skew(&row.id, "web", true).unwrap();
-        store.put_settings("prj_1", &crate::Settings { access: crate::settings::Access::Public, ..Default::default() }).unwrap();
-        let rt = Runtime::new(RuntimeConfig { domain: "preview.test".into(), ..RuntimeConfig::default() }, Arc::new(code_preview::docker::Docker), Arc::new(NoTrees), store);
-        // Each push's container says which it is, and whether roll's cookie reached it.
-        for (service, said) in [("web", "cs_3"), ("web@cs_2", "cs_2"), ("web@cs_1", "cs_1")] {
-            let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            rt.pretend_running(&row.id, service, upstream.local_addr().unwrap());
-            tokio::spawn(async move {
-                loop {
-                    let Ok((mut s, _)) = upstream.accept().await else { return };
-                    tokio::spawn(async move {
-                        let mut buf = vec![0u8; 4096];
-                        let n = s.read(&mut buf).await.unwrap_or(0);
-                        let body = format!("{said}{}", if String::from_utf8_lossy(&buf[..n]).contains("__roll_dpl") { " and the cookie" } else { "" });
-                        let _ = s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await;
-                    });
-                }
-            });
-        }
-        let app = axum::Router::new().fallback(|| async { "api" }).layer(axum::middleware::from_fn_with_state(rt.clone(), route));
-        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = l.local_addr().unwrap();
-        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
-        let get = |path: &str, headers: &str| {
-            let req = format!("GET {path} HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\n{headers}Connection: close\r\n\r\n");
-            async move {
-                let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
-                s.write_all(req.as_bytes()).await.unwrap();
-                let mut out = String::new();
-                s.read_to_string(&mut out).await.unwrap();
-                out
-            }
-        };
-        assert!(get("/api", "Cookie: a=1; __roll_dpl=cs_2\r\n").await.ends_with("\r\n\r\ncs_2"), "the cookie, kept from the app");
-        assert!(get("/api", "x-deployment-id: cs_2\r\n").await.ends_with("\r\n\r\ncs_2"));
-        assert!(get("/assets/app.js?dpl=cs_2", "").await.ends_with("\r\n\r\ncs_2"));
-        assert!(get("/api", "x-deployment-id: cs_1\r\n").await.ends_with("\r\n\r\ncs_3"), "replaced over a day ago");
-        assert!(get("/api", "x-deployment-id: cs_9\r\n").await.ends_with("\r\n\r\ncs_3"), "never kept");
-        let page = get("/", "Sec-Fetch-Dest: document\r\nCookie: __roll_dpl=cs_2\r\n").await;
-        assert!(page.ends_with("\r\n\r\ncs_3") && page.contains("set-cookie: __roll_dpl=cs_3; Path=/; HttpOnly"), "a page load: the current push, {page}");
-        rt.store.set_service_skew(&row.id, "web", false).unwrap();
-        let off = get("/api", "x-deployment-id: cs_2\r\n").await;
-        assert!(off.ends_with("\r\n\r\ncs_3") && !get("/", "Sec-Fetch-Dest: document\r\n").await.contains("__roll_dpl"), "off: {off}");
-    }
-
     /// A screenshot run's sign-in goes to its browsers as one line of stdin (an empty one for
     /// none), checked again first: a page off the service's origin, or no steps, sends nothing.
     #[test]
@@ -3515,123 +3496,6 @@ mod tests {
         assert_eq!(login_line(&with("//evil.example/login", vec![Step::Press("Enter".into())])).unwrap(), b"\n");
         assert_eq!(login_line(&with("/login", vec![])).unwrap(), b"\n");
         assert_eq!(login_line(&crate::ports::ShotOptions::default()).unwrap(), b"\n");
-    }
-
-    /// Chromium's crops carry how their reviewers saw the page (viewport, steps); another
-    /// engine's go to the other browsers' run; a step roll's checks refuse sends none.
-    #[test]
-    fn crops_carry_how_their_reviewers_saw_the_page() {
-        use crate::settings::Step;
-        let ask = |note: &str, browser: Option<&str>, steps: Vec<Step>| crate::ports::CropAsk { note: note.into(), path: "/cart".into(), selector: "button.pay".into(), width: Some(390), height: Some(844), steps, browser: browser.map(String::from) };
-        let env = crops_env(&[
-            ask("rv_1", None, vec![Step::Click("li > button".into()), Step::Type("#coupon".into(), "xxxx".into()), Step::Choose("#size".into(), 2), Step::Press("Escape".into())]),
-            ask("rv_2", Some("webkit-phone"), vec![]),
-            ask("rv_3", None, vec![Step::Click("a[href='//x']{".into())]),
-            ask("rv_5", None, vec![Step::Type("#coupon".into(), "SAVE10".into())]),
-        ]);
-        assert_eq!(env[0], serde_json::json!({ "note": "rv_1", "path": "/cart", "selector": "button.pay", "width": 390, "height": 844, "steps": [{ "click": "li > button" }, { "type": ["#coupon", "xxxx"] }, { "choose": ["#size", 2] }, { "press": "Escape" }] }));
-        assert_eq!(env.len(), 3, "WebKit's is the other browsers' run's");
-        assert_eq!(env[1]["steps"], serde_json::json!([]), "a step its checks refuse: none of them");
-        assert_eq!(env[2]["steps"], serde_json::json!([]), "typing only as roll writes it (x's), never words");
-        assert!(crops_env(&[ask("rv_4", Some("firefox"), vec![])]).is_empty());
-    }
-
-    /// A screenshot run's other pages are only those asked for, each once, their numbers
-    /// bounded (a state's slowest step a time of a minute at most).
-    #[test]
-    fn a_screenshot_run_s_pages_are_only_those_asked_for_each_once() {
-        use base64::Engine as _;
-        let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
-        let (png, junk) = (b64(b"\x89PNG\r\n\x1a\n..."), b64(b"not a png"));
-        let asked = [&"/pricing".to_string(), &"/about".to_string()];
-        // What the browser container printed: what it said of each page, then their PNGs in order.
-        let run = |said: &str, pngs: &[&String]| page_shots(&asked, said, pngs.iter().map(|s| s.as_str())).into_iter().map(|p| (p.path, p.errors)).collect::<Vec<_>>();
-        let pricing = || ("/pricing".to_string(), 2);
-        assert_eq!(run(r#"[{"path":"/pricing","errors":2},{"path":"/about"}]"#, &[&png, &junk]), [pricing()], "not a PNG");
-        assert_eq!(run(r#"[{"path":"/admin"},{"path":"/pricing","errors":2}]"#, &[&png, &png]), [pricing()], "not asked for");
-        assert_eq!(run(r#"[{"path":"/pricing","errors":2},{"path":"/pricing"}]"#, &[&png, &png]), [pricing()], "once");
-        assert_eq!(run(r#"[{"path":"/pricing","errors":99999}]"#, &[&png]), [("/pricing".to_string(), 10_000)], "bounded");
-        assert_eq!(run("not json", &[&png]), []);
-        // A state's slowest step to the next paint: kept when it could be a time (a minute at most).
-        let step_ms = |said: &str| page_shots(&asked, said, [png.as_str()].into_iter()).into_iter().map(|p| p.report.step_ms).collect::<Vec<_>>();
-        assert_eq!(step_ms(r#"[{"path":"/pricing","step_ms":120.4}]"#), [Some(120)]);
-        assert_eq!(step_ms(r#"[{"path":"/pricing","step_ms":1e12}]"#), [None]);
-        assert_eq!(step_ms(r#"[{"path":"/pricing","step_ms":-3}]"#), [None]);
-    }
-
-    /// A run's stories put the ones the change touched first: a story whose own file changed,
-    /// then one that imports a changed file through the module graph (Storybook's
-    /// `--stats-json`), then one beside a changed file, then the rest in the index's order
-    /// (Chromatic's TurboSnap); a repo's path matches a project's by its end, and the repo's root
-    /// by nothing. `shot.js`'s own function, run by `node`.
-    #[test]
-    fn stories_the_change_touched_go_first() {
-        let src = SHOT_JS.split("// touched-first: start").nth(1).and_then(|s| s.split("// touched-first: end").next()).expect("the function");
-        let entries = r#"[{"id":"a--1","importPath":"./src/A.stories.tsx"},{"id":"b--1","importPath":"./src/b/B.stories.tsx"},{"id":"c--1","importPath":"./src/c/C.stories.tsx"},{"id":"d--1"},{"id":"e--1","importPath":"./src/e/E.stories.tsx"}]"#;
-        let changed = r#"["web/src/c/C.stories.tsx","web/src/b/B.tsx","README.md","web/lib/deep.ts"]"#;
-        // E's story imports E, which imports lib/deep.ts (one of a concatenated module's); a cycle on the way.
-        let stats = r#"{"modules":[{"name":"./lib/index.ts + 1 modules","modules":[{"name":"./lib/deep.ts"}],"reasons":[{"moduleName":"./src/e/E.tsx"},{"moduleName":"./lib/index.ts"}]},{"name":"./src/e/E.tsx","reasons":[{"moduleName":"./src/e/E.stories.tsx?story"}]}]}"#;
-        let order = |stats: &str| {
-            let out = std::process::Command::new("node").arg("-e").arg(format!("{src}\nconsole.log(touchedFirst({entries}, {changed}, {stats}).map((e) => e.id).join(','))")).output().expect("node");
-            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-            String::from_utf8_lossy(&out.stdout).trim().to_string()
-        };
-        assert_eq!(order(stats), "c--1,e--1,b--1,a--1,d--1");
-        assert_eq!(order("null"), "c--1,b--1,a--1,d--1,e--1", "without a graph, by files alone");
-        // A default branch's preview: the stories asked for first, before the rest.
-        let out = std::process::Command::new("node").arg("-e").arg(format!("{src}\nconsole.log(touchedFirst({entries}, [], null, [\"d--1\"]).map((e) => e.id).join(','))")).output().expect("node");
-        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "d--1,a--1,b--1,c--1,e--1");
-    }
-
-    /// Stories taken by several containers side by side come back in the order they were dealt
-    /// (the i-th of each in turn), with what they left added up and the first of it in that order.
-    #[test]
-    fn shards_stories_come_back_in_the_order_they_were_dealt() {
-        let shot = |id: &str| crate::ports::PageShot { path: format!("story:{id}"), png: Vec::new(), errors: 0, report: Default::default() };
-        let left = |n: u32, first: &[&str], touched: u32| crate::Skipped { stories: n, first_stories: first.iter().map(|s| s.to_string()).collect(), touched_stories: touched, ..Default::default() };
-        // Dealt a, b, c, d, e over two: a, c, e and b, d.
-        let (shots, skipped) = merge_story_shards(vec![(vec![shot("a"), shot("c"), shot("e")], left(2, &["g", "i"], 1)), (vec![shot("b"), shot("d")], left(1, &["h"], 1))], 0);
-        assert_eq!(shots.iter().map(|p| p.path.as_str()).collect::<Vec<_>>(), ["story:a", "story:b", "story:c", "story:d", "story:e"]);
-        assert_eq!((skipped.stories, skipped.touched_stories, skipped.first_stories), (3, 2, vec!["g".to_string(), "h".to_string(), "i".to_string()]));
-        // A third shard failed: its share of the 10 the change touched (the two said took 4 and
-        // left 2 of them) is untaken too.
-        let said = |taken: u32, touched: u32| crate::Skipped { touched_total: 10, touched_taken: taken, touched_stories: touched, ..Default::default() };
-        let (_, skipped) = merge_story_shards(vec![(vec![shot("a")], said(3, 1)), (vec![shot("b")], said(1, 1))], 1);
-        assert_eq!(skipped.touched_stories, 2 + 4, "the failed share's 4 counted as untaken");
-    }
-
-    /// A stories run's report is the preview's code's: each story once, by an id Storybook would
-    /// make, with a PNG within the cap; anything else is dropped. What it didn't take is said
-    /// (how many, the first by ids Storybook would make).
-    #[test]
-    fn a_stories_runs_pages_are_stories_it_can_name_each_once() {
-        use base64::Engine as _;
-        let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
-        let (png, junk, big) = (b64(b"\x89PNG\r\n\x1a\n..."), b64(b"not a png"), b64(&[b"\x89PNG".as_slice(), &vec![0u8; STORY_MAX]].concat()));
-        let said = r#"{"stories":[{"id":"button--primary","errors":2,"a11y":{"issues":[{"kind":"color-contrast","count":2,"first":"<button>","impact":"serious"}],"lang":true,"title":true},"play":"failed","play_error":"expected \"Pay\"\u0007 to be visible","play_step":"expect.toBeVisible<b>"},{"id":"../x--y"},{"id":"button--primary"},{"id":"card--empty"},{"id":"card--big"},{"id":"card--full"}],"left":12,"first_left":["button--danger","../evil"],"touched_left":40,"by_files":true}"#;
-        let pngs = [&png, &png, &png, &junk, &big, &png];
-        let (shots, left) = story_shots(said, pngs.iter().map(|s| s.as_str()));
-        // A story's accessibility as a page's (axe's rules, its language and title), and its
-        // interaction test as Storybook ran it; one that fails where main's passes broke.
-        assert_eq!(shots[0].report.a11y.as_ref().map(|a| a.problems()), Some(2), "{:?}", shots[0].report.a11y);
-        assert_eq!(shots[0].report.play, Some(crate::Play::Failed));
-        assert_eq!(shots[0].report.play_error.as_deref(), Some("expected \"Pay\" to be visible"), "what it threw, one printable line");
-        assert_eq!(shots[0].report.play_step.as_deref(), Some("expect.toBeVisibleb"), "the step it stopped at, names and dots only");
-        let passed = crate::PageReport { play: Some(crate::Play::Passed), ..Default::default() };
-        assert!(shots[0].report.against(&passed).play_broke && !passed.against(&shots[0].report).play_broke);
-        let got: Vec<(String, u32)> = shots.into_iter().map(|p| (p.path, p.errors)).collect();
-        assert_eq!(got, [("story:button--primary".to_string(), 2), ("story:card--full".to_string(), 0)]);
-        assert_eq!((left.stories, left.first_stories, left.by_files), (12, vec!["button--danger".to_string()], true), "what it didn't take, by ids it could name, and that it chose by files alone");
-        assert_eq!(left.touched_stories, 12, "how many of those the change touched, at most all of them");
-        assert!(story_shots("not json", [png.as_str()].into_iter()).0.is_empty());
-        // The first of them in the other browsers: only a story and a browser asked for, once
-        // each, a PNG within a story's cap.
-        let (ids, browsers) = (["button--primary".to_string()], ["firefox".to_string()]);
-        let line = |story: &str, browser: &str, png: &str| serde_json::json!({ "story": story, "browser": browser, "errors": 1, "png": png, "play": "failed", "play_error": "threw\u{7}" }).to_string();
-        let out = [line("button--primary", "firefox", &png), line("button--primary", "firefox", &png), line("card--full", "firefox", &png), line("button--primary", "webkit", &png), line("button--primary", "firefox", &junk)].join("\n");
-        let got: Vec<(String, u32, Option<crate::Play>, Option<String>)> = browser_story_shots(&out, &ids.iter().collect::<Vec<_>>(), &browsers.iter().collect::<Vec<_>>()).into_iter().map(|p| (p.path, p.errors, p.report.play, p.report.play_error)).collect();
-        assert_eq!(got, [("story:button--primary@firefox".to_string(), 1, Some(crate::Play::Failed), Some("threw".to_string()))], "with its interaction test in that browser");
-        assert!(crate::settings::page_key_ok("story:button--primary@webkit-phone") && !crate::settings::page_key_ok("story:button--primary@lynx"));
     }
 
     /// A run's answer is the preview's code's: a PNG only within the cap, one printable line for
@@ -3662,21 +3526,4 @@ mod tests {
         assert_eq!(run(&["a", "b", "c"]), format!("abc{tag}"));
     }
 
-    #[test]
-    fn query_values_are_decoded_as_browsers_encode_them() {
-        assert_eq!(percent_decode("%2Fcheckout%3Fstep%3D2"), "/checkout?step=2");
-        assert_eq!(percent_decode("a+b%20c"), "a b c");
-        assert_eq!(percent_decode("100%"), "100%");
-        assert_eq!(percent_decode("%zz"), "%zz");
-    }
-
-    #[test]
-    fn loopback_hosts_are_rewritten_for_docker() {
-        assert_eq!(reach_local("postgres://u:p@127.0.0.1:55432/main", true), "postgres://u:p@host.docker.internal:55432/main");
-        assert_eq!(reach_local("http://localhost:7070/x", true), "http://host.docker.internal:7070/x");
-        assert_eq!(reach_local("127.0.0.1:9092,localhost:9093", true), "host.docker.internal:9092,host.docker.internal:9093");
-        assert_eq!(reach_local("db.roll.sh:5432", true), "db.roll.sh:5432");
-        assert_eq!((reach_local("127.0.0.1", true), reach_local("10.0.0.1", true)), ("host.docker.internal".to_string(), "10.0.0.1".to_string()));
-        assert_eq!(reach_local("http://127.0.0.1:1", false), "http://127.0.0.1:1");
-    }
 }

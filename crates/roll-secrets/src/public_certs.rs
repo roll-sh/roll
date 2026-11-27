@@ -89,6 +89,11 @@ CREATE TABLE IF NOT EXISTS public_cert_revocations (
     failed_at INTEGER,
     PRIMARY KEY (cert_id, serial)
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS public_cert_dns_claims (
+    name TEXT PRIMARY KEY,
+    holder TEXT NOT NULL,
+    until INTEGER NOT NULL
+) WITHOUT ROWID;
 ";
 
 /// The columns a registration gained after it shipped (lib.rs adds them to an older table). The
@@ -106,6 +111,11 @@ pub(crate) const ADDED: &[(&str, &str)] = &[
 ];
 
 pub(crate) const KIND: &str = "public_cert";
+
+/// The label of a DNS credential's check (its AWS session: `roll-public-cert-check`, which a
+/// certificate role's `sts:RoleSessionName` condition takes, as it does the orders'
+/// `roll-public-cert-<id>`; a role's own check uses it too, aws.rs).
+pub(crate) const CHECK_LABEL: &str = "public-cert-check";
 
 /// The public CAs roll orders from without the operator naming them (`ROLL_SECRETS_ACME_ALLOW`
 /// adds others).
@@ -473,6 +483,14 @@ fn rotate_within(lifetime_days: u64) -> u64 {
 fn renew_days(rotate_days: Option<u64>, lifetime_days: u64) -> u64 {
     let most = rotate_within(lifetime_days).max(1);
     rotate_days.unwrap_or(lifetime_days * 2 / 3).clamp(1, most)
+}
+
+/// The `_acme-challenge` TXT record names an order writes: one per name, a wildcard's its base's.
+fn challenge_records(domains: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = domains.iter().map(|d| format!("_acme-challenge.{}", d.strip_prefix("*.").unwrap_or(d))).collect();
+    out.sort();
+    out.dedup();
+    out
 }
 
 pub(crate) fn aad(project: &str, id: &str, what: &str) -> String {
@@ -871,7 +889,7 @@ impl Secrets {
             _ => return Err(Error::BadRequest("External Account Binding is eab_kid and eab_hmac_key (base64url), both or neither".into())),
         };
         let dek = self.project(project)?;
-        let cred = self.resolve_dns(project, dns, n.dns_credential.as_ref(), role, "public-cert-check").map_err(as_bad_request)?;
+        let cred = self.resolve_dns(project, dns, n.dns_credential.as_ref(), role, CHECK_LABEL).map_err(as_bad_request)?;
         ca.check(&cred, &domains).map_err(|e| Error::BadRequest(format!("roll couldn't use this {} credential: {e}", dns.as_str())))?;
         let id = names::new_id("pcr", 16);
         // A role's registration holds no key: its sealed credential is empty.
@@ -924,7 +942,7 @@ impl Secrets {
         // A new credential (a token, a key, or a role instead): sealed, with the role it names.
         let credential = match fresh {
             true => {
-                let cred = self.resolve_dns(project, r.dns, ch.dns_credential.as_ref(), role, "public-cert-check").map_err(as_bad_request)?;
+                let cred = self.resolve_dns(project, r.dns, ch.dns_credential.as_ref(), role, CHECK_LABEL).map_err(as_bad_request)?;
                 let names = domains.as_deref().unwrap_or(r.domains.as_slice());
                 ca.check(&cred, names).map_err(|e| Error::BadRequest(format!("roll couldn't use this {} credential: {e}", r.dns.as_str())))?;
                 let kept = if role.is_some() { Value::new(String::new()) } else { ch.dns_credential.clone().unwrap_or_else(|| Value::new(String::new())) };
@@ -933,7 +951,7 @@ impl Secrets {
             false => {
                 if let Some(d) = &domains {
                     // The credential in use must reach the new names' zones too.
-                    let cred = self.dns_credential(&dek, &r, "public-cert-check").map_err(as_bad_request)?;
+                    let cred = self.dns_credential(&dek, &r, CHECK_LABEL).map_err(as_bad_request)?;
                     ca.check(&cred, d).map_err(|e| Error::BadRequest(format!("roll couldn't use {}'s {} credential for these names: {e}", r.name, r.dns.as_str())))?;
                 }
                 None
@@ -1272,19 +1290,43 @@ impl Secrets {
         Ok(out)
     }
 
-    /// Claim, order and keep one registration's certificate. `Ok(false)`: another node holds it.
+    /// Claim, order and keep one registration's certificate. `Ok(false)`: another node holds it,
+    /// or another order (of any project) holds one of its Route 53 record names.
     fn order_public_cert(&self, ca: &dyn PublicCa, r: &Row) -> Result<bool> {
         let now = self.db.now_ms()?;
+        // Route 53 keeps a name's values in one set, read and written whole: two of roll's orders
+        // writing it at once would drop one's value. So an order holds its record names, in the
+        // same write as the registration, for as long as it holds that (released after cleanup).
+        let records = match r.dns {
+            DnsProvider::Route53 => challenge_records(&r.domains),
+            DnsProvider::Cloudflare => vec![],
+        };
+        let holder = names::new_id("dnc", 12);
         let claimed = self.db.write(|c| {
-            Ok::<_, Error>(c.execute(
+            for name in &records {
+                if c.query_row("SELECT 1 FROM public_cert_dns_claims WHERE name = ? AND until > ?", params![name, now], |_| Ok(())).optional()?.is_some() {
+                    return Ok::<_, Error>(false);
+                }
+            }
+            if c.execute(
                 "UPDATE public_certs SET claimed_until = ? WHERE id = ? AND (claimed_until IS NULL OR claimed_until <= ?) AND COALESCE(serial, '') = ? AND renew_requested = ?",
                 params![now + CLAIM_MS, r.id, now, r.serial.clone().unwrap_or_default(), r.renew_requested as i64],
-            )? == 1)
+            )? != 1
+            {
+                return Ok(false);
+            }
+            for name in &records {
+                c.execute("INSERT INTO public_cert_dns_claims (name, holder, until) VALUES (?, ?, ?) ON CONFLICT (name) DO UPDATE SET holder = excluded.holder, until = excluded.until", params![name, holder, now + CLAIM_MS])?;
+            }
+            Ok(true)
         })?;
         if !claimed {
             return Ok(false);
         }
         let result = self.order_claimed(ca, r);
+        if !records.is_empty() {
+            let _ = self.db.write(|c| c.execute("DELETE FROM public_cert_dns_claims WHERE holder = ?", [&holder]));
+        }
         let now = self.db.now_ms()?;
         let caller = Caller::consumer(JOB);
         match result {

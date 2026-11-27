@@ -31,7 +31,7 @@ const MAX_IDS: usize = 20;
 /// `cl_1`, index `logs-a`; secrets' `prj_1/payments`, encryption key `payments`).
 fn selector(product: &str, resource: &str) -> Selector {
     match resource.split_once('/') {
-        Some((id, index)) if roll_auth::scope::sub_resources(product).is_some() => Selector::Id { id: id.into(), index: Some(index.into()) },
+        Some((id, index)) if roll_auth::scope::sub_resources(product).is_some() => Selector::Id { id: id.into(), index: Some(roll_auth::scope::rule_index(product, index)) },
         _ => Selector::id(resource),
     }
 }
@@ -60,13 +60,20 @@ pub fn tighten(rules: &Scope, used: &[Used]) -> Scope {
                 };
             }
             narrow.retain(|a, _| !wide.contains_key(a));
-            let base = Rule { product: p.to_string(), resources: r.resources.clone(), environments: r.environments.clone(), paths: r.paths.clone(), unprotected: r.unprotected, actions: BTreeMap::new() };
+            let base = Rule { product: p.to_string(), resources: r.resources.clone(), environments: r.environments.clone(), paths: r.paths.clone(), unprotected: r.unprotected, keys: r.keys.clone(), actions: BTreeMap::new() };
             if !wide.is_empty() {
                 out.push(Rule { actions: wide, ..base.clone() });
             }
             if !narrow.is_empty() {
                 let mut rule = Rule { actions: narrow, ..base };
-                let named = Rule { resources: Resources::Some(ids.iter().map(|id| selector(p, id)).collect()), ..rule.clone() };
+                // Two expressions can name one selector (`logs-*` and `logs-*,-logs-old`).
+                let mut selectors: Vec<Selector> = Vec::new();
+                for s in ids.iter().map(|id| selector(p, id)) {
+                    if !selectors.contains(&s) {
+                        selectors.push(s);
+                    }
+                }
+                let named = Rule { resources: Resources::Some(selectors), ..rule.clone() };
                 if ids.len() <= MAX_IDS && Scope(vec![r.clone()]).covers(&Scope(vec![named.clone()])) {
                     rule = named;
                 }

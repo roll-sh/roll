@@ -275,6 +275,8 @@ TRIED=$(echo "$TRY" | jq_ "'%s %s' % (d['status'], len(d['text']) > 0)")
 curl -sf "http://$API/v1/previews/$PV/try/$(echo "$TRY" | jq_ "d['run']")/screenshot" | head -c 8 | od -An -c | grep -q "P   N   G" || { echo "the run's picture should be a PNG"; exit 1; }
 
 say "the feedback button on the roll apps environment, for a visitor through roll (link access)"
+# The project's bypass secret first, so the private environment's access carries its hash.
+BYPASS=$(api POST "/v1/previews/projects/$PRJ/bypass" | jq_ "d['secret']")
 api PUT "/v1/previews/projects/$PRJ/settings" '{"access":"link"}' >/dev/null
 for _ in $(seq 1 240); do
   [ "$(api GET "/v1/apps/services/$SVC/environments/$ENV" | jq_ "d.get('feedback')")" = True ] && break
@@ -292,6 +294,12 @@ done
 case "$FB_BODY" in *"/__roll/feedback.js"*) ;; *) echo "a visitor through roll should get the feedback button: $FB_BODY"; exit 1;; esac
 NOTES=$(curl -sS -b "$JAR" -H "Host: $HOSTPART" "http://127.0.0.1:${PORTS}080/__roll/feedback.json?path=%2F")
 case "$NOTES" in "["*) ;; *) echo "the page's notes should come from roll previews: $NOTES"; exit 1;; esac
+say "a snapshot from the team's tests on the roll apps environment's host (roll apps' PreviewSnapshots hook)"
+python3 -c "import struct,zlib,sys; raw=b'\x00\xff\x00\x00'; c=lambda t,d: struct.pack('>I',len(d))+t+d+struct.pack('>I',zlib.crc32(t+d)); open(sys.argv[1],'wb').write(b'\x89PNG\r\n\x1a\n'+c(b'IHDR',struct.pack('>IIBBBBB',1,1,8,2,0,0,0))+c(b'IDAT',zlib.compress(raw))+c(b'IEND',b''))" "$H/snap.png"
+SNAP=$(curl -sS -o "$H/snap.out" -w '%{http_code}' -X POST -H "Host: $HOSTPART" -H "x-roll-preview-bypass: $BYPASS" -H 'content-type: image/png' --data-binary @"$H/snap.png" "http://127.0.0.1:${PORTS}080/__roll/snapshot?name=checkout" --max-time 60)
+[ "$SNAP" = 201 ] || { echo "a snapshot with the bypass secret should be taken on roll apps: $SNAP $(cat "$H/snap.out")"; exit 1; }
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Host: $HOSTPART" -H 'content-type: image/png' --data-binary @"$H/snap.png" "http://127.0.0.1:${PORTS}080/__roll/snapshot?name=checkout" --max-time 60)" = 401 ] || { echo "a snapshot without the secret should be 401"; exit 1; }
+[ "$(api GET "/v1/previews/$PV" | jq_ "'snap:checkout' in [p['path'] for p in d.get('pages', [])]")" = True ] || { echo "the snapshot should be a page of the preview"; exit 1; }
 api PUT "/v1/previews/projects/$PRJ/settings" '{"access":"public"}' >/dev/null
 # Public again redeploys the environment (no feedback button, no access check): settled before
 # the promote reads which deployment runs, else the one it saw is replaced meanwhile (a 409).

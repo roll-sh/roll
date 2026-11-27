@@ -495,6 +495,11 @@ function Form({
             onChange={(v) => set("rehearse_when_queued", v)}
           />
         )}
+        {s.release && (
+          <Field group label="Release checks" note="Check: the release is rehearsed on today's data at every head of a change, beside main's code on its migrated data. Required: also keeps it from landing in roll until both pass at its head.">
+            <Choice value={s.release_checks ?? "off"} options={["off", "check", "required"]} onChange={(v) => set("release_checks", v)} labels={{ off: "Off", check: "At every head", required: "Required to land" }} />
+          </Field>
+        )}
         <Job
           label="Teardown"
           note="Runs once when a preview goes, before its services and branches: remove what its code made outside roll (test webhooks, OAuth redirect URIs). A failure is logged; the preview goes anyway."

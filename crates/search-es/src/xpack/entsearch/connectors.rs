@@ -124,7 +124,7 @@ async fn create(ctx: &Ctx<'_>, id: String) -> EsResult<(bool, String)> {
             check_index_name(st, &id, body.get("index_name"))?;
             let Value::Obj(mut c) = new_connector(&id, &body) else { return Err(not_found(&id)) };
             sync::config::fill_schema(&mut c);
-            remember_user(st, &id, &c, user, now)?;
+            remember_user(st, &id, user, now)?;
             // Put again (on a branch, or from before roll ran syncs): the cluster's own now.
             sync::adopt(st, &id, now)?;
             store::put(st, CONNECTORS, &id, Value::Obj(c), now)
@@ -851,6 +851,9 @@ pub async fn update(ctx: &Ctx<'_>) -> EsResult<Reply> {
         Api::ConnectorUpdateActiveFiltering => validate_id(ctx, "connector_id", EMPTY_ID)?,
         _ => {}
     }
+    // A connector's syncs write to its index as whoever last changed where or what it writes
+    // (below), so an index its aimer may not write is refused at the sync's `_bulk`: these APIs
+    // need only `manage_connector`, as in Elasticsearch.
     let id = ctx.path_param("connector_id").unwrap_or_default().to_string();
     let now_ms = ctx.now_ms;
     let (sealer, unsealed) = (ctx.cluster.config.sealer.clone(), ctx.cluster.config.unsealed_secrets);
@@ -994,8 +997,14 @@ pub async fn update(ctx: &Ctx<'_>) -> EsResult<Reply> {
             }
             let mut adopting: Option<Vec<String>> = None;
             match api {
-                // The service now runs on roll (or another service does): its schema.
-                Api::ConnectorUpdateServiceType | Api::ConnectorUpdateNative => sync::config::fill_schema(&mut m),
+                // The service now runs on roll (or another service does): its schema. One that
+                // starts running here runs as whoever turned it on.
+                Api::ConnectorUpdateServiceType | Api::ConnectorUpdateNative => {
+                    sync::config::fill_schema(&mut m);
+                    if sync::config::runs(&Value::Obj(m.clone())) && !sync::config::runs(&Value::Obj(before.clone())) {
+                        remember_user(st, &id, user, now_ms)?;
+                    }
+                }
                 // The sync runs as whoever configured the connector last; a waiting connector
                 // whose configuration is written is the cluster's own (with only the
                 // credentials this write gives: `protect`).
@@ -1010,8 +1019,15 @@ pub async fn update(ctx: &Ctx<'_>) -> EsResult<Reply> {
                         };
                         adopting = Some(given.map(|g| g.keys().cloned().collect()).unwrap_or_default());
                     }
-                    remember_user(st, &id, &m, user, now_ms)?;
+                    remember_user(st, &id, user, now_ms)?;
                     sync::adopt(st, &id, now_ms)?;
+                }
+                // Where it writes (its index, its pipeline, which can reroute) and what (its
+                // filtering, which decides what a full sync deletes): its syncs run as whoever
+                // changed them last, as transforms run as whoever updated them, never as an
+                // earlier configurer someone else aims elsewhere.
+                Api::ConnectorUpdateIndexName | Api::ConnectorUpdatePipeline | Api::ConnectorUpdateFiltering | Api::ConnectorUpdateActiveFiltering => {
+                    remember_user(st, &id, user, now_ms)?;
                 }
                 _ => {}
             }
@@ -1180,11 +1196,10 @@ pub(crate) fn insert_job(st: &mut crate::meta::ClusterState, cid: &str, job_type
     store::put(st, SYNC_JOBS, id, job, now_ms).map(|_| ())
 }
 
-/// Keeps who configured a connector roll runs ([`sync::RECORDS`]): its syncs run as them.
-fn remember_user(st: &mut crate::meta::ClusterState, id: &str, c: &Map, user: Option<Value>, now_ms: i64) -> EsResult<()> {
-    if !sync::config::runs(&Value::Obj(c.clone())) {
-        return Ok(());
-    }
+/// Keeps who last configured or aimed a connector ([`sync::RECORDS`]): its syncs run as them.
+/// Recorded whether or not roll runs it now, so one turned to run later (`_native`,
+/// `_service_type`) never runs as an earlier user with what someone else aimed it at since.
+fn remember_user(st: &mut crate::meta::ClusterState, id: &str, user: Option<Value>, now_ms: i64) -> EsResult<()> {
     let mut rec = st.metadata.xpack.get(sync::RECORDS, id).and_then(Value::as_object).cloned().unwrap_or_default();
     match user {
         Some(u) => rec.insert("user".into(), u),

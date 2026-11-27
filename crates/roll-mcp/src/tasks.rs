@@ -65,6 +65,14 @@ fn view(id: &str, t: &McpTask, result: Option<Value>) -> Value {
         "failed" => v["error"] = t.error.as_deref().and_then(|e| serde_json::from_str(e).ok()).unwrap_or_else(|| json!({ "code": -32603, "message": "the task failed" })),
         _ => {}
     }
+    // Held while a person decides: the approval it waits on is its input's one key (SEP-2643).
+    if matches!(t.status.as_str(), "working" | "input_required")
+        && let Some(waiting) = t.input.as_deref().and_then(|i| serde_json::from_str::<Value>(i).ok())
+        && let Some((approval, _)) = waiting.as_object().filter(|o| o.len() == 1).and_then(|o| o.iter().next())
+        && approval.starts_with("apr_")
+    {
+        v["_meta"][crate::denials::KEY] = crate::denials::waiting(approval, t.status == "input_required");
+    }
     v
 }
 
@@ -89,6 +97,8 @@ fn answered(job: Result<Option<Value>, tokio::task::JoinError>) -> Option<Value>
 pub(crate) async fn call_or_task(ctx: &Arc<Ctx>, name: &str, args: Value) -> Result<Option<Value>, Value> {
     let (c, n, a) = (ctx.clone(), name.to_string(), args.clone());
     let mut job = tokio::spawn(async move { call(&c, &n, a).await });
+    // The approval it already waits on, which the task's first answer names.
+    let mut approval: Option<String> = None;
     tokio::select! {
         done = &mut job => {
             let done = answered(done);
@@ -103,6 +113,7 @@ pub(crate) async fn call_or_task(ctx: &Arc<Ctx>, name: &str, args: Value) -> Res
             if !waits {
                 return Ok(done);
             }
+            approval = done.as_ref().and_then(|r| crate::waiting_approval(&r["structuredContent"])).map(str::to_string);
             job = tokio::spawn(async move { done });
         }
         _ = tokio::time::sleep(AFTER) => {}
@@ -122,6 +133,9 @@ pub(crate) async fn call_or_task(ctx: &Arc<Ctx>, name: &str, args: Value) -> Res
     tokio::spawn(run(ctx.clone(), access, hash, job, name.to_string(), args));
     let mut v = view(&id, &task, None);
     v["resultType"] = json!("task");
+    if let Some(a) = approval {
+        v["_meta"][crate::denials::KEY] = crate::denials::waiting(&a, false);
+    }
     Err(v)
 }
 
@@ -165,12 +179,12 @@ async fn run(ctx: Arc<Ctx>, access: Arc<roll_access::Access>, hash: String, mut 
                     if showing.as_deref() != Some(approval) {
                         let url = s["url"].as_str().unwrap_or_default();
                         let message = format!("waiting for a person to approve it: {url}");
-                        let input = (ctx.url_elicitation && !url.is_empty()).then(|| {
-                            let elicit = crate::modern::approval_input_required(&result)["inputRequests"]["approval"].clone();
-                            json!({ approval: elicit }).to_string()
-                        });
-                        let status = if input.is_some() { "input_required" } else { "working" };
-                        if save(TaskUpdate { status, status_message: Some(&message), input: input.as_deref(), result: None, error: None }).await {
+                        // Its one key is the approval, either way: `tasks/get` says what it waits on.
+                        let opens = ctx.url_elicitation && !url.is_empty();
+                        let elicit = if opens { crate::modern::approval_input_required(&result)["inputRequests"]["approval"].clone() } else { Value::Null };
+                        let input = json!({ approval: elicit }).to_string();
+                        let status = if opens { "input_required" } else { "working" };
+                        if save(TaskUpdate { status, status_message: Some(&message), input: Some(&input), result: None, error: None }).await {
                             return cancelled(&save).await;
                         }
                         showing = Some(approval.to_string());
@@ -196,6 +210,8 @@ async fn run(ctx: Arc<Ctx>, access: Arc<roll_access::Access>, hash: String, mut 
                     job = tokio::spawn(async move { call(&c, &n, a).await });
                     continue;
                 }
+                // Decided: the call's own envelope (a denial's `unavailable`), as outside a task.
+                let result = crate::denials::on_result(result, false);
                 let sealed = seal(&access, &hash, &result);
                 match sealed {
                     Some(sealed) => {

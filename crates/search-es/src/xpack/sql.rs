@@ -1042,6 +1042,10 @@ async fn run(ctx: &Ctx<'_>, stmt: Stmt, filter: Option<Value>, lenient: bool) ->
             }
             names.sort();
             names.dedup();
+            // Only what the caller may read, as Elasticsearch's `IndexResolver` resolves the
+            // tables as the caller.
+            let visible = crate::xpack::security::authorized_names(ctx);
+            names.retain(|(n, _)| visible(n));
             for (n, kind) in names {
                 if like.as_ref().is_some_and(|p| !crate::xcontent::filter::glob_match(p, &n)) {
                     continue;

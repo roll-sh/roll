@@ -12,9 +12,9 @@ while it's written to and searched.
 
 So you know before you start:
 
-- **No OTLP intake.** roll search doesn't accept OpenTelemetry logs or traces directly. Send logs
-  with `_bulk` (below), or with a shipper that speaks the Elasticsearch API (Filebeat, Fluent Bit,
-  Vector, Logstash, the OpenTelemetry Collector's Elasticsearch exporter).
+- **OTLP takes logs and traces.** OpenTelemetry logs and traces go straight in over OTLP/HTTP
+  (below); metrics, and OTLP over gRPC, don't yet. Other shippers use `_bulk`, or the
+  Elasticsearch API (Filebeat, Fluent Bit, Vector, Logstash).
 - **No alerting UI.** Watcher's API is served but has no screen, OpenSearch's Alerting plugin isn't
   served, and Discover-style browsing has no saved searches or visualizations.
 
@@ -158,6 +158,69 @@ The first write creates the data stream. Check the answer's `errors` flag; a shi
 items that failed with 429. For high volume, batch a few thousand lines or a few MB per call. A
 cluster accepts bodies up to `max_body_mb` (100 MB by default; `--max-body-mb` on
 `roll search clusters update`).
+
+## Send OpenTelemetry logs over OTLP
+
+A cluster takes OTLP/HTTP logs at `/_otlp/v1/logs` and traces at `/_otlp/v1/traces`, in protobuf
+or JSON, gzip allowed, as Elastic's managed OTLP endpoint does. Make a key that can only write OpenTelemetry's data streams:
+
+```sh
+roll search keys create logs collector --access otel
+```
+
+Then point an OpenTelemetry Collector's `otlphttp` exporter at the cluster:
+
+```yaml
+exporters:
+  otlphttp/roll:
+    endpoint: ${env:ELASTICSEARCH_URL}/_otlp
+    headers:
+      Authorization: "ApiKey ${env:OTEL_KEY}"   # the collector key's api_key
+service:
+  pipelines:
+    logs:
+      receivers: [otlp]
+      exporters: [otlphttp/roll]
+    traces:
+      receivers: [otlp]
+      exporters: [otlphttp/roll]
+```
+
+An SDK's OTLP/HTTP log exporter works the same way, with `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` set
+to `$ELASTICSEARCH_URL/_otlp/v1/logs` and
+`OTEL_EXPORTER_OTLP_LOGS_HEADERS=Authorization=ApiKey%20<key>`.
+
+Records land as OpenTelemetry-native documents (`body.text`, `severity_text`, `attributes.*`,
+`resource.attributes.*`, `trace_id`, …) in `logs-<dataset>.otel-<namespace>`. The dataset and
+namespace come from a `data_stream.dataset` or `data_stream.namespace` attribute on the record,
+its scope or its resource, else `generic` and `default`. The built-in `logs-otel@template` maps
+them, so ES|QL and Discover read `message`, `log.level` and `service.name` as ECS names too.
+Spans land in `traces-<dataset>.otel-<namespace>` (`name`, `kind`, `duration` in nanoseconds,
+`status.code`, `trace_id`, `span_id`, `parent_span_id`, `links`), and a span's events (an
+exception it recorded) as log lines with the span's `trace_id` and `span_id`, so a trace's errors
+are found in the logs.
+
+Limits:
+- a record keeps 128 attributes, and the rest count in its `dropped_attributes_count`;
+- a value over 1 MiB is cut there, and the answer's `partial_success` says how many were;
+- a record nested more than 8 deep or holding more than 10,000 values is rejected, and
+  `partial_success` counts it;
+- one request writes at most 64 data streams;
+- an OTLP/JSON body is at most 4 MiB, while protobuf, which Collectors send, goes to the cluster's
+  `max_body_mb`;
+- a key that may not write a record's data stream gets a 403, and a busy cluster a 429 with
+  `Retry-After`, which Collectors back off on;
+- a request refused after part of it was written may be written twice when the Collector retries
+  it.
+
+An `otel` key can create data streams under `logs-*.otel-*`, `traces-*.otel-*` and
+`metrics-*.otel-*` as it writes, up to the cluster's `cluster.max_shards_per_node` (1000 shards by
+default, two a data stream; records for more are refused in `partial_success`). Only a key with
+the cluster privilege can raise it.
+
+An `otel` key writes and can't read: search with another key. Its `create_doc` privilege is
+Elasticsearch's, so OpenSearch-flavor clusters don't have `otel` keys; use a `data` key narrowed
+to `logs-*.otel-*` there.
 
 ## Browse logs in the dashboard
 

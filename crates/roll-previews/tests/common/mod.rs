@@ -12,6 +12,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+/// A work item the fake made: (change, title, body, labels, outside).
+pub type MadeWork = (String, String, String, Vec<String>, bool);
+
 #[derive(Default)]
 pub struct FakeCode {
     pub changes: Mutex<HashMap<String, ChangeInfo>>,
@@ -28,6 +31,8 @@ pub struct FakeCode {
     pub feedback: Mutex<HashMap<String, Vec<roll_previews::notes::Note>>>,
     /// Comments made on changes: (change, body, by, outside).
     pub comments: Mutex<Vec<(String, String, String, bool)>>,
+    /// Work items made on changes' repos.
+    pub works: Mutex<Vec<MadeWork>>,
     /// The `health` path every service says it has.
     pub health: Mutex<Option<String>>,
     /// The page states every service's `roll.toml` names (`[[preview.states]]`).
@@ -93,6 +98,11 @@ impl Source for FakeCode {
         let mut all = self.comments.lock();
         all.push((change.into(), body.into(), by.into(), outside));
         Ok(Some(format!("rv_c{}", all.len())))
+    }
+    async fn work_item(&self, change: &str, title: &str, body: &str, labels: &[&str], outside: bool) -> anyhow::Result<Option<(u64, String)>> {
+        let mut all = self.works.lock();
+        all.push((change.into(), title.into(), body.into(), labels.iter().map(|l| l.to_string()).collect(), outside));
+        Ok(Some((all.len() as u64, "https://roll.test/acme/web/work".into())))
     }
     async fn paths_between(&self, _repo: &str, from: &str, to: &str) -> anyhow::Result<Option<Vec<String>>> {
         Ok(self.between.lock().get(&format!("{from}..{to}")).cloned())
@@ -360,6 +370,19 @@ pub struct FakeApps {
     pub browser: Mutex<HashMap<String, Vec<roll_previews::ports::BrowserCheckResult>>>,
     /// Builds started again on an earlier push's copy: (service, deployment, the variables).
     pub views: Mutex<Vec<(String, String, Vars)>>,
+    /// The webhook URLs each service was last deployed with: (path, token SHA-256).
+    pub hooks: Mutex<HashMap<(String, String), Vars>>,
+    /// Each preview's request log (newest first), and JSON answers by `<preview> <path>`.
+    pub request_log: Mutex<HashMap<String, Vec<roll_previews::RequestLine>>>,
+    pub json: Mutex<HashMap<String, String>>,
+    /// What `fetch` answers for a service, URL and path (`<service> <url><path>`; unset: 200).
+    pub fetched: Mutex<HashMap<String, u16>>,
+    /// Whether services run on roll's runtime here (`can_swap`).
+    pub runtime: std::sync::atomic::AtomicBool,
+    /// The engine, for a fetch that starts a service as the runtime does (its `EnvSource`), and
+    /// what each such start was given: (preview, service, revision, variables).
+    pub env_source: Mutex<Option<std::sync::Weak<dyn roll_previews::ports::EnvSource>>>,
+    pub started: Mutex<Vec<(String, String, String, Vars)>>,
     /// What a service answers on its health path (unset: the backend can't tell).
     pub answers: Mutex<Option<(u16, String)>>,
     /// How many health checks find the service still starting (asked again later).
@@ -408,6 +431,8 @@ pub struct FakeApps {
     pub on_deploy: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
     /// Which service each screenshot run was of.
     pub shot_services: Mutex<Vec<String>>,
+    /// The same, with whose preview each was: (preview, service).
+    pub shots_of: Mutex<Vec<(String, String)>>,
     /// The notes each screenshot was asked to crop (a `#missing` selector finds nothing).
     pub crops_asked: Mutex<Vec<String>>,
     /// What an agent's run (`…/try`) answers.
@@ -459,6 +484,7 @@ impl Apps for FakeApps {
         }
         // What the backend was sent, whatever it answers.
         self.vars.lock().insert((t.preview.clone(), t.service.clone()), t.vars.clone());
+        self.hooks.lock().insert((t.preview.clone(), t.service.clone()), t.webhooks.clone());
         if self.still.load(Ordering::SeqCst) > 0 {
             self.still.fetch_sub(1, Ordering::SeqCst);
             return Err(roll_previews::ports::StillDeploying("building".into()).into());
@@ -485,6 +511,27 @@ impl Apps for FakeApps {
     }
     async fn memory_mb(&self, _: &str, _: &str) -> Option<u32> {
         *self.memory.lock()
+    }
+    async fn can_swap(&self, _: &str, _: &str) -> anyhow::Result<bool> {
+        Ok(self.runtime.load(Ordering::SeqCst))
+    }
+    async fn fetch(&self, preview: &str, service: &str, url: &str, _: Option<&str>, path: &str, _: bool) -> anyhow::Result<Option<roll_previews::ports::Fetched>> {
+        // A runtime service that isn't up starts first, with what the engine gives it.
+        if self.runtime.load(Ordering::SeqCst) {
+            let source = self.env_source.lock().as_ref().and_then(|w| w.upgrade());
+            if let Some(source) = source {
+                let (t, vars) = source.env(preview, service).await?;
+                self.started.lock().push((preview.to_string(), service.to_string(), t.revision, vars));
+            }
+        }
+        let status = self.fetched.lock().get(&format!("{service} {url}{path}")).copied().unwrap_or(200);
+        if let Some(body) = self.json.lock().get(&format!("{preview} {path}")) {
+            return Ok(Some(roll_previews::ports::Fetched { status, headers: vec![("content-type".into(), "application/json".into())], body: body.clone().into_bytes(), truncated: false }));
+        }
+        Ok(Some(roll_previews::ports::Fetched { status, headers: Vec::new(), body: Vec::new(), truncated: false }))
+    }
+    fn requests(&self, preview: &str) -> Vec<roll_previews::RequestLine> {
+        self.request_log.lock().get(preview).cloned().unwrap_or_default()
     }
     async fn probe(&self, _: &str, _: &str, _path: &str) -> anyhow::Result<Option<(u16, String)>> {
         if self.starting.load(Ordering::SeqCst) > 0 {
@@ -598,6 +645,7 @@ impl Apps for FakeApps {
     async fn screenshot(&self, preview: &str, service: &str, opts: &roll_previews::ports::ShotOptions) -> anyhow::Result<Option<roll_previews::ports::Shot>> {
         let Some(png) = self.shot.lock().clone() else { return Ok(None) };
         self.shot_services.lock().push(service.to_string());
+        self.shots_of.lock().push((preview.to_string(), service.to_string()));
         // The API the preview serves: by any revision it runs (whichever service is first).
         let revs: Vec<String> = self.deployed.lock().iter().filter(|((p, _), _)| p == preview).map(|(_, r)| r.clone()).collect();
         let api = opts.openapi.as_ref().and_then(|_| revs.iter().find_map(|r| self.api.lock().get(r).cloned()));
