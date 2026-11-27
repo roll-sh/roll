@@ -623,7 +623,11 @@ server](secrets/platforms.md#a-vm-or-a-server).
   tokens a minute. Its
   machines' credentials and their logins' tokens don't count toward the workload token caps that
   every project's logins share (docs/permissions.md): a machine holds at most 5 live login tokens
-  of its own. The bootstrap tokens and credentials are roll-access grants (docs/permissions.md,
+  of its own (live now: an ended one frees its place). So `roll` keeps the login's token in the
+  same 0600 file, under the same lock, and every process on the machine (`roll run`s started
+  together at boot, a cron job a minute, `roll secrets agent`) reuses it until a quarter of its
+  life, and at least two minutes, is left; only then does one log in again. A token the server
+  refuses (revoked) isn't handed out again. The bootstrap tokens and credentials are roll-access grants (docs/permissions.md,
   "Bootstrap tokens and machine credentials"), looked up on every use, and open nothing but these
   logins. A unit that enrolls on its first start: [Bare metal and on
   premises](secrets/platforms.md#bare-metal-and-on-premises).
