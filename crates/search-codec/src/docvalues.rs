@@ -1860,7 +1860,7 @@ mod tests {
     /// Random ascending batches of docs (some without values, some past max_doc).
     fn batches(rng: &mut StdRng, max_doc: u32) -> Vec<Vec<u32>> {
         let mut out = vec![Vec::new(), (0..max_doc + 3).collect()];
-        for _ in 0..6 {
+        for _ in 0..20 {
             let p = [0.01, 0.3, 0.9][rng.gen_range(0..3)];
             out.push((0..max_doc + 3).filter(|_| rng.gen_bool(p)).collect());
         }
@@ -1885,7 +1885,7 @@ mod tests {
             ("blocks", |r, d| d as i64 * 1_000_000 + r.gen_range(0..1000)),
         ];
         for (name, g) in gens {
-            for (max_doc, p) in [(0u32, 1.0), (1, 1.0), (300, 0.5), (20_000, 1.0), (20_000, 0.2)] {
+            for (max_doc, p) in [(0u32, 1.0), (1, 1.0), (300, 0.5), (40_000, 1.0), (40_000, 0.2)] {
                 let docs = sparse_docs(&mut rng, max_doc, p);
                 let values: Vec<i64> = docs.iter().map(|&d| g(&mut rng, d)).collect();
                 let mut out = Vec::new();
@@ -1899,7 +1899,7 @@ mod tests {
                     assert!(found[1..].iter().zip(&got[1..]).map(|(&d, &v)| (d, v)).eq(want.iter().copied()), "{name}");
                     assert_eq!((found[0], got[0]), (7, -1), "batch output is appended");
                 }
-                for (start, len) in [(0usize, values.len()), (1, 5), (values.len() / 2, 10_000), (values.len(), 3)] {
+                for (start, len) in [(0usize, values.len()), (1, 5), (values.len() / 2, 20_000), (values.len(), 3)] {
                     let start = start.min(values.len());
                     let mut buf = vec![9i64; len];
                     dv.values_range(start as u32, &mut buf);

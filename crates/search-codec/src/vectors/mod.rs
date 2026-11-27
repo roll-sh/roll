@@ -1174,12 +1174,14 @@ mod tests {
     fn hnsw_recall_and_filters() {
         let mut rng = StdRng::seed_from_u64(7);
         let dims = 16;
-        let n = 1500;
+        let n = 3000;
         let data = random_data(&mut rng, n, dims);
         for (sim, quant) in [
             (VectorSimilarity::L2Norm, false),
-            (VectorSimilarity::Cosine, true),
+            (VectorSimilarity::Cosine, false),
             (VectorSimilarity::DotProduct, true),
+            (VectorSimilarity::Cosine, true),
+            (VectorSimilarity::L2Norm, true),
         ] {
             let sp = spec(sim, VectorElement::Float32, dims as u32, true, quant);
             // Sparse docs: every other doc has a vector.
@@ -1188,7 +1190,7 @@ mod tests {
             assert_eq!(r.len(), n as u32);
             let mut recall = 0usize;
             let mut total = 0usize;
-            for _ in 0..15 {
+            for _ in 0..30 {
                 let qv: Vec<f32> = (0..dims).map(|_| rng.gen_range(-1.0..1.0)).collect();
                 let q = prep(&r, &qv);
                 let exact = r.exact_search(&q, 10, None);
@@ -1220,7 +1222,7 @@ mod tests {
 
     fn recall(r: &VectorsReader, rng: &mut StdRng, dims: usize) -> f64 {
         let (mut hit, mut total) = (0usize, 0usize);
-        for _ in 0..15 {
+        for _ in 0..30 {
             let qv: Vec<f32> = (0..dims).map(|_| rng.gen_range(-1.0..1.0)).collect();
             let q = prep(r, &qv);
             let exact: std::collections::HashSet<u32> =
@@ -1235,15 +1237,12 @@ mod tests {
     #[test]
     fn int4_quantized_search_recall() {
         let mut rng = StdRng::seed_from_u64(23);
-        for (dims, sims) in [
-            (15usize, &[VectorSimilarity::L2Norm, VectorSimilarity::Cosine, VectorSimilarity::DotProduct][..]),
-            (32, &[VectorSimilarity::L2Norm][..]),
-        ] {
-            for &sim in sims {
+        for dims in [15usize, 32] {
+            for sim in [VectorSimilarity::L2Norm, VectorSimilarity::Cosine, VectorSimilarity::DotProduct] {
                 let mut sp = spec(sim, VectorElement::Float32, dims as u32, true, true);
                 sp.quantization = VectorQuantization::Scalar { bits: 4, confidence_interval: None };
-                let data = random_data(&mut rng, 1000, dims);
-                let r = open(&sp, &(0..1000).collect::<Vec<u32>>(), &data, 1000);
+                let data = random_data(&mut rng, 2000, dims);
+                let r = open(&sp, &(0..2000).collect::<Vec<u32>>(), &data, 2000);
                 assert!(matches!(r.quant, Some(Quantized::Scalar { code_len, .. }) if code_len == dims.div_ceil(2)));
                 let rec = recall(&r, &mut rng, dims);
                 assert!(rec > 0.85, "{sim:?} dims {dims} recall {rec}");
@@ -1264,20 +1263,20 @@ mod tests {
     fn binary_quantized_search_recall() {
         let mut rng = StdRng::seed_from_u64(29);
         for (dims, sims) in [
-            (96usize, &[VectorSimilarity::L2Norm, VectorSimilarity::MaxInnerProduct][..]),
+            (96usize, &[VectorSimilarity::Cosine, VectorSimilarity::DotProduct, VectorSimilarity::L2Norm, VectorSimilarity::MaxInnerProduct][..]),
             (200, &[VectorSimilarity::Cosine][..]),
         ] {
             let centers: Vec<Vec<f32>> = (0..50).map(|_| (0..dims).map(|_| rng.gen_range(-1.0..1.0)).collect()).collect();
             for &sim in sims {
                 let mut sp = spec(sim, VectorElement::Float32, dims as u32, true, false);
                 sp.quantization = VectorQuantization::Binary;
-                let n = 1000;
+                let n = 2000;
                 let data = clustered(&mut rng, n, &centers);
                 let docs: Vec<u32> = (0..n as u32).map(|i| i * 2).collect();
                 let r = open(&sp, &docs, &data, 2 * n as u32);
                 assert!(matches!(r.quant, Some(Quantized::Binary { .. })));
                 let (mut hit, mut total) = (0, 0);
-                for _ in 0..12 {
+                for _ in 0..20 {
                     let c = &centers[rng.gen_range(0..centers.len())];
                     let qv: Vec<f32> = c.iter().map(|x| x + rng.gen_range(-0.3f32..0.3)).collect();
                     let q = prep(&r, &qv);
@@ -1340,7 +1339,7 @@ mod tests {
         sp.hnsw = Some(HnswParams { m: 8, ef_construction: 50 });
         let docs: Vec<u32> = (0..n as u32).collect();
         let (mut miss40, mut miss200) = (0, 0);
-        for _ in 0..2 {
+        for _ in 0..3 {
             let (d, g, q) = write_vectors(&sp, &docs, &data, n as u32, None, 8).unwrap();
             let d = d.join(&data);
             let r = VectorsReader::open(&sp, Slice::from(d), g.map(Slice::from), q.map(Slice::from), n as u32).unwrap();
@@ -1402,7 +1401,7 @@ mod tests {
     #[test]
     fn filtered_search_recall_and_cost() {
         let mut rng = StdRng::seed_from_u64(31);
-        let (dims, n) = (16usize, 2500usize);
+        let (dims, n) = (16usize, 6000usize);
         let data = random_data(&mut rng, n, dims);
         for quant in [false, true] {
             let sp = spec(VectorSimilarity::L2Norm, VectorElement::Float32, dims as u32, true, quant);
@@ -1412,7 +1411,7 @@ mod tests {
                 let accept = move |d: u32| d.wrapping_mul(2654435761).is_multiple_of(modulo);
                 let (mut hit_f, mut hit_p, mut total) = (0usize, 0usize, 0usize);
                 let (mut cost_f, mut cost_p) = (0usize, 0usize);
-                for _ in 0..10 {
+                for _ in 0..20 {
                     let qv: Vec<f32> = (0..dims).map(|_| rng.gen_range(-1.0..1.0)).collect();
                     let q = prep(&r, &qv);
                     let exact: std::collections::HashSet<u32> =
@@ -1459,20 +1458,20 @@ mod tests {
         let dims = 16;
         for quant in [false, true] {
             let sp = spec(VectorSimilarity::DotProduct, VectorElement::Float32, dims as u32, true, quant);
-            let a = random_data(&mut rng, 1000, dims);
-            let b = random_data(&mut rng, 400, dims);
-            let ra = open(&sp, &(0..1000).collect::<Vec<u32>>(), &a, 1000);
+            let a = random_data(&mut rng, 2000, dims);
+            let b = random_data(&mut rng, 800, dims);
+            let ra = open(&sp, &(0..2000).collect::<Vec<u32>>(), &a, 2000);
             // Merged order: b's vectors first, then a's (so the seed's ordinals move).
             let mut all = b.clone();
             all.extend_from_slice(&a);
-            let docs: Vec<u32> = (0..1400).collect();
-            let seed = GraphSeed { reader: &ra, ords: (400..1400).collect() };
-            let (d, g, q) = write_vectors(&sp, &docs, &all, 1400, Some(seed), 4).unwrap();
+            let docs: Vec<u32> = (0..2800).collect();
+            let seed = GraphSeed { reader: &ra, ords: (800..2800).collect() };
+            let (d, g, q) = write_vectors(&sp, &docs, &all, 2800, Some(seed), 4).unwrap();
             let d = d.join(&all);
-            let merged = VectorsReader::open(&sp, Slice::from(d), g.map(Slice::from), q.map(Slice::from), 1400).unwrap();
+            let merged = VectorsReader::open(&sp, Slice::from(d), g.map(Slice::from), q.map(Slice::from), 2800).unwrap();
             let rec = recall(&merged, &mut rng, dims);
             assert!(rec > 0.9, "quant={quant} recall {rec}");
-            for o in 0..1400u32 {
+            for o in 0..2800u32 {
                 assert_eq!(merged.vector(o), &all[o as usize * dims * 4..(o as usize + 1) * dims * 4]);
             }
         }
@@ -1585,19 +1584,13 @@ mod tests {
     /// quantized to few distinct codes), as found by review: level 0 used to have regions no
     /// link leaves, so searches entering them returned far fewer than k hits.
     fn hard_graph_cases() -> Vec<(&'static str, VectorReaderParts)> {
-        let mut cases = Vec::new();
+        let mut out = Vec::new();
         for (name, dims, n, dup, quantization) in [
             ("float d8 95% duplicates", 8usize, 3000usize, 0.95, VectorQuantization::None),
             ("int8 d2", 2, 2720, 0.0, VectorQuantization::Scalar { bits: 8, confidence_interval: None }),
             ("int4 d2", 2, 2720, 0.0, VectorQuantization::Scalar { bits: 4, confidence_interval: None }),
         ] {
             for seed in 1..=3u64 {
-                cases.push((name, dims, n, dup, quantization, seed));
-            }
-        }
-        // Built side by side: each graph is the same as built alone.
-        std::thread::scope(|s| {
-            let built: Vec<_> = cases.into_iter().map(|(name, dims, n, dup, quantization, seed)| s.spawn(move || {
                 let mut rng = StdRng::seed_from_u64(seed);
                 let mut vecs: Vec<Vec<f32>> = Vec::new();
                 for _ in 0..n {
@@ -1617,17 +1610,15 @@ mod tests {
                     quantization,
                 };
                 let docs: Vec<u32> = (0..n as u32).collect();
-                (name, (open(&sp, &docs, &data, n as u32), rng))
-            })).collect();
-            built.into_iter().map(|h| h.join().unwrap()).collect()
-        })
+                out.push((name, (open(&sp, &docs, &data, n as u32), rng)));
+            }
+        }
+        out
     }
     type VectorReaderParts = (VectorsReader, StdRng);
 
-    /// On graphs the diversity heuristic used to strand: level 0 is strongly connected, and a
-    /// kNN search returns k hits or says it is incomplete.
     #[test]
-    fn hard_graphs_stay_connected_and_fill_k() {
+    fn level0_is_strongly_connected() {
         for (name, (r, mut rng)) in hard_graph_cases() {
             let g = r.graph.as_ref().unwrap();
             let n = r.len() as usize;
@@ -1653,13 +1644,19 @@ mod tests {
             assert_eq!(walk(&|o, f| g.for_each_neighbor(0, o, f)), 0, "{name}: unreachable from the entry");
             assert_eq!(walk(&|o, f| rev[o as usize].iter().for_each(|&x| f(x))), 0, "{name}: cannot reach the entry");
             // So an unbounded beam finds every vector, wherever the descent lands.
-            for _ in 0..3 {
+            for _ in 0..10 {
                 let qv: Vec<f32> = (0..r.spec.dims).map(|_| rng.gen_range(-1.0..1.0)).collect();
                 let a = r.search(&prep(&r, &qv), n, n, None, usize::MAX);
                 assert!(a.complete && a.hits.len() == n, "{name}: {} of {n}", a.hits.len());
             }
+        }
+    }
+
+    #[test]
+    fn knn_returns_k_hits_or_reports_incomplete() {
+        for (name, (r, mut rng)) in hard_graph_cases() {
             let even = |d: u32| d.is_multiple_of(2);
-            for _ in 0..10 {
+            for _ in 0..30 {
                 let qv: Vec<f32> = (0..r.spec.dims).map(|_| rng.gen_range(-1.0..1.0)).collect();
                 let q = prep(&r, &qv);
                 let f = r.search_filtered(&q, 50, 100, &ord_filter(&r, even), usize::MAX);

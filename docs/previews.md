@@ -574,6 +574,9 @@ behind the `Apps` trait:
     `PreviewRouter`, #278), which serves a roll-runtime service, and only for the project that
     holds the domain. Previews answers the 404 for a name it doesn't hold. rolld's API port
     serves the same names too (a node without apps' ingress).
+  - **Team access:** a ticket (`POST /v1/previews/{id}/visit`) to a name under the domain lands
+    on that name, at the domain's scheme; the preview's name under another project's domain gets
+    none.
   - **Changes:** the domain is read from roll apps at most once a minute. When it's verified,
     changed or removed, the project's runtime services' URLs move and every preview reports
     again, so the pull request's links follow.
@@ -2148,7 +2151,7 @@ previews in it), the operator and admins see every project.
 | `DELETE /v1/previews/{id}/webhooks/{webhook}` | | 204: it lets nothing in from the next request |
 | `GET`/`PUT /v1/previews/{id}/env` | `{vars: {NAME: value \| null}}` (`null` removes; at most 100, 32 KiB each; a value may be `roll://ENV[/folder]/KEY`) | `{vars}`: the preview's own variables; its services redeploy with them. 403 for a reference to an environment other than the base without the caller's reveal on its folder; 400 for a malformed one or a look-alike |
 | `POST /v1/previews/{id}/approve` | `{head}` (the head looked at) | `Preview`: that head of a fork's pull request on a Git URL service runs (`pull.approved_head`); the next push waits again. 409 when the preview moved on to another head or isn't a fork's pull request. Admin in the permissions catalogue, and no MCP tool: letting outside code run with the project's data is a person's call |
-| `POST /v1/previews/{id}/visit` | `{to}` (a URL at one of the preview's service hosts) | `{url}`: a one-use way into a team-access preview (`access: "team"`) at `to`, good for a minute, for a person signed in to roll (a session; a token is a 403). 400 when the project's previews aren't `team` or `to` isn't the preview's; 403 for a person who may not open the project. Operator-only in the permissions catalogue: no grant ever gives one |
+| `POST /v1/previews/{id}/visit` | `{to}` (a URL at one of the preview's service hosts, under roll's preview domain or its project's own) | `{url}`: a one-use way into a team-access preview (`access: "team"`) at `to`'s host, good for a minute, for a person signed in to roll (a session; a token is a 403). 400 when the project's previews aren't `team` or `to` isn't the preview's; 403 for a person who may not open the project. Operator-only in the permissions catalogue: no grant ever gives one |
 | `POST /v1/previews/{id}/keep` | `{hours}` (0–720; 0 releases) | `Preview`: kept past its TTL until then (`kept_until`); a landed or closed change still ends it |
 | `GET /v1/previews/{id}/notes` | | `{notes: [{id, path, selector, note, by, at, replies: [{id, note, by, at}], crop, work?: {number, url}}]}`: the notes left on its pages that nobody has resolved, every page's (the latest 500); `crop`: a picture of its element is kept |
 | `GET /v1/previews/{id}/notes/{note}/crop` | | `image/png`: the note's element as a screenshot run cropped it from its page (`X-Roll-Crop-As`: how, when as its reviewer saw it); 404 until one has |
@@ -2635,10 +2638,7 @@ type Settings = {
     `@roll/previews` (`packages/previews`, no dependencies) does both for a team's tests:
     `bypass(page, baseURL)` sets the project's secret on the preview's own origin only (a header
     set for the whole browser a page could send anywhere), `snapshot(page, name)` sends the
-    page's picture (whole, animations stopped) with the head the test ran against
-    (`ROLL_PREVIEW_HEAD`, else a pull request event's head commit, since on `pull_request`
-    workflows `GITHUB_SHA` is GitHub's merge commit and every picture would be refused, else
-    `GITHUB_SHA`), and
+    page's picture (whole, animations stopped) with `GITHUB_SHA` as its head, and
     `sendSnapshot(baseURL, name, png)` takes a file's bytes (Cypress' `after:screenshot`); a
     refused one fails the test, saying why (`packages/previews/test/index.test.ts`):
 
@@ -3185,46 +3185,27 @@ variables roll makes from a branch's URL too (it could run on the preview's own 
 change becoming queued wakes its settled preview, a rehearsal shows only at its head, and schema
 overlaps stay within a repo.
 
-Ranked again on 2026-11-27, late evening, after a fourteenth product review (against Vercel and
-Netlify's toolbar, comments and protection, Render, Railway and Heroku review apps, Neon and
-PlanetScale, Signadot and Speedscale, Chromatic, Percy and Argos, Jam and Marker.io). Its first
-fix landed with it: `@roll/previews`' snapshots on `pull_request` workflows carry the pull
-request's head, not GitHub's merge commit (#1252).
+Ranked again on 2026-11-27, evening, after `@roll/previews` (#1240) and older pushes on demand
+(#1232) landed:
 
-In progress, each in a pull request of its own:
-- a leaked CI bypass secret (`rpb_`) revoked, as deploy hooks are (the review's one high finding);
-- team access on a project's own preview domain (the sign-in's ticket refused its host);
-- a snapshot's head checked on roll apps too (an older push's picture could stand for the head's);
-- what a note's reviewer saw, from their own browser (Jam, Marker.io);
-- writes replayed safely on fresh copies of both previews' data (Signadot, Speedscale), which
-  also takes GET replay off main's preview's own data (a replayed GET can act);
-- a member's preview of a project with a search cluster, checked end to end.
-
-1. **A note resolved when its fix lands** (Marker.io's and Jam's two-way sync): a note's work
-   item or GitHub issue closing resolves it, so the pull request comment stops listing fixed
-   notes; Jira and Asana through an automation trigger after.
-2. **The page's own review in the toolbar** (Vercel's toolbar, Chromatic's UI Review): a team
-   visitor sees whether this page changed against main and what it adds, with Accept opening
-   roll (never clickable by the page's own script).
-3. **A live dashboard**: the list and the sheet follow the preview event feed instead of polling
-   every 15 to 20 s, one slow poll kept as a fallback.
-4. **roll's reviewer reads the visual and API results** (Percy's Visual Review Agent): which of a
-   change's visual changes its diff explains, as the verdict's first line; model output never
-   accepts anything.
-5. **An earlier push started from the sheet, the CLI and MCP**, not only from its own 410 page.
-6. **Restore points for search and buckets**: search's on roll search's reset from a copy (#1149;
-   200 put back, 409 dropped or busy, 503 recorded); buckets need a put-back on roll storage's
-   side.
-7. **Previews for the members thread's next products**: roll apps once its routes become member
-   routes.
-8. **Watches on pg-control**: the data step's Postgres compute start; cheap branches on ext4
+1. **What a note's reviewer saw, from their own browser** (Jam, Marker.io), in progress: a
+   picture of their own tab, taken only on their click, kept with the note as roll's crop is.
+2. **Writes replayed safely** (Signadot, Speedscale; L), in progress: the previews' own writes
+   (bodies captured only where the project opts in, sealed, bounded, never a fork's) replayed on
+   fresh copies of both previews' data, never on the branches they serve from. Capturing
+   production's requests still needs its privacy designed first.
+3. **Restore points for search and buckets**: search's on roll search's reset from a copy (#1149;
+   its shape is agreed: 200 put back, 409 dropped or busy, 503 recorded); buckets need a put-back
+   on roll storage's side.
+4. **Previews for the members thread's next products**: search is a member product (#808), so a
+   member's preview of a project with a cluster is checked end to end (its branch homed in the
+   project, reached by role); roll apps once its routes become member routes.
+5. **Watches on pg-control**: the data step's Postgres compute start; cheap branches on ext4
    through overlay volumes; recovery to a time seconds old (unowned).
 
 Not to build: more lab checks on the first page (each adds noise to every pull request), or a
 Kubernetes cluster per preview (roll apps' Compose import covers multi-service apps, and a
 cluster would break "costs nothing asleep").
-
-Landed 2026-11-27, late evening: the Next list ranked again (#1250), and snapshots' head on `pull_request` workflows (#1252).
 
 Landed 2026-11-27, evening: the thirteenth review's fixes (#1237), `@roll/previews` (#1240), older pushes started on demand (#1232), and lean tests with SQLite's allocations no longer counted under one process-wide lock (#1248: 188 Rust tests to 87, the engine suite 33 s to 4 s).
 

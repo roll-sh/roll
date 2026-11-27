@@ -24,12 +24,7 @@ export interface PageLike {
 export interface SnapshotOptions {
   /** The project's bypass secret (default: `ROLL_PREVIEW_BYPASS`). */
   secret?: string;
-  /**
-   * The head the test ran against, a changeset or git commit: roll refuses a picture of another
-   * head. By default `ROLL_PREVIEW_HEAD`, then a pull request event's head commit (on
-   * `pull_request` workflows `GITHUB_SHA` is GitHub's merge commit, never the head), then
-   * `GITHUB_SHA`.
-   */
+  /** The head the test ran against, a changeset or git commit (default: `GITHUB_SHA`): roll refuses a picture of another head. */
   head?: string;
   /** Where the preview is (default: the page's own origin). */
   baseURL?: string;
@@ -43,25 +38,6 @@ export interface Snapshot {
 
 /** A variable of the process the tests run in (Node), if there is one. */
 const env = (k: string): string | undefined => (globalThis as { process?: { env: Record<string, string | undefined> } }).process?.env[k] || undefined;
-
-/** The head a CI run tested: see [`SnapshotOptions.head`]. */
-export async function ciHead(): Promise<string | undefined> {
-  const own = env("ROLL_PREVIEW_HEAD");
-  if (own) return own;
-  const path = env("GITHUB_EVENT_PATH");
-  if (path && /^pull_request/.test(env("GITHUB_EVENT_NAME") ?? "")) {
-    try {
-      // Named at run time: the package has no Node types, and runs only where Node is.
-      const fs = "node:fs/promises";
-      const { readFile } = (await import(fs)) as { readFile(path: string, encoding: "utf8"): Promise<string> };
-      const sha = JSON.parse(await readFile(path, "utf8"))?.pull_request?.head?.sha;
-      if (typeof sha === "string" && /^[0-9a-f]{40}$/.test(sha)) return sha;
-    } catch {
-      // No event file to read: GITHUB_SHA, as on other events.
-    }
-  }
-  return env("GITHUB_SHA");
-}
 
 /**
  * The project's bypass secret on every request to the preview's own origin (`baseURL`'s), and on
@@ -79,15 +55,11 @@ export async function sendSnapshot(baseURL: string, name: string, png: Uint8Arra
   if (!secret) throw new Error("snapshot: no secret (set ROLL_PREVIEW_BYPASS)");
   const url = new URL("/__roll/snapshot", new URL(baseURL).origin);
   url.searchParams.set("name", name);
-  const head = options.head ?? (await ciHead());
+  const head = options.head ?? env("GITHUB_SHA");
   if (head) url.searchParams.set("head", head);
   const r = await fetch(url, { method: "POST", headers: { [BYPASS_HEADER]: secret, "content-type": "image/png" }, body: new Blob([new Uint8Array(png)], { type: "image/png" }), redirect: "error" });
   const text = await r.text();
-  if (r.status !== 201) {
-    // A picture of another head than the preview's: say which head the test sent, and from where.
-    const said = r.status === 409 && head ? ` (sent head ${head}${env("GITHUB_EVENT_NAME") ? ` on a ${env("GITHUB_EVENT_NAME")} event` : ""}; set ROLL_PREVIEW_HEAD or the head option to the commit the preview runs)` : "";
-    throw new Error(`snapshot ${name}: ${r.status} ${text.slice(0, 300)}${said}`);
-  }
+  if (r.status !== 201) throw new Error(`snapshot ${name}: ${r.status} ${text.slice(0, 300)}`);
   return JSON.parse(text) as Snapshot;
 }
 

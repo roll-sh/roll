@@ -2182,7 +2182,7 @@ mod tests {
     #[test]
     fn round_trips_all_options_and_sizes() {
         let mut rng = StdRng::seed_from_u64(99);
-        let max_doc = 40_000u32;
+        let max_doc = 300_000u32;
         let norms: Vec<u8> = (0..max_doc).map(|_| rng.r#gen()).collect();
         let dfs = [
             1usize,
@@ -2197,7 +2197,8 @@ mod tests {
             4096,
             4097,
             8192 + 129,
-            39_000,
+            40_000,
+            299_000,
         ];
         for opts in [
             IndexOptions::Docs,
@@ -2213,7 +2214,7 @@ mod tests {
                 let terms: Vec<Vec<Posting>> = dfs
                     .iter()
                     .map(|&df| {
-                        let df = if with_pos { df.min(9000) } else { df };
+                        let df = if with_pos { df.min(20_000) } else { df };
                         let mut t = gen_term(&mut rng, df, max_doc, with_pos);
                         if !opts.has_freqs() {
                             t.iter_mut().for_each(|p| p.freq = 1);
@@ -2472,11 +2473,11 @@ mod tests {
     #[test]
     fn dense_blocks_round_trip() {
         let mut rng = StdRng::seed_from_u64(41);
-        let max_doc = 40_000u32;
+        let max_doc = 200_000u32;
         let mut shapes: Vec<Vec<u32>> = vec![
             (0..5000).collect(),                                // consecutive from doc 0
             (7..20_000).step_by(2).collect(),                   // every 2nd doc
-            (100..30_000).step_by(3).collect(),                 // every 3rd doc
+            (100..50_000).step_by(3).collect(),                 // every 3rd doc
             (0..max_doc).filter(|_| rng.gen_bool(0.5)).collect(), // random half
         ];
         // Alternating dense runs and sparse stretches.
@@ -2533,7 +2534,7 @@ mod tests {
                     check_iteration(&data, st, t, flags);
                     check_advance(&mut rng, &data, st, t, flags);
                 }
-                for start in [0u32, 1, 4999, 27_777] {
+                for start in [0u32, 1, 4999, 77_777] {
                     for upto in [start + 1, start + 64, start + 129, start + 5000, max_doc] {
                         let mut c = PostingsCursor::new(&data, st, PostingsFlags::DOCS);
                         let first = c.advance(start);

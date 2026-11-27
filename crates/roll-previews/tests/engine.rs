@@ -1966,4 +1966,20 @@ async fn a_projects_own_preview_domain_serves_only_its_previews() {
     e.engine.store.set_project_domain("prj_other", Some(("preview.other.dev", false)), &none, &none).unwrap();
     assert_eq!(e.engine.store.service_for_domain_host(&web.host, "preview.other.dev").unwrap(), None, "only the domain's own project's previews");
     assert_eq!(e.engine.store.service_for_domain_host(&web.host, "preview.unknown.dev").unwrap(), None);
+    // Team access there: a signed-in person's ticket lands on the domain's host they asked for;
+    // the preview's name under another project's domain, or a name of nothing, gets none.
+    struct Anyone;
+    impl roll_previews::ports::Visitors for Anyone {
+        fn may_open(&self, _: &str, _: &str, _: &str) -> bool {
+            true
+        }
+    }
+    let _ = e.engine.visitors.set(Arc::new(Anyone));
+    let s = e.engine.store.settings(&e.project).unwrap().patched(&json!({ "access": "team" })).unwrap();
+    e.engine.store.put_settings(&e.project, &s).unwrap();
+    let ticket = |to: String| e.engine.visit_ticket(&p.id, "usr_ada", "ada", "ses_1", &to);
+    let url = ticket(format!("https://{}.preview.acme.dev/cart?x=1", web.host)).unwrap();
+    assert!(url.starts_with(&format!("http://{}.preview.acme.dev/__roll/visit?ticket=rlv_", web.host)) && url.ends_with("&to=%2Fcart%3Fx%3D1"), "{url}");
+    assert!(matches!(ticket(format!("http://{}.preview.other.dev/", web.host)), Err(roll_previews::Error::BadRequest(_))), "another project's domain");
+    assert!(matches!(ticket("http://nothing.preview.acme.dev/".into()), Err(roll_previews::Error::BadRequest(_))));
 }

@@ -683,7 +683,7 @@ fn check(r: &SegmentReader, docs: &[Doc]) {
 #[test]
 fn write_read_round_trip() {
     let mut rng = StdRng::seed_from_u64(1);
-    for n in [0usize, 1, 2, 127, 128, 129, 1000] {
+    for n in [0usize, 1, 2, 127, 128, 129, 2000] {
         let docs: Vec<Doc> = (0..n).map(|i| random_doc(&mut rng, i)).collect();
         let src = MemSource::new(docs.clone(), 1, None);
         let r = write(&src);
@@ -742,7 +742,7 @@ fn uninverted_terms_read_as_sorted_doc_values() {
 #[test]
 fn spilled_writes_are_identical() {
     let mut rng = StdRng::seed_from_u64(21);
-    let docs: Vec<Doc> = (0..1500).map(|i| random_doc(&mut rng, i)).collect();
+    let docs: Vec<Doc> = (0..3000).map(|i| random_doc(&mut rng, i)).collect();
     let src = MemSource::new(docs.clone(), 1, None);
     // Per-doc values out of doc order go through the spill-backed sort.
     let mut shuffled = MemSource::new(docs.clone(), 1, None);
@@ -756,7 +756,7 @@ fn spilled_writes_are_identical() {
     let mem = write_with(&src, SpillOptions::in_memory());
     let dir = std::env::temp_dir().join(format!("roll-codec-spill-seg-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    for budget in [0usize, 64 << 10] {
+    for budget in [0usize, 1000, 64 << 10] {
         for (name, s) in [("ordered", &src), ("shuffled", &shuffled)] {
             let spilled = write_with(s, SpillOptions { dir: Some(dir.clone()), memory_bytes: budget });
             assert!(spilled == mem, "budget {budget}, {name}: spilled segment differs");
@@ -1181,7 +1181,7 @@ fn corrupted_sections_do_not_panic_in_codec_code() {
         LOC.with(|c| *c.borrow_mut() = Some(loc));
     }));
     let mut ours = Vec::new();
-    let rounds: usize = std::env::var("ROLL_CODEC_FUZZ_ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(120);
+    let rounds: usize = std::env::var("ROLL_CODEC_FUZZ_ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(300);
     for _ in 0..rounds {
         let mut bad = out.clone();
         for _ in 0..rng.gen_range(1..8) {
