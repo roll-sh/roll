@@ -5008,11 +5008,13 @@ async fn import_folders(c: &Client<'_>, env: &str, folders: &crate::managers::Fo
     Ok(())
 }
 
-/// What `import --check` found so far: keys the source has that are missing here or differ.
+/// What `import --check` found so far: keys the source has that are missing here or differ, and
+/// keys it couldn't compare (sensitive, linked or with references here).
 #[derive(Default)]
 struct CopyCheck {
     missing: usize,
     changed: usize,
+    unchecked: usize,
     folders: usize,
 }
 
@@ -5020,6 +5022,12 @@ impl CopyCheck {
     fn done(&self) -> anyhow::Result<()> {
         let plural = |n: usize| if n == 1 { "" } else { "s" };
         match self.missing + self.changed {
+            0 if self.unchecked > 0 => {
+                // Not a mismatch (1), not complete (0): a script can tell these apart.
+                let n = self.unchecked;
+                eprintln!("Every key roll could compare is here with the same value, but {n} key{} {} compared (sensitive, linked or with references here): check {} by hand.", plural(n), if n == 1 { "wasn't" } else { "weren't" }, if n == 1 { "it" } else { "them" });
+                std::process::exit(2);
+            }
             0 => {
                 eprintln!("The copy is complete: every key of the source is here with the same value ({} folder{}).", self.folders, plural(self.folders));
                 Ok(())
@@ -5051,6 +5059,7 @@ async fn check_folders(c: &Client<'_>, env: &str, name: &str, folders: &crate::m
         println!("  {same} the same");
         copy.missing += list("added").len();
         copy.changed += list("changed").len();
+        copy.unchecked += list("references").len() + list("linked").len() + entries.iter().filter(|e| !seen.contains(&e.key)).count();
         copy.folders += 1;
     }
     Ok(())
