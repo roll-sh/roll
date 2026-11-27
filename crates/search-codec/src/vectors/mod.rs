@@ -1585,13 +1585,19 @@ mod tests {
     /// quantized to few distinct codes), as found by review: level 0 used to have regions no
     /// link leaves, so searches entering them returned far fewer than k hits.
     fn hard_graph_cases() -> Vec<(&'static str, VectorReaderParts)> {
-        let mut out = Vec::new();
+        let mut cases = Vec::new();
         for (name, dims, n, dup, quantization) in [
             ("float d8 95% duplicates", 8usize, 3000usize, 0.95, VectorQuantization::None),
             ("int8 d2", 2, 2720, 0.0, VectorQuantization::Scalar { bits: 8, confidence_interval: None }),
             ("int4 d2", 2, 2720, 0.0, VectorQuantization::Scalar { bits: 4, confidence_interval: None }),
         ] {
             for seed in 1..=3u64 {
+                cases.push((name, dims, n, dup, quantization, seed));
+            }
+        }
+        // Built side by side: each graph is the same as built alone.
+        std::thread::scope(|s| {
+            let built: Vec<_> = cases.into_iter().map(|(name, dims, n, dup, quantization, seed)| s.spawn(move || {
                 let mut rng = StdRng::seed_from_u64(seed);
                 let mut vecs: Vec<Vec<f32>> = Vec::new();
                 for _ in 0..n {
@@ -1611,10 +1617,10 @@ mod tests {
                     quantization,
                 };
                 let docs: Vec<u32> = (0..n as u32).collect();
-                out.push((name, (open(&sp, &docs, &data, n as u32), rng)));
-            }
-        }
-        out
+                (name, (open(&sp, &docs, &data, n as u32), rng))
+            })).collect();
+            built.into_iter().map(|h| h.join().unwrap()).collect()
+        })
     }
     type VectorReaderParts = (VectorsReader, StdRng);
 
