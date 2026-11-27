@@ -17,7 +17,8 @@ You need:
 ## 0. No server yet?
 
 To try roll secrets, run one rolld on your own machine. It keeps everything in SQLite in one
-directory, and it listens on `127.0.0.1` only, so nothing else can reach it.
+directory, listens on `127.0.0.1` only, and asks for a token of its own, so neither another user of
+the machine nor a web page you open can use it.
 
 rolld isn't in the CLI's releases yet. Build it from a clone with a current stable Rust (the
 first build takes a while):
@@ -27,20 +28,31 @@ git clone https://github.com/roll-sh/roll && cd roll
 cargo build --release -p rolld -p roll-cli
 ```
 
-Then start it with a key of its own:
+Then start it with a key and an operator token of its own:
 
 ```sh
-mkdir -p ~/roll-eval && openssl rand -hex 32 > ~/roll-eval/secrets.key && chmod 600 ~/roll-eval/secrets.key
-ROLL_SECRET_KEY="$(cat ~/roll-eval/secrets.key)" ROLL_HOME=~/roll-eval/home ROLL_PRODUCTS=tasks \
-  ./target/release/rolld --api 127.0.0.1:7070
+mkdir -p ~/roll-eval && chmod 700 ~/roll-eval
+openssl rand -hex 32 > ~/roll-eval/secrets.key && openssl rand -hex 32 > ~/roll-eval/admin.token
+chmod 600 ~/roll-eval/secrets.key ~/roll-eval/admin.token
+ROLL_SECRET_KEY="$(cat ~/roll-eval/secrets.key)" ROLL_ADMIN_TOKEN="$(cat ~/roll-eval/admin.token)" \
+  ROLL_HOME=~/roll-eval/home ROLL_PRODUCTS=tasks ./target/release/rolld --api 127.0.0.1:7070
+```
+
+And in the shell you'll use the CLI from:
+
+```sh
+export ROLL_ADMIN_TOKEN="$(cat ~/roll-eval/admin.token)"
 ```
 
 - `ROLL_SECRET_KEY` encrypts every value. Keep the file: without it, the values can't be read
   again.
 - roll secrets is always on. `ROLL_PRODUCTS` must name at least one product, and `tasks` opens no
   port of its own, so rolld listens on `127.0.0.1:7070` only: no Postgres, no Docker.
-- With no `ROLL_ADMIN_TOKEN` on `127.0.0.1`, the API is open to this machine only, and every
-  command runs as its operator.
+- `ROLL_ADMIN_TOKEN` is the operator's token: every command that carries it runs as the operator.
+  Without one, rolld on `127.0.0.1` is open to every user and process on the machine. It still
+  answers only requests addressed to `localhost`, `127.0.0.1` or `[::1]`, so a web page can't
+  reach it by pointing a name of its own at your machine. Keep the token for anything you import
+  real values into.
 
 The build gives you the CLI too (`./target/release/roll`), or install it as step 1 shows. Skip
 step 2: `roll login` signs a person in through the dashboard, and this node has no dashboard and no

@@ -141,7 +141,7 @@ fn search_secret_write(b: &Value) -> Vec<Lent> {
 }
 
 /// A folder as roll secrets' `names::path` normalizes it, or `None` where it refuses it.
-fn secret_path(p: &str) -> Option<String> {
+pub(crate) fn secret_path(p: &str) -> Option<String> {
     let p = if p.is_empty() { "/" } else { p };
     let rest = p.strip_prefix('/').filter(|r| !r.starts_with('/'))?;
     let rest = rest.strip_suffix('/').unwrap_or(rest);
@@ -1892,6 +1892,11 @@ static ROWS: &[Row] = &[
     // Writing a domain's records at the customer's Cloudflare with their token (a `roll://`
     // reference roll secrets checks they may reveal): what pointing the domain here is.
     row("POST", "/v1/apps/services/{id}/environments/{env}/domains/{host}/configure", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")).lends(Lend::Each(apps_dns_token)),
+    // Quieting an environment's alerts for a while: what changing its alerts is (deploy on
+    // production, else write); ending one only lets them out again.
+    row("GET", "/v1/apps/services/{id}/environments/{env}/silences", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
+    row("POST", "/v1/apps/services/{id}/environments/{env}/silences", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")),
+    row("DELETE", "/v1/apps/services/{id}/environments/{env}/silences/{sid}", "apps", W, one(PG, "service")).env(EnvFrom::Param("env")),
     // Taking a hostname another environment holds (production's, maybe), once DNS proves it's the
     // caller's: the holder's environment isn't in the path, so it's the project's admin's call.
     row("POST", "/v1/apps/services/{id}/environments/{env}/domains/{host}/claim", "apps", ADMIN, one(PG, "service")).env(EnvFrom::Param("env")),
@@ -1961,6 +1966,7 @@ static ROWS: &[Row] = &[
     // A share link lets someone outside the team in, its token only in the answer: reveal, as the
     // bypass secret is. Listing (no tokens) is read and revoking one is delete, by the prefix.
     row("POST", "/v1/previews/{id}/shares", "previews", REVEAL, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    row("POST", "/v1/previews/{id}/webhooks", "previews", REVEAL, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
     // A preview's own variables come back with their values: reveal (setting them is write, by
     // the prefix).
     row("GET", "/v1/previews/{id}/env", "previews", REVEAL, one(PG, "preview")).env(EnvFrom::Fixed("preview")),

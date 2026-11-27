@@ -389,7 +389,8 @@ async fn index_resolved(ctx: &Ctx<'_>, target: write::Target, mut args: WriteArg
     // Ingest runs before auto ids exist.
     let ingest_args = if auto_id { std::borrow::Cow::Owned(WriteArgs { id: None, ..args.clone() }) } else { std::borrow::Cow::Borrowed(&args) };
     let requested = target.index.name.clone();
-    let ran = crate::ingest::run_for_write(cluster, target, &ingest_args, &id, value, source, ctx.now_ms, Some(&ctx.ingest_nanos)).await;
+    let moved = |index: &str, creates: bool| crate::xpack::security::check_moved_write(ctx, index, creates);
+    let ran = crate::ingest::run_for_write(cluster, target, &ingest_args, &id, value, source, ctx.now_ms, Some(&ctx.ingest_nanos), Some(&moved)).await;
     let ran = match ran {
         // An index the write created and the pipeline moved the document out of (or refused it
         // into) was never Elasticsearch's to create. A data stream's failure store may still
@@ -421,7 +422,7 @@ async fn index_resolved(ctx: &Ctx<'_>, target: write::Target, mut args: WriteArg
                 if let Some(only) = &args.index_only {
                     return Err(EsError::illegal_argument(format!("a connector's sync can't write document [{id}] outside [{only}] (to [{}])", t.index.name)));
                 }
-                crate::xpack::security::check_moved_write(ctx, &t.index.name)?;
+                crate::xpack::security::check_moved_write(ctx, &t.index.name, false)?;
             }
             if let Some(ingested) = ingested {
                 let crate::ingest::Ingested { args: changed, executed: ran, created } = *ingested;

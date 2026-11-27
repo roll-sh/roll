@@ -353,6 +353,10 @@ impl Apps {
                     b
                 }
             };
+            // A silence open when it happened: kept, never sent (a resolve always is).
+            if self.silenced(&e.service, &e.environment, &e.kind, e.at).await {
+                continue;
+            }
             for t in self.db(move |s| s.targets(&p)).await.unwrap_or_default() {
                 if wants(&t.events, &e.kind, &e.data, matches!(t.kind.as_str(), "pagerduty" | "opsgenie")) && t.follows(&e.service, &e.environment, preview) {
                     queued.push((t.id.clone(), e.seq, e.kind.clone()));
