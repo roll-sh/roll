@@ -380,6 +380,62 @@ All 22 queries' user instructions -0.00% / -0.04%; per query within +-0.26% (q03
 / -0.15, q16 -0.10 / -0.13, the rest within 0.1%); hashes equal; peak anon+shmem 1,620.9 / 1,620.3 MB
 against 1,616.0 / 1,615.6. Foreign load 0.8-2.5 cores (wall times not compared).
 
+## Short write transactions, round 21: the 32 MB memtable's memory; compact estimate change records (2026-11-27, agent 337)
+
+HANDOFF "Short write transactions, round 21" has what it means. Builds: plain dist (`tools/dist.sh`). **b0** =
+`cand/a333-2` (`0b865ee44`), **p1** = b0 + the change (and probe switches off by default), **b1** = the head
+`2676ea37a`, **n1** = b1 + the change (`cand/a337`). Every lane hold carried 1.1-7.8 foreign cores (over the 1.0 rule:
+instruction counts only; tps, cycles and seconds are readings). Harness `~/.cache/a337/bench`.
+
+### Memory: TPC-B-like at 8 clients, warmed, peak anon+shmem (`mem.sh`, 0.2 s samples, 2 GB cache)
+
+| build, setting | peak | what |
+|---|---|---|
+| b0 | 591, 580, 600 MB | live Rust heap at the peak 110 MB (heapprof build: 598 MB peak) |
+| b0, `MIMALLOC_PURGE_DELAY=0` | 581 MB | |
+| b0, `MIMALLOC_ABANDONED_PAGE_PURGE=1` | 664 MB | |
+| p1, values in the memtable's own chunks (probe) / not | 577 / 554 MB | |
+| p2, `mi_collect` after each flush (probe), chunks / not | 574 / 564 MB | |
+| p1, 8 MB memtable | 542 MB | anon a sawtooth: each of 7 compactions drops ~120 MB |
+| p1, `--cache-mb 64` | 222 MB (the load's) | the run's growth is the block cache |
+
+### Bytes into the memtable a TPC-B-like commit (`walsnap.sh`: the unflushed WAL after 20,000 warmed transactions)
+
+| | b0 | p1 |
+|---|---|---|
+| all, as the memtable counts them | 1,072 | 542 |
+| accounts / history / tellers / branches rows | 179 / 111 / 96 / 91 | the same |
+| estimate records | 594 (change records 324 bytes each, 2 full records of 4.0 / 4.4 MB, 23,969 deletions in the window) | 64 (55 bytes each, no fold in the window) |
+
+### The standing measure (160,000 warmed, then counted under `enable_seqscan=off`), user instructions a transaction
+
+| run | measure | connection threads | flush thread | compactions | bytes written | peak |
+|---|---|---|---|---|---|---|
+| b1 8 cl, 160,000 | 355.0k, 355.6k | 288.6k, 288.5k | 66.4k, 67.0k | 1, 1 | 9,379, 9,427 | 649, 596 MB |
+| n1 8 cl, 160,000 | 355.6k, 355.2k | 292.7k, 292.6k | 62.9k, 62.5k | 1, 1 | 8,568, 8,250 | 564, 581 MB |
+| b1 32 cl, 160,000 | 307.8k, 357.8k | 297.2k, 295.9k | 10.6k, 61.9k | 0, 1 | 6,259, 7,069 | 593, 606 MB |
+| n1 32 cl, 160,000 | 358.6k, 355.0k | 294.2k, 293.3k | 64.4k, 61.7k | 1, 1 | 6,623, 6,721 | 607, 605 MB |
+| b1 8 cl, 480,000 | **365.3k** | 297.6k | 67.8k | 3 | 9,587 | 626 MB |
+| n1 8 cl, 480,000 | **340.4k** | 294.8k | 45.7k | 2 | 8,061 | 621 MB |
+| b0 8 cl, 480,000 | **397.3k** | 312.5k | 84.8k | 4 | 9,715 | |
+| p1 8 cl, 480,000 | **354.9k** | 309.3k | 45.6k | 2 | 8,118 | |
+
+(A 160,000 window holds one compaction on both builds nearly always; three windows show the rate.)
+
+The shipped build of the change (`tools/dist-pgo.sh` of `9414109e6`, 333's profile, staleness 3.60%), one run each:
+8 clients **295.9k** (connection threads 238.4k, background 57.4k, one compaction), 32 clients **304.1k** (241.9k /
+62.2k, one), 8 clients over 480,000 **285.2k** (241.2k / 44.1k, two); peak 572 / 605 / 619 MB.
+
+### Reads and loads (n1 against b1, two pairs)
+
+| cell | b1 | n1 |
+|---|---|---|
+| prepared point select, connection threads a read | 54.6k (start l0=3), 57.4k | 52.8k, 58.4k |
+| 1,000-row range read after the load (8 clients) | 2,080.7k, 2,152.4k | 2,089.2k, 2,088.7k |
+| bulk load, 50 commits of 20,000 rows, a row | 10,105, 10,105 | 10,126, 10,144 |
+| TPC-H SF 0.1 22 queries / load, server user instructions | 13.968 G, 13.967 G / 61.73 G, 61.70 G | 13.967 G, 13.969 G / 61.74 G, 61.73 G |
+| idle sessions 1 / 100 / 1,000 | 10.5 / 39.5 / 298.1 MB (b0) | 10.5 / 37.3 / 293.9 MB |
+
 ## Short write transactions, round 20: the TPC-B-like spread by thread class; a small table's filtered scan of a kept hot range (2026-11-26, agent 333)
 
 HANDOFF "Short write transactions, round 20" has what it means. Builds: plain dist (`tools/dist.sh`). **b0** = `e60eabee2`
