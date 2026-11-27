@@ -2211,6 +2211,24 @@ async fn a_second_index_is_reached_only_where_the_rules_allow_it() {
         { "product": "search", "resources": [{ "id": "cl_1", "index": "roll-judgments-*" }], "actions": { "read": "ask" } },
     ]);
     assert!(!list(asks).await, "an ask asks nobody inside a request");
+    // A person's token is held within their session as well (bob owns `cl_bobs`): the token's
+    // rule decides where it's narrower, the session where the token's is wider.
+    d.people.add("usr_bob", "bob");
+    let bobs = |rules: Value| {
+        let d = &d;
+        async move {
+            let (s, made) = d.as_user("usr_bob", Method::POST, "/v1/access/tokens", Some(json!({ "name": "eval", "rules": rules }))).await;
+            assert_eq!(s, StatusCode::CREATED, "{made}");
+            let t = made["token"].as_str().unwrap().to_string();
+            let (s, v) = d.call(&t, Method::POST, "/v1/search/clusters/cl_bobs/indices/logs-1/evaluate", Some(json!({}))).await;
+            assert_eq!(s, StatusCode::OK, "{v}");
+            v["list"].as_bool().unwrap()
+        }
+    };
+    let on_bobs = |index: &str| json!([{ "product": "search", "resources": [{ "id": "cl_bobs", "index": index }], "actions": { "read": "allow" } }]);
+    assert!(!bobs(on_bobs("logs-*")).await);
+    assert!(bobs(on_bobs("logs-*,roll-judgments-*")).await);
+    assert!(bobs(json!([{ "product": "search", "resources": "*", "actions": { "read": "allow" } }])).await);
 }
 
 /// The search console is decided from its route alone: the gate reads no body (a large `_bulk`
