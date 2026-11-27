@@ -4010,6 +4010,12 @@ async fn roll_up_deploys_an_uploaded_tree_and_cron_runs_on_demand() {
     let d: Value = serde_json::from_slice(&w.api.clone().oneshot(req).await.unwrap().into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(settled(&w, &id, "production", d["id"].as_str().unwrap()).await["status"], "ready", "{d}");
     assert_eq!(call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None).await.1["active"]["id"], live);
+    // A deployment's image on its owner's machine (`docker load`): the runtime's archive of it.
+    let req = Request::get(format!("/v1/apps/services/{id}/environments/production/deploys/{}/image", d["id"].as_str().unwrap())).body(Body::empty()).unwrap();
+    let resp = w.api.clone().oneshot(req).await.unwrap();
+    assert_eq!((resp.status(), resp.headers()["content-type"].to_str().unwrap().to_string()), (StatusCode::OK, "application/x-tar".to_string()));
+    let tar = String::from_utf8(resp.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap();
+    assert!(tar.starts_with("fake image "), "{tar}");
     let _ = Ordering::SeqCst;
 }
 

@@ -1770,6 +1770,8 @@ static ROWS: &[Row] = &[
     // A folder upload's files as deployed (never the environment a bundle carries, nor a file
     // named as a secret): source can hold credentials all the same, so it's revealed, not read.
     row("GET", "/v1/apps/services/{id}/environments/{env}/deploys/{dep}/source", "apps", REVEAL, one(PG, "service")).env(EnvFrom::Param("env")),
+    // Its image's layers can hold what its build had: reveal, as its source.
+    row("GET", "/v1/apps/services/{id}/environments/{env}/deploys/{dep}/image", "apps", REVEAL, one(PG, "service")).env(EnvFrom::Param("env")),
     // A static build's files as served (what anyone can fetch from its URL, unless it's gated).
     row("GET", "/v1/apps/services/{id}/environments/{env}/deploys/{dep}/output", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
     // Keeping a deployment from pruning changes nothing that runs.

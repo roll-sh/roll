@@ -1377,6 +1377,15 @@ pub enum AppsCmd {
         #[arg(long, conflicts_with_all = ["delete", "incident", "update", "title", "item"])]
         remove_domain: bool,
     },
+    /// A deployment's image on this machine (`fly auth docker`'s): `roll apps image dep_… |
+    /// docker load`, or `-o image.tar`. Its layers can hold what the build had: reveal.
+    Image {
+        deployment: String,
+        #[command(flatten)]
+        target: Target,
+        #[arg(long, short = 'o', value_name = "FILE")]
+        output: Option<PathBuf>,
+    },
     /// Quiet an environment's alerts for a while (Cloud Monitoring's snooze): `--for 2h --reason
     /// "db migration"`, `--alert check.down` (repeated) for some kinds only; alone, the open ones;
     /// `--end sil_…` ends one early. Events are still kept, and resolves still go out.
@@ -5491,6 +5500,35 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 return Ok(());
             }
             v
+        }
+        AppsCmd::Image { deployment, target, output } => {
+            use std::io::{IsTerminal, Write};
+            if output.is_none() && std::io::stdout().is_terminal() {
+                bail!("an image is binary: pipe it (`roll apps image {deployment} | docker load`) or write it with -o image.tar");
+            }
+            let svc = service(api, &target).await?;
+            let mut req = api.http.get(format!("{}{}/deploys/{}/image", api.base, env_path(&svc, &target.env), enc(&deployment)));
+            if let Some(k) = &api.key {
+                req = req.bearer_auth(k);
+            }
+            let mut res = req.send().await.with_context(|| format!("can't reach {}", api.base))?;
+            if !res.status().is_success() {
+                let st = res.status();
+                let v: Value = res.json().await.unwrap_or(Value::Null);
+                bail!("{}", v["error"].as_str().unwrap_or(st.as_str()));
+            }
+            let mut out: Box<dyn Write> = match &output {
+                Some(p) => Box::new(std::fs::File::create(p).with_context(|| format!("can't write {}", p.display()))?),
+                None => Box::new(std::io::stdout().lock()),
+            };
+            let mut n = 0u64;
+            while let Some(chunk) = res.chunk().await? {
+                n += chunk.len() as u64;
+                out.write_all(&chunk)?;
+            }
+            out.flush()?;
+            eprintln!("{} MiB of {deployment}'s image", n >> 20);
+            return Ok(());
         }
         AppsCmd::Silence { target, duration, reason, alerts, end } => {
             let svc = service(api, &target).await?;

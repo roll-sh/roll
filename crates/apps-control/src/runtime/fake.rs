@@ -454,6 +454,11 @@ impl Runtime for Fake {
         Ok(Box::new(ours))
     }
 
+    /// Its name as the "archive" (a test reads it back).
+    async fn export_image(&self, image: &str) -> anyhow::Result<Option<Box<dyn tokio::io::AsyncRead + Send + Unpin>>> {
+        Ok(Some(Box::new(std::io::Cursor::new(format!("fake image {image}").into_bytes()))))
+    }
+
     /// A size of its name's (an image named `…:big…` is 2 GB).
     async fn image_bytes(&self, image: &str) -> Option<u64> {
         Some(if image.contains("big") { 2 << 30 } else { 48 << 20 })
