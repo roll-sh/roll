@@ -285,6 +285,25 @@ The current checked measurements compare release engine builds and PostgreSQL 18
 the wire. Older rounds below are historical records, with their original methods and
 limits. Their results have not been reverified on the current source.
 
+## Point selects, outside the session, round 2: transaction settings, the API's clock, notice lists (2026-11-27, agent 336)
+
+HANDOFF "Point selects, outside the session, round 2" has what changed. Plain dist `bench`
+(`tools/dist.sh --example bench`), base `5436da0ee`, the candidate's code on it; in process, 1
+client, 100,000 rows. Process `instructions:u` per op (`perf stat`, a 30 s run minus a 10 s run of
+one database, `~/.cache/a336/inproc/run2.sh`), two alternating pairs:
+
+| case | base | candidate | |
+|---|---|---|---|
+| point select, extended | 33,994 / 34,051 | 32,884 / 32,831 | -3.3% / -3.6% |
+| point select, simple protocol | 36,681 / 36,928 | 35,157 / 35,164 | -4.2% / -4.8% |
+| range_scan_100 | 388,640 / 388,504 | 387,136 / 387,178 | -0.4% / -0.3% |
+| point select, extended, both arms with agent 325's profile | 27,922 / 27,939 | 26,624 / 26,797 | -4.7% / -4.1% |
+| point select, simple, both arms with the profile | 31,172 | 29,798 | -4.4% |
+
+TPC-H SF 0.1 in process (lane C, the 22 once): 17.0522 G user instructions base, 17.0531 G
+candidate, every query's rows and hash equal. short_txn moved +5.6% / -2.1% (its data's state).
+Lanes A, B and C read 5.5-8 foreign cores throughout: no cycle numbers.
+
 ## Point selects, outside the session: lock keys, portals and pgstat (2026-11-26, agent 329)
 
 HANDOFF "Point selects, outside the session: lock keys, portals and pgstat" has what changed. Plain

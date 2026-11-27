@@ -25376,3 +25376,96 @@ Nothing measured and dropped.
    clean restart): roll's store is still in memory only.
 3. The counters roll doesn't count at all (above), and PostgreSQL's catalog reads in the
    database's tuple counts.
+
+## Point selects, outside the session, round 2: the transaction's settings, the API's clock, notice lists (agent 336, 2026-11-27)
+
+What agent 329 measured and left ("Point selects, outside the session", Left), the pieces taken
+here. No behaviour change.
+
+### What changed
+
+- **transaction_isolation / transaction_read_only** (`Settings::start_transaction`, 912
+  instructions a transaction with `end_transaction`): every transaction put both values into the
+  settings map and took them out again at its end (agent 323 had made it allocation-free, but it
+  was still two hashed inserts, two removes and the string copies). Now the start keeps them in
+  `Settings::txn_view` (the two static strings and the nest level) and the end clears it: reads
+  of the two names (`get_str`, `show`, `session_value`, current_setting, pg_settings) look there
+  first. Whatever changes `values` or the stack (a SET of anything in the transaction, SET LOCAL,
+  a savepoint's end, an error's `abort_level`, `restore_raw`, RESET ALL) goes through
+  `stack_txn_start` first, which now moves them into `values` and the replaced values into the
+  stack as before. A session's own value of these names (rare) stays in `values` underneath:
+  nothing to save or restore. `txn_settings` doesn't scan the empty `changed` list.
+- **The embedding API's clock** (`Session::api_starts`): a session no client message times (the
+  in-process bench, embedders, autovacuum's and the apply workers' sessions) read the clock in
+  `ensure_txn` (the transaction's start), in `run_query` (statement_timestamp) and in
+  `finish_txn` (`Database::touch`) for each statement. Now `query` / `query_copy`, `execute`,
+  `bind_message(_in)` and `execute_portal` read it once, as the server's `message_starts` does
+  for a message, and everything in the call uses that time; at the call's end it is dropped
+  again, with the transaction start it noted when no block is open (finish_xact_command, as at a
+  message's end: a call that ran no transaction, such as a CHECKPOINT, left it for the next
+  transaction's now() in the first version, which golden's a80b_monitoring caught). A server
+  session (`message_starts` ran) is unchanged. As a side effect an embedder's transaction_timestamp() and statement_timestamp()
+  of a transaction's first statement are now one reading, as PostgreSQL's are.
+- **Notice lists** (`exec::live_notices`): each statement context allocated an
+  `Rc<RefCell<Vec<Error>>>`, registered a weak reference to it in a thread-local list and pruned
+  the list. Now the list holds the `Rc`s, and a new context takes the first free one past the
+  last one in use (outermost first is kept: flush_live_notices sends them in that order), cleared;
+  `flush_live_notices` skips the free ones.
+
+### Measured
+
+Plain dist `bench` (`tools/dist.sh --example bench`); base `5436da0ee` (cand/a336 on `2676ea37a`:
+its changes are in the server's connection path, which the in-process bench doesn't run), the
+candidate's code on it. In process, 1 client, 100,000 rows; process `instructions:u` per op from
+`perf stat` of a 30 s minus a 10 s run of one database after a 6 s warm run
+(`~/.cache/a336/inproc/run2.sh`, agent 329's), two alternating pairs:
+
+| case | base | candidate | |
+|---|---|---|---|
+| point select, extended | 33,994 / 34,051 | 32,884 / 32,831 | -3.3% / -3.6% |
+| point select, simple protocol | 36,681 / 36,928 | 35,157 / 35,164 | -4.2% / -4.8% |
+| range_scan_100 (lane B) | 388,640 / 388,504 | 387,136 / 387,178 | -0.4% / -0.3% |
+
+The same pairs with the shipped build's profile on both arms (`-Cprofile-use` of agent 325's
+`roll-engine.profdata` from `5192a74c0`, the dist flags, `bench` as `tools/dist.sh --example bench`
+builds it): extended 27,922 -> 26,624 / 27,939 -> 26,797 (-4.7 / -4.1%), simple 31,172 -> 29,798
+(-4.4%).
+
+(The measured candidate predates the call's end, `api_ends`: two stores and a test a call more.)
+
+TPC-H SF 0.1 in process (lane C, the 22 once, process `instructions:u`): 17.0522 G base, 17.0531 G
+candidate (level); every query's rows and hash equal. short_txn moved +5.6% / -2.1% in its two
+pairs (its data's state: flushes and compactions of the writes, as agent 329 saw): nothing to
+read from it. Lanes A, B and C read 5.5-8 foreign cores throughout: no cycle numbers count.
+
+Intel PT counts as agent 329 took them didn't work this round: attaching to the extended
+select's bench failed with ESRCH every time (the simple one worked), perf launching the bench
+wrote the whole run (91 MB, not the snapshot), and a delayed start lost every sample. So the
+gate is the process counter above; the per-function split is 329's.
+
+### Checks
+
+On `ba05a5788` (on `0fa8e55bd`): `tools/quick-check.sh` with `QC_CHECKED=1` and
+`QC_TESTS=kept_plans`: clippy 16 warnings, none new in a changed file; 407 tests in 11 binaries
+(`golden`, `wire`, `wire_waits`, `kept_plans`, the lib's unit tests among them), and again built
+`verify-checked`; regress 51,148 / 51,150, 0 newly differing; isolation 1,647 / 1,648; pg_dump_tap
+14,609 passed. `session_state` and `twophase` (verify) passed. The first quick-check (before
+`api_ends`) failed golden's a80b_monitoring (`checkpoint_time <= now()` false: the stale
+transaction start above); golden passes since. `tools/crash-binary.py` against the measured
+candidate's roll-engine (plain dist, cand/a336 under it): `--seed 1` 7 rounds ok, `--seed 1
+--power drop` 10 rounds ok.
+
+### Left
+
+- Execute's second binding lookup (`bound_as` from `planned_as` after Bind's, ~400): Bind could
+  keep the binding it looked up in the portal for the Execute (PostgreSQL plans at Bind), inside
+  agent 328's custom-plan choice; not done.
+- `pgstat::report` (408): not changed here (agent 335's and 339's area this round). PostgreSQL
+  keeps a transaction's counts local until a flush; roll moves them into the backend's slot every
+  transaction so a reader can flush an idle backend after PGSTAT_IDLE_INTERVAL. Keeping them
+  local needs the backend's own idle timer (an `IdleRead` deadline at the slot's `due`, as
+  PostgreSQL's IDLE_STATS_UPDATE_TIMEOUT) and the same for embedded sessions, which have no read
+  loop.
+- `ExecCtx::with_search_path`'s other allocations: `temp_cleanup`'s `Rc<TempCleanup>`, `txn_time`'s
+  `Rc<Cell>`, the `CatalogNames` `Arc` (each ~60-100 instructions with the free); a new lock's key
+  hashed twice in `TxnState::lock` (one hash, ~30-40).
