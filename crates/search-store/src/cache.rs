@@ -24,8 +24,11 @@
 //! have a lane of their own, [`URGENT_PARTS`] more: a waking shard's footers and its first
 //! query's ranges never queue behind other segments' bulk parts.
 //!
-//! Parts are aligned to the object's *end*: the first request is a suffix read, which learns
-//! the size and brings the last part, where a segment keeps its footer and table of contents.
+//! Parts are aligned to the object's *end*: the first request is a suffix read ([`FIRST_READ`],
+//! 256 KiB), which learns the size and brings the footer and table of contents. Readers that
+//! wait for a range get exactly it (64 KiB units, on the urgent lane), not the parts holding it:
+//! a waking shard's metadata is a few hundred KiB spread over every part, so whole parts would
+//! fetch the whole file before its first query.
 //! A reader that can't wait for a large segment uses [`SegmentFetch`]: it reads any range as
 //! soon as the parts holding it are in ([`SegmentFetch::read`] moves them to the front of the
 //! queue), so a query can start on the term dictionary and skip data while the postings are
@@ -230,7 +233,21 @@ struct Parts {
     /// Parts readers are waiting for, served before the sequential cursor.
     urgent: std::collections::VecDeque<usize>,
     next: usize,
+    /// Byte ranges in besides the done parts (sorted, disjoint): the first read's suffix and the
+    /// exact ranges readers waited for ([`Parts::want`]).
+    have: Vec<std::ops::Range<u64>>,
+    /// Ranges readers wait for, fetched exactly on the urgent lane (a waking shard's metadata is
+    /// a few hundred KiB spread over every part: fetching whole parts for it fetches the file).
+    wanted: std::collections::VecDeque<std::ops::Range<u64>>,
+    /// Wanted ranges being fetched.
+    flight: Vec<std::ops::Range<u64>>,
 }
+
+/// Wanted ranges are fetched in these units (64 KiB), at most a part at a time.
+const WANT_ALIGN: u64 = 64 << 10;
+/// A download's first read: the suffix holding the footer and table of contents (the whole object
+/// when it is no larger). The rest of the last part comes with the bulk parts.
+pub const FIRST_READ: u64 = 256 << 10;
 
 impl Parts {
     #[cfg(test)]
@@ -242,7 +259,20 @@ impl Parts {
         let part = part.max(1);
         let n = size.div_ceil(part).max(1) as usize;
         let head = size - (n as u64 - 1) * part;
-        Parts { size, head, part, done: vec![false; n], taken: vec![false; n], done_count: 0, done_bytes: 0, urgent: Default::default(), next: 0 }
+        Parts {
+            size,
+            head,
+            part,
+            done: vec![false; n],
+            taken: vec![false; n],
+            done_count: 0,
+            done_bytes: 0,
+            urgent: Default::default(),
+            next: 0,
+            have: Vec::new(),
+            wanted: Default::default(),
+            flight: Vec::new(),
+        }
     }
 
     fn count(&self) -> usize {
@@ -264,16 +294,78 @@ impl Parts {
     }
 
     fn complete(&self, range: &std::ops::Range<u64>) -> bool {
-        self.covering(range).all(|k| self.done[k])
+        self.covering(range).all(|k| {
+            if self.done[k] {
+                return true;
+            }
+            let p = self.range(k);
+            self.has(&(range.start.max(p.start)..range.end.min(p.end)))
+        })
     }
 
-    /// The next part a reader asked for, if any isn't taken yet ([`Parts::prioritize`]).
-    fn take_urgent(&mut self) -> Option<usize> {
-        while let Some(k) = self.urgent.pop_front() {
-            if !self.taken[k] {
-                self.taken[k] = true;
-                return Some(k);
+    /// Part `k`'s bytes not in yet at either end (the first read's suffix, a range a reader
+    /// waited for): what a bulk worker still fetches for it (empty: nothing).
+    fn trimmed(&self, k: usize) -> std::ops::Range<u64> {
+        let mut r = self.range(k);
+        if let Some(h) = self.have.iter().find(|h| h.start < r.end && r.end <= h.end) {
+            r.end = h.start.max(r.start);
+        }
+        if let Some(h) = self.have.iter().find(|h| h.start <= r.start && r.start < h.end) {
+            r.start = h.end.min(r.end);
+        }
+        r
+    }
+
+    /// Whether `r` (non-empty) lies inside one range of [`Parts::have`].
+    fn has(&self, r: &std::ops::Range<u64>) -> bool {
+        let i = self.have.partition_point(|h| h.end < r.end);
+        self.have.get(i).is_some_and(|h| h.start <= r.start && r.end <= h.end)
+    }
+
+    /// Records `r` as in (merging neighbours).
+    fn add(&mut self, r: std::ops::Range<u64>) {
+        if r.is_empty() {
+            return;
+        }
+        let (mut start, mut end) = (r.start, r.end);
+        let mut out = Vec::with_capacity(self.have.len() + 1);
+        for h in self.have.drain(..) {
+            if h.end < start || end < h.start {
+                out.push(h);
+            } else {
+                start = start.min(h.start);
+                end = end.max(h.end);
             }
+        }
+        out.push(start..end);
+        out.sort_by_key(|h| h.start);
+        self.have = out;
+        self.flight.retain(|f| !(start <= f.start && f.end <= end));
+    }
+
+    /// Asks for exactly `range` (aligned to [`WANT_ALIGN`], in chunks of at most a part) ahead
+    /// of everything: the urgent worker fetches it ([`Parts::take_wanted`]).
+    fn want(&mut self, range: &std::ops::Range<u64>) {
+        let start = range.start - range.start % WANT_ALIGN;
+        let end = range.end.div_ceil(WANT_ALIGN).saturating_mul(WANT_ALIGN).min(self.size);
+        let mut at = start;
+        while at < end {
+            let r = at..(at + self.part).min(end);
+            at = r.end;
+            if !self.complete(&r) && !self.wanted.contains(&r) {
+                self.wanted.push_back(r);
+            }
+        }
+    }
+
+    /// The next wanted range that isn't in or being fetched yet.
+    fn take_wanted(&mut self) -> Option<std::ops::Range<u64>> {
+        while let Some(r) = self.wanted.pop_front() {
+            if self.complete(&r) || self.flight.iter().any(|f| f.start <= r.start && r.end <= f.end) {
+                continue;
+            }
+            self.flight.push(r.clone());
+            return Some(r);
         }
         None
     }
@@ -318,6 +410,7 @@ impl Parts {
                 self.urgent.push_back(k);
             }
         }
+        self.want(range);
     }
 }
 
@@ -800,17 +893,18 @@ impl Cache {
     /// the rest come in parallel, parts readers wait for first.
     async fn download(&self, key: &str, file: &Arc<File>, dl: &Download) -> anyhow::Result<u64> {
         let part = self.fetch_part();
+        let first = part.min(FIRST_READ);
         let (tail, size) = {
             // Whoever opens the segment waits for this one (its size, footer and table of
-            // contents): the urgent lane.
+            // contents): the urgent lane, and only the suffix holding them.
             let _permit = self.urgent.acquire().await?;
-            let r = self.objects.get_suffix(key, part).await?.ok_or_else(|| anyhow::anyhow!("object {key} is missing"))?;
+            let r = self.objects.get_suffix(key, first).await?.ok_or_else(|| anyhow::anyhow!("object {key} is missing"))?;
             self.counters.received_bytes.fetch_add(r.0.len() as u64, Relaxed);
             self.throttled(r.0.len() as u64).await;
             r
         };
         anyhow::ensure!(size > 0, "object {key} is empty");
-        anyhow::ensure!(tail.len() as u64 == size.min(part), "short read of {key}");
+        anyhow::ensure!(tail.len() as u64 == size.min(first), "short read of {key}");
         // Room for the whole file now: its blocks fill in from here on.
         let evicted = {
             let mut st = self.st.lock();
@@ -823,7 +917,7 @@ impl Cache {
         {
             // Sparse until the parts land: the whole object can be mapped from now on.
             let f = file.clone();
-            let at = size - size.min(part);
+            let at = size - size.min(first);
             tokio::task::spawn_blocking(move || {
                 use std::os::unix::fs::FileExt;
                 f.set_len(size)?;
@@ -833,14 +927,33 @@ impl Cache {
         }
         let workers = {
             let mut parts = Parts::with_part(size, part);
-            let last = parts.count() - 1;
-            parts.finish(last);
+            if size <= first {
+                // The whole object came with the first read.
+                for k in 0..parts.count() {
+                    parts.finish(k);
+                }
+            } else {
+                parts.add(size - first..size);
+                // A last part the suffix covers is done.
+                let last = parts.count() - 1;
+                if parts.range(last).start >= size - first {
+                    parts.finish(last);
+                }
+            }
             let left = parts.count() - parts.done_count;
             *dl.parts.lock() = Some(parts);
             dl.tick.send_modify(|t| *t += 1);
             left.min(FETCH_PARTS)
         };
         let fetch = |k: usize, range: std::ops::Range<u64>| async move {
+            if range.is_empty() {
+                // Already in, from the first read or readers' ranges.
+                if let Some(p) = dl.parts.lock().as_mut() {
+                    p.finish(k);
+                }
+                dl.tick.send_modify(|t| *t += 1);
+                return anyhow::Ok(());
+            }
             let (data, now) = self.objects.get_range_sized(key, range.clone()).await?.ok_or_else(|| anyhow::anyhow!("object {key} is missing"))?;
             self.counters.received_bytes.fetch_add(data.len() as u64, Relaxed);
             self.throttled(data.len() as u64).await;
@@ -855,7 +968,7 @@ impl Cache {
         let worker = || async {
             loop {
                 let permit = self.parts.acquire().await?;
-                let Some((k, range)) = dl.parts.lock().as_mut().and_then(|p| p.take().map(|k| (k, p.range(k)))) else {
+                let Some((k, range)) = dl.parts.lock().as_mut().and_then(|p| p.take().map(|k| (k, p.trimmed(k)))) else {
                     // Out of parts: the urgent worker may be done too.
                     dl.wanted.notify_one();
                     return anyhow::Ok(());
@@ -864,24 +977,32 @@ impl Cache {
                 drop(permit);
             }
         };
-        // The parts readers wait for, on the urgent lane, so they never queue behind the bulk
-        // parts of every other download on the node (the bulk workers take them first too,
-        // whichever gets there first).
+        // The ranges readers wait for, exactly, on the urgent lane, so they never queue behind
+        // the bulk parts of every other download on the node, nor fetch whole parts for a few
+        // KiB (the bulk workers take the parts holding them first too).
         let urgent = async {
             loop {
                 let next = {
                     let mut g = dl.parts.lock();
                     let Some(p) = g.as_mut() else { return anyhow::Ok(()) };
-                    match p.take_urgent() {
-                        Some(k) => Some((k, p.range(k))),
+                    match p.take_wanted() {
+                        Some(r) => Some(r),
                         None if p.all_taken() => return anyhow::Ok(()),
                         None => None,
                     }
                 };
                 match next {
-                    Some((k, range)) => {
+                    Some(range) => {
                         let _permit = self.urgent.acquire().await?;
-                        fetch(k, range).await?;
+                        let (data, now) = self.objects.get_range_sized(key, range.clone()).await?.ok_or_else(|| anyhow::anyhow!("object {key} is missing"))?;
+                        self.counters.received_bytes.fetch_add(data.len() as u64, Relaxed);
+                        self.throttled(data.len() as u64).await;
+                        anyhow::ensure!(now == size && data.len() as u64 == range.end - range.start, "{key} changed while being read");
+                        write_at(file, data, range.start).await?;
+                        if let Some(p) = dl.parts.lock().as_mut() {
+                            p.add(range);
+                        }
+                        dl.tick.send_modify(|t| *t += 1);
                     }
                     None => dl.wanted.notified().await,
                 }
