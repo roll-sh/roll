@@ -613,6 +613,9 @@ pub struct RuleArgs {
     /// Only resources in these environments.
     #[arg(long = "env", value_delimiter = ',')]
     environments: Vec<String>,
+    /// Secrets rules only: only these keys (repeatable), never the folder as a whole.
+    #[arg(long = "key", value_delimiter = ',')]
+    keys: Vec<String>,
     /// Actions allowed: read, write, delete, reveal, deploy, admin.
     #[arg(long, value_delimiter = ',')]
     allow: Vec<String>,
@@ -1006,6 +1009,14 @@ async fn rules(api: &Api, c: &RuleArgs) -> anyhow::Result<Value> {
     if rules.is_empty() {
         bail!("say what the token may do: --preset read-only (or agent, project, …), or --allow read,write");
     }
+    if !c.keys.is_empty() {
+        let mut named = false;
+        for r in rules.iter_mut().filter(|r| r["product"] == "secrets") {
+            r["keys"] = json!(c.keys);
+            named = true;
+        }
+        anyhow::ensure!(named, "--key narrows a secrets rule: add --product secrets");
+    }
     Ok(Value::Array(rules))
 }
 
@@ -1024,7 +1035,10 @@ fn describe_rule(r: &Value) -> String {
         other => s(other),
     };
     let actions: Vec<String> = r["actions"].as_object().into_iter().flatten().map(|(a, e)| if e == "ask" { format!("{a} (ask)") } else { a.clone() }).collect();
-    let env = r["environments"].as_array().map(|e| format!(" in {}", e.iter().map(s).collect::<Vec<_>>().join(", "))).unwrap_or_default();
+    let mut env = r["environments"].as_array().map(|e| format!(" in {}", e.iter().map(s).collect::<Vec<_>>().join(", "))).unwrap_or_default();
+    if let Some(k) = r["keys"].as_array() {
+        env.push_str(&format!(", keys {}", k.iter().map(s).collect::<Vec<_>>().join(", ")));
+    }
     let product = if r["product"] == "*" { "every product".to_string() } else { s(&r["product"]) };
     format!("{product}: {} on {resources}{env}", actions.join(", "))
 }

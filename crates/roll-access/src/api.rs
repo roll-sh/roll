@@ -361,9 +361,9 @@ async fn check(State(a): S, ext: Extensions, Json(c): Json<Check>) -> crate::Res
             headers.insert(k, v);
         }
     }
-    let (a2, q, h) = (a.clone(), uri.query().map(str::to_string), headers.clone());
+    let (a2, q, h, path) = (a.clone(), uri.query().map(str::to_string), headers.clone(), uri.path().to_string());
     let params2 = params.clone();
-    let mut target = tokio::task::spawn_blocking(move || crate::evaluate::target(&a2, row, &params2, q.as_deref(), &h, person))
+    let mut target = tokio::task::spawn_blocking(move || crate::evaluate::target(&a2, row, &path, &params2, q.as_deref(), &h, person))
         .await
         .map_err(|e| Error::Internal(e.to_string()))?;
     crate::evaluate::project_from_body(row, &mut target, c.body.as_ref()).map_err(Error::BadRequest)?;
@@ -1178,9 +1178,11 @@ async fn remembered(a: &Arc<Access>, id: &str, remember: Option<&str>) -> crate:
         return Err(Error::BadRequest(format!("{why}: approve it once")));
     }
     // A secret lent to another product's route (apps' DNS token, search's rotated password) at an
-    // environment's root: remembered, every later call would reveal every key there, so it's
-    // approved once; one in a folder of its own is remembered for that folder.
+    // environment's root, naming no key: remembered, every later call would reveal every key
+    // there, so it's approved once; one naming its key is remembered for that key (`keys`, 8 hours
+    // at most at the root, below), and one in a folder of its own for that folder.
     if found.product == "secrets"
+        && found.scope_key.is_none()
         && found.scope_path.as_deref().is_none_or(roll_auth::scope::is_root)
         && catalog::find(&found.method, &found.route, &found.path).is_some_and(|f| f.row.product != "secrets" && f.row.lends.is_some())
     {
@@ -1251,6 +1253,9 @@ pub(crate) fn rule_of(found: &crate::store::Approval) -> crate::Result<roll_auth
         environments: found.environment.clone().map(|e| vec![e]),
         paths: found.scope_path.clone().map(|p| vec![p]),
         unprotected: false,
+        // A request about one secret key remembers that key alone (a rule limited to it).
+        // The one key it was about: a lend's (it's another product's route), or the path's.
+        keys: (found.product == "secrets").then(|| found.scope_key.clone().or_else(|| catalog::secret_key_in(&found.path))).flatten().map(|k| vec![k]),
         actions: [(action, roll_auth::scope::Effect::Allow)].into_iter().collect(),
     })
 }
@@ -1377,6 +1382,7 @@ async fn request_access(State(a): S, ext: Extensions, Json(r): Json<AccessReques
             environment: env.as_deref(),
             scope_path: path.as_deref(),
             scope_index: index.as_deref(),
+            scope_key: None,
             wait_ms,
             also: None,
         })

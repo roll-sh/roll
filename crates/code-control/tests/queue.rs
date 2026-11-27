@@ -990,6 +990,7 @@ async fn storing_a_notices_credential_needs_write_in_the_folder_and_a_trusted_pr
         environments: None,
         paths: None,
         unprotected: false,
+        keys: None,
         actions: std::collections::BTreeMap::from([(roll_auth::scope::Action::Read, roll_auth::scope::Effect::Allow)]),
     };
     let grant = roll_auth::Grant { user: None, ask_otherwise: false, id: "tok_reader".into(), name: "reader".into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(roll_auth::scope::Scope(vec![rule])) };

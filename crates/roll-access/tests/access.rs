@@ -171,8 +171,11 @@ fn postgres() -> Router {
                 let body: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
                 let Some(project) = body["secret"]["project"].as_str().map(String::from) else { return axum::Json(json!({ "reveal": reveal })) };
                 let g = roll_auth::Grant::on(&ext).unwrap();
+                // As roll secrets asks: a write of the one key the body names, a read of the folder.
+                let key = body["secret"]["key"].as_str().map(String::from);
                 let at = |env: &str, path: &str, action: roll_auth::scope::Action| {
-                    let r = roll_auth::scope::Resource { product: "secrets".into(), id: Some(project.clone()), project: Some(project.clone()), environment: Some(env.into()), path: Some(path.into()), ..Default::default() };
+                    let key = (action == roll_auth::scope::Action::Write).then(|| key.clone()).flatten();
+                    let r = roll_auth::scope::Resource { product: "secrets".into(), id: Some(project.clone()), project: Some(project.clone()), environment: Some(env.into()), path: Some(path.into()), key, ..Default::default() };
                     g.allows(&r, action) == roll_auth::scope::Outcome::Allow
                 };
                 use roll_auth::scope::Action::{Read, Write};
@@ -187,6 +190,8 @@ fn postgres() -> Router {
         .route("/v1/search/clusters/{id}/indices/{index}/update_by_query", post(|| async { axum::Json(json!({ "task": "n:1" })) }))
         .route("/v1/search/clusters/{id}/tasks/{task}", get(|| async { axum::Json(json!({ "completed": true })) }))
         .route("/v1/secrets/projects/{project}/environments/{env}/secrets", get(|| async { axum::Json(json!([])) }))
+        .route("/v1/secrets/projects/{project}/environments/{env}/secrets/{key}/value", get(|| async { axum::Json(json!({ "value": "x" })) }))
+        .route("/v1/secrets/projects/{project}/environments/{env}/secrets/{key}", axum::routing::put(|| async { axum::Json(json!({})) }))
         .route("/v1/secrets/projects/{project}/health", get(|| async { axum::Json(json!({ "findings": [] })) }))
         .route("/v1/secrets/projects/{project}/transit", get(|| async { axum::Json(json!([])) }))
         .route("/v1/secrets/projects/{project}/transit/{name}/encrypt", axum::routing::post(|| async { axum::Json(json!({ "ciphertext": "roll:v1:x" })) }))
@@ -2250,6 +2255,36 @@ async fn a_rule_can_grant_one_encryption_key() {
     assert_eq!(d.call(&all, Method::POST, "/v1/secrets/projects/prj_a/transit/billing/encrypt", Some(json!({ "plaintext": "aGk=" }))).await.0, StatusCode::OK);
 }
 
+/// A rule limited to some secret keys: a request about one key is decided by it, a folder's
+/// list and values (answered key by key) let it through, and what's answered only per
+/// environment and folder (health), a list or a create don't. Keys are secrets' only.
+#[tokio::test]
+async fn a_rule_can_grant_some_secret_keys() {
+    let d = Daemon::new(50);
+    let (stripe, _) = d.token(json!([{ "product": "secrets", "resources": [{ "id": "prj_a" }], "environments": ["production"], "keys": ["STRIPE_KEY"], "actions": { "read": "allow", "reveal": "allow", "write": "allow" } }]), json!({})).await;
+    let at = |rest: &str| format!("/v1/secrets/projects/prj_a/environments/production{rest}");
+    assert_eq!(d.call(&stripe, Method::GET, &at("/secrets/STRIPE_KEY/value"), None).await.0, StatusCode::OK);
+    assert_eq!(d.call(&stripe, Method::GET, &at("/secrets/DB_PASSWORD/value"), None).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(d.call(&stripe, Method::PUT, &at("/secrets/STRIPE_KEY"), Some(json!({ "value": "x" }))).await.0, StatusCode::OK);
+    assert_eq!(d.call(&stripe, Method::PUT, &at("/secrets/DB_PASSWORD"), Some(json!({ "value": "x" }))).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(d.call(&stripe, Method::GET, &at("/values"), None).await.0, StatusCode::OK);
+    assert_eq!(d.call(&stripe, Method::GET, &at("/secrets"), None).await.0, StatusCode::OK);
+    assert_eq!(d.call(&stripe, Method::GET, "/v1/secrets/projects/prj_a/health", None).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(d.call(&stripe, Method::GET, "/v1/secrets/projects/prj_a/environments/staging/secrets/STRIPE_KEY/value", None).await.0, StatusCode::FORBIDDEN);
+    let (s, _) = d.call(OPERATOR, Method::POST, "/v1/access/tokens", Some(json!({ "name": "x", "rules": [{ "product": "postgres", "resources": "*", "keys": ["A"], "actions": { "read": "allow" } }] }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    // An approval of one key's reveal, remembered, is that key's rule: the next key asks again.
+    let (asks, id) = d.token(json!([{ "product": "secrets", "resources": [{ "id": "prj_a" }], "environments": ["production"], "actions": { "reveal": "ask" } }]), json!({})).await;
+    let (_, pending) = d.call(&asks, Method::GET, &at("/secrets/STRIPE_KEY/value?path=/api"), None).await;
+    let apr = pending["approval"].as_str().unwrap_or_else(|| panic!("{pending}")).to_string();
+    assert_eq!(d.call(OPERATOR, Method::POST, &format!("/v1/access/approvals/{apr}/approve"), Some(json!({ "remember": "1h" }))).await.0, StatusCode::OK);
+    let (_, g) = d.call(OPERATOR, Method::GET, &format!("/v1/access/tokens/{id}"), None).await;
+    assert_eq!(g["temporary"][0]["rule"]["keys"], json!(["STRIPE_KEY"]), "{g}");
+    assert_eq!(d.call(&asks, Method::GET, &at("/secrets/STRIPE_KEY/value?path=/api"), None).await.0, StatusCode::OK);
+    let (s, out) = d.call(&asks, Method::GET, &at("/secrets/DB_PASSWORD/value?path=/api"), None).await;
+    assert_eq!((s, out["code"].as_str()), (StatusCode::FORBIDDEN, Some("approval_pending")), "{out}");
+}
+
 /// The search console is decided from its route alone: the gate reads no body (a large `_bulk`
 /// through it isn't refused as too large), and tells search whether the grant may also reveal
 /// (`capable`), for a request search finds answers a credential.
@@ -3523,15 +3558,22 @@ async fn a_secret_written_as_the_caller_is_asked_for_and_only_it_is_allowed() {
     root["secret"]["path"] = json!("/");
     let (s, out) = d.call(&asks, Method::POST, path, Some(root)).await;
     assert_eq!((s, out["code"].as_str()), (StatusCode::FORBIDDEN, Some("approval_pending")), "{out}");
-    // The root folder reaches every folder under it: lent to search's route, the whole environment
-    // is approved once only.
+    // The root folder reaches every folder under it, but the lend names its key: remembered for
+    // that key only (`keys`), 8 hours at most at the root. Another key asks again.
     let root_id = out["approval"].as_str().unwrap().to_string();
     let approve = |remember: Option<&str>| {
         let (d, url, body) = (&d, format!("/v1/access/approvals/{root_id}/approve"), remember.map(|r| json!({ "remember": r })));
         async move { d.call(OPERATOR, Method::POST, &url, body).await.0 }
     };
-    assert_eq!(approve(Some("8h")).await, StatusCode::BAD_REQUEST);
-    assert_eq!(approve(None).await, StatusCode::OK);
+    assert_eq!(approve(Some("1d")).await, StatusCode::BAD_REQUEST);
+    assert_eq!(approve(Some("8h")).await, StatusCode::OK);
+    let mut again = body("production");
+    again["secret"]["path"] = json!("/");
+    let (s, out) = d.call(&asks, Method::POST, path, Some(again.clone())).await;
+    assert_eq!(s, StatusCode::OK, "the remembered key: {out}");
+    again["secret"]["key"] = json!("OTHER_PASSWORD");
+    let (s, out) = d.call(&asks, Method::POST, path, Some(again)).await;
+    assert_eq!((s, out["code"].as_str()), (StatusCode::FORBIDDEN, Some("approval_pending")), "another key: {out}");
     let (allows, _) = d.token(json!([search("allow"), { "product": "secrets", "resources": [{ "project": project }], "actions": { "write": "allow" } }]), json!({})).await;
     let (s, seen) = d.call(&allows, Method::POST, path, Some(body("production"))).await;
     assert_eq!((s, seen["here"].as_bool()), (StatusCode::OK, Some(true)), "{seen}");
@@ -3559,17 +3601,21 @@ async fn a_dns_token_read_once_is_asked_for_by_its_folder() {
     let (_, asked) = d.call(OPERATOR, Method::GET, &format!("/v1/access/approvals/{}", out["approval"].as_str().unwrap()), None).await;
     assert_eq!((asked["product"].as_str(), asked["action"].as_str(), asked["environment"].as_str(), asked["scope_path"].as_str()), (Some("secrets"), Some("reveal"), Some("production"), Some("/dns")), "{asked}");
     assert!(asked["summary"].as_str().is_some_and(|s| s.contains("CF_TOKEN in production:/dns")), "the card names the key: {asked}");
-    // At the environment's root, remembering it would reveal every production key to every later
-    // configure: approved once only.
-    let (s, out) = d.call(&token, Method::POST, path, Some(json!({ "cloudflare_token": "roll://production/CF_TOKEN" }))).await;
+    // At the environment's root, remembering it reaches that one key (`keys`), never every
+    // production key: 8 hours at most there, and another key asks again.
+    let at_root = |key: &str| json!({ "cloudflare_token": format!("roll://production/{key}") });
+    let (s, out) = d.call(&token, Method::POST, path, Some(at_root("CF_TOKEN"))).await;
     assert_eq!((s, out["code"].as_str()), (StatusCode::FORBIDDEN, Some("approval_pending")), "{out}");
     let root = out["approval"].as_str().unwrap().to_string();
     let approve = |remember: Option<&str>| {
         let (d, url, body) = (&d, format!("/v1/access/approvals/{root}/approve"), remember.map(|r| json!({ "remember": r })));
         async move { d.call(OPERATOR, Method::POST, &url, body).await.0 }
     };
-    assert_eq!(approve(Some("8h")).await, StatusCode::BAD_REQUEST);
-    assert_eq!(approve(None).await, StatusCode::OK);
+    assert_eq!(approve(Some("1d")).await, StatusCode::BAD_REQUEST);
+    assert_eq!(approve(Some("8h")).await, StatusCode::OK);
+    assert_eq!(d.call(&token, Method::POST, path, Some(at_root("CF_TOKEN"))).await.0, StatusCode::OK, "the remembered key");
+    let (s, out) = d.call(&token, Method::POST, path, Some(at_root("DB_PASSWORD"))).await;
+    assert_eq!((s, out["code"].as_str()), (StatusCode::FORBIDDEN, Some("approval_pending")), "another key: {out}");
 }
 
 /// Claude's auto-connect (its connector docs, "Enterprise Managed Auth"): Claude signs the

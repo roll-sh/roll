@@ -5222,6 +5222,7 @@ async fn on_call_targets_open_and_close_incidents() {
     assert_eq!(call(&w.api, "POST", &base, Some(json!({"kind": "webhook", "url": format!("http://{at}/x"), "routing_key": "x"}))).await.0, StatusCode::BAD_REQUEST);
     let (st, pd) = call(&w.api, "POST", &base, Some(json!({"kind": "pagerduty", "routing_key": "r0ut1ngk3y", "events": ["deploy.failed", "alert.memory"]}))).await;
     assert_eq!((st, pd["kind"].as_str(), pd.get("secret")), (StatusCode::CREATED, Some("pagerduty"), None), "{pd}");
+    let pd_id = pd["id"].as_str().unwrap().to_string();
     let (st, og) = call(&w.api, "POST", &base, Some(json!({"kind": "opsgenie", "api_key": "g3n1e", "region": "eu", "events": ["alert.memory"]}))).await;
     assert_eq!(st, StatusCode::CREATED, "{og}");
     assert!(!call(&w.api, "GET", &base, None).await.1.to_string().contains("r0ut1ngk3y"), "the key never comes back");
@@ -5252,11 +5253,23 @@ async fn on_call_targets_open_and_close_incidents() {
     assert_eq!(og_calls.len(), 2, "{seen:?}");
     assert_eq!((og_calls[0].1["authorization"].to_str().unwrap(), og_calls[0].2["alias"].as_str(), og_calls[0].2["priority"].as_str()), ("GenieKey g3n1e", Some(key("alert.memory").as_str()), Some("P3")));
     assert!(og_calls[1].0.ends_with("/close?identifierType=alias") && og_calls[1].0.contains("alert.memory"), "{}", og_calls[1].0);
+    // A page resolved since isn't sent again: it would open the incident again.
+    let pd_log = call(&w.api, "GET", &format!("{base}/{pd_id}/deliveries"), None).await.1;
+    let failed = pd_log.as_array().unwrap().iter().find(|d| d["kind"] == "deploy.failed").unwrap();
+    let again = format!("{base}/{pd_id}/deliveries/{}/redeliver", failed["id"].as_str().unwrap());
+    assert_eq!(call(&w.api, "POST", &again, None).await.0, StatusCode::CONFLICT, "{pd_log}");
     // A silence (Cloud Monitoring's snooze): its alert pages no one while it's open; another
     // alert still does.
     let silences = format!("/v1/apps/services/{id}/environments/production/silences");
     let until = code_sql::now_ms() + 3_600_000;
     assert_eq!(call(&w.api, "POST", &silences, Some(json!({"until": until, "reason": "x", "alerts": ["deploy.active"]}))).await.0, StatusCode::BAD_REQUEST, "only alerts");
+    // A repeating one (Better Stack's maintenance windows): weekly, a year unless it says.
+    let (st, weekly) = call(&w.api, "POST", &silences, Some(json!({"reason": "backups", "every": {"windows": [{"from": "sat 02:00", "to": "sat 04:00"}], "timezone": "Europe/Berlin"}}))).await;
+    assert_eq!((st, weekly["every"]["windows"][0]["from"].as_str()), (StatusCode::CREATED, Some("sat 02:00")), "{weekly}");
+    assert!(weekly["until"].as_i64().unwrap() > code_sql::now_ms() + 300 * 86_400_000, "{weekly}");
+    assert_eq!(call(&w.api, "DELETE", &format!("{silences}/{}", weekly["id"].as_str().unwrap()), None).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(call(&w.api, "POST", &silences, Some(json!({"reason": "x", "every": {"windows": [{"from": "sat 02:00", "to": "sat 02:00"}]}}))).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(call(&w.api, "POST", &silences, Some(json!({"reason": "x"}))).await.0, StatusCode::BAD_REQUEST, "a one-off has an end");
     let (st, sil) = call(&w.api, "POST", &silences, Some(json!({"until": until, "reason": "db migration", "alerts": ["alert.memory"]}))).await;
     assert_eq!((st, sil["alerts"].clone()), (StatusCode::CREATED, json!(["alert.memory"])), "{sil}");
     assert_eq!(call(&w.api, "GET", &silences, None).await.1.as_array().map(Vec::len), Some(1));
@@ -5388,8 +5401,25 @@ async fn a_failed_deploy_is_sent_to_the_projects_targets_signed_and_retried() {
     let has = |log: &Value, seq: i64| log.as_array().unwrap().iter().any(|d| d["event"] == seq);
     let log = get_until(&w.api, &got_of(&by_name), |l| has(l, pr[0]) && has(l, prod[0])).await;
     assert!(has(&log, pr[0]) && has(&log, prod[0]), "the service's, previews too: {log}");
-    let log = get_until(&w.api, &got_of(&hook), |l| has(l, prod[0])).await;
+    let log = get_until(&w.api, &got_of(&hook), |l| l.as_array().unwrap().iter().any(|d| d["event"] == prod[0] && d["status"] == "delivered")).await;
     assert!(!has(&log, pr[0]), "not a preview's: {log}");
+    // Redelivered (GitHub's, Stripe's): from its first try, its delivery id kept; not while
+    // it's still being tried, nor another target's.
+    let did = log.as_array().unwrap().iter().find(|d| d["event"] == prod[0]).unwrap()["id"].as_str().unwrap().to_string();
+    let again = |t: &Value, d: &str| format!("{base}/{}/deliveries/{d}/redeliver", t["id"].as_str().unwrap());
+    let (st, d) = call(&w.api, "POST", &again(&hook, &did), None).await;
+    assert_eq!((st, d["status"].as_str(), d["attempts"].as_u64()), (StatusCode::OK, Some("pending"), Some(0)), "{d}");
+    assert_eq!(call(&w.api, "POST", &again(&hook, &did), None).await.0, StatusCode::CONFLICT, "still being tried");
+    assert_eq!(call(&w.api, "POST", &again(&staging, &did), None).await.0, StatusCode::NOT_FOUND, "another target's");
+    let mut twice = 0;
+    for _ in 0..200 {
+        twice = got.lock().iter().filter(|(h, b)| h["x-roll-delivery"] == did.as_str() && b["text"].as_str().is_some_and(|t| t.contains("production's"))).count();
+        if twice >= 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(twice, 2, "sent again with the same id");
     let log = call(&w.api, "GET", &got_of(&staging), None).await.1;
     assert!(!has(&log, pr[0]) && !has(&log, prod[0]), "staging's only: {log}");
 }
@@ -7628,6 +7658,38 @@ async fn a_tcp_service_answers_on_its_own_port() {
     let _ = twice.read_to_string(&mut b).await;
     assert!(b.is_empty(), "the second is closed: {b}");
     call(&w.api, "PUT", &format!("/v1/apps/services/{id}/environments/production"), Some(json!({"rate_limit": null}))).await;
+    // Its uptime checks connect to its port (Fly's TCP checks), past its rate limit and allow
+    // list as an HTTP check is past its gates; `contains` is looked for in its banner.
+    let base = format!("/v1/apps/services/{id}/environments/production");
+    for bad in [json!([{"name": "home", "path": "/"}]), json!([{"name": "port", "tcp": true, "path": "/"}]), json!([{"name": "port", "tcp": true, "status": 200}])] {
+        assert_eq!(call(&w.api, "PUT", &base, Some(json!({"checks": bad}))).await.0, StatusCode::BAD_REQUEST, "{bad}");
+    }
+    let (st, env) = call(&w.api, "PUT", &base, Some(json!({"checks": [{"name": "port", "tcp": true}], "allow_ips": ["10.9.9.9/32"]}))).await;
+    assert_eq!((st, env["checks"][0]["tcp"].as_bool()), (StatusCode::OK, Some(true)), "{env}");
+    let t0 = code_sql::now_ms() + 3_600_000;
+    let pass = |n: i64| {
+        let (w, base) = (&w, base.clone());
+        async move {
+            w.apps.cron_pass(t0 + n * 61_000).await;
+            let mut env = Value::Null;
+            for _ in 0..300 {
+                env = call(&w.api, "GET", &base, None).await.1;
+                if env["check_states"][0]["last_at"].as_i64() == Some(t0 + n * 61_000) {
+                    return env["check_states"][0].clone();
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            panic!("pass {n} never came back: {env}");
+        }
+    };
+    let up = pass(0).await;
+    assert_eq!((up["up"].as_bool(), up["error"].clone()), (Some(true), Value::Null), "{up}");
+    call(&w.api, "PUT", &base, Some(json!({"checks": [{"name": "port", "tcp": true, "contains": "MQTT", "timeout_s": 1}], "allow_ips": null}))).await;
+    pass(1).await;
+    let down = pass(2).await;
+    assert_eq!(down["up"].as_bool(), Some(false), "an HTTP app says nothing first: {down}");
+    assert!(down["error"].as_str().unwrap().contains("no answer in 1s"), "{down}");
+    call(&w.api, "PUT", &base, Some(json!({"checks": null}))).await;
     // Private, it has no public port (TCP carries no token): the private network reaches it.
     call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"public": false}}))).await;
     assert!(call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None).await.1["tcp"].is_null());

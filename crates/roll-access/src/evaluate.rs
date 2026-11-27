@@ -189,7 +189,7 @@ pub(crate) fn folder_from_body(row: &Row, target: &mut Target, body: Option<&Val
 /// What a request is about, from its row and path. `person`: a person's grant decides it (their
 /// session, or a token of theirs), which a canvas's project reaches only where it trusts the
 /// resource ([`Access::resource_as`]).
-pub(crate) fn target(access: &Access, row: &Row, params: &[(String, String)], query: Option<&str>, headers: &axum::http::HeaderMap, person: bool) -> Target {
+pub(crate) fn target(access: &Access, row: &Row, path: &str, params: &[(String, String)], query: Option<&str>, headers: &axum::http::HeaderMap, person: bool) -> Target {
     let param = |name: &str| params.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone());
     let product = row.product.to_string();
     // Storage acts in the account a request names. Bucket names repeat across accounts, so a
@@ -226,6 +226,10 @@ pub(crate) fn target(access: &Access, row: &Row, params: &[(String, String)], qu
             r.index = row.index.and_then(param);
             r.filters_itself = row.filters_itself;
             r.filters_index = row.filters_index;
+            // Only a path under `…/secrets/{key}`: another route's `{key}` (an encryption key, a
+            // decoy) is never read as a secret key.
+            r.key = if row.secret_key { catalog::secret_key_in(path) } else { None };
+            r.filters_keys = row.filters_keys;
             if let Some(name) = row.path_query {
                 let path = query.and_then(|qs| url::form_urlencoded::parse(qs.as_bytes()).find(|(k, _)| k == name).map(|(_, v)| v.into_owned()));
                 // As roll secrets spells it (`/api/` is `/api`), so a rule and an approval name it one way.
@@ -293,7 +297,7 @@ fn narrowed(scope: &Scope, product: &str, action: Action) -> bool {
     // A list answers at once: any rule about it that's narrower than every resource, or that
     // asks, means each item is checked, and only the ones allowed outright stay.
     let wide_allow = |r: &roll_auth::scope::Rule| {
-        r.resources == Resources::All && r.environments.is_none() && r.paths.is_none() && r.actions.get(&action) == Some(&roll_auth::scope::Effect::Allow)
+        r.resources == Resources::All && r.environments.is_none() && r.paths.is_none() && r.keys.is_none() && r.actions.get(&action) == Some(&roll_auth::scope::Effect::Allow)
     };
     let matching: Vec<_> = scope.0.iter().filter(|r| (r.product == "*" || r.product == product) && r.actions.contains_key(&action)).collect();
     !matching.iter().any(|r| wide_allow(r))
@@ -698,9 +702,9 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
         return deny(StatusCode::BAD_REQUEST, "bad_request", why, json!({}));
     }
     let mut target = {
-        let (a, q, h) = (access.clone(), original.query().map(str::to_string), parts.headers.clone());
+        let (a, q, h, path) = (access.clone(), original.query().map(str::to_string), parts.headers.clone(), original.path().to_string());
         let params = params.clone();
-        match tokio::task::spawn_blocking(move || target(&a, row, &params, q.as_deref(), &h, as_user)).await {
+        match tokio::task::spawn_blocking(move || target(&a, row, &path, &params, q.as_deref(), &h, as_user)).await {
             Ok(t) => t,
             Err(e) => return Error::Internal(e.to_string()).into_response(),
         }
@@ -843,6 +847,7 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
                     environments: r.environment.clone().map(|e| vec![e]),
                     paths: None,
                     unprotected: false,
+                    keys: None,
                     actions: [(own.0, roll_auth::scope::Effect::Allow)].into_iter().collect(),
                 }),
                 _ => None,
@@ -970,6 +975,7 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
                     environments: None,
                     paths: None,
                     unprotected: false,
+                    keys: None,
                     actions: [(action, roll_auth::scope::Effect::Allow)].into_iter().collect(),
                 };
                 let mut wider = (*scope).clone();
@@ -1034,7 +1040,7 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
                 let via = ctx.mcp.as_ref().map(|m| format!(", tool {}", m.tool)).unwrap_or_default();
                 format!("{action} {p} {id}{at}{also} ({} {}{via})", ctx.method, row.route)
             });
-            let asked = Asked { headers: &parts.headers, path: original.path(), body: &bytes, request_hash, args: ctx.args.clone(), environment, scope_path, scope_index, product: about, summary, also: lent_also_rule.clone() };
+            let asked = Asked { headers: &parts.headers, path: original.path(), body: &bytes, request_hash, args: ctx.args.clone(), environment, scope_path, scope_index, scope_key: lent_key.clone().filter(|_| lent.is_some()), product: about, summary, also: lent_also_rule.clone() };
             match ask(&ctx, row, action, resource.clone(), asked).await {
                 Ok(a) => approved = Some(roll_auth::Approved { by: approvers(&a), id: a.id.into(), until: None }),
                 Err(resp) => return *resp,
@@ -1296,18 +1302,23 @@ pub(crate) async fn lend_outcome(access: &Arc<Access>, row: &'static Row, params
             .await;
             // A lookup that fails decides nothing in the request's favour.
             let Ok(res) = resolved else { return Some(Lending { outcome: Outcome::Deny, product: "secrets", action: l.action, id: l.r#ref, all, folder: Some((env, path)), key: l.key.clone(), grants: Vec::new(), reads: Vec::new() }) };
-            let outcome = scope.outcome(&Target::One(res.clone()), l.action);
+            // The lent action on its one key, when the request names it: a rule for that key (`keys`)
+            // reaches it, and the rule handed over is for that key only.
+            let keyed = roll_auth::scope::Resource { key: l.key.clone(), ..res.clone() };
+            let outcome = scope.outcome(&Target::One(keyed), l.action);
             let id = res.id.clone().unwrap_or_default();
             let named = format!("{id}:{env}:{path}");
             if outcome != Outcome::Allow {
                 short.push(named.clone());
-                // Exactly that folder in that environment, for this one action.
+                // Exactly that folder in that environment (that key, when it's named), for this one
+                // action. Reading the folder to find it, below, stays the folder's.
                 grants.push(roll_auth::scope::Rule {
                     product: "secrets".into(),
                     resources: Resources::Some(vec![roll_auth::scope::Selector::Id { id: id.clone(), index: None }]),
                     environments: res.environment.clone().map(|e| vec![e]),
                     paths: res.path.clone().map(|p| vec![p]),
                     unprotected: false,
+                    keys: l.key.clone().map(|k| vec![k]),
                     actions: [(l.action, roll_auth::scope::Effect::Allow)].into_iter().collect(),
                 });
             }
@@ -1321,6 +1332,7 @@ pub(crate) async fn lend_outcome(access: &Arc<Access>, row: &'static Row, params
                     environments: res.environment.clone().map(|e| vec![e]),
                     paths: res.path.clone().map(|p| vec![p]),
                     unprotected: false,
+                    keys: None,
                     actions: [(Action::Read, roll_auth::scope::Effect::Allow)].into_iter().collect(),
                 });
             }
@@ -1443,6 +1455,8 @@ struct Asked<'a> {
     environment: Option<String>,
     scope_path: Option<String>,
     scope_index: Option<String>,
+    /// A lend's one secret key (`Lent::key`), which its path doesn't name.
+    scope_key: Option<String>,
     /// The product it's about (a link's: the linked resource's).
     product: &'static str,
     /// What the approval says it covers, when the route's own row doesn't say it (a lend's).
@@ -1466,7 +1480,7 @@ async fn ask(ctx: &Ctx, row: &Row, action: Action, resource: Option<String>, req
     if ctx.mcp.as_ref().is_some_and(|m| m.quiet || m.unattended) {
         return Err(Box::new(deny(StatusCode::FORBIDDEN, "would_ask", "this would ask a person, and roll's own work for a connection never does".into(), json!({}))));
     }
-    let Asked { headers, path, body, request_hash, args, environment, scope_path, scope_index, product: about, summary: lent_summary, also } = req;
+    let Asked { headers, path, body, request_hash, args, environment, scope_path, scope_index, scope_key, product: about, summary: lent_summary, also } = req;
     let access = &ctx.access;
     let mut existing = headers.get(APPROVAL_HEADER).and_then(|v| v.to_str().ok()).map(|v| v.trim().to_string());
     // The same request again (a client retrying after the person opened the approval, an agent
@@ -1516,6 +1530,7 @@ async fn ask(ctx: &Ctx, row: &Row, action: Action, resource: Option<String>, req
                     environment: environment.as_deref(),
                     scope_path: scope_path.as_deref(),
                     scope_index: scope_index.as_deref(),
+                    scope_key: scope_key.as_deref(),
                     wait_ms,
                     also: also.as_ref(),
                 })

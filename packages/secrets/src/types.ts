@@ -329,6 +329,8 @@ export type Token = {
   allowed_ips: string[] | null;
   /** Only these encryption keys (`payments,pay-*`), when its rule names some; null: the project. */
   keys?: string | null;
+  /** Only these secret keys of its folders (`STRIPE_KEY`), when its rule names some; null: every key. */
+  only_keys?: string[] | null;
 };
 /** A one-time share (never its ciphertext): `open` until its last open, expiry or revocation. */
 export type Share = { id: string; note: string; views_left: number; created_by: string; created_at: number; expires_at: number; opened_at: number | null; open: boolean; from?: ShareFrom };
@@ -399,7 +401,8 @@ export type NewBootstrap = { minutes?: number; allowed_ips?: string[]; credentia
 export type MadeBootstrap = { identity: string; chain: string; secret: string; expires_at: number };
 /** One of a machine identity's machines (`GET …/identities/{id}/machines`): `waiting` until its bootstrap token is exchanged, `live`, `ended` (not replaced before it ended) or `revoked`. Never a secret. */
 export type MachineChain = { chain: string; state: "waiting" | "live" | "ended" | "revoked"; credential_hours: number; created_at: number; created_by: string; refreshed_at: number | null; expires_at: number | null; revoked_at: number | null; revoked_why: string | null };
-export type NewToken = { name: string; environments?: string[]; paths?: string[]; actions: Action[]; expires_at?: number; ttl_days?: number; allowed_ips?: string[] };
+/** `only_keys`: only these keys of its folders (`STRIPE_KEY`), never a folder as a whole. */
+export type NewToken = { name: string; environments?: string[]; paths?: string[]; only_keys?: string[]; actions: Action[]; expires_at?: number; ttl_days?: number; allowed_ips?: string[] };
 /** `approval`: the approval that let the request through roll-access's gate (an `ask` approved; `until` when a rule it remembered allowed it). */
 /** `seq` and `hash` place a row in its project's chain (absent on rows from before it); an `audit.digest` row's `digest` is roll's signed JWS of it. */
 export type AuditEntry = { id: number; seq?: number; hash?: string; at: number; actor: string; action: string; environment: string | null; path: string | null; keys: string[]; summary: string; ip: string | null; approval?: Approval; digest?: string };

@@ -80,6 +80,14 @@ describe("the builder", () => {
     expect(draftOf(rules)).toEqual(d);
   });
 
+  it("keeps a secrets rule's keys, and leaves keys on another product's rule as they are", () => {
+    const d = { matrix: { secrets: { reveal: "allow" as const } }, project: "prj_a", environments: ["production"], ids: {}, keys: ["STRIPE_KEY"] };
+    const rules = rulesOf(d);
+    expect(rules).toEqual([{ product: "secrets", resources: [{ project: "prj_a" }], environments: ["production"], keys: ["STRIPE_KEY"], actions: { reveal: "allow" } }]);
+    expect(draftOf(rules)).toEqual(d);
+    expect(draftOf([{ product: "postgres", resources: "*", keys: ["A"], actions: {} }])).toBeNull();
+  });
+
   it("round-trips rules through its matrix, and leaves rules it can't show as they are", () => {
     const rules = [
       { product: "postgres", resources: [{ project: "prj_a" }], environments: ["development"], actions: { read: "allow", delete: "ask" } },

@@ -5905,8 +5905,8 @@ verifies them all.
 
 The roll-wide permission model (docs/permissions.md, `crates/roll-access`, branch
 `feature/roll-mcp`) decides who may do what: rolld's gate classifies each request by its route
-pattern and method into the product `secrets`, a resource (`{project, environments, paths}`) and one
-action:
+pattern and method into the product `secrets`, a resource (`{project, environments, paths, keys}`)
+and one action:
 
 | Action | Routes |
 | --- | --- |
@@ -5938,6 +5938,15 @@ that follow from it:
   environment, so none reaches them through a reference, an import or a base either.
 - **Folders.** A caller limited to some folders sees only their changes, change items, requests,
   audit rows and the leases of their secrets.
+- **Keys.** A rule with `keys: ["STRIPE_KEY"]` (docs/permissions.md, "Secrets' keys") reaches
+  only those keys of its folders: one key's routes (its value, versions, TOTP code, set, delete,
+  rotate, hosts, purge) at that key, and a folder's list, values (`roll run`, an export, `?seq=`),
+  resolve and batch of changes key by key: those keys alone, and a batch naming another is
+  refused with its name. A digest, a watch's delta, a `.env` import or diff, a promote, health
+  and leaks stay the folder's (403). `Scope::key` and `Scope::by_key` carry it to `Grants::allows`;
+  `access::reaches` asks it per key, and `Grants::limits_keys` skips that for every other caller.
+  `roll secrets tokens create … --key STRIPE_KEY` makes one. (Encryption keys are another
+  thing: `{id, index}`, below.)
 - **Fingerprints** are shown only to a caller who may reveal the value: a writer could otherwise
   test guesses against values it can't read. The grid's and compare's statuses still say whether
   two environments match, to a caller who can read both.

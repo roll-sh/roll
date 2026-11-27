@@ -396,7 +396,7 @@ impl Secrets {
     /// Bind shared key `key` of `slug`'s own folder `path` to `hosts`: an admin's, audited.
     pub fn set_hosts(&self, project: &str, slug: &str, path: &str, key: &str, hosts: Hosts, caller: &Caller) -> Result<Hosts> {
         let path = names::path(path)?;
-        caller.need(Action::Admin, &Scope::at(project, slug, &path))?;
+        caller.need(Action::Admin, &Scope::at(project, slug, &path).key(key))?;
         let dek = self.project(project)?;
         let hosts = hosts.checked()?;
         let now = self.db.now_ms()?;
@@ -431,7 +431,7 @@ impl Secrets {
     /// Take `key`'s binding off: its placeholders stop working at their next use.
     pub fn clear_hosts(&self, project: &str, slug: &str, path: &str, key: &str, caller: &Caller) -> Result<()> {
         let path = names::path(path)?;
-        caller.need(Action::Admin, &Scope::at(project, slug, &path))?;
+        caller.need(Action::Admin, &Scope::at(project, slug, &path).key(key))?;
         self.project(project)?;
         let (gone, held) = self.db.write(|c| {
             let env = envs::by_slug(c, project, slug)?;

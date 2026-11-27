@@ -377,28 +377,20 @@ impl Apps {
     /// notifying on what's still open when a snooze ends): one resolved since (a later event
     /// closing its key) is dropped, one still open queued to its targets as it would have been.
     async fn release_held(self: &Arc<Self>) {
-        let Ok(held) = self.db(|s| s.held_alerts(50)).await else { return };
         let now = code_sql::now_ms();
+        let Ok(held) = self.db(move |s| s.held_alerts(now, 50)).await else { return };
         for (seq, svc, env) in held {
             let Ok(Some(e)) = self.db(move |s| s.event(seq)).await else {
                 let _ = self.db(move |s| s.release_held(seq, &[])).await;
                 continue;
             };
+            // Still quiet: looked at again in a while, behind no one (another environment's held
+            // alerts are read meanwhile).
             if self.silenced(&svc, &env, &e.kind, now).await {
+                let _ = self.db(move |s| s.defer_held(seq, now + 30_000)).await;
                 continue;
             }
-            // Closed since? The events after it of its environment, a few pages at most.
-            let key = oncall_of(&e).map(|(_, k, _)| k);
-            let (mut after, mut closed) = (seq, false);
-            for _ in 0..10 {
-                let Ok(page) = self.db(move |s| s.events(after, 200)).await else { break };
-                let Some(last) = page.last().map(|x| x.seq) else { break };
-                closed = page.iter().any(|x| x.service == svc && x.environment == env && oncall_of(x).is_some_and(|(open, k, _)| !open && Some(&k) == key.as_ref()));
-                if closed {
-                    break;
-                }
-                after = last;
-            }
+            let closed = self.closed_since(&e).await;
             let mut rows = Vec::new();
             if !closed {
                 let sid = svc.clone();
@@ -417,6 +409,56 @@ impl Apps {
                 tracing::warn!(seq, error = %err, "apps: a held alert wasn't let go; tried again");
             }
         }
+    }
+
+    /// Whether a later event of `e`'s environment carries its on-call key: one that closes it
+    /// (`closing`), or any (a newer open or close). Read by the environment's own events, all of
+    /// them (a busy fleet's other events don't push it out of reach).
+    async fn later_with_key(self: &Arc<Self>, e: &Event, closing: bool) -> bool {
+        let Some((_, key, _)) = oncall_of(e) else { return false };
+        let mut after = e.seq;
+        loop {
+            let (sid, en) = (e.service.clone(), e.environment.clone());
+            let Ok(page) = self.db(move |s| s.env_events(&sid, &en, after, 1000)).await else { return false };
+            let Some(last) = page.last().map(|x| x.seq) else { return false };
+            if page.iter().any(|x| oncall_of(x).is_some_and(|(open, k, _)| k == key && (!closing || !open))) {
+                return true;
+            }
+            after = last;
+        }
+    }
+
+    /// Whether an alert that opens an incident was closed by a later event of its environment.
+    async fn closed_since(self: &Arc<Self>, e: &Event) -> bool {
+        matches!(oncall_of(e), Some((true, ..))) && self.later_with_key(e, true).await
+    }
+
+    /// `POST …/deliveries/{did}/redeliver`: a delivered or failed one sent again from its first
+    /// try. Not an on-call target's event of an alert that a later one opened or closed since: a
+    /// trigger would open a resolved incident again, a resolve close an open one.
+    pub async fn redeliver(self: &Arc<Self>, project: &str, target: &str, id: &str) -> Result<Delivery> {
+        let p = project.to_string();
+        let Some(t) = self.db(move |s| s.targets(&p)).await?.into_iter().find(|t| t.id == target) else {
+            return Err(Error::NotFound(format!("no notification target {target}")));
+        };
+        let (ti, di) = (target.to_string(), id.to_string());
+        let Some(d) = self.db(move |s| s.delivery(&ti, &di)).await? else {
+            return Err(Error::NotFound(format!("no delivery {id}")));
+        };
+        if matches!(t.kind.as_str(), "pagerduty" | "opsgenie") {
+            let seq = d.event;
+            if let Some(e) = self.db(move |s| s.event(seq)).await?
+                && self.later_with_key(&e, false).await
+            {
+                return Err(Error::Conflict("a later event of this alert went out since: sent again, this one would undo it (open a resolved incident or close an open one)".into()));
+            }
+        }
+        let (ti, di) = (target.to_string(), id.to_string());
+        if !self.db(move |s| s.redeliver(&ti, &di)).await? {
+            return Err(Error::Conflict("this delivery is still being tried".into()));
+        }
+        let (ti, di) = (target.to_string(), id.to_string());
+        self.db(move |s| s.delivery(&ti, &di)).await?.ok_or_else(|| Error::NotFound(format!("no delivery {id}")))
     }
 
     /// What's due, a few at a time (one slow target doesn't hold up the others), each try's
