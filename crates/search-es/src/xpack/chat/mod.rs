@@ -540,7 +540,10 @@ pub struct Answering {
     values: Option<Values>,
     deadline: tokio::time::Instant,
     timeout: Duration,
+    /// The answer as sent: the model's text made literal ([`answer`]).
     pub answer: String,
+    /// The model's own text (within the same cap), which citations and estimates read.
+    written: String,
     finish: Option<String>,
     refusal: bool,
     usage: Option<(u64, u64)>,
@@ -589,7 +592,7 @@ impl Answering {
 
     /// The source numbers the answer cites.
     pub fn cited(&self) -> Vec<usize> {
-        prompt::citations(&self.answer, &self.given)
+        prompt::citations(&self.written, &self.given)
     }
 
     /// `(prompt, completion)` tokens: the provider's count, else roll's estimate.
@@ -597,7 +600,7 @@ impl Answering {
         if self.given.is_empty() {
             return (0, 0);
         }
-        self.usage.unwrap_or((self.input_estimate, prompt::tokens(&self.answer)))
+        self.usage.unwrap_or((self.input_estimate, prompt::tokens(&self.written)))
     }
 
     pub fn usage_value(&self) -> Value {
@@ -620,7 +623,7 @@ impl Answering {
             t.add(i, o);
         }
         if let Some(c) = self.charge.take() {
-            let used = self.usage.map_or_else(|| prompt::tokens(&self.answer), |(_, o)| o);
+            let used = self.usage.map_or_else(|| prompt::tokens(&self.written), |(_, o)| o);
             c.limiter.refund_output(c.payer.as_ref(), &c.profile, c.per_day, c.output.saturating_sub(used));
         }
     }
@@ -682,6 +685,12 @@ impl Answering {
             if text.is_empty() {
                 continue;
             }
+            let room = MAX_ANSWER_BYTES.saturating_sub(self.written.len());
+            let written = prompt::cut(&text, room);
+            if let Err(e) = self.held.add(written.len() as u64, "<chat answer>") {
+                return Some(self.fail(e));
+            }
+            self.written.push_str(written);
             let safe = self.sanitizer.feed(&text);
             if let Some(e) = self.push(safe) {
                 return Some(e);
@@ -695,13 +704,15 @@ impl Answering {
         if text.is_empty() {
             return None;
         }
-        let room = MAX_ANSWER_BYTES.saturating_sub(self.answer.len());
-        let cut = prompt::cut(&text, room).to_string();
+        // A piece that doesn't fit goes whole: cutting one could end the answer inside an entity
+        // or a kept link.
+        let fits = text.len() <= MAX_ANSWER_BYTES.saturating_sub(self.answer.len());
+        let cut = if fits { text } else { String::new() };
         if let Err(e) = self.held.add(cut.len() as u64, "<chat answer>") {
             return Some(self.fail(e));
         }
         self.answer.push_str(&cut);
-        if cut.len() < text.len() {
+        if !fits {
             // Past the answer's cap: it ends here, and the upstream is closed.
             self.finish = Some("length".into());
             self.values = None;
@@ -797,6 +808,7 @@ pub async fn run(ctx: &Ctx<'_>, profile: &Profile, ask: Ask) -> EsResult<Answeri
         deadline,
         timeout,
         answer: String::new(),
+        written: String::new(),
         finish: None,
         refusal: false,
         usage: None,
@@ -810,16 +822,10 @@ pub async fn run(ctx: &Ctx<'_>, profile: &Profile, ask: Ask) -> EsResult<Answeri
         flushed: false,
         tokens: None,
     };
-    // Links only to the sources' own URLs, and only when the profile allows links.
+    // Links only to the sources' own URLs, those a link can hold as written
+    // (`answer::keepable`), and only when the profile allows links.
     if profile.allow_links {
-        let urls: Vec<String> = answering
-            .given
-            .iter()
-            .flat_map(|s| s.fields.values())
-            .filter_map(Value::as_str)
-            .filter(|u| u.starts_with("https://") || u.starts_with("http://"))
-            .map(str::to_owned)
-            .collect();
+        let urls: Vec<String> = answering.given.iter().flat_map(|s| s.fields.values()).filter_map(Value::as_str).filter(|u| answer::keepable(u)).map(str::to_owned).collect();
         answering.sanitizer = answer::Sanitizer::new(Some(urls));
     }
     if answering.given.is_empty() {
