@@ -3043,25 +3043,25 @@ overlaps stay within a repo.
 4. **Snapshots from the team's own Playwright or Cypress suite** (Argos's, Percy's SDKs; M):
    a step in their tests sends a page's picture to the preview's visual review.
 5. **Notes to Jira, GitHub Issues or Asana** (Marker.io, Netlify's Drawer; S).
-6. **A failed story shard counted as untaken, in review**: its share of the touched stories
-   holds the visual review, as the ones left out do.
-7. **Replaying recorded traffic against the preview and main** (Signadot, Speedscale; L): writes
+6. **Replaying recorded traffic against the preview and main** (Signadot, Speedscale; L): writes
    replay safely on branched data; capturing production's requests needs its privacy designed
    first.
-8. **A rehearsal that holds a change back** (a required rule): rehearsed at each head, so the
+7. **A rehearsal that holds a change back** (a required rule): rehearsed at each head, so the
    landing blocker never waits on the queue that would ask for it.
-9. **Older pushes past the last three, started on demand**; **what a note's reviewer saw, from
-    their own browser** (Jam, Marker.io).
-10. **Restore points for search and buckets**: search's once roll search's `reset {from}` is in
-    (its Next 32); buckets need a put-back on roll storage's side.
-11. **Previews for the members thread's next products**: once roll apps' and roll search's routes
+8. **Older pushes past the last three, started on demand**; **what a note's reviewer saw, from
+   their own browser** (Jam, Marker.io).
+9. **Restore points for search and buckets**: search's once roll search's `reset {from}` is in
+   (its Next 32); buckets need a put-back on roll storage's side.
+10. **Previews for the members thread's next products**: once roll apps' and roll search's routes
     become member routes (docs/members.md, v1.1).
-12. **Watches on pg-control**: the data step's Postgres compute start; cheap branches on ext4
+11. **Watches on pg-control**: the data step's Postgres compute start; cheap branches on ext4
     through overlay volumes; recovery to a time seconds old (unowned).
 
 Not to build: more lab checks on the first page (each adds noise to every pull request), or a
 Kubernetes cluster per preview (roll apps' Compose import covers multi-service apps, and a
 cluster would break "costs nothing asleep").
+
+Landed 2026-11-27, early: a failed story shard's share of the touched stories counted as untaken (#1175).
 
 Landed 2026-11-26, midday: restore points for streams (#1112), the TurboSnap test's race under
 load (#1114), the tenth review's fixes (#1119), the visual review holding on stories a change
