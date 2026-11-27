@@ -638,6 +638,34 @@ fn sorted_setops() {
         let f1 = int(&mut s, "SELECT temp_files FROM pg_stat_database WHERE datname = current_database()");
         assert_eq!(f1 - f0, 2, "{sql}: the two Sorts' files");
     }
+    // EXPLAIN ANALYZE: each Sort's own rows (the second input read as far as the first's
+    // groups go) and tuplesort's method, PostgreSQL 18.6's. (Its Disk figures are extsort's
+    // model's, a plain Sort's: 1000kB where PostgreSQL shows 1008kB.)
+    let analyzed = |s: &mut Session, sql: &str| -> Vec<String> {
+        let plan = q(s, &format!("EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) {sql}")).unwrap();
+        plan.iter()
+            .map(|r| match &r[0] {
+                Value::Text(t) => t.trim().to_string(),
+                v => format!("{v:?}"),
+            })
+            .filter(|l| l.starts_with("->  Sort") || l.starts_with("Sort Method"))
+            .map(|l| l.split("  Disk").next().unwrap_or_default().to_string())
+            .collect()
+    };
+    let got = analyzed(&mut s, "SELECT t, a FROM so INTERSECT ALL SELECT t, a FROM so WHERE a % 3 = 0");
+    assert_eq!(
+        got,
+        [
+            "->  Sort (actual rows=6666.00 loops=1)",
+            "Sort Method: external merge",
+            "->  Sort (actual rows=19988.00 loops=1)",
+            "Sort Method: external merge",
+        ]
+    );
+    q(&mut s, "SET work_mem = '4MB'").unwrap();
+    let got = analyzed(&mut s, "SELECT t, a FROM so WHERE a > 8000 EXCEPT ALL SELECT t, a FROM so WHERE a > 100");
+    assert_eq!(got[0], "->  Sort (actual rows=1998.00 loops=1)");
+    assert_eq!(got[2], "->  Sort (actual rows=19691.00 loops=1)");
     drop(s);
     eng.shutdown();
 }
