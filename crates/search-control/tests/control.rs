@@ -7799,7 +7799,7 @@ async fn opensearch_semantic_search_follows_the_guide() {
     ok(e.es(&u, &p, Method::PUT, "/_ingest/pipeline/nlp", Some(json!({"processors": [{"text_embedding": {"model_id": mid, "field_map": {"text": "text_vec"}}}]}))).await);
     let index = json!({
         "settings": {"index.knn": true, "default_pipeline": "nlp"},
-        "mappings": {"properties": {"text": {"type": "text"}, "text_vec": {"type": "knn_vector", "dimension": 3, "method": {"name": "hnsw", "space_type": "l2", "engine": "lucene"}}}}
+        "mappings": {"properties": {"text": {"type": "text"}, "text_vec": {"type": "knn_vector", "dimension": 3, "method": {"name": "hnsw", "space_type": "cosinesimil", "engine": "lucene"}}}}
     });
     ok(e.es(&u, &p, Method::PUT, "/docs", Some(index)).await);
     for (id, text) in [("1", "a cat sleeps"), ("2", "a dog barks"), ("3", "the weather")] {
