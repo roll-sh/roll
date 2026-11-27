@@ -285,12 +285,12 @@ export function approvalWhere(a: Pick<Approval, "environment" | "scope_path">): 
 }
 
 /** Whether approving it can be remembered: it's about one resource, and roll's policy doesn't ask several people for it. */
-export const rememberable = (a: Pick<Approval, "resource" | "gates"> & { method?: string; args?: unknown; product?: string; scope_path?: string | null; route?: string }) =>
+export const rememberable = (a: Pick<Approval, "resource" | "gates"> & { method?: string; args?: unknown; product?: string; scope_path?: string | null; scope_key?: string | null; route?: string }) =>
   Boolean(a.resource && !a.resource.startsWith("new in ")) && !a.gates?.length && !accessRequest(a) && !lendsWholeEnvironment(a);
 
-/** Whether `a` lends a whole environment's secrets to another product's route (apps' DNS token as `roll://production/KEY`): approved once, never remembered (the server refuses), since every later call would reveal every key there. */
-export function lendsWholeEnvironment(a: { product?: string; scope_path?: string | null; route?: string }): boolean {
-  return a.product === "secrets" && isRoot(a.scope_path) && Boolean(a.route) && !a.route!.startsWith("/v1/secrets");
+/** Whether `a` lends a whole environment's secrets to another product's route, naming no key: approved once, never remembered (the server refuses), since every later call would reveal every key there. One naming its key (`scope_key`: apps' DNS token as `roll://production/KEY`) is remembered for that key. */
+export function lendsWholeEnvironment(a: { product?: string; scope_path?: string | null; scope_key?: string | null; route?: string }): boolean {
+  return a.product === "secrets" && !a.scope_key && isRoot(a.scope_path) && Boolean(a.route) && !a.route!.startsWith("/v1/secrets");
 }
 
 /** An access request (a token asking for one more rule for a while): how long and why, or null for a request waiting to run. */
@@ -361,6 +361,8 @@ export interface Approval {
   scope_path?: string | null;
   /** The indices it was about (search). */
   scope_index?: string | null;
+  /** The one secret key a lend's approval is about (its path names another product's route). */
+  scope_key?: string | null;
 }
 
 /** Actions that destroy, ship, expose a credential or change who may do what: approve them with care. */
