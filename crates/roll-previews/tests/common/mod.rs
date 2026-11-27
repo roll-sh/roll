@@ -361,7 +361,7 @@ pub struct FakeApps {
     /// Builds started again on an earlier push's copy: (service, deployment, the variables).
     pub views: Mutex<Vec<(String, String, Vars)>>,
     /// The webhook URLs each service was last deployed with: (path, token SHA-256).
-    pub hooks: Mutex<HashMap<(String, String), Vec<(String, String)>>>,
+    pub hooks: Mutex<HashMap<(String, String), Vars>>,
     /// What `fetch` answers for a service, URL and path (`<service> <url><path>`; unset: 200).
     pub fetched: Mutex<HashMap<String, u16>>,
     /// Whether services run on roll's runtime here (`can_swap`).
