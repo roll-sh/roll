@@ -305,11 +305,13 @@ impl Secrets {
     /// makes: the one project that holds and stands for `resource`, `reveal` on the folder for the
     /// caller (an approval of an `ask` there is enough, since it's this request's: the gate lends
     /// it), no protected environment for an untrusted copy, and no caller that's itself untrusted.
-    /// A sensitive key only with `to`: the one fixed host the product sends it to, a constant in
-    /// its code (`roll_edge::acme::Cloudflare::API`), so the value goes there from roll's process
-    /// and never to the caller (without it a person or a token never reads one). Audited as
-    /// `secrets.use` by the caller, naming the resource, `purpose` (a fixed phrase of the
-    /// product's, never a value) and `to`.
+    /// Never a sensitive key, `to` or not: a person who may reveal the folder but not read the
+    /// key would otherwise have roll act with it wherever it reaches (a DNS token writing records
+    /// in every zone it can edit), so it waits for an opt-in on the key its owner sets. `to` is
+    /// the one fixed host the product sends the value to, a constant in its code
+    /// (`roll_edge::acme::Cloudflare::API`), named in the audit. Audited as `secrets.use` by the
+    /// caller, naming the resource, `purpose` (a fixed phrase of the product's, never a value) and
+    /// `to`.
     pub fn use_once(&self, resource: &ResourceRef, reference: &str, caller: &Caller, purpose: &str, to: Option<&'static str>) -> Result<Resolved, Refusal> {
         if to.is_some_and(|t| !t.starts_with("https://") || t.contains('@')) {
             return Err(Refusal::Failed(Error::Internal("a fixed host is an https:// URL with no credentials".into())));
@@ -320,15 +322,12 @@ impl Secrets {
             return Err(Refusal::NotAllowed(format!("{} runs code nobody vetted, so it reads no roll:// reference", caller.principal)));
         }
         self.may_reveal_for(&project, &r, caller)?;
-        // Read with the caller's rights, never as a runtime, and named for the resource (with a `:`,
-        // so no person's own overrides are read: `Caller::personal`).
+        // Read with the caller's rights, never as a runtime (so a sensitive key is refused, even for
+        // a fixed host: `consumer_entry`), and named for the resource (with a `:`, so no person's
+        // own overrides are read: `Caller::personal`).
         let by = caller.made_by().to_string();
         let mut reader = caller.clone().not_runtime().acting_as(format!("{} for {by}", resource.consumer()));
         reader.maker = Some(by);
-        // Bound for a fixed host, the value goes from roll's process to it, never to the caller:
-        // read as roll's own runtime would, so a sensitive key is read too (an untrusted copy's
-        // reader still never is one: `consumer_entry`).
-        reader.runtime = to.is_some();
         let resource = &ResourceRef { placeholders: false, ..resource.clone() };
         self.resolve_one(&project, &r.env, &r.path, &r.key, &reader, resource.untrusted, resource, Some(crate::read::Once { by: caller, purpose, to }))
     }
