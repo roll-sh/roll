@@ -42,6 +42,14 @@ pub const E5_NAME: &str = "intfloat/multilingual-e5-small";
 
 const ACCESS_SETTING: &str = "plugins.ml_commons.model_access_control_enabled";
 
+/// `MLPredictionTaskAction.NAME`: what running a remote model takes.
+const PREDICT: &str = "cluster:admin/opensearch/ml/predict";
+/// The most texts one document or request embeds (one call for most connectors, one each with
+/// Bedrock's pre-process, which [`connector::MAX_CALLS`] bounds lower).
+pub const MAX_TEXTS: usize = 256;
+/// Completed task documents kept: the oldest go past it.
+const MAX_TASKS: usize = 1000;
+
 /// The APIs this module serves.
 pub fn implemented(api: Api) -> bool {
     matches!(
@@ -219,6 +227,11 @@ async fn update_connector(ctx: &Ctx<'_>) -> EsResult<Reply> {
                 return Err(EsError::status(400, format!("{} models are still using this connector, please undeploy the models first: [{}]", live.len(), live.join(", "))));
             }
             let (rec, _) = connector::parse(&body, Some(&shown(&before)), now)?;
+            // Where the credential goes may only move with the credential given again: the
+            // stored one never follows a new protocol, URL or header to another host.
+            if given.is_none() && connector::moves_credential(&shown(&before), &rec) {
+                return Err(iae("the connector's protocol, an action's URL or headers, or a parameter they name changes: give its [credential] again"));
+            }
             let mut rec = rec;
             if let (Value::Obj(m), Some(v)) = (&mut rec, before.get("_roll_version")) {
                 m.insert("_roll_version".into(), v.clone());
@@ -285,7 +298,8 @@ fn may_use(st: &crate::meta::ClusterState, p: Option<&Principal>, group: &Value)
     if !access_control(st) {
         return true;
     }
-    let Some(p) = p else { return true };
+    // No caller to check (internal work): closed while access is controlled.
+    let Some(p) = p else { return false };
     let w = who(p);
     if w.admin {
         return true;
@@ -422,6 +436,13 @@ async fn update_group(ctx: &Ctx<'_>) -> EsResult<Reply> {
             if !may_use(st, Some(&p), &g) {
                 return Err(no_permission(&id));
             }
+            // `MLModelGroupManager`: only the owner or an admin changes who may use the group.
+            if ["access_mode", "backend_roles", "add_all_backend_roles"].iter().any(|k| body.contains_key(*k)) && access_control(st) {
+                let w = who(&p);
+                if !w.admin && g.pointer(&["owner", "name"]).and_then(Value::as_str) != Some(w.name.as_str()) {
+                    return Err(EsError::new(403, "status_exception", "Only owner or admin can update access control data."));
+                }
+            }
             let access = access_fields(st, &body, &p, false)?;
             if let Some(n) = body.get("name").and_then(Value::as_str)
                 && let Some((other, _)) = group_named(st, n).filter(|(gid, _)| **gid != id)
@@ -495,6 +516,21 @@ pub fn model(st: &crate::meta::ClusterState, id: &str) -> Option<Value> {
         return Some(e5_record());
     }
     st.metadata.xpack.get(MODELS, id).cloned()
+}
+
+/// Stores a task document, dropping the oldest past [`MAX_TASKS`] (tasks are done when they're
+/// answered; the metadata holds them, so they can't grow without bound).
+fn put_task(st: &mut crate::meta::ClusterState, id: &str, rec: Value, now: i64) -> EsResult<(i64, i64)> {
+    let out = put(st, TASKS, id, rec, now)?;
+    let n = st.metadata.xpack.len(TASKS);
+    if n > MAX_TASKS {
+        let mut by_age: Vec<(i64, String)> = st.metadata.xpack.iter(TASKS).map(|(k, t)| (t.get("create_time").and_then(Value::as_i64).unwrap_or(0), k.clone())).collect();
+        by_age.sort();
+        for (_, k) in by_age.into_iter().take(n - MAX_TASKS) {
+            store::remove(st, TASKS, &k);
+        }
+    }
+    Ok(out)
 }
 
 fn task_record(model_id: &str, ty: &str, function: &str, node: &str, asynchronous: bool, now: i64) -> Value {
@@ -624,10 +660,10 @@ async fn register_model(ctx: &Ctx<'_>) -> EsResult<Reply> {
             if let Some(s) = inline_credential {
                 store::put(st, SECRETS, &format!("model:{mid}"), s, now)?;
             }
-            put(st, TASKS, &tid, task_record(&mid, "REGISTER_MODEL", function, &node, false, now), now)?;
+            put_task(st, &tid, task_record(&mid, "REGISTER_MODEL", function, &node, false, now), now)?;
             if deploy_now {
                 let dt = crate::meta::names::time_based_id();
-                put(st, TASKS, &dt, task_record(&mid, "DEPLOY_MODEL", function, &node, true, now), now)?;
+                put_task(st, &dt, task_record(&mid, "DEPLOY_MODEL", function, &node, true, now), now)?;
             }
             Ok(())
         })
@@ -723,7 +759,7 @@ async fn deploy(ctx: &Ctx<'_>, on: bool) -> EsResult<Reply> {
                 let next = if on { deployed_record(m, &n, now) } else { undeployed_record(m, now) };
                 put(st, MODELS, &rid, next, now)?;
                 if on {
-                    put(st, TASKS, &tid, task_record(&rid, "DEPLOY_MODEL", function, &n, true, now), now)?;
+                    put_task(st, &tid, task_record(&rid, "DEPLOY_MODEL", function, &n, true, now), now)?;
                 }
                 Ok(())
             })
@@ -780,10 +816,18 @@ async fn ensure_deployed(cluster: &Cluster, id: &str, m: &Value, now: i64) -> Es
 /// Embeds `texts` with model `id` as `p` (ingest's `text_embedding`, `neural`): `search` says
 /// whether they're queries (E5's query prefix) or documents.
 pub async fn embed(cluster: &Cluster, id: &str, texts: &[String], p: Option<&Principal>, search: bool) -> EsResult<Vec<Vec<f32>>> {
+    if texts.len() > MAX_TEXTS {
+        return Err(iae(format!("[{}] texts to embed at once, more than roll's [{MAX_TEXTS}]", texts.len())));
+    }
     let st = cluster.state();
     let m = usable(&st, id, p)?;
     let run = runner(&st, id, &m)?;
     drop(st);
+    // A remote model calls a provider on the owner's key: as OpenSearch's plugins call the
+    // predict action as the user, the caller needs it (roll's own E5 needs nothing more).
+    if let (Runner::Remote(_), Some(p)) = (&run, p) {
+        crate::xpack::security::check_cluster_action_of(cluster, p, PREDICT)?;
+    }
     let timeout = Duration::from_secs(30);
     let vectors = match run {
         Runner::E5 => {
@@ -863,6 +907,12 @@ fn get_task(ctx: &Ctx) -> EsResult<Reply> {
     let id = path(ctx, "task_id");
     let st = ctx.state();
     let t = st.metadata.xpack.get(TASKS, &id).ok_or_else(|| EsError::status(404, "Failed to find task"))?;
+    // A task shows its model's id: only to who may use the model (a deleted one's stays visible).
+    if let Some(mid) = t.get("model_id").and_then(Value::as_str)
+        && model(&st, mid).is_some()
+    {
+        usable(&st, mid, Some(crate::xpack::security::principal(ctx)))?;
+    }
     Reply::ok(shown(t))
 }
 

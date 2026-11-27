@@ -178,6 +178,10 @@ Each is the stricter choice, or what the code shows the design assumed wrongly.
 - **Credentials reach headers and the URL only.** Only what the connector stores fills the URL
   and headers. A `_predict` call's `parameters` reach the body only, so a caller can't send the
   credential to a host it picks. OpenSearch fills the URL from predict-time parameters too.
+- **A connector update that moves the credential must give it again.** Changing the protocol, an
+  action's URL or headers, or a stored parameter they name, without a new `credential`, is a 400.
+  Otherwise anyone allowed to update connectors could send the stored key to a host of their own.
+  OpenSearch keeps the old credential.
 - **Functions:** only the built-in embedding pre- and post-process functions run (`openai`,
   `cohere`, `default` and `bedrock` `.embedding`). Any other name, and any Painless, is refused
   when the connector is written. OpenSearch accepts any name and fails later.
@@ -191,8 +195,18 @@ Each is the stricter choice, or what the code shows the design assumed wrongly.
     it's off.
   - OpenSearch's read-only role is `ml_read_access`, not `ml_readonly_access`. Both roles come
     from the security plugin's captured configuration.
+  - `neural` and `text_embedding` run a remote model only for a caller holding
+    `cluster:admin/opensearch/ml/predict`, as OpenSearch's plugins call the predict action as the
+    user. roll's own E5 needs nothing more.
+  - `_reindex` and the by-query APIs run pipelines as their caller, so model groups' access
+    applies there too. With access control on, work with no caller to check is refused.
+  - Only the owner or an admin changes a group's access mode or backend roles.
+  - `GET _plugins/_ml/tasks/{id}` checks the task's model against the caller.
 - **Tasks** are `COMPLETED` when they're answered. `_register?deploy=true` also records the
-  deploy task.
+  deploy task. The newest 1,000 are kept.
+- **Bounds:** one document or request embeds at most 256 texts, and at most 32 with a
+  pre-process that takes one text a call (Bedrock's). A connector calls at most 10,000 times a
+  minute per model.
 - **`text_embedding`:**
   - A processor reads its texts where it runs. The vectors are written when its pipeline ends,
     before the next pipeline or the write. So a later processor in the same pipeline doesn't see
@@ -203,15 +217,17 @@ Each is the stricter choice, or what the code shows the design assumed wrongly.
 - **`neural`:**
   - It's embedded on the coordinator before the search runs, wherever it is in the search's query
     (`hybrid` included).
-  - In an aggregation's filter or a rescore query it's refused.
+  - Elsewhere it's refused: in an aggregation's filter or a rescore query, and in `_count`,
+    `_explain`, `_validate/query` and the by-query APIs.
   - `query_image` is refused (multimodal is phase 2).
 - **Local models:** E5 is pre-registered as `.multilingual-e5-small` and registers under
   `intfloat/multilingual-e5-small`. A node without the embedder answers as Elasticsearch-flavor
   E5 does without one.
 - **Not here yet:**
   - the dashboard's Inference tab doesn't list OpenSearch models;
-  - remote calls aren't metered per model. `_inference` doesn't meter provider tokens either; the
-    provider's key is the tenant's.
+  - embedding calls aren't metered, as `_inference`'s embeddings aren't. A `_predict` call without
+    an embedding post-process answers as a completion does, so its tokens are metered the way
+    #1141 meters completions (the provider's figures, else roll's estimate).
 
 ### For OpenSearch customers
 

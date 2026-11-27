@@ -51,6 +51,13 @@ const POST: &[&str] = &[
     "connector.post_process.bedrock.embedding",
 ];
 
+/// The most calls one embedding makes with a pre-process that takes one text a call (Bedrock's).
+pub const MAX_CALLS: usize = 32;
+
+/// A connector's calls a minute when nothing lowers it (the `custom` service's default), per
+/// model, through the inference client's limiter.
+const PER_MINUTE: i64 = 10_000;
+
 /// `ConnectorAction.ActionType`.
 const ACTION_TYPES: &[&str] = &["PREDICT", "EXECUTE", "BATCH_PREDICT", "CANCEL_BATCH_PREDICT", "BATCH_PREDICT_STATUS"];
 
@@ -221,6 +228,24 @@ fn function_refused(which: &str, f: &str) -> EsError {
     }
 }
 
+/// Whether an update from stored record `before` to `after` changes where the credential goes:
+/// the protocol, an action's URL or headers, or a stored parameter those templates name. Then
+/// the credential must be given again ([`super`]'s `update_connector`).
+pub fn moves_credential(before: &Value, after: &Value) -> bool {
+    let s = |v: &Value, k: &str| v.get(k).cloned().unwrap_or(Value::Null);
+    if s(before, "protocol") != s(after, "protocol") {
+        return true;
+    }
+    let targets = |v: &Value| -> Vec<(Value, Value)> { v.get("actions").and_then(Value::as_array).map(|a| a.iter().map(|x| (s(x, "url"), s(x, "headers"))).collect()).unwrap_or_default() };
+    let (tb, ta) = (targets(before), targets(after));
+    if tb != ta {
+        return true;
+    }
+    let named: Vec<String> = ta.iter().flat_map(|(u, h)| [u.to_json(), h.to_json()]).flat_map(|t| t.split("${parameters.").skip(1).filter_map(|r| r.split_once('}').map(|(n, _)| n.to_string())).collect::<Vec<_>>()).collect();
+    let param = |v: &Value, n: &str| v.get("parameters").and_then(|p| p.get(n)).cloned();
+    named.iter().any(|n| param(before, n) != param(after, n))
+}
+
 /// The credential as stored: sealed under the inference keys' kind (bound to the cluster).
 pub fn seal(cluster: &Cluster, credential: &Map) -> EsResult<Value> {
     let kind = crate::xpack::inference::secret_kind(cluster);
@@ -371,6 +396,9 @@ pub async fn predict(cluster: &Cluster, model: &str, c: &Connector, input: Input
         Input::Texts(texts) => {
             let (param, one) = c.pre.map_or(("input", false), |(_, p, one)| (*p, *one));
             if one {
+                if texts.len() > MAX_CALLS {
+                    return Err(iae(format!("[{}] texts at once for a connector that takes one a call; roll's limit is [{MAX_CALLS}]", texts.len())));
+                }
                 texts.iter().map(|t| obj_map(param, Value::from(t.as_str()))).collect()
             } else {
                 vec![obj_map(param, Value::Arr(texts.iter().map(|t| Value::from(t.as_str())).collect()))]
@@ -404,13 +432,20 @@ pub async fn predict(cluster: &Cluster, model: &str, c: &Connector, input: Input
         if c.sigv4 {
             headers.extend(sign(&url, &bytes, &c.parameters, &cred)?);
         }
-        let call = Call { inference_id: model, url, headers, body: bytes, timeout, retry: http::retry_server_errors, per_minute: None };
+        let estimate = (c.post.is_none()).then(|| crate::xpack::inference::tokens::estimate(&String::from_utf8_lossy(&bytes)));
+        let call = Call { inference_id: model, url, headers, body: bytes, timeout, retry: http::retry_server_errors, per_minute: Some(PER_MINUTE) };
         let answer = http::post(cluster, &call).await?;
         if !answer.ok() {
             let text = String::from_utf8_lossy(&answer.body[..answer.body.len().min(1024)]).into_owned();
             return Err(EsError::status(answer.status, format!("Error from remote service: {text}")));
         }
         let raw = answer.json().ok_or_else(|| EsError::status(500, "Error from remote service: the answer isn't JSON"))?;
+        // A call without an embedding post-process answers as a completion does: its tokens are
+        // metered as #1141 meters completions (the provider's figures, else roll's estimate).
+        if let Some(input) = estimate {
+            let (i, o) = crate::xpack::inference::tokens::Reported::of(&raw).or(input, crate::xpack::inference::tokens::estimate(&raw.to_json()));
+            cluster.xpack.tokens.add(i, o);
+        }
         let embeddings = c.post.map(|f| post_process(f, &raw)).transpose()?;
         out.push(Answer { raw, embeddings });
     }

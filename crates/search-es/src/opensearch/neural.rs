@@ -112,6 +112,8 @@ impl Neural {
         if set == 0 {
             q.k = Some(DEFAULT_K);
         }
+        // The k-NN search it becomes: the same bounds, before any embedding.
+        q.knn(Vec::new()).validate()?;
         q.common.boost = check_boost(boost, || q.clone().into())?;
         Ok(q)
     }

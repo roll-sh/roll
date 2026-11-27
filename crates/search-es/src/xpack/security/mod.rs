@@ -1556,8 +1556,13 @@ pub(crate) fn who(p: &Principal) -> String {
 
 /// Whether the request's principal may run cluster action `action`, else Elasticsearch's 403.
 pub fn check_cluster_action(ctx: &Ctx, action: &str) -> EsResult<()> {
-    let p = principal(ctx);
-    if p.is_superuser() || effective(&file_roles(ctx.cluster), &ctx.state(), p).allows_cluster(action) {
+    check_cluster_action_of(ctx.cluster, principal(ctx), action)
+}
+
+/// [`check_cluster_action`] for principal `p` (work a request hands on, such as an ES|QL query's
+/// resource loading).
+pub fn check_cluster_action_of(cluster: &crate::Cluster, p: &Principal, action: &str) -> EsResult<()> {
+    if p.is_superuser() || effective(&file_roles(cluster), &cluster.state(), p).allows_cluster(action) {
         return Ok(());
     }
     Err(denied(p, action, None))
