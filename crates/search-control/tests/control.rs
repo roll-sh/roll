@@ -7941,6 +7941,17 @@ async fn otlp_logs_land_in_otel_data_streams_with_an_otel_key() {
     assert_eq!(hits[0]["_source"]["resource"]["attributes"]["service.name"], "checkout", "{v}");
     assert!(hits[0]["_index"].as_str().unwrap().contains("logs-generic.otel-default"), "{v}");
     assert!(hits[1]["_index"].as_str().unwrap().contains("logs-web.otel-default"), "{v}");
+    // Traces too: a span into traces-*.otel-*, its event a log line beside it.
+    let trace = json!({"resourceSpans": [{"scopeSpans": [{"spans": [{"traceId": "abababababababababababababababab", "spanId": "0101010101010101",
+        "name": "GET /cart", "kind": 2, "startTimeUnixNano": "1700000002000000000", "endTimeUnixNano": "1700000002250000000",
+        "events": [{"timeUnixNano": "1700000002100000000", "name": "exception"}]}]}]}]});
+    let r = e.http.post(format!("{}/_otlp/v1/traces", e.es)).header("authorization", format!("ApiKey {key}")).json(&trace).send().await.unwrap();
+    assert_eq!((r.status().as_u16(), r.text().await.unwrap()), (200, "{}".to_string()));
+    assert_eq!(e.es(&u, &p, Method::POST, "/traces-*.otel-*,logs-*.otel-*/_refresh", None).await.0, 200);
+    let (_, v) = e.es(&u, &p, Method::POST, "/traces-*.otel-*/_search", None).await;
+    assert_eq!((&v["hits"]["hits"][0]["_source"]["duration"], &v["hits"]["hits"][0]["_source"]["kind"]), (&json!(250000000), &json!("Server")), "{v}");
+    let (_, v) = e.es(&u, &p, Method::POST, "/logs-*.otel-*/_search", Some(json!({"query": {"term": {"event_name": "exception"}}}))).await;
+    assert_eq!(v["hits"]["hits"][0]["_source"]["trace_id"], "abababababababababababababababab", "{v}");
     // The key writes and never reads (a wildcard would just find nothing it may read).
     let (s, v) = as_key(&e, &key, Method::POST, "/logs-generic.otel-default/_search", None).await;
     assert_eq!(s, 403, "{v}");
