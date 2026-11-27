@@ -23567,6 +23567,35 @@ only).
 311's format 5 scans): plain 2.88 G against pgrust's 2.22 G (PGO not measured with it). q02's SubPlan (min
 supply cost a part, 1,309 runs) repeats too few values to gain; q20's never repeat.
 
+## The standing on the shipped build, 2026-11-27 (agent 344)
+
+BENCH "Standing, 2026-11-27" re-measures roll's column of the standing on origin's `19c7a8758` with
+one shipped build (`tools/dist-pgo.sh`: a profile trained on its parent `68ec346cb` by the shipped
+recipe, the optimised build made again on the head after cand/a341-2 landed, staleness 0.04% of the hot
+functions' counts). PostgreSQL 18.6's and pgrust's columns are agent 314's (2026-11-24) and agent
+333's (TPC-B-like, its standing measure, 2026-11-26), not rerun. No code changed.
+
+- roll PGO now leads: the TPC-H total (74.93 G user instructions against pgrust's 86.56, 0.87x; 314:
+  1.00x), the bulk script (61.37 G against 86.14) and its bytes written (297 MB against 3,342) and,
+  since agent 343's round 8, its peak memory (242 MB against PostgreSQL's 386), every select-only and
+  range-read user instruction and user cycle cell, TPC-B-like by 333's measure at 8 and 32 clients
+  (287.2 k / 291.8 k a transaction against PostgreSQL's 313.9 k / 341.2 k), and the idle sessions'
+  memory (9.2 / 41.7 / 320 MB).
+- Behind, largest ratio first (BENCH has the list with every cell): the bulk DELETE of a quarter with
+  its compaction (5.95 G, 3.87x pgrust's 1.54); TRUNCATE's window (0.068 G, 2.12x PostgreSQL's 0.032:
+  background work after it, not examined); TPC-H q02 / q11 / q14 / q20 (1.73-1.86x: agent 345's this
+  round); count(*) after the DELETE (1.73x pgrust: the format 4 column decode); kernel instructions per
+  1,000-row read (1.63x pgrust); TPC-H q05, q16, q08, q17, q10, q04, q07 (1.16-1.41x); CREATE UNIQUE
+  INDEX (1.33x pgrust); q01, q19, q03, q21, q13 and CREATE INDEX within 1.00-1.09x. Readings behind:
+  TPC-H's wall time (1.19x pgrust, under 3.15 foreign cores), select-only p99 at 8 clients.
+- The 1,000-row range read's first run fell into a loaded minute (its `pgbench -i` 17.3 s against 6.4
+  s; 1.88 M user / 133 k kernel instructions a read, 1,618 tps) and was run again (1.71 M / 99.7 k,
+  6,302 tps, 1.08 foreign cores): the table has the second.
+
+Left: the rows above. Harness `~/.cache/a344/bench` (`cells.sh`, `chainc.sh`, `table2.py`); the shipped
+recipe needs about 95 minutes of builds on a quiet machine (instrumented 43 min, training 11 min,
+optimised 39-42 min), and re-using a one-commit-old profile with `--profdata` saved the first two.
+
 ## The standing on the shipped build, 2026-11-24 (agent 314)
 
 BENCH "Standing, 2026-11-24" is one table of every benchmarked workload with roll PGO
