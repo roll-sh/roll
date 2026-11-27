@@ -195,6 +195,11 @@ pub(super) fn plan(
         security: None,
     };
     let targets = crate::search::shard_targets(cluster, &st, &req).ok()?;
+    // Shards are read here with no security of their own: only indices the caller may read by
+    // name (one reached through an alias goes through the search API, which applies the alias).
+    if targets.iter().any(|t| !super::caller_reads(cluster, &t.idx.name)) {
+        return None;
+    }
     let mut by_index: Vec<(String, Arc<Vec<ColSpec>>)> = Vec::new();
     let mut out = Vec::with_capacity(targets.len());
     for t in targets {

@@ -321,7 +321,7 @@ pub(super) fn enrich_allowed(cluster: &crate::Cluster, name: &str, table: Option
         let Some(table) = table else { return Ok(()) };
         // The indices the table about to be read (enrich index `table`) was built from, a
         // source deleted since included ([`crate::xpack::enrich::sources_of`]).
-        let built = crate::xpack::enrich::sources_of(&cluster.state(), name, table, crate::time::now_millis()).unwrap_or_default();
+        let built = crate::xpack::enrich::sources_of(&cluster.state(), table).unwrap_or_default();
         if !built.is_empty() && crate::xpack::security::allows_indices_of(cluster, p, "indices:data/read/esql", &built) {
             Ok(())
         } else {
@@ -332,6 +332,13 @@ pub(super) fn enrich_allowed(cluster: &crate::Cluster, name: &str, table: Option
         Ok(r) => r,
         Err(_) => Err(EsError::illegal_state("an ENRICH policy loaded outside an ES|QL query")),
     }
+}
+
+/// Whether the running query's caller may read index `index` by its own name (not only through
+/// an alias): what reading its shards directly, or reaching it by a raw wildcard, needs. No
+/// caller set (outside a query): no.
+pub(super) fn caller_reads(cluster: &crate::Cluster, index: &str) -> bool {
+    CALLER.try_with(|p| crate::xpack::security::allows_indices_of(cluster, p, "indices:data/read/esql", &[index.to_string()])).unwrap_or(false)
 }
 
 /// The checks on a query's sources once its views are spliced in ([`exec`]'s `expand_views`):

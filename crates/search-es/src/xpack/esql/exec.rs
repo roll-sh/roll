@@ -3274,21 +3274,25 @@ async fn resolve_source(cluster: &Cluster, src: &str, sources: &[String], metada
     // wildcards expanded to authorized indices only), never the expression again.
     // Unless an alias filters one: then the names it was given, the authority the grant decided
     // on (its alias), and the alias query bounds the scan to these indices anyway.
-    let alias_filter = alias_query(&st, sources, &indices);
-    let index = if internal::caller().is_some() && alias_filter.is_none() { indices.join(",") } else { index };
+    let alias_filter = alias_query(cluster, &st, sources, &indices);
+    let index = if internal::caller().is_some() && alias_filter.is_none() && indices.iter().all(|i| super::caller_reads(cluster, i)) { indices.join(",") } else { index };
     Ok(Source { index, cols, fields, metadata: metadata.to_vec(), needed: None, ft: Vec::new(), load: Vec::new(), source_order, floats, constants, indices, original_types, unions, unsupported, flattened, flattened_in, dimensions, ts_meta, index_prefix: None, alias_filter })
 }
 
 /// What the aliases `sources` names filter (`search::alias_reach`, as a search filters them):
 /// for each index reached only through filtered aliases, its rows matching one of their filters;
 /// the other indices whole. `None` when no index is filtered.
-fn alias_query(st: &crate::meta::ClusterState, sources: &[String], indices: &[String]) -> Option<Value> {
+fn alias_query(cluster: &Cluster, st: &crate::meta::ClusterState, sources: &[String], indices: &[String]) -> Option<Value> {
     let aliases = st.aliases();
     let all = crate::meta::resolve::is_all(sources);
+    let now = crate::time::now_millis();
     let mut filtered = Vec::new();
     let mut whole = Vec::new();
+    // The raw `FROM` names: an index counts as reached directly only where the caller may read it
+    // by name (a wildcard of theirs that matches it was narrowed away).
+    let readable = |n: &str| super::caller_reads(cluster, n);
     for i in indices {
-        match crate::search::alias_reach(st, &aliases, sources, all, i).0 {
+        match crate::search::alias_reach(st, &aliases, sources, all, i, now, &readable).0 {
             Some(fs) => filtered.push(obj! { "bool" => obj! { "filter" => crate::arr![obj! { "term" => obj! { "_index" => i.as_str() } }], "should" => Value::Arr(fs), "minimum_should_match" => 1 } }),
             None => whole.push(Value::from(i.as_str())),
         }

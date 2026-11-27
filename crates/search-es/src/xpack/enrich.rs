@@ -306,22 +306,16 @@ async fn execute(cluster: &Cluster, name: &str, policy: &Value, now: i64) -> EsR
     Ok(())
 }
 
-/// The indices enrich index `index` (policy `name`'s table) was built from ([`BUILT_FROM`]): a
-/// source deleted since still holds rows in it. For a table built before they were recorded,
-/// the policy's sources as they resolve now, unless that can't vouch for what it holds: `None`
-/// when a source is a pattern (an index it matched then may be gone) or an explicit one is gone.
-pub fn sources_of(st: &crate::meta::ClusterState, name: &str, index: &str, now: i64) -> Option<Vec<String>> {
-    if let Some(Value::Arr(a)) = st.metadata.xpack.get(BUILT_FROM, index) {
-        return Some(a.iter().map(Value::to_es_string).collect());
+/// The indices enrich index `index` (a policy's table) was built from ([`BUILT_FROM`]): a
+/// source deleted since still holds rows in it. `None` without a record (a table built before
+/// they were recorded, or one whose record went with a re-execute that didn't finish loading):
+/// what the policy's sources resolve to now can't vouch for what the table holds, so a check
+/// against it fails closed until the policy runs again.
+pub fn sources_of(st: &crate::meta::ClusterState, index: &str) -> Option<Vec<String>> {
+    match st.metadata.xpack.get(BUILT_FROM, index) {
+        Some(Value::Arr(a)) => Some(a.iter().map(Value::to_es_string).collect()),
+        _ => None,
     }
-    let p = st.metadata.xpack.get(POLICIES, name)?;
-    let (_, cfg) = kind_of(p)?;
-    let indices: Vec<String> = cfg.get("indices").and_then(Value::as_array).into_iter().flatten().map(Value::to_es_string).collect();
-    let opts = crate::meta::resolve::IndicesOptions::LENIENT_EXPAND_OPEN;
-    if indices.iter().any(|i| crate::meta::resolve::is_wildcard(i) || crate::meta::resolve::resolve(st, std::slice::from_ref(i), &opts, now).map_or(true, |r| r.is_empty())) {
-        return None;
-    }
-    Some(crate::meta::resolve::resolve(st, &indices, &opts, now).unwrap_or_default())
 }
 
 fn set_prop(props: &mut Map, path: &str, mapping: Value) {

@@ -7823,6 +7823,15 @@ async fn esql_reads_only_the_indices_the_grant_reaches() {
         (r.status().as_u16(), r.text().await.unwrap())
     };
     assert!(s == 200 && v.contains("\"a\"") && !v.contains("s-of-b") && !v.contains("\"b\""), "{s} {v}");
+    // A wildcard beside the alias, or the alias with a selector, still reads only its rows.
+    for query in ["FROM pub-a, * | KEEP tenant", "FROM pub-a, sh* | KEEP tenant", "FROM \"pub-a::data\" | KEEP tenant"] {
+        let r = e.http.post(format!("{}/v1/search/clusters/esql/esql", e.api)).header("x-test-grant", alias_rules.clone()).header("x-test-index-scope", "pub-a").json(&json!({"query": query})).send().await.unwrap();
+        let (s, v) = (r.status().as_u16(), r.text().await.unwrap());
+        assert!(!v.contains("\"b\""), "{query}: {s} {v}");
+    }
+    let r = e.http.post(format!("{}/v1/search/clusters/esql/indices/pub-a::data/search", e.api)).header("x-test-grant", alias_rules.clone()).json(&json!({"query": {"match_all": {}}})).send().await.unwrap();
+    let (s, v) = (r.status().as_u16(), r.text().await.unwrap());
+    assert!(!v.contains("s-of-b") && !v.contains("\"b\""), "a search through the alias with a selector: {s} {v}");
     for (index, query) in [("pub-a,-zz", "FROM shared METADATA _source"), ("pub-a", "FROM shared"), ("pub-a,-zz", "FROM pub-a METADATA _source")] {
         let r = e.http.post(format!("{}/v1/search/clusters/esql/indices/{index}/esql", e.api)).header("x-test-grant", alias_rules.clone()).json(&json!({"query": query})).send().await.unwrap();
         let (s, v) = (r.status().as_u16(), r.text().await.unwrap());
