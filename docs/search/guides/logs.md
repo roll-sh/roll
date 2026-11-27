@@ -12,9 +12,9 @@ while it's written to and searched.
 
 So you know before you start:
 
-- **No OTLP intake.** roll search doesn't accept OpenTelemetry logs or traces directly. Send logs
-  with `_bulk` (below), or with a shipper that speaks the Elasticsearch API (Filebeat, Fluent Bit,
-  Vector, Logstash, the OpenTelemetry Collector's Elasticsearch exporter).
+- **OTLP takes logs only.** OpenTelemetry logs go straight in over OTLP/HTTP (below); traces and
+  metrics, and OTLP over gRPC, don't yet. Other shippers use `_bulk`, or the Elasticsearch API
+  (Filebeat, Fluent Bit, Vector, Logstash).
 - **No alerting UI.** Watcher's API is served but has no screen, OpenSearch's Alerting plugin isn't
   served, and Discover-style browsing has no saved searches or visualizations.
 
@@ -158,6 +158,51 @@ The first write creates the data stream. Check the answer's `errors` flag; a shi
 items that failed with 429. For high volume, batch a few thousand lines or a few MB per call. A
 cluster accepts bodies up to `max_body_mb` (100 MB by default; `--max-body-mb` on
 `roll search clusters update`).
+
+## Send OpenTelemetry logs over OTLP
+
+A cluster takes OTLP/HTTP logs at `/_otlp/v1/logs`, in protobuf or JSON, gzip allowed, as
+Elastic's managed OTLP endpoint does. Make a key that can only write OpenTelemetry's data streams:
+
+```sh
+roll search keys create my-cluster collector --access otel
+```
+
+Then point an OpenTelemetry Collector's `otlphttp` exporter at the cluster:
+
+```yaml
+exporters:
+  otlphttp/roll:
+    endpoint: https://my-cluster.search.roll.sh/_otlp   # the cluster's URL
+    headers:
+      Authorization: "ApiKey ${env:ROLL_SEARCH_KEY}"
+service:
+  pipelines:
+    logs:
+      receivers: [otlp]
+      exporters: [otlphttp/roll]
+```
+
+An SDK's OTLP/HTTP log exporter works the same way, with `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` set
+to `https://my-cluster.search.roll.sh/_otlp/v1/logs` and
+`OTEL_EXPORTER_OTLP_LOGS_HEADERS=Authorization=ApiKey%20<key>`.
+
+Records land as OpenTelemetry-native documents (`body.text`, `severity_text`, `attributes.*`,
+`resource.attributes.*`, `trace_id`, …) in `logs-<dataset>.otel-<namespace>`. The dataset and
+namespace come from a `data_stream.dataset` or `data_stream.namespace` attribute on the record,
+its scope or its resource, else `generic` and `default`. The built-in `logs-otel@template` maps
+them, so ES|QL and Discover read `message`, `log.level` and `service.name` as ECS names too.
+
+Limits:
+- a record keeps 128 attributes, and the rest count in its `dropped_attributes_count`;
+- a value over 32 KiB, or nested more than 8 deep, rejects its record, which the answer's
+  `partial_success` counts;
+- a key that may not write a record's data stream gets a 403, and a busy cluster a 429 with
+  `Retry-After`, which Collectors back off on.
+
+An `otel` key writes and can't read: search with another key. Its `create_doc` privilege is
+Elasticsearch's, so OpenSearch-flavor clusters don't have `otel` keys; use a `data` key narrowed
+to `logs-*.otel-*` there.
 
 ## Browse logs in the dashboard
 

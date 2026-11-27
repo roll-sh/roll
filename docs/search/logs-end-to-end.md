@@ -1,6 +1,19 @@
 # Logs end to end: design
 
-`## Next` item 18 in [README.md](README.md). Status: design, nothing built.
+`## Next` item 18 in [README.md](README.md). Status: the OTLP/HTTP logs intake and `otel` keys are
+built (`feature/search-otlp`: `crates/search-es/src/otlp/`, [guides/logs.md](guides/logs.md));
+traces, metrics, gRPC, the Watcher page and the rest are design.
+
+As built, where the design left a choice: protobuf is read by a decoder of its own
+(`otlp/wire.rs`, the wire format OTLP needs, every length checked against the bytes present)
+rather than `prost`, one record at a time straight into the `_bulk` NDJSON, whose size is charged
+to the request breaker as it grows (the JSON form's tree is charged at 8× its text before it's
+parsed). Attributes past 128 are dropped and counted, as SDK limits do; a value past 32 KiB or
+nested past 8 rejects its record (`partial_success`); a malformed message fails the request with
+a 400. Records are written by one `_bulk` as the client, so the key's privileges decide each
+target; every record refused for the same 401, 403 or 429 answers that status, not a partial
+success a Collector would drop. Errors are Elasticsearch's JSON, not `google.rpc.Status`
+(Collectors read the status code).
 
 ## Why
 
