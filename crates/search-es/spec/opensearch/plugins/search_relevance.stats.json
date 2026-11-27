@@ -1,0 +1,69 @@
+{
+  "search_relevance.stats": {
+    "documentation": {
+      "url": "https://docs.opensearch.org/latest/search-plugins/search-relevance/",
+      "description": "The Search Relevance Workbench's statistics."
+    },
+    "stability": "experimental",
+    "url": {
+      "paths": [
+        {
+          "path": "/_plugins/_search_relevance/stats",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/_plugins/_search_relevance/stats/{stat}",
+          "methods": [
+            "GET"
+          ],
+          "parts": {
+            "stat": {
+              "type": "string",
+              "description": "Comma-separated statistics to return."
+            }
+          }
+        },
+        {
+          "path": "/_plugins/_search_relevance/{node_id}/stats",
+          "methods": [
+            "GET"
+          ],
+          "parts": {
+            "node_id": {
+              "type": "string",
+              "description": "Nodes to report."
+            }
+          }
+        },
+        {
+          "path": "/_plugins/_search_relevance/{node_id}/stats/{stat}",
+          "methods": [
+            "GET"
+          ],
+          "parts": {
+            "node_id": {
+              "type": "string",
+              "description": "Nodes to report."
+            },
+            "stat": {
+              "type": "string",
+              "description": "Comma-separated statistics to return."
+            }
+          }
+        }
+      ]
+    },
+    "params": {
+      "include_metadata": {
+        "type": "boolean",
+        "description": "Each statistic's type and timing beside its value."
+      },
+      "flat_stat_paths": {
+        "type": "boolean",
+        "description": "Statistic paths as dotted keys."
+      }
+    }
+  }
+}
