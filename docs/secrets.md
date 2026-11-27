@@ -158,7 +158,9 @@ tarballs, and checks the x86_64 build on every pull request that touches `crates
 
 - **Installing.** `irm https://roll.sh/install.ps1 | iex` puts `roll.exe` in
   `%LOCALAPPDATA%\Programs\roll` and on your PATH, after checking it against the release's
-  `SHA256SUMS` as `install.sh` does (a mismatch installs nothing). For a server, from an
+  `SHA256SUMS` and, with gh logged in, its build provenance (`gh attestation verify`), as
+  `install.sh` does (a mismatch installs nothing; `ROLL_VERIFY=attestation` requires the
+  provenance check). For a server, from an
   administrator's PowerShell, `& ([scriptblock]::Create((irm https://roll.sh/install.ps1))) -System`
   installs into `%ProgramFiles%\roll` for every account. Each release also carries a Scoop manifest
   (`scoop install https://github.com/roll-sh/roll/releases/download/cli-v<version>/roll.json`) and
@@ -3590,6 +3592,11 @@ roll completions bash|zsh|fish|powershell
   above, by fingerprint), and whether staged files hold any of
   the project's values (the scan, names only). It fails when a check does: a first step when
   `roll run` doesn't see what it should.
+- `roll run` never hands the command roll's own credentials: a `ROLL_*` variable named like one
+  (`_TOKEN`, `_TOKEN_FILE`, `_KEY`, `_PASSWORD`, `_SECRET`, `_CREDENTIAL_FILE`: `ROLL_ADMIN_TOKEN`,
+  `ROLL_TOKEN`, `ROLL_FALLBACK_KEY`…) is dropped from its environment unless the project sets
+  that name itself, so an app and its dependencies never act as roll's operator or with the token
+  that read its values. `--keep-roll-credentials` passes them on (a script that calls `roll`).
 - `roll run --watch [--interval 5]` keeps the command as a child and restarts it (SIGTERM, then
   SIGKILL after 10 s) when the environment changes. It polls `…/digest`, a hash of the folder's
   effective keys, versions, fingerprints and links, and of what their references reach (in this
@@ -5115,10 +5122,11 @@ Agent's templates do).
     writing a domain's records): `Secrets::use_once(resource, reference, caller, purpose, to)`.
     The checks `bind_ref` makes, as the caller now: the one project that holds and stands for the
     resource, reveal on the folder, no protected environment for an untrusted copy, and no
-    untrusted caller. A sensitive key only with `to`, the one host the product sends the value
-    to, fixed in its code (roll apps: `roll_edge::acme::Cloudflare::API`): the value goes from
-    roll's process to that host and never to the caller, so the best-kept token (a sensitive one)
-    still works; without `to`, a person or a token never reads one.
+    untrusted caller. Never a sensitive key, even with `to` (the one host the product sends the
+    value to, fixed in its code: roll apps' `roll_edge::acme::Cloudflare::API`): someone who may
+    reveal the folder but not read the key would have roll act with it wherever it reaches (a DNS
+    token writes records in every zone it can edit). An opt-in the key's owner sets on the key is
+    a later design.
     No `Maker` is recorded, since nothing reads it later, so an approval of an `ask` there stands
     in for reveal: the permissions catalogue lends the reference's folder (`Lend::Each`), and the
     gate asks a person about that folder. Audited as `secrets.use` by the caller, naming the
