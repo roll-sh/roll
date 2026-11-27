@@ -35,6 +35,7 @@
 
 pub mod credentials;
 pub mod lockdown;
+pub mod mcp;
 pub mod roles;
 pub mod scope;
 pub mod totp;

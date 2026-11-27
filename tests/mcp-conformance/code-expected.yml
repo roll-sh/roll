@@ -1,0 +1,3 @@
+# Checks of the official MCP conformance suite known not to pass against roll code's own
+# /v1/code/mcp (scripts/test-mcp-conformance.sh), and why. Each line is `<scenario>:<check-id>`.
+server: []

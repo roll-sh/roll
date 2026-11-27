@@ -193,6 +193,73 @@ async fn transport_sessions_and_protocol() {
     assert_eq!(s, StatusCode::NOT_FOUND, "an ended session is gone");
 }
 
+/// A 2026-07-28 request (the stateless revision): no initialize and no session, the request's
+/// `_meta` and headers say what it is, and every answer carries the revision's fields. An owner's
+/// token lists and calls the same tools, with the same rights, as in a session; a malformed
+/// request's error carries its id.
+#[tokio::test]
+async fn modern_clients_need_no_session() {
+    let a = app(Some("root"));
+    let root = Some("root");
+    a.req("POST", "/v1/code/owners", Some(json!({ "name": "acme", "kind": "org" })), root).await;
+    let (_, t) = a.req("POST", "/v1/code/owners/acme/tokens", Some(json!({ "name": "t" })), root).await;
+    let owner = t["token"].as_str().unwrap().to_string();
+    a.req("POST", "/v1/code/repos", Some(json!({ "owner": "acme", "name": "web", "visibility": "private" })), root).await;
+    a.req("POST", "/v1/code/repos/acme/web/land", Some(json!({ "message": "m", "files": { "a.txt": { "content": "hi\n" } } })), root).await;
+    let rpc = |id: u64, method: &str, params: Value| {
+        let mut params = params;
+        params["_meta"] = json!({ "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} });
+        json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params })
+    };
+    let headers = |method: &'static str, name: Option<&'static str>| {
+        let mut h = vec![("mcp-protocol-version", "2026-07-28"), ("mcp-method", method)];
+        h.extend(name.map(|n| ("mcp-name", n)));
+        h
+    };
+    let c = Client::new(&a, Some(&owner));
+
+    let (s, h, v) = c.post(rpc(1, "server/discover", json!({})), &headers("server/discover", None)).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert!(!h.contains_key("mcp-session-id"));
+    assert_eq!(v["result"]["supportedVersions"][0], "2026-07-28");
+    assert_eq!((v["result"]["resultType"].as_str(), v["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["name"].as_str()), (Some("complete"), Some("roll-code")), "{v}");
+
+    let (s, _, v) = c.post(rpc(2, "tools/list", json!({})), &headers("tools/list", None)).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let mut names: Vec<&str> = v["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+    names.sort_unstable();
+    let mut documented = TOOLS.to_vec();
+    documented.sort_unstable();
+    assert_eq!(names, documented, "the same tools, by the same names, as a session lists");
+    assert_eq!((v["result"]["cacheScope"].as_str(), v["result"]["ttlMs"].is_u64()), (Some("private"), true));
+
+    let read = rpc(3, "tools/call", json!({ "name": "read_file", "arguments": { "repo": "acme/web", "path": "a.txt" } }));
+    let (s, _, v) = c.post(read.clone(), &headers("tools/call", Some("read_file"))).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!((v["id"].as_u64(), v["result"]["isError"].as_bool(), v["result"]["structuredContent"]["content"].as_str()), (Some(3), Some(false), Some("hi\n")), "{v}");
+    // Without the owner's token, the repo is as private as it is to the HTTP API.
+    let (_, _, v) = Client::new(&a, None).post(read, &headers("tools/call", Some("read_file"))).await;
+    assert_eq!(v["result"]["isError"], true, "{v}");
+
+    // Malformed: no capabilities, a header that names another tool, a handshake method. Each
+    // error is the request's own (its id), never `id: null`.
+    let mut bare = rpc(4, "tools/list", json!({}));
+    bare["params"]["_meta"].as_object_mut().unwrap().remove("io.modelcontextprotocol/clientCapabilities");
+    let (s, _, v) = c.post(bare, &headers("tools/list", None)).await;
+    assert_eq!((s, v["id"].as_u64(), v["error"]["code"].as_i64()), (StatusCode::BAD_REQUEST, Some(4), Some(-32602)), "{v}");
+    let call = rpc(5, "tools/call", json!({ "name": "read_file", "arguments": {} }));
+    let (s, _, v) = c.post(call, &headers("tools/call", Some("land"))).await;
+    assert_eq!((s, v["id"].as_u64(), v["error"]["code"].as_i64()), (StatusCode::BAD_REQUEST, Some(5), Some(-32020)), "{v}");
+    let (s, _, v) = c.post(rpc(6, "initialize", json!({})), &headers("initialize", None)).await;
+    assert_eq!((s, v["id"].as_u64(), v["error"]["code"].as_i64()), (StatusCode::NOT_FOUND, Some(6), Some(-32601)), "{v}");
+    let (s, _, v) = Client::new(&a, Some("rlc_never_issued")).post(rpc(7, "tools/list", json!({})), &headers("tools/list", None)).await;
+    assert_eq!((s, v["id"].as_u64()), (StatusCode::UNAUTHORIZED, Some(7)), "{v}");
+
+    // Lockdown holds on this revision too.
+    let (_, _, v) = c.post(rpc(8, "server/discover", json!({})), &[headers("server/discover", None), vec![("x-mcp-lockdown", "1")]].concat()).await;
+    assert!(v["result"]["instructions"].as_str().unwrap().contains("lockdown"), "{v}");
+}
+
 /// `Accept: text/event-stream` (without `application/json`): each response comes as a `message`
 /// event on an event stream; an initialize still answers in JSON (its session id is a header),
 /// and notifications alone still get 202.

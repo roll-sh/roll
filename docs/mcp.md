@@ -40,7 +40,8 @@ token, through the same gate as any other request. So:
   alerts beside Agent activity (a token's links to it).
 
 roll code had an MCP server of its own at `/v1/code/mcp`, and it stays for roll code owner tokens
-(docs/code/mcp.md). `/v1/mcp` fronts all of its tools under product names (`search_code` is
+(docs/code/mcp.md), in every revision `/v1/mcp` speaks, 2026-07-28 included (the revision's
+request checks and answer fields are `roll_auth::mcp`, shared by both servers). `/v1/mcp` fronts all of its tools under product names (`search_code` is
 `code_search`, `land` is `code_land`, `list_agent_machines` is `agents_list_machines`), through the
 gate. Scoped tokens can't call `/v1/code/mcp`: that server calls roll code's routes without the
 gate. Two keep their names: `search` and `fetch`, which ChatGPT's deep research and company
@@ -421,7 +422,9 @@ outcome with `tests/mcp-conformance/expected.yml`, check by check (`<scenario>:<
 scenario's other checks still hold): what fails there calls the suite's reference server's own
 test tools, prompts and resources, or a capability roll doesn't declare (`logging`, resource
 subscriptions). A check failing that isn't listed fails the run, and so does a listed one passing.
-Run it after changing the protocol (`lib.rs`'s methods, `modern.rs`, `tasks.rs`, `denials.rs`).
+Run it after changing the protocol (`lib.rs`'s methods, `modern.rs`, `roll_auth::mcp`, `tasks.rs`,
+`denials.rs`). It runs against roll code's own `/v1/code/mcp` too, with its own baseline
+(`tests/mcp-conformance/code-expected.yml`; `--only mcp|code` runs one).
 Its first run (2026-11-27) found five things: a 2026-07-28 request without its `_meta` answered as
 an unknown version (now `-32602`), a header and body version that disagree as one too (now
 `-32020`), `initialize` and `ping` still answered in a revision that removed them (now 404),
@@ -1615,7 +1618,7 @@ From a 2026-11-24 gap review (every tool run as an agent would against a fresh r
 
 From a 2026-11-26 comparison (the spec's anniversary post, Claude's connector docs, Atlassian's, Stripe's and GitHub's changelogs; no core SEP went final since 2026-11-15):
 
-1. **roll code's own MCP server speaks 2026-07-28** (found by the conformance suite run against
+1. **roll code's own MCP server speaks 2026-07-28 (this PR)** (found by the conformance suite run against
    `/v1/code/mcp`: 54 checks pass, 131 fail, its errors to a modern request carry `id: null`).
    `/v1/mcp?toolsets=code` already serves roll code's tools in every revision; a 2026-07-28 request
    to `/v1/code/mcp` should be served the same way (its token kinds, `?lockdown=1` and sessions
