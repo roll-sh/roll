@@ -1018,7 +1018,12 @@ async fn a_pre_receive_hook_refuses_a_push_adding_a_production_value_with_a_scan
     let alice = [("GITHUB_USER_LOGIN", "alice")];
     let (passed, said) = push_as(&["-o", "breakglass"], &alice);
     assert!(!passed && said.contains("break glass refused"), "no one may until an admin says: {said}");
-    assert!(ok(&api, &[], &["secrets", "-p", "shop", "breakglass", "alice"], None).await.contains("alice"));
+    // A login is the pusher as a hook's token names it: bound to the hook once it has named alice.
+    assert!(roll(&api, &[], &["secrets", "-p", "shop", "breakglass", "alice"], None).await.code != Some(0), "no hook has named alice yet");
+    let (passed, _) = push_as(&[], &alice);
+    assert!(!passed, "refused, and the hook named alice");
+    let bound = ok(&api, &[], &["secrets", "-p", "shop", "breakglass", "alice"], None).await;
+    assert!(bound.contains("alice@token:"), "{bound}");
     let (passed, said) = push_as(&["-o", "breakglass"], &[("GITHUB_USER_LOGIN", "alice"), ("ROLL_API_URL", "http://127.0.0.1:9")]);
     assert!(!passed && said.contains("couldn't"), "{said}");
     let (passed, said) = push_as(&["-o", "breakglass"], &alice);
@@ -1026,12 +1031,12 @@ async fn a_pre_receive_hook_refuses_a_push_adding_a_production_value_with_a_scan
     let audit: serde_json::Value = reqwest::get(format!("{api}/v1/secrets/projects/{prj}/audit?action=secrets.scan.breakglass")).await.unwrap().json().await.unwrap();
     assert_eq!(audit[0]["keys"], serde_json::json!(["API_KEY", "DATABASE_URL"]), "{audit}");
     let summary = audit[0]["summary"].as_str().unwrap_or_default();
-    assert!(summary.contains("by alice to refs/heads/main"), "{audit}");
+    assert!(summary.contains("by alice (as token:") && summary.contains("says) to refs/heads/main"), "the pusher is the hook's word: {audit}");
     // What it let through is leaked and reported as such. The hook's token may only scan, so it
     // rotates nothing: the leak waits on Health for someone who may write there.
     let leaked: serde_json::Value = reqwest::get(format!("{api}/v1/secrets/projects/{prj}/audit?action=secrets.leaked")).await.unwrap().json().await.unwrap();
     assert_eq!(leaked[0]["keys"], serde_json::json!(["API_KEY", "DATABASE_URL"]), "{leaked}");
-    assert!(leaked[0]["summary"].as_str().unwrap_or_default().contains("let through with break glass by alice"), "{leaked}");
+    assert!(leaked[0]["summary"].as_str().unwrap_or_default().contains("let through with break glass by alice (as token:"), "{leaked}");
     let now = ok(&api, &[], &["secrets", "-p", "shop", "-e", "production", "get", "API_KEY", "--raw"], None).await;
     assert_eq!(now.trim(), managed, "a scan-only hook's break glass rotates nothing, even under leaks.rotate = managed");
     assert!(!leaked.to_string().contains(value) && !leaked.to_string().contains(&managed), "never a value: {leaked}");
