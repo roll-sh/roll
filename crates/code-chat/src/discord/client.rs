@@ -141,6 +141,20 @@ impl Client {
         Ok((guild.id, guild.name))
     }
 
+    /// The guild a channel belongs to (`GET /channels/{channel}`): `None` for a DM or group DM.
+    /// One bot serves every install, so whatever posts for an install checks this first: a
+    /// channel id alone would reach any server the bot is in.
+    pub async fn channel_guild(&self, channel: &str) -> Result<Option<String>, Error> {
+        #[derive(Deserialize)]
+        struct ChannelAnswer {
+            #[serde(default)]
+            guild_id: Option<String>,
+        }
+        let path = format!("/channels/{}", percent_encode(channel));
+        let c: ChannelAnswer = self.call(Method::GET, &path, None).await?;
+        Ok(c.guild_id)
+    }
+
     /// `POST /channels/{channel}/messages`.
     pub async fn create_message(&self, channel: &str, payload: &Value) -> Result<Posted, Error> {
         let path = format!("/channels/{}/messages", percent_encode(channel));
