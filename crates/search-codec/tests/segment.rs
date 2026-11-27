@@ -1537,3 +1537,83 @@ fn merged_terms_with_a_doc_freq_floor_keep_every_frequent_term() {
         }
     }
 }
+
+/// A segment still downloading (`SegmentReader::open_lazy`): its doc values and points sections
+/// are zeros at open and arrive only when the reader first asks for them, so nothing reads them
+/// before then and what it reads after is the real data; a section that never arrives is a panic
+/// naming the segment, never a field without values.
+#[test]
+fn lazy_sections_open_on_first_use_with_the_bytes_that_arrived() {
+    use search_codec::container::{ContainerReader, SectionKind};
+    use std::cell::UnsafeCell;
+    use std::ops::Range;
+    use std::sync::Mutex;
+
+    // A partial download's bytes: written in place by the "download" while readers map them, as
+    // a cache file is (a range is read only after it was reported in).
+    struct Partial(Box<[UnsafeCell<u8>]>);
+    // SAFETY: written only before the range is reported ready, read only after.
+    unsafe impl Sync for Partial {}
+    struct Shared(Arc<Partial>);
+    impl AsRef<[u8]> for Shared {
+        fn as_ref(&self) -> &[u8] {
+            // SAFETY: as for `Partial`.
+            unsafe { std::slice::from_raw_parts(self.0.0.as_ptr() as *const u8, self.0.0.len()) }
+        }
+    }
+    struct Download {
+        buf: Arc<Partial>,
+        full: Vec<u8>,
+        missing: Mutex<Vec<Range<u64>>>,
+        waited: Mutex<Vec<Range<u64>>>,
+        fail: bool,
+    }
+    impl SectionWait for Download {
+        fn is_ready(&self, r: Range<u64>) -> bool {
+            !self.missing.lock().unwrap().iter().any(|m| m.start < r.end && r.start < m.end)
+        }
+        fn wait(&self, r: Range<u64>) -> std::io::Result<()> {
+            self.waited.lock().unwrap().push(r.clone());
+            if self.fail {
+                return Err(std::io::Error::other("the download failed"));
+            }
+            for i in r.clone() {
+                // SAFETY: the range isn't reported ready (nor read) until after this write.
+                unsafe { *self.buf.0[i as usize].get() = self.full[i as usize] };
+            }
+            self.missing.lock().unwrap().retain(|m| !(r.start <= m.start && m.end <= r.end));
+            Ok(())
+        }
+    }
+
+    let mut rng = StdRng::seed_from_u64(7);
+    let docs: Vec<Doc> = (0..300).map(|i| random_doc(&mut rng, i)).collect();
+    let mut full = Vec::new();
+    write_segment(&MemSource::new(docs.clone(), 1, None), &mut full).unwrap();
+    let c = ContainerReader::open(Slice::from(full.clone())).unwrap();
+    let lazy: Vec<Range<u64>> = c.entries().iter().filter(|e| matches!(e.kind, SectionKind::DocValues | SectionKind::Points)).map(|e| e.offset..e.offset + e.len).collect();
+    assert!(lazy.len() >= 3, "the test segment has doc values and points");
+    let download = |fail: bool| {
+        let buf = Arc::new(Partial(full.iter().map(|b| UnsafeCell::new(*b)).collect()));
+        for r in &lazy {
+            for i in r.clone() {
+                // SAFETY: nothing reads the buffer yet.
+                unsafe { *buf.0[i as usize].get() = 0 };
+            }
+        }
+        let d = Arc::new(Download { buf: buf.clone(), full: full.clone(), missing: Mutex::new(lazy.clone()), waited: Mutex::new(Vec::new()), fail });
+        (SegmentReader::open_lazy(Slice::from_owner(Shared(buf)), Some(d.clone())).unwrap(), d)
+    };
+    let (r, d) = download(false);
+    assert!(d.waited.lock().unwrap().is_empty(), "opening waits for none of them");
+    check(&r, &docs);
+    let waited = d.waited.lock().unwrap().clone();
+    assert!(!waited.is_empty() && waited.iter().all(|w| lazy.contains(w)), "{waited:?}");
+    // Each section once, however often it was asked for.
+    let mut once = waited.clone();
+    once.dedup();
+    assert_eq!(once.len(), waited.len());
+    let (r, _) = download(true);
+    let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| r.doc_values(NUM).is_some()));
+    assert!(failed.is_err(), "a section that never arrives is no field without values");
+}
