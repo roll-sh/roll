@@ -455,6 +455,7 @@ export function PreviewSheet({
                     on today's data {p.rehearsal.ok ? `passed in ${duration(p.rehearsal.ms ?? 0)}` : `failed: ${p.rehearsal.error ?? "see the activity"}`}
                   </span>
                 ) : null}
+                {p.main_on_change && <MainOnChangeLine m={p.main_on_change} />}
                 {p.change && (
                   <button
                     type="button"
@@ -2669,5 +2670,19 @@ export function ThreadPopup({ preview, review, close = () => window.close() }: {
         <NoteThread previewId={p.id} change={p.change} review={review} where={p} onDone={() => setTimeout(close, 900)} />
       )}
     </div>
+  );
+}
+
+/** Main's code on a copy of this head's migrated data: the pages that broke there, or that none did. */
+function MainOnChangeLine({ m }: { m: NonNullable<Preview["main_on_change"]> }) {
+  const said = (s: number) => (s === 0 ? "no answer" : String(s));
+  const broke = m.pages.filter((x) => (x.main_status > 0 && x.main_status < 500) && (x.status === 0 || x.status >= 500));
+  const title = "Main's live build, taking no traffic, on a copy of this change's branches as its release left them: while the change deploys, the version before it serves on this schema";
+  if (m.error) return <span className="min-w-0 break-words text-[11px] text-subtle" title={title}>main's code on this data: {m.error}</span>;
+  if (broke.length === 0) return <span className="text-[11px] text-subtle" title={title}>main's code still answers on this data ({m.pages.length} {m.pages.length === 1 ? "page" : "pages"})</span>;
+  return (
+    <span className="min-w-0 break-words font-mono text-[11px] text-danger tabular-nums" title={title}>
+      main's code breaks on this data: {broke.slice(0, 3).map((x) => `${x.path} ${said(x.status)} (main ${said(x.main_status)})`).join(" · ")}
+    </span>
   );
 }

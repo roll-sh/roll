@@ -120,6 +120,8 @@ export interface Preview {
   release?: { head: string; ms: number; before_ms: number | null; locks?: { table: string; mode: string; ms: number }[] } | null;
   /** Its release rehearsed on the parents' data as it is now: asked at `head` (`ok` null while it waits), then how it went. */
   rehearsal?: { head: string; by: string; at: number; ok: boolean | null; ms: number | null; error: string | null } | null;
+  /** Main's code on a copy of this head's migrated data: each page's status there and on main's (0: no answer). */
+  main_on_change?: { head: string; at: number; ms: number; pages: { service: string; path: string; status: number; main_status: number }[]; error: string | null } | null;
   /** Columns its branches were masked with by default: they look like people's data and no rule names them (`keep` leaves one as it is). */
   masked_by_default?: { resource: string; column: string; why: string }[];
   /** Kept past its TTL until then (epoch ms). */
