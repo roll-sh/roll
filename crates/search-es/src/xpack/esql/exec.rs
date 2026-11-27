@@ -3272,8 +3272,10 @@ async fn resolve_source(cluster: &Cluster, src: &str, sources: &[String], metada
     let ts_meta = TsMeta { metrics, data_streams };
     // A client that may read only some indices reads the ones its field caps resolved to (its
     // wildcards expanded to authorized indices only), never the expression again.
-    let index = if internal::caller().is_some() { indices.join(",") } else { index };
+    // Unless an alias filters one: then the names it was given, the authority the grant decided
+    // on (its alias), and the alias query bounds the scan to these indices anyway.
     let alias_filter = alias_query(&st, sources, &indices);
+    let index = if internal::caller().is_some() && alias_filter.is_none() { indices.join(",") } else { index };
     Ok(Source { index, cols, fields, metadata: metadata.to_vec(), needed: None, ft: Vec::new(), load: Vec::new(), source_order, floats, constants, indices, original_types, unions, unsupported, flattened, flattened_in, dimensions, ts_meta, index_prefix: None, alias_filter })
 }
 
