@@ -169,6 +169,19 @@ pub(crate) fn project_from_body(row: &Row, target: &mut Target, body: Option<&Va
     }
 }
 
+/// A row whose body names its secrets folder ([`Row::path_body`]): the folder, as roll secrets reads
+/// it (absent is `/`), or why the request is refused before anyone is asked.
+pub(crate) fn folder_from_body(row: &Row, target: &mut Target, body: Option<&Value>) -> Result<(), String> {
+    let (Some(field), Target::One(r)) = (row.path_body, target) else { return Ok(()) };
+    let named = match body.and_then(|b| b.get(field)) {
+        None | Some(Value::Null) => "/",
+        Some(Value::String(p)) => p.as_str(),
+        Some(_) => return Err(format!("{field} is a folder: / or /folder/…")),
+    };
+    r.path = Some(catalog::secret_path(named).ok_or_else(|| format!("{field} is / or /folder/… with up to {} folders of A-Z, a-z, 0-9, _ and -", roll_secrets_ref::DEPTH_MAX))?);
+    Ok(())
+}
+
 /// What a request is about, from its row and path. `person`: a person's grant decides it (their
 /// session, or a token of theirs), which a canvas's project reaches only where it trusts the
 /// resource ([`Access::resource_as`]).
@@ -672,15 +685,9 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
         ctx.audit(Some(row), None, None, "deny", None, StatusCode::BAD_REQUEST);
         return deny(StatusCode::BAD_REQUEST, "repeated_parameter", format!("?{name}= is given more than once"), json!({}));
     }
-    // A secrets folder as roll secrets spells it, or refused before anyone is asked: `//` would be
-    // asked about (and remembered) as a folder, and reach every one.
-    if row.product == "secrets"
-        && let Some(name) = row.path_query
-        && let Some(p) = original.query().and_then(|q| url::form_urlencoded::parse(q.as_bytes()).find(|(k, _)| k == name).map(|(_, v)| v.into_owned()))
-        && catalog::secret_path(&p).is_none()
-    {
+    if let Some(why) = bad_folder(row, original.query()) {
         ctx.audit(Some(row), None, None, "deny", None, StatusCode::BAD_REQUEST);
-        return deny(StatusCode::BAD_REQUEST, "bad_request", format!("?{name}= is / or /folder/… with up to {} folders of A-Z, a-z, 0-9, _ and -", roll_secrets_ref::DEPTH_MAX), json!({}));
+        return deny(StatusCode::BAD_REQUEST, "bad_request", why, json!({}));
     }
     let mut target = {
         let (a, q, h) = (access.clone(), original.query().map(str::to_string), parts.headers.clone());
@@ -702,7 +709,7 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
     }
     let json_body = buffered.as_ref().and_then(|b| serde_json::from_slice::<Value>(b).ok());
     // A create that names its project in its body is decided by it (and by nothing else).
-    if let Err(why) = project_from_body(row, &mut target, json_body.as_ref()) {
+    if let Err(why) = project_from_body(row, &mut target, json_body.as_ref()).and_then(|()| folder_from_body(row, &mut target, json_body.as_ref())) {
         ctx.audit(Some(row), None, None, "deny", None, StatusCode::BAD_REQUEST);
         return deny(StatusCode::BAD_REQUEST, "bad_request", why, json!({}));
     }
@@ -1206,8 +1213,13 @@ pub(crate) async fn copy_outcome(
         };
         let mut from = r.clone();
         from.environment = Some(env.clone());
+        // A source's folder as roll secrets spells it; one it would refuse decides nothing in the
+        // request's favour (and is never asked about).
         if let Some(p) = path {
-            from.path = Some(p);
+            match catalog::secret_path(&p) {
+                Some(folder) => from.path = Some(folder),
+                None => return Some((Outcome::Deny, env, Some(p))),
+            }
         }
         let outcome = scope.outcome(&Target::One(from.clone()), Action::Reveal);
         if weakest.as_ref().is_none_or(|(w, _, _)| rank(outcome) < rank(*w)) {
@@ -1410,6 +1422,15 @@ struct Asked<'a> {
     summary: Option<String>,
     /// The route's own rule a lend's approval covers too.
     also: Option<roll_auth::scope::Rule>,
+}
+
+/// A secrets folder in the query that roll secrets would refuse (`//`, `/a//b`, `..`, too deep):
+/// what to answer, before anyone is asked (`//` would be asked about, and remembered, as a folder
+/// reaching every one). The gate and `POST /v1/access/check` both ask it.
+pub(crate) fn bad_folder(row: &Row, query: Option<&str>) -> Option<String> {
+    let name = row.path_query.filter(|_| row.product == "secrets")?;
+    let p = url::form_urlencoded::parse(query?.as_bytes()).find(|(k, _)| k == name)?.1.into_owned();
+    catalog::secret_path(&p).is_none().then(|| format!("?{name}= is / or /folder/… with up to {} folders of A-Z, a-z, 0-9, _ and -", roll_secrets_ref::DEPTH_MAX))
 }
 
 /// Wait for a person: an approval sent with the request (`X-Roll-Approval`), or a new one.
