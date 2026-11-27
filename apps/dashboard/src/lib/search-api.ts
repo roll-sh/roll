@@ -300,6 +300,9 @@ export interface SearchUsage {
   stored_bytes: number;
   /** CPU seconds the node's embedding model (E5) spent on the cluster's inputs. */
   inference_cpu_seconds: number;
+  /** Provider tokens of chat answers and completions (the provider bills them, not roll). */
+  input_tokens: number;
+  output_tokens: number;
   cost: {
     memory_usd: number;
     requests_usd: number;
