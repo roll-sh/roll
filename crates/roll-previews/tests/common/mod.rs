@@ -372,6 +372,9 @@ pub struct FakeApps {
     pub views: Mutex<Vec<(String, String, Vars)>>,
     /// The webhook URLs each service was last deployed with: (path, token SHA-256).
     pub hooks: Mutex<HashMap<(String, String), Vars>>,
+    /// Each preview's request log (newest first), and JSON answers by `<preview> <path>`.
+    pub request_log: Mutex<HashMap<String, Vec<roll_previews::RequestLine>>>,
+    pub json: Mutex<HashMap<String, String>>,
     /// What `fetch` answers for a service, URL and path (`<service> <url><path>`; unset: 200).
     pub fetched: Mutex<HashMap<String, u16>>,
     /// Whether services run on roll's runtime here (`can_swap`).
@@ -520,7 +523,13 @@ impl Apps for FakeApps {
             }
         }
         let status = self.fetched.lock().get(&format!("{service} {url}{path}")).copied().unwrap_or(200);
+        if let Some(body) = self.json.lock().get(&format!("{preview} {path}")) {
+            return Ok(Some(roll_previews::ports::Fetched { status, headers: vec![("content-type".into(), "application/json".into())], body: body.clone().into_bytes(), truncated: false }));
+        }
         Ok(Some(roll_previews::ports::Fetched { status, headers: Vec::new(), body: Vec::new(), truncated: false }))
+    }
+    fn requests(&self, preview: &str) -> Vec<roll_previews::RequestLine> {
+        self.request_log.lock().get(preview).cloned().unwrap_or_default()
     }
     async fn probe(&self, _: &str, _: &str, _path: &str) -> anyhow::Result<Option<(u16, String)>> {
         if self.starting.load(Ordering::SeqCst) > 0 {

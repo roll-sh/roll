@@ -120,6 +120,8 @@ export interface Preview {
   release?: { head: string; ms: number; before_ms: number | null; locks?: { table: string; mode: string; ms: number }[] } | null;
   /** Its release rehearsed on the parents' data as it is now: asked at `head` (`ok` null while it waits), then how it went. */
   rehearsal?: { head: string; by: string; at: number; ok: boolean | null; ms: number | null; error: string | null } | null;
+  /** Its recent GETs replayed against main's preview (0: no answer; `removed`/`added`: a JSON answer's top-level fields). */
+  replay?: { head: string; by: string; at: number; ok: boolean | null; requests: { service: string; path: string; status: number; main_status: number; removed: string[]; added: string[] }[]; error: string | null } | null;
   /** Main's code on a copy of this head's migrated data: each page's status there and on main's (0: no answer). */
   main_on_change?: { head: string; at: number; ms: number; pages: { service: string; path: string; status: number; main_status: number }[]; error: string | null } | null;
   /** Columns its branches were masked with by default: they look like people's data and no rule names them (`keep` leaves one as it is). */
@@ -665,6 +667,8 @@ export const previewsApi = {
   vars: (id: string) => call<{ vars: Record<string, string> }>("GET", `${one(id)}/env`),
   /** Resolve a note left on its page (the note's review id): the page's button stops listing it. */
   resolveNote: (id: string, note: string) => call<{ resolved: string }>("POST", `${one(id)}/notes/${encodeURIComponent(note)}/resolve`, {}),
+  /** Its recent GETs replayed against main's preview, in the background (`replay` has it at its head). */
+  replay: (id: string) => call<NonNullable<Preview["replay"]>>("POST", `${one(id)}/replay`, {}),
   /** The open notes on its pages (the page's own list), each with the work item made of it. */
   notes: (id: string) => call<{ notes: { id: string; path: string; note: string; by: string; work?: { number: number; url: string } }[] }>("GET", `${one(id)}/notes`),
   /** The note made a work item on its change's repo by roll (once a note; a guest's marked as outside the team's words). */
