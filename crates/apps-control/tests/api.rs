@@ -1801,6 +1801,7 @@ async fn a_preview_environment_deploys_a_revision_and_tears_down() {
     assert_eq!((body["path"].as_str(), body["query"].as_str()), (Some("/hooks/stripe"), Some("a=1")), "{body}");
     assert_eq!(post(&format!("/hooks/other?roll_hook={hook}")).await.unwrap().status(), StatusCode::UNAUTHORIZED, "one exact path");
     assert_eq!(post("/hooks/stripe?roll_hook=wrong").await.unwrap().status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(call(&w.api, "DELETE", &pv, None).await.0, StatusCode::NO_CONTENT);
     let (st, _) = call(&w.api, "DELETE", &base, None).await;
     assert_eq!(st, StatusCode::NO_CONTENT);
     assert!(!w.fake.instances(&id).iter().any(|(_, dep, _)| *dep == d["id"]), "its instances are gone");
