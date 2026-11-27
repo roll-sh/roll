@@ -288,6 +288,8 @@ pub struct Apps {
     preview_router: std::sync::OnceLock<Arc<dyn integrations::PreviewRouter>>,
     /// What writes a customer's DNS records with their token (`…/domains/{host}/configure`).
     dns_writer: std::sync::OnceLock<Arc<dyn integrations::DnsWriter>>,
+    /// roll previews' snapshots from a team's tests (`POST /__roll/snapshot` on a preview).
+    pub(crate) preview_snapshots: std::sync::OnceLock<Arc<dyn integrations::PreviewSnapshots>>,
     /// roll previews' branch pushes ([`Apps::set_git_pushes`]).
     pub(crate) pushes: std::sync::OnceLock<Arc<dyn integrations::GitPushes>>,
     /// roll's GitHub App ([`Apps::set_github_app`]).
@@ -704,6 +706,7 @@ impl Apps {
             shares: std::sync::OnceLock::new(),
             preview_router: std::sync::OnceLock::new(),
             dns_writer: std::sync::OnceLock::new(),
+            preview_snapshots: std::sync::OnceLock::new(),
             pushes: std::sync::OnceLock::new(),
             github: std::sync::OnceLock::new(),
             mail: std::sync::OnceLock::new(),
@@ -2497,12 +2500,10 @@ impl Apps {
                     return Err(Error::BadRequest(format!("access.webhooks is at most {} of {{path: an absolute path (no query, no . or .., no %), token_sha256: a SHA-256 in hex}}", crate::model::MAX_HOOK_URLS)));
                 }
                 let webhooks: Vec<crate::model::HookUrl> = webhooks.into_iter().map(|h| crate::model::HookUrl { path: h.path, token_hash: h.token_hash.to_ascii_lowercase() }).collect();
-                if !webhooks.is_empty() {
-                    let (sid, e) = (service.to_string(), env.to_string());
-                    let ephemeral = o.get("ephemeral") == Some(&Value::Bool(true)) || self.db(move |s| s.environment(&sid, &e)).await.is_ok_and(|r| r.ephemeral);
-                    if !ephemeral {
-                        return Err(Error::BadRequest("access.webhooks is a preview (ephemeral) environment's".into()));
-                    }
+                // roll previews' `pv-` environments only (the gate honours them nowhere else, whatever
+                // `ephemeral` says later).
+                if !webhooks.is_empty() && !env.starts_with("pv-") {
+                    return Err(Error::BadRequest("access.webhooks is a preview's (a pv- environment roll previews makes)".into()));
                 }
                 // A new way in keeps the paths whose preflights pass (`preflight`, set on its own).
                 let (sid, e) = (service.to_string(), env.to_string());
@@ -4664,8 +4665,12 @@ impl Apps {
         self.shares.get().cloned()
     }
 
-    /// Where names under a project's preview domain that no environment holds go (roll previews'
-    /// router, for its previews on roll's own runtime). Set once.
+    /// roll previews' snapshots from a team's tests (`POST /__roll/snapshot`). Set once.
+    pub fn set_preview_snapshots(&self, s: Arc<dyn integrations::PreviewSnapshots>) {
+        let _ = self.preview_snapshots.set(s);
+    }
+
+    /// What writes a customer's DNS records with their token (`…/domains/{host}/configure`). Set once.
     pub fn set_dns_writer(&self, w: Arc<dyn integrations::DnsWriter>) {
         let _ = self.dns_writer.set(w);
     }
@@ -4718,6 +4723,8 @@ impl Apps {
         self.verify_domain(service, env, &h).await
     }
 
+    /// Where names under a project's preview domain that no environment holds go (roll previews'
+    /// router, for its previews on roll's own runtime). Set once.
     pub fn set_preview_router(&self, router: Arc<dyn integrations::PreviewRouter>) {
         let _ = self.preview_router.set(router);
     }

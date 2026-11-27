@@ -110,11 +110,18 @@ impl crate::Apps {
             let mut new: Vec<&str> = tags.iter().copied().filter(|t| crate::tags::tag_matches(&pattern, t) && !seen.iter().any(|s| s == t)).collect();
             new.sort_by(|a, b| crate::tags::version_order(a, b));
             let Some(newest) = new.pop() else { continue };
+            // Older than a release already seen (a backport tagged after it): marked, never put
+            // live by the watch (a person's push of it through the hook still is).
+            let newest_seen = seen.iter().filter(|t| crate::tags::tag_matches(&pattern, t)).max_by(|a, b| crate::tags::version_order(a, b));
+            if newest_seen.is_some_and(|s| crate::tags::version_order(newest, s) == std::cmp::Ordering::Less) {
+                new.push(newest);
+            } else {
+                wanted.push(newest.to_string());
+            }
             for older in new {
                 let (sid, en, t) = (svc.id.clone(), env.clone(), older.to_string());
                 let _ = self.db(move |s| s.mark_tag_seen(&sid, &en, &t)).await;
             }
-            wanted.push(newest.to_string());
         }
         wanted.sort();
         wanted.dedup();

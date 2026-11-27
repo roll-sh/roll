@@ -7,18 +7,6 @@ const oneLine = (s: string) => s.replace(/[\r\n`]+/g, " ").replace(/\s+/g, " ").
 const cut = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
 const from = (p: Where) => (p.repo && p.number ? ` of ${p.repo}#${p.number}` : "");
 
-/** A note on a preview's page made a work item (Vercel Comments' "Create issue"; roll's agents
- * claim work items): its first line the title, and the note's own review (the page and its link,
- * the element, the note, what went wrong there) the body, with where it came from. */
-export function workFromNote(p: Where, review: string, body: string): WorkInput {
-  const note = (body.split("\n\n")[1] ?? body).trim();
-  return {
-    title: cut(`Preview feedback: ${oneLine(note.split("\n")[0] ?? note)}`, 100),
-    body: `${body.trim()}\n\nFrom a note on the preview${from(p)} (review \`${review.replace(/[^\w-]/g, "")}\`).`,
-    labels: ["preview-feedback"],
-  };
-}
-
 /** An error group of a preview made a work item: its service and title, its sample (masked, as the
  * preview shows it) in a block nothing in it can close, and how often it was seen. */
 export function workFromError(p: Where, g: ErrorGroup): WorkInput {
