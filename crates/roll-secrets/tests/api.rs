@@ -2769,7 +2769,7 @@ async fn a_hook_token_widened_after_naming_a_pusher_vouches_for_no_one() {
     let push = |breakglass: bool| json!({ "candidates": [], "breakglass": breakglass, "pusher": "alice", "refs": ["refs/heads/main"] });
     assert_eq!(api.req(Method::POST, "/scan", Some(push(false)), Some(&hook)).await.0, StatusCode::OK);
     // A list from before logins were bound: a bare login, as an old server stored it.
-    api.db.write(|c| c.execute("UPDATE projects SET breakglass = ? WHERE project_id = ?", (json!(["alice"]).to_string(), api.project.as_str()))).unwrap();
+    api.db.write(|c| c.execute("UPDATE projects SET breakglass = ? WHERE project_id = ?", [json!(["alice"]).to_string().as_str(), api.project.as_str()])).unwrap();
     assert_eq!(api.req(Method::POST, "/scan", Some(push(true)), Some(&hook)).await.0, StatusCode::OK, "alice through a scan-only hook");
 
     // The token gains reveal after naming alice.
