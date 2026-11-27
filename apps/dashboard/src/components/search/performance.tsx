@@ -7,9 +7,12 @@
  * measure per chart, neutral ink for a single series, the percentiles in `--viz-2…4` with a
  * legend carrying each value, hairline grid, a crosshair and value on hover or focus. Nothing
  * animates, so reduced motion needs nothing more.
+ *
+ * Health alert rules (lib/search-alerts.ts) show their state beside the chart they watch, and
+ * all of them, the month's cost too, in a panel under the charts with a test send.
  */
 
-import { ChevronRight, Terminal } from "lucide-react";
+import { BellRing, ChevronRight, Send, Terminal } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { searchApi, type SearchCluster } from "@/lib/search-api";
 import {
@@ -29,6 +32,7 @@ import {
   type SearchSlowLog,
   type SlowEntry,
 } from "@/lib/search-performance";
+import { chartOf, formatAlertValue, ruleText, type AlertChart, type AlertRule } from "@/lib/search-alerts";
 import { usePageVisible } from "../apps/live";
 import { Segmented } from "../redis/shared";
 import { btn, CopyButton, panel, useCopy } from "../ui";
@@ -55,7 +59,19 @@ function when(at: number, long: boolean) {
   return long ? `${d.toLocaleDateString("en-US", { month: "short", day: "numeric" })} ${time}` : time;
 }
 
-function Chart({ title, at, lines, format, headline, long }: { title: string; at: number[]; lines: Line[]; format: (v: number) => string; headline: string[]; long: boolean }) {
+/** A rule's state, as a dot and a word (firing in the danger colour; its rule on hover). */
+function RuleState({ rule }: { rule: AlertRule }) {
+  const firing = rule.state === "firing";
+  return (
+    <span title={`${rule.name ? `${rule.name}: ` : ""}${ruleText(rule)}`} className={`inline-flex items-center gap-1 text-[11px] ${firing ? "text-danger" : "text-subtle"}`}>
+      <i className={`inline-block size-1.5 rounded-full ${firing ? "bg-danger" : "bg-line-2"}`} aria-hidden />
+      {firing ? "firing" : "ok"}
+      <span className="sr-only">: {ruleText(rule)}</span>
+    </span>
+  );
+}
+
+function Chart({ title, at, lines, format, headline, long, rules = [] }: { title: string; at: number[]; lines: Line[]; format: (v: number) => string; headline: string[]; long: boolean; rules?: AlertRule[] }) {
   const [hover, setHover] = useState<number | null>(null);
   const n = at.length;
   const top = niceMax(Math.max(0, ...lines.flatMap((l) => l.values.map((v) => v ?? 0))));
@@ -68,7 +84,12 @@ function Chart({ title, at, lines, format, headline, long }: { title: string; at
   return (
     <figure className={`${panel} p-4`}>
       <figcaption className="flex items-baseline justify-between gap-2">
-        <span className="text-[12px] text-muted">{title}</span>
+        <span className="flex flex-wrap items-baseline gap-x-2 text-[12px] text-muted">
+          {title}
+          {rules.map((r) => (
+            <RuleState key={r.id} rule={r} />
+          ))}
+        </span>
         <span className="font-mono text-[11px] text-subtle tabular-nums">{hover !== null ? when(at[hover], long) : ""}</span>
       </figcaption>
       <div className="mt-1 flex flex-wrap items-baseline gap-x-3">
@@ -118,6 +139,7 @@ export function PerformanceTab({ cluster, onOpenConsole }: { cluster: SearchClus
   const [slow, setSlow] = useState<SearchSlowLog | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [slowErr, setSlowErr] = useState<string | null>(null);
+  const [rules, setRules] = useState<AlertRule[] | null>(null);
   const visible = usePageVisible();
 
   useEffect(() => {
@@ -125,8 +147,9 @@ export function PerformanceTab({ cluster, onOpenConsole }: { cluster: SearchClus
     let alive = true;
     let timer: ReturnType<typeof setTimeout>;
     const load = async () => {
-      const [m, s] = await Promise.allSettled([searchApi.metrics(cluster.id, range), searchApi.slowlog(cluster.id)]);
+      const [m, s, a] = await Promise.allSettled([searchApi.metrics(cluster.id, range), searchApi.slowlog(cluster.id), searchApi.alerts(cluster.id)]);
       if (!alive) return;
+      if (a.status === "fulfilled") setRules(a.value.rules);
       if (m.status === "fulfilled") {
         setMetrics(m.value);
         setErr(null);
@@ -151,6 +174,7 @@ export function PerformanceTab({ cluster, onOpenConsole }: { cluster: SearchClus
   const long = range !== "1h";
   const per = m ? (m.step_s === 60 ? "per minute" : m.step_s % 3600 === 0 ? `per ${m.step_s / 3600} h` : `per ${m.step_s / 60} min`) : "";
   const sum = (a: number[]) => a.reduce((x, v) => x + v, 0);
+  const watching = (c: AlertChart) => (rules ?? []).filter((r) => chartOf(r.metric) === c);
 
   return (
     <div className="space-y-4">
@@ -183,9 +207,10 @@ export function PerformanceTab({ cluster, onOpenConsole }: { cluster: SearchClus
             </div>
           ) : (
             <div className="grid gap-3 sm:grid-cols-2">
-              <Chart title={`Requests / s, ${per}`} at={s.at} long={long} format={formatRate} headline={[`${formatRate(t.rate)} avg`]} lines={[{ label: "requests", values: s.rate, color: "var(--soft)" }]} />
+              <Chart title={`Requests / s, ${per}`} rules={watching("rate")} at={s.at} long={long} format={formatRate} headline={[`${formatRate(t.rate)} avg`]} lines={[{ label: "requests", values: s.rate, color: "var(--soft)" }]} />
               <Chart
                 title="Latency"
+                rules={watching("latency")}
                 at={s.at}
                 long={long}
                 format={formatLatency}
@@ -198,6 +223,7 @@ export function PerformanceTab({ cluster, onOpenConsole }: { cluster: SearchClus
               />
               <Chart
                 title={`Errors, ${per}`}
+                rules={watching("errors")}
                 at={s.at}
                 long={long}
                 format={count}
@@ -207,15 +233,70 @@ export function PerformanceTab({ cluster, onOpenConsole }: { cluster: SearchClus
                   { label: "5xx", values: s.server, color: "var(--viz-4)" },
                 ]}
               />
-              <Chart title={`Rejections (429), ${per}`} at={s.at} long={long} format={count} headline={[count(t.rejected)]} lines={[{ label: "429", values: s.rejected, color: "var(--soft)" }]} />
+              <Chart title={`Rejections (429), ${per}`} rules={watching("rejections")} at={s.at} long={long} format={count} headline={[count(t.rejected)]} lines={[{ label: "429", values: s.rejected, color: "var(--soft)" }]} />
             </div>
           )}
           {err && <p className="text-[12px] text-danger">Couldn&apos;t refresh: {err}</p>}
         </>
       )}
 
+      {rules && <HealthAlerts clusterId={cluster.id} rules={rules} />}
+
       <SlowLog log={slow} error={slowErr} onOpenConsole={onOpenConsole} />
     </div>
+  );
+}
+
+/** Every rule of the cluster with its state and last value, and a test send per rule. */
+function HealthAlerts({ clusterId, rules }: { clusterId: string; rules: AlertRule[] }) {
+  const [sent, setSent] = useState<Record<string, string>>({});
+  const test = async (r: AlertRule) => {
+    setSent((x) => ({ ...x, [r.id]: "Sending…" }));
+    try {
+      const q = await searchApi.testAlert(clusterId, r.id);
+      setSent((x) => ({ ...x, [r.id]: `Queued ${q.queued.length} test ${q.queued.length === 1 ? "delivery" : "deliveries"}` }));
+    } catch (e) {
+      setSent((x) => ({ ...x, [r.id]: message(e) }));
+    }
+  };
+  return (
+    <section className={`${panel} overflow-hidden`} aria-label="Health alerts">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line px-4 py-2.5">
+        <p className="inline-flex items-center gap-1.5 text-[12px] text-muted">
+          <BellRing size={14} strokeWidth={1.5} aria-hidden />
+          Health alerts, checked every minute by roll, also while the cluster sleeps
+        </p>
+        <code className="font-mono text-[11px] text-subtle">roll search alerts create</code>
+      </div>
+      {rules.length === 0 ? (
+        <p className="px-4 py-4 text-[13px] text-subtle">No rules yet. A rule sends a signed webhook or a chat message when it fires and when it recovers.</p>
+      ) : (
+        <ul className="divide-y divide-line">
+          {rules.map((r) => (
+            <li key={r.id} className="flex flex-wrap items-center gap-x-4 gap-y-1 px-4 py-2.5 text-[13px]">
+              <RuleState rule={r} />
+              <span className="min-w-48 flex-1">
+                <span>{ruleText(r)}</span>
+                {r.name && <span className="ml-2 text-subtle">{r.name}</span>}
+              </span>
+              <span className="font-mono text-[12px] text-muted tabular-nums" title="The last evaluation's value">
+                {formatAlertValue(r.metric, r.value)}
+              </span>
+              <span className="hidden text-[12px] text-subtle sm:inline">{r.targets.map((t) => (t.type === "webhook" ? t.url : `${t.type} ${t.channel}`)).join(", ")}</span>
+              <button type="button" className={btn} onClick={() => void test(r)} disabled={sent[r.id] === "Sending…"}>
+                <Send size={14} strokeWidth={1.5} aria-hidden />
+                Send test
+              </button>
+              {sent[r.id] && (
+                <span className="w-full text-[12px] text-subtle" role="status">
+                  {sent[r.id]}
+                </span>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   );
 }
 

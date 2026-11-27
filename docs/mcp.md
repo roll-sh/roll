@@ -1208,6 +1208,11 @@ previews are listed once those products are on.
 | `search_get_cluster` | A cluster's settings, state, indices, size, URL and branches. | `GET /v1/search/clusters/{cluster}` |
 | `search_create_cluster` | A new cluster, or a branch of one (its password once, to tokens that may reveal). | `POST /v1/search/clusters` |
 | `search_list_branches` | A cluster's branches. | `GET /v1/search/clusters/{id}/branches` |
+| `search_list_alerts` | A cluster's health alert rules with their state (ok or firing) and last value; never a secret. | `GET /v1/search/clusters/{cluster}/alerts` |
+| `search_get_alert` | One health alert rule with its state. | `GET /v1/search/clusters/{cluster}/alerts/{rule}` |
+| `search_delete_alert` | Delete a health alert rule and what it still owed. | `DELETE /v1/search/clusters/{cluster}/alerts/{rule}` |
+| `search_test_alert` | Queue a test delivery to each of a rule's targets. | `POST /v1/search/clusters/{cluster}/alerts/{rule}/test` |
+| `search_alert_deliveries` | A rule's newest deliveries and how each went. | `GET /v1/search/clusters/{cluster}/alerts/{rule}/deliveries` |
 | `search_list_remotes` | The clusters this one searches across: alias, cluster, key id, whether it connects (never the key). | `GET /v1/search/clusters/{id}/remotes` |
 | `search_overview` | What roll search offers here: versions, endpoint, defaults, pricing. | `GET /v1/search` |
 | `search_unlink_remote` | Unlink a remote cluster (its credentials go; a key roll made is revoked). | `DELETE /v1/search/clusters/{cluster}/remotes/{alias}` |

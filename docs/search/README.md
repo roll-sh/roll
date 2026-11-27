@@ -957,6 +957,11 @@ origins (browser search), once they're on main.
 | GET | `/v1/search/clusters/{id}/browser-keys/{key}/usage?window=1h\|24h\|14d` | one browser key's usage (above; 24h by default): `{key, window, step_s, from, to, points: [{at, requests, throttled, refused, reasons}], totals: {requests, throttled, refused, reasons, users: [{user, requests, throttled}], origins: [{origin, refused}]}}`. `throttled` counts 429s, `refused` the other refusals, `reasons` both by name (`key_rate`, `address_rate`, `user_rate`, `concurrency`, `cluster_ceiling`, `origin`, `policy`, `body_too_large`, `invalid_key`); points only where the key made requests. 404 for a key that isn't one of the cluster's browser keys; 400 for another window |
 | POST | `/v1/search/clusters/{id}/browser-keys` | a key a web page ships (above) `{name, indices or application, filter?, expires_in_s?, rate_limit?: {per_minute?, per_ip_per_minute?}, limits?: {max_concurrent?, max_result_window?, max_buckets?, max_items?, max_inference?, max_rerank_window?, max_body_bytes?, inference_endpoints?, allow_scripts?, allow_expensive_queries?, events?}}` → the same fields plus `api_key` (once) and `url`. `limits.events` lets the page post `search_click` and `roll_conversion` events about what the key reaches (counted for its own visitor, never stored: relevance-experiments.md). 400 on an OpenSearch-flavor cluster; 409 past 20 browser keys |
 | DELETE | `/v1/search/clusters/{id}/browser-keys/{key}` | revoke a browser key (204; 404 for any other key of the cluster; on a deleted cluster, a browser key of it is kept for the restore, which revokes it: 202) |
+| GET | `/v1/search/clusters/{id}/alerts` | health alert rules with their state ("Health alerts"): `{rules: [{id, name, metric, op, threshold, window, targets, state, since, value, evaluated_at, created_at}]}`; a webhook target shows its origin only |
+| POST | `/v1/search/clusters/{id}/alerts` | `{name?, metric, op, threshold, window?, targets: [{type: webhook, url, secret} \| {type: slack \| discord, install, channel}]}` → 201 the rule; 400 for a private address, an install that isn't the caller's, or a bad window; 409 past 20 rules |
+| GET, DELETE | `/v1/search/clusters/{id}/alerts/{rule}` | one rule; deleting it drops what it still owed (204) |
+| POST | `/v1/search/clusters/{id}/alerts/{rule}/test` | 202 `{queued: [delivery ids]}`: a `search.alert.test` delivery per target, sent by the worker at once |
+| GET | `/v1/search/clusters/{id}/alerts/{rule}/deliveries` | the rule's newest 50 deliveries: `{deliveries: [{id, target, event, status, attempts, next_at, last_status, last_error, created_at, delivered_at}]}` |
 | GET | `/v1/search/clusters/{id}/remotes` | the remote clusters it holds credentials for: `{remotes: [{alias, cluster, cluster_id, key_id, minted, created_at, connected}]}` (never the key) |
 | PUT | `/v1/search/clusters/{id}/remotes/{alias}` | link another cluster of the same owner as remote `alias` (above): `{cluster, skip_unavailable?, access?}` or `{cluster, skip_unavailable?, api_key}` → `{alias, cluster, cluster_id, mode, proxy_address, key_id, minted, skip_unavailable?}`; 404 for a cluster the caller can't link to, missing or not. `admin` on both clusters for roll-access |
 | DELETE | `/v1/search/clusters/{id}/remotes/{alias}` | unlink: the remote's settings and credentials go, a key roll made is revoked (204) |
@@ -1297,6 +1302,56 @@ suggestions off stops rebuilds and leaves the index for the owner to delete. Tur
 analytics: the catalog's row goes with the analytics' rows, and the next metering pass on the
 cluster's owner deletes every suggestions index roll built from it (marked at creation with
 `index.roll.suggestions.source` and `source_uuid`).
+
+## Health alerts
+
+Rules on a cluster's own health (logs-end-to-end.md, section 3; `crates/search-control/src/alerts.rs`),
+like Elastic Cloud's deployment alerts and Amazon OpenSearch Service's CloudWatch alarms on
+p99 latency and 5xx and 429 rates. They live in roll's catalog, not in the cluster, so they hold
+while it sleeps and nothing through its Elasticsearch API reads or changes them.
+
+- **A rule** is `{name?, metric, op, threshold, window, targets}`:
+  - `metric`: `p99_ms` or `p95_ms` (latency over the window, milliseconds), `error_rate` (5xx,
+    percent of requests), `throttle_rate` (429s, percent of requests), `request_rate` (requests
+    a second), or `month_cost_usd` (this UTC month's cost so far, priced as `…/usage` prices it;
+    no window);
+  - `op`: `>`, `>=`, `<` or `<=`; `window`: whole minutes from `1m` to `24h` (`5m`, `2h`);
+  - `targets` (1 to 5): `{type: "webhook", url, secret}` (the secret, 16 to 200 characters, is
+    the receiver's too, and is never answered), or `{type: "slack" | "discord", install, channel}`:
+    a channel of a roll code chat install (docs/code/chatops.md) of the rule maker's own roll code
+    owner, never a copied webhook URL.
+  - At most 20 rules a cluster.
+- **Evaluation.** Every metering pass (60 s), on one node of a fleet (the singleton
+  `search-alerts`), over the catalog's minute ring, which every node's pass fills: a window may
+  miss up to one pass of another node's newest requests. A window without requests gives
+  latency and the error rates no value, which never fires; its request rate is 0 (so
+  `request_rate < 0.1 over 10m` tells a cluster nobody reaches any more). Answers show each
+  rule's `state` (`ok` or `firing`), `since`, the last `value` and `evaluated_at`.
+- **Changes are delivered once.** `ok` to `firing` (`search.alert.firing`) and back
+  (`search.alert.resolved`) are each a compare-and-swap on the rule in one catalog write that also
+  queues a delivery per target (search's own outbox, `search_alert_deliveries`: roll code's
+  delivery queue is in code's database, so a search state change couldn't promise into it in its
+  own transaction). Nothing is sent from a request: a worker on the node that runs the pass (or a
+  test send's) claims due rows and sends them.
+- **Webhooks** are signed as roll code's are: a POST of
+  `{event, at, cluster: {id, name}, rule: {id, name, metric, op, threshold, window}, state,
+  value, text}` with `x-roll-event`, `x-roll-delivery`, `x-roll-timestamp` and
+  `x-roll-signature-256: sha256=<hex HMAC-SHA256(secret, "{timestamp}.{body}")>`. They go through
+  `roll_net::PublicOnly` with no redirects and a 10 s timeout: an address that's private, written
+  as one (refused when the rule is made) or resolved to one (never sent), isn't reached, unless
+  the node allows it (`--search-alerts-allow-private`, local development). A 2xx is delivered;
+  anything else is tried again after 30 s, tripling to at most 6 h, 8 tries in all. Answers show
+  a webhook's origin only (its path may hold a token).
+- **Chat** posts one line through roll code's install, as roll secrets' notices do; whether the
+  install is still the maker's is asked again on every send.
+- **Routes** (rows in the table above): `GET …/alerts`, `POST …/alerts` (201), `GET` and
+  `DELETE …/alerts/{rule}`, `POST …/alerts/{rule}/test` (202: a test delivery queued per target,
+  `search.alert.test`) and `GET …/alerts/{rule}/deliveries` (the newest 50: `{id, target, event,
+  status: pending | delivered | failed, attempts, next_at, last_status, last_error, created_at,
+  delivered_at}`). `roll search alerts list|create|delete|test|deliveries`, the MCP tools
+  `search_list_alerts`, `search_get_alert`, `search_delete_alert`, `search_test_alert` and
+  `search_alert_deliveries` (making one sets a secret: no tool), and the Performance tab (each
+  rule's state beside its chart, every rule with a test send) use them.
 
 ## Metering and pricing
 
@@ -1784,7 +1839,7 @@ deterministic (#396).
    landed in #735, ECS documents into `logs-roll.apps-*` through an `append` key; Elastic
    Observability's managed OTLP intake, OpenSearch Ingestion and the
    Alerting plugin): no OTLP intake in search, `_plugins/_alerting` isn't served, Watcher has no UI,
-   nothing alerts on a cluster's own p99, 5xx or 429s, and Discover has no saved searches or
+   health alerts on a cluster's own p99, 5xx, 429s and cost are built ("Health alerts"), and Discover has no saved searches or
    visualizations. An OTLP logs and traces intake into data streams also gives roll apps' log drains a
    home in roll search.
 19. **Vector search's footprint** (docs/benchmarks/search.md, "Vector search": 1M × 384 against

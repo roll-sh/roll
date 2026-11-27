@@ -119,6 +119,50 @@ pub enum Search {
     /// key, here, with no call to roll.
     #[command(subcommand)]
     BrowserKeys(BrowserKeys),
+    /// Alerts on a cluster's own health: rules over its request metrics and this month's cost,
+    /// kept by roll (they hold while it sleeps), sent to webhooks and chat channels.
+    #[command(subcommand)]
+    Alerts(Alerts),
+}
+
+#[derive(Subcommand)]
+pub enum Alerts {
+    /// The cluster's rules and their state (`ok` or `firing`).
+    List { cluster: String },
+    /// Adds a rule, e.g. `--metric p99_ms --op '>' --threshold 500 --window 5m --webhook URL`.
+    /// A webhook's signing secret comes from `ROLL_SEARCH_ALERT_SECRET` (never an argument), else
+    /// one is made here and printed once: give it to the receiver.
+    Create {
+        cluster: String,
+        /// p99_ms, p95_ms, error_rate (5xx, % of requests), throttle_rate (429s, %),
+        /// request_rate (a second) or month_cost_usd.
+        #[arg(long)]
+        metric: String,
+        /// >, >=, < or <=.
+        #[arg(long, allow_hyphen_values = true)]
+        op: String,
+        #[arg(long, allow_hyphen_values = true)]
+        threshold: f64,
+        /// Whole minutes from 1m to 24h (none for month_cost_usd).
+        #[arg(long)]
+        window: Option<String>,
+        #[arg(long)]
+        name: Option<String>,
+        /// A URL to POST signed changes to (repeatable).
+        #[arg(long)]
+        webhook: Vec<String>,
+        /// `<install>/<channel>`: a channel of one of your roll code Slack installs (repeatable).
+        #[arg(long)]
+        slack: Vec<String>,
+        /// `<install>/<channel>`: a channel of one of your roll code Discord installs (repeatable).
+        #[arg(long)]
+        discord: Vec<String>,
+    },
+    Delete { cluster: String, rule: String },
+    /// Sends a test delivery to each of the rule's targets.
+    Test { cluster: String, rule: String },
+    /// The rule's newest deliveries: what was sent, to which target, and how it went.
+    Deliveries { cluster: String, rule: String },
 }
 
 #[derive(Subcommand)]
@@ -176,6 +220,28 @@ fn derive_key(secret: &str, payload: &str) -> String {
 
 /// A browser key's usage answer as text: totals, a sparkline of requests and of 429s, the
 /// reasons, top users and refused origins.
+/// A cluster's alert rules, one a line.
+fn print_alert_rules(v: &Value) {
+    let rules = v["rules"].as_array().cloned().unwrap_or_default();
+    if rules.is_empty() {
+        println!("no alert rules");
+    }
+    for r in &rules {
+        let window = r["window"].as_str().map(|w| format!(" over {w}")).unwrap_or_default();
+        let value = r["value"].as_f64().map(|x| format!("  now {}", (x * 100.0).round() / 100.0)).unwrap_or_default();
+        println!("{}  {:<7} {} {} {}{window}{value}  {}", s(&r["id"]), s(&r["state"]), s(&r["metric"]), s(&r["op"]), number(&r["threshold"]), s(&r["name"]));
+    }
+}
+
+/// A JSON number as people write it (`500`, not `500.0`).
+fn number(v: &Value) -> String {
+    match v.as_f64() {
+        Some(x) if x.fract() == 0.0 && x.abs() < 1e15 => format!("{}", x as i64),
+        Some(x) => x.to_string(),
+        None => v.to_string(),
+    }
+}
+
 fn print_browser_usage(v: &Value) {
     let t = &v["totals"];
     let n = |v: &Value| v.as_u64().unwrap_or(0);
@@ -1141,6 +1207,96 @@ pub async fn run(api: &Api, as_json: bool, cmd: Search) -> anyhow::Result<()> {
                 json!({ "deleted": id })
             }
         },
+        Search::Alerts(a) => {
+            let cluster = match &a {
+                Alerts::List { cluster } | Alerts::Create { cluster, .. } | Alerts::Delete { cluster, .. } | Alerts::Test { cluster, .. } | Alerts::Deliveries { cluster, .. } => cluster.clone(),
+            };
+            let c = find(api, &cluster).await?;
+            let base = format!("/v1/search/clusters/{}/alerts", urlencoding::encode(&s(&c["id"])));
+            let rule = |r: &str| format!("{base}/{}", urlencoding::encode(r));
+            match a {
+                Alerts::List { .. } => {
+                    let v = api.get(&base).await?;
+                    if !as_json {
+                        print_alert_rules(&v);
+                        return Ok(());
+                    }
+                    v
+                }
+                Alerts::Create { metric, op, threshold, window, name, webhook, slack, discord, .. } => {
+                    let mut targets = Vec::new();
+                    let mut made = None;
+                    if !webhook.is_empty() {
+                        let secret = match std::env::var("ROLL_SEARCH_ALERT_SECRET").ok().filter(|s| !s.is_empty()) {
+                            Some(s) => s,
+                            None => {
+                                let mut b = [0u8; 24];
+                                getrandom::fill(&mut b).context("randomness")?;
+                                let s: String = b.iter().map(|x| format!("{x:02x}")).collect();
+                                made = Some(s.clone());
+                                s
+                            }
+                        };
+                        targets.extend(webhook.iter().map(|u| json!({ "type": "webhook", "url": u, "secret": secret })));
+                    }
+                    for (kind, list) in [("slack", &slack), ("discord", &discord)] {
+                        for t in list {
+                            let (install, channel) = t.split_once('/').with_context(|| format!("--{kind} {t}: <install>/<channel>"))?;
+                            targets.push(json!({ "type": kind, "install": install, "channel": channel }));
+                        }
+                    }
+                    if targets.is_empty() {
+                        bail!("give at least one --webhook, --slack or --discord");
+                    }
+                    let mut body = json!({ "metric": metric, "op": op, "threshold": threshold, "targets": targets });
+                    if let Some(w) = window {
+                        body["window"] = json!(w);
+                    }
+                    if let Some(n) = name {
+                        body["name"] = json!(n);
+                    }
+                    let mut v = api.post(&base, body).await?;
+                    if !as_json {
+                        println!("{} {} {} {} {}", s(&v["id"]), s(&v["metric"]), s(&v["op"]), number(&v["threshold"]), v["window"].as_str().unwrap_or("(this month)"));
+                        if let Some(m) = &made {
+                            println!("webhook secret (shown once; your receiver checks x-roll-signature-256 with it): {m}");
+                        }
+                        return Ok(());
+                    }
+                    if let Some(m) = made {
+                        v["secret"] = json!(m);
+                    }
+                    v
+                }
+                Alerts::Delete { rule: r, .. } => {
+                    api.call(Method::DELETE, &rule(&r), None).await?;
+                    if !as_json {
+                        println!("deleted {r}");
+                        return Ok(());
+                    }
+                    json!({ "deleted": r })
+                }
+                Alerts::Test { rule: r, .. } => {
+                    let v = api.post(&format!("{}/test", rule(&r)), json!({})).await?;
+                    if !as_json {
+                        println!("queued {} test deliveries: roll search alerts deliveries {cluster} {r}", v["queued"].as_array().map_or(0, Vec::len));
+                        return Ok(());
+                    }
+                    v
+                }
+                Alerts::Deliveries { rule: r, .. } => {
+                    let v = api.get(&format!("{}/deliveries", rule(&r))).await?;
+                    if !as_json {
+                        for d in v["deliveries"].as_array().into_iter().flatten() {
+                            let how = d["last_error"].as_str().map(str::to_string).or_else(|| d["last_status"].as_i64().map(|c| c.to_string())).unwrap_or_default();
+                            println!("{}  {:<22} target {}  {:<9} tries {}  {how}", s(&d["id"]), s(&d["event"]), d["target"], s(&d["status"]), d["attempts"]);
+                        }
+                        return Ok(());
+                    }
+                    v
+                }
+            }
+        }
         Search::BrowserKeys(BrowserKeys::Usage { cluster, key, window }) => {
             let c = find(api, &cluster).await?;
             let v = api
@@ -1593,6 +1749,8 @@ mod tests {
         }
         let t = T::try_parse_from(["t", "clusters", "branch", "app", "app-dev", "--at", "15m"]).unwrap();
         assert!(matches!(t.s, Search::Clusters(Clusters::Branch { ref at, .. }) if at.as_deref() == Some("15m")));
+        let t = T::try_parse_from(["t", "alerts", "create", "app", "--metric", "p99_ms", "--op", ">", "--threshold", "500", "--window", "5m", "--slack", "chi_1/C1"]).unwrap();
+        assert!(matches!(t.s, Search::Alerts(Alerts::Create { ref op, threshold, ref slack, .. }) if op == ">" && threshold == 500.0 && slack.len() == 1));
         let t = T::try_parse_from(["t", "request", "app", "GET", "/_cat/indices?v"]).unwrap();
         assert!(matches!(t.s, Search::Request { ref method, ref body, .. } if method == "GET" && body.is_none()));
         let t = T::try_parse_from(["t", "request", "app", "POST", "/_bulk", "@bulk.ndjson"]).unwrap();
