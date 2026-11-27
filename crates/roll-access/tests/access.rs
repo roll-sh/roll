@@ -171,8 +171,11 @@ fn postgres() -> Router {
                 let body: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
                 let Some(project) = body["secret"]["project"].as_str().map(String::from) else { return axum::Json(json!({ "reveal": reveal })) };
                 let g = roll_auth::Grant::on(&ext).unwrap();
+                // As roll secrets asks: a write of the one key the body names, a read of the folder.
+                let key = body["secret"]["key"].as_str().map(String::from);
                 let at = |env: &str, path: &str, action: roll_auth::scope::Action| {
-                    let r = roll_auth::scope::Resource { product: "secrets".into(), id: Some(project.clone()), project: Some(project.clone()), environment: Some(env.into()), path: Some(path.into()), ..Default::default() };
+                    let key = (action == roll_auth::scope::Action::Write).then(|| key.clone()).flatten();
+                    let r = roll_auth::scope::Resource { product: "secrets".into(), id: Some(project.clone()), project: Some(project.clone()), environment: Some(env.into()), path: Some(path.into()), key, ..Default::default() };
                     g.allows(&r, action) == roll_auth::scope::Outcome::Allow
                 };
                 use roll_auth::scope::Action::{Read, Write};
