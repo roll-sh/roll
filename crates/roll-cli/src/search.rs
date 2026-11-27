@@ -229,7 +229,16 @@ fn print_alert_rules(v: &Value) {
     for r in &rules {
         let window = r["window"].as_str().map(|w| format!(" over {w}")).unwrap_or_default();
         let value = r["value"].as_f64().map(|x| format!("  now {}", (x * 100.0).round() / 100.0)).unwrap_or_default();
-        println!("{}  {:<7} {} {} {}{window}{value}  {}", s(&r["id"]), s(&r["state"]), s(&r["metric"]), s(&r["op"]), r["threshold"], s(&r["name"]));
+        println!("{}  {:<7} {} {} {}{window}{value}  {}", s(&r["id"]), s(&r["state"]), s(&r["metric"]), s(&r["op"]), number(&r["threshold"]), s(&r["name"]));
+    }
+}
+
+/// A JSON number as people write it (`500`, not `500.0`).
+fn number(v: &Value) -> String {
+    match v.as_f64() {
+        Some(x) if x.fract() == 0.0 && x.abs() < 1e15 => format!("{}", x as i64),
+        Some(x) => x.to_string(),
+        None => v.to_string(),
     }
 }
 
@@ -1248,7 +1257,7 @@ pub async fn run(api: &Api, as_json: bool, cmd: Search) -> anyhow::Result<()> {
                     }
                     let mut v = api.post(&base, body).await?;
                     if !as_json {
-                        println!("{} {} {} {} {}", s(&v["id"]), s(&v["metric"]), s(&v["op"]), v["threshold"], v["window"].as_str().unwrap_or("(this month)"));
+                        println!("{} {} {} {} {}", s(&v["id"]), s(&v["metric"]), s(&v["op"]), number(&v["threshold"]), v["window"].as_str().unwrap_or("(this month)"));
                         if let Some(m) = &made {
                             println!("webhook secret (shown once; your receiver checks x-roll-signature-256 with it): {m}");
                         }
