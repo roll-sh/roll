@@ -4204,59 +4204,66 @@ fn row_types(p: &Plan) -> Vec<crate::types::DataType> {
     }
 }
 
-/// Rows deduplicated through a TupleHashTable sized for `plan`'s estimate, in the
-/// table's iteration order (the first row of each group).
+/// Rows deduplicated through a TupleHashTable sized for `plan`'s estimate, in the table's
+/// iteration order (the first row of each group): a HashAggregate without aggregates over
+/// the rows `next` reads as they come, `key` a row's key (None: the row is its own). Only
+/// each group's first row is held, a row of a group already in the table dropped as it
+/// comes, as nodeAgg's table holds them (every row was held first, and each group's key a
+/// copy of its row); `types`: the key's, from the first row.
 fn hashed_distinct(
-    rows: impl IntoIterator<Item = Row>,
-    key: impl Fn(&Row) -> Row,
-    types: Vec<crate::types::DataType>,
+    mut next: impl FnMut() -> Result<Option<Row>>,
+    key: impl Fn(&Row) -> Result<Option<Row>>,
+    types: impl FnOnce(&Row) -> Vec<crate::types::DataType>,
     plan: &Arc<Plan>,
     ctx: &ExecCtx,
 ) -> Result<Vec<Row>> {
-    hashed_distinct_keyed(rows.into_iter().map(|r| (key(&r), r)), types, plan, ctx)
-}
-
-/// `hashed_distinct` over rows paired with their keys.
-fn hashed_distinct_keyed(
-    rows: impl IntoIterator<Item = (Row, Row)>,
-    types: Vec<crate::types::DataType>,
-    plan: &Arc<Plan>,
-    ctx: &ExecCtx,
-) -> Result<Vec<Row>> {
-    let mut index: HashMap<Row, usize> = HashMap::default();
-    let mut firsts: Vec<Row> = Vec::new();
-    let mut order = super::pghash::GroupOrder::new(types, ctx);
-    // (Each group's hash taken at its first row: equal keys hash alike.)
-    let mut hashes: Vec<u32> = Vec::new();
-    for (k, r) in rows {
-        ctx.check()?;
-        let g = match index.get(&k) {
-            Some(g) => *g,
-            None => {
-                firsts.push(r);
-                hashes.push(order.hash(&k));
-                index.insert(k, firsts.len() - 1);
-                firsts.len() - 1
-            }
-        };
-        order.lookup(hashes[g], g);
-    }
-    // (A HashAggregate without aggregates.)
+    let Some(first) = next()? else { return Ok(Vec::new()) };
+    let mut order = super::pghash::GroupOrder::new(types(&first), ctx);
+    // (A HashAggregate without aggregates: its table made for the estimate first.)
     let e = super::pghash::agg_estimate(plan, ctx);
-    let (est, width) = (e.rows, e.input_width);
     let sizing = super::pghash::AggSizing {
-        input_width: width,
+        input_width: e.input_width,
         num_trans: 0,
         trans_space: 0.0,
         num_hashes: 1,
-        total_groups: est,
+        total_groups: e.rows,
     };
+    let nbuckets = sizing.nbuckets(e.rows, super::pghash::hash_mem(ctx));
+    order.size(nbuckets);
+    let st = super::fasthash::FastState::default();
+    let mut table: hashbrown::HashTable<usize> = hashbrown::HashTable::new();
+    let mut firsts: Vec<Row> = Vec::new();
+    // (The groups' keys, when a row isn't its own; each group's hash taken at its first
+    // row: equal keys hash alike.)
+    let mut keys: Vec<Row> = Vec::new();
+    let mut hashes: Vec<u32> = Vec::new();
+    let mut row = Some(first);
+    while let Some(r) = row {
+        let k = key(&r)?;
+        let keyed = k.is_some();
+        let kv: &[Value] = k.as_deref().unwrap_or(&r);
+        let h = std::hash::BuildHasher::hash_one(&st, kv);
+        let g = match table.find(h, |&g| if keyed { keys[g][..] == *kv } else { firsts[g][..] == *kv }) {
+            Some(&g) => g,
+            None => {
+                let g = firsts.len();
+                hashes.push(order.hash(kv));
+                if let Some(k) = k {
+                    keys.push(k);
+                }
+                firsts.push(r);
+                let (keys, firsts) = (&keys, &firsts);
+                table.insert_unique(h, g, |&x| std::hash::BuildHasher::hash_one(&st, if keyed { &keys[x][..] } else { &firsts[x][..] }));
+                g
+            }
+        };
+        order.lookup(hashes[g], g);
+        row = next()?;
+    }
+    drop(table);
+    drop(keys);
     let mut slots: Vec<Option<Row>> = firsts.into_iter().map(Some).collect();
-    Ok(order
-        .order(sizing.nbuckets(est, super::pghash::hash_mem(ctx)))
-        .into_iter()
-        .filter_map(|i| slots[i].take())
-        .collect())
+    Ok(order.order(nbuckets).into_iter().filter_map(|i| slots[i].take()).collect())
 }
 
 /// Rows sorted ascending on columns `cols` (a Unique's input order).
@@ -4306,11 +4313,23 @@ fn output_types(p: &Plan, row: Option<&Row>) -> Vec<crate::types::DataType> {
 impl Node for DistinctNode {
     fn next(&mut self, ctx: &ExecCtx) -> Result<Option<Row>> {
         if let Some(plan) = self.hashed.take() {
-            let mut rows = Vec::new();
-            while let Some(r) = self.input.next(ctx)? {
-                ctx.check()?;
-                rows.push(r);
-            }
+            // (The input's rows as they come; all of them read first only where they're
+            // sorted.)
+            let source = &mut self.input;
+            let mut next = || -> Result<Option<Row>> {
+                let r = source.next(ctx)?;
+                if r.is_some() {
+                    ctx.check()?;
+                }
+                Ok(r)
+            };
+            let all = |next: &mut dyn FnMut() -> Result<Option<Row>>| -> Result<Vec<Row>> {
+                let mut rows = Vec::new();
+                while let Some(r) = next()? {
+                    rows.push(r);
+                }
+                Ok(rows)
+            };
             let input = match &*plan {
                 Plan::Distinct { input, .. } => input.clone(),
                 _ => plan.clone(),
@@ -4325,7 +4344,7 @@ impl Node for DistinctNode {
             let out = if let Some(keys) = self.presort.take() {
                 let mut seen: HashMap<Row, ()> = HashMap::default();
                 let mut out: Vec<Row> = Vec::new();
-                for r in sort_rows(rows, &keys, ctx)? {
+                for r in sort_rows(all(&mut next)?, &keys, ctx)? {
                     if seen.insert(whole(&r), ()).is_none() {
                         out.push(r);
                     }
@@ -4333,13 +4352,8 @@ impl Node for DistinctNode {
                 out
             } else if let Some(on) = &self.on {
                 let colls = super::agg::nondeterministic_keys(on, ctx);
-                let mut keyed = Vec::with_capacity(rows.len());
-                for r in rows {
-                    let k = super::agg::group_key(&eval_all(on, &r, ctx)?, &colls);
-                    keyed.push((k, r));
-                }
-                let types: Vec<crate::types::DataType> = on.iter().map(Expr::ty).collect();
-                hashed_distinct_keyed(keyed, types, &plan, ctx)?
+                let key = |r: &Row| -> Result<Option<Row>> { Ok(Some(super::agg::group_key(&eval_all(on, r, ctx)?, &colls))) };
+                hashed_distinct(next, key, |_| on.iter().map(Expr::ty).collect(), &plan, ctx)?
             // (Shown as a Unique over its input sorted: the rows in that order. With values
             // that compare equal but differ (`'1 mon'` / `'30 days'`, `1.0` / `1.00`), the
             // one kept is the first of its run in that order, so all rows are sorted first.)
@@ -4348,7 +4362,7 @@ impl Node for DistinctNode {
                 let mut seen: HashMap<Row, ()> = HashMap::default();
                 let mut out: Vec<Row> = Vec::new();
                 if ties {
-                    let mut all = rows;
+                    let mut all = all(&mut next)?;
                     sort_rows_by(&mut all, &cols, ctx)?;
                     for r in all {
                         if seen.insert(whole(&r), ()).is_none() {
@@ -4356,7 +4370,7 @@ impl Node for DistinctNode {
                         }
                     }
                 } else {
-                    for r in rows {
+                    while let Some(r) = next()? {
                         if seen.insert(whole(&r), ()).is_none() {
                             out.push(r);
                         }
@@ -4365,8 +4379,10 @@ impl Node for DistinctNode {
                 }
                 out
             } else {
-                let types = output_types(&input, rows.first());
-                hashed_distinct(rows, whole, types, &plan, ctx)?
+                // (A row is its own key but for bpchar's trailing spaces.)
+                let plain = norms.iter().all(Option::is_none);
+                let key = |r: &Row| -> Result<Option<Row>> { Ok((!plain).then(|| whole(r))) };
+                hashed_distinct(next, key, |first| output_types(&input, Some(first)), &plan, ctx)?
             };
             self.out = Some(out.into_iter());
         }
@@ -4856,7 +4872,11 @@ impl SetOpNode {
                     return Ok(out);
                 }
                 return match &self.plan {
-                    Some(plan) => hashed_distinct(left.into_iter().chain(right), key, types, plan, ctx),
+                    Some(plan) => {
+                        let plain = colls.iter().all(Option::is_none);
+                        let mut rows = left.into_iter().chain(right);
+                        hashed_distinct(|| Ok(rows.next()), |r| Ok((!plain).then(|| key(r))), |_| types, plan, ctx)
+                    }
                     None => {
                         let mut seen: HashMap<Row, ()> = HashMap::default();
                         for r in left.into_iter().chain(right) {
