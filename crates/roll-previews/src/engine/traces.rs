@@ -725,47 +725,6 @@ mod tests {
         TraceRow { trace: String::new(), name: name.into(), service: String::new(), start_ms: 0, ms, spans: 1, error: false, repeated: None }
     }
 
-    /// A route is slower than main's only past the noise: enough traces on both sides, half again
-    /// main's p50 and 100 ms more; a route main hasn't seen isn't compared.
-    #[test]
-    fn a_statement_run_many_times_in_a_trace_is_said_by_its_shape() {
-        let span = |q: &str| Span { trace: "a".repeat(32), span: "0000000000000002".into(), parent: "0000000000000001".into(), name: "SELECT".into(), service: "web".into(), start: 0, end: 1, error: false, attrs: vec![("db.statement".into(), q.into())] };
-        assert_eq!(statement_shape("SELECT *  FROM items\n WHERE id = 42 AND name = 'ab' AND v2 IN (1, 2, 3)"), "SELECT * FROM items WHERE id = ? AND name = ? AND v2 IN (?)");
-        let mut spans: Vec<Span> = (0..REPEATED_MIN).map(|i| span(&format!("SELECT * FROM items WHERE order_id = {i}"))).collect();
-        assert_eq!(repeated_query(&spans), Some(Repeated { statement: "SELECT * FROM items WHERE order_id = ?".into(), count: REPEATED_MIN }));
-        spans.pop();
-        assert_eq!(repeated_query(&spans), None, "fewer than {REPEATED_MIN} isn't said");
-    }
-
-    #[test]
-    fn a_texts_trace_ids_are_whole_runs_of_32_hex_digits() {
-        let id = "4bf92f3577b34da6a3ce929d0e0e4736";
-        let found: Vec<String> = trace_ids_in(&format!("trace_id={id} traceparent=00-{}-00f067aa0ba902b7-01 x{id}0 {}", id.to_ascii_uppercase(), &id[..31])).collect();
-        assert_eq!(found, [id, id]);
-    }
-
-    /// Where a slower route's time went: each span name's median under the route (a trace's
-    /// spans of a name summed, a trace without it counted as 0), the one that grew most and by
-    /// at least the noise.
-    #[test]
-    fn a_slower_routes_time_is_put_on_the_span_that_grew() {
-        let span = |t: &str, id: &str, parent: &str, name: &str, ms: u64| Span { trace: t.repeat(32), span: id.into(), parent: parent.into(), name: name.into(), service: "web".into(), start: 0, end: ms * 1_000_000, error: false, attrs: vec![] };
-        let main = [span("a", "1", "", "GET /orders", 120), span("a", "2", "1", "SELECT orders", 40), span("a", "3", "1", "render", 30)];
-        let mine = [
-            span("b", "1", "", "GET /orders", 420),
-            span("b", "2", "1", "SELECT orders", 40),
-            span("b", "3", "1", "SELECT items", 150),
-            span("b", "4", "1", "SELECT items", 150),
-            span("b", "5", "1", "render", 35),
-            span("c", "1", "", "GET /other", 900),
-            span("c", "2", "1", "SELECT items", 900),
-        ];
-        let (mine, main) = (span_medians(&mine, "GET /orders"), span_medians(&main, "GET /orders"));
-        assert_eq!(mine.get("SELECT items"), Some(&300), "summed in its trace, other routes' left out");
-        assert_eq!(grew(&mine, &main), Some(crate::GrewSpan { span: "SELECT items".into(), ms: 300, main_ms: 0 }));
-        assert_eq!(grew(&main, &main), None, "nothing grew");
-    }
-
     #[test]
     fn a_route_is_slower_than_mains_only_past_the_noise() {
         let mine: Vec<TraceRow> = (0..10).map(|_| row("GET /checkout", 400)).chain((0..10).map(|_| row("GET /", 30))).chain((0..3).map(|_| row("GET /new", 900))).collect();

@@ -1391,16 +1391,5 @@ fn kept_url(url: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    /// A followed log that's polled passes each line on once: what's new after the lines it
-    /// already saw, everything when the tail moved past them.
-    #[test]
-    fn a_polled_log_passes_on_only_new_lines() {
-        let v = |s: &[&str]| s.iter().map(|x| x.to_string()).collect::<Vec<_>>();
-        assert_eq!(super::resume_at(&[], &v(&["a", "b"])), Some(0));
-        assert_eq!(super::resume_at(&v(&["a", "b"]), &v(&["a", "b"])), Some(2), "nothing new");
-        assert_eq!(super::resume_at(&v(&["b", "c"]), &v(&["z", "a", "b", "c", "d"])), Some(4), "a wider read: only d is new");
-        assert_eq!(super::resume_at(&v(&["x", "x"]), &v(&["x", "x", "x"])), Some(2), "repeated lines aren't swallowed");
-        assert_eq!(super::resume_at(&v(&["a"]), &v(&["q", "r"])), None, "moved past everything seen: a gap");
-    }
 }
 

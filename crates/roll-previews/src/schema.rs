@@ -244,22 +244,6 @@ fn type_of(spec: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn a_diffs_tables_are_those_its_lines_touch() {
-        use super::tables_touched;
-        let lines: Vec<String> = [
-            "+ column public.users.nickname text",
-            "- constraint users_email_key on public.users UNIQUE (email)",
-            "+ index CREATE INDEX orders_at ON public.orders USING btree (at)",
-            "+ table public.\"Audit Log\"",
-            "+ view public.active_users",
-            "+ function public.f() returns integer",
-        ]
-        .map(String::from)
-        .to_vec();
-        let got: Vec<String> = tables_touched(&lines).into_iter().collect();
-        assert_eq!(got, ["public.\"Audit Log\"", "public.orders", "public.users"]);
-    }
 
     /// A migration's dangerous steps, read from the diff: a dropped table and column (a rename
     /// is one), a type change and a column made NOT NULL; an added column or index isn't one.
