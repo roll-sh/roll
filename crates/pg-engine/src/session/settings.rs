@@ -2440,8 +2440,9 @@ impl Settings {
 
     /// Transaction end: undo SET LOCAL, and on abort undo every SET made in the transaction.
     pub fn end_transaction(&mut self, committed: bool) {
-        // (Just `start_transaction`'s SET LOCALs, still out of `values`: nothing to undo.)
-        if self.stack.is_empty() && self.txn_view.take().is_some() {
+        if self.stack.is_empty() && self.txn_view.is_some() {
+            // Just `start_transaction`'s SET LOCALs, still out of `values`: nothing to undo.
+            self.txn_view = None;
         } else if self.stack.is_empty()
             && let Some((_, priors)) = self.txn_start.take()
         {

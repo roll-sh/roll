@@ -51,6 +51,9 @@ pub struct PointReader {
     /// Check the last level's bloom filters too (keys that may not exist; keys an index
     /// named are in it when no newer source has them, so its filters would only cost).
     bloom_last: bool,
+    /// Its store writes column blocks (`StoreOptions::colblocks`): sorted reads look in their
+    /// key columns (`get_sorted_keyed`).
+    cols: bool,
     bufs: Bufs,
 }
 
@@ -85,10 +88,10 @@ impl Drop for PointReader {
 }
 
 impl PointReader {
-    pub(super) fn new(view: Arc<View>, ts: u64, bloom_last: bool) -> PointReader {
+    pub(super) fn new(view: Arc<View>, ts: u64, bloom_last: bool, cols: bool) -> PointReader {
         let mut bufs = SPARE.try_with(|s| s.try_borrow_mut().map(|mut s| std::mem::take(&mut *s)).unwrap_or_default()).unwrap_or_default();
         bufs.held.resize_with(view.imm.len() + view.l0.len() + 1, Held::default);
-        PointReader { view, ts, bloom_last, bufs }
+        PointReader { view, ts, bloom_last, cols, bufs }
     }
 
     pub fn ts(&self) -> u64 {
@@ -110,6 +113,25 @@ impl PointReader {
         &self.view
     }
 
+
+    /// `get_raw` in a store writing column blocks (storage format 5): a row of a column block
+    /// found in its key column, made of the columns `cols` marks alone (None: all), the others
+    /// NULL.
+    #[inline(never)]
+    pub fn get_raw_cols(&mut self, key: &[u8], cols: Option<&[bool]>) -> Result<Option<Version>> {
+        self.room();
+        let b = &mut self.bufs;
+        b.seek.clear();
+        b.seek.extend_from_slice(key);
+        b.seek.extend_from_slice(&(!self.ts).to_be_bytes());
+        let view = &self.view;
+        let hit = match newest_above_l1(view, key, &b.seek, &mut b.held, &mut b.pos)? {
+            Some(h) => Some(h),
+            None if view.l1.is_empty() => None,
+            None => l1_get_cols(&view.l1, self.bloom_last, b.held.get_mut(view.imm.len() + view.l0.len()), key, &b.seek, &mut b.pos, cols)?,
+        };
+        Ok(deleted_by_range(view, key, hit, self.ts))
+    }
 
     /// The newest version of `key` visible at the reader's snapshot, range deletions applied;
     /// values as stored (out-of-line ones not put back).
@@ -267,7 +289,29 @@ impl PointReader {
     /// `get_sorted` for a reader of the columns `cols` marks alone (None: all): a row of a
     /// column block (storage format 5) is made of those, the others NULL, the rows of the
     /// batch's blocks made after every seek, a block's run at a time, into one buffer.
+    /// (Inlined: a lookup's multi-get and the transaction's sorted get each kept it in their
+    /// bodies, as before its keyed reads and the masked callers: as a call, TPC-H q09 took
+    /// +0.9% more instructions, q02 / q11 / q20 +0.5%, with the switch off. In a store writing
+    /// column blocks, the instance reading their key columns, `get_sorted_keyed`: with it in
+    /// the one body the same queries took +0.4-0.6%.)
+    #[inline(always)]
     pub fn get_sorted_cols<K: AsRef<[u8]>>(&mut self, keys: &[K], resolve: bool, cols: Option<&[bool]>) -> Result<Vec<Option<Bytes>>> {
+        if self.cols {
+            return self.get_sorted_keyed(keys, resolve, cols);
+        }
+        self.get_sorted_in::<K, false>(keys, resolve, cols)
+    }
+
+    /// `get_sorted_cols` in a store writing column blocks: a column block's keys found in its
+    /// key column (`Block::key_seek`).
+    #[inline(never)]
+    fn get_sorted_keyed<K: AsRef<[u8]>>(&mut self, keys: &[K], resolve: bool, cols: Option<&[bool]>) -> Result<Vec<Option<Bytes>>> {
+        self.get_sorted_in::<K, true>(keys, resolve, cols)
+    }
+
+    /// `get_sorted_cols`; `C`: keys of column blocks with key columns searched there.
+    #[inline(always)]
+    fn get_sorted_in<K: AsRef<[u8]>, const C: bool>(&mut self, keys: &[K], resolve: bool, cols: Option<&[bool]>) -> Result<Vec<Option<Bytes>>> {
         debug_assert!(keys.windows(2).all(|w| w[0].as_ref() < w[1].as_ref()), "keys strictly ascending");
         self.room();
         let ts = self.ts;
@@ -331,19 +375,21 @@ impl PointReader {
         }
         // The restart the first seek of each block starts at, its entries asked for (the
         // next keys in the block are sought on from the one before).
+        // (A column block with a key column: each of its keys found there, `KEYS`.)
         let mut plan: Vec<(usize, usize)> = Vec::with_capacity(sorted.len());
-        let (mut bi, mut prev) = (0, None);
+        let (mut bi, mut prev, mut keyed) = (0, None, false);
         for st in sorted.iter() {
             let L1::Block(f, b) = st.l1 else { continue };
             while (blocks[bi].0, blocks[bi].1) != (f, b) {
                 bi += 1;
             }
             if prev == Some(bi) {
-                plan.push((bi, usize::MAX));
+                plan.push((bi, if C && keyed { KEYS } else { usize::MAX }));
                 continue;
             }
             let block = &blocks[bi].2;
-            let r = block.restart_for(&seek[st.seek.clone()]);
+            keyed = C && block.has_keys();
+            let r = if keyed { KEYS } else { block.restart_for(&seek[st.seek.clone()]) };
             block.prefetch_restart(r);
             plan.push((bi, r));
             prev = Some(bi);
@@ -379,6 +425,18 @@ impl PointReader {
                     match r {
                         usize::MAX if pos_in == Some(b) => block.seek_on(sk, pos),
                         usize::MAX => block.seek(sk, pos),
+                        KEYS if C => match block.key_seek(sk) {
+                            Some((row, same, vts)) => {
+                                pos_in = None;
+                                if same && (view.rdels.is_empty() || view.rdels.covering(key, vts, ts).is_none()) {
+                                    colrows.push((st.i, b, row));
+                                }
+                                continue;
+                            }
+                            None => {
+                                block.seek(sk, pos);
+                            }
+                        },
                         r => {
                             block.seek_from(r, sk, pos);
                             keep = Some((b, st.seek.clone()));
@@ -473,6 +531,50 @@ fn make_col_rows(colrows: &[(usize, usize, u32)], blocks: &[(usize, usize, Arc<s
         s = e;
     }
 }
+
+/// A read of `key` (seek key `seek`) in a column block's key column: its version (None: none
+/// at or before the seek key's), the row made of the columns `cols` marks alone (None: all),
+/// `pos` left at no entry. None: not found there (seek the entries).
+fn key_get_cols(block: &super::sst::Block, key: &[u8], seek: &[u8], pos: &mut BlockPos, cols: Option<&[bool]>) -> Option<Option<Version>> {
+    let (row, same, vts) = block.key_seek(seek)?;
+    debug_assert!(!same || key.len() + 8 == seek.len());
+    pos.unset();
+    Some(same.then(|| (vts, Some(block.col_row_at(row, cols)))))
+}
+
+/// `file_get` of L1 in a store writing column blocks (storage format 5): a column block's row
+/// found in its key column (the held block's, then the file's block's), made of the columns
+/// `cols` marks alone (None: all); else as `file_get` reads it.
+fn l1_get_cols(ssts: &[Arc<SstReader>], bloom: bool, mut held: Option<&mut Held>, key: &[u8], seek: &[u8], pos: &mut BlockPos, cols: Option<&[bool]>) -> Result<Option<Version>> {
+    if let Some((block, hpos)) = held.as_deref_mut().and_then(|h| h.holding(seek))
+        && block.has_keys()
+        && let Some(hit) = key_get_cols(block, key, seek, hpos, cols)
+    {
+        return Ok(hit);
+    }
+    let f = ssts.partition_point(|s| user_key(&s.meta.last_key) < key);
+    // (No bloom filter: the key column finds a key that isn't there; `file_get` checks it.)
+    if let Some(sst) = ssts.get(f)
+        && key >= user_key(&sst.meta.first_key)
+    {
+        let b = sst.find_block(seek);
+        if b < sst.block_count() {
+            let block = sst.block(b)?;
+            if block.has_keys()
+                && let Some(hit) = key_get_cols(&block, key, seek, pos, cols)
+            {
+                if let Some(slot) = held.as_deref_mut() {
+                    slot.keep(block, seek, pos);
+                }
+                return Ok(hit);
+            }
+        }
+    }
+    file_get(ssts, bloom, held, key, seek, pos)
+}
+
+/// `get_sorted_cols`' plan for a key in a column block with a key column (`Block::key_seek`).
+const KEYS: usize = usize::MAX - 1;
 
 /// A key of `PointReader::get_sorted`: its place in the keys, its seek key's bytes,
 /// where in L1 it is, or the version a source newer than L1 holds.

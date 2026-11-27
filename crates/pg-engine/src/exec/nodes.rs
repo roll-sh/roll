@@ -5320,8 +5320,10 @@ struct MaterialNode {
 }
 
 impl MaterialNode {
-    /// The side's rows read so far (`rows`, then `r`) and the rest of `node`'s, stored.
-    fn fill(rows: Vec<Row>, r: Row, mut node: BoxNode, types: Vec<crate::types::DataType>, cols: Option<Vec<bool>>, ctx: &ExecCtx) -> Result<Held> {
+    /// The side's rows read so far (`rows`, then `r`) and the rest of `node`'s, stored;
+    /// under EXPLAIN ANALYZE the store's figures are the Materialize's (plan node `key`).
+    #[allow(clippy::too_many_arguments)]
+    fn fill(rows: Vec<Row>, r: Row, mut node: BoxNode, types: Vec<crate::types::DataType>, cols: Option<Vec<bool>>, key: usize, ctx: &ExecCtx) -> Result<Held> {
         let mut store = super::tuplestore::Tuplestore::new(types, false, ctx).with_cols(cols);
         for r in rows {
             store.put(r, None, ctx)?;
@@ -5332,6 +5334,13 @@ impl MaterialNode {
         }
         if let Some(rows) = store.take_rows() {
             return Ok(Held::Mem(rows));
+        }
+        if let Some(instr) = ctx.instr.borrow().as_ref() {
+            let (disk, bytes) = store.stats();
+            instr.update(key, |s| {
+                let (d0, b0) = s.material.unwrap_or_default();
+                s.material = Some((d0 || disk, b0.max(bytes)));
+            });
         }
         let slot = store.reader();
         Ok(Held::Material(Box::new(MaterialNode { store, slot })))
@@ -5736,10 +5745,12 @@ impl NestLoopNode {
     /// Materialize counts its tuplestore's tuples (the columns the join reads): past work_mem
     /// they go to a tuplestore that writes its file where PostgreSQL's does, read by a
     /// `MaterialNode`. A RIGHT / FULL join (its unmatched inner rows are kept by number), a
-    /// side kept for rescans and EXPLAIN ANALYZE (`material_stats` counts the store) keep
-    /// them in memory.
+    /// side kept for rescans, and under EXPLAIN ANALYZE one PostgreSQL rescans without a
+    /// Materialize (its counters repeated each outer row: `report_rescans`) keep them in
+    /// memory (`material_stats` counts the store); under a Materialize EXPLAIN ANALYZE runs as
+    /// the plain run, past work_mem on disk.
     fn collect_held(&mut self, ctx: &ExecCtx) -> Result<Held> {
-        if matches!(self.kind, JoinKind::Right | JoinKind::Full) || self.rescans > 0 || ctx.instrumented() {
+        if matches!(self.kind, JoinKind::Right | JoinKind::Full) || self.rescans > 0 || (ctx.instrumented() && self.report_rescans) {
             return self.collect_right(ctx).map(Held::Mem);
         }
         self.right_node = None;
@@ -5761,7 +5772,7 @@ impl NestLoopNode {
                         let t = super::workmem::minimal_tuple_len_cols(&r, &types, need.as_deref(), ctx);
                         est += SAMPLE as i64 * (super::workmem::maxalign(t) + 16);
                         if est > allowed {
-                            return MaterialNode::fill(rows, r, node, types, need, ctx);
+                            return MaterialNode::fill(rows, r, node, types, need, Arc::as_ptr(&plan) as usize, ctx);
                         }
                     }
                     rows.push(r);

@@ -115,6 +115,19 @@ impl Chains {
             .collect()
     }
 
+    /// `visible`, of the rows whose value `keep` takes: the others neither copied nor
+    /// returned.
+    fn visible_kept(&self, start: &[u8], end: &[u8], ts: u64, keep: &mut dyn FnMut(&[u8]) -> bool) -> Vec<(Bytes, Bytes)> {
+        let range = (Bound::Included(start), Bound::Excluded(end));
+        self.keys
+            .range::<[u8], _>(range)
+            .filter_map(|(k, chain)| {
+                let v = newest(chain, ts)?.1.as_ref()?;
+                keep(v).then(|| (k.clone(), v.clone()))
+            })
+            .collect()
+    }
+
     fn too_big(&self) -> bool {
         self.keys.len() > MAX_KEYS || self.bytes > MAX_BYTES
     }
@@ -199,6 +212,20 @@ impl Hot {
         Some(c.visible(start, end, ts))
     }
 
+    /// `scan`, of the rows whose stored value `keep` takes (a filter's comparisons over
+    /// the stored values, called on every visible row in key order): the rows it rejects
+    /// are never copied out of the chains.
+    pub(super) fn scan_kept(&self, start: &[u8], end: &[u8], ts: u64, keep: &mut dyn FnMut(&[u8]) -> bool) -> Option<Vec<(Bytes, Bytes)>> {
+        if !self.any.load(Ordering::Acquire) {
+            return None;
+        }
+        let p = covering(start, end)?;
+        let range = self.ranges.read().get(&p)?.clone();
+        let mut c = range.lock();
+        c.idle = 0;
+        Some(c.visible_kept(start, end, ts, keep))
+    }
+
     /// Count a scan in `p`'s range, which isn't kept (a sequential scan of the relation, an
     /// index scan of a few of its keys): true when it is time to keep it. A scan counted while
     /// another thread counts goes uncounted: every unique-key probe counts here, and with more
@@ -224,6 +251,8 @@ impl Hot {
     /// `get_version` of `key` at `ts` when a kept range holds a version of it (Some: the
     /// answer); None: the store answers (a key the range holds no version of at `ts` may
     /// be a deletion every snapshot sees that the chain dropped).
+    /// (Inlined: `Store::get_with` kept it in its body before `get_cols_with` called it too.)
+    #[inline(always)]
     pub(super) fn get(&self, key: &[u8], ts: u64) -> Option<Option<(u64, Option<Bytes>)>> {
         if !self.any.load(Ordering::Acquire) {
             return None;

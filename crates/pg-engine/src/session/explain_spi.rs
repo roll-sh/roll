@@ -2,7 +2,7 @@
 //! asks, and explained in the function's own execution context, giving the QUERY PLAN rows.
 
 use crate::error::Result;
-use crate::exec::{ExecCtx, Row, collect};
+use crate::exec::{ExecCtx, Row};
 use crate::sql::binder::Binder;
 use crate::sql::binder::ast::inner;
 use crate::sql::plan::OutCol;
@@ -124,7 +124,7 @@ pub(crate) fn explain(
         }
         let r = match &ctas {
             Some(node) => crate::session::ddl::execute(ctx, node, "").map(|_| ()),
-            None => collect(&plan.0, ctx, None).map(|_| ()),
+            None => crate::exec::run_discard(&plan.0, ctx),
         };
         *ctx.instr.borrow_mut() = saved;
         r?;

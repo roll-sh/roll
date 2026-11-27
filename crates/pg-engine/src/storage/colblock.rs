@@ -16,10 +16,16 @@
 //! derived index value) with the same header kind (`ROW_HEADER` or `ROW_HEADER_TID`, none with
 //! values stored out of line) and the same column count; any other block stays format 2.
 //!
+//! A block whose keys are of one length, sharing all but at most 8 bytes before their 8 bytes of
+//! version, also has them as a key column (`KeyCol`): a seek there is a search of numbers
+//! (`ColDir::key_seek`), not a walk of the entries.
+//!
 //! Section layout (all offsets in a parsed `ColDir` are into the block's buffer):
-//! `MAGIC, varint n, varint ncols, varint vlen, tid byte, then the header columns (xmin, and with
-//! TIDs the block and offset: each `Ints`: width byte, varint base), then per column its kind byte
-//! and parameters and a has-NULLs byte; then the payloads in that order; 8 zero bytes; u32 vbase`.
+//! `MAGIC, varint n, varint ncols, varint vlen, flags byte (bit 0: TIDs; bit 1: a key column), then
+//! the header columns (xmin, and with TIDs the block and offset: each `Ints`: width byte, varint
+//! base), with a key column its key length (varint), its prefix's length (varint) and bytes, and its
+//! words' and versions' `Ints`; then per column its kind byte and parameters and a has-NULLs byte;
+//! then the payloads in that order; 8 zero bytes; u32 vbase`.
 
 use super::row::{ROW_HEADER, ROW_HEADER_TID, tag};
 use super::sst::{get_varint, put_varint};
@@ -71,6 +77,40 @@ struct Ints {
     at: u32,
 }
 
+/// A block's keys as numbers (format 5's key column): every key `len` bytes, its first `c` the
+/// prefix at `pre`, then the user key's other bytes (at most 8) as a big-endian number (`word`),
+/// then its version's 8 (`ver`). Equal-length keys compare as those pairs do.
+#[derive(Clone, Copy, Debug)]
+pub struct KeyCol {
+    len: u32,
+    c: u32,
+    pre: u32,
+    word: Ints,
+    ver: Ints,
+}
+
+/// The big-endian number of `b` (at most 8 bytes).
+#[inline(always)]
+fn be(b: &[u8]) -> u64 {
+    b.iter().fold(0u64, |a, &x| a << 8 | x as u64)
+}
+
+/// `keys` (ascending) as a key column, when they are of its form: (key length, prefix, words,
+/// versions).
+fn key_col<'a>(keys: &[&'a [u8]]) -> Option<(usize, &'a [u8], Vec<u64>, Vec<u64>)> {
+    let (first, last) = (*keys.first()?, *keys.last()?);
+    let l = first.len();
+    if l < 8 || keys.iter().any(|k| k.len() != l) {
+        return None;
+    }
+    // (Ascending keys all share what the first and last share.)
+    let c = first.iter().zip(last).take_while(|(a, b)| a == b).count().min(l - 8);
+    if l - 8 - c > 8 {
+        return None;
+    }
+    Some((l, &first[..c], keys.iter().map(|k| be(&k[c..l - 8])).collect(), keys.iter().map(|k| be(&k[l - 8..])).collect()))
+}
+
 /// A parsed column section.
 #[derive(Debug)]
 pub struct ColDir {
@@ -80,6 +120,8 @@ pub struct ColDir {
     xmin: Ints,
     tb: Ints,
     to: Ints,
+    /// The block's keys as a column (None: not of its form, or written before it).
+    keys: Option<KeyCol>,
     pub cols: Vec<Col>,
     /// The rows' bytes, all of them (what the values took in format 2).
     pub vlen: u32,
@@ -248,43 +290,59 @@ fn num_parts(v: &[u8]) -> Option<(u32, i64, usize)> {
     (crate::types::decint::i128_signed_le(x as i128).1 == n).then_some((scale as u32, x, n))
 }
 
-/// `encode` of rows given as their bytes one after another (`vals`) and their lengths.
-pub fn encode_lens(vals: &[u8], lens: &[u32], vbase: usize, out: &mut Vec<u8>) -> bool {
+/// `encode` of rows given as their bytes one after another (`vals`) and their lengths, with
+/// their keys (`keys`, ends in `kends`; none: no key column).
+pub fn encode_lens(vals: &[u8], lens: &[u32], keys: &[u8], kends: &[u32], vbase: usize, out: &mut Vec<u8>) -> bool {
     let mut rows: Vec<&[u8]> = Vec::with_capacity(lens.len());
     let mut o = 0usize;
     for l in lens {
         rows.push(&vals[o..o + *l as usize]);
         o += *l as usize;
     }
-    encode(&rows, vbase, out)
+    let ks: Vec<&[u8]> = kends.iter().scan(0usize, |a, &e| Some(&keys[std::mem::replace(a, e as usize)..e as usize])).collect();
+    encode_keyed(&rows, &ks, vbase, out)
 }
 
 /// The rows (`rows`, each a stored row's bytes) as a column section appended to `out` (the block's
 /// buffer, whose entries end at `vbase`). False, `out` as it was: the rows don't fit a column block.
 pub fn encode(rows: &[&[u8]], vbase: usize, out: &mut Vec<u8>) -> bool {
+    encode_keyed(rows, &[], vbase, out)
+}
+
+/// `encode`, with the rows' keys (`keys`, ascending, one a row; empty: none) as a key column
+/// when they are of its form.
+pub fn encode_keyed(rows: &[&[u8]], keys: &[&[u8]], vbase: usize, out: &mut Vec<u8>) -> bool {
     let start = out.len();
-    let ok = encode_in(rows, vbase, out);
+    let ok = encode_in(rows, keys, vbase, out);
     if !ok {
         out.truncate(start);
     }
     ok
 }
 
-fn encode_in(rows: &[&[u8]], vbase: usize, out: &mut Vec<u8>) -> bool {
+fn encode_in(rows: &[&[u8]], keys: &[&[u8]], vbase: usize, out: &mut Vec<u8>) -> bool {
     let Some(s) = split(rows) else { return false };
     let n = rows.len();
     let vlen: usize = rows.iter().map(|r| r.len()).sum();
     if vlen > u32::MAX as usize / 2 {
         return false;
     }
+    let kc = if keys.len() == n { key_col(keys) } else { None };
     let mut dir = vec![MAGIC];
     put_varint(&mut dir, n as u64);
     put_varint(&mut dir, s.ncols as u64);
     put_varint(&mut dir, vlen as u64);
-    dir.push(s.tid as u8);
+    dir.push(s.tid as u8 | (kc.is_some() as u8) << 1);
     let mut pay = Vec::with_capacity(vlen);
     for h in 0..if s.tid { 3 } else { 1 } {
         put_ints(&mut dir, &mut pay, s.hdr.iter().map(move |x| x[h]));
+    }
+    if let Some((l, pre, words, vers)) = &kc {
+        put_varint(&mut dir, *l as u64);
+        put_varint(&mut dir, pre.len() as u64);
+        dir.extend_from_slice(pre);
+        put_ints(&mut dir, &mut pay, words.iter().copied());
+        put_ints(&mut dir, &mut pay, vers.iter().copied());
     }
     let val = |r: usize, c: usize| {
         let (a, b) = s.spans[r * s.ncols + c];
@@ -432,7 +490,8 @@ fn encode_in(rows: &[&[u8]], vbase: usize, out: &mut Vec<u8>) -> bool {
     out.extend_from_slice(&pay);
     out.extend_from_slice(&[0; 8]);
     out.extend_from_slice(&(vbase as u32).to_le_bytes());
-    // (Checked: every row made back from the section is the row it was.)
+    // (Checked: every row made back from the section is the row it was, every key found
+    // where it is.)
     let Some(d) = ColDir::parse(out, vbase, out.len()) else { return false };
     let mut buf = Vec::new();
     for (r, row) in rows.iter().enumerate() {
@@ -441,6 +500,9 @@ fn encode_in(rows: &[&[u8]], vbase: usize, out: &mut Vec<u8>) -> bool {
         if buf != *row {
             return false;
         }
+    }
+    if kc.is_some() && !keys.iter().enumerate().all(|(r, k)| d.key_seek(out, k).is_some_and(|(x, same, _)| same && x as usize == r)) {
+        return false;
     }
     true
 }
@@ -464,13 +526,35 @@ impl ColDir {
         let n = get_varint(s, &mut p).ok()? as usize;
         let ncols = get_varint(s, &mut p).ok()? as usize;
         let vlen = get_varint(s, &mut p).ok()? as u32;
-        let tid = *s.get(p)? != 0;
+        let flags = *s.get(p)?;
+        if flags > 3 {
+            return None;
+        }
+        let tid = flags & 1 != 0;
         p += 1;
         let mut ints = [Ints::default(); 3];
+        let ints_at = |x: &mut Ints, p: &mut usize| -> Option<()> {
+            x.w = *s.get(*p)?;
+            *p += 1;
+            x.base = get_varint(s, p).ok()?;
+            (x.w <= 8).then_some(())
+        };
         for x in ints.iter_mut().take(if tid { 3 } else { 1 }) {
-            x.w = *s.get(p)?;
-            p += 1;
-            x.base = get_varint(s, &mut p).ok()?;
+            ints_at(x, &mut p)?;
+        }
+        let mut keys = None;
+        if flags & 2 != 0 {
+            let len = get_varint(s, &mut p).ok()? as usize;
+            let c = get_varint(s, &mut p).ok()? as usize;
+            if len < 8 || c > len - 8 || len - 8 - c > 8 || p + c > end {
+                return None;
+            }
+            let pre = p as u32;
+            p += c;
+            let (mut word, mut ver) = (Ints::default(), Ints::default());
+            ints_at(&mut word, &mut p)?;
+            ints_at(&mut ver, &mut p)?;
+            keys = Some(KeyCol { len: len as u32, c: c as u32, pre, word, ver });
         }
         // (The directory first, the payloads after it in its order.)
         let mut kinds = Vec::with_capacity(ncols);
@@ -510,6 +594,12 @@ impl ColDir {
         for x in ints.iter_mut().take(if tid { 3 } else { 1 }) {
             x.at = p as u32;
             p += n * x.w as usize;
+        }
+        if let Some(k) = &mut keys {
+            for x in [&mut k.word, &mut k.ver] {
+                x.at = p as u32;
+                p += n * x.w as usize;
+            }
         }
         let mut cols = Vec::with_capacity(ncols);
         let off = |s: &[u8], at: usize, ow: u8| uint(s, at, ow) as usize;
@@ -555,7 +645,48 @@ impl ColDir {
             }
             cols.push(Col { kind, nulls, at, aux, aux2 });
         }
-        (p + 12 == end).then_some(ColDir { n: n as u32, ncols: ncols as u32, tid, xmin: ints[0], tb: ints[1], to: ints[2], cols, vlen, vbase })
+        (p + 12 == end).then_some(ColDir { n: n as u32, ncols: ncols as u32, tid, xmin: ints[0], tb: ints[1], to: ints[2], keys, cols, vlen, vbase })
+    }
+
+    /// Whether it has its block's keys as a column.
+    #[inline]
+    pub fn has_keys(&self) -> bool {
+        self.keys.is_some()
+    }
+
+    /// The first row whose key is at or after `sk` (a store key: user key, then version), by the
+    /// key column: (row, whether its user key is `sk`'s, its commit ts). None: no key column, `sk`
+    /// not of its length, or after the last row.
+    #[inline]
+    pub fn key_seek(&self, d: &[u8], sk: &[u8]) -> Option<(u32, bool, u64)> {
+        let k = self.keys.as_ref()?;
+        let (l, c) = (k.len as usize, k.c as usize);
+        if sk.len() != l {
+            return None;
+        }
+        match sk[..c].cmp(&d[k.pre as usize..k.pre as usize + c]) {
+            std::cmp::Ordering::Less => return Some((0, false, 0)),
+            std::cmp::Ordering::Greater => return None,
+            std::cmp::Ordering::Equal => {}
+        }
+        let (tw, tv) = (be(&sk[c..l - 8]), be(&sk[l - 8..]));
+        let n = self.n as usize;
+        // (The first row whose (word, version) is not below the key's.)
+        let (mut lo, mut len) = (0usize, n);
+        while len > 0 {
+            let half = len / 2;
+            let m = lo + half;
+            if (k.word.get(d, m), k.ver.get(d, m)) < (tw, tv) {
+                lo = m + 1;
+                len -= half + 1;
+            } else {
+                len = half;
+            }
+        }
+        if lo == n {
+            return None;
+        }
+        Some((lo as u32, k.word.get(d, lo) == tw, !k.ver.get(d, lo)))
     }
 
     /// Column `c`'s value in row `r` as the row stores it (tag and payload) onto `out`.
@@ -658,6 +789,11 @@ impl ColDir {
     /// place then known, so every value is written where it goes. With `mask`, a column it
     /// doesn't mark (or past its end) NULL: rows for a reader of those columns alone.
     pub fn rows_into(&self, d: &[u8], rows: &[u32], mask: Option<&[bool]>, out: &mut Vec<u8>, ends: &mut Vec<usize>) {
+        if let [r] = rows {
+            self.row_one(d, *r as usize, mask, out);
+            ends.push(out.len());
+            return;
+        }
         let read = |c: usize| mask.is_none_or(|m| m.get(c) == Some(&true));
         // (Per row its length, then where its next byte goes.)
         let hdr = 1 + varint_len(self.ncols as u64);
@@ -670,10 +806,19 @@ impl ColDir {
                 hdr + varint_len(self.xmin.get(d, r)) + tid
             })
             .collect();
-        for c in 0..self.ncols as usize {
-            match read(c) {
-                true => self.col_lens(d, c, rows, &mut at),
-                false => at.iter_mut().for_each(|l| *l += 1),
+        // (A run of columns not read: a NULL each, the run at once.)
+        let unread = |c: usize| (c..self.ncols as usize).take_while(|&x| !read(x)).count();
+        let mut c = 0;
+        while c < self.ncols as usize {
+            match unread(c) {
+                0 => {
+                    self.col_lens(d, c, rows, &mut at);
+                    c += 1;
+                }
+                k => {
+                    at.iter_mut().for_each(|l| *l += k);
+                    c += k;
+                }
             }
         }
         let mut end = out.len();
@@ -697,16 +842,41 @@ impl ColDir {
             }
             varint_at(o, p, self.ncols as u64);
         }
-        for c in 0..self.ncols as usize {
-            match read(c) {
-                true => self.col_write(d, c, rows, o, &mut at),
-                false => at.iter_mut().for_each(|p| {
-                    o[*p] = tag::NULL;
-                    *p += 1;
-                }),
+        let mut c = 0;
+        while c < self.ncols as usize {
+            match unread(c) {
+                0 => {
+                    self.col_write(d, c, rows, o, &mut at);
+                    c += 1;
+                }
+                k => {
+                    at.iter_mut().for_each(|p| {
+                        o[*p..*p + k].fill(tag::NULL);
+                        *p += k;
+                    });
+                    c += k;
+                }
             }
         }
         debug_assert!(at.iter().zip(&ends[ends.len() - rows.len()..]).all(|(a, e)| a == e));
+    }
+
+    /// `rows_into` of one row (a keyed fetch's, often alone in its block): its header, then each
+    /// column's value onto `out` as it goes (`value`), with no pass for the lengths first.
+    fn row_one(&self, d: &[u8], r: usize, mask: Option<&[bool]>, out: &mut Vec<u8>) {
+        out.push(if self.tid { ROW_HEADER_TID } else { ROW_HEADER });
+        put_varint(out, self.xmin.get(d, r));
+        if self.tid {
+            put_varint(out, self.tb.get(d, r));
+            put_varint(out, self.to.get(d, r));
+        }
+        put_varint(out, self.ncols as u64);
+        for c in 0..self.ncols as usize {
+            match mask.is_none_or(|m| m.get(c) == Some(&true)) {
+                true => self.value(d, c, r, out),
+                false => out.push(tag::NULL),
+            }
+        }
     }
 
     /// `rows_into`'s lengths: column `c`'s value's bytes in each of `rows` added to `lens`.

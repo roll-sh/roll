@@ -23,6 +23,12 @@ pub trait FillRows: Send {
         let _ = lazy;
         self.fill(b, max)
     }
+
+    /// The columns its reader reads (`fill_lazy`'s reader: None, all): rows it fetches by key
+    /// from column blocks may be made of those alone, the others NULL.
+    fn read_cols(&mut self, mask: Option<Arc<[bool]>>) {
+        let _ = mask;
+    }
 }
 
 impl FillRows for super::Scan {
@@ -54,6 +60,10 @@ impl<F: FillRows> FillRows for BulkFill<F> {
 
     fn fill_lazy(&mut self, b: &mut RowBatch, lazy: &mut LazyRows, max: usize) -> crate::error::Result<()> {
         super::bulk_read(|| self.0.fill_lazy(b, lazy, max))
+    }
+
+    fn read_cols(&mut self, mask: Option<Arc<[bool]>>) {
+        self.0.read_cols(mask)
     }
 }
 

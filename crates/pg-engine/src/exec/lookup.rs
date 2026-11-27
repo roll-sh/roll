@@ -189,6 +189,9 @@ pub struct Lookup {
     /// A row of a column block (storage format 5) is made of these alone, the others NULL
     /// (`PointReader::get_sorted_cols`).
     reads: Option<Arc<[bool]>>,
+    /// `reads` for its single rows too: its store writes column blocks (storage format 5),
+    /// whose rows are made of those columns alone (`Store::get_cols_with`).
+    cols: Option<Arc<[bool]>>,
 }
 
 /// `e` with the nested loop's parameters (`Outer(1, k)`: `params[k]`, over the outer
@@ -326,7 +329,9 @@ impl Lookup {
                 None => Some(Arc::from(r)),
             }
         });
+        let cols = reads.clone().filter(|_| store.colblocks());
         Ok(Some(Lookup {
+            cols,
             reads,
             store,
             ts,
@@ -374,16 +379,31 @@ impl Lookup {
     /// executor's thread, which runs it as the serial join does). `sc`: the worker's counts
     /// and cache.
     pub fn rows(&self, l: &[Value], out: &mut Vec<Value>, sc: &mut LookupScratch) -> bool {
+        if self.cols.is_some() {
+            return self.rows_cols(l, out, sc);
+        }
         let mut start = std::mem::take(&mut sc.start);
         start.clear();
         start.extend_from_slice(&self.prefix);
-        let r = self.rows_under(l, &mut start, out, sc);
+        let r = self.rows_under::<false>(l, &mut start, out, sc);
+        sc.start = start;
+        r
+    }
+
+    /// `rows` in a store writing column blocks: the rows read of the columns `cols` marks alone,
+    /// through their blocks' key columns (`get`'s `C` instance).
+    #[inline(never)]
+    fn rows_cols(&self, l: &[Value], out: &mut Vec<Value>, sc: &mut LookupScratch) -> bool {
+        let mut start = std::mem::take(&mut sc.start);
+        start.clear();
+        start.extend_from_slice(&self.prefix);
+        let r = self.rows_under::<true>(l, &mut start, out, sc);
         sc.start = start;
         r
     }
 
     /// `rows` with the index key `start` (the prefix) made in place.
-    fn rows_under(&self, l: &[Value], start: &mut Vec<u8>, out: &mut Vec<Value>, sc: &mut LookupScratch) -> bool {
+    fn rows_under<const C: bool>(&self, l: &[Value], start: &mut Vec<u8>, out: &mut Vec<Value>, sc: &mut LookupScratch) -> bool {
         truncate_row(out, 0);
         for (k, desc, nulls_first, coll, pad) in &self.keys {
             let Some(v) = k.run(l) else { return false };
@@ -400,12 +420,12 @@ impl Lookup {
         // does: the rows after it aren't fetched.)
         let first = matches!(self.kind, JoinKind::Semi | JoinKind::Anti);
         if first && !self.cache {
-            return self.first_row(l, start, out, sc);
+            return self.first_row::<C>(l, start, out, sc);
         }
         let found = match sc.cache.get(start.as_slice()) {
             Some(rows) => rows.clone(),
             None => {
-                let Some(rows) = self.fetch(start, sc) else { return false };
+                let Some(rows) = self.fetch::<C>(start, sc) else { return false };
                 let rows = std::rc::Rc::new(rows);
                 if self.cache {
                     if sc.cache.len() >= CACHE_KEYS {
@@ -452,9 +472,13 @@ impl Lookup {
         entry_keys(&self.store, self.ts, self.unique, start, sc)
     }
 
-    /// Row `d` at the snapshot, through the worker's reader (None inside: not visible).
-    fn get(&self, d: &[u8], reader: &mut Option<crate::storage::point::PointReader>) -> Option<Option<bytes::Bytes>> {
-        row_at(&self.store, self.ts, d, reader)
+    /// Row `d` at the snapshot, through the worker's reader (None inside: not visible). `C`: a
+    /// store writing column blocks (`rows_cols`), the row of the columns read alone.
+    fn get<const C: bool>(&self, d: &[u8], reader: &mut Option<crate::storage::point::PointReader>) -> Option<Option<bytes::Bytes>> {
+        match (C, &self.cols) {
+            (true, Some(c)) => row_at_cols(&self.store, self.ts, d, reader, c),
+            _ => row_at(&self.store, self.ts, d, reader),
+        }
     }
 
     /// Stored row `bytes` appended to `out` as `Decode::row` makes it: the table's columns,
@@ -549,14 +573,14 @@ impl Lookup {
 
     /// The rows of the index entries under key `start`, in index order, `width` values a
     /// row (None: a read failed, or a row didn't decode).
-    fn fetch(&self, start: &[u8], sc: &mut LookupScratch) -> Option<Vec<Value>> {
+    fn fetch<const C: bool>(&self, start: &[u8], sc: &mut LookupScratch) -> Option<Vec<Value>> {
         self.entries(start, sc)?;
         let dkeys = std::mem::take(&mut sc.dkeys);
         let out = (|| {
             let mut rows = Vec::new();
             if dkeys.len() <= 1 {
                 if let Some(d) = dkeys.first()
-                    && let Some(b) = self.get(d, &mut sc.reader)?
+                    && let Some(b) = self.get::<C>(d, &mut sc.reader)?
                 {
                     self.decode_into(&b, &mut rows).ok()?;
                 }
@@ -568,7 +592,7 @@ impl Lookup {
             sorted.dedup();
             let mut found: Vec<(&[u8], bytes::Bytes)> = Vec::with_capacity(sorted.len());
             for k in sorted {
-                if let Some(b) = self.get(k, &mut sc.reader)? {
+                if let Some(b) = self.get::<C>(k, &mut sc.reader)? {
                     found.push((k, b));
                 }
             }
@@ -586,9 +610,9 @@ impl Lookup {
 
     /// `rows` of a semi or anti join: the index entries' rows fetched one at a time in
     /// index order up to the first that passes the filter and the join condition.
-    fn first_row(&self, l: &[Value], start: &[u8], out: &mut Vec<Value>, sc: &mut LookupScratch) -> bool {
+    fn first_row<const C: bool>(&self, l: &[Value], start: &[u8], out: &mut Vec<Value>, sc: &mut LookupScratch) -> bool {
         if !self.unique {
-            return self.first_row_scanned(l, start, out, sc);
+            return self.first_row_scanned::<C>(l, start, out, sc);
         }
         if self.entries(start, sc).is_none() {
             return false;
@@ -597,7 +621,7 @@ impl Lookup {
         let r = (|| {
             let mut read = 0u64;
             for (n, d) in dkeys.iter().enumerate() {
-                let Some(b) = self.get(d, &mut sc.reader)? else { continue };
+                let Some(b) = self.get::<C>(d, &mut sc.reader)? else { continue };
                 match self.add(l, &b, out) {
                     Add::Kept => {
                         read += 1;
@@ -610,7 +634,7 @@ impl Lookup {
                         // whole fetch counts them.)
                         read += 1;
                         for d in &dkeys[n + 1..] {
-                            if let Some(Some(_)) = self.get(d, &mut sc.reader) {
+                            if let Some(Some(_)) = self.get::<C>(d, &mut sc.reader) {
                                 read += 1;
                             }
                         }
@@ -634,7 +658,7 @@ impl Lookup {
 
     /// `first_row` of a key not unique: its entries read from the index scan one at a time,
     /// none past the first whose row passes (no list of the entries' row keys made first).
-    fn first_row_scanned(&self, l: &[Value], start: &[u8], out: &mut Vec<Value>, sc: &mut LookupScratch) -> bool {
+    fn first_row_scanned<const C: bool>(&self, l: &[Value], start: &[u8], out: &mut Vec<Value>, sc: &mut LookupScratch) -> bool {
         let LookupScratch { reader, entries, end, fetched, loops, .. } = sc;
         prefix_end_into(start, end);
         if !entries.as_mut().is_some_and(|s| s.reseek(start, end, self.ts)) {
@@ -642,7 +666,7 @@ impl Lookup {
         }
         let it = entries.as_mut().expect("made above");
         let mut read = 0u64;
-        while let Some(e) = it.next_value(|d| self.get(d, reader)) {
+        while let Some(e) = it.next_value(|d| self.get::<C>(d, reader)) {
             let Ok(Some(b)) = e else { return false };
             let Some(b) = b else { continue };
             match self.add(l, &b, out) {
@@ -656,7 +680,7 @@ impl Lookup {
                     // (Left to the executor's thread: every visible row counted, as a
                     // whole fetch counts them.)
                     read += 1;
-                    while let Some(e) = it.next_value(|d| self.get(d, reader)) {
+                    while let Some(e) = it.next_value(|d| self.get::<C>(d, reader)) {
                         match e {
                             Ok(Some(Some(_))) => read += 1,
                             Ok(Some(None)) => {}
@@ -1021,6 +1045,16 @@ fn entry_spans_to(store: &Arc<Store>, ts: u64, unique: bool, start: &[u8], end: 
 fn row_at(store: &Store, ts: u64, d: &[u8], reader: &mut Option<crate::storage::point::PointReader>) -> Option<Option<bytes::Bytes>> {
     let r = reader.get_or_insert_with(|| store.point_reader(ts, false));
     match store.get_with(r, d, true).ok()? {
+        Some((_, Some(b))) => Some(Some(b)),
+        _ => Some(None),
+    }
+}
+
+/// `row_at`, a row of a column block made of the columns `cols` marks alone.
+#[inline(never)]
+fn row_at_cols(store: &Store, ts: u64, d: &[u8], reader: &mut Option<crate::storage::point::PointReader>, cols: &[bool]) -> Option<Option<bytes::Bytes>> {
+    let r = reader.get_or_insert_with(|| store.point_reader(ts, false));
+    match store.get_cols_with(r, d, cols).ok()? {
         Some((_, Some(b))) => Some(Some(b)),
         _ => Some(None),
     }

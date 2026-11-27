@@ -100,8 +100,9 @@ impl Big {
                     b.on = Some((spec, mem));
                 }
                 // (Several windows, or one whose input isn't sorted for it: `Chain`, made by
-                // `stream_rest`, `on` left None.)
-                None if chained(calls, presorted, ctx) => return true,
+                // `stream_rest`, `on` left None. Not under EXPLAIN ANALYZE, whose WindowAggs
+                // and Sorts count the plan's nodes: computed in memory.)
+                None if !ctx.instrumented() && chained(calls, presorted, ctx) => return true,
                 None => {
                     *big = None;
                     return false;
@@ -291,7 +292,7 @@ fn streamable(calls: &[WindowCall], presorted: &[String], stream: &Option<Vec<Ne
     if !keys.is_empty() && stream.is_none() {
         return None;
     }
-    super::winstream::Spec::of(calls)
+    super::winstream::Spec::of(calls, ctx)
 }
 
 /// A partition being streamed: the rows read before it went to `winstream`, its partition
@@ -383,12 +384,11 @@ impl WindowNode {
             self.store = Some(Stores {
                 keys: [std::sync::Arc::as_ptr(plan) as usize, std::sync::Arc::as_ptr(input) as usize],
                 types: crate::sql::paths::analyzejoins::col_types(input),
-                keep,
+                keep: keep.clone(),
                 wins: Vec::new(),
             });
-        } else {
-            self.shape = Shape { input: Some(input.clone()), types: None, keep };
         }
+        self.shape = Shape { input: Some(input.clone()), types: None, keep };
         self
     }
 
@@ -413,10 +413,9 @@ impl Node for WindowNode {
         if !self.started {
             self.started = true;
             self.stream = streamed_partitions(&self.calls, &self.presorted, ctx);
-            // (EXPLAIN ANALYZE counts the store over a whole partition: `count_store`.)
-            if self.store.is_none() {
-                self.big = Some(Big { allowed: None, est: 0, on: None });
-            }
+            // (EXPLAIN ANALYZE counts the store of a partition that fits by `count_store`, of
+            // one streamed as the stream holds it: `Streamed::record`.)
+            self.big = Some(Big { allowed: None, est: 0, on: None });
         }
         loop {
             if let Some(r) = self.out.next() {
@@ -526,6 +525,9 @@ impl WindowNode {
             && let Some(Streamed::Part { part, .. }) = self.streamed.take()
         {
             (*part).release(mem);
+            if let Some(st) = &self.store {
+                record_streamed(st, mem.stats(), self.sort.as_ref(), ctx);
+            }
         }
         Ok(r)
     }
@@ -591,6 +593,25 @@ impl WindowNode {
             out.push(r);
         }
         Ok(out)
+    }
+}
+
+/// EXPLAIN ANALYZE of a partition streamed (`winstream`): its store's figures (`StoreMem::stats`)
+/// join the WindowAgg's as `compute` records a partition counted whole, and the Sort the
+/// executor made shows as PostgreSQL's below.
+#[inline(never)]
+fn record_streamed(st: &Stores, (disk, bytes): (bool, i64), sort: Option<&std::sync::Arc<crate::sql::plan::Plan>>, ctx: &ExecCtx) {
+    let Some(instr) = ctx.instr.borrow().clone() else { return };
+    for key in st.keys {
+        instr.update(key, |s| {
+            let (d0, b0) = s.winstore[0].unwrap_or_default();
+            s.winstore[0] = Some((d0 || disk, b0.max(bytes as u64)));
+        });
+    }
+    if let Some(sp) = sort
+        && let Some(sort) = instr.get(std::sync::Arc::as_ptr(sp) as usize).and_then(|s| s.sort)
+    {
+        instr.update(st.keys[1], |s| s.sort = Some(sort));
     }
 }
 
@@ -1082,8 +1103,12 @@ fn count_store(st: &mut Stores, w: &Win, calls: &[WindowCall], rows: &[Row], res
                 super::workmem::minimal_tuple_len(&vals, &types, ctx)
             })
             .collect();
-        let frames: Vec<(usize, usize)> =
-            (0..m).map(|r| frame_of(&wc, r, m, peers, part, w.okeys, &offsets, ctx)).collect::<Result<_>>()?;
+        let frames: Vec<(usize, usize)> = if FrameSearch::takes(&wc) {
+            let mut fs = FrameSearch::new(&wc, part, peers, w.okeys, &offsets);
+            (0..m).map(|r| fs.at(r, ctx)).collect::<Result<_>>()?
+        } else {
+            (0..m).map(|r| frame_of(&wc, r, m, peers, part, w.okeys, &offsets, ctx)).collect::<Result<_>>()?
+        };
         // (update_frametailpos: what it spools for row r.)
         let tail_spool = |r: usize| match &f.end {
             FrameBound::UnboundedFollowing => m,
@@ -1196,7 +1221,7 @@ fn peer_groups(
     Ok(out)
 }
 
-fn offset_value(
+pub(super) fn offset_value(
     e: &crate::sql::expr::Expr,
     ctx: &ExecCtx,
     unit: FrameUnit,
@@ -1497,6 +1522,136 @@ fn frame_of(
     Ok((s, e.max(s)))
 }
 
+/// `frame_of`'s test for a RANGE offset bound, for a streamed partition (`winstream`): whether
+/// the row whose ORDER BY value is `v` is where the bound of the current row (value `cur`)
+/// stops (the head: the first row in range; the tail: the first row after it), `key` the
+/// window's ORDER BY.
+pub(super) fn range_stop(v: &Value, cur: &Value, off: &Value, preceding: bool, is_start: bool, key: &SortKey, ctx: &ExecCtx) -> Result<bool> {
+    let (mut sub, mut less) = (preceding, !is_start);
+    if key.desc {
+        sub = !sub;
+        less = !less;
+    }
+    Ok(if v.is_null() || cur.is_null() {
+        if is_start {
+            if key.nulls_first { !v.is_null() || cur.is_null() } else { v.is_null() || !cur.is_null() }
+        } else if key.nulls_first {
+            !v.is_null()
+        } else {
+            !cur.is_null()
+        }
+    } else {
+        in_range(v, cur, off, sub, less, ctx)? == is_start
+    })
+}
+
+/// A partition's frames for a RANGE or GROUPS frame with an offset bound, found as
+/// nodeWindowAgg.c's update_frameheadpos / update_frametailpos find them: each such bound a
+/// pointer moving forward as the current row does (RANGE: to where `range_stop` stops, from
+/// where the previous row's stopped; GROUPS: a peer group at a time), O(1) a row on average
+/// where `frame_of` looks from the partition's start. Rows are asked in order; the frames are
+/// `frame_of`'s (its bounds move forward as the current row does, the partition being sorted
+/// on the ORDER BY value that `in_range` compares).
+struct FrameSearch<'a> {
+    call: &'a WindowCall,
+    part: &'a [usize],
+    peers: &'a [(usize, usize)],
+    okeys: &'a [Vec<Value>],
+    offsets: &'a (Option<Value>, Option<Value>),
+    /// The current row's peer group: its number and the row it starts at.
+    group: (usize, usize),
+    /// The head's and the tail's pointers: a position (RANGE), or a peer group's number and
+    /// first row (GROUPS).
+    ptrs: [(usize, usize); 2],
+}
+
+impl<'a> FrameSearch<'a> {
+    /// A frame `frame_of` would look for from the partition's start each row.
+    fn takes(call: &WindowCall) -> bool {
+        let f = &call.frame;
+        let offset = |b: &FrameBound| matches!(b, FrameBound::Preceding(_) | FrameBound::Following(_));
+        match f.unit {
+            FrameUnit::Rows => false,
+            FrameUnit::Range => !call.order_by.is_empty() && (offset(&f.start) || offset(&f.end)),
+            FrameUnit::Groups => offset(&f.start) || offset(&f.end),
+        }
+    }
+
+    fn new(
+        call: &'a WindowCall,
+        part: &'a [usize],
+        peers: &'a [(usize, usize)],
+        okeys: &'a [Vec<Value>],
+        offsets: &'a (Option<Value>, Option<Value>),
+    ) -> Self {
+        FrameSearch { call, part, peers, okeys, offsets, group: (0, 0), ptrs: [(0, 0); 2] }
+    }
+
+    /// Row `i`'s frame [start, end), as `frame_of` gives it.
+    fn at(&mut self, i: usize, ctx: &ExecCtx) -> Result<(usize, usize)> {
+        let call = self.call;
+        let f = &call.frame;
+        if f.unit == FrameUnit::Groups {
+            // (The current row's peer group, counted on from the last row asked.)
+            while self.group.1 < self.peers[i].0 {
+                self.group = (self.group.0 + 1, self.peers[self.group.1].1);
+            }
+        }
+        let s = self.bound(0, &f.start, i, ctx)?;
+        let e = self.bound(1, &f.end, i, ctx)?;
+        Ok((s, e.max(s)))
+    }
+
+    fn bound(&mut self, which: usize, b: &FrameBound, i: usize, ctx: &ExecCtx) -> Result<usize> {
+        let m = self.part.len();
+        let is_start = which == 0;
+        Ok(match b {
+            FrameBound::UnboundedPreceding => 0,
+            FrameBound::UnboundedFollowing => m,
+            FrameBound::CurrentRow => {
+                if is_start {
+                    self.peers[i].0
+                } else {
+                    self.peers[i].1
+                }
+            }
+            FrameBound::Preceding(_) | FrameBound::Following(_) => {
+                let off = if is_start { &self.offsets.0 } else { &self.offsets.1 };
+                let off = off.as_ref().expect("an offset bound's value");
+                let preceding = matches!(b, FrameBound::Preceding(_));
+                if self.call.frame.unit == FrameUnit::Groups {
+                    let k = off.as_i64().unwrap_or(0).max(0) as usize;
+                    let g = self.group.0 as i128;
+                    let target = if preceding { g - k as i128 } else { g + k as i128 };
+                    if target < 0 {
+                        return Ok(0);
+                    }
+                    // (The pointer on to group `target`'s first row, or past the last.)
+                    let p = &mut self.ptrs[which];
+                    while (p.0 as i128) < target && p.1 < m {
+                        *p = (p.0 + 1, self.peers[p.1].1);
+                    }
+                    if p.1 >= m {
+                        m
+                    } else if is_start {
+                        p.1
+                    } else {
+                        self.peers[p.1].1
+                    }
+                } else {
+                    let key = &self.call.order_by[0];
+                    let cur = &self.okeys[self.part[i]][0];
+                    let p = &mut self.ptrs[which].0;
+                    while *p < m && !range_stop(&self.okeys[self.part[*p]][0], cur, off, preceding, is_start, key, ctx)? {
+                        *p += 1;
+                    }
+                    *p
+                }
+            }
+        })
+    }
+}
+
 fn excluded(call: &WindowCall, i: usize, p: usize, peers: &[(usize, usize)]) -> bool {
     match call.frame.exclude {
         FrameExclude::NoOthers => false,
@@ -1530,6 +1685,45 @@ fn compute_partition(
             _ => None,
         },
     );
+    if FrameSearch::takes(call) {
+        return searched_partition(call, rows, okeys, part, peers, &offsets, out, ctx);
+    }
+    let frame = |i: usize| frame_of(call, i, m, peers, part, okeys, &offsets, ctx);
+    partition_with(call, rows, part, peers, frame, out, ctx)
+}
+
+/// `compute_partition` for a RANGE or GROUPS frame with an offset bound: each row's frame from
+/// a `FrameSearch` (`frame_of` looks for those bounds from the partition's start each row:
+/// quadratic in the partition).
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn searched_partition(
+    call: &WindowCall,
+    rows: &[Row],
+    okeys: &[Vec<Value>],
+    part: &[usize],
+    peers: &[(usize, usize)],
+    offsets: &(Option<Value>, Option<Value>),
+    out: &mut [Value],
+    ctx: &ExecCtx,
+) -> Result<()> {
+    let mut fs = FrameSearch::new(call, part, peers, okeys, offsets);
+    partition_with(call, rows, part, peers, |i| fs.at(i, ctx), out, ctx)
+}
+
+/// `compute_partition`'s functions over a partition, row `i`'s frame from `frame` (asked in
+/// order of the rows, as nodeWindowAgg.c moves its frame pointers).
+#[inline(always)]
+fn partition_with(
+    call: &WindowCall,
+    rows: &[Row],
+    part: &[usize],
+    peers: &[(usize, usize)],
+    mut frame: impl FnMut(usize) -> Result<(usize, usize)>,
+    out: &mut [Value],
+    ctx: &ExecCtx,
+) -> Result<()> {
+    let m = part.len();
     match &call.func {
         WinFunc::Builtin(kind) => {
             let mut dense = 0i64;
@@ -1633,7 +1827,7 @@ fn compute_partition(
                         }
                     }
                     WinKind::FirstValue | WinKind::LastValue | WinKind::NthValue => {
-                        let (s, e) = frame_of(call, i, m, peers, part, okeys, &offsets, ctx)?;
+                        let (s, e) = frame(i)?;
                         let positions: Vec<usize> =
                             (s..e).filter(|p| !excluded(call, i, *p, peers)).collect();
                         let mut vals = Vec::new();
@@ -1676,7 +1870,7 @@ fn compute_partition(
                 && agg.user.as_ref().is_some_and(|u| u.moving.is_some()) =>
         {
             let mv = agg.user.as_ref().and_then(|u| u.moving.as_deref()).unwrap();
-            moving_aggregate(call, agg, mv, rows, part, peers, okeys, &offsets, out, ctx)?;
+            moving_aggregate(call, agg, mv, rows, part, peers, frame, out, ctx)?;
         }
         WinFunc::Agg(agg) => {
             let incremental = matches!(call.frame.start, FrameBound::UnboundedPreceding)
@@ -1688,7 +1882,7 @@ fn compute_partition(
                 let mut st = new_state(agg, direct.clone())?;
                 let mut fed = 0usize;
                 for i in 0..m {
-                    let (_, e) = frame_of(call, i, m, peers, part, okeys, &offsets, ctx)?;
+                    let (_, e) = frame(i)?;
                     while fed < e {
                         feed(agg, &mut st, &rows[part[fed]], ctx)?;
                         fed += 1;
@@ -1699,7 +1893,7 @@ fn compute_partition(
                 }
             } else {
                 for i in 0..m {
-                    let (s, e) = frame_of(call, i, m, peers, part, okeys, &offsets, ctx)?;
+                    let (s, e) = frame(i)?;
                     let mut st = new_state(agg, direct.clone())?;
                     for p in s..e {
                         if excluded(call, i, p, peers) {
@@ -1747,8 +1941,27 @@ fn frame_values(
         }
     };
     let offsets = (offset(&call.frame.start, true)?, offset(&call.frame.end, false)?);
+    if FrameSearch::takes(call) {
+        let mut fs = FrameSearch::new(call, part, peers, okeys, &offsets);
+        return frame_values_with(call, *kind, rows, part, |i| fs.at(i, ctx), out, ctx);
+    }
+    frame_values_with(call, *kind, rows, part, |i| frame_of(call, i, m, peers, part, okeys, &offsets, ctx), out, ctx)
+}
+
+/// `frame_values` with row `i`'s frame from `frame`.
+#[inline(always)]
+fn frame_values_with(
+    call: &WindowCall,
+    kind: WinKind,
+    rows: &[Row],
+    part: &[usize],
+    mut frame: impl FnMut(usize) -> Result<(usize, usize)>,
+    out: &mut [Value],
+    ctx: &ExecCtx,
+) -> Result<()> {
+    let m = part.len();
     for i in 0..m {
-        let (s, e) = frame_of(call, i, m, peers, part, okeys, &offsets, ctx)?;
+        let (s, e) = frame(i)?;
         let at = match kind {
             WinKind::FirstValue => (s < e).then_some(s),
             WinKind::LastValue => (s < e).then(|| e - 1),
@@ -1777,58 +1990,73 @@ fn frame_values(
 }
 
 /// A moving aggregate's transition state (WindowStatePerAggData).
-struct MovingState {
+pub(super) struct MovingState {
     value: Value,
     /// transValueCount: rows aggregated and not yet removed.
     count: usize,
 }
 
-/// eval_windowaggregates for a user aggregate in moving-aggregate mode: rows leaving the
-/// frame head are removed with the inverse transition (a NULL from it, or removing the last
-/// row, restarts the aggregation).
-#[allow(clippy::too_many_arguments)]
-fn moving_aggregate(
-    call: &WindowCall,
-    agg: &crate::sql::plan::AggCall,
-    mv: &crate::sql::plan::UserAgg,
-    rows: &[Row],
-    part: &[usize],
-    peers: &[(usize, usize)],
-    okeys: &[Vec<Value>],
-    offsets: &(Option<Value>, Option<Value>),
-    out: &mut [Value],
-    ctx: &ExecCtx,
-) -> Result<()> {
-    let m = part.len();
-    let init = |ctx: &ExecCtx| -> Result<MovingState> {
+/// A user aggregate's moving-aggregate implementation (MSFUNC / MINVFUNC / MFINALFUNC /
+/// MINITCOND) as eval_windowaggregates runs it: what `moving_aggregate` and a streamed
+/// partition (`winstream`) both compute with. (Inlined into each: called from a second
+/// place, `moving_aggregate`'s calls of them cost a fitting frame +0.9% user instructions.)
+pub(super) struct Moving<'a> {
+    pub agg: &'a crate::sql::plan::AggCall,
+    pub mv: &'a crate::sql::plan::UserAgg,
+}
+
+impl Moving<'_> {
+    /// A call `compute_partition` runs in moving-aggregate mode: a frame whose head moves, an
+    /// aggregate with a moving implementation and no DISTINCT, ORDER BY or volatile input.
+    pub(super) fn of(call: &WindowCall) -> Option<Moving<'_>> {
+        let WinFunc::Agg(agg) = &call.func else { return None };
+        if matches!(call.frame.start, FrameBound::UnboundedPreceding)
+            || agg.distinct
+            || !agg.order_by.is_empty()
+            || agg.args.iter().chain(&agg.filter).any(|e| e.is_volatile())
+        {
+            return None;
+        }
+        let mv = agg.user.as_ref().and_then(|u| u.moving.as_deref())?;
+        Some(Moving { agg, mv })
+    }
+
+    #[inline(always)]
+    pub(super) fn init(&self, ctx: &ExecCtx) -> Result<MovingState> {
         Ok(MovingState {
-            value: match &mv.init {
+            value: match &self.mv.init {
                 Some(e) => eval(e, &[], ctx)?,
                 None => Value::Null,
             },
             count: 0,
         })
-    };
-    // The aggregate's inputs for a row; None when FILTERed out.
-    let inputs = |row: &Row| -> Result<Option<Vec<Value>>> {
-        if let Some(f) = &agg.filter
+    }
+
+    /// The aggregate's inputs for a row; None when FILTERed out.
+    #[inline(always)]
+    fn inputs(&self, row: &Row, ctx: &ExecCtx) -> Result<Option<Vec<Value>>> {
+        if let Some(f) = &self.agg.filter
             && !crate::sql::expr::eval_bool(f, row, ctx)?
         {
             return Ok(None);
         }
-        Ok(Some(eval_all(&agg.args, row, ctx)?))
-    };
-    let call_with = |e: &crate::sql::expr::Expr, st: &Value, args: &[Value]| -> Result<Value> {
+        Ok(Some(eval_all(&self.agg.args, row, ctx)?))
+    }
+
+    #[inline(always)]
+    fn call_with(e: &crate::sql::expr::Expr, st: &Value, args: &[Value], ctx: &ExecCtx) -> Result<Value> {
         let mut r = Vec::with_capacity(args.len() + 1);
         r.push(st.clone());
         r.extend_from_slice(args);
         eval(e, &r, ctx)
-    };
-    let advance = |st: &mut MovingState, row: &Row| -> Result<()> {
-        let Some(args) = inputs(row)? else {
+    }
+
+    #[inline(always)]
+    pub(super) fn advance(&self, st: &mut MovingState, row: &Row, ctx: &ExecCtx) -> Result<()> {
+        let Some(args) = self.inputs(row, ctx)? else {
             return Ok(());
         };
-        if mv.trans_strict {
+        if self.mv.trans_strict {
             if args.iter().any(Value::is_null) {
                 return Ok(());
             }
@@ -1842,7 +2070,7 @@ fn moving_aggregate(
             }
         }
         st.count += 1;
-        let v = call_with(&mv.trans, &st.value, &args)?;
+        let v = Self::call_with(&self.mv.trans, &st.value, &args, ctx)?;
         if v.is_null() {
             return Err(Error::new(
                 code::NULL_VALUE_NOT_ALLOWED,
@@ -1851,13 +2079,15 @@ fn moving_aggregate(
         }
         st.value = v;
         Ok(())
-    };
-    // advance_windowaggregate_base: false when the inverse transition can't remove the row.
-    let remove = |st: &mut MovingState, row: &Row| -> Result<bool> {
-        let Some(args) = inputs(row)? else {
+    }
+
+    /// advance_windowaggregate_base: false when the inverse transition can't remove the row.
+    #[inline(always)]
+    pub(super) fn remove(&self, st: &mut MovingState, row: &Row, ctx: &ExecCtx) -> Result<bool> {
+        let Some(args) = self.inputs(row, ctx)? else {
             return Ok(true);
         };
-        let (inv, inv_strict) = mv.inverse.as_ref().expect("inverse transition");
+        let (inv, inv_strict) = self.mv.inverse.as_ref().expect("inverse transition");
         if *inv_strict && args.iter().any(Value::is_null) {
             return Ok(true);
         }
@@ -1867,24 +2097,49 @@ fn moving_aggregate(
             ));
         }
         if st.count == 1 {
-            *st = init(ctx)?;
+            *st = self.init(ctx)?;
             return Ok(true);
         }
-        let v = call_with(inv, &st.value, &args)?;
+        let v = Self::call_with(inv, &st.value, &args, ctx)?;
         if v.is_null() {
             return Ok(false);
         }
         st.count -= 1;
         st.value = v;
         Ok(true)
-    };
-    let finalize = |st: &MovingState| -> Result<Value> {
-        match &mv.final_ {
-            Some(_) if mv.final_strict && st.value.is_null() => Ok(Value::Null),
+    }
+
+    #[inline(always)]
+    pub(super) fn finalize(&self, st: &MovingState, ctx: &ExecCtx) -> Result<Value> {
+        match &self.mv.final_ {
+            Some(_) if self.mv.final_strict && st.value.is_null() => Ok(Value::Null),
             Some(f) => eval(f, std::slice::from_ref(&st.value), ctx),
             None => Ok(st.value.clone()),
         }
-    };
+    }
+}
+
+/// eval_windowaggregates for a user aggregate in moving-aggregate mode: rows leaving the
+/// frame head are removed with the inverse transition (a NULL from it, or removing the last
+/// row, restarts the aggregation).
+#[allow(clippy::too_many_arguments)]
+fn moving_aggregate(
+    call: &WindowCall,
+    agg: &crate::sql::plan::AggCall,
+    mv: &crate::sql::plan::UserAgg,
+    rows: &[Row],
+    part: &[usize],
+    peers: &[(usize, usize)],
+    mut frame: impl FnMut(usize) -> Result<(usize, usize)>,
+    out: &mut [Value],
+    ctx: &ExecCtx,
+) -> Result<()> {
+    let m = part.len();
+    let mova = Moving { agg, mv };
+    let init = |ctx: &ExecCtx| mova.init(ctx);
+    let advance = |st: &mut MovingState, row: &Row| mova.advance(st, row, ctx);
+    let remove = |st: &mut MovingState, row: &Row| mova.remove(st, row, ctx);
+    let finalize = |st: &MovingState| mova.finalize(st, ctx);
     let exclusion = call.frame.exclude != FrameExclude::NoOthers;
     let end_reuses = matches!(
         call.frame.end,
@@ -1894,7 +2149,7 @@ fn moving_aggregate(
     let (mut base, mut upto) = (0usize, 0usize);
     let mut result = Value::Null;
     for i in 0..m {
-        let (head, tail) = frame_of(call, i, m, peers, part, okeys, offsets, ctx)?;
+        let (head, tail) = frame(i)?;
         // The frame is the previous row's: its result stands.
         if i > 0 && base == head && end_reuses && !exclusion && base <= i && upto > i {
             out[part[i]] = result.clone();

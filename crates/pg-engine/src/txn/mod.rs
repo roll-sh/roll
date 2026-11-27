@@ -3561,6 +3561,27 @@ impl TxnState {
         TxnScan::new(own.into_iter().collect(), self.lower(start, end, st.ts, mark), src)
     }
 
+    /// `scan_snap` of a range none of our writes can be in, read from a kept hot range
+    /// (`Store::scan_raw_kept`): only the rows whose stored value `keep` takes. None: scan
+    /// instead (writes or range deletions of ours may be in the range, spilled writes, or no
+    /// hot range holds it; `keep` not called).
+    pub fn scan_snap_kept(&self, start: &[u8], end: &[u8], s: &Snap, keep: &mut dyn FnMut(&[u8]) -> bool) -> Option<TxnScan> {
+        self.catch_up(s);
+        let st = s.st.borrow();
+        let mark = st.mark as u64;
+        if st.mark < self.journal_base
+            || !st.prev.is_empty()
+            || self.runs.is_some()
+            || self.mem_in(start, end).next().is_some()
+            || !self.own_excluded(start, end, mark).is_empty()
+        {
+            return None;
+        }
+        let store = self.db.store.scan_raw_kept(start, end, st.ts, keep)?;
+        let src = self.toast_source(start, end, st.ts, mark, OwnVals::Now);
+        Some(TxnScan::new(Vec::new(), Lower::Store(Box::new(store)), src))
+    }
+
     /// `scan_snap`'s first entry of [start, end) as of the snapshot `s`, read by a point probe
     /// of the store (`Store::first_with`: each source positioned at `start`, no merging
     /// scan): Some(None) when there is none. None: scan instead (writes or range deletions
@@ -3751,6 +3772,22 @@ impl TxnState {
         }
         let ts = s.st.borrow().ts;
         self.db.store.get_sorted(keys, ts, resolve)
+    }
+
+    /// `get_sorted_snap`, rows of column blocks (storage format 5) made of the columns `cols`
+    /// marks alone, the others NULL; this transaction's own rows as they are.
+    pub fn get_sorted_snap_cols(&self, keys: &[Vec<u8>], s: &Snap, cols: &[bool]) -> Result<Vec<Option<Bytes>>> {
+        debug_assert!(keys.windows(2).all(|w| w[0] < w[1]), "keys strictly ascending");
+        self.catch_up(s);
+        let own = {
+            let st = s.st.borrow();
+            keys.iter().map(|k| self.snap_get(k, &st)).find_map(|r| r.transpose()).transpose()?.is_some()
+        };
+        if own {
+            return self.get_many_snap_with(keys, s, true);
+        }
+        let ts = s.st.borrow().ts;
+        self.db.store.get_sorted_cols(keys, ts, true, cols)
     }
 
     /// Whether this transaction holds heavyweight lock `key` (in any mode).

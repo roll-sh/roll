@@ -618,11 +618,17 @@ struct Block2 {
     /// without one (a deletion, a derived value): not a column block.
     lens: Vec<u32>,
     odd: bool,
+    /// The entries' keys, one after another, and where each ends (`colblocks` writers only:
+    /// a column block's key column).
+    keys: Vec<u8>,
+    kends: Vec<u32>,
 }
 
 impl Block2 {
     fn clear(&mut self) {
         self.lens.clear();
+        self.keys.clear();
+        self.kends.clear();
         self.odd = false;
         self.vals.clear();
         self.rkeys.clear();
@@ -1044,6 +1050,8 @@ impl SstWriter {
             b.vals.extend_from_slice(v);
             if self.colblocks {
                 b.lens.push(v.len() as u32);
+                b.keys.extend_from_slice(key);
+                b.kends.push(b.keys.len() as u32);
             }
         } else {
             b.odd = true;
@@ -1057,7 +1065,7 @@ impl SstWriter {
         let mut raw = std::mem::take(&mut self.block);
         let vbase = raw.len() as u32;
         // (Format 5: a block of rows alone, its values as columns when they fit them.)
-        let cols = self.colblocks && !b.odd && b.lens.len() == self.block_entries && super::colblock::encode_lens(&b.vals, &b.lens, vbase as usize, &mut raw);
+        let cols = self.colblocks && !b.odd && b.lens.len() == self.block_entries && super::colblock::encode_lens(&b.vals, &b.lens, &b.keys, &b.kends, vbase as usize, &mut raw);
         if !cols {
             raw.extend_from_slice(&b.vals);
         }
@@ -1484,6 +1492,11 @@ impl BlockPos {
 
     pub fn index(&self) -> usize {
         self.i
+    }
+
+    /// At no entry: a `seek_on` from it seeks (a read found its row in a key column instead).
+    pub fn unset(&mut self) {
+        self.i = usize::MAX;
     }
 
     pub fn key(&self) -> &[u8] {
@@ -1925,6 +1938,20 @@ impl Block {
         self.cols.is_some()
     }
 
+    /// Whether it is a column block with its keys as a column (`key_seek`).
+    #[inline]
+    pub fn has_keys(&self) -> bool {
+        self.cols.as_ref().is_some_and(|c| c.dir.has_keys())
+    }
+
+    /// A column block's first row whose key is at or after `sk`, found in its key column:
+    /// (row, whether its user key is `sk`'s, its commit ts). None: no key column, a key not of
+    /// its form, or past the last row (seek the entries).
+    #[inline]
+    pub fn key_seek(&self, sk: &[u8]) -> Option<(u32, bool, u64)> {
+        self.cols.as_ref()?.dir.key_seek(&self.data, sk)
+    }
+
     /// The block's buffer (a column block's section is in it).
     pub fn data(&self) -> &Bytes {
         &self.data
@@ -1951,6 +1978,16 @@ impl Block {
                 Bytes::from(v)
             }
         }
+    }
+
+    /// Row `r` of a column block (`key_seek`'s), made of its columns (with `mask`, those it
+    /// marks alone, the others NULL).
+    #[inline(never)]
+    pub fn col_row_at(&self, r: u32, mask: Option<&[bool]>) -> Bytes {
+        let c = self.cols.as_ref().expect("a column block's row");
+        let mut v = Vec::new();
+        c.dir.rows_into(&self.data, &[r], mask, &mut v, &mut Vec::with_capacity(1));
+        Bytes::from(v)
     }
 
     /// A column block's rows' bytes, made from its columns once (kept while the block lives:

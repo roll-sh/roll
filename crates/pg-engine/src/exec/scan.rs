@@ -716,6 +716,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             fscan: None,
             fetch_calls: 0,
             dscan: None,
+            fmask: None,
             erow: Vec::new(),
             epos: 0,
             owned: false,
@@ -822,6 +823,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             fscan: None,
             fetch_calls: 0,
             dscan: None,
+            fmask: None,
             erow: Vec::new(),
             epos: 0,
             owned: false,
@@ -918,6 +920,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             fscan: None,
             fetch_calls: 0,
             dscan: None,
+            fmask: None,
             erow: Vec::new(),
             epos: 0,
             owned: false,
@@ -1085,6 +1088,7 @@ fn open_scan_as(
         fscan: None,
         fetch_calls: 0,
         dscan: None,
+        fmask: None,
         erow: Vec::new(),
         epos: 0,
         owned: false,
@@ -2209,6 +2213,7 @@ fn dense_bitmap_scan(
         fscan: None,
         fetch_calls: 0,
         dscan: None,
+        fmask: None,
         erow: Vec::new(),
         epos: 0,
         owned: false,
@@ -2610,11 +2615,11 @@ fn skip_entries(ix: &Index, scan: &crate::sql::plan::SkipScan, start: &[u8], end
     Ok(out)
 }
 
-/// The table columns a heap fetch's rows are read for: those decoded (`need`), the
-/// projection's (`pick` offers them as stored) and the filter's. A column block's rows
-/// (storage format 5) are made of these alone, the others NULL. None (whole rows): a row
-/// lock or DML's rows, a table whose rows go out whole (`sizing::tracked`, `emit`), no
-/// projection or `need` known.
+/// The table columns a heap fetch's rows are read for: those decoded (`need`, which the
+/// nodes above name: no scan of theirs reads others), a projection's (`pick` offers them as
+/// stored) and the filter's. A column block's rows (storage format 5) are made of these
+/// alone, the others NULL. None (whole rows): a row lock or DML's rows, a table whose rows go
+/// out whole (`sizing::tracked`, `emit`), no `need` known.
 #[cold]
 #[inline(never)]
 fn read_mask(p: &ScanPlan, need: Option<&[bool]>, proj: Option<&[u32]>, other: bool) -> Option<Arc<[bool]>> {
@@ -2623,7 +2628,7 @@ fn read_mask(p: &ScanPlan, need: Option<&[bool]>, proj: Option<&[u32]>, other: b
     }
     let mut mask = need?.to_vec();
     mask.resize(p.table.columns.len(), false);
-    for &c in proj? {
+    for &c in proj.unwrap_or_default() {
         *mask.get_mut(c as usize)? = true;
     }
     if let Some(f) = &p.filter
@@ -2736,6 +2741,8 @@ struct ScanNode {
     fetch_calls: u32,
     /// Dense fetches' raw scan of the table's rows, kept from batch to batch (`fetch_dense`).
     dscan: Option<Box<TxnScan>>,
+    /// `fetch_mask`, once worked out.
+    fmask: Option<Option<Arc<[bool]>>>,
     /// A secondary scan's rows for the entries in `erb` (`next_secondary_ref`): where in
     /// `rb` each entry's row is (`NO_ROW`: none visible), and the next entry to hand out.
     erow: Vec<u32>,
@@ -2808,6 +2815,9 @@ const HELD_BYTES: usize = 256 << 10;
 pub static HEAP_ORDER_STREAMED: crate::counter::Counter = crate::counter::Counter::new();
 #[doc(hidden)]
 pub static HEAP_ORDER_HELD: crate::counter::Counter = crate::counter::Counter::new();
+/// Held passes over a kept hot range with the filter's rejects left there (`open_kept`).
+#[doc(hidden)]
+pub static HEAP_ORDER_KEPT: crate::counter::Counter = crate::counter::Counter::new();
 
 /// The index columns (table column, type, direction) a bitmap's quals can be checked on
 /// from the index entries alone: a btree's plain columns of the types `index_only_columns`
@@ -2969,6 +2979,20 @@ pub(super) fn fetch_rows(keys: &[Vec<u8>], ctx: &ExecCtx) -> Result<Vec<Option<b
     let txn = ctx.txn.borrow();
     match ctx.snapshot().as_deref() {
         Some(s) => get_sorted(&txn, keys, s, true),
+        None => keys.iter().map(|k| txn.get(k)).collect(),
+    }
+}
+
+/// `fetch_rows` for a reader of the columns `cols` marks alone: rows of column blocks (storage
+/// format 5) are made of those, the others NULL (`Txn::get_sorted_snap_cols`).
+fn fetch_rows_cols(keys: &[Vec<u8>], cols: &[bool], ctx: &ExecCtx) -> Result<Vec<Option<bytes::Bytes>>> {
+    if let Some(rows) = fetch_dense(keys, false, None, ctx)? {
+        return Ok(rows);
+    }
+    let txn = ctx.txn.borrow();
+    match ctx.snapshot().as_deref() {
+        Some(s) if keys.windows(2).all(|w| w[0] < w[1]) => txn.get_sorted_snap_cols(keys, s, cols),
+        Some(s) => txn.get_many_snap(keys, s),
         None => keys.iter().map(|k| txn.get(k)).collect(),
     }
 }
@@ -4184,7 +4208,8 @@ impl ScanNode {
             self.hstream = Some(Box::new(Stream::Tids(Vec::new())));
         }
         let tid = |v: &[u8]| stored_tid(v).map(tid_rank);
-        loop {
+        let mut kept_ok = true;
+        'stream: loop {
             match self.hstream.as_deref_mut().expect("a stream") {
                 Stream::Tids(tids) => {
                     let mut tids = std::mem::take(tids);
@@ -4203,6 +4228,9 @@ impl ScanNode {
                     // UPDATE's `WHERE tid = $1` keeps one row of pgbench_tellers' 320.)
                     let early = hold && self.early_filter(ctx);
                     let mut rejected = 0u32;
+                    // (A kept hot range's rows read with those the comparisons reject left
+                    // where they are, counted here: none copied into the batch.)
+                    let kept = early && kept_ok && self.open_kept(ctx, &mut rejected);
                     // (The batch's rows read where they are.)
                     while self.next_plain(ctx)? {
                         ctx.check()?;
@@ -4218,6 +4246,9 @@ impl ScanNode {
                                 // table too big to model's as stored, having no other place.)
                                 self.hstream = None;
                                 self.restart();
+                                if kept {
+                                    self.spare = None;
+                                }
                                 if let Some(w) = est {
                                     super::sizing::estimated_order_found(&self.plan.table, super::sizing::EstOrder::Unplaced, w, &ctx.sess.db);
                                     self.streamed = true;
@@ -4233,6 +4264,14 @@ impl ScanNode {
                                 held_bytes += k.len() + v.len();
                                 if held.len() < HELD_ROWS && held_bytes <= HELD_BYTES {
                                     held.push((t, k.to_vec(), self.rb.value_bytes(self.rb.pos())));
+                                } else if kept {
+                                    // (Too many to hold: the other way takes every row's TID,
+                                    // the rejected ones' too. The pass made again over all.)
+                                    kept_ok = false;
+                                    self.restart();
+                                    self.spare = None;
+                                    self.hstream = Some(Box::new(Stream::Tids(Vec::new())));
+                                    continue 'stream;
                                 } else {
                                     hold = false;
                                     held = Vec::new();
@@ -4245,9 +4284,9 @@ impl ScanNode {
                         }
                     }
                     if hold {
-                        for _ in 0..rejected {
-                            self.count_row(ctx);
-                            ctx.filtered(self.key);
+                        self.count_rows(ctx, rejected);
+                        if rejected > 0 {
+                            ctx.count(self.key, |s| s.removed += rejected as u64);
                         }
                         // (Every row held: by TID, as the merge returns them; TIDs are distinct.
                         // The TIDs sorted with the rows' places, each row then moved once.)
@@ -4407,12 +4446,27 @@ impl ScanNode {
             {
                 return Ok(rows);
             }
-            return fetch_rows(keys, ctx);
+            return match self.fetch_mask(ctx) {
+                Some(m) => fetch_rows_cols(keys, &m, ctx),
+                None => fetch_rows(keys, ctx),
+            };
         };
         if !self.toast_ready(&snap, ctx) {
             return fetch_rows(keys, ctx);
         }
         get_sorted(&ctx.txn.borrow(), keys, &snap, false)
+    }
+
+    /// The columns its rows fetched by key are read for, in a store writing column blocks
+    /// (storage format 5: their rows are made of those alone, `read_mask`). None: every column,
+    /// or a store without them. Worked out at the first fetch.
+    fn fetch_mask(&mut self, ctx: &ExecCtx) -> Option<Arc<[bool]>> {
+        self.fmask
+            .get_or_insert_with(|| {
+                let other = self.am.is_some() || self.ios_cols.is_some();
+                ctx.sess.db.store.colblocks().then(|| read_mask(&self.plan, self.need.as_deref(), self.proj.as_deref(), other)).flatten()
+            })
+            .clone()
     }
 
     /// The scan's reader of its rows' out-of-line values (`toast`), made as a scan of the
@@ -4617,6 +4671,48 @@ impl ScanNode {
     /// fetch to note (a sequential scan's).
     /// Made ready here: the filter's kernel (`kfilter`), and whether it has stored-value
     /// comparisons.
+    /// `next_heap_ordered`'s held pass over a kept hot range (`Txn::scan_snap_kept`): its one
+    /// range opened as `seek` opens it, but only with the rows that the filter's stored-value
+    /// comparisons don't reject (`stored_rejects`), the others counted in `rejected`. A row
+    /// without its TID is taken (the pass then reads them all its other way). False: not
+    /// opened (no kept range holds it, or our writes may be in it).
+    fn open_kept(&mut self, ctx: &ExecCtx, rejected: &mut u32) -> bool {
+        if self.iter.is_some() || self.cur_range != 0 || self.ranges.len() != 1 || self.rev || self.skip.is_some() {
+            return false;
+        }
+        let Some(snap) = ctx.snapshot() else { return false };
+        let Some(Some((_, Some(c)))) = &self.kfilter else { return false };
+        let (start, end) = &self.ranges[0];
+        let mut keep = |v: &[u8]| {
+            if !matches!(v.first(), Some(&(ROW_HEADER_TID | ROW_HEADER_TID_EXT))) {
+                return true;
+            }
+            let rejects = !crate::storage::toast::has_external(v) && row_data_fast(v).and_then(|d| c.passes(d)) == Some(false);
+            *rejected += rejects as u32;
+            !rejects
+        };
+        let Some(it) = ctx.txn.borrow().scan_snap_kept(start, end, &snap, &mut keep) else {
+            return false;
+        };
+        // (As `seek` reads a plain scan's rows: as stored.)
+        let plain = self.plan.mark.is_none()
+            && self.sample.is_none()
+            && self.only.is_none()
+            && !self.plan.sys
+            && !matches!(self.plan.access, Access::Tid { .. } | Access::TidRange(_));
+        let it = match it.source() {
+            Some(src) if plain => {
+                self.toast = Some(std::cell::RefCell::new(crate::txn::toast::Reader::new(src.clone())));
+                it.raw()
+            }
+            _ => it,
+        };
+        self.iter = Some(StoreIter::Fwd(Box::new(it)));
+        self.cur_range = 1;
+        HEAP_ORDER_KEPT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        true
+    }
+
     fn early_filter(&mut self, ctx: &ExecCtx) -> bool {
         let plan = &self.plan;
         if plan.filter.is_none()
@@ -6153,6 +6249,7 @@ impl Node for ScanNode {
             fscan,
             fetch_calls,
             dscan,
+            fmask: _,
             erow,
             epos,
             owned,
@@ -6374,6 +6471,15 @@ impl ScanNode {
     /// What `next` returns for the stored row `bytes` under `key`: counted, read, checked
     /// against the filter and locked (None: skipped).
     /// A row handed out, counted as its scan counts it.
+    /// `count_row` of `n` rows.
+    fn count_rows(&self, ctx: &ExecCtx, n: u32) {
+        match self.stat {
+            StatTarget::Seq(t) if n > 0 => super::pgstat::count_returned(ctx, t, n as i64),
+            StatTarget::Seq(_) | StatTarget::Off => {}
+            _ => (0..n).for_each(|_| self.count_row(ctx)),
+        }
+    }
+
     fn count_row(&self, ctx: &ExecCtx) {
         match self.stat {
             StatTarget::Off => {}
@@ -7464,6 +7570,7 @@ fn keyed_scan(s: &ScanPlan, plan: ScanPlan, ix: &Index, keys: Keys, ctx: &ExecCt
         fscan: None,
         fetch_calls: 0,
         dscan: None,
+        fmask: None,
         erow: Vec::new(),
         epos: 0,
         owned: false,

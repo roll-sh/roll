@@ -805,9 +805,24 @@ impl Session {
     /// A call of the embedding API that runs or binds a statement, in a session no client
     /// message times: the clock read once for it, as for a message (the statement's
     /// timestamp, the transaction it starts, the database's last use), not by each reader.
-    fn api_starts(&self) {
-        if !self.timed_by_messages.get() {
+    /// Returns whether it did (`api_ends` then).
+    fn api_starts(&self) -> bool {
+        let api = !self.timed_by_messages.get();
+        if api {
             self.starts_at();
+        }
+        api
+    }
+
+    /// The end of a call `api_starts` timed, as of a message (finish_xact_command): outside a
+    /// transaction block the transaction it began is over, and what runs outside such a call
+    /// reads the clock itself again.
+    fn api_ends(&self, api: bool) {
+        if api {
+            self.stmt_start.set(0);
+            if self.txn.is_none() && self.status == TxnStatus::Idle {
+                self.xact_from.set(None);
+            }
         }
     }
 
@@ -1420,8 +1435,10 @@ impl Session {
 
     /// Run one statement of a simple query.
     pub fn execute(&mut self, p: &Arc<Prepared>) -> Result<Outcome> {
-        self.api_starts();
-        self.execute_here(p)
+        let api = self.api_starts();
+        let r = self.execute_here(p);
+        self.api_ends(api);
+        r
     }
 
     /// `execute`, timed by the call or message it is part of.
@@ -1454,7 +1471,10 @@ impl Session {
     /// `query`, with `copy_data` as the input of a COPY FROM STDIN.
     pub fn query_copy(&mut self, sql: &str, copy_data: &[u8]) -> Result<Vec<QueryResult>> {
         // (Every entry runs with the red zone below it: an embedder's thread may be small.)
-        crate::stack::grow(|| self.query_copy_here(sql, copy_data))
+        let api = self.api_starts();
+        let r = crate::stack::grow(|| self.query_copy_here(sql, copy_data));
+        self.api_ends(api);
+        r
     }
 
     /// A reload published new configuration values: take them before the next message, as a
@@ -1468,7 +1488,6 @@ impl Session {
     }
 
     fn query_copy_here(&mut self, sql: &str, copy_data: &[u8]) -> Result<Vec<QueryResult>> {
-        self.api_starts();
         self.poll_config();
         let stmts = match self.parse(sql) {
             Ok(s) => s,
@@ -3065,12 +3084,13 @@ impl Session {
         result_formats: Vec<i16>,
         trailing: bool,
     ) -> Result<()> {
-        self.api_starts();
+        let api = self.api_starts();
         self.waits_armed = false;
         let r = crate::stack::grow(|| self.bind_inner(portal, stmt, params, formats, result_formats, trailing));
         if r.is_err() {
             self.on_error();
         }
+        self.api_ends(api);
         r
     }
 
@@ -3313,10 +3333,12 @@ impl Session {
 
     /// Execute message. Returns the outcome and whether the portal was suspended (more rows).
     pub fn execute_portal(&mut self, portal: &str, max_rows: usize) -> Result<(Outcome, bool)> {
-        self.api_starts();
+        let api = self.api_starts();
         self.waits_armed = false;
         self.extended = true;
-        crate::stack::grow(|| self.execute_portal_here(portal, max_rows))
+        let r = crate::stack::grow(|| self.execute_portal_here(portal, max_rows));
+        self.api_ends(api);
+        r
     }
 
     fn execute_portal_here(&mut self, portal: &str, max_rows: usize) -> Result<(Outcome, bool)> {

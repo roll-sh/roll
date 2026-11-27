@@ -380,6 +380,104 @@ All 22 queries' user instructions -0.00% / -0.04%; per query within +-0.26% (q03
 / -0.15, q16 -0.10 / -0.13, the rest within 0.1%); hashes equal; peak anon+shmem 1,620.9 / 1,620.3 MB
 against 1,616.0 / 1,615.6. Foreign load 0.8-2.5 cores (wall times not compared).
 
+## Short write transactions, round 20: the TPC-B-like spread by thread class; a small table's filtered scan of a kept hot range (2026-11-26, agent 333)
+
+HANDOFF "Short write transactions, round 20" has what it means. Builds: plain dist (`tools/dist.sh`). **b0** = `e60eabee2`
+(agent 328's candidate), **n1** = b0 + this change (`9c98d0d72`). Lane A, one run a `tools/lane.sh` hold; every hold read
+5-7.6 foreign cores (over the 1.0 rule: instruction counts only). Harness `~/.cache/a333/bench` (`split.sh`).
+
+### The split: scale 32, 160,000 TPC-B-like transactions a run, user instructions a transaction
+
+Counted from every client connected through 8 s after the last transaction and a CHECKPOINT. Connection threads exactly
+(`perf stat --per-thread --no-inherit`); the flush thread (a new `roll-flush` thread a background run) and autovacuum
+workers as the cgroup total minus the threads alive at the start, split by a `-c 5000011` sample. "Start": the L0 files
+left when the window opens (the load's last three, or not). "Warmed": 160,000 transactions first, uncounted. Seq scans:
+the window's `pg_stat_user_tables.seq_scan` of tellers / branches (of 160,000 UPDATEs each).
+
+| run | start | mode | tps | total | connection threads | flush thread | autovacuum | compactions | tellers seq / branches seq |
+|---|---|---|---|---|---|---|---|---|---|
+| b0 8 cl r7 | cold, 0 L0 | auto | 598 | 509.8k | 374.1k | 122.0k | 13.6k | 4 | 10,916 / 160,001 |
+| b0 8 cl r8 | cold, 0 L0 | auto | 1204 | 538.2k | 410.7k | 121.6k | 5.8k | 4 | 42,181 / 42,182 |
+| b0 32 cl q2 | cold, 0 L0 | auto | 3806 | 463.7k | 356.4k | 102.7k | 4.6k | 3 | 55 / 160,001 |
+| b0 8 cl w1 | warmed, 3 L0 | auto | 1524 | 489.4k | 345.6k | 133.6k | 10.1k | 4 | 0 / 132,911 |
+| b0 8 cl w2 | warmed, 1 L0 | auto | 1969 | 464.1k | 317.8k | 135.7k | 10.6k | 4 | 0 / 1 |
+| b0 8 cl g1 | warmed, 1 L0 | auto | 612 | 474.6k | 316.5k | 134.1k | 24.0k | 4 | 0 / 1 |
+| b0 8 cl g2 | warmed, 1 L0 | force_generic_plan | 733 | 484.3k | 331.6k | 133.9k | 18.7k | 4 | 0 / 59,926 |
+| n1 8 cl s1 | cold, 3 L0 | auto | 758 | 528.1k | 351.6k | 164.1k | 12.3k | 5 | 24,695 / 66,530 |
+| n1 8 cl s2 | cold, 3 L0 | auto | 1065 | 547.0k | 375.8k | 165.2k | 5.9k | 5 | 51,474 / 93,298 |
+| n1 8 cl s3 | cold, 3 L0 | auto | 1754 | 549.1k | 376.4k | 165.4k | 7.1k | 5 | 55,968 / 55,968 |
+| n1 32 cl sq1 | cold, 3 L0 | auto | 1142 | 506.8k | 337.7k | 162.6k | 6.4k | 5 | 1,417 / 45,315 |
+| n1 8 cl w1 | warmed, 1 L0 | auto | 1352 | 462.1k | 317.6k | 134.0k | 10.4k | 4 | 0 / 1 |
+| n1 8 cl w2 | warmed, 3 L0 | auto | 1112 | 474.4k | 331.7k | 129.5k | 13.1k | 4 | 0 / 160,001 |
+
+(g1 ran under force_generic_plan too; its line was written before the mode was. b0's first six runs, before the
+seq-scan counts were recorded: connection threads 424k, 502k, 468k, 439k, 519k, 417k at 1,574 / 2,158 / 1,486 / 1,233 /
+2,200 / 1,095 tps, the flush thread 123-136k with four compactions each.)
+
+b0's connection threads against its runs' plan mix: `317.4k + 319k x T + 34.7k x B` (T, B: tellers / branches seq scans
+a transaction), residuals −949 .. +1,136 over r7, r8, w1, w2, g1, g2. n1's: a tellers seq scan ~131k, a branches one
+13-14k; with no seq scan 317.6k (b0's fit 317.4k).
+
+PostgreSQL 18.6 (`postgres@sha256:77f58...`, 2 GB shared_buffers, as 328's harness), 8 clients, cold: client backends
+406.5k, checkpointer 4.4k, autovacuum workers 7.5k (branches 157,527 seq scans, tellers 3,762); warmed: backends 312.0k
+(no branches seq scan in the window) and 347.6k (all 160,000), checkpointer 4.0k. 32 clients, cold: backends 344.2k,
+checkpointer 4.4k, autovacuum 6.5k.
+
+### One statement, one client (`stmt.sh`): user instructions an execution (whole cgroup, 10,000 executions)
+
+| statement, plan | b0 | n1 |
+|---|---|---|
+| UPDATE pgbench_tellers, seq scan (index and bitmap scans off) | 408.3k, 388.9k | 244.8k, 248.1k |
+| UPDATE pgbench_tellers, index scan | 115.1k | 116.4k |
+| UPDATE pgbench_branches (one page: a seq scan in every cell) | 123.0k, 121.9k, 122.1k | 104.6k, 105.2k, 104.6k |
+
+(A cell that planned a seq scan by itself and one with a compaction in it are left out: 379.7k / 217.4k, 690.7k / 672.1k.)
+
+### Reads that must stay level: connection threads exactly over a fixed count (`reads.sh`)
+
+| case | b0 | n1 |
+|---|---|---|
+| prepared point select (1 client, 100,000) | 60.9k, 58.8k | 58.3k, 62.8k |
+| 1,000-row primary-key range read (8 clients x 2,000), the same start (no L0 file) | 2,128.0k, 2,109.2k | 2,103.9k |
+
+(Runs before the start state was recorded: b0 2,113.5k, 2,102.9k, n1 2,145.5k, 2,138.1k; an n1 run that started with
+the load's three L0 files: 2,155.8k. A one-client LBR profile of the range read, b0 against n1: −1.0%, no symbol past
+sampling noise.)
+
+### Second part: the memtable sized by memory (`cand/a333-2`) and the standing
+
+The schedule probe (`~/.cache/a333/patches/probe-schedule-env.patch` on n1, both arms on one binary), warmed windows,
+user instructions a transaction (connection threads at the run's plan mix; with no seq scan in brackets):
+
+| memtable / L0 trigger | clients | connection threads | flush thread | compactions | autovacuum (apart) | peak anon+shmem |
+|---|---|---|---|---|---|---|
+| 8 MB / 4 (before) | 8 | 317.9k | 136.5k | 4 | 14.7k | 493 MB |
+| 16 MB / 4 | 8 | 332.6k (319.3k with no seq scan) | 99.4k | 2 | 4.4k | 528 MB |
+| **32 MB / 4** | 8 | 305.0k | 64.3k | 1 | 16.2k | 598 MB |
+| 8 MB / 8 | 8 | 335.9k (326.0k) | 102.7k | 2 | 9.8k | 530 MB |
+| 8 MB / 4 (before) | 32 | 325.2k | 136.0k | 4 | 11.4k | 518 MB |
+| **32 MB / 4** | 32 | 317.6k, 306.7k | 66.7k, 65.0k | 1, 1 | 10.6k, 5.9k | 632, 668 MB |
+
+The standing by the stable measure (HANDOFF "Short write transactions, round 20" has the method), each run:
+
+| server | clients | run | tps | measure | of it: connections / backends | background (flush, checkpointer, WAL writer, ...) | time-driven, per second | peak anon+shmem |
+|---|---|---|---|---|---|---|---|---|
+| pg | 8 | st-pg-8-S1 | 1056 | **311.5k** | 307.3k | 4.2k | 10 M | 666.9 MB |
+| pgrust | 8 | st-pgrust-8-S1 | 543 | **328.3k** | 321.7k | 6.6k | 200 M | 902.3 MB |
+| pg | 32 | st-pg-32-S1 | 592 | **344.0k** | 339.8k | 4.3k | 7 M | 692.6 MB |
+| pgrust | 32 | st-pgrust-32-S1 | 2121 | **357.3k** | 352.3k | 5.0k | 250 M | 931.2 MB |
+| pgrust | 8 | st-pgrust-8-S2 | 1162 | **327.0k** | 321.2k | 5.7k | 211 M | 823.7 MB |
+| pg | 8 | st-pg-8-S2 | 1295 | **316.3k** | 312.1k | 4.2k | 9 M | 652.5 MB |
+| pgrust | 32 | st-pgrust-32-S2 | 1159 | **360.6k** | 355.0k | 5.6k | 230 M | 919.8 MB |
+| pg | 32 | st-pg-32-S2 | 1566 | **338.4k** | 334.1k | 4.2k | 12 M | 692.8 MB |
+| p2 | 8 | st-p2-8-S1 | 1646 | **306.7k** | 244.6k | 62.1k | 7 M | 632.0 MB |
+| p2 | 32 | st-p2-32-S1 | 1800 | **316.3k** | 251.5k | 64.8k | 16 M | 630.2 MB |
+| p2 | 8 | st-p2-8-S2 | 1614 | **305.2k** | 243.1k | 62.0k | 15 M | 595.0 MB |
+| p2 | 32 | st-p2-32-S2 | 2821 | **308.0k** | 248.3k | 59.6k | 17 M | 607.5 MB |
+
+(`p2`: the shipped build of `cand/a333-2`'s code, `tools/dist-pgo.sh` with its own training, staleness 0.00%. "measure":
+the run's user instructions a transaction without the time-driven threads, which are per second in their column.)
+
 ## Cheap custom plans, round 1: a named statement's custom plan stays its binding after a size change (2026-11-26, agent 328)
 
 HANDOFF "Cheap custom plans" has what changed. Builds: plain dist (`tools/dist.sh`). **b0** = `eccf1d824`,
@@ -572,6 +670,97 @@ window):
 The last against PGO, select-only at 8 clients, 3 alternating pairs: user instructions per read
 31,777 -> 32,105 / 31,587 -> 34,607 / 34,026 -> 31,978, user cycles 69,268 -> 69,872 / 68,855 ->
 72,931 / 69,927 -> 68,111 (foreign 1.25-1.88): no direction, dropped.
+
+## Query memory, round 6: in-memory RANGE / GROUPS frame search, EXPLAIN ANALYZE of a nested loop's Materialize and of every plan's rows; grouping sets and user aggregates' narrower sorts dropped (2026-11-26, agent 338)
+
+HANDOFF "Query memory, round 6" has what changed. Plain dist builds (`tools/dist.sh`): **b0**
+agent 334's stack (`ab2690694`, landed as `2676ea37a`); **n1** b0 with grouping sets out of `run`,
+the frame search and user aggregates' column need; **n2** n1 with the EXPLAIN ANALYZE changes and
+another grouping-sets loop; **n3** the candidates' code on b0. PostgreSQL 18.6 by digest. Harness:
+agent 334's copied to `~/.cache/a338/bench` (lane C, `mem.sh` with `mem-q5.txt` / `mem-q5r.txt`,
+`fpair.sh` with `fv`, `agg` and `rng` added). Foreign load on lane C was 3.4-6.6 cores in every
+hold (1.9-3.8 in the perf windows): instruction counts only, walls are not compared.
+
+### Peak memory a query (MB of the server cgroup's anon+shmem over the level before; 1M rows, work_mem 4 MB)
+
+Result hashes in order and sorted equal PostgreSQL's in every cell but the EXPLAIN rows (their
+text differs).
+
+| query | base (b0) | new (n2) | PostgreSQL 18.6 | temp files: b0 / new / PostgreSQL |
+|---|---:|---:|---:|---|
+| EXPLAIN ANALYZE of `sum(id) OVER (ORDER BY a ROWS BETWEEN 5 PRECEDING AND 5 FOLLOWING)` | 58.2 | 21.3 | 10.1 | 1 / 1 / 1 |
+| EXPLAIN ANALYZE of a nested loop, 4 outer rows over a 1M-row Materialize | 162.7 | 22.3 | 8.2 | 0 / 1 / 1 |
+| `count(*)`, `last_value(s)` `OVER (ORDER BY a RANGE BETWEEN 50 PRECEDING AND 50 FOLLOWING EXCLUDE CURRENT ROW)`, work_mem 1 GB | not finished (agent 334: 30 min) | 428.5 (15.2 s) | 29.1 (12.0 s) | - / 0 / 0 |
+| (dropped) `GROUP BY GROUPING SETS ((a % 1000), (id % 7))`, `count(*)`, `max(s)` | 290.9 | 19.2 | 35.1 | 0 / 2 / 4 (parallel) |
+| (dropped) `GROUP BY GROUPING SETS ((a % 100), ())`, `count(*)`, `sum(id)` | 195.7 | 32.0 | 10.2 | 0 / 1 / 1 |
+| (dropped) `msum(a) OVER (ORDER BY a ROWS BETWEEN 5 PRECEDING AND CURRENT ROW)` | 14.1 (51.2 MB file) | 32.1 (12.05 MB) | 10.3 (12.05 MB) | 1 / 1 / 1 |
+
+### When the input fits (G user instructions, 40 runs, 20,000 rows; alternating pairs; results equal)
+
+| query | base (b0) | new | new / base |
+|---|---:|---:|---|
+| `count(*)`, `last_value(s)` over `RANGE BETWEEN 50 PRECEDING AND 50 FOLLOWING EXCLUDE CURRENT ROW`, 10 partitions | 399.87 | n1 11.459 | -97.13% |
+| the candidates (n3), two pairs: window: sum, lag, rank by `id % 10` (agent 320's) | 7.6524 / 7.6526 | 7.6421 / 7.6388 | -0.14%, -0.18% |
+| (n3) `sum(id)`, `last_value(s)` over `ROWS BETWEEN 5 PRECEDING AND 5 FOLLOWING` | 6.6717 / 6.6714 | 6.6556 / 6.6549 | -0.24%, -0.25% |
+| (n3) `first_value(id)`, `last_value(s)` over `ROWS BETWEEN 3 PRECEDING AND 3 FOLLOWING` (`frame_values`) | 7.4324 / 7.4323 | 7.4281 / 7.4248 | -0.06%, -0.10% |
+| (n3) `msum(a)` (CREATE AGGREGATE with msfunc / minvfunc) over 6 rows | 6.6520 / 6.6512 | 6.6450 / 6.6444 | -0.10%, -0.10% |
+| (n3) the RANGE +-50 query above | 399.8655 | 11.4576 | -97.13% |
+| n1 (with the dropped changes): window | 7.6524 / 7.6524 | 7.6386 / 7.6384 | -0.18%, -0.18% |
+| n1: sliding sum and last_value | 6.6717 / 6.6716 | n1 6.6529 / 6.6531 | -0.28%, -0.28% |
+| n1: first / last_value | 7.4324 / 7.4323 | n1 7.4254 / 7.4256 | -0.09%, -0.09% |
+| (dropped) two hashed grouping sets | 4.9769 / 4.9769 / 4.9772 | n1 4.9831 / 4.9826, n2 4.9848 | +0.12%, +0.11%, +0.15% |
+| (dropped) a hashed set and () | 3.6537 / 3.6563 / 3.6545 | n1 3.6602 / 3.6613, n2 3.6586 | +0.18%, +0.14%, +0.11% |
+| plain GROUP BY `a % 1000`: count, max(s), sum(id) (`run` without the grouping sets' code) | 1.8788 / 1.8793 / 1.8790 | n1 1.8802 / 1.8806, n2 1.8806 | +0.07%, +0.07%, +0.09% |
+| (dropped) `msum(a)` over 6 rows (the need change) | 6.6449 | n1 6.1242 | -7.84% |
+
+Foreign load in the perf windows 1.9-3.8 cores: user cycles are not compared (n3's first /
+last_value read +10.8 / +15.8% cycles at 3.65 / 3.73 foreign cores against 2.91 / 3.05). No
+TPC-H query has a window; the dropped grouping sets' `run` change wasn't taken to TPC-H (it failed
+the fitting gate first).
+
+## Query memory, round 5: sliding window frames, EXPLAIN ANALYZE of a streamed window; grouping sets dropped (2026-11-26, agent 334)
+
+HANDOFF "Query memory, round 5" has what changed. Plain dist builds (`tools/dist.sh`): **b0**
+agent 330's stack (`2ad810e0a`, landed as `9ca2d3685`); **n1** the first two changes on it;
+**b1** origin's `9ca2d3685`; **n2** the windows, EXPLAIN ANALYZE and grouping sets on b1 with the
+gate's fixes (`58baf4872`; its window.rs / winstream.rs are the candidates'); **n3** n2 with
+`hashed_sets` / `sorted_sets` forced inline into `run`. The grouping sets were dropped (HANDOFF). PostgreSQL 18.6 by digest. Harness: agent 330's
+copied to `~/.cache/a334/bench` (lane C, `mem.sh` with `mem-q1.txt` / `mem-q2.txt` / `mem-q3.txt`,
+`fpair.sh`, `tpair.sh`). Foreign load on lane C was 5.7-7.3 cores in every hold (3.1-3.9 in the
+perf windows): instruction counts only, walls are not compared.
+
+### Peak memory a query (MB of the server cgroup's anon+shmem over the level before; 1M rows, work_mem 4 MB)
+
+Result hashes in order and sorted equal PostgreSQL's in every cell.
+
+| query | base (b0) | new | PostgreSQL 18.6 | temp: new / PostgreSQL |
+|---|---:|---:|---:|---|
+| `sum(id) OVER (ORDER BY a ROWS BETWEEN 5 PRECEDING AND 5 FOLLOWING)` | 351.9 | 12.4 (n2) | 10.2 | 1 / 18.1, 1 / 18.1 |
+| `count(*)`, `last_value(s)` `OVER (ORDER BY a RANGE BETWEEN 50 PRECEDING AND 50 FOLLOWING EXCLUDE CURRENT ROW)` | not finished in 30 min (quadratic `frame_of`) | 12.0 (n1) | 10.3 | 1 / 47.1, 1 / 46.0 (its EXPLAIN) |
+| (dropped) `GROUP BY GROUPING SETS ((a % 1000), (id % 7))`, `count(*)`, `max(s)` (sorted) | 290.6 | 15.9 (n1) / 19.1 (n2) | 35.1 | 2 / 100.4, 4 / 102.4 (parallel) |
+| (dropped) `GROUP BY GROUPING SETS ((a % 100), ())`, `count(*)`, `sum(id)` (sorted) | 191.0 | 24.9 (n1) / 32.0 (n2) | 10.2 | 1 / 18.1, 1 / 18.1 |
+| EXPLAIN ANALYZE of the ROWS query | 406.4 | 67.4 (n2) | - | 1 / 18.1 |
+
+### When the input fits (G user instructions, 40 runs, 20,000 rows; alternating pairs; results equal)
+
+| query | base | new | new / base |
+|---|---:|---:|---|
+| window: sum, lag, rank by `id % 10` (agent 320's) | b1 7.6444 / 7.6442 | n2 7.6500 / 7.6499 | +0.07%, +0.07% |
+| `sum(id)`, `last_value(s)` over `ROWS BETWEEN 5 PRECEDING AND 5 FOLLOWING` | b1 6.6811 / 6.6813 | n2 6.6627 / 6.6628 | -0.28%, -0.28% |
+| `msum(a)` (CREATE AGGREGATE with msfunc / minvfunc) over 6 rows (n1, dropped form) | b0 6.7153 / 6.7141 | n1 6.7747 / 6.7773 | +0.89%, +0.94% |
+| the same (n2) | b1 6.7174 / 6.7159 | n2 6.6368 / 6.6343 | -1.20%, -1.22% |
+| two hashed grouping sets (n1, dropped form) | b0 4.9394 / 4.9394 | n1 4.9547 / 4.9543 | +0.31%, +0.30% |
+| the same (n2: `hashed_sets` outlined from `run`) | b1 4.9404 / 4.9396 | n2 4.9515 / 4.9514 | +0.22%, +0.24% |
+| the same (n3: both forced inline) | b1 4.9400 / 4.9394 | n3 5.0893 / 5.0896 | +3.02%, +3.04% |
+| a hashed set and () (n1, dropped form) | b0 3.6458 / 3.6476 | n1 3.6580 / 3.6590 | +0.33%, +0.31% |
+| the same (n2) | b1 3.6455 / 3.6454 | n2 3.6552 / 3.6552 | +0.26%, +0.27% |
+| the same (n3) | b1 3.6475 / 3.6485 | n3 3.7530 / 3.7526 | +2.89%, +2.85% |
+
+n3 also had the window +0.18 / +0.18%, sliding -0.16 / -0.16%, msum -1.10 / -1.09% (b1 7.6444 /
+7.6446, 6.6811 / 6.6813, 6.7175 / 6.7164). TPC-H SF1 for the dropped grouping sets (`tpair.sh`;
+`AggNode::run` changed: the aggregations; b1 against n2, two pairs; hashes equal): q01 7.3168 / 7.3168 -> 7.3169 / 7.3168 (0.00%), q13 4.1059 / 4.1023 -> 4.1052 / 4.1048
+(-0.02%, +0.06%), q18 15.5782 / 15.5531 -> 15.5746 / 15.5633 (-0.02%, +0.07%). No TPC-H query
+has a window or grouping sets.
 
 ## Query memory, round 4: several windows, sorted set operations, count(DISTINCT) (2026-11-26, agent 330)
 
@@ -1198,6 +1387,172 @@ not run again. With two PGO builds' ~0.9% spread, p1's total is 75.1-76.5 G: 0.8
 | q21 | 6.21 | **4.80** | 5.25 | 4.71 | 7.38 | 1.02x |
 | q22 | 0.54 | **0.54** | 0.62 | 0.59 | 1.13 | 0.92x |
 | the 22 | 86.17 | **75.83** | 83.25 | 86.56 | 160.37 | 0.88x pgrust |
+
+## Storage format 5 against format 4, step 2 second piece (2026-11-26, agent 311)
+
+HANDOFF "Storage format 5: column blocks, step 2, second piece". Plain dist builds (`tools/dist.sh`)
+on `0037841bd2` (step 2's first piece landed): **h9** that commit, **r8** the candidate's code
+cherry-picked onto it (the same patch-id as the candidate on the head). Interim builds: **n1**
+(`DisplacedFill` lazy, the index scan's mask), **n2** (with the key column, `IndexChunk` lazy;
+`dense_rows` still read values: q18 failed on format 5), **r6** (everything but `row_one`), **r7**
+(with it; single reads dispatched in `Store::get_with`). Unpadded builds (`cargo build --profile
+dist` without `-x86-branches-within-32B-boundaries`): **h9u**, **r7u**, **r8u**. TPC-H
+SF1 loaded by each table's binary in each form; lane C, 3 runs a query in one perf window after a
+warm-up of the 22; point and range reads on lanes A and B; every result hash equal across forms
+and builds.
+
+**Format 5 against format 4** (r8, one binary, the two data sets):
+
+| | format 4 | format 5 | |
+|---|---|---|---|
+| TPC-H q01 (G) | 7.317 | 5.228 | -28.6% |
+| TPC-H q02 (G) | 2.280 | 2.221 | -2.6% |
+| TPC-H q03 (G) | 4.115 | 4.456 | +8.3% |
+| TPC-H q04 (G) | 1.349 | 1.511 | +12.0% |
+| TPC-H q05 (G) | 2.815 | 3.239 | +15.1% |
+| TPC-H q06 (G) | 3.381 | 3.454 | +2.2% |
+| TPC-H q07 (G) | 3.526 | 3.782 | +7.3% |
+| TPC-H q08 (G) | 1.451 | 1.445 | -0.4% |
+| TPC-H q09 (G) | 7.858 | 7.764 | -1.2% |
+| TPC-H q10 (G) | 5.549 | 5.636 | +1.6% |
+| TPC-H q11 (G) | 0.835 | 0.817 | -2.2% |
+| TPC-H q12 (G) | 5.878 | 3.936 | -33.0% |
+| TPC-H q13 (G) | 4.102 | 4.522 | +10.3% |
+| TPC-H q14 (G) | 1.384 | 1.510 | +9.1% |
+| TPC-H q15 (G) | 2.299 | 2.411 | +4.9% |
+| TPC-H q16 (G) | 2.870 | 2.874 | +0.1% |
+| TPC-H q17 (G) | 2.867 | 2.778 | -3.1% |
+| TPC-H q18 (G) | 15.486 | 15.972 | +3.1% |
+| TPC-H q19 (G) | 0.474 | 0.444 | -6.3% |
+| TPC-H q20 (G) | 0.891 | 0.901 | +1.0% |
+| TPC-H q21 (G) | 5.261 | 5.336 | +1.4% |
+| TPC-H q22 (G) | 0.623 | 0.623 | -0.0% |
+| TPC-H, the 22 (G) | 82.61 | 80.86 | -2.1% |
+| VmHWM over the 22 (MB) | 1,641 | 1,416 | -13.7% |
+| TPC-H SF1 load (user G) | 701.7 | 767.0 | +9.3% |
+| load VmHWM (MB) | 1,357 | 1,363 | +0.4% |
+| store on disk (MB) | 583.8 | 552.5 | -5.4% |
+| bulk copy_in (G) | 6.406 | 6.407 | +0.0% |
+| bulk create_index (G) | 3.737 | 3.731 | -0.2% |
+| bulk create_unique_index (G) | 2.671 | 2.676 | +0.2% |
+| bulk copy_out (G) | 2.359 | 2.359 | +0.0% |
+| bulk insert_select (G) | 4.434 | 4.457 | +0.5% |
+| bulk update_half (G) | 11.606 | 11.603 | -0.0% |
+| bulk delete_quarter (G) | 6.738 | 7.956 | +18.1% |
+| bulk vacuum (G) | 1.720 | 1.882 | +9.4% |
+| bulk analyze (G) | 0.473 | 0.677 | +43.2% |
+| bulk count_after (G) | 0.361 | 0.294 | -18.4% |
+| bulk seq_count (G) | 0.175 | 0.177 | +1.2% |
+| bulk seq_sum (G) | 0.324 | 0.274 | -15.5% |
+| bulk count_star (G) | 0.175 | 0.177 | +1.2% |
+| bulk sum_a (G) | 0.324 | 0.274 | -15.5% |
+| range read, 100 rows (instructions / read; 4 pairs) | 568,030 | 629,105 | +10.8% |
+| point select (instructions / select; 4 pairs) | 61,753 | 63,226 | +2.4% |
+| keyed fetch, q02's form (instructions / key) | 2,697 | 2,287 | -15.2% |
+
+(r7's: the 22 82.63 -> 80.90 G, point select 62,170 -> 64,158, the rest within 0.4% of r8's.)
+
+**Keyed fetch in isolation** (`~/.cache/a311/keyed/keyed.sh`: 500 suppliers' 80 partsupp rows each
+by `ps_suppkey` through a nested loop, 40,000 fetches; the index scan less the same entries'
+index-only count, per key; lane C):
+
+| build | format 4 | format 5 | format 5 without key columns |
+|---|---|---|---|
+| s11 (step 2 first piece) | 2,685 | 4,001 | |
+| n1 | 2,734 | 4,049 | |
+| n2 | 2,750 | 3,062 | 4,071 (s11's data) |
+| r6 | 2,711 | 3,056 | |
+| r7 | 2,697 | **2,287** | |
+| r8 | 2,697 | **2,287** | |
+
+**The key column alone** (n2, format 5 data without key columns, s11's, against data with them,
+n2's): q02 2.532 -> 2.371 G (-6.4%), q11 0.925 -> 0.859 (-7.1%), q14 1.777 -> 1.732 (-2.5%), q20
+1.123 -> 1.069 (-4.8%), q19 0.520 -> 0.503 (-3.2%), q22 0.704 -> 0.695 (-1.2%), q18 failed in both
+(above); load 739.1 -> 749.4 G (+1.4%), store 543 -> 554 MB.
+
+**319's chunks with rows left unmade** (n1 against s11, format 5): q02 2.773 -> 2.526 G (-8.9%), q19
+0.781 -> 0.518 (-33.6%), q20 1.358 -> 1.118 (-17.7%), q22 1.019 -> 0.707 (-30.6%), q11 and q14 level.
+
+**Switch off** (h9 -> r8, format 4 data, two alternating pairs; lane C 2.9-3.2 foreign cores):
+
+| query | h9 / r8 pair 1 (G) | r8 / h9 pair 2 (G) | % per pair |
+|---|---|---|---|
+| q01 | 7.3174 / 7.3169 | 7.3175 / 7.3175 | -0.01, +0.00 |
+| q02 | 2.2780 / 2.2802 | 2.2798 / 2.2785 | +0.10, +0.06 |
+| q03 | 4.1196 / 4.1145 | 4.1111 / 4.1186 | -0.12, -0.18 |
+| q04 | 1.3498 / 1.3492 | 1.3494 / 1.3498 | -0.04, -0.03 |
+| q05 | 2.8143 / 2.8126 | 2.8139 / 2.8142 | -0.06, -0.01 |
+| q06 | 3.3813 / 3.3815 | 3.3812 / 3.3813 | +0.01, -0.00 |
+| q07 | 3.5278 / 3.5245 | 3.5257 / 3.5290 | -0.09, -0.09 |
+| q08 | 1.4498 / 1.4507 | 1.4506 / 1.4506 | +0.06, -0.00 |
+| q09 | 7.8420 / 7.8578 | 7.8583 / 7.8413 | +0.20, +0.22 |
+| q10 | 5.5539 / 5.5620 | 5.5522 / 5.5530 | +0.14, -0.01 |
+| q11 | 0.8343 / 0.8351 | 0.8351 / 0.8343 | +0.09, +0.10 |
+| q12 | 5.8788 / 5.8785 | 5.8782 / 5.8789 | -0.00, -0.01 |
+| q13 | 4.1035 / 4.1025 | 4.1019 / 4.1035 | -0.02, -0.04 |
+| q14 | 1.3893 / 1.3853 | 1.3860 / 1.3889 | -0.29, -0.21 |
+| q15 | 2.2987 / 2.2987 | 2.2987 / 2.2988 | +0.00, -0.00 |
+| q16 | 2.8707 / 2.8567 | 2.8703 / 2.8838 | -0.49, -0.47 |
+| q17 | 2.8620 / 2.8634 | 2.8650 / 2.8658 | +0.05, -0.03 |
+| q18 | 15.5780 / 15.4861 | 15.4834 / 15.5695 | -0.59, -0.55 |
+| q19 | 0.4736 / 0.4738 | 0.4740 / 0.4743 | +0.04, -0.08 |
+| q20 | 0.8917 / 0.8912 | 0.8911 / 0.8909 | -0.05, +0.03 |
+| q21 | 5.2561 / 5.2544 | 5.2561 / 5.2575 | -0.03, -0.03 |
+| q22 | 0.6234 / 0.6232 | 0.6235 / 0.6235 | -0.03, +0.01 |
+
+The 22: 82.694 -> 82.599 G (-0.12%), 82.703 -> 82.603 (-0.12%). Bulk steps (pair 1, pair 2): COPY
+in 0.00 / +0.01%, CREATE INDEX +0.15 / +0.01%, CREATE UNIQUE INDEX +0.24 / -0.17%, COPY TO 0.00 /
+0.00%, INSERT ... SELECT +0.01 / 0.00%, UPDATE -0.09 / +0.03%, DELETE 0.00 / +0.01%, VACUUM -0.30 /
++0.30%, ANALYZE -0.90 / +0.88%, count(*) and sum steps -0.03 to +0.05%. Range read (instructions /
+read) 566,071 -> 565,270 (-0.14%), 568,595 -> 569,024 (+0.08%); point select 61,977 -> 62,644
+(+1.08%), 62,272 -> 62,183 (-0.14%).
+
+**No-padding control** (unpadded builds of the same commits, two pairs, lane C):
+
+| query | h9u -> r7u | h9u -> r8u |
+|---|---|---|
+| q01 | -0.00, +0.00 | -0.01, +0.00 |
+| q02 | -0.01, -0.02 | -0.02, -0.00 |
+| q04 | **+0.30, +0.30** | -0.17, -0.02 |
+| q09 | | **+0.10, +0.15** |
+| q11 | -0.03, -0.01 | -0.01, -0.00 |
+| q14 | -0.04, -0.01 | -0.12, -0.43 |
+| q16 | -0.85, -0.46 | |
+| q18 | -0.56, -0.53 | |
+| q20 | -0.01, +0.02 | |
+| q21 | **+0.24, +0.23** | -0.11, -0.01 |
+| q22 | +0.09, +0.10 | |
+
+r7's q04 / q21 (shipped +0.31 / +0.26-0.31%) were code, the same unpadded: its single reads'
+dispatch in `Store::get_with` and `Lookup::get`; r8 dispatches once per outer row
+(`Lookup::rows_cols`). r8's q09 (shipped +0.20 / +0.22%) is +0.10 / +0.15% unpadded.
+
+r7's switch-off pairs (h9 -> r7, for the record):
+
+| query | h9 / r7 pair 1 (G) | r7 / h9 pair 2 (G) | % per pair |
+|---|---|---|---|
+| q01 | 7.3175 / 7.3175 | 7.3176 / 7.3176 | -0.00, +0.00 |
+| q02 | 2.2776 / 2.2799 | 2.2803 / 2.2781 | +0.10, +0.10 |
+| q03 | 4.1225 / 4.1145 | 4.1154 / 4.1254 | -0.19, -0.24 |
+| q04 | 1.3499 / 1.3540 | 1.3539 / 1.3497 | +0.31, +0.32 |
+| q05 | 2.8155 / 2.8140 | 2.8121 / 2.8162 | -0.05, -0.15 |
+| q06 | 3.3813 / 3.3813 | 3.3813 / 3.3814 | +0.00, -0.00 |
+| q07 | 3.5282 / 3.5256 | 3.5253 / 3.5287 | -0.07, -0.10 |
+| q08 | 1.4498 / 1.4514 | 1.4503 / 1.4501 | +0.11, +0.02 |
+| q09 | 7.8400 / 7.8497 | 7.8489 / 7.8417 | +0.12, +0.09 |
+| q10 | 5.5528 / 5.5529 | 5.5516 / 5.5574 | +0.00, -0.10 |
+| q11 | 0.8344 / 0.8350 | 0.8349 / 0.8344 | +0.07, +0.06 |
+| q12 | 5.8786 / 5.8786 | 5.8784 / 5.8786 | +0.00, -0.00 |
+| q13 | 4.1032 / 4.1022 | 4.1030 / 4.1029 | -0.02, +0.00 |
+| q14 | 1.3888 / 1.3887 | 1.3888 / 1.3868 | -0.01, +0.14 |
+| q15 | 2.2987 / 2.2988 | 2.2986 / 2.2987 | +0.00, -0.00 |
+| q16 | 2.8836 / 2.8693 | 2.8697 / 2.8835 | -0.50, -0.48 |
+| q17 | 2.8652 / 2.8684 | 2.8634 / 2.8640 | +0.11, -0.02 |
+| q18 | 15.5722 / 15.4831 | 15.4792 / 15.5692 | -0.57, -0.58 |
+| q19 | 0.4738 / 0.4738 | 0.4742 / 0.4736 | -0.01, +0.13 |
+| q20 | 0.8909 / 0.8909 | 0.8909 / 0.8914 | +0.00, -0.05 |
+| q21 | 5.2571 / 5.2709 | 5.2755 / 5.2589 | +0.26, +0.31 |
+| q22 | 0.6236 / 0.6240 | 0.6239 / 0.6234 | +0.06, +0.09 |
 
 ## Storage format 5 against format 4, step 2 first piece (2026-11-25, agent 311)
 
