@@ -87,23 +87,35 @@ impl Engine {
         }
         let notes = self.source.feedback(change).await.map_err(|e| Error::Internal(format!("{e:#}")))?;
         let n = notes.into_iter().find(|n| n.id == note).ok_or_else(|| Error::NotFound(format!("no note {note} on this preview's change")))?;
+        // One caller makes it: two at once (two clicks, the sheet and the CLI) make one item.
+        match self.store.claim_note_work(id, note, by)? {
+            crate::store::NoteWorkClaim::Made(number, url) => return Ok(crate::notes::NoteWork { number, url }),
+            crate::store::NoteWorkClaim::Busy => return Err(Error::Conflict("its work item is being made: ask again in a moment".into())),
+            crate::store::NoteWorkClaim::Mine => {}
+        }
         let first = n.note.lines().find(|l| !l.trim().is_empty()).unwrap_or("A note").trim();
         let first = format!("Preview feedback: {}", first.replace('`', " "));
         let title: String = if first.chars().count() > 100 { format!("{}…", first.chars().take(99).collect::<String>()) } else { first };
         let url = self.store.services(id)?.into_iter().next().map(|s| format!("{}{}", s.url.trim_end_matches('/'), n.path)).unwrap_or_default();
         let place = if n.path.is_empty() { "/" } else { n.path.as_str() };
         let on = if n.selector.is_empty() { String::new() } else { format!(", on `{}`", n.selector.replace('`', "'")) };
-        let mut body = format!("{}\n\nLeft by {} on {place} of preview {id} (change {change}){on}.", n.note.trim(), n.by);
+        let mut body = format!("{}\n\nLeft by {} on {place} of preview {id} (change {change}){on}; made a work item by {by}.", n.note.trim(), n.by);
         if !url.is_empty() {
             body.push_str(&format!("\n\n{url}"));
         }
-        let (number, at) = self
-            .source
-            .work_item(change, &title, &body, &["preview-feedback"], n.outside)
-            .await
-            .map_err(|e| Error::Internal(format!("{e:#}")))?
-            .ok_or_else(|| Error::Conflict("this preview's change has no repo to make work items on".into()))?;
-        self.store.set_note_work(id, note, number, &at, by)?;
+        let made = match self.source.work_item(change, &title, &body, &["preview-feedback"], n.outside).await {
+            Ok(Some(made)) => made,
+            Ok(None) => {
+                self.store.set_note_work(id, note, None)?;
+                return Err(Error::Conflict("this preview's change has no repo to make work items on".into()));
+            }
+            Err(e) => {
+                self.store.set_note_work(id, note, None)?;
+                return Err(Error::Internal(format!("{e:#}")));
+            }
+        };
+        let (number, at) = made;
+        self.store.set_note_work(id, note, Some((number, &at)))?;
         self.store.log(id, &format!("{by} made a note work item #{number}"))?;
         let said = code_control::review::preview_note::reply_body(note, &format!("Made work item #{number} from this note."));
         if let Err(e) = self.source.comment(change, &said, by, false).await {

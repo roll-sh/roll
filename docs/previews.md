@@ -1935,7 +1935,8 @@ land on the change.
   `preview-feedback`, once a note (kept, shown with the note as `work`), and the note gets a
   reply naming it. A guest's note (a share link's) makes an item marked as someone outside the
   team's words, so MCP's lockdown withholds them from an agent that claims it; made from the
-  browser as the person, it wasn't (`engine.rs::a_note_becomes_a_work_item_once`). An error's
+  browser as the person, it wasn't. It's roll code's resource, so the caller must write the
+  repo's code too (their grant asked inside the request) (`engine.rs::a_note_becomes_a_work_item_once`). An error's
   item is made in the preview's repo as the person looking (roll code's `POST …/work`; someone
   without write on the repo gets its refusal). It takes its service
   and title, and its sample as the preview shows it (masked), in a block nothing in it can close,
@@ -2099,7 +2100,7 @@ previews in it), the operator and admins see every project.
 | `GET /v1/previews/{id}/notes` | | `{notes: [{id, path, selector, note, by, at, replies: [{id, note, by, at}], crop, work?: {number, url}}]}`: the notes left on its pages that nobody has resolved, every page's (the latest 500); `crop`: a picture of its element is kept |
 | `GET /v1/previews/{id}/notes/{note}/crop` | | `image/png`: the note's element as a screenshot run cropped it from its page (`X-Roll-Crop-As`: how, when as its reviewer saw it); 404 until one has |
 | `POST /v1/previews/{id}/notes/{note}/resolve` | | `{resolved}`: a note on the preview's page (its review's id) resolved, so the page stops listing it; 404 for a note that isn't the change's |
-| `POST /v1/previews/{id}/notes/{note}/work` | | `{number, url}`: the note made a work item on its change's repo by roll (labelled `preview-feedback`, a guest's words marked as outside the team's), said on the change; once a note (asked again, the same one); 404 for a note that isn't the change's |
+| `POST /v1/previews/{id}/notes/{note}/work` | | `{number, url}`: the note made a work item on its change's repo by roll (labelled `preview-feedback`, a guest's words marked as outside the team's), said on the change; once a note (asked again, the same one; two callers at once make one, the second a 409 while it's made); 403 when the caller's grant (or a person's token's session) doesn't write the change's repo's code; 404 for a note that isn't the change's |
 | `GET /v1/previews/{id}/mail` | | `{mail: [{id, at, from, to, subject, size}]}`: what its services sent, caught (newest first, the last 50) |
 | `GET /v1/previews/{id}/mail/{mail}` | | One caught message as sent, as `text/plain` (never rendered) |
 | `GET /v1/previews/{id}/connect` | | `{branches: [{kind, parent, vars}]}`: each data branch's connection as its services get it, the branch's own credentials (a Postgres branch's role, never the parent's or a superuser's), read from the products each time; 409 while it's being deleted |

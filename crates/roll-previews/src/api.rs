@@ -588,8 +588,19 @@ async fn resolve_note(AxState(e): S, Path((id, note)): Path<(String, String)>, w
 }
 
 /// The note made a work item on its change's repo (the same one when asked again).
-async fn note_work(AxState(e): S, Path((id, note)): Path<(String, String)>, who: Option<axum::Extension<roll_auth::SignedIn>>, grant: Option<axum::Extension<roll_auth::Grant>>) -> crate::Result<Json<crate::notes::NoteWork>> {
+async fn note_work(AxState(e): S, Path((id, note)): Path<(String, String)>, who: Option<axum::Extension<roll_auth::SignedIn>>, grant: Option<axum::Extension<roll_auth::Grant>>, ext: axum::http::Extensions) -> crate::Result<Json<crate::notes::NoteWork>> {
     check_id(&id)?;
+    // It makes roll code's work item on the change's repo: a second product's resource, so the
+    // caller's grant (and a person's token's session) must write that repo too.
+    {
+        use roll_auth::scope::{Action, Outcome, Resource};
+        let row = e.store.row(&id)?;
+        let repo = Resource { product: "code".into(), id: Some(row.repo.clone()), project: Some(row.project_id.clone()), ..Default::default() };
+        let writes = |g: &roll_auth::Grant| g.allows(&repo, Action::Write) == Outcome::Allow;
+        if grant.as_ref().is_some_and(|axum::Extension(g)| !writes(g)) || roll_auth::SessionGrant::on(&ext).is_some_and(|g| !writes(g)) {
+            return Err(Error::Forbidden(format!("making a work item writes {}'s code: this grant doesn't", row.repo)));
+        }
+    }
     let by = match (who, grant) {
         (Some(axum::Extension(u)), None) => u.handle,
         (_, Some(axum::Extension(g))) => format!("token:{}", g.name),

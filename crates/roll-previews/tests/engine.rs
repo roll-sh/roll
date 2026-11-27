@@ -3166,7 +3166,9 @@ async fn a_note_becomes_a_work_item_once() {
     let note = roll_previews::notes::Note { id: "rv_n1".into(), path: "/cart".into(), selector: "button.pay".into(), note: "The Pay button is cut off\non a phone".into(), by: "guest:Ada".into(), at: 1, replies: Vec::new(), crop: false, crop_as: None, seen: Default::default(), outside: true, work: None };
     e.code.feedback.lock().insert("chg_nw".into(), vec![note]);
     assert!(matches!(e.engine.note_to_work(&p.id, "rv_none", "bob").await, Err(roll_previews::Error::NotFound(_))));
-    let w = e.engine.note_to_work(&p.id, "rv_n1", "bob").await.unwrap();
+    // Two at once (two clicks, the sheet and the CLI): one item.
+    let (a, b) = tokio::join!(e.engine.note_to_work(&p.id, "rv_n1", "bob"), e.engine.note_to_work(&p.id, "rv_n1", "ann"));
+    let w = a.or(b).unwrap();
     assert_eq!(e.engine.note_to_work(&p.id, "rv_n1", "bob").await.unwrap(), w, "asked again: the same one");
     let works = e.code.works.lock().clone();
     assert_eq!(works.len(), 1, "made once");

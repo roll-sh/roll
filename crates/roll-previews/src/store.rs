@@ -2789,18 +2789,42 @@ impl Store {
     }
 
     /// The notes resolved on a preview's page (their reviews' ids).
-    /// The notes made work items, by note: (number, where it's shown).
+    /// The notes made work items, by note: (number, where it's shown). One still being made
+    /// isn't one.
     pub fn note_work(&self, preview: &str) -> Result<std::collections::HashMap<String, (u64, String)>> {
-        let rows: Vec<(String, i64, String)> = self.db.read(|c| c.query("SELECT review_id, number, url FROM note_work WHERE preview_id = ?", [preview], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))))?;
+        let rows: Vec<(String, i64, String)> = self.db.read(|c| c.query("SELECT review_id, number, url FROM note_work WHERE preview_id = ? AND number > 0", [preview], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))))?;
         Ok(rows.into_iter().map(|(n, num, url)| (n, (num as u64, url))).collect())
     }
 
-    /// Note `review` was made work item `number` (kept after it was: a crash makes one twice at
-    /// worst, never says one that isn't).
-    pub fn set_note_work(&self, preview: &str, review: &str, number: u64, url: &str, by: &str) -> Result<()> {
+    /// Who makes note `review`'s work item, decided in one write: this caller (a row of its
+    /// own, number 0 until it's made; one a crash left over a minute ago is taken over), or the
+    /// item already made, or `Busy` while another caller makes it.
+    pub fn claim_note_work(&self, preview: &str, review: &str, by: &str) -> Result<NoteWorkClaim> {
         let now = self.now_ms()?;
         self.db.write(|c| {
-            c.execute("INSERT INTO note_work (preview_id, review_id, number, url, by, at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (preview_id, review_id) DO NOTHING", params![preview, review, number as i64, url, by, now])?;
+            let row: Option<(i64, String, i64)> = c.query_row("SELECT number, url, at FROM note_work WHERE preview_id = ? AND review_id = ?", params![preview, review], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
+            Ok::<_, Error>(match row {
+                Some((number, url, _)) if number > 0 => NoteWorkClaim::Made(number as u64, url),
+                Some((_, _, at)) if now - at < 60_000 => NoteWorkClaim::Busy,
+                Some(_) => {
+                    c.execute("UPDATE note_work SET by = ?, at = ? WHERE preview_id = ? AND review_id = ? AND number = 0", params![by, now, preview, review])?;
+                    NoteWorkClaim::Mine
+                }
+                None => {
+                    c.execute("INSERT INTO note_work (preview_id, review_id, number, url, by, at) VALUES (?, ?, 0, '', ?, ?) ON CONFLICT (preview_id, review_id) DO NOTHING", params![preview, review, by, now])?;
+                    NoteWorkClaim::Mine
+                }
+            })
+        })
+    }
+
+    /// Note `review`'s work item made (`number`), or, with `None`, not: its claim let go.
+    pub fn set_note_work(&self, preview: &str, review: &str, made: Option<(u64, &str)>) -> Result<()> {
+        self.db.write(|c| {
+            match made {
+                Some((number, url)) => c.execute("UPDATE note_work SET number = ?, url = ? WHERE preview_id = ? AND review_id = ?", params![number as i64, url, preview, review])?,
+                None => c.execute("DELETE FROM note_work WHERE preview_id = ? AND review_id = ? AND number = 0", params![preview, review])?,
+            };
             Ok::<_, Error>(())
         })
     }
@@ -4172,6 +4196,14 @@ pub struct BaseRow {
 
 /// Live share links a preview may have at once.
 pub const SHARES_MAX: usize = 20;
+
+/// [`Store::claim_note_work`]'s answer.
+#[derive(Clone, Debug, PartialEq)]
+pub enum NoteWorkClaim {
+    Mine,
+    Made(u64, String),
+    Busy,
+}
 
 /// Earlier pushes kept reachable per service.
 /// How long after it was replaced an earlier push still answers requests that name it (skew
