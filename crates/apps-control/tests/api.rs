@@ -359,7 +359,7 @@ async fn settled(w: &World, svc: &str, env: &str, dep: &str) -> Value {
 }
 
 fn host(url: &Value) -> String {
-    url.as_str().unwrap().trim_start_matches("http://").split(':').next().unwrap().to_string()
+    url.as_str().unwrap().trim_start_matches("https://").trim_start_matches("http://").split(':').next().unwrap().to_string()
 }
 
 async fn image_service(w: &World, name: &str, run: Value) -> (Value, Value) {
