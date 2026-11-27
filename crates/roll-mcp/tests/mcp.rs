@@ -347,6 +347,9 @@ async fn tools_follow_the_tokens_rules() {
     assert!(names(&d.rpc(&asker, "tools/list", json!({})).await).contains(&"postgres_list_projects".to_string()));
     let pending = d.tool(&asker, "postgres_delete_project", json!({ "project": "pa" })).await;
     assert_eq!((pending["isError"].as_bool(), pending["structuredContent"]["status"].as_str()), (Some(false), Some("approval_pending")), "{pending}");
+    // It says a way forward exists, which the model takes (SEP-2643), naming the approval.
+    let said = &pending["_meta"]["io.modelcontextprotocol/authorization"];
+    assert_eq!((said["remediation"].as_str(), said["authorizationContextId"].as_str()), (Some("undisclosed"), pending["structuredContent"]["approval"].as_str()), "{pending}");
     let id = pending["structuredContent"]["approval"].as_str().unwrap();
     let waited = d.tool(&asker, "access_wait_approval", json!({ "approval_id": id, "wait": 0 })).await;
     assert_eq!(waited["structuredContent"]["state"], "pending");
@@ -368,6 +371,7 @@ async fn tools_follow_the_tokens_rules() {
     let (_, _, out) = d.http_with(&asker, Method::POST, "/v1/mcp", Some(call), &[("mcp-session-id", &session)]).await;
     let e = &out["error"]["data"]["elicitations"][0];
     assert_eq!((out["error"]["code"].as_i64(), e["mode"].as_str()), (Some(-32042), Some("url")), "{out}");
+    assert_eq!(out["error"]["data"]["_meta"]["io.modelcontextprotocol/authorization"]["remediationHints"], json!([{ "type": "url" }]), "{out}");
     assert!(e["url"].as_str().unwrap().contains(e["elicitationId"].as_str().unwrap()), "{out}");
     // And it's named in the audit log by what it called itself (the session id carries it).
     let log = d.audit_until(|l| l[0]["client"] == "cursor 1.2").await;
@@ -755,6 +759,7 @@ async fn a_2026_client_is_served_without_initialize() {
     let r = &out["result"];
     let ask = &r["inputRequests"]["approval"];
     assert_eq!((r["resultType"].as_str(), ask["method"].as_str(), ask["params"]["mode"].as_str()), (Some("input_required"), Some("elicitation/create"), Some("url")), "{out}");
+    assert_eq!(r["_meta"]["io.modelcontextprotocol/authorization"]["remediation"], "available", "{out}");
     let url = ask["params"]["url"].as_str().unwrap();
     let approval = url.split("id=").nth(1).unwrap_or_default().split('&').next().unwrap_or_default();
     assert!(approval.starts_with("apr_"), "{url}");
