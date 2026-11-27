@@ -152,6 +152,7 @@ fn postgres() -> Router {
         .route("/v1/apps/services/{id}/links/{kind}/{ref}", axum::routing::put(|| async { axum::Json(json!({ "ok": true })) }))
         .route("/v1/apps/services/{id}/environments/{env}", axum::routing::put(|| async { axum::Json(json!({ "ok": true })) }))
         .route("/v1/apps/services/{id}/environments/{env}/redeploy", post(|| async { axum::Json(json!({ "ok": true })) }))
+        .route("/v1/apps/services/{id}/environments/{env}/domains/{host}/configure", post(|| async { axum::Json(json!({ "status": "active" })) }))
         .route("/v1/search/clusters/{id}/indices/{index}/search", post(|| async { axum::Json(json!({ "hits": [] })) }))
         .route(
             "/v1/search/clusters",
@@ -2680,20 +2681,30 @@ async fn a_spent_bootstrap_token_or_machine_credential_ends_its_chain() {
     d.access.store.prune(30).unwrap();
 }
 
-/// The 40th review's item 4: bootstrap tokens and machine credentials open nothing and live as
-/// long as their machine, so they don't take the workload token room every login shares (roll
-/// secrets caps them per identity): with an owner's cap of them live, that owner still logs in.
+/// The 40th review's item 4 and the 42nd's: a fleet's machines don't take the workload token room
+/// every CI login shares. Their bootstrap tokens and credentials open nothing and live as long as
+/// the machine (roll secrets caps chains per identity), and their logins count toward their own
+/// chain, a few at once: with an owner's cap of machines live, each logged in, that owner's CI
+/// still logs in.
 #[tokio::test(flavor = "multi_thread")]
-async fn machine_credentials_leave_the_workload_token_caps_to_logins() {
-    use roll_access::store::{ChainSecret, OWNER_MAX_WORKLOADS, Presented};
+async fn machines_leave_the_workload_token_caps_to_ci_logins() {
+    use roll_access::store::{CHAIN_MAX_LOGINS, ChainSecret, OWNER_MAX_WORKLOADS, Presented};
     let d = Daemon::new(50);
+    let new = |name: &str| serde_json::from_value::<roll_access::store::NewGrant>(json!({ "name": name, "rules": [{ "product": "workspace", "resources": "*", "actions": { "read": "allow" } }] })).unwrap();
+    let mut machine = String::new();
     for n in 0..OWNER_MAX_WORKLOADS {
         let boot = d.access.store.create_bootstrap(&format!("rack-{n}"), 10, &[], "operator", None).unwrap();
-        assert!(matches!(d.access.store.redeem(&boot.secret, ChainSecret::Bootstrap, None, 24).unwrap(), Presented::Live(_)));
+        let Presented::Live(m) = d.access.store.redeem(&boot.secret, ChainSecret::Bootstrap, None, 24).unwrap() else { panic!("live") };
+        d.access.store.create_workload(&new("rack"), 15, "operator", None, Some(&m.grant)).unwrap();
+        machine = m.grant;
     }
     let within = serde_json::from_value::<roll_auth::scope::Scope>(json!([{ "product": "workspace", "resources": "*", "actions": { "read": "allow" } }])).unwrap();
-    let new = serde_json::from_value::<roll_access::store::NewGrant>(json!({ "name": "ci", "rules": [{ "product": "workspace", "resources": "*", "actions": { "read": "allow" } }] })).unwrap();
-    d.access.mint_workload(new, &within, 15, None).await.expect("a CI login still gets its token");
+    d.access.mint_workload(new("ci"), &within, 15, None).await.expect("a CI login still gets its token");
+    // One machine holds a few live logins, no more.
+    for _ in 1..CHAIN_MAX_LOGINS {
+        d.access.store.create_workload(&new("rack"), 15, "operator", None, Some(&machine)).unwrap();
+    }
+    assert!(matches!(d.access.store.create_workload(&new("rack"), 15, "operator", None, Some(&machine)), Err(roll_access::Error::Conflict(_))));
 }
 
 /// Open registration (RFC 7591) can't be flooded: a network registers at most 20 clients a minute
@@ -3465,6 +3476,23 @@ async fn a_secret_written_as_the_caller_is_asked_for_and_only_it_is_allowed() {
     let (none, _) = d.token(json!([search("allow")]), json!({})).await;
     let (s, out) = d.call(&none, Method::POST, path, Some(body("production"))).await;
     assert_eq!((s, out["code"].as_str()), (StatusCode::FORBIDDEN, Some("forbidden")), "{out}");
+}
+
+/// A domain's Cloudflare token is a `roll://` reference apps reads once as the caller (nothing
+/// keeps it): a token whose reveal on its folder is `ask` gets an approval naming that folder, not
+/// a 403 with nothing to approve.
+#[tokio::test]
+async fn a_dns_token_read_once_is_asked_for_by_its_folder() {
+    let d = Daemon::new(50);
+    let project = d.workspace.create("", "shop", "", None).unwrap().id;
+    d.workspace.place(roll_workspace::Scope::All, &project, roll_workspace::Kind::Service, "svc_web", 0.0, 0.0).unwrap();
+    let rules = json!([{ "product": "apps", "resources": "*", "actions": { "write": "allow", "deploy": "allow" } }, { "product": "secrets", "resources": [{ "project": project }], "actions": { "reveal": "ask" } }]);
+    let (token, _) = d.token(rules, json!({})).await;
+    let path = "/v1/apps/services/svc_web/environments/production/domains/acme.dev/configure";
+    let (s, out) = d.call(&token, Method::POST, path, Some(json!({ "cloudflare_token": "roll://production/dns/CF_TOKEN" }))).await;
+    assert_eq!((s, out["code"].as_str()), (StatusCode::FORBIDDEN, Some("approval_pending")), "{out}");
+    let (_, asked) = d.call(OPERATOR, Method::GET, &format!("/v1/access/approvals/{}", out["approval"].as_str().unwrap()), None).await;
+    assert_eq!((asked["product"].as_str(), asked["action"].as_str(), asked["environment"].as_str(), asked["scope_path"].as_str()), (Some("secrets"), Some("reveal"), Some("production"), Some("/dns")), "{asked}");
 }
 
 /// Claude's auto-connect (its connector docs, "Enterprise Managed Auth"): Claude signs the

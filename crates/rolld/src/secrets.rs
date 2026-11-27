@@ -1977,6 +1977,23 @@ impl apps_control::integrations::SecretSource for ForApps {
         .await?
     }
 
+    /// A reference read once for the asker's request on the service (`Secrets::use_once`: as
+    /// them, no maker kept; untrusted in an untrusted preview, as `resolve_as`).
+    async fn use_once(&self, who: apps_control::integrations::Asker<'_>, project: &str, env: &str, service: &str, reference: &str, purpose: &str) -> anyhow::Result<String> {
+        let (secrets, _) = self.0.get().cloned().ok_or_else(|| anyhow::anyhow!("roll secrets is starting: try again in a moment"))?;
+        let caller = secrets.caller_of(who.operator, who.user, who.grant).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let (project, env, service, reference, purpose) = (project.to_string(), env.to_string(), service.to_string(), reference.to_string(), purpose.to_string());
+        tokio::task::spawn_blocking(move || {
+            let untrusted = matches!(secrets.environment(&project, &env, &roll_secrets::Caller::consumer(&format!("app:{service}"))), Ok(e) if e.kind == roll_secrets::EnvironmentKind::Ephemeral && !e.trusted);
+            let mut r = roll_secrets::ResourceRef::new(roll_workspace::Kind::Service, &service);
+            if untrusted {
+                r = r.untrusted();
+            }
+            secrets.use_once(&r, &reference, &caller, &purpose).map(|v| v.value.expose().to_string()).map_err(|e| anyhow::anyhow!("{e}"))
+        })
+        .await?
+    }
+
     /// Read as the asker (`Secrets::values_seen_by`: the service's read, with their rights), not
     /// as the service: the service follows the environment's base, imports and references into
     /// folders the asker may not reveal (production's, a protected environment's). Every key must
