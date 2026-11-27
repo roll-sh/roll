@@ -61,6 +61,15 @@ async fn create_token(axum::extract::State(tokens): axum::extract::State<Tokens>
     axum::Json(serde_json::json!({ "grant": { "id": id, "name": name, "rules": b["rules"], "expires_at": b["expires_at"] }, "token": secret }))
 }
 
+/// roll-access's grants looked up by id, as rolld hands them to roll secrets: a token as it is now.
+struct Granted(Tokens);
+
+impl roll_auth::Grants for Granted {
+    fn grant(&self, id: &str) -> Option<roll_auth::Grant> {
+        self.0.lock().unwrap().values().find(|g| &*g.id == id).cloned()
+    }
+}
+
 async fn gate(axum::extract::State(tokens): axum::extract::State<Tokens>, mut req: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
     use axum::response::IntoResponse;
     if let Some(t) = roll_auth::bearer(req.headers()).map(str::to_string) {
@@ -210,7 +219,7 @@ async fn start_with(logins: bool) -> Server {
         trust_forwarded_for: false,
         web_url: None,
         deliver: None,
-        grants: None,
+        grants: Some(Arc::new(Granted(tokens.clone()))),
         people: None,
         clouds: None,
         outside: None,
