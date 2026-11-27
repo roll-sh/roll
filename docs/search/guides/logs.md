@@ -206,7 +206,8 @@ Limits:
 - a request refused after part of it was written may be written twice when the Collector retries
   it.
 
-An `otel` key can create data streams under `logs-*.otel-*` as it writes, and roll doesn't cap
+An `otel` key can create data streams under `logs-*.otel-*`, `traces-*.otel-*` and
+`metrics-*.otel-*` as it writes, and roll doesn't cap
 how many a cluster may hold yet. Keep `otel` keys in Collectors you run, not in code you ship to
 customers.
 

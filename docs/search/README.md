@@ -1783,10 +1783,18 @@ deterministic (#396).
 18. **Logs end to end** (design in [logs-end-to-end.md](logs-end-to-end.md); roll apps' drain
    landed in #735, ECS documents into `logs-roll.apps-*` through an `append` key; Elastic
    Observability's managed OTLP intake, OpenSearch Ingestion and the
-   Alerting plugin): no OTLP intake in search, `_plugins/_alerting` isn't served, Watcher has no UI,
-   nothing alerts on a cluster's own p99, 5xx or 429s, and Discover has no saved searches or
-   visualizations. An OTLP logs and traces intake into data streams also gives roll apps' log drains a
-   home in roll search.
+   Alerting plugin). Landed: the OTLP/HTTP logs intake and `otel` keys (#1178:
+   `POST /_otlp/v1/logs`, protobuf or JSON, OTel-native documents in `logs-*.otel-*` data streams,
+   every value charged as it's built) and Watcher's Alerts tab (#1180). In progress: alerts on a
+   cluster's own p99, 5xx and 429s (`feature/search-health-alerts`) and Discover's saved searches
+   (item 33). Left:
+   - **The shard limit on auto-create.** `cluster.max_shards_per_node` isn't enforced when an index
+     is made, so an `otel` (or `data`) key can create data streams without bound. Enforce it with
+     Elasticsearch's error ("this action would add [n] shards, but this cluster currently has
+     [x]/[y] maximum normal shards open").
+   - OTLP traces and metrics, and OTLP over gRPC.
+   - `_plugins/_alerting` on OpenSearch-flavor clusters.
+   - Visualizations.
 19. **Vector search's footprint** (docs/benchmarks/search.md, "Vector search": 1M × 384 against
    Elasticsearch 9.5.5 and OpenSearch 3.9). Roll leads on indexing (4,735 docs/s against 3,585
    and 2,978 at 8 clients), merged `knn` (1.9 ms CPU against 6.1 and 4.9), `rrf` (3.2 against 13.8
