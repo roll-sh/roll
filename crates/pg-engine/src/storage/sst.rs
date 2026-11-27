@@ -3996,6 +3996,8 @@ impl SstReader {
         if let Some(b) = self.cache.get(self.cache_id, i as u32) {
             return Ok(b);
         }
+        // (A query's read from the file, counted for the statistics; compaction's aren't.)
+        let query = fill;
         let fill = fill && !super::in_read_once();
         // (A bulk read's block goes through a ring in a full cache: `BlockCache::insert_bulk`.)
         let bulk = fill && super::in_bulk_read();
@@ -4003,6 +4005,10 @@ impl SstReader {
         let buf = |n: usize| self.cache.buffer(self.cache_id, i as u32, n, bulk);
         let dead = self.dead.as_ref().and_then(|d| d.block(i));
         let block = self.raw_block_in(i, (fill && dead.is_none()).then_some(&buf as &dyn Fn(usize) -> Option<Buf>))?;
+        if query {
+            // (The bytes read from the file: the block as stored.)
+            super::note_read(self.index.key(i), self.index.at[i].1 as usize);
+        }
         let mut block = match dead {
             Some(dead) => block.without(dead),
             None => block,

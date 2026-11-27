@@ -273,6 +273,10 @@ fn checkpointer_sync_time(_: &[Value], c: &FnCtx) -> Result<Value> {
     Ok(Value::Float8(pgstat::with_shared(c.exec, |s| s.checkpoint_io[2]) as f64))
 }
 
+fn buf_alloc(_: &[Value], c: &FnCtx) -> Result<Value> {
+    Ok(Value::Int8(pgstat::with_shared(c.exec, |s| s.buffers_alloc)))
+}
+
 fn checkpointer_reset_time(_: &[Value], c: &FnCtx) -> Result<Value> {
     Ok(ts(pgstat::reset_time(c.exec, "checkpointer")))
 }
@@ -302,6 +306,7 @@ pub fn register(r: &mut Registry) {
     r.from_pg(2771, Some(checkpointer_buffers_written), None);
     r.from_pg(3160, Some(checkpointer_write_time), None);
     r.from_pg(3161, Some(checkpointer_sync_time), None);
+    r.from_pg(2859, Some(buf_alloc), None);
     r.from_pg(6314, Some(checkpointer_reset_time), None);
     r.from_pg(3075, Some(bgwriter_reset_time), None);
     r.from_pg(2230, Some(clear_snapshot), None);

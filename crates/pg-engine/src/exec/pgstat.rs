@@ -141,6 +141,9 @@ pub struct Fixed {
     /// The shutdown checkpoint's start while it runs: the statistics file, written inside
     /// it, has what it did until then (`saved`).
     pub shutdown_checkpoint: Option<(crate::storage::fileio::FileIo, Instant)>,
+    /// pg_stat_bgwriter's buffers_alloc: blocks the backends' queries read from table files
+    /// into the block cache (8 kB each, `count_reads`).
+    pub buffers_alloc: i64,
     pub wal_records: i64,
     pub wal_bytes: i64,
     /// pg_stat_io counts by (backend type, object, context, operation).
@@ -1416,6 +1419,9 @@ pub fn reset_shared(ctx: &ExecCtx, target: &str) {
         s.checkpoints_performed = 0;
         s.checkpoint_io = [0; 3];
     }
+    if target == "bgwriter" {
+        s.buffers_alloc = 0;
+    }
     s.resets.insert(target.to_string(), t);
 }
 
@@ -1465,6 +1471,7 @@ pub fn saved(fixed: &Fixed, start: i64, dbs: Vec<(u32, Shared)>) -> file::Saved 
         checkpoints_requested: fixed.checkpoints_requested,
         checkpoints_performed: fixed.checkpoints_performed,
         checkpoint_io: std::array::from_fn(|i| fixed.checkpoint_io[i] + shutdown.map_or(0, |d| d[i])),
+        buffers_alloc: fixed.buffers_alloc,
         wal_records: fixed.wal_records,
         wal_bytes: fixed.wal_bytes,
         io: fixed.io.iter().map(|(k, v)| (*k, *v)).collect(),
@@ -1485,6 +1492,7 @@ pub fn restore(fixed: &mut Fixed, saved: Option<&file::Saved>, now: i64) {
     fixed.checkpoints_requested = s.checkpoints_requested;
     fixed.checkpoints_performed = s.checkpoints_performed;
     fixed.checkpoint_io = s.checkpoint_io;
+    fixed.buffers_alloc = s.buffers_alloc;
     fixed.wal_records = s.wal_records;
     fixed.wal_bytes = s.wal_bytes;
     fixed.io = s.io.iter().copied().collect();
@@ -1886,6 +1894,48 @@ pub fn end_prepared(
     end_xact_counts(sess, xact, commit, cat, false)
 }
 
+/// The relation whose keys start with (`table`, `id`): the table (its rows, id 0), its TOAST
+/// table, or its index with that id (an index's keys under its id, its own entries under its
+/// oid).
+fn rel_of(cat: &crate::catalog::Catalog, table: u32, id: u32) -> Option<u32> {
+    let t = cat.tables.get(&table)?;
+    match id {
+        0 => Some(table),
+        crate::storage::toast::SPACE => (t.toast != 0).then_some(t.toast),
+        _ => t.indexes.iter().copied().find(|&ix| ix == id || cat.index(ix).is_some_and(|i| i.id == id)),
+    }
+}
+
+/// The blocks this backend's queries read from table files (block cache misses:
+/// `storage::take_reads`), in 8 kB blocks of what was read: each relation's blocks fetched
+/// and not hit (pg_statio_*'s heap / idx / toast blks_read, pg_stat_database's blks_read),
+/// pg_stat_io's reads (bulkread for a bulk read's) and pg_stat_bgwriter's buffers_alloc.
+/// (Out of line: a transaction's end runs only the flag's check.)
+#[cold]
+#[inline(never)]
+fn count_reads(sess: &crate::session::state::SessionState, cat: &crate::catalog::Catalog) {
+    let (mut normal, mut bulk) = (0, 0);
+    let tables = sess.settings.borrow().track_counts();
+    {
+        let mut p = sess.pgstat.borrow_mut();
+        for (table, id, in_bulk, bytes) in crate::storage::take_reads() {
+            let n = bytes.div_ceil(8192) as i64;
+            if tables && let Some(rel) = rel_of(cat, table, id) {
+                p.tab(rel).blocks_fetched += n;
+            }
+            *(if in_bulk { &mut bulk } else { &mut normal }) += n;
+        }
+    }
+    // (VACUUM's reads are its context's, as its ring's in PostgreSQL.)
+    let normal_context = if sess.in_vacuum.get() { "vacuum" } else { "normal" };
+    for (context, n) in [(normal_context, normal), ("bulkread", bulk)] {
+        if n > 0 {
+            add_io(sess, ("client backend", "relation", context, "reads"), n);
+        }
+    }
+    fixed(&sess.db).lock().buffers_alloc += normal + bulk;
+}
+
 fn end_xact_counts(
     sess: &crate::session::state::SessionState,
     xact: XactStats,
@@ -1893,6 +1943,9 @@ fn end_xact_counts(
     cat: &crate::catalog::Catalog,
     count_xact: bool,
 ) {
+    if crate::storage::any_reads() {
+        count_reads(sess, cat);
+    }
     flush_io(sess);
     let wal = xact.wal_records;
     {

@@ -91,6 +91,13 @@ fn crash_unlogged_child_run() {
     assert_eq!(one(&mut s, DB_RESET), db_reset);
     assert_eq!(one(&mut s, "SELECT pg_stat_get_checkpointer_stat_reset_time()"), reset);
     assert_eq!(one(&mut s, PGSS), "[[Int8(3)]]");
+    // The block cache starts empty: the table's blocks are read from its file (heap_blks_read,
+    // in 8 kB blocks of what was read), and counted as allocated buffers.
+    assert_eq!(one(&mut s, "SELECT count(*) FROM l"), "[[Int8(500)]]");
+    s.query("SELECT pg_stat_force_next_flush()").unwrap();
+    let read = "SELECT heap_blks_read > 0 AND heap_blks_read < 10 FROM pg_statio_user_tables WHERE relname = 'l'";
+    assert_eq!(one(&mut s, read), "[[Bool(true)]]");
+    assert_eq!(one(&mut s, "SELECT buffers_alloc > 0 FROM pg_stat_bgwriter"), "[[Bool(true)]]");
     s.query(Q).unwrap();
     std::fs::write(dir.join("reset"), &reset).unwrap();
     assert_eq!(one(&mut s, "SELECT count(*) FROM u"), "[[Int8(500)]]");

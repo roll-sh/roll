@@ -691,6 +691,52 @@ pub(crate) fn in_read_once() -> bool {
     ONCE.with(|b| b.get())
 }
 
+/// A query's reads from table files (block cache misses) on this thread, for the statistics:
+/// (the relation key of the block's last key, `keys::index_prefix`'s 8 bytes; read in bulk;
+/// bytes), and whether there are any. At most `READS_KEPT` relations between two takes: past
+/// that the last entry counts the rest.
+type Reads = Vec<(u64, bool, u64)>;
+const READS_KEPT: usize = 64;
+
+thread_local! {
+    static READS: std::cell::RefCell<Reads> = const { std::cell::RefCell::new(Vec::new()) };
+    static READ_ANY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// A block of `bytes` bytes whose last key is `key` was read from its file for a query.
+/// (Out of line: a miss's path, away from the hit's in `Sst::block_with`.)
+#[cold]
+#[inline(never)]
+pub(crate) fn note_read(key: &[u8], bytes: usize) {
+    let rel = key.get(..8).map_or(0, |k| u64::from_be_bytes(k.try_into().unwrap_or_default()));
+    let bulk = in_bulk_read();
+    READS.with(|r| {
+        let mut r = r.borrow_mut();
+        let n = r.len();
+        match r.iter_mut().rev().take(4).find(|e| e.0 == rel && e.1 == bulk) {
+            Some(e) => e.2 += bytes as u64,
+            None if n < READS_KEPT => r.push((rel, bulk, bytes as u64)),
+            None => r[n - 1].2 += bytes as u64,
+        }
+    });
+    READ_ANY.with(|a| a.set(true));
+}
+
+/// Whether this thread read blocks from files since `take_reads` last ran.
+#[inline]
+pub fn any_reads() -> bool {
+    READ_ANY.with(|a| a.get())
+}
+
+/// This thread's reads since the last call: (table oid, index id, in bulk, bytes).
+pub fn take_reads() -> Vec<(u32, u32, bool, u64)> {
+    READ_ANY.with(|a| a.set(false));
+    READS.with(|r| std::mem::take(&mut *r.borrow_mut()))
+        .into_iter()
+        .map(|(k, bulk, bytes)| ((k >> 32) as u32, k as u32, bulk, bytes))
+        .collect()
+}
+
 /// Run `f` as a bulk read: a block it reads from a file goes into the block cache where the
 /// cache has room; once the cache is full, through a small ring of blocks per shard
 /// (`BlockCache::insert_bulk`), reused for the scan's next blocks unless another reader read

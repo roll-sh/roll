@@ -42,6 +42,7 @@ pub struct Saved {
     pub checkpoints_performed: i64,
     /// buffers_written, write_time, sync_time.
     pub checkpoint_io: [i64; 3],
+    pub buffers_alloc: i64,
     pub wal_records: i64,
     pub wal_bytes: i64,
     pub io: Vec<(IoKey, i64)>,
@@ -217,6 +218,7 @@ pub fn encode(s: &Saved, lsn: u64) -> Vec<u8> {
     for v in s.checkpoint_io {
         w.i64(v);
     }
+    w.i64(s.buffers_alloc);
     w.u32(s.io.len() as u32);
     for ((a, b, c, d), n) in &s.io {
         for x in [a, b, c, d] {
@@ -281,6 +283,7 @@ pub fn decode(bytes: &[u8], lsn: u64) -> Option<Saved> {
     for v in &mut s.checkpoint_io {
         *v = r.i64()?;
     }
+    s.buffers_alloc = r.i64()?;
     for _ in 0..r.count(24)? {
         let key = (intern(&r.str()?), intern(&r.str()?), intern(&r.str()?), intern(&r.str()?));
         s.io.push((key, r.i64()?));
