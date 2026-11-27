@@ -527,6 +527,12 @@ CREATE TABLE IF NOT EXISTS domains (
 CREATE INDEX IF NOT EXISTS domains_env ON domains (service, env);
 -- A project's own preview domain (`*.preview.acme.dev`, roll previews' preview deployment
 -- suffix), and the label each preview environment answers to under it.
+CREATE TABLE IF NOT EXISTS held_alerts (
+    seq INTEGER PRIMARY KEY,
+    service TEXT NOT NULL,
+    env TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS events_env ON events (service, env, seq);
 CREATE TABLE IF NOT EXISTS alert_silences (
     id TEXT PRIMARY KEY,
     service TEXT NOT NULL,
@@ -1287,6 +1293,12 @@ impl Store {
         // NULL: NDJSON, as every drain was before formats.
         db.add_column("log_drains", "format", "TEXT")?;
         db.add_column("domains", "redirect_to", "TEXT")?;
+        // A preview's webhook URLs (`access.webhooks`), as JSON.
+        db.add_column("env_access", "webhooks", "TEXT")?;
+        // A repeating silence's weekly windows (`every`), as JSON.
+        db.add_column("alert_silences", "every", "TEXT")?;
+        // When a held alert is looked at again (one still quiet waits, never in front of others').
+        db.add_column("held_alerts", "after_ms", "INTEGER NOT NULL DEFAULT 0")?;
         let store = Store { db, sealer };
         store.mark_references()?;
         store.quote_log_patterns()?;
@@ -1495,7 +1507,7 @@ impl Store {
             c.execute("DELETE FROM deploy_git_tags WHERE deployment IN (SELECT id FROM deployments WHERE service = ?)", [id])?;
             c.execute("DELETE FROM state WHERE key LIKE ?", [format!("%:{id}/%")])?;
             c.execute("DELETE FROM status_days WHERE key LIKE ?", [format!("%:{id}/%")])?;
-            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "variable_runtime_only", "visit_tickets", "visit_sessions", "variable_files", "error_groups", "variables", "links", "domains", "preview_hosts", "runs", "jobs", "metrics", "usage", "form_submissions", "deploy_scans", "env_data", "env_branches", "udp_ports", "env_unscheduled", "sandboxes", "env_peering", "volume_hours", "env_deploy_tags", "alert_silences"] {
+            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "variable_runtime_only", "visit_tickets", "visit_sessions", "variable_files", "error_groups", "variables", "links", "domains", "preview_hosts", "runs", "jobs", "metrics", "usage", "form_submissions", "deploy_scans", "env_data", "env_branches", "udp_ports", "env_unscheduled", "sandboxes", "env_peering", "volume_hours", "env_deploy_tags", "alert_silences", "held_alerts"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ?"), [id])?;
             }
             match c.execute("DELETE FROM services WHERE id = ?", [id])? {
@@ -1635,7 +1647,7 @@ impl Store {
             if n == 0 {
                 return Err(Error::NotFound(format!("service {service} has no environment {env}")));
             }
-            for t in ["variables", "variable_files", "error_groups", "domains", "preview_hosts", "runs", "jobs", "metrics", "deploy_keys", "env_access", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "variable_runtime_only", "visit_tickets", "visit_sessions", "form_submissions", "env_data", "udp_ports", "env_unscheduled", "sandboxes", "env_peering", "env_deploy_tags", "alert_silences"] {
+            for t in ["variables", "variable_files", "error_groups", "domains", "preview_hosts", "runs", "jobs", "metrics", "deploy_keys", "env_access", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "variable_runtime_only", "visit_tickets", "visit_sessions", "form_submissions", "env_data", "udp_ports", "env_unscheduled", "sandboxes", "env_peering", "env_deploy_tags", "alert_silences", "held_alerts"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ? AND env = ?"), [service, env])?;
             }
             // Its schedules', challenge's and base images' state goes with it.
@@ -1785,12 +1797,17 @@ impl Store {
     /// Queue events' deliveries and move the notifier's cursor from `from` to `to`, in one
     /// transaction, only if the cursor is still at `from` (another node that held the notifier
     /// may have moved it): false when it wasn't. A (target, event) is queued once whatever runs.
-    pub fn queue_deliveries(&self, deliveries: &[(String, i64, String)], from: i64, to: i64) -> Result<bool> {
+    /// `held`: the alerts a silence held back in the same page (event seq, service, env), kept
+    /// for [`crate::Apps`]'s release when it ends.
+    pub fn queue_deliveries(&self, deliveries: &[(String, i64, String)], held: &[(i64, String, String)], from: i64, to: i64) -> Result<bool> {
         let now = self.now()?;
         self.db.write(|c| {
             let at: Option<String> = c.query_row("SELECT value FROM state WHERE key = 'notify'", (), |r| r.get(0)).optional()?;
             if at.and_then(|v| v.parse::<i64>().ok()) != Some(from) {
                 return Ok(false);
+            }
+            for (seq, svc, env) in held {
+                c.execute("INSERT INTO held_alerts (seq, service, env) VALUES (?, ?, ?) ON CONFLICT (seq) DO NOTHING", params![seq, svc, env])?;
             }
             for (target, event, kind) in deliveries {
                 c.execute(
@@ -1801,6 +1818,45 @@ impl Store {
             }
             c.execute("UPDATE state SET value = ? WHERE key = 'notify'", [to.to_string()])?;
             Ok(true)
+        })
+    }
+
+    /// The alerts silences held back that are due a look at `now`, oldest first, at most
+    /// `limit`: (event seq, service, env).
+    pub fn held_alerts(&self, now: i64, limit: usize) -> Result<Vec<(i64, String, String)>> {
+        Ok(self.db.query("SELECT seq, service, env FROM held_alerts WHERE after_ms <= ? ORDER BY seq LIMIT ?", params![now, limit as i64], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?)
+    }
+
+    /// A held alert still quiet, looked at again from `after_ms` on.
+    pub fn defer_held(&self, seq: i64, after_ms: i64) -> Result<()> {
+        self.db.execute("UPDATE held_alerts SET after_ms = ? WHERE seq = ?", params![after_ms, seq])?;
+        Ok(())
+    }
+
+    /// One environment's events after `after`, in order, at most `limit`.
+    pub fn env_events(&self, service: &str, env: &str, after: i64, limit: usize) -> Result<Vec<Event>> {
+        Ok(self.db.query(
+            "SELECT seq, at, kind, service, env, deployment, data FROM events WHERE service = ? AND env = ? AND seq > ? ORDER BY seq LIMIT ?",
+            params![service, env, after, limit.clamp(1, 1000) as i64],
+            |r| {
+                let data: String = r.get(6)?;
+                Ok(Event { seq: r.get(0)?, at: r.get(1)?, kind: r.get(2)?, service: r.get(3)?, environment: r.get(4)?, deployment: r.get(5)?, data: serde_json::from_str(&data).unwrap_or(serde_json::Value::Null) })
+            },
+        )?)
+    }
+
+    /// A held alert let go: its deliveries (if any are due) queued and it forgotten, in one write.
+    pub fn release_held(&self, seq: i64, deliveries: &[(String, i64, String)]) -> Result<()> {
+        let now = self.now()?;
+        self.db.write(|c| {
+            for (target, event, kind) in deliveries {
+                c.execute(
+                    "INSERT INTO notify_deliveries (id, target, event, kind, status, attempts, next_at, code, error, at) VALUES (?, ?, ?, ?, 'pending', 0, ?, NULL, NULL, ?) ON CONFLICT (target, event) DO NOTHING",
+                    params![new_id("dlv"), target, event, kind, now, now],
+                )?;
+            }
+            c.execute("DELETE FROM held_alerts WHERE seq = ?", [seq])?;
+            Ok(())
         })
     }
 
@@ -1840,22 +1896,33 @@ impl Store {
         Ok(())
     }
 
+    /// `…/redeliver`: a target's finished delivery pending again from its first try, its id
+    /// (`X-Roll-Delivery`) kept. Ok(false): it's still pending; Err(NotFound): not this target's.
+    pub fn redeliver(&self, target: &str, id: &str) -> Result<bool> {
+        let now = self.now()?;
+        let (t, i) = (target.to_string(), id.to_string());
+        self.db.write(move |c| {
+            let status: Vec<String> = c.query("SELECT status FROM notify_deliveries WHERE id = ? AND target = ?", params![i, t], |r| r.get(0))?;
+            match status.first().map(String::as_str) {
+                None => Err(Error::NotFound(format!("no delivery {i}"))),
+                Some("pending") => Ok(false),
+                Some(_) => {
+                    c.execute("UPDATE notify_deliveries SET status = 'pending', attempts = 0, next_at = ?, code = NULL, error = NULL, at = ? WHERE id = ?", params![now, now, i])?;
+                    Ok(true)
+                }
+            }
+        })
+    }
+
+    pub fn delivery(&self, target: &str, id: &str) -> Result<Option<Delivery>> {
+        Ok(self.db.query("SELECT id, event, kind, status, attempts, code, error, at FROM notify_deliveries WHERE target = ? AND id = ?", params![target, id], delivery_row)?.pop())
+    }
+
     pub fn deliveries(&self, target: &str, limit: usize) -> Result<Vec<Delivery>> {
         Ok(self.db.query(
             "SELECT id, event, kind, status, attempts, code, error, at FROM notify_deliveries WHERE target = ? ORDER BY at DESC, id DESC LIMIT ?",
             params![target, limit as i64],
-            |r| {
-                Ok(Delivery {
-                    id: r.get(0)?,
-                    event: r.get(1)?,
-                    kind: r.get(2)?,
-                    status: r.get(3)?,
-                    attempts: r.get::<_, i64>(4)? as u32,
-                    code: r.get::<_, Option<i64>>(5)?.map(|c| c as u16),
-                    error: r.get(6)?,
-                    at: r.get(7)?,
-                })
-            },
+            delivery_row,
         )?)
     }
 
@@ -1913,7 +1980,8 @@ impl Store {
 
     /// Events older than `before_ms`, but the audit trail's (`audit.*`) only after 90 days.
     pub fn prune_events(&self, before_ms: i64) -> Result<()> {
-        self.db.execute("DELETE FROM events WHERE at < ? AND kind NOT LIKE 'audit.%'", [before_ms])?;
+        // An alert still held by a silence keeps its event until it's let go.
+        self.db.execute("DELETE FROM events WHERE at < ? AND kind NOT LIKE 'audit.%' AND seq NOT IN (SELECT seq FROM held_alerts)", [before_ms])?;
         self.db.execute("DELETE FROM events WHERE at < ? AND kind LIKE 'audit.%'", [code_sql::now_ms() - 90 * 86_400_000])?;
         self.db.execute("DELETE FROM notify_deliveries WHERE at < ? AND status <> 'pending'", [before_ms])?;
         Ok(())
@@ -3008,30 +3076,56 @@ impl Store {
 
     /// A silence of an environment's alerts until `until` (ms): `alerts` the kinds (none: every
     /// alert). At most [`crate::silences::MAX_OPEN`] open at once; ended ones are dropped here.
-    pub fn add_silence(&self, service: &str, env: &str, until: i64, alerts: &[String], reason: &str) -> Result<crate::silences::Silence> {
+    pub fn add_silence(&self, service: &str, env: &str, until: i64, alerts: &[String], reason: &str, every: Option<&crate::freeze::PauseSchedule>) -> Result<crate::silences::Silence> {
         let (now, id) = (self.now()?, format!("sil_{}", random(12).to_ascii_lowercase()));
         let j = serde_json::to_string(alerts).expect("kinds serialize");
+        let w = every.map(|e| serde_json::to_string(e).expect("windows serialize"));
         self.db.write(|c| {
             c.execute("DELETE FROM alert_silences WHERE service = ? AND env = ? AND until_ms <= ?", params![service, env, now])?;
             let open: i64 = c.query_row("SELECT COUNT(*) FROM alert_silences WHERE service = ? AND env = ?", [service, env], |r| r.get(0))?;
             if open >= crate::silences::MAX_OPEN {
                 return Err(Error::Conflict(format!("at most {} silences are open in an environment: end one first", crate::silences::MAX_OPEN)));
             }
-            c.execute("INSERT INTO alert_silences (id, service, env, until_ms, alerts, reason, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)", params![id, service, env, until, j, reason, now])?;
+            c.execute("INSERT INTO alert_silences (id, service, env, until_ms, alerts, reason, created_at, every) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", params![id, service, env, until, j, reason, now, w])?;
             Ok(())
         })?;
-        Ok(crate::silences::Silence { id, until, alerts: alerts.to_vec(), reason: reason.into(), created_at: now })
+        Ok(crate::silences::Silence { id, until, alerts: alerts.to_vec(), reason: reason.into(), created_at: now, every: every.cloned() })
     }
 
     /// An environment's silences still open at `now`.
     pub fn silences(&self, service: &str, env: &str, now: i64) -> Result<Vec<crate::silences::Silence>> {
-        Ok(self.db.query("SELECT id, until_ms, alerts, reason, created_at FROM alert_silences WHERE service = ? AND env = ? AND until_ms > ? ORDER BY until_ms", params![service, env, now], |r| {
-            Ok(crate::silences::Silence { id: r.get(0)?, until: r.get(1)?, alerts: serde_json::from_str(&r.get::<_, String>(2)?).unwrap_or_default(), reason: r.get(3)?, created_at: r.get(4)? })
+        Ok(self.db.query("SELECT id, until_ms, alerts, reason, created_at, every FROM alert_silences WHERE service = ? AND env = ? AND until_ms > ? AND created_at <= ? ORDER BY until_ms", params![service, env, now, now], |r| {
+            Ok(crate::silences::Silence {
+                id: r.get(0)?,
+                until: r.get(1)?,
+                alerts: serde_json::from_str(&r.get::<_, String>(2)?).unwrap_or_default(),
+                reason: r.get(3)?,
+                created_at: r.get(4)?,
+                every: r.get::<_, Option<String>>(5)?.and_then(|s| serde_json::from_str(&s).ok()),
+            })
         })?)
     }
 
+    /// The silences of `project`'s environments with this reason ended (a maintenance's, when it is).
+    pub fn end_silences_named(&self, project: &str, reason: &str) -> Result<()> {
+        self.db.write(|c| {
+            c.execute("DELETE FROM alert_silences WHERE reason = ? AND service IN (SELECT id FROM services WHERE project = ?)", [reason, project])?;
+            // What they held is looked at again now, not at its next turn.
+            c.execute("UPDATE held_alerts SET after_ms = 0 WHERE service IN (SELECT id FROM services WHERE project = ?)", [project])?;
+            Ok(())
+        })
+    }
+
+    /// A silence ended early: false when there's no such open one. What the environment's
+    /// silences held is looked at again now.
     pub fn end_silence(&self, service: &str, env: &str, id: &str) -> Result<bool> {
-        Ok(self.db.execute("DELETE FROM alert_silences WHERE service = ? AND env = ? AND id = ?", [service, env, id])? > 0)
+        self.db.write(|c| {
+            if c.execute("DELETE FROM alert_silences WHERE service = ? AND env = ? AND id = ?", [service, env, id])? == 0 {
+                return Ok(false);
+            }
+            c.execute("UPDATE held_alerts SET after_ms = 0 WHERE service = ? AND env = ?", [service, env])?;
+            Ok(true)
+        })
     }
 
     /// When a scheduled maintenance ends, if it's one.
@@ -3055,8 +3149,7 @@ impl Store {
         Ok(self.db.query_row("SELECT tag FROM deploy_git_tags WHERE deployment = ?", [deployment], |r| r.get(0)).optional()?)
     }
 
-    /// `tag` marked as acted on: false when it already was (each tag deploys once). The newest
-    /// [`crate::tags::MAX_SEEN`] are kept.
+    /// `tag` marked as acted on: false when it already was (each tag deploys once).
     pub fn mark_tag_seen(&self, service: &str, env: &str, tag: &str) -> Result<bool> {
         self.db.write(|c| {
             let Some(seen): Option<String> = c.query_row("SELECT seen FROM env_deploy_tags WHERE service = ? AND env = ?", [service, env], |r| r.get(0)).optional()? else { return Ok(false) };
@@ -3064,9 +3157,9 @@ impl Store {
             if seen.iter().any(|t| t == tag) {
                 return Ok(false);
             }
+            // Never trimmed: a tag dropped from it would read as new to the watch and deploy again.
             seen.push(tag.to_string());
-            let skip = seen.len().saturating_sub(crate::tags::MAX_SEEN);
-            c.execute("UPDATE env_deploy_tags SET seen = ? WHERE service = ? AND env = ?", params![serde_json::to_string(&seen[skip..]).expect("tags serialize"), service, env])?;
+            c.execute("UPDATE env_deploy_tags SET seen = ? WHERE service = ? AND env = ?", params![serde_json::to_string(&seen).expect("tags serialize"), service, env])?;
             Ok(true)
         })
     }
@@ -3899,13 +3992,14 @@ impl Store {
     pub fn access(&self, service: &str, env: &str) -> Result<Option<Access>> {
         Ok(self
             .db
-            .query_row("SELECT token_hash, bypass_hash, signed_in, password_hash, sso, preflight, callers FROM env_access WHERE service = ? AND env = ?", params![service, env], |r| {
+            .query_row("SELECT token_hash, bypass_hash, signed_in, password_hash, sso, preflight, callers, webhooks FROM env_access WHERE service = ? AND env = ?", params![service, env], |r| {
                 // No token: an empty one (the column was made required), which no digest matches.
                 let token: String = r.get(0)?;
                 let sso = r.get::<_, Option<String>>(4)?.and_then(|s| serde_json::from_str(&s).ok());
                 let preflight = r.get::<_, Option<String>>(5)?.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
                 let callers = r.get::<_, Option<String>>(6)?.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
-                Ok(Access { token_hash: Some(token).filter(|t| !t.is_empty()), bypass_hash: r.get(1)?, signed_in: r.get::<_, i64>(2)? != 0, password_hash: r.get(3)?, sso, preflight, callers })
+                let webhooks = r.get::<_, Option<String>>(7)?.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+                Ok(Access { token_hash: Some(token).filter(|t| !t.is_empty()), bypass_hash: r.get(1)?, signed_in: r.get::<_, i64>(2)? != 0, password_hash: r.get(3)?, sso, preflight, callers, webhooks })
             })
             .optional()?)
     }
@@ -3913,8 +4007,8 @@ impl Store {
     pub fn set_access(&self, service: &str, env: &str, access: Option<&Access>) -> Result<()> {
         match access {
             Some(a) => self.db.execute(
-                "INSERT INTO env_access (service, env, token_hash, bypass_hash, signed_in, password_hash, sso, preflight, callers) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (service, env) DO UPDATE SET token_hash = excluded.token_hash, bypass_hash = excluded.bypass_hash, signed_in = excluded.signed_in, password_hash = excluded.password_hash, sso = excluded.sso, preflight = excluded.preflight, callers = excluded.callers",
-                params![service, env, a.token_hash.as_deref().unwrap_or(""), a.bypass_hash, a.signed_in as i64, a.password_hash, a.sso.as_ref().and_then(|s| serde_json::to_string(s).ok()), (!a.preflight.is_empty()).then(|| serde_json::to_string(&a.preflight).unwrap_or_default()), (!a.callers.is_empty()).then(|| serde_json::to_string(&a.callers).unwrap_or_default())],
+                "INSERT INTO env_access (service, env, token_hash, bypass_hash, signed_in, password_hash, sso, preflight, callers, webhooks) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (service, env) DO UPDATE SET token_hash = excluded.token_hash, bypass_hash = excluded.bypass_hash, signed_in = excluded.signed_in, password_hash = excluded.password_hash, sso = excluded.sso, preflight = excluded.preflight, callers = excluded.callers, webhooks = excluded.webhooks",
+                params![service, env, a.token_hash.as_deref().unwrap_or(""), a.bypass_hash, a.signed_in as i64, a.password_hash, a.sso.as_ref().and_then(|s| serde_json::to_string(s).ok()), (!a.preflight.is_empty()).then(|| serde_json::to_string(&a.preflight).unwrap_or_default()), (!a.callers.is_empty()).then(|| serde_json::to_string(&a.callers).unwrap_or_default()), (!a.webhooks.is_empty()).then(|| serde_json::to_string(&a.webhooks).unwrap_or_default())],
             )?,
             None => self.db.execute("DELETE FROM env_access WHERE service = ? AND env = ?", params![service, env])?,
         };
@@ -5279,6 +5373,19 @@ fn insert_event(c: &code_sql::Conn<'_>, now: i64, kind: &str, service: &str, env
     Ok(())
 }
 
+fn delivery_row(r: &code_sql::Row<'_>) -> code_sql::Result<Delivery> {
+    Ok(Delivery {
+        id: r.get(0)?,
+        event: r.get(1)?,
+        kind: r.get(2)?,
+        status: r.get(3)?,
+        attempts: r.get::<_, i64>(4)? as u32,
+        code: r.get::<_, Option<i64>>(5)?.map(|c| c as u16),
+        error: r.get(6)?,
+        at: r.get(7)?,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5315,12 +5422,17 @@ mod tests {
         let s = Store::new(db, Sealer::new(&"k".repeat(32)).unwrap()).unwrap();
         s.set_state("notify", "0").unwrap();
         let page = [("ntf_a".to_string(), 1, "deploy.failed".to_string()), ("ntf_a".to_string(), 2, "crash_loop".to_string())];
-        assert!(s.queue_deliveries(&page, 0, 2).unwrap());
-        assert!(!s.queue_deliveries(&page, 0, 2).unwrap(), "the cursor moved: the second notifier queues nothing");
-        assert!(s.queue_deliveries(&page, 2, 2).unwrap());
+        assert!(s.queue_deliveries(&page, &[], 0, 2).unwrap());
+        assert!(!s.queue_deliveries(&page, &[], 0, 2).unwrap(), "the cursor moved: the second notifier queues nothing");
+        assert!(s.queue_deliveries(&page, &[], 2, 2).unwrap());
         let due = s.due_deliveries(50, 60_000).unwrap();
         assert_eq!(due.len(), 2, "one per (target, event), whatever ran: {due:?}");
         assert!(s.due_deliveries(50, 60_000).unwrap().is_empty(), "claimed: no other node sends them meanwhile");
+        // A held alert still quiet waits behind no one: another environment's is read meanwhile.
+        let held = [(3, "svc_a".to_string(), "production".to_string()), (4, "svc_b".to_string(), "production".to_string())];
+        assert!(s.queue_deliveries(&[], &held, 2, 4).unwrap());
+        s.defer_held(3, i64::MAX).unwrap();
+        assert_eq!(s.held_alerts(code_sql::now_ms(), 1).unwrap(), [(4, "svc_b".to_string(), "production".to_string())]);
     }
 
     #[test]

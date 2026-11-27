@@ -346,6 +346,13 @@ async fn check(State(a): S, ext: Extensions, Json(c): Json<Check>) -> crate::Res
     };
     let row = found.row;
     let params = found.params.unwrap_or_default();
+    if !row.body_shape_ok(c.body.as_ref()) {
+        return Ok(Json(json!({ "decision": "deny", "why": "the body isn't the JSON this route reads" })));
+    }
+    // A folder the gate refuses before deciding is refused here too.
+    if let Some(why) = crate::evaluate::bad_folder(row, uri.query()) {
+        return Ok(Json(json!({ "decision": "deny", "why": why })));
+    }
     // Decided as the gate decides: the request's headers (a create's `X-Roll-Project`), the
     // project a create's body names, the copy a body asks for, and "ask for anything else".
     let mut headers = axum::http::HeaderMap::new();
@@ -354,15 +361,25 @@ async fn check(State(a): S, ext: Extensions, Json(c): Json<Check>) -> crate::Res
             headers.insert(k, v);
         }
     }
-    let (a2, q, h) = (a.clone(), uri.query().map(str::to_string), headers.clone());
+    let (a2, q, h, path) = (a.clone(), uri.query().map(str::to_string), headers.clone(), uri.path().to_string());
     let params2 = params.clone();
-    let mut target = tokio::task::spawn_blocking(move || crate::evaluate::target(&a2, row, &params2, q.as_deref(), &h, person))
+    let mut target = tokio::task::spawn_blocking(move || crate::evaluate::target(&a2, row, &path, &params2, q.as_deref(), &h, person))
         .await
         .map_err(|e| Error::Internal(e.to_string()))?;
     crate::evaluate::project_from_body(row, &mut target, c.body.as_ref()).map_err(Error::BadRequest)?;
+    if let Err(why) = crate::evaluate::folder_from_body(row, &mut target, c.body.as_ref()) {
+        return Ok(Json(json!({ "decision": "deny", "why": why })));
+    }
     let mut action = row.action_with(&method, &params, c.body.as_ref(), &headers);
     let asked = action;
     let mut outcome = if matches!(row.target, catalog::Tgt::AnyGrant) { Outcome::Allow } else { scope.outcome(&target, action) };
+    // What else its body needs, as the gate asks it: the weakest decides.
+    for more in row.needs_too.zip(c.body.as_ref()).map(|(f, b)| f(b)).unwrap_or_default() {
+        let o = scope.outcome(&target, more);
+        if crate::evaluate::rank(o) < crate::evaluate::rank(outcome) {
+            (outcome, action) = (o, more);
+        }
+    }
     if let Some((copied, _, _)) = crate::evaluate::copy_outcome(&a, row, &params, &target, (c.body.as_ref(), uri.query()), &scope).await
         && crate::evaluate::rank(copied) < crate::evaluate::rank(outcome)
     {
@@ -1165,6 +1182,17 @@ async fn remembered(a: &Arc<Access>, id: &str, remember: Option<&str>) -> crate:
         let why = if found.product == "secrets" { "this request names no single encryption key" } else { "this request excludes indices, which a rule can't" };
         return Err(Error::BadRequest(format!("{why}: approve it once")));
     }
+    // A secret lent to another product's route (apps' DNS token, search's rotated password) at an
+    // environment's root, naming no key: remembered, every later call would reveal every key
+    // there, so it's approved once; one naming its key is remembered for that key (`keys`, 8 hours
+    // at most at the root, below), and one in a folder of its own for that folder.
+    if found.product == "secrets"
+        && found.scope_key.is_none()
+        && found.scope_path.as_deref().is_none_or(roll_auth::scope::is_root)
+        && catalog::find(&found.method, &found.route, &found.path).is_some_and(|f| f.row.product != "secrets" && f.row.lends.is_some())
+    {
+        return Err(Error::BadRequest("this lends a whole environment's secrets: approve it once, or keep the token in a folder of its own".into()));
+    }
     // A folder's rule reaches every folder under it, so one at a secrets environment's root (or with
     // no folder) is the whole environment, or more: remembered for 8 hours at most.
     if found.product == "secrets" && found.scope_path.as_deref().is_none_or(roll_auth::scope::is_root) && until.is_none_or(|u| u > code_sql::now_ms() + 8 * 3_600_000) {
@@ -1230,6 +1258,9 @@ pub(crate) fn rule_of(found: &crate::store::Approval) -> crate::Result<roll_auth
         environments: found.environment.clone().map(|e| vec![e]),
         paths: found.scope_path.clone().map(|p| vec![p]),
         unprotected: false,
+        // A request about one secret key remembers that key alone (a rule limited to it).
+        // The one key it was about: a lend's (it's another product's route), or the path's.
+        keys: (found.product == "secrets").then(|| found.scope_key.clone().or_else(|| catalog::secret_key_in(&found.path))).flatten().map(|k| vec![k]),
         actions: [(action, roll_auth::scope::Effect::Allow)].into_iter().collect(),
     })
 }
@@ -1356,6 +1387,7 @@ async fn request_access(State(a): S, ext: Extensions, Json(r): Json<AccessReques
             environment: env.as_deref(),
             scope_path: path.as_deref(),
             scope_index: index.as_deref(),
+            scope_key: None,
             wait_ms,
             also: None,
         })

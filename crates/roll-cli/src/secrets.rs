@@ -1355,14 +1355,19 @@ pub enum SaasCmd {
     /// `[--account-id] --template`; databricks `--host [--lifetime-days]`; confluent `--owner
     /// [--resource [--confluent-environment]]`; sonarqube `[--host] [--sonar-kind] [--sonar-project]
     /// [--expires-days]`; jenkins `--host --jenkins-user`; salesforce `--domain --app-id
-    /// --consumer-id`. Datadog's credential is `<API key>:<application key>`, Confluent's
-    /// `KEY:SECRET`, Jenkins' an API token of the user, Salesforce's another external client app's
-    /// `KEY:SECRET`. `--credential-expires` is when the credential itself ends at the vendor: health
-    /// warns two weeks before.
+    /// --consumer-id`; prismacloud `--prisma-api --service-account [--prisma-id] [--expires-days]`;
+    /// paddle `--api-key-id [--expires-days]`. Datadog's credential is `<API key>:<application
+    /// key>`, Confluent's `KEY:SECRET`, Jenkins' an API token of the user, Salesforce's another
+    /// external client app's `KEY:SECRET`, Prisma Cloud's a System Admin's access key as
+    /// `ACCESS_KEY_ID:SECRET`. Paddle's is the rotatable API key itself: Paddle can only rotate a
+    /// key with itself, so the registration holds the key, every rotation replaces it there, and
+    /// Paddle ends the old secret after the link's grace (a day at most; roll can't end it sooner).
+    /// `--credential-expires` is when the credential itself ends at the vendor: health warns two
+    /// weeks before.
     Add {
         name: String,
         /// sendgrid, twilio, okta, entra, auth0, gitlab, openai, datadog, cloudflare, databricks,
-        /// confluent, sonarqube, jenkins or salesforce.
+        /// confluent, sonarqube, jenkins, salesforce, prismacloud or paddle.
         #[arg(long)]
         vendor: String,
         /// A scope each key gets: SendGrid's (none: full access), GitLab's (one at least) or a
@@ -1403,7 +1408,8 @@ pub enum SaasCmd {
         /// default), 50 owner (groups).
         #[arg(long)]
         access_level: Option<u8>,
-        /// Each GitLab token's lifetime in days (default 365), or a SonarQube token's (none: no end).
+        /// Each GitLab token's lifetime in days (default 365), or a SonarQube token's, a Prisma Cloud
+        /// access key's or a Paddle secret's (none: no end, or the Paddle key's own).
         #[arg(long)]
         expires_days: Option<u16>,
         /// The OpenAI project (proj_…) whose service account keys rotate.
@@ -1446,6 +1452,18 @@ pub enum SaasCmd {
         /// The Salesforce app's OAuth consumer whose key and secret rotate.
         #[arg(long = "consumer-id")]
         consumer_id: Option<String>,
+        /// Prisma Cloud's API host for the tenant (api.prismacloud.io, api2.eu.prismacloud.io…).
+        #[arg(long = "prisma-api")]
+        prisma_api: Option<String>,
+        /// The Prisma Cloud service account whose access keys rotate.
+        #[arg(long = "service-account")]
+        service_account: Option<String>,
+        /// The Prisma Cloud tenant's Prisma id (for an access key that reaches several tenants).
+        #[arg(long = "prisma-id")]
+        prisma_id: Option<String>,
+        /// The Paddle API key (apikey_…) that rotates itself.
+        #[arg(long = "api-key-id")]
+        api_key_id: Option<String>,
         /// When the registered credential ends at the vendor: a date (2027-03-31), RFC 3339 or how
         /// long from now (90d).
         #[arg(long = "credential-expires")]
@@ -1907,6 +1925,10 @@ pub enum Tokens {
         /// Folders it reaches (default: all).
         #[arg(long = "for-path")]
         paths: Vec<String>,
+        /// Only this key of those folders (repeatable; default: every key): it reads, lists and
+        /// writes these alone.
+        #[arg(long = "key")]
+        keys: Vec<String>,
         /// read, reveal, write, delete, admin, scan (default: read and reveal).
         #[arg(long = "action")]
         actions: Vec<String>,
@@ -2158,6 +2180,11 @@ pub struct Run {
     /// Never mask values in what the command prints.
     #[arg(long)]
     pub no_mask: bool,
+    /// Pass roll's own credentials (ROLL_ADMIN_TOKEN, ROLL_TOKEN and the like) on to the command.
+    /// By default it gets none of them unless the project sets that name itself: an app and its
+    /// dependencies never act as roll's operator or with the token that read its values.
+    #[arg(long)]
+    pub keep_roll_credentials: bool,
     /// A dotenv file whose entries join the environment's (and win over them): plain values as
     /// written, `roll://ENV/KEY` references resolved (repeatable; docs/secrets.md, "References
     /// in files").
@@ -3554,7 +3581,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                     println!("{}  {:<16} {:<9} {}{ends}", s(&r["id"]), s(&r["name"]), s(&r["vendor"]), target.join(" "));
                 }
             }
-            SaasCmd::Add { name, vendor, scopes, account_sid, domain, app_id, tenant, client_id, object_id, app_client_id, host, gitlab_project, gitlab_group, access_level, expires_days, openai_project, site, key, account_id, template, lifetime_days, owner, resource, confluent_environment, sonar_kind, sonar_project, jenkins_user, consumer_id, credential_expires } => {
+            SaasCmd::Add { name, vendor, scopes, account_sid, domain, app_id, tenant, client_id, object_id, app_client_id, host, gitlab_project, gitlab_group, access_level, expires_days, openai_project, site, key, account_id, template, lifetime_days, owner, resource, confluent_environment, sonar_kind, sonar_project, jenkins_user, consumer_id, prisma_api, service_account, prisma_id, api_key_id, credential_expires } => {
                 let credential_expires_at = match credential_expires.as_deref().map(expiry).transpose()? {
                     Some(None) => anyhow::bail!("--credential-expires is when the credential ends: a date, RFC 3339 or how long from now"),
                     Some(Some(t)) => Some(t),
@@ -3564,7 +3591,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 if !scopes.is_empty() {
                     target.insert("scopes".into(), json!(scopes));
                 }
-                for (k, v) in [("account_sid", account_sid), ("domain", domain), ("app_id", app_id), ("tenant", tenant), ("client_id", client_id), ("object_id", object_id), ("app_client_id", app_client_id), ("host", host), ("project", gitlab_project), ("group", gitlab_group), ("project_id", openai_project), ("site", site), ("key", key), ("account_id", account_id), ("template", template), ("owner", owner), ("resource", resource), ("environment", confluent_environment), ("kind", sonar_kind), ("project", sonar_project), ("user", jenkins_user), ("consumer_id", consumer_id)] {
+                for (k, v) in [("account_sid", account_sid), ("domain", domain), ("app_id", app_id), ("tenant", tenant), ("client_id", client_id), ("object_id", object_id), ("app_client_id", app_client_id), ("host", host), ("project", gitlab_project), ("group", gitlab_group), ("project_id", openai_project), ("site", site), ("key", key), ("account_id", account_id), ("template", template), ("owner", owner), ("resource", resource), ("environment", confluent_environment), ("kind", sonar_kind), ("project", sonar_project), ("user", jenkins_user), ("consumer_id", consumer_id), ("api", prisma_api), ("service_account", service_account), ("prisma_id", prisma_id), ("api_key_id", api_key_id)] {
                     if let Some(v) = v {
                         target.insert(k.into(), json!(v));
                     }
@@ -3976,10 +4003,10 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                     let rule = t["rules"].as_array().and_then(|r| r.iter().find(|r| r["product"] == "secrets")).cloned().unwrap_or_default();
                     let actions = rule["actions"].as_object().map(|a| a.iter().map(|(k, v)| if v == "ask" { format!("{k}?") } else { k.clone() }).collect::<Vec<_>>().join(",")).unwrap_or_default();
                     let state = if t["revoked_at"].is_null() { t["last_used_at"].as_i64().map(|at| format!("used {}", ago(at))).unwrap_or_else(|| "never used".into()) } else { "revoked".into() };
-                    println!("{}  {:<20} envs {}  paths {}  {}  {}", s(&t["id"]), s(&t["name"]), list(&rule["environments"]), list(&rule["paths"]), actions, state);
+                    println!("{}  {:<20} envs {}  paths {}  keys {}  {}  {}", s(&t["id"]), s(&t["name"]), list(&rule["environments"]), list(&rule["paths"]), list(&rule["keys"]), actions, state);
                 }
             }
-            Tokens::Create { name, envs, all_environments, paths, actions, scan_only, ttl_days, no_expiry, allow_ips } => {
+            Tokens::Create { name, envs, all_environments, paths, keys, actions, scan_only, ttl_days, no_expiry, allow_ips } => {
                 let actions = if scan_only {
                     vec!["scan".to_string()]
                 } else if actions.is_empty() {
@@ -4004,6 +4031,13 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 if !paths.is_empty() {
                     rule["paths"] = json!(paths);
                 }
+                let reach = if keys.is_empty() {
+                    reach
+                } else {
+                    let named = format!("{reach}, keys {}", keys.join(", "));
+                    rule["keys"] = json!(keys);
+                    named
+                };
                 let mut body = json!({ "name": name, "rules": [rule] });
                 // The API keeps a token without `expires_at` for good: the CLI sends one unless
                 // told not to.
@@ -4490,7 +4524,19 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 None => println!("No one may push past a pre-receive hook: `git push -o breakglass` is refused"),
                 Some(a) => {
                     let who: Vec<&str> = a.iter().filter_map(Value::as_str).collect();
-                    println!("May push past a pre-receive hook (audited): {}", who.join(", "));
+                    // Each binding with its hook token's name (a set's answer has them), so a token
+                    // that isn't the hook stands out.
+                    let named: Vec<String> = who
+                        .iter()
+                        .map(|w| {
+                            let token = w.find("@token:").map_or(*w, |i| &w[i + 1..]);
+                            match v["breakglass_hooks"][token].as_str() {
+                                Some(name) => format!("{w} ({name})"),
+                                None => w.to_string(),
+                            }
+                        })
+                        .collect();
+                    println!("May push past a pre-receive hook (audited): {}", named.join(", "));
                     // A list from before logins were bound: each bare login counts only through a
                     // token whose hook named it, until the list is set again.
                     if who.iter().any(|w| *w != "*" && !w.starts_with("token:") && !w.contains("@token:")) {
@@ -5008,11 +5054,13 @@ async fn import_folders(c: &Client<'_>, env: &str, folders: &crate::managers::Fo
     Ok(())
 }
 
-/// What `import --check` found so far: keys the source has that are missing here or differ.
+/// What `import --check` found so far: keys the source has that are missing here or differ, and
+/// keys it couldn't compare (sensitive, linked or with references here).
 #[derive(Default)]
 struct CopyCheck {
     missing: usize,
     changed: usize,
+    unchecked: usize,
     folders: usize,
 }
 
@@ -5020,6 +5068,12 @@ impl CopyCheck {
     fn done(&self) -> anyhow::Result<()> {
         let plural = |n: usize| if n == 1 { "" } else { "s" };
         match self.missing + self.changed {
+            0 if self.unchecked > 0 => {
+                // Not a mismatch (1), not complete (0): a script can tell these apart.
+                let n = self.unchecked;
+                eprintln!("Every key roll could compare is here with the same value, but {n} key{} {} compared (sensitive, linked or with references here): check {} by hand.", plural(n), if n == 1 { "wasn't" } else { "weren't" }, if n == 1 { "it" } else { "them" });
+                std::process::exit(2);
+            }
             0 => {
                 eprintln!("The copy is complete: every key of the source is here with the same value ({} folder{}).", self.folders, plural(self.folders));
                 Ok(())
@@ -5051,6 +5105,7 @@ async fn check_folders(c: &Client<'_>, env: &str, name: &str, folders: &crate::m
         println!("  {same} the same");
         copy.missing += list("added").len();
         copy.changed += list("changed").len();
+        copy.unchecked += list("references").len() + list("linked").len() + entries.iter().filter(|e| !seen.contains(&e.key)).count();
         copy.folders += 1;
     }
     Ok(())
@@ -5637,12 +5692,13 @@ fn write_private(path: &std::path::Path, text: &str) -> anyhow::Result<()> {
 /// metadata server (`ROLL_IDENTITY_KIND=gcp` or `azure`); a machine identity's credential
 /// (`ROLL_IDENTITY_KIND=machine`, or a bootstrap token set: vm_login.rs); without any (or with
 /// `ROLL_IDENTITY_KIND=aws`), a `GetCallerIdentity` signed with the machine's AWS credentials
-/// (aws_login.rs). A short-lived secrets token and when it ends (ms).
-pub async fn identity_login(api: &Api, identity: &str) -> anyhow::Result<(String, i64)> {
+/// (aws_login.rs). A short-lived secrets token and when it ends (ms). `stale`: the token in use
+/// (refused, or being renewed), which a machine's kept login mustn't hand back.
+pub async fn identity_login(api: &Api, identity: &str, stale: Option<&str>) -> anyhow::Result<(String, i64)> {
     let env = |k: &str| std::env::var(k).ok().filter(|t| !t.trim().is_empty());
     let kind = env("ROLL_IDENTITY_KIND").map(|k| k.trim().to_string());
     if vm_login::is_machine(kind.as_deref()) {
-        return vm_login::machine_login(api, identity).await;
+        return vm_login::machine_login(api, identity, stale).await;
     }
     let oidc_source = ["ROLL_OIDC_TOKEN", "ROLL_OIDC_TOKEN_FILE", "ACTIONS_ID_TOKEN_REQUEST_URL", "SYSTEM_OIDCREQUESTURI"].iter().any(|k| env(k).is_some());
     let aws = match kind.as_deref() {
@@ -5775,9 +5831,9 @@ fn now_ms() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
 }
 
-/// A login with a deadline.
-async fn login_within(api: &Api, identity: &str) -> anyhow::Result<(String, i64)> {
-    match tokio::time::timeout(LOGIN_TIMEOUT, identity_login(api, identity)).await {
+/// A login with a deadline, never handing back `stale` (the token it replaces).
+async fn login_within(api: &Api, identity: &str, stale: &str) -> anyhow::Result<(String, i64)> {
+    match tokio::time::timeout(LOGIN_TIMEOUT, identity_login(api, identity, Some(stale).filter(|s| !s.is_empty()))).await {
         Ok(r) => r,
         Err(elapsed) => Err(anyhow::Error::new(elapsed).context(format!("no answer in {} s", LOGIN_TIMEOUT.as_secs()))),
     }
@@ -5785,7 +5841,7 @@ async fn login_within(api: &Api, identity: &str) -> anyhow::Result<(String, i64)
 
 impl Relogin {
     pub async fn new(api: &Api, identity: &str) -> anyhow::Result<Relogin> {
-        let (token, expires_at) = identity_login(api, identity).await?;
+        let (token, expires_at) = identity_login(api, identity, None).await?;
         Ok(Relogin { identity: identity.to_string(), first: token.clone(), held: tokio::sync::Mutex::new(Held::new(token, expires_at)) })
     }
 
@@ -5803,13 +5859,13 @@ impl Relogin {
         if now >= held.ends {
             // Ended (or refused): nothing to go on with. Log in now.
             // The cause is kept: `--fallback` tells no answer from a refusal by it.
-            let (token, expires_at) = login_within(api, &self.identity).await.with_context(|| format!("logging in again as {} failed", self.identity))?;
+            let (token, expires_at) = login_within(api, &self.identity, &held.token).await.with_context(|| format!("logging in again as {} failed", self.identity))?;
             held.store(token, expires_at);
         } else if now >= held.renew && held.retry.is_none_or(|r| now >= r) && held.renewing.as_ref().is_none_or(|h| h.is_finished()) {
             let (me, anon) = (self.clone(), Api { base: api.base.clone(), http: api.http.clone(), key: None, headers: api.headers.clone(), login: None });
-            let started = held.generation;
+            let (started, stale) = (held.generation, held.token.clone());
             held.renewing = Some(tokio::spawn(async move {
-                let got = login_within(&anon, &me.identity).await;
+                let got = login_within(&anon, &me.identity, &stale).await;
                 let mut held = me.held.lock().await;
                 if held.generation != started {
                     // A newer login was stored meanwhile (one in the foreground): it stays.
@@ -7340,8 +7396,12 @@ pub async fn run_command(api: &Api, r: Run) -> anyhow::Result<()> {
     if streams.any() {
         return run_masked(&r, &env, streams).await;
     }
+    let drop = roll_credentials_to_drop(&r, &env);
     let mut cmd = std::process::Command::new(crate::sys::program(&r.command[0]));
     cmd.args(&r.command[1..]).envs(env.into_iter().map(|v| (v.name, v.value)));
+    for k in &drop {
+        cmd.env_remove(k);
+    }
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -7453,7 +7513,23 @@ async fn run_masked(r: &Run, env: &[Var], streams: crate::mask::Streams) -> anyh
 fn spawn_masked(r: &Run, env: &[Var], streams: crate::mask::Streams) -> anyhow::Result<crate::mask::Running> {
     let pairs: Vec<(String, String)> = env.iter().map(|v| (v.name.clone(), v.value.clone())).collect();
     let conceal: Vec<&str> = env.iter().filter(|v| v.from_roll).map(|v| v.value.as_str()).collect();
-    crate::mask::spawn(&r.command, &pairs, &conceal, streams).with_context(|| format!("running {}", r.command[0]))
+    crate::mask::spawn(&r.command, &pairs, &roll_credentials_to_drop(r, env), &conceal, streams).with_context(|| format!("running {}", r.command[0]))
+}
+
+/// roll's own credentials in this process's environment, which the command doesn't get unless
+/// the project sets the name itself or `--keep-roll-credentials` says so.
+fn roll_credentials_to_drop(r: &Run, env: &[Var]) -> Vec<std::ffi::OsString> {
+    if r.keep_roll_credentials {
+        return Vec::new();
+    }
+    let set: std::collections::HashSet<&str> = env.iter().map(|v| v.name.as_str()).collect();
+    std::env::vars_os().filter_map(|(k, _)| k.to_str().filter(|n| is_roll_credential(n) && !set.contains(n)).map(|_| k.clone())).collect()
+}
+
+/// A `ROLL_*` variable named like a credential: a token (or a file holding one), a key, a
+/// password or a secret. `ROLL_API_URL`, `ROLL_PROJECT` and the like aren't.
+pub(crate) fn is_roll_credential(name: &str) -> bool {
+    name.starts_with("ROLL_") && ["_TOKEN", "_TOKEN_FILE", "_KEY", "_PASSWORD", "_SECRET", "_CREDENTIAL_FILE"].iter().any(|s| name.ends_with(s))
 }
 
 #[allow(clippy::too_many_arguments)]

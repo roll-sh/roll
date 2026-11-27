@@ -1163,7 +1163,7 @@ async fn put_repository(State(c): State<AppState>, Path((id, name)): Path<(Strin
 struct NewKey {
     name: String,
     expires_in_s: Option<i64>,
-    /// `admin` (default), `data`, `read` or `append` ([`crate::control::KeyAccess`]).
+    /// `admin` (default), `data`, `read`, `append` or `otel` ([`crate::control::KeyAccess`]).
     access: Option<String>,
     /// Index names or patterns the key reaches (default every index; not with `admin`).
     indices: Option<Vec<String>>,

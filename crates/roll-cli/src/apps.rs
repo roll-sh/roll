@@ -1334,6 +1334,10 @@ pub enum AppsCmd {
         /// A target's latest deliveries, newest first: what was sent, how it answered, the tries.
         #[arg(long, value_name = "ID", conflicts_with_all = ["add", "remove", "edit", "test"])]
         deliveries: Option<String>,
+        /// With `--deliveries ID`: send that delivery's event again, from its first try (a
+        /// delivered or failed one; not an on-call page resolved since).
+        #[arg(long, value_name = "DELIVERY", requires = "deliveries")]
+        redeliver: Option<String>,
         /// Email the project's owner (at their account's address; a project's first service
         /// adds this once, so it's for one removed before).
         #[arg(long, conflicts_with_all = ["add", "remove", "edit", "test", "deliveries"])]
@@ -1377,19 +1381,36 @@ pub enum AppsCmd {
         #[arg(long, conflicts_with_all = ["delete", "incident", "update", "title", "item"])]
         remove_domain: bool,
     },
+    /// A deployment's image on this machine (`fly auth docker`'s): `roll apps image dep_… |
+    /// docker load`, or `-o image.tar`. Its layers can hold what the build had: reveal.
+    Image {
+        deployment: String,
+        #[command(flatten)]
+        target: Target,
+        #[arg(long, short = 'o', value_name = "FILE")]
+        output: Option<PathBuf>,
+    },
     /// Quiet an environment's alerts for a while (Cloud Monitoring's snooze): `--for 2h --reason
     /// "db migration"`, `--alert check.down` (repeated) for some kinds only; alone, the open ones;
-    /// `--end sil_…` ends one early. Events are still kept, and resolves still go out.
+    /// `--end sil_…` ends one early. Events are still kept, and resolves still go out. A
+    /// repeating one: `--every "sat 02:00-sat 04:00"` (repeated; `--timezone Europe/Berlin`),
+    /// quiet only inside its weekly windows, for a year unless `--for` says.
     Silence {
         #[command(flatten)]
         target: Target,
-        /// How long (`30m`, `2h`, `1d`; at most 30 days).
+        /// How long (`30m`, `2h`, `1d`; at most 30 days, a repeating one's a year).
         #[arg(long = "for", value_name = "DURATION", requires = "reason", conflicts_with = "end")]
         duration: Option<String>,
         #[arg(long)]
         reason: Option<String>,
-        #[arg(long = "alert", value_name = "KIND", requires = "duration")]
+        #[arg(long = "alert", value_name = "KIND", requires = "reason")]
         alerts: Vec<String>,
+        /// A weekly window it's quiet in: `"sat 02:00-sat 04:00"` (repeat it for more).
+        #[arg(long, value_name = "WINDOW", requires = "reason", conflicts_with = "end")]
+        every: Vec<String>,
+        /// The windows' time zone (IANA; default UTC).
+        #[arg(long, requires = "every")]
+        timezone: Option<String>,
         #[arg(long, value_name = "ID")]
         end: Option<String>,
     },
@@ -5319,7 +5340,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 v
             }
         }
-        AppsCmd::Notifications { target, add, kind, region, events, only_env, only_service, previews, every_env, every_service, remove, test, edit, deliveries, email } => {
+        AppsCmd::Notifications { target, add, kind, region, events, only_env, only_service, previews, every_env, every_service, remove, test, edit, deliveries, redeliver, email } => {
             if add.is_none() && edit.is_none() && !email && (events.is_some() || !only_env.is_empty() || !only_service.is_empty() || previews.is_some()) {
                 bail!("--events, --only-env, --only-service and --previews go with --add, --email or --edit");
             }
@@ -5391,6 +5412,13 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             } else if let Some(id) = remove {
                 api.call(reqwest::Method::DELETE, &format!("{path}/{}", enc(&id)), None).await?;
                 json!({ "deleted": id })
+            } else if let (Some(id), Some(did)) = (&deliveries, redeliver) {
+                let d = api.post(&format!("{path}/{}/deliveries/{}/redeliver", enc(id), enc(&did)), json!({})).await?;
+                if !json_out {
+                    println!("{} {} queued again", s(&d["id"]), s(&d["kind"]));
+                    return Ok(());
+                }
+                d
             } else if let Some(id) = deliveries {
                 let v = api.get(&format!("{path}/{}/deliveries", enc(&id))).await?;
                 if !json_out {
@@ -5398,7 +5426,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                         let t = d["at"].as_i64().and_then(chrono::DateTime::from_timestamp_millis).map(|t| t.format("%Y-%m-%d %H:%M").to_string()).unwrap_or_default();
                         let how = d["error"].as_str().map(str::to_string).or(d["code"].as_u64().map(|c| format!("answered {c}"))).unwrap_or_default();
                         let tries = d["attempts"].as_u64().unwrap_or(0);
-                        println!("{t}  {:<9} {:<24} {tries} {}  {how}", s(&d["status"]), s(&d["kind"]), if tries == 1 { "try " } else { "tries" });
+                        println!("{}  {t}  {:<9} {:<24} {tries} {}  {how}", s(&d["id"]), s(&d["status"]), s(&d["kind"]), if tries == 1 { "try " } else { "tries" });
                     }
                     return Ok(());
                 }
@@ -5535,19 +5563,58 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Silence { target, duration, reason, alerts, end } => {
+        AppsCmd::Image { deployment, target, output } => {
+            use std::io::{IsTerminal, Write};
+            if output.is_none() && std::io::stdout().is_terminal() {
+                bail!("an image is binary: pipe it (`roll apps image {deployment} | docker load`) or write it with -o image.tar");
+            }
+            let svc = service(api, &target).await?;
+            let mut req = api.http.get(format!("{}{}/deploys/{}/image", api.base, env_path(&svc, &target.env), enc(&deployment)));
+            if let Some(k) = &api.key {
+                req = req.bearer_auth(k);
+            }
+            let mut res = req.send().await.with_context(|| format!("can't reach {}", api.base))?;
+            if !res.status().is_success() {
+                let st = res.status();
+                let v: Value = res.json().await.unwrap_or(Value::Null);
+                bail!("{}", v["error"].as_str().unwrap_or(st.as_str()));
+            }
+            let mut out: Box<dyn Write> = match &output {
+                Some(p) => Box::new(std::fs::File::create(p).with_context(|| format!("can't write {}", p.display()))?),
+                None => Box::new(std::io::stdout().lock()),
+            };
+            let mut n = 0u64;
+            while let Some(chunk) = res.chunk().await? {
+                n += chunk.len() as u64;
+                out.write_all(&chunk)?;
+            }
+            out.flush()?;
+            eprintln!("{} MiB of {deployment}'s image", n >> 20);
+            return Ok(());
+        }
+        AppsCmd::Silence { target, duration, reason, alerts, every, timezone, end } => {
             let svc = service(api, &target).await?;
             let path = format!("{}/silences", env_path(&svc, &target.env));
             if let Some(id) = end {
                 api.call(reqwest::Method::DELETE, &format!("{path}/{}", enc(&id)), None).await?;
                 json!({ "ended": id })
-            } else if let Some(d) = duration {
-                let ms = ago_ms(&d).map_err(|_| anyhow::anyhow!("--for is a duration like 30m, 2h or 1d"))?;
-                let until = chrono::Utc::now().timestamp_millis() + ms;
-                let v = api.post(&path, json!({ "until": until, "reason": reason, "alerts": alerts })).await?;
+            } else if duration.is_some() || !every.is_empty() {
+                let until = match duration {
+                    Some(d) => Some(chrono::Utc::now().timestamp_millis() + ago_ms(&d).map_err(|_| anyhow::anyhow!("--for is a duration like 30m, 2h or 1d"))?),
+                    None => None,
+                };
+                let mut body = json!({ "until": until, "reason": reason, "alerts": alerts });
+                if !every.is_empty() {
+                    let windows = every
+                        .iter()
+                        .map(|w| w.split_once('-').map(|(from, to)| json!({ "from": from.trim(), "to": to.trim() })).ok_or_else(|| anyhow::anyhow!("--every is a weekly window like \"sat 02:00-sat 04:00\"")))
+                        .collect::<anyhow::Result<Vec<_>>>()?;
+                    body["every"] = json!({ "windows": windows, "timezone": timezone });
+                }
+                let v = api.post(&path, body).await?;
                 if !json_out {
-                    let at = chrono::DateTime::from_timestamp_millis(until).map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string()).unwrap_or_default();
-                    println!("{}  quiet until {at}", s(&v["id"]));
+                    let at = v["until"].as_i64().and_then(chrono::DateTime::from_timestamp_millis).map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string()).unwrap_or_default();
+                    println!("{}  quiet {}until {at}", s(&v["id"]), if every.is_empty() { String::new() } else { format!("in {} ", every.join(", ")) });
                     return Ok(());
                 }
                 v
@@ -5557,7 +5624,8 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                     for x in v.as_array().into_iter().flatten() {
                         let at = x["until"].as_i64().and_then(chrono::DateTime::from_timestamp_millis).map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string()).unwrap_or_default();
                         let what = x["alerts"].as_array().filter(|a| !a.is_empty()).map(|a| a.iter().map(s).collect::<Vec<_>>().join(", ")).unwrap_or_else(|| "every alert".into());
-                        println!("{}  until {at}  {what}  {}", s(&x["id"]), s(&x["reason"]));
+                        let windows = x["every"]["windows"].as_array().map(|w| format!("  in {}", w.iter().map(|w| format!("{}-{}", s(&w["from"]), s(&w["to"]))).collect::<Vec<_>>().join(", "))).unwrap_or_default();
+                        println!("{}  until {at}{windows}  {what}  {}", s(&x["id"]), s(&x["reason"]));
                     }
                     return Ok(());
                 }

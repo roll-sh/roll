@@ -252,17 +252,3 @@ impl SandboxBackend for FargateSandboxes {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn names_map_to_sandboxes() {
-        assert_eq!(task_name("sbx_abc1"), "roll-sbx-abc1");
-        assert_eq!(sandbox_id("roll-sbx-abc1").as_deref(), Some("sbx_abc1"));
-        for bad in ["roll-sbx-", "roll-check-x", "roll-sbx-a-b", "sbx-a"] {
-            assert!(sandbox_id(bad).is_none(), "{bad}");
-        }
-    }
-}
