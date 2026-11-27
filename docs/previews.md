@@ -2320,6 +2320,15 @@ type Settings = {
   with how its pages compare with main's; attaching the same link again updates it. A name that
   isn't an issue of the workspace fails that run's step and nothing else.
   `a_changes_linear_issues_from_its_title_and_branch`, `linear-templates.test.ts`.
+- **Jira and Asana** (Marker.io's notes to a tracker): the gallery's "Preview notes as Jira issues"
+  and "Preview notes as Asana tasks" (`preview-note-to-jira`, `preview-note-to-asana`) take each
+  note left on a change's preview (the `review` trigger, a body that's a note's, not a reply's)
+  to the team's tracker with automations' `webhook` step: public addresses only, no redirects,
+  the answer read up to 1 MiB, and the credential an automation secret (`{{ secrets.jira }}`,
+  base64 of email:API token; `{{ secrets.asana }}`, a personal access token), never in the
+  spec. The owner sets their site or project; the issue's summary and description are the note
+  with its page and element (`automation-templates.test.ts`). A GitHub-mirrored repo's own
+  GitHub Issues take notes natively (a note's work item).
 - **GitHub PR**, through roll code's GitHub outbox (durable, retried, sent on the repo's owner):
   - one comment, edited in place, with a table of services, URLs, status, data branches and cost;
   - a commit status `roll/preview` on the head. A preview removed before it was ready (the change
@@ -3143,27 +3152,25 @@ variables roll makes from a branch's URL too (it could run on the preview's own 
 change becoming queued wakes its settled preview, a rehearsal shows only at its head, and schema
 overlaps stay within a repo.
 
-1. **Notes to Jira, GitHub Issues or Asana** (Marker.io, Netlify's Drawer; S): a GitHub issue on a
-   mirrored repo, in review (a note's work item by roll landed, #1196); Jira and Asana next.
+1. **Notes to Jira and Asana, in review**: the gallery's templates (GitHub Issues and roll's work items
+   landed, #1196, #1209).
 2. **Replaying recorded traffic against the preview and main** (Signadot, Speedscale; L): writes
    replay safely on branched data; capturing production's requests needs its privacy designed
    first.
-3. **A rehearsal that holds a change back, in review** (`release_checks`): rehearsed at each
-   head, and main's code on its migrated data, as a landing blocker.
-4. **Older pushes past the last three, started on demand**; **what a note's reviewer saw, from
+3. **Older pushes past the last three, started on demand**; **what a note's reviewer saw, from
    their own browser** (Jam, Marker.io).
-5. **Restore points for search and buckets**: search's once roll search's `reset {from}` is in
+4. **Restore points for search and buckets**: search's once roll search's `reset {from}` is in
    (its Next 32); buckets need a put-back on roll storage's side.
-6. **Previews for the members thread's next products**: once roll apps' and roll search's routes
+5. **Previews for the members thread's next products**: once roll apps' and roll search's routes
    become member routes (docs/members.md, v1.1).
-7. **Watches on pg-control**: the data step's Postgres compute start; cheap branches on ext4
+6. **Watches on pg-control**: the data step's Postgres compute start; cheap branches on ext4
    through overlay volumes; recovery to a time seconds old (unowned).
 
 Not to build: more lab checks on the first page (each adds noise to every pull request), or a
 Kubernetes cluster per preview (roll apps' Compose import covers multi-service apps, and a
 cluster would break "costs nothing asleep").
 
-Landed 2026-11-27, early: a failed story shard's share of the touched stories counted as untaken (#1175), and masking that's safe by default for NoSQL and search, with the project told of each column masked by default (#1177), and main's code on a copy of a change's migrated data, on roll apps (#1183) and roll's runtime (#1185), webhook URLs into private previews (#1187), the twelfth review's fixes (#1200), snapshots from the team's own tests (#1192), a note's work item made by roll (#1196), a team note opening a GitHub issue on a mirrored repo (#1209), and snapshots, notes and share links on roll apps services checked by service (#1212).
+Landed 2026-11-27, early: a failed story shard's share of the touched stories counted as untaken (#1175), and masking that's safe by default for NoSQL and search, with the project told of each column masked by default (#1177), and main's code on a copy of a change's migrated data, on roll apps (#1183) and roll's runtime (#1185), webhook URLs into private previews (#1187), the twelfth review's fixes (#1200), snapshots from the team's own tests (#1192), a note's work item made by roll (#1196), a team note opening a GitHub issue on a mirrored repo (#1209), and snapshots, notes and share links on roll apps services checked by service (#1212), and release_checks (#1204).
 
 Landed 2026-11-26, midday: restore points for streams (#1112), the TurboSnap test's race under
 load (#1114), the tenth review's fixes (#1119), the visual review holding on stories a change
