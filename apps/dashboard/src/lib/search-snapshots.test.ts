@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  describeCondition,
+  describeCron,
   describeSchedule,
   recoveryProgress,
   repositoryBody,
@@ -9,6 +11,8 @@ import {
   restoreRequest,
   slmPolicyBody,
   slmRows,
+  smPolicyBody,
+  smProblem,
   snapshotRows,
 } from "./search-snapshots";
 
@@ -94,5 +98,27 @@ describe("snapshot lifecycle policies", () => {
     const f = { id: "nightly", name: "<nightly-{now/d}>", schedule: "0 30 1 * * ?", repository: "r1", indices: "logs-*, metrics-*", includeGlobalState: false, expireAfter: "", minCount: "", maxCount: "" };
     expect(slmPolicyBody(f)).toEqual({ schedule: "0 30 1 * * ?", name: "<nightly-{now/d}>", repository: "r1", config: { indices: ["logs-*", "metrics-*"], include_global_state: false } });
     expect(slmPolicyBody({ ...f, expireAfter: "30d", maxCount: "50" }).retention).toEqual({ expire_after: "30d", max_count: 50 });
+  });
+});
+
+describe("snapshot management policies", () => {
+  const cron = (expression: string, timezone = "UTC") => ({ expression, timezone });
+  it("describes cron schedules in words", () => {
+    expect(describeCron(cron("30 1 * * *"))).toBe("Daily at 01:30 UTC");
+    expect(describeCron(cron("0 2 * * 0", "Europe/Budapest"))).toBe("Sundays at 02:00 Europe/Budapest");
+    expect(describeCron(cron("*/15 * * * *"))).toBe("Every 15 minutes");
+    expect(describeCron(cron("5 4 * 1 *"))).toBe("5 4 * 1 * (UTC)");
+  });
+  it("builds the policy the form describes and refuses what the plugin would", () => {
+    const f = { name: "nightly", description: "", repository: "r", indices: "logs-*", includeGlobalState: false, schedule: "30 1 * * *", timezone: "UTC", deletes: true, maxAge: "", minCount: "", maxCount: "7" };
+    expect(smPolicyBody(f)).toEqual({
+      creation: { schedule: { cron: { expression: "30 1 * * *", timezone: "UTC" } } },
+      deletion: { schedule: { cron: { expression: "30 1 * * *", timezone: "UTC" } }, condition: { max_count: 7 } },
+      snapshot_config: { repository: "r", indices: "logs-*", include_global_state: "false" },
+    });
+    expect(smProblem(f, [], false)).toBeNull();
+    expect(smProblem({ ...f, maxCount: "1" }, [], false)).toBe("Keep at most more than at least.");
+    expect(smProblem({ ...f, name: "Nightly" }, [], false)).toBe("Policy names are lowercase.");
+    expect(describeCondition(smPolicyBody(f).deletion as never)).toBe("delete past 7");
   });
 });

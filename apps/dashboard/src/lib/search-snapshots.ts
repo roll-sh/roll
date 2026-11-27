@@ -389,3 +389,150 @@ export function formatMillis(ms: number | null): string {
   if (s < 3600) return s % 60 ? `${Math.floor(s / 60)}m ${s % 60}s` : `${s / 60}m`;
   return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
 }
+
+// --- OpenSearch snapshot management policies (`_plugins/_sm`) ---------------------------------
+
+/** A cron schedule as `_plugins/_sm` keeps it (Unix cron, five fields, in a time zone). */
+export interface SmCron {
+  cron: { expression: string; timezone: string };
+}
+
+/** A policy as `GET _plugins/_sm/policies` gives it (`sm_policy`). */
+export interface SmPolicy {
+  name: string;
+  description?: string;
+  creation?: { schedule: SmCron; time_limit?: string };
+  deletion?: { schedule: SmCron; condition: { max_age?: string; min_count?: number; max_count?: number }; time_limit?: string };
+  snapshot_config: { repository: string; indices?: string | string[]; include_global_state?: string | boolean; partial?: string | boolean; date_format?: string; timezone?: string; [k: string]: unknown };
+  enabled?: boolean;
+}
+
+export interface SmDoc {
+  _id: string;
+  _seq_no: number;
+  _primary_term: number;
+  sm_policy: SmPolicy;
+}
+
+/** One workflow of `_explain` (`creation` or `deletion`). */
+export interface SmWorkflow {
+  current_state: string;
+  trigger?: { time: number | null };
+  started?: string[];
+  latest_execution?: { status: string; start_time: number; end_time: number | null; info?: { message?: string; cause?: string } };
+  retry?: { count: number };
+}
+
+export interface SmExplain {
+  name: string;
+  enabled: boolean;
+  creation?: SmWorkflow;
+  deletion?: SmWorkflow;
+}
+
+export interface SmRow {
+  name: string;
+  doc: SmDoc;
+  explain: SmExplain | null;
+}
+
+/** The policies with their `_explain` state, by name. */
+export function smRows(list: { policies?: SmDoc[] } | null, explain: { policies?: SmExplain[] } | null): SmRow[] {
+  const byName = new Map((explain?.policies ?? []).map((e) => [e.name, e]));
+  return (list?.policies ?? []).map((doc) => ({ name: doc.sm_policy.name, doc, explain: byName.get(doc.sm_policy.name) ?? null })).sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/** Unix cron's weekdays (0 and 7 are Sunday). */
+const UNIX_DAYS: Record<string, string> = { SUN: "Sundays", MON: "Mondays", TUE: "Tuesdays", WED: "Wednesdays", THU: "Thursdays", FRI: "Fridays", SAT: "Saturdays", "0": "Sundays", "1": "Mondays", "2": "Tuesdays", "3": "Wednesdays", "4": "Thursdays", "5": "Fridays", "6": "Saturdays", "7": "Sundays" };
+
+/**
+ * A Unix cron expression (`min hour day month weekday`) in words for the common shapes, with
+ * its time zone; anything else as written.
+ */
+export function describeCron(c: SmCron["cron"] | undefined): string {
+  if (!c) return "—";
+  const f = c.expression.trim().split(/\s+/);
+  const zone = c.timezone === "UTC" ? "UTC" : c.timezone;
+  if (f.length !== 5) return c.expression;
+  const [min, hour, dom, month, dow] = f;
+  const num = (v: string) => /^\d+$/.test(v);
+  if (month !== "*") return `${c.expression} (${zone})`;
+  if (min === "*" && hour === "*" && dom === "*" && dow === "*") return "Every minute";
+  const step = /^\*\/(\d+)$/.exec(min);
+  if (step && hour === "*" && dom === "*" && dow === "*") return `Every ${step[1]} minutes`;
+  if (num(min) && hour === "*" && dom === "*" && dow === "*") return `Hourly at :${min.padStart(2, "0")}`;
+  if (!num(min) || !num(hour)) return `${c.expression} (${zone})`;
+  const at = `at ${hour.padStart(2, "0")}:${min.padStart(2, "0")} ${zone}`;
+  if (dom === "*" && dow === "*") return `Daily ${at}`;
+  const day = UNIX_DAYS[dow.toUpperCase()];
+  if (dom === "*" && day) return `${day} ${at}`;
+  if (num(dom) && dow === "*") return `Monthly on day ${dom} ${at}`;
+  return `${c.expression} (${zone})`;
+}
+
+/** A deletion condition in words, or "keeps all" without a deletion. */
+export function describeCondition(d: SmPolicy["deletion"]): string {
+  if (!d) return "keeps all";
+  const c = d.condition;
+  const parts: string[] = [];
+  if (c.max_age) parts.push(`older than ${c.max_age}`);
+  if (c.max_count !== undefined) parts.push(`past ${c.max_count}`);
+  const keep = c.min_count !== undefined && c.min_count > 1 ? ` · keeps ${c.min_count}` : "";
+  return parts.length ? `delete ${parts.join(" or ")}${keep}` : "keeps all";
+}
+
+/** The schedules the form offers (Unix cron). */
+export const SM_SCHEDULE_PRESETS = [
+  { label: "Daily at 01:30", value: "30 1 * * *" },
+  { label: "Every hour", value: "0 * * * *" },
+  { label: "Every 30 minutes", value: "*/30 * * * *" },
+  { label: "Sundays at 02:00", value: "0 2 * * 0" },
+];
+
+export interface SmForm {
+  name: string;
+  description: string;
+  repository: string;
+  indices: string;
+  includeGlobalState: boolean;
+  schedule: string;
+  timezone: string;
+  deletes: boolean;
+  maxAge: string;
+  minCount: string;
+  maxCount: string;
+}
+
+/** `POST`/`PUT _plugins/_sm/policies/<name>`'s body. */
+export function smPolicyBody(f: SmForm): Record<string, unknown> {
+  const indices = patternList(f.indices);
+  const schedule = { cron: { expression: f.schedule.trim(), timezone: f.timezone.trim() || "UTC" } };
+  const body: Record<string, unknown> = {};
+  if (f.description.trim()) body.description = f.description.trim();
+  body.creation = { schedule };
+  if (f.deletes) {
+    const condition: Record<string, unknown> = {};
+    if (f.maxAge.trim()) condition.max_age = f.maxAge.trim();
+    if (f.minCount.trim()) condition.min_count = Number(f.minCount);
+    if (f.maxCount.trim()) condition.max_count = Number(f.maxCount);
+    body.deletion = { schedule, condition };
+  }
+  body.snapshot_config = { repository: f.repository, indices: indices.length ? indices.join(",") : "*", include_global_state: String(f.includeGlobalState) };
+  return body;
+}
+
+/** What keeps the form from being sent (the plugin's own checks, said before it does). */
+export function smProblem(f: SmForm, taken: string[], editing: boolean): string | null {
+  const name = f.name.trim();
+  if (!name) return null;
+  if (name !== name.toLowerCase()) return "Policy names are lowercase.";
+  if (!editing && taken.includes(name)) return `${name} exists already.`;
+  if (f.schedule.trim().split(/\s+/).length !== 5) return "The schedule is a five-field cron expression.";
+  if (f.deletes) {
+    if (!f.maxAge.trim() && !f.maxCount.trim()) return "Delete past a count or an age.";
+    const min = f.minCount.trim() ? Number(f.minCount) : 1;
+    if (min < 1) return "Keep at least one.";
+    if (f.maxCount.trim() && Number(f.maxCount) <= min) return "Keep at most more than at least.";
+  }
+  return null;
+}

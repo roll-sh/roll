@@ -300,6 +300,9 @@ type Run = {
   type: "web" | "worker" | "cron";
   port?: number;            // web: the port the app listens on (default from the plan; an image's own EXPOSE on a web service's first deploy, then the port its live deployment has; else 8080; PORT is set to it)
   start?: string;           // overrides the image's command
+  teardown?: string;        // once before a preview (ephemeral) environment is deleted, in a container of its
+                            // live image with its variables (at most 10 minutes; a failure is a
+                            // job.failed event, never holding the delete)
   pre_deploy?: string;      // once per deploy, in a container of the new image with its variables and
                             // the project network (no volume), before the switch: a migration. A
                             // non-zero exit fails the deploy; the old one keeps serving

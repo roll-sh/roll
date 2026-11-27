@@ -1078,10 +1078,11 @@ async fn a_products_lifetime_cap_binds_consents_and_remembered_approvals() {
     let conn = d.access.store.list().unwrap().into_iter().find(|g| g.kind == "oauth").unwrap();
     assert!(within(&json!(conn.expires_at)), "a connection with no end ends at the cap: {:?}", conn.expires_at);
 
-    // A token that never expires, with no secrets rule, asks for the rest: a secrets read
-    // remembered for good is remembered for the cap's 30 days, its rules unchanged.
+    // A token that never expires, with no secrets rule, asks for the rest: a secrets read of one
+    // folder remembered for good is remembered for the cap's 30 days, its rules unchanged (the
+    // root's, every folder, is 8 hours at most whatever the cap).
     let (token, id) = d.token(json!([{ "product": "workspace", "resources": "*", "actions": { "read": "allow" } }]), json!({ "ask_otherwise": true })).await;
-    let (_, pending) = d.call(&token, Method::GET, "/v1/secrets/projects/pa/environments/development/secrets", None).await;
+    let (_, pending) = d.call(&token, Method::GET, "/v1/secrets/projects/pa/environments/development/secrets?path=/api", None).await;
     let apr = pending["approval"].as_str().unwrap_or_else(|| panic!("{pending}")).to_string();
     let (s, out) = d.call(OPERATOR, Method::POST, &format!("/v1/access/approvals/{apr}/approve"), Some(json!({ "remember": "always" }))).await;
     assert_eq!(s, StatusCode::OK, "{out}");
@@ -3401,9 +3402,17 @@ async fn a_secret_written_as_the_caller_is_asked_for_and_only_it_is_allowed() {
             id
         }
     };
-    // The route's own action asks too: the approval still names the secret.
+    // The route's own action asks too: the approval names the secret, and the route's own action
+    // beside it; remembered, both are, so the next call asks about neither.
     let (tie, _) = d.token(json!([search("ask"), write_asks]), json!({})).await;
-    asked(tie).await;
+    let tie_id = asked(tie.clone()).await;
+    let (_, card) = d.call(OPERATOR, Method::GET, &format!("/v1/access/approvals/{tie_id}"), None).await;
+    let summary = card["summary"].as_str().unwrap_or_default();
+    assert!(summary.starts_with("write secrets ") && summary.contains("in production:/ai") && summary.contains(", and admin search"), "{card}");
+    assert_eq!(d.call(OPERATOR, Method::POST, &format!("/v1/access/approvals/{tie_id}/approve"), Some(json!({ "remember": "1h" }))).await.0, StatusCode::OK);
+    assert_eq!(d.send(&tie, Method::POST, path, Some(body("production")), &[("x-roll-approval", &tie_id)]).await.0, StatusCode::OK);
+    let (s, seen) = d.call(&tie, Method::POST, path, Some(body("production"))).await;
+    assert_eq!((s, seen["here"].as_bool()), (StatusCode::OK, Some(true)), "both remembered: {seen}");
     let (asks, _) = d.token(json!([search("allow"), write_asks]), json!({})).await;
     let id = asked(asks.clone()).await;
     assert_eq!(d.call(OPERATOR, Method::POST, &format!("/v1/access/approvals/{id}/approve"), Some(json!({ "remember": "1h" }))).await.0, StatusCode::OK);
@@ -3418,6 +3427,15 @@ async fn a_secret_written_as_the_caller_is_asked_for_and_only_it_is_allowed() {
     root["secret"]["path"] = json!("/");
     let (s, out) = d.call(&asks, Method::POST, path, Some(root)).await;
     assert_eq!((s, out["code"].as_str()), (StatusCode::FORBIDDEN, Some("approval_pending")), "{out}");
+    // The root folder reaches every folder under it: the whole environment, remembered for 8 hours
+    // at most.
+    let root_id = out["approval"].as_str().unwrap().to_string();
+    let approve = |remember: &str| {
+        let (d, url, body) = (&d, format!("/v1/access/approvals/{root_id}/approve"), json!({ "remember": remember }));
+        async move { d.call(OPERATOR, Method::POST, &url, Some(body)).await.0 }
+    };
+    assert_eq!(approve("1d").await, StatusCode::BAD_REQUEST);
+    assert_eq!(approve("8h").await, StatusCode::OK);
     let (allows, _) = d.token(json!([search("allow"), { "product": "secrets", "resources": [{ "project": project }], "actions": { "write": "allow" } }]), json!({})).await;
     let (s, seen) = d.call(&allows, Method::POST, path, Some(body("production"))).await;
     assert_eq!((s, seen["here"].as_bool()), (StatusCode::OK, Some(true)), "{seen}");
@@ -3599,4 +3617,28 @@ async fn claude_sets_up_auto_connect_with_an_admins_consent() {
     let idp = e["idps"].as_array().unwrap().iter().find(|i| i["issuer"] == claude).unwrap_or_else(|| panic!("{e}"));
     assert_eq!((idp["domains"].clone(), idp["express"].clone()), (json!(["acme.test"]), json!(true)), "{e}");
     assert!(e["apps"].as_array().unwrap().iter().any(|a| a["metadata"][0] == client && a["rules"] == rules), "Claude registered: {e}");
+    // A mail service anyone can sign up at is never a domain it vouches for.
+    let mut public = consent(callback);
+    public["ema_domains"] = json!(["gmail.com"]);
+    assert_eq!(d.call(OPERATOR, Method::POST, "/v1/access/oauth/authorize", Some(public)).await.0, StatusCode::BAD_REQUEST);
+    // A provider the operator set up by hand stays; a second setup replaces the first's issuer and
+    // gives the existing Claude app the new consent's rules.
+    let mut idps = e["idps"].as_array().unwrap().clone();
+    idps.push(json!({ "issuer": "https://acme.okta.example", "jwks": json!({ "keys": [{ "kty": "EC", "crv": "P-256", "x": "f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU", "y": "x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0" }] }).to_string(), "domains": ["acme.test"] }));
+    assert_eq!(d.call(OPERATOR, Method::PUT, "/v1/access/enterprise/idps", Some(json!({ "idps": idps }))).await.0, StatusCode::OK);
+    let wider = json!([{ "product": "workspace", "resources": "*", "actions": { "read": "allow", "write": "allow" } }]);
+    let mut again = consent(callback);
+    again["rules"] = wider.clone();
+    let (_, out) = d.call(OPERATOR, Method::POST, "/v1/access/oauth/authorize", Some(again)).await;
+    let back = url::Url::parse(out["redirect"].as_str().unwrap_or_else(|| panic!("{out}"))).unwrap();
+    let code = back.query_pairs().find(|(k, _)| k == "code").unwrap().1.into_owned();
+    let (_, got) = exchange(code).await;
+    let second = "https://identity.anthropic.com/issuers/iss_91c0";
+    let (s, _) = d.call(got["access_token"].as_str().unwrap(), Method::PUT, &path, Some(json!({ "ema_issuer": second }))).await;
+    assert_eq!(s, StatusCode::OK);
+    let (_, e) = d.call(OPERATOR, Method::GET, "/v1/access/enterprise", None).await;
+    let issuers: Vec<&str> = e["idps"].as_array().unwrap().iter().filter_map(|i| i["issuer"].as_str()).collect();
+    assert_eq!(issuers, ["https://acme.okta.example", second], "{e}");
+    let claudes: Vec<&Value> = e["apps"].as_array().unwrap().iter().filter(|a| a["metadata"][0] == client).collect();
+    assert_eq!((claudes.len(), claudes[0]["rules"].clone()), (1, wider), "{e}");
 }

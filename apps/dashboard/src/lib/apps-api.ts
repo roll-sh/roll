@@ -167,6 +167,8 @@ export interface Run {
   start?: string;
   /** Once per deploy before the switch (a migration); a non-zero exit fails the deploy. */
   pre_deploy?: string;
+  /** Once before a preview environment is deleted (Heroku's `pr-predestroy`). */
+  teardown?: string;
   schedule?: string;
   /** The zone a cron schedule's fields are in (IANA); UTC when unset. */
   timezone?: string;

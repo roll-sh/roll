@@ -134,6 +134,10 @@ pub struct Settings {
     /// and again after a reset): migrations, Heroku's release phase. A failure fails the preview,
     /// and its services stay on what they ran.
     pub release: Option<Seed>,
+    /// When a change is queued to land in roll code, its release is rehearsed on its Postgres
+    /// parents as they are now (`POST …/rehearse`, asked by roll at that head; off by default:
+    /// each is a fresh branch, its masking and a release run).
+    pub rehearse_when_queued: bool,
     /// A command run once when the preview is deleted, before its services, secrets environment
     /// and branches go (Heroku's `pr-predestroy`): what its code made outside roll (a test-mode
     /// webhook, an OAuth redirect URI, a DNS record) cleaned up with the preview's own variables.
@@ -605,6 +609,7 @@ impl Default for Settings {
             crons: false,
             seed: None,
             release: None,
+            rehearse_when_queued: false,
             teardown: None,
             masking: BTreeMap::new(),
         }
@@ -795,8 +800,8 @@ impl Settings {
                 if col.split('.').count() != 3 || col.split('.').any(str::is_empty) || col.len() > 200 || f.trim().is_empty() || f.len() > 200 {
                     return bad(format!("masking: {key}: {col:?} → {f:?} isn't \"schema.table.column\" → a rule"));
                 }
-                if postgres && !crate::mask::is_rule(f) {
-                    return bad(format!("masking: {key}: {col}: {f:?} isn't a rule ({})", crate::mask::RULES));
+                if postgres && f.trim() != crate::mask::KEEP && !crate::mask::is_rule(f) {
+                    return bad(format!("masking: {key}: {col}: {f:?} isn't a rule ({}, or keep)", crate::mask::RULES));
                 }
             }
         }
