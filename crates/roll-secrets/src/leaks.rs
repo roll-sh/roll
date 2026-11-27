@@ -673,15 +673,14 @@ impl Secrets {
         self.project(project)?;
         // Every token the list could bind, and its name if it's a hook's now: asked before the
         // write (a write closure only touches the database), one lookup per token.
-        let logins: Vec<&str> = who.iter().filter_map(|w| match Entry::parse(w) {
-            Some(Entry::Unbound(login)) => Some(login),
-            _ => None,
-        }).collect();
         let mut tokens: std::collections::BTreeSet<String> = who.iter().filter_map(|w| match Entry::parse(w) {
             Some(Entry::Token(t) | Entry::Pusher { token: t, .. }) => Some(t.to_string()),
             _ => None,
         }).collect();
-        for login in &logins {
+        for login in who.iter().filter_map(|w| match Entry::parse(w) {
+            Some(Entry::Unbound(login)) => Some(login),
+            _ => None,
+        }) {
             tokens.extend(self.db.read(|c| c.query::<String>("SELECT principal FROM scan_pushers WHERE project_id = ? AND pusher = ? AND principal LIKE 'token:%'", params![project, login], |r| r.get(0)))?);
         }
         let mut hook_now: BTreeMap<String, String> = BTreeMap::new();
