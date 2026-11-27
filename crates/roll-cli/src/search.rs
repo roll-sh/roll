@@ -494,6 +494,25 @@ pub enum Judgments {
         #[arg(long)]
         source: Option<String>,
     },
+    /// Make or replace a list from an index's click analytics: clicks over expected clicks at
+    /// each position (COEC), for queries searched at least --min-searches times.
+    FromClicks {
+        cluster: String,
+        name: String,
+        /// The index whose analytics (`index.roll.analytics.enabled`, `search_click` events)
+        /// rate its documents.
+        #[arg(long)]
+        index: String,
+        /// Searches a query needs in the window (default 10).
+        #[arg(long)]
+        min_searches: Option<u64>,
+        /// Positions counted, 1 to 20 (default 20).
+        #[arg(long)]
+        max_rank: Option<u32>,
+        /// Days of analytics read, 1 to 30 (default 30).
+        #[arg(long)]
+        days: Option<u32>,
+    },
     /// Delete a list and its index.
     #[command(alias = "rm")]
     Delete { cluster: String, name: String },
@@ -1040,6 +1059,10 @@ pub async fn run(api: &Api, as_json: bool, cmd: Search) -> anyhow::Result<()> {
                         body["source"] = json!(s);
                     }
                     api.call(Method::PUT, &format!("{}{}", c(cluster).await?, list(&name)), Some(body)).await?
+                }
+                Judgments::FromClicks { cluster, name, index, min_searches, max_rank, days } => {
+                    let body = json!({ "index": index, "min_searches": min_searches, "max_rank": max_rank, "days": days });
+                    api.post(&format!("{}{}/_from_clicks", c(cluster).await?, list(&name)), body).await?
                 }
                 Judgments::Delete { cluster, name } => api.call(Method::DELETE, &format!("{}{}", c(cluster).await?, list(&name)), None).await?,
             };

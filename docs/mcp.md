@@ -1259,6 +1259,7 @@ previews are listed once those products are on.
 | `search_list_judgments` | The cluster's stored judgment lists: source, queries, ratings, when built. | `GET /v1/search/clusters/{cluster}/judgments` |
 | `search_get_judgments` | A stored judgment list's judged queries, in `search_evaluate`'s shape. | `GET /v1/search/clusters/{cluster}/judgments/{name}` |
 | `search_put_judgments` | Make or replace a stored judgment list (an index, `roll-judgments-<name>`). | `PUT /v1/search/clusters/{cluster}/judgments/{name}` |
+| `search_judgments_from_clicks` | Make or replace a stored judgment list from an index's click analytics (COEC, for queries with at least `min_searches` searches; counts only). | `POST /v1/search/clusters/{cluster}/judgments/{name}/_from_clicks` |
 | `search_delete_judgments` | Delete a stored judgment list and its index. | `DELETE /v1/search/clusters/{cluster}/judgments/{name}` |
 | `search_add_document` | Index a document under a new id. | `POST /v1/search/clusters/{cluster}/indices/{index}/docs` |
 | `search_bulk` | Index, update or delete many documents (NDJSON); deleting is delete. | `POST /v1/search/clusters/{cluster}/indices/{index}/bulk` |

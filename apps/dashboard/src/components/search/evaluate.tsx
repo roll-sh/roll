@@ -3,7 +3,8 @@
  * `_rank_eval`): judged queries, pasted or dropped as JSON or CSV or picked from the lists stored in
  * the cluster, score one search configuration, or two side by side, on an index; with two, the
  * queries that got better or worse, the largest change first. Pasted judgments can be kept as a
- * list. The same run is one `roll search index evaluate` line for CI.
+ * list, or a list built from the index's clicks (COEC). The same run is one `roll search index
+ * evaluate` line for CI.
  *
  * Nothing animates but the busy line's shimmer. Scores are mono, changes signed, and the accent
  * marks only the primary action.
@@ -48,6 +49,8 @@ export function EvaluatePanel({ cluster }: { cluster: SearchCluster }) {
   const [list, setList] = useState("");
   const [saveAs, setSaveAs] = useState("");
   const [saved, setSaved] = useState<string | null>(null);
+  const [minSearches, setMinSearches] = useState(10);
+  const [building, setBuilding] = useState(false);
   const [metric, setMetric] = useState<(typeof METRICS)[number]["value"]>("ndcg");
   const [base, setBase] = useState({ name: "baseline", text: pretty(matchConfiguration("baseline", "title").request) });
   const [cand, setCand] = useState<{ name: string; text: string } | null>(null);
@@ -114,6 +117,21 @@ export function EvaluatePanel({ cluster }: { cluster: SearchCluster }) {
       setSaved(`Kept as ${kept.name} (${kept.queries} queries, ${kept.ratings} ratings).`);
     } catch (e) {
       setError(errText(e));
+    }
+  };
+
+  const fromClicks = async () => {
+    setError(null);
+    setSaved(null);
+    setBuilding(true);
+    try {
+      const kept = await searchApi.judgmentsFromClicks(cluster.id, saveAs, { index, min_searches: minSearches });
+      setLists((await searchApi.judgmentLists(cluster.id)).lists);
+      setList(kept.name);
+    } catch (e) {
+      setError(errText(e));
+    } finally {
+      setBuilding(false);
     }
   };
 
@@ -213,6 +231,19 @@ export function EvaluatePanel({ cluster }: { cluster: SearchCluster }) {
                 />
                 <button className={btn} disabled={!validListName(saveAs) || !judgments.trim()} onClick={() => void save()}>
                   Save list
+                </button>
+                <span>or build it from clicks on {index || "the index"}, queries searched at least</span>
+                <input
+                  type="number"
+                  min={1}
+                  className={`${input} w-16 py-0.5 font-mono text-[12px]`}
+                  value={minSearches}
+                  onChange={(e) => setMinSearches(Math.max(1, Number(e.target.value) || 1))}
+                  aria-label="Minimum searches"
+                />
+                <span>times</span>
+                <button className={btn} disabled={building || !validListName(saveAs) || !index} onClick={() => void fromClicks()}>
+                  {building ? "Building…" : "Build from clicks"}
                 </button>
                 {saved && <span className="text-muted">{saved}</span>}
               </div>

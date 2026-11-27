@@ -1497,6 +1497,8 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/search/clusters/{id}/judgments/{name}", "search", R, one(PG, "cluster")),
     row("PUT", "/v1/search/clusters/{id}/judgments/{name}", "search", W, one(PG, "cluster")),
     row("DELETE", "/v1/search/clusters/{id}/judgments/{name}", "search", D, one(PG, "cluster")),
+    // Reads the index's click analytics and writes the list.
+    row("POST", "/v1/search/clusters/{id}/judgments/{name}/_from_clicks", "search", W, one(PG, "cluster")),
     row("GET", "/v1/search/clusters/{id}/query_rules", "search", R, one(PG, "cluster")),
     row("GET", "/v1/search/clusters/{id}/query_rules/{ruleset}", "search", R, one(PG, "cluster")),
     row("PUT", "/v1/search/clusters/{id}/query_rules/{ruleset}", "search", W, one(PG, "cluster")),

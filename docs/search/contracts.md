@@ -1734,6 +1734,7 @@ contexts of x-pack's version allowlist), `EsObj::Version`, `contexts::version_al
 | GET    | `/v1/search/clusters/{id}/judgments/{name}` | one list: `{name, index, meta, judgments}`, `judgments` in `evaluate`'s shape |
 | PUT    | `/v1/search/clusters/{id}/judgments/{name}` | make or replace a list (`{judgments, source?}`): `{name, index, source, queries, ratings}` |
 | DELETE | `/v1/search/clusters/{id}/judgments/{name}` | delete a list and its index |
+| POST   | `/v1/search/clusters/{id}/judgments/{name}/_from_clicks` | make or replace a list from an index's click analytics (`{index, min_searches?, max_rank?, days?}`, COEC) |
 | GET    | `/v1/search/clusters/{id}/tasks/{task}`          | `_tasks/<task>`: status, and the result once `completed` |
 
 Errors follow the other control planes: `{"error": "..."}` with 400/404/409/500, plus 413 when a

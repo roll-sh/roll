@@ -35,8 +35,10 @@
 //! - `analytics`: search analytics ([`search_es::analytics::Bucket`]) of the indices that turned
 //!   them on, in two fixed rings per index, a row per slot: [`ANALYTICS_HOUR_SLOTS`] one-hour
 //!   buckets (7 days) and [`ANALYTICS_DAY_SLOTS`] one-day buckets (30 days), each a bounded
-//!   list of top queries and of queries with no results. A slot is replaced when its time comes
-//!   round again; an index whose analytics go off or that is deleted loses its rows.
+//!   list of top queries and of queries with no results, the daily ones also what their most
+//!   searched queries showed and had clicked at each position ([`ANALYTICS_DAY_CELL_QUERIES`]).
+//!   A slot is replaced when its time comes round again; an index whose analytics go off or that
+//!   is deleted loses its rows.
 //!
 //! - `crawler_sites`: one row per cluster and domain or origin verified (or being verified) for
 //!   its web crawlers: its kind (`domain`, by DNS, covering every origin on it; `origin`, by the
@@ -567,6 +569,15 @@ pub const ANALYTICS_DAY_TOP: (usize, usize) = (300, 100);
 /// The list sizes a bucket of `res` seconds keeps.
 pub fn analytics_caps(res: i64) -> (usize, usize) {
     if res >= 86_400 { ANALYTICS_DAY_TOP } else { ANALYTICS_HOUR_TOP }
+}
+
+/// Queries a day's bucket keeps (document, position) cells for, the most searched: judgments
+/// from clicks read the daily ring only, so the hourly ring keeps none.
+pub const ANALYTICS_DAY_CELL_QUERIES: usize = 100;
+
+/// The queries a ring of resolution `res` keeps cells for.
+pub fn analytics_cell_queries(res: i64) -> usize {
+    if res >= 86_400 { ANALYTICS_DAY_CELL_QUERIES } else { 0 }
 }
 
 fn allowlist_json(rules: &[IpRule]) -> String {
@@ -1486,7 +1497,8 @@ impl Store {
                         Some((a, data)) if a == at => search_es::analytics::Bucket::decode(&data, top, empty),
                         Some((a, _)) if a > at => continue,
                         _ => search_es::analytics::Bucket::new(top, empty),
-                    };
+                    }
+                    .with_shown(analytics_cell_queries(res));
                     merged.merge(bucket);
                     x.execute(
                         "INSERT INTO search_analytics (cluster_id, idx, res, slot, at, data) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
