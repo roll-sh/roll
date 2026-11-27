@@ -1493,6 +1493,21 @@ impl Apps {
         self.run_once(tpl, cmd, "pre-deploy", self.cfg.build_timeout, log, cancel).await.map_err(|e| anyhow::anyhow!("{e:#}: nothing was switched"))
     }
 
+    /// `GET …/deploys/{dep}/image`: the deployment's image as `docker save`'s tar, for `docker
+    /// load` here (Fly's `fly auth docker`, Artifact Registry's pull). Only a built one, still
+    /// kept (not pruned), and where the runtime can hand it out.
+    pub async fn export_deployment_image(self: &Arc<Self>, service: &str, env: &str, dep: &str) -> Result<(String, Box<dyn tokio::io::AsyncRead + Send + Unpin>)> {
+        let d = self.deployment(service, env, dep).await?;
+        let (Some(image), None) = (d.image.clone(), d.pruned_at) else {
+            return Err(Error::Conflict(format!("{dep} has no image kept to hand out (never built, or pruned)")));
+        };
+        match self.deps.runtime.export_image(&image).await {
+            Ok(Some(r)) => Ok((image, r)),
+            Ok(None) => Err(Error::BadRequest("this node's runtime can't hand out an image (its registry holds it)".into())),
+            Err(e) => Err(Error::Conflict(format!("{e:#}"))),
+        }
+    }
+
     /// `run.teardown` before a preview environment goes: once per deployment (a retried delete
     /// doesn't run it again), in a container of its live deployment's image, at most
     /// [`TEARDOWN_LIMIT`] (well under what a deleting client waits: roll previews' ten minutes),

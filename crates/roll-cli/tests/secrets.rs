@@ -393,6 +393,10 @@ async fn roll_run_injects_an_environments_secrets_and_refuses_unresolved_referen
     let check = [&at[..], &["import", "--from", "vault", "--source", "secret/shop", "--check"]].concat();
     let matching = roll(&api, &env, &check, None).await;
     assert!(matching.code == Some(0) && matching.stdout.contains("+ HOST") && matching.stdout.contains("2 the same") && matching.stderr.contains("The copy is complete"), "{}{}", matching.stdout, matching.stderr);
+    // A key roll can't compare (a reference here) isn't counted as the same: exit 2, named.
+    ok(&api, &[], &[&at[..], &["set", "RETRIES=${HOST}"]].concat(), None).await;
+    let unchecked = roll(&api, &env, &check, None).await;
+    assert!(unchecked.code == Some(2) && unchecked.stdout.contains("? RETRIES") && unchecked.stderr.contains("1 key wasn't compared"), "{}{}", unchecked.stdout, unchecked.stderr);
     ok(&api, &[], &[&at[..], &["set", "FROM_VAULT=fake-changed"]].concat(), None).await;
     ok(&api, &[], &[&at[..], &["rm", "RETRIES"]].concat(), None).await;
     let drifted = roll(&api, &env, &check, None).await;
