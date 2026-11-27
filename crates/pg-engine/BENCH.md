@@ -1526,6 +1526,109 @@ not run again. With two PGO builds' ~0.9% spread, p1's total is 75.1-76.5 G: 0.8
 | q22 | 0.54 | **0.54** | 0.62 | 0.59 | 1.13 | 0.92x |
 | the 22 | 86.17 | **75.83** | 83.25 | 86.56 | 160.37 | 0.88x pgrust |
 
+## Storage format 5 against format 4, step 2 third piece (2026-11-27, agent 311)
+
+HANDOFF "Storage format 5: column blocks, step 2, third piece". Plain dist builds (`tools/dist.sh`)
+on `2676ea37a` (step 2's second piece landed): **h10** that commit, **r15** the candidate's code
+cherry-picked onto it (the same patch-id as the candidate on the head); unpadded builds of the same
+two (`cargo build --profile dist` without `-x86-branches-within-32B-boundaries`): **h10u**,
+**r15u**. TPC-H SF1 loaded by r15 in each form; lane C, 3 runs a query in one perf window after a
+warm-up of the 22; point and range reads on lanes A and B; every result hash equal across forms and
+builds.
+
+**Format 5 against format 4** (r15, one binary, the two data sets):
+
+| | format 4 | format 5 | |
+|---|---|---|---|
+| TPC-H q01 (G) | 7.317 | 5.228 | -28.6% |
+| TPC-H q02 (G) | 2.253 | 2.219 | -1.5% |
+| TPC-H q03 (G) | 4.093 | 4.468 | +9.2% |
+| TPC-H q04 (G) | 1.341 | 1.487 | +10.9% |
+| TPC-H q05 (G) | 2.768 | 3.184 | +15.0% |
+| TPC-H q06 (G) | 3.378 | 3.451 | +2.1% |
+| TPC-H q07 (G) | 3.485 | 3.787 | +8.7% |
+| TPC-H q08 (G) | 1.392 | 1.378 | -1.0% |
+| TPC-H q09 (G) | 7.673 | 7.685 | +0.2% |
+| TPC-H q10 (G) | 5.550 | 5.635 | +1.5% |
+| TPC-H q11 (G) | 0.823 | 0.816 | -0.9% |
+| TPC-H q12 (G) | 5.878 | 3.940 | -33.0% |
+| TPC-H q13 (G) | 4.106 | 4.061 | -1.1% |
+| TPC-H q14 (G) | 1.377 | 1.512 | +9.8% |
+| TPC-H q15 (G) | 2.298 | 2.410 | +4.9% |
+| TPC-H q16 (G) | 2.866 | 2.859 | -0.3% |
+| TPC-H q17 (G) | 2.852 | 2.791 | -2.1% |
+| TPC-H q18 (G) | 15.463 | 15.939 | +3.1% |
+| TPC-H q19 (G) | 0.471 | 0.445 | -5.5% |
+| TPC-H q20 (G) | 0.880 | 0.899 | +2.2% |
+| TPC-H q21 (G) | 5.235 | 5.214 | -0.4% |
+| TPC-H q22 (G) | 0.623 | 0.621 | -0.3% |
+| TPC-H, the 22 (G) | 82.12 | 80.03 | -2.5% |
+| VmHWM over the 22 (MB) | 1,643 | 1,420 | -13.6% |
+| TPC-H SF1 load (user G) | 681.1 | 770.4 | +13.1% |
+| load VmHWM (MB) | 1,397 | 1,366 | -2.2% |
+| store on disk (MB) | 583.4 | 551.9 | -5.4% |
+| bulk copy_in (G) | 6.407 | 6.406 | -0.0% |
+| bulk create_index (G) | 3.735 | 3.731 | -0.1% |
+| bulk create_unique_index (G) | 2.675 | 2.676 | +0.1% |
+| bulk copy_out (G) | 2.359 | 2.359 | -0.0% |
+| bulk insert_select (G) | 4.434 | 4.457 | +0.5% |
+| bulk update_half (G) | 12.440 | 12.438 | -0.0% |
+| bulk delete_quarter (G) | 6.737 | 7.955 | +18.1% |
+| bulk vacuum (G) | 1.722 | 1.883 | +9.4% |
+| bulk analyze (G) | 0.473 | 0.677 | +43.1% |
+| bulk count_after (G) | 0.360 | 0.294 | -18.4% |
+| bulk seq_count (G) | 0.175 | 0.177 | +1.2% |
+| bulk seq_sum (G) | 0.324 | 0.274 | -15.5% |
+| bulk count_star (G) | 0.175 | 0.177 | +1.2% |
+| bulk sum_a (G) | 0.324 | 0.273 | -15.5% |
+| range read, 100 rows (instructions / read; 4 pairs) | 556,544 | 620,008 | +11.4% |
+| point select (instructions / select; 4 pairs) | 57,515 | 59,698 | +3.8% |
+| keyed fetch, q02's form (instructions / key) | 2,529 | 2,297 | -9.2% |
+
+**Switch off** (h10 -> r15, format 4 data, two alternating pairs):
+
+| query | h10 / r15 pair 1 (G) | r15 / h10 pair 2 (G) | % per pair |
+|---|---|---|---|
+| q01 | 7.3164 / 7.3164 | 7.3166 / 7.3165 | +0.00, +0.00 |
+| q02 | 2.2512 / 2.2531 | 2.2516 / 2.2516 | +0.08, -0.00 |
+| q03 | 4.0885 / 4.0929 | 4.0859 / 4.0918 | +0.11, -0.14 |
+| q04 | 1.3413 / 1.3412 | 1.3413 / 1.3413 | -0.00, -0.00 |
+| q05 | 2.7696 / 2.7701 | 2.7681 / 2.7683 | +0.02, -0.01 |
+| q06 | 3.3780 / 3.3781 | 3.3781 / 3.3781 | +0.01, +0.00 |
+| q07 | 3.4830 / 3.4835 | 3.4825 / 3.4829 | +0.01, -0.01 |
+| q08 | 1.3928 / 1.3924 | 1.3929 / 1.3930 | -0.03, -0.01 |
+| q09 | 7.6799 / 7.6732 | 7.6729 / 7.6811 | -0.09, -0.11 |
+| q10 | 5.5469 / 5.5545 | 5.5489 / 5.5487 | +0.14, +0.00 |
+| q11 | 0.8225 / 0.8230 | 0.8224 / 0.8225 | +0.07, -0.01 |
+| q12 | 5.8774 / 5.8778 | 5.8781 / 5.8778 | +0.01, +0.01 |
+| q13 | 4.1007 / 4.1036 | 4.1038 / 4.1008 | +0.07, +0.07 |
+| q14 | 1.3793 / 1.3763 | 1.3797 / 1.3790 | -0.22, +0.05 |
+| q15 | 2.2979 / 2.2980 | 2.2980 / 2.2980 | +0.00, -0.00 |
+| q16 | 2.8597 / 2.8601 | 2.8594 / 2.8594 | +0.01, +0.00 |
+| q17 | 2.8474 / 2.8494 | 2.8466 / 2.8498 | +0.07, -0.11 |
+| q18 | 15.4646 / 15.4610 | 15.4630 / 15.4588 | -0.02, +0.03 |
+| q19 | 0.4709 / 0.4709 | 0.4709 / 0.4709 | -0.01, -0.01 |
+| q20 | 0.8801 / 0.8815 | 0.8802 / 0.8806 | +0.16, -0.04 |
+| q21 | 5.2298 / 5.2317 | 5.2302 / 5.2304 | +0.04, -0.00 |
+| q22 | 0.6224 / 0.6225 | 0.6225 / 0.6225 | +0.01, -0.01 |
+
+The 22: 82.100 -> 82.111 G (+0.01%), 82.104 -> 82.094 (-0.01%). Bulk steps (pair 1, pair 2): COPY
+in 0.00 / 0.00%, CREATE INDEX +0.10 / +0.07%, CREATE UNIQUE INDEX 0.00 / -0.03%, COPY TO 0.00 /
+0.00%, INSERT ... SELECT 0.00 / 0.00%, UPDATE +0.02 / 0.00%, DELETE 0.00 / 0.00%, VACUUM 0.00 /
+0.00%, ANALYZE 0.00 / +0.02%, count(*) and sum steps -0.05 to +0.04%. Range read (instructions /
+read) 557,241 -> 556,590 (-0.12%), 555,940 -> 555,939 (0.00%); point select 56,465 -> 56,699
+(+0.41%), 59,229 -> 58,335 (-1.51%).
+
+**No-padding control** (h10u -> r15u, two pairs): q01 0.00 / 0.00, q02 0.00 / -0.03, q03 +0.04 /
+-0.09, q04 +0.02 / +0.01, q05 -0.03 / -0.07, q07 +0.02 / -0.01, q08 -0.04 / +0.01, q09 -0.11 /
+-0.15, q11 0.00 / -0.05, q13 +0.05 / -0.06, q14 -0.07 / +0.08, q18 +3.76 / +0.02 (h10u's first run
+14.52 G against its second's 15.07, r15u's 15.07 and 15.07), q21 +0.11 / -0.09%.
+
+Interim builds, for the record: r9 (with `Lookup::batch_cols`): switch off q09 +0.43%, q07 +0.40%,
+q19 +0.38%, q03 +0.35% (`batch` inlined into `pipe::lookup_batch`); r11 (`batch` kept out of
+line): q07 +0.27%, q03 +0.19%, q09 +0.17%, q14 +0.20% (`entry_spans_to` no longer inlined in
+`batch`), format 5's q09 +25% (no memo); r14 (no batch path): format 5's q09 +28.4% (no memo).
+
 ## Storage format 5 against format 4, step 2 second piece (2026-11-26, agent 311)
 
 HANDOFF "Storage format 5: column blocks, step 2, second piece". Plain dist builds (`tools/dist.sh`)
