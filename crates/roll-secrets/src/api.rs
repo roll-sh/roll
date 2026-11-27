@@ -410,7 +410,9 @@ async fn project_settings(State(s): S, Who(c): Who, Path(project): Path<String>,
             out.insert("leaks".into(), json!({ "rotate": s.set_leak_rotate(&project, rotate, &c)? }));
         }
         if let Some(who) = breakglass {
-            out.insert("breakglass".into(), json!(s.set_breakglass(&project, who, &c)?));
+            let (list, hooks) = s.set_breakglass(&project, who, &c)?;
+            out.insert("breakglass".into(), json!(list));
+            out.insert("breakglass_hooks".into(), json!(hooks));
         }
         Ok(out)
     })

@@ -631,6 +631,9 @@ impl Secrets {
         db.add_column("projects", "leak_rotate", "TEXT")?;
         db.ensure_schema(leaks::SCHEMA)?;
         db.ensure_schema(leaks::SCAN_COUNTS_SCHEMA)?;
+        // The name of the scan-only token (a hook's) that last named the pusher; NULL when the
+        // token may do more, or named it before this was kept (its next scan fills it in).
+        db.add_column("scan_pushers", "hook", "TEXT")?;
         db.ensure_schema(guardrails::SCHEMA)?;
         // Who may push past a pre-receive hook (`breakglass`, leaks.rs): a JSON list; NULL is no one.
         db.add_column("projects", "breakglass", "TEXT")?;

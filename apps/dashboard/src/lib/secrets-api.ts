@@ -125,7 +125,7 @@ export function secretsApi(project: string) {
     setValidityChecks: (validity_checks: "on" | "off") => req<{ validity_checks: "on" | "off" }>("PATCH", P, { validity_checks }),
     /** What a leaked managed key does (admin): rotated at once, or only reported. */
     setLeakRotate: (rotate: LeakRotate) => req<{ leaks: { rotate: LeakRotate } }>("PATCH", P, { leaks: { rotate } }),
-    setBreakglass: (who: string[]) => req<{ breakglass: string[] }>("PATCH", P, { breakglass: who }),
+    setBreakglass: (who: string[]) => req<{ breakglass: string[]; breakglass_hooks: Record<string, string> }>("PATCH", P, { breakglass: who }),
     /** Whether found credentials work, asked of their providers; none asked while the project's checks are off. */
     checkValidity: (credentials: ValidityProbe[]) => req<{ validity_checks: "on" | "off"; results: CheckedCredential[] }>("POST", `${P}/validity`, { credentials }),
     /** A credential's last check, by its fingerprint. */
