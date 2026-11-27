@@ -4490,7 +4490,19 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 None => println!("No one may push past a pre-receive hook: `git push -o breakglass` is refused"),
                 Some(a) => {
                     let who: Vec<&str> = a.iter().filter_map(Value::as_str).collect();
-                    println!("May push past a pre-receive hook (audited): {}", who.join(", "));
+                    // Each binding with its hook token's name (a set's answer has them), so a token
+                    // that isn't the hook stands out.
+                    let named: Vec<String> = who
+                        .iter()
+                        .map(|w| {
+                            let token = w.find("@token:").map_or(*w, |i| &w[i + 1..]);
+                            match v["breakglass_hooks"][token].as_str() {
+                                Some(name) => format!("{w} ({name})"),
+                                None => w.to_string(),
+                            }
+                        })
+                        .collect();
+                    println!("May push past a pre-receive hook (audited): {}", named.join(", "));
                     // A list from before logins were bound: each bare login counts only through a
                     // token whose hook named it, until the list is set again.
                     if who.iter().any(|w| *w != "*" && !w.starts_with("token:") && !w.contains("@token:")) {

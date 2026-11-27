@@ -4227,12 +4227,17 @@ refuses any push whose new commits add a value of the project, whoever pushes it
   audited as `scan.breakglass`; roll secrets' policy can rule it out everywhere with
   `no_breakglass`, "Guardrails"). A login is the pusher as one hook names it, so it's kept as
   `alice@token:<id>`: any token that may scan could name alice, and only the hook's token
-  vouches for her. `roll secrets breakglass alice` binds alice to each token whose hook has named
-  her in an ordinary scan (so push once through the hook first: a login no hook has named is
-  refused, 400), and `alice@token:<id>` is taken once that token's hook has named a pusher. A
-  list set before logins were bound keeps its bare logins, each counting only through a token
-  whose hook named that login in an earlier scan; `roll secrets breakglass` shows them, and
-  setting the same list again binds them. The hook asks roll
+  vouches for her. `roll secrets breakglass alice` binds alice to the hook's token that has
+  named her in an ordinary scan: a token that may only scan (every rule `scan`, made by an
+  admin, not a person's own). A token that may do more (a person's reveal and scan, an admin
+  role) could name anyone, so its word binds no bare login. So push once through the hook first:
+  a login no hook has named is refused (400), and so is one that several hooks' tokens have
+  named, until it's named as `alice@token:<id>`. `alice@token:<id>` is taken once that token's
+  hook has named a pusher. The answer, and `roll secrets breakglass`, print each binding with
+  its token's name (`alice@token:tok_… (git-hook)`), so a token that isn't the hook stands out. A
+  list set before logins were bound keeps its bare logins, each counting only through a
+  scan-only token whose hook named that login in an earlier scan; `roll secrets breakglass` shows
+  them, and setting the same list again binds them. The hook asks roll
   first: roll refuses a pusher the list doesn't name through this token (403, audited), and records the push as
   `secrets.scan.breakglass` with the pusher and refs before anything is read. It's still scanned,
   and the keys it found go in the same log. What it lets through is leaked: the value is in the
@@ -6964,7 +6969,7 @@ isn't in the workspace is 404.
 | `GET /v1/secrets/health` | | `{ok, key: "env"\|"kms"\|"file"\|"shares"\|"missing", resealed: "all"\|number\|null, customer_managed, issuer_pulled: {kid, pulled_at, detail}[], links: string[], syncs: string[]}` (`links`, `syncs`: the kinds registered; `issuer_pulled`: issuer keys an emergency rotation pulled in the last 30 days) |
 | `GET`, `POST /v1/secrets/unseal` | `{share}` (`POST`) | `{sealed, have?, need?, error?}`: a sealed node's progress (public; see "Starting sealed"); 429 with `Retry-After` past the limits |
 | `GET` | | `{project, environments: Environment[], previews: number, history_days: number \| null, validity_checks: "on" \| "off", leaks: {rotate: "managed" \| "off"}, breakglass: string[], deletion: {window_days, holds: string \| null}}` (`deletion`: what deleting the workspace project takes with it, as its refusal says it, and how many days it stays recoverable; `leaks.rotate`: "When a value leaks") |
-| `PATCH` | `{history_days?, validity_checks?: "on" \| "off", leaks?: {rotate: "managed" \| "off"}, breakglass?: string[]}` (`breakglass`: who may push past a pre-receive hook, at most 100 of a pusher's login through one hook's token, `alice@token:<id>` (taken once that token's hook has named a pusher), a bare `alice` (bound to each token whose hook has named alice; 400 when none has), `token:<id>` and `*`; `[]` no one; the answer is the list as stored) | what changed, as given (`admin`; validity checks audited as `validity.checks`, leak rotation as `leaks.rotate`, break glass as `scan.breakglass`) |
+| `PATCH` | `{history_days?, validity_checks?: "on" \| "off", leaks?: {rotate: "managed" \| "off"}, breakglass?: string[]}` (`breakglass`: who may push past a pre-receive hook, at most 100 of a pusher's login through one hook's token, `alice@token:<id>` (taken once that token's hook has named a pusher), a bare `alice` (bound to the one scan-only token whose hook has named alice; 400 when none has, or several have), `token:<id>` and `*`; `[]` no one; the answer is the list as stored, and `breakglass_hooks: {"token:<id>": name}`, each bound token's name as its hook last scanned) | what changed, as given (`admin`; validity checks audited as `validity.checks`, leak rotation as `leaks.rotate`, break glass as `scan.breakglass`) |
 | `GET /grid?path=` | | `Grid` |
 | `GET /environments` | | `Environment[]` in order |
 | `POST /environments` | `NewEnvironment` | 201 `Environment` |

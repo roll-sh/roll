@@ -2602,22 +2602,26 @@ async fn one_pusher_spends_its_share_and_made_up_pushers_only_the_tokens_budget(
 }
 
 /// A login on the break-glass list is a pusher as one hook's token names it: `alice` is refused
-/// until a hook has named alice, then bound to that hook's token, so another scan token naming
-/// alice can't break glass; and the leak says the pusher is the hook's word.
+/// until a hook has named alice, then bound to that hook's token (a scan-only one), not to a
+/// reveal+scan token that named alice too, so that token can't break glass; the answer names the
+/// hook's token; and the leak says the pusher is the hook's word.
 #[tokio::test]
 async fn a_break_glass_login_is_bound_to_the_hook_token_that_named_it() {
     let api = Api::new().await;
     let value = "fake-Kq8mZ3vT9xLr2WbN";
     api.set("production", "API_KEY", value).await;
-    let (hook, other) = (api.token(json!({ "actions": ["scan"] })), api.token(json!({ "actions": ["reveal", "scan"] })));
-    let (s, e) = api.call(Method::PATCH, "", Some(json!({ "breakglass": ["alice"] }))).await;
-    assert_eq!(s, StatusCode::BAD_REQUEST, "no hook has named alice yet: {e}");
+    let (hook, other) = (api.token(json!({ "actions": ["scan"], "name": "git-hook" })), api.token(json!({ "actions": ["reveal", "scan"] })));
     let push = |breakglass: bool| json!({ "candidates": [value], "breakglass": breakglass, "pusher": "alice", "refs": ["refs/heads/main"] });
+    let named = json!({ "candidates": [], "pusher": "alice", "refs": ["refs/heads/main"] });
+    assert_eq!(api.req(Method::POST, "/scan", Some(named), Some(&other)).await.0, StatusCode::OK);
+    let (s, e) = api.call(Method::PATCH, "", Some(json!({ "breakglass": ["alice"] }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "only a token that may do more has named alice: {e}");
     assert_eq!(api.req(Method::POST, "/scan", Some(push(false)), Some(&hook)).await.0, StatusCode::OK);
     let set = api.ok(Method::PATCH, "", Some(json!({ "breakglass": ["alice"] }))).await;
     let bound = set["breakglass"][0].as_str().unwrap_or_default().to_string();
     let principal = bound.strip_prefix("alice@").filter(|t| t.starts_with("token:")).unwrap_or_else(|| panic!("{set}")).to_string();
     assert_eq!(set["breakglass"].as_array().map(Vec::len), Some(1), "only the hook that named alice: {set}");
+    assert_eq!(set["breakglass_hooks"], json!({ principal.clone(): "git-hook" }), "{set}");
 
     let (s, e) = api.req(Method::POST, "/scan", Some(push(true)), Some(&other)).await;
     assert_eq!(s, StatusCode::FORBIDDEN, "another token naming alice isn't her hook: {e}");
