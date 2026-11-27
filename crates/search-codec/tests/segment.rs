@@ -1611,6 +1611,7 @@ fn lazy_sections_open_on_first_use_with_the_bytes_that_arrived() {
     assert!(!waited.is_empty() && waited.iter().all(|w| lazy.contains(w)), "{waited:?}");
     // Each section once, however often it was asked for.
     let mut once = waited.clone();
+    once.sort_by_key(|r| r.start);
     once.dedup();
     assert_eq!(once.len(), waited.len());
     let (r, _) = download(true);
