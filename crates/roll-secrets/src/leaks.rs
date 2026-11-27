@@ -296,9 +296,10 @@ fn token_key(principal: &str) -> String {
 /// A scan of `n` tried candidates by `principal`'s hook in `project`, naming `pusher`, counted only
 /// when it fits every budget, in one write: the budget it would overspend and when that has room
 /// again (ms) otherwise, so a refused push spends nothing and its retry isn't refused longer. With
-/// `learn`, a pusher it names is kept as one this token's hook names ([`learn_pusher`]).
+/// `learn`, a pusher it names is kept as one this token's hook names ([`learn_pusher`]; `hook`:
+/// the token's name when it may only scan).
 #[allow(clippy::too_many_arguments)]
-fn spend(c: &Conn<'_>, project: &str, principal: &str, pusher: Option<&str>, learn: bool, now: i64, n: i64) -> Result<Option<(Of, Limit, i64)>> {
+fn spend(c: &Conn<'_>, project: &str, principal: &str, pusher: Option<&str>, learn: bool, hook: Option<&str>, now: i64, n: i64) -> Result<Option<(Of, Limit, i64)>> {
     let minute = now / 60_000;
     let next = (minute + 1) * 60_000;
     let (share, whole) = (budget_key(principal, pusher), token_key(principal));
@@ -333,21 +334,23 @@ fn spend(c: &Conn<'_>, project: &str, principal: &str, pusher: Option<&str>, lea
         params![project, minute, n],
     )?;
     if learn && let Some(p) = pusher {
-        learn_pusher(c, project, principal, p, now)?;
+        learn_pusher(c, project, principal, p, hook, now)?;
     }
     Ok(None)
 }
 
 /// Keep `pusher` as one `principal`'s hook named in an ordinary scan of `project` (inside the
-/// scan's write): what `set_breakglass` binds a login to, and what an unbound login on a list set
-/// before logins were bound needs. At most [`PUSHERS_MAX`] a token: more are counted, not kept.
-fn learn_pusher(c: &Conn<'_>, project: &str, principal: &str, pusher: &str, now: i64) -> Result<()> {
-    if c.execute("UPDATE scan_pushers SET last_ms = ? WHERE project_id = ? AND principal = ? AND pusher = ?", params![now, project, principal, pusher])? > 0 {
+/// scan's write), with `hook`, the token's name when it may only scan (as it is now): what
+/// `set_breakglass` binds a bare login to, and what an unbound login on a list set before logins
+/// were bound needs, is a scan-only token's word. At most [`PUSHERS_MAX`] a token: more are
+/// counted, not kept.
+fn learn_pusher(c: &Conn<'_>, project: &str, principal: &str, pusher: &str, hook: Option<&str>, now: i64) -> Result<()> {
+    if c.execute("UPDATE scan_pushers SET last_ms = ?, hook = ? WHERE project_id = ? AND principal = ? AND pusher = ?", params![now, hook, project, principal, pusher])? > 0 {
         return Ok(());
     }
     let kept: i64 = c.query_row("SELECT COUNT(*) FROM scan_pushers WHERE project_id = ? AND principal = ?", params![project, principal], |r| r.get(0))?;
     if kept < PUSHERS_MAX {
-        c.execute("INSERT INTO scan_pushers (project_id, principal, pusher, last_ms) VALUES (?, ?, ?, ?) ON CONFLICT (project_id, principal, pusher) DO NOTHING", params![project, principal, pusher, now])?;
+        c.execute("INSERT INTO scan_pushers (project_id, principal, pusher, last_ms, hook) VALUES (?, ?, ?, ?, ?) ON CONFLICT (project_id, principal, pusher) DO NOTHING", params![project, principal, pusher, now, hook])?;
     }
     Ok(())
 }
@@ -414,6 +417,9 @@ impl crate::access::Grants for ScanOnly {
     }
     fn sees(&self, project: &str) -> bool {
         project == self.0
+    }
+    fn limits_keys(&self) -> bool {
+        false
     }
 }
 
@@ -590,7 +596,8 @@ impl Secrets {
         if caller.principal != "operator" {
             let now = self.db.now_ms()?;
             // Break glass teaches roll no pusher: only an ordinary scan's pusher binds a login.
-            if let Some((of, limit, at)) = self.db.write(|c| spend(c, project, &caller.principal, push.pusher.as_deref(), !push.breakglass, now, n))? {
+            let hook = caller.grants.hook();
+            if let Some((of, limit, at)) = self.db.write(|c| spend(c, project, &caller.principal, push.pusher.as_deref(), !push.breakglass, hook, now, n))? {
                 let limit = of.said(limit, &caller.principal, push.pusher.as_deref());
                 self.audit_now(project, caller, action, None, None, &[], &format!("refused a scan of {} candidates ({n} tried){said}: over {limit}", candidates.len()));
                 return Err(Error::TooMany(format!("scan budget spent: at most {limit}, and this call would try {n} more; it has room again {}", wait(at, now))));
@@ -651,15 +658,18 @@ impl Secrets {
                 Entry::Pusher { .. } | Entry::Unbound(_) => {}
             }
         }
-        // An unbound login: only through a token whose hook named it in an ordinary scan before.
-        Ok(unbound && self.db.read(|c| c.query_row("SELECT 1 FROM scan_pushers WHERE project_id = ? AND principal = ? AND pusher = ?", params![project, caller.principal, pusher], |r| r.get::<_, i64>(0)).optional())?.is_some())
+        // An unbound login: only through a scan-only token (a hook's) that named it in an ordinary
+        // scan before, as `set_breakglass` would bind it. A token that may do more vouches for no one.
+        Ok(unbound && self.db.read(|c| c.query_row("SELECT 1 FROM scan_pushers WHERE project_id = ? AND principal = ? AND pusher = ? AND hook IS NOT NULL", params![project, caller.principal, pusher], |r| r.get::<_, i64>(0)).optional())?.is_some())
     }
 
     /// Set [`Secrets::breakglass`] (an admin's; audited as `scan.breakglass`). A login is bound
     /// to a hook's token: `alice@token:<id>` only once that token's hook has named a pusher, and a
-    /// bare `alice` becomes `alice@token:<id>` for each token whose hook has named alice (400 when
-    /// none has), so setting an old list again binds it. What's stored comes back.
-    pub fn set_breakglass(&self, project: &str, who: Vec<String>, caller: &Caller) -> Result<Vec<String>> {
+    /// bare `alice` becomes `alice@token:<id>` for the one scan-only token (a hook's) that has named
+    /// alice: 400 when none has, or when several have (name one). A token that may do more than
+    /// scan (a person's, an admin's) could name anyone, so its word binds no bare login. Setting an
+    /// old list again binds it. What's stored comes back, with the hooks' names by token.
+    pub fn set_breakglass(&self, project: &str, who: Vec<String>, caller: &Caller) -> Result<(Vec<String>, BTreeMap<String, String>)> {
         caller.need(Action::Admin, &Scope::project(project))?;
         if !breakglass_ok(&who) {
             return Err(Error::BadRequest(format!("breakglass is at most {BREAKGLASS_MAX} of: a pusher's login through one hook's token (alice@token:<id>, or alice for each token whose hook named alice), token:<id>, or *")));
@@ -682,11 +692,17 @@ impl Secrets {
                         bound.push(w.clone());
                     }
                     Some(Entry::Unbound(login)) => {
-                        let tokens: Vec<String> = c.query("SELECT principal FROM scan_pushers WHERE project_id = ? AND pusher = ? AND principal LIKE 'token:%' ORDER BY principal", params![project, login], |r| r.get(0))?;
-                        if tokens.is_empty() {
-                            return Err(Error::BadRequest(format!("no hook's token has named pusher {login} in this project yet: a login is bound to the token whose hook names it ({login}@token:<id>), so push once as {login} through that hook first")));
+                        let named: Vec<(String, Option<String>)> = c.query("SELECT principal, hook FROM scan_pushers WHERE project_id = ? AND pusher = ? AND principal LIKE 'token:%' ORDER BY principal", params![project, login], |r| Ok((r.get(0)?, r.get(1)?)))?;
+                        let hooks: Vec<(String, String)> = named.iter().filter_map(|(t, h)| Some((t.clone(), h.clone()?))).collect();
+                        match hooks.as_slice() {
+                            [(t, _)] => bound.push(format!("{login}@{t}")),
+                            [] if named.is_empty() => return Err(Error::BadRequest(format!("no hook's token has named pusher {login} in this project yet: a login is bound to the token whose hook names it ({login}@token:<id>), so push once as {login} through that hook first"))),
+                            [] => return Err(Error::BadRequest(format!("only tokens that may do more than scan have named pusher {login}, and they could name anyone: push once as {login} through the hook (its token may only scan), or name its token ({login}@token:<id>)"))),
+                            many => {
+                                let which: Vec<String> = many.iter().map(|(t, h)| format!("{login}@{t} ({h})")).collect();
+                                return Err(Error::BadRequest(format!("{} hooks' tokens have named pusher {login}: name the one whose hook vouches for them, one of {}", many.len(), which.join(", "))));
+                            }
                         }
-                        bound.extend(tokens.into_iter().map(|t| format!("{login}@{t}")));
                     }
                     None => return Err(Error::BadRequest(format!("not a breakglass entry: {w}"))),
                 }
@@ -699,7 +715,18 @@ impl Secrets {
             c.execute("UPDATE projects SET breakglass = ? WHERE project_id = ?", params![(!bound.is_empty()).then(|| json!(bound).to_string()), project])?;
             let summary = if bound.is_empty() { "no one may push past a pre-receive hook".to_string() } else { format!("may push past a pre-receive hook: {}", bound.join(", ")) };
             crate::audit::record(c, self.keys()?, project, caller, "scan.breakglass", None, None, &[], &summary, now)?;
-            Ok(bound)
+            // Each bound token's name, as its hook last said it, so an extra one stands out.
+            let mut hooks = BTreeMap::new();
+            for t in bound.iter().filter_map(|w| match Entry::parse(w) {
+                Some(Entry::Token(t) | Entry::Pusher { token: t, .. }) => Some(t),
+                _ => None,
+            }) {
+                let name: Option<Option<String>> = c.query_row("SELECT hook FROM scan_pushers WHERE project_id = ? AND principal = ? ORDER BY last_ms DESC LIMIT 1", params![project, t], |r| r.get(0)).optional()?;
+                if let Some(Some(n)) = name {
+                    hooks.insert(t.to_string(), n);
+                }
+            }
+            Ok((bound, hooks))
         })
     }
 

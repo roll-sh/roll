@@ -238,6 +238,7 @@ function Matrix({
               <tr className="border-b border-line bg-white/[0.015]">
                 <td colSpan={ACTIONS.length + 2} className="px-3 py-2.5">
                   <Pick product={p} chosen={draft.ids[p] ?? []} known={inventory[p] ?? []} onChange={(ids) => setIds(p, ids)} />
+                  {p === "secrets" && <Keys keys={draft.keys ?? []} onChange={(keys) => onChange({ ...draft, keys: keys.length ? keys : undefined })} />}
                 </td>
               </tr>
             )}
@@ -310,6 +311,30 @@ function Pick({ product, chosen, known, onChange }: { product: string; chosen: s
         />
       </form>
     </div>
+  );
+}
+
+/** A secrets rule's keys: only these keys of its folders, never a folder's whole list. */
+function Keys({ keys, onChange }: { keys: string[]; onChange: (keys: string[]) => void }) {
+  const [text, setText] = useState("");
+  return (
+    <form
+      className="mt-2.5 flex flex-wrap items-center gap-1.5 border-t border-line pt-2.5"
+      onSubmit={(e) => {
+        e.preventDefault();
+        const add = text.split(/[\s,]+/).filter((k) => /^[A-Za-z_][A-Za-z0-9_]{0,255}$/.test(k));
+        if (add.length) onChange([...new Set([...keys, ...add])]);
+        setText("");
+      }}
+    >
+      <span className="text-[11px] text-subtle">{keys.length ? "Only these keys:" : "Every key of the folders it reaches. Name keys to narrow it:"}</span>
+      {keys.map((k) => (
+        <button key={k} type="button" onClick={() => onChange(keys.filter((x) => x !== k))} className="rounded-md border border-fg/40 px-2 py-0.5 font-mono text-[11px] text-fg" title="Remove">
+          {k} ×
+        </button>
+      ))}
+      <input value={text} onChange={(e) => setText(e.target.value)} placeholder="STRIPE_KEY" className={`${input} h-7 w-40 font-mono text-[11px]`} aria-label="Secrets keys" />
+    </form>
   );
 }
 

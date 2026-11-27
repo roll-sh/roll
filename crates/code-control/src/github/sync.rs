@@ -122,7 +122,7 @@ async fn import(code: &Arc<Code>, hub: &Hub, repo_id: &str) -> Result<()> {
     // Open issues become work items, open PRs changes.
     let r = code.repo_by_id(repo_id)?;
     for issue in hub.client.list_issues(link.installation_id, &link.owner, &link.repo, None).await.map_err(gh)? {
-        let d = mapping::issue_draft(&issue);
+        let d = issue_draft(hub, &issue);
         if d.state == DraftState::Open {
             upsert_issue(code, &r, &d)?;
         }
@@ -252,6 +252,17 @@ fn priority(labels: &[String]) -> i64 {
         }
     }
     2
+}
+
+/// An issue as a work item: its author's words are someone's outside the team unless GitHub says
+/// they can push, or roll's own App opened it (a preview note of the team's: its bot's
+/// association is `NONE`).
+pub(crate) fn issue_draft(hub: &super::Hub, issue: &code_github::model::Issue) -> WorkItemDraft {
+    let mut d = mapping::issue_draft(issue);
+    if issue.user.as_ref().is_some_and(|u| u.login == hub.config.bot_login()) {
+        d.outside = false;
+    }
+    d
 }
 
 pub(crate) fn upsert_issue(code: &Code, r: &RepoRow, d: &WorkItemDraft) -> Result<()> {
@@ -722,7 +733,13 @@ pub(crate) async fn handle_for_repo(code: &Arc<Code>, repo_id: &str, event_name:
     let Some(hub) = code.github_hub().cloned() else { return Err(Error::NotFound("GitHub App".into())) };
     let event = Event::parse(event_name, body).map_err(|e| Error::Invalid(e.to_string()))?;
     let Some(full_name) = repo_of(&event) else { return Ok(()) };
-    let Some((r, link)) = repos_for(code, full_name)?.into_iter().find(|(r, _)| r.id == repo_id) else { return Ok(()) };
+    let Some((r, mut link)) = repos_for(code, full_name)?.into_iter().find(|(r, _)| r.id == repo_id) else { return Ok(()) };
+    // GitHub's word on its privacy, kept as the mirror last saw it (roll secrets' Health reads it);
+    // only where the payload says (`private` defaults to false when a slim one leaves it out).
+    let private = serde_json::from_slice::<serde_json::Value>(body).ok().and_then(|v| v["repository"]["private"].as_bool());
+    if let Some(p) = private.filter(|p| link.private != Some(*p)) {
+        link = update_link(code, &r.id, |l| l.private = Some(p))?.unwrap_or(link);
+    }
     // The owner's automations hear of it first (recorded once per delivery and repo).
     crate::chatops::github::record(code, &hub, &r, &link, receipt, &event)?;
     handle_repo(code, &hub, &r, &link, &event).await
@@ -767,7 +784,7 @@ async fn handle_repo(code: &Arc<Code>, hub: &Hub, r: &RepoRow, link: &Link, even
             if e.issue.is_pull_request() {
                 return Ok(());
             }
-            upsert_issue(code, r, &mapping::issue_draft(&e.issue))
+            upsert_issue(code, r, &issue_draft(hub, &e.issue))
         }
         Event::CheckRun(e) if e.requested_action.is_some() => super::notify::visual_action(code, hub, r, link, e).await,
         Event::CheckRun(_) | Event::Status(_) => Ok(()),

@@ -1029,6 +1029,7 @@
             "dismissed": false,
             "head": "cs_0123456789abcdef",
             "id": "rev_0123456789abcd",
+            "outside": false,
             "repo": "acme/app",
             "repo_id": "rep_0123456789abcd",
             "reviewer": {
@@ -1251,21 +1252,20 @@
           "fields": [
             "repo",
             "masking.project",
-            "masking.columns"
+            "masking.resources"
           ],
           "kind": "masking",
           "sample": {
             "dashboard_url": null,
             "masking": {
-              "columns": [
-                {
-                  "column": "public.users.phone",
-                  "resource": "postgres:pg_0123456789ab",
-                  "why": "a phone number"
-                }
-              ],
               "project": "prj_0123456789ab",
-              "project_name": "shop"
+              "project_name": "shop",
+              "resources": [
+                {
+                  "columns": 2,
+                  "resource": "postgres:pg_0123456789ab"
+                }
+              ]
             },
             "repo": "acme/app",
             "repo_id": "rep_0123456789abcd"

@@ -631,6 +631,9 @@ impl Secrets {
         db.add_column("projects", "leak_rotate", "TEXT")?;
         db.ensure_schema(leaks::SCHEMA)?;
         db.ensure_schema(leaks::SCAN_COUNTS_SCHEMA)?;
+        // The name of the scan-only token (a hook's) that last named the pusher; NULL when the
+        // token may do more, or named it before this was kept (its next scan fills it in).
+        db.add_column("scan_pushers", "hook", "TEXT")?;
         db.ensure_schema(guardrails::SCHEMA)?;
         // Who may push past a pre-receive hook (`breakglass`, leaks.rs): a JSON list; NULL is no one.
         db.add_column("projects", "breakglass", "TEXT")?;
@@ -652,6 +655,8 @@ impl Secrets {
         db.ensure_schema(rotators::SCHEMA)?;
         db.ensure_schema(saas::SCHEMA)?;
         db.add_column("saas_rotators", "credential_expires_at", "INTEGER")?;
+        // A self-rotating vendor's rotation in progress (saas.rs, `Provider::self_rotate`).
+        db.add_column("saas_rotators", "rotating_at", "INTEGER")?;
         db.ensure_schema(transit::SCHEMA)?;
         db.ensure_schema(pki::SCHEMA)?;
         // An intermediate CA (pki.rs): its CSR while it's pending, then the certificates above it.

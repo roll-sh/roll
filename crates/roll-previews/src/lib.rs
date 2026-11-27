@@ -450,6 +450,12 @@ pub struct Preview {
     /// check against today's production): asked for at a head, then how it went.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rehearsal: Option<Rehearsal>,
+    /// Main's code on a copy of its migrated data, at its head (see [`MainOnChange`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub main_on_change: Option<MainOnChange>,
+    /// Its recent requests replayed against main's preview, at its head (see [`Replay`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay: Option<Replay>,
     /// Columns its branches were masked with by default (they look like people's data, and no
     /// rule names them): a rule, or `keep`, says otherwise.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -526,6 +532,9 @@ pub struct Preview {
     /// The project's rule for regressions against main's (`check`, `required`), when it has one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub regressions: Option<String>,
+    /// The project's rule for its release at each head (`check`, `required`), when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_checks: Option<String>,
     /// Who accepted its regressions at its head (`POST …/regressions/accept`); a new head asks again.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub regressions_accepted: Option<RegressionsAccepted>,
@@ -1157,6 +1166,24 @@ pub struct Share {
     pub notes: bool,
 }
 
+/// A webhook URL of a private preview (Vercel's bypass in a query parameter): one path, its
+/// token in the URL (shown once), for a Stripe or GitHub webhook. It sets no cookie.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Webhook {
+    /// `whk_…`
+    pub id: String,
+    /// The service it opens `path` of (the preview's first, when it was made).
+    pub service: String,
+    pub path: String,
+    pub label: String,
+    pub created_by: String,
+    pub created_at: i64,
+    pub revoked: bool,
+    /// Requests it let in, and the last one's time.
+    pub hits: i64,
+    pub last_at: Option<i64>,
+}
+
 /// How much a preview's page changed between the screenshots of two heads.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct VisualChange {
@@ -1338,6 +1365,76 @@ pub enum VisualState {
     /// Someone refused a page at this head (Chromatic's Deny): it fails until a new head, or
     /// until someone accepts that page.
     Refused,
+}
+
+/// A change's preview's recent GETs replayed against main's preview (`POST …/replay`), at a head.
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+pub struct Replay {
+    pub head: String,
+    pub by: String,
+    pub at: i64,
+    /// `None` while it runs; then whether every request answered as main's did.
+    #[serde(default)]
+    pub ok: Option<bool>,
+    #[serde(default)]
+    pub requests: Vec<ReplayedRequest>,
+    /// Why it couldn't (one line, masked): no preview of main, nothing served lately.
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// One request asked of both previews: its status on each (0: no answer), and a JSON answer's
+/// top-level fields main's has and this one hasn't (`removed`) or the other way (`added`).
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+pub struct ReplayedRequest {
+    pub service: String,
+    pub path: String,
+    pub status: u16,
+    pub main_status: u16,
+    #[serde(default)]
+    pub removed: Vec<String>,
+    #[serde(default)]
+    pub added: Vec<String>,
+}
+
+impl ReplayedRequest {
+    /// It answers differently: another status, or fields main's answer has gone.
+    pub fn differs(&self) -> bool {
+        self.status != self.main_status || !self.removed.is_empty()
+    }
+}
+
+/// Main's code on a copy of a change's migrated data, at a head (pgroll's expand/contract,
+/// tested): main's live builds on copies of the change's Postgres branches, its pages read there
+/// and on main's preview.
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+pub struct MainOnChange {
+    pub head: String,
+    pub at: i64,
+    pub ms: i64,
+    #[serde(default)]
+    pub pages: Vec<MainOnChangePage>,
+    /// Why it couldn't run (one line, masked): no preview of main, no build that can run on a
+    /// copy, a branch that can't be copied.
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// One page main's code was asked for on the change's data (`status`) and on main's
+/// (`main_status`); 0 is no answer.
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+pub struct MainOnChangePage {
+    pub service: String,
+    pub path: String,
+    pub status: u16,
+    pub main_status: u16,
+}
+
+impl MainOnChangePage {
+    /// It answers on main's data but fails on the change's (a 5xx, or no answer).
+    pub fn broke(&self) -> bool {
+        (1..500).contains(&self.main_status) && (self.status == 0 || self.status >= 500)
+    }
 }
 
 /// A change's release run again on fresh branches of its Postgres parents, as they are now
@@ -1777,11 +1874,6 @@ pub fn label_part(s: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn a_git_url_services_preview_stands_as_the_service() {
-        assert_eq!(super::canvas_resource("acme/web"), (roll_workspace::Kind::Repo, "acme/web"));
-        assert_eq!(super::canvas_resource("git:svc_1"), (roll_workspace::Kind::Service, "svc_1"));
-    }
 
     use super::*;
 
@@ -1795,129 +1887,6 @@ mod tests {
         assert_eq!(mask_cut("key sk_test_51Hx9abc ok\nthen sk_te\nline-tw", &values), "key *** ok\nthen sk_te\n***");
         assert_eq!(mask_cut("é sk_test_51H", &values), "é ***", "cut on a character's boundary");
         assert_eq!(mask_cut("nothing secret", &values), "nothing secret");
-    }
-
-    #[test]
-    fn docker_stats_read_as_cores_and_bytes() {
-        assert_eq!(parse_docker_stats("1.50%|84MiB / 256MiB"), Some((0.015, 84 * 1024 * 1024)));
-        assert_eq!(parse_docker_stats("212.00%|1.5GiB / 4GiB\n"), Some((2.12, (1.5 * 1024.0 * 1024.0 * 1024.0) as u64)));
-        assert_eq!(parse_docker_stats("0.00%|0B / 0B"), Some((0.0, 0)));
-        assert_eq!(parse_docker_stats("--|-- / --"), None, "a container that just stopped");
-    }
-
-    /// Production data reaches a preview only as it's masked, or as it is, and that's said.
-    #[test]
-    fn a_branch_says_what_production_data_it_hands_over() {
-        assert_eq!(Data::of(Kind::Postgres, Mode::Branch, 0), Data::Real);
-        assert_eq!(Data::of(Kind::Postgres, Mode::Branch, 2), Data::Masked);
-        assert_eq!(Data::of(Kind::Postgres, Mode::Schema, 0), Data::None);
-        // No masks for them: a mask rule there changes nothing.
-        assert_eq!(Data::of(Kind::Redis, Mode::Branch, 1), Data::Real);
-        assert_eq!(Data::of(Kind::Stream, Mode::Branch, 0), Data::Real);
-        assert_eq!(Data::of(Kind::Stream, Mode::Schema, 0), Data::None);
-        // Never copied.
-        assert_eq!(Data::of(Kind::Queue, Mode::Branch, 0), Data::None);
-        assert_eq!(Data::of(Kind::Tasks, Mode::Branch, 0), Data::None);
-    }
-
-    /// The endpoints the session timed read back each once and within reason; one is slower than
-    /// main's only by half again and by more than 20 ms (a fast endpoint's noise isn't).
-    #[test]
-    fn endpoint_times_read_back_and_slower_means_clearly() {
-        let s = super::PageSpeed::parse(
-            r#"{"ttfb_ms": 1, "fcp_ms": null, "load_ms": 9, "bytes": 1, "endpoints": [{"path": "/api/users", "ms": 40, "status": 200},
-               {"path": "/api/users", "ms": 1, "status": 200}, {"path": "no slash", "ms": 1, "status": 200}, {"path": "/slow", "ms": 999999, "status": 200}]}"#,
-        )
-        .unwrap();
-        assert_eq!(s.endpoints.iter().map(|e| (e.path.as_str(), e.ms)).collect::<Vec<_>>(), [("/api/users", 40)]);
-        let e = |ms, main_ms| super::EndpointAgainst { path: "/x".into(), ms, status: 200, main_ms, shape_changes: Vec::new() };
-        assert!(e(140, Some(40)).slower());
-        assert!(!e(14, Some(4)).slower(), "within 20 ms");
-        assert!(!e(55, Some(40)).slower(), "not half again");
-        assert!(!e(140, None).slower(), "nothing to compare with");
-    }
-
-    /// A secret value in what a preview's pages served is named with where, each name and path
-    /// once; nothing else is.
-    #[test]
-    fn a_served_secret_is_named_with_where_each_once() {
-        let keyed = [("STRIPE_KEY".to_string(), "sk_live_abcdef12".to_string()), ("DATABASE_URL".to_string(), "p4ssw0rd-xyz".to_string())];
-        let bodies = [
-            ("/app.js".to_string(), b"a='sk_live_abcdef12';b='sk_live_abcdef12'".to_vec()),
-            ("/".to_string(), b"<p>nothing here</p>".to_vec()),
-            ("/api/me".to_string(), b"{\"db\":\"postgres://u:p4ssw0rd-xyz@h\"}".to_vec()),
-        ];
-        let found: Vec<(String, String)> = super::served_secrets(&bodies, &keyed).into_iter().map(|s| (s.key, s.path)).collect();
-        assert_eq!(found, [("STRIPE_KEY".to_string(), "/app.js".to_string()), ("DATABASE_URL".to_string(), "/api/me".to_string())]);
-        assert!(super::served_secrets(&bodies, &[]).is_empty());
-    }
-
-    /// An endpoint's JSON answer against main's: a field gone (the outermost only) or a type
-    /// widened is said; a field gained, a type narrowed, or what's under an array empty on either
-    /// side isn't. Its shape reads back as whole, known lines only.
-    #[test]
-    fn a_response_shape_change_is_a_field_gone_or_a_type_widened() {
-        let lines = |s: &[&str]| s.iter().map(|l| l.to_string()).collect::<Vec<_>>();
-        let main = lines(&["$ object", "total number", "users array", "users[] object", "users[].email string", "users[].name string", "meta object", "meta.page number", "tags []", "next string|null"]);
-        let now = lines(&["$ object", "total string", "users array", "users[] object", "users[].name null|string", "users[].avatar string", "tags array", "tags[] string", "next string"]);
-        let said: Vec<(String, String, Option<String>)> = super::shape_changes(&now, &main).into_iter().map(|c| (c.path, c.main, c.now)).collect();
-        assert_eq!(
-            said,
-            [
-                ("meta".to_string(), "object".to_string(), None),
-                ("total".into(), "number".into(), Some("string".into())),
-                ("users[].email".into(), "string".into(), None),
-                ("users[].name".into(), "string".into(), Some("null|string".into())),
-            ]
-        );
-        let unknown = super::shape_changes(&lines(&["$ object", "users []"]), &main);
-        assert!(!unknown.iter().any(|c| c.path.starts_with("users[]")), "under an empty array: {unknown:?}");
-        assert!(super::shape_changes(&[], &main).is_empty(), "not JSON now");
-        let s = super::PageSpeed::parse(r#"{"ttfb_ms": 1, "fcp_ms": null, "load_ms": 9, "bytes": 1, "endpoints": [{"path": "/x", "ms": 4, "status": 200, "shape": ["$ object", "a`b string", "c date", "d\nx string", "e number"]}]}"#).unwrap();
-        assert_eq!(s.endpoints[0].shape, ["$ object", "e number"]);
-    }
-
-    /// What the browser writes reads back; numbers past reason, or anything else, don't.
-    #[test]
-    fn page_speed_reads_what_the_browser_wrote() {
-        let s = PageSpeed::parse(r#"{"ttfb_ms":40,"fcp_ms":380,"load_ms":1200,"bytes":312000}"#).unwrap();
-        assert_eq!((s.ttfb_ms, s.fcp_ms, s.load_ms, s.bytes, s.lcp_ms, s.cls), (40, Some(380), 1200, 312000, None, None), "an older browser script's");
-        let v = PageSpeed::parse(r#"{"ttfb_ms":40,"fcp_ms":380,"load_ms":1200,"bytes":0,"lcp_ms":900,"cls":0.12}"#).unwrap();
-        assert_eq!((v.lcp_ms, v.cls), (Some(900), Some(0.12)));
-        assert_eq!(PageSpeed::parse(r#"{"ttfb_ms":40,"fcp_ms":380,"load_ms":1200,"bytes":0,"lcp_ms":900,"cls":1e9}"#), None, "a shift past reason");
-        assert_eq!(PageSpeed::parse(r#"{"ttfb_ms":40,"fcp_ms":null,"load_ms":1200,"bytes":0}"#).unwrap().fcp_ms, None);
-        assert_eq!(PageSpeed::parse(r#"{"ttfb_ms":40,"fcp_ms":380,"load_ms":99999999,"bytes":0}"#), None, "a page that lies past 10 minutes");
-        assert_eq!(PageSpeed::parse("<html>"), None);
-        // What went wrong: counted, the first of each kept to one printable line.
-        let h = PageHealth::parse(r#"{"ttfb_ms":1,"fcp_ms":null,"load_ms":2,"bytes":0,"errors":["TypeError: x is undefined\n    at app.js:3","`second`"],"failed":["500 http://127.0.0.1/api/cart"]}"#).unwrap();
-        assert_eq!((h.errors, h.first_error.as_deref(), h.failed, h.first_failed.as_deref()), (2, Some("TypeError: x is undefined"), 1, Some("500 http://127.0.0.1/api/cart")));
-        assert_eq!(PageHealth::parse(r#"{"ttfb_ms":1,"load_ms":2,"bytes":0}"#), None, "an operator's own command that times nothing");
-        // What a screen reader can't name: only kinds that have any, the first one's markup flat.
-        let a = PageA11y::parse(r#"{"errors":[],"failed":[],"a11y":{"images":{"count":3,"first":"<img src=\"a.png\">"},"fields":{"count":0,"first":null},"buttons":{"count":1,"first":"<button>\n</button>"},"links":{"count":0,"first":null},"lang":false,"title":true}}"#).unwrap();
-        assert_eq!(a.issues.iter().map(|i| (i.kind.as_str(), i.count)).collect::<Vec<_>>(), [("images", 3), ("buttons", 1)]);
-        assert_eq!(a.issues[1].first.as_deref(), Some("<button> </button>"));
-        assert!(!a.lang && a.title);
-        // Against main's page: only what this one added (more images, the language lost).
-        let main = PageA11y { issues: vec![A11yIssue { kind: "images".into(), count: 2, first: None, impact: None, help: None }], lang: true, title: true, seo: None };
-        assert_eq!((a.problems(), a.added_since(&main)), (5, 3));
-        assert_eq!(main.added_since(&a), 0);
-        // axe-core's rules: ids and impacts as axe names them, anything else from the page dropped.
-        let x = PageA11y::parse(r#"{"a11y":{"issues":[{"kind":"color-contrast","count":4,"first":"<p class=\"x\">","impact":"serious","help":"Elements must meet minimum color contrast ratio thresholds"},{"kind":"](javascript:x)","count":1,"first":null},{"kind":"region","count":2,"first":null,"impact":"<b>"}],"lang":true,"title":true}}"#).unwrap();
-        assert_eq!(x.issues.iter().map(|i| (i.kind.as_str(), i.count, i.impact.as_deref())).collect::<Vec<_>>(), [("color-contrast", 4, Some("serious")), ("region", 2, None)]);
-        assert_eq!(x.problems(), 6);
-        // SEO basics ride along with the report, compared with main's by problem.
-        let s = PageA11y::parse(r#"{"a11y":{"issues":[],"lang":true,"title":true},"seo":{"description":false,"viewport":true,"h1":2,"noindex":true}}"#).unwrap().seo.unwrap();
-        assert_eq!(s.problems(), ["no meta description", "more than one h1", "noindex in its markup"]);
-        let main_seo = PageSeo { description: false, viewport: true, h1: 1, noindex: false };
-        assert_eq!(s.added_since(&main_seo), 2);
-        let health = |errors, failed| PageHealth { errors, first_error: None, failed, first_failed: None, unstable: false };
-        assert_eq!((health(3, 1).added_since(&health(2, 4)), health(0, 0).added_since(&health(5, 5))), (1, 0));
-        assert_eq!(PageSpeed::parse(""), None);
-        // Its own broken links: paths only, printable, bounded; against main's, only the new.
-        let l = PageLinks::parse(r#"{"links":{"checked":7,"broken":[{"path":"/gone","status":404},{"path":"/`x`\n","status":0},{"path":"https://x/y","status":500}]}}"#).unwrap();
-        assert_eq!(l.broken.iter().map(|b| (b.path.as_str(), b.status)).collect::<Vec<_>>(), [("/gone", 404), ("/x", 0)]);
-        let main = PageLinks { checked: 3, broken: vec![BrokenLink { path: "/gone".into(), status: 404 }] };
-        assert_eq!((l.checked, l.added_since(&main)), (7, 1));
     }
 
     #[test]

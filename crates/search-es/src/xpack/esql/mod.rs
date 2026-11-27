@@ -296,6 +296,23 @@ fn body_time_zone(ctx: &Ctx, m: &Map) -> EsResult<Option<String>> {
     }
 }
 
+tokio::task_local! {
+    /// Whom the running ES|QL query reads as ([`enrich_allowed`]).
+    static CALLER: crate::xpack::security::Principal;
+}
+
+/// Whether the running query's caller may use `ENRICH` policy `name`, checked where its table is
+/// loaded (after views are spliced in, for every source a policy is read for here): an `ENRICH`
+/// resolves its policy as the caller (`EnrichPolicyResolver`), `monitor_enrich` here, as a
+/// remote's part needs it there ([`ccs::admit_part`]). Outside a query nothing loads one.
+pub(super) fn enrich_allowed(cluster: &crate::Cluster, name: &str) -> EsResult<()> {
+    let _ = name;
+    match CALLER.try_with(|p| crate::xpack::security::check_cluster_action_of(cluster, p, ccs::RESOLVE_POLICY)) {
+        Ok(r) => r,
+        Err(_) => Err(EsError::illegal_state("an ENRICH policy loaded outside an ES|QL query")),
+    }
+}
+
 /// Runs a request: the JSON response and the table (for text formats), both charged to `mem`
 /// until it drops (after the response is rendered). A linked remote's part
 /// ([`ccs::requested`]) runs as one and answers its result for the coordinating cluster.
@@ -387,7 +404,10 @@ async fn run_query(ctx: &Ctx<'_>, req: &Request, mem: &memory::Memory) -> EsResu
     let used = telemetry::Used::of(&q, &ctx.state());
     let column_metadata = q.settings.column_metadata;
     let approximation = q.settings.approximation || req.approximation;
-    let result = exec::execute(ctx.cluster, q, req.filter.clone(), &mut w, mem).await;
+    // Its `ENRICH` policies are loaded as it runs (views spliced in first): each is checked
+    // there as this caller ([`enrich_allowed`]).
+    let caller = crate::xpack::security::principal(ctx).clone();
+    let result = CALLER.scope(caller, exec::execute(ctx.cluster, q, req.filter.clone(), &mut w, mem)).await;
     telemetry.record(kibana, Some(&used), result.is_err(), started.elapsed().as_millis() as i64);
     // Warnings recorded before a failure (the implicit limit's, added while analyzing) go out
     // with the error, as Elasticsearch's do.

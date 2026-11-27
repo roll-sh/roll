@@ -329,6 +329,8 @@ export type Token = {
   allowed_ips: string[] | null;
   /** Only these encryption keys (`payments,pay-*`), when its rule names some; null: the project. */
   keys?: string | null;
+  /** Only these secret keys of its folders (`STRIPE_KEY`), when its rule names some; null: every key. */
+  only_keys?: string[] | null;
 };
 /** A one-time share (never its ciphertext): `open` until its last open, expiry or revocation. */
 export type Share = { id: string; note: string; views_left: number; created_by: string; created_at: number; expires_at: number; opened_at: number | null; open: boolean; from?: ShareFrom };
@@ -399,7 +401,8 @@ export type NewBootstrap = { minutes?: number; allowed_ips?: string[]; credentia
 export type MadeBootstrap = { identity: string; chain: string; secret: string; expires_at: number };
 /** One of a machine identity's machines (`GET …/identities/{id}/machines`): `waiting` until its bootstrap token is exchanged, `live`, `ended` (not replaced before it ended) or `revoked`. Never a secret. */
 export type MachineChain = { chain: string; state: "waiting" | "live" | "ended" | "revoked"; credential_hours: number; created_at: number; created_by: string; refreshed_at: number | null; expires_at: number | null; revoked_at: number | null; revoked_why: string | null };
-export type NewToken = { name: string; environments?: string[]; paths?: string[]; actions: Action[]; expires_at?: number; ttl_days?: number; allowed_ips?: string[] };
+/** `only_keys`: only these keys of its folders (`STRIPE_KEY`), never a folder as a whole. */
+export type NewToken = { name: string; environments?: string[]; paths?: string[]; only_keys?: string[]; actions: Action[]; expires_at?: number; ttl_days?: number; allowed_ips?: string[] };
 /** `approval`: the approval that let the request through roll-access's gate (an `ask` approved; `until` when a rule it remembered allowed it). */
 /** `seq` and `hash` place a row in its project's chain (absent on rows from before it); an `audit.digest` row's `digest` is roll's signed JWS of it. */
 export type AuditEntry = { id: number; seq?: number; hash?: string; at: number; actor: string; action: string; environment: string | null; path: string | null; keys: string[]; summary: string; ip: string | null; approval?: Approval; digest?: string };
@@ -519,7 +522,7 @@ export type DeletedProject = { project: string; name: string; environment?: stri
 export type Recovered = { project: string; name: string; recovered_at: number; rotated: number; rotation_failed: string[] };
 export type Place = { project: string; project_name: string; environment: string; path: string; key: string; version: number; updated_at: number; linked: boolean };
 /** One thing to fix (`GET …/health`), worst first: where, never a value. */
-export type Finding = { issue: "decoy_used" | "production_unprotected" | "backup_left" | "off_policy" | "expired" | "rotation_failing" | "revoke_failing" | "missing" | "exposed" | "public" | "weak" | "unplaced" | "operator_made" | "stored_cloud_key" | "expiring" | "certificate_expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string; owner?: string; decoy?: Decoy };
+export type Finding = { issue: "decoy_used" | "production_unprotected" | "backup_left" | "off_policy" | "expired" | "rotation_failing" | "revoke_failing" | "missing" | "exposed" | "public" | "weak" | "public_repo_no_leak_rotation" | "unplaced" | "operator_made" | "stored_cloud_key" | "expiring" | "certificate_expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string; owner?: string; decoy?: Decoy };
 /** roll secrets' policy (`GET`/`PUT /v1/secrets/policy`, the operator's or an admin account's): floors every project may only tighten; `null` is no floor. */
 export type Guardrails = { production_approvals: number | null; leaks_rotate: "managed" | null; sync_kinds: string[] | null; no_stored_cloud_keys: boolean; max_token_days: number | null; no_breakglass: boolean; updated_at: number | null; updated_by: string | null };
 /** One project's findings (`GET /v1/secrets/findings`). */
@@ -602,7 +605,7 @@ export type MadeGateway = { gateway: Gateway; token?: string };
 export type GitHubApp = { id: string; name: string; app_id: number; installation_id: number; api_base: string; repositories: string[]; permissions: Record<string, string>; created_at: number; created_by: string };
 export type Rotator = { id: string; name: string; host: string; created_at: number; created_by: string };
 /** A vendor roll issues and revokes keys at itself (`saas` links): its account, never the credential. */
-export type SaasVendor = "sendgrid" | "twilio" | "okta" | "entra" | "auth0" | "gitlab" | "openai" | "datadog" | "cloudflare" | "databricks" | "confluent" | "sonarqube" | "jenkins" | "salesforce";
+export type SaasVendor = "sendgrid" | "twilio" | "okta" | "entra" | "auth0" | "gitlab" | "openai" | "datadog" | "cloudflare" | "databricks" | "confluent" | "sonarqube" | "jenkins" | "salesforce" | "prismacloud" | "paddle";
 /** `credential_expires_at`: when the registered credential ends at the vendor (ms), if the admin gave it; health warns two weeks before. */
 export type SaasRotator = { id: string; name: string; vendor: SaasVendor; target: Record<string, unknown>; credential_expires_at?: number; created_at: number; created_by: string };
 /** `credential` is sealed at once and never answered; `credential_expires_at` (ms, in the future) is when it ends at the vendor. */

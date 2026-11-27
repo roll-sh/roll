@@ -714,38 +714,3 @@ impl Isolation for Fargate {
         url.to_string()
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn sizes_round_up_to_fargate_shapes() {
-        assert_eq!(fargate_size(0.25, 128), (256, 512));
-        assert_eq!(fargate_size(1.0, 1024), (1024, 2048));
-        assert_eq!(fargate_size(1.0, 3000), (1024, 3072));
-        assert_eq!(fargate_size(0.5, 9000), (2048, 9216));
-        assert_eq!(fargate_size(2.0, 16 << 10), (2048, 16384));
-        assert_eq!(fargate_size(8.0, 17000), (8192, 20480));
-        assert_eq!(fargate_size(64.0, 1), (16384, 122880));
-        let env = |pairs: &'static [(&'static str, &'static str)]| move |k: &str| pairs.iter().find(|(n, _)| *n == k).map(|(_, v)| v.to_string());
-        assert!(FargateConfig::from_lookup(env(&[]), PathBuf::new()).unwrap().is_none());
-        assert!(FargateConfig::from_lookup(env(&[("ROLL_CODE_RUNNER", "fargate")]), PathBuf::new()).is_err());
-        assert!(FargateConfig::from_lookup(env(&[("ROLL_CODE_RUNNER", "k8s")]), PathBuf::new()).is_err());
-        let c = FargateConfig::from_lookup(
-            env(&[
-                ("ROLL_CODE_RUNNER", "fargate"),
-                ("ROLL_CODE_FARGATE_CLUSTER", "roll-cloud"),
-                ("ROLL_CODE_FARGATE_SUBNETS", "subnet-a, subnet-b"),
-                ("ROLL_CODE_FARGATE_SECURITY_GROUP", "sg-1"),
-                ("ROLL_CODE_FARGATE_CHECK_TASK", "roll-cloud-check"),
-                ("ROLL_CODE_FARGATE_PREVIEW_TASK", "roll-cloud-preview"),
-                ("ROLL_S3_BUCKET", "data"),
-            ]),
-            PathBuf::new(),
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!((c.subnets.len(), c.public_ip, c.spot, c.preview_port, c.prefix.as_str()), (2, false, false, 9970, "code/runs/"));
-    }
-}

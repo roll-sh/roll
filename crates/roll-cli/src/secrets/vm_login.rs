@@ -8,7 +8,11 @@
 //! - `ROLL_IDENTITY_KIND=machine` (or a bootstrap token set): a machine identity's credential, kept
 //!   in a 0600 file under the state directory, made from a bootstrap token once and replaced at half
 //!   its life. A spent credential presented again revokes every one of the machine's, so the file
-//!   is only ever replaced under a lock, and a login with it holds the lock too.
+//!   is only ever replaced under a lock, and a login with it holds the lock too. The login's token
+//!   is kept in the same file and reused by every process on the machine until a quarter of its
+//!   life (at least [`LOGIN_MARGIN_MS`]) is left: a machine holds a few live logins at most
+//!   (roll-access's `CHAIN_MAX_LOGINS`), and a restart storm or a cron job a minute must never
+//!   reach that.
 //!
 //! The metadata servers are link-local and fixed: asked directly (never through a proxy), with no
 //! redirects, and each login asks again for a fresh token. A token or credential never goes in an
@@ -67,6 +71,30 @@ struct Kept {
     /// The bootstrap token's SHA-256 it came from: the same token in the environment isn't
     /// exchanged again (that would revoke the machine), a new one is.
     bootstrap: String,
+    /// The last login's token, shared by the machine's processes ([`Login::fresh`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    login: Option<Login>,
+}
+
+/// A login's token and its times (ms): when it was got and when it ends.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Login {
+    token: String,
+    at: i64,
+    expires_at: i64,
+}
+
+/// A kept login is reused until this much (or a quarter of its life, if more) is left.
+const LOGIN_MARGIN_MS: i64 = 2 * 60 * 1000;
+
+impl Login {
+    /// Whether it's good to hand out at `now`: well before it ends, so the process using it has
+    /// most of its life (a renewing process logs in again a quarter before it ends, and finds it
+    /// past this), and it isn't the token the server just refused (`stale`).
+    fn fresh(&self, now: i64, stale: Option<&str>) -> bool {
+        let margin = ((self.expires_at - self.at) / 4).max(LOGIN_MARGIN_MS);
+        now >= self.at && now + margin < self.expires_at && stale != Some(self.token.as_str())
+    }
 }
 
 /// Whether this login is a machine identity's: `ROLL_IDENTITY_KIND=machine`, or a bootstrap token
@@ -139,10 +167,11 @@ fn keep(path: &Path, k: &Kept) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A machine identity's login: under the credential file's lock, its credential (made from the
-/// bootstrap token the first time, or from a new one; replaced once it's past half its life),
-/// then `login` with it.
-pub(super) async fn machine_login(api: &Api, identity: &str) -> anyhow::Result<(String, i64)> {
+/// A machine identity's login: under the credential file's lock, the login kept there while it's
+/// fresh (and isn't `stale`, the token the caller had refused or is renewing); else its credential
+/// (made from the bootstrap token the first time, or from a new one; replaced once it's past half
+/// its life), then `login` with it, kept for the machine's other processes.
+pub(super) async fn machine_login(api: &Api, identity: &str, stale: Option<&str>) -> anyhow::Result<(String, i64)> {
     let path = credential_file(identity)?;
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir).with_context(|| format!("making {}", dir.display()))?;
@@ -158,12 +187,12 @@ pub(super) async fn machine_login(api: &Api, identity: &str) -> anyhow::Result<(
         Ok(f)
     })
     .await??;
-    let out = locked(api, identity, &path).await;
+    let out = locked(api, identity, &path, stale).await;
     drop(lock);
     out
 }
 
-async fn locked(api: &Api, identity: &str, path: &Path) -> anyhow::Result<(String, i64)> {
+async fn locked(api: &Api, identity: &str, path: &Path, stale: Option<&str>) -> anyhow::Result<(String, i64)> {
     let kept: Option<Kept> = match std::fs::read_to_string(path) {
         Ok(text) => Some(serde_json::from_str::<Kept>(&text).with_context(|| format!("{} isn't a machine credential file", path.display()))?).filter(|k| k.identity == identity),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
@@ -191,10 +220,22 @@ async fn locked(api: &Api, identity: &str, path: &Path) -> anyhow::Result<(Strin
         let next = exchange_retrying(api, identity, "refresh", body, kept.bootstrap.clone()).await.map_err(|e| {
             if super::no_answer(&e) { e.context("replacing the machine credential got no answer, so it isn't used to log in: run again within two minutes and the replacement is retried") } else { e }
         })?;
+        // A replaced credential ends no login: the machine's goes on (one chain).
+        let next = Kept { login: kept.login.take(), ..next };
         keep(path, &next)?;
         kept = next;
     }
-    super::post_login(api, json!({ "identity": identity, "machine": kept.credential })).await
+    // The machine's own login, still good: no new one.
+    if let Some(l) = kept.login.take_if(|l| l.fresh(now, stale)) {
+        return Ok((l.token, l.expires_at));
+    }
+    let (token, expires_at) = super::post_login(api, json!({ "identity": identity, "machine": kept.credential })).await?;
+    kept.login = Some(Login { token: token.clone(), at: now, expires_at });
+    // Not kept, it's only logged in again by the next process: never a reason to fail this one.
+    if let Err(e) = keep(path, &kept) {
+        eprintln!("roll: couldn't keep the login in {} for the machine's other processes: {e:#}", path.display());
+    }
+    Ok((token, expires_at))
 }
 
 /// [`exchange`], asked again a few times while it gets no answer: rolld answers a retry of an
@@ -231,5 +272,5 @@ async fn exchange(api: &Api, identity: &str, step: &str, body: Value, bootstrap:
     let credential = v["secret"].as_str().context("the answer has no machine credential")?.to_string();
     let expires_at = v["expires_at"].as_i64().context("the answer has no expiry")?;
     let refresh_at = v["refresh_at"].as_i64().unwrap_or(expires_at);
-    Ok(Kept { identity: identity.to_string(), credential, expires_at, refresh_at, bootstrap })
+    Ok(Kept { identity: identity.to_string(), credential, expires_at, refresh_at, bootstrap, login: None })
 }

@@ -363,6 +363,11 @@ impl Control {
             }
             after = hits.last().map(|h| h["sort"].clone());
         }
+        // A list is replaced by deleting its index and writing it again: one read while that runs
+        // (or after a write that stopped partway) finds fewer ratings than its mapping promises.
+        if meta.get("ratings").and_then(Value::as_u64).is_some_and(|n| n != ratings.len() as u64) {
+            return Err(ControlError::Conflict(format!("[{index}] holds {} ratings where its list was written with {}: it's being built, or a write stopped partway (put it again)", ratings.len(), meta["ratings"])));
+        }
         let judgments = group(ratings).map_err(|e| ControlError::Invalid(format!("[{index}]: {e}")))?;
         Ok((meta, judgments))
     }

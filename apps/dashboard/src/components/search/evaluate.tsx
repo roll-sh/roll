@@ -108,9 +108,13 @@ export function EvaluatePanel({ cluster }: { cluster: SearchCluster }) {
     return js;
   };
 
+  // Saving under a list's name replaces it: say so first.
+  const replaces = (name: string) => !lists.some((l) => l.name === name) || window.confirm(`Replace the judgment list ${name}? Its ratings are replaced by these.`);
+
   const save = async () => {
     setError(null);
     setSaved(null);
+    if (!replaces(saveAs)) return;
     try {
       const kept = await searchApi.putJudgmentList(cluster.id, saveAs, pasted());
       setLists((await searchApi.judgmentLists(cluster.id)).lists);
