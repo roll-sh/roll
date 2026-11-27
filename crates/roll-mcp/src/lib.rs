@@ -562,7 +562,7 @@ async fn handle(State(m): State<Mcp>, uri: axum::http::Uri, ext: Extensions, hea
             // A method the revision doesn't have is a 404 (with its JSON-RPC error), so a client
             // tells it from a server that has no MCP endpoint here.
             Some(r) if modern && r["error"]["code"] == -32601 => (StatusCode::NOT_FOUND, Json(r)).into_response(),
-            Some(r) if modern && r["error"]["code"] == modern::HEADER_MISMATCH => (StatusCode::BAD_REQUEST, Json(r)).into_response(),
+            Some(r) if modern && (r["error"]["code"] == modern::HEADER_MISMATCH || r["error"]["code"] == tasks::MISSING_CAPABILITY) => (StatusCode::BAD_REQUEST, Json(r)).into_response(),
             Some(r) if !batch => Json(r).into_response(),
             last => {
                 responses.extend(last);
@@ -855,6 +855,9 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
         let (Some(method), Some(id)) = (msg.get("method").and_then(Value::as_str), msg.get("id").cloned()) else { continue };
         let params = msg.get("params").cloned().unwrap_or(Value::Null);
         let resp = match method {
+            // 2026-07-28 is stateless: it has neither (removed with the handshake), so a request of
+            // that revision asking for them is a method it doesn't have (404).
+            "initialize" | "ping" if ctx.modern => rpc_error(id, -32601, format!("{method} isn't a 2026-07-28 method: that revision has no handshake, and every request carries its version and capabilities in _meta")),
             "initialize" => rpc_result(id, initialize(ctx, &params)),
             "server/discover" => {
                 // Events (SEP-3415) are this revision's: only discovery offers them.
@@ -928,6 +931,10 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
                 denials::echo(&params, &mut args);
                 if let Some(r) = unwrapped {
                     rpc_result(id, r)
+                } else if ctx.modern && params.get("inputResponses").is_some_and(|r| r.as_object().is_none_or(|o| o.values().any(|a| !a.is_object()))) {
+                    // A retry's answers to an input request are an object keyed by request, each an
+                    // answer object (SEP-2322).
+                    rpc_error(id, -32602, "inputResponses is an object of the answers (each an object), keyed by each input request's name")
                 } else if ctx.search && name == search::FIND {
                     rpc_result(id, search::find(&ctx.tools(), &args))
                 } else if !args.is_object() {
@@ -985,6 +992,10 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
             }
             "tasks/get" | "tasks/update" | "tasks/cancel" => match tasks::method(ctx, method, &params).await {
                 Ok(v) => rpc_result(id, v),
+                // What it needs, as 2026-07-28's MissingRequiredClientCapabilityError says it.
+                Err((code, message)) if code == tasks::MISSING_CAPABILITY => {
+                    json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message, "data": { "requiredCapabilities": { "extensions": { tasks::EXT: {} } } } } })
+                }
                 Err((code, message)) => rpc_error(id, code, message),
             },
             "resources/list" => {
@@ -1025,7 +1036,7 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
                             let message: String = r["content"][0]["text"].as_str().unwrap_or("not read").chars().take(300).collect();
                             json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message, "data": r["structuredContent"] } })
                         }
-                        None => rpc_error(id, -32002, format!("resource not found: {uri}")),
+                        None => json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32002, "message": format!("resource not found: {uri}"), "data": { "uri": uri } } }),
                     }
                 }
                 Some(uri) if uri.starts_with("skill://") => match skills::read(uri, &tool_names(ctx)) {
@@ -1033,7 +1044,8 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
                     // The Skills extension's answer for a file roll doesn't serve.
                     None => rpc_error(id, -32602, format!("No skill file is served at {uri}")),
                 },
-                other => rpc_error(id, -32002, format!("resource not found: {}", other.unwrap_or(""))),
+                // Which one, as SEP-2164 asks (`data.uri`).
+                other => json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32002, "message": format!("resource not found: {}", other.unwrap_or("")), "data": { "uri": other.unwrap_or("") } } }),
             },
             "skills/list" => rpc_result(id, skills::list(&tool_names(ctx))),
             "skills/get" => match skills::get(params.get("uri").and_then(Value::as_str).unwrap_or(""), &tool_names(ctx)) {

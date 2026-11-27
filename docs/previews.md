@@ -2171,6 +2171,7 @@ previews in it), the operator and admins see every project.
 | `GET /v1/previews/{id}/routes?minutes=` | | `{ minutes, main, routes: [{ name, count, p50_ms, p95_ms, main_p50_ms, main_count, slower, repeated?, grew?, budget_ms, over_budget }] }`: each route's time from its traces (a trace's root span's name, as an SDK names a request by its route), against the same route on main's preview (the repo's default branch's, else the project's baseline; `main` its id), the slower ones first: `slower` with at least 5 traces on both sides and a p50 half again main's and 100 ms more. Names masked |
 | `PUT /v1/previews/{id}/files?service=&path=` | a tar, at most 100 MiB | `{ service, path }`: its files written under the directory `path`, said in the activity. Admin |
 | `GET /v1/previews/{id}/requests` | | `{requests: [{at, service, method, path, status, ms}]}`: its latest 200 requests through roll's runtime, newest first (Vercel's request log): never the query, which can carry a token, and the path masked as its logs are (a path is its code's to choose); `ms` until the answer's headers. Kept in memory on the preview's holder (runs there) and gone with its last service; a roll apps instance's requests are roll apps' own. The sheet's Requests tab, errors at a glance; `roll preview requests <id> [--errors]` |
+| `POST /v1/previews/{id}/replay` | | 202 `{head, by, at, ok: null, requests: []}`: its recent GETs (its own and main's preview's request logs, newest first, each once, 40 at most, never roll's `/__roll/` paths) asked of it and of main's preview again, in the background; `replay` on the preview has them at its head once done (`{…, ok, requests: [{service, path, status, main_status, removed, added}], error}`: `removed`/`added` a JSON answer's top-level fields main's has and its hasn't, or the other way; 0 is no answer); 409 for a fork's preview, or one already replaying; 400 for a branch's (`roll preview replay <id>`, the Requests tab's Replay) |
 | `GET /v1/previews/{id}/metrics` | | `{services: [{service, cpu, memory_bytes, memory_mb}]}`: what its running services use right now (Render's and Railway's metrics): cores of CPU and resident memory, against the memory each runs with. It comes from `docker stats` for roll's runtime. For roll apps' instances it's their last finished minute (`…/environments/pv-…/metrics`), with memory per instance. A sleeping service isn't listed. 404 for no such preview. It runs on the preview's holder, and is read again at most every 10 s, however many sheets ask. The sheet shows it on each running service, read every 15 s while it's open |
 | `GET /v1/previews/{id}/errors?minutes=` | | `{minutes, groups: [{service, fingerprint, kind, title, count, first_seen, last_seen, sample, trace?}]}`: its services' errors in the last `minutes` (5–1,440, 60 by default, rounded up to a 15-minute step), grouped as roll apps groups an environment's (Sentry's issues and Vercel's runtime logs, from the output alone; docs/apps/http-api.md): a stack trace (Python, JVM, Node, Go) joined from its lines, or an error line, by what it is (its type and first frames with numbers and ids taken out). `fingerprint` names a group (keyed under a random key per process, so it says nothing of the error and changes on a restart); `kind` is `python`, `java`, `node`, `go` or `line`; `sample` is the newest one whole (8 KiB at most); newest first; `trace` the kept trace its sample names, if any. Title and sample are masked as its logs are, a value a cut split included (its start at a line's end is `***` too): its code can print its secrets. Its values are read (an audited read) only when there's an error. A roll apps service's are roll apps' own (`…/environments/pv-…/errors`, its 50 most frequent); a `roll.toml` service's are read from its container's last 2,000 lines in the span (`docker logs --timestamps --since`, at most 4 MiB a stream for at most 10 s), masked before they're grouped, its newest 50. A runtime that doesn't stamp lines gives none (its tail's old crash would read as new). 404 for no such preview. It runs on the preview's holder and is read again at most every 10 s for a span, however many ask. The sheet's Errors tab |
 | `GET /v1/previews/{id}/errors/count?minutes=` | | `{minutes, count}`: how many errors those groups hold. Nothing in them leaves, so nothing is masked and no values are read. Kept as long. A row of the Previews tab shows the last hour's once it's on screen, three rows at a time |
@@ -2227,6 +2228,7 @@ type Preview = {
   release?: { head: string; ms: number; before_ms: number | null; locks?: { table: string; mode: string; ms: number }[] } | null;
   rehearsal?: { head: string; by: string; at: number; ok: boolean | null; ms: number | null; error: string | null } | null; // its release on today's data (POST …/rehearse)
   main_on_change?: { head: string; at: number; ms: number; pages: { service: string; path: string; status: number; main_status: number }[]; error: string | null } | null; // main's code on a copy of this head's migrated data (0: no answer)
+  replay?: { head: string; by: string; at: number; ok: boolean | null; requests: { service: string; path: string; status: number; main_status: number; removed: string[]; added: string[] }[]; error: string | null } | null; // its recent GETs replayed against main's preview, at its head
   masked_by_default?: { resource: string; column: string; why: string }[]; // columns masked as they look like people's data and no rule names them
   reaches?: "open" | "roll";
   visual_change?: { since: string; percent: number; phone_percent?: number | null } | null;
@@ -2329,6 +2331,16 @@ type Settings = {
   spec. The owner sets their site or project; the issue's summary and description are the note
   with its page and element (`automation-templates.test.ts`). A GitHub-mirrored repo's own
   GitHub Issues take notes natively (a note's work item).
+- **Replay** (Signadot's SmartTests, Speedscale's replays, without capturing production): `POST
+  …/replay` asks the GETs a change's preview and main's have served lately (their own request
+  logs, roll's runtime's: paths only, never a query) of each again, in the background, and keeps
+  how each answered: another status, or a JSON object answer whose top-level fields main's has
+  and the change's hasn't, is a difference ("/api/items 200 (main 200) · lost price"). The
+  Requests tab and `roll preview replay` say them. Only GETs (a write would act twice), only a
+  trusted change's preview (a fork's visitors and code choose its paths, and main's preview
+  answers with main's secrets), and only what the previews themselves served: replaying
+  production's traffic needs its capture's privacy designed first
+  (`engine.rs::recent_requests_are_replayed_against_mains_preview`).
 - **GitHub PR**, through roll code's GitHub outbox (durable, retried, sent on the repo's owner):
   - one comment, edited in place, with a table of services, URLs, status, data branches and cost;
   - a commit status `roll/preview` on the head. A preview removed before it was ready (the change
@@ -3152,25 +3164,24 @@ variables roll makes from a branch's URL too (it could run on the preview's own 
 change becoming queued wakes its settled preview, a rehearsal shows only at its head, and schema
 overlaps stay within a repo.
 
-1. **Notes to Jira and Asana, in review**: the gallery's templates (GitHub Issues and roll's work items
-   landed, #1196, #1209).
-2. **Replaying recorded traffic against the preview and main** (Signadot, Speedscale; L): writes
+1. **Replaying recorded traffic against the preview and main** (Signadot, Speedscale; L): writes
    replay safely on branched data; capturing production's requests needs its privacy designed
-   first.
-3. **Older pushes past the last three, started on demand**; **what a note's reviewer saw, from
+   first. The previews' own GETs replayed
+   against main's, in review.
+2. **Older pushes past the last three, started on demand**; **what a note's reviewer saw, from
    their own browser** (Jam, Marker.io).
-4. **Restore points for search and buckets**: search's once roll search's `reset {from}` is in
+3. **Restore points for search and buckets**: search's once roll search's `reset {from}` is in
    (its Next 32); buckets need a put-back on roll storage's side.
-5. **Previews for the members thread's next products**: once roll apps' and roll search's routes
+4. **Previews for the members thread's next products**: once roll apps' and roll search's routes
    become member routes (docs/members.md, v1.1).
-6. **Watches on pg-control**: the data step's Postgres compute start; cheap branches on ext4
+5. **Watches on pg-control**: the data step's Postgres compute start; cheap branches on ext4
    through overlay volumes; recovery to a time seconds old (unowned).
 
 Not to build: more lab checks on the first page (each adds noise to every pull request), or a
 Kubernetes cluster per preview (roll apps' Compose import covers multi-service apps, and a
 cluster would break "costs nothing asleep").
 
-Landed 2026-11-27, early: a failed story shard's share of the touched stories counted as untaken (#1175), and masking that's safe by default for NoSQL and search, with the project told of each column masked by default (#1177), and main's code on a copy of a change's migrated data, on roll apps (#1183) and roll's runtime (#1185), webhook URLs into private previews (#1187), the twelfth review's fixes (#1200), snapshots from the team's own tests (#1192), a note's work item made by roll (#1196), a team note opening a GitHub issue on a mirrored repo (#1209), and snapshots, notes and share links on roll apps services checked by service (#1212), and release_checks (#1204).
+Landed 2026-11-27, early: a failed story shard's share of the touched stories counted as untaken (#1175), and masking that's safe by default for NoSQL and search, with the project told of each column masked by default (#1177), and main's code on a copy of a change's migrated data, on roll apps (#1183) and roll's runtime (#1185), webhook URLs into private previews (#1187), the twelfth review's fixes (#1200), snapshots from the team's own tests (#1192), a note's work item made by roll (#1196), a team note opening a GitHub issue on a mirrored repo (#1209), and snapshots, notes and share links on roll apps services checked by service (#1212), release_checks (#1204), and preview notes to Jira and Asana (#1220).
 
 Landed 2026-11-26, midday: restore points for streams (#1112), the TurboSnap test's race under
 load (#1114), the tenth review's fixes (#1119), the visual review holding on stories a change

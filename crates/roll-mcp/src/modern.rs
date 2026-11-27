@@ -108,16 +108,28 @@ fn error(status: StatusCode, id: &Value, code: i64, message: String, data: Optio
 /// the HTTP status and JSON-RPC error to answer.
 pub fn check(h: &HeaderMap, msg: &Value, legacy: &[&str]) -> Result<(), (StatusCode, Value)> {
     let id = msg.get("id").cloned().unwrap_or(Value::Null);
-    let asked = version(msg).unwrap_or_default();
+    let mismatch = |what: String| Err(error(StatusCode::BAD_REQUEST, &id, HEADER_MISMATCH, format!("Header mismatch: {what}"), None));
+    let invalid = |what: &str| Err(error(StatusCode::BAD_REQUEST, &id, INVALID_PARAMS, format!("Invalid params: {what}"), None));
+    let header = header_value(h, "mcp-protocol-version");
+    // The header and the body disagreeing is a mismatch, whatever either says (SEP-2575); a body
+    // with no version, or no `_meta`, is a malformed request, not an unknown version.
+    let Some(asked) = version(msg) else {
+        return invalid(&format!("a 2026-07-28 request carries its version in params._meta[{VERSION:?}]"));
+    };
+    if let Some(v) = &header
+        && v != asked
+    {
+        return mismatch(format!("MCP-Protocol-Version {v:?} isn't the body's {asked:?}"));
+    }
     if asked != MODERN {
         let supported: Vec<&str> = std::iter::once(MODERN).chain(legacy.iter().copied()).collect();
         return Err(error(StatusCode::BAD_REQUEST, &id, UNSUPPORTED_VERSION, "Unsupported protocol version".into(), Some(json!({ "supported": supported, "requested": asked }))));
     }
-    let mismatch = |what: String| Err(error(StatusCode::BAD_REQUEST, &id, HEADER_MISMATCH, format!("Header mismatch: {what}"), None));
-    match header_value(h, "mcp-protocol-version") {
-        Some(v) if v == asked => {}
-        Some(v) => return mismatch(format!("MCP-Protocol-Version {v:?} isn't the body's {asked:?}")),
-        None => return mismatch("MCP-Protocol-Version is missing".into()),
+    if !msg["params"]["_meta"][CAPABILITIES].is_object() {
+        return invalid(&format!("a 2026-07-28 request declares what it can in params._meta[{CAPABILITIES:?}] (an object, empty if nothing)"));
+    }
+    if header.is_none() {
+        return mismatch("MCP-Protocol-Version is missing".into());
     }
     let method = msg["method"].as_str().unwrap_or_default();
     // A notification (no id) may come without it: the TypeScript SDK sends `notifications/cancelled`

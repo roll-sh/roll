@@ -4062,6 +4062,7 @@ impl Store {
         // head's outcome isn't this one's.
         let rehearsal = self.runtime_fact::<crate::Rehearsal>(&r.id, "rehearsal")?.filter(|x| x.head == r.build());
         let main_on_change = self.runtime_fact::<crate::MainOnChange>(&r.id, "main_on_change")?.filter(|x| x.head == r.build());
+        let replay = self.runtime_fact::<crate::Replay>(&r.id, "replay")?.filter(|x| x.head == r.build());
         let masked_by_default: Vec<crate::MaskedByDefault> = self.runtime_fact(&r.id, "masked_by_default")?.unwrap_or_default();
         let schema_overlaps = self.schema_overlaps(&r, schema_changes.as_deref())?;
         let kept_until = self.kept_until(&r.id)?;
@@ -4214,6 +4215,7 @@ impl Store {
             schema_overlaps,
             rehearsal,
             main_on_change,
+            replay,
             masked_by_default,
             release,
             kept_until,
