@@ -67,7 +67,7 @@ enum Open {
 }
 
 fn open_link(h: &str) -> Open {
-    let Some(label_end) = h[1..].find(|c| c == ']' || c == '[' || c == '\n').map(|i| i + 1) else {
+    let Some(label_end) = h[1..].find([']', '[', '\n']).map(|i| i + 1) else {
         return if h.len() - 1 > 512 { Open::No } else { Open::More };
     };
     if h.as_bytes()[label_end] != b']' || label_end - 1 > 512 {
@@ -225,7 +225,8 @@ mod tests {
         o.extension.tasklist = true;
         let arena = comrak::Arena::new();
         let root = comrak::parse_document(&arena, out, &o);
-        let linkable = regex::Regex::new(r"(?i)https?://|ftp://|www\.|//[a-z0-9-]|mailto:|xmpp:|[a-z0-9.+_-]@[a-z0-9]").unwrap();
+        // (`mailto:` and `xmpp:` aren't links without their address, and `@` is broken.)
+        let linkable = regex::Regex::new(r"(?i)https?://|ftp://|www\.|//[a-z0-9-]|[a-z0-9.+_-]@[a-z0-9]").unwrap();
         for n in root.descendants() {
             match &n.data().value {
                 NodeValue::Link(l) => assert!(allowed.contains(&l.url), "a link to {} in {out:?}", l.url),

