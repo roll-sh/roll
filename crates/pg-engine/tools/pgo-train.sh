@@ -25,8 +25,12 @@
 #                    catalog regress breadth): only for a hold-out measurement, never for a shipped
 #                    build (tools/dist-pgo.sh refuses to merge a profile without every class
 #                    unless PGO_TRAIN_SKIP is set, and marks such a build as not for shipping)
-# Time: about 14 minutes on this machine (823-861 s, 2026-11-23). Classes and their shares are set below;
-# a class's OLTP parts run for fixed seconds, the others for fixed work. A class that completes
+# Time: about 14 minutes on this machine (823-861 s, 2026-11-23). Classes and their shares are set below.
+# Every part runs a fixed amount of work: the OLTP parts a fixed number of operations a client
+# (bench --txns, pgbench -t), about what the instrumented engine did in the seconds they ran for
+# before, since what a part ran for a fixed time followed the machine's load (one class's counts
+# 4.5-5.7 G from one commit to the next) and so did the profile (HANDOFF "Reproducible PGO
+# training"). A class that completes
 # leaves <raw dir>/<class>/.ran; the engine must still be running at each class's end (an engine
 # that died lost that run's counts: the script stops with an error).
 set -eu
@@ -120,19 +124,22 @@ class point
 # Point reads: extended protocol with binary results (the bench client), simple protocol
 # (text), extended with text parameters and results (pgbench -M extended), prepared text.
 if want point; then
-  b oltp --rows 100000 --clients 8 --secs 25 --only point_select
-  b oltp --rows 100000 --clients 8 --secs 15 --only point_select_simple
-  b oltp --rows 100000 --clients 1 --secs 5 --only point_select,select_1
+  b oltp --rows 100000 --clients 8 --txns 96000 --only point_select
+  # (A client older than --txns ignores it and runs its default 10 s: refused.)
+  grep -q 'txns_per_client=96000' "$WORK/out/bench.log" \
+    || { echo "pgo-train: the bench client ($BENCH) has no --txns: build tools/bench of this checkout" >&2; exit 1; }
+  b oltp --rows 100000 --clients 8 --txns 59000 --only point_select_simple
+  b oltp --rows 100000 --clients 1 --txns 70000 --only point_select,select_1
   pgbench -i -I dtGvp -s 1 bench
-  pgbench -n -S -M extended -c 8 -j 4 -T 10 bench
-  pgbench -n -S -M prepared -c 8 -j 4 -T 10 bench
-  pgbench -n -S -M simple -c 8 -j 4 -T 5 bench
+  pgbench -n -S -M extended -c 8 -j 4 -t 43000 bench
+  pgbench -n -S -M prepared -c 8 -j 4 -t 46000 bench
+  pgbench -n -S -M simple -c 8 -j 4 -t 22000 bench
 fi
 class range
 # Range reads: 100-row index ranges, a secondary index's aggregate.
 if want range; then
-  b oltp --rows 100000 --clients 8 --secs 25 --only range_scan_100
-  b oltp --rows 100000 --clients 8 --secs 5 --only secondary_lookup
+  b oltp --rows 100000 --clients 8 --txns 25000 --only range_scan_100
+  b oltp --rows 100000 --clients 8 --txns 13000 --only secondary_lookup
 fi
 class bulk
 # Bulk: COPY in and out, index builds, INSERT ... SELECT, UPDATE, DELETE, VACUUM, ANALYZE.
@@ -161,21 +168,21 @@ class short
 # BENCH "Short write transactions") and its single-row UPDATE alone.
 if want short; then
   b oltp-load --rows 100000
-  b oltp --rows 100000 --clients 8 --secs 25 --only short_txn
-  b oltp --rows 100000 --clients 32 --secs 15 --only short_txn
-  b oltp --rows 100000 --clients 1 --secs 5 --only short_txn
-  b oltp --rows 100000 --clients 8 --secs 5 --only insert
-  b oltp --rows 100000 --clients 8 --secs 5 --only update_indexed
-  b oltp --rows 100000 --clients 8 --secs 5 --only upsert
-  pgbench -n -f /w/delete.sql -c 8 -j 4 -T 5 bench
+  b oltp --rows 100000 --clients 8 --txns 10500 --only short_txn
+  b oltp --rows 100000 --clients 32 --txns 3000 --only short_txn
+  b oltp --rows 100000 --clients 1 --txns 9000 --only short_txn
+  b oltp --rows 100000 --clients 8 --txns 9300 --only insert
+  b oltp --rows 100000 --clients 8 --txns 9200 --only update_indexed
+  b oltp --rows 100000 --clients 8 --txns 8900 --only upsert
+  pgbench -n -f /w/delete.sql -c 8 -j 4 -t 4400 bench
   [ -n "$(psql -d bench -Atc "SELECT 1 FROM pg_class WHERE relname = 'pgbench_accounts'")" ] || pgbench -i -I dtGvp -s 1 bench
-  pgbench -n -M prepared -c 8 -j 4 -T 15 bench
-  pgbench -n -M simple -c 8 -j 4 -T 5 bench
+  pgbench -n -M prepared -c 8 -j 4 -t 1800 bench
+  pgbench -n -M simple -c 8 -j 4 -t 540 bench
   psql -d bench -c CHECKPOINT
   [ -n "$(psql -d tpcb -Atc "SELECT 1 FROM pg_class WHERE relname = 'pgbench_accounts'" 2>/dev/null)" ] \
     || { psql -d postgres -c "CREATE DATABASE tpcb" >/dev/null; pgbench -i -I dtGvp -s 32 tpcb; }
-  pgbench -n -M prepared -c 8 -j 4 -T 15 tpcb
-  pgbench -n -M prepared -f /w/update.sql -D scale=32 -c 8 -j 4 -T 10 tpcb
+  pgbench -n -M prepared -c 8 -j 4 -t 2000 tpcb
+  pgbench -n -M prepared -f /w/update.sql -D scale=32 -c 8 -j 4 -t 5000 tpcb
 fi
 psql -d postgres -c "DROP DATABASE IF EXISTS tpcb" >/dev/null
 class tpch
