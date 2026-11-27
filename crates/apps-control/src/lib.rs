@@ -1893,6 +1893,7 @@ impl Apps {
         let sso = gate.as_ref().and_then(|a| a.sso.clone());
         let preflight = gate.as_ref().map(|a| a.preflight.clone()).unwrap_or_default();
         let callers = gate.as_ref().map(|a| a.callers.clone()).unwrap_or_default();
+        let webhook_paths = gate.as_ref().map(|a| a.webhooks.iter().map(|h| h.path.clone()).collect()).unwrap_or_default();
         let (sid, e) = (r.service.clone(), r.name.clone());
         let waiting_for_ci = self.db(move |s| s.ci_waits()).await?.into_iter().find(|(w, _)| w.service == sid && w.env == e).map(|(w, _)| w.sha);
         let (sid, e) = (r.service.clone(), r.name.clone());
@@ -1927,6 +1928,7 @@ impl Apps {
             last_cold_start,
             preflight,
             callers,
+            webhook_paths,
             password,
             next_run_at,
             schedules: self.schedule_states(&svc, &r).await,
@@ -2440,7 +2442,7 @@ impl Apps {
             None => None,
             Some(Value::Null) => Some(None),
             Some(Value::Object(a)) => {
-                if let Some(k) = a.keys().find(|k| !["token", "bypass_sha256", "signed_in", "password", "sso", "callers"].contains(&k.as_str())) {
+                if let Some(k) = a.keys().find(|k| !["token", "bypass_sha256", "signed_in", "password", "sso", "callers", "webhooks"].contains(&k.as_str())) {
                     return Err(Error::BadRequest(format!("access.{k} isn't a field")));
                 }
                 let signed_in = match a.get("signed_in") {
@@ -2484,10 +2486,28 @@ impl Apps {
                     Some(Value::String(h)) if h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()) => Some(h.to_ascii_lowercase()),
                     Some(_) => return Err(Error::BadRequest("access.bypass_sha256 is a SHA-256 in hex".into())),
                 };
+                // A preview's webhook URLs (roll previews' `roll_hook`): one exact path each, only on
+                // a preview (ephemeral) environment, the tokens' SHA-256 only.
+                let webhooks: Vec<crate::model::HookUrl> = match a.get("webhooks") {
+                    None | Some(Value::Null) => Vec::new(),
+                    Some(v) => serde_json::from_value(v.clone()).map_err(|_| Error::BadRequest("access.webhooks is [{path, token_sha256}]".into()))?,
+                };
+                let path_ok = |p: &str| p.starts_with('/') && p.len() <= 512 && !p.contains(['?', '#', '%', '\\']) && !p.split('/').any(|s| s == "." || s == "..") && p.bytes().all(|b| b.is_ascii_graphic());
+                if webhooks.len() > crate::model::MAX_HOOK_URLS || webhooks.iter().any(|h| !path_ok(&h.path) || h.token_hash.len() != 64 || !h.token_hash.bytes().all(|b| b.is_ascii_hexdigit())) {
+                    return Err(Error::BadRequest(format!("access.webhooks is at most {} of {{path: an absolute path (no query, no . or .., no %), token_sha256: a SHA-256 in hex}}", crate::model::MAX_HOOK_URLS)));
+                }
+                let webhooks: Vec<crate::model::HookUrl> = webhooks.into_iter().map(|h| crate::model::HookUrl { path: h.path, token_hash: h.token_hash.to_ascii_lowercase() }).collect();
+                if !webhooks.is_empty() {
+                    let (sid, e) = (service.to_string(), env.to_string());
+                    let ephemeral = o.get("ephemeral") == Some(&Value::Bool(true)) || self.db(move |s| s.environment(&sid, &e)).await.is_ok_and(|r| r.ephemeral);
+                    if !ephemeral {
+                        return Err(Error::BadRequest("access.webhooks is a preview (ephemeral) environment's".into()));
+                    }
+                }
                 // A new way in keeps the paths whose preflights pass (`preflight`, set on its own).
                 let (sid, e) = (service.to_string(), env.to_string());
                 let preflight = self.db(move |s| s.access(&sid, &e)).await.ok().flatten().map(|a| a.preflight).unwrap_or_default();
-                Some(Some(Access { token_hash: token.map(crate::public::token_hash), bypass_hash: bypass, signed_in, password_hash: password, sso, preflight, callers }))
+                Some(Some(Access { token_hash: token.map(crate::public::token_hash), bypass_hash: bypass, signed_in, password_hash: password, sso, preflight, callers, webhooks }))
             }
             Some(_) => return Err(Error::BadRequest("access is {token?, signed_in?, password?, sso?, callers?, bypass_sha256?} or null".into())),
         };
