@@ -1006,6 +1006,7 @@ mod converge;
 mod discover;
 mod drains;
 mod env;
+mod main_on_change;
 mod masks;
 mod points;
 pub use points::MAX_POINTS;
