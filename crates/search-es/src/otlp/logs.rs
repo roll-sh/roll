@@ -116,6 +116,16 @@ impl Budget {
         }
     }
 
+    /// `bytes` of text more in the record being built (a value already counted).
+    fn bytes(&mut self, bytes: usize) -> Step<()> {
+        let n = bytes as u64;
+        self.record_bytes += n;
+        match self.charge(n) {
+            Ok(()) => Step::Ok(()),
+            Err(f) => Step::Stop(f),
+        }
+    }
+
     /// The record was written out (or rejected): its values are given back.
     fn record_done(&mut self) {
         let n = std::mem::take(&mut self.record_bytes);
@@ -225,30 +235,24 @@ fn any_pb(b: &[u8], depth: usize, budget: &mut Budget, batch: &mut Batch) -> Ste
     if depth > MAX_DEPTH {
         return Step::Reject(Rejected(format!("values nested deeper than {MAX_DEPTH}")));
     }
+    // Counted before its fields are read: an empty value is a value too.
+    step!(budget.value(0));
     let mut out = Value::Null;
     for f in Fields::new(b) {
         let (n, w) = wire!(f);
         out = match n {
             1 => {
                 let s = wire!(w.string());
-                step!(budget.value(s.len().min(MAX_VALUE_BYTES)));
+                step!(budget.bytes(s.len().min(MAX_VALUE_BYTES)));
                 Value::from(bounded(s, batch))
             }
-            2 => {
-                step!(budget.value(0));
-                Value::Bool(wire!(w.uint()) != 0)
-            }
-            3 => {
-                step!(budget.value(0));
-                Value::from(wire!(w.uint()) as i64)
-            }
+            2 => Value::Bool(wire!(w.uint()) != 0),
+            3 => Value::from(wire!(w.uint()) as i64),
             4 => {
-                step!(budget.value(0));
                 let f = f64::from_bits(wire!(w.uint()));
                 if f.is_finite() { Value::from(f) } else { Value::from(f.to_string()) }
             }
             5 | 6 => {
-                step!(budget.value(0));
                 // ArrayValue { values = 1 } / KeyValueList { values = 1 }.
                 let mut arr = Vec::new();
                 let mut map = Map::new();
@@ -272,7 +276,7 @@ fn any_pb(b: &[u8], depth: usize, budget: &mut Budget, batch: &mut Batch) -> Ste
                 if kept.len() < raw.len() {
                     batch.truncated += 1;
                 }
-                step!(budget.value(kept.len() * 4 / 3 + 4));
+                step!(budget.bytes(kept.len() * 4 / 3 + 4));
                 Value::from(base64_encode(kept))
             }
             _ => continue,
@@ -323,14 +327,14 @@ fn any_json(v: &Value, depth: usize, budget: &mut Budget, batch: &mut Batch) -> 
     if depth > MAX_DEPTH {
         return Step::Reject(Rejected(format!("values nested deeper than {MAX_DEPTH}")));
     }
+    step!(budget.value(0));
     let Some(m) = v.as_object() else { return Step::Ok(Value::Null) };
     let get = |a: &str, b: &str| m.get(a).or_else(|| m.get(b));
     if let Some(s) = get("stringValue", "string_value") {
         let s = s.as_str().unwrap_or_default();
-        step!(budget.value(s.len().min(MAX_VALUE_BYTES)));
+        step!(budget.bytes(s.len().min(MAX_VALUE_BYTES)));
         return Step::Ok(Value::from(bounded(s, batch)));
     }
-    step!(budget.value(0));
     if let Some(b) = get("boolValue", "bool_value") {
         return Step::Ok(Value::Bool(b.as_bool().unwrap_or(false)));
     }
