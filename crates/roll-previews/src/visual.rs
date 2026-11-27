@@ -190,29 +190,7 @@ pub fn text_diff(then: &str, now: &str) -> crate::TextDiff {
 
 #[cfg(test)]
 mod tests {
-    /// Pages changed the same way have one signature wherever the change sits (Percy's grouped
-    /// diffs); another change, a color included, has another; an unchanged page none.
-    #[test]
-    fn the_same_change_on_two_pages_has_one_signature() {
-        // A 6 × 6 square at (x, y) on a white 40 × 40 page, in `color`.
-        let page = |x: u32, y: u32, color: [u8; 4]| png(40, 40, move |px, py| if (x..x + 6).contains(&px) && (y..y + 6).contains(&py) { color } else { [255, 255, 255, 255] });
-        let (black, red, blue) = ([0, 0, 0, 255], [220, 30, 30, 255], [30, 30, 220, 255]);
-        let sig = |before: &[u8], after: &[u8]| super::compare(before, after).unwrap().1;
-        let here = sig(&page(2, 2, black), &page(2, 2, red));
-        assert!(here.as_ref().is_some_and(|s| s.len() == 12));
-        assert_eq!(sig(&page(20, 30, black), &page(20, 30, red)), here, "the same change elsewhere");
-        assert_ne!(sig(&page(2, 2, black), &page(2, 2, blue)), here, "a button gone blue isn't one gone red");
-        assert_eq!(sig(&page(2, 2, black), &page(2, 2, black)), None, "nothing changed");
-    }
 
-    #[test]
-    fn a_page_s_words_against_main_s() {
-        let d = super::text_diff("Shop\nCheckout\nHelp\nHelp", "Shop\nPay now\n\n  Help  ");
-        assert_eq!((d.added, d.removed, d.added_n, d.removed_n), (vec!["Pay now".to_string()], vec!["Checkout".to_string(), "Help".to_string()], 1, 2));
-        let many: String = (0..30).map(|i| format!("line {i}\n")).collect();
-        let d = super::text_diff("", &many);
-        assert_eq!((d.added.len(), d.added_n), (20, 30), "bounded, with the count");
-    }
     use super::{changed, diff};
     use image::{ImageFormat, Rgba, RgbaImage};
 

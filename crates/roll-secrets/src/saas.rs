@@ -727,7 +727,10 @@ impl Provider {
     /// credential before it's checked: from the vendor's answer on, it's the key every later
     /// rotation needs, whatever happens to this one. Checking it with a request of its own starts
     /// the old secret's grace at the vendor (the link's `grace_minutes`, a leak's 0). Nothing is
-    /// left to revoke: the handle is empty.
+    /// left to revoke: the handle is the claim (`claim`, its time), held until the write storing
+    /// the new key is done ([`LinkProvider::settled`]). A rotation that read the secret before
+    /// another's write would otherwise rotate the key that write stored, and leave the secret on
+    /// it while the vendor ends it.
     fn self_rotate(&self, id: &str, vendor: &Vendor, key: &Value, link: &Link) -> Result<Issued> {
         let d = self.deliver.as_ref();
         let now = now_ms();
@@ -741,12 +744,19 @@ impl Provider {
             paddle_check(d, vendor, &new, &rotation)?;
             let Vendor::Paddle { api_key_id, .. } = vendor else { unreachable!("only Paddle rotates itself") };
             names::value(new.expose()).map_err(|_| Error::Link("paddle answered a secret roll can't keep (over 64 KiB)".into()))?;
-            Ok(Issued { parts: BTreeMap::from([("secret".to_string(), new), ("id".to_string(), Value::new(api_key_id.clone()))]), handle: json!({}), expires_at })
+            Ok(Issued { parts: BTreeMap::from([("secret".to_string(), new), ("id".to_string(), Value::new(api_key_id.clone()))]), handle: json!({ "claim": now }), expires_at })
         });
-        if let Err(e) = self.db.write(|c| Ok::<_, Error>(c.execute("UPDATE saas_rotators SET rotating_at = NULL WHERE id = ? AND rotating_at = ?", params![id, now])?)) {
-            tracing::warn!(rotator = %id, "releasing a self-rotation's claim failed (it lapses by itself): {e}");
+        if out.is_err() {
+            self.release(id, now);
         }
         out
+    }
+
+    /// A self-rotation's claim made at `at`, given up (a later claim is left alone).
+    fn release(&self, id: &str, at: i64) {
+        if let Err(e) = self.db.write(|c| Ok::<_, Error>(c.execute("UPDATE saas_rotators SET rotating_at = NULL WHERE id = ? AND rotating_at = ?", params![id, at])?)) {
+            tracing::warn!(rotator = %id, "releasing a self-rotation's claim failed (it lapses by itself): {e}");
+        }
     }
 }
 
@@ -796,6 +806,16 @@ impl LinkProvider for Provider {
     /// roll's lease.
     fn revocable(&self, link: &Link) -> bool {
         !self.vendor(&link.r#ref).is_some_and(|v| v.self_rotating())
+    }
+
+    fn supersedes(&self, link: &Link) -> bool {
+        self.vendor(&link.r#ref).is_some_and(|v| v.self_rotating())
+    }
+
+    fn settled(&self, r#ref: &str, handle: &Json) {
+        if let Some(at) = handle.get("claim").and_then(Json::as_i64) {
+            self.release(r#ref, at);
+        }
     }
 
     /// A vendor that ends its keys by itself: the link rotates them before that, or the key

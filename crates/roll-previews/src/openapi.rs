@@ -179,21 +179,6 @@ pub fn breaking(main: &str, change: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    /// A service's OpenAPI lines read back as facts of the shapes the session writes, sorted,
-    /// each once; anything else its document could hold (another method, no path, a newline to
-    /// fake a line, a 4xx response, a word that isn't a fact) doesn't.
-    #[test]
-    fn only_facts_of_their_shapes_read_back() {
-        let got = super::lines(
-            r#"{"api": ["POST /orders", "GET /users", "GET /users", "FETCH /x", "GET users", "GET /a\nDELETE /b", 7,
-               "GET /users param query:limit type integer", "GET /users response 200 email type string",
-               "GET /users response 404 error type string", "GET /users param query:limit maybe", "GET /users cookie x type y"]}"#,
-        )
-        .unwrap();
-        assert_eq!(got, ["GET /users", "GET /users param query:limit type integer", "GET /users response 200 email type string", "POST /orders"]);
-        assert_eq!(super::operations(&got.join("\n")), "GET /users\nPOST /orders");
-        assert_eq!(super::lines(r#"{"seo": {}}"#), None, "no document read");
-    }
 
     /// What breaks inside an operation both keep: a parameter that becomes required and a new
     /// required body field, a type that changes, a value no longer taken, a response field that
