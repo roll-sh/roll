@@ -158,7 +158,9 @@ tarballs, and checks the x86_64 build on every pull request that touches `crates
 
 - **Installing.** `irm https://roll.sh/install.ps1 | iex` puts `roll.exe` in
   `%LOCALAPPDATA%\Programs\roll` and on your PATH, after checking it against the release's
-  `SHA256SUMS` as `install.sh` does (a mismatch installs nothing). For a server, from an
+  `SHA256SUMS` and, with gh logged in, its build provenance (`gh attestation verify`), as
+  `install.sh` does (a mismatch installs nothing; `ROLL_VERIFY=attestation` requires the
+  provenance check). For a server, from an
   administrator's PowerShell, `& ([scriptblock]::Create((irm https://roll.sh/install.ps1))) -System`
   installs into `%ProgramFiles%\roll` for every account. Each release also carries a Scoop manifest
   (`scoop install https://github.com/roll-sh/roll/releases/download/cli-v<version>/roll.json`) and
