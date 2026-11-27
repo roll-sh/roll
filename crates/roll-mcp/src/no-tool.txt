@@ -52,6 +52,7 @@ DELETE /v1/previews/projects/{project}/bypass                                  a
 GET /v1/previews/projects/{project}/bypass                                     answers or sets a credential
 POST /v1/previews/projects/{project}/bypass                                    answers or sets a credential
 POST /v1/previews/projects/{project}/hooks                                     answers or sets a credential (a deploy hook's secret)
+POST /v1/previews/{id}/notes/{note}/work                                       no tool yet
 POST /v1/previews/{id}/approve                                                 a person's call (approving, accepting, cutting off)
 PUT /v1/previews/{id}/env                                                      answers or sets a credential (a preview's env is reveal)
 GET /v1/previews/{id}/errors/count                                             the dashboard's (a row's count; previews_errors has the groups)

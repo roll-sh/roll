@@ -38,6 +38,7 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route("/v1/previews/{id}/connect", get(connect))
         .route("/v1/previews/{id}/notes", get(notes))
         .route("/v1/previews/{id}/notes/{note}/resolve", post(resolve_note))
+        .route("/v1/previews/{id}/notes/{note}/work", post(note_work))
         .route("/v1/previews/{id}/notes/{note}/crop", get(note_crop))
         .route("/v1/previews/{id}/mail", get(mails))
         .route("/v1/previews/{id}/mail/{mail}", get(mail_raw))
@@ -584,6 +585,17 @@ async fn resolve_note(AxState(e): S, Path((id, note)): Path<(String, String)>, w
     };
     e.resolve_note(&id, &note, &by).await?;
     Ok(Json(serde_json::json!({ "resolved": note })))
+}
+
+/// The note made a work item on its change's repo (the same one when asked again).
+async fn note_work(AxState(e): S, Path((id, note)): Path<(String, String)>, who: Option<axum::Extension<roll_auth::SignedIn>>, grant: Option<axum::Extension<roll_auth::Grant>>) -> crate::Result<Json<crate::notes::NoteWork>> {
+    check_id(&id)?;
+    let by = match (who, grant) {
+        (Some(axum::Extension(u)), None) => u.handle,
+        (_, Some(axum::Extension(g))) => format!("token:{}", g.name),
+        (None, None) => "operator".into(),
+    };
+    e.note_to_work(&id, &note, &by).await.map(Json)
 }
 
 /// The mail the preview's services sent, caught (newest first; the last 50).

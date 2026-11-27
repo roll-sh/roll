@@ -2722,7 +2722,7 @@ async fn a_notes_element_is_cropped_by_the_next_screenshot() {
     let mut png = Vec::new();
     image::RgbaImage::new(4, 4).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
     *e.apps.shot.lock() = Some(png.clone());
-    let note = |id: &str, selector: &str| roll_previews::notes::Note { id: id.into(), path: "/".into(), selector: selector.into(), note: "look".into(), by: "ada".into(), at: 1, replies: Vec::new(), crop: false, crop_as: None, seen: Default::default(), outside: false };
+    let note = |id: &str, selector: &str| roll_previews::notes::Note { id: id.into(), path: "/".into(), selector: selector.into(), note: "look".into(), by: "ada".into(), at: 1, replies: Vec::new(), crop: false, crop_as: None, seen: Default::default(), outside: false, work: None };
     e.code.feedback.lock().insert("chg_cr".into(), vec![note("rv_h1", "body > h1"), note("rv_gone", "#missing"), note("rv_bad", "h1 { color: red }")]);
     e.code.open(change("chg_cr", 4));
     e.engine.pass().await.unwrap();
@@ -2965,7 +2965,7 @@ async fn a_pages_notes_by_its_environment_name() {
     e.code.open(change("chg_n", 4));
     e.engine.pass().await.unwrap();
     let p = e.engine.store.row_by_change("chg_n").unwrap().unwrap();
-    let note = |path: &str, text: &str| roll_previews::notes::Note { id: format!("rv_{text}"), path: path.into(), selector: "h1".into(), note: text.into(), by: "ada".into(), at: 1, replies: Vec::new(), crop: false, crop_as: None, seen: Default::default(), outside: false };
+    let note = |path: &str, text: &str| roll_previews::notes::Note { id: format!("rv_{text}"), path: path.into(), selector: "h1".into(), note: text.into(), by: "ada".into(), at: 1, replies: Vec::new(), crop: false, crop_as: None, seen: Default::default(), outside: false, work: None };
     e.code.feedback.lock().insert("chg_n".into(), vec![note("/", "Too big"), note("/about", "Typo")]);
     let env_name = roll_previews::branch_name(&p.id);
     let got = e.engine.notes_for(&env_name, "/").await.unwrap();
@@ -3146,12 +3146,35 @@ async fn a_share_links_guest_leaves_notes_as_a_guest() {
     }
     assert!(matches!(e.engine.guest_note(&p.id, &open, &note).await, Err(roll_previews::Error::Conflict(_))), "ten an hour per link");
     // What a guest sees: their link's notes only.
-    let theirs = roll_previews::notes::Note { id: "rv_c1".into(), path: "/pricing".into(), selector: "button.buy".into(), note: "Too small".into(), by: "guest:Ada".into(), at: 1, replies: Vec::new(), crop: false, crop_as: None, seen: Default::default(), outside: false };
+    let theirs = roll_previews::notes::Note { id: "rv_c1".into(), path: "/pricing".into(), selector: "button.buy".into(), note: "Too small".into(), by: "guest:Ada".into(), at: 1, replies: Vec::new(), crop: false, crop_as: None, seen: Default::default(), outside: false, work: None };
     let team = roll_previews::notes::Note { id: "rv_team".into(), by: "bob".into(), ..theirs.clone() };
     e.code.feedback.lock().insert("chg_g".into(), vec![theirs, team]);
     let seen: Vec<String> = e.engine.guest_notes_of(&p.id, &open.id, "/pricing").await.unwrap().into_iter().map(|n| n.id).collect();
     assert_eq!(seen, ["rv_c1"]);
     assert!(e.engine.guest_notes_of(&p.id, &closed.id, "/pricing").await.unwrap().is_empty());
+}
+
+/// A note made a work item on its change's repo (Marker.io's notes to a tracker; roll code's
+/// work items, which an agent can claim): its words and where it was left, a guest's marked as
+/// someone's outside the team, once a note, said on the change and shown with the note.
+#[tokio::test]
+async fn a_note_becomes_a_work_item_once() {
+    let e = env(json!({ "enabled": true }));
+    e.code.open(change("chg_nw", 1));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_nw").unwrap().unwrap();
+    let note = roll_previews::notes::Note { id: "rv_n1".into(), path: "/cart".into(), selector: "button.pay".into(), note: "The Pay button is cut off\non a phone".into(), by: "guest:Ada".into(), at: 1, replies: Vec::new(), crop: false, crop_as: None, seen: Default::default(), outside: true, work: None };
+    e.code.feedback.lock().insert("chg_nw".into(), vec![note]);
+    assert!(matches!(e.engine.note_to_work(&p.id, "rv_none", "bob").await, Err(roll_previews::Error::NotFound(_))));
+    let w = e.engine.note_to_work(&p.id, "rv_n1", "bob").await.unwrap();
+    assert_eq!(e.engine.note_to_work(&p.id, "rv_n1", "bob").await.unwrap(), w, "asked again: the same one");
+    let works = e.code.works.lock().clone();
+    assert_eq!(works.len(), 1, "made once");
+    let (change, title, body, labels, outside) = &works[0];
+    assert!(change == "chg_nw" && title == "Preview feedback: The Pay button is cut off" && labels == &["preview-feedback"] && *outside, "{works:?}");
+    assert!(body.contains("on a phone") && body.contains("/cart") && body.contains("button.pay"), "{body}");
+    assert!(e.code.comments.lock().iter().any(|(c, b, _, _)| c == "chg_nw" && b.contains(&format!("work item #{}", w.number))), "said on the change");
+    assert_eq!(e.engine.open_notes(&p.id).await.unwrap()[0].work.as_ref(), Some(&w), "shown with the note");
 }
 
 /// A start's dynamic credentials (roll secrets' leases) live as long as it runs: renewed near

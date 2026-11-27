@@ -28,6 +28,8 @@ pub struct FakeCode {
     pub feedback: Mutex<HashMap<String, Vec<roll_previews::notes::Note>>>,
     /// Comments made on changes: (change, body, by, outside).
     pub comments: Mutex<Vec<(String, String, String, bool)>>,
+    /// Work items made on changes' repos: (change, title, body, labels, outside).
+    pub works: Mutex<Vec<(String, String, String, Vec<String>, bool)>>,
     /// The `health` path every service says it has.
     pub health: Mutex<Option<String>>,
     /// The page states every service's `roll.toml` names (`[[preview.states]]`).
@@ -93,6 +95,11 @@ impl Source for FakeCode {
         let mut all = self.comments.lock();
         all.push((change.into(), body.into(), by.into(), outside));
         Ok(Some(format!("rv_c{}", all.len())))
+    }
+    async fn work_item(&self, change: &str, title: &str, body: &str, labels: &[&str], outside: bool) -> anyhow::Result<Option<(u64, String)>> {
+        let mut all = self.works.lock();
+        all.push((change.into(), title.into(), body.into(), labels.iter().map(|l| l.to_string()).collect(), outside));
+        Ok(Some((all.len() as u64, "https://roll.test/acme/web/work".into())))
     }
     async fn paths_between(&self, _repo: &str, from: &str, to: &str) -> anyhow::Result<Option<Vec<String>>> {
         Ok(self.between.lock().get(&format!("{from}..{to}")).cloned())

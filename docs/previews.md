@@ -1929,11 +1929,15 @@ land on the change.
   form until this fixed it (`form.card`).
 - A note or an error becomes a fix to make (Vercel Comments' "Create issue", Netlify's drawer):
   the note's sheet (opened from its Reply or Resolve) and each error group on the sheet's Errors
-  tab have "Make a work item". It's made in the preview's repo as the person looking (roll code's
-  `POST …/work`; someone without write on the repo gets its refusal), where roll's agents claim
-  work too. A note's item takes the note's first line as its title and its whole review as its
-  body (the page and its link, the element, the note, what went wrong on the page), labelled
-  `preview-feedback`, and the note gets a reply naming the item. An error's item takes its service
+  tab have "Make a work item", where roll's agents claim work too. A note's is made by roll
+  (`POST …/notes/{note}/work`, `roll preview notes <id> --work <note>`): in the change's repo,
+  titled by the note's first line, its body the note with its page, element and link, labelled
+  `preview-feedback`, once a note (kept, shown with the note as `work`), and the note gets a
+  reply naming it. A guest's note (a share link's) makes an item marked as someone outside the
+  team's words, so MCP's lockdown withholds them from an agent that claims it; made from the
+  browser as the person, it wasn't (`engine.rs::a_note_becomes_a_work_item_once`). An error's
+  item is made in the preview's repo as the person looking (roll code's `POST …/work`; someone
+  without write on the repo gets its refusal). It takes its service
   and title, and its sample as the preview shows it (masked), in a block nothing in it can close,
   labelled `preview-error` (`lib/preview-work.ts`).
 - A note is resolved from the page too (Vercel Comments): its Resolve opens roll
@@ -2092,9 +2096,10 @@ previews in it), the operator and admins see every project.
 | `POST /v1/previews/{id}/approve` | `{head}` (the head looked at) | `Preview`: that head of a fork's pull request on a Git URL service runs (`pull.approved_head`); the next push waits again. 409 when the preview moved on to another head or isn't a fork's pull request. Admin in the permissions catalogue, and no MCP tool: letting outside code run with the project's data is a person's call |
 | `POST /v1/previews/{id}/visit` | `{to}` (a URL at one of the preview's service hosts) | `{url}`: a one-use way into a team-access preview (`access: "team"`) at `to`, good for a minute, for a person signed in to roll (a session; a token is a 403). 400 when the project's previews aren't `team` or `to` isn't the preview's; 403 for a person who may not open the project. Operator-only in the permissions catalogue: no grant ever gives one |
 | `POST /v1/previews/{id}/keep` | `{hours}` (0–720; 0 releases) | `Preview`: kept past its TTL until then (`kept_until`); a landed or closed change still ends it |
-| `GET /v1/previews/{id}/notes` | | `{notes: [{id, path, selector, note, by, at, replies: [{id, note, by, at}], crop}]}`: the notes left on its pages that nobody has resolved, every page's (the latest 500); `crop`: a picture of its element is kept |
+| `GET /v1/previews/{id}/notes` | | `{notes: [{id, path, selector, note, by, at, replies: [{id, note, by, at}], crop, work?: {number, url}}]}`: the notes left on its pages that nobody has resolved, every page's (the latest 500); `crop`: a picture of its element is kept |
 | `GET /v1/previews/{id}/notes/{note}/crop` | | `image/png`: the note's element as a screenshot run cropped it from its page (`X-Roll-Crop-As`: how, when as its reviewer saw it); 404 until one has |
 | `POST /v1/previews/{id}/notes/{note}/resolve` | | `{resolved}`: a note on the preview's page (its review's id) resolved, so the page stops listing it; 404 for a note that isn't the change's |
+| `POST /v1/previews/{id}/notes/{note}/work` | | `{number, url}`: the note made a work item on its change's repo by roll (labelled `preview-feedback`, a guest's words marked as outside the team's), said on the change; once a note (asked again, the same one); 404 for a note that isn't the change's |
 | `GET /v1/previews/{id}/mail` | | `{mail: [{id, at, from, to, subject, size}]}`: what its services sent, caught (newest first, the last 50) |
 | `GET /v1/previews/{id}/mail/{mail}` | | One caught message as sent, as `text/plain` (never rendered) |
 | `GET /v1/previews/{id}/connect` | | `{branches: [{kind, parent, vars}]}`: each data branch's connection as its services get it, the branch's own credentials (a Postgres branch's role, never the parent's or a superuser's), read from the products each time; 409 while it's being deleted |
@@ -3062,7 +3067,8 @@ overlaps stay within a repo.
    per-path bypass that fits in a Stripe or GitHub webhook URL, never the project-wide secret.
 3. **Snapshots from the team's own Playwright or Cypress suite** (Argos's, Percy's SDKs; M):
    a step in their tests sends a page's picture to the preview's visual review.
-4. **Notes to Jira, GitHub Issues or Asana** (Marker.io, Netlify's Drawer; S).
+4. **Notes to Jira, GitHub Issues or Asana** (Marker.io, Netlify's Drawer; S): a note's work item
+   made by roll, a guest's marked as outside the team's words, in review; a tracker outside roll next.
 5. **Replaying recorded traffic against the preview and main** (Signadot, Speedscale; L): writes
    replay safely on branched data; capturing production's requests needs its privacy designed
    first.

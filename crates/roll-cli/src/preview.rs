@@ -196,8 +196,11 @@ pub enum Preview {
     /// (the page's button stops listing it).
     Notes {
         preview: String,
-        #[arg(long)]
+        #[arg(long, conflicts_with = "work")]
         resolve: Option<String>,
+        /// Make the note a work item on the change's repo (once; prints its number).
+        #[arg(long)]
+        work: Option<String>,
     },
     /// Its restore points (its Postgres data saved, to put back later): --save [label] one now,
     /// --restore <point> to put the data back as that point left it, --delete <point>.
@@ -1210,12 +1213,17 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
             }
             v
         }
-        Preview::Notes { preview, resolve } => {
-            let v = match &resolve {
-                Some(note) => api.post(&format!("/v1/previews/{preview}/notes/{note}/resolve"), json!({})).await?,
-                None => api.get(&format!("/v1/previews/{preview}/notes")).await?,
+        Preview::Notes { preview, resolve, work } => {
+            let v = match (&resolve, &work) {
+                (Some(note), _) => api.post(&format!("/v1/previews/{preview}/notes/{note}/resolve"), json!({})).await?,
+                (None, Some(note)) => api.post(&format!("/v1/previews/{preview}/notes/{note}/work"), json!({})).await?,
+                (None, None) => api.get(&format!("/v1/previews/{preview}/notes")).await?,
             };
             if !as_json {
+                if work.is_some() {
+                    println!("work item #{}  {}", v["number"].as_u64().unwrap_or(0), s(&v["url"]));
+                    return Ok(());
+                }
                 match (&resolve, v["notes"].as_array()) {
                     (Some(note), _) => println!("resolved {note}"),
                     (None, Some(list)) if !list.is_empty() => list.iter().for_each(|n| {

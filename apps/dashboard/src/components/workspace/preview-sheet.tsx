@@ -6,7 +6,7 @@ import { codeApi } from "@/lib/code-api";
 import { Confirm } from "@/components/ui";
 import { TerminalScreen } from "@/components/terminal-screen";
 import { type RestorePoint, endpointSlower, type EndpointTime, a11yWords, checkSummary, seoWords, duration, followLogs, followShell, downloadFiles, openUrl, pageGroup, pageLabel, previewsApi, noteCropUrl, qrUrl, screenshotUrl, resourceId, thanMain, type CaughtMail, type PageCheck, type Preview, type TextDiff, type PreviewActivity, type PreviewVisitor, type PreviewKind, type PreviewShare, type RequestLine, type ServiceMetrics, type ErrorGroup, type TraceSummary, type TraceSpan, type RouteTime, type Repeated, UNTAKEN_STORIES } from "@/lib/previews-api";
-import { workFromError, workFromNote } from "@/lib/preview-work";
+import { workFromError } from "@/lib/preview-work";
 import { verdict, type VerdictTarget } from "@/lib/preview-verdict";
 import { isProblem, logFilter, logLevel } from "@/lib/preview-logs";
 import { formatBytes } from "@/lib/roll-api";
@@ -1464,8 +1464,7 @@ export function ApiBreaking({ items }: { items: string[] }) {
  * it (`POST …/notes/{review}/resolve`, kept by previews), and the page stops listing it. */
 function NoteThread({ previewId, change, review, where, onDone }: { previewId: string; change: string; review: string; where: Pick<Preview, "repo" | "number">; onDone?: () => void }) {
   const [note, setNote] = useState<string | null>(null);
-  // The note's whole review (the page, the element, what went wrong there), for a work item.
-  const [whole, setWhole] = useState<string | null>(null);
+  // The work item roll made of it (`POST …/notes/{review}/work`), if any.
   const [made, setMade] = useState<number | null>(null);
   const [replies, setReplies] = useState<{ id: string; by: string; text: string }[]>([]);
   const [reply, setReply] = useState("");
@@ -1495,7 +1494,10 @@ function NoteThread({ previewId, change, review, where, onDone }: { previewId: s
         const r = all.find((x) => x.id === review);
         if (!r) return setError("That note isn't on this change.");
         setNote(r.body.split("\n\n")[1] ?? r.body);
-        setWhole(r.body);
+        previewsApi.notes(previewId).then(
+          (n) => setMade(n.notes.find((x) => x.id === review)?.work?.number ?? null),
+          () => {},
+        );
         setReplies(
           all
             .filter((x) => !x.dismissed && replyOf(x.body)?.note === review)
@@ -1576,15 +1578,12 @@ function NoteThread({ previewId, change, review, where, onDone }: { previewId: s
         {where.repo && (
           <button
             type="button"
-            disabled={state === "busy" || whole === null || made !== null}
+            disabled={state === "busy" || note === null || made !== null}
             title="A work item in the repo, with the note and its page: someone, or an agent, picks it up"
             onClick={async () => {
-              if (!where.repo || whole === null) return;
               setState("busy");
               try {
-                const item = await codeApi.createWork(where.repo, workFromNote(where, review, whole));
-                setMade(item.number);
-                await codeApi.submitReview(change, { verdict: "comment", body: replyBody(review, `Made work item #${item.number} from this note.`) });
+                setMade((await previewsApi.noteWork(previewId, review)).number);
                 await load();
               } catch (e) {
                 setError(errorText(e));

@@ -182,7 +182,7 @@ mod tests {
         }
         /// Ada's note on `/hello`, as roll code names the person who posted it.
         async fn feedback(&self, _: &str) -> anyhow::Result<Vec<crate::notes::Note>> {
-            Ok(vec![crate::notes::Note { id: "rev_1".into(), path: "/hello".into(), selector: "h1".into(), note: "bigger".into(), by: "ada".into(), at: 1, replies: Vec::new(), crop: false, crop_as: None, seen: Default::default(), outside: false }])
+            Ok(vec![crate::notes::Note { id: "rev_1".into(), path: "/hello".into(), selector: "h1".into(), note: "bigger".into(), by: "ada".into(), at: 1, replies: Vec::new(), crop: false, crop_as: None, seen: Default::default(), outside: false, work: None }])
         }
         async fn report(&self, _: &Preview, _: &Settings) {}
         async fn forget(&self, _: &Preview, _: Option<&str>) {}

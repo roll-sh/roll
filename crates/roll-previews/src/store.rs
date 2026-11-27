@@ -264,6 +264,16 @@ CREATE TABLE IF NOT EXISTS visual_page_refusals (
     reason TEXT NOT NULL,
     PRIMARY KEY (preview_id, path)
 );
+-- A note made a work item on its change's repo (`POST …/notes/{note}/work`): once a note.
+CREATE TABLE IF NOT EXISTS note_work (
+    preview_id TEXT NOT NULL,
+    review_id TEXT NOT NULL,
+    number INTEGER NOT NULL,
+    url TEXT NOT NULL,
+    by TEXT NOT NULL,
+    at INTEGER NOT NULL,
+    PRIMARY KEY (preview_id, review_id)
+);
 CREATE TABLE IF NOT EXISTS resolved_notes (
     preview_id TEXT NOT NULL,
     review_id TEXT NOT NULL,
@@ -1559,7 +1569,7 @@ impl Store {
             if let Some((project, change, head)) = gone {
                 emit(c, now, "deleted", &project, id, change.as_deref(), &serde_json::json!({ "head": head }))?;
             }
-            for t in ["resources", "services", "pinned", "pinned_data", "restore_points", "shares", "guest_notes", "note_tells", "visit_tickets", "visit_sessions", "visits", "activity", "screenshots", "page_shots", "visual_page_accepts", "visual_page_refusals", "mail", "resolved_notes", "base_history", "leases", "note_crops", "git_pulls", "git_reports", "runtime_facts", "gone_pushes", "run_usage", "service_spend", "previews"] {
+            for t in ["resources", "services", "pinned", "pinned_data", "restore_points", "shares", "guest_notes", "note_tells", "visit_tickets", "visit_sessions", "visits", "activity", "screenshots", "page_shots", "visual_page_accepts", "visual_page_refusals", "mail", "resolved_notes", "note_work", "base_history", "leases", "note_crops", "git_pulls", "git_reports", "runtime_facts", "gone_pushes", "run_usage", "service_spend", "previews"] {
                 let col = if t == "previews" { "id" } else { "preview_id" };
                 c.execute(&format!("DELETE FROM {t} WHERE {col} = ?"), [id])?;
             }
@@ -2779,6 +2789,22 @@ impl Store {
     }
 
     /// The notes resolved on a preview's page (their reviews' ids).
+    /// The notes made work items, by note: (number, where it's shown).
+    pub fn note_work(&self, preview: &str) -> Result<std::collections::HashMap<String, (u64, String)>> {
+        let rows: Vec<(String, i64, String)> = self.db.read(|c| c.query("SELECT review_id, number, url FROM note_work WHERE preview_id = ?", [preview], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))))?;
+        Ok(rows.into_iter().map(|(n, num, url)| (n, (num as u64, url))).collect())
+    }
+
+    /// Note `review` was made work item `number` (kept after it was: a crash makes one twice at
+    /// worst, never says one that isn't).
+    pub fn set_note_work(&self, preview: &str, review: &str, number: u64, url: &str, by: &str) -> Result<()> {
+        let now = self.now_ms()?;
+        self.db.write(|c| {
+            c.execute("INSERT INTO note_work (preview_id, review_id, number, url, by, at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (preview_id, review_id) DO NOTHING", params![preview, review, number as i64, url, by, now])?;
+            Ok::<_, Error>(())
+        })
+    }
+
     pub fn resolved_notes(&self, preview: &str) -> Result<std::collections::HashSet<String>> {
         let ids: Vec<String> = self.db.read(|c| c.query("SELECT review_id FROM resolved_notes WHERE preview_id = ?", [preview], |r| r.get(0)))?;
         Ok(ids.into_iter().collect())
