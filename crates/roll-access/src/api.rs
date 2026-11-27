@@ -361,9 +361,9 @@ async fn check(State(a): S, ext: Extensions, Json(c): Json<Check>) -> crate::Res
             headers.insert(k, v);
         }
     }
-    let (a2, q, h) = (a.clone(), uri.query().map(str::to_string), headers.clone());
+    let (a2, q, h, path) = (a.clone(), uri.query().map(str::to_string), headers.clone(), uri.path().to_string());
     let params2 = params.clone();
-    let mut target = tokio::task::spawn_blocking(move || crate::evaluate::target(&a2, row, &params2, q.as_deref(), &h, person))
+    let mut target = tokio::task::spawn_blocking(move || crate::evaluate::target(&a2, row, &path, &params2, q.as_deref(), &h, person))
         .await
         .map_err(|e| Error::Internal(e.to_string()))?;
     crate::evaluate::project_from_body(row, &mut target, c.body.as_ref()).map_err(Error::BadRequest)?;
@@ -1251,6 +1251,8 @@ pub(crate) fn rule_of(found: &crate::store::Approval) -> crate::Result<roll_auth
         environments: found.environment.clone().map(|e| vec![e]),
         paths: found.scope_path.clone().map(|p| vec![p]),
         unprotected: false,
+        // A request about one secret key remembers that key alone (a rule limited to it).
+        keys: (found.product == "secrets").then(|| catalog::secret_key_in(&found.path)).flatten().map(|k| vec![k]),
         actions: [(action, roll_auth::scope::Effect::Allow)].into_iter().collect(),
     })
 }

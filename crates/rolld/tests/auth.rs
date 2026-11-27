@@ -542,6 +542,18 @@ async fn every_control_plane_route_needs_the_operator_token() {
         .map(|(_, r, _)| r.clone())
         .collect();
     assert!(unscoped.is_empty(), "routes no scoped token can be classified for (add catalogue rows in roll-access): {unscoped:#?}");
+    // roll-access reads a secret key (what `keys: [...]` rules reach) only from a path under
+    // `…/secrets/{key}`: every secrets route naming a `{key}` is under it, or it says why its
+    // `{key}` isn't a secret key here.
+    const SECRET_KEY: &str = "/v1/secrets/projects/{project}/environments/{env}/secrets/{key}";
+    const NOT_A_SECRET_KEY: &[(&str, &str)] = &[];
+    let keyed: Vec<_> = routes
+        .iter()
+        .filter(|(h, r, _)| h == "api" && r.starts_with("/v1/secrets/") && r.split('/').any(|s| s == "{key}") && !r.starts_with(SECRET_KEY) && !NOT_A_SECRET_KEY.iter().any(|(p, _)| *p == r.as_str()))
+        .map(|(_, r, _)| r.clone())
+        .collect();
+    assert!(routes.iter().any(|(h, r, _)| h == "api" && r.starts_with(SECRET_KEY)), "rolld lists no {SECRET_KEY} route");
+    assert!(keyed.is_empty(), "secrets routes with a {{key}} that isn't a secret key's (name it otherwise, or list it in NOT_A_SECRET_KEY): {keyed:#?}");
     // A method a prefix row decides (no row of the route's own names it) takes the prefix's action,
     // whatever it answers: each was looked at, and a new one is (a GET that answers values is
     // reveal; the env of a preview was read until it was). Public routes aren't a grant's.
