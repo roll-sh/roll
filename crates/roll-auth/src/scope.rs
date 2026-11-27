@@ -299,6 +299,11 @@ pub struct Rule {
     /// It only narrows.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unprotected: bool,
+    /// Secrets only: only these keys of the folders it reaches (`STRIPE_KEY`), never the folder as
+    /// a whole. A request about one key matches when it's one of these; one about no key (a list,
+    /// a folder's values) only where the product answers key by key ([`Resource::filters_keys`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keys: Option<Vec<String>>,
     pub actions: BTreeMap<Action, Effect>,
 }
 
@@ -345,6 +350,13 @@ pub struct Resource {
     /// [`crate::Grant::allows`] with each one's index): a rule limited to some indices matches it
     /// though the request names none. Secrets' encryption key list.
     pub filters_index: bool,
+    /// The one secret key the request is about (secrets' `…/secrets/{key}`; not an encryption key,
+    /// which is [`Resource::index`]).
+    pub key: Option<String>,
+    /// The product answers only the keys the caller's grant reaches (it asks [`crate::Grant::allows`]
+    /// with each one's key): a rule limited to some keys matches it though the request names none.
+    /// Environments and folders still match as they do. A folder's list and values.
+    pub filters_keys: bool,
 }
 
 impl Resource {
@@ -424,6 +436,16 @@ impl Rule {
         }
     }
 
+    /// A rule with keys reaches a request about one of them, or one the product answers key by key.
+    fn key_matches(&self, r: &Resource) -> bool {
+        match (&self.keys, &r.key) {
+            (None, _) => true,
+            (Some(list), Some(k)) => list.iter().any(|l| l == k),
+            // Not `filters_itself`: those routes answer per environment and folder, not per key.
+            (Some(_), None) => r.filters_keys,
+        }
+    }
+
     /// Whether this rule is about `target` at all (whatever its actions).
     pub fn matches(&self, target: &Target) -> bool {
         if !self.product_matches(target.product()) {
@@ -436,17 +458,21 @@ impl Rule {
                     Resources::Some(sel) => sel.iter().any(|s| s.matches(r)),
                 };
                 let unprotected = !self.unprotected || (r.protected == Some(false) && r.environment.as_deref() != Some(PRODUCTION));
-                resource && (r.filters_itself || (self.environment_matches(r.environment.as_deref()) && unprotected && self.path_matches(r.path.as_deref())))
+                resource
+                    && self.key_matches(r)
+                    && (r.filters_itself || (self.environment_matches(r.environment.as_deref()) && unprotected && self.path_matches(r.path.as_deref())))
             }
-            Target::List { .. } => true,
+            // A list's items are each checked as one resource, but a rule with keys names no
+            // resource of a list (none is a key): it never takes part.
+            Target::List { .. } => self.keys.is_none(),
             Target::Create { project, environment, .. } => {
                 let resource = match &self.resources {
                     Resources::All => true,
                     Resources::Some(sel) => project.as_ref().is_some_and(|p| sel.iter().any(|s| matches!(s, Selector::Project { project } if project == p))),
                 };
-                resource && self.environment_matches(environment.as_deref()) && self.paths.is_none() && !self.unprotected
+                resource && self.environment_matches(environment.as_deref()) && self.paths.is_none() && !self.unprotected && self.keys.is_none()
             }
-            Target::Product { .. } => self.resources == Resources::All && self.environments.is_none() && self.paths.is_none() && !self.unprotected,
+            Target::Product { .. } => self.resources == Resources::All && self.environments.is_none() && self.paths.is_none() && !self.unprotected && self.keys.is_none(),
         }
     }
 
@@ -470,8 +496,13 @@ impl Rule {
         };
         // `unprotected` narrows: a rule with it covers only rules with it.
         let unprotected = !self.unprotected || other.unprotected;
+        let keys = match (&self.keys, &other.keys) {
+            (None, _) => true,
+            (Some(_), None) => false,
+            (Some(mine), Some(theirs)) => theirs.iter().all(|t| mine.contains(t)),
+        };
         let actions = other.actions.iter().all(|(a, e)| self.actions.get(a).is_some_and(|mine| mine >= e));
-        product && resources && environments && paths && unprotected && actions
+        product && resources && environments && paths && unprotected && keys && actions
     }
 }
 
@@ -558,6 +589,15 @@ impl Scope {
                 && paths.iter().any(|p| !canonical_path(p))
             {
                 out.push(format!("{at}: paths are / or /folder/…, each folder named once (no empty, . or .. folder: /api or /api/x, not // or /a//b)"));
+            }
+            if let Some(keys) = &r.keys {
+                if r.product != "secrets" {
+                    out.push(format!("{at}: only secrets rules name keys"));
+                } else if keys.is_empty() || keys.len() > 64 {
+                    out.push(format!("{at}: keys must list 1-64 keys (leave keys out for every key in the folders)"));
+                } else if let Some(bad) = keys.iter().find(|k| !roll_secrets_ref::is_key(k)) {
+                    out.push(format!("{at}: {:?} isn't a key name (a letter or _, then letters, digits and _, up to {} characters)", bad.chars().take(64).collect::<String>(), roll_secrets_ref::KEY_MAX));
+                }
             }
         }
         out

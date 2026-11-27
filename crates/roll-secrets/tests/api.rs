@@ -2453,6 +2453,7 @@ async fn links_read_live_values_issue_managed_credentials_rotate_and_lease_dynam
             environments: Some(vec!["staging".into()]),
             paths: None,
             unprotected: false,
+            keys: None,
             actions: BTreeMap::from([(A::Read, Effect::Allow), (A::Reveal, Effect::Allow)]),
         };
         roll_auth::Grant { user: None, ask_otherwise: false, id: "tok_tf".into(), name: "tf".into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(Scope(vec![rule])) }
@@ -5877,6 +5878,7 @@ async fn a_rule_naming_one_encryption_key_reaches_it_alone() {
         environments: None,
         paths: None,
         unprotected: false,
+        keys: None,
         actions: BTreeMap::from([(A::Read, Effect::Allow), (A::Write, Effect::Allow)]),
     };
     let grant = roll_auth::Grant { user: None, ask_otherwise: false, id: "tok_pay".into(), name: "pay".into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(Scope(vec![rule])) };
@@ -5912,6 +5914,7 @@ async fn a_roll_access_grant_reaches_only_what_its_rules_name() {
         environments: Some(vec!["development".into()]),
         paths: None,
         unprotected: false,
+        keys: None,
         actions: BTreeMap::from([(A::Read, Effect::Allow), (A::Reveal, Effect::Allow)]),
     };
     let grant = roll_auth::Grant { user: None, ask_otherwise: false, id: "tok_ci".into(), name: "ci".into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(Scope(vec![rule])) };
@@ -5934,7 +5937,7 @@ async fn a_roll_access_grant_reaches_only_what_its_rules_name() {
     let audit = api.ok(Method::GET, "/audit?actor=token:tok_ci", None).await;
     assert_eq!(audit[0]["action"], "secrets.export");
     // A rule naming the project by id (as the dashboard's builder writes it) reaches it the same.
-    let by_id = Rule { resources: Resources::Some(vec![Selector::Id { id: api.project.clone(), index: None }]), environments: Some(vec!["development".into()]), paths: None, product: "secrets".into(), unprotected: false, actions: BTreeMap::from([(A::Read, Effect::Allow), (A::Reveal, Effect::Allow)]) };
+    let by_id = Rule { resources: Resources::Some(vec![Selector::Id { id: api.project.clone(), index: None }]), environments: Some(vec!["development".into()]), paths: None, product: "secrets".into(), unprotected: false, keys: None, actions: BTreeMap::from([(A::Read, Effect::Allow), (A::Reveal, Effect::Allow)]) };
     let grant = roll_auth::Grant { scope: Arc::new(Scope(vec![by_id])), ..grant.clone() };
     let mut req = Request::builder().uri(format!("/v1/secrets/projects/{}/environments/development/values", api.project)).body(Body::empty()).unwrap();
     req.extensions_mut().insert(roll_auth::Operator);
@@ -5980,6 +5983,7 @@ async fn a_signed_in_person_manages_only_their_own_projects_secrets() {
         environments: None,
         paths: None,
         unprotected: false,
+        keys: None,
         actions: BTreeMap::from([(roll_auth::scope::Action::Read, roll_auth::scope::Effect::Allow)]),
     };
     let grant = roll_auth::Grant { ask_otherwise: false, user: Some("usr_ada".into()), id: "tok_ada".into(), name: "ada".into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(roll_auth::scope::Scope(vec![everything])) };
@@ -6895,7 +6899,7 @@ async fn a_projects_admin_cuts_off_only_its_own_tokens_and_leaves_the_operators_
     let at = |rest: &str| format!("/v1/secrets/projects/{mine}{rest}");
     api.as_ada(Method::PUT, &at("/environments/production/secrets/STRIPE_KEY"), Some(json!({ "value": "sk_test_fake" }))).await;
     // The operator's CI token reaches every project's secrets; hers names only her project.
-    let everywhere = roll_auth::scope::Rule { product: "secrets".into(), resources: roll_auth::scope::Resources::All, environments: None, paths: None, unprotected: false, actions: BTreeMap::from([(roll_auth::scope::Action::Read, roll_auth::scope::Effect::Allow)]) };
+    let everywhere = roll_auth::scope::Rule { product: "secrets".into(), resources: roll_auth::scope::Resources::All, environments: None, paths: None, unprotected: false, keys: None, actions: BTreeMap::from([(roll_auth::scope::Action::Read, roll_auth::scope::Effect::Allow)]) };
     let (_, ops) = api.gate.grant("operator-ci", everywhere, None);
     let confined = |name: &str| api.gate.grant(name, roll_secrets::access::rule(&mine, None, None, &[roll_secrets::Action::Read]), None).1;
     let ci = confined("ada-ci");

@@ -1087,7 +1087,7 @@ fn identity_needs<'a>(i: &'a Identity, project: &'a str) -> Vec<(Action, Scope<'
     for a in &i.actions {
         for env in &envs {
             for path in &paths {
-                out.push((*a, Scope { project, env: *env, path: *path, whole: env.is_none() }));
+                out.push((*a, Scope { project, env: *env, path: *path, whole: env.is_none(), key: None, by_key: false }));
             }
         }
     }

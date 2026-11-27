@@ -222,6 +222,8 @@ pub(crate) fn target(access: &Access, row: &Row, params: &[(String, String)], qu
             r.index = row.index.and_then(param);
             r.filters_itself = row.filters_itself;
             r.filters_index = row.filters_index;
+            r.key = row.key.and_then(param);
+            r.filters_keys = row.filters_keys;
             if let Some(name) = row.path_query {
                 let path = query.and_then(|qs| url::form_urlencoded::parse(qs.as_bytes()).find(|(k, _)| k == name).map(|(_, v)| v.into_owned()));
                 // As roll secrets spells it (`/api/` is `/api`), so a rule and an approval name it one way.
@@ -289,7 +291,7 @@ fn narrowed(scope: &Scope, product: &str, action: Action) -> bool {
     // A list answers at once: any rule about it that's narrower than every resource, or that
     // asks, means each item is checked, and only the ones allowed outright stay.
     let wide_allow = |r: &roll_auth::scope::Rule| {
-        r.resources == Resources::All && r.environments.is_none() && r.paths.is_none() && r.actions.get(&action) == Some(&roll_auth::scope::Effect::Allow)
+        r.resources == Resources::All && r.environments.is_none() && r.paths.is_none() && r.keys.is_none() && r.actions.get(&action) == Some(&roll_auth::scope::Effect::Allow)
     };
     let matching: Vec<_> = scope.0.iter().filter(|r| (r.product == "*" || r.product == product) && r.actions.contains_key(&action)).collect();
     !matching.iter().any(|r| wide_allow(r))
@@ -835,6 +837,7 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
                     environments: r.environment.clone().map(|e| vec![e]),
                     paths: None,
                     unprotected: false,
+                    keys: None,
                     actions: [(own.0, roll_auth::scope::Effect::Allow)].into_iter().collect(),
                 }),
                 _ => None,
@@ -962,6 +965,7 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
                     environments: None,
                     paths: None,
                     unprotected: false,
+                    keys: None,
                     actions: [(action, roll_auth::scope::Effect::Allow)].into_iter().collect(),
                 };
                 let mut wider = (*scope).clone();
@@ -1296,6 +1300,7 @@ pub(crate) async fn lend_outcome(access: &Arc<Access>, row: &'static Row, params
                     environments: res.environment.clone().map(|e| vec![e]),
                     paths: res.path.clone().map(|p| vec![p]),
                     unprotected: false,
+                    keys: None,
                     actions: [(l.action, roll_auth::scope::Effect::Allow)].into_iter().collect(),
                 });
             }
@@ -1309,6 +1314,7 @@ pub(crate) async fn lend_outcome(access: &Arc<Access>, row: &'static Row, params
                     environments: res.environment.clone().map(|e| vec![e]),
                     paths: res.path.clone().map(|p| vec![p]),
                     unprotected: false,
+                    keys: None,
                     actions: [(Action::Read, roll_auth::scope::Effect::Allow)].into_iter().collect(),
                 });
             }

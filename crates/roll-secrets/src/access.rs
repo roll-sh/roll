@@ -50,25 +50,48 @@ pub struct Scope<'a> {
     /// shares, required keys, rotators, the keys other environments have): only a rule over all of
     /// it reaches it. A plain project-wide read answers per environment and folder instead.
     pub whole: bool,
+    /// The one key it's about (`None`: the folder as a whole). A rule limited to some keys
+    /// (`keys: [...]`) reaches only a scope naming one of them.
+    pub key: Option<&'a str>,
+    /// The folder, answered or written key by key, each key asked again with [`Scope::key`]: a rule
+    /// limited to some keys takes part in it (it then reads or writes those alone).
+    pub by_key: bool,
 }
 
 impl<'a> Scope<'a> {
     pub fn project(project: &'a str) -> Self {
-        Scope { project, env: None, path: None, whole: false }
+        Scope { project, env: None, path: None, whole: false, key: None, by_key: false }
     }
 
     /// The project as a whole, unfiltered (see [`Scope::whole`]).
     pub fn whole(project: &'a str) -> Self {
-        Scope { project, env: None, path: None, whole: true }
+        Scope { project, env: None, path: None, whole: true, key: None, by_key: false }
     }
 
     pub fn env(project: &'a str, env: &'a str) -> Self {
-        Scope { project, env: Some(env), path: None, whole: false }
+        Scope { project, env: Some(env), path: None, whole: false, key: None, by_key: false }
     }
 
     pub fn at(project: &'a str, env: &'a str, path: &'a str) -> Self {
-        Scope { project, env: Some(env), path: Some(path), whole: false }
+        Scope { project, env: Some(env), path: Some(path), whole: false, key: None, by_key: false }
     }
+
+    /// Only key `key` of it.
+    pub fn key(self, key: &'a str) -> Self {
+        Scope { key: Some(key), ..self }
+    }
+
+    /// Answered or written key by key (see [`Scope::by_key`]).
+    pub fn by_key(self) -> Self {
+        Scope { by_key: true, ..self }
+    }
+}
+
+/// Whether `caller` reaches a folder's key `key`: what a list or a batch asks of each key, once it
+/// asked the folder [`Scope::by_key`].
+pub fn reaches(caller: &Caller, action: Action, at: &Scope<'_>, key: &str) -> bool {
+    !caller.grants.limits_keys() || caller.allows(action, &at.key(key))
+}
 }
 
 /// What a caller may do.
@@ -105,6 +128,11 @@ pub trait Grants: Send + Sync + std::fmt::Debug {
     fn reaches_key(&self, action: Action, project: &str, name: &str) -> bool {
         let _ = name;
         self.allows(action, &Scope::project(project))
+    }
+    /// Whether some rule of it reaches only some secret keys (`keys: [...]`): then what's answered
+    /// key by key is asked again per key ([`reaches`]). Others answer the same for every key.
+    fn limits_keys(&self) -> bool {
+        false
     }
 }
 
@@ -196,6 +224,9 @@ impl Grants for Within {
     fn reaches_key(&self, action: Action, project: &str, name: &str) -> bool {
         self.0.reaches_key(action, project, name) && self.1.reaches_key(action, project, name)
     }
+    fn limits_keys(&self) -> bool {
+        self.0.limits_keys() || self.1.limits_keys()
+    }
 }
 
 /// The operator: everything.
@@ -245,6 +276,9 @@ impl Grants for Narrowed {
     fn sees(&self, project: &str) -> bool {
         self.0.sees(project)
     }
+    fn limits_keys(&self) -> bool {
+        self.0.limits_keys()
+    }
 }
 
 /// One rule of roll-access's model for secrets: `project`, its environments and folders (all
@@ -266,6 +300,7 @@ pub fn rule(project: &str, environments: Option<Vec<String>>, paths: Option<Vec<
         environments,
         paths,
         unprotected: false,
+        keys: None,
         actions: actions.iter().map(|a| (action(*a), scope::Effect::Allow)).collect(),
     }
 }
@@ -466,7 +501,7 @@ impl Grants for GrantGrants {
         // id (`{id: "prj_…"}`, as the builder and Tighten write it) reaches it as one naming the
         // project does.
         let protected = at.env.and_then(|e| self.1.get(at.project, e));
-        let r = scope::Resource { product: "secrets".into(), id: Some(at.project.into()), project: Some(at.project.into()), environment: at.env.map(Into::into), protected, path: at.path.map(Into::into), filters_itself: filtered, ..Default::default() };
+        let r = scope::Resource { product: "secrets".into(), id: Some(at.project.into()), project: Some(at.project.into()), environment: at.env.map(Into::into), protected, path: at.path.map(Into::into), filters_itself: filtered, key: at.key.map(Into::into), filters_keys: at.by_key, ..Default::default() };
         // `ask` pauses a whole request at the gate; inside the product it's a no.
         self.0.allows(&r, action) == scope::Outcome::Allow
     }
@@ -476,6 +511,10 @@ impl Grants for GrantGrants {
         use roll_auth::scope;
         let r = scope::Resource { product: "secrets".into(), id: Some(project.into()), project: Some(project.into()), index: Some(name.into()), ..Default::default() };
         self.allows(action, &Scope::project(project)) || self.0.allows(&r, scope_action(action)) == scope::Outcome::Allow
+    }
+
+    fn limits_keys(&self) -> bool {
+        self.0.scope.0.iter().any(|r| r.keys.is_some())
     }
 
     /// Code read on the repository, as it sits on `project`'s canvas.
@@ -655,11 +694,14 @@ impl Caller {
         if !self.grants.sees(at.project) {
             return Err(crate::Error::NotFound(format!("no project {}", at.project)));
         }
-        let place = match (at.env, at.path) {
+        let mut place = match (at.env, at.path) {
             (Some(e), Some(p)) if p != "/" => format!("{e}:{p}"),
             (Some(e), _) => e.to_string(),
             _ => at.project.to_string(),
         };
+        if let Some(k) = at.key {
+            place = format!("{place} ({k})");
+        }
         Err(crate::Error::Forbidden(format!("this token may not {} in {place}", action.as_str())))
     }
 
