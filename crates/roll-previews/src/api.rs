@@ -33,6 +33,8 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route("/v1/previews/{id}/env", get(vars).put(put_vars))
         .route("/v1/previews/{id}/shares", get(shares).post(share))
         .route("/v1/previews/{id}/shares/{share}", axum::routing::delete(unshare))
+        .route("/v1/previews/{id}/webhooks", get(webhooks).post(webhook))
+        .route("/v1/previews/{id}/webhooks/{webhook}", axum::routing::delete(unwebhook))
         .route("/v1/previews/{id}/screenshot", get(screenshot))
         .route("/v1/previews/{id}/qr.png", get(qr))
         .route("/v1/previews/{id}/connect", get(connect))
@@ -531,6 +533,48 @@ async fn share(AxState(e): S, Path(id): Path<String>, who: Option<axum::Extensio
 async fn unshare(AxState(e): S, Path((id, share)): Path<(String, String)>) -> crate::Result<Response> {
     check_id(&id)?;
     blocking(e, move |e| e.unshare(&id, &share)).await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WebhookBody {
+    /// The one path it lets requests to (`/api/stripe`), no query.
+    path: String,
+    /// What it's for (`"Stripe"`), shown with it.
+    #[serde(default)]
+    label: String,
+}
+
+async fn webhooks(AxState(e): S, Path(id): Path<String>) -> crate::Result<Json<Vec<crate::Webhook>>> {
+    check_id(&id)?;
+    blocking(e, move |e| {
+        e.store.row(&id)?;
+        e.store.webhooks(&id)
+    })
+    .await
+    .map(Json)
+}
+
+/// The URL is in this answer only (its token isn't kept).
+async fn webhook(AxState(e): S, Path(id): Path<String>, who: Option<axum::Extension<roll_auth::SignedIn>>, grant: Option<axum::Extension<roll_auth::Grant>>, b: Bytes) -> crate::Result<Response> {
+    check_id(&id)?;
+    let w: WebhookBody = body(&b)?;
+    let maker = who.as_ref().map(|axum::Extension(u)| u.user.clone()).or_else(|| grant.and_then(|axum::Extension(g)| g.user.map(|u| u.to_string())));
+    let by = who.map(|axum::Extension(u)| u.handle).unwrap_or_else(|| "operator".into());
+    let (hook, url) = e.webhook(&id, &w.path, &by, maker.as_deref(), &w.label).await?;
+    let mut v = serde_json::to_value(&hook).unwrap_or_default();
+    v["url"] = json!(url);
+    Ok((StatusCode::CREATED, Json(v)).into_response())
+}
+
+async fn unwebhook(AxState(e): S, Path((id, webhook)): Path<(String, String)>) -> crate::Result<Response> {
+    check_id(&id)?;
+    blocking(e, move |e| {
+        e.store.revoke_webhook(&id, &webhook)?;
+        e.store.log(&id, &format!("webhook URL {webhook} revoked"))
+    })
+    .await?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 

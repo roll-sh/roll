@@ -1458,6 +1458,20 @@ thirty-fourth review found them in the clear.
               ROLL_PREVIEW_BYPASS: ${{ secrets.ROLL_PREVIEW_BYPASS }}
     ```
 
+  - **Webhooks** (Vercel's bypass in a query parameter, for what takes a URL and no header:
+    Stripe's, GitHub's, Slack's): `POST …/webhooks {path, label}` (`roll preview webhook <id>
+    /api/stripe --label Stripe`, the sheet's Webhooks) makes a URL of the preview's own, the
+    first service's at `path` with `?roll_hook=<token>`, that lets requests to exactly that path
+    in, whatever their method, with no cookie or redirect; the service gets the request without
+    the token (the rest of the query kept). It lasts as long as the preview, until revoked; only
+    its SHA-256 is kept, checked at every request, so a revoked one stops at once, and like a
+    share link it acts at its maker's rights now (one who may no longer open the project's
+    previews ends it). Its token is never a share link's (a `roll_share` with it opens
+    nothing), the project's bypass never comes into it, and how many requests it let in and when
+    last are kept (`hits`, `last_at`). Only a private, trusted preview takes one: a fork's code
+    would get what's sent to it. Services on roll apps don't take them yet (their gate is roll
+    apps'), so a preview whose first service is there gets a 409
+    (`runtime.rs::service_hosts_reach_their_containers`).
     Services on roll apps get the secret's SHA-256 with the link's token (`access: {token,
     bypass_sha256}`, or `{signed_in: true, bypass_sha256}` under team access); their proxy checks
     it the same way. Rotating or removing the secret makes
@@ -2065,6 +2079,8 @@ previews in it), the operator and admins see every project.
 | `GET /v1/previews/{id}/screenshot.png?exp=&sig=` | | `image/png` behind a signed, expiring link, without credentials (403 otherwise): the pull request comment's image; `&diff=base` under its own signature, the diff against main |
 | `GET`/`POST /v1/previews/{id}/shares` | `{hours, label?, notes?}` (1–720 hours; `label` who it's for, one line of 60 characters at most; `notes` its visitors may leave notes as guests) for a new one | `Share[]` (never a token), or 201 `Share` with `url`, the only time the link is shown; 409 for a public preview or past 20 live ones. A link works only while its maker (the person, or the person behind the token, that made it; not the operator's) may still open the project's previews: an account that still signs in, with a role that reveals a preview. Asked again at most every few minutes while it's used; one whose maker may not ends at once ("ada's share link ended: …" in the activity). `visit::tests::a_signed_in_person_gets_into_a_team_preview` |
 | `DELETE /v1/previews/{id}/shares/{share}` | | 204: the link stops at the visitor's next request |
+| `GET`/`POST /v1/previews/{id}/webhooks` | `{path, label?}` (`path` its service's own, no query; `label` what it's for, 60 characters at most) | `GET`: `[{id, path, label, created_by, created_at, revoked, hits, last_at}]` (never the URL); `POST`: 201 with `url` (`<first service's URL><path>?roll_hook=<token>`), shown only here; 409 for a public preview, a fork's, one whose first service is on roll apps, or 20 already |
+| `DELETE /v1/previews/{id}/webhooks/{webhook}` | | 204: it lets nothing in from the next request |
 | `GET`/`PUT /v1/previews/{id}/env` | `{vars: {NAME: value \| null}}` (`null` removes; at most 100, 32 KiB each; a value may be `roll://ENV[/folder]/KEY`) | `{vars}`: the preview's own variables; its services redeploy with them. 403 for a reference to an environment other than the base without the caller's reveal on its folder; 400 for a malformed one or a look-alike |
 | `POST /v1/previews/{id}/approve` | `{head}` (the head looked at) | `Preview`: that head of a fork's pull request on a Git URL service runs (`pull.approved_head`); the next push waits again. 409 when the preview moved on to another head or isn't a fork's pull request. Admin in the permissions catalogue, and no MCP tool: letting outside code run with the project's data is a person's call |
 | `POST /v1/previews/{id}/visit` | `{to}` (a URL at one of the preview's service hosts) | `{url}`: a one-use way into a team-access preview (`access: "team"`) at `to`, good for a minute, for a person signed in to roll (a session; a token is a 403). 400 when the project's previews aren't `team` or `to` isn't the preview's; 403 for a person who may not open the project. Operator-only in the permissions catalogue: no grant ever gives one |
@@ -3038,8 +3054,7 @@ overlaps stay within a repo.
    preview run once against a copy of the change's branch after its release (its pages and
    endpoints), so a migration that breaks the version still running while it deploys is caught on
    real data.
-3. **Webhooks into private previews** (Vercel's bypass in a query parameter; S): a per-preview,
-   per-path bypass that fits in a Stripe or GitHub webhook URL, never the project-wide secret.
+3. **Webhooks into private previews, in review** (roll's runtime); roll apps' gate next (asked).
 4. **Snapshots from the team's own Playwright or Cypress suite** (Argos's, Percy's SDKs; M):
    a step in their tests sends a page's picture to the preview's visual review.
 5. **Notes to Jira, GitHub Issues or Asana** (Marker.io, Netlify's Drawer; S).

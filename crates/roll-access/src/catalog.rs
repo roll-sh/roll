@@ -1966,6 +1966,7 @@ static ROWS: &[Row] = &[
     // A share link lets someone outside the team in, its token only in the answer: reveal, as the
     // bypass secret is. Listing (no tokens) is read and revoking one is delete, by the prefix.
     row("POST", "/v1/previews/{id}/shares", "previews", REVEAL, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    row("POST", "/v1/previews/{id}/webhooks", "previews", REVEAL, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
     // A preview's own variables come back with their values: reveal (setting them is write, by
     // the prefix).
     row("GET", "/v1/previews/{id}/env", "previews", REVEAL, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
