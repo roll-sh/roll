@@ -311,6 +311,14 @@ pub struct PreviewMainOnChange {
     pub broke: Vec<(String, u16, u16)>,
 }
 
+/// A change's release rehearsed on today's data at its preview's head.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct PreviewRehearsal {
+    pub ok: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 /// What a change shows of its preview environment (roll previews' `Preview`, summed up).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PreviewEnvironment {
@@ -427,6 +435,13 @@ pub struct PreviewEnvironment {
     /// Whether its preview was compared with main's at its head (errors, and routes with traces).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub regressions_compared: bool,
+    /// The project's rule for its release at each head (`check`, `required`), when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_checks: Option<String>,
+    /// Its release rehearsed on the parents' data as it is now, at `head` (`ok` null while it
+    /// waits; `error` one line, masked).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rehearsal: Option<PreviewRehearsal>,
     /// The `roll/visual` status (the project's `github.visual_review`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visual_review: Option<PreviewVisualReview>,

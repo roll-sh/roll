@@ -532,6 +532,9 @@ pub struct Preview {
     /// The project's rule for regressions against main's (`check`, `required`), when it has one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub regressions: Option<String>,
+    /// The project's rule for its release at each head (`check`, `required`), when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_checks: Option<String>,
     /// Who accepted its regressions at its head (`POST …/regressions/accept`); a new head asks again.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub regressions_accepted: Option<RegressionsAccepted>,

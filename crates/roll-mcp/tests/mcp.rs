@@ -347,6 +347,9 @@ async fn tools_follow_the_tokens_rules() {
     assert!(names(&d.rpc(&asker, "tools/list", json!({})).await).contains(&"postgres_list_projects".to_string()));
     let pending = d.tool(&asker, "postgres_delete_project", json!({ "project": "pa" })).await;
     assert_eq!((pending["isError"].as_bool(), pending["structuredContent"]["status"].as_str()), (Some(false), Some("approval_pending")), "{pending}");
+    // It says a way forward exists, which the model takes (SEP-2643), naming the approval.
+    let said = &pending["_meta"]["io.modelcontextprotocol/authorization"];
+    assert_eq!((said["remediation"].as_str(), said["authorizationContextId"].as_str()), (Some("undisclosed"), pending["structuredContent"]["approval"].as_str()), "{pending}");
     let id = pending["structuredContent"]["approval"].as_str().unwrap();
     let waited = d.tool(&asker, "access_wait_approval", json!({ "approval_id": id, "wait": 0 })).await;
     assert_eq!(waited["structuredContent"]["state"], "pending");
@@ -368,6 +371,7 @@ async fn tools_follow_the_tokens_rules() {
     let (_, _, out) = d.http_with(&asker, Method::POST, "/v1/mcp", Some(call), &[("mcp-session-id", &session)]).await;
     let e = &out["error"]["data"]["elicitations"][0];
     assert_eq!((out["error"]["code"].as_i64(), e["mode"].as_str()), (Some(-32042), Some("url")), "{out}");
+    assert_eq!(out["error"]["data"]["_meta"]["io.modelcontextprotocol/authorization"]["remediationHints"], json!([{ "type": "url" }]), "{out}");
     assert!(e["url"].as_str().unwrap().contains(e["elicitationId"].as_str().unwrap()), "{out}");
     // And it's named in the audit log by what it called itself (the session id carries it).
     let log = d.audit_until(|l| l[0]["client"] == "cursor 1.2").await;
@@ -553,6 +557,8 @@ async fn a_call_waiting_for_approval_is_a_task_polled_to_its_result() {
     let made = send(asker.clone(), "tools/call", json!({ "name": "postgres_delete_project", "arguments": { "project": "pa" } }), true).await;
     let task = &made["result"];
     assert_eq!(task["resultType"], "task", "{made}");
+    // Held while a person decides, it says so (SEP-2643's out-of-band interaction), on every poll.
+    assert_eq!(task["_meta"]["io.modelcontextprotocol/authorization"]["remediationHints"][0]["type"], "task", "{made}");
     let id = task["taskId"].as_str().unwrap().to_string();
     // It shows where a person decides.
     let mut got = json!(null);
@@ -567,6 +573,8 @@ async fn a_call_waiting_for_approval_is_a_task_polled_to_its_result() {
     let requests = got["result"]["inputRequests"].as_object().cloned().unwrap_or_default();
     assert_eq!(requests.len(), 1, "{got}");
     assert!(requests.keys().all(|k| k.starts_with("apr_")) && requests.values().all(|r| r["params"]["mode"] == "url"), "{got}");
+    let said = &got["result"]["_meta"]["io.modelcontextprotocol/authorization"];
+    assert_eq!((said["remediation"].as_str(), said["authorizationContextId"].as_str(), said["remediationHints"].as_array().map(Vec::len)), (Some("available"), requests.keys().next().map(String::as_str), Some(2)), "{got}");
     // Nobody else's poll finds it, and a client that didn't declare the extension can't ask.
     assert_eq!(send(reader.clone(), "tasks/get", json!({ "taskId": id }), true).await["error"]["code"], -32602);
     assert_eq!(send(asker.clone(), "tasks/get", json!({ "taskId": id }), false).await["error"]["code"], -32021);
@@ -582,6 +590,7 @@ async fn a_call_waiting_for_approval_is_a_task_polled_to_its_result() {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
     assert_eq!((got["result"]["status"].as_str(), got["result"]["result"]["isError"].as_bool()), (Some("completed"), Some(false)), "{got}");
+    assert!(got["result"]["_meta"].get("io.modelcontextprotocol/authorization").is_none(), "done: {got}");
 }
 
 /// A tool that waits for something (a run) up to its limit per request waits on as a task, asked
@@ -755,6 +764,7 @@ async fn a_2026_client_is_served_without_initialize() {
     let r = &out["result"];
     let ask = &r["inputRequests"]["approval"];
     assert_eq!((r["resultType"].as_str(), ask["method"].as_str(), ask["params"]["mode"].as_str()), (Some("input_required"), Some("elicitation/create"), Some("url")), "{out}");
+    assert_eq!(r["_meta"]["io.modelcontextprotocol/authorization"]["remediation"], "available", "{out}");
     let url = ask["params"]["url"].as_str().unwrap();
     let approval = url.split("id=").nth(1).unwrap_or_default().split('&').next().unwrap_or_default();
     assert!(approval.starts_with("apr_"), "{url}");
