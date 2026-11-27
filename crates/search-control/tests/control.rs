@@ -4309,6 +4309,15 @@ async fn names_are_authorized_as_resolved() {
     assert_eq!((s, &v["error"]["type"]), (404, &json!("aliases_not_found_exception")), "as on Elasticsearch: {v}");
     let (_, v) = e.es(&u, &p, Method::GET, "/mine/_alias", None).await;
     assert_eq!(v, json!({"mine": {"aliases": {"sec-a": {}}}}), "{v}");
+    // A pattern's closed indices are the caller's only where it may change aliases.
+    for (m, path) in [(Method::PUT, "/other/_alias/mine-o"), (Method::POST, "/other/_close")] {
+        assert_eq!(e.es(&u, &p, m, path, None).await.0, 200, "{path}");
+    }
+    // `o*` matches no open index for the request's check; the removal resolves closed ones too.
+    let (s, v) = lim(Method::DELETE, "/o*/_alias/mine-o", None).await;
+    assert_eq!(s, 404, "{v}");
+    let (_, v) = e.es(&u, &p, Method::GET, "/_alias/mine-o?expand_wildcards=all", None).await;
+    assert_eq!(v, json!({"other": {"aliases": {"mine-o": {}}}}), "{v}");
 }
 
 /// The same alias attack on OpenSearch: the body's index is authorized, and an alias can't

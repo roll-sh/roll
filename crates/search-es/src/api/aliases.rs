@@ -903,7 +903,10 @@ pub async fn delete_alias(ctx: &Ctx<'_>) -> EsResult<Reply> {
         .update(move |st| {
             auth.check(false, &[], &spelled)?;
             let opts = IndicesOptions { expand_closed: true, allow_aliases: false, ..IndicesOptions::STRICT_EXPAND_OPEN };
-            let resolved = resolve::resolve(st, &indices, &opts, now)?;
+            let mut resolved = resolve::resolve(st, &indices, &opts, now)?;
+            // Closed ones too, which the request's own check (open indices) didn't see: only those
+            // the caller may change aliases on.
+            resolved.retain(|n| auth.allows(n));
             blocks::check(resolved.iter().map(|n| st.metadata.indices[n].as_ref()), Level::MetadataWrite)?;
             let mut removed = false;
             for n in &resolved {
