@@ -3124,9 +3124,13 @@ the names with dns-01, renews them, and keys link to the result.
     3 minutes at most) before the propagation wait. After the order it takes out only its own values
     (an UPSERT of the rest), and DELETEs the set only when nothing else is left, as it stands (a set
     that moved in between is read again and tried once more). Route 53 has no compare-and-swap, so
-    two clients writing the same set within the same instant can still lose a value, as with any
-    client (lego's too); the order then fails and is tried again. A role in use can't be deleted
-    (409), and renaming it carries over.
+    two writers of one set can drop each other's value. roll's own orders never do: an order holds
+    its `_acme-challenge` names in the shared database (`public_cert_dns_claims`, taken in the same
+    write as the order's own claim and released after its cleanup), across projects and nodes, and
+    another order of a held name waits for the next pass. Another client can still write the set
+    from an older read, so once the changes are `INSYNC` roll reads each set back: a missing value
+    is added again and waited on once more, and still missing fails the order (saying so) before
+    the CA is asked to look. A role in use can't be deleted (409), and renaming it carries over.
   - **A role's session for a certificate is its own.** Each one is named `roll-public-cert-<id>`
     (`roll-public-cert-check` when a credential is checked), where syncs' are `roll-sync-<id>` and
     links' leases `roll-roll-secrets-…` (roll names every session: nothing a person types can make one
@@ -3142,6 +3146,11 @@ the names with dns-01, renews them, and keys link to the result.
       "StringEquals": { "<issuer host>:aud": "sts.amazonaws.com", "<issuer host>:sub": "roll-secrets:<project>" },
       "StringLike": { "sts:RoleSessionName": "roll-public-cert-*" } }
     ```
+
+    roll checks a role when it's added, or given a new ARN or trust, as `roll-check`. Refused under
+    that name, it checks it again as `roll-public-cert-check` (its probe of a made-up project too),
+    so a role kept for certificates this way is added, and moved to roll's issuer, as any other.
+    A refusal under both names says a `sts:RoleSessionName` condition may be the cause.
 
     A role shared with syncs or links can instead allow Route 53 to certificates' sessions only,
     in its permission policy: `"Condition": { "StringLike": { "aws:userid": "*:roll-public-cert-*" } }`
