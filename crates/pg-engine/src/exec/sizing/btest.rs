@@ -464,10 +464,10 @@ impl BtEst {
     }
 }
 
-/// The summary as `estkeep` keeps it: in full; its changed leaves as they are (a build
-/// before the compact form's); or what changed since it was last made durable (`COMPACT`).
+/// The summary as `estkeep` keeps it: in full, or what changed since it was last made
+/// durable (`COMPACT`). (2 was its changed leaves whole, which no record `estkeep` reads
+/// holds.)
 const FULL: u8 = 1;
-const CHANGED: u8 = 2;
 const COMPACT: u8 = 3;
 
 impl BtEst {
@@ -641,7 +641,11 @@ impl BtEst {
     /// malformed record, or changes without a summary to apply them to).
     pub(super) fn decode(d: &mut Dec, base: Option<BtEst>) -> Option<BtEst> {
         let tag = d.u8()?;
-        let mut e = if tag == COMPACT { Self::decode_changes(d, base?)? } else { Self::decode_whole(d, tag, base)? };
+        let mut e = match tag {
+            FULL => Self::decode_full(d)?,
+            COMPACT => Self::decode_changes(d, base?)?,
+            _ => return None,
+        };
         e.sent = Some(e.head());
         e.sent_len = e.store.len();
         Some(e)
@@ -701,8 +705,8 @@ impl BtEst {
         Some(e)
     }
 
-    /// A full record, or the changed leaves whole (`CHANGED`).
-    fn decode_whole(d: &mut Dec, tag: u8, base: Option<BtEst>) -> Option<BtEst> {
+    /// A full record.
+    fn decode_full(d: &mut Dec) -> Option<BtEst> {
         let dedup = d.u8()? != 0;
         let (base_size, pivot) = (d.f64()?, d.f64()?);
         let mut n = [0usize; 5];
@@ -710,63 +714,39 @@ impl BtEst {
             *x = d.u64()? as usize;
         }
         let blocks = d.u32()?;
-        let leaf = |d: &mut Dec| -> Option<Leaf> {
-            Some(Leaf { max: d.u128()?, used: d.f64()?, tuples: d.f64()?, tids: d.f64()?, keys: d.f64()? })
-        };
-        let mut e = match tag {
-            FULL => {
-                let k = d.u32()? as usize;
-                let (mut lows, mut slots) = (Vec::with_capacity(k.min(1 << 20)), Vec::with_capacity(k.min(1 << 20)));
-                for _ in 0..k {
-                    lows.push((d.u128()?, d.u64()?));
-                    slots.push(d.u32()?);
-                }
-                let m = d.u32()? as usize;
-                let mut store = Vec::with_capacity(m.min(1 << 20));
-                for _ in 0..m {
-                    store.push(leaf(d)?);
-                }
-                if slots.iter().any(|s| *s as usize >= m) {
-                    return None;
-                }
-                BtEst {
-                    lows,
-                    slots,
-                    store,
-                    dedup,
-                    base: 0.0,
-                    pivot: 0.0,
-                    inner_built: 0,
-                    inner_base: 0,
-                    free: 0,
-                    stuck: 0,
-                    hint: 0,
-                    blocks: 0,
-                    dirty: Vec::new(),
-                    dirty_bits: Vec::new(),
-                    all_dirty: false,
-                    sent: None,
-                    sent_len: 0,
-                    places: Vec::new(),
-                }
-            }
-            CHANGED => {
-                let mut e = base?;
-                for _ in 0..d.u32()? {
-                    let slot = d.u32()? as usize;
-                    let lo = (d.u128()?, d.u64()?);
-                    let l = leaf(d)?;
-                    if slot < e.store.len() {
-                        e.store[slot] = l;
-                    } else if slot == e.store.len() {
-                        e.add_leaf(slot, lo, l);
-                    } else {
-                        return None;
-                    }
-                }
-                e
-            }
-            _ => return None,
+        let k = d.u32()? as usize;
+        let (mut lows, mut slots) = (Vec::with_capacity(k.min(1 << 20)), Vec::with_capacity(k.min(1 << 20)));
+        for _ in 0..k {
+            lows.push((d.u128()?, d.u64()?));
+            slots.push(d.u32()?);
+        }
+        let m = d.u32()? as usize;
+        let mut store = Vec::with_capacity(m.min(1 << 20));
+        for _ in 0..m {
+            store.push(Leaf { max: d.u128()?, used: d.f64()?, tuples: d.f64()?, tids: d.f64()?, keys: d.f64()? });
+        }
+        if slots.iter().any(|s| *s as usize >= m) {
+            return None;
+        }
+        let mut e = BtEst {
+            lows,
+            slots,
+            store,
+            dedup,
+            base: 0.0,
+            pivot: 0.0,
+            inner_built: 0,
+            inner_base: 0,
+            free: 0,
+            stuck: 0,
+            hint: 0,
+            blocks: 0,
+            dirty: Vec::new(),
+            dirty_bits: Vec::new(),
+            all_dirty: false,
+            sent: None,
+            sent_len: 0,
+            places: Vec::new(),
         };
         e.set_head(Head { dedup, base: base_size, pivot, n, blocks });
         Some(e)

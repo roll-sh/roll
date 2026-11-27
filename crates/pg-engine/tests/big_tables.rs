@@ -4,7 +4,7 @@
 
 use pg_engine::engine::{Engine, EngineOptions};
 use pg_engine::exec::scan::ROWS_FROM_INDEX_ENTRIES;
-use pg_engine::exec::sizing::with_max_versions;
+use pg_engine::exec::sizing::{estkeep, with_max_versions};
 use pg_engine::session::Session;
 use pg_engine::storage::with_txn_spill_bytes;
 use std::sync::atomic::Ordering;
@@ -814,6 +814,158 @@ fn past_model_state(s: &mut Session) -> String {
     run(s, "SET max_parallel_workers_per_gather = 0");
     let q = format!("SELECT concat_ws(' ', ({PAST_MODEL_SIZES}), pg_relation_size('t_id') / 8192, (SELECT md5(string_agg(id::text, ',')) FROM t), (SELECT sum(c) FROM t))");
     rows(s, &q).join("\n")
+}
+
+/// One-row UPDATEs after the history, each a commit: past the model, change records after
+/// the table's full one (`sizing::estkeep`), none folded; a modelled table beside it.
+fn change_records_history(s: &mut Session) {
+    past_model_history(s);
+    run(s, "CREATE TABLE m (id int PRIMARY KEY, b text);
+         INSERT INTO m SELECT g, 'row ' || g FROM generate_series(1, 1000) g");
+    for i in 0..120 {
+        // (40 rows three times each: a version placed again after one placed before.)
+        run(s, &format!("UPDATE t SET b = b || repeat('z', 150) WHERE id = {}", 2 + (i % 40) * 241 % 29_000));
+        if i % 3 == 0 {
+            run(s, &format!("UPDATE m SET b = b || repeat('y', 300) WHERE id = {}", 1 + i * 7));
+        }
+    }
+}
+
+fn table_oid(s: &mut Session, name: &str) -> u32 {
+    match s.query(&format!("SELECT '{name}'::regclass::oid")).unwrap()[0].rows[0][0] {
+        pg_engine::types::Value::Oid(oid) => oid,
+        ref v => panic!("{v:?}"),
+    }
+}
+
+/// An UPDATE of rows that outgrow their pages, past the model: where its versions go follows
+/// the estimate's fill, room and tail page (what a change record applied twice would move).
+fn change_records_update(s: &mut Session) -> String {
+    run(s, "UPDATE t SET b = b || repeat('w', 120) WHERE id % 97 = 0");
+    rows(s, "SELECT concat_ws(' ', pg_relation_size('t'), pg_relation_size('t_a'), pg_relation_size('t_id'), (SELECT md5(string_agg(id::text, ',')) FROM t), (SELECT sum(c) FROM t))").join("\n")
+}
+
+/// What the estimates give: sizes, pg_class, plans' row counts, a serial scan's order and
+/// float sum; then pg_stat's counts.
+fn change_records_state(s: &mut Session) -> Vec<String> {
+    // (The session's counts reported, however recent its last report.)
+    run(s, "SELECT pg_stat_force_next_flush();\nSET max_parallel_workers_per_gather = 0");
+    [
+        "SELECT pg_relation_size('t'), pg_relation_size('t_a'), pg_relation_size('t_id'), pg_relation_size('m'), pg_relation_size('m_pkey')",
+        "SELECT string_agg(concat_ws(' ', relname, relpages, reltuples), ', ' ORDER BY relname) FROM pg_class WHERE relname IN ('t', 't_a', 't_id', 'm', 'm_pkey')",
+        "EXPLAIN SELECT * FROM t WHERE a < 100",
+        "EXPLAIN SELECT * FROM t",
+        "EXPLAIN SELECT * FROM m",
+        "SELECT md5(string_agg(id::text, ',')), sum(c) FROM t",
+        "SELECT md5(string_agg(id::text, ',')) FROM m",
+        "SELECT string_agg(concat_ws(' ', relname, n_live_tup, n_dead_tup, n_tup_upd, n_tup_hot_upd), ', ' ORDER BY relname) FROM pg_stat_user_tables",
+    ]
+    .iter()
+    .map(|q| rows(s, q).join("\n"))
+    .collect()
+}
+
+/// A table past the model, killed with only change records after its estimate's full record:
+/// after reopening, its sizes, pg_class, plans, serial order and float sum are those of the
+/// same statements run without a crash, and after a clean restart; a modelled table's too.
+/// pg_stat's counts are gone after the crash, as PostgreSQL discards them
+/// (pgstat_discard_stats), and kept across the restart. (Agent 341: the full record's key was
+/// a prefix of the change records', so the store held it after them, `restore` refused the
+/// records, and the table was estimated afresh: another serial order and sum.) Then the same
+/// with the change records folded every kilobyte (`estkeep::with_fold_after`): each fold's
+/// range deletion takes the change records before it, those after the last fold remain.
+#[test]
+fn change_records_restored_after_a_crash() {
+    change_records_case(None);
+    change_records_case(Some(1024));
+}
+
+fn change_records_case(fold: Option<usize>) {
+    let go = |f: &mut dyn FnMut()| match fold {
+        Some(n) => estkeep::with_fold_after(n, f),
+        None => f(),
+    };
+    // (Read twice without a restart: the restart's reading is the second, after the first's
+    // scans pruned.)
+    let (mut live, mut again, mut restarted, mut updated) = (Vec::new(), Vec::new(), Vec::new(), String::new());
+    let (mut kept, mut written_live) = (Vec::new(), None);
+    with_max_versions(2000, || {
+        go(&mut || {
+            let dir = tempfile::tempdir().unwrap();
+            let eng = open(dir.path());
+            let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
+            change_records_history(&mut s);
+            let oid = table_oid(&mut s, "t");
+            let (held, written) = estkeep::kept_records(&s.state.db, oid);
+            // (The full record and the change records since the last fold: none a fold dropped.)
+            assert_eq!(Some(held.clone()), written.map(|n| (0..=n).collect()), "records, folds {fold:?}");
+            assert!(held.len() > 1, "{held:?}");
+            kept = held;
+            written_live = written;
+            live = change_records_state(&mut s);
+            again = change_records_state(&mut s);
+            drop(s);
+            eng.shutdown();
+            let eng = open(dir.path());
+            let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
+            restarted = change_records_state(&mut s);
+            updated = change_records_update(&mut s);
+            drop(s);
+            eng.shutdown();
+        })
+    });
+    assert_eq!(restarted, again, "after a restart, folds {fold:?}");
+    let tmp = tempfile::tempdir().unwrap();
+    let st = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "change_records_crash_child", "--nocapture", "--test-threads=1"])
+        .env("CHANGE_RECORDS_CRASH_DIR", tmp.path())
+        .env("CHANGE_RECORDS_FOLD", fold.map_or(String::new(), |n| n.to_string()))
+        .stdout(std::process::Stdio::null())
+        .status()
+        .unwrap();
+    assert!(!st.success(), "the child wasn't killed");
+    let crashed = with_max_versions(2000, || {
+        let eng = open(tmp.path());
+        let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
+        let oid = table_oid(&mut s, "t");
+        assert_eq!(estkeep::kept_records(&s.state.db, oid).0, kept, "records after a crash, folds {fold:?}");
+        let state = change_records_state(&mut s);
+        // (Restored: every change record since the last fold, none other.)
+        assert_eq!(estkeep::kept_records(&s.state.db, oid).1, written_live, "change records restored, folds {fold:?}");
+        let r = (state, change_records_update(&mut s));
+        drop(s);
+        eng.shutdown();
+        r
+    });
+    let (crashed, crashed_updated) = crashed;
+    let n = live.len() - 1;
+    assert_eq!(crashed[..n], live[..n], "after a crash, folds {fold:?}");
+    // (The per-page record of updates past the model, `estpages`, isn't kept across either.)
+    assert_eq!(crashed_updated, updated, "an UPDATE after a crash and after a restart, folds {fold:?}");
+    assert_eq!(crashed[n], r#"[Text("m 0 0 0 0, t 0 0 0 0")]"#, "pg_stat after a crash");
+}
+
+/// `change_records_restored_after_a_crash`'s crash: the history committed, then `kill -9`.
+#[test]
+fn change_records_crash_child() {
+    let Ok(dir) = std::env::var("CHANGE_RECORDS_CRASH_DIR") else {
+        return;
+    };
+    let fold = std::env::var("CHANGE_RECORDS_FOLD").ok().and_then(|v| v.parse().ok());
+    with_max_versions(2000, || {
+        let f = || {
+            let eng = Engine::open(EngineOptions { sync: true, ..options(std::path::Path::new(&dir)) }).unwrap();
+            let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
+            change_records_history(&mut s);
+            let me = std::process::id().to_string();
+            std::process::Command::new("kill").args(["-9", &me]).status().unwrap();
+            unreachable!("still alive after SIGKILL");
+        };
+        match fold {
+            Some(n) => estkeep::with_fold_after(n, f),
+            None => f(),
+        }
+    });
 }
 
 #[test]

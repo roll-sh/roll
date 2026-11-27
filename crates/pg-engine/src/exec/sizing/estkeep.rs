@@ -3,9 +3,9 @@
 //! model, the fill and fresh pages, the btrees' leaves), so a table's sizes, plans, serial
 //! scan order and float sums are the same after it as before.
 //!
-//! - A table's record is its estimate in full (`est_key`, the key its heap pages were kept
-//!   under before), then what changed since, one record a commit (`est_key ++ seq`): the
-//!   places set since (`Log`), the runs begun, the btrees' changed leaves.
+//! - A table's record is its estimate in full (`rec_key(oid, 0)`), then what changed since,
+//!   one record a commit (`rec_key(oid, 1)`, 2, ...): the places set since (`Log`), the runs
+//!   begun, the btrees' changed leaves.
 //! - A commit takes the changes of every table whose estimate changed (`take`, from the
 //!   commit's `check`, under the store's commit lock): they commit with it, in commit order,
 //!   so after a crash the records give the estimate as of the last commit. (What a
@@ -19,13 +19,22 @@
 use super::*;
 use std::sync::atomic::Ordering;
 
-/// A full record's and a change record's first byte: a change record holds what changed
-/// whole (`CHANGES`, a build before the compact form's: still read), or only the fields
-/// that differ from the record before (`COMPACT`). A build before `COMPACT` takes a table
-/// with such a record as one without (estimated afresh).
+/// A full record's and a change record's first byte: a change record holds only the fields
+/// that differ from the record before. (0xe2, a change record of its fields whole, was
+/// written only under `est_key`.)
 const FULL: u8 = 0xe1;
-const CHANGES: u8 = 0xe2;
 const COMPACT: u8 = 0xe3;
+
+/// Where the records are kept: table `oid`'s full record under `rec_key(oid, 0)`, its change
+/// records under 1, 2, ... in order. Every key is as long as the others, as the store needs
+/// its keys (prefix-free: a key's versions follow it, `!ts` appended). Builds before this one
+/// kept the full record under `est_key(oid)` and the change records under it with the number
+/// appended: the full record's key a prefix of theirs, so the memtable held it after them
+/// (its `!ts` against their numbers' zero bytes), a file's reader took a change record for an
+/// older version of it, and `restore` found a change record first and refused the table's
+/// records, after a clean close too (estimated afresh: another serial scan order and float
+/// sum). Those are deleted with the table's first full record here (`drop_records`).
+const PREFIX: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 0x29];
 
 /// A record's bytes, written in order (little-endian).
 pub(crate) struct Enc(pub Vec<u8>);
@@ -232,10 +241,32 @@ impl Saved {
     }
 }
 
-fn change_key(oid: u32, seq: u64) -> Vec<u8> {
-    let mut k = est_key(oid);
+thread_local! {
+    /// The change records' bytes after which a commit on this thread folds them
+    /// (`with_fold_after`; None: the full record's, at least 64 kB).
+    static FOLD_AFTER_HERE: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+/// Run `f` with a table's change records folded into a full record once they pass `n` bytes,
+/// on this thread (so a test's small histories fold).
+#[doc(hidden)]
+pub fn with_fold_after<R>(n: usize, f: impl FnOnce() -> R) -> R {
+    let _g = crate::scoped::set(&FOLD_AFTER_HERE, Some(n), "estkeep::FOLD_AFTER_HERE");
+    f()
+}
+
+fn rec_key(oid: u32, seq: u64) -> Vec<u8> {
+    let mut k = PREFIX.to_vec();
+    k.extend_from_slice(&oid.to_be_bytes());
     k.extend_from_slice(&seq.to_be_bytes());
     k
+}
+
+/// Table `oid`'s records' keys: [start, end).
+fn rec_range(oid: u32) -> (Vec<u8>, Vec<u8>) {
+    let start = rec_key(oid, 0);
+    let end = prefix_end(&start[..PREFIX.len() + 4]);
+    (start, end)
 }
 
 /// An estimate changed: the next commit makes it durable (`take`).
@@ -457,18 +488,10 @@ fn decode_heap_changes(d: &mut Dec, h: &mut EstHeap) -> Option<()> {
     Some(())
 }
 
-fn decode_heap(d: &mut Dec, full: bool, h: &mut EstHeap) -> Option<()> {
+fn decode_heap_full(d: &mut Dec, h: &mut EstHeap) -> Option<()> {
     decode_scalars(d, h)?;
-    // (A full record, or changes after the places were dropped: `EstHeap::unplace`.)
-    if full || d.u8()? != 0 {
-        h.runs.clear();
-        h.moved.clear();
-    }
-    let from = if full { 0 } else { d.u32()? as usize };
-    if from > h.runs.len() {
-        return None;
-    }
-    h.runs.truncate(from);
+    h.runs.clear();
+    h.moved.clear();
     for _ in 0..d.u32()? {
         let k = d.bytes()?;
         let t = d.tid()?;
@@ -526,7 +549,7 @@ fn take_shard(db: &Database, cat: &Catalog, rf: &mut RelFiles, writes: &mut Vec<
             continue;
         }
         let saved = est_saved.remove(&oid).unwrap_or_default();
-        drop_records(db, oid, saved.seq, writes);
+        drop_records(db, oid, saved.seq, true, writes);
     }
     let mut left = false;
     for (&oid, e) in estimated.iter_mut() {
@@ -564,7 +587,7 @@ fn take_shard(db: &Database, cat: &Catalog, rf: &mut RelFiles, writes: &mut Vec<
             || saved.full_next
             || saved.seq.is_none()
             || e.sent.is_none()
-            || saved.changes_bytes > saved.full_bytes.max(1 << 16);
+            || saved.changes_bytes > FOLD_AFTER_HERE.get().unwrap_or(saved.full_bytes.max(1 << 16));
         let parts: Vec<u32> = ixs.iter().copied().filter(|i| est_btrees.get(i).is_some_and(|b| full || b.changed())).collect();
         let mut enc = Enc(Vec::with_capacity(if full { 256 } else { 64 }));
         if full {
@@ -597,12 +620,12 @@ fn take_shard(db: &Database, cat: &Catalog, rf: &mut RelFiles, writes: &mut Vec<
         enc.0.shrink_to_fit();
         let len = enc.0.len();
         if full {
-            drop_records(db, oid, saved.seq, writes);
-            writes.push((est_key(oid), Some(bytes::Bytes::from(enc.0))));
+            drop_records(db, oid, saved.seq, false, writes);
+            writes.push((rec_key(oid, 0), Some(bytes::Bytes::from(enc.0))));
             *saved = Saved { seq: Some(0), full_bytes: len, changes_bytes: 0, full_next: false };
         } else {
             let seq = saved.seq.unwrap_or(0) + 1;
-            writes.push((change_key(oid, seq), Some(bytes::Bytes::from(enc.0))));
+            writes.push((rec_key(oid, seq), Some(bytes::Bytes::from(enc.0))));
             saved.seq = Some(seq);
             saved.changes_bytes += len;
         }
@@ -612,22 +635,41 @@ fn take_shard(db: &Database, cat: &Catalog, rf: &mut RelFiles, writes: &mut Vec<
     left
 }
 
-/// Delete table `oid`'s records: its full one and the changes after it (`seq` of them; None:
-/// those the store has).
-fn drop_records(db: &Database, oid: u32, seq: Option<u64>, writes: &mut Vec<(Vec<u8>, Option<bytes::Bytes>)>) {
+/// Delete table `oid`'s change records (`seq` of them; None: those the store has, and what a
+/// build before this one kept under `est_key`), and its full record when `full` (the
+/// table's estimate went; else a new one replaces it in the same commit).
+fn drop_records(db: &Database, oid: u32, seq: Option<u64>, full: bool, writes: &mut Vec<(Vec<u8>, Option<bytes::Bytes>)>) {
+    if full {
+        writes.push((rec_key(oid, 0), None));
+    }
     match seq {
-        Some(n) => {
-            writes.push((est_key(oid), None));
-            writes.extend((1..=n).map(|s| (change_key(oid, s), None)));
-        }
+        Some(n) => writes.extend((1..=n).map(|s| (rec_key(oid, s), None))),
         None => {
-            let start = est_key(oid);
-            let end = prefix_end(&start);
-            for (k, _) in db.store.scan(&start, &end, db.store.visible_ts()).flatten() {
-                writes.push((k, None));
+            let (start, end) = rec_range(oid);
+            let old = est_key(oid);
+            let old_end = prefix_end(&old);
+            let ts = db.store.visible_ts();
+            for (k, _) in db.store.scan(&start, &end, ts).chain(db.store.scan(&old, &old_end, ts)).flatten() {
+                if k != start {
+                    writes.push((k, None));
+                }
             }
         }
     }
+}
+
+/// The records the store holds of table `oid`'s estimate, by number (0: the full record),
+/// and how many change records this database wrote or restored since its last full record
+/// (None: not known).
+#[doc(hidden)]
+pub fn kept_records(db: &Database, oid: u32) -> (Vec<u64>, Option<u64>) {
+    let (start, end) = rec_range(oid);
+    let held = db
+        .store
+        .scan(&start, &end, db.store.visible_ts())
+        .filter_map(|r| r.ok()?.0.get(PREFIX.len() + 4..)?.try_into().ok().map(u64::from_be_bytes))
+        .collect();
+    (held, db.relfiles.of(oid).read().est_saved.get(&oid).and_then(|s| s.seq))
 }
 
 /// The database is closing: every estimate's changes folded into a full record.
@@ -654,8 +696,7 @@ pub fn persist(db: &Database) {
 /// the store holds.
 pub(super) fn restore(t: &Table, ctx: &ExecCtx) -> Option<(EstHeap, Vec<(u32, btest::BtEst)>, Saved)> {
     let store = &ctx.sess.db.store;
-    let start = est_key(t.oid);
-    let end = prefix_end(&start);
+    let (start, end) = rec_range(t.oid);
     let node = ctx.catalog().relfilenode(t.oid)?;
     let ixs = btree_oids(t);
     let mut it = store.scan(&start, &end, store.visible_ts());
@@ -667,21 +708,20 @@ pub(super) fn restore(t: &Table, ctx: &ExecCtx) -> Option<(EstHeap, Vec<(u32, bt
     let mut btrees: HashMap<u32, btest::BtEst> = HashMap::new();
     let mut saved = Saved { seq: Some(0), full_bytes: v.len(), changes_bytes: 0, full_next: false };
     let mut apply = |v: &[u8], full: bool, btrees: &mut HashMap<u32, btest::BtEst>| -> Option<()> {
-        let compact = v[0] == COMPACT;
         let mut d = Dec(&v[1..]);
-        let (n, l) = if compact { (u32::try_from(d.varint()?).ok()?, u32::try_from(d.varint()?).ok()?) } else { (d.u32()?, d.u32()?) };
+        let (n, l) = if full { (d.u32()?, d.u32()?) } else { (u32::try_from(d.varint()?).ok()?, u32::try_from(d.varint()?).ok()?) };
         if n != node || max_versions() > l as usize {
             return None;
         }
         h.limit = l;
-        if compact {
-            decode_heap_changes(&mut d, &mut h)?;
+        if full {
+            decode_heap_full(&mut d, &mut h)?;
         } else {
-            decode_heap(&mut d, full, &mut h)?;
+            decode_heap_changes(&mut d, &mut h)?;
         }
-        let parts = if compact { d.varint()? } else { d.u32()? as u64 };
+        let parts = if full { d.u32()? as u64 } else { d.varint()? };
         for _ in 0..parts {
-            let i = if compact { u32::try_from(d.varint()?).ok()? } else { d.u32()? };
+            let i = if full { d.u32()? } else { u32::try_from(d.varint()?).ok()? };
             let b = btest::BtEst::decode(&mut d, btrees.remove(&i))?;
             btrees.insert(i, b);
         }
@@ -690,8 +730,8 @@ pub(super) fn restore(t: &Table, ctx: &ExecCtx) -> Option<(EstHeap, Vec<(u32, bt
     apply(&v, true, &mut btrees)?;
     for r in it {
         let (k, v) = r.ok()?;
-        let seq = u64::from_be_bytes(k.get(start.len()..)?.try_into().ok()?);
-        if !matches!(v.first(), Some(&CHANGES | &COMPACT)) || seq != saved.seq? + 1 {
+        let seq = u64::from_be_bytes(k.get(PREFIX.len() + 4..)?.try_into().ok()?);
+        if v.first() != Some(&COMPACT) || seq != saved.seq? + 1 {
             return None;
         }
         apply(&v, false, &mut btrees)?;
@@ -740,7 +780,7 @@ mod tests {
         let mut full = Enc(Vec::new());
         encode_heap_full(&mut full, &h);
         let mut copy = EstHeap::default();
-        decode_heap(&mut Dec(&full.0), true, &mut copy).expect("a full record");
+        decode_heap_full(&mut Dec(&full.0), &mut copy).expect("a full record");
         h.sent = Some(Sent::of(&h));
         h.log = Log { moved: Vec::new(), runs_saved: h.runs.len(), reset: false };
         let (mut x, mut bytes) = (0x2545_F491_4F6C_DD1Du64, 0);
