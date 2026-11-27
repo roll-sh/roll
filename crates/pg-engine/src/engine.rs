@@ -257,7 +257,8 @@ struct Backend {
     key: CancelKey,
     database: u32,
     cancel: Option<Arc<AtomicBool>>,
-    socket: Option<Arc<TcpStream>>,
+    /// A client backend's socket, and whether its thread waits in a read for the client.
+    socket: Option<(Arc<TcpStream>, Arc<AtomicBool>)>,
     terminated: Arc<AtomicBool>,
     /// Messages the server loop started reading (`read_counter`).
     reads: Arc<AtomicU64>,
@@ -737,13 +738,14 @@ impl Engine {
 
     /// Immediate shutdown: `message` (quickdie's WARNING) goes to every client backend's
     /// client, whose connection then closes; the process exits next.
-    pub fn quit_client_backends(&self, message: &[u8]) {
-        for b in self.backends.lock().values().filter(|b| b.activity.lock().backend_type.is_none()) {
-            if let Some(mut s) = b.socket.as_deref() {
-                let _ = std::io::Write::write_all(&mut s, message);
-                let _ = s.shutdown(Shutdown::Both);
-            }
-        }
+    /// The sockets of the client backends' clients (immediate shutdown: `server::quit_clients`).
+    pub fn client_sockets(&self) -> Vec<Arc<TcpStream>> {
+        self.backends
+            .lock()
+            .values()
+            .filter(|b| b.activity.lock().backend_type.is_none())
+            .filter_map(|b| b.socket.as_ref().map(|(s, _)| s.clone()))
+            .collect()
     }
 
     /// Fast shutdown: every client backend's session ends ("terminating connection due to
@@ -1073,7 +1075,7 @@ impl Engine {
     /// Allocate a backend id and a cancel key of `key_len` bytes for a new connection.
     pub fn register_backend(
         &self,
-        socket: Option<Arc<TcpStream>>,
+        socket: Option<(Arc<TcpStream>, Arc<AtomicBool>)>,
         client: Option<std::net::SocketAddr>,
         key_len: usize,
     ) -> (i32, CancelKey, Arc<AtomicBool>) {
@@ -1259,12 +1261,19 @@ impl Engine {
     }
 
     fn terminate(b: &Backend) {
-        b.terminated.store(true, Ordering::Relaxed);
+        b.terminated.store(true, Ordering::SeqCst);
         if let Some(c) = &b.cancel {
             c.store(true, Ordering::Relaxed);
             crate::txn::locks::interrupt(c);
         }
-        if let Some(s) = &b.socket {
+        // A read waiting for the client wakes when the socket's reading side shuts; only that
+        // one: once the session's FIN is out, input to a socket with its reading side shut
+        // makes the kernel reset the connection, and the client can lose its end to the reset.
+        // (The reader sets its flag before it reads `terminated`, set above before this load:
+        // one of the two sees the other.)
+        if let Some((s, reading)) = &b.socket
+            && reading.load(Ordering::SeqCst)
+        {
             let _ = s.shutdown(Shutdown::Read);
         }
     }

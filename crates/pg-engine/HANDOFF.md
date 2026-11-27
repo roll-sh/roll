@@ -25145,6 +25145,81 @@ apply session's progress, and one per unsynced slot save (a session's release of
    ext4 / XFS crash states; needs loop devices on the host.
 4. initdb and the first schema load are not cut (they run unwatched).
 
+## A connection the server ends: no reset of what the client still has to read (agent 336, 2026-11-26)
+
+No speed change to measure (the connection's end): the wire path's only addition is one atomic
+store and load around a read that blocks.
+
+**The fault.** Agents 327 and 329 each saw `wire_waits` fail one line under load (about 100):
+after transaction_timeout ended the session, the client read "error communicating with the
+server" where PostgreSQL's transcript has the FATAL and "connection closed". Agent 293's fix
+(`Closing`: FIN first, close once the client acknowledged it, 200 ms at most) covered the common
+order and left two ways to a reset:
+- A socket closed with input unread is still reset (tcp_close's "data was unread"): the client's
+  next query, sent before it read the FATAL. With the FIN acknowledged first the client reads the
+  FATAL and EOF, but the reset fails its next write (EPIPE: "Broken pipe"), and a client that
+  writes before it reads (tokio-postgres's query, then its Terminate at drop) gets "error
+  communicating with the server". When the acknowledgement took longer than 200 ms (a loaded
+  machine's softirqs) the reset went out alone, behind a FIN still queued on another CPU, and the
+  client read "connection reset", the FATAL lost with it.
+- `Engine::terminate` (pg_terminate_backend, a fast shutdown, DROP DATABASE ... FORCE, the
+  engine's shutdown) shut the socket's reading side to wake a session waiting for its client.
+  Once the session's FIN is out, input to a socket with its reading side shut makes the kernel
+  reset the connection at once (tcp_rcv_state_process, FIN_WAIT1/2 with RCV_SHUTDOWN:
+  TCPAbortOnData), even while it is open, and a read on it ends at once (nothing could be drained).
+PostgreSQL 18.6 does neither better nor worse: its backend exits right after the FATAL
+(socket_close leaves the descriptor to the process's exit, with no shutdown), so it resets too
+when the client's input is there; it is just gone before most clients' next query comes.
+
+**Fix (`server.rs`, `engine.rs`).**
+- `Closing` (dropped last in `handle`, after the session's teardown): the FIN goes out if the
+  session hasn't sent it, then what the client sends is read and dropped until the client closes
+  its end (it does once it reads the FIN: libpq, tokio-postgres, JDBC) or `CLOSE_WAIT` (500 ms)
+  passed; then, as before, until the client acknowledged the FIN (or the connection is gone), and
+  the input that came meanwhile is read without waiting. The socket closes with nothing unread: a
+  plain close, which no later input can turn into a reset of what the client still has to read
+  (input after the close is answered with a reset, after the FIN, as PostgreSQL's closed socket
+  does). A client that reads its end closes it at once: on loopback nothing waits; a remote one
+  holds the finished thread about a round trip, after the session's locks and backend entry are
+  gone. Every way `handle` returns goes through it: timeouts, terminations, protocol errors,
+  authentication failures, too many connections, a FATAL in startup, a cancel request.
+- `Engine::terminate` shuts the reading side only of a read that waits for the client:
+  `IdleRead` sets a flag before its blocking read and checks the termination after it, the
+  terminator sets the termination before it reads the flag (both sequentially consistent: one of
+  the two sees the other); a read that would wait after a termination ends the input instead, as
+  the shut side did. A session busy in a statement (the cancel ends it) keeps its reading side.
+  An idle one still has it shut: the wake needs it.
+- Fast and smart shutdown: `roll-engine` waits up to 500 ms for the connections' threads to close
+  their sockets before the process exits (`server::wait_closed`), so the exit doesn't close them
+  with input unread. Immediate shutdown: the WARNING and FIN go to every client, then up to 100 ms
+  for their acknowledgements, and unread input is dropped before the process exits.
+
+**Test** (`wire::server_ends_a_session_with_input_unread`, 1.4 s): a raw connection sends
+`SELECT pg_sleep(5)`, then 50 ms later `SELECT 2` (unread in the server's socket when the session
+ends), and the session ends by `transaction_timeout = 200`, then by pg_terminate_backend; 450 ms
+later the client writes its next query and a Terminate, then reads to the end: the FATAL (25P04,
+57P01) and EOF. On the base (the same test binary built on it) the first write fails with "Broken
+pipe" in 3 of 3 runs; with the drain but the old termination the terminate case's second write
+fails in 3 of 3 (the kernel's reset on input after the FIN); with both 3 of 3 pass.
+
+**Verification** (on `5436da0ee`, these changes on `2676ea37a`): `tools/quick-check.sh` with
+`QC_CHECKED=1` and `QC_TESTS=kept_plans`: clippy 16 warnings, none new in a changed file; 421
+tests in 26 binaries (`wire`, `wire_waits`, `golden`, `kept_plans`, `twophase`,
+`backend_lifecycle`, `connection_log`, `hba` among them), and again built `verify-checked`; crash
+seeds 1-3 x 2 and power_cut_at_every_point; regress 51,148 / 51,150, 0 newly differing;
+isolation 1,647 / 1,648; pg_dump_tap 14,609 passed. `wire_waits` 10 of 10 (debug build, two
+copies at once, load 48-68), and 10 of 10 again on the quick-check's verify binary (two at once, load 31-45).
+Again on the merge with `0fa8e55bd` (`00605bea2`): the same quick-check, 422 tests in 26 binaries
+and again `verify-checked`, crash seeds, regress 51,148 / 51,150 (0 newly differing), isolation
+1,647 / 1,648, pg_dump_tap 14,609 passed.
+`tools/crash-binary.py` against this commit's roll-engine (plain dist): `--seed 1` 7 rounds ok (93 s,
+its fast-shutdown round included), `--seed 1 --power drop` 10 rounds ok (116 s).
+
+**Left.** A session waiting idle for its client still has its socket's reading side shut by a
+termination (nothing else wakes a blocking read without a signal or a poll per read): a client
+that sends its next query just after the FATAL can still get the kernel's reset, after the FIN
+(it reads the FATAL and EOF; a second write fails), as with PostgreSQL's exited backend.
+
 ## Cumulative statistics across restarts, pg_stat views compared (agent 335, 2026-11-26)
 
 Item 2 of agent 331's "Left": roll's cumulative statistics started from 0 at every start, clean
