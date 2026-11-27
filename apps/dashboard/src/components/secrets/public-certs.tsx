@@ -1,7 +1,8 @@
-import { Ban, Globe, Plus, RefreshCw, Trash2 } from "lucide-react";
+import { Ban, Globe, KeyRound, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { useState } from "react";
-import type { NewPublicCert, PublicCert, PublicCertDns, RevokeReason } from "@/lib/secrets-api";
-import { useSecrets } from "./secrets-page";
+import { Link } from "@/components/link";
+import type { AwsRole, NewPublicCert, PublicCert, PublicCertChange, PublicCertDns, RevokeReason } from "@/lib/secrets-api";
+import { secretsHref, useSecrets } from "./secrets-page";
 import { ActorMark, Chip, button, card, dangerButton, ErrorNote, errorText, field, ghost, label, primary, Section, stamp, until, useLoad } from "./ui";
 
 /** The public CAs roll orders from (docs/secrets.md, "Publicly trusted certificates"); `eab`: it asks for an External Account Binding. */
@@ -18,6 +19,14 @@ const NAME = /^[A-Za-z0-9_-]{1,64}$/;
 const DOMAIN = /^(\*\.)?(?!-)[a-z0-9-]{1,63}(\.(?!-)[a-z0-9-]{1,63})+$/;
 const REASONS: RevokeReason[] = ["unspecified", "keyCompromise", "superseded", "affiliationChanged", "cessationOfOperation"];
 
+/** Whether the credential fields hold something to send: one of the project's AWS roles (Route 53), or a token or key in its shape. */
+const credentialOk = (dns: PublicCertDns, role: string, credential: string) =>
+  (dns === "route53" && role !== "") || (dns === "route53" ? /^[A-Za-z0-9]{16,128}:\S+$/.test(credential.trim()) : credential.trim() !== "");
+
+/** What the credential fields send: the role, else the token or key (typed in once; nothing reads it back). */
+const credentialBody = (dns: PublicCertDns, role: string, credential: string): Pick<PublicCertChange, "aws_role" | "dns_credential"> =>
+  dns === "route53" && role !== "" ? { aws_role: role } : { dns_credential: credential.trim() };
+
 const caName = (url: string) => CAS.find((c) => c.url === url)?.name ?? url;
 const day = (ms: number) => new Date(ms).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 
@@ -32,10 +41,11 @@ function renewal(c: PublicCert, now = Date.now()) {
  * Publicly trusted certificates (docs/secrets.md, "Publicly trusted certificates"): roll orders them
  * from Let's Encrypt, ZeroSSL or Google over ACME, proves the names with dns-01 through Cloudflare or
  * Route 53, renews them, and rotates the keys linked to them. The DNS credential goes in once: no
- * answer ever holds it, so it's never shown again.
+ * answer ever holds it, so it's never shown again; a certificate's own form replaces it (or moves
+ * Route 53 between an access key and a project AWS role) over `PATCH`, which orders at once.
  */
 export function PublicCerts() {
-  const { api } = useSecrets();
+  const { api, project } = useSecrets();
   const list = useLoad(() => api.publicCerts(), [api]);
   const roles = useLoad(() => api.awsRoles().catch(() => []), [api]);
   const [adding, setAdding] = useState(false);
@@ -51,12 +61,12 @@ export function PublicCerts() {
   const [error, setError] = useState<string | null>(null);
   const [confirm, setConfirm] = useState<{ id: string; what: "revoke" | "delete" } | null>(null);
   const [reason, setReason] = useState<RevokeReason>("unspecified");
+  const [replacing, setReplacing] = useState<{ id: string; role: string; credential: string } | null>(null);
+  const rolesHref = `${secretsHref(project.id, { view: "credentials" })}#aws-roles`;
 
   const domains = names.split(/[\s,]+/).map((d) => d.trim().toLowerCase().replace(/\.$/, "")).filter(Boolean);
   const eab = CAS.find((c) => c.url === ca)?.eab ?? false;
-  const asRole = dns === "route53" && role !== "";
-  const credentialOk = asRole || (dns === "route53" ? /^[A-Za-z0-9]{16,128}:\S+$/.test(credential.trim()) : credential.trim() !== "");
-  const ok = NAME.test(name) && domains.length > 0 && domains.length <= 100 && domains.every((d) => DOMAIN.test(d)) && credentialOk && (!eab || (eabKid.trim() !== "" && eabKey.trim() !== ""));
+  const ok = NAME.test(name) && domains.length > 0 && domains.length <= 100 && domains.every((d) => DOMAIN.test(d)) && credentialOk(dns, role, credential) && (!eab || (eabKid.trim() !== "" && eabKey.trim() !== ""));
 
   // What was typed in goes with the form: nothing reads it back.
   const reset = () => {
@@ -71,13 +81,27 @@ export function PublicCerts() {
   const add = async () => {
     setBusy("add");
     setError(null);
-    const body: NewPublicCert = { name, directory_url: ca, domains, dns_provider: dns };
-    if (asRole) body.aws_role = role;
-    else body.dns_credential = credential.trim();
+    const body: NewPublicCert = { name, directory_url: ca, domains, dns_provider: dns, ...credentialBody(dns, role, credential) };
     if (eab) Object.assign(body, { eab_kid: eabKid.trim(), eab_hmac_key: eabKey.trim() });
     try {
       await api.addPublicCert(body);
       reset();
+      list.reload();
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+  // A new credential is checked with the provider, kept sealed, and orders at once; the form (and
+  // what was typed in it) goes once it's taken.
+  const replace = async (c: PublicCert) => {
+    if (!replacing) return;
+    setBusy(`${c.id}:replace`);
+    setError(null);
+    try {
+      await api.updatePublicCert(c.id, credentialBody(c.dns_provider, replacing.role, replacing.credential));
+      setReplacing(null);
       list.reload();
     } catch (e) {
       setError(errorText(e));
@@ -139,31 +163,13 @@ export function PublicCerts() {
             <span className={label}>DNS provider</span>
             <span className="flex gap-1.5">
               {(Object.keys(DNS) as PublicCertDns[]).map((d) => (
-                <Chip key={d} on={dns === d} onClick={() => (setDns(d), setCredential(""), setRole(""))}>
+                <Chip key={d} on={dns === d} onClick={() => (setDns(d), setCredential(""), setRole(d === "route53" ? (roles.data?.[0]?.name ?? "") : ""))}>
                   {DNS[d]}
                 </Chip>
               ))}
             </span>
           </div>
-          {dns === "route53" && (
-            <label>
-              <span className={label}>Sign in to AWS as</span>
-              <select value={role} onChange={(e) => (setRole(e.target.value), setCredential(""))} className={`${field} text-[12px]`}>
-                <option value="">An access key</option>
-                {(roles.data ?? []).map((r) => (
-                  <option key={r.id} value={r.name}>
-                    AWS role {r.name} (no key kept)
-                  </option>
-                ))}
-              </select>
-            </label>
-          )}
-          {!asRole && (
-            <label className={dns === "route53" ? "" : "sm:col-span-2"}>
-              <span className={label}>{dns === "route53" ? "Access key (ACCESS_KEY_ID:SECRET_ACCESS_KEY)" : "API token (Zone DNS edit on the names' zones)"}</span>
-              <input type="password" autoComplete="off" value={credential} onChange={(e) => setCredential(e.target.value)} spellCheck={false} className={`${field} font-mono text-[12px]`} />
-            </label>
-          )}
+          <DnsFields dns={dns} roles={roles.data ?? []} rolesHref={rolesHref} role={role} setRole={setRole} credential={credential} setCredential={setCredential} />
           {eab && (
             <>
               <label>
@@ -177,9 +183,7 @@ export function PublicCerts() {
             </>
           )}
           <p className="text-[11px] text-subtle sm:col-span-2">
-            {asRole
-              ? "roll writes the records as the role, a short session each time: give it route53:ChangeResourceRecordSets on the zone, ListHostedZonesByName and GetChange."
-              : "Checked with the provider first, then kept sealed: roll never shows it again. Replace it from the CLI (roll secrets public-certs set --credential)."}
+            <DnsHint dns={dns} role={role} />
           </p>
           <span className="flex gap-2 sm:col-span-2">
             <button type="submit" className={primary} disabled={!ok || busy !== null}>
@@ -216,10 +220,19 @@ export function PublicCerts() {
                       >
                         <RefreshCw className={`size-3.5 ${busy === `${c.id}:renew` ? "animate-spin motion-reduce:animate-none" : ""}`} />
                       </button>
-                      <button className={ghost} disabled={busy !== null || !c.serial} onClick={() => setConfirm({ id: c.id, what: "revoke" })} aria-label={`Revoke ${c.name}`} title="Revoke at the CA">
+                      <button
+                        className={ghost}
+                        disabled={busy !== null}
+                        onClick={() => (setConfirm(null), setReplacing(replacing?.id === c.id ? null : { id: c.id, role: c.dns_provider === "route53" ? (c.aws_role ?? roles.data?.[0]?.name ?? "") : "", credential: "" }))}
+                        aria-label={`Replace ${c.name}'s credential`}
+                        title={c.dns_provider === "route53" ? "Replace the DNS credential, or move between an access key and an AWS role" : "Replace the DNS credential"}
+                      >
+                        <KeyRound className="size-3.5" />
+                      </button>
+                      <button className={ghost} disabled={busy !== null || !c.serial} onClick={() => (setReplacing(null), setConfirm({ id: c.id, what: "revoke" }))} aria-label={`Revoke ${c.name}`} title="Revoke at the CA">
                         <Ban className="size-3.5" />
                       </button>
-                      <button className={ghost} disabled={busy !== null} onClick={() => setConfirm({ id: c.id, what: "delete" })} aria-label={`Remove ${c.name}`} title="Remove (refused while a key links to it)">
+                      <button className={ghost} disabled={busy !== null} onClick={() => (setReplacing(null), setConfirm({ id: c.id, what: "delete" }))} aria-label={`Remove ${c.name}`} title="Remove (refused while a key links to it)">
                         <Trash2 className="size-3.5" />
                       </button>
                     </span>
@@ -241,6 +254,37 @@ export function PublicCerts() {
                       {v.last_error ? ` (${v.last_error})` : ""}; roll keeps asking.
                     </p>
                   ))}
+                  {replacing?.id === c.id && (
+                    <form
+                      className="rise mt-2 ml-[22px] grid gap-3 rounded-xl border border-line-2 bg-panel p-3 sm:grid-cols-2"
+                      onSubmit={(e) => {
+                        e.preventDefault();
+                        if (credentialOk(c.dns_provider, replacing.role, replacing.credential) && !busy) void replace(c);
+                      }}
+                    >
+                      <DnsFields
+                        dns={c.dns_provider}
+                        roles={roles.data ?? []}
+                        rolesHref={rolesHref}
+                        role={replacing.role}
+                        setRole={(role) => setReplacing({ ...replacing, role })}
+                        credential={replacing.credential}
+                        setCredential={(credential) => setReplacing({ ...replacing, credential })}
+                        autoFocus
+                      />
+                      <p className="text-[11px] text-subtle sm:col-span-2">
+                        <DnsHint dns={c.dns_provider} role={replacing.role} replacing />
+                      </p>
+                      <span className="flex gap-2 sm:col-span-2">
+                        <button type="submit" className={primary} disabled={!credentialOk(c.dns_provider, replacing.role, replacing.credential) || busy !== null}>
+                          {busy === `${c.id}:replace` ? "Checking…" : "Replace credential"}
+                        </button>
+                        <button type="button" className={ghost} onClick={() => setReplacing(null)}>
+                          Cancel
+                        </button>
+                      </span>
+                    </form>
+                  )}
                   {confirm?.id === c.id && (
                     <div className="rise mt-2 flex flex-wrap items-center gap-2 pl-[22px] text-[11.5px]">
                       {confirm.what === "revoke" ? (
@@ -281,6 +325,64 @@ export function PublicCerts() {
       )}
     </Section>
   );
+}
+
+/**
+ * The DNS credential's fields: Cloudflare's API token, or for Route 53 one of the project's AWS
+ * roles (listed first: no key is kept) or an access key. A password field that's never filled from
+ * an answer: the credential is typed in once.
+ */
+function DnsFields(p: { dns: PublicCertDns; roles: AwsRole[]; rolesHref: string; role: string; setRole: (r: string) => void; credential: string; setCredential: (c: string) => void; autoFocus?: boolean }) {
+  const asRole = p.dns === "route53" && p.role !== "";
+  return (
+    <>
+      {p.dns === "route53" && (
+        <label>
+          <span className={label}>Sign in to AWS as</span>
+          <select autoFocus={p.autoFocus && p.roles.length > 0} value={p.role} onChange={(e) => (p.setRole(e.target.value), p.setCredential(""))} className={`${field} text-[12px]`}>
+            {p.roles.map((r) => (
+              <option key={r.id} value={r.name}>
+                AWS role {r.name} (no key kept)
+              </option>
+            ))}
+            <option value="">An access key</option>
+          </select>
+          {p.roles.length === 0 && (
+            <span className="mt-1 block text-[11px] text-subtle">
+              No AWS role yet:{" "}
+              <Link href={p.rolesHref} className="text-accent hover:underline">
+                add one
+              </Link>
+              , and roll keeps no key.
+            </span>
+          )}
+        </label>
+      )}
+      {!asRole && (
+        <label className={p.dns === "route53" ? "" : "sm:col-span-2"}>
+          <span className={label}>{p.dns === "route53" ? "Access key (ACCESS_KEY_ID:SECRET_ACCESS_KEY)" : "API token (Zone DNS edit on the names' zones)"}</span>
+          <input
+            type="password"
+            autoComplete="off"
+            autoFocus={p.autoFocus && p.dns !== "route53"}
+            value={p.credential}
+            onChange={(e) => p.setCredential(e.target.value)}
+            spellCheck={false}
+            className={`${field} font-mono text-[12px]`}
+          />
+        </label>
+      )}
+    </>
+  );
+}
+
+function DnsHint({ dns, role, replacing = false }: { dns: PublicCertDns; role: string; replacing?: boolean }) {
+  const then = replacing ? " roll orders a new certificate with it at once." : "";
+  return dns === "route53" && role !== ""
+    ? `roll writes the records as the role, a short session each time, named roll-public-cert-… and limited to _acme-challenge TXT records: give it route53:ChangeResourceRecordSets and ListResourceRecordSets on the zone, ListHostedZonesByName and GetChange.${then}`
+    : replacing
+      ? `Checked with the provider first, then kept sealed in place of the old one: roll never shows it again.${then}`
+      : "Checked with the provider first, then kept sealed: roll never shows it again (the certificate's key button replaces it).";
 }
 
 function Status({ status }: { status: PublicCert["status"] }) {

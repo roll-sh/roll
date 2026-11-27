@@ -3103,11 +3103,12 @@ the names with dns-01, renews them, and keys link to the result.
     ExternalId as the role trusts roll, and only while the role's maker may still manage the project.
     Without one, `dns_credential` is an access key, `ACCESS_KEY_ID:SECRET_ACCESS_KEY`, sealed as
     Cloudflare's token is. Either way it's checked as Cloudflare's is: a public hosted zone for every
-    name. The role or the key needs this much, on the names' zones:
+    name, whose `_acme-challenge` TXT set it can read. The role or the key needs this much, on the
+    names' zones:
 
     ```json
     { "Version": "2012-10-17", "Statement": [
-      { "Effect": "Allow", "Action": "route53:ChangeResourceRecordSets", "Resource": "arn:aws:route53:::hostedzone/Z0123456789ABCDEFGHIJ" },
+      { "Effect": "Allow", "Action": ["route53:ChangeResourceRecordSets", "route53:ListResourceRecordSets"], "Resource": "arn:aws:route53:::hostedzone/Z0123456789ABCDEFGHIJ" },
       { "Effect": "Allow", "Action": ["route53:ListHostedZonesByName", "route53:GetChange"], "Resource": "*" } ] }
     ```
 
@@ -3115,11 +3116,36 @@ the names with dns-01, renews them, and keys link to the result.
     `route53:ChangeResourceRecordSetsNormalizedRecordNames` condition to `_acme-challenge.*` names.)
     roll calls `https://route53.amazonaws.com` only, signed with SigV4, through its guarded client
     (public addresses, no redirects, at most 1 MiB per answer). It finds each name's public hosted
-    zone with `ListHostedZonesByName` (a private zone of the same name is skipped), UPSERTs the
-    `_acme-challenge` TXT record set (a wildcard and its apex share one set of two values, written
-    whole), waits for each change to be `INSYNC` (`GetChange`, 3 minutes at most) before the
-    propagation wait, and deletes the set again after the order. A role in use can't be deleted (409),
-    and renaming it carries over.
+    zone with `ListHostedZonesByName` (a private zone of the same name is skipped), reads the
+    `_acme-challenge` TXT record set (`ListResourceRecordSets`), and UPSERTs it with roll's value
+    added. Other values of the set are kept: another ACME client's (cert-manager, Caddy), another
+    certificate's whose names overlap (`*.example.com` and `example.com` share one set), and the
+    other name of a wildcard and its apex. It waits for each change to be `INSYNC` (`GetChange`,
+    3 minutes at most) before the propagation wait. After the order it takes out only its own values
+    (an UPSERT of the rest), and DELETEs the set only when nothing else is left, as it stands (a set
+    that moved in between is read again and tried once more). Route 53 has no compare-and-swap, so
+    two clients writing the same set within the same instant can still lose a value, as with any
+    client (lego's too); the order then fails and is tried again. A role in use can't be deleted
+    (409), and renaming it carries over.
+  - **A role's session for a certificate is its own.** Each one is named `roll-public-cert-<id>`
+    (`roll-public-cert-check` when a credential is checked), where syncs' are `roll-sync-<id>` and
+    links' leases `roll-roll-secrets-…` (roll names every session: nothing a person types can make one
+    start `roll-public-cert-`). It also carries an inline session policy, so it can only
+    find zones, read and write `_acme-challenge` TXT records and wait on changes, whatever else the
+    role allows. A role also linked into keys (`dynamic`) hands every reader of that environment
+    what the role allows, Route 53 write included. Keep the role for certificates only with
+    `sts:RoleSessionName` in its trust policy, added to the conditions "AWS" gives
+    (`sts:AssumeRoleWithWebIdentity` for roll's issuer, `sts:AssumeRole` for an ExternalId):
+
+    ```json
+    "Condition": {
+      "StringEquals": { "<issuer host>:aud": "sts.amazonaws.com", "<issuer host>:sub": "roll-secrets:<project>" },
+      "StringLike": { "sts:RoleSessionName": "roll-public-cert-*" } }
+    ```
+
+    A role shared with syncs or links can instead allow Route 53 to certificates' sessions only,
+    in its permission policy: `"Condition": { "StringLike": { "aws:userid": "*:roll-public-cert-*" } }`
+    on the Route 53 statements (`aws:userid` is the role's id and the session name).
   - `eab_kid` and `eab_hmac_key` (base64url) are the External Account Binding that ZeroSSL and
     Google ask for.
   - The answer is `status: "pending"`. Nothing is ordered during the request.
