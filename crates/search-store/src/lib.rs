@@ -58,6 +58,7 @@ pub use cache::{CacheStats, SegmentData, SegmentFetch, Verifier};
 pub use error::{Fenced, Refused, WalFull};
 pub use gc::GcStats;
 pub use keys::{LiveGen, SegmentId, SegmentKey, ShardId, ShardVersion, Version};
+pub use reset::{ResetOutcome, ResetTicket};
 pub use manifest::{BranchBase, ClusterState, INSTANCE_DATA_PREFIX, NO_OPS_PERFORMED, SegmentRef, ShardManifest, WalHead};
 pub use pg_storage::{Objects, StorageConfig};
 pub use wal::{ClusterWalStats, Lsn, PinningShard, ReplayStats, ShardWalStats, Wal, WalConfig, WalRecord, WalShard, WalSource, WalStats};

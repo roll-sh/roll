@@ -506,12 +506,8 @@ async fn update(State(c): State<AppState>, caller: Caller, Path(id): Path<String
     Ok(Json(view(&c, &caller, d, false).await?))
 }
 
-async fn remove(State(c): State<AppState>, Path(id): Path<String>, method: Method, headers: HeaderMap) -> Result<Response, ControlError> {
+async fn remove(State(c): State<AppState>, Path(id): Path<String>) -> Result<Response, ControlError> {
     let d = c.get(&id).await?;
-    // On its owner, where a reset of it runs too: one operation at a time ([`Control::delete`]).
-    if let Some(resp) = forward(&c, &d.name, method, &format!("/v1/search/clusters/{id}"), &headers, bytes::Bytes::new()).await {
-        return Ok(resp);
-    }
     c.delete(&d.id).await?;
     Ok(Json(json!({ "deleted": d.id, "name": d.name })).into_response())
 }
@@ -546,7 +542,7 @@ struct ResetReq {
 }
 
 /// Resets a branch in place to a copy of it ([`Control::reset`]).
-async fn reset(State(c): State<AppState>, caller: Caller, Path(id): Path<String>, method: Method, headers: HeaderMap, body: bytes::Bytes) -> Result<Response, ControlError> {
+async fn reset(State(c): State<AppState>, caller: Caller, Path(id): Path<String>, body: bytes::Bytes) -> Result<Response, ControlError> {
     let r: ResetReq = serde_json::from_slice(&body).map_err(|e| ControlError::Invalid(format!("invalid request: {e}")))?;
     let b = c.get(&id).await?;
     // The copy is one the caller may write, as branching it needs (the branch's check is the
@@ -557,9 +553,7 @@ async fn reset(State(c): State<AppState>, caller: Caller, Path(id): Path<String>
         Ok(_) | Err(ControlError::NotFound(_)) => return Err(ControlError::NotFound(format!("no search cluster {}", r.from))),
         Err(e) => return Err(e),
     };
-    if let Some(resp) = forward(&c, &b.name, method, &format!("/v1/search/clusters/{id}/reset"), &headers, body.clone()).await {
-        return Ok(resp);
-    }
+    // On the branch's owner already: `per_cluster` sends every per-cluster route there.
     let d = c.reset(&b, &from).await?;
     Ok(Json(view(&c, &caller, d, false).await?).into_response())
 }

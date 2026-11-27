@@ -407,6 +407,7 @@ mod tests {
                     reindex_whitelist: Vec::new(),
                     protected: false,
                     project_id: None,
+                    parent_now: false,
                 },
                 crate::store::Caps::NONE,
             )

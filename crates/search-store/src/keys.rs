@@ -302,6 +302,11 @@ pub fn reset_state_key(cluster: &str) -> String {
     format!("{CLUSTER_PREFIX}{cluster}/state/reset-state.zst")
 }
 
+/// What became of the cluster's last reset (`Store::reset_outcome`).
+pub fn reset_outcome_key(cluster: &str) -> String {
+    format!("{CLUSTER_PREFIX}{cluster}/state/reset-outcome.json")
+}
+
 /// The commit points a reset in progress applies, copied under the cluster it resets.
 pub fn reset_copies_prefix(cluster: &str) -> String {
     format!("{CLUSTER_PREFIX}{cluster}/reset/")
@@ -372,7 +377,7 @@ pub const TOMBSTONE_SUFFIX: &str = ".deleted.json";
 
 /// A generation in a shard's history: a commit point, or the tombstone that ends it. Orders by
 /// version alone.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ShardVersion {
     pub version: Version,
     pub deleted: bool,
@@ -456,6 +461,8 @@ pub enum ClusterObject<'a> {
     Pin { cluster: &'a str, name: &'a str, shard: u32 },
     /// A commit point a reset in progress applies (`crate::Store::begin_reset`).
     ResetCopy { cluster: &'a str, index_uuid: &'a str, shard: u32 },
+    /// A reset in progress (its copies are kept while it is).
+    ResetIntent { cluster: &'a str },
 }
 
 pub fn parse_cluster_key(key: &str) -> Option<ClusterObject<'_>> {
@@ -464,6 +471,9 @@ pub fn parse_cluster_key(key: &str) -> Option<ClusterObject<'_>> {
     if let Some(file) = rest.strip_prefix("state/") {
         if file.contains('/') {
             return None;
+        }
+        if file == "reset.json" {
+            return Some(ClusterObject::ResetIntent { cluster });
         }
         return Some(ClusterObject::State { cluster, version: parse_version(file, ".json.zst")? });
     }

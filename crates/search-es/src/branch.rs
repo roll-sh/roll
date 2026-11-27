@@ -226,12 +226,12 @@ pub fn paused_policy(rec: &Value) -> bool {
     rec.pointer(&["_roll", "inherited"]).and_then(Value::as_bool) == Some(true)
 }
 
-/// The state a branch takes when it is reset in place to `from`, a copy of it or another branch
-/// of its parent line (`None`: one that never stored anything): `from`'s indices, data streams
-/// and data stream aliases, and everything else the branch's own as it is now (users, keys,
-/// roles, browser keys' settings, templates, pipelines, repositories, settings, what it marked
-/// as inherited). A reset so never brings back a key revoked or a password changed since the
-/// copy was made, nor a parent's secret. Its version moves on from the branch's.
+/// The state a branch takes when it is reset in place to `from`, a copy of it made without `at`
+/// (`None`: one that never stored anything): `from`'s indices, data streams and data stream
+/// aliases, and everything else the branch's own as it is now (users, keys, roles, browser keys'
+/// settings, templates, pipelines, repositories, settings, what it marked as inherited). A reset
+/// so never brings back a key revoked or a password changed since the copy was made, nor a
+/// parent's secret. Its version moves on from the branch's.
 pub fn reset_state(branch: &[u8], from: Option<&[u8]>, dialect: crate::cluster::Dialect) -> anyhow::Result<Vec<u8>> {
     let read = |b: &[u8]| -> anyhow::Result<ClusterState> {
         let v = crate::json::parse(b).map_err(|e| anyhow::anyhow!("corrupt cluster state: {e}"))?.unwrap_or(Value::Null);
