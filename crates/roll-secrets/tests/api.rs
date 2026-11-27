@@ -1305,12 +1305,15 @@ struct FakeSts {
     /// STS throttling every call (a failure to ask, not a refusal).
     throttled: Mutex<bool>,
     sessions: Mutex<u32>,
+    /// The last session's name and inline policy.
+    last: Mutex<Option<(String, Option<String>)>>,
     /// IAM user `legacy-ci`'s access key ids, and how many were ever made.
     keys: Mutex<(Vec<String>, u32)>,
 }
 
 impl roll_secrets::aws::Sts for FakeSts {
-    fn assume(&self, role_arn: &str, external_id: &str, _session: &str, seconds: i32) -> Result<roll_secrets::aws::Session, String> {
+    fn assume(&self, role_arn: &str, external_id: &str, session: &str, seconds: i32, policy: Option<&str>) -> Result<roll_secrets::aws::Session, String> {
+        *self.last.lock().unwrap() = Some((session.to_string(), policy.map(String::from)));
         if *self.throttled.lock().unwrap() {
             return Err("Throttling".into());
         }
@@ -1327,8 +1330,9 @@ impl roll_secrets::aws::Sts for FakeSts {
         })
     }
     /// As AWS checks a web identity: the token's audience, and the subject the trust pins.
-    fn assume_web_identity(&self, role_arn: &str, token: &str, _session: &str, seconds: i32) -> Result<roll_secrets::aws::Session, String> {
+    fn assume_web_identity(&self, role_arn: &str, token: &str, session: &str, seconds: i32, policy: Option<&str>) -> Result<roll_secrets::aws::Session, String> {
         use base64::Engine;
+        *self.last.lock().unwrap() = Some((session.to_string(), policy.map(String::from)));
         let payload = token.split('.').nth(1).ok_or("InvalidIdentityToken")?;
         let claims: Value = serde_json::from_slice(&base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(payload).map_err(|_| "InvalidIdentityToken")?).map_err(|_| "InvalidIdentityToken")?;
         let sub_ok = self.web_pinned.lock().unwrap().as_deref().is_none_or(|p| claims["sub"] == p);
@@ -1340,7 +1344,7 @@ impl roll_secrets::aws::Sts for FakeSts {
         Ok(roll_secrets::aws::Session { access_key_id: Secret::new(format!("ASIA{n}")), secret_access_key: Secret::new(format!("secret-{n}")), session_token: Secret::new(format!("token-{n}")), expires_at: i64::from(seconds) * 1000 })
     }
     fn iam_keys(&self, role_arn: &str, external_id: &str, user: &str) -> Result<Vec<String>, String> {
-        self.assume(role_arn, external_id, "iam", 900)?;
+        self.assume(role_arn, external_id, "iam", 900, None)?;
         if user != "legacy-ci" {
             return Err("NoSuchEntity".into());
         }
@@ -3366,6 +3370,9 @@ async fn health_lists_every_finding_in_every_environment_worst_first() {
         fn referenced(&self, repo: &str, keys: &[String]) -> Option<std::collections::BTreeSet<String>> {
             (repo == "acme/web").then(|| keys.iter().filter(|k| *k == "CERT").cloned().collect())
         }
+        fn public(&self, _: &str) -> Option<String> {
+            None
+        }
     }
     api.secrets.set_code_refs(Arc::new(Code));
     let p = api.project.clone();
@@ -3391,6 +3398,43 @@ async fn health_lists_every_finding_in_every_environment_worst_first() {
     let (_, seen) = api.req(Method::GET, "/health", None, Some(&reader)).await;
     let detail = seen.as_array().unwrap().iter().find(|f| f["issue"] == "public").map(|f| f["detail"].clone());
     assert_eq!(detail, Some(json!("NEXT_PUBLIC_ keys go into the browser bundle (Next.js), and this one holds a server credential")));
+}
+
+#[tokio::test]
+async fn health_flags_a_public_repository_whose_project_does_not_rotate_leaked_values() {
+    // roll code's visibility is a fake here: every repository below is public.
+    struct Code;
+    impl roll_secrets::health::CodeRefs for Code {
+        fn referenced(&self, _: &str, _: &[String]) -> Option<std::collections::BTreeSet<String>> {
+            None
+        }
+        fn public(&self, repo: &str) -> Option<String> {
+            Some(if repo == "acme/web" { "GitHub (acme/web)".into() } else { "roll code".into() })
+        }
+    }
+    let api = Api::new().await;
+    api.secrets.set_code_refs(Arc::new(Code));
+    let flagged = |v: &Value| v.as_array().unwrap().iter().filter(|f| f["issue"] == "public_repo_no_leak_rotation").map(|f| f["key"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+    let p = api.project.clone();
+    api.ok(Method::PUT, &format!("/v1/workspace/projects/{p}/resources/repo/acme%2Fweb"), Some(json!({ "x": 0, "y": 0 }))).await;
+    // leaks.rotate starts off: a value pushed there is world-readable, and nothing rotates it.
+    let found = api.ok(Method::GET, "/health", None).await;
+    assert_eq!(flagged(&found), ["acme/web"]);
+    let detail = found.as_array().unwrap().iter().find(|f| f["issue"] == "public_repo_no_leak_rotation").unwrap()["detail"].as_str().unwrap().to_string();
+    assert!(detail.contains("public on GitHub (acme/web)") && detail.contains("roll secrets leaks managed"), "{detail}");
+    // Managed: a leaked managed key rotates at once, so nothing to say.
+    api.ok(Method::PATCH, "", Some(json!({ "leaks": { "rotate": "managed" } }))).await;
+    assert!(flagged(&api.ok(Method::GET, "/health", None).await).is_empty());
+    // A person's canvas stands only for their own repositories: another owner's public one put
+    // there says nothing about this project, ada's own does.
+    let (_, mine) = api.as_ada(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "mine" }))).await;
+    let mine = mine["id"].as_str().unwrap().to_string();
+    for repo in ["zed%2Fsite", "ada%2Fapp"] {
+        let (s, _) = api.as_ada(Method::PUT, &format!("/v1/workspace/projects/{mine}/resources/repo/{repo}"), Some(json!({ "x": 0, "y": 0 }))).await;
+        assert!(s.is_success());
+    }
+    let (s, found) = api.as_ada(Method::GET, &format!("/v1/secrets/projects/{mine}/health"), None).await;
+    assert_eq!((s, flagged(&found)), (StatusCode::OK, vec!["ada/app".to_string()]));
 }
 
 #[tokio::test]
@@ -9151,6 +9195,9 @@ async fn route53_proves_public_certificates_as_the_projects_aws_role_or_an_acces
     assert_eq!(api.ok(Method::GET, "/public-certs", None).await[0]["status"], "issued");
     let dns = ca.dns.lock().unwrap().clone();
     assert!(dns.len() == 2 && dns.iter().all(|d| d.starts_with("role ASIA")) && dns[0] != dns[1], "a session for the check and another for the order: {dns:?}");
+    // The order's session is named for the certificate and narrowed to Route 53's challenge records.
+    let (session, policy) = api.sts.last.lock().unwrap().clone().unwrap();
+    assert_eq!((session, policy.as_deref()), (format!("roll-public-cert-{id}"), Some(roll_secrets::public_certs::ROUTE53_SESSION_POLICY)));
 
     // The role is the certificate's: renamed with it, and kept while it's used.
     api.ok(Method::PATCH, &format!("/aws-roles/{role_id}"), Some(json!({ "name": "route53" }))).await;

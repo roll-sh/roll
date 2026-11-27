@@ -192,6 +192,9 @@ fn postgres() -> Router {
         .route("/v1/secrets/projects/{project}/transit/{name}/encrypt", axum::routing::post(|| async { axum::Json(json!({ "ciphertext": "roll:v1:x" })) }))
         .route("/v1/secrets/projects/{project}/environments/{env}/values", get(|| async { axum::Json(json!({})) }))
         .route("/v1/secrets/projects/{project}/environments/{env}/promote", axum::routing::post(|| async { axum::Json(json!({})) }))
+        .route("/v1/secrets/projects/{project}/environments/{env}/resolve", axum::routing::post(|| async { axum::Json(json!({})) }))
+        .route("/v1/secrets/projects/{project}/environments/{env}/diff", axum::routing::post(|| async { axum::Json(json!({})) }))
+        .route("/v1/secrets/projects/{project}/environments/{env}/import", axum::routing::post(|| async { axum::Json(json!({})) }))
         .route("/v1/secrets/projects/{project}/environments/{env}/imports", axum::routing::put(|| async { axum::Json(json!({})) }))
 }
 
@@ -1083,13 +1086,57 @@ async fn a_products_lifetime_cap_binds_consents_and_remembered_approvals() {
     // folder remembered for good is remembered for the cap's 30 days, its rules unchanged (the
     // root's, every folder, is 8 hours at most whatever the cap).
     let (token, id) = d.token(json!([{ "product": "workspace", "resources": "*", "actions": { "read": "allow" } }]), json!({ "ask_otherwise": true })).await;
-    let (_, pending) = d.call(&token, Method::GET, "/v1/secrets/projects/pa/environments/development/secrets?path=/api", None).await;
+    // A folder roll secrets would refuse (`//` reads as every folder) is refused before anyone is asked.
+    let (s, out) = d.call(&token, Method::GET, "/v1/secrets/projects/pa/environments/development/secrets?path=//", None).await;
+    assert_eq!((s, out["code"].as_str()), (StatusCode::BAD_REQUEST, Some("bad_request")), "{out}");
+    // Taken as roll secrets spells it: `/api/` is remembered as `/api`.
+    let (_, pending) = d.call(&token, Method::GET, "/v1/secrets/projects/pa/environments/development/secrets?path=/api/", None).await;
     let apr = pending["approval"].as_str().unwrap_or_else(|| panic!("{pending}")).to_string();
     let (s, out) = d.call(OPERATOR, Method::POST, &format!("/v1/access/approvals/{apr}/approve"), Some(json!({ "remember": "always" }))).await;
     assert_eq!(s, StatusCode::OK, "{out}");
     let (_, g) = d.call(OPERATOR, Method::GET, &format!("/v1/access/tokens/{id}"), None).await;
     assert_eq!((g["rules"].as_array().map(Vec::len), g["expires_at"].is_null()), (Some(1), true), "{g}");
     assert!(within(&g["temporary"][0]["until"]), "{g}");
+    assert_eq!(g["temporary"][0]["rule"]["paths"], json!(["/api"]), "{g}");
+    // The root is the whole environment: 8 hours at most.
+    let (_, pending) = d.call(&token, Method::GET, "/v1/secrets/projects/pa/environments/development/secrets?path=/", None).await;
+    let root = pending["approval"].as_str().unwrap_or_else(|| panic!("{pending}")).to_string();
+    let approve = |remember: &str| {
+        let (d, url, body) = (&d, format!("/v1/access/approvals/{root}/approve"), json!({ "remember": remember }));
+        async move { d.call(OPERATOR, Method::POST, &url, Some(body)).await.0 }
+    };
+    assert_eq!(approve("always").await, StatusCode::BAD_REQUEST);
+    assert_eq!(approve("8h").await, StatusCode::OK);
+}
+
+/// A secrets folder is the one the product reads (a body's when resolving, comparing or importing,
+/// never `?path=`), spelled as roll secrets spells it (`/api/` is `/api`), or refused before
+/// anyone is asked.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_secrets_folder_is_the_one_the_request_reads() {
+    let d = Daemon::new(50);
+    let (token, _) = d.token(json!([{ "product": "secrets", "resources": "*", "paths": ["/api/"], "actions": { "reveal": "allow" } }]), json!({})).await;
+    let resolve = "/v1/secrets/projects/pa/environments/development/resolve";
+    let (s, out) = d.call(&token, Method::POST, resolve, Some(json!({ "path": "/api/stripe", "text": "x" }))).await;
+    assert_eq!(s, StatusCode::OK, "{out}");
+    let (s, out) = d.call(&token, Method::POST, &format!("{resolve}?path=/api"), Some(json!({ "text": "x" }))).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "the body's folder (none: /), not the query's: {out}");
+    let (s, out) = d.call(&token, Method::POST, resolve, Some(json!({ "path": "//", "text": "x" }))).await;
+    assert_eq!((s, out["code"].as_str()), (StatusCode::BAD_REQUEST, Some("bad_request")), "{out}");
+    assert_eq!(d.call(&token, Method::POST, "/v1/secrets/projects/pa/environments/development/diff", Some(json!({ "path": "/api", "dotenv": "A=1" }))).await.0, StatusCode::OK);
+    // `/v1/access/check` says what the gate would: a folder secrets refuses is a deny.
+    let (_, c) = d.call(&token, Method::POST, "/v1/access/check", Some(json!({ "method": "GET", "path": "/v1/secrets/projects/pa/environments/development/values?path=//" }))).await;
+    assert_eq!(c["decision"], "deny", "{c}");
+    // A .env import that replaces the folder deletes its other keys: delete, and write.
+    let (writes, _) = d.token(json!([{ "product": "secrets", "resources": "*", "paths": ["/api"], "actions": { "write": "allow" } }]), json!({})).await;
+    let import = "/v1/secrets/projects/pa/environments/development/import";
+    assert_eq!(d.call(&writes, Method::POST, import, Some(json!({ "path": "/api", "dotenv": "A=1" }))).await.0, StatusCode::OK);
+    assert_eq!(d.call(&writes, Method::POST, import, Some(json!({ "path": "/api", "dotenv": "A=1", "replace": true }))).await.0, StatusCode::FORBIDDEN);
+    let (deletes, _) = d.token(json!([{ "product": "secrets", "resources": "*", "paths": ["/api"], "actions": { "delete": "allow" } }]), json!({})).await;
+    assert_eq!(d.call(&deletes, Method::POST, import, Some(json!({ "path": "/api", "dotenv": "A=1", "replace": true }))).await.0, StatusCode::FORBIDDEN, "and write");
+    // The same fields as an array (a typed body takes them in order) hide them from the gate.
+    let (s, out) = d.call(&writes, Method::POST, import, Some(json!(["A=1", null, "/api", false, null, false, true]))).await;
+    assert_eq!((s, out["code"].as_str()), (StatusCode::BAD_REQUEST, Some("bad_request")), "{out}");
 }
 
 /// The policy's `oauth_clients`: a client it leaves out can't be consented to, sign a device in,
@@ -1490,6 +1537,8 @@ async fn a_token_asks_for_access_for_a_while() {
     let secrets = |path: Option<&str>| json!({ "product": "secrets", "action": "read", "resource": "web", "environment": "production", "path": path, "for": "1d", "reason": "look into the outage" });
     assert_eq!(d.call(&token, Method::POST, "/v1/access/requests", Some(secrets(None))).await.0, StatusCode::BAD_REQUEST);
     assert_eq!(d.call(&token, Method::POST, "/v1/access/requests", Some(secrets(Some("/api")))).await.0, StatusCode::ACCEPTED);
+    // The root spelled another way is the root: `//` would reach every folder.
+    assert_eq!(d.call(&token, Method::POST, "/v1/access/requests", Some(secrets(Some("//")))).await.0, StatusCode::BAD_REQUEST);
     let (s, apr) = d.call(&token, Method::POST, "/v1/access/requests", Some(ask.clone())).await;
     assert_eq!((s, apr["state"].as_str(), apr["args"]["reason"].as_str()), (StatusCode::ACCEPTED, Some("pending"), Some("drop the scratch database I made")), "{apr}");
     assert!(apr["summary"].as_str().is_some_and(|s| s.contains("every environment")), "the person reads its whole reach: {apr}");
@@ -2236,7 +2285,8 @@ async fn a_rule_can_grant_some_indices() {
     assert!(who("resource=CL_1").await.is_empty(), "exact, case and all");
     let (_, t) = d.call(OPERATOR, Method::GET, &format!("/v1/access/tokens/{logs_id}/tighten"), None).await;
     assert_eq!(t["narrower"], true, "{t}");
-    assert_eq!(t["rules"][0]["resources"], json!([{ "id": "cl_1", "index": "logs-*,-logs-old" }, { "id": "cl_1", "index": "logs-2025" }]), "{t}");
+    // An expression's exclusions aren't a rule's: what covers that request is its patterns.
+    assert_eq!(t["rules"][0]["resources"], json!([{ "id": "cl_1", "index": "logs-*" }, { "id": "cl_1", "index": "logs-2025" }]), "{t}");
     // Applied only over the rules it was made from: a change in between is a conflict.
     let apply = |from: Value| {
         let (d, path) = (&d, format!("/v1/access/tokens/{logs_id}/tighten"));
@@ -3459,15 +3509,15 @@ async fn a_secret_written_as_the_caller_is_asked_for_and_only_it_is_allowed() {
     root["secret"]["path"] = json!("/");
     let (s, out) = d.call(&asks, Method::POST, path, Some(root)).await;
     assert_eq!((s, out["code"].as_str()), (StatusCode::FORBIDDEN, Some("approval_pending")), "{out}");
-    // The root folder reaches every folder under it: the whole environment, remembered for 8 hours
-    // at most.
+    // The root folder reaches every folder under it: lent to search's route, the whole environment
+    // is approved once only.
     let root_id = out["approval"].as_str().unwrap().to_string();
-    let approve = |remember: &str| {
-        let (d, url, body) = (&d, format!("/v1/access/approvals/{root_id}/approve"), json!({ "remember": remember }));
-        async move { d.call(OPERATOR, Method::POST, &url, Some(body)).await.0 }
+    let approve = |remember: Option<&str>| {
+        let (d, url, body) = (&d, format!("/v1/access/approvals/{root_id}/approve"), remember.map(|r| json!({ "remember": r })));
+        async move { d.call(OPERATOR, Method::POST, &url, body).await.0 }
     };
-    assert_eq!(approve("1d").await, StatusCode::BAD_REQUEST);
-    assert_eq!(approve("8h").await, StatusCode::OK);
+    assert_eq!(approve(Some("8h")).await, StatusCode::BAD_REQUEST);
+    assert_eq!(approve(None).await, StatusCode::OK);
     let (allows, _) = d.token(json!([search("allow"), { "product": "secrets", "resources": [{ "project": project }], "actions": { "write": "allow" } }]), json!({})).await;
     let (s, seen) = d.call(&allows, Method::POST, path, Some(body("production"))).await;
     assert_eq!((s, seen["here"].as_bool()), (StatusCode::OK, Some(true)), "{seen}");
@@ -3480,7 +3530,8 @@ async fn a_secret_written_as_the_caller_is_asked_for_and_only_it_is_allowed() {
 
 /// A domain's Cloudflare token is a `roll://` reference apps reads once as the caller (nothing
 /// keeps it): a token whose reveal on its folder is `ask` gets an approval naming that folder, not
-/// a 403 with nothing to approve.
+/// a 403 with nothing to approve, its card naming the key; at the environment's root it's approved
+/// once only.
 #[tokio::test]
 async fn a_dns_token_read_once_is_asked_for_by_its_folder() {
     let d = Daemon::new(50);
@@ -3493,6 +3544,18 @@ async fn a_dns_token_read_once_is_asked_for_by_its_folder() {
     assert_eq!((s, out["code"].as_str()), (StatusCode::FORBIDDEN, Some("approval_pending")), "{out}");
     let (_, asked) = d.call(OPERATOR, Method::GET, &format!("/v1/access/approvals/{}", out["approval"].as_str().unwrap()), None).await;
     assert_eq!((asked["product"].as_str(), asked["action"].as_str(), asked["environment"].as_str(), asked["scope_path"].as_str()), (Some("secrets"), Some("reveal"), Some("production"), Some("/dns")), "{asked}");
+    assert!(asked["summary"].as_str().is_some_and(|s| s.contains("CF_TOKEN in production:/dns")), "the card names the key: {asked}");
+    // At the environment's root, remembering it would reveal every production key to every later
+    // configure: approved once only.
+    let (s, out) = d.call(&token, Method::POST, path, Some(json!({ "cloudflare_token": "roll://production/CF_TOKEN" }))).await;
+    assert_eq!((s, out["code"].as_str()), (StatusCode::FORBIDDEN, Some("approval_pending")), "{out}");
+    let root = out["approval"].as_str().unwrap().to_string();
+    let approve = |remember: Option<&str>| {
+        let (d, url, body) = (&d, format!("/v1/access/approvals/{root}/approve"), remember.map(|r| json!({ "remember": r })));
+        async move { d.call(OPERATOR, Method::POST, &url, body).await.0 }
+    };
+    assert_eq!(approve(Some("8h")).await, StatusCode::BAD_REQUEST);
+    assert_eq!(approve(None).await, StatusCode::OK);
 }
 
 /// Claude's auto-connect (its connector docs, "Enterprise Managed Auth"): Claude signs the

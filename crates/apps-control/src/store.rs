@@ -527,6 +527,16 @@ CREATE TABLE IF NOT EXISTS domains (
 CREATE INDEX IF NOT EXISTS domains_env ON domains (service, env);
 -- A project's own preview domain (`*.preview.acme.dev`, roll previews' preview deployment
 -- suffix), and the label each preview environment answers to under it.
+CREATE TABLE IF NOT EXISTS alert_silences (
+    id TEXT PRIMARY KEY,
+    service TEXT NOT NULL,
+    env TEXT NOT NULL,
+    until_ms INTEGER NOT NULL,
+    alerts TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS alert_silences_env ON alert_silences (service, env);
 CREATE TABLE IF NOT EXISTS deploy_git_tags (
     deployment TEXT PRIMARY KEY,
     tag TEXT NOT NULL
@@ -1277,6 +1287,8 @@ impl Store {
         // NULL: NDJSON, as every drain was before formats.
         db.add_column("log_drains", "format", "TEXT")?;
         db.add_column("domains", "redirect_to", "TEXT")?;
+        // A preview's webhook URLs (`access.webhooks`), as JSON.
+        db.add_column("env_access", "webhooks", "TEXT")?;
         let store = Store { db, sealer };
         store.mark_references()?;
         store.quote_log_patterns()?;
@@ -1485,7 +1497,7 @@ impl Store {
             c.execute("DELETE FROM deploy_git_tags WHERE deployment IN (SELECT id FROM deployments WHERE service = ?)", [id])?;
             c.execute("DELETE FROM state WHERE key LIKE ?", [format!("%:{id}/%")])?;
             c.execute("DELETE FROM status_days WHERE key LIKE ?", [format!("%:{id}/%")])?;
-            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "variable_runtime_only", "visit_tickets", "visit_sessions", "variable_files", "error_groups", "variables", "links", "domains", "preview_hosts", "runs", "jobs", "metrics", "usage", "form_submissions", "deploy_scans", "env_data", "env_branches", "udp_ports", "env_unscheduled", "sandboxes", "env_peering", "volume_hours", "env_deploy_tags"] {
+            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "variable_runtime_only", "visit_tickets", "visit_sessions", "variable_files", "error_groups", "variables", "links", "domains", "preview_hosts", "runs", "jobs", "metrics", "usage", "form_submissions", "deploy_scans", "env_data", "env_branches", "udp_ports", "env_unscheduled", "sandboxes", "env_peering", "volume_hours", "env_deploy_tags", "alert_silences"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ?"), [id])?;
             }
             match c.execute("DELETE FROM services WHERE id = ?", [id])? {
@@ -1625,7 +1637,7 @@ impl Store {
             if n == 0 {
                 return Err(Error::NotFound(format!("service {service} has no environment {env}")));
             }
-            for t in ["variables", "variable_files", "error_groups", "domains", "preview_hosts", "runs", "jobs", "metrics", "deploy_keys", "env_access", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "variable_runtime_only", "visit_tickets", "visit_sessions", "form_submissions", "env_data", "udp_ports", "env_unscheduled", "sandboxes", "env_peering", "env_deploy_tags"] {
+            for t in ["variables", "variable_files", "error_groups", "domains", "preview_hosts", "runs", "jobs", "metrics", "deploy_keys", "env_access", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "variable_runtime_only", "visit_tickets", "visit_sessions", "form_submissions", "env_data", "udp_ports", "env_unscheduled", "sandboxes", "env_peering", "env_deploy_tags", "alert_silences"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ? AND env = ?"), [service, env])?;
             }
             // Its schedules', challenge's and base images' state goes with it.
@@ -2996,6 +3008,39 @@ impl Store {
         Ok(())
     }
 
+    /// A silence of an environment's alerts until `until` (ms): `alerts` the kinds (none: every
+    /// alert). At most [`crate::silences::MAX_OPEN`] open at once; ended ones are dropped here.
+    pub fn add_silence(&self, service: &str, env: &str, until: i64, alerts: &[String], reason: &str) -> Result<crate::silences::Silence> {
+        let (now, id) = (self.now()?, format!("sil_{}", random(12).to_ascii_lowercase()));
+        let j = serde_json::to_string(alerts).expect("kinds serialize");
+        self.db.write(|c| {
+            c.execute("DELETE FROM alert_silences WHERE service = ? AND env = ? AND until_ms <= ?", params![service, env, now])?;
+            let open: i64 = c.query_row("SELECT COUNT(*) FROM alert_silences WHERE service = ? AND env = ?", [service, env], |r| r.get(0))?;
+            if open >= crate::silences::MAX_OPEN {
+                return Err(Error::Conflict(format!("at most {} silences are open in an environment: end one first", crate::silences::MAX_OPEN)));
+            }
+            c.execute("INSERT INTO alert_silences (id, service, env, until_ms, alerts, reason, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)", params![id, service, env, until, j, reason, now])?;
+            Ok(())
+        })?;
+        Ok(crate::silences::Silence { id, until, alerts: alerts.to_vec(), reason: reason.into(), created_at: now })
+    }
+
+    /// An environment's silences still open at `now`.
+    pub fn silences(&self, service: &str, env: &str, now: i64) -> Result<Vec<crate::silences::Silence>> {
+        Ok(self.db.query("SELECT id, until_ms, alerts, reason, created_at FROM alert_silences WHERE service = ? AND env = ? AND until_ms > ? ORDER BY until_ms", params![service, env, now], |r| {
+            Ok(crate::silences::Silence { id: r.get(0)?, until: r.get(1)?, alerts: serde_json::from_str(&r.get::<_, String>(2)?).unwrap_or_default(), reason: r.get(3)?, created_at: r.get(4)? })
+        })?)
+    }
+
+    pub fn end_silence(&self, service: &str, env: &str, id: &str) -> Result<bool> {
+        Ok(self.db.execute("DELETE FROM alert_silences WHERE service = ? AND env = ? AND id = ?", [service, env, id])? > 0)
+    }
+
+    /// When a scheduled maintenance ends, if it's one.
+    pub fn maintenance_until(&self, project: &str, id: &str) -> Result<Option<i64>> {
+        Ok(self.db.query_row("SELECT scheduled_until FROM status_incidents WHERE project = ? AND id = ?", [project, id], |r| r.get::<_, Option<i64>>(0)).optional()?.flatten())
+    }
+
     /// Every environment's tag list of a service forgotten (its source moved to another repository).
     pub fn clear_deploy_tags(&self, service: &str) -> Result<()> {
         self.db.execute("UPDATE env_deploy_tags SET seen = '[]' WHERE service = ?", [service])?;
@@ -3856,13 +3901,14 @@ impl Store {
     pub fn access(&self, service: &str, env: &str) -> Result<Option<Access>> {
         Ok(self
             .db
-            .query_row("SELECT token_hash, bypass_hash, signed_in, password_hash, sso, preflight, callers FROM env_access WHERE service = ? AND env = ?", params![service, env], |r| {
+            .query_row("SELECT token_hash, bypass_hash, signed_in, password_hash, sso, preflight, callers, webhooks FROM env_access WHERE service = ? AND env = ?", params![service, env], |r| {
                 // No token: an empty one (the column was made required), which no digest matches.
                 let token: String = r.get(0)?;
                 let sso = r.get::<_, Option<String>>(4)?.and_then(|s| serde_json::from_str(&s).ok());
                 let preflight = r.get::<_, Option<String>>(5)?.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
                 let callers = r.get::<_, Option<String>>(6)?.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
-                Ok(Access { token_hash: Some(token).filter(|t| !t.is_empty()), bypass_hash: r.get(1)?, signed_in: r.get::<_, i64>(2)? != 0, password_hash: r.get(3)?, sso, preflight, callers })
+                let webhooks = r.get::<_, Option<String>>(7)?.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+                Ok(Access { token_hash: Some(token).filter(|t| !t.is_empty()), bypass_hash: r.get(1)?, signed_in: r.get::<_, i64>(2)? != 0, password_hash: r.get(3)?, sso, preflight, callers, webhooks })
             })
             .optional()?)
     }
@@ -3870,8 +3916,8 @@ impl Store {
     pub fn set_access(&self, service: &str, env: &str, access: Option<&Access>) -> Result<()> {
         match access {
             Some(a) => self.db.execute(
-                "INSERT INTO env_access (service, env, token_hash, bypass_hash, signed_in, password_hash, sso, preflight, callers) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (service, env) DO UPDATE SET token_hash = excluded.token_hash, bypass_hash = excluded.bypass_hash, signed_in = excluded.signed_in, password_hash = excluded.password_hash, sso = excluded.sso, preflight = excluded.preflight, callers = excluded.callers",
-                params![service, env, a.token_hash.as_deref().unwrap_or(""), a.bypass_hash, a.signed_in as i64, a.password_hash, a.sso.as_ref().and_then(|s| serde_json::to_string(s).ok()), (!a.preflight.is_empty()).then(|| serde_json::to_string(&a.preflight).unwrap_or_default()), (!a.callers.is_empty()).then(|| serde_json::to_string(&a.callers).unwrap_or_default())],
+                "INSERT INTO env_access (service, env, token_hash, bypass_hash, signed_in, password_hash, sso, preflight, callers, webhooks) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (service, env) DO UPDATE SET token_hash = excluded.token_hash, bypass_hash = excluded.bypass_hash, signed_in = excluded.signed_in, password_hash = excluded.password_hash, sso = excluded.sso, preflight = excluded.preflight, callers = excluded.callers, webhooks = excluded.webhooks",
+                params![service, env, a.token_hash.as_deref().unwrap_or(""), a.bypass_hash, a.signed_in as i64, a.password_hash, a.sso.as_ref().and_then(|s| serde_json::to_string(s).ok()), (!a.preflight.is_empty()).then(|| serde_json::to_string(&a.preflight).unwrap_or_default()), (!a.callers.is_empty()).then(|| serde_json::to_string(&a.callers).unwrap_or_default()), (!a.webhooks.is_empty()).then(|| serde_json::to_string(&a.webhooks).unwrap_or_default())],
             )?,
             None => self.db.execute("DELETE FROM env_access WHERE service = ? AND env = ?", params![service, env])?,
         };

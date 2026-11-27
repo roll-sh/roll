@@ -1377,6 +1377,31 @@ pub enum AppsCmd {
         #[arg(long, conflicts_with_all = ["delete", "incident", "update", "title", "item"])]
         remove_domain: bool,
     },
+    /// A deployment's image on this machine (`fly auth docker`'s): `roll apps image dep_… |
+    /// docker load`, or `-o image.tar`. Its layers can hold what the build had: reveal.
+    Image {
+        deployment: String,
+        #[command(flatten)]
+        target: Target,
+        #[arg(long, short = 'o', value_name = "FILE")]
+        output: Option<PathBuf>,
+    },
+    /// Quiet an environment's alerts for a while (Cloud Monitoring's snooze): `--for 2h --reason
+    /// "db migration"`, `--alert check.down` (repeated) for some kinds only; alone, the open ones;
+    /// `--end sil_…` ends one early. Events are still kept, and resolves still go out.
+    Silence {
+        #[command(flatten)]
+        target: Target,
+        /// How long (`30m`, `2h`, `1d`; at most 30 days).
+        #[arg(long = "for", value_name = "DURATION", requires = "reason", conflicts_with = "end")]
+        duration: Option<String>,
+        #[arg(long)]
+        reason: Option<String>,
+        #[arg(long = "alert", value_name = "KIND", requires = "duration")]
+        alerts: Vec<String>,
+        #[arg(long, value_name = "ID")]
+        end: Option<String>,
+    },
     /// The project's spend limits this month: show them, or set `--alert` and `--hard` (dollars;
     /// `0` removes one). At the hard limit its services stop until it's raised.
     Limits {
@@ -5518,6 +5543,64 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 return Ok(());
             }
             v
+        }
+        AppsCmd::Image { deployment, target, output } => {
+            use std::io::{IsTerminal, Write};
+            if output.is_none() && std::io::stdout().is_terminal() {
+                bail!("an image is binary: pipe it (`roll apps image {deployment} | docker load`) or write it with -o image.tar");
+            }
+            let svc = service(api, &target).await?;
+            let mut req = api.http.get(format!("{}{}/deploys/{}/image", api.base, env_path(&svc, &target.env), enc(&deployment)));
+            if let Some(k) = &api.key {
+                req = req.bearer_auth(k);
+            }
+            let mut res = req.send().await.with_context(|| format!("can't reach {}", api.base))?;
+            if !res.status().is_success() {
+                let st = res.status();
+                let v: Value = res.json().await.unwrap_or(Value::Null);
+                bail!("{}", v["error"].as_str().unwrap_or(st.as_str()));
+            }
+            let mut out: Box<dyn Write> = match &output {
+                Some(p) => Box::new(std::fs::File::create(p).with_context(|| format!("can't write {}", p.display()))?),
+                None => Box::new(std::io::stdout().lock()),
+            };
+            let mut n = 0u64;
+            while let Some(chunk) = res.chunk().await? {
+                n += chunk.len() as u64;
+                out.write_all(&chunk)?;
+            }
+            out.flush()?;
+            eprintln!("{} MiB of {deployment}'s image", n >> 20);
+            return Ok(());
+        }
+        AppsCmd::Silence { target, duration, reason, alerts, end } => {
+            let svc = service(api, &target).await?;
+            let path = format!("{}/silences", env_path(&svc, &target.env));
+            if let Some(id) = end {
+                api.call(reqwest::Method::DELETE, &format!("{path}/{}", enc(&id)), None).await?;
+                json!({ "ended": id })
+            } else if let Some(d) = duration {
+                let ms = ago_ms(&d).map_err(|_| anyhow::anyhow!("--for is a duration like 30m, 2h or 1d"))?;
+                let until = chrono::Utc::now().timestamp_millis() + ms;
+                let v = api.post(&path, json!({ "until": until, "reason": reason, "alerts": alerts })).await?;
+                if !json_out {
+                    let at = chrono::DateTime::from_timestamp_millis(until).map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string()).unwrap_or_default();
+                    println!("{}  quiet until {at}", s(&v["id"]));
+                    return Ok(());
+                }
+                v
+            } else {
+                let v = api.get(&path).await?;
+                if !json_out {
+                    for x in v.as_array().into_iter().flatten() {
+                        let at = x["until"].as_i64().and_then(chrono::DateTime::from_timestamp_millis).map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string()).unwrap_or_default();
+                        let what = x["alerts"].as_array().filter(|a| !a.is_empty()).map(|a| a.iter().map(s).collect::<Vec<_>>().join(", ")).unwrap_or_else(|| "every alert".into());
+                        println!("{}  until {at}  {what}  {}", s(&x["id"]), s(&x["reason"]));
+                    }
+                    return Ok(());
+                }
+                v
+            }
         }
         AppsCmd::Limits { target, alert, hard } => {
             let svc = service(api, &target).await?;

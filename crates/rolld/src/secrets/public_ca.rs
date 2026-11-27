@@ -176,7 +176,8 @@ impl PublicCa for RollPublicCa {
                 let record = format!("_acme-challenge.{}", n.trim_start_matches("*."));
                 match &dns {
                     Dns::Cloudflare(cf) => cf.zone_for(&record).await.map(drop),
-                    Dns::Route53(r53) => r53.zone_for(&record).await.map(drop),
+                    // Its zone, and the TXT set read: an order keeps the set's other values.
+                    Dns::Route53(r53) => r53.check(&record).await,
                 }
                 .map_err(|e| format!("{e:#}"))?;
             }

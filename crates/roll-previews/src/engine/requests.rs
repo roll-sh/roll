@@ -458,6 +458,42 @@ impl Engine {
         Ok((share, format!("{}/?roll_share={token}", url.trim_end_matches('/'))))
     }
 
+    /// `POST …/{id}/webhooks {path, label}`: a URL that lets requests to exactly `path` of the
+    /// preview's first service past its privacy, its token in the query (Stripe's and GitHub's
+    /// webhooks take a URL, not a header), for the preview's life or until revoked. It sets no
+    /// cookie, and the service never sees the token. Only a private, trusted preview's: a fork's
+    /// code would be handed what's sent to it. The URL is shown only here.
+    pub async fn webhook(&self, id: &str, path: &str, by: &str, maker: Option<&str>, label: &str) -> Result<(crate::Webhook, String)> {
+        // As roll apps' gate takes them too: no `.` or `..` segment, `%`, `?`, `#` or `\`, and
+        // never roll's own `/__roll/` paths.
+        let odd = path.split('/').any(|seg| seg == "." || seg == "..") || path.contains(['%', '?', '#', '\\']) || path == "/__roll" || path.starts_with("/__roll/");
+        if !crate::settings::page_path_ok(path) || odd {
+            return Err(Error::BadRequest("path: a path of the service's own, starting with / (up to 200 characters; no query, #, %, \\, quotes, spaces, . or .. segments, nor /__roll/)".into()));
+        }
+        let label = label.trim();
+        if label.chars().count() > 60 || label.chars().any(char::is_control) {
+            return Err(Error::BadRequest("a webhook URL's label is one line of 60 characters at most".into()));
+        }
+        let r = self.store.row(id)?;
+        if r.desired == Desired::Deleted {
+            return Err(Error::Conflict("the preview is being deleted".into()));
+        }
+        if !r.trusted {
+            return Err(Error::Conflict("a preview of a pull request from a fork takes no webhook URL: its code would get what's sent to it".into()));
+        }
+        if !self.store.access(id)?.is_some_and(|a| a.required()) {
+            return Err(Error::Conflict("the preview is public: a webhook can use its plain URL".into()));
+        }
+        let svc = self.store.services(id)?.into_iter().next().ok_or_else(|| Error::Conflict("the preview has no service yet".into()))?;
+        let url = svc.url;
+        let (hook, token) = self.store.create_webhook(id, &svc.name, path, by, maker, label)?;
+        self.store.log(id, &format!("a webhook URL for {path} made by {by} ({}{})", hook.id, if label.is_empty() { String::new() } else { format!(", \"{label}\"") }))?;
+        // A backend whose own gate serves the service (roll apps) is told at the next converge.
+        self.store.update(id, |row| row.next_at = 0)?;
+        self.kick();
+        Ok((hook, format!("{}{path}?roll_hook={token}", url.trim_end_matches('/'))))
+    }
+
     /// A note a guest left through share link `share` (its `notes` on): posted on the change as
     /// `guest:<name>`, its text made inert for a pull request (no mention, image or HTML), at most
     /// [`crate::notes::GUEST_PER_HOUR`] an hour per link. Its review's id.
