@@ -3027,9 +3027,15 @@ impl Store {
 
     /// An environment's silences still open at `now`.
     pub fn silences(&self, service: &str, env: &str, now: i64) -> Result<Vec<crate::silences::Silence>> {
-        Ok(self.db.query("SELECT id, until_ms, alerts, reason, created_at FROM alert_silences WHERE service = ? AND env = ? AND until_ms > ? ORDER BY until_ms", params![service, env, now], |r| {
+        Ok(self.db.query("SELECT id, until_ms, alerts, reason, created_at FROM alert_silences WHERE service = ? AND env = ? AND until_ms > ? AND created_at <= ? ORDER BY until_ms", params![service, env, now, now], |r| {
             Ok(crate::silences::Silence { id: r.get(0)?, until: r.get(1)?, alerts: serde_json::from_str(&r.get::<_, String>(2)?).unwrap_or_default(), reason: r.get(3)?, created_at: r.get(4)? })
         })?)
+    }
+
+    /// The silences of `project`'s environments with this reason ended (a maintenance's, when it is).
+    pub fn end_silences_named(&self, project: &str, reason: &str) -> Result<()> {
+        self.db.execute("DELETE FROM alert_silences WHERE reason = ? AND service IN (SELECT id FROM services WHERE project = ?)", [reason, project])?;
+        Ok(())
     }
 
     pub fn end_silence(&self, service: &str, env: &str, id: &str) -> Result<bool> {
@@ -3057,8 +3063,7 @@ impl Store {
         Ok(self.db.query_row("SELECT tag FROM deploy_git_tags WHERE deployment = ?", [deployment], |r| r.get(0)).optional()?)
     }
 
-    /// `tag` marked as acted on: false when it already was (each tag deploys once). The newest
-    /// [`crate::tags::MAX_SEEN`] are kept.
+    /// `tag` marked as acted on: false when it already was (each tag deploys once).
     pub fn mark_tag_seen(&self, service: &str, env: &str, tag: &str) -> Result<bool> {
         self.db.write(|c| {
             let Some(seen): Option<String> = c.query_row("SELECT seen FROM env_deploy_tags WHERE service = ? AND env = ?", [service, env], |r| r.get(0)).optional()? else { return Ok(false) };
@@ -3066,9 +3071,9 @@ impl Store {
             if seen.iter().any(|t| t == tag) {
                 return Ok(false);
             }
+            // Never trimmed: a tag dropped from it would read as new to the watch and deploy again.
             seen.push(tag.to_string());
-            let skip = seen.len().saturating_sub(crate::tags::MAX_SEEN);
-            c.execute("UPDATE env_deploy_tags SET seen = ? WHERE service = ? AND env = ?", params![serde_json::to_string(&seen[skip..]).expect("tags serialize"), service, env])?;
+            c.execute("UPDATE env_deploy_tags SET seen = ? WHERE service = ? AND env = ?", params![serde_json::to_string(&seen).expect("tags serialize"), service, env])?;
             Ok(true)
         })
     }

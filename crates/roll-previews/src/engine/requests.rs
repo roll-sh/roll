@@ -464,8 +464,11 @@ impl Engine {
     /// cookie, and the service never sees the token. Only a private, trusted preview's: a fork's
     /// code would be handed what's sent to it. The URL is shown only here.
     pub async fn webhook(&self, id: &str, path: &str, by: &str, maker: Option<&str>, label: &str) -> Result<(crate::Webhook, String)> {
-        if !crate::settings::page_path_ok(path) || path.contains('?') {
-            return Err(Error::BadRequest("path: a path of the service's own, starting with / (up to 200 characters, no query, #, quotes or spaces)".into()));
+        // As roll apps' gate takes them too: no `.` or `..` segment, `%`, `?`, `#` or `\`, and
+        // never roll's own `/__roll/` paths.
+        let odd = path.split('/').any(|seg| seg == "." || seg == "..") || path.contains(['%', '?', '#', '\\']) || path == "/__roll" || path.starts_with("/__roll/");
+        if !crate::settings::page_path_ok(path) || odd {
+            return Err(Error::BadRequest("path: a path of the service's own, starting with / (up to 200 characters; no query, #, %, \\, quotes, spaces, . or .. segments, nor /__roll/)".into()));
         }
         let label = label.trim();
         if label.chars().count() > 60 || label.chars().any(char::is_control) {
@@ -482,14 +485,44 @@ impl Engine {
             return Err(Error::Conflict("the preview is public: a webhook can use its plain URL".into()));
         }
         let svc = self.store.services(id)?.into_iter().next().ok_or_else(|| Error::Conflict("the preview has no service yet".into()))?;
-        // roll's runtime checks them; roll apps' gate doesn't yet.
-        if !self.apps.can_swap(id, &svc.name).await.unwrap_or(false) {
-            return Err(Error::Conflict(format!("{} runs on roll apps, whose gate doesn't take webhook URLs yet", svc.name)));
-        }
         let url = svc.url;
-        let (hook, token) = self.store.create_webhook(id, path, by, maker, label)?;
+        let (hook, token) = self.store.create_webhook(id, &svc.name, path, by, maker, label)?;
         self.store.log(id, &format!("a webhook URL for {path} made by {by} ({}{})", hook.id, if label.is_empty() { String::new() } else { format!(", \"{label}\"") }))?;
+        // A backend whose own gate serves the service (roll apps) is told at the next converge.
+        self.store.update(id, |row| row.next_at = 0)?;
+        self.kick();
         Ok((hook, format!("{}{path}?roll_hook={token}", url.trim_end_matches('/'))))
+    }
+
+    /// A picture the team's own tests sent (`POST /__roll/snapshot?name=&head=` on the preview's
+    /// host, with the project's bypass secret; Argos's and Percy's SDKs): page `snap:<name>` of
+    /// the visual review at the head the preview serves (`head`, when sent, must be that one: a
+    /// test of another head isn't filed as this one's). Kept here; the preview's owner compares it
+    /// at its next converge (a change's against main's, main's against the changes waiting on it)
+    /// and reports it, once for every picture sent since. The head it was kept at.
+    pub async fn snapshot(self: &Arc<Self>, id: &str, name: &str, head: Option<&str>, png: Vec<u8>) -> Result<String> {
+        if !crate::settings::snapshot_name_ok(name) {
+            return Err(Error::BadRequest("name: 1 to 80 of a-z, A-Z, 0-9, -, _, . and /".into()));
+        }
+        let r = self.store.row(id)?;
+        if r.desired == Desired::Deleted {
+            return Err(Error::Conflict("the preview is being deleted".into()));
+        }
+        let serves = r.build().to_string();
+        if let Some(h) = head.filter(|h| !h.is_empty())
+            && h != serves
+            && self.source.git_commit(&r.repo, &serves).await.ok().flatten().as_deref() != Some(h)
+        {
+            return Err(Error::Conflict(format!("the preview serves {serves}, not {h}: send it from a test of that head")));
+        }
+        // Compared with the picture it replaces: CPU work, off the runtime's workers.
+        let (store, pid, h, n) = (self.store.clone(), id.to_string(), serves.clone(), name.to_string());
+        tokio::task::spawn_blocking(move || store.put_snapshot(&pid, &h, &n, &png)).await.map_err(|e| Error::Internal(e.to_string()))??;
+        self.store.set_runtime_fact(id, "snapshots_due", Some(&true))?;
+        self.store.log(id, &format!("a snapshot from the team's tests: {name}"))?;
+        self.store.update(id, |row| row.next_at = 0)?;
+        self.kick();
+        Ok(serves)
     }
 
     /// A note a guest left through share link `share` (its `notes` on): posted on the change as

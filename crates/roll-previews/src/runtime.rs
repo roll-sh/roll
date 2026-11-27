@@ -912,6 +912,38 @@ impl Runtime {
         }
     }
 
+    /// `POST /__roll/snapshot?name=` with the project's bypass secret and a PNG (at most
+    /// [`SCREENSHOT_MAX`]): the team's tests' picture, kept as page `snap:<name>`. 401 without
+    /// the secret (a fork's preview never has one), 400 for anything but a PNG.
+    async fn snapshot(&self, preview: &str, req: Request) -> Response {
+        if req.method() != axum::http::Method::POST {
+            return (StatusCode::METHOD_NOT_ALLOWED, "POST a PNG").into_response();
+        }
+        let want = match self.store.access(preview) {
+            Ok(a) => a.and_then(|a| a.bypass),
+            Err(_) => return (StatusCode::SERVICE_UNAVAILABLE, "try again").into_response(),
+        };
+        let given = req.headers().get(BYPASS_HEADER).and_then(|v| v.to_str().ok());
+        if !matches!((&want, given), (Some(want), Some(given)) if same(&crate::store::bypass_hash(given), want)) {
+            return (StatusCode::UNAUTHORIZED, "send the project's bypass secret in x-roll-preview-bypass").into_response();
+        }
+        let query = req.uri().query().unwrap_or("").to_string();
+        let param = |k: &str| query.split('&').filter_map(|kv| kv.split_once('=')).find(|(n, _)| *n == k).map(|(_, v)| percent_decode(v));
+        let (name, head) = (param("name").unwrap_or_default(), param("head"));
+        let Ok(png) = axum::body::to_bytes(req.into_body(), SCREENSHOT_MAX).await else { return (StatusCode::PAYLOAD_TOO_LARGE, "a PNG of 2 MiB at most").into_response() };
+        if !png.starts_with(b"\x89PNG\r\n\x1a\n") {
+            return (StatusCode::BAD_REQUEST, "the body is a PNG").into_response();
+        }
+        let e = match self.engine() {
+            Ok(e) => e,
+            Err(_) => return (StatusCode::SERVICE_UNAVAILABLE, "try again").into_response(),
+        };
+        match e.snapshot(preview, &name, head.as_deref(), png.to_vec()).await {
+            Ok(head) => (StatusCode::CREATED, axum::Json(serde_json::json!({ "page": format!("snap:{name}"), "head": head }))).into_response(),
+            Err(err) => err.into_response(),
+        }
+    }
+
     /// The notes a share link's guest sees on `path`: those left through it.
     async fn guest_notes(&self, preview: &str, share: &str, path: &str) -> Response {
         let here = match self.engine() {
@@ -949,7 +981,7 @@ impl Runtime {
         // A webhook URL (Stripe's, GitHub's): its token in the query, for its one path only, at
         // every request (no cookie, no redirect); the service gets the request without it.
         if let Some(t) = given("roll_hook").map(str::to_string)
-            && let Some(hook) = crate::visit::webhook_visit(&self.store, self.engine().ok().as_ref(), preview, &t, req.uri().path(), self.cfg.visitor_recheck).await
+            && let Some(hook) = crate::visit::webhook_visit(&self.store, self.engine().ok().as_ref(), preview, &t, service, req.uri().path(), self.cfg.visitor_recheck).await
         {
             let rest: Vec<&str> = query.split('&').filter(|kv| !kv.starts_with("roll_hook=") && !kv.is_empty()).collect();
             let path = req.uri().path().to_string();
@@ -1288,6 +1320,8 @@ pub const FEEDBACK_NOTES_PATH: &str = "/__roll/feedback.json";
 pub const GUEST_NOTE_PATH: &str = "/__roll/notes";
 /// The toolbar's Main: the page on main's preview (`?path=`), as `{url}` (a team visitor's only).
 pub const MAIN_PAGE_PATH: &str = "/__roll/main";
+/// Where the team's tests send a snapshot (`POST ?name=`, a PNG, the project's bypass secret).
+pub const SNAPSHOT_PATH: &str = "/__roll/snapshot";
 pub(crate) const FEEDBACK_TAG: &[u8] = b"<script src=\"/__roll/feedback.js\" defer></script>";
 /// Adds the feedback button's tag to a page as it streams: before the first `</body>` (matched
 /// across chunk boundaries, in any case), or at the end of a page without one. Chunks pass on as
@@ -2940,6 +2974,11 @@ fn origin_of(url: &str) -> Option<String> {
 
 /// A request for a preview's service: through its gate, then to the service.
 async fn serve(rt: Arc<Runtime>, preview: String, service: String, mut req: Request) -> Response {
+    // The team's own snapshots: by the project's bypass secret only, whatever the preview's
+    // access (a public preview's too), never through its gate.
+    if req.uri().path() == SNAPSHOT_PATH {
+        return rt.snapshot(&preview, req).await;
+    }
     if let Some(r) = rt.gate(&preview, &service, &mut req).await {
         return r;
     }
@@ -3233,13 +3272,14 @@ mod tests {
         assert!(raw(with_share).await.starts_with("HTTP/1.1 401"), "revoked: out at once");
         // A webhook URL: its one path only, the service never seeing its token, no cookie; it
         // isn't a share link, and it's out at once when revoked.
-        let (hook, htoken) = rt.store.create_webhook(&row.id, "/hooks/stripe", "ada", None, "Stripe").unwrap();
+        let (hook, htoken) = rt.store.create_webhook(&row.id, "web", "/hooks/stripe", "ada", None, "Stripe").unwrap();
         let post_hook = format!("POST /hooks/stripe?roll_hook={htoken}&x=1 HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
         let hooked = raw(post_hook.clone()).await;
         assert!(hooked.ends_with("service saw /hooks/stripe?x=1") && !hooked.to_ascii_lowercase().contains("set-cookie"), "{hooked}");
         assert!(raw(format!("GET /hello?roll_hook={htoken} HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nConnection: close\r\n\r\n")).await.starts_with("HTTP/1.1 401"), "another path");
         assert!(raw(format!("GET /hello?roll_share={htoken} HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nConnection: close\r\n\r\n")).await.starts_with("HTTP/1.1 401"), "not a share link");
         assert_eq!(rt.store.webhooks(&row.id).unwrap()[0].hits, 1);
+        assert!(rt.store.webhook_live(&row.id, &htoken, "api", "/hooks/stripe").unwrap().is_none(), "its own service's path only");
         rt.store.revoke_webhook(&row.id, &hook.id).unwrap();
         assert!(raw(post_hook).await.starts_with("HTTP/1.1 401"), "revoked: out at once");
         // The notes already left on a page: for the same visitors only.
@@ -3250,6 +3290,12 @@ mod tests {
         assert!(raw(page("text/html")).await.ends_with("<p>asked for any</p></BODY></html>"), "the rule turns it off");
         let (secret, _) = rt.store.rotate_bypass("prj_1").unwrap();
         assert!(raw(with(&secret)).await.ends_with("service saw /hello"));
+        // The team's snapshots: the project's secret only (not the link's cookie), never reaching
+        // the service; past it, the engine keeps the picture (engine.rs, the_teams_snapshots_…).
+        let snap = |head: &str| format!("POST /__roll/snapshot?name=checkout HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\n{head}Content-Type: image/png\r\nContent-Length: 8\r\nConnection: close\r\n\r\n\u{89}PNG\r\n\u{1a}\n");
+        assert!(raw(snap(&format!("Cookie: roll_access_{}={token}\r\n", row.id))).await.starts_with("HTTP/1.1 401"), "a visitor can't send one");
+        let past = raw(snap(&format!("X-Roll-Preview-Bypass: {secret}\r\n"))).await;
+        assert!(!past.starts_with("HTTP/1.1 401") && !past.contains("service saw"), "{past}");
         assert!(raw(with("rpb_wrong")).await.starts_with("HTTP/1.1 401"));
         rt.store.rotate_bypass("prj_1").unwrap();
         assert!(raw(with(&secret)).await.starts_with("HTTP/1.1 401"), "a rotated secret stops working");

@@ -114,7 +114,9 @@ impl Apps {
         let (svc, row) = self.db(move |s| Ok((s.service(&sid)?, s.environment(&sid, &e).ok()))).await?;
         let row = match row {
             Some(r) => r,
-            // Deploying into an environment makes it (previews: PUT first is optional).
+            // Deploying into an environment makes it; never a `pv-` one, which is roll previews' own
+            // (made by its PUT first, as the operator: no tenant can name one after another's preview).
+            None if env.starts_with("pv-") => return Err(Error::NotFound(format!("no environment {env}: a pv- environment is roll previews' own (it makes one for each preview)"))),
             None => {
                 self.put_environment(service, env, Value::Object(Default::default())).await?;
                 let (sid, e) = (service.to_string(), env.to_string());

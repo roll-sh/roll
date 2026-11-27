@@ -13,6 +13,7 @@ use crate::meta::{AliasMeta, ClusterState, IndexMeta};
 use crate::obj;
 use crate::rest::{Ctx, Reply};
 use crate::xcontent::filter::glob_match;
+use crate::xpack::security::AliasAuth;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
@@ -142,8 +143,27 @@ pub fn get_alias(ctx: &Ctx) -> EsResult<Reply> {
 enum Action {
     /// `given`: the alias properties the action spelled out (data stream aliases reject some).
     Add { indices: Vec<String>, aliases: Vec<String>, meta: AliasMeta, given: Vec<String> },
-    Remove { indices: Vec<String>, aliases: Vec<String>, must_exist: Option<bool> },
+    /// `only`: what a limited caller's wildcards may reach ([`authorize`]).
+    Remove { indices: Vec<String>, aliases: Vec<String>, must_exist: Option<bool>, only: Option<Reach> },
     RemoveIndex { indices: Vec<String> },
+}
+
+/// The indices (and data streams) and aliases a removal may touch: those its caller may change
+/// aliases on.
+#[derive(Debug)]
+struct Reach {
+    targets: BTreeSet<String>,
+    aliases: BTreeSet<String>,
+}
+
+impl Reach {
+    fn target(only: &Option<Reach>, name: &str) -> bool {
+        only.as_ref().is_none_or(|r| r.targets.contains(name))
+    }
+
+    fn alias(only: &Option<Reach>, name: &str) -> bool {
+        only.as_ref().is_none_or(|r| r.aliases.contains(name))
+    }
 }
 
 /// A parse failure inside one action: the error, and where the wrappers
@@ -350,7 +370,7 @@ fn parse_action(kind: &str, body: &Map, raw: Option<&[u8]>, path: &[Seg], warnin
             }
             Action::Add { indices, aliases, meta, given }
         }
-        "remove" => Action::Remove { indices, aliases, must_exist },
+        "remove" => Action::Remove { indices, aliases, must_exist, only: None },
         _ => Action::RemoveIndex { indices },
     })
 }
@@ -547,8 +567,9 @@ fn apply(st: &mut ClusterState, actions: &[Action], now: i64) -> EsResult<Vec<Ou
                 }
                 None
             }
-            Action::Remove { indices, aliases, must_exist } => {
-                let streams = data_streams_matching(st, indices, now)?;
+            Action::Remove { indices, aliases, must_exist, only } => {
+                let mut streams = data_streams_matching(st, indices, now)?;
+                streams.retain(|d| Reach::target(only, d));
                 let mut ds_targets = Vec::new();
                 if !streams.is_empty() {
                     let mut removed = 0;
@@ -557,7 +578,7 @@ fn apply(st: &mut ClusterState, actions: &[Action], now: i64) -> EsResult<Vec<Ou
                             .metadata
                             .data_stream_aliases
                             .iter()
-                            .filter(|(name, a)| a.data_streams.iter().any(|x| x == d) && (aliases.iter().any(|p| p == "*" || p == "_all") || aliases.iter().any(|p| glob_match(p, name))))
+                            .filter(|(name, a)| a.data_streams.iter().any(|x| x == d) && (aliases.iter().any(|p| p == "*" || p == "_all") || aliases.iter().any(|p| glob_match(p, name))) && Reach::alias(only, name))
                             .map(|(name, _)| name.clone())
                             .collect();
                         for a in selected {
@@ -572,8 +593,9 @@ fn apply(st: &mut ClusterState, actions: &[Action], now: i64) -> EsResult<Vec<Ou
                     }
                     ds_targets = streams;
                 }
-                let names = resolve::resolve(st, indices, &IndicesOptions { allow_aliases: false, include_data_streams: false, ..opts }, now)?;
+                let mut names = resolve::resolve(st, indices, &IndicesOptions { allow_aliases: false, include_data_streams: false, ..opts }, now)?;
                 reject_backing_indices(st, indices, &names)?;
+                names.retain(|n| Reach::target(only, n));
                 let mut all = ds_targets.clone();
                 all.extend(names.iter().cloned());
                 targeted = Some(all);
@@ -584,7 +606,7 @@ fn apply(st: &mut ClusterState, actions: &[Action], now: i64) -> EsResult<Vec<Ou
                     let mut hit = false;
                     for n in &names {
                         let idx = &st.metadata.indices[n];
-                        let matching: Vec<String> = idx.aliases.keys().filter(|k| *k == alias || (resolve::is_wildcard(alias) && glob_match(alias, k))).cloned().collect();
+                        let matching: Vec<String> = idx.aliases.keys().filter(|k| (*k == alias || (resolve::is_wildcard(alias) && glob_match(alias, k))) && Reach::alias(only, k)).cloned().collect();
                         if matching.is_empty() {
                             continue;
                         }
@@ -705,11 +727,57 @@ fn action_value(a: &Action, targeted: Option<&Vec<String>>) -> Value {
     }
 }
 
-async fn run_actions(ctx: &Ctx<'_>, actions: Vec<Action>) -> EsResult<Reply> {
+/// Authorizes each action on what it resolves to in `st`, the state it applies to: the indices
+/// (or data streams) it reaches, whatever named them (the path, the body's `index`), and the
+/// alias names ([`AliasAuth`]). A removal's wildcards reach only what the caller may change, as
+/// on Elasticsearch (its `IndicesAndAliasesResolver`): an index or alias a wildcard selects that
+/// the caller holds nothing on is left alone (`only`), and one spelled out is refused. What
+/// doesn't resolve fails in `apply` as before.
+fn authorize(auth: &AliasAuth, st: &ClusterState, actions: &mut [Action], now: i64) -> EsResult<()> {
+    let lenient = IndicesOptions { expand_closed: true, allow_aliases: false, include_data_streams: false, ignore_unavailable: true, allow_no_indices: true, ..IndicesOptions::STRICT_EXPAND_OPEN };
+    let targets = |indices: &[String]| -> Vec<String> {
+        let mut out = data_streams_matching(st, indices, now).unwrap_or_default();
+        out.extend(resolve::resolve(st, indices, &lenient, now).unwrap_or_default());
+        out
+    };
+    let spelled = |e: &&String| !resolve::is_wildcard(e) && *e != "_all" && !e.starts_with('-');
+    for a in actions {
+        match a {
+            Action::Add { indices, aliases, .. } => {
+                let names: Vec<String> = aliases.iter().map(|a| resolve::resolve_date_math(a, now).unwrap_or_else(|_| a.clone())).collect();
+                auth.check(true, &targets(indices), &names)?;
+            }
+            Action::Remove { indices, aliases, only, .. } => {
+                let named: Vec<String> = indices.iter().filter(spelled).cloned().collect();
+                let mut strict = targets(&named);
+                strict.extend(named.iter().map(|e| resolve::resolve_date_math(e, now).unwrap_or_else(|_| e.clone())));
+                auth.check(false, &strict, &aliases.iter().filter(spelled).cloned().collect::<Vec<_>>())?;
+                if !auth.limited() {
+                    continue;
+                }
+                let on: BTreeSet<String> = targets(indices).into_iter().filter(|t| auth.allows(t)).collect();
+                let mut names: BTreeSet<String> = BTreeSet::new();
+                for t in &on {
+                    if let Some(idx) = st.metadata.indices.get(t) {
+                        names.extend(idx.aliases.keys().filter(|a| auth.allows(a)).cloned());
+                    }
+                }
+                names.extend(st.metadata.data_stream_aliases.iter().filter(|(a, d)| auth.allows(a) && d.data_streams.iter().any(|s| on.contains(s))).map(|(a, _)| a.clone()));
+                *only = Some(Reach { targets: on, aliases: names });
+            }
+            Action::RemoveIndex { indices } => auth.check_index_removal(&targets(indices))?,
+        }
+    }
+    Ok(())
+}
+
+async fn run_actions(ctx: &Ctx<'_>, mut actions: Vec<Action>) -> EsResult<Reply> {
+    let auth = AliasAuth::of(ctx);
     let now = ctx.now_ms;
     let (outcomes, actions) = ctx
         .cluster
         .update(move |st| {
+            authorize(&auth, st, &mut actions, now)?;
             let outcomes = apply(st, &actions, now)?;
             // Everything failed: nothing to acknowledge. Missing aliases are reported together.
             if outcomes.iter().all(|(e, _)| e.is_some()) {
@@ -827,10 +895,18 @@ pub async fn delete_alias(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let indices = index_expressions(ctx);
     let indices = if indices.is_empty() { vec!["_all".to_string()] } else { indices };
     let now = ctx.now_ms;
+    // The alias names are authorized too: one spelled out must be the caller's, and a pattern
+    // reaches only the caller's (Elasticsearch turns this request into an `_aliases` removal).
+    let auth = AliasAuth::of(ctx);
+    let spelled: Vec<String> = names.iter().filter(|n| !resolve::is_wildcard(n) && *n != "_all" && !n.starts_with('-')).cloned().collect();
     ctx.cluster
         .update(move |st| {
+            auth.check(false, &[], &spelled)?;
             let opts = IndicesOptions { expand_closed: true, allow_aliases: false, ..IndicesOptions::STRICT_EXPAND_OPEN };
-            let resolved = resolve::resolve(st, &indices, &opts, now)?;
+            let mut resolved = resolve::resolve(st, &indices, &opts, now)?;
+            // Closed ones too, which the request's own check (open indices) didn't see: only those
+            // the caller may change aliases on.
+            resolved.retain(|n| auth.allows(n));
             blocks::check(resolved.iter().map(|n| st.metadata.indices[n].as_ref()), Level::MetadataWrite)?;
             let mut removed = false;
             for n in &resolved {
@@ -838,7 +914,7 @@ pub async fn delete_alias(ctx: &Ctx<'_>) -> EsResult<Reply> {
                 let matching: Vec<String> = idx
                     .aliases
                     .keys()
-                    .filter(|a| alias_selected(&names, a))
+                    .filter(|a| alias_selected(&names, a) && auth.allows(a))
                     .cloned()
                     .collect();
                 if matching.is_empty() {

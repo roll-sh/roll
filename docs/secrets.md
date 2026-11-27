@@ -1298,7 +1298,15 @@ it carried and what to do, re-issue a CA, rotate a credential; only for its admi
 writes a `backup.left` audit row saying the same, and that a schedule they set up stops),
 `unplaced` (a key bound to hosts without a `header` or `query`, from before a placement
 was required: a trusted reader's placeholder may ride in any header, and an untrusted consumer's
-doesn't swap; see "Using a key without seeing it"), `expiring` (within two weeks: a key's
+doesn't swap; see "Using a key without seeing it"), `public_repo_no_leak_rotation` (a warning: a
+repository the project stands for, `counts_for_repo`, that anyone may read, while its
+`leaks.rotate` is `off`, so a value pushed there is world-readable at once and roll only reports
+it; `key` is the repository, `environment` empty, and the detail says where it's public, roll code
+or the GitHub repository it mirrors, and what to do, `roll secrets leaks managed` or the dashboard's
+"Leaked keys"; roll code says where from what it already keeps, a repository's visibility and its
+GitHub link's `private` as connecting and each delivery last said, never by asking GitHub; for
+whoever reads the whole project; under a policy that keeps `leaks.rotate` managed it's the
+`off_policy` finding instead, never both), `expiring` (within two weeks: a key's
 `expires_at`, so a vendor's key roll hasn't rotated in time, or a SaaS rotator's
 `credential_expires_at`, listed by its name with `environment` empty, never with the credential),
 `certificate_expiring` (a certificate a project CA signed for a CSR that ends
@@ -1610,7 +1618,7 @@ gives one Twilio key. Each rotation is `rotation.succeeded` on the events feed, 
 the vendor refuses is `rotation.failed` (and `rotation_failing` in health), as for every managed key.
 
 **Keys a vendor ends by itself rotate before that.** GitLab ends each token after `expires_days`,
-Databricks after `lifetime_days`, SonarQube after `expires_days` when one is set, Entra a
+Databricks after `lifetime_days`, SonarQube, Prisma Cloud and Paddle after `expires_days` when one is set, Entra a
 password after Microsoft's two years, and Salesforce a staged consumer key and secret after 30
 days (the first one after linking stays staged until the next rotation). A link to one
 of those needs `rotate_days`, at most the lifetime less 14 days (half the lifetime below 28 days),
@@ -1664,7 +1672,10 @@ instead of at the first rotation:
 - Jenkins: `GET /whoami/api/json`, which must name `user` (Jenkins answers it for anyone);
 - Salesforce: signing in, the app's consumers (`GET …/apps/oauth/credentials/{app_id}`; the
   credential's own app is refused, as rotating it would end roll's credential) and the consumer's
-  staged sets.
+  staged sets;
+- Prisma Cloud: signing in (`POST /login`), then the access keys (`GET /access_keys`);
+- Paddle: the key's own rotations (`GET /api-keys/{api_key_id}/rotations`, made with the key,
+  which needs no permission and activates nothing); the key must be the one `api_key_id` names.
 
 | `vendor` | `target` | `credential` | Issue | Revoke |
 | --- | --- | --- | --- | --- |
@@ -1681,6 +1692,8 @@ instead of at the first rotation:
 | `confluent` | `{owner: "sa-…" \| "u-…", resource?: "lkc-…", environment?: "env-…"}` (no `resource`: a Cloud API key) | a Cloud API key as `KEY:SECRET` that may manage `owner`'s keys (OrganizationAdmin, or AccountAdmin of the owner) | `POST https://api.confluent.cloud/iam/v2/api-keys {spec: {display_name, owner: {id}, resource?: {id, environment?}}}` (basic auth) → `id` (the key), `spec.secret` | `DELETE …/api-keys/{id}` |
 | `sonarqube` | `{host?: "sonarcloud.io" \| a SonarQube Server's host, kind?: "user" (default) \| "global_analysis" \| "project_analysis", project?: the project's key (project_analysis only), expires_days?: 1-730}` (analysis tokens on a Server only) | a user token of the user whose tokens rotate (for analysis tokens, one who may run analysis there) | `POST https://{host}/api/user_tokens/generate`, form `name, type, projectKey?, expirationDate?` (the token as basic auth's login) → `token` (`id` is the name roll gave it) | `POST …/api/user_tokens/revoke`, form `name` |
 | `jenkins` | `{host: "ci.example.com", user}` | an API token of `user` (Jenkins lets only a user make their own) | `GET https://{host}/crumbIssuer/api/json` (none on a 404), then `POST https://{host}/user/{user}/descriptorByName/jenkins.security.ApiTokenProperty/generateNewToken`, form `newTokenName`, with the crumb (basic auth `user:token`) → `data.tokenUuid`, `data.tokenValue`; then `GET /whoami/api/json` with the new token, which must name `user` | the crumb, then `POST …/ApiTokenProperty/revoke`, form `tokenUuid` |
+| `prismacloud` | `{api: "api.prismacloud.io" \| another of Prisma Cloud's API hosts, service_account, prisma_id?, expires_days?: 1-730}` | a System Admin's access key as `ACCESS_KEY_ID:SECRET` | `POST https://{api}/login {username, password, prismaId?}` → `token`, then `POST https://{api}/access_keys {name, serviceAccountName, expiresOn?}` (`x-redlock-auth`) → `id`, `secretKey`; then `POST /login` with the new key | `DELETE …/access_keys/{id}` |
+| `paddle` | `{api_key_id: "apikey_…", expires_days?: 1-730}` | the rotatable API key itself (`pdl_live_apikey_…`, or `pdl_sdbx_apikey_…` for the sandbox) | self-rotating: `POST https://{api.paddle.com \| sandbox-api.paddle.com}/api-keys/{api_key_id}/rotations {grace_period_seconds, new_key_expires_at?}` with the key (Bearer) → `data.new_key` (kept as the registration's credential), then `GET …/rotations/{id}` with the new key (`id` is `api_key_id`) | nothing: Paddle ends the old secret `grace_period_seconds` after the new one is first used |
 | `salesforce` | `{domain: "acme.my.salesforce.com", app_id: "0xI…", consumer_id}` (a local external client app and its OAuth consumer) | another external client app's consumer key and secret as `KEY:SECRET`, with the client credentials flow and a run-as user that may manage the app's OAuth credentials | `POST https://{domain}/services/oauth2/token` (client credentials), then any set still staged promoted (below), then `POST https://{domain}/services/data/v65.0/apps/oauth/credentials/{app_id}/{consumer_id}/staged` (Bearer) → `key` (`id`), `secret`, `expirationDate` | a set never promoted: `DELETE …/staged/{staged id}`; the consumer's credential: `PATCH …/staged/{the next set} {command: "rotate"}`, which promotes the next set and ends it |
 
 - **Auth0 has no grace period.** `rotate-secret` replaces the app's secret at once: the old one
@@ -1755,11 +1768,72 @@ instead of at the first rotation:
   fails); only local external client apps (not packaged ones or connected apps) have staged
   credentials. The credential must be another app's, as rotating the app roll signs in with would
   end its own credential. `domain` is a hostname (no IP literal, no port).
+- **Prisma Cloud: access keys of a service account, checked before they're kept.** The credential is
+  a System Admin's access key (only an admin makes keys for a service account); each rotation adds
+  an access key to `service_account`, signs in with it, and deletes the old one after
+  `grace_minutes`. A new key that doesn't sign in is deleted at once, and the rotation fails with
+  the old key in place. A service account has two access keys at most, so one environment per
+  registration, and a rotation inside the last grace period fails (`already_have_two_access_keys`)
+  until the old key is deleted. Each key has a name of its own (Prisma Cloud refuses a name it has).
+  With `expires_days`, each key ends after that many days and a link's `rotate_days` is at most
+  `expires_days` less 14. `api` is one of Prisma Cloud's API hosts (`api.prismacloud.io`,
+  `api2.prismacloud.io`, `api3.prismacloud.io`, `api4.prismacloud.io`, `api.anz.prismacloud.io`,
+  `api.eu.prismacloud.io`, `api2.eu.prismacloud.io`, `api.gov.prismacloud.io`, `api.prismacloud.cn`,
+  `api.ca.prismacloud.io`, `api.sg.prismacloud.io`, `api.uk.prismacloud.io`,
+  `api.ind.prismacloud.io`, `api.jp.prismacloud.io`, `api.fr.prismacloud.io`,
+  `api.id.prismacloud.io`); `prisma_id` picks the tenant for a key that reaches more than one. Link
+  `PRISMA_CLOUD_ACCESS_KEY` to `id` and `PRISMA_CLOUD_SECRET_KEY` to `secret`.
+- **Paddle's keys rotate themselves (Paddle's model).** Paddle's API can't make, list for another
+  key, or revoke an API key: a rotatable key can only rotate itself, called with itself, and the old
+  secret ends on Paddle's schedule. So the registration's credential is the key itself, the one your
+  services use, and the key it names (`api_key_id`) is the one that rotates: register a key made
+  with "rotatable" on, and register it once. Linking rotates it at once. Each rotation is made with
+  the key the registration holds, and the new secret replaces it there before anything else (from
+  Paddle's answer on, it's the key every later rotation needs, whatever happens to this one); roll
+  then makes one request with the new secret, which checks it and, as Paddle takes a secret's first
+  use as its activation, starts the old secret's grace: `grace_period_seconds` is the link's
+  `grace_minutes`, and Paddle keeps an old secret a day at most, so a link with `grace_minutes` over
+  1440 is refused. Two rotations at once would undo each other at Paddle (a new rotation cancels a
+  pending one), so one claims the registration (409 for the other, for five minutes at most if its
+  node stops). The key's id never changes (`id` is `api_key_id`). With `expires_days`, each new
+  secret gets `new_key_expires_at` that many days ahead, and a link's `rotate_days` is at most
+  `expires_days` less 14; without it, each keeps the key's own expiry, which the registration's
+  `credential_expires_at` can give health. One environment per registration: the registration is one
+  key.
+  - **What roll can't do for a Paddle key:** revoke it. A retired secret isn't revoked after the
+    grace period, only its lease ends (`revoked … (a saas credential can't be ended early: it
+    works until it expires)`): Paddle ends it, `grace_minutes` after the new one was first used.
+    A secret that leaks while it's in that grace (an old version's value) works until Paddle's end,
+    a day at most, whatever roll does; deleting its lease changes nothing at Paddle. To end a key at
+    once, revoke it in Paddle's dashboard (which ends rotation too: a revoked key can't rotate) and
+    register a new one.
+  - **`leaks.rotate` for a Paddle key** (managed, the current secret leaked): roll rotates it with
+    `grace_period_seconds: 0` and activates the new secret at once, so the leaked one stops working
+    as the rotation completes (Paddle's atomic rotation), `rotation.succeeded` with `via: leak`.
+    Whoever holds the leaked secret can rotate the key too (Paddle lets any holder). If they
+    rotate it and use their new secret before roll rotates, roll's secret ends with its grace and
+    roll's rotations fail (`paddle answered 401`): revoke the key in the dashboard and register a
+    new one.
+  - A backup holds the key as it was then: a restore of an older backup brings back a secret Paddle
+    has ended. Replace it (`PATCH …/saas/{id} {credential}`) after such a restore.
+
+Vendors that AWS Secrets Manager's managed external secrets cover and roll doesn't, and why (only
+public APIs that make, check and end a credential are built):
+- **Netskope** (REST API v2 service account tokens): Netskope documents no API to make or
+  regenerate a token; a service account's token is generated again in the admin console only.
+- **Cisco Security Cloud Control** (API keys): the value that would rotate is the key's OAuth
+  refresh token, which every consumer must spend at the same endpoint to get an access token, and
+  Cisco says to always use the refresh token from the most recent refresh. roll and the services
+  would race over one token, and Cisco has no API to make a second key or to end a token.
+- **Palo Alto Networks' self-rotating tenant API key** (AWS's `PaloAltoApiKey`): AWS doesn't name
+  the product, and no Palo Alto API documents a key that makes its own replacement (Cortex's
+  `api_keys/generate` can't be called with a key it made). roll rotates Prisma Cloud's access keys
+  instead (above), which Palo Alto's public API makes, checks and deletes.
 
 Requests go out from rolld's guarded client, as a rotator's calls do: HTTPS to a public address, no
 redirects, a 15-second timeout, at most 64 KiB of answer. The hosts are the vendors' own, except
 Okta's and Auth0's tenant domains, a self-managed GitLab's host, a Databricks workspace's host, a
-SonarQube Server's host, a Jenkins controller's host and a Salesforce org's My Domain host, which must be hostnames (no IP literal, no port) and then pass the same guard; Datadog's site must be one of its documented ones. The credential is sealed with the project's data key, bound to the registration's
+SonarQube Server's host, a Jenkins controller's host and a Salesforce org's My Domain host, which must be hostnames (no IP literal, no port) and then pass the same guard; Datadog's site and Prisma Cloud's API host must be one of their documented ones, and Paddle's host follows from the key (`api.paddle.com`, or `sandbox-api.paddle.com` for a sandbox key). The credential is sealed with the project's data key, bound to the registration's
 id, vendor and target, so a row pointed at another host no longer opens; it's never answered,
 logged or audited, and the list shows the vendor and target only. A vendor's answer is never part
 of an error: errors name the vendor, the step and the status (`okta answered 401 issuing a key`).
@@ -7280,7 +7354,7 @@ type ProjectFindings = { project: string; project_name: string; findings: Findin
 type Finding = { issue: "decoy_used" | "production_unprotected" | "expired" | "rotation_failing" | "revoke_failing" | "missing" | "exposed" | "public" | "weak" | "unplaced" | "operator_made" | "stored_cloud_key" | "expiring" | "certificate_expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string; owner?: string; decoy?: Decoy }; // decoy: on decoy_used only (an admin's session's or the operator's), the key's Decoy
 type Rotation = { environment: string; path: string; keys: string[]; kind: string; ref: string; name: string; rotate_days: number | null; rotate_window: string | null; grace_minutes: number; issued_at: number | null; next_due: number | null; last_error: string | null; failed_at: number | null };
 type Rotator = { id: string; name: string; host: string; created_at: number; created_by: string };
-type SaasRotator = { id: string; name: string; vendor: "sendgrid" | "twilio" | "okta" | "entra" | "auth0" | "gitlab" | "openai" | "datadog" | "cloudflare" | "databricks" | "confluent" | "sonarqube" | "jenkins" | "salesforce"; target: Record<string, unknown>; credential_expires_at?: number; created_at: number; created_by: string };
+type SaasRotator = { id: string; name: string; vendor: "sendgrid" | "twilio" | "okta" | "entra" | "auth0" | "gitlab" | "openai" | "datadog" | "cloudflare" | "databricks" | "confluent" | "sonarqube" | "jenkins" | "salesforce" | "prismacloud" | "paddle"; target: Record<string, unknown>; credential_expires_at?: number; created_at: number; created_by: string };
 // PATCH …/saas/{id}: the vendor and target stay. `credential_expires_at`: absent keeps it (a new
 // credential drops the old one's), null clears it, ms in the future sets it.
 type SaasRotatorChange = { name?: string; credential?: string; credential_expires_at?: number | null };
