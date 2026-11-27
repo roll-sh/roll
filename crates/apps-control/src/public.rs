@@ -484,8 +484,14 @@ pub(crate) async fn call_scheduled(apps: Arc<Apps>, service: &str, env: &str, ho
 /// GET `path` of an environment on its owner for an uptime check (`crate::checks`), as `host`
 /// asks and past its gates as a schedule's call is: the status and at most `max` bytes of the
 /// answer, or why it never answered.
-pub(crate) async fn call_check(apps: Arc<Apps>, service: &str, env: &str, host: &str, path: &str, timeout: std::time::Duration, max: usize) -> std::result::Result<(u16, Vec<u8>), String> {
-    let mut req = Request::builder().method(axum::http::Method::GET).uri(path).header(header::HOST, host).header(header::USER_AGENT, "roll-uptime/1.0").body(Body::empty()).map_err(|e| e.to_string())?;
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn call_check(apps: Arc<Apps>, service: &str, env: &str, host: &str, method: &str, path: &str, headers: &[(String, String)], body: Option<String>, timeout: std::time::Duration, max: usize) -> std::result::Result<(u16, Vec<u8>), String> {
+    let method = axum::http::Method::from_bytes(method.as_bytes()).unwrap_or(axum::http::Method::GET);
+    let mut b = Request::builder().method(method).uri(path).header(header::HOST, host).header(header::USER_AGENT, "roll-uptime/1.0");
+    for (k, v) in headers {
+        b = b.header(k.as_str(), v.as_str());
+    }
+    let mut req = b.body(body.map(Body::from).unwrap_or_else(Body::empty)).map_err(|e| e.to_string())?;
     req.extensions_mut().insert(Scheduled);
     tokio::time::timeout(timeout, async {
         let r = proxy(apps, service, env, None, req).await;
