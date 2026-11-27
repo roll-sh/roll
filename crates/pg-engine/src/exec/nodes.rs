@@ -3746,10 +3746,22 @@ impl Node for SortedNode {
 /// grouping reads, in the order its input's target list has them (what PostgreSQL's sort tuple
 /// holds, which its memory and runs count): the rows are held with those alone. None: whole.
 pub(super) fn sort_all(
+    input: BoxNode,
+    keys: &[SortKey],
+    types: Vec<crate::types::DataType>,
+    held: Option<Vec<usize>>,
+    ctx: &ExecCtx,
+) -> Result<BoxNode> {
+    sort_counted(input, keys, types, held, None, ctx)
+}
+
+/// `sort_all`, its tuplesort's figures EXPLAIN ANALYZE's for instrumentation key `counted`.
+fn sort_counted(
     mut input: BoxNode,
     keys: &[SortKey],
     types: Vec<crate::types::DataType>,
     held: Option<Vec<usize>>,
+    counted: Option<usize>,
     ctx: &ExecCtx,
 ) -> Result<BoxNode> {
     let width = types.len();
@@ -3793,7 +3805,12 @@ pub(super) fn sort_all(
         s.put(r, None, ctx)?;
     }
     let Some(sort) = sort else { return Ok(Box::new(VecNode::new(Vec::new()))) };
-    let (out, _, _) = sort.finish(ctx)?;
+    let (out, method, kb) = sort.finish(ctx)?;
+    if let Some(key) = counted
+        && let Some(instr) = ctx.instr.borrow().as_ref()
+    {
+        instr.update(key, |s| s.sort = Some((method, kb)));
+    }
     Ok(Box::new(SortedNode { out, held: if fits { held.map(|c| (c, width)) } else { None } }))
 }
 
@@ -4741,6 +4758,8 @@ struct SortedSetOpNode {
     /// The next row of each, read ahead.
     l: Option<Row>,
     r: Option<Row>,
+    /// The second input's group read and not yet matched: its first row and its rows.
+    rg: Option<(Row, usize)>,
     /// The group being given out: its row and how many more copies of it.
     out: Option<(Row, usize)>,
     done: bool,
@@ -4779,6 +4798,7 @@ impl SortedSetOpNode {
             right: None,
             l: None,
             r: None,
+            rg: None,
             out: None,
             done: false,
             mem: None,
@@ -4804,9 +4824,18 @@ impl SortedSetOpNode {
         )
     }
 
-    /// `plan`'s rows sorted on the keys.
+    /// `plan`'s rows sorted on the keys. Under EXPLAIN ANALYZE as the Sort EXPLAIN shows over
+    /// it (its key the plan's address + 1): the rows read of it and its tuplesort's figures.
     fn sorted(&self, plan: &Arc<Plan>, ctx: &ExecCtx) -> Result<BoxNode> {
-        ctx.statement(|| sort_all(open(plan, ctx)?, &self.keys, self.types.clone(), None, ctx))
+        let instr = ctx.instr.borrow().clone();
+        let key = Arc::as_ptr(plan) as usize + 1;
+        ctx.statement(|| {
+            let sorted = sort_counted(open(plan, ctx)?, &self.keys, self.types.clone(), None, Some(key), ctx)?;
+            Ok(match instr {
+                Some(instr) => super::InstrNode::wrap(sorted, key, instr),
+                None => sorted,
+            })
+        })
     }
 
     fn cmp(keys: &[SortKey], a: &Row, b: &Row, ctx: &ExecCtx) -> Result<Ordering> {
@@ -4830,7 +4859,14 @@ impl SortedSetOpNode {
             std::mem::swap(&mut first, &mut second);
         }
         let (types, plan) = (&self.types, self.set.plan.as_ref().expect("a planned SetOp"));
-        let held = ctx.temp_cleanup.run(|| {
+        // (EXPLAIN ANALYZE of a sorted one: both inputs sorted, for the Sorts' own figures.)
+        let analyzed = match ctx.instr.borrow().is_some() {
+            true => Self::sort_keys(plan, types, ctx),
+            false => None,
+        };
+        let held = match analyzed {
+            Some(keys) => Err((None, keys)),
+            None => ctx.temp_cleanup.run(|| {
             ctx.statement(|| {
                 let mut node = open(&first, ctx)?;
                 let allowed = super::workmem::work_mem(ctx);
@@ -4855,28 +4891,34 @@ impl SortedSetOpNode {
                             };
                             rows.push(r);
                             let rest = Box::new(PrefixNode { rows: rows.into_iter(), input: Some(node) });
-                            return Ok(Err((sort_all(rest, &keys, types.clone(), None, ctx)?, keys)));
+                            return Ok(Err((Some(sort_all(rest, &keys, types.clone(), None, ctx)?), keys)));
                         }
                     }
                     rows.push(r);
                 }
                 Ok(Ok(rows))
             })
-        })?;
+        })?,
+        };
         let mut a = match held {
             Ok(rows) => {
+                note_sorted_input(&first, rows.len(), ctx);
                 if rows.is_empty() {
                     self.done = true;
                     return Ok(());
                 }
                 let b = collect(&second, ctx, None)?;
+                note_sorted_input(&second, b.len(), ctx);
                 let (l, r) = if self.swapped { (b, rows) } else { (rows, b) };
                 self.mem = Some(self.set.combine(l, r, ctx)?.into_iter());
                 return Ok(());
             }
             Err((sorted, keys)) => {
                 self.keys = keys;
-                sorted
+                match sorted {
+                    Some(s) => s,
+                    None => self.sorted(&first, ctx)?,
+                }
             }
         };
         let ra = a.next(ctx)?;
@@ -4886,12 +4928,28 @@ impl SortedSetOpNode {
         }
         let mut b = self.sorted(&second, ctx)?;
         let rb = b.next(ctx)?;
-        if self.swapped {
-            (self.left, self.l, self.right, self.r) = (Some(b), rb, Some(a), ra);
-        } else {
-            (self.left, self.l, self.right, self.r) = (Some(a), ra, Some(b), rb);
-        }
+        // (The first input drives the merge, nodeSetOp's outer one: INTERSECT's with fewer
+        // groups. Either side's row of a group is the same value.)
+        (self.left, self.l, self.right, self.r) = (Some(a), ra, Some(b), rb);
         Ok(())
+    }
+
+    /// The second input's next group (setop_load_group): its first row and its rows, the row
+    /// after it read ahead; None at its end.
+    fn right_group(&mut self, ctx: &ExecCtx) -> Result<Option<(Row, usize)>> {
+        let Some(first) = self.r.take() else { return Ok(None) };
+        let mut n = 1usize;
+        let right = self.right.as_mut().unwrap();
+        loop {
+            ctx.check()?;
+            match right.next(ctx)? {
+                Some(x) if Self::cmp(&self.keys, &x, &first, ctx)? == Ordering::Equal => n += 1,
+                x => {
+                    self.r = x;
+                    return Ok(Some((first, n)));
+                }
+            }
+        }
     }
 
     /// The next group of the left input's rows: its row and how many times it comes out.
@@ -4914,19 +4972,23 @@ impl SortedSetOpNode {
                     None => break,
                 }
             }
-            let mut nr = 0usize;
-            while let Some(x) = self.r.take() {
-                match Self::cmp(&self.keys, &x, &row, ctx)? {
-                    Ordering::Less => {}
-                    Ordering::Equal => nr += 1,
-                    Ordering::Greater => {
-                        self.r = Some(x);
-                        break;
-                    }
+            // (setop_retrieve_sorted: the second input read a group at a time, as far as
+            // the first's groups go.)
+            let nr = loop {
+                if self.rg.is_none() {
+                    self.rg = self.right_group(ctx)?;
                 }
-                ctx.check()?;
-                self.r = self.right.as_mut().unwrap().next(ctx)?;
-            }
+                let Some((x, n)) = &self.rg else { break 0 };
+                match Self::cmp(&self.keys, &row, x, ctx)? {
+                    Ordering::Less => break 0,
+                    Ordering::Equal => {
+                        let n = *n;
+                        self.rg = None;
+                        break n;
+                    }
+                    Ordering::Greater => self.rg = None,
+                }
+            };
             let n = match (self.kind, self.all) {
                 (SetOpKind::Intersect, true) => nl.min(nr),
                 (SetOpKind::Intersect, false) => usize::from(nr > 0),
@@ -4985,6 +5047,18 @@ struct SetOpNode {
     plan: Option<Arc<Plan>>,
     /// A hashed UNION's rows, a batch at a time.
     rows: Option<Box<dyn HashedRows>>,
+}
+
+/// EXPLAIN ANALYZE of a SetOp over sorted inputs run in memory: the Sort EXPLAIN shows over
+/// input `plan` (`SortedSetOpNode::sorted`'s key) with the input's `rows`.
+#[inline(never)]
+fn note_sorted_input(plan: &Arc<Plan>, rows: usize, ctx: &ExecCtx) {
+    if let Some(instr) = ctx.instr.borrow().as_ref() {
+        instr.update(Arc::as_ptr(plan) as usize + 1, |s| {
+            s.loops += 1;
+            s.rows += rows as u64;
+        });
+    }
 }
 
 impl SetOpNode {
@@ -5082,10 +5156,12 @@ impl SetOpNode {
                 && crate::sql::explain::setop_shape(&self.left, &self.right, true, ctx).0;
             let (first, second) = if swapped { (&self.right, &self.left) } else { (&self.left, &self.right) };
             let a = collect(first, ctx, None)?;
+            note_sorted_input(first, a.len(), ctx);
             if a.is_empty() {
                 return Ok(Vec::new());
             }
             let b = collect(second, ctx, None)?;
+            note_sorted_input(second, b.len(), ctx);
             if swapped { (b, a) } else { (a, b) }
         } else {
             (collect(&self.left, ctx, None)?, collect(&self.right, ctx, None)?)

@@ -9266,8 +9266,12 @@ impl Builder<'_, '_> {
                 let rgroups = self.num_groups(&r.node.cols, r.node.rows);
                 let exported = l.exported.clone();
                 let mut groups = lgroups;
+                // (A Sort over an input: the executor counts it as the input's plan node's
+                // address + 1, `SortedSetOpNode::sorted`.)
+                let (mut lkey, mut rkey) = (addr(left) + 1, addr(right) + 1);
                 if *kind == SetOpKind::Intersect && lgroups > rgroups {
                     std::mem::swap(&mut l, &mut r);
+                    std::mem::swap(&mut lkey, &mut rkey);
                     groups = rgroups;
                 }
                 n.rows = match (kind, all) {
@@ -9301,7 +9305,7 @@ impl Builder<'_, '_> {
                 let can_sort = types.iter().all(setop_sortable);
                 let entry = ((n.width as f64 / 8.0).ceil() * 8.0) + 16.0;
                 n.disabled = !g.hashagg || entry * groups > g.work_mem * g.hash_mem_multiplier * 1024.0;
-                let sorted_in = |b: &mut Self, c: &Built| -> ExNode {
+                let sorted_in = |b: &mut Self, c: &Built, key: usize| -> ExNode {
                     let names: Vec<String> = c.exported.iter().map(|k| b.pick(k, Cx::Upper)).collect();
                     if c.node.order.len() >= names.len() && c.node.order[..names.len()] == names[..] {
                         return c.node.clone();
@@ -9311,7 +9315,7 @@ impl Builder<'_, '_> {
                     sn.details.push(Detail::SortInfo);
                     b.sort_costs(&mut sn, &c.node);
                     sn.disabled = !g.sort;
-                    sn.key = c.node.key;
+                    sn.key = Some(key);
                     if b.o.verbose {
                         sn.output = c.node.output.clone();
                     }
@@ -9319,8 +9323,8 @@ impl Builder<'_, '_> {
                     sn.children.push(c.node.clone().child("Outer"));
                     sn
                 };
-                let sl = sorted_in(self, &l);
-                let sr = sorted_in(self, &r);
+                let sl = sorted_in(self, &l, lkey);
+                let sr = sorted_in(self, &r, rkey);
                 let mut so = n.clone();
                 so.strategy = Some("Sorted");
                 so.title = format!("SetOp {cmd}");
