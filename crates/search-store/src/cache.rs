@@ -1209,17 +1209,18 @@ mod tests {
         let objects = crate::test_objects("cache-urgent");
         let dir = crate::test_dir().join(format!("urgent-{:016x}", crate::random_u64()));
         let cache = Cache::open(dir.join("seg"), dir.join("tmp"), 1 << 30, objects.clone(), None).unwrap();
-        let part = 4096u64;
+        // The smallest part the cache takes (64 KiB): 64 of them an object.
+        let part = 64u64 << 10;
         cache.set_fetch_part(part);
         let len = 64 * part as usize;
         let bytes = |i: usize| -> Vec<u8> { (0..len).map(|j| ((i * 7 + j) % 251) as u8).collect() };
         for i in 0..9 {
             objects.put(&format!("search/seg/u{i}.seg"), Bytes::from(bytes(i))).await.unwrap();
         }
-        // 512 KiB/s: the eight bulk downloads take four seconds. Behind their 64 waiting workers
-        // (one FIFO for every part) the reader's two reads would come after about half a MiB of
-        // them; on the urgent lane only the reads already in flight (32 KiB) are ahead.
-        cache.set_throttle(512 << 10);
+        // 8 MiB/s: the eight bulk downloads (32 MiB) take four seconds. Behind their 64 waiting
+        // workers (one FIFO for every part) the reader's two reads would come after about 7 MiB
+        // of them; on the urgent lane only the reads already in flight (512 KiB) are ahead.
+        cache.set_throttle(8 << 20);
         let mut busy = Vec::new();
         for i in 0..8 {
             busy.push(cache.fetch_progressive(&format!("u{i}.seg"), &format!("search/seg/u{i}.seg")).await.unwrap());
@@ -1231,7 +1232,7 @@ mod tests {
         let waited = started.elapsed();
         assert_eq!(&got[..], &bytes(8)[mid as usize..mid as usize + 100]);
         let done: u64 = busy.iter().map(|b| b.downloaded()).sum();
-        assert!(done < len as u64, "the reader came after the bulk downloads ({done} bytes of them were in after {waited:?})");
+        assert!(done < 2 << 20, "the reader came after the bulk downloads ({done} bytes of them were in after {waited:?})");
         let whole = f.complete().await.unwrap();
         assert_eq!(&whole[..], &bytes(8)[..]);
         for (i, b) in busy.iter().enumerate() {
