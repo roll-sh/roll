@@ -687,6 +687,8 @@ export interface EnvironmentPut {
   wait_for_ci?: boolean;
   /** Deploy when the image's tag moves (an image service with a tag). */
   follow_tag?: boolean;
+  /** A Git URL service: deploy the repository's new tags matching this (`v*`), each once; null stops it. */
+  deploy_tags?: string | null;
   /** Redeploy (same image, new values) when the project's secrets change. */
   redeploy_on_secrets?: boolean;
   /** Its instances send OpenTelemetry traces to roll (`OTEL_*` from the next deploy). */
@@ -816,6 +818,8 @@ export interface Environment extends EnvironmentSummary {
   scaling?: { backlog: number | null; wanted: number } | null;
   /** An image service's tag is watched: a new digest behind it deploys. */
   follow_tag?: boolean;
+  /** A Git URL service's environment deploys the repository's new tags matching this. */
+  deploy_tags?: string;
   /** Redeploys (same image, new values) when the project's secrets change, checked each minute. */
   redeploy_on_secrets?: boolean;
   /** Its instances send OpenTelemetry traces to roll. */
