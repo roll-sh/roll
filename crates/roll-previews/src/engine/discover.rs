@@ -40,6 +40,42 @@ impl Engine {
         }
     }
 
+    /// Tell the project's repos of the columns its previews masked by default that it hasn't
+    /// been told of (Tonic's new sensitive columns), each once: what production gained reaches a
+    /// person who can write its rule (or `keep`), not only a preview's activity.
+    async fn masking_notice(&self, project: &roll_workspace::Project, repos: &[String], rows: &[Row]) {
+        let noticed = match self.store.noticed_masks(&project.id) {
+            Ok(n) => n,
+            Err(e) => return warn!(project = %project.id, error = %e, "previews: reading masking notices"),
+        };
+        let mut columns: Vec<crate::MaskedByDefault> = Vec::new();
+        for r in rows.iter().filter(|r| r.desired == Desired::Active) {
+            let masked: Vec<crate::MaskedByDefault> = self.store.runtime_fact(&r.id, "masked_by_default").ok().flatten().unwrap_or_default();
+            for m in masked {
+                if !noticed.contains(&(m.resource.clone(), m.column.clone())) && !columns.iter().any(|c| c.resource == m.resource && c.column == m.column) {
+                    columns.push(m);
+                }
+            }
+        }
+        if columns.is_empty() {
+            return;
+        }
+        let mut resources: Vec<crate::ports::MaskedCount> = Vec::new();
+        for c in &columns {
+            match resources.iter_mut().find(|r| r.resource == c.resource) {
+                Some(r) => r.columns += 1,
+                None => resources.push(crate::ports::MaskedCount { resource: c.resource.clone(), columns: 1 }),
+            }
+        }
+        let notice = crate::ports::MaskingNotice { project: project.id.clone(), project_name: project.name.clone(), resources, columns };
+        if let Err(e) = self.source.masking(repos, &notice).await {
+            return warn!(project = %project.id, error = %e, "previews: telling the project of columns masked by default (tried again next pass)");
+        }
+        if let Err(e) = self.store.set_noticed_masks(&project.id, &notice.columns) {
+            warn!(project = %project.id, error = %e, "previews: recording a masking notice");
+        }
+    }
+
     /// The project's own preview domain, read from roll apps at most once a [`DOMAIN_EVERY`]:
     /// when it's verified, changed or gone, its runtime services' URLs move and every preview of
     /// the project reports again (the pull request's links).
@@ -250,6 +286,17 @@ impl Engine {
                                 self.store.log(&r.id, &format!("pushed: {}", short(&c.head)))?;
                             }
                         }
+                        // Queued to land where the project rehearses then, with none at this head:
+                        // converged now, not at the next whole converge (the queue lands first).
+                        if s.rehearse_when_queued
+                            && s.release.is_some()
+                            && c.queued
+                            && c.head == r.head
+                            && r.next_at > now
+                            && self.store.runtime_fact::<crate::Rehearsal>(&r.id, "rehearsal")?.is_none_or(|x| x.head != r.build())
+                        {
+                            self.store.update(&r.id, |row| row.next_at = 0)?;
+                        }
                         // Services kept on an earlier head redeploy once the path filters no
                         // longer leave out what changed since (they were edited or removed).
                         if c.head == r.head && let Some(runs) = &r.runs && !self.only_ignored(s, &r.repo, runs, &r.head).await {
@@ -388,6 +435,7 @@ impl Engine {
         let spent: f64 = self.store.spent(project_id, month)? + rows.iter().filter_map(|r| self.store.cost(r).ok()).map(|c| c.month_to_date_usd).sum::<f64>();
         let over_budget = s.max_usd_month > 0.0 && spent >= s.max_usd_month;
         self.budget_alert(&project, &repos, s, spent, month).await;
+        self.masking_notice(&project, &repos, &rows).await;
         if over_budget {
             free = 0;
         }

@@ -9,6 +9,7 @@
 import { apiHeaders, call, onApiStatus, ROLL_API } from "./roll-api";
 import { withSession } from "./code-token";
 import { analyticsQuery, type AnalyticsRange, type SearchAnalytics } from "./search-analytics";
+import type { EvalConfiguration, Evaluation, Judgment } from "./search-evaluate";
 import type { SuggestionsStatus } from "./search-suggestions";
 import type { MetricsRange, SearchMetrics, SearchSlowLog } from "./search-performance";
 import type { AuditPage } from "./search-audit";
@@ -299,6 +300,9 @@ export interface SearchUsage {
   stored_bytes: number;
   /** CPU seconds the node's embedding model (E5) spent on the cluster's inputs. */
   inference_cpu_seconds: number;
+  /** Provider tokens of chat answers and completions (the provider bills them, not roll). */
+  input_tokens: number;
+  output_tokens: number;
   cost: {
     memory_usd: number;
     requests_usd: number;
@@ -313,7 +317,8 @@ export interface SearchUsage {
 
 /** What an API key may do: `data` is an app's role (every index, templates, pipelines and
  * lifecycle policies, no security); `admin` is everything the cluster's own user may do. */
-export type KeyAccess = "data" | "admin";
+/** `otel`: an OpenTelemetry Collector's key for the OTLP intake (OTel's data streams, write only). */
+export type KeyAccess = "data" | "admin" | "otel";
 
 /** A new API key (`POST …/keys`), shown once: `api_key` for `Authorization: ApiKey …`, or on an
  * OpenSearch-flavor cluster an internal user's `username` and `password`. */
@@ -404,6 +409,9 @@ export const searchApi = {
   metrics: (id: string, range: MetricsRange) => call<SearchMetrics>("GET", `${cl(id)}/metrics?range=${range}`),
   slowlog: (id: string) => call<SearchSlowLog>("GET", `${cl(id)}/slowlog`),
   analytics: (id: string, index: string | null, range: AnalyticsRange) => call<SearchAnalytics>("GET", `${cl(id)}/analytics?${analyticsQuery(index, range)}`),
+  /** One or two search configurations scored against judged queries (`_rank_eval`) on an index. */
+  evaluate: (id: string, index: string, body: { judgments: Judgment[]; configurations: EvalConfiguration[]; metric?: unknown }) =>
+    call<Evaluation>("POST", `${cl(id)}/indices/${encodeURIComponent(index)}/evaluate`, body),
   /** An index's query suggestions: settings, last build, heaviest suggestions (never wakes the cluster). */
   suggestions: (id: string, index: string) => call<SuggestionsStatus>("GET", `${cl(id)}/indices/${encodeURIComponent(index)}/suggestions`),
   rebuildSuggestions: (id: string, index: string) => call<SuggestionsStatus>("POST", `${cl(id)}/indices/${encodeURIComponent(index)}/suggestions/rebuild`, {}),

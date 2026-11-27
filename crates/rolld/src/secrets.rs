@@ -271,7 +271,7 @@ impl RollSts {
 }
 
 impl roll_secrets::aws::Sts for RollSts {
-    fn assume(&self, role_arn: &str, external_id: &str, session_name: &str, seconds: i32) -> Result<roll_secrets::aws::Session, String> {
+    fn assume(&self, role_arn: &str, external_id: &str, session_name: &str, seconds: i32, policy: Option<&str>) -> Result<roll_secrets::aws::Session, String> {
         // The store calls from its blocking threads (and nothing else may): wait for STS there.
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
@@ -282,6 +282,7 @@ impl roll_secrets::aws::Sts for RollSts {
                     .external_id(external_id)
                     .role_session_name(session_name)
                     .duration_seconds(seconds)
+                    .set_policy(policy.map(String::from))
                     .send()
                     .await
                     .map_err(|e| aws_sdk_sts::error::ProvideErrorMetadata::code(&e).unwrap_or("no answer").to_string())?;
@@ -298,7 +299,7 @@ impl roll_secrets::aws::Sts for RollSts {
 
     /// AssumeRoleWithWebIdentity isn't signed: AWS trusts roll's issuer's token, not a credential
     /// of roll's (none is needed on the server).
-    fn assume_web_identity(&self, role_arn: &str, token: &str, session_name: &str, seconds: i32) -> Result<roll_secrets::aws::Session, String> {
+    fn assume_web_identity(&self, role_arn: &str, token: &str, session_name: &str, seconds: i32, policy: Option<&str>) -> Result<roll_secrets::aws::Session, String> {
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
                 let conf = self.conf.get_or_init(|| aws_config::load_defaults(aws_config::BehaviorVersion::latest())).await;
@@ -317,6 +318,7 @@ impl roll_secrets::aws::Sts for RollSts {
                     .web_identity_token(token)
                     .role_session_name(session_name)
                     .duration_seconds(seconds)
+                    .set_policy(policy.map(String::from))
                     .send()
                     .await
                     .map_err(|e| sts_failure(&e))?;
@@ -369,7 +371,7 @@ impl RollSts {
     /// global: us-east-1).
     fn iam(&self, role_arn: &str, external_id: &str) -> Result<aws_sdk_iam::Client, String> {
         use roll_secrets::aws::Sts;
-        let s = self.assume(role_arn, external_id, "roll-iam", 900)?;
+        let s = self.assume(role_arn, external_id, "roll-iam", 900, None)?;
         let conf = Self::wait(async { Ok(self.conf.get_or_init(|| aws_config::load_defaults(aws_config::BehaviorVersion::latest())).await.clone()) })?;
         let creds = aws_sdk_iam::config::Credentials::new(s.access_key_id.expose(), s.secret_access_key.expose(), Some(s.session_token.expose().to_string()), None, "roll-secrets");
         Ok(aws_sdk_iam::Client::from_conf(aws_sdk_iam::config::Builder::from(&conf).credentials_provider(creds).region(aws_sdk_iam::config::Region::new("us-east-1")).build()))
@@ -558,7 +560,7 @@ pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Work
 /// product's): roll-access makes and changes every token, so it asks on each (guardrails.rs).
 fn cap_token_lifetimes(access: &roll_access::Access, secrets: Arc<Secrets>) {
     let cap: roll_access::LifetimeCap = Box::new(move |rules| {
-        if !rules.0.iter().any(|r| r.product == "secrets" || r.product == "*") {
+        if !reaches_secrets(rules) {
             return None;
         }
         secrets.token_days_cap().unwrap_or_else(|e| {
@@ -567,6 +569,12 @@ fn cap_token_lifetimes(access: &roll_access::Access, secrets: Arc<Secrets>) {
         })
     });
     let _ = access.lifetime_cap.set(cap);
+}
+
+/// Whether a grant's rules reach roll secrets, for its policy's `max_token_days`: a `secrets` or
+/// `*` rule.
+fn reaches_secrets(rules: &roll_auth::scope::Scope) -> bool {
+    rules.0.iter().any(|r| r.product == "secrets" || r.product == "*")
 }
 
 /// A decoy key's token was used: roll-access tells roll secrets, which raises `decoy_used` on its
@@ -1346,9 +1354,10 @@ fn search_parts(k: &Json) -> roll_secrets::Result<BTreeMap<String, Value>> {
     Ok(BTreeMap::from([("user".to_string(), text(k, "/username")?), ("password".to_string(), text(k, "/password")?)]))
 }
 
-/// roll code's search for roll secrets' health (`code` check): whether a repository's default
-/// branch mentions each key, from roll code's trigram index. Any error (code search off, the
-/// index not ready, the repository not on this node) is "can't tell": nothing gets flagged.
+/// roll code for roll secrets' health: whether a repository's default branch mentions each key
+/// (`code` check), from roll code's trigram index, and where a repository is public (roll code's
+/// visibility, or its GitHub mirror's as last seen). Any error (code search off, the index not
+/// ready, the repository not on this node) is "can't tell": nothing gets flagged.
 pub struct CodeRefs(pub Arc<code_control::Code>);
 
 impl roll_secrets::health::CodeRefs for CodeRefs {
@@ -1365,6 +1374,11 @@ impl roll_secrets::health::CodeRefs for CodeRefs {
             }
             Some(found)
         })
+    }
+
+    fn public(&self, repo: &str) -> Option<String> {
+        let (owner, name) = repo.split_once('/')?;
+        code_control::github::public_at(&self.0.find_repo(owner, name).ok()?)
     }
 }
 
@@ -1971,6 +1985,24 @@ impl apps_control::integrations::SecretSource for ForApps {
         .await?
     }
 
+    /// A reference read once for the asker's request on the service (`Secrets::use_once`: as
+    /// them, no maker kept, a sensitive key only for `to`, the fixed host it goes to; untrusted
+    /// in an untrusted preview, as `resolve_as`).
+    async fn use_once(&self, who: apps_control::integrations::Asker<'_>, project: &str, env: &str, service: &str, reference: &str, purpose: &str, to: Option<&'static str>) -> anyhow::Result<String> {
+        let (secrets, _) = self.0.get().cloned().ok_or_else(|| anyhow::anyhow!("roll secrets is starting: try again in a moment"))?;
+        let caller = secrets.caller_of(who.operator, who.user, who.grant).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let (project, env, service, reference, purpose) = (project.to_string(), env.to_string(), service.to_string(), reference.to_string(), purpose.to_string());
+        tokio::task::spawn_blocking(move || {
+            let untrusted = matches!(secrets.environment(&project, &env, &roll_secrets::Caller::consumer(&format!("app:{service}"))), Ok(e) if e.kind == roll_secrets::EnvironmentKind::Ephemeral && !e.trusted);
+            let mut r = roll_secrets::ResourceRef::new(roll_workspace::Kind::Service, &service);
+            if untrusted {
+                r = r.untrusted();
+            }
+            secrets.use_once(&r, &reference, &caller, &purpose, to).map(|v| v.value.expose().to_string()).map_err(|e| anyhow::anyhow!("{e}"))
+        })
+        .await?
+    }
+
     /// Read as the asker (`Secrets::values_seen_by`: the service's read, with their rights), not
     /// as the service: the service follows the environment's base, imports and references into
     /// folders the asker may not reveal (production's, a protected environment's). Every key must
@@ -2263,6 +2295,16 @@ impl roll_secrets::Workloads for Workloads {
     fn grants(&self) -> roll_secrets::Result<Vec<roll_auth::Grant>> {
         let list = self.0.store.list().map_err(|e| Error::Internal(format!("listing roll-access's tokens: {e}")))?;
         Ok(self.now(list.into_iter().filter(|g| g.revoked_at.is_none())))
+    }
+
+    fn outliving(&self, days: u32) -> roll_secrets::Result<Vec<roll_secrets::guardrails::Outliving>> {
+        let list = self.0.store.list().map_err(|e| Error::Internal(format!("listing roll-access's tokens: {e}")))?;
+        let (now, past) = (code_sql::now_ms(), code_sql::now_ms() + i64::from(days) * 86_400_000);
+        Ok(list
+            .into_iter()
+            .filter(|g| g.kind != "workload" && !g.decoy && !g.pending && g.live(now) && reaches_secrets(&g.rules) && g.expires_at.is_none_or(|e| e > past))
+            .map(|g| roll_secrets::guardrails::Outliving { kind: g.kind.to_string(), id: g.id, name: g.name, user: g.user, created_at: g.created_at, expires_at: g.expires_at })
+            .collect())
     }
 
     /// A machine identity's bootstrap token: roll-access's chain, owned as the identity's logins are.
@@ -3541,11 +3583,11 @@ mod tests {
             .credentials_provider(aws_sdk_sts::config::SharedCredentialsProvider::new(aws_sdk_sts::config::Credentials::new("AKIATEST", "secret", None, None, "test")))
             .build();
         let sts = super::RollSts::new(Some(conf));
-        let s = sts.assume("arn:aws:iam::123456789012:role/roll", "roll-secrets:prj_a", "roll-app-web", 1200).unwrap();
+        let s = sts.assume("arn:aws:iam::123456789012:role/roll", "roll-secrets:prj_a", "roll-app-web", 1200, Some(r#"{"Version":"2012-10-17"}"#)).unwrap();
         assert_eq!((s.access_key_id.expose(), s.session_token.expose(), s.expires_at), ("ASIATEST", "token", 1_893_456_000_000));
         let form = seen.lock().unwrap()[0].clone();
-        assert!(form.contains("RoleSessionName=roll-app-web") && form.contains("DurationSeconds=1200"), "{form}");
-        assert_eq!(sts.assume("arn:aws:iam::123456789012:role/roll", "roll-secrets:prj_other", "x", 900).err().as_deref(), Some("AccessDenied"));
+        assert!(form.contains("RoleSessionName=roll-app-web") && form.contains("DurationSeconds=1200") && form.contains("Policy=%7B%22Version%22%3A%222012-10-17%22%7D"), "{form}");
+        assert_eq!(sts.assume("arn:aws:iam::123456789012:role/roll", "roll-secrets:prj_other", "x", 900, None).err().as_deref(), Some("AccessDenied"));
     }
 
     /// A KMS that decrypts one ciphertext, and only with roll secrets' encryption context.

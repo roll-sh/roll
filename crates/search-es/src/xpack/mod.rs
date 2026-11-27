@@ -80,6 +80,8 @@ pub struct Runtime {
     pub connector_syncs: entsearch::sync::Syncs,
     /// What the audit log records, as of a state version ([`security::audit::snapshot`]).
     pub audit: parking_lot::Mutex<Option<(u64, std::sync::Arc<security::audit::Snapshot>)>>,
+    /// Provider tokens of completions not metered yet ([`inference::tokens`]).
+    pub tokens: std::sync::Arc<inference::tokens::Tokens>,
 }
 
 /// The `_nodes` header plus the node, as the cache-clearing APIs answer.
@@ -291,6 +293,8 @@ handlers! { ctx;
     InferenceStreamCompletion | InferenceChatCompletionUnified => inference::stream_route(ctx).await,
     InferencePutRegionPolicy => inference::region::put(ctx).await,
     RollSearchApplicationPromoteExperiment => entsearch::experiments::promote(ctx).await,
+    RollOtlpLogs => crate::otlp::logs(ctx).await,
+    RollOtlpTraces => crate::otlp::traces(ctx).await,
     InferenceGetRegionPolicy => inference::region::get(ctx),
     InferenceDeleteRegionPolicy => inference::region::delete(ctx).await,
     MlPutDataFrameAnalytics => ml::dfa::put(ctx).await,

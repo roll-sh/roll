@@ -1545,6 +1545,8 @@ impl Node { fn new(catalog, stores, cfg) -> Arc<Node>; fn with_hooks(..); fn set
             async fn enforce_memory(room) -> Vec<String> /* the budget check the reaper runs every 2 s; returns the clusters unloaded */;
             fn take_request_counts() -> Vec<(String, u64)> /* metering: requests admitted per cluster since the previous call,
                                            unloaded instances included; each request reported once */;
+            fn take_tokens() -> Vec<(String, (u64, u64))> /* completions' provider tokens (input, output) per cluster since the
+                                           previous call, the same way; metered, not priced */;
             fn background_tasks() -> usize /* 0 whenever nothing is loaded */; fn scheduler() -> Option<&Arc<FairScheduler>>; pub wakes, unloads: AtomicU64 }
 impl Loaded { pub cluster: Arc<Cluster>; pub data: Option<Arc<persist::ClusterData>>; fn spec(); fn in_flight(); fn requests() -> u64;
               fn epoch() -> u64; fn bytes_in_flight(); pub wake_time: Duration; pub recovery: persist::RecoveryStats { shards, segments, fetching, records, orphans } }
@@ -1726,6 +1728,9 @@ contexts of x-pack's version allowlist), `EsObj::Version`, `contexts::version_al
 | GET    | `/v1/search/clusters/{id}/usage`                 | metering, cost vs Elastic Cloud / Amazon OpenSearch Service |
 | GET    | `/v1/search/clusters/{id}/metrics`               | request rate, latency percentiles, errors and rejections by kind (`?range=1h\|24h\|14d`) |
 | GET    | `/v1/search/clusters/{id}/slowlog`               | the search and indexing slow logs, newest first (at most 500) |
+| POST   | `/v1/search/clusters/{id}/indices/{index}/update_by_query` | `_update_by_query` on that one index (`{query?, script?, max_docs?, conflicts?, slices?}`); 202 `{task}` with `wait_for_completion=false` |
+| POST   | `/v1/search/clusters/{id}/indices/{index}/evaluate` | one or two configurations scored by `_rank_eval` against `judgments` and compared query by query (`{judgments, configurations, metric?}`) |
+| GET    | `/v1/search/clusters/{id}/tasks/{task}`          | `_tasks/<task>`: status, and the result once `completed` |
 
 Errors follow the other control planes: `{"error": "..."}` with 400/404/409/500, plus 413 when a
 console request exceeds what the cluster's `max_body_mb` allows (`api::console_limit`: twice the

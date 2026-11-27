@@ -81,6 +81,7 @@ pub mod edge;
 pub mod password;
 pub mod freeze;
 pub mod board;
+pub mod silences;
 pub mod status_page;
 pub mod vulns;
 pub mod checks;
@@ -285,6 +286,10 @@ pub struct Apps {
     shares: std::sync::OnceLock<Arc<dyn integrations::PreviewShares>>,
     /// Where a name under a project's preview domain no environment holds goes (roll previews).
     preview_router: std::sync::OnceLock<Arc<dyn integrations::PreviewRouter>>,
+    /// What writes a customer's DNS records with their token (`…/domains/{host}/configure`).
+    dns_writer: std::sync::OnceLock<Arc<dyn integrations::DnsWriter>>,
+    /// roll previews' snapshots from a team's tests (`POST /__roll/snapshot` on a preview).
+    pub(crate) preview_snapshots: std::sync::OnceLock<Arc<dyn integrations::PreviewSnapshots>>,
     /// roll previews' branch pushes ([`Apps::set_git_pushes`]).
     pub(crate) pushes: std::sync::OnceLock<Arc<dyn integrations::GitPushes>>,
     /// roll's GitHub App ([`Apps::set_github_app`]).
@@ -700,6 +705,8 @@ impl Apps {
             notes: std::sync::OnceLock::new(),
             shares: std::sync::OnceLock::new(),
             preview_router: std::sync::OnceLock::new(),
+            dns_writer: std::sync::OnceLock::new(),
+            preview_snapshots: std::sync::OnceLock::new(),
             pushes: std::sync::OnceLock::new(),
             github: std::sync::OnceLock::new(),
             mail: std::sync::OnceLock::new(),
@@ -1515,6 +1522,8 @@ impl Apps {
             }
             if forget_git {
                 s.delete_git_login(&r.id)?;
+                // Another repository's tags are none of what was seen in this one.
+                s.clear_deploy_tags(&r.id)?;
                 s.delete_git_github(&r.id)?;
             }
             Ok(())
@@ -1887,6 +1896,7 @@ impl Apps {
         let sso = gate.as_ref().and_then(|a| a.sso.clone());
         let preflight = gate.as_ref().map(|a| a.preflight.clone()).unwrap_or_default();
         let callers = gate.as_ref().map(|a| a.callers.clone()).unwrap_or_default();
+        let webhook_paths = gate.as_ref().map(|a| a.webhooks.iter().map(|h| h.path.clone()).collect()).unwrap_or_default();
         let (sid, e) = (r.service.clone(), r.name.clone());
         let waiting_for_ci = self.db(move |s| s.ci_waits()).await?.into_iter().find(|(w, _)| w.service == sid && w.env == e).map(|(w, _)| w.sha);
         let (sid, e) = (r.service.clone(), r.name.clone());
@@ -1921,6 +1931,7 @@ impl Apps {
             last_cold_start,
             preflight,
             callers,
+            webhook_paths,
             password,
             next_run_at,
             schedules: self.schedule_states(&svc, &r).await,
@@ -1933,6 +1944,10 @@ impl Apps {
             run: r.run.clone(),
             hook: r.hook_hash.is_some(),
             follow_tag: r.follow_tag,
+            deploy_tags: {
+                let (sid, e) = (r.service.clone(), r.name.clone());
+                self.db(move |s| s.deploy_tags(&sid, &e)).await.ok().flatten().map(|(p, _)| p)
+            },
             redeploy_on_secrets: r.redeploy_on_secrets,
             traces: {
                 let (sid, e) = (r.service.clone(), r.name.clone());
@@ -2112,7 +2127,7 @@ impl Apps {
     pub async fn put_environment_by(self: &Arc<Self>, service: &str, env: &str, body: Value, by: Option<String>) -> Result<Environment> {
         let o = body.as_object().cloned().unwrap_or_default();
         for k in o.keys() {
-            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "routes", "redirects", "checks", "heartbeats", "split", "mirror", "snippets", "config", "freeze", "pause_schedule", "paused", "held", "hostname", "traces", "egress", "vitals", "report", "preview_host", "log_retention_days", "keep_days", "approvals", "badge", "closed_by", "data", "scheduled", "attack_mode", "challenge_until", "preflight"].contains(&k.as_str()) {
+            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "routes", "redirects", "checks", "heartbeats", "split", "mirror", "snippets", "config", "freeze", "pause_schedule", "paused", "held", "hostname", "traces", "egress", "vitals", "report", "preview_host", "log_retention_days", "keep_days", "approvals", "badge", "closed_by", "data", "scheduled", "attack_mode", "challenge_until", "preflight", "deploy_tags"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
@@ -2430,7 +2445,7 @@ impl Apps {
             None => None,
             Some(Value::Null) => Some(None),
             Some(Value::Object(a)) => {
-                if let Some(k) = a.keys().find(|k| !["token", "bypass_sha256", "signed_in", "password", "sso", "callers"].contains(&k.as_str())) {
+                if let Some(k) = a.keys().find(|k| !["token", "bypass_sha256", "signed_in", "password", "sso", "callers", "webhooks"].contains(&k.as_str())) {
                     return Err(Error::BadRequest(format!("access.{k} isn't a field")));
                 }
                 let signed_in = match a.get("signed_in") {
@@ -2474,10 +2489,26 @@ impl Apps {
                     Some(Value::String(h)) if h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()) => Some(h.to_ascii_lowercase()),
                     Some(_) => return Err(Error::BadRequest("access.bypass_sha256 is a SHA-256 in hex".into())),
                 };
+                // A preview's webhook URLs (roll previews' `roll_hook`): one exact path each, only on
+                // a preview (ephemeral) environment, the tokens' SHA-256 only.
+                let webhooks: Vec<crate::model::HookUrl> = match a.get("webhooks") {
+                    None | Some(Value::Null) => Vec::new(),
+                    Some(v) => serde_json::from_value(v.clone()).map_err(|_| Error::BadRequest("access.webhooks is [{path, token_sha256}]".into()))?,
+                };
+                let path_ok = |p: &str| p.starts_with('/') && p.len() <= 512 && !p.contains(['?', '#', '%', '\\']) && !p.split('/').any(|s| s == "." || s == "..") && p.bytes().all(|b| b.is_ascii_graphic());
+                if webhooks.len() > crate::model::MAX_HOOK_URLS || webhooks.iter().any(|h| !path_ok(&h.path) || h.token_hash.len() != 64 || !h.token_hash.bytes().all(|b| b.is_ascii_hexdigit())) {
+                    return Err(Error::BadRequest(format!("access.webhooks is at most {} of {{path: an absolute path (no query, no . or .., no %), token_sha256: a SHA-256 in hex}}", crate::model::MAX_HOOK_URLS)));
+                }
+                let webhooks: Vec<crate::model::HookUrl> = webhooks.into_iter().map(|h| crate::model::HookUrl { path: h.path, token_hash: h.token_hash.to_ascii_lowercase() }).collect();
+                // roll previews' `pv-` environments only (the gate honours them nowhere else, whatever
+                // `ephemeral` says later).
+                if !webhooks.is_empty() && !env.starts_with("pv-") {
+                    return Err(Error::BadRequest("access.webhooks is a preview's (a pv- environment roll previews makes)".into()));
+                }
                 // A new way in keeps the paths whose preflights pass (`preflight`, set on its own).
                 let (sid, e) = (service.to_string(), env.to_string());
                 let preflight = self.db(move |s| s.access(&sid, &e)).await.ok().flatten().map(|a| a.preflight).unwrap_or_default();
-                Some(Some(Access { token_hash: token.map(crate::public::token_hash), bypass_hash: bypass, signed_in, password_hash: password, sso, preflight, callers }))
+                Some(Some(Access { token_hash: token.map(crate::public::token_hash), bypass_hash: bypass, signed_in, password_hash: password, sso, preflight, callers, webhooks }))
             }
             Some(_) => return Err(Error::BadRequest("access is {token?, signed_in?, password?, sso?, callers?, bypass_sha256?} or null".into())),
         };
@@ -2505,6 +2536,26 @@ impl Apps {
         };
         let sid = service.to_string();
         let svc = self.db(move |s| s.service(&sid)).await?;
+        // The Git tags it deploys (Cloud Build's tag triggers): a Git URL service's, from its hook.
+        // The tags already there are read now, before anything is written (a host that doesn't
+        // answer is a 400 that changes nothing), and kept as seen: only one made from now on deploys.
+        let deploy_tags: Option<Option<(String, Vec<String>)>> = match o.get("deploy_tags") {
+            None => None,
+            Some(Value::Null) => Some(None),
+            Some(Value::String(p)) => {
+                crate::tags::check_tag_pattern(p).map_err(Error::BadRequest)?;
+                let Source::Git { url, .. } = &svc.source else {
+                    return Err(Error::BadRequest("deploy_tags is for a Git URL service (its repository's hook sends the tags)".into()));
+                };
+                let refs = self.git_remote(service, url).await.ls_refs().await.map_err(|e| Error::BadRequest(format!("its repository's tags couldn't be read: {e:#}")))?;
+                let seen: Vec<String> = refs.refs.iter().filter_map(|r| r.name.strip_prefix("refs/tags/")).filter(|t| crate::tags::tag_matches(p, t)).map(str::to_string).collect();
+                if seen.len() > crate::tags::MAX_SEEN {
+                    return Err(Error::BadRequest(format!("{p} matches {} tags already: narrow it (at most {})", seen.len(), crate::tags::MAX_SEEN)));
+                }
+                Some(Some((p.clone(), seen)))
+            }
+            Some(_) => return Err(Error::BadRequest("deploy_tags is a tag pattern like v*, or null".into())),
+        };
         let pname = {
             let this = self.clone();
             let p = svc.project.clone();
@@ -2828,6 +2879,11 @@ impl Apps {
             }
             _ => {}
         }
+        // The Git tags it deploys, read and checked above.
+        if let Some(set) = deploy_tags {
+            let (sid, e) = (service.to_string(), env.to_string());
+            self.db(move |s| s.set_deploy_tags(&sid, &e, set.as_ref().map(|(p, seen)| (p.as_str(), seen.as_slice())))).await?;
+        }
         match o.get("follow_tag") {
             None | Some(Value::Null) => {}
             Some(Value::Bool(on)) => {
@@ -2970,7 +3026,11 @@ impl Apps {
     /// history as `removed`.
     pub async fn delete_environment(self: &Arc<Self>, service: &str, env: &str) -> Result<()> {
         let (sid, e) = (service.to_string(), env.to_string());
-        self.db(move |s| s.environment(&sid, &e)).await?;
+        let row = self.db(move |s| s.environment(&sid, &e)).await?;
+        // A preview's `run.teardown` first, while its deployment and variables are still there.
+        if row.ephemeral {
+            self.teardown_command(service, env).await;
+        }
         // Its jobs' ids, for their logs: the rows go with the environment.
         let (sid, e) = (service.to_string(), env.to_string());
         let jobs = self.db(move |s| s.jobs_started(&sid, &e, 0, i64::MAX)).await.unwrap_or_default();
@@ -3245,6 +3305,14 @@ impl Apps {
             }
             if let Some(b) = &env.branch {
                 vars.insert("ROLL_GIT_BRANCH".into(), (b.clone(), "roll"));
+            }
+            // A tag's deploy (`deploy_tags`): its name, for a tracker's release (Cloud Build's
+            // `$TAG_NAME`).
+            if !deployment.is_empty() {
+                let d = deployment.to_string();
+                if let Ok(Some(tag)) = self.db(move |s| s.deploy_git_tag(&d)).await {
+                    vars.insert("ROLL_GIT_TAG".into(), (tag, "roll"));
+                }
             }
             vars.insert("ROLL_GIT_URL".into(), (url.clone(), "roll"));
         }
@@ -4172,6 +4240,41 @@ impl Apps {
         Ok(d)
     }
 
+    /// `POST …/domains/{host}/claim` (Vercel's "this domain is linked to another team"): take a
+    /// hostname another environment holds by proving it's yours. The first ask answers the TXT
+    /// record to add (`_roll-challenge.<host>`, a token of this environment's own, beside any value
+    /// there); once DNS has it, the next ask moves the domain here in one write, verified, and the
+    /// holder is told (`domain.expired`, `reason: claimed`).
+    pub async fn claim_domain(self: &Arc<Self>, service: &str, env: &str, host: &str) -> Result<Value> {
+        let h = host.to_ascii_lowercase();
+        let mut reserved: Vec<&str> = self.cfg.reserved.iter().map(String::as_str).collect();
+        reserved.push(&self.cfg.domain);
+        let h = check_hostname(&h, &reserved)?;
+        let (sid, e) = (service.to_string(), env.to_string());
+        self.db(move |s| s.environment(&sid, &e)).await?;
+        let (sid, e, hh) = (service.to_string(), env.to_string(), h.clone());
+        let Some(token) = self.db(move |s| s.claim_token(&hh, &sid, &e)).await? else {
+            return Err(Error::BadRequest(format!("{h} isn't another environment's custom domain: add it (POST …/domains)")));
+        };
+        let challenge = crate::model::challenge_name(&h);
+        if !self.deps.resolver.txt(&challenge).await.contains(&token) {
+            return Ok(json!({ "claimed": false, "txt": { "name": challenge, "value": token } }));
+        }
+        self.hosts_changed();
+        let tls = if self.deps.tls.issues() { TlsStatus::Pending } else { TlsStatus::None };
+        let (sid, e, hh, t) = (service.to_string(), env.to_string(), h.clone(), token.clone());
+        let Some((from_svc, from_env)) = self.db(move |s| s.take_domain(&hh, &sid, &e, &t, tls)).await? else {
+            return Err(Error::Conflict(format!("{h} moved meanwhile: ask again")));
+        };
+        self.hosts_changed();
+        tracing::info!(host = %h, from_service = %from_svc, from_env = %from_env, service, env, "apps: a domain was claimed by proving it");
+        // The provider's hostname is let go and asked for again, for this environment.
+        self.release_domains(std::slice::from_ref(&h)).await;
+        self.refresh_tls(&h).await;
+        let d = self.domains(service, env).await?.into_iter().find(|d| d.hostname == h).ok_or_else(|| Error::Internal(format!("{h} was claimed but isn't listed")))?;
+        Ok(json!({ "claimed": true, "domain": d }))
+    }
+
     // ── a project's preview domain (docs/apps/README.md, "A project's preview domain") ──
 
     /// Where a project's preview domain's CNAME points (a name of roll's that reaches it).
@@ -4562,6 +4665,64 @@ impl Apps {
         self.shares.get().cloned()
     }
 
+    /// roll previews' snapshots from a team's tests (`POST /__roll/snapshot`). Set once.
+    pub fn set_preview_snapshots(&self, s: Arc<dyn integrations::PreviewSnapshots>) {
+        let _ = self.preview_snapshots.set(s);
+    }
+
+    /// What writes a customer's DNS records with their token (`…/domains/{host}/configure`). Set once.
+    pub fn set_dns_writer(&self, w: Arc<dyn integrations::DnsWriter>) {
+        let _ = self.dns_writer.set(w);
+    }
+
+    /// `POST …/domains/{host}/configure {cloudflare_token}` (Vercel's and Netlify's own DNS): the
+    /// domain's records written at Cloudflare with the customer's token, then checked. The token
+    /// is a `roll://` reference the caller must be able to reveal, read as them for this call only
+    /// (roll secrets' `use_once`): nothing of it is kept.
+    pub async fn configure_domain(self: &Arc<Self>, service: &str, env: &str, host: &str, body: Value, who: integrations::Asker<'_>) -> Result<Domain> {
+        let o = body.as_object().cloned().unwrap_or_default();
+        if let Some(k) = o.keys().find(|k| !matches!(k.as_str(), "cloudflare_token" | "replace")) {
+            return Err(Error::BadRequest(format!("unknown field {k}")));
+        }
+        let Some(reference) = o.get("cloudflare_token").and_then(Value::as_str) else {
+            return Err(Error::BadRequest("cloudflare_token is a roll:// reference to a Cloudflare API token (Zone:DNS:Edit on the domain's zone)".into()));
+        };
+        let replace = match o.get("replace") {
+            None | Some(Value::Null) => false,
+            Some(Value::Bool(b)) => *b,
+            Some(_) => return Err(Error::BadRequest("replace is a boolean".into())),
+        };
+        // A reference by roll secrets' own rule (` roll://…` and `ROLL://…` are errors, not text).
+        match roll_secrets_ref::Reference::parse(reference) {
+            Ok(Some(_)) => {}
+            Ok(None) => return Err(Error::BadRequest("cloudflare_token is a roll:// reference, never the token itself".into())),
+            Err(e) => return Err(Error::BadRequest(format!("cloudflare_token: {e}"))),
+        }
+        let Some(writer) = self.dns_writer.get().cloned() else {
+            return Err(Error::BadRequest("writing DNS records isn't set up on this node".into()));
+        };
+        let h = host.to_ascii_lowercase();
+        let d = self.domains(service, env).await?.into_iter().find(|d| d.hostname == h && d.kind == DomainKind::Custom).ok_or_else(|| Error::NotFound(format!("{h} isn't a domain of {service} in {env}")))?;
+        if d.hostname.starts_with("*.") {
+            return Err(Error::BadRequest("a wildcard's records are added by hand".into()));
+        }
+        let (sid, e) = (service.to_string(), env.to_string());
+        let svc = self.db(move |s| s.service(&sid)).await?;
+        let token = self.deps.secrets.use_once(who, &svc.project, &e, service, reference, "writing a domain's records at Cloudflare", Some(writer.api())).await.map_err(|why| Error::Forbidden(format!("{reference}: {why:#} (it must be a key you may reveal)")))?;
+        // The TXT challenge first where `record` asks for it (it proves the name, whatever the
+        // CNAME meets), then the CNAME to its target (Cloudflare flattens one at a zone's apex,
+        // which plain DNS can't hold).
+        if d.record != "cname" {
+            writer.put_record(&token, "TXT", &crate::model::challenge_name(&d.hostname), &d.token, false).await.map_err(|e| Error::BadRequest(format!("{e:#}")))?;
+        }
+        let blocking = writer.put_record(&token, "CNAME", &d.hostname, &d.target, replace).await.map_err(|e| Error::BadRequest(format!("{e:#}")))?;
+        if !blocking.is_empty() {
+            return Err(Error::Conflict(format!("{} still points elsewhere ({}): send replace: true to swap those records for roll's CNAME", d.hostname, blocking.join(", "))));
+        }
+        drop(token);
+        self.verify_domain(service, env, &h).await
+    }
+
     /// Where names under a project's preview domain that no environment holds go (roll previews'
     /// router, for its previews on roll's own runtime). Set once.
     pub fn set_preview_router(&self, router: Arc<dyn integrations::PreviewRouter>) {
@@ -4923,7 +5084,7 @@ impl ResolvedVars {
             .iter()
             // `ROLL_AWAKE_URL` is roll's own on every web service: its arrival isn't a change of
             // the service's to deploy (each deployment gets it).
-            .filter(|(k, _)| !matches!(k.as_str(), "ROLL_DEPLOYMENT" | "ROLL_GIT_COMMIT" | "ROLL_GIT_BRANCH" | "ROLL_AWAKE_URL"))
+            .filter(|(k, _)| !matches!(k.as_str(), "ROLL_DEPLOYMENT" | "ROLL_GIT_COMMIT" | "ROLL_GIT_BRANCH" | "ROLL_GIT_TAG" | "ROLL_AWAKE_URL"))
             // roll's `WEB_CONCURRENCY` follows `cpu` and `memory_mb`, settings a deploy already says;
             // the service's own value is a change like any.
             .filter(|(k, _)| !(k == "WEB_CONCURRENCY" && self.sources.get(k.as_str()).copied() == Some("roll")))

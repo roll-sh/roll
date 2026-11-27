@@ -31,6 +31,7 @@ pub mod semantic;
 pub mod services;
 pub mod settings;
 pub mod stream;
+pub mod tokens;
 
 use crate::cluster::Cluster;
 use crate::error::{EsError, EsResult};
@@ -582,6 +583,11 @@ pub async fn infer(ctx: &Ctx<'_>) -> EsResult<Reply> {
     }
     let req = parse_request(ctx, ep.task, timeout(ctx)?)?;
     let results = service.infer(ctx.cluster, &ep, &req).await?;
+    if let Results::Completion(texts, reported) = &results {
+        let input = req.input.iter().map(|s| tokens::estimate(s)).sum();
+        let (i, o) = reported.or(input, texts.iter().map(|s| tokens::estimate(s)).sum());
+        ctx.cluster.xpack.tokens.add(i, o);
+    }
     Reply::ok(results.to_value())
 }
 
@@ -602,18 +608,19 @@ pub async fn stream_route(ctx: &Ctx<'_>) -> EsResult<Reply> {
 async fn stream(ctx: &Ctx<'_>, url_task: TaskType, id: &str) -> EsResult<Reply> {
     let (ep, service) = run_target(ctx, url_task, id)?;
     let timeout = timeout(ctx)?;
-    let streaming = match ep.task {
+    let (streaming, input) = match ep.task {
         TaskType::Completion => {
             let req = parse_request(ctx, ep.task, timeout)?;
-            service.stream_completion(ctx.cluster, &ep, &req).await?
+            (service.stream_completion(ctx.cluster, &ep, &req).await?, req.input.iter().map(|s| tokens::estimate(s)).sum())
         }
         TaskType::ChatCompletion => {
             let body = ctx.body()?.unwrap_or_else(Value::object);
-            service.stream_chat(ctx.cluster, &ep, &body, timeout).await?
+            (service.stream_chat(ctx.cluster, &ep, &body, timeout).await?, tokens::estimate_messages(&body))
         }
         other => return Err(EsError::status(400, format!("Streaming is not allowed for service [{}] and task [{}]", ep.service, other.name()))),
     };
-    Ok(Reply::Stream(200, "text/event-stream".into(), streaming.into_sse(ep.id.clone(), ep.task)))
+    let count = tokens::Count::new(ctx.cluster.xpack.tokens.clone(), input);
+    Ok(Reply::Stream(200, "text/event-stream".into(), streaming.into_sse(ep.id.clone(), ep.task, count)))
 }
 
 /// What roll runs an endpoint for from inside a search.

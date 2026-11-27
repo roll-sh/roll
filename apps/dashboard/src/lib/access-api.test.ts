@@ -28,6 +28,7 @@ describe("access", () => {
     expect(presetRules(presets[2], "prj_a")[0].resources).toEqual([{ project: "prj_a" }]);
     expect(presetRules(presets[2])[0].resources).toBe("*");
     expect(denyRedirect("http://127.0.0.1:5000/cb?x=1", "s")).toBe("http://127.0.0.1:5000/cb?x=1&error=access_denied&error_description=The+user+denied+the+request&state=s");
+    expect(new URL(denyRedirect("https://claude.ai/api/mcp/auth_callback", "s", "https://api.roll.example/")).searchParams.get("iss")).toBe("https://api.roll.example");
     expect(statusOf({ revoked_at: null, expires_at: 1 }, 2)).toBe("expired");
   });
 });
@@ -210,6 +211,10 @@ describe("two-person approvals", () => {
     expect(describeApprovalRule({ product: "secrets", actions: ["reveal"], environments: ["production"], approvals: 2 })).toBe("Secrets · reveal · production: 2 approvals");
     expect(rememberable({ resource: "prj_a", gates: [{ approvals: 2, approved: 1 }] })).toBe(false);
     expect(rememberable({ resource: "prj_a" })).toBe(true);
+    // A lend of a whole environment's secrets to another product's route is approved once.
+    expect(rememberable({ resource: "prj_a", product: "secrets", scope_path: "/", route: "/v1/apps/services/{id}/environments/{env}/domains/{domain}/configure" })).toBe(false);
+    expect(rememberable({ resource: "prj_a", product: "secrets", scope_path: "/dns", route: "/v1/apps/services/{id}/environments/{env}/domains/{domain}/configure" })).toBe(true);
+    expect(rememberable({ resource: "prj_a", product: "secrets", scope_path: "/", route: "/v1/secrets/projects/{project}/environments/{env}/values" })).toBe(true);
   });
 });
 

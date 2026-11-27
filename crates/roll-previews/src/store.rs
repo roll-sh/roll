@@ -264,6 +264,16 @@ CREATE TABLE IF NOT EXISTS visual_page_refusals (
     reason TEXT NOT NULL,
     PRIMARY KEY (preview_id, path)
 );
+-- A note made a work item on its change's repo (`POST …/notes/{note}/work`): once a note.
+CREATE TABLE IF NOT EXISTS note_work (
+    preview_id TEXT NOT NULL,
+    review_id TEXT NOT NULL,
+    number INTEGER NOT NULL,
+    url TEXT NOT NULL,
+    by TEXT NOT NULL,
+    at INTEGER NOT NULL,
+    PRIMARY KEY (preview_id, review_id)
+);
 CREATE TABLE IF NOT EXISTS resolved_notes (
     preview_id TEXT NOT NULL,
     review_id TEXT NOT NULL,
@@ -289,6 +299,13 @@ CREATE TABLE IF NOT EXISTS budget_alerts (
     level INTEGER NOT NULL,
     at INTEGER NOT NULL,
     PRIMARY KEY (project_id, month, max_usd, level)
+);
+CREATE TABLE IF NOT EXISTS masking_notices (
+    project_id TEXT NOT NULL,
+    resource TEXT NOT NULL,
+    col TEXT NOT NULL,
+    at INTEGER NOT NULL,
+    PRIMARY KEY (project_id, resource, col)
 );
 CREATE TABLE IF NOT EXISTS hooks (
     id TEXT PRIMARY KEY,
@@ -393,6 +410,17 @@ CREATE TABLE IF NOT EXISTS restore_points (
 type PageShotRow = (String, String, i64, Option<(String, String)>, Option<i64>, Option<String>);
 
 fn write_page_shots(c: &Conn<'_>, id: &str, head: &str, rows: &[PageShotRow], wanted: &[String]) -> Result<()> {
+    upsert_page_shots(c, id, head, rows)?;
+    let paths: Vec<String> = c.query("SELECT path FROM page_shots WHERE preview_id = ?", [id], |r| r.get(0))?;
+    for gone in paths.iter().filter(|p| !wanted.contains(p)) {
+        // The team's own snapshots at this head stay (sent from their tests, not taken by this
+        // run); an earlier head's go.
+        c.execute("DELETE FROM page_shots WHERE preview_id = ? AND path = ? AND NOT (path LIKE 'snap:%' AND head = ?)", [id, gone.as_str(), head])?;
+    }
+    Ok(())
+}
+
+fn upsert_page_shots(c: &Conn<'_>, id: &str, head: &str, rows: &[PageShotRow]) -> Result<()> {
     for (path, png, errors, before, change_bp, report) in rows {
         match before {
             Some((prev_head, prev_png)) => c.execute(
@@ -407,10 +435,6 @@ fn write_page_shots(c: &Conn<'_>, id: &str, head: &str, rows: &[PageShotRow], wa
                 params![id, path, head, png, errors, report],
             )?,
         };
-    }
-    let paths: Vec<String> = c.query("SELECT path FROM page_shots WHERE preview_id = ?", [id], |r| r.get(0))?;
-    for gone in paths.iter().filter(|p| !wanted.contains(p)) {
-        c.execute("DELETE FROM page_shots WHERE preview_id = ? AND path = ?", [id, gone.as_str()])?;
     }
     Ok(())
 }
@@ -1037,6 +1061,20 @@ impl Store {
         if !db.has_column("shares", "opened_day")? {
             db.add_column("shares", "opened_day", "INTEGER")?;
         }
+        // A webhook URL (one path, no cookie) is a share row with its path; a share link has none.
+        if !db.has_column("shares", "path")? {
+            db.add_column("shares", "path", "TEXT")?;
+        }
+        // A webhook URL's service: its token opens its path there only.
+        if !db.has_column("shares", "service")? {
+            db.add_column("shares", "service", "TEXT")?;
+        }
+        if !db.has_column("shares", "hits")? {
+            db.add_column("shares", "hits", "INTEGER NOT NULL DEFAULT 0")?;
+        }
+        if !db.has_column("shares", "last_at")? {
+            db.add_column("shares", "last_at", "INTEGER")?;
+        }
         Ok(Store { db, rates: Rates::default(), signing: std::sync::OnceLock::new(), sealer: std::sync::OnceLock::new() })
     }
 
@@ -1188,6 +1226,27 @@ impl Store {
                 "INSERT INTO budget_alerts (project_id, month, max_usd, level, at) VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
                 params![project, month, max_usd, level, now],
             )?;
+            Ok::<_, Error>(())
+        })
+    }
+
+    /// The columns masked by default (`kind:parent`, column) `project` was told of.
+    pub fn noticed_masks(&self, project: &str) -> Result<std::collections::BTreeSet<(String, String)>> {
+        Ok(self.db.read(|c| {
+            let mut q = c.prepare("SELECT resource, col FROM masking_notices WHERE project_id = ?")?;
+            let rows = q.query_map([project], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            rows.collect::<std::result::Result<_, _>>()
+        })?)
+    }
+
+    /// Record that `project` was told of `columns` (after it was: a crash repeats one, never
+    /// loses one).
+    pub fn set_noticed_masks(&self, project: &str, columns: &[crate::MaskedByDefault]) -> Result<()> {
+        let now = self.now_ms()?;
+        self.db.write(|c| {
+            for m in columns {
+                c.execute("INSERT INTO masking_notices (project_id, resource, col, at) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING", params![project, m.resource, m.column, now])?;
+            }
             Ok::<_, Error>(())
         })
     }
@@ -1381,6 +1440,7 @@ impl Store {
             c.execute("DELETE FROM project_domains WHERE project_id = ?", [project])?;
             c.execute("DELETE FROM git_skips WHERE project_id = ?", [project])?;
             c.execute("DELETE FROM budget_alerts WHERE project_id = ?", [project])?;
+            c.execute("DELETE FROM masking_notices WHERE project_id = ?", [project])?;
             c.execute("DELETE FROM visit_sessions WHERE project_id = ?", [project])?;
             c.execute("DELETE FROM visit_tickets WHERE project_id = ?", [project])?;
             Ok::<_, Error>(())
@@ -1530,7 +1590,7 @@ impl Store {
             if let Some((project, change, head)) = gone {
                 emit(c, now, "deleted", &project, id, change.as_deref(), &serde_json::json!({ "head": head }))?;
             }
-            for t in ["resources", "services", "pinned", "pinned_data", "restore_points", "shares", "guest_notes", "note_tells", "visit_tickets", "visit_sessions", "visits", "activity", "screenshots", "page_shots", "visual_page_accepts", "visual_page_refusals", "mail", "resolved_notes", "base_history", "leases", "note_crops", "git_pulls", "git_reports", "runtime_facts", "gone_pushes", "run_usage", "service_spend", "previews"] {
+            for t in ["resources", "services", "pinned", "pinned_data", "restore_points", "shares", "guest_notes", "note_tells", "visit_tickets", "visit_sessions", "visits", "activity", "screenshots", "page_shots", "visual_page_accepts", "visual_page_refusals", "mail", "resolved_notes", "note_work", "base_history", "leases", "note_crops", "git_pulls", "git_reports", "runtime_facts", "gone_pushes", "run_usage", "service_spend", "previews"] {
                 let col = if t == "previews" { "id" } else { "preview_id" };
                 c.execute(&format!("DELETE FROM {t} WHERE {col} = ?"), [id])?;
             }
@@ -1871,7 +1931,15 @@ impl Store {
         Ok(())
     }
 
-    /// Forget the masked base `name` (making it failed, or it was deleted).
+    /// Let go of the claim on making the masked base `name` (making it failed): the next
+    /// converge takes it over under the same name (its half-made branch found again), and nobody
+    /// waits on a claim nothing holds.
+    pub fn release_mask_base(&self, kind: Kind, parent: &str, name: &str) -> Result<()> {
+        self.db.write(|c| c.execute("UPDATE mask_bases SET claim_until = 0 WHERE kind = ? AND parent = ? AND name = ? AND state = 'making'", params![kind.as_str(), parent, name]).map(|_| ()))?;
+        Ok(())
+    }
+
+    /// Forget the masked base `name` (it was deleted).
     pub fn drop_mask_base(&self, kind: Kind, parent: &str, name: &str) -> Result<()> {
         self.db.write(|c| c.execute("DELETE FROM mask_bases WHERE kind = ? AND parent = ? AND name = ?", params![kind.as_str(), parent, name]).map(|_| ()))?;
         Ok(())
@@ -2105,6 +2173,12 @@ impl Store {
     /// The head the schema's changes were read at.
     pub fn schema_head(&self, id: &str) -> Result<Option<String>> {
         Ok(self.db.read(|c| c.query_row("SELECT schema_head FROM previews WHERE id = ?", [id], |r| r.get(0)).optional())?.flatten())
+    }
+
+    /// The schema's changes read at [`Store::schema_head`] (`None`: none read).
+    pub fn schema_changes(&self, id: &str) -> Result<Option<Vec<String>>> {
+        let json: Option<String> = self.db.read(|c| c.query_row("SELECT schema_changes FROM previews WHERE id = ?", [id], |r| r.get(0)).optional())?.flatten();
+        Ok(json.and_then(|j| serde_json::from_str(&j).ok()))
     }
 
     /// `risks`: [`crate::schema::risks`] of every line, the ones past `changes`' cap too.
@@ -2402,6 +2476,29 @@ impl Store {
     pub fn set_page_shots(&self, id: &str, head: &str, pages: &[crate::ports::PageShot], wanted: &[String]) -> Result<()> {
         let rows = self.prepare_page_shots(id, head, pages)?;
         self.db.write(|c| write_page_shots(c, id, head, &rows, wanted))
+    }
+
+    /// A picture the team's own tests sent (`snap:<name>`, Argos's and Percy's SDKs) at `head`:
+    /// a page of the visual review like any other, compared with the one it replaces at an
+    /// earlier head. At most [`SNAPSHOTS_MAX`] a preview.
+    pub fn put_snapshot(&self, id: &str, head: &str, name: &str, png: &[u8]) -> Result<()> {
+        let path = format!("snap:{name}");
+        let rows = self.prepare_page_shots(id, head, &[crate::ports::PageShot { path: path.clone(), png: png.to_vec(), errors: 0, report: Default::default() }])?;
+        use base64::Engine as _;
+        let new = base64::engine::general_purpose::STANDARD.encode(png);
+        self.db.write(|c| {
+            let others: i64 = c.query_row("SELECT COUNT(*) FROM page_shots WHERE preview_id = ? AND path LIKE 'snap:%' AND path <> ?", params![id, path], |r| r.get(0))?;
+            if others as usize >= SNAPSHOTS_MAX {
+                return Err(Error::Conflict(format!("the preview has {SNAPSHOTS_MAX} snapshots")));
+            }
+            // Another picture by the same name: what was accepted or refused isn't this one.
+            let was: Option<String> = c.query_row("SELECT png FROM page_shots WHERE preview_id = ? AND path = ?", params![id, path], |r| r.get(0)).optional()?;
+            if was.is_some_and(|w| w != new) {
+                c.execute("DELETE FROM visual_page_accepts WHERE preview_id = ? AND path = ?", params![id, path])?;
+                c.execute("DELETE FROM visual_page_refusals WHERE preview_id = ? AND path = ?", params![id, path])?;
+            }
+            upsert_page_shots(c, id, head, &rows)
+        })
     }
 
     /// What [`Store::set_page_shots`] writes, read and compared first (outside the write).
@@ -2736,6 +2833,46 @@ impl Store {
     }
 
     /// The notes resolved on a preview's page (their reviews' ids).
+    /// The notes made work items, by note: (number, where it's shown). One still being made
+    /// isn't one.
+    pub fn note_work(&self, preview: &str) -> Result<std::collections::HashMap<String, (u64, String)>> {
+        let rows: Vec<(String, i64, String)> = self.db.read(|c| c.query("SELECT review_id, number, url FROM note_work WHERE preview_id = ? AND number > 0", [preview], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))))?;
+        Ok(rows.into_iter().map(|(n, num, url)| (n, (num as u64, url))).collect())
+    }
+
+    /// Who makes note `review`'s work item, decided in one write: this caller (a row of its
+    /// own, number 0 until it's made; one a crash left over a minute ago is taken over), or the
+    /// item already made, or `Busy` while another caller makes it.
+    pub fn claim_note_work(&self, preview: &str, review: &str, by: &str) -> Result<NoteWorkClaim> {
+        let now = self.now_ms()?;
+        self.db.write(|c| {
+            let row: Option<(i64, String, i64)> = c.query_row("SELECT number, url, at FROM note_work WHERE preview_id = ? AND review_id = ?", params![preview, review], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
+            Ok::<_, Error>(match row {
+                Some((number, url, _)) if number > 0 => NoteWorkClaim::Made(number as u64, url),
+                Some((_, _, at)) if now - at < 60_000 => NoteWorkClaim::Busy,
+                Some(_) => {
+                    c.execute("UPDATE note_work SET by = ?, at = ? WHERE preview_id = ? AND review_id = ? AND number = 0", params![by, now, preview, review])?;
+                    NoteWorkClaim::Mine
+                }
+                None => {
+                    c.execute("INSERT INTO note_work (preview_id, review_id, number, url, by, at) VALUES (?, ?, 0, '', ?, ?) ON CONFLICT (preview_id, review_id) DO NOTHING", params![preview, review, by, now])?;
+                    NoteWorkClaim::Mine
+                }
+            })
+        })
+    }
+
+    /// Note `review`'s work item made (`number`), or, with `None`, not: its claim let go.
+    pub fn set_note_work(&self, preview: &str, review: &str, made: Option<(u64, &str)>) -> Result<()> {
+        self.db.write(|c| {
+            match made {
+                Some((number, url)) => c.execute("UPDATE note_work SET number = ?, url = ? WHERE preview_id = ? AND review_id = ?", params![number as i64, url, preview, review])?,
+                None => c.execute("DELETE FROM note_work WHERE preview_id = ? AND review_id = ? AND number = 0", params![preview, review])?,
+            };
+            Ok::<_, Error>(())
+        })
+    }
+
     pub fn resolved_notes(&self, preview: &str) -> Result<std::collections::HashSet<String>> {
         let ids: Vec<String> = self.db.read(|c| c.query("SELECT review_id FROM resolved_notes WHERE preview_id = ?", [preview], |r| r.get(0)))?;
         Ok(ids.into_iter().collect())
@@ -2882,6 +3019,30 @@ impl Store {
     }
 
     /// No schema changes shown (the head they were read at stays, so they're read again).
+    /// The project's other open changes' previews whose schema changes touch a table `r`'s do
+    /// (PlanetScale flags deploy requests that conflict): each one's id, branch and those tables,
+    /// 5 previews and 5 tables each at most. A default branch's preview has none.
+    fn schema_overlaps(&self, r: &Row, mine: Option<&[String]>) -> Result<Vec<crate::SchemaOverlap>> {
+        let Some(mine) = mine.filter(|_| r.change_id.is_some()) else { return Ok(Vec::new()) };
+        let tables = crate::schema::tables_touched(mine);
+        if tables.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut out = Vec::new();
+        // Its own repo's: a pull request's comment never names another repo's branch or tables.
+        for o in self.rows(Some(&r.project_id))?.into_iter().filter(|o| o.id != r.id && o.repo == r.repo && o.change_id.is_some() && o.desired == crate::Desired::Active) {
+            let (theirs, _, _) = self.release_facts(&o.id)?;
+            let both: Vec<String> = crate::schema::tables_touched(theirs.as_deref().unwrap_or_default()).intersection(&tables).take(5).cloned().collect();
+            if !both.is_empty() {
+                out.push(crate::SchemaOverlap { preview: o.id.clone(), branch: o.branch.clone().unwrap_or_default(), tables: both });
+                if out.len() == 5 {
+                    break;
+                }
+            }
+        }
+        Ok(out)
+    }
+
     pub fn clear_schema_changes(&self, id: &str) -> Result<()> {
         self.db.write(|c| {
             c.execute("UPDATE previews SET schema_changes = NULL, schema_risks = NULL WHERE id = ? AND schema_changes IS NOT NULL", [id])?;
@@ -2897,7 +3058,8 @@ impl Store {
             c.query_row("SELECT schema_changes, schema_risks, released, release_ms, prev_release_ms FROM previews WHERE id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))).optional()
         })?;
         let Some((changes, risks, head, ms, before)) = raw else { return Ok((None, Vec::new(), None)) };
-        let run = head.zip(ms).map(|(head, ms)| crate::ReleaseRun { head, ms, before_ms: before });
+        let locks = |head: &str| self.runtime_fact::<crate::ReleaseLocksAt>(id, "release_locks").ok().flatten().filter(|l| l.head == head).map(|l| l.locks).unwrap_or_default();
+        let run = head.zip(ms).map(|(head, ms)| crate::ReleaseRun { locks: locks(&head), head, ms, before_ms: before });
         Ok((changes.and_then(|j| serde_json::from_str(&j).ok()), risks.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default(), run))
     }
 
@@ -3115,6 +3277,8 @@ impl Store {
     /// The host a service (or an earlier push's, `<service>@<revision>`) answers on.
     pub fn service_host(&self, id: &str, name: &str) -> Result<Option<String>> {
         Ok(self.db.read(|c| match name.split_once('@') {
+            // Main's code on the preview's data (`web@main`): a host of its own no visitor reaches.
+            Some((svc, "main")) => c.query_row("SELECT host FROM services WHERE preview_id = ? AND name = ?", [id, svc], |r| r.get::<_, String>(0)).optional().map(|h| h.map(|h| format!("{}-main", crate::label_part(&h, 58)))),
             Some((svc, rev)) => c.query_row("SELECT host FROM pinned WHERE preview_id = ? AND service = ? AND revision = ?", [id, svc, rev], |r| r.get(0)).optional(),
             None => c.query_row("SELECT host FROM services WHERE preview_id = ? AND name = ?", [id, name], |r| r.get(0)).optional(),
         })?)
@@ -3269,6 +3433,8 @@ impl Store {
                  ON CONFLICT (preview_id, service, revision) DO UPDATE SET at = excluded.at",
                 params![id, service, revision, host, url, now],
             )?;
+            // Kept again (started on demand): its link isn't a gone push's any more.
+            c.execute("DELETE FROM gone_pushes WHERE host = ?", [host.as_str()])?;
             let old: Vec<String> = c.query(
                 "SELECT revision FROM pinned WHERE preview_id = ? AND service = ? ORDER BY at DESC LIMIT 1000 OFFSET ?",
                 params![id, service, PINNED_KEEP as i64],
@@ -3510,7 +3676,7 @@ impl Store {
         let sid = format!("shr_{}", &new_token()[..12]);
         let hash = bypass_hash(&token);
         self.db.write(|c| {
-            let live: i64 = c.query_row("SELECT COUNT(*) FROM shares WHERE preview_id = ? AND revoked = 0 AND expires_at > ?", params![id, now], |r| r.get(0))?;
+            let live: i64 = c.query_row("SELECT COUNT(*) FROM shares WHERE preview_id = ? AND path IS NULL AND revoked = 0 AND expires_at > ?", params![id, now], |r| r.get(0))?;
             if live as usize >= SHARES_MAX {
                 return Err(Error::Conflict(format!("the preview has {SHARES_MAX} live share links: revoke one first")));
             }
@@ -3526,7 +3692,7 @@ impl Store {
     /// The preview's share links, newest first (never their tokens).
     pub fn shares(&self, id: &str) -> Result<Vec<crate::Share>> {
         Ok(self.db.read(|c| {
-            c.query("SELECT id, expires_at, created_by, created_at, revoked, label, notes FROM shares WHERE preview_id = ? ORDER BY created_at DESC", [id], |r| {
+            c.query("SELECT id, expires_at, created_by, created_at, revoked, label, notes FROM shares WHERE preview_id = ? AND path IS NULL ORDER BY created_at DESC", [id], |r| {
                 Ok(crate::Share { id: r.get(0)?, expires_at: r.get(1)?, created_by: r.get(2)?, created_at: r.get(3)?, revoked: r.get::<_, i64>(4)? != 0, label: r.get(5)?, notes: r.get::<_, i64>(6)? != 0 })
             })
         })?)
@@ -3540,12 +3706,74 @@ impl Store {
         Ok(())
     }
 
+    /// A webhook URL for `path` of preview `id` (Stripe's or GitHub's, into a private preview):
+    /// that path only, for the preview's life, its token in the query. Shown once.
+    pub fn create_webhook(&self, id: &str, service: &str, path: &str, by: &str, maker: Option<&str>, label: &str) -> Result<(crate::Webhook, String)> {
+        let now = self.now_ms()?;
+        let token = format!("rph_{}", new_token());
+        let wid = format!("whk_{}", &new_token()[..12]);
+        let hash = bypass_hash(&token);
+        self.db.write(|c| {
+            let live: i64 = c.query_row("SELECT COUNT(*) FROM shares WHERE preview_id = ? AND path IS NOT NULL AND revoked = 0", [id], |r| r.get(0))?;
+            if live as usize >= WEBHOOKS_MAX {
+                return Err(Error::Conflict(format!("the preview has {WEBHOOKS_MAX} webhook URLs: revoke one first")));
+            }
+            c.execute(
+                "INSERT INTO shares (id, preview_id, hash, expires_at, created_by, created_at, maker, maker_checked, label, notes, path, service) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
+                params![wid, id, hash, i64::MAX, by, now, maker, now, label, path, service],
+            )?;
+            Ok::<_, Error>(())
+        })?;
+        Ok((crate::Webhook { id: wid, service: service.to_string(), path: path.to_string(), label: label.to_string(), created_by: by.to_string(), created_at: now, revoked: false, hits: 0, last_at: None }, token))
+    }
+
+    /// The preview's webhook URLs, newest first (never their tokens).
+    pub fn webhooks(&self, id: &str) -> Result<Vec<crate::Webhook>> {
+        Ok(self.db.read(|c| {
+            c.query("SELECT id, path, label, created_by, created_at, revoked, hits, last_at, service FROM shares WHERE preview_id = ? AND path IS NOT NULL ORDER BY created_at DESC", [id], |r| {
+                Ok(crate::Webhook { id: r.get(0)?, service: r.get::<_, Option<String>>(8)?.unwrap_or_default(), path: r.get(1)?, label: r.get(2)?, created_by: r.get(3)?, created_at: r.get(4)?, revoked: r.get::<_, i64>(5)? != 0, hits: r.get(6)?, last_at: r.get(7)? })
+            })
+        })?)
+    }
+
+    pub fn revoke_webhook(&self, id: &str, webhook: &str) -> Result<()> {
+        let n = self.db.write(|c| Ok::<_, Error>(c.execute("UPDATE shares SET revoked = 1 WHERE preview_id = ? AND id = ? AND path IS NOT NULL", params![id, webhook])?))?;
+        if n == 0 {
+            return Err(Error::NotFound(format!("no webhook URL {webhook}")));
+        }
+        Ok(())
+    }
+
+    /// A live webhook URL `token` of preview `id` for exactly `path` of `service` (as a share
+    /// link's row, for its maker's check: [`crate::visit::share_visit`]).
+    pub fn webhook_live(&self, id: &str, token: &str, service: &str, path: &str) -> Result<Option<LiveShare>> {
+        Ok(self.db.read(|c| {
+            c.query_row(
+                "SELECT id, expires_at, maker, maker_checked, label, notes FROM shares WHERE preview_id = ? AND hash = ? AND service = ? AND path = ? AND revoked = 0",
+                params![id, bypass_hash(token), service, path],
+                |r| Ok(LiveShare { id: r.get(0)?, ends: r.get(1)?, maker: r.get(2)?, maker_checked: r.get(3)?, label: r.get(4)?, notes: false }),
+            )
+            .optional()
+        })?)
+    }
+
+    /// The live webhook URLs' (service, path, token SHA-256), for a backend whose gate checks them.
+    pub fn webhook_hashes(&self, id: &str) -> Result<Vec<(String, String, String)>> {
+        Ok(self.db.read(|c| c.query("SELECT service, path, hash FROM shares WHERE preview_id = ? AND path IS NOT NULL AND service IS NOT NULL AND revoked = 0 ORDER BY created_at", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))))?)
+    }
+
+    /// A request came in by webhook URL `webhook` (how many, and when last: a relaxed write).
+    pub fn webhook_hit(&self, webhook: &str, now: i64) -> Result<()> {
+        self.db.write(|c| c.execute("UPDATE shares SET hits = hits + 1, last_at = ? WHERE id = ?", params![now, webhook]).map(drop))?;
+        Ok(())
+    }
+
     /// A live share link `token` of preview `id` (not revoked, not past).
     pub fn share_live(&self, id: &str, token: &str) -> Result<Option<LiveShare>> {
         let now = self.now_ms()?;
         Ok(self.db.read(|c| {
             c.query_row(
-                "SELECT id, expires_at, maker, maker_checked, label, notes FROM shares WHERE preview_id = ? AND hash = ? AND revoked = 0 AND expires_at > ?",
+                "SELECT id, expires_at, maker, maker_checked, label, notes FROM shares WHERE preview_id = ? AND hash = ? AND path IS NULL AND revoked = 0 AND expires_at > ?",
                 params![id, bypass_hash(token), now],
                 |r| Ok(LiveShare { id: r.get(0)?, ends: r.get(1)?, maker: r.get(2)?, maker_checked: r.get(3)?, label: r.get(4)?, notes: r.get::<_, i64>(5)? != 0 }),
             )
@@ -3644,7 +3872,7 @@ impl Store {
     pub fn share_ends(&self, id: &str, token: &str) -> Result<Option<i64>> {
         let now = self.now_ms()?;
         Ok(self.db.read(|c| {
-            c.query_row("SELECT expires_at FROM shares WHERE preview_id = ? AND hash = ? AND revoked = 0 AND expires_at > ?", params![id, bypass_hash(token), now], |r| r.get(0)).optional()
+            c.query_row("SELECT expires_at FROM shares WHERE preview_id = ? AND hash = ? AND path IS NULL AND revoked = 0 AND expires_at > ?", params![id, bypass_hash(token), now], |r| r.get(0)).optional()
         })?)
     }
 
@@ -3832,6 +4060,13 @@ impl Store {
         let url = services.first().map(|(s, _)| s.url.clone());
         let share_url = url.as_deref().map(share);
         let (schema_changes, schema_risks, release) = self.release_facts(&r.id)?;
+        // Only at the head it's for: one asked at an earlier head never runs, and an earlier
+        // head's outcome isn't this one's.
+        let rehearsal = self.runtime_fact::<crate::Rehearsal>(&r.id, "rehearsal")?.filter(|x| x.head == r.build());
+        let main_on_change = self.runtime_fact::<crate::MainOnChange>(&r.id, "main_on_change")?.filter(|x| x.head == r.build());
+        let replay = self.runtime_fact::<crate::Replay>(&r.id, "replay")?.filter(|x| x.head == r.build());
+        let masked_by_default: Vec<crate::MaskedByDefault> = self.runtime_fact(&r.id, "masked_by_default")?.unwrap_or_default();
+        let schema_overlaps = self.schema_overlaps(&r, schema_changes.as_deref())?;
         let kept_until = self.kept_until(&r.id)?;
         // Its page as a link only when it's `https://` (it's kept whole to tell its repository).
         let pull = self.git_pull(&r.id)?.map(|mut g| {
@@ -3909,6 +4144,15 @@ impl Store {
             crate::settings::RegressionsRule::Check => Some("check".to_string()),
             crate::settings::RegressionsRule::Required => Some("required".to_string()),
         };
+        // Only where there's a Postgres branch to rehearse on: a rule that could never be met
+        // holds nothing back.
+        let rehearsable = self.resources(&r.id)?.iter().any(|x| x.kind == crate::Kind::Postgres && x.r#ref.is_some());
+        let release_checks = match settings.release_checks {
+            _ if !rehearsable => None,
+            crate::settings::ReleaseChecksRule::Off => None,
+            crate::settings::ReleaseChecksRule::Check => Some("check".to_string()),
+            crate::settings::ReleaseChecksRule::Required => Some("required".to_string()),
+        };
         // An acceptance counts at its head, for what it accepted (more at that head asks again), and
         // for a required rule only a person's.
         let showing = crate::RegressionsAccepted::of(slower_routes.as_ref(), new_errors.as_ref());
@@ -3970,6 +4214,11 @@ impl Store {
             cost: cost.rounded(),
             schema_risks,
             schema_changes,
+            schema_overlaps,
+            rehearsal,
+            main_on_change,
+            replay,
+            masked_by_default,
             release,
             kept_until,
             pull,
@@ -3995,6 +4244,7 @@ impl Store {
             served_secrets,
             skipped,
             regressions,
+            release_checks,
             regressions_accepted,
             regressions_compared,
             intercepted,
@@ -4066,6 +4316,18 @@ pub struct BaseRow {
 
 /// Live share links a preview may have at once.
 pub const SHARES_MAX: usize = 20;
+/// The most live webhook URLs a preview has.
+pub const WEBHOOKS_MAX: usize = 20;
+/// The most snapshots the team's tests keep on a preview.
+pub const SNAPSHOTS_MAX: usize = 40;
+
+/// [`Store::claim_note_work`]'s answer.
+#[derive(Clone, Debug, PartialEq)]
+pub enum NoteWorkClaim {
+    Mine,
+    Made(u64, String),
+    Busy,
+}
 
 /// Earlier pushes kept reachable per service.
 /// How long after it was replaced an earlier push still answers requests that name it (skew

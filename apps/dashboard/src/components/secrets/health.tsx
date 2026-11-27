@@ -1,7 +1,7 @@
 import { CircleCheck, Dices, FileSearch, RotateCw, ShieldCheck } from "lucide-react";
 import { useState } from "react";
 import { Link } from "@/components/link";
-import { needsApproval, secretsGuardrails, type Finding, type Guardrails, type Op, type SecretsApi, type SetSecret } from "@/lib/secrets-api";
+import { needsApproval, secretsPolicyReport, type Finding, type Guardrails, type Op, type SecretsApi, type SetSecret } from "@/lib/secrets-api";
 import { decoyUse } from "@/lib/secrets-decoy";
 import { generateValue } from "@/lib/secrets-generate";
 import { secretsHref, useSecrets } from "./secrets-page";
@@ -19,6 +19,7 @@ const ISSUES: { issue: Finding["issue"]; title: string; what: string; serious: b
   { issue: "exposed", title: "Exposed", what: "A protected environment's value, also set where more people and less vetted code read it, or a public certificate whose private key is also linked there.", serious: true },
   { issue: "public", title: "In the browser", what: "Server credentials under a name a framework puts in the JavaScript it sends to every visitor (NEXT_PUBLIC_, VITE_, PUBLIC_…): rename the key, or keep the value on the server.", serious: true },
   { issue: "weak", title: "Weak", what: "Credentials easy to guess: New value replaces one with 48 random characters.", serious: false },
+  { issue: "public_repo_no_leak_rotation", title: "Public repositories, leaks not rotated", what: "Repositories this project stands for that anyone may read (on roll code, or the GitHub repository it mirrors), while leaked keys aren't rotated: a value pushed there is world-readable at once, and roll only reports it. Turn on Rotate a leaked managed key at once in Environments' Leaked keys (roll secrets leaks managed).", serious: false },
   { issue: "unplaced", title: "No placement", what: "Keys bound to hosts without naming the header or query parameter that carries them: a placeholder may ride in any header, one the host might echo back, and untrusted code's doesn't swap. Bind each again (Authorization: Bearer {} by default).", serious: false },
   { issue: "operator_made", title: "Made as the operator", what: "Syncs and workload identities an admin's session made before roll recorded the person: they'd keep acting after that admin is demoted or can't sign in. Make each again from your session to bind it to you.", serious: false },
   { issue: "stored_cloud_key", title: "Cloud keys kept in roll", what: "Syncs that sign in to AWS, Google or Azure with a key stored here, when they could sign in without one: the project's AWS role, or roll's issuer through workload identity federation or a federated credential. The key works, but it can leak, expire and needs rotating. Make each sync again without it, then delete the key.", serious: false },
@@ -140,7 +141,7 @@ export function HealthView() {
                 <div key={`${f.environment}/${f.path}/${f.key}`} className="flex flex-wrap items-center gap-x-3 gap-y-0.5 px-3 py-1.5 text-[12.5px]">
                   {f.issue === "production_unprotected" || (f.issue === "off_policy" && !f.key) ? (
                     <span className="text-fg">{f.environment ? name(f.environment) : "Leaked keys"}</span>
-                  ) : f.issue === "certificate_expiring" || f.issue === "operator_made" || f.issue === "stored_cloud_key" || f.issue === "off_policy" || f.issue === "backup_left" || registration(f) ? (
+                  ) : f.issue === "certificate_expiring" || f.issue === "operator_made" || f.issue === "public_repo_no_leak_rotation" || f.issue === "stored_cloud_key" || f.issue === "off_policy" || f.issue === "backup_left" || registration(f) ? (
                     <span className="flex min-w-0 items-center gap-3">
                       <span className="font-mono text-fg">{f.key}</span>
                       <span className="text-subtle">{f.issue === "certificate_expiring" ? `CA ${f.path}` : registration(f) ? (f.issue === "revoke_failing" ? "public certificate" : "SaaS rotator") : f.environment ? `${name(f.environment)}${f.path === "/" ? "" : ` ${f.path}`}` : ""}</span>
@@ -198,11 +199,13 @@ function guardrailLines(g: Guardrails): string[] {
   return lines;
 }
 
-/** The policy, read-only, for the operator and admin accounts (anyone else's GET is a 403: nothing shows). */
+/** The policy, read-only, for the operator and admin accounts (anyone else's GET is a 403: nothing shows), with every exception to it across projects. */
 function GuardrailsView() {
-  const policy = useLoad(() => secretsGuardrails().catch(() => null), []);
-  const lines = policy.data ? guardrailLines(policy.data) : [];
-  if (!lines.length) return null;
+  const report = useLoad(() => secretsPolicyReport().catch(() => null), []);
+  const lines = report.data ? guardrailLines(report.data.policy) : [];
+  if (!report.data || !lines.length) return null;
+  const { projects, grants } = report.data;
+  const row = "flex items-baseline gap-2 px-3 py-1.5 text-[12.5px]";
   return (
     <Section title="Guardrails">
       <p className="mb-2 text-[11.5px] text-muted">roll secrets' policy for every project: each may tighten these floors, never go below them. Set with roll secrets policy set.</p>
@@ -213,6 +216,29 @@ function GuardrailsView() {
           </p>
         ))}
       </div>
+      {(projects.length > 0 || grants.length > 0) && (
+        <>
+          <p className="mt-3 mb-2 text-[11.5px] text-muted">Below the policy: made before it, nothing was rewritten. The next change to each must meet it.</p>
+          <div className={`${card} divide-y divide-line`}>
+            {projects.flatMap((p) =>
+              p.findings.map((f, i) => (
+                <p key={`${p.project}:${i}`} className={row}>
+                  <Link href={secretsHref(p.project, { view: "health" })} className="shrink-0 text-fg hover:underline">{p.project_name}</Link>
+                  <span className="text-muted">{f.detail}</span>
+                </p>
+              )),
+            )}
+            {grants.map((g) => (
+              <p key={g.id} className={row}>
+                <span className="shrink-0 text-fg">{g.name}</span>
+                <span className="text-muted">
+                  {g.kind === "oauth" ? "connection" : "token"} of {g.user ?? "the operator"} with a secrets rule, {g.expires_at === null ? "never expires" : `expires ${new Date(g.expires_at).toISOString().slice(0, 10)}`}
+                </span>
+              </p>
+            ))}
+          </div>
+        </>
+      )}
     </Section>
   );
 }

@@ -832,22 +832,14 @@ pub fn workspace_deps(tree: &dyn Tree, dir: &str) -> Vec<String> {
     if let Some(y) = tree.read("pnpm-workspace.yaml").and_then(|b| serde_yaml_ng::from_slice::<serde_yaml_ng::Value>(&b).ok()) {
         globs.extend(y["packages"].as_sequence().into_iter().flatten().filter_map(|v| v.as_str().map(str::to_string)));
     }
-    // Each package by name, from the directories its globs name (`a/*`, `a/**` two levels down,
-    // or a directory itself; `!` excludes aren't followed: a package more is only watched more).
+    // Each package by name, from the directories its globs name (`*` one directory, a part of
+    // one like `app-*`, `**` up to three levels; `!` excludes aren't followed: a package more is
+    // only watched more), at most 2,000 directories however they're spelled.
     let mut dirs = Vec::new();
     for g in globs.iter().filter(|g| !g.starts_with('!')) {
-        let g = g.trim_start_matches("./").trim_end_matches('/');
-        match g.split_once("/*") {
-            Some((base, rest)) if crate::tree::valid(base) => {
-                let mut level: Vec<String> = tree.list(base).into_iter().filter_map(|n| n.strip_suffix('/').map(|n| format!("{base}/{n}"))).collect();
-                if rest.starts_with('*') {
-                    let deeper: Vec<String> = level.iter().flat_map(|d| tree.list(d).into_iter().filter_map(move |n| n.strip_suffix('/').map(|n| format!("{d}/{n}")))).collect();
-                    level.extend(deeper);
-                }
-                dirs.extend(level);
-            }
-            None if crate::tree::valid(g) => dirs.push(g.to_string()),
-            _ => {}
+        let segs: Vec<&str> = g.trim_start_matches("./").trim_end_matches('/').split('/').filter(|s| !s.is_empty()).collect();
+        if segs.iter().all(|s| s.contains('*') || crate::tree::valid(s)) {
+            expand(tree, "", &segs, &mut dirs);
         }
     }
     let manifest = |d: &str| tree.read(&format!("{d}/package.json")).and_then(|b| serde_json::from_slice::<Value>(&b).ok());
@@ -876,12 +868,62 @@ pub fn workspace_deps(tree: &dyn Tree, dir: &str) -> Vec<String> {
         }
     }
     let mut out: Vec<String> = seen.into_iter().map(|d| format!("{d}/**")).collect();
-    for f in ["package.json", "pnpm-workspace.yaml", "pnpm-lock.yaml", "package-lock.json", "yarn.lock", "bun.lock", "bun.lockb", "turbo.json", "nx.json", ".npmrc"] {
+    // The root's files a package's build reads: manifests, lockfiles, the task runner's config,
+    // the TypeScript base its tsconfig extends, the Node pin, and patched dependencies.
+    for f in ["package.json", "pnpm-workspace.yaml", "pnpm-lock.yaml", "package-lock.json", "yarn.lock", "bun.lock", "bun.lockb", "turbo.json", "nx.json", ".npmrc", ".yarnrc.yml", "tsconfig.json", "tsconfig.base.json", ".nvmrc", ".node-version"] {
         if tree.exists(f) {
             out.push(f.to_string());
         }
     }
+    for d in ["patches", ".yarn/patches"] {
+        if tree.exists(d) {
+            out.push(format!("{d}/**"));
+        }
+    }
     out
+}
+
+/// The directories under `at` that `segs` (a workspace glob's parts) names, into `out` (at most
+/// 2,000).
+fn expand(tree: &dyn Tree, at: &str, segs: &[&str], out: &mut Vec<String>) {
+    let join = |n: &str| if at.is_empty() { n.to_string() } else { format!("{at}/{n}") };
+    let Some((first, rest)) = segs.split_first() else {
+        if !at.is_empty() && !out.iter().any(|d| d == at) {
+            out.push(at.to_string());
+        }
+        return;
+    };
+    if out.len() >= 2000 {
+        return;
+    }
+    let subdirs = || tree.list(at).into_iter().filter_map(|n| n.strip_suffix('/').map(str::to_string)).collect::<Vec<_>>();
+    match *first {
+        "**" => {
+            // Zero levels, then one more (three in all).
+            expand(tree, at, rest, out);
+            let depth = segs.len() - rest.len();
+            if at.matches('/').count() < 3 + depth {
+                for d in subdirs() {
+                    expand(tree, &join(&d), segs, out);
+                    if at.split('/').count() >= 3 {
+                        break;
+                    }
+                }
+            }
+        }
+        s if s.contains('*') => {
+            let (pre, post) = s.split_once('*').unwrap_or((s, ""));
+            let post = post.trim_start_matches('*');
+            for d in subdirs().into_iter().filter(|d| d.starts_with(pre) && d.ends_with(post) && d.len() >= pre.len() + post.len()) {
+                expand(tree, &join(&d), rest, out);
+            }
+        }
+        s => {
+            if tree.exists(&join(s)) {
+                expand(tree, &join(s), rest, out);
+            }
+        }
+    }
 }
 
 /// A client-side router in `package.json`'s dependencies (the app routes in the browser).

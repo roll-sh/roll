@@ -57,6 +57,12 @@ pub enum Issue {
     Public,
     /// A credential easy to guess (shown to whoever may reveal it).
     Weak,
+    /// A repository the project stands for ([`Secrets::counts_for_repo`]) that anyone may read
+    /// (roll code's own visibility, or the GitHub repository it mirrors as the mirror last saw it),
+    /// while the project's `leaks.rotate` is `off`: a value pushed there is world-readable at
+    /// once, and roll only reports it. `key` is the repository, `environment` empty. A warning;
+    /// under a policy that keeps `leaks.rotate` managed it's `off_policy` instead.
+    PublicRepoNoLeakRotation,
     /// A key bound to hosts with no header or query parameter (bound before a placement was
     /// required): a trusted reader's placeholder may ride in any header, one the host might echo,
     /// and an untrusted consumer's doesn't swap.
@@ -88,13 +94,18 @@ pub enum Issue {
     Unreferenced,
 }
 
-/// roll code's search, as health's `code` check needs it (rolld implements it with roll code's
-/// trigram index): roll secrets reads no files.
+/// roll code, as health needs it (rolld implements it over code-control): its search for the
+/// `code` check, from roll code's trigram index, and repositories' visibility. roll secrets reads
+/// no files and asks no other service.
 pub trait CodeRefs: Send + Sync {
     /// Which of `keys` appear on repository `repo`'s (`owner/name`) default branch, anywhere, case
     /// sensitive (a substring is enough: a key that might be read is never flagged). `None`: the
     /// repository can't be searched here (not indexed yet, roll code off), so nothing is said.
     fn referenced(&self, repo: &str, keys: &[String]) -> Option<BTreeSet<String>>;
+    /// Where anyone may read repository `repo` (`owner/name`): "roll code", or the GitHub
+    /// repository it mirrors, from what roll code already knows (no network call). `None`: private
+    /// everywhere, or nothing tells (no such repository, roll code off), so nothing is said.
+    fn public(&self, repo: &str) -> Option<String>;
 }
 
 /// The most keys one `code` check looks for.
@@ -238,23 +249,8 @@ impl Secrets {
         }
         // How far the project is from roll secrets' policy.
         let floors = self.floors()?;
-        if let Some(n) = floors.production_approvals
-            && let Some(e) = envs.iter().find(|e| e.slug == crate::PRODUCTION && e.kind == Kind::Standard)
-            && (!e.protected || e.approvals < n)
-            && caller.allows(Action::Read, &Scope::env(project, &e.slug))
-        {
-            let has = if e.protected { format!("{} approval{}", e.approvals, if e.approvals == 1 { "" } else { "s" }) } else { "no protection".into() };
-            let detail = format!("roll secrets' policy keeps production protected with at least {n} approval{}; it has {has}", if n == 1 { "" } else { "s" });
-            out.push(Finding { issue: Issue::OffPolicy, environment: e.slug.clone(), path: "/".into(), key: String::new(), detail, owner: None, decoy: None });
-        }
-        if floors.leaks_rotate == Some(crate::leaks::LeakRotate::Managed) && self.leak_rotate(project)? != crate::leaks::LeakRotate::Managed && caller.allows(Action::Read, &Scope::whole(project)) {
-            let detail = "roll secrets' policy keeps leaks.rotate managed; it's off, so a leaked managed key isn't rotated".to_string();
-            out.push(Finding { issue: Issue::OffPolicy, environment: String::new(), path: "/".into(), key: String::new(), detail, owner: None, decoy: None });
-        }
-        if floors.no_breakglass && caller.allows(Action::Read, &Scope::whole(project)) && !self.breakglass(project)?.is_empty() {
-            let detail = "roll secrets' policy allows no break glass; this project's breakglass list names someone (it's refused at the hook either way)".to_string();
-            out.push(Finding { issue: Issue::OffPolicy, environment: String::new(), path: "/".into(), key: String::new(), detail, owner: None, decoy: None });
-        }
+        out.extend(self.off_policy(project, caller, &floors, &envs)?);
+        out.extend(self.public_repos_unrotated(project, caller, &floors)?);
         let mut have: HashSet<(String, String, String)> = HashSet::new();
         for (env_id, path, key, fp, link, refs, updated_at, expires_at, weak, public) in &rows {
             let Some(e) = slug.get(env_id.as_str()) else { continue };
@@ -470,25 +466,17 @@ impl Secrets {
                 Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
             })
         })?;
-        for (env, path, id, kind, target) in all {
+        // (Under `no_stored_cloud_keys` they're `off_policy` instead.)
+        for (env, path, id, kind, target) in all.into_iter().filter(|_| !floors.no_stored_cloud_keys) {
             if !caller.allows(Action::Read, &Scope::at(project, &env, &path)) {
                 continue;
             }
             let Ok(t) = self.syncs.get(&kind) else { continue };
-            if let Some(kinds) = floors.sync_kinds.as_ref().filter(|ks| !t.internal() && !ks.contains(&kind)) {
-                let allowed = if kinds.is_empty() { "none".to_string() } else { kinds.join(", ") };
-                let detail = format!("{kind} sync: roll secrets' policy allows only these sync kinds ({allowed})");
-                out.push(Finding { issue: Issue::OffPolicy, environment: env.clone(), path: path.clone(), key: id.clone(), detail, owner: None, decoy: None });
-            }
             let target: serde_json::Value = serde_json::from_str(&target).unwrap_or_default();
             let Some(instead) = t.stored_cloud_key(&target) else { continue };
             let keys = t.credentials(&target).join(", ");
-            let (issue, detail) = if floors.no_stored_cloud_keys {
-                (Issue::OffPolicy, format!("{kind} sync signs in with a cloud key stored in roll ({keys}), which roll secrets' policy rules out: {instead}, and delete the key (\"Syncing without a cloud key\")"))
-            } else {
-                (Issue::StoredCloudKey, format!("{kind} sync signs in with a cloud key stored in roll ({keys}): {instead}, and delete the key (\"Syncing without a cloud key\")"))
-            };
-            out.push(Finding { issue, environment: env, path, key: id, detail, owner: None, decoy: None });
+            let detail = format!("{kind} sync signs in with a cloud key stored in roll ({keys}): {instead}, and delete the key (\"Syncing without a cloud key\")");
+            out.push(Finding { issue: Issue::StoredCloudKey, environment: env, path, key: id, detail, owner: None, decoy: None });
         }
         if caller.allows(Action::Read, &Scope::whole(project)) {
             for (env, path, id, name) in identities {
@@ -519,6 +507,71 @@ fn some(names: &BTreeSet<String>) -> String {
 }
 
 impl Secrets {
+    /// How far `project` is from roll secrets' policy, as `caller` may read it (`off_policy`
+    /// findings): each project's Health and the operator's report across projects
+    /// ([`Secrets::policy_report`]) both come from here. `envs`: the project's standard ones.
+    pub(crate) fn off_policy(&self, project: &str, caller: &Caller, floors: &crate::guardrails::Guardrails, envs: &[envs::EnvRow]) -> Result<Vec<Finding>> {
+        let mut out = vec![];
+        if let Some(n) = floors.production_approvals
+            && let Some(e) = envs.iter().find(|e| e.slug == crate::PRODUCTION && e.kind == Kind::Standard)
+            && (!e.protected || e.approvals < n)
+            && caller.allows(Action::Read, &Scope::env(project, &e.slug))
+        {
+            let has = if e.protected { format!("{} approval{}", e.approvals, if e.approvals == 1 { "" } else { "s" }) } else { "no protection".into() };
+            let detail = format!("roll secrets' policy keeps production protected with at least {n} approval{}; it has {has}", if n == 1 { "" } else { "s" });
+            out.push(Finding { issue: Issue::OffPolicy, environment: e.slug.clone(), path: "/".into(), key: String::new(), detail, owner: None, decoy: None });
+        }
+        if floors.leaks_rotate == Some(crate::leaks::LeakRotate::Managed) && self.leak_rotate(project)? != crate::leaks::LeakRotate::Managed && caller.allows(Action::Read, &Scope::whole(project)) {
+            let detail = "roll secrets' policy keeps leaks.rotate managed; it's off, so a leaked managed key isn't rotated".to_string();
+            out.push(Finding { issue: Issue::OffPolicy, environment: String::new(), path: "/".into(), key: String::new(), detail, owner: None, decoy: None });
+        }
+        if floors.no_breakglass && caller.allows(Action::Read, &Scope::whole(project)) && !self.breakglass(project)?.is_empty() {
+            let detail = "roll secrets' policy allows no break glass; this project's breakglass list names someone (it's refused at the hook either way)".to_string();
+            out.push(Finding { issue: Issue::OffPolicy, environment: String::new(), path: "/".into(), key: String::new(), detail, owner: None, decoy: None });
+        }
+        let syncs: Vec<(String, String, String, String, String)> = self.db.read(|c| {
+            c.query("SELECT e.slug, s.path, s.id, s.kind, s.target FROM syncs s JOIN environments e ON e.id = s.env_id AND e.forgotten_at IS NULL WHERE s.project_id = ? ORDER BY s.id", [project], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })
+        })?;
+        for (env, path, id, kind, target) in syncs {
+            if !caller.allows(Action::Read, &Scope::at(project, &env, &path)) {
+                continue;
+            }
+            let Ok(t) = self.syncs.get(&kind) else { continue };
+            if let Some(kinds) = floors.sync_kinds.as_ref().filter(|ks| !t.internal() && !ks.contains(&kind)) {
+                let allowed = if kinds.is_empty() { "none".to_string() } else { kinds.join(", ") };
+                let detail = format!("{kind} sync: roll secrets' policy allows only these sync kinds ({allowed})");
+                out.push(Finding { issue: Issue::OffPolicy, environment: env.clone(), path: path.clone(), key: id.clone(), detail, owner: None, decoy: None });
+            }
+            let target: serde_json::Value = serde_json::from_str(&target).unwrap_or_default();
+            if let (true, Some(instead)) = (floors.no_stored_cloud_keys, t.stored_cloud_key(&target)) {
+                let keys = t.credentials(&target).join(", ");
+                let detail = format!("{kind} sync signs in with a cloud key stored in roll ({keys}), which roll secrets' policy rules out: {instead}, and delete the key (\"Syncing without a cloud key\")");
+                out.push(Finding { issue: Issue::OffPolicy, environment: env, path, key: id, detail, owner: None, decoy: None });
+            }
+        }
+        Ok(out)
+    }
+
+    /// [`Issue::PublicRepoNoLeakRotation`]: each repository the project stands for that anyone may
+    /// read, while its `leaks.rotate` is `off` (under a policy that keeps it managed, `off_policy`
+    /// already says so). For whoever reads the whole project, as `leaks.rotate`'s own finding.
+    fn public_repos_unrotated(&self, project: &str, caller: &Caller, floors: &crate::guardrails::Guardrails) -> Result<Vec<Finding>> {
+        let Some(code) = self.code_refs.get() else { return Ok(vec![]) };
+        if floors.leaks_rotate == Some(crate::leaks::LeakRotate::Managed) || !caller.allows(Action::Read, &Scope::whole(project)) || self.leak_rotate(project)? == crate::leaks::LeakRotate::Managed {
+            return Ok(vec![]);
+        }
+        let repos: BTreeSet<String> = self.workspace.get(roll_workspace::Scope::All, project).map(|p| p.resources.into_iter().filter(|r| r.kind == roll_workspace::Kind::Repo).map(|r| r.r#ref).collect()).unwrap_or_default();
+        let mut out = vec![];
+        for repo in repos.into_iter().filter(|r| self.counts_for_repo(project, r)) {
+            let Some(at) = code.public(&repo) else { continue };
+            let detail = format!("{repo} is public on {at}, and leaks.rotate is off: a value pushed there is world-readable at once, and roll only reports it. Rotate leaked managed keys at once: `roll secrets leaks managed`, or the dashboard's Leaked keys setting");
+            out.push(Finding { issue: Issue::PublicRepoNoLeakRotation, environment: String::new(), path: "/".into(), key: repo, detail, owner: None, decoy: None });
+        }
+        Ok(out)
+    }
+
     /// What reaches an unprotected `production`, as a finding's detail: members by role (owners and
     /// admins everywhere, developers who name it), and the checks and sandboxes that read it in the
     /// last 90 days (its audit log: what can be told without reading any repository).

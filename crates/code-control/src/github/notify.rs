@@ -50,6 +50,19 @@ pub(super) async fn change_landed(code: &Code, hub: &Hub, c: &Change) -> Result<
     set_mark(code, &key, "done")
 }
 
+impl Code {
+    /// An issue on the repo's GitHub mirror, made by roll's App (Issues: read and write), when the
+    /// repo is connected: its number and page. GitHub's `issues` webhook then makes it the repo's
+    /// work item, as any issue there. `None` when the repo isn't connected or there's no App.
+    pub async fn open_github_issue(&self, r: &RepoRow, title: &str, body: &str, labels: &[String]) -> Result<Option<(u64, String)>> {
+        let (Some(hub), Some((_, l))) = (self.github_hub().cloned(), connected(self, &r.id)) else { return Ok(None) };
+        let gh = |e: code_github::Error| crate::Error::Internal(e.into());
+        let issue = hub.client.create_issue(l.installation_id, &l.owner, &l.repo, title, body, labels).await.map_err(gh)?;
+        let url = issue.html_url.unwrap_or_else(|| format!("{}/{}/issues/{}", hub.config.web_base, l.full_name(), issue.number));
+        Ok(Some((issue.number, url)))
+    }
+}
+
 pub(super) async fn work_finished(code: &Code, hub: &Hub, w: &WorkItem) -> Result<()> {
     let Some(number) = w.source.strip_prefix("github#").and_then(|n| n.parse::<u64>().ok()) else { return Ok(()) };
     let Some((r, l)) = connected(code, &w.repo_id) else { return Ok(()) };
@@ -457,7 +470,43 @@ fn cls_words(c: f64) -> String {
 fn release_line(e: &crate::model::PreviewEnvironment) -> Option<String> {
     let ms = u32::try_from(e.release_ms?).unwrap_or(u32::MAX);
     let before = e.release_before_ms.and_then(|b| u32::try_from(b).ok()).and_then(|b| than_main(ms, b, "the push before"));
-    Some(format!("Its release (migrations) took {} on the preview's data{}.\n\n", ms_words(ms), before.map(|w| format!(", {w}")).unwrap_or_default()))
+    let locks: Vec<String> = e
+        .release_locks
+        .iter()
+        .take(3)
+        .map(|(table, mode, held)| {
+            let table: String = table.chars().filter(|c| !c.is_control()).map(|c| if c == '`' { '\'' } else { c }).take(120).collect();
+            let what = match mode.as_str() {
+                "AccessExclusiveLock" => "ACCESS EXCLUSIVE (reads and writes wait)",
+                "ExclusiveLock" => "EXCLUSIVE (writes wait)",
+                "ShareRowExclusiveLock" => "SHARE ROW EXCLUSIVE (writes wait)",
+                _ => "SHARE (writes wait)",
+            };
+            format!("{what} on `{table}` for {}", ms_words(u32::try_from(*held).unwrap_or(u32::MAX)))
+        })
+        .collect();
+    let held = if locks.is_empty() { String::new() } else { format!(" It held {}: on production it would hold them as long.", locks.join(", ")) };
+    Some(format!("Its release (migrations) took {} on the preview's data{}.{held}\n\n", ms_words(ms), before.map(|w| format!(", {w}")).unwrap_or_default()))
+}
+
+/// Main's code on a copy of the change's migrated data: the pages that broke there, or that none
+/// did. While the change deploys, the version before it serves on the new schema.
+fn main_on_change_line(e: &crate::model::PreviewEnvironment) -> Option<String> {
+    let crate::model::PreviewMainOnChange { asked, broke } = e.main_on_change.as_ref()?;
+    if broke.is_empty() {
+        return (*asked > 0).then(|| format!("Main's code still answers on this change's migrated data ({asked} {}), so the version serving while it deploys keeps working.\n\n", if *asked == 1 { "page" } else { "pages" }));
+    }
+    let said = |s: u16| if s == 0 { "no answer".to_string() } else { s.to_string() };
+    let pages: Vec<String> = broke
+        .iter()
+        .take(5)
+        .map(|(path, status, main)| {
+            let path: String = path.chars().filter(|c| !c.is_control()).map(|c| if c == '`' { '\'' } else { c }).take(120).collect();
+            format!("`{path}` answers {} (on main's data, {})", said(*status), said(*main))
+        })
+        .collect();
+    let more = if broke.len() > 5 { format!(" and {} more", broke.len() - 5) } else { String::new() };
+    Some(format!("**Main's code breaks on this change's migrated data:** {}{more}. While it deploys, the version before it serves on this schema: expand first and contract in a later change.\n\n", pages.join(", ")))
 }
 
 /// The `roll/regressions` status, with the project's `regressions` rule: how many routes are
@@ -549,6 +598,17 @@ fn review_line(v: &crate::model::PreviewVisualReview, dashboard: Option<&str>) -
 /// that could link, mention or break out of the quote).
 fn one_line(s: &str) -> String {
     s.chars().filter(|c| !c.is_control()).map(|c| if matches!(c, '`' | '"' | '[' | ']' | '<' | '>' | '@' | '*' | '_' | '\\') { ' ' } else { c }).take(200).collect::<String>().trim().to_string()
+}
+
+/// Other open changes that change the same tables (PlanetScale's conflicting deploy requests):
+/// whichever lands second migrates a table the first changed. Names as code, never markup.
+fn overlaps_line(overlaps: &[(String, Vec<String>)]) -> String {
+    if overlaps.is_empty() {
+        return String::new();
+    }
+    let code = |s: &str| format!("`{}`", s.chars().filter(|c| !c.is_control()).map(|c| if c == '`' { '\'' } else { c }).take(120).collect::<String>());
+    let each: Vec<String> = overlaps.iter().take(5).map(|(b, t)| format!("{} ({})", code(&branch_name(b)), t.iter().take(5).map(|t| code(t)).collect::<Vec<_>>().join(", "))).collect();
+    format!("**Also changing these tables:** {}. Whichever lands second migrates a table the first one changed: rebase it, and look at its preview again.\n\n", each.join("; "))
 }
 
 fn stories(n: u32) -> String {
@@ -958,8 +1018,12 @@ pub fn preview_comment_for(p: Option<&Preview>, marker: &str, teardown: Option<&
             if let Some(lines) = e.schema_changes.as_ref().filter(|l| !l.is_empty()) {
                 out.push_str(&risks_line(&e.schema_risks));
                 out.push_str(&schema_block(lines));
+                out.push_str(&overlaps_line(&e.schema_overlaps));
             }
             if let Some(line) = release_line(e) {
+                out.push_str(&line);
+            }
+            if let Some(line) = main_on_change_line(e) {
                 out.push_str(&line);
             }
             out.push_str(&notes_block(&e.notes));
@@ -1224,8 +1288,13 @@ mod preview_tests {
             head: None,
             schema_changes: None,
             schema_risks: Vec::new(),
+            schema_overlaps: Vec::new(),
             release_ms: None,
+            release_locks: Vec::new(),
             release_before_ms: None,
+            main_on_change: None,
+            release_checks: None,
+            rehearsal: None,
             screenshot_url: None,
             expires_at: None,
             earlier: Vec::new(),

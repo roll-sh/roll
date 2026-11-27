@@ -85,6 +85,8 @@ export interface GithubLink {
   url: string;
   /** Whether branch protection on the default branch lets only the roll App push. `null` = unknown. */
   default_branch_protected: boolean | null;
+  /** Whether the GitHub repository is private, as last seen. Absent on older links. */
+  private?: boolean;
   mirror: {
     state: MirrorState;
     last_push_at: number | null;
@@ -409,6 +411,12 @@ export interface PreviewEnvironment {
   schema_changes?: string[];
   /** What in `schema_changes` would hurt production when it lands (roll previews' `schema::risks`). */
   schema_risks?: string[];
+  /** Other open changes whose previews' schema changes touch the same tables: `[branch, tables]`. */
+  schema_overlaps?: [string, string[]][];
+  /** The project's rule for its release at each head, when it has one. */
+  release_checks?: "check" | "required";
+  /** Its release rehearsed on today's data at its head (`ok` null while it waits). */
+  rehearsal?: { ok: boolean | null; error?: string };
   /** How long the release (migrations) took on the preview's data, and at the run before. */
   release_ms?: number;
   release_before_ms?: number;
@@ -1009,7 +1017,7 @@ export interface LeakScan {
 
 // ── webhooks and commit statuses ──
 
-export const WEBHOOK_EVENTS = ["landed", "change", "review", "thread", "check", "queue", "work", "preview", "push", "budget"] as const;
+export const WEBHOOK_EVENTS = ["landed", "change", "review", "thread", "check", "queue", "work", "preview", "push", "budget", "masking"] as const;
 export type WebhookEvent = (typeof WEBHOOK_EVENTS)[number];
 
 export interface Webhook {
@@ -1288,6 +1296,8 @@ export interface CodeEvents {
   push: PushEvent;
   /** A workspace project's previews passed a share of their monthly budget (roll previews). */
   budget: { budget: { project: string; project_name: string; percent: number; spent_usd_month: number; max_usd_month: number }; dashboard_url: string | null };
+  /** Columns of a workspace project's parents its previews masked by default, each said once (roll previews). */
+  masking: { masking: { project: string; project_name: string; resources: { resource: string; columns: number }[] }; dashboard_url: string | null };
 }
 
 // ── client ──
@@ -1594,7 +1604,7 @@ export const isNotFound = (e: unknown) => e instanceof ApiError && e.status === 
 
 export type EventHandlers = { [K in keyof CodeEvents]?: (data: CodeEvents[K]) => void } & { open?: (open: boolean) => void };
 
-const EVENT_KINDS: (keyof CodeEvents)[] = ["landed", "change", "work", "check", "preview", "queue", "review", "thread", "push", "budget"];
+const EVENT_KINDS: (keyof CodeEvents)[] = ["landed", "change", "work", "check", "preview", "queue", "review", "thread", "push", "budget", "masking"];
 
 /** Route one raw event to its handler; unknown kinds and bad JSON are dropped. */
 export function dispatchEvent(handlers: EventHandlers, kind: string, data: string) {

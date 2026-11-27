@@ -34,6 +34,7 @@ pub mod json;
 pub mod mapping;
 pub mod meta;
 pub mod opensearch;
+pub mod otlp;
 pub mod query;
 pub mod query_suggestions;
 pub mod remote;

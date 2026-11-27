@@ -57,6 +57,19 @@ pub(crate) fn local_path(p: &str) -> String {
 /// the engine (`engine`), and isn't let in without one.
 pub(crate) async fn share_visit(store: &crate::store::Store, engine: Option<&std::sync::Arc<Engine>>, preview: &str, token: &str, recheck: std::time::Duration) -> Option<crate::store::LiveShare> {
     let live = store.share_live(preview, token).ok().flatten()?;
+    maker_still_reaches(store, engine, preview, live, recheck).await
+}
+
+/// Webhook URL `token` of `preview` for exactly `path`, if it's live and its maker may still
+/// open the project's previews (as [`share_visit`]).
+pub(crate) async fn webhook_visit(store: &crate::store::Store, engine: Option<&std::sync::Arc<Engine>>, preview: &str, token: &str, service: &str, path: &str, recheck: std::time::Duration) -> Option<crate::store::LiveShare> {
+    let live = store.webhook_live(preview, token, service, path).ok().flatten()?;
+    maker_still_reaches(store, engine, preview, live, recheck).await
+}
+
+/// A link a person made (a share link, a webhook URL) acts only at their rights now: checked at
+/// most once a `recheck`, and revoked once they may no longer open the project's previews.
+async fn maker_still_reaches(store: &crate::store::Store, engine: Option<&std::sync::Arc<Engine>>, preview: &str, live: crate::store::LiveShare, recheck: std::time::Duration) -> Option<crate::store::LiveShare> {
     let (share, maker_checked) = (live.id.clone(), live.maker_checked);
     let Some(maker) = live.maker.clone() else { return Some(live) };
     let now = store.now_ms().ok()?;
@@ -70,9 +83,16 @@ pub(crate) async fn share_visit(store: &crate::store::Store, engine: Option<&std
         let _ = store.share_maker_checked(&share, now);
         return Some(live);
     }
-    let by = store.shares(preview).ok().and_then(|all| all.into_iter().find(|s| s.id == share)).map(|s| s.created_by).unwrap_or_default();
-    if store.revoke_share(preview, &share).is_ok() {
-        let _ = store.log(preview, &format!("{by}'s share link ended: they may no longer open the project's previews"));
+    let webhook = store.webhooks(preview).ok().and_then(|all| all.into_iter().find(|w| w.id == share));
+    let by = match &webhook {
+        Some(w) => Some(w.created_by.clone()),
+        None => store.shares(preview).ok().and_then(|all| all.into_iter().find(|s| s.id == share)).map(|s| s.created_by),
+    }
+    .unwrap_or_default();
+    let ended = if webhook.is_some() { store.revoke_webhook(preview, &share) } else { store.revoke_share(preview, &share) };
+    if ended.is_ok() {
+        let what = if webhook.is_some() { "webhook URL" } else { "share link" };
+        let _ = store.log(preview, &format!("{by}'s {what} ended: they may no longer open the project's previews"));
     }
     None
 }
@@ -182,7 +202,7 @@ mod tests {
         }
         /// Ada's note on `/hello`, as roll code names the person who posted it.
         async fn feedback(&self, _: &str) -> anyhow::Result<Vec<crate::notes::Note>> {
-            Ok(vec![crate::notes::Note { id: "rev_1".into(), path: "/hello".into(), selector: "h1".into(), note: "bigger".into(), by: "ada".into(), at: 1, replies: Vec::new(), crop: false, crop_as: None, seen: Default::default(), outside: false }])
+            Ok(vec![crate::notes::Note { id: "rev_1".into(), path: "/hello".into(), selector: "h1".into(), note: "bigger".into(), by: "ada".into(), at: 1, replies: Vec::new(), crop: false, crop_as: None, seen: Default::default(), outside: false, work: None }])
         }
         async fn report(&self, _: &Preview, _: &Settings) {}
         async fn forget(&self, _: &Preview, _: Option<&str>) {}

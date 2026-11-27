@@ -281,6 +281,13 @@ async fn roll_run_injects_an_environments_secrets_and_refuses_unresolved_referen
     let token = ok(&api, &[], &["secrets", "-p", "shop", "tokens", "create", "ci", "--for-env", "production"], None).await;
     let t = [("ROLL_TOKEN", token.trim())];
     assert_eq!(ok(&api, &t, &["run", "-e", "production", "--no-mask", "--", "sh", "-c", "echo $HOST"], None).await.trim(), "db.internal");
+    // The command never gets roll's own credentials, run straight or masked, unless asked.
+    let seen = "echo ${ROLL_TOKEN:-none} ${ROLL_ADMIN_TOKEN:-none} $ROLL_PROJECT_HINT";
+    let t = [t[0], ("ROLL_ADMIN_TOKEN", "fake-admin-token"), ("ROLL_PROJECT_HINT", "kept")];
+    assert_eq!(ok(&api, &t, &["run", "-e", "production", "--no-mask", "--", "sh", "-c", seen], None).await.trim(), "none none kept");
+    assert_eq!(ok(&api, &[&t[..], &[("CI", "true")]].concat(), &["run", "-e", "production", "--", "sh", "-c", seen], None).await.trim(), "none none kept");
+    let kept = ok(&api, &t, &["run", "-e", "production", "--no-mask", "--keep-roll-credentials", "--", "sh", "-c", "echo ${ROLL_ADMIN_TOKEN:-none}"], None).await;
+    assert_eq!(kept.trim(), "fake-admin-token");
     let denied = roll(&api, &t, &["run", "-e", "staging", "--", "true"], None).await;
     assert_ne!(denied.code, Some(0));
     // `kubernetes` prints what External Secrets Operator needs: its store's URL, with the token it
@@ -388,6 +395,22 @@ async fn roll_run_injects_an_environments_secrets_and_refuses_unresolved_referen
     ok(&api, &env, &[&at[..], &["import", "--from", "vault", "--source", "secret/shop"]].concat(), None).await;
     let got = ok(&api, &[], &["run", "-p", "shop", "-e", "production", "--allow-unresolved", "--", "sh", "-c", "echo $FROM_VAULT $RETRIES"], None).await;
     assert_eq!(got.trim(), "v-1 3");
+    // Checking the copy reads the source again and compares by fingerprint: names only, nothing
+    // written, a failure while a key is missing or differs.
+    let check = [&at[..], &["import", "--from", "vault", "--source", "secret/shop", "--check"]].concat();
+    let matching = roll(&api, &env, &check, None).await;
+    assert!(matching.code == Some(0) && matching.stdout.contains("+ HOST") && matching.stdout.contains("2 the same") && matching.stderr.contains("The copy is complete"), "{}{}", matching.stdout, matching.stderr);
+    // A key roll can't compare (a reference here) isn't counted as the same: exit 2, named.
+    ok(&api, &[], &[&at[..], &["set", "RETRIES=${HOST}"]].concat(), None).await;
+    let unchecked = roll(&api, &env, &check, None).await;
+    assert!(unchecked.code == Some(2) && unchecked.stdout.contains("? RETRIES") && unchecked.stderr.contains("1 key wasn't compared"), "{}{}", unchecked.stdout, unchecked.stderr);
+    ok(&api, &[], &[&at[..], &["set", "FROM_VAULT=fake-changed"]].concat(), None).await;
+    ok(&api, &[], &[&at[..], &["rm", "RETRIES"]].concat(), None).await;
+    let drifted = roll(&api, &env, &check, None).await;
+    let shown = format!("{}{}", drifted.stdout, drifted.stderr);
+    assert!(drifted.code != Some(0) && drifted.stdout.contains("- RETRIES") && drifted.stdout.contains("~ FROM_VAULT") && !shown.contains("v-1") && !shown.contains("fake-changed"), "{shown}");
+    let still = ok(&api, &[], &["run", "-p", "shop", "-e", "production", "--allow-unresolved", "--", "sh", "-c", "echo $FROM_VAULT ${RETRIES:-unset}"], None).await;
+    assert_eq!(still.trim(), "fake-changed unset", "a check writes nothing");
     // Several environments at once: each source path into its environment.
     let mapped = ok(&api, &env, &["secrets", "-p", "shop", "import", "--from", "vault", "--source", "secret/shop", "--map", "stg=staging"], None).await;
     assert!(mapped.contains("stg → staging: 1 value"), "{mapped}");
@@ -1006,7 +1029,12 @@ async fn a_pre_receive_hook_refuses_a_push_adding_a_production_value_with_a_scan
     let alice = [("GITHUB_USER_LOGIN", "alice")];
     let (passed, said) = push_as(&["-o", "breakglass"], &alice);
     assert!(!passed && said.contains("break glass refused"), "no one may until an admin says: {said}");
-    assert!(ok(&api, &[], &["secrets", "-p", "shop", "breakglass", "alice"], None).await.contains("alice"));
+    // A login is the pusher as a hook's token names it: bound to the hook once it has named alice.
+    assert!(roll(&api, &[], &["secrets", "-p", "shop", "breakglass", "alice"], None).await.code != Some(0), "no hook has named alice yet");
+    let (passed, _) = push_as(&[], &alice);
+    assert!(!passed, "refused, and the hook named alice");
+    let bound = ok(&api, &[], &["secrets", "-p", "shop", "breakglass", "alice"], None).await;
+    assert!(bound.contains("alice@token:"), "{bound}");
     let (passed, said) = push_as(&["-o", "breakglass"], &[("GITHUB_USER_LOGIN", "alice"), ("ROLL_API_URL", "http://127.0.0.1:9")]);
     assert!(!passed && said.contains("couldn't"), "{said}");
     let (passed, said) = push_as(&["-o", "breakglass"], &alice);
@@ -1014,13 +1042,14 @@ async fn a_pre_receive_hook_refuses_a_push_adding_a_production_value_with_a_scan
     let audit: serde_json::Value = reqwest::get(format!("{api}/v1/secrets/projects/{prj}/audit?action=secrets.scan.breakglass")).await.unwrap().json().await.unwrap();
     assert_eq!(audit[0]["keys"], serde_json::json!(["API_KEY", "DATABASE_URL"]), "{audit}");
     let summary = audit[0]["summary"].as_str().unwrap_or_default();
-    assert!(summary.contains("by alice to refs/heads/main"), "{audit}");
-    // What it let through is leaked: reported as such, and the managed key rotated.
+    assert!(summary.contains("by alice (as token:") && summary.contains("says) to refs/heads/main"), "the pusher is the hook's word: {audit}");
+    // What it let through is leaked and reported as such. The hook's token may only scan, so it
+    // rotates nothing: the leak waits on Health for someone who may write there.
     let leaked: serde_json::Value = reqwest::get(format!("{api}/v1/secrets/projects/{prj}/audit?action=secrets.leaked")).await.unwrap().json().await.unwrap();
     assert_eq!(leaked[0]["keys"], serde_json::json!(["API_KEY", "DATABASE_URL"]), "{leaked}");
-    assert!(leaked[0]["summary"].as_str().unwrap_or_default().contains("let through with break glass by alice"), "{leaked}");
+    assert!(leaked[0]["summary"].as_str().unwrap_or_default().contains("let through with break glass by alice (as token:"), "{leaked}");
     let now = ok(&api, &[], &["secrets", "-p", "shop", "-e", "production", "get", "API_KEY", "--raw"], None).await;
-    assert_ne!(now.trim(), managed, "rotated under leaks.rotate = managed");
+    assert_eq!(now.trim(), managed, "a scan-only hook's break glass rotates nothing, even under leaks.rotate = managed");
     assert!(!leaked.to_string().contains(value) && !leaked.to_string().contains(&managed), "never a value: {leaked}");
 }
 
@@ -1247,8 +1276,9 @@ async fn the_local_agent_on_a_gce_vm_logs_in_with_the_metadata_servers_identity_
 }
 
 /// On bare metal, `roll` exchanges the bootstrap token once for a machine credential kept 0600 in
-/// the state directory and logs in with it; the token still set doesn't exchange again. Past half
-/// its life, the next run replaces it, and the old one stops working.
+/// the state directory and logs in with it; the token still set doesn't exchange again, and the
+/// machine's later runs (more than its 5 live logins' worth) share the one login kept beside it.
+/// Past half its life, the next run replaces it, and the old one stops working.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_bootstrap_token_becomes_a_machine_credential_kept_on_disk_and_replaced_at_half_life() {
@@ -1269,6 +1299,12 @@ async fn a_bootstrap_token_becomes_a_machine_credential_kept_on_disk_and_replace
     let first = kept["credential"].as_str().unwrap().to_string();
     assert!(first.starts_with("rlmc_") && !kept.to_string().contains(&token), "{kept}");
     assert_eq!(get().await.trim(), "fake-hello", "the same bootstrap token isn't exchanged again");
+    let login = kept["login"]["token"].as_str().unwrap_or_else(|| panic!("{kept}")).to_string();
+    for _ in 0..7 {
+        assert_eq!(get().await.trim(), "fake-hello", "a restart storm shares the machine's login");
+    }
+    let kept: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    assert_eq!(kept["login"]["token"].as_str(), Some(login.as_str()), "one login for every run");
 
     // Past half its life: the next run replaces it.
     let mut aged = kept.clone();
@@ -1602,4 +1638,48 @@ async fn infisical_brings_a_whole_project_with_its_folders_and_a_dry_run_writes_
     assert_eq!(region.trim(), "fake-region-1");
     let listed = ok(&api, &[], &["--json", "secrets", "-p", "shop", "-e", "development", "ls"], None).await;
     assert!(listed.contains("where it runs"), "Infisical's comment is the key's comment: {listed}");
+}
+
+/// A public CA that takes one Cloudflare token and orders nothing (the API tests order).
+struct TokenOnlyCa(std::sync::Mutex<Vec<String>>);
+
+impl roll_secrets::public_certs::PublicCa for TokenOnlyCa {
+    fn allows(&self, directory: &str) -> bool {
+        roll_secrets::public_certs::PUBLIC_CAS.contains(&directory)
+    }
+    fn check(&self, dns: &roll_secrets::public_certs::DnsCredential, _: &[String]) -> Result<(), String> {
+        let roll_secrets::public_certs::DnsCredential::Cloudflare(token) = dns else { return Err("Route 53: no".into()) };
+        self.0.lock().unwrap().push(token.expose().to_string());
+        if token.expose() == "cf-token-from-stdin" { Ok(()) } else { Err("Cloudflare: find zone: HTTP 401".into()) }
+    }
+    fn order(&self, _: roll_secrets::public_certs::Order<'_>) -> Result<roll_secrets::public_certs::Ordered, String> {
+        Err("not in this test".into())
+    }
+    fn revoke(&self, _: roll_secrets::public_certs::Revoke<'_>) -> Result<roll_secrets::public_certs::RevokeReason, String> {
+        Err("not in this test".into())
+    }
+}
+
+/// `roll secrets public-certs`: the DNS credential comes on stdin and is never printed, a renewal
+/// past the caps says when the next may come, and the registration goes by name.
+#[tokio::test]
+async fn public_certs_take_the_dns_credential_on_stdin_and_say_the_renewal_caps() {
+    let s = start().await;
+    let ca = Arc::new(TokenOnlyCa(Default::default()));
+    s.secrets.set_public_ca(ca.clone());
+    let api = s.api.as_str();
+    let at = ["secrets", "-p", "shop", "public-certs"];
+    let run = |more: &'static [&'static str]| [&at[..], more].concat();
+    let added = ok(api, &[], &run(&["add", "web", "--domain", "www.example.com", "--domain", "*.example.com", "--dns", "cloudflare"]), Some("cf-token-from-stdin\n")).await;
+    assert!(added.contains("Registered web") && !added.contains("cf-token"), "{added}");
+    assert_eq!(*ca.0.lock().unwrap(), ["cf-token-from-stdin"], "the token from stdin, checked before it's kept");
+    let listed = ok(api, &[], &run(&["ls"]), None).await;
+    assert!(listed.contains("web") && listed.contains("pending") && listed.contains("www.example.com,*.example.com") && !listed.contains("cf-token"), "{listed}");
+    ok(api, &[], &run(&["renew", "web"]), None).await;
+    let held = roll(api, &[], &run(&["renew", "web"]), None).await;
+    assert!(held.code != Some(0) && held.stderr.contains("ask again after"), "{}", held.stderr);
+    let shown = ok(api, &[], &run(&["show", "web"]), None).await;
+    assert!(shown.contains("renewals held until") && shown.contains("1 of 3"), "{shown}");
+    ok(api, &[], &run(&["rm", "web"]), None).await;
+    assert_eq!(ok(api, &[], &run(&["ls"]), None).await.trim(), "");
 }

@@ -484,8 +484,14 @@ pub(crate) async fn call_scheduled(apps: Arc<Apps>, service: &str, env: &str, ho
 /// GET `path` of an environment on its owner for an uptime check (`crate::checks`), as `host`
 /// asks and past its gates as a schedule's call is: the status and at most `max` bytes of the
 /// answer, or why it never answered.
-pub(crate) async fn call_check(apps: Arc<Apps>, service: &str, env: &str, host: &str, path: &str, timeout: std::time::Duration, max: usize) -> std::result::Result<(u16, Vec<u8>), String> {
-    let mut req = Request::builder().method(axum::http::Method::GET).uri(path).header(header::HOST, host).header(header::USER_AGENT, "roll-uptime/1.0").body(Body::empty()).map_err(|e| e.to_string())?;
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn call_check(apps: Arc<Apps>, service: &str, env: &str, host: &str, method: &str, path: &str, headers: &[(String, String)], body: Option<String>, timeout: std::time::Duration, max: usize) -> std::result::Result<(u16, Vec<u8>), String> {
+    let method = axum::http::Method::from_bytes(method.as_bytes()).unwrap_or(axum::http::Method::GET);
+    let mut b = Request::builder().method(method).uri(path).header(header::HOST, host).header(header::USER_AGENT, "roll-uptime/1.0");
+    for (k, v) in headers {
+        b = b.header(k.as_str(), v.as_str());
+    }
+    let mut req = b.body(body.map(Body::from).unwrap_or_else(Body::empty)).map_err(|e| e.to_string())?;
     req.extensions_mut().insert(Scheduled);
     tokio::time::timeout(timeout, async {
         let r = proxy(apps, service, env, None, req).await;
@@ -917,6 +923,17 @@ async fn check_access(apps: &Arc<Apps>, service: &str, env: &str, req: &mut Requ
     {
         return None;
     }
+    // A preview's webhook URL (roll previews' `roll_hook`: Stripe's, GitHub's, which can't send a
+    // header): its exact path with its token, any method, no cookie, no redirect, the token taken
+    // out of the query before the app sees it. Anything else falls to the gate as it would.
+    if env.starts_with("pv-")
+        && !access.webhooks.is_empty()
+        && let Some(given) = query_value(req, "roll_hook")
+        && access.webhooks.iter().any(|h| h.path == req.uri().path() && same(&token_hash(&given), &h.token_hash))
+    {
+        drop_query_param(req, "roll_hook");
+        return None;
+    }
     // A roll previews share link (someone outside the team, until it ends) on a preview's
     // environment: asked of previews at every request, so a revoked one stops at once. Its cookie
     // never reaches the app, and its guest is no visitor session (`…/visitors` is people's).
@@ -925,14 +942,14 @@ async fn check_access(apps: &Arc<Apps>, service: &str, env: &str, req: &mut Requ
     {
         let name = host_only(apps, format!("roll_share_{env}"));
         if let Some(t) = take_cookie(req, &name)
-            && let Some(s) = shares.live(env, &t, false).await
+            && let Some(s) = shares.live(service, env, &t, false).await
         {
             take_cookie(req, &host_only(apps, format!("roll_access_{env}")));
             req.extensions_mut().insert(ShareGuest { token: t, notes: s.notes });
             return None;
         }
         if let Some(t) = query_value(req, "roll_share")
-            && let Some(s) = shares.live(env, &t, true).await
+            && let Some(s) = shares.live(service, env, &t, true).await
         {
             let left = ((s.ends_ms - code_sql::now_ms()) / 1000).max(1);
             return Some(match enter(apps, req, "roll_share", &name, &t, Some(left)) {
@@ -978,6 +995,9 @@ async fn check_access(apps: &Arc<Apps>, service: &str, env: &str, req: &mut Requ
             .trim_end_matches('.')
             .to_ascii_lowercase();
             let jwt = apps.visitor_jwt(service, env, &format!("{}://{host}", apps.cfg.scheme), &user, &who).await;
+            if user.starts_with("usr_") {
+                req.extensions_mut().insert(RollPerson);
+            }
             req.extensions_mut().insert(VisitorIs(who, jwt));
             return None;
         }
@@ -1104,6 +1124,50 @@ pub(crate) fn host_only(apps: &Apps, name: String) -> String {
     if apps.cfg.scheme == "https" { format!("__Host-{name}") } else { name }
 }
 
+/// Where a preview's snapshots from the team's tests come in ([`snapshot`]).
+pub const SNAPSHOT_PATH: &str = "/__roll/snapshot";
+
+/// `POST /__roll/snapshot?name=` on a preview: with `x-roll-preview-bypass` matching the
+/// environment's bypass secret, its PNG (at most 2 MiB) to roll previews. Without the hook here or
+/// a bypass set it's a 404, as an app's own path would be.
+async fn snapshot(apps: &Arc<Apps>, service: &str, env: &str, req: Request) -> Response {
+    const MAX: usize = 2 << 20;
+    let Some(hook) = apps.preview_snapshots.get().cloned() else { return page(StatusCode::NOT_FOUND, "Not found", "There's nothing here.") };
+    let (sid, e) = (service.to_string(), env.to_string());
+    let Some(bypass) = apps.db(move |s| s.access(&sid, &e)).await.ok().flatten().and_then(|a| a.bypass_hash) else { return page(StatusCode::NOT_FOUND, "Not found", "There's nothing here.") };
+    let given = req.headers().get("x-roll-preview-bypass").and_then(|v| v.to_str().ok()).map(str::to_string);
+    if !given.is_some_and(|g| same(&token_hash(&g), &bypass)) {
+        return (StatusCode::UNAUTHORIZED, axum::Json(serde_json::json!({ "error": "a snapshot takes the project's bypass secret (x-roll-preview-bypass)" }))).into_response();
+    }
+    let name = query_value(&req, "name").unwrap_or_default();
+    let body = match axum::body::to_bytes(req.into_body(), MAX).await {
+        Ok(b) => b,
+        Err(_) => return (StatusCode::PAYLOAD_TOO_LARGE, axum::Json(serde_json::json!({ "error": "a snapshot is at most 2 MiB" }))).into_response(),
+    };
+    if !body.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return (StatusCode::BAD_REQUEST, axum::Json(serde_json::json!({ "error": "a snapshot is a PNG" }))).into_response();
+    }
+    match hook.snapshot(service, env, &name, body).await {
+        Ok(v) => (StatusCode::CREATED, axum::Json(v)).into_response(),
+        Err(crate::Error::Conflict(m)) => (StatusCode::CONFLICT, axum::Json(serde_json::json!({ "error": m }))).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, axum::Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
+    }
+}
+
+/// `param` taken out of the request's query (every one of it), the rest left as it was.
+fn drop_query_param(req: &mut Request, param: &str) {
+    let prefix = format!("{param}=");
+    let rest: Vec<&str> = req.uri().query().unwrap_or("").split('&').filter(|p| !p.is_empty() && !p.starts_with(prefix.as_str()) && *p != param).collect();
+    let pq = if rest.is_empty() { req.uri().path().to_string() } else { format!("{}?{}", req.uri().path(), rest.join("&")) };
+    let mut parts = req.uri().clone().into_parts();
+    if let Ok(p) = pq.parse() {
+        parts.path_and_query = Some(p);
+        if let Ok(u) = axum::http::Uri::from_parts(parts) {
+            *req.uri_mut() = u;
+        }
+    }
+}
+
 /// A query parameter's value, decoded (the last, when it's there more than once).
 fn query_value(req: &Request, param: &str) -> Option<String> {
     let prefix = format!("{param}=");
@@ -1143,6 +1207,11 @@ struct ShareGuest {
 /// email, or a roll person's user id, told to the app as `x-roll-visitor`.
 #[derive(Clone)]
 struct VisitorIs(String, Option<String>);
+
+/// A roll person let in by signing in to roll (`access.signed_in`; a `usr_…` visitor, never a
+/// provider's): on a preview's environment, one of its team, who gets roll previews' button.
+#[derive(Clone)]
+struct RollPerson;
 
 /// A visitor with no session of an environment that lets a provider sign people in
 /// (`access.sso`): a page load goes to roll's sign-in with that provider, which sends them back
@@ -1859,6 +1928,12 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
             None => page(StatusCode::SERVICE_UNAVAILABLE, "Unavailable", "Try again in a few seconds."),
         };
     }
+    // roll previews' snapshot from the team's own tests: the project's bypass secret only (on a
+    // public preview too; never a visitor's cookie), a PNG of at most 2 MiB, handed to roll
+    // previews; never the app's.
+    if env.starts_with("pv-") && req.uri().path() == SNAPSHOT_PATH && req.method() == axum::http::Method::POST {
+        return snapshot(&apps, service, env, req).await;
+    }
     if !rewritten && !ours && let Some(turned_away) = check_access(&apps, service, env, &mut req).await {
         // The access link's own redirect is a way in, not a refusal.
         return match turned_away.status() {
@@ -1895,9 +1970,12 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
     }
     // roll previews' feedback button: its script from the preview's own host, and a page load
     // (a browser's document, else a GET asking for HTML) gets the tag.
-    // A share link's guest gets it when their link takes notes, and posts from the page.
+    // A share link's guest gets it when their link takes notes, and posts from the page; a team
+    // member signed in to roll (team access) gets it as a link visitor does (it opens roll, where
+    // they post). Nobody a password, an allow list or a provider's sign-in let in.
     let guest = req.extensions().get::<ShareGuest>().cloned();
-    let target = if via_link || guest.as_ref().is_some_and(|g| g.notes) { apps.feedback_target(service, env).await } else { None };
+    let team = env.starts_with("pv-") && req.extensions().get::<RollPerson>().is_some();
+    let target = if via_link || team || guest.as_ref().is_some_and(|g| g.notes) { apps.feedback_target(service, env).await } else { None };
     if let Some(t) = &target
         && req.uri().path() == crate::feedback::PATH
     {
@@ -1905,8 +1983,8 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
     }
     if target.is_some() && req.uri().path() == crate::feedback::NOTES {
         return match &guest {
-            Some(g) => crate::feedback::guest_notes(apps.preview_shares(), env, &g.token, req.uri().query()).await,
-            None => crate::feedback::notes(apps.feedback_notes(), env, req.uri().query()).await,
+            Some(g) => crate::feedback::guest_notes(apps.preview_shares(), service, env, &g.token, req.uri().query()).await,
+            None => crate::feedback::notes(apps.feedback_notes(), service, env, req.uri().query()).await,
         };
     }
     if target.is_some()
@@ -1915,7 +1993,7 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
         && req.method() == axum::http::Method::POST
     {
         let token = g.token.clone();
-        return crate::feedback::guest_note(apps.preview_shares(), env, &token, req).await;
+        return crate::feedback::guest_note(apps.preview_shares(), service, env, &token, req).await;
     }
     let page_load = req.method() == axum::http::Method::GET
         && match req.headers().get("sec-fetch-dest").and_then(|v| v.to_str().ok()) {

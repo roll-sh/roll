@@ -75,6 +75,13 @@ pub trait Brancher: Send + Sync {
         Ok(None)
     }
 
+    /// The locks other sessions hold now on `branch`'s tables, `(table, mode)` (Postgres's
+    /// `pg_locks` names, `AccessExclusiveLock`…), sampled while the release runs so its strongest
+    /// is said (PlanetScale's safe migrations). Empty where the product has none to say.
+    async fn locks(&self, _parent: &str, _branch: &str) -> anyhow::Result<Vec<(String, String)>> {
+        Ok(Vec::new())
+    }
+
     /// Whether masked branches can come from one masked base per parent (Neon's anonymized
     /// branches): [`Self::branch_from`] a branch of the parent the engine masked once, and
     /// [`Self::children`] to know when an old base is no longer used.
@@ -202,6 +209,13 @@ pub trait Brancher: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// [`Brancher::columns`] read on `branch` of the parent, just made from it (so the parent's
+    /// columns, without waking a parent that sleeps): what's masked by default comes from here.
+    /// The parent's, where the product reads those without waking anything.
+    async fn branch_columns(&self, parent: &str, _branch: &str, _kept: Option<&str>, max: usize) -> anyhow::Result<Vec<crate::mask::Column>> {
+        self.columns(parent, max).await
+    }
+
     /// The parent's schema and the branch's, one line per object, for [`crate::schema::diff`].
     /// `None` from products without a schema to compare.
     async fn schema(&self, _parent: &str, _branch: &str) -> anyhow::Result<Option<(Vec<String>, Vec<String>)>> {
@@ -234,6 +248,8 @@ pub struct ChangeInfo {
     pub branch: Option<String>,
     pub head: String,
     pub open: bool,
+    /// In roll code's merge queue, waiting to land (`queued`).
+    pub queued: bool,
     pub draft: bool,
     /// Its labels (`preview` asks for one, `no-preview` skips it, as the title words do).
     pub labels: Vec<String>,
@@ -555,6 +571,15 @@ pub trait Source: Send + Sync {
     async fn comment(&self, _change: &str, _body: &str, _by: &str, _outside: bool) -> anyhow::Result<Option<String>> {
         Ok(None)
     }
+    /// A work item on the change's repo (roll code's issues: what an agent can claim) with
+    /// `title`, `body` and `labels`, `outside` when its words are someone's outside the team: its
+    /// number and where it's shown. On a repo mirrored to GitHub, the team's words open an issue
+    /// there instead (which becomes the repo's work item); someone's outside the team's stay a
+    /// work item in roll only (marked so, and never published to GitHub). `None` where this source
+    /// can't.
+    async fn work_item(&self, _change: &str, _title: &str, _body: &str, _labels: &[&str], _outside: bool) -> anyhow::Result<Option<(u64, String)>> {
+        Ok(None)
+    }
     /// The git commit of a changeset.
     async fn git_commit(&self, _repo: &str, _revision: &str) -> anyhow::Result<Option<String>> {
         Ok(None)
@@ -575,6 +600,12 @@ pub trait Source: Send + Sync {
     /// who follow its repos (roll code: each repo's `budget` event). `Err` when it couldn't be
     /// queued: the engine tries again on its next pass.
     async fn budget(&self, _repos: &[String], _alert: &BudgetAlert) -> anyhow::Result<()> {
+        Ok(())
+    }
+    /// Columns of the project's parents that previews masked by default and the project hadn't
+    /// been told of (roll code: each repo's `masking` event). `Err` when it couldn't be queued:
+    /// the engine tries again on its next pass.
+    async fn masking(&self, _repos: &[String], _notice: &MaskingNotice) -> anyhow::Result<()> {
         Ok(())
     }
     /// A receiver that fires when roll code changed something (a nudge to converge sooner).
@@ -635,6 +666,9 @@ pub struct Target {
     /// With `access_token` or `signed_in`: the project's bypass secret's SHA-256 (hex), which
     /// opens it for automation too (`x-roll-preview-bypass`).
     pub bypass_sha256: Option<String>,
+    /// Its webhook URLs' paths and their tokens' SHA-256 (hex): a backend whose own gate serves
+    /// it (roll apps) lets a request to exactly that path in with the token (`?roll_hook=`).
+    pub webhooks: Vec<(String, String)>,
     /// The feedback button on its pages (the project's `feedback`, a change's preview, link
     /// access): a backend that serves the pages itself (roll apps) adds it as the runtime does.
     pub feedback: bool,
@@ -686,6 +720,27 @@ pub struct BudgetAlert {
     pub percent: u32,
     pub spent_usd_month: f64,
     pub max_usd_month: f64,
+}
+
+/// The columns of a project's parents masked by default that it's told of: each once, when a
+/// preview's branch was first masked with it (production gained it, or masking by default began).
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct MaskingNotice {
+    pub project: String,
+    pub project_name: String,
+    /// How many of each resource's (`kind:parent`), never their names: a repo's event stream is
+    /// read by people who may not read the resource's schema. The dashboard names them.
+    pub resources: Vec<MaskedCount>,
+    /// The columns told of (kept so they're told once), not sent.
+    #[serde(skip)]
+    pub columns: Vec<crate::MaskedByDefault>,
+}
+
+/// A resource's columns masked by default that the project is told of, counted.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct MaskedCount {
+    pub resource: String,
+    pub columns: usize,
 }
 
 /// What's at a path in a service, as a tar, as it's read.

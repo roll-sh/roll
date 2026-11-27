@@ -92,6 +92,9 @@ pub struct Idp {
     /// What people call it ("Okta").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Set by Claude's express admin setup (`ema_issuer:manage`): a later setup replaces it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub express: bool,
     /// The one tenant roll trusts at a multi-tenant issuer (its assertions' `tenant` claim): the
     /// issuer with this tenant is trusted, never the issuer's other tenants. An assertion that
     /// names a tenant is refused from a provider trusted without one.
@@ -189,11 +192,7 @@ impl Access {
             {
                 return Err(Error::BadRequest(format!("{}'s jwks is a JWKS document with keys", i.issuer)));
             }
-            i.domains = i.domains.iter().map(|d| d.trim().trim_start_matches('@').to_ascii_lowercase()).collect();
-            let domain_ok = |d: &str| !d.is_empty() && d.len() <= 253 && d.contains('.') && d.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-');
-            if i.domains.len() > 50 || !i.domains.iter().all(|d| domain_ok(d)) {
-                return Err(Error::BadRequest(format!("{}'s domains are 1 to 50 email domains (acme.com)", i.issuer)));
-            }
+            i.domains = email_domains(&i.domains).ok_or_else(|| Error::BadRequest(format!("{}'s domains are 1 to 50 email domains (acme.com)", i.issuer)))?;
             if i.tenant.as_deref().is_some_and(|t| t.trim().is_empty() || t.len() > 200 || t.contains(char::is_control)) {
                 return Err(Error::BadRequest(format!("{}'s tenant is its tenant id (1 to 200 characters)", i.issuer)));
             }
@@ -586,6 +585,14 @@ enum Who {
     Id(String),
 }
 
+/// Email domains as roll keeps them (lowercase, no `@`), or `None` past 50 or for one that isn't
+/// a domain.
+fn email_domains(domains: &[String]) -> Option<Vec<String>> {
+    let out: Vec<String> = domains.iter().map(|d| d.trim().trim_start_matches('@').to_ascii_lowercase()).collect();
+    let ok = |d: &str| !d.is_empty() && d.len() <= 253 && d.contains('.') && d.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-');
+    (out.len() <= 50 && out.iter().all(|d| ok(d))).then_some(out)
+}
+
 /// How an app's client proved itself at the token endpoint.
 enum Credential {
     Secret(String),
@@ -719,7 +726,8 @@ fn connect(a: &Access, app: &App, idp: &Idp, user: &str, read_only: bool, mcp_on
         Some(g) if g.revoked_at.is_some() => {
             return Err(Error::OAuth("access_denied", "this person's connection to the app was revoked or denied in roll".into()));
         }
-        Some(g) if !g.live(now) || a.policy_now().idle(&g, now) => {
+        // Or one that no longer meets the policy with the app's rules now (made before a cap).
+        Some(g) if !g.live(now) || a.policy_now().idle(&g, now) || a.meets_policy(&app.rules, g.expires_at).is_err() => {
             a.store.revoke(&g.id)?;
             None
         }
@@ -745,7 +753,11 @@ fn connect(a: &Access, app: &App, idp: &Idp, user: &str, read_only: bool, mcp_on
         return Ok((a.store.get(&id)?, access));
     }
     let host = url::Url::parse(&idp.issuer).ok().and_then(|u| u.host_str().map(str::to_string)).unwrap_or_default();
-    let new = NewGrant { name: format!("{} (via {})", app.name, idp.name.clone().unwrap_or(host)).chars().take(100).collect(), rules: app.rules.clone(), pending: a.policy_now().needs_approval(&app.rules, false), ..Default::default() };
+    // Nobody asks for a lifetime here: the policy's longest for these rules, or a day when it
+    // requires an end and names no length (the next sign-in after makes it again). None: none.
+    let expires_at = a.lifetime_days(&app.rules).map(|d| i64::from(d) * 86_400_000).or_else(|| a.policy().require_expiry.then_some(86_400_000)).map(|ms| now + ms);
+    a.meets_policy(&app.rules, expires_at).map_err(|e| Error::OAuth("access_denied", e.to_string()))?;
+    let new = NewGrant { name: format!("{} (via {})", app.name, idp.name.clone().unwrap_or(host)).chars().take(100).collect(), rules: app.rules.clone(), expires_at, pending: a.policy_now().needs_approval(&app.rules, false), ..Default::default() };
     let (grant, access) = a.store.create(&new, GrantKind::Oauth, &format!("enterprise:{}", idp.issuer), Some(&app.client_id), Some(user))?;
     if grant.pending {
         return Err(waits());
@@ -881,4 +893,309 @@ pub(crate) async fn remove_app(axum::extract::State(a): S, ext: axum::http::Exte
     crate::api::operator_only(&a, &ext, "remove enterprise apps")?;
     let n = tokio::task::spawn_blocking(move || a.remove_app(&id)).await.map_err(|e| Error::Internal(e.to_string()))??;
     Ok(axum::Json(json!({ "revoked": n })))
+}
+
+// ── Express admin setup (Claude's auto-connect: Claude registers its issuer itself) ──
+//
+// Claude's connector docs, "Support express admin setup": an admin clicks Connect in Claude's
+// auto-connect setup, approves roll's consent screen for the scope `ema_issuer:manage`, and Claude
+// sends its organization's issuer to `ema_setup_endpoint` with the short token it got. The
+// consent names the email domains that issuer vouches for (prefilled from the admin's own; a
+// provider vouches only for domains the operator named or DNS proved, never any address), and the
+// most Claude may do for a person (the app's rules).
+
+/// Claude's client metadata documents: the public one, and its confidential form.
+pub const CLAUDE_CLIENT: &str = "https://claude.ai/oauth/mcp-oauth-client-metadata";
+pub const CLAUDE_CONFIDENTIAL: &str = "https://claude.ai/oauth/mcp-oauth-client-metadata/confidential_client";
+/// Where Claude's authorization returns: express setup's only redirect.
+pub const CLAUDE_CALLBACK: &str = "https://claude.ai/api/mcp/auth_callback";
+/// The scope that lets Claude set roll's trusted issuer (advertised in the metadata).
+pub const EMA_SCOPE: &str = "ema_issuer:manage";
+const EMA_SETTING: &str = "ema_setups";
+const EMA_CODE_MS: i64 = 10 * 60_000;
+const EMA_TOKEN_MS: i64 = 5 * 60_000;
+const EMA_PENDING_MAX: usize = 20;
+
+/// One express setup an admin approved: the code Claude trades, then the token it sends the
+/// issuer with (each stored hashed, each used once).
+#[derive(Clone, Serialize, Deserialize)]
+struct EmaSetup {
+    code: String,
+    #[serde(default)]
+    token: Option<String>,
+    client_id: String,
+    redirect_uri: String,
+    challenge: String,
+    domains: Vec<String>,
+    rules: Scope,
+    by: String,
+    expires_at: i64,
+}
+
+fn read_setups(c: &code_sql::Conn<'_>) -> Result<Vec<EmaSetup>, Error> {
+    let raw: Option<String> = c.query_row("SELECT value FROM settings WHERE key = ?", [EMA_SETTING], |r| r.get(0)).optional()?;
+    let now = code_sql::now_ms();
+    Ok(raw.and_then(|v| serde_json::from_str::<Vec<EmaSetup>>(&v).ok()).unwrap_or_default().into_iter().filter(|s| s.expires_at > now).collect())
+}
+
+fn write_setups(c: &code_sql::Conn<'_>, s: &[EmaSetup]) -> Result<(), Error> {
+    c.execute("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", params![EMA_SETTING, json!(s).to_string()])?;
+    Ok(())
+}
+
+impl Access {
+    /// An admin approved express setup for Claude: the code its redirect carries.
+    fn ema_begin(&self, client_id: &str, redirect_uri: &str, challenge: &str, domains: &[String], rules: Scope, by: &str) -> Result<String, Error> {
+        let domains = email_domains(domains).filter(|d| !d.is_empty()).ok_or_else(|| Error::BadRequest("name the email domains Claude's issuer vouches for: 1 to 50 (acme.com)".into()))?;
+        if let Some(d) = domains.iter().find(|d| PUBLIC_MAIL.contains(&d.as_str())) {
+            return Err(Error::BadRequest(format!("{d} is a mail service anyone can sign up at: name your company's own domains")));
+        }
+        crate::store::check_rules(&rules)?;
+        let code = new_secret("rle_");
+        let setup = EmaSetup { code: hash(&code), token: None, client_id: client_id.into(), redirect_uri: redirect_uri.into(), challenge: challenge.into(), domains, rules, by: by.into(), expires_at: code_sql::now_ms() + EMA_CODE_MS };
+        self.store.db.write(|c| {
+            let mut all = read_setups(c)?;
+            if all.len() >= EMA_PENDING_MAX {
+                return Err(Error::TooMany(format!("at most {EMA_PENDING_MAX} express setups wait at once")));
+            }
+            all.push(setup.clone());
+            write_setups(c, &all)
+        })?;
+        Ok(code)
+    }
+
+    /// Claude's code for a token: the same client and redirect, PKCE checked, the code spent.
+    fn ema_exchange(&self, code: &str, client_id: &str, redirect_uri: &str, pkce: &dyn Fn(&str) -> bool) -> Result<String, Error> {
+        let bad = || Error::OAuth("invalid_grant", "that setup code isn't one roll issued, or it's spent or old".into());
+        let token = new_secret("rle_");
+        let (h, t) = (hash(code), hash(&token));
+        self.store.db.write(|c| {
+            let mut all = read_setups(c)?;
+            let s = all.iter_mut().find(|s| s.token.is_none() && same(&s.code, &h)).ok_or_else(bad)?;
+            if s.client_id != client_id || s.redirect_uri != redirect_uri || !pkce(&s.challenge) {
+                return Err(bad());
+            }
+            (s.code, s.token, s.expires_at) = (String::new(), Some(t.clone()), code_sql::now_ms() + EMA_TOKEN_MS);
+            write_setups(c, &all)
+        })?;
+        Ok(token)
+    }
+
+    /// The token's setup, spent: Claude's issuer trusted for its domains (replacing what an
+    /// earlier express setup trusted), and Claude registered as an app if it isn't one.
+    fn ema_apply(&self, token: &str, issuer: &str) -> Result<(), EmaRefusal> {
+        if !claude_issuer(issuer) {
+            return Err(EmaRefusal::Issuer);
+        }
+        let h = hash(token);
+        // One write: the token spent, Claude's issuer trusted (an earlier express setup's
+        // replaced, one the operator set up by hand kept), and Claude's app given the consent's
+        // rules (made, or an existing one's narrowed or widened with its people's connections), so
+        // nothing is half done and nobody's change in between is undone.
+        let done = self.store.db.write(|c| {
+            let mut all = read_setups(c)?;
+            let Some(i) = all.iter().position(|s| s.token.as_deref().is_some_and(|t| same(t, &h))) else { return Ok(None) };
+            let s = all.remove(i);
+            let mut e = read_enterprise(c)?;
+            e.idps.retain(|i| !i.express);
+            if !e.idps.iter().any(|i| i.issuer == issuer) {
+                if e.idps.len() >= MAX_IDPS {
+                    return Err(Error::Conflict(format!("roll trusts {MAX_IDPS} identity providers already: remove one first")));
+                }
+                e.idps.push(Idp { issuer: issuer.into(), jwks: None, matching: Matching::Email, domains: s.domains.clone(), sso: None, admins: false, name: Some("Claude".into()), express: true, tenant: None });
+            }
+            let claude = |a: &App| a.metadata.iter().any(|m| m == CLAUDE_CLIENT || m == CLAUDE_CONFIDENTIAL);
+            let changed = match e.apps.iter_mut().find(|a| claude(a)) {
+                Some(app) => {
+                    app.rules = s.rules.clone();
+                    Some(app.client_id.clone())
+                }
+                None => {
+                    if e.apps.len() >= MAX_APPS {
+                        return Err(Error::Conflict(format!("at most {MAX_APPS} apps: remove some first")));
+                    }
+                    let metadata = vec![CLAUDE_CLIENT.to_string(), CLAUDE_CONFIDENTIAL.to_string()];
+                    e.apps.push(App { client_id: crate::new_id("ent"), name: "Claude".into(), rules: s.rules.clone(), secret_hash: None, jwk: None, metadata, issuers: Vec::new(), old_secret_hash: None, old_until: None, leaked: None, created_at: code_sql::now_ms() });
+                    None
+                }
+            };
+            write_setups(c, &all)?;
+            write_enterprise(c, &e)?;
+            // An existing app's people's connections take the rules at once, as `update_app`'s do.
+            if let Some(id) = changed {
+                let encoded = serde_json::to_string(&s.rules).map_err(|e| Error::Internal(e.to_string()))?;
+                let ids: Vec<String> = c.query("SELECT id FROM grants WHERE client_id = ? AND kind = 'oauth' AND revoked_at IS NULL", [id.as_str()], |r| r.get(0))?;
+                ids.iter().try_for_each(|g| crate::store::set_rules(c, g, &encoded))?;
+            }
+            Ok::<_, Error>(Some(s))
+        });
+        let setup = match done {
+            Ok(Some(s)) => s,
+            Ok(None) => return Err(EmaRefusal::Token),
+            Err(Error::Conflict(why)) => return Err(EmaRefusal::Refused(why)),
+            Err(e) => {
+                tracing::warn!(error = %e, "Claude's express setup failed");
+                return Err(EmaRefusal::Failed);
+            }
+        };
+        let ev = crate::store::AuditEvent {
+            id: crate::new_id("aud"),
+            at: code_sql::now_ms(),
+            grant_id: None,
+            grant_name: None,
+            source: "access".into(),
+            tool: None,
+            method: "PUT".into(),
+            route: "/v1/access/enterprise/ema-setup".into(),
+            product: Some("access".into()),
+            action: Some("admin".into()),
+            resource: Some(issuer.to_string()),
+            decision: "express_setup".into(),
+            approval: None,
+            status: 200,
+            // `by`, as every audit row names who decided (the audit page reads it).
+            args: Some(json!({ "by": setup.by, "domains": setup.domains })),
+            ip: None,
+            duration_ms: 0,
+            client: Some("Claude".into()),
+        };
+        if let Some(ev) = self.store.queue_audit(ev) {
+            self.store.audit(&ev);
+        }
+        Ok(())
+    }
+}
+
+enum EmaRefusal {
+    Token,
+    Issuer,
+    /// The approver isn't one of roll's admins any more.
+    Approver,
+    /// Something to fix first (too many providers or apps), said to the admin.
+    Refused(String),
+    Failed,
+}
+
+/// Mail services anyone can sign up at: never domains a company's issuer vouches for.
+const PUBLIC_MAIL: &[&str] = &["gmail.com", "googlemail.com", "outlook.com", "hotmail.com", "live.com", "msn.com", "yahoo.com", "icloud.com", "me.com", "aol.com", "proton.me", "protonmail.com", "gmx.com", "gmx.net", "mail.com", "yandex.com", "zoho.com", "fastmail.com"];
+
+/// The consent screen's express setup: roll's admins only, Claude's client and callback exactly.
+pub(crate) async fn ema_consent(a: &Arc<Access>, ext: &axum::http::Extensions, c: &crate::oauth::Consent, domains: Vec<String>) -> Result<axum::response::Response, Error> {
+    use axum::response::IntoResponse;
+    if !matches!(crate::api::who(a, ext)?, crate::api::Who::Operator) {
+        return Err(Error::Forbidden("only roll's admins set up Claude's auto-connect".into()));
+    }
+    if !matches!(c.client_id.as_str(), CLAUDE_CLIENT | CLAUDE_CONFIDENTIAL) || c.redirect_uri != CLAUDE_CALLBACK {
+        return Err(Error::BadRequest(format!("{EMA_SCOPE} is Claude's only, returning to {CLAUDE_CALLBACK}")));
+    }
+    // roll's policy may list the clients that connect: Claude is one of them, or not this either
+    // (checked here, as express setup's code never makes a stored client the token endpoint reads).
+    let claude = crate::store::Client { id: CLAUDE_CLIENT.into(), name: "Claude".into(), uri: Some("https://claude.ai".into()), redirect_uris: vec![CLAUDE_CALLBACK.into()], created_at: 0, last_used_at: None };
+    if !a.policy_now().allows_client(&claude) {
+        return Err(Error::Forbidden(crate::evaluate::CLIENT_NOT_ALLOWED.into()));
+    }
+    let (a2, cid, uri, ch, rules, by) = (a.clone(), c.client_id.clone(), c.redirect_uri.clone(), c.code_challenge.clone(), c.allowed.rules.clone(), crate::api::actor(ext));
+    let code = tokio::task::spawn_blocking(move || a2.ema_begin(&cid, &uri, &ch, &domains, rules, &by)).await.map_err(|e| Error::Internal(e.to_string()))??;
+    let mut redirect = url::Url::parse(&c.redirect_uri).map_err(|_| Error::BadRequest("redirect_uri isn't a URL".into()))?;
+    {
+        let mut q = redirect.query_pairs_mut();
+        q.append_pair("code", &code);
+        if let Some(s) = &c.state {
+            q.append_pair("state", s);
+        }
+        q.append_pair("iss", a.config.api_url.trim_end_matches('/'));
+    }
+    Ok(axum::Json(json!({ "redirect": redirect.to_string() })).into_response())
+}
+
+/// The token endpoint for an express setup's code (`rle_…`), or `None` for any other code. The
+/// confidential client signs a client assertion with its document's keys; the public one has PKCE.
+pub(crate) async fn ema_token(a: &Arc<Access>, f: &HashMap<String, String>, code: &str, client_id: &str, redirect: &str, verifier: &str) -> Option<axum::response::Response> {
+    use axum::response::IntoResponse;
+    if !code.starts_with("rle_") {
+        return None;
+    }
+    let get = |k: &str| f.get(k).map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+    let (a2, code, cid, redirect, verifier) = (a.clone(), code.to_string(), client_id.to_string(), redirect.to_string(), verifier.to_string());
+    let assertion = get("client_assertion");
+    let signed = get("client_assertion_type").as_deref() == Some(crate::client_credentials::JWT_BEARER);
+    let api = a.config.api_url.trim_end_matches('/').to_string();
+    let api2 = api.clone();
+    let made = tokio::task::spawn_blocking(move || {
+        let unknown = || Error::OAuth("invalid_client", "the client's credentials didn't check out".into());
+        match (cid.as_str(), assertion) {
+            (CLAUDE_CLIENT, None) => {}
+            (CLAUDE_CONFIDENTIAL, Some(jwt)) if signed => {
+                let kid = jsonwebtoken::decode_header(&jwt).ok().and_then(|h| h.kid);
+                let doc = client_document(&a2, &cid, kid.as_deref())?;
+                if doc.method != Method::PrivateKeyJwt {
+                    return Err(unknown());
+                }
+                let (jti, exp) = verify(&jwt, &doc.key(kid.as_deref()).ok_or_else(unknown)?, &cid, &api2)?;
+                if !a2.store.first_jti(&cid, &jti, exp + LEEWAY_MS)? {
+                    return Err(Error::OAuth("invalid_client", "that client assertion was used already".into()));
+                }
+            }
+            _ => return Err(unknown()),
+        }
+        a2.ema_exchange(&code, &cid, &redirect, &|ch| crate::oauth::pkce_ok(&verifier, ch))
+    })
+    .await;
+    Some(match made {
+        Ok(Ok(token)) => (
+            [(axum::http::header::CACHE_CONTROL, "no-store"), (axum::http::header::PRAGMA, "no-cache")],
+            axum::Json(json!({ "access_token": token, "token_type": "Bearer", "expires_in": EMA_TOKEN_MS / 1000, "scope": EMA_SCOPE, "ema_setup_endpoint": format!("{api}/v1/access/enterprise/ema-setup") })),
+        )
+            .into_response(),
+        Ok(Err(e)) => e.into_response(),
+        Err(e) => Error::Internal(e.to_string()).into_response(),
+    })
+}
+
+/// `PUT /v1/access/enterprise/ema-setup {ema_issuer}` with express setup's token: Claude's
+/// organization's issuer trusted for the domains the admin named. Refusals are `{error,
+/// error_description}`, which Claude shows the admin.
+pub(crate) async fn ema_setup(axum::extract::State(a): S, headers: axum::http::HeaderMap, body: axum::body::Bytes) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let refuse = |status: u16, error: &str, why: &str| (axum::http::StatusCode::from_u16(status).unwrap_or(axum::http::StatusCode::BAD_REQUEST), axum::Json(json!({ "error": error, "error_description": why }))).into_response();
+    let token = headers.get(axum::http::header::AUTHORIZATION).and_then(|v| v.to_str().ok()).and_then(|v| v.split_once(' ')).filter(|(s, _)| s.eq_ignore_ascii_case("bearer")).map(|(_, t)| t.trim().to_string()).unwrap_or_default();
+    if !token.starts_with("rle_") {
+        return refuse(401, "invalid_token", "express setup takes the token its authorization gave");
+    }
+    let issuer = serde_json::from_slice::<Value>(&body).ok().and_then(|b| b["ema_issuer"].as_str().map(String::from)).unwrap_or_default();
+    // The admin who approved is one still (a person demoted since approves nothing).
+    if let Err(r) = still_admin(&a, &token).await {
+        return match r {
+            EmaRefusal::Token => refuse(401, "invalid_token", "that token isn't express setup's, or it's spent or old: run the setup again"),
+            _ => refuse(403, "access_denied", "the admin who approved this isn't one of roll's admins any more"),
+        };
+    }
+    match tokio::task::spawn_blocking(move || a.ema_apply(&token, &issuer)).await {
+        Ok(Ok(())) => axum::Json(json!({})).into_response(),
+        Ok(Err(EmaRefusal::Token)) => refuse(401, "invalid_token", "that token isn't express setup's, or it's spent or old: run the setup again"),
+        Ok(Err(EmaRefusal::Issuer)) => refuse(400, "invalid_request", "roll's express setup takes a Claude issuer (https://identity.anthropic.com/issuers/<id>)"),
+        Ok(Err(EmaRefusal::Approver)) => refuse(403, "access_denied", "the admin who approved this isn't one of roll's admins any more"),
+        Ok(Err(EmaRefusal::Refused(why))) => refuse(409, "invalid_request", &why),
+        Ok(Err(EmaRefusal::Failed)) | Err(_) => refuse(500, "server_error", "roll couldn't save the setup: run it again"),
+    }
+}
+
+/// Whether the setup this token is for was approved by someone who's one of roll's admins now: the
+/// operator, or a person whose account still is an admin's.
+async fn still_admin(a: &Arc<Access>, token: &str) -> Result<(), EmaRefusal> {
+    let h = hash(token);
+    let a2 = a.clone();
+    let by = tokio::task::spawn_blocking(move || a2.store.db.read(read_setups).ok().and_then(|all| all.into_iter().find(|s| s.token.as_deref().is_some_and(|t| same(t, &h))).map(|s| s.by)))
+        .await
+        .ok()
+        .flatten()
+        .ok_or(EmaRefusal::Token)?;
+    if by == "operator" {
+        return Ok(());
+    }
+    let people = a.people.get().ok_or(EmaRefusal::Approver)?;
+    match people.person_now(&by) {
+        Ok(Some(p)) if p.admin => Ok(()),
+        _ => Err(EmaRefusal::Approver),
+    }
 }

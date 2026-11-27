@@ -260,6 +260,9 @@ async fn catalog_view(State(a): S) -> Json<Value> {
         "routes": rows,
         "operator_only": catalog::OPERATOR_ONLY.iter().map(|(r, why)| json!({ "route": r, "why": why })).collect::<Vec<_>>(),
         "api_url": a.config.api_url,
+        // Products whose own policy caps the grants that reach them (roll secrets'
+        // `max_token_days`): a connection with such a rule ends within it.
+        "lifetime_caps": a.lifetime_caps().into_iter().map(|(product, days, why)| json!({ "product": product, "days": days, "why": why })).collect::<Vec<_>>(),
     }))
 }
 
@@ -343,6 +346,13 @@ async fn check(State(a): S, ext: Extensions, Json(c): Json<Check>) -> crate::Res
     };
     let row = found.row;
     let params = found.params.unwrap_or_default();
+    if !row.body_shape_ok(c.body.as_ref()) {
+        return Ok(Json(json!({ "decision": "deny", "why": "the body isn't the JSON this route reads" })));
+    }
+    // A folder the gate refuses before deciding is refused here too.
+    if let Some(why) = crate::evaluate::bad_folder(row, uri.query()) {
+        return Ok(Json(json!({ "decision": "deny", "why": why })));
+    }
     // Decided as the gate decides: the request's headers (a create's `X-Roll-Project`), the
     // project a create's body names, the copy a body asks for, and "ask for anything else".
     let mut headers = axum::http::HeaderMap::new();
@@ -357,9 +367,19 @@ async fn check(State(a): S, ext: Extensions, Json(c): Json<Check>) -> crate::Res
         .await
         .map_err(|e| Error::Internal(e.to_string()))?;
     crate::evaluate::project_from_body(row, &mut target, c.body.as_ref()).map_err(Error::BadRequest)?;
+    if let Err(why) = crate::evaluate::folder_from_body(row, &mut target, c.body.as_ref()) {
+        return Ok(Json(json!({ "decision": "deny", "why": why })));
+    }
     let mut action = row.action_with(&method, &params, c.body.as_ref(), &headers);
     let asked = action;
     let mut outcome = if matches!(row.target, catalog::Tgt::AnyGrant) { Outcome::Allow } else { scope.outcome(&target, action) };
+    // What else its body needs, as the gate asks it: the weakest decides.
+    for more in row.needs_too.zip(c.body.as_ref()).map(|(f, b)| f(b)).unwrap_or_default() {
+        let o = scope.outcome(&target, more);
+        if crate::evaluate::rank(o) < crate::evaluate::rank(outcome) {
+            (outcome, action) = (o, more);
+        }
+    }
     if let Some((copied, _, _)) = crate::evaluate::copy_outcome(&a, row, &params, &target, (c.body.as_ref(), uri.query()), &scope).await
         && crate::evaluate::rank(copied) < crate::evaluate::rank(outcome)
     {
@@ -632,8 +652,7 @@ impl Access {
                 (g.id.to_string(), g.user.as_deref().map(str::to_string))
             }
         };
-        self.check_policy(new.expires_at)?;
-        self.check_lifetime_cap(&new.rules, new.expires_at)?;
+        self.meets_policy(&new.rules, new.expires_at)?;
         let made = blocking(self.clone(), move |a| a.store.create(&new, GrantKind::Token, &by, None, user.as_deref())).await?;
         self.tell_added(&made.0, Added::Token, ext);
         if let Some(handle) = asker {
@@ -794,8 +813,7 @@ async fn update(State(a): S, ext: Extensions, Path(id): Path<String>, body: axum
     }
     // A token whose rules, lifetime or addresses change meets the policy as it is now.
     if change.rules.is_some() || change.expires_at.is_some() || change.ip_allow.is_some() {
-        a.check_policy(change.expires_at.unwrap_or(target.expires_at))?;
-        a.check_lifetime_cap(change.rules.as_ref().unwrap_or(&target.rules), change.expires_at.unwrap_or(target.expires_at))?;
+        a.meets_policy(change.rules.as_ref().unwrap_or(&target.rules), change.expires_at.unwrap_or(target.expires_at))?;
     }
     // A person widening their own token past what the policy has an admin approve: it waits again.
     let asker = match &who_handle {
@@ -946,8 +964,7 @@ async fn rotate(State(a): S, ext: Extensions, Path(id): Path<String>, body: axum
         may_touch(&a, &g, &target).await?;
     }
     // A new secret is a new token: it meets the policy (set an expiry first if it must expire).
-    a.check_policy(target.expires_at)?;
-    a.check_lifetime_cap(&target.rules, target.expires_at)?;
+    a.meets_policy(&target.rules, target.expires_at)?;
     let keep = body.keep_old_for_s.map(|s| s * 1000);
     let (grant, token) = blocking(a, move |a| a.store.rotate(&id, keep)).await?;
     Ok(Json(json!({ "grant": grant, "token": token })))
@@ -1111,16 +1128,16 @@ async fn approve(State(a): S, ext: Extensions, Path(id): Path<String>, body: axu
     let decided = blocking(a.clone(), move |a| a.decide(&id, true, &by, None)).await?;
     a.changed(&decided);
     // Checked again now it's decided: a gate added meanwhile means it was approved once.
-    if let Some((grant, rule, until)) = remembered.filter(|_| decided.state == "approved" && a.policy().gates(&decided).is_empty()) {
+    if let Some((grant, rules, until)) = remembered.filter(|_| decided.state == "approved" && a.policy().gates(&decided).is_empty()) {
         let apr = decided.id.clone();
-        blocking(a.clone(), move |a| a.store.remember(&grant, &rule, until, &apr)).await?;
+        blocking(a.clone(), move |a| a.store.remember(&grant, &rules, until, &apr)).await?;
     }
     Ok(Json(json!(decided)))
 }
 
 /// What approving `id` with `remember` would also allow: the grant, the rule (the request's action
 /// on its one resource) and until when (`None`: for good). Checked before anything is decided.
-async fn remembered(a: &Arc<Access>, id: &str, remember: Option<&str>) -> crate::Result<Option<(String, roll_auth::scope::Rule, Option<i64>)>> {
+async fn remembered(a: &Arc<Access>, id: &str, remember: Option<&str>) -> crate::Result<Option<(String, Vec<roll_auth::scope::Rule>, Option<i64>)>> {
     let hours = |h: i64| Some(Some(code_sql::now_ms() + h * 3_600_000));
     let until: Option<Option<i64>> = match remember {
         None | Some("once") => None,
@@ -1154,22 +1171,68 @@ async fn remembered(a: &Arc<Access>, id: &str, remember: Option<&str>) -> crate:
         return Err(Error::BadRequest("this route spans every environment: approve it once".into()));
     }
     // The indices it was about stay part of it (`cl_1/logs-a` is cluster `cl_1`, index `logs-a`);
-    // a secrets request names one key, and a name that isn't one would remember as a pattern.
+    // a secrets request names one key, and a name that isn't one would remember as a pattern; a
+    // search request that excluded indices would remember as a rule reaching them.
     if found.scope_index.as_deref().is_some_and(|ix| !roll_auth::scope::rememberable_part(&found.product, ix)) {
-        return Err(Error::BadRequest("this request names no single encryption key: approve it once".into()));
+        let why = if found.product == "secrets" { "this request names no single encryption key" } else { "this request excludes indices, which a rule can't" };
+        return Err(Error::BadRequest(format!("{why}: approve it once")));
+    }
+    // A secret lent to another product's route (apps' DNS token, search's rotated password) at an
+    // environment's root: remembered, every later call would reveal every key there, so it's
+    // approved once; one in a folder of its own is remembered for that folder.
+    if found.product == "secrets"
+        && found.scope_path.as_deref().is_none_or(roll_auth::scope::is_root)
+        && catalog::find(&found.method, &found.route, &found.path).is_some_and(|f| f.row.product != "secrets" && f.row.lends.is_some())
+    {
+        return Err(Error::BadRequest("this lends a whole environment's secrets: approve it once, or keep the token in a folder of its own".into()));
+    }
+    // A folder's rule reaches every folder under it, so one at a secrets environment's root (or with
+    // no folder) is the whole environment, or more: remembered for 8 hours at most.
+    if found.product == "secrets" && found.scope_path.as_deref().is_none_or(roll_auth::scope::is_root) && until.is_none_or(|u| u > code_sql::now_ms() + 8 * 3_600_000) {
+        return Err(Error::BadRequest("this reaches every folder of the environment: remember it for an hour or 8 hours at most, or approve it once".into()));
     }
     let rule = rule_of(&found)?;
     // What the request named becomes a rule: it meets the rules' own checks (one line, sizes).
     if let Some(p) = roll_auth::scope::Scope(vec![rule.clone()]).problems().first() {
         return Err(Error::BadRequest(format!("this request can't be remembered ({p}): approve it once")));
     }
-    // For good is a change to the token: it meets the policy as it is now.
-    if until.is_none() {
-        let g = found.grant_id.clone();
-        let grant = blocking(a.clone(), move |a| a.store.get(&g)).await?;
-        a.check_policy(grant.expires_at)?;
+    let g = found.grant_id.clone();
+    let grant = blocking(a.clone(), move |a| a.store.get(&g)).await?;
+    // A lend's approval (a secret a route writes as the caller) covers the route's own action too
+    // when that asked as well: remembered with it, so the next call doesn't ask about half of it.
+    let mut rules = vec![rule];
+    if let Some(own) = own_rule(a, &found, &grant) {
+        // What roll's policy asks several people for (or asks again) is approved once each time,
+        // the route's own rule too.
+        if a.policy().asks_again(&own) {
+            return Err(Error::BadRequest(format!("roll's policy asks again for {} on {}: approve it once", own.actions.keys().map(|a| a.as_str()).collect::<Vec<_>>().join(", "), own.product)));
+        }
+        rules.push(own);
     }
-    Ok(Some((found.grant_id, rule, until)))
+    // A rule a product caps (roll secrets' `max_token_days`) is remembered for that long at most:
+    // for good becomes until then.
+    let all = roll_auth::scope::Scope(rules.clone());
+    let until = match a.within_cap(&all, until) {
+        capped @ Some(_) => capped,
+        None => {
+            // For good is a change to the token: it meets the policy as it is now, with the rules.
+            let mut with = grant.rules.clone();
+            with.0.extend(rules.iter().cloned());
+            a.meets_policy(&with, grant.expires_at)?;
+            None
+        }
+    };
+    Ok(Some((found.grant_id, rules, until)))
+}
+
+/// The route's own rule a lend's approval covers too, as the gate recorded it when it asked (never
+/// worked out again from the token as it is now): none when the token allows it already, its
+/// temporary rules included.
+fn own_rule(a: &Access, found: &crate::store::Approval, grant: &crate::store::Grant) -> Option<roll_auth::scope::Rule> {
+    let own = found.also.clone()?;
+    let policy = a.policy_now();
+    let now = grant.effective_rules(code_sql::now_ms(), |r| policy.asks_again(r));
+    (!now.covers(&roll_auth::scope::Scope(vec![own.clone()]))).then_some(own)
 }
 
 /// The rule an approval is about: its action on its one resource (or the product's every resource
@@ -1252,8 +1315,14 @@ async fn request_access(State(a): S, ext: Extensions, Json(r): Json<AccessReques
         }
         return Err(Error::Forbidden("this token was made never to ask a person: its owner changes its rules instead".into()));
     }
-    if request_duration(&r.for_).is_none() {
+    let Some(lasts) = request_duration(&r.for_) else {
         return Err(Error::BadRequest("for: 15m, 1h, 8h or 1d".into()));
+    };
+    // A folder's rule reaches every folder under it: one at a secrets environment's root (or with
+    // no folder) is all of it, or every environment's, so it lasts 8 hours at most, as a
+    // remembered approval of one does.
+    if r.product == "secrets" && r.path.as_deref().is_none_or(roll_auth::scope::is_root) && lasts > 8 * 3_600_000 {
+        return Err(Error::BadRequest("this reaches every folder of the environment (name a folder in path for longer): for 15m, 1h or 8h".into()));
     }
     // Tokens and approvals are changed by people, never asked for: a token that could manage
     // tokens could widen itself past any approval.
@@ -1309,6 +1378,7 @@ async fn request_access(State(a): S, ext: Extensions, Json(r): Json<AccessReques
             scope_path: path.as_deref(),
             scope_index: index.as_deref(),
             wait_ms,
+            also: None,
         })
     })
     .await?;

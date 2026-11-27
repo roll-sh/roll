@@ -106,6 +106,12 @@ pub trait Grants: Send + Sync + std::fmt::Debug {
         let _ = name;
         self.allows(action, &Scope::project(project))
     }
+    /// The token's name when it may only scan: a pre-receive hook's (an admin's token whose every
+    /// rule is `scan`, asking nothing otherwise), the only kind whose word about a pusher binds a
+    /// bare break-glass login (leaks.rs). Anything that may do more, or acts as a person, `None`.
+    fn hook(&self) -> Option<&str> {
+        None
+    }
 }
 
 /// Whether `repo` (`owner/name`) is under a person's own roll code owner.
@@ -326,6 +332,14 @@ pub trait Workloads: Send + Sync {
     fn grants_naming(&self, project: &str) -> crate::Result<Vec<roll_auth::Grant>> {
         Ok(self.grants()?.into_iter().filter(|g| g.scope.0.iter().any(|r| rule_may_name(r, project))).collect())
     }
+    /// roll-access's live tokens and connections whose rules reach roll secrets and that live
+    /// more than `days` from now, or never end: those `max_token_days` would refuse made now (the
+    /// operator's policy report). Not workload logins, decoys, or ones waiting for an admin.
+    /// Blocking.
+    fn outliving(&self, days: u32) -> crate::Result<Vec<crate::guardrails::Outliving>> {
+        let _ = days;
+        Ok(vec![])
+    }
     /// A long-lived roll token with `rule`, made for the request `ext` belongs to as `POST
     /// /v1/access/tokens` makes one (its owner the caller; a gateway's). Blocking.
     fn token(&self, ext: &axum::http::Extensions, name: &str, rule: roll_auth::scope::Rule) -> crate::Result<Minted> {
@@ -480,6 +494,12 @@ impl Grants for GrantGrants {
     /// A person's session knows only the projects they're a member of: anyone else's is a 404.
     fn sees(&self, project: &str) -> bool {
         self.0.kind != roll_auth::GrantKind::Session || roll_auth::roles::names_project(&self.0.scope, project)
+    }
+
+    fn hook(&self) -> Option<&str> {
+        let g = &self.0;
+        let scans = |r: &roll_auth::scope::Rule| !r.actions.is_empty() && r.actions.keys().all(|a| *a == roll_auth::scope::Action::Scan);
+        (g.kind == roll_auth::GrantKind::Token && g.user.is_none() && !g.ask_otherwise && !g.scope.0.is_empty() && g.scope.0.iter().all(scans)).then_some(&*g.name)
     }
 
     /// The one project its secrets rules name, if they name exactly one.

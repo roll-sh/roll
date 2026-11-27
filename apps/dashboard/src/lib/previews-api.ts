@@ -113,8 +113,19 @@ export interface Preview {
   schema_changes?: string[] | null;
   /** What in `schema_changes` would hurt production when it lands (a dropped table or column, a type change, a column made NOT NULL). */
   schema_risks?: string[];
+  /** Other open changes whose previews' schema changes touch the same tables: whichever lands second migrates a table the first changed. */
+  schema_overlaps?: { preview: string; branch: string; tables: string[] }[];
   /** The project's release (migrations) at its last head: how long it took on this preview's data, and the run before's. */
-  release?: { head: string; ms: number; before_ms: number | null } | null;
+  /** `locks`: the locks it held that made others wait, the strongest per table (`AccessExclusiveLock`…) and for how long. */
+  release?: { head: string; ms: number; before_ms: number | null; locks?: { table: string; mode: string; ms: number }[] } | null;
+  /** Its release rehearsed on the parents' data as it is now: asked at `head` (`ok` null while it waits), then how it went. */
+  rehearsal?: { head: string; by: string; at: number; ok: boolean | null; ms: number | null; error: string | null } | null;
+  /** Its recent GETs replayed against main's preview (0: no answer; `removed`/`added`: a JSON answer's top-level fields). */
+  replay?: { head: string; by: string; at: number; ok: boolean | null; requests: { service: string; path: string; status: number; main_status: number; removed: string[]; added: string[] }[]; error: string | null } | null;
+  /** Main's code on a copy of this head's migrated data: each page's status there and on main's (0: no answer). */
+  main_on_change?: { head: string; at: number; ms: number; pages: { service: string; path: string; status: number; main_status: number }[]; error: string | null } | null;
+  /** Columns its branches were masked with by default: they look like people's data and no rule names them (`keep` leaves one as it is). */
+  masked_by_default?: { resource: string; column: string; why: string }[];
   /** Kept past its TTL until then (epoch ms). */
   kept_until?: number | null;
   /** What its code may reach: a fork's preview is `roll` by default though the project's reach anything (`egress_forks`). */
@@ -164,6 +175,8 @@ export interface Preview {
   browser_checks_rule?: "check" | "required" | null;
   /** The project's rule for regressions against main (`check`, `required`). */
   regressions?: "check" | "required" | null;
+  /** The project's rule for its release at each head (where there's a Postgres branch to rehearse on). */
+  release_checks?: "check" | "required" | null;
   /** Who accepted its regressions at its head. */
   regressions_accepted?: { head: string; by: string; at: number } | null;
   /** Compared with main's preview at its head (errors; routes too with traces): until then nothing says it has no regressions. */
@@ -229,6 +242,18 @@ export interface PreviewJob {
 }
 
 /** A link that opens a preview until it ends, for someone outside the team. */
+/** A webhook URL into a private preview: one path, its token in the URL's query (shown once), no cookie. */
+export interface PreviewWebhook {
+  id: string;
+  path: string;
+  label: string;
+  created_by: string;
+  created_at: number;
+  revoked: boolean;
+  hits: number;
+  last_at: number | null;
+}
+
 export interface PreviewShare {
   id: string;
   expires_at: number;
@@ -433,7 +458,7 @@ function storyLabel(id: string): string {
 }
 
 export const pageLabel = (path: string) =>
-  /^@\d+$/.test(path) ? `${path.slice(1)} px` : path.startsWith("mode:") ? `${path.slice(5)} mode` : path.startsWith("story:") ? storyLabel(path.slice(6)) : path === "browser:firefox" ? "Firefox" : path === "browser:webkit" ? "WebKit" : path === "browser:webkit-phone" ? "WebKit, phone" : path || "/";
+  /^@\d+$/.test(path) ? `${path.slice(1)} px` : path.startsWith("mode:") ? `${path.slice(5)} mode` : path.startsWith("story:") ? storyLabel(path.slice(6)) : path.startsWith("snap:") ? `${path.slice(5)} (your tests)` : path === "browser:firefox" ? "Firefox" : path === "browser:webkit" ? "WebKit" : path === "browser:webkit-phone" ? "WebKit, phone" : path || "/";
 
 /** "1.2 s" or "380 ms". */
 export const duration = (ms: number) => (ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(1)} s`);
@@ -503,6 +528,10 @@ export interface PreviewSettings {
   seed: PreviewJob | null;
   /** Run at each new head, after the seed and before services deploy (migrations). */
   release?: PreviewJob | null;
+  /** When a change is queued to land, its release is rehearsed on today's data (`…/rehearse`, by roll). */
+  rehearse_when_queued?: boolean;
+  /** check: its release rehearsed on today's data at every head; required: also a landing blocker. */
+  release_checks?: "off" | "check" | "required";
   /** Run once when the preview is deleted, before its services and branches go (cleanup outside roll). */
   teardown?: PreviewJob | null;
   /** NoSQL column masks: `"nosql:<ref>"` → `{"keyspace.table.column": "mask_default()"}`. */
@@ -633,10 +662,21 @@ export const previewsApi = {
   share: (id: string, hours: number, opts: { label?: string; notes?: boolean } = {}) =>
     call<PreviewShare & { url: string }>("POST", `${one(id)}/shares`, { hours, label: opts.label ?? "", notes: opts.notes ?? false }),
   unshare: (id: string, share: string) => call<void>("DELETE", `${one(id)}/shares/${encodeURIComponent(share)}`),
+  /** Its webhook URLs (never their tokens). */
+  webhooks: (id: string) => call<PreviewWebhook[]>("GET", `${one(id)}/webhooks`),
+  /** A URL that lets requests to exactly `path` in (Stripe's, GitHub's webhooks): shown only in this answer. */
+  webhook: (id: string, path: string, label = "") => call<PreviewWebhook & { url: string }>("POST", `${one(id)}/webhooks`, { path, label }),
+  unwebhook: (id: string, webhook: string) => call<void>("DELETE", `${one(id)}/webhooks/${encodeURIComponent(webhook)}`),
   /** Its own variables, over the project's `env`. */
   vars: (id: string) => call<{ vars: Record<string, string> }>("GET", `${one(id)}/env`),
   /** Resolve a note left on its page (the note's review id): the page's button stops listing it. */
   resolveNote: (id: string, note: string) => call<{ resolved: string }>("POST", `${one(id)}/notes/${encodeURIComponent(note)}/resolve`, {}),
+  /** Its recent GETs replayed against main's preview, in the background (`replay` has it at its head). */
+  replay: (id: string) => call<NonNullable<Preview["replay"]>>("POST", `${one(id)}/replay`, {}),
+  /** The open notes on its pages (the page's own list), each with the work item made of it. */
+  notes: (id: string) => call<{ notes: { id: string; path: string; note: string; by: string; work?: { number: number; url: string } }[] }>("GET", `${one(id)}/notes`),
+  /** The note made a work item on its change's repo by roll (once a note; a guest's marked as outside the team's words). */
+  noteWork: (id: string, note: string) => call<{ number: number; url: string }>("POST", `${one(id)}/notes/${encodeURIComponent(note)}/work`, {}),
   /** The mail its services sent, caught instead of delivered (newest first; the last 50). */
   mail: (id: string) => call<{ mail: CaughtMail[] }>("GET", `${one(id)}/mail`),
   /** One caught message as it was sent, as text. */
@@ -654,6 +694,8 @@ export const previewsApi = {
   wake: (id: string) => call<Preview>("POST", `${one(id)}/wake`),
   /** Re-branches every resource, or the ones named (`"<kind>:<parent>"`). */
   reset: (id: string, resources?: string[]) => call<Preview>("POST", `${one(id)}/reset`, resources?.length ? { resources } : {}),
+  /** Rehearse its release on today's data (its next converge does). */
+  rehearse: (id: string) => call<Preview>("POST", `${one(id)}/rehearse`, {}),
   /** Its restore points (its Postgres data saved, to put back later), oldest first, and how many it may keep. */
   restorePoints: (id: string) => call<{ points: RestorePoint[]; max: number }>("GET", `${one(id)}/restore-points`),
   savePoint: (id: string, label: string) => call<RestorePoint>("POST", `${one(id)}/restore-points`, { label }),

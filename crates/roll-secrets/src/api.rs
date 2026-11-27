@@ -34,6 +34,7 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route("/v1/secrets/whoami", get(whoami))
         // Guardrails: floors every project may only tighten (guardrails.rs).
         .route("/v1/secrets/policy", get(guardrails).put(set_guardrails))
+        .route("/v1/secrets/policy/report", get(policy_report))
         .route("/v1/secrets/search", get(find))
         // Deleted projects in their recovery window (docs/secrets.md, "When a secret, an
         // environment or the project goes").
@@ -308,6 +309,11 @@ async fn guardrails(State(s): S, Who(c): Who) -> crate::Result<Response> {
     Ok(ok(blocking(s, move |s| s.guardrails(&c)).await?))
 }
 
+/// Every exception to the policy across projects (the operator's, or an admin account's).
+async fn policy_report(State(s): S, Who(c): Who) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.policy_report(&c)).await?))
+}
+
 /// Replace the policy: `{production_approvals?, leaks_rotate?, sync_kinds?, no_stored_cloud_keys?,
 /// max_token_days?, no_breakglass?}`, a field left out having no floor.
 async fn set_guardrails(State(s): S, Who(c): Who, b: Bytes) -> crate::Result<Response> {
@@ -383,7 +389,7 @@ async fn project_settings(State(s): S, Who(c): Who, Path(project): Path<String>,
         None => None,
     };
     let breakglass: Option<Vec<String>> = match o.remove("breakglass") {
-        Some(v) => Some(serde_json::from_value(v).map_err(|_| Error::BadRequest("breakglass is a list: pushers' logins, token:<id>, *".into()))?),
+        Some(v) => Some(serde_json::from_value(v).map_err(|_| Error::BadRequest("breakglass is a list: pushers' logins through a hook's token (alice@token:<id>), token:<id>, *".into()))?),
         None => None,
     };
     if let Some(k) = o.keys().next() {
@@ -404,7 +410,9 @@ async fn project_settings(State(s): S, Who(c): Who, Path(project): Path<String>,
             out.insert("leaks".into(), json!({ "rotate": s.set_leak_rotate(&project, rotate, &c)? }));
         }
         if let Some(who) = breakglass {
-            out.insert("breakglass".into(), json!(s.set_breakglass(&project, who, &c)?));
+            let (list, hooks) = s.set_breakglass(&project, who, &c)?;
+            out.insert("breakglass".into(), json!(list));
+            out.insert("breakglass_hooks".into(), json!(hooks));
         }
         Ok(out)
     })

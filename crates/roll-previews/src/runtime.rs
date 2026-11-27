@@ -808,6 +808,19 @@ impl Runtime {
 
     /// The notes left on `path` of the preview's pages, as JSON (the latest 50; for whoever has
     /// the button: link access or a team session, through roll).
+    /// The same page on main's preview, for the toolbar's Main (404 when there's none).
+    async fn main_page(&self, preview: &str, service: &str, path: &str) -> Response {
+        let url = match self.engine() {
+            Ok(e) => e.main_page_url(preview, service, path).await.ok().flatten(),
+            Err(_) => None,
+        };
+        let headers = [(header::CONTENT_TYPE, "application/json"), (header::CACHE_CONTROL, "private, no-store")];
+        match url {
+            Some(url) => (headers, axum::Json(serde_json::json!({ "url": url }))).into_response(),
+            None => (StatusCode::NOT_FOUND, headers, axum::Json(serde_json::json!({ "error": "no main preview of this page" }))).into_response(),
+        }
+    }
+
     async fn feedback_notes(&self, preview: &str, path: &str) -> Response {
         let here = match self.engine() {
             Ok(e) => e.notes_of(preview, path).await.unwrap_or_default(),
@@ -899,6 +912,38 @@ impl Runtime {
         }
     }
 
+    /// `POST /__roll/snapshot?name=` with the project's bypass secret and a PNG (at most
+    /// [`SCREENSHOT_MAX`]): the team's tests' picture, kept as page `snap:<name>`. 401 without
+    /// the secret (a fork's preview never has one), 400 for anything but a PNG.
+    async fn snapshot(&self, preview: &str, req: Request) -> Response {
+        if req.method() != axum::http::Method::POST {
+            return (StatusCode::METHOD_NOT_ALLOWED, "POST a PNG").into_response();
+        }
+        let want = match self.store.access(preview) {
+            Ok(a) => a.and_then(|a| a.bypass),
+            Err(_) => return (StatusCode::SERVICE_UNAVAILABLE, "try again").into_response(),
+        };
+        let given = req.headers().get(BYPASS_HEADER).and_then(|v| v.to_str().ok());
+        if !matches!((&want, given), (Some(want), Some(given)) if same(&crate::store::bypass_hash(given), want)) {
+            return (StatusCode::UNAUTHORIZED, "send the project's bypass secret in x-roll-preview-bypass").into_response();
+        }
+        let query = req.uri().query().unwrap_or("").to_string();
+        let param = |k: &str| query.split('&').filter_map(|kv| kv.split_once('=')).find(|(n, _)| *n == k).map(|(_, v)| percent_decode(v));
+        let (name, head) = (param("name").unwrap_or_default(), param("head"));
+        let Ok(png) = axum::body::to_bytes(req.into_body(), SCREENSHOT_MAX).await else { return (StatusCode::PAYLOAD_TOO_LARGE, "a PNG of 2 MiB at most").into_response() };
+        if !png.starts_with(b"\x89PNG\r\n\x1a\n") {
+            return (StatusCode::BAD_REQUEST, "the body is a PNG").into_response();
+        }
+        let e = match self.engine() {
+            Ok(e) => e,
+            Err(_) => return (StatusCode::SERVICE_UNAVAILABLE, "try again").into_response(),
+        };
+        match e.snapshot(preview, &name, head.as_deref(), png.to_vec()).await {
+            Ok(head) => (StatusCode::CREATED, axum::Json(serde_json::json!({ "page": format!("snap:{name}"), "head": head }))).into_response(),
+            Err(err) => err.into_response(),
+        }
+    }
+
     /// The notes a share link's guest sees on `path`: those left through it.
     async fn guest_notes(&self, preview: &str, share: &str, path: &str) -> Response {
         let here = match self.engine() {
@@ -933,6 +978,20 @@ impl Runtime {
         let team = access.mode == crate::settings::Access::Team;
         let query = req.uri().query().unwrap_or("").to_string();
         let given = |name: &str| query.split('&').filter_map(|kv| kv.split_once('=')).find(|(k, _)| *k == name).map(|(_, v)| v);
+        // A webhook URL (Stripe's, GitHub's): its token in the query, for its one path only, at
+        // every request (no cookie, no redirect); the service gets the request without it.
+        if let Some(t) = given("roll_hook").map(str::to_string)
+            && let Some(hook) = crate::visit::webhook_visit(&self.store, self.engine().ok().as_ref(), preview, &t, service, req.uri().path(), self.cfg.visitor_recheck).await
+        {
+            let rest: Vec<&str> = query.split('&').filter(|kv| !kv.starts_with("roll_hook=") && !kv.is_empty()).collect();
+            let path = req.uri().path().to_string();
+            let Ok(uri) = (if rest.is_empty() { path } else { format!("{path}?{}", rest.join("&")) }).parse() else { return Some((StatusCode::BAD_REQUEST, "bad request").into_response()) };
+            *req.uri_mut() = uri;
+            if let Ok(now) = self.store.now_ms() {
+                let _ = self.store.webhook_hit(&hook.id, now);
+            }
+            return None;
+        }
         if team {
             // A ticket from roll's dashboard, coming back: the session it opens.
             if req.uri().path() == crate::visit::PATH {
@@ -1259,6 +1318,12 @@ pub const FEEDBACK_PATH: &str = "/__roll/feedback.js";
 pub const FEEDBACK_NOTES_PATH: &str = "/__roll/feedback.json";
 /// Where a share link's guest posts a note from the button.
 pub const GUEST_NOTE_PATH: &str = "/__roll/notes";
+/// The toolbar's Main: the page on main's preview (`?path=`), as `{url}` (a team visitor's only).
+pub const MAIN_PAGE_PATH: &str = "/__roll/main";
+/// On an earlier push's link its preview no longer keeps: start it again ([`Engine::restart_push`]).
+pub const START_PUSH_PATH: &str = "/__roll/start-push";
+/// Where the team's tests send a snapshot (`POST ?name=`, a PNG, the project's bypass secret).
+pub const SNAPSHOT_PATH: &str = "/__roll/snapshot";
 pub(crate) const FEEDBACK_TAG: &[u8] = b"<script src=\"/__roll/feedback.js\" defer></script>";
 /// Adds the feedback button's tag to a page as it streams: before the first `</body>` (matched
 /// across chunk boundaries, in any case), or at the end of a page without one. Chunks pass on as
@@ -1341,6 +1406,7 @@ fn feedback_script(target: &str, guest: bool, flags: &[crate::settings::FlagRule
     let js = include_str!("feedback.js")
         .replace("__ROLL_TARGET__", &serde_json::to_string(target).unwrap_or_else(|_| "\"\"".into()))
         .replace("__ROLL_GUEST__", if guest { "true" } else { "false" })
+        .replace("__ROLL_MAIN__", if guest { "false" } else { "true" })
         .replace("__ROLL_FLAGS__", &serde_json::to_string(flags).unwrap_or_else(|_| "[]".into()));
     ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8"), (header::CACHE_CONTROL, "private, max-age=300")], js).into_response()
 }
@@ -1454,6 +1520,10 @@ fn story_shots<'a>(said: &str, pngs: impl Iterator<Item = &'a str>) -> (Vec<crat
         #[serde(default)]
         touched_left: u32,
         #[serde(default)]
+        touched_total: u32,
+        #[serde(default)]
+        touched_taken: u32,
+        #[serde(default)]
         by_files: bool,
     }
     let run: Run = serde_json::from_str(said.trim()).unwrap_or_default();
@@ -1464,6 +1534,8 @@ fn story_shots<'a>(said: &str, pngs: impl Iterator<Item = &'a str>) -> (Vec<crat
         stories: run.left.min(100_000),
         first_stories: run.first_left.into_iter().filter(|id| crate::settings::story_id_ok(id)).take(10).collect(),
         touched_stories: run.touched_left.min(run.left).min(100_000),
+        touched_total: run.touched_total.min(100_000),
+        touched_taken: run.touched_taken.min(run.touched_total).min(100_000),
         by_files: run.by_files && run.left > 0,
     };
     let said = run.stories;
@@ -1492,12 +1564,17 @@ fn play_step_of(step: Option<String>, play: Option<crate::Play>) -> Option<Strin
 }
 
 /// Shards' stories back in the touched-first order they were dealt from (one each in turn: the
-/// i-th of every shard, then the next), and what they left together.
-fn merge_story_shards(shards: Vec<(Vec<crate::ports::PageShot>, crate::Skipped)>) -> (Vec<crate::ports::PageShot>, crate::Skipped) {
+/// i-th of every shard, then the next), and what they left together. `failed` shards' share of
+/// the stories the change touched (what the others neither took nor left) counts as untaken, so
+/// the visual review holds on it as on the ones left out.
+fn merge_story_shards(shards: Vec<(Vec<crate::ports::PageShot>, crate::Skipped)>, failed: usize) -> (Vec<crate::ports::PageShot>, crate::Skipped) {
     let mut skipped = crate::Skipped::default();
+    let (mut touched, mut accounted) = (0u32, 0u32);
     let mut firsts: Vec<std::vec::IntoIter<String>> = Vec::new();
     let mut lists: Vec<std::vec::IntoIter<crate::ports::PageShot>> = Vec::new();
     for (shots, left) in shards {
+        touched = touched.max(left.touched_total);
+        accounted += left.touched_taken + left.touched_stories;
         skipped.stories += left.stories;
         skipped.touched_stories += left.touched_stories;
         skipped.by_files |= left.by_files;
@@ -1512,6 +1589,11 @@ fn merge_story_shards(shards: Vec<(Vec<crate::ports::PageShot>, crate::Skipped)>
         skipped.first_stories.extend(firsts.iter_mut().filter_map(Iterator::next));
     }
     skipped.first_stories.truncate(10);
+    if failed > 0 {
+        let missing = touched.saturating_sub(accounted);
+        skipped.touched_stories += missing;
+        skipped.stories += missing;
+    }
     (shots, skipped)
 }
 
@@ -2315,19 +2397,20 @@ impl Runtime {
         });
         let done = futures::future::join_all(shards).await;
         let ms = done.iter().map(|(_, ms)| *ms).sum();
-        let (mut oks, mut first_err) = (Vec::new(), None);
+        let (mut oks, mut first_err, mut failed) = (Vec::new(), None, 0);
         for (r, _) in done {
             match r {
                 Ok(ok) => oks.push(ok),
                 Err(e) => {
                     warn!(service = %name, error = %e, "previews: a share of Storybook's stories");
+                    failed += 1;
                     first_err.get_or_insert(e);
                 }
             }
         }
         match (oks.is_empty(), first_err) {
             (true, Some(e)) => (Err(e), ms),
-            _ => (Ok(merge_story_shards(oks)), ms),
+            _ => (Ok(merge_story_shards(oks, failed)), ms),
         }
     }
 
@@ -2816,28 +2899,70 @@ fn page_shots<'a>(asked: &[&String], said: &str, pngs: impl Iterator<Item = &'a 
 pub async fn route(State(rt): State<Arc<Runtime>>, req: Request, next: Next) -> Response {
     match named(&rt, &req) {
         Some((preview, service)) => serve_named(rt, preview, service, req).await,
-        None => match gone(&rt, &req) {
-            Some(page) => page,
+        None => match gone_host(&rt, &req) {
+            Some(g) => gone(&rt, g, req).await,
             None => next.run(req).await,
         },
     }
 }
 
+/// The earlier push a request's host was, if its preview no longer keeps it.
+fn gone_host(rt: &Runtime, req: &Request) -> Option<crate::store::GonePush> {
+    let host = req.headers().get(header::HOST).and_then(|h| h.to_str().ok()).map(str::to_string).or_else(|| req.uri().host().map(str::to_string))?;
+    rt.gone_for_host(&host)
+}
+
 /// An earlier push its preview no longer keeps: a page saying so (410), with the way to the
 /// current one, rather than a 404 that reads as a broken preview. It names no more than the link
 /// did (the service and its push), and the current link is the preview's own, behind its gate.
-fn gone(rt: &Runtime, req: &Request) -> Option<Response> {
-    let host = req.headers().get(header::HOST).and_then(|h| h.to_str().ok()).map(str::to_string).or_else(|| req.uri().host().map(str::to_string))?;
-    let crate::store::GonePush { service, revision, current_url: current, .. } = rt.gone_for_host(&host)?;
-    let short: String = revision.strip_prefix("cs_").unwrap_or(&revision).chars().take(10).collect();
-    let now = current.map_or_else(|| "<p>The preview no longer runs this service.</p>".to_string(), |u| format!("<p><a href=\"{}\">Open the latest push</a>.</p>", escape(&u)));
+/// A trusted, private preview's page also starts it again on demand ([`START_PUSH_PATH`]): a GET
+/// through the preview's own gate (where the link's token or roll's sign-in sets its cookie) is a
+/// page that asks, and only its own form's POST (this host's origin), from a visitor in by the
+/// link's cookie or a session of a person signed in to roll (not a share link, not the CI
+/// bypass), starts it, at most once a minute a preview. A link scanner or another site's link
+/// changes nothing.
+async fn gone(rt: &Arc<Runtime>, g: crate::store::GonePush, mut req: Request) -> Response {
+    let trusted = rt.store.row(&g.preview).is_ok_and(|r| r.trusted);
+    let private = rt.store.access(&g.preview).ok().flatten().is_some_and(|a| a.required());
+    let startable = trusted && private;
+    if req.uri().path() == START_PUSH_PATH && startable {
+        if let Some(r) = rt.gate(&g.preview, &g.service, &mut req).await {
+            return r;
+        }
+        if req.extensions().get::<ThroughRoll>().is_none() {
+            return roll_page(StatusCode::FORBIDDEN, "This push can't start again from here", "<p>Open the preview's own link first: a share link doesn't start its earlier pushes.</p>");
+        }
+        if req.method() == axum::http::Method::GET {
+            return roll_page(StatusCode::OK, "Start this push again?", &format!("<p>It runs on the preview's data now, and the oldest push of <code>{}</code> it keeps goes in its place.</p><form method=\"post\" action=\"{START_PUSH_PATH}\"><button type=\"submit\">Start it</button></form>", escape(&g.service)));
+        }
+        let host = req.headers().get(header::HOST).and_then(|h| h.to_str().ok()).unwrap_or("").to_string();
+        let origin = req.headers().get(header::ORIGIN).and_then(|h| h.to_str().ok()).unwrap_or("");
+        if req.method() != axum::http::Method::POST || origin.split_once("://").map(|(_, h)| h) != Some(host.as_str()) {
+            return (StatusCode::FORBIDDEN, "started from this page's own form only").into_response();
+        }
+        let Ok(engine) = rt.engine() else { return (StatusCode::SERVICE_UNAVAILABLE, "try again").into_response() };
+        return match engine.restart_push(&g, "a visitor").await {
+            Ok(_) => {
+                let mut r = StatusCode::SEE_OTHER.into_response();
+                r.headers_mut().insert(header::LOCATION, HeaderValue::from_static("/"));
+                r.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+                r
+            }
+            Err(e) => roll_page(StatusCode::CONFLICT, "This push can't start again", &format!("<p>{}</p>", escape(&e.to_string()))),
+        };
+    }
+    let short: String = g.revision.strip_prefix("cs_").unwrap_or(&g.revision).chars().take(10).collect();
+    let now = g.current_url.as_ref().map_or_else(|| "<p>The preview no longer runs this service.</p>".to_string(), |u| format!("<p><a href=\"{}\">Open the latest push</a>.</p>", escape(u)));
+    // The link's own query rides along: a token it carried lets its visitor in to start it.
+    let query = req.uri().query().map(|q| format!("?{q}")).unwrap_or_default();
+    let again = if startable { format!("<p><a href=\"{START_PUSH_PATH}{}\">Start this push again</a>.</p>", escape(&query)) } else { String::new() };
     let mut r = roll_page(
         StatusCode::GONE,
         "This push isn't kept any more",
-        &format!("<p>This link was <code>{}</code> at an earlier push (<code>{}</code>). A preview keeps the last {} pushes of each service; this one was replaced since.</p>{now}", escape(&service), escape(&short), crate::store::PINNED_KEEP),
+        &format!("<p>This link was <code>{}</code> at an earlier push (<code>{}</code>). A preview keeps the last {} pushes of each service; this one was replaced since.</p>{now}{again}", escape(&g.service), escape(&short), crate::store::PINNED_KEEP),
     );
     r.headers_mut().insert(header::HeaderName::from_static("x-robots-tag"), header::HeaderValue::from_static("noindex"));
-    Some(r)
+    r
 }
 
 /// A request roll apps' ingress hands on (a name under a project's own preview domain that no
@@ -2845,7 +2970,10 @@ fn gone(rt: &Runtime, req: &Request) -> Option<Response> {
 pub async fn serve_host(rt: Arc<Runtime>, req: Request) -> Response {
     match named(&rt, &req) {
         Some((preview, service)) => serve_named(rt, preview, service, req).await,
-        None => gone(&rt, &req).unwrap_or_else(|| (StatusCode::NOT_FOUND, "no such preview").into_response()),
+        None => match gone_host(&rt, &req) {
+            Some(g) => gone(&rt, g, req).await,
+            None => (StatusCode::NOT_FOUND, "no such preview").into_response(),
+        },
     }
 }
 
@@ -2893,6 +3021,11 @@ fn origin_of(url: &str) -> Option<String> {
 
 /// A request for a preview's service: through its gate, then to the service.
 async fn serve(rt: Arc<Runtime>, preview: String, service: String, mut req: Request) -> Response {
+    // The team's own snapshots: by the project's bypass secret only, whatever the preview's
+    // access (a public preview's too), never through its gate.
+    if req.uri().path() == SNAPSHOT_PATH {
+        return rt.snapshot(&preview, req).await;
+    }
     if let Some(r) = rt.gate(&preview, &service, &mut req).await {
         return r;
     }
@@ -2925,6 +3058,12 @@ async fn serve(rt: Arc<Runtime>, preview: String, service: String, mut req: Requ
             Feedback::Team(_) => rt.feedback_notes(&preview, &path).await,
             Feedback::Guest(share) => rt.guest_notes(&preview, &share.id, &path).await,
         };
+    }
+    if req.uri().path() == MAIN_PAGE_PATH
+        && let Some(Feedback::Team(_)) = &target
+    {
+        let path = req.uri().query().unwrap_or("").split('&').filter_map(|kv| kv.split_once('=')).find(|(k, _)| *k == "path").map(|(_, v)| percent_decode(v)).unwrap_or_default();
+        return rt.main_page(&preview, &service, &path).await;
     }
     if req.uri().path() == GUEST_NOTE_PATH
         && req.method() == axum::http::Method::POST
@@ -3178,6 +3317,35 @@ mod tests {
         assert!(raw(post("https://evil.example")).await.starts_with("HTTP/1.1 403"), "another site's page posts nothing");
         rt.store.revoke_share(&row.id, &share.id).unwrap();
         assert!(raw(with_share).await.starts_with("HTTP/1.1 401"), "revoked: out at once");
+        // An earlier push past the last three: its link says it's gone and offers to start it
+        // again, which only a visitor the preview's gate lets in may ask.
+        let url = |h: &str| format!("http://{h}.preview.test");
+        rt.store.pin(&row.id, "web", "cs_old", &url).unwrap();
+        let old_host = rt.store.pinned(&row.id).unwrap().into_iter().find(|p| p.revision == "cs_old").unwrap().url.split("://").nth(1).unwrap().to_string();
+        for rev in ["cs_p1", "cs_p2", "cs_p3"] {
+            rt.store.pin(&row.id, "web", rev, &url).unwrap();
+        }
+        let gone_page = raw(format!("GET / HTTP/1.1\r\nHost: {old_host}\r\nConnection: close\r\n\r\n")).await;
+        assert!(gone_page.starts_with("HTTP/1.1 410") && gone_page.contains("/__roll/start-push"), "{gone_page}");
+        assert!(raw(format!("GET /__roll/start-push HTTP/1.1\r\nHost: {old_host}\r\nConnection: close\r\n\r\n")).await.starts_with("HTTP/1.1 401"), "not without the preview's access");
+        // Through the link's cookie, a GET only asks (a link scanner changes nothing), and a POST
+        // from another origin is refused.
+        let ask = raw(format!("GET /__roll/start-push HTTP/1.1\r\nHost: {old_host}\r\nCookie: roll_access_{}={token}\r\nConnection: close\r\n\r\n", row.id)).await;
+        assert!(ask.starts_with("HTTP/1.1 200") && ask.contains("method=\"post\""), "{ask}");
+        let forged = raw(format!("POST /__roll/start-push HTTP/1.1\r\nHost: {old_host}\r\nOrigin: https://evil.example\r\nCookie: roll_access_{}={token}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", row.id)).await;
+        assert!(forged.starts_with("HTTP/1.1 403"), "{forged}");
+        // A webhook URL: its one path only, the service never seeing its token, no cookie; it
+        // isn't a share link, and it's out at once when revoked.
+        let (hook, htoken) = rt.store.create_webhook(&row.id, "web", "/hooks/stripe", "ada", None, "Stripe").unwrap();
+        let post_hook = format!("POST /hooks/stripe?roll_hook={htoken}&x=1 HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        let hooked = raw(post_hook.clone()).await;
+        assert!(hooked.ends_with("service saw /hooks/stripe?x=1") && !hooked.to_ascii_lowercase().contains("set-cookie"), "{hooked}");
+        assert!(raw(format!("GET /hello?roll_hook={htoken} HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nConnection: close\r\n\r\n")).await.starts_with("HTTP/1.1 401"), "another path");
+        assert!(raw(format!("GET /hello?roll_share={htoken} HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nConnection: close\r\n\r\n")).await.starts_with("HTTP/1.1 401"), "not a share link");
+        assert_eq!(rt.store.webhooks(&row.id).unwrap()[0].hits, 1);
+        assert!(rt.store.webhook_live(&row.id, &htoken, "api", "/hooks/stripe").unwrap().is_none(), "its own service's path only");
+        rt.store.revoke_webhook(&row.id, &hook.id).unwrap();
+        assert!(raw(post_hook).await.starts_with("HTTP/1.1 401"), "revoked: out at once");
         // The notes already left on a page: for the same visitors only.
         let notes = raw(format!("GET /__roll/feedback.json?path=%2F HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nCookie: roll_access_{}={token}\r\nConnection: close\r\n\r\n", row.id)).await;
         assert!(notes.contains("application/json") && notes.ends_with("[]"), "{notes}");
@@ -3186,6 +3354,12 @@ mod tests {
         assert!(raw(page("text/html")).await.ends_with("<p>asked for any</p></BODY></html>"), "the rule turns it off");
         let (secret, _) = rt.store.rotate_bypass("prj_1").unwrap();
         assert!(raw(with(&secret)).await.ends_with("service saw /hello"));
+        // The team's snapshots: the project's secret only (not the link's cookie), never reaching
+        // the service; past it, the engine keeps the picture (engine.rs, the_teams_snapshots_…).
+        let snap = |head: &str| format!("POST /__roll/snapshot?name=checkout HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\n{head}Content-Type: image/png\r\nContent-Length: 8\r\nConnection: close\r\n\r\n\u{89}PNG\r\n\u{1a}\n");
+        assert!(raw(snap(&format!("Cookie: roll_access_{}={token}\r\n", row.id))).await.starts_with("HTTP/1.1 401"), "a visitor can't send one");
+        let past = raw(snap(&format!("X-Roll-Preview-Bypass: {secret}\r\n"))).await;
+        assert!(!past.starts_with("HTTP/1.1 401") && !past.contains("service saw"), "{past}");
         assert!(raw(with("rpb_wrong")).await.starts_with("HTTP/1.1 401"));
         rt.store.rotate_bypass("prj_1").unwrap();
         assert!(raw(with(&secret)).await.starts_with("HTTP/1.1 401"), "a rotated secret stops working");
@@ -3551,9 +3725,14 @@ mod tests {
         let shot = |id: &str| crate::ports::PageShot { path: format!("story:{id}"), png: Vec::new(), errors: 0, report: Default::default() };
         let left = |n: u32, first: &[&str], touched: u32| crate::Skipped { stories: n, first_stories: first.iter().map(|s| s.to_string()).collect(), touched_stories: touched, ..Default::default() };
         // Dealt a, b, c, d, e over two: a, c, e and b, d.
-        let (shots, skipped) = merge_story_shards(vec![(vec![shot("a"), shot("c"), shot("e")], left(2, &["g", "i"], 1)), (vec![shot("b"), shot("d")], left(1, &["h"], 1))]);
+        let (shots, skipped) = merge_story_shards(vec![(vec![shot("a"), shot("c"), shot("e")], left(2, &["g", "i"], 1)), (vec![shot("b"), shot("d")], left(1, &["h"], 1))], 0);
         assert_eq!(shots.iter().map(|p| p.path.as_str()).collect::<Vec<_>>(), ["story:a", "story:b", "story:c", "story:d", "story:e"]);
         assert_eq!((skipped.stories, skipped.touched_stories, skipped.first_stories), (3, 2, vec!["g".to_string(), "h".to_string(), "i".to_string()]));
+        // A third shard failed: its share of the 10 the change touched (the two said took 4 and
+        // left 2 of them) is untaken too.
+        let said = |taken: u32, touched: u32| crate::Skipped { touched_total: 10, touched_taken: taken, touched_stories: touched, ..Default::default() };
+        let (_, skipped) = merge_story_shards(vec![(vec![shot("a")], said(3, 1)), (vec![shot("b")], said(1, 1))], 1);
+        assert_eq!(skipped.touched_stories, 2 + 4, "the failed share's 4 counted as untaken");
     }
 
     /// A stories run's report is the preview's code's: each story once, by an id Storybook would

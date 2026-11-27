@@ -66,9 +66,14 @@ Where this design or the request left a choice open, the stricter one:
     stays); the experiment ends now if it still runs and records `promoted: {variant, at}`. Once
     per experiment (409 again). An ended experiment can't be started again by a `PUT` (400): its
     counts would mix two tests.
-- **Left:** confidence intervals beside the p-values, promoting from the Relevance tab, judgment
-  lists and evaluation (section 1), the `roll_` rule types (section 4) and dynamic re-ranking
-  (section 5).
+- **Intervals and promoting from the tab** (also built): each rate carries its 95% Wilson
+  interval, and each comparison the difference from the baseline with its 95% interval
+  (Newcombe's hybrid score interval, from the two Wilson intervals, so it agrees with them at
+  small counts and rates near 0 where the plain normal interval doesn't). The Relevance tab shows
+  them under each rate, reads each experiment's state from its application (running, ended,
+  promoted) and promotes a variant through the `_promote` route after saying what it does.
+- **Left:** judgment lists and evaluation (section 1), the `roll_` rule types (section 4) and
+  dynamic re-ranking (section 5).
 
 ## Why
 
@@ -95,6 +100,24 @@ lacks is a roll extension under a `roll_` name, and Elasticsearch's own APIs kee
 9.5.5 does.
 
 ## 1. Judgments and offline evaluation
+
+**First slice as built** (`feature/search-evaluate`): `POST /v1/search/clusters/{id}/indices/{index}/evaluate`
+(`crates/search-control/src/evaluate.rs`) takes the judgments in the request, `[{query, ratings:
+[{_id, rating, _index?}]}]` (up to 500 queries of 200 ratings), and one or two configurations:
+a search body with `{{query}}` where each query goes, or a search template (a stored one by `id`,
+or an inline `source`, with `params`). Each configuration is one `_rank_eval` on the index with
+the judged queries as its templated requests, run as the index's routes run (a read), so the
+cluster checks and meters them as any search; the metric is `_rank_eval`'s, nDCG@10 by default.
+With two, the second is compared against the first: the difference in score, how many queries
+got better, worse or stayed, and the 50 that moved most each way. `roll search index evaluate`
+reads judgments as JSON or CSV (`query,_id,rating`, Quepid's export) and fails a CI run with
+`--fail-below` or `--fail-on-worse`; MCP's `search_evaluate` maps the route; the Relevance tab's
+Evaluate panel takes a paste or a file and prints the CI line. A configuration may also be a
+search application (`application`, on the application's own name), each query rendered by its
+`_render_query` (dictionary and defaults kept), or one of its experiment's variants
+(`variant: {experiment, variant}`, the variant's params over the query): a variant is scored on
+the judgments before it takes traffic. Next: judgment lists kept as indices and built from
+clicks (below).
 
 - **Judgment lists.** A judgment list is an ordinary index the owner names
   (`roll-judgments-<name>`): documents `{query, index, doc_id, rating, source}`, with `source`

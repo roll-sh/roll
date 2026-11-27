@@ -204,6 +204,33 @@ pub fn granted_by(action: &str, cluster: bool) -> Vec<&'static str> {
 /// Every cluster privilege name in the order Elasticsearch lists them in validation errors.
 const CLUSTER_ERROR_ORDER: &str = "manage_own_api_key,manage_data_stream_global_retention,monitor_data_stream_global_retention,none,cancel_task,clone_api_key,cross_cluster_replication,cross_cluster_search,delegate_pki,grant_api_key,manage_autoscaling,manage_index_templates,manage_logstash_pipelines,manage_oidc,manage_saml,manage_search_application,manage_search_query_rules,manage_search_synonyms,manage_service_account,manage_token,manage_user_profile,monitor_connector,monitor_enrich,monitor_esql,monitor_inference,monitor_ml,monitor_reindex,monitor_rollup,monitor_snapshot,monitor_stats,monitor_text_structure,monitor_watcher,post_behavioral_analytics_event,read_ccr,read_connector_secrets,read_fleet_secrets,read_ilm,read_pipeline,read_project_routing,read_security,read_slm,transport_client,write_connector_secrets,write_fleet_secrets,create_snapshot,manage_behavioral_analytics,manage_ccr,manage_connector,manage_enrich,manage_ilm,manage_inference,manage_ml,manage_project_routing,manage_reindex,manage_rollup,manage_slm,manage_watcher,monitor_data_frame_transforms,monitor_transform,manage_ingest_pipelines,manage_pipeline,manage_api_key,manage_data_frame_transforms,manage_transform,manage_security,monitor,manage,all";
 
+/// The index actions two names' permissions are compared on ([`super::Effective::no_wider`]):
+/// the index action of every API ([`action_of`]), the actions the evaluator authorizes inside a
+/// request ([`SUB_ACTIONS`]), and an action of every pattern of every named index privilege (its
+/// `*` filled), so whatever a grant reaches by name, raw action or action group, one of them
+/// stands for it.
+pub static PROBE_ACTIONS: std::sync::LazyLock<Vec<String>> = std::sync::LazyLock::new(|| {
+    let apis = crate::routes::API_NAMES.iter().map(|api| action_of(api)).filter(|(scope, _)| *scope == Scope::Index).map(|(_, a)| a);
+    let named = INDEX.iter().flat_map(|n| n.patterns.iter()).filter(|p| !p.starts_with('!')).map(|p| p.replace('*', "roll-probe"));
+    let mut out: Vec<String> = apis.chain(SUB_ACTIONS.iter().map(|a| a.to_string())).chain(named).collect();
+    out.sort();
+    out.dedup();
+    out
+});
+
+/// Index actions authorized for a part of a request rather than for an API: bulk items and the
+/// per-index reads of `_mget` and `_mtermvectors`.
+pub const SUB_ACTIONS: &[&str] = &[
+    "indices:data/write/bulk[s]",
+    "indices:data/write/index",
+    "indices:data/write/delete",
+    "indices:data/write/update",
+    "indices:data/read/mget[shard]",
+    "indices:data/read/mtv[shard]",
+    "indices:admin/auto_create",
+    "indices:admin/mapping/auto_put",
+];
+
 const INDEX_ERROR_ORDER: &str = "all,auto_configure,create,create_dataset,create_doc,create_index,create_view,cross_cluster_replication,cross_cluster_replication_internal,delete,delete_dataset,delete_index,delete_view,index,maintenance,manage,manage_data_stream_lifecycle,manage_dataset,manage_failure_store,manage_follow_index,manage_ilm,manage_leader_index,manage_view,monitor,none,read,read_cross_cluster,read_dataset_metadata,read_failure_store,read_view_metadata,view_index_metadata,write";
 
 pub fn is_cluster_privilege(p: &str) -> bool {
@@ -265,6 +292,9 @@ pub fn action_of(api: &str) -> (Scope, String) {
         // roll's A/B tests (`crate::xpack::entsearch::experiments`): promoting a variant writes
         // the search application, as its `PUT` does.
         "roll.search_application.promote_experiment" => Some((Cluster, "cluster:admin/xpack/application/search_application/put")),
+        // OTLP's intake (`crate::otlp`) writes through one `_bulk` as its client: each target
+        // data stream is authorized there, as any write's.
+        "roll.otlp.logs" | "roll.otlp.traces" => Some((Any, "indices:data/write/bulk")),
         "sql.query" | "sql.translate" => Some((Any, "indices:data/read/sql")),
         "index" | "create" => Some((Index, "indices:data/write/index")),
         "update" => Some((Index, "indices:data/write/update")),
@@ -328,6 +358,13 @@ pub fn action_of(api: &str) -> (Scope, String) {
         "ism.change_policy" => Some((Cluster, "cluster:admin/opendistro/ism/managedindex/change")),
         "ism.retry" => Some((Cluster, "cluster:admin/opendistro/ism/managedindex/retry")),
         "ism.explain" => Some((Cluster, "cluster:admin/opendistro/ism/managedindex/explain")),
+        "sm.create_policy" | "sm.update_policy" => Some((Cluster, "cluster:admin/opensearch/snapshot_management/policy/write")),
+        "sm.get_policy" => Some((Cluster, "cluster:admin/opensearch/snapshot_management/policy/get")),
+        "sm.get_policies" => Some((Cluster, "cluster:admin/opensearch/snapshot_management/policy/search")),
+        "sm.delete_policy" => Some((Cluster, "cluster:admin/opensearch/snapshot_management/policy/delete")),
+        "sm.explain_policy" => Some((Cluster, "cluster:admin/opensearch/snapshot_management/policy/explain")),
+        "sm.start_policy" => Some((Cluster, "cluster:admin/opensearch/snapshot_management/policy/start")),
+        "sm.stop_policy" => Some((Cluster, "cluster:admin/opensearch/snapshot_management/policy/stop")),
         "search_pipeline.put" => Some((Cluster, "cluster:admin/search/pipeline/put")),
         "search_pipeline.get" => Some((Cluster, "cluster:admin/search/pipeline/get")),
         "search_pipeline.delete" => Some((Cluster, "cluster:admin/search/pipeline/delete")),
@@ -485,11 +522,23 @@ impl Permission {
         self.indices.iter().any(|g| (!restricted || g.allow_restricted) && grant_names(g, index) && g.privileges.iter().any(|p| index_grants(p, action)))
     }
 
-    /// Whether the role may read the failure store of `index` (a data stream): only
-    /// `read_failure_store` and `all` grant it, as Elasticsearch's failure store selector
-    /// privileges (`read` doesn't, though its action patterns cover the failure store's).
-    pub fn reads_failure_store(&self, index: &str) -> bool {
-        self.indices.iter().any(|g| grant_names(g, index) && g.privileges.iter().any(|p| p == "read_failure_store" || p == "all"))
+    /// Whether the role may perform `action` on the failure store of `index` (a data stream),
+    /// as Elasticsearch's failure store selector privileges grant it: `read_failure_store` the
+    /// actions `read` covers, `manage_failure_store` those `manage` covers (settings, mappings,
+    /// rollover; never a write or a read), `all` every one. No other privilege reaches it
+    /// (`read`'s patterns cover the failure store's, but `read` doesn't).
+    /// A restricted data stream's needs `allow_restricted_indices`, as [`Permission::allows_index`].
+    pub fn grants_failure_store(&self, action: &str, index: &str, restricted: bool) -> bool {
+        self.indices.iter().any(|g| {
+            (!restricted || g.allow_restricted)
+                && grant_names(g, index)
+                && g.privileges.iter().any(|p| match p.as_str() {
+                    "all" => true,
+                    "read_failure_store" => index_grants("read", action),
+                    "manage_failure_store" => index_grants("manage", action),
+                    _ => false,
+                })
+        })
     }
 
     /// Whether the role holds a named index privilege on `index` (directly, through `all`, or

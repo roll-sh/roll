@@ -81,8 +81,54 @@ impl crate::Apps {
                     Err(e) => sink().line(format!("deploying {url} at {}: {e}", &sha[..12])),
                 }
             }
+            started.extend(self.watch_deploy_tags(&svc, url, &remote).await);
         }
         started
+    }
+
+    /// The repository's new tags an environment's `deploy_tags` matches, with no hook (Cloud
+    /// Build's triggers): the newest of them by version order (`v10` after `v9`), the older ones
+    /// marked as seen so a pass never puts an older release live after a newer one. Through the
+    /// hook's own tag path.
+    async fn watch_deploy_tags(self: &std::sync::Arc<Self>, svc: &crate::store::ServiceRow, url: &str, remote: &Remote<'_>) -> Vec<String> {
+        let sid = svc.id.clone();
+        let Ok(envs) = self.db(move |s| s.environments(&sid)).await else { return Vec::new() };
+        let mut watched = Vec::new();
+        for e in envs.into_iter().filter(|e| !e.ephemeral) {
+            let (sid, en) = (svc.id.clone(), e.name.clone());
+            if let Ok(Some((pattern, seen))) = self.db(move |s| s.deploy_tags(&sid, &en)).await {
+                watched.push((e.name, pattern, seen));
+            }
+        }
+        if watched.is_empty() {
+            return Vec::new();
+        }
+        let Ok(refs) = remote.ls_refs().await else { return Vec::new() };
+        let tags: Vec<&str> = refs.refs.iter().filter_map(|r| r.name.strip_prefix("refs/tags/")).collect();
+        let mut wanted = Vec::new();
+        for (env, pattern, seen) in watched {
+            let mut new: Vec<&str> = tags.iter().copied().filter(|t| crate::tags::tag_matches(&pattern, t) && !seen.iter().any(|s| s == t)).collect();
+            new.sort_by(|a, b| crate::tags::version_order(a, b));
+            let Some(newest) = new.pop() else { continue };
+            // Older than a release already seen (a backport tagged after it): marked, never put
+            // live by the watch (a person's push of it through the hook still is).
+            let newest_seen = seen.iter().filter(|t| crate::tags::tag_matches(&pattern, t)).max_by(|a, b| crate::tags::version_order(a, b));
+            if newest_seen.is_some_and(|s| crate::tags::version_order(newest, s) == std::cmp::Ordering::Less) {
+                new.push(newest);
+            } else {
+                wanted.push(newest.to_string());
+            }
+            for older in new {
+                let (sid, en, t) = (svc.id.clone(), env.clone(), older.to_string());
+                let _ = self.db(move |s| s.mark_tag_seen(&sid, &en, &t)).await;
+            }
+        }
+        wanted.sort();
+        wanted.dedup();
+        match self.deploy_pushed_tags(&svc.id, svc, url, &wanted, "tag watch").await {
+            Ok((_, deployed, _)) => deployed.into_iter().map(|d| d.id).collect(),
+            Err(_) => Vec::new(),
+        }
     }
 }
 
@@ -387,6 +433,37 @@ async fn fetch_filtered(r: &Remote<'_>, args: FetchArgs) -> anyhow::Result<code_
         Err(e) if args.filter.is_some() && e.to_string().contains("does not support filters") => r.fetch(&FetchArgs { filter: None, ..args }).await,
         r => r,
     }
+}
+
+/// The commits `to` brings since `from`, newest first, at most `limit` (Render's for GitLab and
+/// Bitbucket): one fetch of commits only (`tree:0`, `from` as what's had), walked back from `to`
+/// by its parents. The flag: whether it reached `from` (all of them). `None`: no fetch could say.
+pub async fn commits(r: &Remote<'_>, from: &str, to: &str, limit: usize) -> anyhow::Result<Option<(Vec<crate::integrations::CommitInfo>, bool)>> {
+    let (a, b): (ObjectId, ObjectId) = (from.parse().map_err(|_| anyhow::anyhow!("{from} isn't a commit id"))?, to.parse().map_err(|_| anyhow::anyhow!("{to} isn't a commit id"))?);
+    let args = FetchArgs { wants: vec![b], haves: vec![a], depth: Some(limit as u32 + 1), filter: Some(code_git::Filter::TreeNone) };
+    let objects: HashMap<ObjectId, Object> = fetch_filtered(r, args).await?.objects.into_iter().filter(|o| o.kind == Kind::Commit).map(|o| (o.id, o)).collect();
+    let (mut out, mut queue, mut seen, mut reached) = (Vec::new(), std::collections::VecDeque::from([b]), std::collections::HashSet::new(), false);
+    while let Some(c) = queue.pop_front() {
+        if c == a {
+            reached = true;
+            continue;
+        }
+        if out.len() >= limit || !seen.insert(c) {
+            continue;
+        }
+        // Past what came (a shallow edge): the rest is unknown.
+        let Some(o) = objects.get(&c) else { continue };
+        let info = parse_commit(&o.data).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let text = String::from_utf8_lossy(&o.data);
+        let (headers, message) = text.split_once("\n\n").unwrap_or((&text, ""));
+        let author = headers.lines().find_map(|l| l.strip_prefix("author ")).map(|a| a.split(" <").next().unwrap_or(a).to_string()).unwrap_or_default();
+        out.push(crate::integrations::CommitInfo { sha: c.to_string(), summary: message.lines().next().unwrap_or("").chars().take(200).collect(), author });
+        queue.extend(info.parents);
+    }
+    if out.is_empty() && !reached {
+        return Ok(None);
+    }
+    Ok(Some((out.clone(), reached && out.len() < limit)))
 }
 
 /// The paths that differ between the trees of commits `from` and `to`: one shallow fetch of

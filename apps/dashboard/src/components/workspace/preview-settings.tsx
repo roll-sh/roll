@@ -317,7 +317,7 @@ function Form({
                       />
                       <p className="mt-1 text-[11px] text-subtle">
                         {r.kind === "postgres"
-                          ? "Rewritten in each preview's branch before anything serves it, one column per line: schema.table.column = null, redact, hash, email or fixed:<value>. The parent is untouched."
+                          ? "Rewritten in each preview's branch before anything serves it, one column per line: schema.table.column = null, redact, hash, email or fixed:<value>. With any rule here, a column that looks like people's data and has none is masked too: keep leaves one as it is. The parent is untouched."
                           : r.kind === "search"
                             ? "Rewritten in each preview's branch before anything serves it, one field per line: index.field (nested: index.a.b) = redact, remove or email. The parent is untouched."
                             : "Masked in previews, one column per line: keyspace.table.column = mask function. The parent is untouched."}
@@ -487,6 +487,19 @@ function Form({
           placeholder={["node:22", "npm ci && npm run migrate"]}
           onChange={(j) => set("release", j)}
         />
+        {s.release && (
+          <Toggle
+            label="Rehearse when queued"
+            note="When a change is queued to land, its release runs once more on fresh branches of the parents as they are now (masked as the rules say): a preview's data may be days old."
+            checked={s.rehearse_when_queued ?? false}
+            onChange={(v) => set("rehearse_when_queued", v)}
+          />
+        )}
+        {s.release && (
+          <Field group label="Release checks" note="Check: the release is rehearsed on today's data at every head of a change, beside main's code on its migrated data. Required: also keeps it from landing in roll until both pass at its head.">
+            <Choice value={s.release_checks ?? "off"} options={["off", "check", "required"]} onChange={(v) => set("release_checks", v)} labels={{ off: "Off", check: "At every head", required: "Required to land" }} />
+          </Field>
+        )}
         <Job
           label="Teardown"
           note="Runs once when a preview goes, before its services and branches: remove what its code made outside roll (test webhooks, OAuth redirect URIs). A failure is logged; the preview goes anyway."

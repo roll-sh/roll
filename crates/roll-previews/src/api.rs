@@ -33,11 +33,15 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route("/v1/previews/{id}/env", get(vars).put(put_vars))
         .route("/v1/previews/{id}/shares", get(shares).post(share))
         .route("/v1/previews/{id}/shares/{share}", axum::routing::delete(unshare))
+        .route("/v1/previews/{id}/webhooks", get(webhooks).post(webhook))
+        .route("/v1/previews/{id}/webhooks/{webhook}", axum::routing::delete(unwebhook))
         .route("/v1/previews/{id}/screenshot", get(screenshot))
         .route("/v1/previews/{id}/qr.png", get(qr))
         .route("/v1/previews/{id}/connect", get(connect))
         .route("/v1/previews/{id}/notes", get(notes))
         .route("/v1/previews/{id}/notes/{note}/resolve", post(resolve_note))
+        .route("/v1/previews/{id}/notes/{note}/work", post(note_work))
+        .route("/v1/previews/{id}/replay", post(replay))
         .route("/v1/previews/{id}/notes/{note}/crop", get(note_crop))
         .route("/v1/previews/{id}/mail", get(mails))
         .route("/v1/previews/{id}/mail/{mail}", get(mail_raw))
@@ -46,6 +50,7 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route("/v1/previews/{id}/restore-points", get(restore_points).post(save_point))
         .route("/v1/previews/{id}/restore-points/{point}", axum::routing::delete(delete_point))
         .route("/v1/previews/{id}/restore-points/{point}/restore", post(restore_point))
+        .route("/v1/previews/{id}/rehearse", post(rehearse))
         .route("/v1/previews/{id}/data/{resource}", get(browse_data))
         // roll's word for a preview's own service: the address is its credential (rolld's gate
         // lets it through, as the trace intake).
@@ -535,6 +540,51 @@ async fn unshare(AxState(e): S, Path((id, share)): Path<(String, String)>) -> cr
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct WebhookBody {
+    /// The one path it lets requests to (`/api/stripe`), no query.
+    path: String,
+    /// What it's for (`"Stripe"`), shown with it.
+    #[serde(default)]
+    label: String,
+}
+
+async fn webhooks(AxState(e): S, Path(id): Path<String>) -> crate::Result<Json<Vec<crate::Webhook>>> {
+    check_id(&id)?;
+    blocking(e, move |e| {
+        e.store.row(&id)?;
+        e.store.webhooks(&id)
+    })
+    .await
+    .map(Json)
+}
+
+/// The URL is in this answer only (its token isn't kept).
+async fn webhook(AxState(e): S, Path(id): Path<String>, who: Option<axum::Extension<roll_auth::SignedIn>>, grant: Option<axum::Extension<roll_auth::Grant>>, b: Bytes) -> crate::Result<Response> {
+    check_id(&id)?;
+    let w: WebhookBody = body(&b)?;
+    let maker = who.as_ref().map(|axum::Extension(u)| u.user.clone()).or_else(|| grant.and_then(|axum::Extension(g)| g.user.map(|u| u.to_string())));
+    let by = who.map(|axum::Extension(u)| u.handle).unwrap_or_else(|| "operator".into());
+    let (hook, url) = e.webhook(&id, &w.path, &by, maker.as_deref(), &w.label).await?;
+    let mut v = serde_json::to_value(&hook).unwrap_or_default();
+    v["url"] = json!(url);
+    Ok((StatusCode::CREATED, Json(v)).into_response())
+}
+
+async fn unwebhook(AxState(e): S, Path((id, webhook)): Path<(String, String)>) -> crate::Result<Response> {
+    check_id(&id)?;
+    blocking(e, move |e| {
+        e.store.revoke_webhook(&id, &webhook)?;
+        // roll apps' gate is told at the next converge.
+        e.store.update(&id, |row| row.next_at = 0)?;
+        e.kick();
+        e.store.log(&id, &format!("webhook URL {webhook} revoked"))
+    })
+    .await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct VarsBody {
     /// `null` removes one.
     vars: BTreeMap<String, Option<String>>,
@@ -583,6 +633,40 @@ async fn resolve_note(AxState(e): S, Path((id, note)): Path<(String, String)>, w
     };
     e.resolve_note(&id, &note, &by).await?;
     Ok(Json(serde_json::json!({ "resolved": note })))
+}
+
+/// Its recent requests replayed against main's preview, in the background (202).
+async fn replay(AxState(e): S, Path(id): Path<String>, who: Option<axum::Extension<roll_auth::SignedIn>>, grant: Option<axum::Extension<roll_auth::Grant>>) -> crate::Result<Response> {
+    check_id(&id)?;
+    let by = match (who, grant) {
+        (Some(axum::Extension(u)), None) => u.handle,
+        (_, Some(axum::Extension(g))) => format!("token:{}", g.name),
+        (None, None) => "operator".into(),
+    };
+    let asked = e.replay(&id, &by).await?;
+    Ok((StatusCode::ACCEPTED, Json(asked)).into_response())
+}
+
+/// The note made a work item on its change's repo (the same one when asked again).
+async fn note_work(AxState(e): S, Path((id, note)): Path<(String, String)>, who: Option<axum::Extension<roll_auth::SignedIn>>, grant: Option<axum::Extension<roll_auth::Grant>>, ext: axum::http::Extensions) -> crate::Result<Json<crate::notes::NoteWork>> {
+    check_id(&id)?;
+    // It makes roll code's work item on the change's repo: a second product's resource, so the
+    // caller's grant (and a person's token's session) must write that repo too.
+    {
+        use roll_auth::scope::{Action, Outcome, Resource};
+        let row = e.store.row(&id)?;
+        let repo = Resource { product: "code".into(), id: Some(row.repo.clone()), project: Some(row.project_id.clone()), ..Default::default() };
+        let writes = |g: &roll_auth::Grant| g.allows(&repo, Action::Write) == Outcome::Allow;
+        if grant.as_ref().is_some_and(|axum::Extension(g)| !writes(g)) || roll_auth::SessionGrant::on(&ext).is_some_and(|g| !writes(g)) {
+            return Err(Error::Forbidden(format!("making a work item writes {}'s code: this grant doesn't", row.repo)));
+        }
+    }
+    let by = match (who, grant) {
+        (Some(axum::Extension(u)), None) => u.handle,
+        (_, Some(axum::Extension(g))) => format!("token:{}", g.name),
+        (None, None) => "operator".into(),
+    };
+    e.note_to_work(&id, &note, &by).await.map(Json)
 }
 
 /// The mail the preview's services sent, caught (newest first; the last 50).
@@ -796,6 +880,14 @@ async fn save_point(AxState(e): S, Path(id): Path<String>, who: Option<axum::Ext
     let b: SavePointBody = if b.is_empty() { SavePointBody::default() } else { body(&b)? };
     let point = e.save_point(&id, &b.label, &asker(who, grant)).await?;
     Ok((axum::http::StatusCode::CREATED, Json(point)).into_response())
+}
+
+/// `POST …/rehearse`: the change's release once more on its Postgres parents as they are now
+/// (its next converge does it; `rehearsal` says how it went).
+async fn rehearse(AxState(e): S, Path(id): Path<String>, who: Option<axum::Extension<roll_auth::SignedIn>>, grant: Option<axum::Extension<roll_auth::Grant>>) -> crate::Result<(axum::http::StatusCode, Json<Preview>)> {
+    check_id(&id)?;
+    let by = asker(who, grant);
+    blocking(e, move |e| e.rehearse(&id, &by)).await.map(|p| (axum::http::StatusCode::ACCEPTED, Json(p)))
 }
 
 async fn restore_point(AxState(e): S, Path((id, point)): Path<(String, String)>, who: Option<axum::Extension<roll_auth::SignedIn>>, grant: Option<axum::Extension<roll_auth::Grant>>) -> crate::Result<Json<Preview>> {

@@ -5,8 +5,8 @@ import { appsApi, followShell as followAppsShell } from "@/lib/apps-api";
 import { codeApi } from "@/lib/code-api";
 import { Confirm } from "@/components/ui";
 import { TerminalScreen } from "@/components/terminal-screen";
-import { type RestorePoint, endpointSlower, type EndpointTime, a11yWords, checkSummary, seoWords, duration, followLogs, followShell, downloadFiles, openUrl, pageGroup, pageLabel, previewsApi, noteCropUrl, qrUrl, screenshotUrl, resourceId, thanMain, type CaughtMail, type PageCheck, type Preview, type TextDiff, type PreviewActivity, type PreviewVisitor, type PreviewKind, type PreviewShare, type RequestLine, type ServiceMetrics, type ErrorGroup, type TraceSummary, type TraceSpan, type RouteTime, type Repeated, UNTAKEN_STORIES } from "@/lib/previews-api";
-import { workFromError, workFromNote } from "@/lib/preview-work";
+import { type RestorePoint, endpointSlower, type EndpointTime, a11yWords, checkSummary, seoWords, duration, followLogs, followShell, downloadFiles, openUrl, pageGroup, pageLabel, previewsApi, noteCropUrl, qrUrl, screenshotUrl, resourceId, thanMain, type CaughtMail, type PageCheck, type Preview, type TextDiff, type PreviewActivity, type PreviewVisitor, type PreviewKind, type PreviewShare, type PreviewWebhook, type RequestLine, type ServiceMetrics, type ErrorGroup, type TraceSummary, type TraceSpan, type RouteTime, type Repeated, UNTAKEN_STORIES } from "@/lib/previews-api";
+import { workFromError } from "@/lib/preview-work";
 import { verdict, type VerdictTarget } from "@/lib/preview-verdict";
 import { isProblem, logFilter, logLevel } from "@/lib/preview-logs";
 import { formatBytes } from "@/lib/roll-api";
@@ -357,6 +357,20 @@ export function PreviewSheet({
                 </button>
               )}
             </Label>
+            {p.masked_by_default && p.masked_by_default.length > 0 && (
+              <p className="mb-1.5 text-[11.5px] break-words text-soft">
+                Masked by default, as they look like people's data and no rule names them:{" "}
+                {p.masked_by_default.map((m, i) => (
+                  <span key={`${m.resource}:${m.column}`}>
+                    {i > 0 ? ", " : ""}
+                    <span className="font-mono text-[11px] text-fg" title={m.why}>
+                      {m.column}
+                    </span>
+                  </span>
+                ))}
+                . A rule in the masking settings, or <code className="font-mono text-[11px]">keep</code>, says otherwise.
+              </p>
+            )}
             {p.resources.length ? (
               <div className="rounded-lg border border-line-2 bg-raised inset-shadow-highlight">
                 {p.resources.map((r) => {
@@ -421,10 +435,39 @@ export function PreviewSheet({
             )}
 
             {p.release && (
-              <p className="mt-1.5 font-mono text-[11px] text-subtle tabular-nums" title="The project's release (migrations), run on this preview's data before its services">
-                release {duration(p.release.ms)}
-                {p.release.before_ms != null ? ` · ${thanMain(p.release.ms, p.release.before_ms, "the push before") ?? "as before"}` : ""}
-              </p>
+              <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1">
+                <p className="font-mono text-[11px] text-subtle tabular-nums" title="The project's release (migrations), run on this preview's data before its services">
+                  release {duration(p.release.ms)}
+                  {p.release.before_ms != null ? ` · ${thanMain(p.release.ms, p.release.before_ms, "the push before") ?? "as before"}` : ""}
+                </p>
+                {p.release.locks && p.release.locks.length > 0 && (
+                  <p className="min-w-0 break-words font-mono text-[11px] text-danger tabular-nums" title="Locks the release held that made others wait, sampled while it ran: on production it would hold them as long">
+                    {p.release.locks
+                      .slice(0, 3)
+                      .map((l) => `${l.mode === "AccessExclusiveLock" ? "ACCESS EXCLUSIVE" : l.mode.replace(/Lock$/, "").replace(/([a-z])([A-Z])/g, "$1 $2").toUpperCase()} on ${l.table} ${duration(l.ms)}`)
+                      .join(" · ")}
+                  </p>
+                )}
+                {p.rehearsal && p.rehearsal.ok === null ? (
+                  <span className="text-[11px] text-subtle">rehearsing on today's data…</span>
+                ) : p.rehearsal ? (
+                  <span className={`min-w-0 break-words font-mono text-[11px] tabular-nums ${p.rehearsal.ok ? "text-subtle" : "text-danger"}`} title="The release once more on fresh branches of the parents as they are now (masked as the rules say)">
+                    on today's data {p.rehearsal.ok ? `passed in ${duration(p.rehearsal.ms ?? 0)}` : `failed: ${p.rehearsal.error ?? "see the activity"}`}
+                  </span>
+                ) : null}
+                {p.main_on_change && <MainOnChangeLine m={p.main_on_change} />}
+                {p.change && (
+                  <button
+                    type="button"
+                    disabled={busy !== null || gone || p.rehearsal?.ok === null}
+                    onClick={() => run("rehearse", () => previewsApi.rehearse(p.id))}
+                    title="Run the release once more on fresh branches of the parents as they are now: a preview's data may be days old"
+                    className="h-6 rounded-md px-2 text-[11px] text-muted hover:text-fg disabled:opacity-40"
+                  >
+                    {busy === "rehearse" ? "Asking…" : "Rehearse on today's data"}
+                  </button>
+                )}
+              </div>
             )}
             {p.schema_changes && p.schema_changes.length > 0 && (
               <>
@@ -446,6 +489,16 @@ export function PreviewSheet({
                     </div>
                   ))}
                 </pre>
+                {p.schema_overlaps && p.schema_overlaps.length > 0 && (
+                  <ul className="mt-1.5 space-y-0.5 text-[11.5px] text-soft" aria-label="Other changes changing these tables">
+                    {p.schema_overlaps.map((o) => (
+                      <li key={o.preview} className="break-words">
+                        <span className="font-mono text-[11px] text-fg">{o.branch || o.preview}</span> also changes{" "}
+                        <span className="font-mono text-[11px]">{o.tables.join(", ")}</span>: whichever lands second migrates a table the first changed.
+                      </li>
+                    ))}
+                  </ul>
+                )}
               </>
             )}
 
@@ -621,6 +674,7 @@ export function PreviewSheet({
 
             <Vars id={p.id} />
             <Shares id={p.id} />
+            <Webhooks id={p.id} />
 
             <Label>Details</Label>
             <Rows
@@ -823,6 +877,88 @@ function Shares({ id }: { id: string }) {
                 {x.notes ? " · takes notes" : ""}
               </span>
               <button type="button" className="text-muted hover:text-danger disabled:opacity-40" disabled={busy} onClick={() => void act(() => previewsApi.unshare(id, x.id))}>
+                Revoke
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {error && <p className="text-[11.5px] text-danger">{error}</p>}
+    </>
+  );
+}
+
+/** URLs for webhooks into the private preview (Stripe's, GitHub's): one path each, until revoked. */
+function Webhooks({ id }: { id: string }) {
+  const [list, setList] = useState<PreviewWebhook[] | null>(null);
+  const [made, setMade] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [path, setPath] = useState("");
+  const [label, setLabel] = useState("");
+  useEffect(() => {
+    let live = true;
+    previewsApi.webhooks(id).then(
+      (l) => live && setList(l),
+      (e) => live && setError(errorText(e)),
+    );
+    return () => {
+      live = false;
+    };
+  }, [id]);
+  const act = async (fn: () => Promise<void>) => {
+    setBusy(true);
+    try {
+      await fn();
+      setList(await previewsApi.webhooks(id));
+      setError(null);
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  if (!list) return error ? <p className="text-[11.5px] text-danger">{error}</p> : null;
+  const open = list.filter((x) => !x.revoked);
+  const field = "h-7 min-w-0 rounded-md border border-line-2 bg-canvas px-2 text-[11.5px] outline-none placeholder:text-subtle focus:border-accent/60";
+  return (
+    <>
+      <Label>Webhooks</Label>
+      <p className="text-[11.5px] text-subtle">A URL for a webhook (Stripe, GitHub): requests to that one path get in, for as long as the preview lives.</p>
+      <form
+        className="flex gap-1.5"
+        onSubmit={(e) => {
+          e.preventDefault();
+          void act(async () => setMade((await previewsApi.webhook(id, path.trim(), label.trim())).url));
+        }}
+      >
+        <input value={path} onChange={(e) => setPath(e.target.value)} placeholder="/api/stripe" aria-label="The path it lets in" className={`${field} flex-1 font-mono`} />
+        <input value={label} onChange={(e) => setLabel(e.target.value)} maxLength={60} placeholder="For (optional)" aria-label="What it's for" className={`${field} w-28`} />
+        <button type="submit" className={small} disabled={busy || !path.trim().startsWith("/")}>
+          Make
+        </button>
+      </form>
+      {made && (
+        <div className="flex items-center gap-1.5 rounded-md border border-line-2 bg-canvas px-2 py-1.5">
+          <span className="min-w-0 flex-1 truncate font-mono text-[11px]" title={made}>
+            {made}
+          </span>
+          <button type="button" className="text-[11.5px] text-accent hover:underline" onClick={() => void navigator.clipboard?.writeText(made)}>
+            Copy
+          </button>
+        </div>
+      )}
+      {made && <p className="text-[11px] text-subtle">Shown only now: roll keeps no copy of it.</p>}
+      {open.length > 0 && (
+        <ul className="space-y-1">
+          {open.map((x) => (
+            <li key={x.id} className="flex items-center gap-2 text-[11.5px]">
+              <span className="min-w-0 truncate font-mono text-subtle">{x.path}</span>
+              <span className="min-w-0 flex-1 truncate text-muted">
+                {x.label ? `${x.label} · ` : ""}
+                {x.hits} {x.hits === 1 ? "request" : "requests"}
+              </span>
+              <button type="button" className="text-muted hover:text-danger disabled:opacity-40" disabled={busy} onClick={() => void act(() => previewsApi.unwebhook(id, x.id))}>
                 Revoke
               </button>
             </li>
@@ -1411,8 +1547,7 @@ export function ApiBreaking({ items }: { items: string[] }) {
  * it (`POST …/notes/{review}/resolve`, kept by previews), and the page stops listing it. */
 function NoteThread({ previewId, change, review, where, onDone }: { previewId: string; change: string; review: string; where: Pick<Preview, "repo" | "number">; onDone?: () => void }) {
   const [note, setNote] = useState<string | null>(null);
-  // The note's whole review (the page, the element, what went wrong there), for a work item.
-  const [whole, setWhole] = useState<string | null>(null);
+  // The work item roll made of it (`POST …/notes/{review}/work`), if any.
   const [made, setMade] = useState<number | null>(null);
   const [replies, setReplies] = useState<{ id: string; by: string; text: string }[]>([]);
   const [reply, setReply] = useState("");
@@ -1442,7 +1577,10 @@ function NoteThread({ previewId, change, review, where, onDone }: { previewId: s
         const r = all.find((x) => x.id === review);
         if (!r) return setError("That note isn't on this change.");
         setNote(r.body.split("\n\n")[1] ?? r.body);
-        setWhole(r.body);
+        previewsApi.notes(previewId).then(
+          (n) => setMade(n.notes.find((x) => x.id === review)?.work?.number ?? null),
+          () => {},
+        );
         setReplies(
           all
             .filter((x) => !x.dismissed && replyOf(x.body)?.note === review)
@@ -1523,15 +1661,12 @@ function NoteThread({ previewId, change, review, where, onDone }: { previewId: s
         {where.repo && (
           <button
             type="button"
-            disabled={state === "busy" || whole === null || made !== null}
+            disabled={state === "busy" || note === null || made !== null}
             title="A work item in the repo, with the note and its page: someone, or an agent, picks it up"
             onClick={async () => {
-              if (!where.repo || whole === null) return;
               setState("busy");
               try {
-                const item = await codeApi.createWork(where.repo, workFromNote(where, review, whole));
-                setMade(item.number);
-                await codeApi.submitReview(change, { verdict: "comment", body: replyBody(review, `Made work item #${item.number} from this note.`) });
+                setMade((await previewsApi.noteWork(previewId, review)).number);
                 await load();
               } catch (e) {
                 setError(errorText(e));
@@ -1694,6 +1829,48 @@ function metricsText(m: ServiceMetrics): string {
 }
 
 /** Its latest requests through roll (Vercel's request log): newest first, errors at a glance. */
+/** Its recent GETs replayed against main's preview (Signadot's SmartTests): what answered differently. */
+function Replay({ preview: p }: { preview: Preview }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const r = p.replay;
+  const differs = (r?.requests ?? []).filter((q) => q.status !== q.main_status || q.removed.length > 0);
+  const said = (s: number) => (s === 0 ? "no answer" : String(s));
+  return (
+    <div className="mb-3 flex flex-col gap-1.5 rounded-lg border border-line-2 bg-canvas px-2.5 py-2 text-[11.5px]">
+      <div className="flex items-center gap-2">
+        <span className="min-w-0 flex-1 text-muted">
+          {!r ? "Replay its recent requests against main's preview." : r.ok === null ? "Replaying against main's preview…" : r.error ? `Couldn't replay: ${r.error}` : differs.length ? `${differs.length} of ${r.requests.length} answered differently from main's` : `All ${r.requests.length} answered as main's did`}
+        </span>
+        <button
+          type="button"
+          disabled={busy || r?.ok === null}
+          onClick={async () => {
+            setBusy(true);
+            try {
+              await previewsApi.replay(p.id);
+              setError(null);
+            } catch (e) {
+              setError(errorText(e));
+            } finally {
+              setBusy(false);
+            }
+          }}
+          className="h-6 rounded-md border border-line-2 px-2 text-[11.5px] text-fg hover:bg-white/[0.05] disabled:opacity-40"
+        >
+          {r ? "Replay again" : "Replay"}
+        </button>
+      </div>
+      {differs.slice(0, 8).map((q) => (
+        <p key={`${q.service}${q.path}`} className="min-w-0 break-words font-mono text-[10.5px] text-danger">
+          {q.path} {said(q.status)} (main {said(q.main_status)}){q.removed.length ? ` · lost ${q.removed.slice(0, 4).join(", ")}` : ""}
+        </p>
+      ))}
+      {error && <p className="text-danger">{error}</p>}
+    </div>
+  );
+}
+
 function Requests({ preview: p }: { preview: Preview }) {
   const [list, setList] = useState<RequestLine[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -1714,6 +1891,7 @@ function Requests({ preview: p }: { preview: Preview }) {
   const several = p.services.length > 1;
   return (
     <>
+      {p.change && <Replay preview={p} />}
       <div className="mb-2 flex items-center gap-2">
         <label className="flex flex-1 items-center gap-1.5 text-[11.5px] text-muted">
           <input type="checkbox" checked={errorsOnly} onChange={(e) => setErrorsOnly(e.target.checked)} className="accent-accent" />
@@ -2534,5 +2712,19 @@ export function ThreadPopup({ preview, review, close = () => window.close() }: {
         <NoteThread previewId={p.id} change={p.change} review={review} where={p} onDone={() => setTimeout(close, 900)} />
       )}
     </div>
+  );
+}
+
+/** Main's code on a copy of this head's migrated data: the pages that broke there, or that none did. */
+function MainOnChangeLine({ m }: { m: NonNullable<Preview["main_on_change"]> }) {
+  const said = (s: number) => (s === 0 ? "no answer" : String(s));
+  const broke = m.pages.filter((x) => (x.main_status > 0 && x.main_status < 500) && (x.status === 0 || x.status >= 500));
+  const title = "Main's live build, taking no traffic, on a copy of this change's branches as its release left them: while the change deploys, the version before it serves on this schema";
+  if (m.error) return <span className="min-w-0 break-words text-[11px] text-subtle" title={title}>main's code on this data: {m.error}</span>;
+  if (broke.length === 0) return <span className="text-[11px] text-subtle" title={title}>main's code still answers on this data ({m.pages.length} {m.pages.length === 1 ? "page" : "pages"})</span>;
+  return (
+    <span className="min-w-0 break-words font-mono text-[11px] text-danger tabular-nums" title={title}>
+      main's code breaks on this data: {broke.slice(0, 3).map((x) => `${x.path} ${said(x.status)} (main ${said(x.main_status)})`).join(" · ")}
+    </span>
   );
 }

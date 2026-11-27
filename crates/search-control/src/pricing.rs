@@ -147,7 +147,7 @@ mod tests {
     #[test]
     fn busy_cluster() {
         let p = Pricing::default();
-        let t = UsageTotals { loaded_seconds: 3600 * 100, loaded_gib_hours: 50.0, requests: 3_000_000, peak_loaded_bytes: 0, stored_gib_months: 2.5, inference_cpu_seconds: 7200.0 };
+        let t = UsageTotals { loaded_seconds: 3600 * 100, loaded_gib_hours: 50.0, requests: 3_000_000, peak_loaded_bytes: 0, stored_gib_months: 2.5, inference_cpu_seconds: 7200.0, ..Default::default() };
         let c = p.cost(&t, 720.0, 300 << 30);
         assert!(close(c.memory_usd, 50.0 * 0.0067));
         assert!(close(c.requests_usd, 3.0 * 0.005));

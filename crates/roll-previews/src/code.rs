@@ -59,6 +59,23 @@ impl CodeSource {
         Ok(self.code.find_repo(owner, name)?)
     }
 
+    /// A project's own event (`kind`: `budget`, `masking`) as `{<kind>: data, dashboard_url}`,
+    /// to each of its repos. A repo gone from roll code has nobody to tell; anything else fails,
+    /// to be tried again.
+    fn project_event(&self, repos: &[String], project: &str, kind: &'static str, data: serde_json::Value) -> anyhow::Result<()> {
+        let web = self.code.config.web_url.trim_end_matches('/');
+        let dashboard = (!web.is_empty()).then(|| format!("{web}/dashboard/projects/{project}/previews"));
+        for full in repos {
+            let repo = match self.repo(full) {
+                Ok(r) => r,
+                Err(e) if e.downcast_ref::<code_control::Error>().is_some_and(|e| matches!(e, code_control::Error::NotFound(_))) => continue,
+                Err(e) => return Err(e),
+            };
+            self.code.emit_project(&repo.id, kind, serde_json::json!({ kind: data, "dashboard_url": dashboard }))?;
+        }
+        Ok(())
+    }
+
     fn info(&self, repo: &RepoRow, c: &code_control::model::Change) -> ChangeInfo {
         let head = self.code.store.resolve(&repo.id, &c.head).ok().flatten().map(|cs| cs.to_string()).unwrap_or_else(|| c.head.clone());
         ChangeInfo {
@@ -69,6 +86,7 @@ impl CodeSource {
             branch: c.branch.clone(),
             head,
             open: matches!(c.state, ChangeState::Open | ChangeState::Queued | ChangeState::Conflict),
+            queued: c.state == ChangeState::Queued,
             draft: c.draft,
             labels: c.labels.clone(),
             trusted: c.trusted,
@@ -125,9 +143,12 @@ impl CodeSource {
                 github: PreviewGithub { comment: s.github.comment, status: s.github.status, deployment: s.github.deployment },
                 head: Some(p.head.clone()),
                 schema_changes: p.schema_changes.clone(),
+                schema_overlaps: p.schema_overlaps.iter().map(|o| (o.branch.clone(), o.tables.clone())).collect(),
                 schema_risks: p.schema_risks.clone(),
                 release_ms: p.release.as_ref().map(|x| x.ms),
+                release_locks: p.release.as_ref().map(|x| x.locks.iter().map(|l| (l.table.clone(), l.mode.clone(), l.ms)).collect()).unwrap_or_default(),
                 release_before_ms: p.release.as_ref().and_then(|x| x.before_ms),
+                main_on_change: p.main_on_change.as_ref().filter(|m| m.error.is_none()).map(|m| code_control::model::PreviewMainOnChange { asked: m.pages.len() as u32, broke: m.pages.iter().filter(|x| x.broke()).map(|x| (x.path.clone(), x.status, x.main_status)).collect() }),
                 expires_at: p.goes_at,
                 base_change: p.base_change.as_ref().map(|b| code_control::model::PreviewBaseChange { branch: b.branch.clone(), percent: b.percent, phone_percent: b.phone_percent, load_ms: b.load_ms, lcp_ms: b.lcp_ms, a11y_added: b.a11y_added, errors_added: b.errors_added,
                     text: b.text.as_ref().map(|t| code_control::model::PreviewTextDiff { added: t.added.clone(), removed: t.removed.clone(), added_n: t.added_n, removed_n: t.removed_n }),
@@ -149,6 +170,8 @@ impl CodeSource {
                         .collect(),
                     seo_added: b.seo_added }),
                 regressions: p.regressions.clone(),
+                release_checks: p.release_checks.clone(),
+                rehearsal: p.rehearsal.as_ref().map(|x| code_control::model::PreviewRehearsal { ok: x.ok, error: x.error.clone() }),
                 regressions_accepted_by: p.regressions_accepted.as_ref().map(|a| a.by.clone()),
                 speed_budget: Some(code_control::model::PreviewSpeedBudget { load_ms: s.github.budget.load_ms, bytes: s.github.budget.bytes, lcp_ms: s.github.budget.lcp_ms, cls: s.github.budget.cls })
                     .filter(|b| b.load_ms > 0 || b.bytes > 0 || b.lcp_ms > 0 || b.cls > 0.0),
@@ -391,6 +414,18 @@ impl Source for CodeSource {
         Ok(Some(review.id))
     }
 
+    async fn work_item(&self, change: &str, title: &str, body: &str, labels: &[&str], outside: bool) -> anyhow::Result<Option<(u64, String)>> {
+        let Some(c) = self.code.db.change(change)? else { return Ok(None) };
+        let Some(r) = self.code.db.repo_by_id(&c.repo_id)? else { return Ok(None) };
+        let labels_owned: Vec<String> = labels.iter().map(|l| l.to_string()).collect();
+        if !outside && let Some(made) = self.code.open_github_issue(&r, title, body, &labels_owned).await? {
+            return Ok(Some(made));
+        }
+        let w = self.code.create_work_from(&r, &serde_json::json!({ "title": title, "body": body, "labels": labels }), outside)?;
+        let web = self.code.config.web_url.trim_end_matches('/');
+        Ok(Some((w.number, format!("{web}/{}/work", r.full_name()))))
+    }
+
     async fn git_commit(&self, repo: &str, revision: &str) -> anyhow::Result<Option<String>> {
         let r = self.repo(repo)?;
         let cs = self.code.store.resolve_or_404(&r.id, revision)?;
@@ -406,18 +441,11 @@ impl Source for CodeSource {
     }
 
     async fn budget(&self, repos: &[String], alert: &crate::ports::BudgetAlert) -> anyhow::Result<()> {
-        let web = self.code.config.web_url.trim_end_matches('/');
-        let dashboard = (!web.is_empty()).then(|| format!("{web}/dashboard/projects/{}/previews", alert.project));
-        for full in repos {
-            // A repo gone from roll code has nobody to tell; anything else is tried again.
-            let repo = match self.repo(full) {
-                Ok(r) => r,
-                Err(e) if e.downcast_ref::<code_control::Error>().is_some_and(|e| matches!(e, code_control::Error::NotFound(_))) => continue,
-                Err(e) => return Err(e),
-            };
-            self.code.emit_budget(&repo.id, serde_json::json!({ "budget": alert, "dashboard_url": dashboard }))?;
-        }
-        Ok(())
+        self.project_event(repos, &alert.project, "budget", serde_json::json!(alert))
+    }
+
+    async fn masking(&self, repos: &[String], notice: &crate::ports::MaskingNotice) -> anyhow::Result<()> {
+        self.project_event(repos, &notice.project, "masking", serde_json::json!(notice))
     }
 
     fn git_report_body(&self, p: &Preview, s: &Settings, deleted: Option<Option<&str>>) -> Option<crate::ports::GitReportBody> {

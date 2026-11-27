@@ -12,6 +12,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+/// A work item the fake made: (change, title, body, labels, outside).
+pub type MadeWork = (String, String, String, Vec<String>, bool);
+
 #[derive(Default)]
 pub struct FakeCode {
     pub changes: Mutex<HashMap<String, ChangeInfo>>,
@@ -28,6 +31,8 @@ pub struct FakeCode {
     pub feedback: Mutex<HashMap<String, Vec<roll_previews::notes::Note>>>,
     /// Comments made on changes: (change, body, by, outside).
     pub comments: Mutex<Vec<(String, String, String, bool)>>,
+    /// Work items made on changes' repos.
+    pub works: Mutex<Vec<MadeWork>>,
     /// The `health` path every service says it has.
     pub health: Mutex<Option<String>>,
     /// The page states every service's `roll.toml` names (`[[preview.states]]`).
@@ -41,6 +46,7 @@ pub struct FakeCode {
     pub teardowns: Mutex<Vec<(String, String)>>,
     /// Budget alerts sent: (the repos told, the alert).
     pub budgets: Mutex<Vec<(Vec<String>, roll_previews::ports::BudgetAlert)>>,
+    pub maskings: Mutex<Vec<(Vec<String>, roll_previews::ports::MaskingNotice)>>,
 }
 
 impl FakeCode {
@@ -93,6 +99,11 @@ impl Source for FakeCode {
         all.push((change.into(), body.into(), by.into(), outside));
         Ok(Some(format!("rv_c{}", all.len())))
     }
+    async fn work_item(&self, change: &str, title: &str, body: &str, labels: &[&str], outside: bool) -> anyhow::Result<Option<(u64, String)>> {
+        let mut all = self.works.lock();
+        all.push((change.into(), title.into(), body.into(), labels.iter().map(|l| l.to_string()).collect(), outside));
+        Ok(Some((all.len() as u64, "https://roll.test/acme/web/work".into())))
+    }
     async fn paths_between(&self, _repo: &str, from: &str, to: &str) -> anyhow::Result<Option<Vec<String>>> {
         Ok(self.between.lock().get(&format!("{from}..{to}")).cloned())
     }
@@ -126,6 +137,10 @@ impl Source for FakeCode {
     }
     async fn budget(&self, repos: &[String], alert: &roll_previews::ports::BudgetAlert) -> anyhow::Result<()> {
         self.budgets.lock().push((repos.to_vec(), alert.clone()));
+        Ok(())
+    }
+    async fn masking(&self, repos: &[String], notice: &roll_previews::ports::MaskingNotice) -> anyhow::Result<()> {
+        self.maskings.lock().push((repos.to_vec(), notice.clone()));
         Ok(())
     }
     fn nudges(&self) -> Option<tokio::sync::broadcast::Receiver<()>> {
@@ -162,6 +177,10 @@ pub struct FakeData {
     pub renames_on_reset: AtomicUsize,
     /// Branches made from another of the parent's (a masked base): branch → the one it came from.
     pub from: Mutex<HashMap<String, String>>,
+    /// How many masks to fail next.
+    pub fail_masks: AtomicUsize,
+    /// The locks other sessions hold on its branches' tables (as `pg_locks` would say).
+    pub locks: Mutex<Vec<(String, String)>>,
 }
 
 impl FakeData {
@@ -183,6 +202,8 @@ impl FakeData {
             restored: Mutex::new(Vec::new()),
             renames_on_reset: AtomicUsize::new(0),
             from: Mutex::new(HashMap::new()),
+            fail_masks: AtomicUsize::new(0),
+            locks: Mutex::new(Vec::new()),
         })
     }
 }
@@ -233,6 +254,9 @@ impl Brancher for FakeData {
     fn branches_from_base(&self) -> bool {
         self.kind == Kind::Postgres
     }
+    async fn locks(&self, _parent: &str, _branch: &str) -> anyhow::Result<Vec<(String, String)>> {
+        Ok(self.locks.lock().clone())
+    }
     async fn branch_from(&self, parent: &str, from: &str, name: &str, _mode: Mode) -> anyhow::Result<Option<Branched>> {
         anyhow::ensure!(self.branches.lock().contains(from), "no branch {from} to branch from");
         let id = format!("{parent}~{name}");
@@ -257,6 +281,10 @@ impl Brancher for FakeData {
         self.delete(parent, snapshot, name).await
     }
     async fn mask(&self, _parent: &str, branch: &str, _kept: Option<&str>, columns: &std::collections::BTreeMap<String, String>) -> anyhow::Result<()> {
+        if self.fail_masks.load(Ordering::SeqCst) > 0 {
+            self.fail_masks.fetch_sub(1, Ordering::SeqCst);
+            anyhow::bail!("the compute didn't start");
+        }
         self.masks.lock().push((branch.to_string(), columns.clone()));
         Ok(())
     }
@@ -342,6 +370,19 @@ pub struct FakeApps {
     pub browser: Mutex<HashMap<String, Vec<roll_previews::ports::BrowserCheckResult>>>,
     /// Builds started again on an earlier push's copy: (service, deployment, the variables).
     pub views: Mutex<Vec<(String, String, Vars)>>,
+    /// The webhook URLs each service was last deployed with: (path, token SHA-256).
+    pub hooks: Mutex<HashMap<(String, String), Vars>>,
+    /// Each preview's request log (newest first), and JSON answers by `<preview> <path>`.
+    pub request_log: Mutex<HashMap<String, Vec<roll_previews::RequestLine>>>,
+    pub json: Mutex<HashMap<String, String>>,
+    /// What `fetch` answers for a service, URL and path (`<service> <url><path>`; unset: 200).
+    pub fetched: Mutex<HashMap<String, u16>>,
+    /// Whether services run on roll's runtime here (`can_swap`).
+    pub runtime: std::sync::atomic::AtomicBool,
+    /// The engine, for a fetch that starts a service as the runtime does (its `EnvSource`), and
+    /// what each such start was given: (preview, service, revision, variables).
+    pub env_source: Mutex<Option<std::sync::Weak<dyn roll_previews::ports::EnvSource>>>,
+    pub started: Mutex<Vec<(String, String, String, Vars)>>,
     /// What a service answers on its health path (unset: the backend can't tell).
     pub answers: Mutex<Option<(u16, String)>>,
     /// How many health checks find the service still starting (asked again later).
@@ -375,6 +416,8 @@ pub struct FakeApps {
     pub egress: Mutex<HashMap<(String, String), roll_previews::settings::EgressRule>>,
     /// Seeds run (their DATABASE_URL), and the exit code the next ones give.
     pub seeds: Mutex<Vec<String>>,
+    /// The last job's variables.
+    pub last_job_env: Mutex<Vec<(String, String)>>,
     pub seed_exit: std::sync::atomic::AtomicI32,
     /// Every seed or release run: (its command, the revision), and how many services were
     /// deployed at that revision when it ran.
@@ -388,6 +431,8 @@ pub struct FakeApps {
     pub on_deploy: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
     /// Which service each screenshot run was of.
     pub shot_services: Mutex<Vec<String>>,
+    /// The same, with whose preview each was: (preview, service).
+    pub shots_of: Mutex<Vec<(String, String)>>,
     /// The notes each screenshot was asked to crop (a `#missing` selector finds nothing).
     pub crops_asked: Mutex<Vec<String>>,
     /// What an agent's run (`…/try`) answers.
@@ -439,6 +484,7 @@ impl Apps for FakeApps {
         }
         // What the backend was sent, whatever it answers.
         self.vars.lock().insert((t.preview.clone(), t.service.clone()), t.vars.clone());
+        self.hooks.lock().insert((t.preview.clone(), t.service.clone()), t.webhooks.clone());
         if self.still.load(Ordering::SeqCst) > 0 {
             self.still.fetch_sub(1, Ordering::SeqCst);
             return Err(roll_previews::ports::StillDeploying("building".into()).into());
@@ -465,6 +511,27 @@ impl Apps for FakeApps {
     }
     async fn memory_mb(&self, _: &str, _: &str) -> Option<u32> {
         *self.memory.lock()
+    }
+    async fn can_swap(&self, _: &str, _: &str) -> anyhow::Result<bool> {
+        Ok(self.runtime.load(Ordering::SeqCst))
+    }
+    async fn fetch(&self, preview: &str, service: &str, url: &str, _: Option<&str>, path: &str, _: bool) -> anyhow::Result<Option<roll_previews::ports::Fetched>> {
+        // A runtime service that isn't up starts first, with what the engine gives it.
+        if self.runtime.load(Ordering::SeqCst) {
+            let source = self.env_source.lock().as_ref().and_then(|w| w.upgrade());
+            if let Some(source) = source {
+                let (t, vars) = source.env(preview, service).await?;
+                self.started.lock().push((preview.to_string(), service.to_string(), t.revision, vars));
+            }
+        }
+        let status = self.fetched.lock().get(&format!("{service} {url}{path}")).copied().unwrap_or(200);
+        if let Some(body) = self.json.lock().get(&format!("{preview} {path}")) {
+            return Ok(Some(roll_previews::ports::Fetched { status, headers: vec![("content-type".into(), "application/json".into())], body: body.clone().into_bytes(), truncated: false }));
+        }
+        Ok(Some(roll_previews::ports::Fetched { status, headers: Vec::new(), body: Vec::new(), truncated: false }))
+    }
+    fn requests(&self, preview: &str) -> Vec<roll_previews::RequestLine> {
+        self.request_log.lock().get(preview).cloned().unwrap_or_default()
     }
     async fn probe(&self, _: &str, _: &str, _path: &str) -> anyhow::Result<Option<(u16, String)>> {
         if self.starting.load(Ordering::SeqCst) > 0 {
@@ -567,6 +634,7 @@ impl Apps for FakeApps {
     async fn seed(&self, job: &roll_previews::ports::SeedJob) -> anyhow::Result<(i32, String)> {
         let db = job.env.iter().find(|(k, _)| k == "DATABASE_URL").map(|(_, v)| v.clone()).unwrap_or_default();
         self.seeds.lock().push(db);
+        *self.last_job_env.lock() = job.env.clone();
         self.seed_egress.lock().push(job.egress);
         let at_rev = self.deployed.lock().values().filter(|r| **r == job.revision).count();
         self.runs.lock().push((job.seed.run.clone(), job.revision.clone(), at_rev));
@@ -577,6 +645,7 @@ impl Apps for FakeApps {
     async fn screenshot(&self, preview: &str, service: &str, opts: &roll_previews::ports::ShotOptions) -> anyhow::Result<Option<roll_previews::ports::Shot>> {
         let Some(png) = self.shot.lock().clone() else { return Ok(None) };
         self.shot_services.lock().push(service.to_string());
+        self.shots_of.lock().push((preview.to_string(), service.to_string()));
         // The API the preview serves: by any revision it runs (whichever service is first).
         let revs: Vec<String> = self.deployed.lock().iter().filter(|((p, _), _)| p == preview).map(|(_, r)| r.clone()).collect();
         let api = opts.openapi.as_ref().and_then(|_| revs.iter().find_map(|r| self.api.lock().get(r).cloned()));
@@ -772,6 +841,7 @@ pub fn change(id: &str, n: i64) -> ChangeInfo {
         branch: Some(format!("feat/{n}")),
         head: format!("cs_{n}a"),
         open: true,
+        queued: false,
         draft: false,
         labels: Vec::new(),
         trusted: true,

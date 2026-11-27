@@ -352,8 +352,9 @@ pub enum Keys {
         name: String,
         /// `data`: indices, templates, pipelines and lifecycle policies, no security (users,
         /// roles, keys); `read`: search and read the indices only; `append`: add documents to
-        /// the named data streams only (a log drain; it can't read them); `admin`: everything
-        /// the cluster's own user may do.
+        /// the named data streams only (a log drain; it can't read them); `otel`: an OpenTelemetry
+        /// Collector's key for the cluster's OTLP intake (OTel's own data streams, write only);
+        /// `admin`: everything the cluster's own user may do.
         #[arg(long, default_value = "data")]
         access: String,
         /// Shorthand for `--access read`.
@@ -405,6 +406,30 @@ pub enum Index {
     },
     /// Delete the documents a query matches (`{"query": …}`).
     DeleteByQuery { cluster: String, index: String, body: String },
+    /// Score one or two search configurations against judged queries (`_rank_eval`, nDCG@10
+    /// unless --metric says) and compare them query by query; for CI, --fail-below and
+    /// --fail-on-worse exit non-zero.
+    Evaluate {
+        cluster: String,
+        index: String,
+        /// Judged queries: JSON (`[{query, ratings: [{_id, rating}]}]`) or CSV with a header
+        /// (`query,_id,rating`, `doc_id` or `docid` for `_id`), as `@file` or `-`.
+        #[arg(long)]
+        judgments: String,
+        /// A configuration (repeat once to compare): `{name?, request | template, query_param?}`,
+        /// a search body with `{{query}}` where each query goes, or a search template.
+        #[arg(long = "config", required = true, num_args = 1)]
+        configs: Vec<String>,
+        /// A `_rank_eval` metric (`{"precision": {"k": 5}}`).
+        #[arg(long)]
+        metric: Option<String>,
+        /// Fail when the last configuration scores below this.
+        #[arg(long)]
+        fail_below: Option<f64>,
+        /// Fail when the second configuration scores below the first.
+        #[arg(long)]
+        fail_on_worse: bool,
+    },
     /// Read or change the index's settings.
     #[command(subcommand)]
     Settings(IndexSettings),
@@ -673,6 +698,75 @@ pub fn at(v: &str, now: i64) -> anyhow::Result<i64> {
     n.checked_mul(unit).and_then(|secs| now.checked_sub(secs)).with_context(|| format!("bad time {v:?}: too long ago"))
 }
 
+/// Judged queries from `--judgments`: JSON as the route takes them (`[{query, ratings}]`, or
+/// `{judgments: […]}`), or CSV with a header naming `query`, `_id` (or `doc_id`, `docid`) and
+/// `rating` (and optionally `_index`), one rated document a line, grouped by query in order.
+fn judgments_arg(text: &str) -> anyhow::Result<Value> {
+    let t = text.trim_start();
+    if t.starts_with('[') || t.starts_with('{') {
+        let v: Value = serde_json::from_str(t).context("--judgments isn't JSON")?;
+        return Ok(if v.is_array() { v } else { v["judgments"].clone() });
+    }
+    let mut lines = t.lines().filter(|l| !l.trim().is_empty());
+    let head: Vec<String> = lines.next().context("--judgments is empty")?.split(',').map(|h| h.trim().to_ascii_lowercase()).collect();
+    let col = |names: &[&str]| head.iter().position(|h| names.contains(&h.as_str()));
+    let (Some(q), Some(d), Some(r)) = (col(&["query"]), col(&["_id", "doc_id", "docid"]), col(&["rating", "grade"])) else {
+        bail!("--judgments CSV needs a header with query, _id (or doc_id) and rating");
+    };
+    let ix = col(&["_index", "index"]);
+    let mut out: Vec<(String, Vec<Value>)> = Vec::new();
+    for (n, line) in lines.enumerate() {
+        let f: Vec<&str> = line.split(',').map(str::trim).collect();
+        let get = |i: usize| f.get(i).copied().with_context(|| format!("--judgments line {}: too few fields", n + 2));
+        let rating: i64 = get(r)?.parse().with_context(|| format!("--judgments line {}: rating isn't a whole number", n + 2))?;
+        let mut doc = json!({ "_id": get(d)?, "rating": rating });
+        if let Some(i) = ix.and_then(|i| f.get(i)).filter(|s| !s.is_empty()) {
+            doc["_index"] = json!(i);
+        }
+        let query = get(q)?.to_string();
+        match out.iter_mut().find(|(k, _)| *k == query) {
+            Some((_, ratings)) => ratings.push(doc),
+            None => out.push((query, vec![doc])),
+        }
+    }
+    Ok(Value::Array(out.into_iter().map(|(query, ratings)| json!({ "query": query, "ratings": ratings })).collect()))
+}
+
+/// An evaluation for people: each configuration's score, then the comparison and the queries
+/// that moved most.
+fn evaluation_text(v: &Value) -> String {
+    let mut out = String::new();
+    let score = |x: &Value| x.as_f64().map_or("—".to_string(), |s| format!("{s:.4}"));
+    for c in v["configurations"].as_array().into_iter().flatten() {
+        let failed = c["failed"].as_u64().unwrap_or(0);
+        let note = if failed > 0 { format!("  ({failed} queries failed)") } else { String::new() };
+        out.push_str(&format!("{:<24} {}{note}\n", s(&c["name"]), score(&c["score"])));
+    }
+    let cmp = &v["comparison"];
+    if cmp.is_object() {
+        out.push_str(&format!(
+            "\n{} against {}: {}  ({} better, {} worse, {} unchanged)\n",
+            s(&cmp["candidate"]),
+            s(&cmp["baseline"]),
+            cmp["difference"].as_f64().map_or("—".to_string(), |d| format!("{d:+.4}")),
+            cmp["better"],
+            cmp["worse"],
+            cmp["unchanged"]
+        ));
+        for (title, key) in [("better", "better_queries"), ("worse", "worse_queries")] {
+            let rows = cmp[key].as_array().cloned().unwrap_or_default();
+            if rows.is_empty() {
+                continue;
+            }
+            out.push_str(&format!("\n{title}:\n"));
+            for r in rows.iter().take(10) {
+                out.push_str(&format!("  {:+.4}  {}\n", r["difference"].as_f64().unwrap_or(0.0), s(&r["query"])));
+            }
+        }
+    }
+    out
+}
+
 fn read_body(arg: &str) -> anyhow::Result<String> {
     if arg == "-" {
         let mut s = String::new();
@@ -851,6 +945,42 @@ pub async fn run(api: &Api, as_json: bool, cmd: Search) -> anyhow::Result<()> {
                     index_call(api, as_json, Method::POST, &cluster, &index, "/bulk", (refresh(r), Some(("application/x-ndjson", read_body(&body)?)))).await
                 }
                 Index::DeleteByQuery { cluster, index, body } => index_call(api, as_json, Method::POST, &cluster, &index, "/delete_by_query", (vec![], Some(json_body(body)?))).await,
+                Index::Evaluate { cluster, index, judgments, configs, metric, fail_below, fail_on_worse } => {
+                    if configs.len() > 2 {
+                        bail!("--config takes one configuration, or two to compare");
+                    }
+                    let mut body = json!({ "judgments": judgments_arg(&read_body(&judgments)?)? });
+                    let mut confs = Vec::new();
+                    for (i, c) in configs.iter().enumerate() {
+                        let mut v: Value = serde_json::from_str(&read_body(c)?).with_context(|| format!("--config {c} isn't JSON"))?;
+                        if v.get("name").is_none() {
+                            let name = c.strip_prefix('@').and_then(|f| std::path::Path::new(f).file_stem()).map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| ["a", "b"][i].to_string());
+                            v["name"] = json!(name);
+                        }
+                        confs.push(v);
+                    }
+                    body["configurations"] = Value::Array(confs);
+                    if let Some(m) = metric {
+                        body["metric"] = serde_json::from_str(&read_body(&m)?).context("--metric isn't JSON")?;
+                    }
+                    let c = find(api, &cluster).await?;
+                    let v = api.post(&format!("/v1/search/clusters/{}/indices/{}/evaluate", urlencoding::encode(&s(&c["id"])), urlencoding::encode(&index)), body).await?;
+                    if as_json {
+                        println!("{}", serde_json::to_string(&v)?);
+                    } else {
+                        print!("{}", evaluation_text(&v));
+                    }
+                    let last = v["configurations"].as_array().and_then(|a| a.last()).and_then(|c| c["score"].as_f64());
+                    if let Some(min) = fail_below
+                        && last.is_none_or(|s| s < min)
+                    {
+                        bail!("scored {} (below {min})", last.map_or("nothing".to_string(), |s| format!("{s:.4}")));
+                    }
+                    if fail_on_worse && v["comparison"]["difference"].as_f64().is_some_and(|d| d < 0.0) {
+                        bail!("{} scored below {}", s(&v["comparison"]["candidate"]), s(&v["comparison"]["baseline"]));
+                    }
+                    Ok(())
+                }
                 Index::Settings(IndexSettings::Get { cluster, index, defaults }) => {
                     let query = if defaults { vec![("include_defaults", "true".to_string())] } else { vec![] };
                     index_call(api, as_json, Method::GET, &cluster, &index, "/settings", (query, None)).await
@@ -1102,6 +1232,7 @@ pub async fn run(api: &Api, as_json: bool, cmd: Search) -> anyhow::Result<()> {
                             ["roll_link"] => "data",
                             ["roll_read"] => "read",
                             ["roll_append"] => "append",
+                            ["roll_otel"] => "otel",
                             _ => "limited",
                         };
                         let expires = k["expiration"].as_i64().map_or("never expires".to_string(), |ms| format!("expires {}", key_time(ms)));
@@ -1375,6 +1506,7 @@ pub async fn run(api: &Api, as_json: bool, cmd: Search) -> anyhow::Result<()> {
                     println!("  memory         {:>10.4} GiB-h   ${:.4}", f(&u["loaded_gib_hours"]), f(&cost["memory_usd"]));
                     println!("  requests       {:>10}         ${:.4}", s(&u["requests"]), f(&cost["requests_usd"]));
                     println!("  inference      {:>10.1} CPU-s   ${:.4}", f(&u["inference_cpu_seconds"]), f(&cost["inference_usd"]));
+                    println!("  model tokens   {:>10} in      {} out (billed by the provider)", s(&u["input_tokens"]), s(&u["output_tokens"]));
                     println!("  storage        {:>10.4} GiB-mo  ${:.4}  (now {})", f(&u["stored_gib_months"]), f(&cost["storage_usd"]), bytes(f(&u["stored_bytes"])));
                     println!("  total                           ${:.4}", f(&cost["total_usd"]));
                     println!("  Elastic Cloud                   ${:.2}", f(&cost["elastic_cloud_usd"]));

@@ -183,11 +183,17 @@ pub const MAX_WORKLOADS: usize = 10_000;
 /// Live workload grants one owner's identities hold at most, so one busy pipeline doesn't take
 /// everyone's room.
 pub const OWNER_MAX_WORKLOADS: usize = 1_000;
-/// The workload grants those two caps count: live ones, apart from bootstrap tokens and machine
-/// credentials (a chain's grants with no rules, which open nothing). Those live until their
-/// machine is gone, so they'd fill the room every CI login shares; their caller caps them per
-/// identity instead (roll secrets' `machine_chains`, store/bootstrap.rs).
-const COUNTED_WORKLOADS: &str = "kind = 'workload' AND revoked_at IS NULL AND expires_at > ? AND (chain IS NULL OR rules <> '[]')";
+/// The workload grants those two caps count: live ones outside any machine's chain. A chain's
+/// bootstrap token and credentials live until their machine is gone, and a fleet's machines log in
+/// for good, so they'd fill the room every CI login shares: their caller caps the chains per
+/// identity (roll secrets' `machine_chains`, store/bootstrap.rs), and a chain's logins are capped
+/// per chain ([`CHAIN_MAX_LOGINS`]), so a maker's 900 machines leave their own CI its 1,000.
+const COUNTED_WORKLOADS: &str = "kind = 'workload' AND revoked_at IS NULL AND expires_at > ? AND chain IS NULL";
+/// Login tokens one machine (a chain) holds at most that are live now (not revoked, not yet ended:
+/// an ended one frees its place at once): one, the next it logs in for before that one ends, and a
+/// few lost answers retried. Not one per process: roll's CLI keeps the machine's login beside its
+/// credential, and every process on the machine reuses it until a quarter of its life is left.
+pub const CHAIN_MAX_LOGINS: usize = 5;
 /// How long a workload grant lives, in minutes.
 pub const WORKLOAD_MINUTES: std::ops::RangeInclusive<u32> = 5..=60;
 pub const ACCESS_PREFIX: &str = "rlo_";
@@ -507,6 +513,10 @@ pub struct Approval {
     /// when it's answered, from the policy as it is then; not stored).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub gates: Vec<Gate>,
+    /// The route's own rule a lend's approval covers too, as the gate asked for it (the route's
+    /// own action asked as well): shown beside the lent one, and remembered with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub also: Option<roll_auth::scope::Rule>,
 }
 
 /// One rule an approval must pass: how many approvals from whom, and how many it has.
@@ -536,6 +546,8 @@ pub struct Ask<'a> {
     pub scope_index: Option<&'a str>,
     /// How long it waits for its people (the policy's `approval_wait_ms`).
     pub wait_ms: i64,
+    /// The route's own rule it covers too (a lend's approval whose route's own action asked).
+    pub also: Option<&'a roll_auth::scope::Rule>,
 }
 
 /// An approved request runs within this long (and a decided one is shown this long).
@@ -876,7 +888,7 @@ pub(crate) fn name_rules(c: &code_sql::Conn<'_>, id: &str) -> code_sql::Result<(
 }
 
 const APPROVAL_COLUMNS: &str =
-    "id, grant_id, grant_name, product, action, resource, method, route, path, summary, args, tool, state, reason, created_at, decided_at, decided_by, expires_at, request_hash, environment, scope_path, scope_index, approved_by";
+    "id, grant_id, grant_name, product, action, resource, method, route, path, summary, args, tool, state, reason, created_at, decided_at, decided_by, expires_at, request_hash, environment, scope_path, scope_index, approved_by, also";
 
 fn approval_row(r: &code_sql::Row<'_>) -> code_sql::Result<Approval> {
     let args: Option<String> = r.get(10)?;
@@ -905,6 +917,7 @@ fn approval_row(r: &code_sql::Row<'_>) -> code_sql::Result<Approval> {
         scope_index: r.get(21)?,
         approved_by: r.get::<_, Option<String>>(22)?.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default(),
         gates: Vec::new(),
+        also: r.get::<_, Option<String>>(23)?.and_then(|s| serde_json::from_str(&s).ok()),
     })
 }
 
@@ -985,7 +998,8 @@ impl Store {
         }
         // What environment and path a request was about (a remembered approval keeps to them), and
         // who approved it so far (a policy can ask for several people).
-        for col in ["environment", "scope_path", "scope_index", "approved_by"] {
+        // ...and the route's own rule a lend's approval covers too (`also`).
+        for col in ["environment", "scope_path", "scope_index", "approved_by", "also"] {
             if !db.has_column("approvals", col)? {
                 db.add_column("approvals", col, "TEXT")?;
             }
@@ -1261,7 +1275,9 @@ impl Store {
     }
 
     /// A workload grant (`Access::mint_workload`): a token for `minutes`, whose secret dies with it.
-    /// `via`: the live machine credential whose login it is, whose chain it joins.
+    /// `via`: the live machine credential whose login it is, whose chain it joins: it counts toward
+    /// that chain's [`CHAIN_MAX_LOGINS`], not the shared [`MAX_WORKLOADS`] and
+    /// [`OWNER_MAX_WORKLOADS`], in the same write.
     pub fn create_workload(&self, new: &NewGrant, minutes: u32, created_by: &str, user: Option<&str>, via: Option<&str>) -> Result<(Grant, String)> {
         check_name(&new.name)?;
         check_rules(&new.rules)?;
@@ -1276,15 +1292,24 @@ impl Store {
         let rules = serde_json::to_string(&new.rules).map_err(|e| Error::Internal(e.to_string()))?;
         let ip = serde_json::to_string(&new.ip_allow).map_err(|e| Error::Internal(e.to_string()))?;
         self.db.write(|c| {
-            let live: i64 = c.query_row(&format!("SELECT COUNT(*) FROM grants WHERE {COUNTED_WORKLOADS}"), [now], |r| r.get(0))?;
-            if live as usize >= MAX_WORKLOADS {
-                return Err(Error::Conflict(format!("at most {MAX_WORKLOADS} live workload tokens")));
-            }
-            let theirs: i64 = c.query_row(&format!("SELECT COUNT(*) FROM grants WHERE {COUNTED_WORKLOADS} AND created_by = ?"), params![now, created_by], |r| r.get(0))?;
-            if theirs as usize >= OWNER_MAX_WORKLOADS {
-                return Err(Error::Conflict(format!("at most {OWNER_MAX_WORKLOADS} live workload tokens for one owner's identities")));
+            // A machine's login counts toward its chain below, not the room CI logins share.
+            if via.is_none() {
+                let live: i64 = c.query_row(&format!("SELECT COUNT(*) FROM grants WHERE {COUNTED_WORKLOADS}"), [now], |r| r.get(0))?;
+                if live as usize >= MAX_WORKLOADS {
+                    return Err(Error::Conflict(format!("at most {MAX_WORKLOADS} live workload tokens")));
+                }
+                let theirs: i64 = c.query_row(&format!("SELECT COUNT(*) FROM grants WHERE {COUNTED_WORKLOADS} AND created_by = ?"), params![now, created_by], |r| r.get(0))?;
+                if theirs as usize >= OWNER_MAX_WORKLOADS {
+                    return Err(Error::Conflict(format!("at most {OWNER_MAX_WORKLOADS} live workload tokens for one owner's identities")));
+                }
             }
             let chain = via.map(|v| bootstrap::chain_via(c, v, now)).transpose()?;
+            if let Some(chain) = &chain {
+                let logins: i64 = c.query_row("SELECT COUNT(*) FROM grants WHERE chain = ? AND kind = 'workload' AND revoked_at IS NULL AND expires_at > ? AND rules <> '[]'", params![chain, now], |r| r.get(0))?;
+                if logins as usize >= CHAIN_MAX_LOGINS {
+                    return Err(Error::Conflict(format!("at most {CHAIN_MAX_LOGINS} live login tokens for one machine: its processes share the one it has (roll's CLI keeps it beside the machine credential), or log in again once one ends (each within {} minutes)", WORKLOAD_MINUTES.end())));
+                }
+            }
             c.execute(
                 "INSERT INTO grants (id, name, kind, rules, expires_at, ip_allow, created_by, created_at, client_id, rate_per_minute, user_id, ask_otherwise, chain) VALUES (?, ?, 'workload', ?, ?, ?, ?, ?, NULL, ?, ?, 0, ?)",
                 params![id, new.name.trim(), rules, until, ip, created_by, now, new.rate_per_minute.map(i64::from), user, chain],
@@ -1469,7 +1494,9 @@ impl Store {
 
     /// Allow `rule` on a grant: for good (`until: None`, added to its rules unless they hold it), or
     /// until a time (its temporary rules, the lapsed ones dropped).
-    pub fn remember(&self, id: &str, rule: &roll_auth::scope::Rule, until: Option<i64>, approval: &str) -> Result<Grant> {
+    /// `rules` remembered on grant `id` in one write (an approval's: a lend's and its route's own).
+    pub fn remember(&self, id: &str, rules: &[roll_auth::scope::Rule], until: Option<i64>, approval: &str) -> Result<Grant> {
+        let new = rules;
         self.changeable(id)?;
         let now = code_sql::now_ms();
         self.db.write(|c| {
@@ -1481,13 +1508,21 @@ impl Store {
             }
             match until {
                 None => {
-                    let mut rules: Scope = serde_json::from_str(&rules).unwrap_or_default();
-                    if !rules.0.contains(rule) {
-                        rules.0.push(rule.clone());
+                    let mut kept: Scope = serde_json::from_str(&rules).unwrap_or_default();
+                    for rule in new {
+                        if !kept.0.contains(rule) {
+                            kept.0.push(rule.clone());
+                        }
                     }
-                    set_rules(c, id, &serde_json::to_string(&rules).unwrap_or_default())?;
+                    set_rules(c, id, &serde_json::to_string(&kept).unwrap_or_default())?;
                 }
-                Some(until) => push_temp(c, id, temp, TempRule { rule: rule.clone(), until, approval: Some(approval.to_string()), gated: false }, now)?,
+                Some(until) => {
+                    let mut temp = temp;
+                    for rule in new {
+                        push_temp(c, id, temp.take(), TempRule { rule: rule.clone(), until, approval: Some(approval.to_string()), gated: false }, now)?;
+                        temp = c.query_row("SELECT temp_rules FROM grants WHERE id = ?", [id], |r| r.get(0)).optional()?.flatten();
+                    }
+                }
             }
             Ok(())
         })?;
@@ -1665,7 +1700,7 @@ impl Store {
                 return Err(Error::TooMany("this token has 50 approvals waiting: decide some first".into()));
             }
             c.execute(
-                &format!("INSERT INTO approvals ({APPROVAL_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, ?, NULL, NULL, ?, ?, ?, ?, ?, NULL)"),
+                &format!("INSERT INTO approvals ({APPROVAL_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, ?, NULL, NULL, ?, ?, ?, ?, ?, NULL, ?)"),
                 params![
                     id,
                     a.grant.id,
@@ -1684,7 +1719,8 @@ impl Store {
                     a.request_hash,
                     a.environment,
                     a.scope_path,
-                    a.scope_index
+                    a.scope_index,
+                    a.also.and_then(|r| serde_json::to_string(r).ok())
                 ],
             )?;
             Ok(())
@@ -2376,7 +2412,9 @@ impl Store {
     /// decides on the merged rules whether it waits for an admin now (`needs_approval`), so a change
     /// made meanwhile is never lost or approved unseen. Nothing else about it changes. Answers the
     /// connection and whether the rule was new.
-    pub fn apply_step_up(&self, id: &str, grant_id: &str, needs_approval: &dyn Fn(&Scope, bool) -> bool) -> Result<(Grant, bool)> {
+    /// `ends`: the connection's end with the rule added (a product's cap may bring it forward;
+    /// never later than it is).
+    pub fn apply_step_up(&self, id: &str, grant_id: &str, ends: Option<i64>, needs_approval: &dyn Fn(&Scope, bool) -> bool) -> Result<(Grant, bool)> {
         let now = code_sql::now_ms();
         let added = self.db.write(|c| {
             let rule: Option<String> = c.query_row("SELECT rule FROM oauth_step_ups WHERE id = ? AND grant_id = ? AND expires_at > ?", params![id, grant_id, now], |r| r.get(0)).optional()?;
@@ -2401,6 +2439,9 @@ impl Store {
             check_rules(&scope)?;
             let waits = needs_approval(&scope, ask);
             c.execute("UPDATE grants SET pending = ? WHERE id = ?", params![waits, grant_id])?;
+            if let Some(t) = ends.filter(|t| expires.is_none_or(|e| e > *t)) {
+                c.execute("UPDATE grants SET expires_at = ? WHERE id = ?", params![t, grant_id])?;
+            }
             set_rules(c, grant_id, &serde_json::to_string(&scope).unwrap_or_default())?;
             Ok::<_, Error>(true)
         })?;

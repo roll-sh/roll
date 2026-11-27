@@ -74,6 +74,23 @@ pub enum AppsTls {
     Cloudflare,
 }
 
+/// A customer's own Cloudflare, with their token for one call (`…/domains/{host}/configure`):
+/// roll-edge's client, its host fixed, no redirects, its answers bounded.
+struct CloudflareDns;
+
+#[async_trait]
+impl apps_control::integrations::DnsWriter for CloudflareDns {
+    async fn put_record(&self, token: &str, kind: &str, name: &str, content: &str, replace: bool) -> anyhow::Result<Vec<String>> {
+        anyhow::ensure!(!token.trim().is_empty(), "the secret holding the Cloudflare token is empty");
+        let cf = roll_edge::acme::Cloudflare::new(token, self.api())?;
+        cf.put_record(kind, name, content, "roll apps: this domain's record", replace).await
+    }
+
+    fn api(&self) -> &'static str {
+        roll_edge::acme::Cloudflare::API
+    }
+}
+
 /// Cloudflare for SaaS as roll apps' certificate provider.
 struct SaasTls(roll_edge::saas::CustomHostnames);
 
@@ -944,6 +961,7 @@ pub async fn start(
         workspace: Some(workspace),
     };
     let apps = Apps::new(cfg, store, deps);
+    apps.set_dns_writer(Arc::new(CloudflareDns));
     if let Some(c) = code {
         apps.set_github_app(Arc::new(CodeGitHub(c.clone())));
         apps.set_explainer(Arc::new(CodeExplainer(c.clone())));

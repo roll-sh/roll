@@ -97,6 +97,14 @@ async fn issues(State(m): S) -> Json<Value> {
     Json(Value::Array(m.issues.lock().clone()))
 }
 
+async fn create_issue(State(m): S, Path((o, r)): Path<(String, String)>, Json(b): Json<Value>) -> Json<Value> {
+    record(&m, "POST", format!("/repos/{o}/{r}/issues"), b.clone());
+    let n = 100 + m.next_id.fetch_add(1, Ordering::SeqCst);
+    let made = issue_json(n, b["title"].as_str().unwrap_or(""), "open", &[]);
+    m.issues.lock().push(made.clone());
+    Json(made)
+}
+
 async fn issue(State(m): S, Path((_o, _r, n)): Path<(String, String, u64)>) -> Response {
     match m.issues.lock().iter().find(|i| i["number"] == n) {
         Some(i) => Json(i.clone()).into_response(),
@@ -412,7 +420,7 @@ async fn github_mock() -> GitHub {
         .route("/repos/{o}/{r}/actions/workflows", get(list_workflows))
         .route("/repos/{o}/{r}/environments", get(list_environments))
         .route("/orgs/{org}/teams", get(list_teams))
-        .route("/repos/{o}/{r}/issues", get(issues))
+        .route("/repos/{o}/{r}/issues", get(issues).post(create_issue))
         .route("/repos/{o}/{r}/issues/{n}", get(issue).patch(patch_issue))
         .route("/repos/{o}/{r}/issues/{n}/comments", get(list_comments).post(comment))
         .route("/repos/{o}/{r}/issues/comments/{id}", axum::routing::patch(edit_comment))
@@ -623,6 +631,11 @@ async fn connect_import_webhooks_and_mirror() {
     until("PR import", || async { imported(&a).await }).await;
     let work = a.ok("GET", "/v1/code/repos/acme/app/work", None).await;
     assert_eq!(work.as_array().unwrap().len(), 1, "closed issues aren't imported: {work}");
+    // A preview note's issue (roll previews' note to work): opened on the mirror by roll's App.
+    let row = a.code.find_repo("acme", "app").unwrap();
+    let (n, url) = a.code.open_github_issue(&row, "Preview feedback: cut off", "the note", &["preview-feedback".to_string()]).await.unwrap().expect("a connected repo");
+    assert_eq!(url, format!("https://github.com/acme/app/issues/{n}"));
+    assert!(g.mock.calls.lock().iter().any(|(m, p, b)| m == "POST" && p == "/repos/acme/app/issues" && b["labels"] == json!(["preview-feedback"]) && b["body"] == "the note"));
     assert_eq!(work[0]["source"], "github#1");
     assert_eq!(work[0]["priority"], 1);
     // Its author can't push (no association: anyone could have opened it), so MCP's lockdown withholds it.
@@ -710,8 +723,13 @@ async fn connect_import_webhooks_and_mirror() {
             head: None,
             schema_changes: None,
             schema_risks: Vec::new(),
+            schema_overlaps: Vec::new(),
             release_ms: None,
+            release_locks: Vec::new(),
             release_before_ms: None,
+            main_on_change: None,
+            release_checks: None,
+            rehearsal: None,
             screenshot_url: None,
             expires_at: None,
             earlier: Vec::new(),
