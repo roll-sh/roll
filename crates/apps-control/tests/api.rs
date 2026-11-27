@@ -7633,14 +7633,15 @@ async fn a_tcp_service_answers_on_its_own_port() {
         let (w, base) = (&w, base.clone());
         async move {
             w.apps.cron_pass(t0 + n * 61_000).await;
+            let mut env = Value::Null;
             for _ in 0..300 {
-                let st = call(&w.api, "GET", &base, None).await.1["check_states"][0].clone();
-                if st["last_at"].as_i64() == Some(t0 + n * 61_000) {
-                    return st;
+                env = call(&w.api, "GET", &base, None).await.1;
+                if env["check_states"][0]["last_at"].as_i64() == Some(t0 + n * 61_000) {
+                    return env["check_states"][0].clone();
                 }
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
-            panic!("pass {n} never came back");
+            panic!("pass {n} never came back: {env}");
         }
     };
     let up = pass(0).await;

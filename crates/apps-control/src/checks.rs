@@ -223,8 +223,9 @@ impl Apps {
             .iter()
             .map(|c| {
                 let r = runs.get(&format!("{}/{}", env_key(service, env), c.name)).cloned().unwrap_or_default();
-                // Known once a try has come back (an answer, or why there was none).
-                let tried = r.status.is_some() || r.error.is_some();
+                // Known once a try has come back (an answer, or why there was none; a TCP
+                // check's pass has neither).
+                let tried = r.status.is_some() || r.error.is_some() || r.last_at > 0;
                 let failure_at = self.check_failures.lock().get(&format!("{}/{}", env_key(service, env), c.name)).copied();
                 let metrics = self.check_metrics.lock().get(&format!("{}/{}", env_key(service, env), c.name)).cloned();
                 CheckState { name: c.name.clone(), up: tried.then_some(r.down_since.is_none()), failures: r.failures, last_at: tried.then_some(r.last_at), status: r.status, ms: tried.then_some(r.ms), error: r.error, down_since: r.down_since, failure_at, deployment: r.deployment, metrics, over_budget: r.over_budget }

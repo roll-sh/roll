@@ -437,10 +437,10 @@ impl Apps {
         };
         if matches!(t.kind.as_str(), "pagerduty" | "opsgenie") {
             let seq = d.event;
-            if let Some(e) = self.db(move |s| s.event(seq)).await? {
-                if self.closed_since(&e).await {
-                    return Err(Error::Conflict("this alert was resolved since: sent again, it would open the incident again".into()));
-                }
+            if let Some(e) = self.db(move |s| s.event(seq)).await?
+                && self.closed_since(&e).await
+            {
+                return Err(Error::Conflict("this alert was resolved since: sent again, it would open the incident again".into()));
             }
         }
         let (ti, di) = (target.to_string(), id.to_string());
