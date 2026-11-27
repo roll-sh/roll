@@ -1492,6 +1492,12 @@ async fn https_answers_carry_hsts_by_default() {
     assert_eq!(put(json!({"hsts": {"max_age": 600, "preload": true}})).await.0, StatusCode::BAD_REQUEST, "preload needs a year and subdomains");
     assert_eq!(put(json!({"hsts": false})).await.0, StatusCode::OK);
     assert_eq!(sts().await, None, "off");
+    // Synced to another environment, off stays off (a PUT's null would be the default).
+    let staging = base.replace("/production", "/staging");
+    assert_eq!(call(&w.api, "PUT", &staging, Some(json!({}))).await.0, StatusCode::OK);
+    let diff = call(&w.api, "GET", &format!("{staging}/diff?from=production"), None).await.1;
+    let row = diff["settings"].as_array().unwrap().iter().find(|r| r["field"] == "hsts").cloned().unwrap_or_default();
+    assert_eq!(row["put"], json!({"hsts": false}), "{diff}");
     put(json!({"hsts": null, "headers": [{"set": {"Strict-Transport-Security": "max-age=1"}}]})).await;
     assert_eq!(sts().await.as_deref(), Some("max-age=1"), "its own header wins");
 }

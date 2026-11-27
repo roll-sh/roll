@@ -2090,7 +2090,9 @@ impl Apps {
         for k in ["wait_for_ci", "follow_tag", "redeploy_on_secrets", "traces", "vitals", "hsts", "report", "egress", "allow_ips", "rate_limit", "firewall", "headers", "routes", "redirects", "checks", "log_retention_days", "keep_days", "approvals"] {
             let (x, y) = (a.get(k).cloned().unwrap_or(Value::Null), b.get(k).cloned().unwrap_or(Value::Null));
             if x != y {
-                settings.push(json!({ "field": k, "from": x, "to": y, "put": { k: x } }));
+                // An environment's `hsts: null` reads as none sent, where a PUT's null is the default.
+                let put = if k == "hsts" && x.is_null() { json!(false) } else { x.clone() };
+                settings.push(json!({ "field": k, "from": x, "to": y, "put": { k: put } }));
             }
         }
         for (k, x, y) in [("error", &from_env.pages.error, &to_env.pages.error), ("maintenance", &from_env.pages.maintenance, &to_env.pages.maintenance)] {
