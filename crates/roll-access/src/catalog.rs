@@ -233,7 +233,8 @@ fn search_parent(b: &Value) -> Vec<Lent> {
 fn search_key_action(b: &Value) -> Action {
     match b.get("access").and_then(Value::as_str) {
         Some("read") => Action::Reveal,
-        Some("append") => Action::Write,
+        // An `otel` key adds documents to OpenTelemetry's data streams and reads nothing.
+        Some("append" | "otel") => Action::Write,
         Some("data") => Action::Delete,
         _ => Action::Admin,
     }

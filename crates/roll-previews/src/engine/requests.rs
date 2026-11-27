@@ -494,6 +494,37 @@ impl Engine {
         Ok((hook, format!("{}{path}?roll_hook={token}", url.trim_end_matches('/'))))
     }
 
+    /// A picture the team's own tests sent (`POST /__roll/snapshot?name=&head=` on the preview's
+    /// host, with the project's bypass secret; Argos's and Percy's SDKs): page `snap:<name>` of
+    /// the visual review at the head the preview serves (`head`, when sent, must be that one: a
+    /// test of another head isn't filed as this one's). Kept here; the preview's owner compares it
+    /// at its next converge (a change's against main's, main's against the changes waiting on it)
+    /// and reports it, once for every picture sent since. The head it was kept at.
+    pub async fn snapshot(self: &Arc<Self>, id: &str, name: &str, head: Option<&str>, png: Vec<u8>) -> Result<String> {
+        if !crate::settings::snapshot_name_ok(name) {
+            return Err(Error::BadRequest("name: 1 to 80 of a-z, A-Z, 0-9, -, _, . and /".into()));
+        }
+        let r = self.store.row(id)?;
+        if r.desired == Desired::Deleted {
+            return Err(Error::Conflict("the preview is being deleted".into()));
+        }
+        let serves = r.build().to_string();
+        if let Some(h) = head.filter(|h| !h.is_empty())
+            && h != serves
+            && self.source.git_commit(&r.repo, &serves).await.ok().flatten().as_deref() != Some(h)
+        {
+            return Err(Error::Conflict(format!("the preview serves {serves}, not {h}: send it from a test of that head")));
+        }
+        // Compared with the picture it replaces: CPU work, off the runtime's workers.
+        let (store, pid, h, n) = (self.store.clone(), id.to_string(), serves.clone(), name.to_string());
+        tokio::task::spawn_blocking(move || store.put_snapshot(&pid, &h, &n, &png)).await.map_err(|e| Error::Internal(e.to_string()))??;
+        self.store.set_runtime_fact(id, "snapshots_due", Some(&true))?;
+        self.store.log(id, &format!("a snapshot from the team's tests: {name}"))?;
+        self.store.update(id, |row| row.next_at = 0)?;
+        self.kick();
+        Ok(serves)
+    }
+
     /// A note a guest left through share link `share` (its `notes` on): posted on the change as
     /// `guest:<name>`, its text made inert for a pull request (no mention, image or HTML), at most
     /// [`crate::notes::GUEST_PER_HOUR`] an hour per link. Its review's id.
