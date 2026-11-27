@@ -275,14 +275,14 @@ function HealthAlerts({ clusterId, rules }: { clusterId: string; rules: AlertRul
           {rules.map((r) => (
             <li key={r.id} className="flex flex-wrap items-center gap-x-4 gap-y-1 px-4 py-2.5 text-[13px]">
               <RuleState rule={r} />
-              <span className="min-w-0 flex-1">
+              <span className="min-w-48 flex-1">
                 <span>{ruleText(r)}</span>
                 {r.name && <span className="ml-2 text-subtle">{r.name}</span>}
               </span>
               <span className="font-mono text-[12px] text-muted tabular-nums" title="The last evaluation's value">
                 {formatAlertValue(r.metric, r.value)}
               </span>
-              <span className="text-[12px] text-subtle">{r.targets.map((t) => (t.type === "webhook" ? t.url : `${t.type} ${t.channel}`)).join(", ")}</span>
+              <span className="hidden text-[12px] text-subtle sm:inline">{r.targets.map((t) => (t.type === "webhook" ? t.url : `${t.type} ${t.channel}`)).join(", ")}</span>
               <button type="button" className={btn} onClick={() => void test(r)} disabled={sent[r.id] === "Sending…"}>
                 <Send size={14} strokeWidth={1.5} aria-hidden />
                 Send test
