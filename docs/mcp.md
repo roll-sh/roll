@@ -1531,6 +1531,8 @@ previews are listed once those products are on.
 | `previews_list_hooks` | A project's preview deploy hooks (never their secrets). | `GET /v1/previews/projects/{project}/hooks` |
 | `previews_delete_hook` | Delete a preview deploy hook. | `DELETE /v1/previews/projects/{project}/hooks/{hook}` |
 | `previews_list_shares` | Who a preview is shared with outside the team (never the links' tokens). | `GET /v1/previews/{id}/shares` |
+| `previews_list_webhooks` | A preview's webhook URLs for outside services (never their tokens; making one is a person's). | `GET /v1/previews/{id}/webhooks` |
+| `previews_revoke_webhook` | Revoke a preview's webhook URL. | `DELETE /v1/previews/{id}/webhooks/{webhook}` |
 | `previews_env` | A preview's own variables, with their values (reveal). | `GET /v1/previews/{id}/env` |
 | `previews_connect` | Each data branch's connection as the preview's services get it (the branches' own credentials; reveal). | `GET /v1/previews/{id}/connect` |
 | `previews_list_mail` | The mail a preview's services sent, caught and never delivered (reveal). | `GET /v1/previews/{id}/mail` |
