@@ -7977,6 +7977,10 @@ async fn otlp_logs_land_in_otel_data_streams_with_an_otel_key() {
     let (_, v) = e.es(&u, &p, Method::GET, "/metrics-*.otel-*/_field_caps?fields=metrics.*", None).await;
     let types: Vec<_> = ["metrics.cpu.utilization", "metrics.orders", "metrics.latency"].iter().map(|f| v["fields"][f].as_object().and_then(|o| o.keys().next().cloned())).collect();
     assert_eq!(types, [Some("double".to_string()), Some("long".into()), Some("histogram".into())], "{v}");
+    // OTLP/JSON past its 4 MiB is a 413 (protobuf goes to the cluster's body limit).
+    let big = format!(r#"{{"resourceMetrics":[],"pad":"{}"}}"#, "x".repeat(4 * 1024 * 1024));
+    let r = e.http.post(format!("{}/_otlp/v1/metrics", e.es)).header("authorization", format!("ApiKey {key}")).header("content-type", "application/json").body(big).send().await.unwrap();
+    assert_eq!(r.status().as_u16(), 413);
     // The key writes and never reads (a wildcard would just find nothing it may read).
     let (s, v) = as_key(&e, &key, Method::POST, "/logs-generic.otel-default/_search", None).await;
     assert_eq!(s, 403, "{v}");
