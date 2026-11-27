@@ -1101,7 +1101,7 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
     if row.filters_index
         && let Target::One(r) = &target
     {
-        let approved_ask = outcome == Outcome::Ask;
+        let approved_ask = outcome == Outcome::Ask && (!decided_before || approved_before);
         let reach = scope.indices_reaching_within(within_scope.as_deref(), r, action, approved_ask);
         parts.extensions.insert(roll_auth::IndexScope(reach));
     }
