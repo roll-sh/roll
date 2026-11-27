@@ -87,6 +87,9 @@ impl Grants for AllBut {
     fn allows(&self, _: Action, at: &Scope<'_>) -> bool {
         at.env != Some(self.0)
     }
+    fn limits_keys(&self) -> bool {
+        false
+    }
 }
 
 fn set(key: &str, value: &str) -> Op {

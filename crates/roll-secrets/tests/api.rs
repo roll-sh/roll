@@ -2458,6 +2458,7 @@ async fn links_read_live_values_issue_managed_credentials_rotate_and_lease_dynam
             environments: Some(vec!["staging".into()]),
             paths: None,
             unprotected: false,
+            keys: None,
             actions: BTreeMap::from([(A::Read, Effect::Allow), (A::Reveal, Effect::Allow)]),
         };
         roll_auth::Grant { user: None, ask_otherwise: false, id: "tok_tf".into(), name: "tf".into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(Scope(vec![rule])) }
@@ -5883,6 +5884,7 @@ async fn a_rule_naming_one_encryption_key_reaches_it_alone() {
         environments: None,
         paths: None,
         unprotected: false,
+        keys: None,
         actions: BTreeMap::from([(A::Read, Effect::Allow), (A::Write, Effect::Allow)]),
     };
     let grant = roll_auth::Grant { user: None, ask_otherwise: false, id: "tok_pay".into(), name: "pay".into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(Scope(vec![rule])) };
@@ -5906,6 +5908,54 @@ async fn a_rule_naming_one_encryption_key_reaches_it_alone() {
     assert_eq!(call(Method::POST, "/transit/billing/encrypt", Some(plain)).await.0, StatusCode::FORBIDDEN);
 }
 
+/// A rule limited to some keys (`keys: ["STRIPE_KEY"]`) reaches those keys of its folders alone:
+/// it reveals one, lists and reads the folder's values as that one, and is refused another key's
+/// value and any write naming another key (the batch names it).
+#[tokio::test]
+async fn key_scoped_rule_reaches_only_its_keys() {
+    use roll_auth::scope::{Action as A, Effect, Resources, Rule, Scope, Selector};
+    let api = Api::new().await;
+    api.set("production", "STRIPE_KEY", "sk_live").await;
+    api.set("production", "DB_PASSWORD", "pw").await;
+    let rule = Rule {
+        product: "secrets".into(),
+        resources: Resources::Some(vec![Selector::Project { project: api.project.clone() }]),
+        environments: Some(vec!["production".into()]),
+        paths: None,
+        unprotected: false,
+        keys: Some(vec!["STRIPE_KEY".into()]),
+        actions: BTreeMap::from([(A::Read, Effect::Allow), (A::Reveal, Effect::Allow), (A::Write, Effect::Allow)]),
+    };
+    let grant = roll_auth::Grant { user: None, ask_otherwise: false, id: "tok_stripe".into(), name: "stripe".into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(Scope(vec![rule])) };
+    let call = |method: Method, path: &str, body: Option<Value>| {
+        let mut req = Request::builder().method(method).uri(format!("/v1/secrets/projects/{}{path}", api.project)).header("content-type", "application/json").body(body.map_or(Body::empty(), |b| Body::from(b.to_string()))).unwrap();
+        req.extensions_mut().insert(roll_auth::Operator);
+        req.extensions_mut().insert(grant.clone());
+        let router = api.router.clone();
+        async move {
+            let resp = router.oneshot(req).await.unwrap();
+            let status = resp.status();
+            let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+            (status, serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null))
+        }
+    };
+    let (s, v) = call(Method::GET, "/environments/production/secrets/STRIPE_KEY/value", None).await;
+    assert_eq!((s, v["value"].as_str()), (StatusCode::OK, Some("sk_live")), "{v}");
+    assert_eq!(call(Method::GET, "/environments/production/secrets/DB_PASSWORD/value", None).await.0, StatusCode::FORBIDDEN);
+    let (s, list) = call(Method::GET, "/environments/production/secrets", None).await;
+    let names: Vec<&str> = list.as_array().map(|l| l.iter().filter_map(|x| x["key"].as_str()).collect()).unwrap_or_default();
+    assert_eq!((s, names), (StatusCode::OK, vec!["STRIPE_KEY"]), "{list}");
+    let (s, v) = call(Method::GET, "/environments/production/values", None).await;
+    assert_eq!((s, v["values"].as_object().map(|o| o.keys().cloned().collect::<Vec<_>>())), (StatusCode::OK, Some(vec!["STRIPE_KEY".to_string()])), "{v}");
+    assert_eq!(call(Method::PUT, "/environments/production/secrets/DB_PASSWORD", Some(json!({ "value": "mine" }))).await.0, StatusCode::FORBIDDEN);
+    let (s, e) = call(Method::POST, "/environments/production/changes", Some(json!({ "ops": [{ "op": "set", "key": "STRIPE_KEY", "value": "sk_2" }, { "op": "set", "key": "NEW_KEY", "value": "x" }] }))).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{e}");
+    assert!(e.to_string().contains("NEW_KEY") && !e.to_string().contains("STRIPE_KEY,"), "names the key outside the rule: {e}");
+    let (s, w) = call(Method::PUT, "/environments/production/secrets/STRIPE_KEY", Some(json!({ "value": "sk_2" }))).await;
+    assert_eq!(s, StatusCode::OK, "{w}");
+    assert_eq!(api.values("production", "/").await["values"]["DB_PASSWORD"], "pw", "the other key is as it was");
+}
+
 #[tokio::test]
 async fn a_roll_access_grant_reaches_only_what_its_rules_name() {
     use roll_auth::scope::{Action as A, Effect, Resources, Rule, Scope, Selector};
@@ -5918,6 +5968,7 @@ async fn a_roll_access_grant_reaches_only_what_its_rules_name() {
         environments: Some(vec!["development".into()]),
         paths: None,
         unprotected: false,
+        keys: None,
         actions: BTreeMap::from([(A::Read, Effect::Allow), (A::Reveal, Effect::Allow)]),
     };
     let grant = roll_auth::Grant { user: None, ask_otherwise: false, id: "tok_ci".into(), name: "ci".into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(Scope(vec![rule])) };
@@ -5940,7 +5991,7 @@ async fn a_roll_access_grant_reaches_only_what_its_rules_name() {
     let audit = api.ok(Method::GET, "/audit?actor=token:tok_ci", None).await;
     assert_eq!(audit[0]["action"], "secrets.export");
     // A rule naming the project by id (as the dashboard's builder writes it) reaches it the same.
-    let by_id = Rule { resources: Resources::Some(vec![Selector::Id { id: api.project.clone(), index: None }]), environments: Some(vec!["development".into()]), paths: None, product: "secrets".into(), unprotected: false, actions: BTreeMap::from([(A::Read, Effect::Allow), (A::Reveal, Effect::Allow)]) };
+    let by_id = Rule { resources: Resources::Some(vec![Selector::Id { id: api.project.clone(), index: None }]), environments: Some(vec!["development".into()]), paths: None, product: "secrets".into(), unprotected: false, keys: None, actions: BTreeMap::from([(A::Read, Effect::Allow), (A::Reveal, Effect::Allow)]) };
     let grant = roll_auth::Grant { scope: Arc::new(Scope(vec![by_id])), ..grant.clone() };
     let mut req = Request::builder().uri(format!("/v1/secrets/projects/{}/environments/development/values", api.project)).body(Body::empty()).unwrap();
     req.extensions_mut().insert(roll_auth::Operator);
@@ -5986,6 +6037,7 @@ async fn a_signed_in_person_manages_only_their_own_projects_secrets() {
         environments: None,
         paths: None,
         unprotected: false,
+        keys: None,
         actions: BTreeMap::from([(roll_auth::scope::Action::Read, roll_auth::scope::Effect::Allow)]),
     };
     let grant = roll_auth::Grant { ask_otherwise: false, user: Some("usr_ada".into()), id: "tok_ada".into(), name: "ada".into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(roll_auth::scope::Scope(vec![everything])) };
@@ -7023,7 +7075,7 @@ async fn a_projects_admin_cuts_off_only_its_own_tokens_and_leaves_the_operators_
     let at = |rest: &str| format!("/v1/secrets/projects/{mine}{rest}");
     api.as_ada(Method::PUT, &at("/environments/production/secrets/STRIPE_KEY"), Some(json!({ "value": "sk_test_fake" }))).await;
     // The operator's CI token reaches every project's secrets; hers names only her project.
-    let everywhere = roll_auth::scope::Rule { product: "secrets".into(), resources: roll_auth::scope::Resources::All, environments: None, paths: None, unprotected: false, actions: BTreeMap::from([(roll_auth::scope::Action::Read, roll_auth::scope::Effect::Allow)]) };
+    let everywhere = roll_auth::scope::Rule { product: "secrets".into(), resources: roll_auth::scope::Resources::All, environments: None, paths: None, unprotected: false, keys: None, actions: BTreeMap::from([(roll_auth::scope::Action::Read, roll_auth::scope::Effect::Allow)]) };
     let (_, ops) = api.gate.grant("operator-ci", everywhere, None);
     let confined = |name: &str| api.gate.grant(name, roll_secrets::access::rule(&mine, None, None, &[roll_secrets::Action::Read]), None).1;
     let ci = confined("ada-ci");

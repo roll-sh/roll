@@ -7358,6 +7358,7 @@ dependencies = [
  "getrandom 0.4.3",
  "qrcode",
  "ring",
+ "roll-secrets-ref",
  "serde",
  "serde_json",
  "sha2 0.10.9",
