@@ -154,6 +154,8 @@ fn postgres() -> Router {
         .route("/v1/apps/services/{id}/environments/{env}/redeploy", post(|| async { axum::Json(json!({ "ok": true })) }))
         .route("/v1/apps/services/{id}/environments/{env}/domains/{host}/configure", post(|| async { axum::Json(json!({ "status": "active" })) }))
         .route("/v1/search/clusters/{id}/indices/{index}/search", post(|| async { axum::Json(json!({ "hits": [] })) }))
+        // Search's evaluate reads a judgment list's index beside the one it evaluates.
+        .route("/v1/search/clusters/{id}/indices/{index}/evaluate", post(|ext: axum::http::Extensions| async move { axum::Json(json!({ "list": roll_auth::OtherIndex::reaches(&ext, "roll-judgments-q", roll_auth::scope::Action::Read) })) }))
         .route(
             "/v1/search/clusters",
             post(|| async { axum::Json(json!({ "id": "cl_new", "password": "fresh" })) })
@@ -2185,6 +2187,30 @@ async fn a_rule_can_grant_one_encryption_key() {
     // A rule on the whole project still reaches every key.
     let (all, _) = d.token(json!([{ "product": "secrets", "resources": [{ "id": "prj_a" }], "actions": { "write": "allow" } }]), json!({})).await;
     assert_eq!(d.call(&all, Method::POST, "/v1/secrets/projects/prj_a/transit/billing/encrypt", Some(json!({ "plaintext": "aGk=" }))).await.0, StatusCode::OK);
+}
+
+/// A second index inside one request (a judgment list beside the evaluated index) is decided as the
+/// route's own resource is, the index changed: only where the token's rules allow it outright.
+#[tokio::test]
+async fn a_second_index_is_reached_only_where_the_rules_allow_it() {
+    let d = Daemon::new(50);
+    let list = |rules: Value| {
+        let d = &d;
+        async move {
+            let (t, _) = d.token(rules, json!({})).await;
+            let (s, v) = d.call(&t, Method::POST, "/v1/search/clusters/cl_1/indices/logs-1/evaluate", Some(json!({}))).await;
+            assert_eq!(s, StatusCode::OK, "{v}");
+            v["list"].as_bool().unwrap()
+        }
+    };
+    let rule = |index: &str| json!([{ "product": "search", "resources": [{ "id": "cl_1", "index": index }], "actions": { "read": "allow" } }]);
+    assert!(!list(rule("logs-*")).await, "the evaluated index's rule doesn't reach the list's");
+    assert!(list(rule("logs-*,roll-judgments-*")).await);
+    let asks = json!([
+        { "product": "search", "resources": [{ "id": "cl_1", "index": "logs-*" }], "actions": { "read": "allow" } },
+        { "product": "search", "resources": [{ "id": "cl_1", "index": "roll-judgments-*" }], "actions": { "read": "ask" } },
+    ]);
+    assert!(!list(asks).await, "an ask asks nobody inside a request");
 }
 
 /// The search console is decided from its route alone: the gate reads no body (a large `_bulk`
