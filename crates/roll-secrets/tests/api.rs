@@ -1378,6 +1378,11 @@ struct Gate {
     workloads: Mutex<std::collections::BTreeSet<String>>,
     /// Every grant's person, revoked ones too (roll-access keeps revoked rows).
     owners: Mutex<BTreeMap<String, Option<String>>>,
+    /// Machine chains (roll-access's bootstrap tokens, none exchanged here): when each ends, and
+    /// when it was revoked.
+    chains: Mutex<BTreeMap<String, (i64, Option<i64>)>>,
+    /// How long a bootstrap token lives, in ms, when set (a test's short one); its minutes otherwise.
+    chain_ms: std::sync::atomic::AtomicI64,
 }
 
 impl Gate {
@@ -1504,6 +1509,33 @@ impl roll_secrets::Workloads for Gate {
     }
     fn revoke_token(&self, id: &str, _: &str) -> roll_secrets::Result<()> {
         self.revoke(id)
+    }
+    fn bootstrap(&self, _: &str, _: Option<Vec<String>>, minutes: u32, _: Option<&str>) -> roll_secrets::Result<roll_secrets::Chained> {
+        let n = self.made.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
+        let ms = Some(self.chain_ms.load(std::sync::atomic::Ordering::SeqCst)).filter(|ms| *ms > 0).unwrap_or(minutes as i64 * 60_000);
+        let chain = format!("tok_chain{n}");
+        self.chains.lock().unwrap().insert(chain.clone(), (now + ms, None));
+        Ok(roll_secrets::Chained { chain, secret: format!("rlbt_fake{n}"), issued_at: now, expires_at: now + ms })
+    }
+    fn revoke_chain(&self, chain: &str, _: &str) -> roll_secrets::Result<()> {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
+        if let Some(c) = self.chains.lock().unwrap().get_mut(chain) {
+            c.1.get_or_insert(now);
+        }
+        Ok(())
+    }
+    fn chains(&self, chains: &[String]) -> roll_secrets::Result<Vec<roll_secrets::ChainState>> {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
+        let held = self.chains.lock().unwrap();
+        Ok(chains
+            .iter()
+            .filter_map(|c| held.get(c).map(|&(until, revoked)| (c, until, revoked)))
+            .map(|(c, until, revoked_at)| {
+                let state = if revoked_at.is_some() { "revoked" } else if until > now { "waiting" } else { "ended" };
+                roll_secrets::ChainState { chain: c.clone(), state, refreshed_at: None, expires_at: Some(until), revoked_at, revoked_why: revoked_at.map(|_| "an admin revoked the machine".into()) }
+            })
+            .collect())
     }
 }
 
@@ -2531,6 +2563,27 @@ async fn a_scanner_never_confirms_a_weak_password_inside_text_it_knows() {
     let (s, found) = api.req(Method::POST, "/scan", Some(json!({ "candidates": [url, random] })), Some(&token)).await;
     // The URL is long, but its password is a word: never tried. A scan-only token isn't told the key.
     assert_eq!((s, found.clone()), (StatusCode::OK, json!([{ "index": 1, "environment": "production" }])), "{found}");
+}
+
+/// A scanner's budget is its token's and pusher's: one pusher's spent minute is refused (429,
+/// naming the budget and when it has room), counting nothing, while another pusher's push through
+/// the same token goes on.
+#[tokio::test]
+async fn one_pusher_spending_a_scan_budget_leaves_other_pushers_theirs() {
+    let api = Api::new().await;
+    let token = api.token(json!({ "actions": ["scan"] }));
+    // All in one minute (the budget's window).
+    while std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() % 60_000 > 45_000 {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    let scan = |pusher: &str| json!({ "candidates": [], "pusher": pusher, "refs": ["refs/heads/main"] });
+    for _ in 0..roll_secrets::leaks::SCANS_PER_MINUTE {
+        assert_eq!(api.req(Method::POST, "/scan", Some(scan("alice")), Some(&token)).await.0, StatusCode::OK);
+    }
+    let (s, e) = api.req(Method::POST, "/scan", Some(scan("alice")), Some(&token)).await;
+    let said = e["error"].as_str().unwrap_or_default();
+    assert!(s == StatusCode::TOO_MANY_REQUESTS && said.contains("for pusher alice") && said.contains("room again in"), "{s} {e}");
+    assert_eq!(api.req(Method::POST, "/scan", Some(scan("bob")), Some(&token)).await.0, StatusCode::OK, "bob's push isn't alice's");
 }
 
 /// roll code's GitHub App checking a push to a repo on the project's canvas: a scanner of the
@@ -6222,6 +6275,9 @@ async fn a_project_backs_up_sealed_to_a_key_and_restores_into_another() {
     api.ok(Method::POST, "/transit", Some(json!({ "name": "cards" }))).await;
     let sync = api.ok(Method::POST, "/syncs", Some(json!({ "environment": "staging", "kind": "fake", "target": { "name": "x", "token_key": "PLATFORM_TOKEN" } }))).await;
     let whsec = sync["signing_secret"].as_str().unwrap().to_string();
+    // A machine identity with one machine waiting: its credentials aren't the backup's.
+    let racks = api.ok(Method::POST, "/identities", Some(json!({ "name": "racks", "kind": "machine", "environments": ["staging"], "actions": ["read"] }))).await;
+    api.ok(Method::POST, &format!("/identities/{}/bootstrap", racks["id"].as_str().unwrap()), Some(json!({}))).await;
 
     let secret = [7u8; 32];
     // Only a caller who may manage and reveal the whole project takes it out or compares it: an
@@ -6254,6 +6310,7 @@ async fn a_project_backs_up_sealed_to_a_key_and_restores_into_another() {
     let v = api.ok(Method::POST, "/backup/verify", Some(archive.clone())).await;
     assert_eq!((v["keys"]["missing"].clone(), v["keys"]["changed"].clone(), v["registrations"]["missing"].clone()), (json!([]), json!(["staging:/API"]), json!([])), "{v}");
     assert!(!v.to_string().contains("sk_live_backup") && !v.to_string().contains("PRIVATE KEY"));
+    assert!(v["machines"][0].as_str().unwrap().contains("racks: its machines don't come back") && v["machines"][0].as_str().unwrap().contains("1 was live"), "{v}");
     let (s, e) = api.req(Method::POST, "/backup/verify", Some(archive.clone()), Some(&admin_only)).await;
     assert_eq!(s, StatusCode::FORBIDDEN, "{e}");
     // A token's verify counts, and names nothing.
@@ -6264,14 +6321,15 @@ async fn a_project_backs_up_sealed_to_a_key_and_restores_into_another() {
     // log in as is left out, never written to be enabled later.
     let mut archive = archive;
     let shared = json!({ "name": "any-repo", "issuer": "https://token.actions.githubusercontent.com", "audience": "roll", "subject": "repo:*", "claims": "{}", "actions": "[\"read\"]", "ttl_minutes": 15 });
-    archive["identities"] = json!([{ "kind": "identity", "id": "idn_shared", "columns": shared }]);
+    archive["identities"].as_array_mut().unwrap().push(json!({ "kind": "identity", "id": "idn_shared", "columns": shared }));
 
     let (_, other) = api.call(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "restored" }))).await;
     let to = |p: &str| format!("/v1/secrets/projects/{}{p}", other["id"].as_str().unwrap());
     let r = api.ok(Method::POST, &to("/restore"), Some(archive.clone())).await;
-    assert_eq!((r["secrets"].as_u64(), r["registrations"].as_u64(), r["identities"].as_u64(), r["syncs"].as_u64()), (Some(3), Some(1), Some(0), Some(1)), "{r}");
-    let warnings = r["warnings"].as_array().unwrap();
-    assert!(warnings.len() == 1 && warnings[0].as_str().unwrap().contains("any-repo") && warnings[0].as_str().unwrap().contains("signs for everyone"), "{r}");
+    assert_eq!((r["secrets"].as_u64(), r["registrations"].as_u64(), r["identities"].as_u64(), r["syncs"].as_u64()), (Some(3), Some(1), Some(1), Some(1)), "{r}");
+    let warnings: Vec<&str> = r["warnings"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
+    assert!(warnings.len() == 2 && warnings.iter().any(|w| w.contains("any-repo") && w.contains("signs for everyone")), "{r}");
+    assert!(warnings.iter().any(|w| w.contains("racks: its machines don't come back") && w.contains("new bootstrap token (1 was live at the backup)")), "{r}");
     // The CA came back with its key, under the restorer: a certificate issued after the restore
     // chains to the same CA certificate.
     let restored = api.ok(Method::GET, &to("/cas"), None).await[0].clone();
@@ -6295,6 +6353,32 @@ async fn a_project_backs_up_sealed_to_a_key_and_restores_into_another() {
     assert!(restored["paused_why"].as_str().unwrap().contains("without its credential"), "{restored}");
     let (s, _) = api.call(Method::PATCH, &at(&format!("/syncs/{}", restored["id"].as_str().unwrap())), Some(json!({ "paused": false }))).await;
     assert_eq!(s, StatusCode::CONFLICT);
+}
+
+/// The 41st review's item 5: an identity's cap counts the machines whose credentials haven't ended,
+/// so a revoked one holds its place until its last credential would have ended (its reuse is still
+/// caught until then), then frees it; an admin forgets the ended ones.
+#[tokio::test]
+async fn a_revoked_machine_holds_its_place_until_its_credential_would_have_ended() {
+    let api = Api::new().await;
+    api.secrets.set_machines_max(1);
+    api.gate.chain_ms.store(1_500, std::sync::atomic::Ordering::SeqCst);
+    let id = api.ok(Method::POST, "/identities", Some(json!({ "name": "racks", "kind": "machine", "environments": ["production"], "actions": ["read"] }))).await["id"].as_str().unwrap().to_string();
+    let at = format!("/identities/{id}/bootstrap");
+    let boot = || api.call(Method::POST, &at, Some(json!({})));
+    let (s, first) = boot().await;
+    assert_eq!(s, StatusCode::CREATED, "{first}");
+    let (s, e) = boot().await;
+    assert!(s == StatusCode::BAD_REQUEST && e.to_string().contains("haven't ended"), "{s} {e}");
+    api.call(Method::DELETE, &format!("/identities/{id}/machines/{}", first["chain"].as_str().unwrap()), None).await;
+    assert_eq!(boot().await.0, StatusCode::BAD_REQUEST, "revoked, it holds its place until it would have ended");
+    assert_eq!(api.ok(Method::POST, &format!("/identities/{id}/machines/prune"), None).await["pruned"], 0, "and isn't forgotten before then");
+    tokio::time::sleep(std::time::Duration::from_millis(1_600)).await;
+    let (s, second) = boot().await;
+    assert_eq!(s, StatusCode::CREATED, "{second}");
+    assert_eq!(api.ok(Method::POST, &format!("/identities/{id}/machines/prune"), None).await["pruned"], 1);
+    let machines = api.ok(Method::GET, &format!("/identities/{id}/machines"), None).await;
+    assert_eq!(machines.as_array().unwrap().iter().map(|m| m["chain"].clone()).collect::<Vec<_>>(), [second["chain"].clone()], "{machines}");
 }
 
 #[tokio::test]
@@ -7696,8 +7780,8 @@ async fn members_reach_secrets_by_their_role() {
 }
 
 /// Guardrails (docs/secrets.md): with a policy of one production approval, a project's admin
-/// can't take production back to none, Health shows a project still below it, and a new project's
-/// production is born at it.
+/// can't take production back to none, Health and the operator's report show a project still
+/// below it, and a new project's production is born at it.
 #[tokio::test]
 async fn a_policy_floor_holds_against_a_project_admin_and_new_projects_are_born_at_it() {
     let api = Api::new().await;
@@ -7717,8 +7801,14 @@ async fn a_policy_floor_holds_against_a_project_admin_and_new_projects_are_born_
     let (s, h) = api.signed_in("cat", false, Method::GET, &at("/health"), None).await;
     assert_eq!(s, StatusCode::OK, "{h}");
     assert!(h.as_array().unwrap().iter().any(|f| f["issue"] == "off_policy" && f["environment"] == "production"), "{h}");
+    // And the operator's report lists it, across projects, until it meets the floor.
+    let below = |r: &Value| r["projects"].as_array().unwrap().iter().filter(|p| p["project"] == json!(before)).map(|p| p["findings"].clone()).collect::<Vec<_>>();
+    let r = api.ok(Method::GET, "/v1/secrets/policy/report", None).await;
+    assert!(below(&r).first().is_some_and(|f| f[0]["environment"] == "production" && f[0]["detail"].as_str().unwrap().contains("at least 1 approval")), "{r}");
+    assert_eq!(api.signed_in("cat", false, Method::GET, "/v1/secrets/policy/report", None).await.0, StatusCode::FORBIDDEN, "a project's admin isn't the operator");
     let (s, e) = api.signed_in("cat", false, Method::PUT, &at("/environments/production/policy"), Some(json!({ "protected": true, "approvals": 1 }))).await;
     assert!(s.is_success(), "{e}");
+    assert!(below(&api.ok(Method::GET, "/v1/secrets/policy/report", None).await).is_empty());
     let (s, e) = api.signed_in("cat", false, Method::PUT, &at("/environments/production/policy"), Some(json!({ "protected": true, "approvals": 0 }))).await;
     assert_eq!(s, StatusCode::FORBIDDEN, "{e}");
     assert!(e["error"].as_str().unwrap().contains("roll secrets' policy") && e["error"].as_str().unwrap().contains("at least 1 approval"), "{e}");
@@ -8744,14 +8834,17 @@ async fn a_rotation_now_is_rotation_succeeded_with_the_keys_new_version() {
     assert!(!events.to_string().contains("sk-2"));
 }
 
-/// A public ACME CA and DNS provider, as rolld's client answers: certificates signed by a root of
-/// its own, an account made once (with the EAB it was given), names under `roll-fake.test` only,
-/// and `unproven.…` names never proven.
+/// A public ACME CA and DNS provider (Cloudflare or Route 53), as rolld's client answers:
+/// certificates signed by a root of its own, an account made once (with the EAB it was given),
+/// names under `roll-fake.test` only, and `unproven.…` names never proven. Route 53 takes a fake
+/// STS session (`ASIA…` with its token) or the access key `AKIAROLLFAKE00000001:fake-secret`.
 struct FakeCa {
     root: rcgen::CertificateParams,
     root_key: rcgen::KeyPair,
     root_pem: String,
     orders: Mutex<Vec<(Vec<String>, bool)>>,
+    /// The DNS credential of each check and order: `cloudflare`, `role <key id>` or `key <key id>`.
+    dns: Mutex<Vec<String>>,
     /// (serial, reason) of each certificate revoked.
     revoked: Mutex<Vec<(String, roll_secrets::public_certs::RevokeReason)>>,
 }
@@ -8763,7 +8856,21 @@ impl FakeCa {
         root.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
         root.distinguished_name.push(rcgen::DnType::CommonName, "roll fake public root");
         let root_pem = root.self_signed(&root_key).unwrap().pem();
-        FakeCa { root, root_key, root_pem, orders: Mutex::default(), revoked: Mutex::default() }
+        FakeCa { root, root_key, root_pem, orders: Mutex::default(), dns: Mutex::default(), revoked: Mutex::default() }
+    }
+
+    /// The credential, as the fake provider takes it: what it was, or its refusal.
+    fn signed_in(&self, dns: &roll_secrets::public_certs::DnsCredential) -> Result<(), String> {
+        use roll_secrets::public_certs::DnsCredential;
+        let who = match dns {
+            DnsCredential::Cloudflare(t) if t.expose() == "fake-cf-dns-token" => "cloudflare".to_string(),
+            DnsCredential::Cloudflare(_) => return Err("Cloudflare: find zone: HTTP 401".into()),
+            DnsCredential::Route53 { access_key_id, secret_access_key, session_token: Some(t) } if access_key_id.starts_with("ASIA") && secret_access_key.expose().starts_with("secret-") && t.expose().starts_with("token-") => format!("role {access_key_id}"),
+            DnsCredential::Route53 { access_key_id, secret_access_key, session_token: None } if access_key_id == "AKIAROLLFAKE00000001" && secret_access_key.expose() == "fake-secret" => format!("key {access_key_id}"),
+            DnsCredential::Route53 { .. } => return Err("Route 53: find hosted zone roll-fake.test: InvalidClientTokenId: The security token included in the request is invalid.".into()),
+        };
+        self.dns.lock().unwrap().push(who);
+        Ok(())
     }
 }
 
@@ -8772,10 +8879,8 @@ impl roll_secrets::public_certs::PublicCa for FakeCa {
         roll_secrets::public_certs::PUBLIC_CAS.contains(&directory)
     }
 
-    fn check(&self, _: roll_secrets::public_certs::DnsProvider, credential: &Secret, names: &[String]) -> Result<(), String> {
-        if credential.expose() != "fake-cf-dns-token" {
-            return Err("Cloudflare: find zone: HTTP 401".into());
-        }
+    fn check(&self, dns: &roll_secrets::public_certs::DnsCredential, names: &[String]) -> Result<(), String> {
+        self.signed_in(dns)?;
         match names.iter().find(|n| !n.ends_with("roll-fake.test")) {
             Some(n) => Err(format!("Cloudflare: no zone for {n} (does the token see it?)")),
             None => Ok(()),
@@ -8784,7 +8889,7 @@ impl roll_secrets::public_certs::PublicCa for FakeCa {
 
     fn order(&self, o: roll_secrets::public_certs::Order<'_>) -> Result<roll_secrets::public_certs::Ordered, String> {
         self.orders.lock().unwrap().push((o.names.to_vec(), o.account.is_some()));
-        assert_eq!(o.credential.expose(), "fake-cf-dns-token");
+        self.signed_in(o.dns).expect("the registration's DNS credential");
         if let Some(n) = o.names.iter().find(|n| n.starts_with("unproven.")) {
             return Err(format!("the CA refused: unauthorized No TXT record found at _acme-challenge.{n}"));
         }
@@ -8946,6 +9051,58 @@ async fn public_certificates_are_ordered_in_the_background_renewed_and_a_failed_
     api.ok(Method::PUT, "/environments/staging/secrets/TLS_KEY", Some(confirmed)).await;
     let health = api.ok(Method::GET, "/health", None).await;
     assert!(health.as_array().unwrap().iter().any(|f| f["issue"] == "exposed" && f["environment"] == "production" && f["key"] == "TLS_KEY" && f["detail"].as_str().unwrap().contains("staging")), "{health}");
+}
+
+/// Route 53 proves a public certificate's names as one of the project's AWS roles (#945: a session
+/// for each check and order, no key kept), or with an access key kept sealed as Cloudflare's token
+/// is. The role can't be deleted while a certificate uses it, and its rename carries over.
+#[tokio::test]
+async fn route53_proves_public_certificates_as_the_projects_aws_role_or_an_access_key() {
+    let api = Api::new().await;
+    let ca = Arc::new(FakeCa::new());
+    api.secrets.set_public_ca(ca.clone());
+    *api.sts.pinned.lock().unwrap() = Some(format!("roll-secrets:{}", api.project));
+    let role = api.ok(Method::POST, "/aws-roles", Some(json!({ "name": "dns", "role_arn": "arn:aws:iam::123456789012:role/roll" }))).await;
+    let role_id = role["id"].as_str().unwrap().to_string();
+    let new = |dns: Value| {
+        let mut b = json!({ "name": "web", "directory_url": roll_secrets::public_certs::PUBLIC_CAS[0], "domains": ["www.roll-fake.test", "*.roll-fake.test"], "dns_provider": "route53", "eab_kid": "kid-roll-fake", "eab_hmac_key": "cm9sbC1mYWtlLWhtYWM" });
+        b.as_object_mut().unwrap().extend(dns.as_object().unwrap().clone());
+        b
+    };
+    for bad in [json!({}), json!({ "aws_role": "dns", "dns_credential": "AKIAROLLFAKE00000001:fake-secret" }), json!({ "dns_credential": "fake-secret" }), json!({ "aws_role": "nope" })] {
+        assert_eq!(api.call(Method::POST, "/public-certs", Some(new(bad.clone()))).await.0, StatusCode::BAD_REQUEST, "{bad}");
+    }
+    let cert = api.ok(Method::POST, "/public-certs", Some(new(json!({ "aws_role": "dns" })))).await;
+    let id = cert["id"].as_str().unwrap().to_string();
+    assert_eq!((&cert["dns_provider"], &cert["aws_role"]), (&json!("route53"), &json!("dns")), "{cert}");
+    tokio::task::spawn_blocking({
+        let s = api.secrets.clone();
+        move || s.sweep_public_certs().unwrap()
+    })
+    .await
+    .unwrap();
+    assert_eq!(api.ok(Method::GET, "/public-certs", None).await[0]["status"], "issued");
+    let dns = ca.dns.lock().unwrap().clone();
+    assert!(dns.len() == 2 && dns.iter().all(|d| d.starts_with("role ASIA")) && dns[0] != dns[1], "a session for the check and another for the order: {dns:?}");
+
+    // The role is the certificate's: renamed with it, and kept while it's used.
+    api.ok(Method::PATCH, &format!("/aws-roles/{role_id}"), Some(json!({ "name": "route53" }))).await;
+    assert_eq!(api.ok(Method::GET, "/public-certs", None).await[0]["aws_role"], "route53");
+    let (s, e) = api.call(Method::DELETE, &format!("/aws-roles/{role_id}"), None).await;
+    assert!(s == StatusCode::CONFLICT && e.to_string().contains("web"), "{s} {e}");
+
+    // An access key instead: kept sealed, never answered, and it orders at once.
+    let changed = api.ok(Method::PATCH, &format!("/public-certs/{id}"), Some(json!({ "dns_credential": "AKIAROLLFAKE00000001:fake-secret" }))).await;
+    assert!(changed.get("aws_role").is_none() && !changed.to_string().contains("fake-secret"), "{changed}");
+    tokio::task::spawn_blocking({
+        let s = api.secrets.clone();
+        move || s.sweep_public_certs().unwrap()
+    })
+    .await
+    .unwrap();
+    assert_eq!(ca.dns.lock().unwrap().last().map(String::as_str), Some("key AKIAROLLFAKE00000001"));
+    assert_eq!(ca.orders.lock().unwrap().len(), 2);
+    api.ok(Method::DELETE, &format!("/aws-roles/{role_id}"), None).await;
 }
 
 /// docs/secrets.md, "Publicly trusted certificates": a leak of a linked key revokes its certificate

@@ -104,6 +104,9 @@ pub fn router(control: Arc<Control>) -> Router {
         .route("/v1/search/clusters/{id}/indices/{index}/docs/{doc}", get(doc_get).put(doc_put).delete(doc_delete))
         .route("/v1/search/clusters/{id}/indices/{index}/bulk", post(index_bulk))
         .route("/v1/search/clusters/{id}/indices/{index}/delete_by_query", post(index_delete_by_query))
+        .route("/v1/search/clusters/{id}/indices/{index}/update_by_query", post(index_update_by_query))
+        .route("/v1/search/clusters/{id}/indices/{index}/evaluate", post(index_evaluate))
+        .route("/v1/search/clusters/{id}/tasks/{task}", get(cluster_task))
         .route("/v1/search/clusters/{id}/indices/{index}/suggestions", get(suggestions))
         .route("/v1/search/clusters/{id}/indices/{index}/suggestions/rebuild", post(rebuild_suggestions))
         .route("/v1/search/clusters/{id}/site-verifications", get(site_verifications).post(start_site_verification))
@@ -858,6 +861,176 @@ index_route!(index_search, "POST", "/search", "/_search", true, EsBody::Json);
 index_route!(doc_create, "POST", "/docs", "/_doc", false, EsBody::Json);
 index_route!(index_bulk, "POST", "/bulk", "/_bulk", false, EsBody::Ndjson);
 index_route!(index_delete_by_query, "POST", "/delete_by_query", "/_delete_by_query", true, EsBody::Json);
+
+/// `POST …/indices/{index}/evaluate`: one or two search configurations scored against a judgment
+/// list by the cluster's `_rank_eval` on that index, run as the index's routes run (the owner
+/// narrowed to the index), and compared query by query ([`crate::evaluate`]). A configuration the
+/// cluster refuses answers the cluster's own error.
+async fn index_evaluate(State(c): State<AppState>, Path((id, index)): Path<(String, String)>, headers: HeaderMap, body: Body) -> Result<Response, ControlError> {
+    let seg = index_segment(&index, true)?;
+    let cluster = c.get(&id).await?;
+    let mut held = Reservation::none();
+    let bytes = read_limited(body, (cluster.max_body_mb.max(1) as usize) << 20, declared(&headers), c.node.body_budget(), &mut held).await.map_err(|e| read_error(&cluster, e))?;
+    let spec = crate::evaluate::parse(&bytes).map_err(ControlError::Invalid)?;
+    crate::evaluate::check_ratings_name(&spec, &index).map_err(ControlError::Invalid)?;
+    drop(held);
+    let mut answers = Vec::with_capacity(spec.configurations.len());
+    for conf in &spec.configurations {
+        let body = match &conf.application {
+            None => crate::evaluate::rank_eval_body(&spec, conf, &index),
+            Some(app) => match evaluate_application(&c, &id, &index, &spec, conf, &app.name).await? {
+                Ok(body) => body,
+                Err(refused) => return Ok(refused),
+            },
+        };
+        let req = serde_json::to_vec(&body).unwrap_or_default();
+        let (status, ct, out) = c.es(&id, "POST", &format!("/{seg}/_rank_eval"), Some(index.as_str()), Some("application/json"), bytes::Bytes::from(req)).await?;
+        if status != 200 {
+            let code = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
+            return Ok((code, [(axum::http::header::CONTENT_TYPE, ct)], out).into_response());
+        }
+        answers.push(serde_json::from_slice::<Value>(&out).map_err(|e| ControlError::Internal(anyhow::anyhow!("rank_eval answered no JSON: {e}")))?);
+    }
+    Ok(Json(crate::evaluate::answer(&spec, &answers)).into_response())
+}
+
+/// An application's configuration as `_rank_eval` takes it: each judged query rendered by the
+/// application's own `_render_query` (its dictionary and defaults, a variant's params over them),
+/// at most 8 at a time. It evaluates on the application's own name (its alias), so the caller's
+/// read of that name is what covers it. A rendering the cluster refuses is the answer (`Err`).
+async fn evaluate_application(c: &Control, id: &str, index: &str, spec: &crate::evaluate::Spec, conf: &crate::evaluate::Configuration, app: &str) -> Result<Result<Value, Response>, ControlError> {
+    use futures::StreamExt;
+    if index != app {
+        return Err(ControlError::Invalid(format!("an application's configuration evaluates on the application's own name: …/indices/{app}/evaluate")));
+    }
+    let base = format!("/_application/search_application/{}", urlencoding::encode(app));
+    let passthrough = |status: u16, ct: String, out: bytes::Bytes| (StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY), [(axum::http::header::CONTENT_TYPE, ct)], out).into_response();
+    let (status, ct, out) = c.es(id, "GET", &base, None, None, bytes::Bytes::new()).await?;
+    if status != 200 {
+        return Ok(Err(passthrough(status, ct, out)));
+    }
+    let stored: Value = serde_json::from_slice(&out).map_err(|e| ControlError::Internal(anyhow::anyhow!("the application answered no JSON: {e}")))?;
+    // Hits come back under the application's indices' own names: a rating without an `_index` is
+    // about its one index, and needs one when it searches several.
+    let indices: Vec<&str> = stored["indices"].as_array().map(|a| a.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+    let unnamed = spec.judgments.iter().any(|j| j.ratings.iter().any(|r| r.0.is_empty()));
+    let default_index = match indices.as_slice() {
+        [one] => one.to_string(),
+        _ if unnamed => return Err(ControlError::Invalid(format!("[{app}] searches {} indices: each rating names its document's [_index]", indices.len()))),
+        _ => String::new(),
+    };
+    let params: Vec<_> = spec.judgments.iter().map(|j| crate::evaluate::application_params(conf, &stored, &j.query)).collect::<Result<_, _>>().map_err(ControlError::Invalid)?;
+    let render = format!("{base}/_render_query");
+    let rendered: Vec<_> = futures::stream::iter(params)
+        .map(|p| {
+            let body = bytes::Bytes::from(serde_json::to_vec(&json!({ "params": p })).unwrap_or_default());
+            c.es(id, "POST", &render, None, Some("application/json"), body)
+        })
+        .buffered(8)
+        .collect()
+        .await;
+    let mut bodies = Vec::with_capacity(rendered.len());
+    for r in rendered {
+        let (status, ct, out) = r?;
+        if status != 200 {
+            return Ok(Err(passthrough(status, ct, out)));
+        }
+        bodies.push(serde_json::from_slice::<Value>(&out).map_err(|e| ControlError::Internal(anyhow::anyhow!("_render_query answered no JSON: {e}")))?);
+    }
+    Ok(Ok(crate::evaluate::rank_eval_rendered(spec, bodies, &default_index)))
+}
+
+/// What `…/update_by_query`'s body may hold: `_update_by_query`'s own, plus `slices` (Elasticsearch
+/// takes it in the URL; it's moved there).
+const UPDATE_BY_QUERY_FIELDS: &[&str] = &["query", "script", "max_docs", "conflicts", "slices"];
+/// And its query string's: running it in the background, and pacing it.
+const UPDATE_BY_QUERY_PARAMS: &[&str] = &["wait_for_completion", "refresh", "requests_per_second", "scroll_size", "timeout", "slices"];
+
+/// A query string's pairs, decoded (`+` a space).
+fn query_pairs(q: Option<&str>) -> Vec<(String, String)> {
+    let decode = |t: &str| urlencoding::decode(&t.replace('+', " ")).map(|c| c.into_owned()).unwrap_or_else(|_| t.to_string());
+    q.unwrap_or_default().split('&').filter(|p| !p.is_empty()).map(|p| p.split_once('=').unwrap_or((p, ""))).map(|(k, v)| (decode(k), decode(v))).collect()
+}
+
+/// `…/update_by_query`'s body and query string as the cluster's `_update_by_query` takes them:
+/// the body's fields checked (an unknown one is a 400) and `slices` moved to the query string;
+/// the query string's parameters checked too. `slices` is a positive number or `auto`; how many
+/// an index allows (`index.max_slices_per_scroll`) is the engine's to refuse, as for any client.
+fn update_by_query_request(body: &[u8], query: Option<&str>) -> Result<(bytes::Bytes, String), ControlError> {
+    let mut params = query_pairs(query);
+    if let Some((k, _)) = params.iter().find(|(k, _)| !UPDATE_BY_QUERY_PARAMS.contains(&k.as_str())) {
+        return Err(ControlError::Invalid(format!("update_by_query takes no parameter [{k}] (it takes {})", UPDATE_BY_QUERY_PARAMS.join(", "))));
+    }
+    let mut doc = match body.iter().all(u8::is_ascii_whitespace) {
+        true => serde_json::Map::new(),
+        false => match serde_json::from_slice::<Value>(body) {
+            Ok(Value::Object(m)) => m,
+            _ => return Err(ControlError::Invalid("the body is a JSON object: query, script, max_docs, conflicts and slices, each optional".into())),
+        },
+    };
+    if let Some(k) = doc.keys().find(|k| !UPDATE_BY_QUERY_FIELDS.contains(&k.as_str())) {
+        return Err(ControlError::Invalid(format!("update_by_query's body has no field [{k}] (it takes {})", UPDATE_BY_QUERY_FIELDS.join(", "))));
+    }
+    if let Some(s) = doc.remove("slices") {
+        if params.iter().any(|(k, _)| k == "slices") {
+            return Err(ControlError::Invalid("[slices] is given twice: in the body and in the query string".into()));
+        }
+        let s = match &s {
+            Value::Number(n) if n.as_u64().is_some_and(|n| n >= 1) => n.to_string(),
+            Value::String(a) if a == "auto" => a.clone(),
+            other => return Err(ControlError::Invalid(format!("[slices] is a positive number or \"auto\", not {other}"))),
+        };
+        params.push(("slices".into(), s));
+    }
+    let query = params.iter().map(|(k, v)| format!("{}={}", urlencoding::encode(k), urlencoding::encode(v))).collect::<Vec<_>>().join("&");
+    let body = if doc.is_empty() { bytes::Bytes::new() } else { bytes::Bytes::from(serde_json::to_vec(&Value::Object(doc)).unwrap_or_default()) };
+    Ok((body, query))
+}
+
+/// `POST …/indices/{index}/update_by_query`: the cluster's `_update_by_query` on that one index, a
+/// literal name (no wildcard, list or date math), run as the index's routes run (the owner
+/// narrowed to the index). With no script each document is indexed again as it is, so a field
+/// added since (a `semantic_text` fed by `copy_to`) is filled and embedded, through the cluster's
+/// pipelines, inference and limits as any write. `wait_for_completion=false` answers 202 with the
+/// task, which `GET …/tasks/{task}` follows.
+async fn index_update_by_query(State(c): State<AppState>, Path((id, index)): Path<(String, String)>, method: Method, uri: axum::http::Uri, headers: HeaderMap, body: Body) -> Result<Response, ControlError> {
+    if index.contains(['<', '>']) || index.starts_with(['-', '+']) {
+        return Err(ControlError::Invalid(format!("invalid index name [{index}]: update_by_query takes one index by its name")));
+    }
+    let seg = index_segment(&index, false)?;
+    let cluster = c.get(&id).await?;
+    let mut held = Reservation::none();
+    let bytes = read_limited(body, (cluster.max_body_mb.max(1) as usize) << 20, declared(&headers), c.node.body_budget(), &mut held).await.map_err(|e| read_error(&cluster, e))?;
+    let (bytes, query) = update_by_query_request(&bytes, uri.query())?;
+    drop(held);
+    let background = query_pairs(Some(&query)).iter().any(|(k, v)| k == "wait_for_completion" && v == "false");
+    let mut headers = headers;
+    headers.remove(axum::http::header::CONTENT_LENGTH);
+    let q = (!query.is_empty()).then_some(query.as_str());
+    let mut resp = es_route(&c, &id, method, api_index_path(&id, &index, "/update_by_query"), "POST", format!("/{seg}/_update_by_query"), Some(index.as_str()), q, &headers, Body::from(bytes), EsBody::Json).await?;
+    // Started in the background: accepted, its task to follow.
+    if background && resp.status() == StatusCode::OK {
+        *resp.status_mut() = StatusCode::ACCEPTED;
+    }
+    Ok(resp)
+}
+
+/// `GET /v1/search/clusters/{id}/tasks/{task}`: `_tasks/{task}`, a task's status, and its result
+/// once it's done (`completed`, `response` or `error`). Its query string takes
+/// `wait_for_completion` and `timeout`.
+async fn cluster_task(State(c): State<AppState>, Path((id, task)): Path<(String, String)>, method: Method, uri: axum::http::Uri, headers: HeaderMap) -> Result<Response, ControlError> {
+    let valid = task.split_once(':').is_some_and(|(node, n)| !node.is_empty() && node.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b)) && !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+    if !valid {
+        return Err(ControlError::Invalid(format!("invalid task id [{task}]: it is <node>:<number>")));
+    }
+    for (k, _) in query_pairs(uri.query()) {
+        if !["wait_for_completion", "timeout"].contains(&k.as_str()) {
+            return Err(ControlError::Invalid(format!("a task's route takes no parameter [{k}] (it takes wait_for_completion and timeout)")));
+        }
+    }
+    let api_path = format!("/v1/search/clusters/{}/tasks/{}", urlencoding::encode(&id), urlencoding::encode(&task));
+    es_route(&c, &id, method, api_path, "GET", format!("/_tasks/{}", urlencoding::encode(&task)), None, uri.query(), &headers, Body::empty(), EsBody::None).await
+}
 
 /// One document's route: `…/indices/{index}/<rest>/{doc}` to `/{index}/<es_rest>/{doc}`.
 macro_rules! doc_route {

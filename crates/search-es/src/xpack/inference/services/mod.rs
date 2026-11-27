@@ -389,7 +389,7 @@ impl Service {
                 let body = obj! { "messages" => crate::arr![obj! { "content" => "how big", "role" => "user" }] };
                 // Elasticsearch's validation passes once the stream opened (recorded: an endpoint
                 // whose stream fails midway is created); dropping it closes the upstream request.
-                self.stream_chat(cluster, ep, &body, timeout).await.map(|_| Results::Completion(vec![]))
+                self.stream_chat(cluster, ep, &body, timeout).await.map(|_| Results::Completion(vec![], Default::default()))
             }
             _ => self.infer(cluster, ep, &req).await,
         };
@@ -508,7 +508,7 @@ fn result_class(r: &Results) -> &'static str {
         Results::Bits(_) => "DenseEmbeddingBitResults",
         Results::Sparse(_) => "SparseEmbeddingResults",
         Results::Rerank(_) => "RankedDocsResults",
-        Results::Completion(_) => "ChatCompletionResults",
+        Results::Completion(..) => "ChatCompletionResults",
     }
 }
 

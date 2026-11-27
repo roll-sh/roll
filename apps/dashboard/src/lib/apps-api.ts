@@ -167,6 +167,8 @@ export interface Run {
   start?: string;
   /** Once per deploy before the switch (a migration); a non-zero exit fails the deploy. */
   pre_deploy?: string;
+  /** Once before a preview environment is deleted (Heroku's `pr-predestroy`). */
+  teardown?: string;
   schedule?: string;
   /** The zone a cron schedule's fields are in (IANA); UTC when unset. */
   timezone?: string;
@@ -422,6 +424,16 @@ export function toEnv(vars: Record<string, string>): string {
 
 /** A field set to `null` goes back to its default (apps-control's `merge`). */
 export type Reset<T> = { [K in keyof T]?: T[K] | null };
+
+/** What a project's board charts (`board.rs`): one service's metric in one environment. */
+export const BOARD_METRICS = ["requests", "errors", "error_pct", "p50_ms", "p95_ms", "p99_ms", "cpu", "memory_bytes", "instances", "cold_starts", "egress_bytes", "over_capacity"] as const;
+export interface BoardPanel {
+  title?: string;
+  service: string;
+  environment?: string;
+  /** One of [`BOARD_METRICS`], or `app:<name>`: one of the app's own series. */
+  metric: (typeof BOARD_METRICS)[number] | `app:${string}`;
+}
 
 export interface ServicePatch {
   name?: string;
@@ -1680,6 +1692,8 @@ export const appsApi = {
   incidents: (project: string) => call<{ incidents: Incident[] }>("GET", `/v1/apps/projects/${enc(project)}/status-page/incidents`).then((r) => r.incidents),
   updateIncident: (project: string, incident: string, body: { state: IncidentState; text: string }) => call<null>("POST", `/v1/apps/projects/${enc(project)}/status-page/incidents/${enc(incident)}/updates`, body),
   deleteStatusPage: (project: string) => call<void>("DELETE", `/v1/apps/projects/${enc(project)}/status-page`),
+  board: (project: string) => call<{ panels: BoardPanel[] }>("GET", `/v1/apps/projects/${enc(project)}/board`),
+  putBoard: (project: string, panels: BoardPanel[]) => call<{ panels: BoardPanel[] }>("PUT", `/v1/apps/projects/${enc(project)}/board`, { panels }),
   statusDomain: (project: string) => call<Domain>("GET", `/v1/apps/projects/${enc(project)}/status-page/domain`),
   setStatusDomain: (project: string, hostname: string) => call<Domain>("POST", `/v1/apps/projects/${enc(project)}/status-page/domain`, { hostname }),
   verifyStatusDomain: (project: string) => call<Domain>("POST", `/v1/apps/projects/${enc(project)}/status-page/domain/verify`),
@@ -1927,6 +1941,8 @@ export const appsApi = {
   domains: (id: string, e: string) => call<Domain[]>("GET", `${env(id, e)}/domains`),
   addDomain: (id: string, e: string, hostname: string) => call<Domain>("POST", `${env(id, e)}/domains`, { hostname }),
   verifyDomain: (id: string, e: string, host: string) => call<Domain>("POST", `${env(id, e)}/domains/${enc(host)}/verify`),
+  claimDomain: (id: string, e: string, host: string) => call<{ claimed: false; txt: { name: string; value: string } } | { claimed: true; domain: Domain }>("POST", `${env(id, e)}/domains/${enc(host)}/claim`),
+  configureDomain: (id: string, e: string, host: string, cloudflareToken: string, replace = false) => call<Domain>("POST", `${env(id, e)}/domains/${enc(host)}/configure`, { cloudflare_token: cloudflareToken, ...(replace ? { replace: true } : {}) }),
   removeDomain: (id: string, e: string, host: string) => call<null>("DELETE", `${env(id, e)}/domains/${enc(host)}`),
   redirectDomain: (id: string, e: string, host: string, to: string | null) => call<Domain>("PATCH", `${env(id, e)}/domains/${enc(host)}`, { redirect_to: to }),
   /** Send a custom domain to another of the app's ports (null: the service's own). */

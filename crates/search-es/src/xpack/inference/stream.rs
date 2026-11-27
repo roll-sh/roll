@@ -20,6 +20,7 @@
 
 use super::TaskType;
 use super::http::{Answer, Opened};
+use super::tokens::Count;
 use crate::error::{EsError, EsResult};
 use crate::json::{Map, Value};
 use crate::obj;
@@ -55,10 +56,12 @@ impl Streaming {
         }
     }
 
-    /// The answer as server-sent events, sent as they come.
-    pub fn into_sse(self, id: String, task: TaskType) -> ByteStream {
+    /// The answer as server-sent events, sent as they come; what it used goes to `count` when
+    /// it ends.
+    pub fn into_sse(self, id: String, task: TaskType, mut count: Count) -> ByteStream {
         match self {
             Streaming::Ready(events) => {
+                count.sent(&events);
                 let mut out = String::new();
                 for e in &events {
                     message(&mut out, &e.to_json());
@@ -67,7 +70,7 @@ impl Streaming {
                 Box::pin(futures::stream::iter([Bytes::from(out)]))
             }
             Streaming::Live { opened, decode } => {
-                let state = Live { opened, decode, reader: Reader::default(), id, done: false };
+                let state = Live { opened, decode, reader: Reader::default(), id, done: false, count: Some(count) };
                 Box::pin(futures::stream::unfold(state, move |mut s| async move {
                     let piece = match s.values().await? {
                         Ok(values) => {
@@ -88,11 +91,12 @@ impl Streaming {
 
     /// The answer's decoded events as they come, for roll's own use of a stream (the chat
     /// engine, `crate::xpack::chat`): each item is what one read of the upstream made; an error
-    /// ends it. Bounded as [`Streaming::into_sse`] is.
+    /// ends it. Bounded as [`Streaming::into_sse`] is. Its tokens are the caller's to count (an
+    /// answer counts the `usage` it reports, `crate::xpack::inference::tokens`).
     pub fn into_values(self, id: String) -> Values {
         match self {
             Streaming::Ready(events) => Values { live: None, ready: Some(events) },
-            Streaming::Live { opened, decode } => Values { live: Some(Live { opened, decode, reader: Reader::default(), id, done: false }), ready: None },
+            Streaming::Live { opened, decode } => Values { live: Some(Live { opened, decode, reader: Reader::default(), id, done: false, count: None }), ready: None },
         }
     }
 }
@@ -120,9 +124,23 @@ struct Live {
     id: String,
     /// The upstream's body ended or failed: nothing more comes.
     done: bool,
+    /// What the stream used, counted when it's dropped ([`Streaming::into_sse`]'s).
+    count: Option<Count>,
 }
 
 impl Live {
+    /// `events` decoded, seen by the count on the way (the provider's figures in, the text out).
+    fn decode_counted(&mut self, events: &[(Option<String>, String)]) -> EsResult<Vec<Value>> {
+        if let Some(c) = &mut self.count {
+            c.upstream(events);
+        }
+        let values = (self.decode)(events)?;
+        if let Some(c) = &mut self.count {
+            c.sent(&values);
+        }
+        Ok(values)
+    }
+
     /// The events the next read of the upstream made (skipping reads that made none), the
     /// last events at its end (`done` is then set), or the error that ends it.
     async fn values(&mut self) -> Option<EsResult<Vec<Value>>> {
@@ -140,9 +158,9 @@ impl Live {
             let Some(piece) = piece else {
                 self.done = true;
                 let rest = self.reader.finish();
-                return Some(if rest.is_empty() { Ok(Vec::new()) } else { (self.decode)(&rest) });
+                return Some(if rest.is_empty() { Ok(Vec::new()) } else { self.decode_counted(&rest) });
             };
-            match self.reader.feed(&piece, &self.id).and_then(|events| if events.is_empty() { Ok(vec![]) } else { (self.decode)(&events) }) {
+            match self.reader.feed(&piece, &self.id).and_then(|events| if events.is_empty() { Ok(vec![]) } else { self.decode_counted(&events) }) {
                 Ok(v) if v.is_empty() => continue,
                 Ok(v) => return Some(Ok(v)),
                 Err(e) => {

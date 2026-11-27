@@ -481,6 +481,9 @@ KEY_MINT=$(curl -s -o /dev/null -w '%{http_code}' -XPOST -H "Authorization: ApiK
 APP_WAL=$(docker run --rm --name roll-previews-psqltest --network host postgres:18-alpine psql "$APP_DB" -Atc "SELECT length(pg_read_binary_file('pg_wal/' || pg_walfile_name(pg_current_wal_lsn())))" 2>&1 | head -1 || true)
 case "$APP_WAL" in *"permission denied"*) ;; *) echo "the branch's role should be refused the WAL: $APP_WAL"; exit 1;; esac
 APP_MASKED=$(docker run --rm --name roll-previews-psqltest --network host postgres:18-alpine psql "$APP_DB" -Atc "SELECT email FROM users WHERE id = 1" 2>&1 | head -1 || true)
+# Its Postgres branch comes from the parent's masked base (masked once for these rules), masked as
+# it is (APP_MASKED, checked below).
+[ "$(api GET "/v1/previews/$PV/activity" | jq_ "any('from its masked base' in a['message'] for a in d)")" = True ] || { echo "the preview's Postgres branch should come from the parent's masked base: $(api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d if 'postgres' in a['message']][:6]")"; exit 1; }
 # Logs are pushed: a request made while following shows up on the stream.
 FOLLOW="$HOME_DIR/follow.txt"
 curl -sN --max-time 20 "http://$API/v1/previews/$PV/logs?follow=1&lines=1" >"$FOLLOW" &
@@ -868,6 +871,15 @@ until_head() { # until_head <change head>: the preview is for it
   done
   echo "the preview should follow the change to $1"; api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d[:8]]"; exit 1
 }
+# Settled first: the new rule may redeploy the head it runs, and a push in the middle of that
+# deploy leaves nothing to keep (the push before never finished deploying).
+SETTLED=""
+for _ in $(seq 1 120); do
+  ONE=$(api GET "/v1/previews/$PV" | jq_ "(d['state'], d['updated_at'])")
+  sleep 3
+  [ "$ONE" = "$(api GET "/v1/previews/$PV" | jq_ "(d['state'], d['updated_at'])")" ] && case "$ONE" in "('ready',"*|"('sleeping',"*) SETTLED=yes; break;; esac
+done
+[ -n "$SETTLED" ] || { echo "the preview should settle after the ignore_paths rule: $ONE"; exit 1; }
 BUILD=$(api GET "/v1/previews/$PV" | jq_ "d['head']")
 api POST "/v1/code/changes/$CHG/revise" '{"base":"main","message":"Docs","files":{"index.html":{"content":"preview of change 1, again"},"docs/setup.md":{"content":"how to run it"},'"$OPENAPI_CHG"'}}' >/dev/null
 DOCS_HEAD=$(api GET "/v1/code/changes/$CHG" | jq_ "d['head']")
@@ -1374,6 +1386,10 @@ SEARCH_LEFT=$(api GET /v1/search/clusters | jq_ "len([c for c in (d if isinstanc
 BRANCHES_LEFT=$(api GET /v1/redis/databases | jq_ "len([x for x in d if x['name'].startswith('pv-')])")
 # The Postgres branch and every earlier push's copy of it went with the preview.
 PG_LEFT=$(api GET "/v1/projects/$PG" | jq_ "len([b for b in d['branches'] if b['name'].startswith('pv-')])")
+# At most the masked base for the rules now (kept for the next preview a day; an older one goes
+# with its last branch).
+MASK_BASES=$(api GET "/v1/projects/$PG" | jq_ "len([b for b in d['branches'] if b['name'].startswith('pvbase-')])")
+[ "$MASK_BASES" -le 1 ] || { echo "older masked bases should go with their last branch: $(api GET "/v1/projects/$PG" | jq_ "[b['name'] for b in d['branches']]")"; exit 1; }
 [ "$PG_LEFT" = 0 ] || { echo "no Postgres branch of the preview (its own or an earlier push's copy) should outlive it: $(api GET "/v1/projects/$PG" | jq_ "[b['name'] for b in d['branches']]")"; exit 1; }
 
 cat <<EOF

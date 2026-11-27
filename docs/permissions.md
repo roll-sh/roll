@@ -270,6 +270,34 @@ roll token acting as that person, with no consent screen and no roll sign-in.
   `POST …/apps/{id}/rotate {public_jwk?, keep_old_for_s?}` gives it a new key, or a new secret
   answered once, keeping its client id and its people's connections; the old secret works up to a
   week longer while the provider moves over, or stops now with every token its people hold.
+- **Claude's auto-connect** (Claude's connector docs, "Enterprise Managed Auth"). Claude signs the identity assertion itself, under an issuer URL of the customer's Claude organization, and presents its Client ID Metadata Document as the client. Set-up and sign-in:
+  - **Register Claude as an app** by its documents: `POST …/apps {name, rules, metadata: ["https://claude.ai/oauth/mcp-oauth-client-metadata", "…/confidential_client"], issuers?}` (`roll token enterprise app create Claude --claude`, or the form's "Claude's auto-connect"). It keeps an `ent_…` id of roll's, and roll makes no secret. Its people's connections are kept under that id: the documents' URL is also the client of people's own Claude connections (roll's consent screen), and those stay theirs, never touched by the app's rules or its removal.
+  - **Who may vouch for it:** Claude's own issuer, and the trusted providers it names in `issuers` (`--issuer`, for an identity provider that runs Claude's auto-connect, "IdP-managed"). A provider trusted for other apps signs no one in to it.
+  - **How the client authenticates** depends on the document it presents:
+    - The public one (`token_endpoint_auth_method: none`) signs in with no credential of its own. The assertion is the credential, so it must be issued now (`iat`) and live at most five minutes; Claude's live a minute, and each is used once.
+    - The confidential one, which roll's metadata invites because it lists `private_key_jwt`, signs a client assertion with the keys at its document's `jwks_uri`. That client's id without its assertion is refused.
+    - A document naming any other method, or none, is refused.
+  - **Caching:** documents and keys are read through the guarded client and kept five minutes, read again for a key id roll doesn't hold, and kept up to an hour through a failed read. They're a client's public claims, never a person's grant.
+  - **Rotation:** roll holds no credential of such an app, so there's nothing to rotate.
+  - **Trust the organization's issuer:** `https://identity.anthropic.com/issuers/<id>`, exactly as Claude's auto-connect setup shows it (anything else at that host is refused), as a provider with email matching and the domains its people use. Its keys are fetched, never pasted. Claude's issuer then vouches for its members' account emails, which it sends without `email_verified`. Any other issuer (a look-alike, or Claude's with pasted keys) still needs `email_verified: true`, and the domains bound both.
+  - **The resource:** when the assertion names none, the token request's own `resource` holds the token. Claude names roll's MCP server, so its tokens are that server's only.
+  - **Express admin setup** (`ema_issuer:manage`, advertised in `scopes_supported`): Claude registers its issuer itself, so the admin doesn't copy it.
+    - **Who and where:** only for Claude's client (its public document or `/confidential_client`), returning only to `https://claude.ai/api/mcp/auth_callback`, and approved only by roll's admins.
+    - **The consent screen** names what approving turns on and asks for the email domains Claude's issuer vouches for, plus the most Claude may do for a person (the app's rules).
+    - **The code** (with RFC 9207's `iss` in the redirect, as every roll redirect has) trades for a five-minute, single-use token, with `ema_setup_endpoint` and no refresh token. The confidential client signs a client assertion with its document's keys there.
+    - **`PUT /v1/access/enterprise/ema-setup {ema_issuer}`** takes that token, in front of the gate (the token is the credential). In one write it:
+      - spends the token;
+      - trusts the issuer, a Claude issuer only, for those domains with email matching;
+      - replaces what an earlier express setup trusted, keeping a provider the operator set up by hand;
+      - gives Claude's app the consent's rules: it registers the app, or narrows or widens an existing one along with its people's connections, as an edit of the app does.
+    - **Refusals** are `{error, error_description}`:
+      - `invalid_token` for a spent or old token;
+      - `invalid_request` for an issuer that isn't Claude's;
+      - `access_denied` when the admin who approved isn't one any more;
+      - 409 when there are already too many providers or apps;
+      - a generic 500 otherwise.
+    - **Also refused:** at consent, a mail service anyone can sign up at (gmail.com and the like) as a domain; and roll's client allow-list (`oauth_clients`) without Claude on it.
+    - **Audited** as `express_setup`, with who approved (`by`).
 - **A leaked app secret** (an `rlc_` with its checksum, found by roll code's push scan or reported
   by GitHub's secret scanning) is revoked like any other: roll drops the secret, the one kept from
   before a rotation, and every token the app's people hold, in one write, and audits it. The
@@ -445,8 +473,9 @@ first, so they can't hide what runs, and anything that makes or changes credenti
 - A roll secret another product writes once as the caller is lent the same way:
   - **The route:** search's admin password rotated into one (`POST …/password` with `secret: {environment, path?, project?}`, `write`; the project left out is the one the cluster is on).
   - **What's checked:** `write` on that folder as roll secrets decides it, protected environments included. The environment and path are checked as roll secrets names them, so a pattern like `prod*` is refused rather than remembered as a wildcard.
-  - **An approval** names that folder, even when the route's own action asks too, and remembering it allows exactly that folder and environment.
-  - **The grant the product gets** carries one exact rule (that folder: `write` and `read`) for this request. roll secrets checks the caller again inside, and nothing else in the project opens.
+  - **An approval** names that folder, even when the route's own action asks too. Remembering it allows that folder and its subfolders in that environment (a folder's rule reaches every folder under it). `/`, the default, is the whole environment, so a secrets approval at the root (or naming no folder) is remembered for 8 hours at most, and the approval screen offers only that.
+  - **The grant the product gets** carries one exact rule (that folder: `write`) for this request, plus `read` on that folder whenever the write passes, allowed outright or approved, since the product reads the version back. roll secrets checks the caller again inside, and nothing else in the project opens.
+  - **A remembered approval** keeps to what it named. When the route's own action asked too (admin on the cluster), only the secret is remembered, and the next call asks about the route's own action again.
   - **A secret a product keeps following needs `reveal` allowed outright.** That covers an inference endpoint keyed by a secret (its sync) and a bound `roll://` reference: either is checked again as its maker at every use, so an approval can't stand in for it.
 - Comparing a local copy with a secrets folder (`POST …/environments/{env}/diff`, by fingerprint,
   names only) tests a guess at a value: `reveal` there, as reading the values is.
@@ -1109,7 +1138,13 @@ MCP clients for themselves, as GitHub's fine-grained tokens act for the person w
   OAuth connections included (GitHub's organisation token policies, Cloudflare's TTLs). A
   product may cap tokens that reach it more tightly (`Access::lifetime_cap`): roll secrets'
   policy's `max_token_days` caps every grant with a `secrets` or `*` rule (docs/secrets.md,
-  "Guardrails"), refused as a 403 naming that policy.
+  "Guardrails"), refused as a 403 naming that policy. Both are one check,
+  `Access::meets_policy`, on every path that writes a grant's rules or lifetime or issues it a
+  secret: tokens and machine clients (refused past it), consents, devices and step-ups (the
+  connection ends within a product's cap instead, `Access::within_cap`, and the consent screen
+  says so from the catalogue's `lifetime_caps`), remembered approvals (a capped rule is remembered
+  until the cap at most) and enterprise apps' connections, which live as long as the policy
+  allows; `tests/policy_callers.rs` fails on a writer that doesn't ask.
   `max_idle_days` stops a grant nobody has used for that long (since its last use, or since it was
   made): an unused credential is risk with nothing to show for it. The evaluator reads the policy at
   most every 10 seconds, so a change reaches every node within that.
@@ -1184,8 +1219,9 @@ MCP clients for themselves, as GitHub's fine-grained tokens act for the person w
     the chain at its next use. A login (`present_machine`) with a spent credential always ends it.
   - **Not in the workload caps.** They open nothing and live as long as their machine, so they'd
     fill the room every CI login shares: `MAX_WORKLOADS` and `OWNER_MAX_WORKLOADS` count only
-    workload grants with rules. Their caller caps them (roll secrets: 1,000 chains per identity,
-    counted in the write that records the chain, and 60 bootstrap tokens a minute per project).
+    workload grants with rules. Their caller caps them (roll secrets: 1,000 chains per identity
+    whose newest secret hasn't ended, revoked or not, counted in the write that records the chain,
+    and 60 bootstrap tokens a minute per project).
   - **Leaked**, either is revoked with its whole chain, as a token is (below).
   - `Access::revoke_chain(chain, why)` ends a chain (roll secrets: the identity deleted, disabled or
     cut off). Chains are listed with `?kind=workload`, and go a day after their last secret would
@@ -1356,7 +1392,7 @@ Under `/v1/access`. Bodies are JSON; errors are `{"error": string, "code"?: stri
 | route | who | what |
 | --- | --- | --- |
 | `GET /v1/access` | any grant | the caller: the operator, or its own grant (rules, expiry) |
-| `GET /v1/access/catalog` | any grant | products, actions, presets and every classified route |
+| `GET /v1/access/catalog` | any grant | products, actions, presets, every classified route, and `lifetime_caps` (`[{product, days, why}]`: products whose own policy caps the grants that reach them) |
 | `POST /v1/access/check` | any grant | `{method, path, body?, token?}` → `{decision, product, action, resource, route}`: what the evaluator would decide, without running it (a grant checks itself; the operator names `token`) |
 | `GET /v1/access/tokens` | access read | grants, newest first (no secrets), each with `activity`: its last day's requests `{allowed, denied, asked}`; `?product=` (and `&resource=`) only those with a rule on that product by name (naming that `{id}` or `{project}`), as a product's page lists its own tokens; `?kind=workload` the workload tokens instead |
 | `POST /v1/access/tokens` | access admin | `{name, rules, expires_at?, ip_allow?, rate_per_minute?, decoy?}` → 201 `{grant, token}`; `token` is shown this once; `decoy`: a honeytoken ("Decoy tokens"); 403 `reauth_required` from a session without a recent proof |

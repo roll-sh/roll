@@ -125,6 +125,16 @@ async fn variables_and_an_environment_through_the_cli() {
     let staging = t.ok(&["vars", "-s", "web", "-p", "acme", "-e", "staging", "--reveal"]).await;
     let pem_line = staging.lines().find(|l| l.starts_with("PEM=")).unwrap_or_else(|| panic!("{staging}"));
     assert_eq!(pem_line, revealed.lines().find(|l| l.starts_with("PEM=")).unwrap(), "read back exactly");
+    // Pulled into a file here (`vercel env pull`): only this user's, the sealed ones named.
+    let (code, _, err) = t.run(&["vars", "-s", "web", "-p", "acme", "--pull", "pulled.env"]).await;
+    assert_eq!(code, Some(0), "{err}");
+    let pulled = std::fs::read_to_string(t.work.path().join("pulled.env")).unwrap();
+    assert!(pulled.contains(pem_line) && !pulled.contains("sk-live-123") && pulled.contains("sealed, not here: API_KEY") && err.contains("API_KEY"), "{pulled}");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(t.work.path().join("pulled.env")).unwrap().permissions().mode() & 0o777, 0o600);
+    }
     // An environment's own error page, and back to roll's.
     std::fs::write(t.work.path().join("oops.html"), "<h1>oops</h1>").unwrap();
     let env = t.json(&["env", "-s", "web", "-p", "acme", "--error-page", "oops.html"]).await;

@@ -174,12 +174,13 @@ pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
-/// The cluster label of a host name under `domain` (`c1.search.example.com` → `c1`).
-pub fn host_label<'a>(host: &'a str, domain: Option<&str>) -> Option<&'a str> {
-    let host = host.rsplit_once(':').filter(|(_, p)| p.bytes().all(|b| b.is_ascii_digit())).map(|(h, _)| h).unwrap_or(host);
-    let domain = domain?;
-    let label = host.strip_suffix(domain)?.strip_suffix('.')?;
-    (!label.is_empty() && !label.contains('.')).then_some(label)
+/// The cluster label of a host name under `domain` (`c1.search.example.com` → `c1`), lowercased:
+/// DNS names are case-insensitive (`Shop.search.example.com` is `shop`'s).
+pub fn host_label(host: &str, domain: Option<&str>) -> Option<String> {
+    let host = host.rsplit_once(':').filter(|(_, p)| p.bytes().all(|b| b.is_ascii_digit())).map(|(h, _)| h).unwrap_or(host).to_ascii_lowercase();
+    let domain = domain?.to_ascii_lowercase();
+    let label = host.strip_suffix(domain.as_str())?.strip_suffix('.')?;
+    (!label.is_empty() && !label.contains('.')).then(|| label.to_string())
 }
 
 /// The cluster a request names, read as [`crate::Node::enter`] reads it (the `Host` label under
@@ -192,7 +193,7 @@ pub fn cluster_named(headers: &hyper::HeaderMap, path: &str, domain: Option<&str
     // As the node reads it (`http::head_of`): an API key as Bearer on chat's OpenAI routes.
     let auth = auth.map(|a| search_es::xpack::chat::openai::authorization_for(path, a).unwrap_or_else(|| a.to_string()));
     let presented = parse_authorization(auth.as_deref()).ok()?;
-    claim(&presented, host_cluster).map(|c| c.cluster)
+    claim(&presented, host_cluster.as_deref()).map(|c| c.cluster)
 }
 
 /// Which cluster a request is for and the secret to check (`None` when no secret was given).
@@ -216,10 +217,17 @@ impl std::fmt::Debug for Claim {
     }
 }
 
+/// `None` when it names no cluster, or when its qualifier (`<user>@<cluster>`, `<key id>@<cluster>`)
+/// names another cluster than the host it came to: a cluster's own host never takes another's
+/// credentials.
 pub fn claim(p: &Presented, host_cluster: Option<&str>) -> Option<Claim> {
+    let elsewhere = |c: &str| host_cluster.is_some_and(|h| h != c);
     match p {
         Presented::Basic { user, password } => {
             if let Some((u, c)) = user.rsplit_once('@') {
+                if elsewhere(c) {
+                    return None;
+                }
                 return Some(Claim { cluster: c.to_string(), user: Some(u.to_string()), api_key_id: None, secret: Some(password.clone()) });
             }
             match host_cluster {
@@ -229,6 +237,7 @@ pub fn claim(p: &Presented, host_cluster: Option<&str>) -> Option<Claim> {
         }
         Presented::ApiKey { id, secret } => {
             let (key, cluster) = match id.rsplit_once('@') {
+                Some((_, c)) if elsewhere(c) => return None,
                 Some((k, c)) => (Some(k.to_string()), c.to_string()),
                 None => (None, host_cluster.map(str::to_string).unwrap_or_else(|| id.clone())),
             };
@@ -242,11 +251,17 @@ pub fn claim(p: &Presented, host_cluster: Option<&str>) -> Option<Claim> {
                 return Some(Claim { cluster: c.to_string(), user: None, api_key_id: None, secret: Some(token.clone()) });
             }
             let (c, s) = token.rsplit_once('_')?;
+            if elsewhere(c) {
+                return None;
+            }
             Some(Claim { cluster: c.to_string(), user: None, api_key_id: None, secret: Some(s.to_string()) })
         }
         // Its cluster is the one it names (as `<key id>@<cluster>`); no secret of the cluster's own.
         Presented::Derived(token) => {
             let (key, cluster) = search_es::xpack::security::derived::names(token)?;
+            if elsewhere(&cluster) {
+                return None;
+            }
             Some(Claim { cluster, user: None, api_key_id: Some(key), secret: None })
         }
         Presented::None => host_cluster.map(|c| Claim { cluster: c.to_string(), user: None, api_key_id: None, secret: None }),
@@ -382,12 +397,20 @@ mod tests {
         assert_eq!(claim(&Presented::None, None), None);
         let c = claim(&Presented::ApiKey { id: "k1@c5".into(), secret: "s".into() }, None).unwrap();
         assert_eq!((c.cluster.as_str(), c.api_key_id.as_deref()), ("c5", Some("k1")));
+        // At a cluster's own host, only its own qualifier.
+        let c = claim(&Presented::ApiKey { id: "k1@c5".into(), secret: "s".into() }, Some("c5")).unwrap();
+        assert_eq!((c.cluster.as_str(), c.api_key_id.as_deref()), ("c5", Some("k1")));
+        assert_eq!(claim(&Presented::ApiKey { id: "k1@c6".into(), secret: "s".into() }, Some("c5")), None);
+        assert_eq!(claim(&basic("bob@c6"), Some("c5")), None);
+        assert_eq!(claim(&Presented::Bearer("c6_s".into()), Some("c5")), None);
+        assert_eq!(claim(&Presented::Bearer("c5_s".into()), Some("c5")).unwrap().cluster, "c5");
     }
 
     #[test]
     fn hosts() {
-        assert_eq!(host_label("c1.search.example.com", Some("search.example.com")), Some("c1"));
-        assert_eq!(host_label("c1.search.example.com:9243", Some("search.example.com")), Some("c1"));
+        assert_eq!(host_label("c1.search.example.com", Some("search.example.com")).as_deref(), Some("c1"));
+        assert_eq!(host_label("c1.search.example.com:9243", Some("search.example.com")).as_deref(), Some("c1"));
+        assert_eq!(host_label("C1.Search.Example.com", Some("search.example.com")).as_deref(), Some("c1"));
         assert_eq!(host_label("a.b.search.example.com", Some("search.example.com")), None);
         assert_eq!(host_label("search.example.com", Some("search.example.com")), None);
         assert_eq!(host_label("c1.search.example.com", None), None);

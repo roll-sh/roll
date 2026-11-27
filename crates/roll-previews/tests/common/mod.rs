@@ -160,6 +160,10 @@ pub struct FakeData {
     pub restored: Mutex<Vec<(String, String)>>,
     /// A reset makes a new branch with a new id (Redis's), the nth `<parent>~<name>~r<n>`.
     pub renames_on_reset: AtomicUsize,
+    /// Branches made from another of the parent's (a masked base): branch → the one it came from.
+    pub from: Mutex<HashMap<String, String>>,
+    /// How many masks to fail next.
+    pub fail_masks: AtomicUsize,
 }
 
 impl FakeData {
@@ -180,6 +184,8 @@ impl FakeData {
             branch_now: Mutex::new(None),
             restored: Mutex::new(Vec::new()),
             renames_on_reset: AtomicUsize::new(0),
+            from: Mutex::new(HashMap::new()),
+            fail_masks: AtomicUsize::new(0),
         })
     }
 }
@@ -227,6 +233,20 @@ impl Brancher for FakeData {
     fn points_need_their_branch(&self) -> bool {
         self.kind == Kind::Redis
     }
+    fn branches_from_base(&self) -> bool {
+        self.kind == Kind::Postgres
+    }
+    async fn branch_from(&self, parent: &str, from: &str, name: &str, _mode: Mode) -> anyhow::Result<Option<Branched>> {
+        anyhow::ensure!(self.branches.lock().contains(from), "no branch {from} to branch from");
+        let id = format!("{parent}~{name}");
+        self.branches.lock().insert(id.clone());
+        self.from.lock().insert(id.clone(), from.to_string());
+        Ok(Some(Branched::plain(id)))
+    }
+    async fn children(&self, _parent: &str, branch: &str) -> anyhow::Result<usize> {
+        let live = self.branches.lock().clone();
+        Ok(self.from.lock().iter().filter(|(child, of)| *of == branch && live.contains(*child)).count())
+    }
     async fn restore(&self, _parent: &str, branch: &str, _kept: Option<&str>, point: &str, _name: &str, _mode: Mode) -> anyhow::Result<Option<Branched>> {
         anyhow::ensure!(self.branches.lock().contains(point), "no restore point {point}");
         self.restored.lock().push((branch.to_string(), point.to_string()));
@@ -240,6 +260,10 @@ impl Brancher for FakeData {
         self.delete(parent, snapshot, name).await
     }
     async fn mask(&self, _parent: &str, branch: &str, _kept: Option<&str>, columns: &std::collections::BTreeMap<String, String>) -> anyhow::Result<()> {
+        if self.fail_masks.load(Ordering::SeqCst) > 0 {
+            self.fail_masks.fetch_sub(1, Ordering::SeqCst);
+            anyhow::bail!("the compute didn't start");
+        }
         self.masks.lock().push((branch.to_string(), columns.clone()));
         Ok(())
     }
@@ -358,6 +382,8 @@ pub struct FakeApps {
     pub egress: Mutex<HashMap<(String, String), roll_previews::settings::EgressRule>>,
     /// Seeds run (their DATABASE_URL), and the exit code the next ones give.
     pub seeds: Mutex<Vec<String>>,
+    /// The last job's variables.
+    pub last_job_env: Mutex<Vec<(String, String)>>,
     pub seed_exit: std::sync::atomic::AtomicI32,
     /// Every seed or release run: (its command, the revision), and how many services were
     /// deployed at that revision when it ran.
@@ -550,6 +576,7 @@ impl Apps for FakeApps {
     async fn seed(&self, job: &roll_previews::ports::SeedJob) -> anyhow::Result<(i32, String)> {
         let db = job.env.iter().find(|(k, _)| k == "DATABASE_URL").map(|(_, v)| v.clone()).unwrap_or_default();
         self.seeds.lock().push(db);
+        *self.last_job_env.lock() = job.env.clone();
         self.seed_egress.lock().push(job.egress);
         let at_rev = self.deployed.lock().values().filter(|r| **r == job.revision).count();
         self.runs.lock().push((job.seed.run.clone(), job.revision.clone(), at_rev));
@@ -755,6 +782,7 @@ pub fn change(id: &str, n: i64) -> ChangeInfo {
         branch: Some(format!("feat/{n}")),
         head: format!("cs_{n}a"),
         open: true,
+        queued: false,
         draft: false,
         labels: Vec::new(),
         trusted: true,
@@ -815,7 +843,8 @@ fn env_of(settings: serde_json::Value, with_search: bool, cfg: impl FnOnce(&mut 
     let search = FakeData::new(Kind::Search, &["srch_logs"]);
     let apps = Arc::new(FakeApps::default());
     let secrets = Arc::new(FakeSecrets::default());
-    let mut config = Config { domain: "preview.test".into(), otlp: Some("127.0.0.1:7070".into()), ..Config::default() };
+    // Masked bases off unless a test turns them on: the others test a branch masking its own copy.
+    let mut config = Config { domain: "preview.test".into(), otlp: Some("127.0.0.1:7070".into()), mask_base_for: std::time::Duration::ZERO, ..Config::default() };
     cfg(&mut config);
     let engine = Engine::new(
         config,

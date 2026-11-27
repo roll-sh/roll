@@ -34,6 +34,7 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route("/v1/secrets/whoami", get(whoami))
         // Guardrails: floors every project may only tighten (guardrails.rs).
         .route("/v1/secrets/policy", get(guardrails).put(set_guardrails))
+        .route("/v1/secrets/policy/report", get(policy_report))
         .route("/v1/secrets/search", get(find))
         // Deleted projects in their recovery window (docs/secrets.md, "When a secret, an
         // environment or the project goes").
@@ -101,6 +102,7 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/identities/{{id}}/bootstrap"), post(create_bootstrap))
         .route(&format!("{P}/identities/{{id}}/machines"), get(identity_machines))
         .route(&format!("{P}/identities/{{id}}/machines/{{chain}}"), axum::routing::delete(revoke_machine))
+        .route(&format!("{P}/identities/{{id}}/machines/prune"), post(prune_machines))
         .route("/v1/secrets/login", post(login))
         .route("/v1/secrets/login/bootstrap", post(login_bootstrap))
         .route("/v1/secrets/login/refresh", post(login_refresh))
@@ -305,6 +307,11 @@ async fn health(State(s): S, Who(c): Who) -> crate::Result<Response> {
 /// roll secrets' policy (the operator's, or an admin account's).
 async fn guardrails(State(s): S, Who(c): Who) -> crate::Result<Response> {
     Ok(ok(blocking(s, move |s| s.guardrails(&c)).await?))
+}
+
+/// Every exception to the policy across projects (the operator's, or an admin account's).
+async fn policy_report(State(s): S, Who(c): Who) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.policy_report(&c)).await?))
 }
 
 /// Replace the policy: `{production_approvals?, leaks_rotate?, sync_kinds?, no_stored_cloud_keys?,
@@ -1314,6 +1321,11 @@ async fn identity_machines(State(s): S, Who(c): Who, Path((project, id)): Path<(
 async fn revoke_machine(State(s): S, Who(c): Who, Path((project, id, chain)): Path<(String, String, String)>) -> crate::Result<StatusCode> {
     blocking(s, move |s| s.revoke_machine(&project, &id, &chain, &c)).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn prune_machines(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<Response> {
+    let n = blocking(s, move |s| s.prune_machines(&project, &id, &c)).await?;
+    Ok(ok(json!({ "pruned": n })))
 }
 
 /// A bootstrap token for the machine's first machine credential (public: the token is the credential).

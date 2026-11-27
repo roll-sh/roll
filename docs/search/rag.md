@@ -409,10 +409,20 @@ in one call. So roll adds a route.
     capped at `limits.max_history_tokens`.
   - **Per profile:** `max_tokens_per_day`, counted per cluster on its node (a cluster runs on one
     node at a time, as compatibility.md notes for `rate_limit`), after which `_answer` answers 429.
-  - **Metering:** each answer's provider-reported `usage` is added to the cluster's usage per
-    endpoint (`search-control`'s usage totals and `/v1/search/clusters/{id}/usage`). Customer
-    providers bill the tokens themselves, so roll shows them and doesn't charge for them. Requests
-    and CPU are metered as today (`crates/search-control/src/pricing.rs`).
+  - **Metering (built):** provider tokens are counted per cluster, input and output apart
+    (`xpack/inference/tokens.rs`), for `_inference/completion` (answered or streamed) and
+    `_inference/chat_completion`'s streams; `_answer` adds each answer's `usage` (the provider's
+    count, else its estimate) to the same counter, a call that comes with the chat engine. Each
+    call counts the provider's own
+    figures when its answer carries them (OpenAI's `usage` and the services shaped like it,
+    Anthropic's, Bedrock's, Cohere's `billed_units`, Google's `usageMetadata`), else roll's
+    estimate of the text, figure by figure. A stream counts when it ends, also when its client
+    went away. Every metering pass takes them (`Node::take_tokens`, clusters unloaded in between
+    too) into `search_usage`'s `input_tokens` and `output_tokens`, and
+    `/v1/search/clusters/{id}/usage`, `roll search clusters usage` and the dashboard's Usage tab
+    show them. The provider bills the tokens, so roll shows them and doesn't price them; validation
+    calls (creating an endpoint) aren't counted. Requests and CPU are metered as before
+    (`crates/search-control/src/pricing.rs`).
 - **Refusals.**
   - **No hits:** with no hits, or none above the profile's `min_score`, the model isn't called.
     The answer is `{"answer": null, "finish_reason": "no_sources", "sources": []}`. That's cheaper,

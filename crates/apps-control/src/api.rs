@@ -71,6 +71,9 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route("/v1/apps/projects/{project}/drains", get(drains).post(add_drain))
         .route("/v1/apps/projects/{project}/export", post(export_project))
         .route("/v1/apps/projects/{project}/status-page", get(status_page).put(put_status_page).delete(delete_status_page))
+        .route("/v1/apps/projects/{project}/board", get(board).put(put_board))
+        .route("/v1/apps/services/{id}/environments/{env}/domains/{host}/configure", post(configure_domain))
+        .route("/v1/apps/services/{id}/environments/{env}/domains/{host}/claim", post(claim_domain))
         .route("/v1/apps/projects/{project}/status-page/domain", get(status_domain).post(set_status_domain).delete(delete_status_domain))
         .route("/v1/apps/projects/{project}/status-page/domain/verify", post(verify_status_domain))
         .route("/v1/apps/projects/{project}/status-page/incidents", get(status_incidents).post(post_status_incident))
@@ -233,6 +236,22 @@ async fn preview_domain(State(apps): S, Path(project): Path<String>) -> R {
 
 async fn set_preview_domain(State(apps): S, Path(project): Path<String>, b: Bytes) -> R {
     Ok((StatusCode::CREATED, Json(apps.set_preview_domain(&project, body(&b)?).await?)).into_response())
+}
+
+async fn claim_domain(State(apps): S, Path((id, env, host)): Path<(String, String, String)>) -> R {
+    ok(apps.claim_domain(&id, &env, &host).await?)
+}
+
+async fn configure_domain(State(apps): S, Path((id, env, host)): Path<(String, String, String)>, ext: Extensions, b: Bytes) -> R {
+    ok(apps.configure_domain(&id, &env, &host, body(&b)?, asker(&ext)).await?)
+}
+
+async fn board(State(apps): S, Path(project): Path<String>) -> R {
+    ok(apps.board(&project).await?)
+}
+
+async fn put_board(State(apps): S, Path(project): Path<String>, b: Bytes) -> R {
+    ok(apps.put_board(&project, body(&b)?).await?)
 }
 
 async fn status_domain(State(apps): S, Path(project): Path<String>) -> R {

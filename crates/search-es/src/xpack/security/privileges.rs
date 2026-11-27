@@ -266,6 +266,9 @@ pub fn action_of(api: &str) -> (Scope, String) {
         // caller; managing profiles checks its cluster privileges in the handler.
         "roll.chat.answer" | "roll.chat.completions" | "roll.chat.models" => Some((Any, "indices:data/read/roll/chat")),
         "roll.chat.put_profile" | "roll.chat.get_profile" | "roll.chat.delete_profile" => Some((Any, "cluster:admin/roll/chat/profile")),
+        // roll's A/B tests (`crate::xpack::entsearch::experiments`): promoting a variant writes
+        // the search application, as its `PUT` does.
+        "roll.search_application.promote_experiment" => Some((Cluster, "cluster:admin/xpack/application/search_application/put")),
         "sql.query" | "sql.translate" => Some((Any, "indices:data/read/sql")),
         "index" | "create" => Some((Index, "indices:data/write/index")),
         "update" => Some((Index, "indices:data/write/update")),
@@ -486,6 +489,13 @@ impl Permission {
         self.indices.iter().any(|g| (!restricted || g.allow_restricted) && grant_names(g, index) && g.privileges.iter().any(|p| index_grants(p, action)))
     }
 
+    /// Whether the role may read the failure store of `index` (a data stream): only
+    /// `read_failure_store` and `all` grant it, as Elasticsearch's failure store selector
+    /// privileges (`read` doesn't, though its action patterns cover the failure store's).
+    pub fn reads_failure_store(&self, index: &str) -> bool {
+        self.indices.iter().any(|g| grant_names(g, index) && g.privileges.iter().any(|p| p == "read_failure_store" || p == "all"))
+    }
+
     /// Whether the role holds a named index privilege on `index` (directly, through `all`, or
     /// through a privilege granting every action of it).
     pub fn has_index_privilege(&self, privilege: &str, index: &str) -> bool {
@@ -548,8 +558,7 @@ pub fn is_watch_history(index: &str) -> bool {
 /// Restricted indices: the security indices and other internal indices roles must opt into.
 pub fn is_restricted(index: &str) -> bool {
     // `.synonyms-2` (`.synonyms`) holds the synonym sets: a system index, restricted in
-    // Elasticsearch. (`.tasks` too, once it's made hidden: until then a restricted `.tasks`
-    // would fail whole-request checks over `*`.)
+    // Elasticsearch. `.tasks` is restricted on Elasticsearch only (`Effective::restricted`).
     index.starts_with(".security")
         || index == super::opensearch::INDEX
         || index.starts_with(".async-search")

@@ -169,11 +169,21 @@ pub enum Domains {
         #[command(flatten)]
         target: Target,
     },
-    /// Check a custom domain's DNS now.
+    /// Take a hostname another environment holds by proving it's yours: the first run prints the
+    /// TXT record to add, the next (once DNS has it) moves the domain here.
+    Claim {
+        hostname: String,
+        #[command(flatten)]
+        target: Target,
+    },
+    /// Check a custom domain's DNS now; with `--cloudflare-token roll://…` (a roll secret holding a
+    /// Cloudflare API token, Zone:DNS:Edit on its zone) its records are written there first.
     Verify {
         hostname: String,
         #[command(flatten)]
         target: Target,
+        #[arg(long, value_name = "ROLL_REF")]
+        cloudflare_token: Option<String>,
     },
     /// Remove a custom domain.
     #[command(alias = "rm")]
@@ -318,6 +328,9 @@ pub enum AppsCmd {
         /// Run once per deploy before the switch (a migration); a failure stops the deploy.
         #[arg(long)]
         pre_deploy: Option<String>,
+        /// A preview environment's teardown command, run once before it's deleted (`none` clears it).
+        #[arg(long)]
+        teardown: Option<String>,
         /// The path checked at each deploy and every 10 s while running; `none`: the port
         /// accepting.
         #[arg(long)]
@@ -968,6 +981,10 @@ pub enum AppsCmd {
         /// `config:set`), followed until it's live.
         #[arg(long, conflicts_with = "reveal")]
         deploy: bool,
+        /// Write the values to a `.env` file here (`vercel env pull`; default `.env.local`): 0600,
+        /// sealed ones named and left out, said when git doesn't ignore the file.
+        #[arg(long, value_name = "FILE", num_args = 0..=1, default_missing_value = ".env.local", conflicts_with_all = ["set", "unset", "seal", "reveal", "from_file", "deploy", "as_file", "not_file", "runtime_only", "build_too"])]
+        pull: Option<PathBuf>,
     },
     /// Link a roll resource (`postgres <project>`, `redis <db>`, `search <cluster>`): its
     /// connection variables go in (a search cluster's are an API key of the link's own).
@@ -2972,6 +2989,51 @@ async fn up_all(api: &Api, json_out: bool, dir: &Path, u: &Up) -> anyhow::Result
     Ok(())
 }
 
+/// Variables as a `.env` file, each line as `--reveal` prints it (what `--from-file` reads back).
+pub(crate) fn dotenv(header: &str, vars: &[(String, String)], sealed: &[String]) -> String {
+    let mut out = format!("# {header}\n");
+    if !sealed.is_empty() {
+        out.push_str(&format!("# sealed, not here: {}\n", sealed.join(", ")));
+    }
+    for (k, v) in vars {
+        out.push_str(&env_line(k, v));
+        out.push('\n');
+    }
+    out
+}
+
+/// `text` into `path`, readable by this user only (0600), replacing what was there.
+fn write_private(path: &std::path::Path, text: &str) -> anyhow::Result<()> {
+    use std::io::Write;
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.mode(0o600);
+    }
+    let mut f = o.open(path).with_context(|| format!("can't write {}", path.display()))?;
+    // A file made before with wider rights is narrowed too.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    f.write_all(text.as_bytes())?;
+    Ok(())
+}
+
+/// Whether git ignores `path` (outside a repository, or with no git here: yes, nothing to warn).
+fn git_ignores(path: &std::path::Path) -> bool {
+    let dir = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));
+    let name = path.file_name().map(std::path::Path::new).unwrap_or(path);
+    match std::process::Command::new("git").arg("-C").arg(dir).args(["check-ignore", "-q"]).arg(name).status() {
+        // 0: ignored; 1: not ignored; 128: not a repository.
+        Ok(s) => s.code() != Some(1),
+        Err(_) => true,
+    }
+}
+
 pub async fn deploy(api: &Api, json_out: bool, d: Deploy) -> anyhow::Result<()> {
     let svc = service(api, &d.target).await?;
     let dep = if d.local_image.is_some() || d.image_file.is_some() {
@@ -3134,9 +3196,27 @@ pub async fn domains(api: &Api, json_out: bool, d: Domains) -> anyhow::Result<()
             }
             v
         }
-        Domains::Verify { hostname, target } => {
+        Domains::Claim { hostname, target } => {
             let svc = service(api, &target).await?;
-            api.post(&format!("{}/domains/{}/verify", env_path(&svc, &target.env), enc(&hostname)), json!({})).await?
+            let v = api.post(&format!("{}/domains/{}/claim", env_path(&svc, &target.env), enc(&hostname)), json!({})).await?;
+            if !json_out {
+                if v["claimed"] == true {
+                    println!("{} is this environment's now ({})", s(&v["domain"]["hostname"]), s(&v["domain"]["status"]));
+                } else {
+                    println!("{hostname} is another environment's. Prove it's yours with this record (beside any value there):");
+                    println!("  TXT    {}  \"{}\"", s(&v["txt"]["name"]), s(&v["txt"]["value"]));
+                    println!("then run `roll domains claim {hostname}` again.");
+                }
+                return Ok(());
+            }
+            v
+        }
+        Domains::Verify { hostname, target, cloudflare_token } => {
+            let svc = service(api, &target).await?;
+            match cloudflare_token {
+                Some(r) => api.post(&format!("{}/domains/{}/configure", env_path(&svc, &target.env), enc(&hostname)), json!({ "cloudflare_token": r })).await?,
+                None => api.post(&format!("{}/domains/{}/verify", env_path(&svc, &target.env), enc(&hostname)), json!({})).await?,
+            }
         }
         Domains::Remove { hostname, target } => {
             let svc = service(api, &target).await?;
@@ -3491,7 +3571,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Set { target, name, repo, root, image, upload, builder, dockerfile, stage, install, build_command, output, build_start, health_timeout, health_every, health_failures, health_command, alert_memory, alert_errors, alert_p95, alert_log, alert_log_count, alert_cpu, alert_metric, alert_anomaly, min, max, cpu, memory, port, start, pre_deploy, health, schedule, timezone, kind, concurrency, suspend_after, sleep_after, timeout, retries, volume, watch, packages, build_timeout, build_size, submodules, submodule_repos, lfs, otel, rollout, rollout_step, rollout_errors, rollout_manual, rollout_checks, overlap, h2c, health_grpc, scale, public, drain, cpu_target, busy_cpu, memory_target, latency_target, oidc_audience, push, restart, restart_tries, affinity, tcp, udp, rollback_on_crash, rebuild_on_base, block_on, queue, alert_capacity, alert_route, skew_protection, rollout_slo_burn, rollout_p95, floor, floor_timezone, set } => {
+        AppsCmd::Set { target, name, repo, root, image, upload, builder, dockerfile, stage, install, build_command, output, build_start, health_timeout, health_every, health_failures, health_command, alert_memory, alert_errors, alert_p95, alert_log, alert_log_count, alert_cpu, alert_metric, alert_anomaly, min, max, cpu, memory, port, start, pre_deploy, teardown, health, schedule, timezone, kind, concurrency, suspend_after, sleep_after, timeout, retries, volume, watch, packages, build_timeout, build_size, submodules, submodule_repos, lfs, otel, rollout, rollout_step, rollout_errors, rollout_manual, rollout_checks, overlap, h2c, health_grpc, scale, public, drain, cpu_target, busy_cpu, memory_target, latency_target, oidc_audience, push, restart, restart_tries, affinity, tcp, udp, rollback_on_crash, rebuild_on_base, block_on, queue, alert_capacity, alert_route, skew_protection, rollout_slo_burn, rollout_p95, floor, floor_timezone, set } => {
             let svc = service(api, &target).await?;
             // The service's rollout with what was given replaced (the API takes it whole).
             let rollout = if rollout.is_some() || rollout_step.is_some() || rollout_errors.is_some() || rollout_manual.is_some() || rollout_checks.is_some() || overlap.is_some() || rollout_slo_burn.is_some() || rollout_p95.is_some() {
@@ -3664,6 +3744,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 ("port", port.map(Value::from)),
                 ("start", text(start)),
                 ("pre_deploy", text(pre_deploy)),
+                ("teardown", text(teardown)),
                 ("health_path", text(health)),
                 ("health_timeout_s", health_timeout.map(Value::from)),
                 ("health_every_s", health_every.map(|n| if n == 0 { Value::Null } else { Value::from(n) })),
@@ -4578,7 +4659,27 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             dep
         }
-        AppsCmd::Vars { target, set, unset, mut seal, reveal, from_file, deploy, plain, as_file, not_file, runtime_only, build_too } => {
+        AppsCmd::Vars { target, pull: Some(file), .. } => {
+            let svc = service(api, &target).await?;
+            let base = env_path(&svc, &target.env);
+            let (values, listed) = (api.get(&format!("{base}/variables/values")).await?, api.get(&format!("{base}/variables")).await?);
+            let vars: Vec<(String, String)> = values.as_object().into_iter().flatten().filter(|(k, _)| k.as_str() != "PORT" && !k.starts_with("ROLL_")).filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string()))).collect();
+            let sealed: Vec<String> = listed["vars"].as_array().into_iter().flatten().filter(|v| v["sealed"] == true).map(|v| s(&v["name"])).collect();
+            let text = dotenv(&format!("{} {} (roll apps vars --pull)", s(&svc["name"]), target.env), &vars, &sealed);
+            write_private(&file, &text)?;
+            if !json_out {
+                eprintln!("wrote {} {} to {}", vars.len(), if vars.len() == 1 { "variable" } else { "variables" }, file.display());
+                if !sealed.is_empty() {
+                    eprintln!("left out (sealed, never shown again): {}", sealed.join(", "));
+                }
+                if !git_ignores(&file) {
+                    eprintln!("warning: git doesn't ignore {}: add it to .gitignore before a commit takes it", file.display());
+                }
+                return Ok(());
+            }
+            json!({ "file": file, "written": vars.iter().map(|(k, _)| k).collect::<Vec<_>>(), "sealed": sealed })
+        }
+        AppsCmd::Vars { target, set, unset, mut seal, reveal, from_file, deploy, plain, as_file, not_file, runtime_only, build_too, pull: None } => {
             let scopes: serde_json::Map<String, Value> = runtime_only.iter().map(|n| (n.clone(), json!(true))).chain(build_too.iter().map(|n| (n.clone(), json!(false)))).collect();
             let mut files = serde_json::Map::new();
             for f in &as_file {

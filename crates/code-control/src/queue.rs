@@ -182,8 +182,14 @@ impl Code {
         if let Some(v) = c.preview.as_ref().and_then(|p| p.environment.as_ref()).and_then(|e| e.visual_review.as_ref()).filter(|v| v.required) {
             let own = v.by.as_deref().is_some_and(|by| by.eq_ignore_ascii_case(&c.author) || by.eq_ignore_ascii_case(c.author.trim_start_matches('@')));
             match v.state.as_str() {
+                // Only stories it touched that its run didn't take: said as that.
+                "changed" if !v.pages_waiting() && v.untaken_waiting().is_some() => {
+                    let n = v.untaken_waiting().unwrap_or(0);
+                    out.push(Blocker::new("visual", format!("{n} {} it touched {} taken by its preview's run: someone must accept {} as not taken", if n == 1 { "story" } else { "stories" }, if n == 1 { "wasn't" } else { "weren't" }, if n == 1 { "it" } else { "them" })))
+                }
                 "changed" => out.push(Blocker::new("visual", format!("its pages differ from {} by {:.1}%: someone must accept them on its preview", v.branch, v.percent.max(0.1)))),
                 "accepted" if own => out.push(Blocker::new("visual", "its visual change was accepted by its own author: someone else must accept it")),
+                "refused" => out.push(Blocker::new("visual", format!("{} refused its visual change: push again, or someone accepts it on its preview", v.by.as_deref().unwrap_or("someone")))),
                 _ => {}
             }
         }

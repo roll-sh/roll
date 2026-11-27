@@ -46,8 +46,9 @@
 //!   wake): a cluster past its own `max_resident_bytes` is committed (buffers become segment
 //!   files); past the node's `memory_budget`, the least recently used clusters with nothing in
 //!   flight are unloaded.
-//! - **Metering** ([`Node::take_request_counts`]): requests admitted per cluster since the last
-//!   call, counted per instance and carried over when an instance unloads. Counts and
+//! - **Metering** ([`Node::take_request_counts`], [`Node::take_tokens`]): requests admitted per
+//!   cluster since the last call, and completions' provider tokens, counted per instance and
+//!   carried over when an instance unloads. Counts and
 //!   observations are keyed by the cluster's catalog id ([`Loaded::id`]), never its name: a
 //!   name freed by a delete may be taken again before the next pass, and what the old cluster
 //!   left goes with it ([`Node::forget_cluster`]), never to the new one.
@@ -441,6 +442,9 @@ pub struct Node {
     /// Requests of unloaded instances not reported yet ([`Node::take_request_counts`]), by
     /// [`Loaded::id`].
     unmetered: Mutex<HashMap<String, u64>>,
+    /// Provider tokens of unloaded instances not reported yet ([`Node::take_tokens`]), by
+    /// [`Loaded::id`].
+    unmetered_tokens: Mutex<HashMap<String, (u64, u64)>>,
     /// Observations of unloaded instances not handed on yet ([`Node::take_observations`]), by
     /// [`Loaded::id`].
     unobserved: Mutex<HashMap<String, Observed>>,
@@ -515,6 +519,9 @@ pub struct Lease {
     /// A linked remote cluster's request from roll itself ([`search_es::remote::links`]):
     /// the remote access it carries, the only copy search-es sees.
     link: Option<String>,
+    /// The client named the cluster by its own address (its host label, or a node that serves
+    /// only it): [`search_es::rest::EsRequest::own_address`].
+    own_address: bool,
     /// When it started waiting for its permits: its latency is measured from here.
     since: Option<Instant>,
     /// A browser key's request: its running slot ([`crate::browser`]), given back when the
@@ -653,7 +660,7 @@ impl Lease {
     /// answered, or, for an answer it streams, when the stream ends ([`Lease::hold`]).
     pub async fn serve(self, req: EsRequest) -> EsResponse {
         let kind = crate::metrics::Kind::of(&req.method, &req.uri);
-        let head = EsRequest { verified: None, method: req.method.clone(), uri: req.uri.clone(), headers: Vec::new(), body: bytes::Bytes::new() };
+        let head = EsRequest { verified: None, own_address: false, method: req.method.clone(), uri: req.uri.clone(), headers: Vec::new(), body: bytes::Bytes::new() };
         let since = self.since.unwrap_or_else(Instant::now);
         let resp = self.handle(req).await;
         if self.browser.is_some() && crate::browser::is_policy_refusal(resp.status, &resp.body) {
@@ -694,6 +701,7 @@ impl Lease {
         // Who authenticated is said only here, on the request in process (no header can say
         // it); only roll's own calls are a remote cluster's.
         req.verified = None;
+        req.own_address = self.own_address;
         req.headers.retain(|(k, _)| !k.eq_ignore_ascii_case(REMOTE_ACCESS_HEADER));
         if let Some(a) = &self.link {
             req.headers.push((REMOTE_ACCESS_HEADER.to_string(), a.clone()));
@@ -755,7 +763,7 @@ impl Lease {
             // Only reads of async results can change them; only those keep what an error
             // response needs (no copy on the search path).
             let err_req = reads_async_results(&req.uri)
-                .then(|| EsRequest { verified: None, method: req.method.clone(), uri: req.uri.clone(), headers: req.headers.clone(), body: bytes::Bytes::new() });
+                .then(|| EsRequest { verified: None, own_address: false, method: req.method.clone(), uri: req.uri.clone(), headers: req.headers.clone(), body: bytes::Bytes::new() });
             let resp = search_es::rest::handle_shared_admitted(&loaded.cluster, req, admitted).await;
             // A read that kept an async result longer (`keep_alive`) or opened a SQL cursor:
             // Elasticsearch answers once the new expiration is stored, so the read is
@@ -782,7 +790,7 @@ impl Lease {
             }
             return resp;
         }
-        let err_req = EsRequest { verified: None, method: req.method.clone(), uri: req.uri.clone(), headers: req.headers.clone(), body: bytes::Bytes::new() };
+        let err_req = EsRequest { verified: None, own_address: false, method: req.method.clone(), uri: req.uri.clone(), headers: req.headers.clone(), body: bytes::Bytes::new() };
         let resp = search_es::rest::handle_shared_admitted(&loaded.cluster, req, admitted).await;
         drop(self.fair.lock().take());
         // Async results the request stored go to `.async-search`, acknowledged with it.
@@ -1218,6 +1226,7 @@ impl Node {
             leases: OnceLock::new(),
             pending_specs: Mutex::new(HashMap::new()),
             unmetered: Mutex::new(HashMap::new()),
+            unmetered_tokens: Mutex::new(HashMap::new()),
             unobserved: Mutex::new(HashMap::new()),
             reaper_kick: Arc::new(tokio::sync::Notify::new()),
             tasks: Arc::new(TaskCount::default()),
@@ -1543,6 +1552,10 @@ impl Node {
         }
         // Before any job can run: a branch's inherited jobs must not act as its parent's.
         Box::pin(search_es::branch::mark_inherited(&cluster)).await.map_err(|e| anyhow::anyhow!("marking what the branch inherited: {}", e.reason()))?;
+        // Task results an earlier version kept in a `.tasks` that isn't hidden: hidden now.
+        if let Err(e) = Box::pin(search_es::api::tasks::hide_results_index(&cluster)).await {
+            tracing::warn!(cluster = spec.name, error = %e.reason(), "hiding the task results index failed");
+        }
         // Secrets a node without a key kept in the clear are sealed now that this one has one.
         match Box::pin(search_es::seal::seal_leftovers(&cluster)).await {
             Ok(l) if l.changed == 0 => {}
@@ -1736,6 +1749,13 @@ impl Node {
         if left > 0 {
             *self.unmetered.lock().entry(loaded.id().to_string()).or_default() += left;
         }
+        // Streams ended before their lease came back, so they've counted theirs.
+        let (i, o) = loaded.cluster.xpack.tokens.take();
+        if i > 0 || o > 0 {
+            let mut t = self.unmetered_tokens.lock();
+            let e = t.entry(loaded.id().to_string()).or_default();
+            *e = (e.0.saturating_add(i), e.1.saturating_add(o));
+        }
         let seen = Observed::take_from(&loaded);
         if !seen.is_empty() {
             self.unobserved.lock().entry(loaded.id().to_string()).or_default().extend(seen);
@@ -1922,6 +1942,25 @@ impl Node {
         v
     }
 
+    /// Provider tokens of completions and chat answers per cluster since the previous call, as
+    /// `(input, output)` (metered, not priced: the provider bills them;
+    /// `search_es::xpack::inference::tokens`): loaded clusters and those unloaded meanwhile.
+    /// Keyed by [`Loaded::id`].
+    pub fn take_tokens(&self) -> Vec<(String, (u64, u64))> {
+        let loaded: Vec<Arc<Loaded>> = self.clusters.read().values().filter_map(|s| s.get().cloned()).collect();
+        let mut out: HashMap<String, (u64, u64)> = std::mem::take(&mut *self.unmetered_tokens.lock());
+        for l in loaded {
+            let (i, o) = l.cluster.xpack.tokens.take();
+            if i > 0 || o > 0 {
+                let e = out.entry(l.id().to_string()).or_default();
+                *e = (e.0.saturating_add(i), e.1.saturating_add(o));
+            }
+        }
+        let mut v: Vec<(String, (u64, u64))> = out.into_iter().collect();
+        v.sort_unstable();
+        v
+    }
+
     /// The CPU time each cluster's inputs took on the embedding pool since the previous call,
     /// keyed by [`Loaded::id`] like the other observations (metered as inference).
     pub fn take_inference_cpu(&self) -> Vec<(String, Duration)> {
@@ -1978,6 +2017,7 @@ impl Node {
     /// pass: its requests and observations (it was deleted, so nothing may bill or show them).
     pub fn forget_cluster(&self, id: &str) {
         self.unmetered.lock().remove(id);
+        self.unmetered_tokens.lock().remove(id);
         self.unobserved.lock().remove(id);
     }
 
@@ -2252,7 +2292,7 @@ impl Node {
                     .and_then(|s| auth::host_label(s, self.cfg.domain.as_deref()))
                     .or_else(|| req.header("host").and_then(|h| auth::host_label(h, self.cfg.domain.as_deref())));
                 let presented = auth::parse_authorization(req.header("authorization")).unwrap_or(Presented::None);
-                match auth::claim(&presented, host) {
+                match auth::claim(&presented, host.as_deref()) {
                     Some(c) => c.cluster,
                     None => return Ok(None),
                 }
@@ -2300,7 +2340,7 @@ impl Node {
                 host_cluster = sni
                     .and_then(|s| auth::host_label(s, self.cfg.domain.as_deref()))
                     .or_else(|| req.header("host").and_then(|h| auth::host_label(h, self.cfg.domain.as_deref())));
-                Some(auth::claim(&presented, host_cluster))
+                Some(auth::claim(&presented, host_cluster.as_deref()))
             }
         };
         // Why the cluster refused a derived key, from its one verification: said only once its
@@ -2332,9 +2372,13 @@ impl Node {
             (None, Some(name)) => name.as_str(),
             (None, None) => return Err(failed().into()),
         };
+        // Its own address: the host label (or SNI) names the cluster the request runs on, or the
+        // node serves only it. A client steers it through `Host`, which is harmless: it only
+        // picks the format of a new key's `encoded`, never what any credential reaches.
+        let own_address = host_cluster.as_deref() == Some(name) || self.cfg.default_cluster.is_some();
         // Credentials that aren't the cluster's own may be a principal of the cluster's
         // security (native user, API key, access token): checked once the cluster is loaded.
-        let native = claim.as_ref().and_then(|c| auth::native_authorization(&presented, c, host_cluster));
+        let native = claim.as_ref().and_then(|c| auth::native_authorization(&presented, c, host_cluster.as_deref()));
         // A linked remote cluster's request (roll's own, never a client's: the header is
         // ignored from anyone else) authenticates with a cross-cluster key of this cluster.
         let link = match origin {
@@ -2387,6 +2431,7 @@ impl Node {
             }
             // Otherwise it is being unloaded: wake it again below.
             if let Ok(mut lease) = self.pin(loaded, spec.dialect) {
+                lease.own_address = own_address;
                 if via_native {
                     lease.native_auth = native.clone();
                     lease.derived = key_limit.as_ref().and_then(|b: &BrowserAuth| b.derived.clone());
@@ -2442,6 +2487,7 @@ impl Node {
             }
             match self.pin(loaded, dialect) {
                 Ok(mut lease) => {
+                    lease.own_address = own_address;
                     if via_native {
                         lease.native_auth = native.clone();
                         lease.derived = key_limit.as_ref().and_then(|b: &BrowserAuth| b.derived.clone());
@@ -2488,6 +2534,7 @@ impl Node {
             native_auth: None,
             derived: None,
             link: None,
+            own_address: false,
             since: None,
             browser: None,
         };

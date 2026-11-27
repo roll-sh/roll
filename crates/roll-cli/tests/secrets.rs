@@ -164,6 +164,27 @@ async fn start() -> Server {
     start_with(false).await
 }
 
+/// A bucket whose access keys roll manages: each one issued is new.
+#[derive(Default)]
+struct Keys(std::sync::atomic::AtomicU32);
+
+impl roll_secrets::LinkProvider for Keys {
+    fn kind(&self) -> &str {
+        "bucket"
+    }
+    fn fields(&self) -> &[roll_secrets::links::Field] {
+        &[roll_secrets::links::Field { field: "secret", label: "Secret", modes: &[roll_secrets::Mode::Managed], secret: true, suggest: "API_KEY", credential: Some("key") }]
+    }
+    fn read(&self, _: &str, _: &str, _: &roll_secrets::Link) -> roll_secrets::Result<roll_secrets::Value> {
+        Err(roll_secrets::Error::Link("no live fields".into()))
+    }
+    fn issue(&self, _: &str, _: &str, _: &roll_secrets::Link, _: &str, _: Option<u64>) -> roll_secrets::Result<roll_secrets::links::Issued> {
+        let n = self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        let parts = std::collections::BTreeMap::from([("secret".to_string(), roll_secrets::Value::new(format!("fake-Kq8mZ3vT9xLr2WbN-{n}")))]);
+        Ok(roll_secrets::links::Issued { parts, handle: serde_json::json!({ "n": n }), expires_at: None })
+    }
+}
+
 /// With workload identities' logins ([`Logins`]) when `logins`.
 async fn start_with(logins: bool) -> Server {
     let dir = tempfile::tempdir().unwrap();
@@ -179,7 +200,11 @@ async fn start_with(logins: bool) -> Server {
     let opts = roll_secrets::Options {
         keyring: Ok(roll_secrets::Keyring::new(&"k".repeat(32), None).unwrap()),
         key_source: roll_secrets::KeySource::Env,
-        links: Default::default(),
+        links: {
+            let mut links = roll_secrets::Links::default();
+            links.register(Arc::new(Keys::default()));
+            links
+        },
         syncs: Default::default(),
         open: true,
         trust_forwarded_for: false,
@@ -898,7 +923,7 @@ async fn roll_secrets_leaks_sets_and_shows_leak_rotation() {
 /// A git server's pre-receive hook (`scan --pre-receive`) in a real bare repository: a new branch
 /// without values goes through, a push adding a production value is refused naming the key, never
 /// the value, with a scan-only token that can't reveal production, and `-o breakglass` lets it
-/// through, audited.
+/// through, audited, as a leak: a managed key it let through is rotated under `leaks.rotate`.
 // The hook calls the server in this process while the test waits on git: two threads.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_pre_receive_hook_refuses_a_push_adding_a_production_value_with_a_scan_only_token() {
@@ -969,6 +994,15 @@ async fn a_pre_receive_hook_refuses_a_push_adding_a_production_value_with_a_scan
     assert!(!passed && said.contains("config.env:2"), "{said}");
 
     // Break glass is the project's to allow, names the pusher, and never passes unrecorded.
+    let http = reqwest::Client::new();
+    let placed = http.put(format!("{api}/v1/workspace/projects/{prj}/resources/bucket/k1")).json(&serde_json::json!({ "x": 0, "y": 0 })).send().await.unwrap();
+    assert!(placed.status().is_success(), "{}", placed.text().await.unwrap());
+    let link = serde_json::json!({ "link": { "kind": "bucket", "ref": "k1", "field": "secret", "mode": "managed" } });
+    let linked = http.put(format!("{api}/v1/secrets/projects/{prj}/environments/production/secrets/API_KEY")).json(&link).send().await.unwrap();
+    assert!(linked.status().is_success(), "{}", linked.text().await.unwrap());
+    ok(&api, &[], &["secrets", "-p", "shop", "leaks", "managed"], None).await;
+    let managed = ok(&api, &[], &["secrets", "-p", "shop", "-e", "production", "get", "API_KEY", "--raw"], None).await.trim().to_string();
+    commit("keys.env", &format!("API_KEY={managed}\n"));
     let alice = [("GITHUB_USER_LOGIN", "alice")];
     let (passed, said) = push_as(&["-o", "breakglass"], &alice);
     assert!(!passed && said.contains("break glass refused"), "no one may until an admin says: {said}");
@@ -978,9 +1012,17 @@ async fn a_pre_receive_hook_refuses_a_push_adding_a_production_value_with_a_scan
     let (passed, said) = push_as(&["-o", "breakglass"], &alice);
     assert!(passed && said.contains("breakglass"), "{said}");
     let audit: serde_json::Value = reqwest::get(format!("{api}/v1/secrets/projects/{prj}/audit?action=secrets.scan.breakglass")).await.unwrap().json().await.unwrap();
-    assert_eq!(audit[0]["keys"], serde_json::json!(["DATABASE_URL"]), "{audit}");
+    assert_eq!(audit[0]["keys"], serde_json::json!(["API_KEY", "DATABASE_URL"]), "{audit}");
     let summary = audit[0]["summary"].as_str().unwrap_or_default();
     assert!(summary.contains("by alice to refs/heads/main"), "{audit}");
+    // What it let through is leaked and reported as such. The hook's token may only scan, so it
+    // rotates nothing: the leak waits on Health for someone who may write there.
+    let leaked: serde_json::Value = reqwest::get(format!("{api}/v1/secrets/projects/{prj}/audit?action=secrets.leaked")).await.unwrap().json().await.unwrap();
+    assert_eq!(leaked[0]["keys"], serde_json::json!(["API_KEY", "DATABASE_URL"]), "{leaked}");
+    assert!(leaked[0]["summary"].as_str().unwrap_or_default().contains("let through with break glass by alice"), "{leaked}");
+    let now = ok(&api, &[], &["secrets", "-p", "shop", "-e", "production", "get", "API_KEY", "--raw"], None).await;
+    assert_eq!(now.trim(), managed, "a scan-only hook's break glass rotates nothing, even under leaks.rotate = managed");
+    assert!(!leaked.to_string().contains(value) && !leaked.to_string().contains(&managed), "never a value: {leaked}");
 }
 
 /// `roll secrets agent` on port 0 for `shop`'s production, with `env` set (its login): its address
@@ -1561,4 +1603,48 @@ async fn infisical_brings_a_whole_project_with_its_folders_and_a_dry_run_writes_
     assert_eq!(region.trim(), "fake-region-1");
     let listed = ok(&api, &[], &["--json", "secrets", "-p", "shop", "-e", "development", "ls"], None).await;
     assert!(listed.contains("where it runs"), "Infisical's comment is the key's comment: {listed}");
+}
+
+/// A public CA that takes one Cloudflare token and orders nothing (the API tests order).
+struct TokenOnlyCa(std::sync::Mutex<Vec<String>>);
+
+impl roll_secrets::public_certs::PublicCa for TokenOnlyCa {
+    fn allows(&self, directory: &str) -> bool {
+        roll_secrets::public_certs::PUBLIC_CAS.contains(&directory)
+    }
+    fn check(&self, dns: &roll_secrets::public_certs::DnsCredential, _: &[String]) -> Result<(), String> {
+        let roll_secrets::public_certs::DnsCredential::Cloudflare(token) = dns else { return Err("Route 53: no".into()) };
+        self.0.lock().unwrap().push(token.expose().to_string());
+        if token.expose() == "cf-token-from-stdin" { Ok(()) } else { Err("Cloudflare: find zone: HTTP 401".into()) }
+    }
+    fn order(&self, _: roll_secrets::public_certs::Order<'_>) -> Result<roll_secrets::public_certs::Ordered, String> {
+        Err("not in this test".into())
+    }
+    fn revoke(&self, _: roll_secrets::public_certs::Revoke<'_>) -> Result<roll_secrets::public_certs::RevokeReason, String> {
+        Err("not in this test".into())
+    }
+}
+
+/// `roll secrets public-certs`: the DNS credential comes on stdin and is never printed, a renewal
+/// past the caps says when the next may come, and the registration goes by name.
+#[tokio::test]
+async fn public_certs_take_the_dns_credential_on_stdin_and_say_the_renewal_caps() {
+    let s = start().await;
+    let ca = Arc::new(TokenOnlyCa(Default::default()));
+    s.secrets.set_public_ca(ca.clone());
+    let api = s.api.as_str();
+    let at = ["secrets", "-p", "shop", "public-certs"];
+    let run = |more: &'static [&'static str]| [&at[..], more].concat();
+    let added = ok(api, &[], &run(&["add", "web", "--domain", "www.example.com", "--domain", "*.example.com", "--dns", "cloudflare"]), Some("cf-token-from-stdin\n")).await;
+    assert!(added.contains("Registered web") && !added.contains("cf-token"), "{added}");
+    assert_eq!(*ca.0.lock().unwrap(), ["cf-token-from-stdin"], "the token from stdin, checked before it's kept");
+    let listed = ok(api, &[], &run(&["ls"]), None).await;
+    assert!(listed.contains("web") && listed.contains("pending") && listed.contains("www.example.com,*.example.com") && !listed.contains("cf-token"), "{listed}");
+    ok(api, &[], &run(&["renew", "web"]), None).await;
+    let held = roll(api, &[], &run(&["renew", "web"]), None).await;
+    assert!(held.code != Some(0) && held.stderr.contains("ask again after"), "{}", held.stderr);
+    let shown = ok(api, &[], &run(&["show", "web"]), None).await;
+    assert!(shown.contains("renewals held until") && shown.contains("1 of 3"), "{shown}");
+    ok(api, &[], &run(&["rm", "web"]), None).await;
+    assert_eq!(ok(api, &[], &run(&["ls"]), None).await.trim(), "");
 }

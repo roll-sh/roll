@@ -662,6 +662,11 @@ pub struct Run {
     /// migration): a failure fails the deploy and the old deployment keeps serving.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pre_deploy: Option<String>,
+    /// Runs once in a container of the live deployment's image before a preview (ephemeral)
+    /// environment is deleted (Heroku's `pr-predestroy`): its data cleaned up, its webhooks
+    /// removed. Ten minutes at most; a failure is said, never holding the delete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub teardown: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub schedule: Option<String>,
     /// The zone a cron schedule's fields are in (IANA, `Europe/Budapest`); UTC when unset.
@@ -1445,6 +1450,7 @@ impl Default for Run {
             port: None,
             start: None,
             pre_deploy: None,
+            teardown: None,
             schedule: None,
             timezone: None,
             timeout_s: None,
@@ -1539,8 +1545,8 @@ impl Run {
         if let Some(r) = self.alerts.routes.iter().enumerate().find_map(|(i, r)| self.alerts.routes[..i].iter().any(|o| o.label() == r.label()).then_some(r)) {
             return Err(Error::BadRequest(format!("alerts.routes names {} twice", r.label())));
         }
-        if self.alerts.log_match.as_ref().is_some_and(|m| m.trim().is_empty() || m.len() > 200) || !(1..=10_000).contains(&self.alerts.log_count) {
-            return Err(Error::BadRequest("alerts.log_match is 1–200 characters, alerts.log_count 1–10000".into()));
+        if self.alerts.log_match.as_ref().is_some_and(|m| crate::logs::Search::parse(m).is_none() || m.len() > 200) || !(1..=10_000).contains(&self.alerts.log_count) {
+            return Err(Error::BadRequest("alerts.log_match is a log search (1–200 characters, a word in it), alerts.log_count 1–10000".into()));
         }
         let bad = |m: &str| Err(Error::BadRequest(format!("run.{m}")));
         if self.schedules.len() > 20 {
@@ -1638,7 +1644,7 @@ impl Run {
         }
         for (i, m) in self.log_metrics.iter().enumerate() {
             let name_ok = !m.name.is_empty() && m.name.len() <= 100 && m.name.bytes().enumerate().all(|(j, b)| b.is_ascii_alphabetic() || b == b'_' || (j > 0 && (b.is_ascii_digit() || b == b'.')));
-            if !name_ok || m.pattern.is_empty() || m.pattern.chars().count() > 200 || self.log_metrics[..i].iter().any(|o| o.name == m.name) {
+            if !name_ok || crate::logs::Search::parse(&m.pattern).is_none() || m.pattern.chars().count() > 200 || self.log_metrics[..i].iter().any(|o| o.name == m.name) {
                 return bad("log_metrics are {name: a metric's name (unique), pattern: 1–200 characters}");
             }
         }
@@ -1851,6 +1857,9 @@ impl Run {
         }
         if self.pre_deploy.as_ref().is_some_and(|c| c.trim().is_empty() || c.len() > 2000 || c.contains('\0')) {
             return bad("pre_deploy is a command of at most 2000 characters");
+        }
+        if self.teardown.as_ref().is_some_and(|c| c.trim().is_empty() || c.len() > 2000 || c.contains('\0')) {
+            return bad("teardown is a command of at most 2000 characters");
         }
         if let Some(v) = &self.volume {
             if !v.mount.starts_with('/') || v.mount == "/" || v.mount.len() > 200 || v.mount.contains("..") {

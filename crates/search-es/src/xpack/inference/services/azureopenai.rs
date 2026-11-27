@@ -237,7 +237,8 @@ pub async fn infer(cluster: &Cluster, ep: &Endpoint, req: &Request) -> EsResult<
         TaskType::Completion => {
             let input = one_input(req, "Azure OpenAI completion")?;
             let answer = send(cluster, ep, url(cluster, ep, &["chat", "completions"])?, &ts, &completion_body(input, &ts, false), req.timeout, false).await?;
-            Ok(Results::Completion(vec![oai::completion_text(&super::answer_json("azureopenai", &answer)?, "Azure OpenAI completions")?]))
+            let v = super::answer_json("azureopenai", &answer)?;
+            Ok(Results::completion(vec![oai::completion_text(&v, "Azure OpenAI completions")?], &v))
         }
         other => Err(crate::xpack::inference::unsupported_task(other, "azureopenai")),
     }

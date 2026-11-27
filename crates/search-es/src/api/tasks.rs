@@ -356,6 +356,33 @@ fn tasks_mapping() -> Map {
     }
 }
 
+/// The index task results are stored in (`TaskResultsService`).
+pub const RESULTS_INDEX: &str = ".tasks";
+
+/// Makes an Elasticsearch-flavor cluster's `.tasks` hidden, as Elasticsearch creates it (a system
+/// index), when an earlier version created it without the setting: so `*` doesn't reach it, and
+/// it's restricted ([`crate::xpack::security::Effective::restricted`]). Run as the cluster opens;
+/// `true` when it changed it. OpenSearch keeps it as it is.
+pub async fn hide_results_index(cluster: &crate::cluster::Cluster) -> EsResult<bool> {
+    let open = |st: &crate::meta::ClusterState| st.metadata.dialect == crate::cluster::Dialect::Elasticsearch && st.metadata.indices.get(RESULTS_INDEX).is_some_and(|i| !i.is_hidden());
+    if !open(&cluster.state()) {
+        return Ok(false);
+    }
+    cluster
+        .update(move |st| {
+            if !open(st) {
+                return Ok(false);
+            }
+            let mut idx = (*st.metadata.indices[RESULTS_INDEX]).clone();
+            idx.settings.set("index.hidden", "true");
+            idx.version += 1;
+            idx.settings_version += 1;
+            st.metadata.indices.insert(idx.name.clone(), std::sync::Arc::new(idx));
+            Ok(true)
+        })
+        .await
+}
+
 /// Stores a finished task's result in the `.tasks` system index, as
 /// `TaskResultsService.storeResult` does (creating the index on first use): its documents
 /// outlive this process's memory of the task.
@@ -373,6 +400,9 @@ pub async fn persist_result(ctx: &Ctx<'_>, id: u64) -> EsResult<()> {
                 let mut req = super::indices::CreateRequest::default();
                 req.settings.set("index.number_of_shards", "1");
                 req.settings.set("index.auto_expand_replicas", "0-1");
+                if st.metadata.dialect == crate::cluster::Dialect::Elasticsearch {
+                    req.settings.set("index.hidden", "true");
+                }
                 req.mappings = Some(tasks_mapping());
                 super::indices::create_index(st, ".tasks", ".tasks", req, now).map(|_| ())
             })

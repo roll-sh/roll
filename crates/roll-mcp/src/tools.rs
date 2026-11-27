@@ -446,7 +446,7 @@ fn secrets_area(method: &str, path: &str) -> Area {
             "audit" | "health" | "leaks" | "shares" | "rotations" | "backup" | "unstored" => "security",
             "transit" | "leases" | "cas" | "ssh-cas" | "public-certs" | "atlas-projects" | "aws-roles" | "aws-users" | "cloud-accounts" | "directories" | "gateways" | "github-apps"
             | "kubernetes" | "outside-databases" | "rotators" | "saas" | "snowflake-accounts" | "syncs" => "integrations",
-            "placeholders" => "security",
+            "placeholders" | "identities" => "security",
             _ => return Area::Unplaced,
         },
         _ => return Area::Unplaced,
@@ -479,7 +479,7 @@ fn apps_area(method: &str, path: &str) -> Area {
         },
         ["services", "activity"] | ["events"] => "observe",
         ["services", "links"] | ["services", "restore"] | ["services", "move"] | ["import"] | ["plan"] | ["quote"] => "configure",
-        ["projects", "drains" | "notifications" | "limits" | "usage" | "status-page" | "preview-domain" | "export" | "signing", ..] => "project",
+        ["projects", "drains" | "notifications" | "limits" | "usage" | "status-page" | "preview-domain" | "export" | "signing" | "board", ..] => "project",
         _ => return Area::Unplaced,
     };
     Area::One(area)
@@ -539,6 +539,11 @@ const fn t(name: &'static str, title: &'static str, description: &'static str, p
 /// write those keys (the API's own default is a week).
 fn value_request_defaults() -> Value {
     json!({ "ttl_minutes": 1440, "answers": 1 })
+}
+
+/// A search task that completed (its `response` or `error` in the answer).
+fn task_done(v: &Value) -> bool {
+    v["completed"].as_bool() == Some(true)
 }
 
 /// A tasks run that's over (`completed`, `failed` or `canceled`).
@@ -1254,6 +1259,7 @@ static TOOLS: &[Tool] = &[
     t("search_delete_site_verification", "Drop a site verification", "Drop a domain's or origin's verification: its crawls get the unverified limits again.", "search", "DELETE", "/v1/search/clusters/{cluster}/site-verifications/{site}", &[req("cluster", "Cluster"), req("site", "The domain or origin")]),
     t("search_refresh", "Refresh an index", "Make what was just indexed searchable now (Elasticsearch's POST /<index>/_refresh).", "search", "POST", "/v1/search/clusters/{cluster}/indices/{index}/refresh", &[req("cluster", "Cluster"), req("index", "Index")]),
     t("search_analyze", "Analyze text", "The tokens an index's analyzer makes of some text (Elasticsearch's POST /<index>/_analyze): how a field will match.", "search", "POST", "/v1/search/clusters/{cluster}/indices/{index}/analyze", &[req("cluster", "Cluster"), req("index", "Index"), breq("text", Ty::Str, "Text to analyze"), b("analyzer", Ty::Str, "An analyzer by name"), b("field", Ty::Str, "Analyze as this field does"), b("tokenizer", Ty::Any, "A tokenizer by name or defined inline, to try a chain the index doesn't have"), b("filter", Ty::Arr, "Token filters by name or inline, in order"), b("char_filter", Ty::Arr, "Character filters by name or inline, in order"), b("normalizer", Ty::Str, "A normalizer by name (keyword fields)"), b("explain", Ty::Bool, "Each step's tokens with their attributes"), b("attributes", Ty::Arr, "With explain: only these token attributes")]),
+    t("search_evaluate", "Evaluate relevance", "Score one or two search configurations against judged queries with Elasticsearch's _rank_eval on an index (nDCG@10 unless metric says), and with two, compare them query by query: the score difference and the queries that got better or worse. A configuration is a search body with {{query}} where each judged query goes (request), a search template (template: {id} or {source}, with params), or a search application's own template (application, on the index named as the application; variant: {experiment, variant} scores an A/B variant offline). Runs searches only.", "search", "POST", "/v1/search/clusters/{cluster}/indices/{index}/evaluate", &[req("cluster", "Cluster"), req("index", "Index"), breq("judgments", Ty::Arr, "Judged queries: [{query, ratings: [{_id, rating (0-100), _index?}]}], up to 500"), breq("configurations", Ty::Arr, "One or two of {name, request (a search body with {{query}}) | template ({id} or {source}, params?) | application (a search application's name; variant?: {experiment, variant}), query_param? (default query, or query_string for an application)}; with two, the second is compared against the first"), b("metric", Ty::Obj, "A _rank_eval metric, e.g. {\"dcg\": {\"k\": 10, \"normalize\": true}} (the default), precision, recall, mean_reciprocal_rank, expected_reciprocal_rank")]),
     t("search_add_document", "Add a document", "Index a document under a new id.", "search", "POST", "/v1/search/clusters/{cluster}/indices/{index}/docs", &[req("cluster", "Cluster"), req("index", "Index"), P { name: "document", ty: Ty::Str, at: At::RawJson, required: true, desc: "The document, as JSON text" }]),
     t(
         "search_bulk",
@@ -1265,6 +1271,26 @@ static TOOLS: &[Tool] = &[
         &[req("cluster", "Cluster"), req("index", "Index"), P { name: "ndjson", ty: Ty::Str, at: At::RawNdjson, required: true, desc: "Action and document lines" }],
     ),
     t("search_delete_by_query", "Delete by query", "Delete every document of an index that matches a query (at most max_docs of them).", "search", "POST", "/v1/search/clusters/{cluster}/indices/{index}/delete_by_query", &[req("cluster", "Cluster"), req("index", "Index"), breq("query", Ty::Obj, "Query DSL"), b("max_docs", Ty::Int, "Delete at most this many"), b("conflicts", Ty::Choice(&["abort", "proceed"]), "On a document changed meanwhile: stop (the default) or go on")]),
+    t(
+        "search_update_by_query",
+        "Update by query",
+        "Index every document of one index that matches a query again, in place, through the index's pipelines and inference: with no script it embeds a semantic_text field added since, or a field a changed mapping now copies to. A script changes each document instead, and can delete (so it needs delete). With wait_for_completion false it answers a task at once; follow it with search_wait_task.",
+        "search",
+        "POST",
+        "/v1/search/clusters/{cluster}/indices/{index}/update_by_query",
+        &[
+            req("cluster", "Cluster id or name"),
+            req("index", "One index, by its name (no pattern or list)"),
+            b("query", Ty::Obj, "Query DSL: the documents to index again (default: every one)"),
+            b("script", Ty::Any, "A Painless script changing each document (it can delete: needs delete)"),
+            b("max_docs", Ty::Int, "At most this many"),
+            b("conflicts", Ty::Choice(&["abort", "proceed"]), "On a document changed meanwhile: stop (the default) or go on"),
+            b("slices", Ty::Any, "Parallel slices: a number, or \"auto\""),
+            q("wait_for_completion", Ty::Bool, "false: answer a task at once (an index past a few thousand documents)"),
+        ],
+    )
+    .open_world(),
+    t("search_wait_task", "Wait for a search task", "A search task (search_update_by_query's) once it completes, or as it is when the timeout passes: completed, and its response (updated, failures) or error. Pass wait_for_completion: true to wait.", "search", "GET", "/v1/search/clusters/{cluster}/tasks/{task}", &[req("cluster", "Cluster id or name"), req("task", "Task id, as search_update_by_query answered it (node:number)"), q("wait_for_completion", Ty::Bool, "true: wait until it completes or the timeout passes"), q("timeout", Ty::Str, "e.g. 30s (at most a minute)")]).until(task_done),
     t("search_query", "Search", "Run an Elasticsearch _search body on an index: a query or a retriever (hybrid search is an rrf or linear retriever over a standard and a knn one), knn, aggregations, highlighting, paging with search_after.", "search", "POST", "/v1/search/clusters/{cluster}/indices/{index}/search", &[
         req("cluster", "Cluster id or name"),
         req("index", "Index"),
@@ -1345,7 +1371,7 @@ static TOOLS: &[Tool] = &[
     t("secrets_list_ssh_cas", "List SSH certificate authorities", "A project's SSH CAs: their public keys, principals and limits (never a private key; adding one is the project admin's, in the dashboard).", "secrets", "GET", "/v1/secrets/projects/{project}/ssh-cas", &[req("project", "Workspace project")]),
     t("secrets_totp", "Get a one-time code", "The current one-time code (TOTP) from a secret that holds an authenticator seed, and how long it lasts: a reveal, asked for like reading a value. The seed itself is never returned.", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/totp", &[SECRET_PROJECT, ENV, req("name", "Secret name"), q("path", Ty::Str, "Folder")]),
     t("secrets_list_saas", "List SaaS rotators", "A project's rotators for third-party API keys: each one's vendor (SendGrid, Twilio, Okta, Entra, Auth0, GitLab, OpenAI, Datadog, Cloudflare, Databricks, Confluent, SonarQube, Jenkins, Salesforce) and the account or app it rotates for (never a credential; adding one is the project admin's).", "secrets", "GET", "/v1/secrets/projects/{project}/saas", &[SECRET_PROJECT]),
-    t("secrets_list_public_certs", "List publicly trusted certificates", "A project's certificates from public ACME CAs (Let's Encrypt, ZeroSSL, Google Trust Services): names, CA, DNS provider, status (pending, issued, failing), serial, end and next renewal, and why the last order failed (never a credential or a private key; adding one is the project admin's).", "secrets", "GET", "/v1/secrets/projects/{project}/public-certs", &[SECRET_PROJECT]),
+    t("secrets_list_public_certs", "List publicly trusted certificates", "A project's certificates from public ACME CAs (Let's Encrypt, ZeroSSL, Google Trust Services): names, CA, DNS provider (Cloudflare or Route 53), status (pending, issued, failing), serial, end and next renewal, the renewal caps (renewals_asked this week of 3, renew_after while a renewal asked for now would be held), and why the last order failed (never a credential or a private key; adding one is the project admin's).", "secrets", "GET", "/v1/secrets/projects/{project}/public-certs", &[SECRET_PROJECT]),
     t("secrets_renew_public_cert", "Renew a public certificate", "Order a new certificate for a project's public certificate now: roll orders it in the background (minutes) and rotates every key linked to it once the CA issues it (rotation.succeeded, or rotation.failed and the reason in secrets_list_public_certs). Each renewal spends the CA's limit for these names (Let's Encrypt: 5 a week), so roll allows one an hour and three a week (a 429 says when): don't retry it in a loop.", "secrets", "POST", "/v1/secrets/projects/{project}/public-certs/{id}/renew", &[SECRET_PROJECT, req("id", "Public certificate id (pcr_…)")]).open_world(),
     t("secrets_list_kubernetes", "List Kubernetes clusters", "The Kubernetes clusters a project issues service-account tokens for: names, API servers, and whether calls trust the cluster's own CA (never a token or the CA; adding one is the project admin's).", "secrets", "GET", "/v1/secrets/projects/{project}/kubernetes", &[SECRET_PROJECT]),
     t("secrets_list_github_apps", "List GitHub Apps", "A project's GitHub Apps that short-lived installation tokens come from: app and installation ids, repositories and permissions (never the private key; adding one is the project admin's, in the dashboard).", "secrets", "GET", "/v1/secrets/projects/{project}/github-apps", &[req("project", "Workspace project")]),
@@ -1394,6 +1420,7 @@ static TOOLS: &[Tool] = &[
     t("secrets_list_value_requests", "List secret value requests", "A project's value requests, newest first: keys, folder, whether each is open, answered, expired or cancelled, and what an answer became (a change or a change request). Never a value.", "secrets", "GET", "/v1/secrets/projects/{project}/value-requests", &[SECRET_PROJECT]),
     t("secrets_cancel_value_request", "Cancel a secret value request", "Close a value request so its link stops working (whoever asked, or an admin of the folder).", "secrets", "DELETE", "/v1/secrets/projects/{project}/value-requests/{id}", &[SECRET_PROJECT, req("id", "Value request id")]),
     t("secrets_renew_lease", "Renew a lease", "Push a dynamic credential's expiry out, as a long-running consumer does instead of restarting.", "secrets", "POST", "/v1/secrets/projects/{project}/leases/{id}/renew", &[SECRET_PROJECT, req("id", "Lease id"), b("ttl_minutes", Ty::Int, "Minutes from now")]),
+    t("secrets_identity_machines", "A machine identity's machines", "A machine identity's machines (bare metal, VMs without a platform identity), newest first: each one's chain (its bootstrap token's id), state (waiting, live, ended or revoked, and why), when its credential was last replaced and ends, and who made its bootstrap token. Never a secret. After an identity.machine.reused alert: which machines are live and when they last refreshed. Revoking one is a person's, in the dashboard.", "secrets", "GET", "/v1/secrets/projects/{project}/identities/{id}/machines", &[SECRET_PROJECT, req("id", "Machine identity id (idn_…)")]),
     t("secrets_reach", "Who reaches a secret", "Which tokens and identities reach an environment's folder or key, whether code nobody vetted can, where it flows (syncs, shares, imports) and who read it in 30 days: names only. Who has to rotate what after a leak (the project admin's).", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}/reach", &[SECRET_PROJECT, ENV, q("path", Ty::Str, "Folder"), q("key", Ty::Str, "One key")]),
     t("secrets_folder_policies", "Folder approval policies", "An environment's approval policies per folder: who must approve a change there.", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}/folder-policies", &[SECRET_PROJECT, ENV, q("path", Ty::Str, "Folder")]),
     t("secrets_list_rotators", "Rotators", "A project's rotators: which secrets roll rotates (a database password, an API key), how often and from what.", "secrets", "GET", "/v1/secrets/projects/{project}/rotators", &[SECRET_PROJECT]),
@@ -1620,6 +1647,8 @@ static TOOLS: &[Tool] = &[
     t("apps_delete_environment", "Delete an environment", "Delete an environment with its deploys, instances and domains. Irreversible.", "apps", "DELETE", "/v1/apps/services/{service}/environments/{env}", &[SERVICE, ENV]),
     t("apps_link", "Link a resource", "Give a service a roll resource's connection variables (DATABASE_URL and the like, with prefix if given): kind is postgres, redis, bucket, stream, queue, nosql, service (another service of the project: its private and public URLs), tasks (a roll tasks tenant: an API key of the link's own and the tenant's signing keys) or search (a search cluster: a data-only key of the link's own, narrowed with indices and access: a SaaS's tenants' indices, a frontend's read-only key, a log shipper's append-only one; changing them makes a new key and revokes the old). Needs reveal on the resource; the next deploy picks it up.", "apps", "PUT", "/v1/apps/services/{service}/links/{kind}/{ref}", &[SERVICE, req_choice("kind", &["postgres", "redis", "bucket", "stream", "queue", "nosql", "search", "service", "tasks"], "Resource kind (service: another service of the project)"), req("ref", "The resource's id or name"), b("prefix", Ty::Str, "Variable name prefix"), b("indices", Ty::Arr, "Search only: the key's index names or patterns (tenant-*)"), b("access", Ty::Str, "Search only: read, or append (create documents on exact names); none: read and write documents")]),
     t("apps_unlink", "Unlink a resource", "Stop giving a service a linked resource's variables (from the next deploy).", "apps", "DELETE", "/v1/apps/services/{service}/links/{kind}/{ref}", &[SERVICE, req_choice("kind", &["postgres", "redis", "bucket", "stream", "queue", "nosql", "search", "service", "tasks"], "Link kind"), req("ref", "The resource's id or name")]),
+    t("apps_claim_domain", "Claim a domain held elsewhere", "Take a hostname another environment holds by proving it's yours: the first call answers the TXT record to add (claimed false, txt {name, value}); once DNS has it, the next call moves the domain here, verified (claimed true, domain), and the holder is told.", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/domains/{host}/claim", &[SERVICE, ENV, req("host", "The domain")]).open_world(),
+    t("apps_configure_domain", "Write a domain's DNS records", "Write a custom domain's records (its CNAME, and the TXT challenge where it needs one) at the customer's Cloudflare with their API token, then check it: cloudflare_token is a roll:// reference to a token scoped to Zone:DNS:Edit on that zone, read as the caller (who must be able to reveal it, not marked sensitive) for this call only: a grant that would ask for it is refused, not asked. The name's A or AAAA records (its old host) answer a 409 naming them unless replace is true.", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/domains/{host}/configure", &[SERVICE, ENV, req("host", "The domain"), breq("cloudflare_token", Ty::Str, "A roll:// reference to the Cloudflare API token"), b("replace", Ty::Bool, "Delete the name's A and AAAA records for roll's CNAME")]).open_world(),
     t("apps_verify_domain", "Check a domain", "Check a custom domain's DNS now and answer its state (pending, verified) and the record to add.", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/domains/{host}/verify", &[SERVICE, ENV, req("host", "The domain")]).open_world(),
     t("apps_list_backups", "Volume backups", "An environment's volume backups, newest first (7 kept).", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/volume/backups", &[SERVICE, ENV]),
     t("apps_backup_volume", "Back up a volume", "Back up an environment's volume now.", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/volume/backups", &[SERVICE, ENV]),
@@ -1733,7 +1762,7 @@ static TOOLS: &[Tool] = &[
         ENV,
         q("since", Ty::Int, "From this time (unix ms)"),
         q("tail", Ty::Int, "Last lines (at most 2000)"),
-        q("q", Ty::Str, "Search the last 7 days"),
+        q("q", Ty::Str, "Search back to since (default a week): every word, any case; \"a phrase\"; -word absent; OR between alternatives (timeout OR refused). Log alerts and log metrics take the same syntax"),
         q("http", Ty::Bool, "The proxy's access log (one line per request) instead of the runtime's output"),
         q("status", Ty::Str, "With http: only these statuses (500, 5xx, 400-499)"),
         q("min_ms", Ty::Int, "With http: only requests that took at least this long"),
@@ -1751,6 +1780,8 @@ static TOOLS: &[Tool] = &[
     t("apps_visitors", "Who's signed in", "Who's signed in to a sign-in-gated environment now, newest first: each session's id, who (a provider's verified email or a roll person's id), how (github, google, sso or roll), the access.sso entry that let them in, since and until.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/visitors", &[SERVICE, ENV]),
     t("apps_end_visit", "Sign a visitor out", "End one visitor's session in a sign-in-gated environment now (its id from apps_visitors): they sign in again to come back, if access still lets them.", "apps", "DELETE", "/v1/apps/services/{service}/environments/{env}/visitors/{visitor}", &[SERVICE, ENV, req("visitor", "The session's id, from apps_visitors")]),
     t("apps_update_domain", "Change a domain", "Redirect a domain to another hostname of the same environment (redirect_to; null serves the app again; no loops or chains), or serve another of the app's ports on it (port; null the main one). A field left out stays.", "apps", "PATCH", "/v1/apps/services/{service}/environments/{env}/domains/{host}", &[SERVICE, ENV, req("host", "Host name"), bnull("redirect_to", Ty::Str, "Another hostname of this environment to redirect to (clear it: serve the app)"), bnull("port", Ty::Int, "Another of the app's ports (clear it: the main one)")]),
+    t("apps_board", "The project's board", "The charts a project's board shows, in order: each one service's metric in one environment (requests, errors, error_pct, p95_ms, cpu, memory_bytes… or app:<series>). Read each with apps_metrics or apps_app_metrics.", "apps", "GET", "/v1/apps/projects/{project}/board", &[req("project", "Workspace project")]),
+    t("apps_set_board", "Set the project's board", "Replace a project's board (at most 24 panels; none removes it): each {title?, service, environment? (production), metric}, metric one of requests, errors, error_pct, p50_ms, p95_ms, p99_ms, cpu, memory_bytes, instances, cold_starts, egress_bytes, over_capacity, or app:<the app's series>.", "apps", "PUT", "/v1/apps/projects/{project}/board", &[req("project", "Workspace project"), breq("panels", Ty::Arr, "The panels, in order: each {title?, service, environment?, metric}")]),
     t("apps_status_domain", "A status page's own domain", "The domain of its own a project's status page answers on (status.example.com), with its DNS state and TLS; 404 when it has none.", "apps", "GET", "/v1/apps/projects/{project}/status-page/domain", &[req("project", "Workspace project")]),
     t("apps_set_status_domain", "Set a status page's domain", "Put a project's status page on a domain of its own (status.example.com; a new one replaces it): answers the DNS record to add, then apps_verify_status_domain.", "apps", "POST", "/v1/apps/projects/{project}/status-page/domain", &[req("project", "Workspace project"), breq("hostname", Ty::Str, "One name, status.example.com")]),
     t("apps_verify_status_domain", "Check a status page's domain", "Check a status page's own domain's DNS now: active once it checks out (then its certificate is issued), else pending with what DNS answered.", "apps", "POST", "/v1/apps/projects/{project}/status-page/domain/verify", &[req("project", "Workspace project")]).open_world(),
@@ -1806,6 +1837,15 @@ static TOOLS: &[Tool] = &[
         "POST",
         "/v1/previews/{id}/reset",
         &[req("id", "Preview id"), b("resources", Ty::Arr, "Only these, as \"<kind>:<parent>\"")],
+    ),
+    t(
+        "previews_rehearse",
+        "Rehearse a release on today's data",
+        "Run a change's release (its migrations) once more on fresh, masked branches of its Postgres parents as they are now, instead of the preview's branches from when it was made: how long it takes and whether it fails on today's data, before it lands. Answers at once; previews_wait, then the preview's rehearsal {head, ok, ms, error}. Refused for a default branch's preview, or one without a release or a Postgres branch.",
+        "previews",
+        "POST",
+        "/v1/previews/{id}/rehearse",
+        &[req("id", "Preview id")],
     ),
     t("previews_keep", "Keep a preview", "Keep a preview past its time to live, for some hours (0 lets it go; a landed or closed change still ends it).", "previews", "POST", "/v1/previews/{id}/keep", &[req("id", "Preview id"), breq("hours", Ty::Int, "0 to 720")]),
     t("previews_activity", "Preview activity", "What happened to a preview, newest first.", "previews", "GET", "/v1/previews/{id}/activity", &[req("id", "Preview id")]),
@@ -2045,6 +2085,7 @@ mod tests {
             ("search_browser_key_usage", "window", keys(between(include_str!("../../search-control/src/control.rs"), "impl MetricsRange {", "\n}\n"))),
             ("search_analytics", "range", keys(between(include_str!("../../search-control/src/analytics.rs"), "impl Range {", "\n}\n"))),
             ("search_delete_by_query", "conflicts", keys(between(include_str!("../../search-es/src/api/by_query_request.rs"), "fn set_conflicts(", "\n    }\n"))),
+            ("search_update_by_query", "conflicts", keys(between(include_str!("../../search-es/src/api/by_query_request.rs"), "fn set_conflicts(", "\n    }\n"))),
             ("secrets_create_environment", "kind", envs.clone()),
             ("secrets_ensure_environment", "kind", envs),
             ("secrets_get", "type", types.clone()),
@@ -2663,7 +2704,7 @@ mod tests {
         const FORK_WORDS: &[&str] = &[
             // The preview itself (`outside: !trusted`: its title is the fork's pull request's),
             // and every write that answers it.
-            "previews_list", "previews_get", "previews_wait", "previews_create", "previews_refresh", "previews_keep", "previews_sleep", "previews_wake", "previews_reset",
+            "previews_list", "previews_get", "previews_wait", "previews_create", "previews_refresh", "previews_keep", "previews_sleep", "previews_wake", "previews_reset", "previews_rehearse",
             "previews_errors", "previews_traces", "previews_get_trace", "previews_routes", "previews_logs", "previews_requests", "previews_activity",
             "previews_list_mail", "previews_read_mail", "previews_screenshot", "previews_fetch", "previews_try", "previews_try_screenshot", "previews_note_crop", "previews_tables",
             // A share link's guests' notes (`by` `guest:…`).
