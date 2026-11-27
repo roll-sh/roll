@@ -3,8 +3,9 @@
 //! their data, so they come back empty and their sequences start over. It discards the
 //! statistics then (pgstat_discard_stats): counters 0, the fixed-numbered ones reset at that
 //! start. A clean shutdown keeps both (the statistics through pg_stat/pgstat.stat, read and
-//! removed at the next start). A child process (this test binary run again) fills them and
-//! kills itself with SIGKILL.
+//! removed at the next start), and pg_stat_statements' (pg_stat/pg_stat_statements.stat, the
+//! same way). A child process (this test binary run again) fills them and kills itself with
+//! SIGKILL.
 
 use pg_engine::engine::{Engine, EngineOptions};
 use pg_engine::session::Session;
@@ -18,10 +19,15 @@ fn open(dir: &Path) -> std::sync::Arc<Engine> {
         idle_close: Duration::from_secs(600),
         superuser: "postgres".into(),
         max_prepared_transactions: 5,
+        shared_preload_libraries: vec!["pg_stat_statements".into()],
         ..Default::default()
     })
     .unwrap()
 }
+
+/// pg_stat_statements' calls of `Q`.
+const PGSS: &str = "SELECT sum(calls)::int8 FROM pg_stat_statements WHERE query = 'SELECT count(*) FROM l WHERE id < $1'";
+const Q: &str = "SELECT count(*) FROM l WHERE id < 5";
 
 fn one(s: &mut Session, sql: &str) -> String {
     let r = s.query(sql).unwrap_or_else(|e| panic!("{sql}: {e:?}"));
@@ -42,9 +48,19 @@ const SETUP: &str = "CREATE UNLOGGED TABLE u (id serial PRIMARY KEY, v text);
 const STATS: &str = "SELECT n_tup_ins, n_live_tup, n_mod_since_analyze FROM pg_stat_user_tables WHERE relname = 'l'";
 const DB_RESET: &str = "SELECT stats_reset FROM pg_stat_database WHERE datname = 'postgres'";
 
+/// `f` on a session's stack, as the server gives one (pg_stat_statements' jumbling of the
+/// setup's statements needs more than a test thread's in a debug build).
+fn on_session_stack(f: fn()) {
+    std::thread::Builder::new().stack_size(64 << 20).spawn(f).unwrap().join().unwrap();
+}
+
 /// The child: the tables filled, a clean shutdown, more rows, then SIGKILL.
 #[test]
 fn crash_unlogged_child() {
+    on_session_stack(crash_unlogged_child_run);
+}
+
+fn crash_unlogged_child_run() {
     let Ok(dir) = std::env::var("CRASH_UNLOGGED_DIR") else {
         return;
     };
@@ -52,6 +68,10 @@ fn crash_unlogged_child() {
     let eng = open(dir);
     let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
     s.query(SETUP).unwrap();
+    s.query("CREATE EXTENSION pg_stat_statements").unwrap();
+    for _ in 0..3 {
+        s.query(Q).unwrap();
+    }
     let reset = one(&mut s, "SELECT pg_stat_get_checkpointer_stat_reset_time()");
     // (The database's reset time is set: pg_stat_database.stats_reset.)
     s.query("SELECT pg_stat_reset_single_table_counters('u'::regclass)").unwrap();
@@ -61,13 +81,17 @@ fn crash_unlogged_child() {
     eng.shutdown();
     drop(eng);
     assert!(dir.join("pg_stat/pgstat.stat").exists());
+    assert!(dir.join("pg_stat/pg_stat_statements.stat").exists());
     let eng = open(dir);
     assert!(!dir.join("pg_stat/pgstat.stat").exists(), "the statistics file is removed once read");
+    assert!(!dir.join("pg_stat/pg_stat_statements.stat").exists());
     let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
     // (A clean shutdown keeps them, and the statistics.)
     assert_eq!(one(&mut s, STATS), "[[Int8(500), Int8(500), Int8(500)]]");
     assert_eq!(one(&mut s, DB_RESET), db_reset);
     assert_eq!(one(&mut s, "SELECT pg_stat_get_checkpointer_stat_reset_time()"), reset);
+    assert_eq!(one(&mut s, PGSS), "[[Int8(3)]]");
+    s.query(Q).unwrap();
     std::fs::write(dir.join("reset"), &reset).unwrap();
     assert_eq!(one(&mut s, "SELECT count(*) FROM u"), "[[Int8(500)]]");
     assert_eq!(one(&mut s, "SELECT nextval('us')"), "[[Int8(8)]]");
@@ -80,6 +104,10 @@ fn crash_unlogged_child() {
 
 #[test]
 fn unlogged_relations_reset_after_a_crash() {
+    on_session_stack(unlogged_relations_reset_after_a_crash_run);
+}
+
+fn unlogged_relations_reset_after_a_crash_run() {
     let tmp = tempfile::tempdir().unwrap();
     let out = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "crash_unlogged_child", "--nocapture", "--test-threads=1"])
@@ -94,6 +122,8 @@ fn unlogged_relations_reset_after_a_crash() {
     assert_eq!(one(&mut s, DB_RESET), "[[Null]]");
     let reset = std::fs::read_to_string(tmp.path().join("reset")).unwrap();
     assert_ne!(one(&mut s, "SELECT pg_stat_get_checkpointer_stat_reset_time()"), reset);
+    // pg_stat_statements' too: its file went at the start before the crash.
+    assert_eq!(one(&mut s, PGSS), "[[Null]]");
     assert_eq!(one(&mut s, "SELECT count(*) FROM l"), "[[Int8(501)]]");
     assert_eq!(one(&mut s, "SELECT count(*) FROM u"), "[[Int8(0)]]");
     assert_eq!(one(&mut s, "SELECT count(*) FROM uc"), "[[Int8(0)]]");

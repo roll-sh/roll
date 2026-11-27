@@ -212,6 +212,9 @@ pub struct StartupReport {
     /// The startup process's LOG line about the statistics file, when it was discarded
     /// ("corrupted statistics file ...").
     pub stats_log: Option<String>,
+    /// The postmaster's LOG line when pg_stat_statements' file was discarded ("ignoring
+    /// invalid data in file ...").
+    pub pgss_log: Option<String>,
 }
 
 /// A connected client, for pg_stat_activity and cancel / terminate.
@@ -554,11 +557,21 @@ impl Engine {
         };
         let next_lsn = registry.next_lsn;
         let origins_dir = opts.data_dir.clone();
-        let statements = opts
-            .shared_preload_libraries
-            .iter()
-            .any(|l| l == "pg_stat_statements")
-            .then(|| crate::ext::pg_stat_statements::Store::new(crate::types::datetime::Clock::system().now, 5000));
+        let statements = match opts.shared_preload_libraries.iter().any(|l| l == "pg_stat_statements") {
+            true => Some(crate::ext::pg_stat_statements::Store::new(
+                crate::types::datetime::Clock::system().now,
+                count("pg_stat_statements.max", 5000)?,
+            )),
+            false => None,
+        };
+        // pgss_shmem_startup: what the last clean shutdown saved, the file removed (left alone
+        // with pg_stat_statements.save off).
+        let pgss_log = match &statements {
+            Some(s) if setting("pg_stat_statements.save").and_then(|v| crate::session::settings::parse_bool(&v)).unwrap_or(true) => {
+                crate::ext::pg_stat_statements::file::take(&opts.data_dir, s)
+            }
+            _ => None,
+        };
         let engine = Arc::new_cyclic(|me: &Weak<Engine>| {
             let weak = me.clone();
             let oids = Arc::new(OidGen::new(registry.next_oid, move |n| {
@@ -707,6 +720,7 @@ impl Engine {
             cpu: crate::autovacuum::thread_cpu(),
             elapsed: opening.elapsed(),
             stats_log,
+            pgss_log,
         });
         Ok(engine)
     }
@@ -1958,6 +1972,25 @@ impl Engine {
         self.open.lock().dbs.len()
     }
 
+    /// pgss_shmem_shutdown, the postmaster's exit callback: pg_stat_statements' file, with
+    /// pg_stat_statements.save (sighup) as the server has it now, the command line's or the
+    /// configuration files'. At a clean shutdown and at an immediate one (the postmaster
+    /// exits normally after its children quit): kept across both, not across a crash.
+    pub fn save_statements(&self) {
+        let Some(s) = &self.statements else { return };
+        let files = self.conf.loaded();
+        let v = self
+            .command_line_value("pg_stat_statements.save")
+            .map(str::to_string)
+            .or_else(|| files.values.get("pg_stat_statements.save").map(|f| f.value.clone()));
+        if !v.and_then(|v| crate::session::settings::parse_bool(&v)).unwrap_or(true) {
+            return;
+        }
+        if let Err(e) = crate::ext::pg_stat_statements::file::write(&self.opts.data_dir, s, self.opts.sync) {
+            warn!(error = %e, "could not write file \"{}\"", crate::ext::pg_stat_statements::file::NAME);
+        }
+    }
+
     /// Flush and close everything (server shutdown).
     pub fn shutdown(&self) {
         let first = !self.stopped.swap(true, Ordering::AcqRel);
@@ -2016,6 +2049,7 @@ impl Engine {
             if let Err(e) = crate::exec::pgstat::file::write(&self.opts.data_dir, &saved, lsn, self.opts.sync) {
                 warn!(error = %e, "could not write the statistics file");
             }
+            self.save_statements();
         }
         let mut r = self.registry.lock();
         r.wal_lsn = lsn;

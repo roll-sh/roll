@@ -15,6 +15,17 @@ use std::time::{Duration, Instant};
 
 pub mod file;
 
+/// How a client backend's session ends (SessionEndType): a Terminate message (not
+/// counted), the client gone without one, a FATAL error, or a termination.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SessionEnd {
+    #[default]
+    Normal,
+    ClientEof,
+    Fatal,
+    Killed,
+}
+
 /// A table's (or index's) counts a backend has not flushed yet (PgStat_TableCounts).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct TabCounts {
@@ -93,6 +104,17 @@ pub struct DbEntry {
     /// Temporary files removed and their bytes (pgstat_report_tempfile).
     pub temp_files: i64,
     pub temp_bytes: i64,
+    /// Client backends' time connected, running statements (active, fastpath) and idle in a
+    /// transaction block, in microseconds (pgstat_update_dbstats).
+    pub session_time: i64,
+    pub active_time: i64,
+    pub idle_in_transaction_time: i64,
+    /// Client backends that ended by the client going away without a Terminate message, by
+    /// a FATAL error, and terminated (pg_terminate_backend, a fast shutdown)
+    /// (pgstat_report_disconnect).
+    pub sessions_abandoned: i64,
+    pub sessions_fatal: i64,
+    pub sessions_killed: i64,
     pub stat_reset: Option<i64>,
 }
 
@@ -112,6 +134,13 @@ pub struct Fixed {
     pub since: Option<i64>,
     pub checkpoints_requested: i64,
     pub checkpoints_performed: i64,
+    /// pg_stat_checkpointer's buffers_written, write_time and sync_time (milliseconds): what
+    /// the checkpoints' flushes wrote, in 8 kB blocks of table files, and how long writing and
+    /// syncing took (`checkpoint_io`).
+    pub checkpoint_io: [i64; 3],
+    /// The shutdown checkpoint's start while it runs: the statistics file, written inside
+    /// it, has what it did until then (`saved`).
+    pub shutdown_checkpoint: Option<(crate::storage::fileio::FileIo, Instant)>,
     pub wal_records: i64,
     pub wal_bytes: i64,
     /// pg_stat_io counts by (backend type, object, context, operation).
@@ -528,6 +557,17 @@ pub struct Pending {
     pub funcs: HashMap<u32, FuncCounts>,
     /// New sessions to count in the database's entry.
     pub sessions: i64,
+    /// A client backend's (pgstat_should_report_connstat): when its session time was last
+    /// counted (its start, then each flush; 0: another kind of backend).
+    session_from: i64,
+    /// Microseconds active and idle in a transaction block since the last report
+    /// (pgStatActiveTime, pgStatTransactionIdleTime).
+    pub conn_times: (i64, i64),
+    /// How the session ends (pgStatSessionEndCause), and once it has: abandoned, fatal,
+    /// killed (one of them 1), and `ending` (its last report flushes whatever it has).
+    end: SessionEnd,
+    ended: [i64; 3],
+    ending: bool,
     /// Parallel workers the backend's queries planned and launched
     /// (pgstat_update_parallel_workers_stats).
     pub parallel_workers: (i64, i64),
@@ -562,8 +602,15 @@ impl Pending {
     pub fn new_session() -> Pending {
         Pending {
             sessions: 1,
+            session_from: now(),
             ..Default::default()
         }
+    }
+
+    /// Not a client backend (an autovacuum worker): no session, its times uncounted.
+    pub fn not_a_session(&mut self) {
+        self.sessions = 0;
+        self.session_from = 0;
     }
 
     pub fn tab(&mut self, rel: u32) -> &mut TabCounts {
@@ -1211,11 +1258,19 @@ pub fn checkpoint(
         *s.io.entry(("checkpointer", "wal", "normal", "writes")).or_default() += 1;
     }
     let io = crate::storage::fileio::FileIo::begin();
+    if shutdown {
+        fixed.lock().shutdown_checkpoint = Some((io, started));
+    }
     flush()?;
     let io = io.end();
     let mut s = fixed.lock();
+    s.shutdown_checkpoint = None;
     if !shutdown {
         s.checkpoints_requested += 1;
+    }
+    let done = checkpoint_io(&io, started);
+    for (c, n) in s.checkpoint_io.iter_mut().zip(done) {
+        *c += n;
     }
     // (A shutdown or end-of-recovery checkpoint's record is its own redo point.)
     let own_redo = shutdown || flags.starts_with("end-of-recovery");
@@ -1224,6 +1279,9 @@ pub fn checkpoint(
     let (redo, ckpt) = s.checkpoint_at(now());
     let ckpt = if own_redo { redo } else { ckpt };
     s.checkpoints_performed += 1;
+    // (pg_stat_io's stay one write and one fsync a checkpoint: a CHECKPOINT leaves the active
+    // memtables alone, so it mostly writes no table file, where PostgreSQL's writes the dirty
+    // buffers; the regression suite's stats test needs them to grow. HANDOFF, agent 339.)
     for op in ["writes", "fsyncs"] {
         *s.io
             .entry(("checkpointer", "relation", "normal", op))
@@ -1276,6 +1334,14 @@ pub fn checkpoint(
         ));
     }
     Ok(())
+}
+
+/// What a checkpoint started at `started` did through `io` (the store's writes and syncs since
+/// then): blocks written (8 kB of table files each), the writing's and the syncing's
+/// milliseconds, rounded up (LogCheckpointEnd's TimestampDifferenceMilliseconds).
+fn checkpoint_io(io: &crate::storage::fileio::FileIo, started: Instant) -> [i64; 3] {
+    let total = started.elapsed().as_micros() as u64;
+    [io.sst_bytes.div_ceil(8192) as i64, total.saturating_sub(io.sync_us).div_ceil(1000) as i64, io.sync_us.div_ceil(1000) as i64]
 }
 
 /// A LOG line of the checkpointer (its pid in pg_stat_activity).
@@ -1348,6 +1414,7 @@ pub fn reset_shared(ctx: &ExecCtx, target: &str) {
     if target == "checkpointer" {
         s.checkpoints_requested = 0;
         s.checkpoints_performed = 0;
+        s.checkpoint_io = [0; 3];
     }
     s.resets.insert(target.to_string(), t);
 }
@@ -1372,9 +1439,10 @@ pub fn for_file(db: &crate::txn::Database) -> Shared {
     let mut s = db.pgstat.lock();
     let cat = db.catalog();
     let slots: Vec<UnflushedSlot> = s.unflushed.drain().map(|(_, u)| u).collect();
+    let ts = now();
     for slot in slots {
         let u = std::mem::take(&mut *slot.lock());
-        flush(&mut s, u, &cat);
+        flush(&mut s, u, &cat, ts);
     }
     let user = crate::catalog::FIRST_USER_OID;
     Shared {
@@ -1389,11 +1457,14 @@ pub fn for_file(db: &crate::txn::Database) -> Shared {
 /// The cluster's statistics a clean shutdown writes: the fixed-numbered ones (`start`: the
 /// server's start, their reset time when not reset) and databases `dbs`'.
 pub fn saved(fixed: &Fixed, start: i64, dbs: Vec<(u32, Shared)>) -> file::Saved {
+    // (The shutdown checkpoint's writes and times until now: PostgreSQL's file has them.)
+    let shutdown = fixed.shutdown_checkpoint.map(|(io, started)| checkpoint_io(&io.end(), started));
     file::Saved {
         since: Some(fixed.since.unwrap_or(start)),
         resets: fixed.resets.iter().filter(|(k, _)| *k != "recovery_prefetch").map(|(k, v)| (k.clone(), *v)).collect(),
         checkpoints_requested: fixed.checkpoints_requested,
         checkpoints_performed: fixed.checkpoints_performed,
+        checkpoint_io: std::array::from_fn(|i| fixed.checkpoint_io[i] + shutdown.map_or(0, |d| d[i])),
         wal_records: fixed.wal_records,
         wal_bytes: fixed.wal_bytes,
         io: fixed.io.iter().map(|(k, v)| (*k, *v)).collect(),
@@ -1413,6 +1484,7 @@ pub fn restore(fixed: &mut Fixed, saved: Option<&file::Saved>, now: i64) {
     fixed.resets = s.resets.clone();
     fixed.checkpoints_requested = s.checkpoints_requested;
     fixed.checkpoints_performed = s.checkpoints_performed;
+    fixed.checkpoint_io = s.checkpoint_io;
     fixed.wal_records = s.wal_records;
     fixed.wal_bytes = s.wal_bytes;
     fixed.io = s.io.iter().copied().collect();
@@ -1454,6 +1526,12 @@ pub struct Unflushed {
     pub tabs: super::fasthash::HashMap<u32, TabCounts>,
     pub funcs: super::fasthash::HashMap<u32, FuncCounts>,
     sessions: i64,
+    /// A client backend's: where its session time counts from (`Pending::session_from`),
+    /// kept across flushes.
+    session_from: i64,
+    /// Microseconds active and idle in a transaction block, and the session's end.
+    conn_times: (i64, i64),
+    ended: [i64; 3],
     parallel_workers: (i64, i64),
     /// Temporary files removed and their bytes.
     temp: (i64, i64),
@@ -1498,8 +1576,7 @@ pub fn add_pending(t: &mut TabCounts, c: &TabCounts) {
 /// Flush a backend's unflushed counts into the shared entries (pgstat_flush_pending_entries
 /// and the fixed-numbered statistics' flushes); entries of objects no longer in `cat` stay
 /// gone.
-fn flush(s: &mut Shared, u: Unflushed, cat: &crate::catalog::Catalog) {
-    let ts = now();
+fn flush(s: &mut Shared, u: Unflushed, cat: &crate::catalog::Catalog, ts: i64) {
     for (rel, c) in u.tabs {
         if rel >= crate::catalog::FIRST_USER_OID && !in_catalog(cat, rel) {
             continue;
@@ -1568,6 +1645,15 @@ fn flush(s: &mut Shared, u: Unflushed, cat: &crate::catalog::Catalog) {
     }
     drop(f);
     s.db.sessions += u.sessions;
+    // (A client backend's: pgstat_should_report_connstat.)
+    if u.session_from != 0 {
+        s.db.session_time += (ts - u.session_from).max(0);
+        s.db.active_time += u.conn_times.0;
+        s.db.idle_in_transaction_time += u.conn_times.1;
+    }
+    s.db.sessions_abandoned += u.ended[0];
+    s.db.sessions_fatal += u.ended[1];
+    s.db.sessions_killed += u.ended[2];
     s.db.parallel_workers_to_launch += u.parallel_workers.0;
     s.db.parallel_workers_launched += u.parallel_workers.1;
     s.db.temp_files += u.temp.0;
@@ -1669,14 +1755,18 @@ fn flush_idle(s: &mut Shared, db: &crate::txn::Database) {
         return;
     }
     let now = Instant::now();
+    let mut ts = None;
     let due: Vec<Unflushed> = s
         .unflushed
         .values()
         .filter_map(|slot| {
             let mut u = slot.lock();
-            u.due
-                .is_some_and(|d| d <= now)
-                .then(|| std::mem::replace(&mut *u, Unflushed { idle_flushed: Some(now), ..Default::default() }))
+            if !u.due.is_some_and(|d| d <= now) {
+                return None;
+            }
+            let ts = *ts.get_or_insert_with(self::now);
+            let session_from = if u.session_from != 0 { ts } else { 0 };
+            Some(std::mem::replace(&mut *u, Unflushed { idle_flushed: Some(now), session_from, ..Default::default() }))
         })
         .collect();
     if due.is_empty() {
@@ -1684,7 +1774,7 @@ fn flush_idle(s: &mut Shared, db: &crate::txn::Database) {
     }
     let cat = db.catalog();
     for u in due {
-        flush(s, u, &cat);
+        flush(s, u, &cat, ts.unwrap_or_default());
     }
 }
 
@@ -1736,8 +1826,30 @@ pub fn busy(sess: &crate::session::state::SessionState) {
     }
 }
 
-/// The backend ends: what it kept goes now (pgstat_report_stat(true) at exit).
+/// The session ends with `end` (pgStatSessionEndCause): the client went away, or a
+/// termination; a FATAL error unless another cause is known.
+pub fn session_end(sess: &crate::session::state::SessionState, end: SessionEnd) {
+    let mut p = sess.pgstat.borrow_mut();
+    if end != SessionEnd::Fatal || p.end == SessionEnd::Normal {
+        p.end = end;
+    }
+}
+
+/// The backend ends: what it kept goes now (pgstat_report_disconnect, then
+/// pgstat_report_stat(true) at exit).
 pub fn session_ends(sess: &crate::session::state::SessionState) {
+    {
+        let mut p = sess.pgstat.borrow_mut();
+        if p.session_from != 0 {
+            match p.end {
+                SessionEnd::Normal => {}
+                SessionEnd::ClientEof => p.ended[0] += 1,
+                SessionEnd::Fatal => p.ended[1] += 1,
+                SessionEnd::Killed => p.ended[2] += 1,
+            }
+            p.ending = true;
+        }
+    }
     flush_io(sess);
     report(sess, true, &sess.db.catalog());
     if let Some(slot) = sess.pgstat.borrow_mut().slot.take() {
@@ -1854,6 +1966,7 @@ fn report(sess: &crate::session::state::SessionState, mut force: bool, cat: &cra
         && p.sessions == 0
         && p.parallel_workers == (0, 0)
         && temp == (0, 0)
+        && !p.ending
     {
         return;
     }
@@ -1861,7 +1974,7 @@ fn report(sess: &crate::session::state::SessionState, mut force: bool, cat: &cra
     let slot = match &p.slot {
         Some(slot) => slot.clone(),
         None => {
-            let slot = UnflushedSlot::default();
+            let slot = UnflushedSlot::new(parking_lot::Mutex::new(Unflushed { session_from: p.session_from, ..Default::default() }));
             sess.db.pgstat.lock().unflushed.insert(sess.pid, slot.clone());
             p.slot = Some(slot.clone());
             slot
@@ -1886,6 +1999,14 @@ fn report(sess: &crate::session::state::SessionState, mut force: bool, cat: &cra
         *u.slru_zeroed.entry(name).or_default() += n;
     }
     u.sessions += std::mem::take(&mut p.sessions);
+    let (a, i) = std::mem::take(&mut p.conn_times);
+    u.conn_times.0 += a;
+    u.conn_times.1 += i;
+    if p.ending {
+        for (u, p) in u.ended.iter_mut().zip(std::mem::take(&mut p.ended)) {
+            *u += p;
+        }
+    }
     let (a, b) = std::mem::take(&mut p.parallel_workers);
     u.parallel_workers.0 += a;
     u.parallel_workers.1 += b;
@@ -1919,8 +2040,13 @@ fn report(sess: &crate::session::state::SessionState, mut force: bool, cat: &cra
     // (The statistics, then the slot: a reader flushing idle backends locks them so.)
     drop(u);
     let mut s = sess.db.pgstat.lock();
-    let u = std::mem::take(&mut *slot.lock());
-    flush(&mut s, u, cat);
+    let ts = self::now();
+    let u = {
+        let mut g = slot.lock();
+        let session_from = if g.session_from != 0 { ts } else { 0 };
+        std::mem::replace(&mut *g, Unflushed { session_from, ..Default::default() })
+    };
+    flush(&mut s, u, cat, ts);
     p.parked = false;
     p.last_flush = Some(now);
     p.pending_since = None;

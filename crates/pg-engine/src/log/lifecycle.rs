@@ -35,6 +35,10 @@ fn log_checkpoints(engine: &Engine) -> bool {
 /// "starting PostgreSQL ...": the postmaster's first line.
 pub fn starting(engine: &Engine) {
     let files = engine.server_conf().loaded();
+    // (pg_stat_statements' file is read as the shared memory is set up, before this line.)
+    if let Some(t) = engine.startup_report().and_then(|r| r.pgss_log) {
+        postmaster(Some(&files), Severity::Log, &t);
+    }
     postmaster(Some(&files), Severity::Log, &format!("starting {}", crate::sql::func::system::VERSION));
 }
 

@@ -1369,6 +1369,16 @@ fn handle(
 
     let started = std::time::Instant::now();
     let r = message_loop(&mut c, &engine, &mut s, pid, &terminated);
+    // pgStatSessionEndCause: a termination (pg_terminate_backend, a fast shutdown), else a
+    // FATAL error (a timeout's, the connection lost while writing) unless the client went.
+    {
+        use crate::exec::pgstat::{SessionEnd, session_end};
+        if terminated.load(Ordering::Relaxed) {
+            session_end(&s.state, SessionEnd::Killed);
+        } else if c.fatal || r.is_err() {
+            session_end(&s.state, SessionEnd::Fatal);
+        }
+    }
     // (An idle session's FATAL is logged too, before its disconnection line.)
     if terminated.load(Ordering::Relaxed) && !c.fatal {
         c.error(
@@ -1933,6 +1943,20 @@ fn set_activity(act: &Act, f: impl FnOnce(&mut crate::session::state::Activity))
     }
 }
 
+/// pgstat_report_activity's count of the time spent in the state the backend leaves at
+/// `now`: running a statement (active, fastpath function call) or idle in a transaction
+/// block (pg_stat_database's active_time, idle_in_transaction_time).
+fn state_time(s: &Session, a: &crate::session::state::Activity, now: i64) {
+    let Some(from) = a.state_change else { return };
+    let t = &mut s.state.pgstat.borrow_mut().conn_times;
+    match a.state.as_bytes() {
+        [b'a' | b'f', ..] => t.0 += now - from,
+        // ("idle in transaction", "idle in transaction (aborted)".)
+        [b'i', _, _, _, b' ', ..] => t.1 += now - from,
+        _ => {}
+    }
+}
+
 /// pg_stat_activity after a statement: the backend's state, and its application_name as
 /// the statement left it (SET application_name reports itself: pgstat_report_appname).
 fn statement_done_activity(act: &Act, s: &Session) {
@@ -1943,10 +1967,12 @@ fn statement_done_activity(act: &Act, s: &Session) {
     set_activity(act, |a| {
         let state = activity_state(s);
         if a.state != state {
+            // (The clock read only when the state changes.)
+            let now = crate::types::datetime::Clock::system().now;
+            state_time(s, a, now);
             a.state.clear();
             a.state.push_str(state);
-            // (The clock read only when the state changes.)
-            a.state_change = Some(crate::types::datetime::Clock::system().now);
+            a.state_change = Some(now);
         }
         if idle {
             a.xact_start = None;
@@ -1976,6 +2002,7 @@ fn start_activity(act: &Act, s: &Session, state: &str, sql: Option<&str>, now: i
     });
     set_activity(act, |a| {
         if a.state != state {
+            state_time(s, a, now);
             a.state.clear();
             a.state.push_str(state);
         }
@@ -2028,6 +2055,11 @@ fn message_loop(
             raw = Vec::new();
         }
         let msg = match c.read_message_into(idle.as_ref().map(|i| i.0), &mut raw, frontend_limit) {
+            Ok(None) => {
+                // (The client went away without a Terminate message: DISCONNECT_CLIENT_EOF.)
+                crate::exec::pgstat::session_end(&s.state, crate::exec::pgstat::SessionEnd::ClientEof);
+                None
+            }
             Ok(m) => m,
             Err(e) if e.get_ref().is_some_and(|e| e.is::<IdleTimeout>()) => {
                 // The timeout's FATAL, then the session ends (its transaction rolls back).
@@ -2040,7 +2072,11 @@ fn message_loop(
                 c.error(&Error::new(code::PROTOCOL_VIOLATION, format!("invalid frontend message type {t}")).fatal());
                 return c.flush();
             }
-            Err(e) => return Err(e),
+            Err(e) => {
+                // (pq_getbyte's error: the EOF path's cause.)
+                crate::exec::pgstat::session_end(&s.state, crate::exec::pgstat::SessionEnd::ClientEof);
+                return Err(e);
+            }
         };
         let Some(t) = msg else {
             return Ok(());

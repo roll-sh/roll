@@ -5,6 +5,7 @@
 //! real, block counts are zero (the engine has no shared buffers), WAL records and bytes
 //! are those of the rows a statement wrote.
 
+pub mod file;
 pub mod jumble;
 pub mod normalize;
 pub mod store;

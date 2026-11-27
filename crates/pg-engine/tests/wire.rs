@@ -905,6 +905,53 @@ fn cancel_and_terminate() {
     s.engine.shutdown();
 }
 
+/// pg_stat_database's session columns (PostgreSQL 18.6, `~/.cache/a339/sessions-pg.json`): a
+/// client gone without a Terminate message, a FATAL error and a termination each count once;
+/// a statement's time is active_time, a transaction block's wait idle_in_transaction_time.
+#[test]
+fn session_statistics() {
+    let s = server(AuthMethod::ScramSha256);
+    runtime().block_on(async {
+        let c = s.connect("postgres").await;
+        let q = "SELECT sessions_abandoned, sessions_fatal, sessions_killed, active_time, \
+                 idle_in_transaction_time, session_time FROM pg_stat_database WHERE datname = 'postgres'";
+        let read = async || {
+            c.batch_execute("SELECT pg_stat_clear_snapshot()").await.unwrap();
+            let r = c.query_one(q, &[]).await.unwrap();
+            ((r.get::<_, i64>(0), r.get::<_, i64>(1), r.get::<_, i64>(2)), [r.get::<_, f64>(3), r.get::<_, f64>(4), r.get::<_, f64>(5)])
+        };
+        let (_, before) = read().await;
+        {
+            let a = s.connect("postgres").await;
+            a.batch_execute("SELECT pg_sleep(0.2)").await.unwrap();
+            a.batch_execute("BEGIN").await.unwrap();
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            a.batch_execute("COMMIT").await.unwrap();
+        }
+        let (client, conn) = s.config("postgres", "secret").connect(NoTls).await.unwrap();
+        let task = tokio::spawn(conn);
+        client.batch_execute("SELECT 1").await.unwrap();
+        task.abort();
+        let f = s.connect("postgres").await;
+        f.batch_execute("SET idle_session_timeout = '100ms'").await.unwrap();
+        let k = s.connect("postgres").await;
+        let pid: i32 = k.query_one("SELECT pg_backend_pid()", &[]).await.unwrap().get(0);
+        c.query_one("SELECT pg_terminate_backend($1)", &[&pid]).await.unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let (ends, after) = loop {
+            let (ends, t) = read().await;
+            if ends == (1, 1, 1) || Instant::now() > deadline {
+                break (ends, t);
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        };
+        assert_eq!(ends, (1, 1, 1));
+        let [active, idle, session] = std::array::from_fn(|i| after[i] - before[i]);
+        assert!(active >= 200.0 && idle >= 300.0 && session >= active + idle, "{after:?} {before:?}");
+    });
+    s.engine.shutdown();
+}
+
 #[test]
 fn databases_open_and_close() {
     let s = server(AuthMethod::ScramSha256);

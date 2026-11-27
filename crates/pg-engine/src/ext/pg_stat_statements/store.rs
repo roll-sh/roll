@@ -6,6 +6,8 @@ use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::exec::pgstat::file::{R, W};
+
 /// `pgssHashKey`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Key {
@@ -236,6 +238,171 @@ impl Store {
         let g = self.inner.lock();
         (g.dealloc, g.stats_reset)
     }
+}
+
+impl Counters {
+    fn put(&self, w: &mut W) {
+        let Counters {
+            calls,
+            total_time,
+            min_time,
+            max_time,
+            mean_time,
+            sum_var_time,
+            rows,
+            shared_blks_written,
+            local_blks_written,
+            wal_records,
+            wal_fpi,
+            wal_bytes,
+            parallel_workers_to_launch,
+            parallel_workers_launched,
+            temp_blks_read,
+            temp_blks_written,
+            usage,
+        } = self;
+        for k in 0..2 {
+            w.i64(calls[k]);
+            for v in [total_time[k], min_time[k], max_time[k], mean_time[k], sum_var_time[k]] {
+                w.f64(v);
+            }
+        }
+        for v in [
+            *rows,
+            *shared_blks_written,
+            *local_blks_written,
+            *wal_records,
+            *wal_fpi,
+            *wal_bytes as i64,
+            *parallel_workers_to_launch,
+            *parallel_workers_launched,
+            *temp_blks_read,
+            *temp_blks_written,
+        ] {
+            w.i64(v);
+        }
+        w.f64(*usage);
+    }
+
+    fn get(r: &mut R<'_>) -> Option<Counters> {
+        let mut c = Counters::default();
+        for k in 0..2 {
+            c.calls[k] = r.i64()?;
+            c.total_time[k] = r.f64()?;
+            c.min_time[k] = r.f64()?;
+            c.max_time[k] = r.f64()?;
+            c.mean_time[k] = r.f64()?;
+            c.sum_var_time[k] = r.f64()?;
+        }
+        c.rows = r.i64()?;
+        c.shared_blks_written = r.i64()?;
+        c.local_blks_written = r.i64()?;
+        c.wal_records = r.i64()?;
+        c.wal_fpi = r.i64()?;
+        c.wal_bytes = r.i64()? as u64;
+        c.parallel_workers_to_launch = r.i64()?;
+        c.parallel_workers_launched = r.i64()?;
+        c.temp_blks_read = r.i64()?;
+        c.temp_blks_written = r.i64()?;
+        c.usage = r.f64()?;
+        Some(c)
+    }
+}
+
+/// The file's start and format version (PGSS_FILE_HEADER, PGSS_PG_MAJOR_VERSION): another's
+/// is discarded.
+const MAGIC: &[u8; 8] = b"ROLLPGSS";
+const FORMAT: u32 = 1;
+
+impl Store {
+    /// The file's bytes (pgss_shmem_shutdown): every entry in the order they were made, sticky
+    /// ones too, then the deallocation count and the last full reset; a CRC-32 of it all.
+    pub fn dump(&self) -> Vec<u8> {
+        let entries = self.entries();
+        let (dealloc, stats_reset) = self.info();
+        let mut w = W(Vec::with_capacity(64 + entries.len() * 256));
+        w.0.extend_from_slice(MAGIC);
+        w.u32(FORMAT);
+        w.u32(entries.len() as u32);
+        for (k, e) in &entries {
+            w.u32(k.userid);
+            w.u32(k.dbid);
+            w.i64(k.queryid);
+            w.0.push(k.toplevel as u8);
+            w.str(&e.query);
+            e.counters.put(&mut w);
+            w.i64(e.stats_since);
+            w.i64(e.minmax_stats_since);
+        }
+        w.i64(dealloc);
+        w.i64(stats_reset);
+        let crc = crc32fast::hash(&w.0);
+        w.u32(crc);
+        w.0
+    }
+
+    /// pgss_shmem_startup's load of the file's `bytes` into this new store: its entries but
+    /// the sticky ones (never planned or run), the least used deallocated past
+    /// pg_stat_statements.max, and the deallocation count and last reset. On an error the
+    /// store is left as it was.
+    pub fn restore(&self, bytes: &[u8]) -> Result<(), Bad> {
+        let (entries, dealloc, stats_reset) = decode(bytes)?;
+        let mut g = self.inner.lock();
+        for (key, query, counters, stats_since, minmax_stats_since) in entries {
+            if counters.sticky() || g.entries.contains_key(&key) {
+                continue;
+            }
+            if g.entries.len() >= self.max {
+                Self::dealloc(&mut g, self.max);
+            }
+            let order = g.next;
+            g.next += 1;
+            g.entries.insert(key, Entry { query: Arc::from(query), counters, stats_since, minmax_stats_since, order });
+        }
+        // (pgss->stats as the file has it, read last: the deallocations above aren't counted.)
+        g.dealloc = dealloc;
+        g.stats_reset = stats_reset;
+        Ok(())
+    }
+}
+
+/// Why a file wasn't loaded: it ends early (pgss_shmem_startup's read_error), or it isn't
+/// one of this format or doesn't check (data_error).
+#[derive(Debug, PartialEq, Eq)]
+pub enum Bad {
+    Short,
+    Invalid,
+}
+
+type Saved = (Key, String, Counters, i64, i64);
+
+fn decode(bytes: &[u8]) -> Result<(Vec<Saved>, i64, i64), Bad> {
+    let mut r = R(bytes);
+    // (The header, the version and the count read before either is looked at, as
+    // pgss_shmem_startup does.)
+    let (magic, format, n) = (|| Some((r.take(8)? == MAGIC, r.u32()?, r.u32()? as usize)))().ok_or(Bad::Short)?;
+    if !magic || format != FORMAT {
+        return Err(Bad::Invalid);
+    }
+    let mut toplevel_ok = true;
+    let mut body = || -> Option<(Vec<Saved>, i64, i64)> {
+        let mut v = Vec::with_capacity(n.min(r.0.len() / 17));
+        for _ in 0..n {
+            let (userid, dbid, queryid) = (r.u32()?, r.u32()?, r.i64()?);
+            let toplevel = r.take(1)?[0];
+            toplevel_ok &= toplevel < 2;
+            let query = r.str()?;
+            let counters = Counters::get(&mut r)?;
+            let key = Key { userid, dbid, queryid, toplevel: toplevel == 1 };
+            v.push((key, query, counters, r.i64()?, r.i64()?));
+        }
+        Some((v, r.i64()?, r.i64()?))
+    };
+    let (v, dealloc, reset) = body().ok_or(Bad::Short)?;
+    let end = bytes.len() - r.0.len();
+    let crc = r.u32().ok_or(Bad::Short)?;
+    let valid = r.0.is_empty() && toplevel_ok && crc == crc32fast::hash(&bytes[..end]);
+    if valid { Ok((v, dealloc, reset)) } else { Err(Bad::Invalid) }
 }
 
 /// `cur_median_usage`: a sticky entry starts at the median usage.

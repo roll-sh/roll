@@ -21,7 +21,7 @@ use super::{DbEntry, FuncCounts, IoKey, Shared, TabEntry};
 
 const MAGIC: &[u8; 8] = b"ROLLSTAT";
 /// PGSTAT_FILE_FORMAT_ID: a file of another version is discarded.
-const FORMAT: u32 = 1;
+const FORMAT: u32 = 2;
 
 /// The file, in the data directory (PGSTAT_STAT_PERMANENT_FILENAME).
 const NAME: &str = "pg_stat/pgstat.stat";
@@ -40,6 +40,8 @@ pub struct Saved {
     pub resets: HashMap<String, i64>,
     pub checkpoints_requested: i64,
     pub checkpoints_performed: i64,
+    /// buffers_written, write_time, sync_time.
+    pub checkpoint_io: [i64; 3],
     pub wal_records: i64,
     pub wal_bytes: i64,
     pub io: Vec<(IoKey, i64)>,
@@ -50,22 +52,23 @@ pub struct Saved {
     pub subscriptions: Vec<(u32, Option<i64>, [i64; 9])>,
 }
 
-struct W(Vec<u8>);
+/// A little-endian writer (pg_stat_statements' file too).
+pub(crate) struct W(pub Vec<u8>);
 
 impl W {
-    fn u32(&mut self, v: u32) {
+    pub(crate) fn u32(&mut self, v: u32) {
         self.0.extend_from_slice(&v.to_le_bytes());
     }
-    fn u64(&mut self, v: u64) {
+    pub(crate) fn u64(&mut self, v: u64) {
         self.0.extend_from_slice(&v.to_le_bytes());
     }
-    fn i64(&mut self, v: i64) {
+    pub(crate) fn i64(&mut self, v: i64) {
         self.0.extend_from_slice(&v.to_le_bytes());
     }
-    fn f64(&mut self, v: f64) {
+    pub(crate) fn f64(&mut self, v: f64) {
         self.0.extend_from_slice(&v.to_bits().to_le_bytes());
     }
-    fn opt(&mut self, v: Option<i64>) {
+    pub(crate) fn opt(&mut self, v: Option<i64>) {
         match v {
             Some(v) => {
                 self.0.push(1);
@@ -74,16 +77,17 @@ impl W {
             None => self.0.push(0),
         }
     }
-    fn str(&mut self, s: &str) {
+    pub(crate) fn str(&mut self, s: &str) {
         self.u32(s.len() as u32);
         self.0.extend_from_slice(s.as_bytes());
     }
 }
 
-struct R<'a>(&'a [u8]);
+/// Its reader: None past the end or on a value out of range.
+pub(crate) struct R<'a>(pub &'a [u8]);
 
 impl R<'_> {
-    fn take(&mut self, n: usize) -> Option<&[u8]> {
+    pub(crate) fn take(&mut self, n: usize) -> Option<&[u8]> {
         if self.0.len() < n {
             return None;
         }
@@ -91,31 +95,31 @@ impl R<'_> {
         self.0 = b;
         Some(a)
     }
-    fn u32(&mut self) -> Option<u32> {
+    pub(crate) fn u32(&mut self) -> Option<u32> {
         Some(u32::from_le_bytes(self.take(4)?.try_into().ok()?))
     }
-    fn u64(&mut self) -> Option<u64> {
+    pub(crate) fn u64(&mut self) -> Option<u64> {
         Some(u64::from_le_bytes(self.take(8)?.try_into().ok()?))
     }
-    fn i64(&mut self) -> Option<i64> {
+    pub(crate) fn i64(&mut self) -> Option<i64> {
         Some(i64::from_le_bytes(self.take(8)?.try_into().ok()?))
     }
-    fn f64(&mut self) -> Option<f64> {
+    pub(crate) fn f64(&mut self) -> Option<f64> {
         Some(f64::from_bits(self.u64()?))
     }
-    fn opt(&mut self) -> Option<Option<i64>> {
+    pub(crate) fn opt(&mut self) -> Option<Option<i64>> {
         match self.take(1)?[0] {
             0 => Some(None),
             1 => Some(Some(self.i64()?)),
             _ => None,
         }
     }
-    fn str(&mut self) -> Option<String> {
+    pub(crate) fn str(&mut self) -> Option<String> {
         let n = self.u32()? as usize;
         String::from_utf8(self.take(n)?.to_vec()).ok()
     }
     /// A count of entries that can't be more than the bytes left (each at least `min` bytes).
-    fn count(&mut self, min: usize) -> Option<usize> {
+    pub(crate) fn count(&mut self, min: usize) -> Option<usize> {
         let n = self.u32()? as usize;
         (n.saturating_mul(min) <= self.0.len()).then_some(n)
     }
@@ -184,6 +188,12 @@ codec!(DbEntry {
     i64 parallel_workers_launched,
     i64 temp_files,
     i64 temp_bytes,
+    i64 session_time,
+    i64 active_time,
+    i64 idle_in_transaction_time,
+    i64 sessions_abandoned,
+    i64 sessions_fatal,
+    i64 sessions_killed,
     opt stat_reset,
 });
 
@@ -202,6 +212,9 @@ pub fn encode(s: &Saved, lsn: u64) -> Vec<u8> {
         w.i64(*v);
     }
     for v in [s.checkpoints_requested, s.checkpoints_performed, s.wal_records, s.wal_bytes] {
+        w.i64(v);
+    }
+    for v in s.checkpoint_io {
         w.i64(v);
     }
     w.u32(s.io.len() as u32);
@@ -265,6 +278,9 @@ pub fn decode(bytes: &[u8], lsn: u64) -> Option<Saved> {
     s.checkpoints_performed = r.i64()?;
     s.wal_records = r.i64()?;
     s.wal_bytes = r.i64()?;
+    for v in &mut s.checkpoint_io {
+        *v = r.i64()?;
+    }
     for _ in 0..r.count(24)? {
         let key = (intern(&r.str()?), intern(&r.str()?), intern(&r.str()?), intern(&r.str()?));
         s.io.push((key, r.i64()?));
@@ -370,6 +386,7 @@ mod tests {
             since: Some(11),
             resets: [("wal".to_string(), 12)].into(),
             checkpoints_requested: 2,
+            checkpoint_io: [81, 6, 4],
             wal_records: 9,
             io: vec![(("client backend", "relation", "normal", "reads"), 4)],
             slru_zeroed: [("notify".to_string(), 1)].into(),
@@ -385,6 +402,7 @@ mod tests {
         let s = decode(&b, 77).expect("reads back");
         assert_eq!(s.since, Some(11));
         assert_eq!(s.checkpoints_requested, 2);
+        assert_eq!(s.checkpoint_io, [81, 6, 4]);
         assert_eq!(s.io[0], (("client backend", "relation", "normal", "reads"), 4));
         let t = &s.dbs[0].1.tables[&16384];
         assert_eq!((t.tuples_inserted, t.dead_tuples, t.last_vacuum_time, t.total_vacuum_time), (1000, 99, Some(42), 1.5));

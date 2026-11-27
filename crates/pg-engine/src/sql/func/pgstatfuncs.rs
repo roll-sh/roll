@@ -204,6 +204,25 @@ db_counters! {
     db_parallel_workers_launched = 6356 => |d| d.parallel_workers_launched;
     db_temp_files = 3150 => |d| d.temp_files;
     db_temp_bytes = 3151 => |d| d.temp_bytes;
+    db_sessions_abandoned = 6189 => |d| d.sessions_abandoned;
+    db_sessions_fatal = 6190 => |d| d.sessions_fatal;
+    db_sessions_killed = 6191 => |d| d.sessions_killed;
+}
+
+/// A database's times in milliseconds (0 without an entry, as PostgreSQL's).
+macro_rules! db_times {
+    ($($name:ident = $oid:expr => |$d:ident| $body:expr;)*) => {
+        $(fn $name(a: &[Value], c: &FnCtx) -> Result<Value> {
+            Ok(Value::Float8(pgstat::fetch_db(c.exec, oid_arg(&a[0])).map_or(0.0, |$d| $body as f64 / 1000.0)))
+        })*
+        const DB_TIMES: &[(u32, crate::sql::func::FnImpl)] = &[$(($oid, $name)),*];
+    };
+}
+
+db_times! {
+    db_session_time = 6185 => |d| d.session_time;
+    db_active_time = 6186 => |d| d.active_time;
+    db_idle_in_transaction_time = 6187 => |d| d.idle_in_transaction_time;
 }
 
 /// pg_stat_get_db_numbackends shares the backend-status snapshot, including membership.
@@ -242,6 +261,18 @@ fn checkpointer_num_performed(_: &[Value], c: &FnCtx) -> Result<Value> {
     Ok(Value::Int8(pgstat::with_shared(c.exec, |s| s.checkpoints_performed)))
 }
 
+fn checkpointer_buffers_written(_: &[Value], c: &FnCtx) -> Result<Value> {
+    Ok(Value::Int8(pgstat::with_shared(c.exec, |s| s.checkpoint_io[0])))
+}
+
+fn checkpointer_write_time(_: &[Value], c: &FnCtx) -> Result<Value> {
+    Ok(Value::Float8(pgstat::with_shared(c.exec, |s| s.checkpoint_io[1]) as f64))
+}
+
+fn checkpointer_sync_time(_: &[Value], c: &FnCtx) -> Result<Value> {
+    Ok(Value::Float8(pgstat::with_shared(c.exec, |s| s.checkpoint_io[2]) as f64))
+}
+
 fn checkpointer_reset_time(_: &[Value], c: &FnCtx) -> Result<Value> {
     Ok(ts(pgstat::reset_time(c.exec, "checkpointer")))
 }
@@ -261,13 +292,16 @@ pub fn register(r: &mut Registry) {
     r.from_pg(3046, Some(xact_function_calls), None);
     r.from_pg(3047, Some(xact_function_total_time), None);
     r.from_pg(3048, Some(xact_function_self_time), None);
-    for (oid, f) in DB_COUNTERS {
+    for (oid, f) in DB_COUNTERS.iter().chain(DB_TIMES) {
         r.from_pg(*oid, Some(*f), None);
     }
     r.from_pg(3074, Some(db_stat_reset_time), None);
     r.from_pg(3788, Some(snapshot_timestamp), None);
     r.from_pg(2770, Some(checkpointer_num_requested), None);
     r.from_pg(6377, Some(checkpointer_num_performed), None);
+    r.from_pg(2771, Some(checkpointer_buffers_written), None);
+    r.from_pg(3160, Some(checkpointer_write_time), None);
+    r.from_pg(3161, Some(checkpointer_sync_time), None);
     r.from_pg(6314, Some(checkpointer_reset_time), None);
     r.from_pg(3075, Some(bgwriter_reset_time), None);
     r.from_pg(2230, Some(clear_snapshot), None);

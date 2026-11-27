@@ -321,7 +321,7 @@ impl Launcher {
         };
         sess.state.autovacuum.set(true);
         // (A worker's session isn't counted in pg_stat_database.sessions.)
-        sess.state.pgstat.borrow_mut().sessions = 0;
+        sess.state.pgstat.borrow_mut().not_a_session();
         {
             // AutoVacWorkerMain's settings: no timeouts, nothing logged per statement.
             let mut s = sess.state.settings.borrow_mut();

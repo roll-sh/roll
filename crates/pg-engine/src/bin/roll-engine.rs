@@ -356,6 +356,7 @@ fn main() -> anyhow::Result<()> {
                 Some(Shutdown::Immediate) => {
                     // (Sessions end with the process, without a shutdown checkpoint.)
                     pg_engine::server::quit_clients(&engine);
+                    engine.save_statements();
                     lifecycle::shut_down_immediately(&engine);
                     pg_engine::log::flush();
                     std::process::exit(0);
