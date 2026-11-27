@@ -75,6 +75,13 @@ pub trait Brancher: Send + Sync {
         Ok(None)
     }
 
+    /// The locks other sessions hold now on `branch`'s tables, `(table, mode)` (Postgres's
+    /// `pg_locks` names, `AccessExclusiveLock`…), sampled while the release runs so its strongest
+    /// is said (PlanetScale's safe migrations). Empty where the product has none to say.
+    async fn locks(&self, _parent: &str, _branch: &str) -> anyhow::Result<Vec<(String, String)>> {
+        Ok(Vec::new())
+    }
+
     /// Whether masked branches can come from one masked base per parent (Neon's anonymized
     /// branches): [`Self::branch_from`] a branch of the parent the engine masked once, and
     /// [`Self::children`] to know when an old base is no longer used.

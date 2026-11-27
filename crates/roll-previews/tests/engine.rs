@@ -415,6 +415,20 @@ async fn the_toolbars_main_is_the_same_page_on_mains_preview() {
     assert_eq!(e.engine.main_page_url(&chg.id, "web", "//evil.example/").await.unwrap(), None, "only a path on main's host");
 }
 
+/// The locks a release holds that make others wait (PlanetScale's safe migrations) are said with
+/// its time: the strongest per table, sampled while it runs; ordinary writes' locks aren't.
+#[tokio::test]
+async fn a_releases_blocking_locks_are_said_with_its_time() {
+    let e = env(json!({ "enabled": true, "release": { "image": "node:22", "run": "npm run migrate" } }));
+    *e.pg.locks.lock() = vec![("public.orders".into(), "AccessExclusiveLock".into()), ("public.users".into(), "RowExclusiveLock".into()), ("public.orders".into(), "RowExclusiveLock".into())];
+    e.code.open(change("chg_lk", 1));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_lk").unwrap().unwrap();
+    let release = e.engine.store.preview(&p.id).unwrap().release.expect("its release ran");
+    assert_eq!(release.locks.iter().map(|l| (l.table.as_str(), l.mode.as_str())).collect::<Vec<_>>(), [("public.orders", "AccessExclusiveLock")]);
+    assert!(release.locks[0].ms >= 500);
+}
+
 /// A release rehearsed on today's data (PlanetScale's deploy requests): at the next converge,
 /// the release runs once more on a fresh branch of the parent, masked by the rules before it
 /// runs, and the branch goes after; how it went is on the preview.
