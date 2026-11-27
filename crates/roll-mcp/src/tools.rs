@@ -1409,6 +1409,7 @@ static TOOLS: &[Tool] = &[
         bnull("redirects", Ty::Str, "its own redirects on any service, _redirects lines: `/old /new 308`, `/blog/* /posts/:splat` (301 unless 302, 303, 307 or 308); clear it for none"),
         bnull("egress", Ty::Any, "{mode: roll|open, hosts?}: roll lets its code reach roll and only these hosts (at most 20, *. for subdomains), from the next deploy; clear it for open"),
         b("vitals", Ty::Bool, "Measure its pages' Web Vitals in visitors' browsers (read them with apps_vitals)"),
+        bnull("hsts", Ty::Any, "Strict-Transport-Security over HTTPS: {max_age (at most 63072000), include_subdomains?, preload? (with include_subdomains and a year)}, false for none; clear it for the default (two years)"),
         bnull("config", Ty::Obj, "Runtime config its instances read at ROLL_CONFIG_URL (edge functions: context.config) without a deploy: at most 200 keys, 64 KiB; the first one needs a deploy to give them the address. Clear it for none"),
         bnull("freeze", Ty::Obj, "A deploy freeze: {until? (unix ms), windows?: [{from: \"fri 17:00\", to}], timezone?, reason?}, on until cleared when it has neither until nor windows. Setting or clearing one is an admin's call (clearing it would get past it)"),
         b("traces", Ty::Bool, "Send its OpenTelemetry traces and metrics to roll (OTEL_EXPORTER_OTLP_* from the next deploy)"),
