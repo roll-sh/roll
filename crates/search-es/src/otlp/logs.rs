@@ -175,10 +175,16 @@ impl Batch {
         self.reason.get_or_insert(why);
     }
 
+    /// The chunk being written is full: kept at its size (only its length is charged).
+    fn push_chunk(&mut self) {
+        let mut c = std::mem::take(&mut self.current);
+        c.shrink_to_fit();
+        self.chunks.push(c);
+    }
+
     fn finish(mut self) -> Batch {
         if !self.current.is_empty() {
-            let c = std::mem::take(&mut self.current);
-            self.chunks.push(c);
+            self.push_chunk();
         }
         self
     }
@@ -429,10 +435,12 @@ struct Rendered {
     json: String,
 }
 
-/// A context's tree as rendered: its JSON charged, then its tree's charge given back.
+/// A context's tree as rendered: its JSON charged, then its tree's charge given back. Its
+/// routing attributes are kept made valid, so a record never copies them again.
 fn render(c: Context, scope: bool, budget: &mut Budget) -> Result<Rendered, Fail> {
-    let pick = |k: &str| c.attributes.get(k).and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_string);
-    let (dataset, namespace) = (pick("data_stream.dataset"), pick("data_stream.namespace"));
+    let pick = |k: &str| c.attributes.get(k).and_then(Value::as_str).filter(|s| !s.is_empty());
+    let dataset = pick("data_stream.dataset").map(dataset_base).filter(|d| !d.is_empty());
+    let namespace = pick("data_stream.namespace").map(|n| sanitize(n, 100)).filter(|n| !n.is_empty());
     let json = context_json(c, scope).to_json();
     budget.ndjson(json.len())?;
     budget.record_done();
@@ -473,25 +481,28 @@ fn sanitize(s: &str, max: usize) -> String {
     out
 }
 
-fn routing(rec: &Record, scope: &Rendered, resource: &Rendered, dataset: bool) -> Option<String> {
-    let key = if dataset { "data_stream.dataset" } else { "data_stream.namespace" };
-    let own = rec.attributes.get(key).and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_string);
-    let pick = |r: &Rendered| if dataset { r.dataset.clone() } else { r.namespace.clone() };
-    own.or_else(|| pick(scope)).or_else(|| pick(resource))
+/// A dataset made valid, without its `.otel` (lowercased first, so `X.OTEL` is `x`).
+fn dataset_base(raw: &str) -> String {
+    let lower = raw.to_lowercase();
+    sanitize(lower.strip_suffix(".otel").unwrap_or(&lower), 100 - ".otel".len())
 }
 
-/// `(dataset with its .otel, namespace)`.
+/// `(dataset with its .otel, namespace)`: the record's own routing attributes, else its
+/// scope's, else its resource's (both made valid once, in [`render`]).
 fn target(rec: &Record, scope: &Rendered, resource: &Rendered) -> (String, String) {
-    let raw = routing(rec, scope, resource, true).unwrap_or_else(|| "generic".into()).to_lowercase();
-    let base = raw.strip_suffix(".otel").unwrap_or(&raw);
-    let mut base = sanitize(base, 100 - ".otel".len());
-    if base.is_empty() {
-        base = "generic".into();
-    }
-    let mut namespace = sanitize(&routing(rec, scope, resource, false).unwrap_or_default(), 100);
-    if namespace.is_empty() {
-        namespace = "default".into();
-    }
+    let own = |k: &str| rec.attributes.get(k).and_then(Value::as_str).filter(|s| !s.is_empty());
+    let base = own("data_stream.dataset")
+        .map(dataset_base)
+        .filter(|d| !d.is_empty())
+        .or_else(|| scope.dataset.clone())
+        .or_else(|| resource.dataset.clone())
+        .unwrap_or_else(|| "generic".into());
+    let namespace = own("data_stream.namespace")
+        .map(|n| sanitize(n, 100))
+        .filter(|n| !n.is_empty())
+        .or_else(|| scope.namespace.clone())
+        .or_else(|| resource.namespace.clone())
+        .unwrap_or_else(|| "default".into());
     (format!("{base}.otel"), namespace)
 }
 
@@ -568,26 +579,21 @@ fn emit(out: &mut Batch, budget: &mut Budget, rec: Record, scope: &Rendered, res
         d.insert("event_name".into(), Value::from(e));
     }
     let action = obj! { "create" => obj! { "_index" => index } }.to_json();
-    // The resource and scope go in as rendered once ([`Rendered`]).
-    let mut body = doc.to_json();
-    body.pop();
-    for (k, v) in [("resource", &resource.json), ("scope", &scope.json)] {
-        body.push_str(",\"");
-        body.push_str(k);
-        body.push_str("\":");
-        body.push_str(v);
-    }
-    body.push('}');
-    let len = action.len() + body.len() + 2;
-    if !out.current.is_empty() && out.current.len() + len > CHUNK_BYTES {
-        let c = std::mem::take(&mut out.current);
-        out.chunks.push(c);
-    }
+    // The record's own fields, without the closing brace; the resource and scope go in as
+    // rendered once ([`Rendered`]), charged before anything is written.
+    let mut head = doc.to_json();
+    head.pop();
+    const RESOURCE: &str = ",\"resource\":";
+    const SCOPE: &str = ",\"scope\":";
+    let len = action.len() + 1 + head.len() + RESOURCE.len() + resource.json.len() + SCOPE.len() + scope.json.len() + 2;
     budget.ndjson(len)?;
-    out.current.push_str(&action);
-    out.current.push('\n');
-    out.current.push_str(&body);
-    out.current.push('\n');
+    if !out.current.is_empty() && out.current.len() + len > CHUNK_BYTES {
+        out.push_chunk();
+    }
+    out.current.reserve(len);
+    for part in [action.as_str(), "\n", head.as_str(), RESOURCE, resource.json.as_str(), SCOPE, scope.json.as_str(), "}\n"] {
+        out.current.push_str(part);
+    }
     out.accepted += 1;
     Ok(())
 }
@@ -993,6 +999,8 @@ mod tests {
     #[test]
     fn a_non_base64_bytes_value_is_refused_not_cut_mid_character() {
         let mut text = String::from(r#"{"resourceLogs":[{"scopeLogs":[{"logRecords":[{"body":{"bytesValue":""#);
+        // One ASCII byte first: the old cut (at an even byte) then fell inside a character.
+        text.push('a');
         text.push_str(&"é".repeat(800_000));
         text.push_str(r#""}},{"body":{"stringValue":"fine"}}]}]}]}"#);
         let v = crate::json::parse(text.as_bytes()).unwrap().unwrap();
@@ -1003,19 +1011,26 @@ mod tests {
 
     #[test]
     fn a_requests_charge_is_its_ndjson_and_its_contexts_once() {
-        // A large resource and many records: each record's values go back once it's written, and
-        // the resource is charged once, not once per record.
-        let big = "r".repeat(20_000);
-        let recs: Vec<Vec<u8>> = (0..500).map(|i| field(5, &field(1, format!("record {i}").as_bytes()))).collect();
-        let body = request(&[("service.name", &big)], &recs);
+        // A large resource over two scopes of a few records: each record's values and each
+        // context's tree go back once used, and each rendered context once its records are
+        // written, so what stays reserved is the NDJSON (which carries the contexts' text).
+        let big = "r".repeat(200_000);
+        let resource = field(1, &string_kv("service.name", &big));
+        let scope = |name: &[u8]| {
+            let mut sl = field(1, &[field(1, name), field(3, &string_kv("scope.big", &big))].concat());
+            for i in 0..3 {
+                sl.extend(field(2, &field(5, &field(1, format!("record {i}").as_bytes()))));
+            }
+            sl
+        };
+        let rl = [field(1, &resource), field(2, &scope(b"a")), field(2, &scope(b"b"))].concat();
+        let body = field(1, &rl);
         let limit = MemoryBudget::new(u64::MAX);
         let mut b = Budget::new(Reservation::new(limit.clone()));
         let out = from_protobuf(&body, 1, &mut b).unwrap();
         let ndjson: usize = out.chunks.iter().map(String::len).sum();
-        // What stays reserved is the NDJSON (each document carries the resource's text) and
-        // nothing per record beyond it; the contexts' charge was given back at the end.
+        assert_eq!(out.accepted, 6);
         assert!(limit.used() <= ndjson as u64 + STEP, "{} reserved for {ndjson} of NDJSON", limit.used());
-        assert_eq!(out.accepted, 500);
     }
 
     #[test]
