@@ -8823,7 +8823,10 @@ async fn a_public_git_url_deploys_its_branch_and_follows_new_commits() {
         }
     }
     assert_eq!(tagged, ["tag v10"], "{started:?}");
-    assert!(w.apps.watch_git().await.iter().all(|d| !d.is_empty()), "nothing tagged again");
+    for d in w.apps.watch_git().await {
+        let d = settled(&w, &id, "staging", &d).await;
+        assert!(!d["message"].as_str().unwrap_or("").starts_with("tag "), "nothing tagged again: {d}");
+    }
     assert!(call(&w.api, "POST", &hook, Some(tag("v9"))).await.1["ignored"].as_str().unwrap().contains("already"), "v9 is seen, not deployed");
     assert_eq!(call(&w.api, "POST", &hook, Some(tag("release-1"))).await.1["ignored"].as_str().map(|s| s.contains("no environment deploys it")), Some(true));
     // Pull requests go to previews with their number, title and page: a same-repository one on
