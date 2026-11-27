@@ -532,6 +532,7 @@ CREATE TABLE IF NOT EXISTS held_alerts (
     service TEXT NOT NULL,
     env TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS events_env ON events (service, env, seq);
 CREATE TABLE IF NOT EXISTS alert_silences (
     id TEXT PRIMARY KEY,
     service TEXT NOT NULL,
@@ -1296,6 +1297,8 @@ impl Store {
         db.add_column("env_access", "webhooks", "TEXT")?;
         // A repeating silence's weekly windows (`every`), as JSON.
         db.add_column("alert_silences", "every", "TEXT")?;
+        // When a held alert is looked at again (one still quiet waits, never in front of others').
+        db.add_column("held_alerts", "after_ms", "INTEGER NOT NULL DEFAULT 0")?;
         let store = Store { db, sealer };
         store.mark_references()?;
         store.quote_log_patterns()?;
@@ -1818,9 +1821,28 @@ impl Store {
         })
     }
 
-    /// The alerts silences held back, oldest first, at most `limit`: (event seq, service, env).
-    pub fn held_alerts(&self, limit: usize) -> Result<Vec<(i64, String, String)>> {
-        Ok(self.db.query("SELECT seq, service, env FROM held_alerts ORDER BY seq LIMIT ?", [limit as i64], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?)
+    /// The alerts silences held back that are due a look at `now`, oldest first, at most
+    /// `limit`: (event seq, service, env).
+    pub fn held_alerts(&self, now: i64, limit: usize) -> Result<Vec<(i64, String, String)>> {
+        Ok(self.db.query("SELECT seq, service, env FROM held_alerts WHERE after_ms <= ? ORDER BY seq LIMIT ?", params![now, limit as i64], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?)
+    }
+
+    /// A held alert still quiet, looked at again from `after_ms` on.
+    pub fn defer_held(&self, seq: i64, after_ms: i64) -> Result<()> {
+        self.db.execute("UPDATE held_alerts SET after_ms = ? WHERE seq = ?", params![after_ms, seq])?;
+        Ok(())
+    }
+
+    /// One environment's events after `after`, in order, at most `limit`.
+    pub fn env_events(&self, service: &str, env: &str, after: i64, limit: usize) -> Result<Vec<Event>> {
+        Ok(self.db.query(
+            "SELECT seq, at, kind, service, env, deployment, data FROM events WHERE service = ? AND env = ? AND seq > ? ORDER BY seq LIMIT ?",
+            params![service, env, after, limit.clamp(1, 1000) as i64],
+            |r| {
+                let data: String = r.get(6)?;
+                Ok(Event { seq: r.get(0)?, at: r.get(1)?, kind: r.get(2)?, service: r.get(3)?, environment: r.get(4)?, deployment: r.get(5)?, data: serde_json::from_str(&data).unwrap_or(serde_json::Value::Null) })
+            },
+        )?)
     }
 
     /// A held alert let go: its deliveries (if any are due) queued and it forgotten, in one write.
@@ -1958,7 +1980,8 @@ impl Store {
 
     /// Events older than `before_ms`, but the audit trail's (`audit.*`) only after 90 days.
     pub fn prune_events(&self, before_ms: i64) -> Result<()> {
-        self.db.execute("DELETE FROM events WHERE at < ? AND kind NOT LIKE 'audit.%'", [before_ms])?;
+        // An alert still held by a silence keeps its event until it's let go.
+        self.db.execute("DELETE FROM events WHERE at < ? AND kind NOT LIKE 'audit.%' AND seq NOT IN (SELECT seq FROM held_alerts)", [before_ms])?;
         self.db.execute("DELETE FROM events WHERE at < ? AND kind LIKE 'audit.%'", [code_sql::now_ms() - 90 * 86_400_000])?;
         self.db.execute("DELETE FROM notify_deliveries WHERE at < ? AND status <> 'pending'", [before_ms])?;
         Ok(())
@@ -3085,12 +3108,24 @@ impl Store {
 
     /// The silences of `project`'s environments with this reason ended (a maintenance's, when it is).
     pub fn end_silences_named(&self, project: &str, reason: &str) -> Result<()> {
-        self.db.execute("DELETE FROM alert_silences WHERE reason = ? AND service IN (SELECT id FROM services WHERE project = ?)", [reason, project])?;
-        Ok(())
+        self.db.write(|c| {
+            c.execute("DELETE FROM alert_silences WHERE reason = ? AND service IN (SELECT id FROM services WHERE project = ?)", [reason, project])?;
+            // What they held is looked at again now, not at its next turn.
+            c.execute("UPDATE held_alerts SET after_ms = 0 WHERE service IN (SELECT id FROM services WHERE project = ?)", [project])?;
+            Ok(())
+        })
     }
 
+    /// A silence ended early: false when there's no such open one. What the environment's
+    /// silences held is looked at again now.
     pub fn end_silence(&self, service: &str, env: &str, id: &str) -> Result<bool> {
-        Ok(self.db.execute("DELETE FROM alert_silences WHERE service = ? AND env = ? AND id = ?", [service, env, id])? > 0)
+        self.db.write(|c| {
+            if c.execute("DELETE FROM alert_silences WHERE service = ? AND env = ? AND id = ?", [service, env, id])? == 0 {
+                return Ok(false);
+            }
+            c.execute("UPDATE held_alerts SET after_ms = 0 WHERE service = ? AND env = ?", [service, env])?;
+            Ok(true)
+        })
     }
 
     /// When a scheduled maintenance ends, if it's one.
@@ -5393,6 +5428,11 @@ mod tests {
         let due = s.due_deliveries(50, 60_000).unwrap();
         assert_eq!(due.len(), 2, "one per (target, event), whatever ran: {due:?}");
         assert!(s.due_deliveries(50, 60_000).unwrap().is_empty(), "claimed: no other node sends them meanwhile");
+        // A held alert still quiet waits behind no one: another environment's is read meanwhile.
+        let held = [(3, "svc_a".to_string(), "production".to_string()), (4, "svc_b".to_string(), "production".to_string())];
+        assert!(s.queue_deliveries(&[], &held, 2, 4).unwrap());
+        s.defer_held(3, i64::MAX).unwrap();
+        assert_eq!(s.held_alerts(code_sql::now_ms(), 1).unwrap(), [(4, "svc_b".to_string(), "production".to_string())]);
     }
 
     #[test]

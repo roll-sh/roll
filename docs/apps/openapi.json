@@ -729,7 +729,7 @@
     },
     "/v1/apps/projects/{project}/notifications/{nid}/deliveries/{did}/redeliver": {
       "post": {
-        "description": "Answers `Delivery` (pending again from its first try, its id kept: a receiver that dedupes on `X-Roll-Delivery` sees one event); 409 while it's still pending, or for an on-call target's page resolved since (it would open again).",
+        "description": "Answers `Delivery` (pending again from its first try, its id kept: a receiver that dedupes on `X-Roll-Delivery` sees one event); 409 while it's still pending, or for an on-call target's event of an alert a later event opened or closed since (it would undo it).",
         "operationId": "postProjectsProjectNotificationsNidDeliveriesDidRedeliver",
         "parameters": [
           {
@@ -759,7 +759,7 @@
         ],
         "responses": {
           "200": {
-            "description": "`Delivery` (pending again from its first try, its id kept: a receiver that dedupes on `X-Roll-Delivery` sees one event); 409 while it's still pending, or for an on-call target's page resolved since (it would open again)"
+            "description": "`Delivery` (pending again from its first try, its id kept: a receiver that dedupes on `X-Roll-Delivery` sees one event); 409 while it's still pending, or for an on-call target's event of an alert a later event opened or closed since (it would undo it)"
           },
           "4XX": {
             "$ref": "#/components/responses/Error"
