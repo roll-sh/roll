@@ -3555,6 +3555,13 @@ async fn a_secret_written_as_the_caller_is_asked_for_and_only_it_is_allowed() {
     let (s, seen) = d.send(&asks, Method::POST, path, Some(body("production")), &[("x-roll-approval", &id)]).await;
     assert_eq!(s, StatusCode::OK, "{seen}");
     assert_eq!(seen, json!({ "here": true, "read": true, "below": true, "elsewhere": false, "staging": false, "other": false }));
+    // Approved once (nothing remembered): the rule handed to the product reaches the written key,
+    // never another key of the folder.
+    let (once, _) = d.token(json!([search("allow"), write_asks]), json!({})).await;
+    let id = asked(once.clone()).await;
+    assert_eq!(d.call(OPERATOR, Method::POST, &format!("/v1/access/approvals/{id}/approve"), None).await.0, StatusCode::OK);
+    let (s, seen) = d.send(&once, Method::POST, path, Some(body("production")), &[("x-roll-approval", &id)]).await;
+    assert_eq!((s, seen["here"].as_bool(), seen["other"].as_bool()), (StatusCode::OK, Some(true), Some(false)), "{seen}");
     // Remembered, it allows that folder again with no approval (and reading it, which the product
     // does), and nothing beside it: another folder asks again.
     let (s, seen) = d.call(&asks, Method::POST, path, Some(body("production"))).await;
