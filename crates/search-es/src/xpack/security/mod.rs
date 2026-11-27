@@ -500,6 +500,8 @@ pub struct Effective {
     /// Failure store indices by their data streams: reached only with the failure store's own
     /// privileges ([`Effective::allows_index`]).
     pub failure_parents: std::collections::HashMap<String, String>,
+    /// The cluster's data streams: each has a failure store component ([`Effective::no_wider`]).
+    pub streams: std::collections::HashSet<String>,
     /// The cluster's dialect ([`Effective::restricted`]).
     pub dialect: crate::cluster::Dialect,
 }
@@ -517,9 +519,12 @@ impl Effective {
     /// resize target can't give more than the index it's made from (Elasticsearch's
     /// `validateIndexPermissionsAreSubset`, which compares the actions' automata). Compared by
     /// action, never by privilege name, so a role granting raw actions (`indices:data/read/search`)
-    /// or OpenSearch action groups is held to it too ([`privileges::PROBE_ACTIONS`]).
+    /// or OpenSearch action groups is held to it too ([`privileges::PROBE_ACTIONS`]). A data
+    /// stream's failure store is compared too: an alias over one reaches it as `<alias>::failures`,
+    /// so it can't give more there either (a `read_failure_store` the data stream lacks).
     pub fn no_wider(&self, wider: &str, narrower: &str) -> bool {
-        privileges::PROBE_ACTIONS.iter().all(|a| !self.allows_index(a, wider) || self.allows_index(a, narrower))
+        let subset = |w: &str, n: &str| privileges::PROBE_ACTIONS.iter().all(|a| !self.allows_index(a, w) || self.allows_index(a, n));
+        subset(wider, narrower) && (!self.streams.contains(narrower) || subset(&format!("{wider}::failures"), &format!("{narrower}::failures")))
     }
 
     /// Whether `index` is restricted ([`privileges::is_restricted`]: a role must allow restricted
@@ -710,7 +715,8 @@ pub fn effective(file: &FileRoles, st: &crate::meta::ClusterState, p: &Principal
         }
     }
     let failure_parents = st.metadata.data_streams.values().flat_map(|d| d.failure_indices.iter().map(|i| (i.clone(), d.name.clone()))).collect();
-    Effective { own, limited_by, also, parents, history_aliases, failure_parents, dialect: st.metadata.dialect }
+    let streams = st.metadata.data_streams.keys().cloned().collect();
+    Effective { own, limited_by, also, parents, history_aliases, failure_parents, streams, dialect: st.metadata.dialect }
 }
 
 /// Read APIs whose wildcard index expressions Elasticsearch expands to the indices the user

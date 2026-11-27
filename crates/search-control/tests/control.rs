@@ -4218,6 +4218,8 @@ async fn names_are_authorized_as_resolved() {
         (Method::PUT, "/_security/role/raw", json!({"indices": [{"names": ["mine*", "secret"], "privileges": ["manage"]}, {"names": ["mine*"], "privileges": ["indices:data/read/search"]}]})),
         (Method::PUT, "/_security/user/raw", json!({"password": "raw-pass-1", "roles": ["raw"]})),
         (Method::PUT, "/mine/_settings", json!({"index.blocks.write": true})),
+        (Method::PUT, "/_security/role/fsr", json!({"indices": [{"names": ["logs-a"], "privileges": ["read", "manage"]}, {"names": ["mine*"], "privileges": ["read", "manage", "read_failure_store"]}]})),
+        (Method::PUT, "/_security/user/fsr", json!({"password": "fsr-pass-1", "roles": ["fsr"]})),
         (Method::PUT, "/_security/role/fsm", json!({"indices": [{"names": ["logs-*"], "privileges": ["manage_failure_store"]}]})),
         (Method::PUT, "/_security/user/fsm", json!({"password": "fsm-pass-1", "roles": ["fsm"]})),
         (Method::PUT, "/secret/_alias/secret-w", Value::Null),
@@ -4269,6 +4271,10 @@ async fn names_are_authorized_as_resolved() {
     assert_eq!(s, 403, "manage_failure_store writes nothing: {v}");
     let (s, v) = fsm(Method::GET, "/logs-a::failures/_settings", None).await;
     assert_ne!(s, 403, "{v}");
+    // An alias over a data stream can't give more on its failure store either: `mine-fx::failures`
+    // would read logs-a's failure documents.
+    let (s, v) = e.es("fsr@rn", "fsr-pass-1", Method::POST, "/_aliases", Some(json!({"actions": [{"add": {"index": "logs-a", "alias": "mine-fx"}}]}))).await;
+    assert!(s == 403 && v.to_string().contains("more permissions than any of the indices"), "{s} {v}");
     // A multi get's and multi term vectors' items too.
     for path in ["/_mget", "/_mtermvectors"] {
         let (s, v) = e.es("rd@rn", "rd-pass-1", Method::POST, path, Some(json!({"docs": [{"_index": "<.async-search>", "_id": "x"}]}))).await;
