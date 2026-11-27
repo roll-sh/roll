@@ -1,7 +1,7 @@
 import { CircleCheck, Dices, FileSearch, RotateCw, ShieldCheck } from "lucide-react";
 import { useState } from "react";
 import { Link } from "@/components/link";
-import { needsApproval, secretsGuardrails, type Finding, type Guardrails, type Op, type SecretsApi, type SetSecret } from "@/lib/secrets-api";
+import { needsApproval, secretsPolicyReport, type Finding, type Guardrails, type Op, type SecretsApi, type SetSecret } from "@/lib/secrets-api";
 import { decoyUse } from "@/lib/secrets-decoy";
 import { generateValue } from "@/lib/secrets-generate";
 import { secretsHref, useSecrets } from "./secrets-page";
@@ -198,11 +198,13 @@ function guardrailLines(g: Guardrails): string[] {
   return lines;
 }
 
-/** The policy, read-only, for the operator and admin accounts (anyone else's GET is a 403: nothing shows). */
+/** The policy, read-only, for the operator and admin accounts (anyone else's GET is a 403: nothing shows), with every exception to it across projects. */
 function GuardrailsView() {
-  const policy = useLoad(() => secretsGuardrails().catch(() => null), []);
-  const lines = policy.data ? guardrailLines(policy.data) : [];
-  if (!lines.length) return null;
+  const report = useLoad(() => secretsPolicyReport().catch(() => null), []);
+  const lines = report.data ? guardrailLines(report.data.policy) : [];
+  if (!report.data || !lines.length) return null;
+  const { projects, grants } = report.data;
+  const row = "flex items-baseline gap-2 px-3 py-1.5 text-[12.5px]";
   return (
     <Section title="Guardrails">
       <p className="mb-2 text-[11.5px] text-muted">roll secrets' policy for every project: each may tighten these floors, never go below them. Set with roll secrets policy set.</p>
@@ -213,6 +215,29 @@ function GuardrailsView() {
           </p>
         ))}
       </div>
+      {(projects.length > 0 || grants.length > 0) && (
+        <>
+          <p className="mt-3 mb-2 text-[11.5px] text-muted">Below the policy: made before it, nothing was rewritten. The next change to each must meet it.</p>
+          <div className={`${card} divide-y divide-line`}>
+            {projects.flatMap((p) =>
+              p.findings.map((f, i) => (
+                <p key={`${p.project}:${i}`} className={row}>
+                  <Link href={secretsHref(p.project, { view: "health" })} className="shrink-0 text-fg hover:underline">{p.project_name}</Link>
+                  <span className="text-muted">{f.detail}</span>
+                </p>
+              )),
+            )}
+            {grants.map((g) => (
+              <p key={g.id} className={row}>
+                <span className="shrink-0 text-fg">{g.name}</span>
+                <span className="text-muted">
+                  {g.kind === "oauth" ? "connection" : "token"} of {g.user ?? "the operator"} with a secrets rule, {g.expires_at === null ? "never expires" : `expires ${new Date(g.expires_at).toISOString().slice(0, 10)}`}
+                </span>
+              </p>
+            ))}
+          </div>
+        </>
+      )}
     </Section>
   );
 }

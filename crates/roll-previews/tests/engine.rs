@@ -372,6 +372,107 @@ async fn pages_changed_the_same_way_are_accepted_together() {
     assert_eq!(waiting, ["/c"], "the three accepted at once; /c still waits");
 }
 
+/// Open changes whose schema changes touch the same tables name each other (PlanetScale's
+/// conflicting deploy requests); one that changes another table names none.
+#[tokio::test]
+async fn open_changes_that_change_the_same_tables_name_each_other() {
+    let e = env(json!({ "enabled": true }));
+    for (c, n) in [("chg_sa", 1), ("chg_sb", 2), ("chg_sc", 3)] {
+        e.code.open(change(c, n));
+    }
+    e.code.open(ChangeInfo { repo: "acme/api".into(), ..change("chg_sd", 4) });
+    e.engine.pass().await.unwrap();
+    let id = |c: &str| e.engine.store.row_by_change(c).unwrap().unwrap().id;
+    let set = |c: &str, l: &str| e.engine.store.set_schema_changes(&id(c), "h", Some(&[l.to_string()]), &[]).unwrap();
+    set("chg_sa", "+ column public.users.nickname text");
+    set("chg_sb", "- constraint users_email_key on public.users UNIQUE (email)");
+    set("chg_sc", "+ table public.orders");
+    // Another repo's change on the same table: never named on this one's (its comment could be public).
+    set("chg_sd", "+ column public.users.age int");
+    let overlaps = |c: &str| e.engine.store.preview(&id(c)).unwrap().schema_overlaps.into_iter().map(|o| (o.preview, o.tables)).collect::<Vec<_>>();
+    assert_eq!(overlaps("chg_sa"), [(id("chg_sb"), vec!["public.users".to_string()])]);
+    assert_eq!(overlaps("chg_sb"), [(id("chg_sa"), vec!["public.users".to_string()])]);
+    assert!(overlaps("chg_sc").is_empty(), "another table");
+}
+
+/// The toolbar's Main (Vercel's deployment switcher): the page a visitor is on, on main's preview
+/// of the same service, query kept; nothing for main's own preview, a service main's doesn't
+/// run, or a path that isn't one on that host.
+#[tokio::test]
+async fn the_toolbars_main_is_the_same_page_on_mains_preview() {
+    // Screenshots compared with main's: main's preview runs too.
+    let e = env(json!({ "enabled": true, "github": { "screenshot": true } }));
+    e.code.open(change("chg_tm", 1));
+    e.engine.pass().await.unwrap();
+    e.engine.pass().await.unwrap();
+    let chg = e.engine.store.row_by_change("chg_tm").unwrap().unwrap();
+    let base = e.engine.store.rows(Some(&e.project)).unwrap().into_iter().find(|r| r.change_id.is_none()).expect("main's preview");
+    let main_web = e.engine.store.view(base.clone()).unwrap().services.into_iter().find(|s| s.name == "web").expect("main's web").url;
+    let got = e.engine.main_page_url(&chg.id, "web", "/pricing?plan=pro").await.unwrap();
+    assert_eq!(got, Some(format!("{}/pricing?plan=pro", main_web.trim_end_matches('/'))));
+    assert_eq!(e.engine.main_page_url(&base.id, "web", "/").await.unwrap(), None, "main's own preview has no main");
+    assert_eq!(e.engine.main_page_url(&chg.id, "nope", "/").await.unwrap(), None);
+    assert_eq!(e.engine.main_page_url(&chg.id, "web", "//evil.example/").await.unwrap(), None, "only a path on main's host");
+}
+
+/// A release rehearsed on today's data (PlanetScale's deploy requests): at the next converge,
+/// the release runs once more on a fresh branch of the parent, masked by the rules before it
+/// runs, and the branch goes after; how it went is on the preview.
+#[tokio::test]
+async fn a_rehearsal_runs_the_release_on_a_fresh_masked_branch_then_drops_it() {
+    let e = env(json!({ "enabled": true, "release": { "image": "node:22", "run": "npm run migrate" }, "masking": { "postgres:prj_db": { "public.users.email": "email" } } }));
+    e.code.open(change("chg_rh", 1));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_rh").unwrap().unwrap();
+    let fresh = format!("prj_db~pv-{}-r", &p.id[3..]);
+    let ran = e.apps.seeds.lock().len();
+    e.engine.rehearse(&p.id, "ana").unwrap();
+    e.engine.pass().await.unwrap();
+    let seeds = e.apps.seeds.lock().clone();
+    assert_eq!(seeds.len(), ran + 1, "the release once more");
+    assert_eq!(seeds.last().map(String::as_str), Some(format!("fake://{fresh}").as_str()), "on the fresh branch, not the preview's");
+    let host = e.apps.last_job_env.lock().iter().find(|(k, _)| k == "PGHOST").map(|(_, v)| v.clone());
+    assert_eq!(host.as_deref(), Some(fresh.as_str()), "the variables made from its URL too (PGHOST), never the preview's branch");
+    assert!(e.pg.masks.lock().iter().any(|(b, _)| *b == fresh), "masked before it ran");
+    assert!(!e.pg.branches.lock().contains(&fresh), "and gone after");
+    let r = e.engine.store.preview(&p.id).unwrap().rehearsal.expect("how it went");
+    assert_eq!((r.ok, r.by.as_str(), r.head.as_str()), (Some(true), "ana", p.build()));
+    // Once a head: the next converge doesn't run it again.
+    e.engine.store.update(&p.id, |x| x.next_at = 0).unwrap();
+    e.engine.pass().await.unwrap();
+    assert_eq!(e.apps.seeds.lock().len(), ran + 1);
+}
+
+/// With `rehearse_when_queued`, a change queued to land has its release rehearsed on today's data
+/// by roll, once at that head; without it, nothing is asked.
+#[tokio::test]
+async fn a_change_queued_to_land_is_rehearsed_where_the_project_asks() {
+    let e = env(json!({ "enabled": true, "release": { "image": "node:22", "run": "npm run migrate" }, "rehearse_when_queued": true }));
+    e.code.open(ChangeInfo { queued: true, ..change("chg_rq", 1) });
+    e.code.open(change("chg_rn", 3));
+    e.engine.pass().await.unwrap();
+    let open = e.engine.store.row_by_change("chg_rn").unwrap().unwrap();
+    assert!(e.engine.store.preview(&open.id).unwrap().rehearsal.is_none(), "an open change that isn't queued isn't rehearsed");
+    // Queued later, its preview settled: discovered, and rehearsed before the queue lands it.
+    e.code.edit("chg_rn", |c| c.queued = true);
+    e.engine.pass().await.unwrap();
+    e.engine.pass().await.unwrap();
+    assert_eq!(e.engine.store.preview(&open.id).unwrap().rehearsal.and_then(|x| x.ok), Some(true), "rehearsed once it was queued");
+    let p = e.engine.store.row_by_change("chg_rq").unwrap().unwrap();
+    let r = e.engine.store.preview(&p.id).unwrap().rehearsal.expect("rehearsed");
+    assert_eq!((r.by.as_str(), r.ok), ("roll", Some(true)));
+    let ran = e.apps.seeds.lock().len();
+    e.engine.store.update(&p.id, |x| x.next_at = 0).unwrap();
+    e.engine.pass().await.unwrap();
+    assert_eq!(e.apps.seeds.lock().len(), ran, "once at that head");
+    // Not queued, or not asked for: none.
+    let quiet = env(json!({ "enabled": true, "release": { "image": "node:22", "run": "npm run migrate" } }));
+    quiet.code.open(ChangeInfo { queued: true, ..change("chg_rq2", 2) });
+    quiet.engine.pass().await.unwrap();
+    let q = quiet.engine.store.row_by_change("chg_rq2").unwrap().unwrap();
+    assert!(quiet.engine.store.preview(&q.id).unwrap().rehearsal.is_none());
+}
+
 /// A visual change refused (Chromatic's Deny): the review fails at that head, the change is told at
 /// once, an accept of the pages clears it, and a new head asks again.
 #[tokio::test]
@@ -1570,6 +1671,58 @@ async fn masked_postgres_is_masked_before_it_serves_and_new_rules_reach_it() {
     assert_eq!(e.pg.made.load(Ordering::SeqCst), made + 2);
     assert_eq!(e.pg.masks.lock().len(), 3);
     assert_eq!(e.engine.store.row(&p.id).unwrap().state, State::Ready);
+}
+
+/// Masked branches come from one masked base per parent and rules (Neon's anonymized branches):
+/// the base is masked once and each preview branches from it, masked as it is; new rules make a
+/// new base, and the old one goes once no branch comes from it.
+#[tokio::test]
+async fn masked_branches_come_from_one_masked_base() {
+    let e = env_with_config(json!({ "enabled": true, "masking": { "postgres:prj_db": { "public.users.email": "email" } } }), |c| c.mask_base_for = std::time::Duration::from_secs(86_400));
+    let masked = || e.pg.masks.lock().iter().map(|(b, _)| b.clone()).collect::<Vec<_>>();
+    e.code.open(change("chg_mb1", 1));
+    e.engine.pass().await.unwrap();
+    let first = masked();
+    assert!(first.len() == 1 && first[0].starts_with("prj_db~pvbase-"), "the base is masked, not the preview's branch: {first:?}");
+    let base = first[0].clone();
+    e.code.open(change("chg_mb2", 2));
+    e.engine.pass().await.unwrap();
+    assert_eq!(masked(), first, "a second preview masks nothing: it branches from the base");
+    let from_base = |e: &Env| e.pg.from.lock().iter().filter(|(c, of)| **of == base && e.pg.branches.lock().contains(*c)).count();
+    assert!(from_base(&e) >= 2, "both previews' branches come from it");
+    for id in ["chg_mb1", "chg_mb2"] {
+        let p = e.engine.store.row_by_change(id).unwrap().unwrap();
+        assert!(e.engine.store.mask_digest(&p.id, Kind::Postgres, "prj_db").unwrap().is_some_and(|d| !d.is_empty()), "each recorded as masked by the rules");
+    }
+    // New rules: a new base, and the previews branch from it; the old base goes with its last branch.
+    let mut s = e.engine.store.settings(&e.project).unwrap();
+    s.masking.insert("postgres:prj_db".into(), [("public.users.name".to_string(), "redact".to_string())].into_iter().collect());
+    e.engine.store.put_settings(&e.project, &s).unwrap();
+    for r in e.engine.store.rows(Some(&e.project)).unwrap() {
+        e.engine.store.update(&r.id, |x| x.next_at = 0).unwrap();
+    }
+    e.engine.pass().await.unwrap();
+    e.engine.pass().await.unwrap();
+    let now = masked();
+    assert!(now.len() >= 2 && now.iter().filter(|b| b.starts_with("prj_db~pvbase-")).count() >= 2, "a base for the new rules: {now:?}");
+    assert!(!e.pg.branches.lock().contains(&base), "the old base is deleted once nothing comes from it");
+}
+
+/// A masked base that couldn't be made holds no branch up: the preview masks its own copy, and
+/// the next one takes the claim over at once (no wait on a claim nothing holds) and makes it.
+#[tokio::test]
+async fn a_masked_base_that_failed_holds_no_branch_up() {
+    let e = env_with_config(json!({ "enabled": true, "masking": { "postgres:prj_db": { "public.users.email": "email" } } }), |c| c.mask_base_for = std::time::Duration::from_secs(86_400));
+    e.pg.fail_masks.store(1, std::sync::atomic::Ordering::SeqCst);
+    e.code.open(change("chg_mf1", 1));
+    e.engine.pass().await.unwrap();
+    let masked = || e.pg.masks.lock().iter().map(|(b, _)| b.clone()).collect::<Vec<_>>();
+    assert!(masked().iter().all(|b| !b.starts_with("prj_db~pvbase-")) && masked().len() == 1, "its own copy masked: {:?}", masked());
+    e.code.open(change("chg_mf2", 2));
+    let started = std::time::Instant::now();
+    e.engine.pass().await.unwrap();
+    assert!(started.elapsed() < std::time::Duration::from_secs(30), "no wait on the failed claim: {:?}", started.elapsed());
+    assert!(masked().iter().any(|b| b.starts_with("prj_db~pvbase-")), "the base made now: {:?}", masked());
 }
 
 /// A restore point: the data saved (Postgres's and Redis's, the products that put a branch back

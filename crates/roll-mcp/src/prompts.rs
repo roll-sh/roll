@@ -384,7 +384,7 @@ const PROMPTS: &[Prompt] = &[
             Arg { name: "field", description: "The text field to search by meaning, if you know which", required: false },
         ],
         // A provider's endpoint needs admin on the cluster: without it, roll's own model.
-        needs: &["search_get_mapping", "search_put_mapping", "search_query", "search_list_indices", "search_bulk"],
+        needs: &["search_get_mapping", "search_put_mapping", "search_query", "search_list_indices", "search_update_by_query"],
         text: |a| {
             format!(
                 "Set up semantic search on index {index} of search cluster {cluster}; the field is {field} (empty: \
@@ -402,13 +402,12 @@ const PROMPTS: &[Prompt] = &[
                  {{type: semantic_text, inference_id}}, and copy_to it on the source field, its type, settings and \
                  any copy_to targets it has kept (copy_to is replaced, not added to). Documents written from then \
                  on are embedded as they're indexed; the ones already there aren't until they're written again. \
-                 Say how many there are (search_list_indices). If I want them embedded now, there are a few \
-                 thousand or fewer, and they have a unique keyword or numeric field: read them in pages of 500 \
-                 with search_query (sort on that field, search_after, _source, seq_no_primary_term: true), \
-                 stopping at that count, and write each page back through search_bulk as index actions under \
-                 each document's _id with its if_seq_no and if_primary_term, so a document changed meanwhile \
-                 is skipped (a conflict), never overwritten; tell me how many were skipped. Otherwise tell me \
-                 it needs a reindex and stop there. Then check it: for three queries I'd \
+                 Say how many there are (search_list_indices), and what embedding them costs (each takes \
+                 the model's time). If I want them embedded now, search_update_by_query on the index with no \
+                 script, conflicts proceed (a document changed meanwhile is already embedded) and, past a few \
+                 thousand documents, wait_for_completion false; then search_wait_task with \
+                 wait_for_completion true until it completes, and tell me how many were updated and any \
+                 failures. Then check it: for three queries I'd \
                  type, run search_query with {{semantic: {{field, query}}}} on the new field, a match query on the \
                  old one, and a hybrid rrf retriever over both (standard retrievers, one each), with highlight on \
                  the semantic field, and show me the top five of each side by side. Recommend the hybrid one \
@@ -440,8 +439,10 @@ const PROMPTS: &[Prompt] = &[
                  isn't enough, if you have it; before a flow that changes its data, previews_save_data, and \
                  after it previews_restore with previews_wait until it's ready again (it can take minutes); \
                  previews_list_notes for what people left on \
-                 its pages. Tell me whether it's ready to land, with the evidence for each problem. Don't resolve \
-                 notes, refresh, reset or delete the preview without asking me.",
+                 its pages. When the change migrates its database and the preview was made days ago, \
+                 offer previews_rehearse, if you have it: its release again on today's data (previews_wait, then \
+                 its rehearsal: call out a failure, or a release over a minute). Tell me whether it's ready to land, with the evidence for each problem. Don't resolve \
+                 notes, refresh, reset, rehearse or delete the preview without asking me.",
                 a("preview")
             )
         },

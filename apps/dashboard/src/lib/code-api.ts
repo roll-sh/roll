@@ -409,6 +409,8 @@ export interface PreviewEnvironment {
   schema_changes?: string[];
   /** What in `schema_changes` would hurt production when it lands (roll previews' `schema::risks`). */
   schema_risks?: string[];
+  /** Other open changes whose previews' schema changes touch the same tables: `[branch, tables]`. */
+  schema_overlaps?: [string, string[]][];
   /** How long the release (migrations) took on the preview's data, and at the run before. */
   release_ms?: number;
   release_before_ms?: number;

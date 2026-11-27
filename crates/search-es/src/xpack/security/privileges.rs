@@ -289,6 +289,9 @@ pub fn action_of(api: &str) -> (Scope, String) {
         "eql.search" => Some((Index, "indices:data/read/eql")),
         "graph.explore" => Some((Index, "indices:data/read/xpack/graph/explore")),
         "esql.query" | "esql.async_query" => Some((Any, "indices:data/read/esql")),
+        // roll's A/B tests (`crate::xpack::entsearch::experiments`): promoting a variant writes
+        // the search application, as its `PUT` does.
+        "roll.search_application.promote_experiment" => Some((Cluster, "cluster:admin/xpack/application/search_application/put")),
         "sql.query" | "sql.translate" => Some((Any, "indices:data/read/sql")),
         "index" | "create" => Some((Index, "indices:data/write/index")),
         "update" => Some((Index, "indices:data/write/update")),

@@ -281,6 +281,9 @@ pub struct UsageSample {
     pub requests: i64,
     /// CPU milliseconds the node's embedding pool spent on the cluster's inputs.
     pub inference_ms: i64,
+    /// Provider tokens of the cluster's completions and chat answers (metered, not priced).
+    pub input_tokens: i64,
+    pub output_tokens: i64,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -295,6 +298,10 @@ pub struct UsageTotals {
     pub stored_gib_months: f64,
     /// CPU seconds the node's embedding pool spent on the cluster's inputs (E5).
     pub inference_cpu_seconds: f64,
+    /// Provider tokens of completions and chat answers, as the provider reported them (else
+    /// roll's estimate). The provider bills them: they aren't priced.
+    pub input_tokens: i64,
+    pub output_tokens: i64,
 }
 
 /// A deleted cluster kept for restoring until `purge_at`.
@@ -604,6 +611,9 @@ impl Store {
         db.add_column("search_clusters", "loaded_on", "TEXT")?;
         // Intervals before inference was metered had none.
         db.add_column("search_usage", "inference_ms", "INTEGER NOT NULL DEFAULT 0")?;
+        // Intervals before provider tokens were metered had none.
+        db.add_column("search_usage", "input_tokens", "INTEGER NOT NULL DEFAULT 0")?;
+        db.add_column("search_usage", "output_tokens", "INTEGER NOT NULL DEFAULT 0")?;
         db.add_column("search_clusters", "own_bytes", "INTEGER NOT NULL DEFAULT 0")?;
         db.add_column("search_clusters", "wake_at", "INTEGER")?;
         // Clusters made before owners stay the operator's (none).
@@ -660,6 +670,10 @@ impl Store {
         db.ensure_schema(
             "CREATE TABLE IF NOT EXISTS search_experiments (cluster_id TEXT NOT NULL, app TEXT NOT NULL, experiment TEXT NOT NULL, variant TEXT NOT NULL, searches INTEGER NOT NULL, clicks INTEGER NOT NULL, conversions INTEGER NOT NULL, value_milli INTEGER NOT NULL, PRIMARY KEY (cluster_id, app, experiment, variant))",
         )?;
+        // Trials whose first search found nothing, and every search's latency as a histogram
+        // (`VariantStats::latency`, JSON).
+        db.add_column("search_experiments", "no_hits", "INTEGER")?;
+        db.add_column("search_experiments", "latency", "TEXT")?;
         // Browser keys' usage, in the metrics' rings (`record_browser_usage`).
         db.ensure_schema(
             "CREATE TABLE IF NOT EXISTS search_browser_usage (cluster_id TEXT NOT NULL, key_id TEXT NOT NULL, res INTEGER NOT NULL, slot INTEGER NOT NULL, at INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY (cluster_id, key_id, res, slot))",
@@ -1502,6 +1516,19 @@ impl Store {
                        value_milli = search_experiments.value_milli + excluded.value_milli",
                     params![id, app, exp, variant, n(s.searches), n(s.clicks), n(s.conversions), milli],
                 )?;
+                // The histogram adds up bucket by bucket: read, add, write, in this transaction.
+                let kept: Option<(Option<i64>, Option<String>)> = x
+                    .query_row("SELECT no_hits, latency FROM search_experiments WHERE cluster_id = ?1 AND app = ?2 AND experiment = ?3 AND variant = ?4", params![id, app, exp, variant], |r| Ok((r.get(0)?, r.get(1)?)))
+                    .optional()?;
+                let (no_hits, latency) = kept.unwrap_or((None, None));
+                let mut hist = latency_of(latency.as_deref());
+                for (a, b) in hist.iter_mut().zip(s.latency) {
+                    *a = a.saturating_add(b);
+                }
+                x.execute(
+                    "UPDATE search_experiments SET no_hits = ?5, latency = ?6 WHERE cluster_id = ?1 AND app = ?2 AND experiment = ?3 AND variant = ?4",
+                    params![id, app, exp, variant, no_hits.unwrap_or(0).saturating_add(n(s.no_hits)), serde_json::to_string(&hist.to_vec()).unwrap_or_default()],
+                )?;
             }
             Ok::<_, code_sql::Error>(())
         })?;
@@ -1510,15 +1537,22 @@ impl Store {
 
     /// A cluster's experiments' counts, by (application, experiment, variant).
     pub async fn experiments(&self, id: &str) -> anyhow::Result<Vec<(search_es::analytics::VariantKey, search_es::analytics::VariantStats)>> {
-        let rows: Vec<(String, String, String, i64, i64, i64, i64)> = self.db.read(|x| {
+        type ExpRow = (String, String, String, i64, i64, i64, i64, Option<i64>, Option<String>);
+        let rows: Vec<ExpRow> = self.db.read(|x| {
             x.query(
-                "SELECT app, experiment, variant, searches, clicks, conversions, value_milli FROM search_experiments WHERE cluster_id = ?1 ORDER BY app, experiment, variant",
+                "SELECT app, experiment, variant, searches, clicks, conversions, value_milli, no_hits, latency FROM search_experiments WHERE cluster_id = ?1 ORDER BY app, experiment, variant",
                 params![id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?)),
             )
         })?;
         let u = |v: i64| u64::try_from(v).unwrap_or(0);
-        Ok(rows.into_iter().map(|(a, e, v, s, c, cv, m)| ((a, e, v), search_es::analytics::VariantStats { searches: u(s), clicks: u(c), conversions: u(cv), value: m as f64 / 1000.0 })).collect())
+        Ok(rows
+            .into_iter()
+            .map(|(a, e, v, s, c, cv, m, z, l)| {
+                let stats = search_es::analytics::VariantStats { searches: u(s), clicks: u(c), conversions: u(cv), value: m as f64 / 1000.0, no_hits: u(z.unwrap_or(0)), latency: latency_of(l.as_deref()) };
+                ((a, e, v), stats)
+            })
+            .collect())
     }
 
     /// A cluster's analytics buckets of `res` seconds (3600 or 86400) from `since` (unix
@@ -1626,8 +1660,8 @@ impl Store {
     pub async fn record_usage(&self, id: &str, u: &UsageSample) -> anyhow::Result<()> {
         self.db.write(|x| {
             x.execute(
-                "INSERT INTO search_usage (cluster_id, at, seconds, loaded_bytes, requests, inference_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![id, u.at, u.seconds, u.loaded_bytes, u.requests, u.inference_ms],
+                "INSERT INTO search_usage (cluster_id, at, seconds, loaded_bytes, requests, inference_ms, input_tokens, output_tokens) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![id, u.at, u.seconds, u.loaded_bytes, u.requests, u.inference_ms, u.input_tokens, u.output_tokens],
             )
         })?;
         Ok(())
@@ -1787,13 +1821,14 @@ impl Store {
 
     /// Totals over `[since, now]`.
     pub async fn usage_since(&self, id: &str, since: i64, now: i64) -> anyhow::Result<UsageTotals> {
-        let (seconds, byte_seconds, requests, peak, inference_ms): (i64, f64, i64, i64, i64) = self.db.read(|x| {
+        type Sums = (i64, f64, i64, i64, i64, i64, i64);
+        let (seconds, byte_seconds, requests, peak, inference_ms, input_tokens, output_tokens): Sums = self.db.read(|x| {
             x.query_row(
                 "SELECT COALESCE(SUM(seconds), 0), COALESCE(SUM(CAST(seconds AS REAL) * loaded_bytes), 0.0), COALESCE(SUM(requests), 0),
-                        COALESCE(MAX(loaded_bytes), 0), COALESCE(SUM(inference_ms), 0)
+                        COALESCE(MAX(loaded_bytes), 0), COALESCE(SUM(inference_ms), 0), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0)
                  FROM search_usage WHERE cluster_id = ?1 AND at >= ?2",
                 params![id, since],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
             )
         })?;
         Ok(UsageTotals {
@@ -1802,6 +1837,8 @@ impl Store {
             requests,
             peak_loaded_bytes: peak,
             inference_cpu_seconds: inference_ms as f64 / 1000.0,
+            input_tokens,
+            output_tokens,
             stored_gib_months: self.storage_byte_seconds(id, since, now).await? / GIB / MONTH_SECONDS,
         })
     }
@@ -1945,8 +1982,8 @@ mod tests {
 
     async fn usage_totals(s: &Store) {
         assert_eq!(s.insert(&cluster("srch_u", "usage"), Caps::NONE).await.unwrap(), Inserted::Yes);
-        s.record_usage("srch_u", &UsageSample { at: 100, seconds: 60, loaded_bytes: 1 << 30, requests: 10, inference_ms: 1500 }).await.unwrap();
-        s.record_usage("srch_u", &UsageSample { at: 160, seconds: 30, loaded_bytes: 2 << 30, requests: 5, inference_ms: 0 }).await.unwrap();
+        s.record_usage("srch_u", &UsageSample { at: 100, seconds: 60, loaded_bytes: 1 << 30, requests: 10, inference_ms: 1500, ..Default::default() }).await.unwrap();
+        s.record_usage("srch_u", &UsageSample { at: 160, seconds: 30, loaded_bytes: 2 << 30, requests: 5, ..Default::default() }).await.unwrap();
         let t = s.usage_since("srch_u", 0, 200).await.unwrap();
         assert_eq!((t.loaded_seconds, t.requests, t.peak_loaded_bytes, t.inference_cpu_seconds), (90, 15, 2 << 30, 1.5));
         assert!((t.loaded_gib_hours - (60.0 + 60.0) / 3600.0).abs() < 1e-12);
@@ -2307,6 +2344,17 @@ fn verification_row(r: &Row) -> code_sql::Result<SiteVerification> {
         checked_at: r.get(11)?,
         due_at: r.get(12)?,
     })
+}
+
+/// A latency histogram as stored (`None`, or anything unreadable: empty).
+fn latency_of(stored: Option<&str>) -> [u64; search_es::analytics::LATENCY_BUCKETS] {
+    let mut out = [0u64; search_es::analytics::LATENCY_BUCKETS];
+    if let Some(v) = stored.and_then(|s| serde_json::from_str::<Vec<u64>>(s).ok()) {
+        for (a, b) in out.iter_mut().zip(v) {
+            *a = b;
+        }
+    }
+    out
 }
 
 #[cfg(test)]

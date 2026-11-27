@@ -558,7 +558,7 @@ pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Work
 /// product's): roll-access makes and changes every token, so it asks on each (guardrails.rs).
 fn cap_token_lifetimes(access: &roll_access::Access, secrets: Arc<Secrets>) {
     let cap: roll_access::LifetimeCap = Box::new(move |rules| {
-        if !rules.0.iter().any(|r| r.product == "secrets" || r.product == "*") {
+        if !reaches_secrets(rules) {
             return None;
         }
         secrets.token_days_cap().unwrap_or_else(|e| {
@@ -567,6 +567,12 @@ fn cap_token_lifetimes(access: &roll_access::Access, secrets: Arc<Secrets>) {
         })
     });
     let _ = access.lifetime_cap.set(cap);
+}
+
+/// Whether a grant's rules reach roll secrets, for its policy's `max_token_days`: a `secrets` or
+/// `*` rule.
+fn reaches_secrets(rules: &roll_auth::scope::Scope) -> bool {
+    rules.0.iter().any(|r| r.product == "secrets" || r.product == "*")
 }
 
 /// A decoy key's token was used: roll-access tells roll secrets, which raises `decoy_used` on its
@@ -2263,6 +2269,16 @@ impl roll_secrets::Workloads for Workloads {
     fn grants(&self) -> roll_secrets::Result<Vec<roll_auth::Grant>> {
         let list = self.0.store.list().map_err(|e| Error::Internal(format!("listing roll-access's tokens: {e}")))?;
         Ok(self.now(list.into_iter().filter(|g| g.revoked_at.is_none())))
+    }
+
+    fn outliving(&self, days: u32) -> roll_secrets::Result<Vec<roll_secrets::guardrails::Outliving>> {
+        let list = self.0.store.list().map_err(|e| Error::Internal(format!("listing roll-access's tokens: {e}")))?;
+        let (now, past) = (code_sql::now_ms(), code_sql::now_ms() + i64::from(days) * 86_400_000);
+        Ok(list
+            .into_iter()
+            .filter(|g| g.kind != "workload" && !g.decoy && !g.pending && g.live(now) && reaches_secrets(&g.rules) && g.expires_at.is_none_or(|e| e > past))
+            .map(|g| roll_secrets::guardrails::Outliving { kind: g.kind.to_string(), id: g.id, name: g.name, user: g.user, created_at: g.created_at, expires_at: g.expires_at })
+            .collect())
     }
 
     /// A machine identity's bootstrap token: roll-access's chain, owned as the identity's logins are.
