@@ -221,7 +221,7 @@ fn value_of(raw: &Raw, m: &Metric) -> Result<(Value, &'static str), String> {
             if !bc.is_empty() && bc.len() != eb.len() + 1 {
                 return Err(format!("histogram {name:?} bucket count must be one greater than explicit bounds count, ignoring"));
             }
-            if eb.windows(2).any(|w| !(w[0] < w[1])) {
+            if eb.windows(2).any(|w| w[0].partial_cmp(&w[1]) != Some(std::cmp::Ordering::Less)) {
                 return Err(format!("histogram {name:?} bounds are not sorted or are not unique, ignoring"));
             }
             if eb.is_empty() {
@@ -447,9 +447,9 @@ fn fixed64s(w: Wire<'_>, out: &mut Vec<u64>, budget: &mut Budget) -> Step<()> {
             if b.len() % 8 != 0 {
                 return Step::Stop(Fail::Malformed("a packed fixed64 field isn't a multiple of 8 bytes".into()));
             }
-            for c in b.chunks_exact(8) {
+            for c in b.as_chunks::<8>().0 {
                 step_m!(budget.value(0));
-                out.push(u64::from_le_bytes(c.try_into().unwrap_or_default()));
+                out.push(u64::from_le_bytes(*c));
             }
         }
         w => {
