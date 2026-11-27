@@ -1111,16 +1111,16 @@ async fn approve(State(a): S, ext: Extensions, Path(id): Path<String>, body: axu
     let decided = blocking(a.clone(), move |a| a.decide(&id, true, &by, None)).await?;
     a.changed(&decided);
     // Checked again now it's decided: a gate added meanwhile means it was approved once.
-    if let Some((grant, rule, until)) = remembered.filter(|_| decided.state == "approved" && a.policy().gates(&decided).is_empty()) {
+    if let Some((grant, rules, until)) = remembered.filter(|_| decided.state == "approved" && a.policy().gates(&decided).is_empty()) {
         let apr = decided.id.clone();
-        blocking(a.clone(), move |a| a.store.remember(&grant, &rule, until, &apr)).await?;
+        blocking(a.clone(), move |a| rules.iter().try_for_each(|rule| a.store.remember(&grant, rule, until, &apr).map(|_| ()))).await?;
     }
     Ok(Json(json!(decided)))
 }
 
 /// What approving `id` with `remember` would also allow: the grant, the rule (the request's action
 /// on its one resource) and until when (`None`: for good). Checked before anything is decided.
-async fn remembered(a: &Arc<Access>, id: &str, remember: Option<&str>) -> crate::Result<Option<(String, roll_auth::scope::Rule, Option<i64>)>> {
+async fn remembered(a: &Arc<Access>, id: &str, remember: Option<&str>) -> crate::Result<Option<(String, Vec<roll_auth::scope::Rule>, Option<i64>)>> {
     let hours = |h: i64| Some(Some(code_sql::now_ms() + h * 3_600_000));
     let until: Option<Option<i64>> = match remember {
         None | Some("once") => None,
@@ -1168,22 +1168,52 @@ async fn remembered(a: &Arc<Access>, id: &str, remember: Option<&str>) -> crate:
     if let Some(p) = roll_auth::scope::Scope(vec![rule.clone()]).problems().first() {
         return Err(Error::BadRequest(format!("this request can't be remembered ({p}): approve it once")));
     }
+    let g = found.grant_id.clone();
+    let grant = blocking(a.clone(), move |a| a.store.get(&g)).await?;
+    // A lend's approval (a secret a route writes as the caller) covers the route's own action too
+    // when that asked as well: remembered with it, so the next call doesn't ask about half of it.
+    let mut rules = vec![rule];
+    if let Some(own) = own_rule(a, &found, &grant) {
+        rules.push(own);
+    }
     // A rule a product caps (roll secrets' `max_token_days`) is remembered for that long at most:
     // for good becomes until then.
-    let one = roll_auth::scope::Scope(vec![rule.clone()]);
-    let until = match a.within_cap(&one, until) {
+    let all = roll_auth::scope::Scope(rules.clone());
+    let until = match a.within_cap(&all, until) {
         capped @ Some(_) => capped,
         None => {
-            // For good is a change to the token: it meets the policy as it is now, with the rule.
-            let g = found.grant_id.clone();
-            let grant = blocking(a.clone(), move |a| a.store.get(&g)).await?;
-            let mut rules = grant.rules.clone();
-            rules.0.push(rule.clone());
-            a.meets_policy(&rules, grant.expires_at)?;
+            // For good is a change to the token: it meets the policy as it is now, with the rules.
+            let mut with = grant.rules.clone();
+            with.0.extend(rules.iter().cloned());
+            a.meets_policy(&with, grant.expires_at)?;
             None
         }
     };
-    Ok(Some((found.grant_id, rule, until)))
+    Ok(Some((found.grant_id, rules, until)))
+}
+
+/// The rule for a lend's route's own action, when the approval was the lend's (its product isn't
+/// the route's), the row decides its action without the body, and the grant's rules don't allow
+/// it already: what the same approval covered (the gate asked for both at once).
+fn own_rule(a: &Access, found: &crate::store::Approval, grant: &crate::store::Grant) -> Option<roll_auth::scope::Rule> {
+    let f = catalog::by_path(&found.method, &found.path)?;
+    if f.row.lends.is_none() || f.row.product == found.product || matches!(f.row.act, catalog::Act::Body(_) | catalog::Act::Raw(_)) {
+        return None;
+    }
+    let params = f.params.unwrap_or_default();
+    let action = f.row.action_with(&found.method, &params, None, &axum::http::HeaderMap::new());
+    let Target::One(r) = crate::evaluate::target(a, f.row, &params, None, &axum::http::HeaderMap::new(), grant.user.is_some()) else { return None };
+    if grant.rules.outcome(&Target::One(r.clone()), action) == Outcome::Allow {
+        return None;
+    }
+    Some(roll_auth::scope::Rule {
+        product: f.row.product.to_string(),
+        resources: roll_auth::scope::Resources::Some(vec![roll_auth::scope::Selector::Id { id: r.id.clone()?, index: r.index.clone() }]),
+        environments: r.environment.clone().map(|e| vec![e]),
+        paths: None,
+        unprotected: false,
+        actions: [(action, roll_auth::scope::Effect::Allow)].into_iter().collect(),
+    })
 }
 
 /// The rule an approval is about: its action on its one resource (or the product's every resource

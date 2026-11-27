@@ -467,7 +467,7 @@ first, so they can't hide what runs, and anything that makes or changes credenti
   code repo apps reads for the caller: a plan or an import of `repo`, a service built from
   `source: {kind: "repo"}` (made, or changed to it), each needs `read` on that repo, so no apps
   grant reaches a repo's code, head, stack or `roll.toml` by itself. When that decides, the approval is about the linked
-  resource, so remembering it allows revealing that one (all of reveal on it, not only the link);
+  resource, so remembering it allows revealing that one (all of reveal on it, not only the link), and the route's own action on its resource too when that asked as well (the card names both);
   when several linked resources aren't allowed outright, the approval names them all and is
   approved once. Each linked resource's reveal is its own audit row.
 - A roll secret another product writes once as the caller is lent the same way:
@@ -475,7 +475,7 @@ first, so they can't hide what runs, and anything that makes or changes credenti
   - **What's checked:** `write` on that folder as roll secrets decides it, protected environments included. The environment and path are checked as roll secrets names them, so a pattern like `prod*` is refused rather than remembered as a wildcard.
   - **An approval** names that folder, even when the route's own action asks too. Remembering it allows that folder and its subfolders in that environment (a folder's rule reaches every folder under it). `/`, the default, is the whole environment, so a secrets approval at the root (or naming no folder) is remembered for 8 hours at most, and the approval screen offers only that.
   - **The grant the product gets** carries one exact rule (that folder: `write`) for this request, plus `read` on that folder whenever the write passes, allowed outright or approved, since the product reads the version back. roll secrets checks the caller again inside, and nothing else in the project opens.
-  - **A remembered approval** keeps to what it named. When the route's own action asked too (admin on the cluster), only the secret is remembered, and the next call asks about the route's own action again.
+  - **A remembered approval** keeps to what it named. When the route's own action asked too (admin on the cluster), the card names both ("write secrets prj_… in production:/ai, and admin search cl_…"), and remembering keeps both. A route whose action its body decides keeps only the secret's, and asks about its own again.
   - **A secret a product keeps following needs `reveal` allowed outright.** That covers an inference endpoint keyed by a secret (its sync) and a bound `roll://` reference: either is checked again as its maker at every use, so an approval can't stand in for it.
 - Comparing a local copy with a secrets folder (`POST …/environments/{env}/diff`, by fingerprint,
   names only) tests a guess at a value: `reveal` there, as reading the values is.
