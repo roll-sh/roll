@@ -946,6 +946,20 @@ impl Runtime {
         let team = access.mode == crate::settings::Access::Team;
         let query = req.uri().query().unwrap_or("").to_string();
         let given = |name: &str| query.split('&').filter_map(|kv| kv.split_once('=')).find(|(k, _)| *k == name).map(|(_, v)| v);
+        // A webhook URL (Stripe's, GitHub's): its token in the query, for its one path only, at
+        // every request (no cookie, no redirect); the service gets the request without it.
+        if let Some(t) = given("roll_hook").map(str::to_string)
+            && let Some(hook) = crate::visit::webhook_visit(&self.store, self.engine().ok().as_ref(), preview, &t, service, req.uri().path(), self.cfg.visitor_recheck).await
+        {
+            let rest: Vec<&str> = query.split('&').filter(|kv| !kv.starts_with("roll_hook=") && !kv.is_empty()).collect();
+            let path = req.uri().path().to_string();
+            let Ok(uri) = (if rest.is_empty() { path } else { format!("{path}?{}", rest.join("&")) }).parse() else { return Some((StatusCode::BAD_REQUEST, "bad request").into_response()) };
+            *req.uri_mut() = uri;
+            if let Ok(now) = self.store.now_ms() {
+                let _ = self.store.webhook_hit(&hook.id, now);
+            }
+            return None;
+        }
         if team {
             // A ticket from roll's dashboard, coming back: the session it opens.
             if req.uri().path() == crate::visit::PATH {
@@ -1470,6 +1484,10 @@ fn story_shots<'a>(said: &str, pngs: impl Iterator<Item = &'a str>) -> (Vec<crat
         #[serde(default)]
         touched_left: u32,
         #[serde(default)]
+        touched_total: u32,
+        #[serde(default)]
+        touched_taken: u32,
+        #[serde(default)]
         by_files: bool,
     }
     let run: Run = serde_json::from_str(said.trim()).unwrap_or_default();
@@ -1480,6 +1498,8 @@ fn story_shots<'a>(said: &str, pngs: impl Iterator<Item = &'a str>) -> (Vec<crat
         stories: run.left.min(100_000),
         first_stories: run.first_left.into_iter().filter(|id| crate::settings::story_id_ok(id)).take(10).collect(),
         touched_stories: run.touched_left.min(run.left).min(100_000),
+        touched_total: run.touched_total.min(100_000),
+        touched_taken: run.touched_taken.min(run.touched_total).min(100_000),
         by_files: run.by_files && run.left > 0,
     };
     let said = run.stories;
@@ -1508,12 +1528,17 @@ fn play_step_of(step: Option<String>, play: Option<crate::Play>) -> Option<Strin
 }
 
 /// Shards' stories back in the touched-first order they were dealt from (one each in turn: the
-/// i-th of every shard, then the next), and what they left together.
-fn merge_story_shards(shards: Vec<(Vec<crate::ports::PageShot>, crate::Skipped)>) -> (Vec<crate::ports::PageShot>, crate::Skipped) {
+/// i-th of every shard, then the next), and what they left together. `failed` shards' share of
+/// the stories the change touched (what the others neither took nor left) counts as untaken, so
+/// the visual review holds on it as on the ones left out.
+fn merge_story_shards(shards: Vec<(Vec<crate::ports::PageShot>, crate::Skipped)>, failed: usize) -> (Vec<crate::ports::PageShot>, crate::Skipped) {
     let mut skipped = crate::Skipped::default();
+    let (mut touched, mut accounted) = (0u32, 0u32);
     let mut firsts: Vec<std::vec::IntoIter<String>> = Vec::new();
     let mut lists: Vec<std::vec::IntoIter<crate::ports::PageShot>> = Vec::new();
     for (shots, left) in shards {
+        touched = touched.max(left.touched_total);
+        accounted += left.touched_taken + left.touched_stories;
         skipped.stories += left.stories;
         skipped.touched_stories += left.touched_stories;
         skipped.by_files |= left.by_files;
@@ -1528,6 +1553,11 @@ fn merge_story_shards(shards: Vec<(Vec<crate::ports::PageShot>, crate::Skipped)>
         skipped.first_stories.extend(firsts.iter_mut().filter_map(Iterator::next));
     }
     skipped.first_stories.truncate(10);
+    if failed > 0 {
+        let missing = touched.saturating_sub(accounted);
+        skipped.touched_stories += missing;
+        skipped.stories += missing;
+    }
     (shots, skipped)
 }
 
@@ -2331,19 +2361,20 @@ impl Runtime {
         });
         let done = futures::future::join_all(shards).await;
         let ms = done.iter().map(|(_, ms)| *ms).sum();
-        let (mut oks, mut first_err) = (Vec::new(), None);
+        let (mut oks, mut first_err, mut failed) = (Vec::new(), None, 0);
         for (r, _) in done {
             match r {
                 Ok(ok) => oks.push(ok),
                 Err(e) => {
                     warn!(service = %name, error = %e, "previews: a share of Storybook's stories");
+                    failed += 1;
                     first_err.get_or_insert(e);
                 }
             }
         }
         match (oks.is_empty(), first_err) {
             (true, Some(e)) => (Err(e), ms),
-            _ => (Ok(merge_story_shards(oks)), ms),
+            _ => (Ok(merge_story_shards(oks, failed)), ms),
         }
     }
 
@@ -3200,6 +3231,18 @@ mod tests {
         assert!(raw(post("https://evil.example")).await.starts_with("HTTP/1.1 403"), "another site's page posts nothing");
         rt.store.revoke_share(&row.id, &share.id).unwrap();
         assert!(raw(with_share).await.starts_with("HTTP/1.1 401"), "revoked: out at once");
+        // A webhook URL: its one path only, the service never seeing its token, no cookie; it
+        // isn't a share link, and it's out at once when revoked.
+        let (hook, htoken) = rt.store.create_webhook(&row.id, "web", "/hooks/stripe", "ada", None, "Stripe").unwrap();
+        let post_hook = format!("POST /hooks/stripe?roll_hook={htoken}&x=1 HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        let hooked = raw(post_hook.clone()).await;
+        assert!(hooked.ends_with("service saw /hooks/stripe?x=1") && !hooked.to_ascii_lowercase().contains("set-cookie"), "{hooked}");
+        assert!(raw(format!("GET /hello?roll_hook={htoken} HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nConnection: close\r\n\r\n")).await.starts_with("HTTP/1.1 401"), "another path");
+        assert!(raw(format!("GET /hello?roll_share={htoken} HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nConnection: close\r\n\r\n")).await.starts_with("HTTP/1.1 401"), "not a share link");
+        assert_eq!(rt.store.webhooks(&row.id).unwrap()[0].hits, 1);
+        assert!(rt.store.webhook_live(&row.id, &htoken, "api", "/hooks/stripe").unwrap().is_none(), "its own service's path only");
+        rt.store.revoke_webhook(&row.id, &hook.id).unwrap();
+        assert!(raw(post_hook).await.starts_with("HTTP/1.1 401"), "revoked: out at once");
         // The notes already left on a page: for the same visitors only.
         let notes = raw(format!("GET /__roll/feedback.json?path=%2F HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nCookie: roll_access_{}={token}\r\nConnection: close\r\n\r\n", row.id)).await;
         assert!(notes.contains("application/json") && notes.ends_with("[]"), "{notes}");
@@ -3573,9 +3616,14 @@ mod tests {
         let shot = |id: &str| crate::ports::PageShot { path: format!("story:{id}"), png: Vec::new(), errors: 0, report: Default::default() };
         let left = |n: u32, first: &[&str], touched: u32| crate::Skipped { stories: n, first_stories: first.iter().map(|s| s.to_string()).collect(), touched_stories: touched, ..Default::default() };
         // Dealt a, b, c, d, e over two: a, c, e and b, d.
-        let (shots, skipped) = merge_story_shards(vec![(vec![shot("a"), shot("c"), shot("e")], left(2, &["g", "i"], 1)), (vec![shot("b"), shot("d")], left(1, &["h"], 1))]);
+        let (shots, skipped) = merge_story_shards(vec![(vec![shot("a"), shot("c"), shot("e")], left(2, &["g", "i"], 1)), (vec![shot("b"), shot("d")], left(1, &["h"], 1))], 0);
         assert_eq!(shots.iter().map(|p| p.path.as_str()).collect::<Vec<_>>(), ["story:a", "story:b", "story:c", "story:d", "story:e"]);
         assert_eq!((skipped.stories, skipped.touched_stories, skipped.first_stories), (3, 2, vec!["g".to_string(), "h".to_string(), "i".to_string()]));
+        // A third shard failed: its share of the 10 the change touched (the two said took 4 and
+        // left 2 of them) is untaken too.
+        let said = |taken: u32, touched: u32| crate::Skipped { touched_total: 10, touched_taken: taken, touched_stories: touched, ..Default::default() };
+        let (_, skipped) = merge_story_shards(vec![(vec![shot("a")], said(3, 1)), (vec![shot("b")], said(1, 1))], 1);
+        assert_eq!(skipped.touched_stories, 2 + 4, "the failed share's 4 counted as untaken");
     }
 
     /// A stories run's report is the preview's code's: each story once, by an id Storybook would

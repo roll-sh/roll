@@ -5,7 +5,7 @@ import { appsApi, followShell as followAppsShell } from "@/lib/apps-api";
 import { codeApi } from "@/lib/code-api";
 import { Confirm } from "@/components/ui";
 import { TerminalScreen } from "@/components/terminal-screen";
-import { type RestorePoint, endpointSlower, type EndpointTime, a11yWords, checkSummary, seoWords, duration, followLogs, followShell, downloadFiles, openUrl, pageGroup, pageLabel, previewsApi, noteCropUrl, qrUrl, screenshotUrl, resourceId, thanMain, type CaughtMail, type PageCheck, type Preview, type TextDiff, type PreviewActivity, type PreviewVisitor, type PreviewKind, type PreviewShare, type RequestLine, type ServiceMetrics, type ErrorGroup, type TraceSummary, type TraceSpan, type RouteTime, type Repeated, UNTAKEN_STORIES } from "@/lib/previews-api";
+import { type RestorePoint, endpointSlower, type EndpointTime, a11yWords, checkSummary, seoWords, duration, followLogs, followShell, downloadFiles, openUrl, pageGroup, pageLabel, previewsApi, noteCropUrl, qrUrl, screenshotUrl, resourceId, thanMain, type CaughtMail, type PageCheck, type Preview, type TextDiff, type PreviewActivity, type PreviewVisitor, type PreviewKind, type PreviewShare, type PreviewWebhook, type RequestLine, type ServiceMetrics, type ErrorGroup, type TraceSummary, type TraceSpan, type RouteTime, type Repeated, UNTAKEN_STORIES } from "@/lib/previews-api";
 import { workFromError, workFromNote } from "@/lib/preview-work";
 import { verdict, type VerdictTarget } from "@/lib/preview-verdict";
 import { isProblem, logFilter, logLevel } from "@/lib/preview-logs";
@@ -440,6 +440,14 @@ export function PreviewSheet({
                   release {duration(p.release.ms)}
                   {p.release.before_ms != null ? ` · ${thanMain(p.release.ms, p.release.before_ms, "the push before") ?? "as before"}` : ""}
                 </p>
+                {p.release.locks && p.release.locks.length > 0 && (
+                  <p className="min-w-0 break-words font-mono text-[11px] text-danger tabular-nums" title="Locks the release held that made others wait, sampled while it ran: on production it would hold them as long">
+                    {p.release.locks
+                      .slice(0, 3)
+                      .map((l) => `${l.mode === "AccessExclusiveLock" ? "ACCESS EXCLUSIVE" : l.mode.replace(/Lock$/, "").replace(/([a-z])([A-Z])/g, "$1 $2").toUpperCase()} on ${l.table} ${duration(l.ms)}`)
+                      .join(" · ")}
+                  </p>
+                )}
                 {p.rehearsal && p.rehearsal.ok === null ? (
                   <span className="text-[11px] text-subtle">rehearsing on today's data…</span>
                 ) : p.rehearsal ? (
@@ -447,6 +455,7 @@ export function PreviewSheet({
                     on today's data {p.rehearsal.ok ? `passed in ${duration(p.rehearsal.ms ?? 0)}` : `failed: ${p.rehearsal.error ?? "see the activity"}`}
                   </span>
                 ) : null}
+                {p.main_on_change && <MainOnChangeLine m={p.main_on_change} />}
                 {p.change && (
                   <button
                     type="button"
@@ -665,6 +674,7 @@ export function PreviewSheet({
 
             <Vars id={p.id} />
             <Shares id={p.id} />
+            <Webhooks id={p.id} />
 
             <Label>Details</Label>
             <Rows
@@ -867,6 +877,88 @@ function Shares({ id }: { id: string }) {
                 {x.notes ? " · takes notes" : ""}
               </span>
               <button type="button" className="text-muted hover:text-danger disabled:opacity-40" disabled={busy} onClick={() => void act(() => previewsApi.unshare(id, x.id))}>
+                Revoke
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {error && <p className="text-[11.5px] text-danger">{error}</p>}
+    </>
+  );
+}
+
+/** URLs for webhooks into the private preview (Stripe's, GitHub's): one path each, until revoked. */
+function Webhooks({ id }: { id: string }) {
+  const [list, setList] = useState<PreviewWebhook[] | null>(null);
+  const [made, setMade] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [path, setPath] = useState("");
+  const [label, setLabel] = useState("");
+  useEffect(() => {
+    let live = true;
+    previewsApi.webhooks(id).then(
+      (l) => live && setList(l),
+      (e) => live && setError(errorText(e)),
+    );
+    return () => {
+      live = false;
+    };
+  }, [id]);
+  const act = async (fn: () => Promise<void>) => {
+    setBusy(true);
+    try {
+      await fn();
+      setList(await previewsApi.webhooks(id));
+      setError(null);
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  if (!list) return error ? <p className="text-[11.5px] text-danger">{error}</p> : null;
+  const open = list.filter((x) => !x.revoked);
+  const field = "h-7 min-w-0 rounded-md border border-line-2 bg-canvas px-2 text-[11.5px] outline-none placeholder:text-subtle focus:border-accent/60";
+  return (
+    <>
+      <Label>Webhooks</Label>
+      <p className="text-[11.5px] text-subtle">A URL for a webhook (Stripe, GitHub): requests to that one path get in, for as long as the preview lives.</p>
+      <form
+        className="flex gap-1.5"
+        onSubmit={(e) => {
+          e.preventDefault();
+          void act(async () => setMade((await previewsApi.webhook(id, path.trim(), label.trim())).url));
+        }}
+      >
+        <input value={path} onChange={(e) => setPath(e.target.value)} placeholder="/api/stripe" aria-label="The path it lets in" className={`${field} flex-1 font-mono`} />
+        <input value={label} onChange={(e) => setLabel(e.target.value)} maxLength={60} placeholder="For (optional)" aria-label="What it's for" className={`${field} w-28`} />
+        <button type="submit" className={small} disabled={busy || !path.trim().startsWith("/")}>
+          Make
+        </button>
+      </form>
+      {made && (
+        <div className="flex items-center gap-1.5 rounded-md border border-line-2 bg-canvas px-2 py-1.5">
+          <span className="min-w-0 flex-1 truncate font-mono text-[11px]" title={made}>
+            {made}
+          </span>
+          <button type="button" className="text-[11.5px] text-accent hover:underline" onClick={() => void navigator.clipboard?.writeText(made)}>
+            Copy
+          </button>
+        </div>
+      )}
+      {made && <p className="text-[11px] text-subtle">Shown only now: roll keeps no copy of it.</p>}
+      {open.length > 0 && (
+        <ul className="space-y-1">
+          {open.map((x) => (
+            <li key={x.id} className="flex items-center gap-2 text-[11.5px]">
+              <span className="min-w-0 truncate font-mono text-subtle">{x.path}</span>
+              <span className="min-w-0 flex-1 truncate text-muted">
+                {x.label ? `${x.label} · ` : ""}
+                {x.hits} {x.hits === 1 ? "request" : "requests"}
+              </span>
+              <button type="button" className="text-muted hover:text-danger disabled:opacity-40" disabled={busy} onClick={() => void act(() => previewsApi.unwebhook(id, x.id))}>
                 Revoke
               </button>
             </li>
@@ -2578,5 +2670,19 @@ export function ThreadPopup({ preview, review, close = () => window.close() }: {
         <NoteThread previewId={p.id} change={p.change} review={review} where={p} onDone={() => setTimeout(close, 900)} />
       )}
     </div>
+  );
+}
+
+/** Main's code on a copy of this head's migrated data: the pages that broke there, or that none did. */
+function MainOnChangeLine({ m }: { m: NonNullable<Preview["main_on_change"]> }) {
+  const said = (s: number) => (s === 0 ? "no answer" : String(s));
+  const broke = m.pages.filter((x) => (x.main_status > 0 && x.main_status < 500) && (x.status === 0 || x.status >= 500));
+  const title = "Main's live build, taking no traffic, on a copy of this change's branches as its release left them: while the change deploys, the version before it serves on this schema";
+  if (m.error) return <span className="min-w-0 break-words text-[11px] text-subtle" title={title}>main's code on this data: {m.error}</span>;
+  if (broke.length === 0) return <span className="text-[11px] text-subtle" title={title}>main's code still answers on this data ({m.pages.length} {m.pages.length === 1 ? "page" : "pages"})</span>;
+  return (
+    <span className="min-w-0 break-words font-mono text-[11px] text-danger tabular-nums" title={title}>
+      main's code breaks on this data: {broke.slice(0, 3).map((x) => `${x.path} ${said(x.status)} (main ${said(x.main_status)})`).join(" · ")}
+    </span>
   );
 }

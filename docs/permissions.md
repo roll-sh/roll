@@ -467,15 +467,15 @@ first, so they can't hide what runs, and anything that makes or changes credenti
   code repo apps reads for the caller: a plan or an import of `repo`, a service built from
   `source: {kind: "repo"}` (made, or changed to it), each needs `read` on that repo, so no apps
   grant reaches a repo's code, head, stack or `roll.toml` by itself. When that decides, the approval is about the linked
-  resource, so remembering it allows revealing that one (all of reveal on it, not only the link);
+  resource, so remembering it allows revealing that one (all of reveal on it, not only the link), and the route's own action on its resource too when that asked as well (the card names both);
   when several linked resources aren't allowed outright, the approval names them all and is
   approved once. Each linked resource's reveal is its own audit row.
-- A roll secret another product writes once as the caller is lent the same way:
-  - **The route:** search's admin password rotated into one (`POST …/password` with `secret: {environment, path?, project?}`, `write`; the project left out is the one the cluster is on).
-  - **What's checked:** `write` on that folder as roll secrets decides it, protected environments included. The environment and path are checked as roll secrets names them, so a pattern like `prod*` is refused rather than remembered as a wildcard.
-  - **An approval** names that folder, even when the route's own action asks too. Remembering it allows that folder and its subfolders in that environment (a folder's rule reaches every folder under it). `/`, the default, is the whole environment, so a secrets approval at the root (or naming no folder) is remembered for 8 hours at most, and the approval screen offers only that.
-  - **The grant the product gets** carries one exact rule (that folder: `write`) for this request, plus `read` on that folder whenever the write passes, allowed outright or approved, since the product reads the version back. roll secrets checks the caller again inside, and nothing else in the project opens.
-  - **A remembered approval** keeps to what it named. When the route's own action asked too (admin on the cluster), only the secret is remembered, and the next call asks about the route's own action again.
+- A roll secret another product writes or reads once as the caller is lent the same way:
+  - **The routes:** search's admin password rotated into one (`POST …/password` with `secret: {environment, path?, project?}`, `write`; the project left out is the one the cluster is on), and roll apps' Cloudflare token for writing a domain's records (`POST …/domains/{host}/configure` with `cloudflare_token: "roll://[PROJECT@]ENV[/folder]/KEY"`, `reveal` on its folder, read once with `Secrets::use_once`; the project left out is the service's).
+  - **What's checked:** `write` (or `reveal`) on that folder as roll secrets decides it, protected environments included. The environment and path are checked as roll secrets names them, so a pattern like `prod*` is refused rather than remembered as a wildcard.
+  - **An approval** names that folder, even when the route's own action asks too. Remembering it allows that folder and its subfolders in that environment (a folder's rule reaches every folder under it). `/`, the default, is the whole environment, so a secrets approval at the root (or naming no folder) is remembered for 8 hours at most, and the approval screen offers only that. A secret lent to another product's route at the root (apps' DNS token as `roll://production/CF_TOKEN`, search's rotated password written to `/`) is approved once only: remembered, every later call would reach every key there. Keep such a token in a folder of its own (`roll://production/dns/CF_TOKEN`) to remember it. The card names the lent key. A folder has one spelling, roll secrets' (`/api/` is `/api`, `roll_secrets_ref::folder` for both): one secrets would refuse (`//`, `/a//b`, `.` or `..`) is refused at the gate before anyone is asked, a rule's `paths` read `/api/` as `/api` and refuse the rest, and anything deciding the whole environment counts `/` spelled with more slashes as the root. A rule stored with `//` before that reaches no folder. The folder is the one the request reads: `?path=` for most routes (a batch's items may each name their own, which roll secrets checks again one by one), the body's `path` for resolving, comparing and importing a `.env` (absent is `/`), and an import source's own `path`. An import with `replace` (deleting the folder's keys the file lacks) needs `delete` and `write`. A body the gate decides from must be the JSON object (or, for imports, the array) the route reads: a product parsing into a typed struct would take an array field by field, where the gate reading by name sees nothing.
+  - **The grant the product gets** carries one exact rule (that folder: `write` or `reveal`) for this request, plus `read` on that folder whenever the action passes, allowed outright or approved, since the product reads the version back. roll secrets checks the caller again inside, and nothing else in the project opens.
+  - **A remembered approval** keeps to what it named. When the route's own action asked too (admin on the cluster), the card names both ("write secrets prj_… in production:/ai, and admin search cl_…"), and remembering keeps both. What the approval covers is recorded when the gate asks (the approval's `also`), never worked out again from the token at approval time, so a later approval never remembers more than it asked. That route's own rule is skipped when the token's rules, temporary ones included, allow it already, and remembering is refused when roll's policy asks again for it. A route whose action its body decides records none.
   - **A secret a product keeps following needs `reveal` allowed outright.** That covers an inference endpoint keyed by a secret (its sync) and a bound `roll://` reference: either is checked again as its maker at every use, so an approval can't stand in for it.
 - Comparing a local copy with a secrets folder (`POST …/environments/{env}/diff`, by fingerprint,
   names only) tests a guess at a value: `reveal` there, as reading the values is.
@@ -611,9 +611,15 @@ A rule can grant some indices of a search cluster: `{id: "cl_1", index: "logs-*,
 - It covers the index routes (`/v1/search/clusters/{id}/indices/{index}/…`: search, documents,
   bulk, mappings, the index itself) when every name or pattern in `{index}` is covered: a name
   listed, or one starting with what's before a listed pattern's trailing `*` (`logs-*` covers
-  `logs-2025` and `logs-2025-*`, not `logs` or `l*`). Exclusions (`-logs-old`) only narrow, so they
-  needn't be covered; `_all` is `*`; date math only by `*`; another cluster's indices
-  (`remote:logs`) never.
+  `logs-2025` and `logs-2025-*`, not `logs` or `l*`). A request's exclusions (`-logs-old`) only
+  narrow, so they needn't be covered; `_all` is `*`; date math only by `*`; another cluster's
+  indices (`remote:logs`) never.
+- A rule's own `index` lists names and patterns only, never an exclusion
+  (`logs-*,-logs-secret` is refused when the token is made). Elasticsearch's role `names` have
+  none either, and the index routes and search's scoped principal read only the names. A rule
+  stored with one before this was refused covers nothing. A request that excluded indices is
+  approved once, never remembered (the rule would reach them), and tightening writes its
+  patterns (`logs-*`).
 - The cluster's own routes stay the cluster's: the index list, the console (`request`, any method
   and path as the cluster's owner), keys, branches and settings need a rule for the whole cluster.
 - Search checks the rest at query time as the caller: a query's reads of other indices (terms
@@ -906,7 +912,9 @@ database asks once, rather than being refused or asking at every call.
 
 - `POST /v1/access/requests {product, action, resource?, environment?, path?, index?, for, reason}`
   with the token itself (`access_request_access` over MCP; `roll token request --product … --allow …
-  --for 1h --reason … --wait` with `ROLL_TOKEN`, which waits for the decision); `for` is `15m`, `1h`, `8h` or `1d`, and
+  --for 1h --reason … --wait` with `ROLL_TOKEN`, which waits for the decision); `for` is `15m`, `1h`, `8h` or `1d`
+  (a whole environment's secrets, no folder or `/`, 8 hours at most: a folder's rule reaches every
+  folder under it, as for a remembered approval), and
   `reason` (up to 500 characters) is what the person reads. It answers `202` with the pending
   approval (method `GRANT`, `args: {for, reason}`); the same request again is the one waiting.
   Only a token asks, never the operator or a person (they change rules directly), and only one made
@@ -1181,7 +1189,7 @@ MCP clients for themselves, as GitHub's fine-grained tokens act for the person w
   The login is the authentication, so no caller is gated. Workload tokens (`kind: "workload"`)
   stay out of the token list (`?kind=workload` lists the latest 500), the checkup, the expiry
   digest, new-network notices and the tokens' caps (10,000 live of their own, 1,000 per owner; bootstrap
-  tokens and machine credentials, below, aren't counted), and go a day after
+  tokens, machine credentials and their machines' logins, below, aren't counted), and go a day after
   they end. One is fixed: never edited, rotated or grown by a remembered approval (`409`), only
   revoked or left to end. It makes and changes no tokens (`403`): what it made would be a
   credential nobody set up. The product that minted it stops it with `Access::revoke_workload(id,
@@ -1219,9 +1227,11 @@ MCP clients for themselves, as GitHub's fine-grained tokens act for the person w
     the chain at its next use. A login (`present_machine`) with a spent credential always ends it.
   - **Not in the workload caps.** They open nothing and live as long as their machine, so they'd
     fill the room every CI login shares: `MAX_WORKLOADS` and `OWNER_MAX_WORKLOADS` count only
-    workload grants with rules. Their caller caps them (roll secrets: 1,000 chains per identity
+    workload grants outside a chain. Their caller caps them (roll secrets: 1,000 chains per identity
     whose newest secret hasn't ended, revoked or not, counted in the write that records the chain,
-    and 60 bootstrap tokens a minute per project).
+    and 60 bootstrap tokens a minute per project). A machine's logins (`mint_workload_via`) count
+    toward its own chain instead, at most `CHAIN_MAX_LOGINS` (5) live, in the write that mints
+    one (`409` past it), so a maker's fleet never refuses their own CI's logins.
   - **Leaked**, either is revoked with its whole chain, as a token is (below).
   - `Access::revoke_chain(chain, why)` ends a chain (roll secrets: the identity deleted, disabled or
     cut off). Chains are listed with `?kind=workload`, and go a day after their last secret would

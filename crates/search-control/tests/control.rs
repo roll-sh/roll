@@ -2287,7 +2287,8 @@ async fn narrowed_keys() {
 /// would: a data key on `tenant-a-*` copies within its indices only, on either flavor, whether
 /// the other index is the source, the destination, or where a script moves a document. On
 /// Elasticsearch, a role with `read` on the source and `write` on the destination reindexes
-/// (no cluster privilege), and copies only what its document and field level security shows.
+/// (no cluster privilege), and copies only what its document and field level security shows; its
+/// `refresh=true` needs `maintenance` there, as on Elasticsearch.
 #[tokio::test]
 async fn reindex_reads_and_writes_as_its_caller() {
     let e = env().await;
@@ -2357,8 +2358,12 @@ async fn reindex_reads_and_writes_as_its_caller() {
     let v = body(&r);
     use base64::Engine;
     let mover = json!({"api_key": base64::engine::general_purpose::STANDARD.encode(format!("{}@{name}:{}", v["id"].as_str().unwrap(), v["api_key"].as_str().unwrap()))});
-    let (s, v) = call(&mover, reqwest::Method::POST, "/_reindex?refresh=true", Some(reindex("src", "dst"))).await;
+    let (s, v) = call(&mover, reqwest::Method::POST, "/_reindex", Some(reindex("src", "dst"))).await;
     assert_eq!((s, &v["created"]), (200, &json!(1)), "only the visible document: {v}");
+    // Its `refresh=true` refreshes as the caller, as Elasticsearch's does: `write` holds no
+    // `maintenance`.
+    let (s, v) = call(&mover, reqwest::Method::POST, "/_reindex?refresh=true", Some(reindex("src", "dst"))).await;
+    assert!(s == 403 && v.to_string().contains("indices:admin/refresh"), "{s} {v}");
     let doc = body(&console("GET", "/dst/_doc/1", Value::Null).await);
     assert_eq!(doc["_source"], json!({"title": "open", "public": true}), "without the hidden field: {doc}");
 }
@@ -4220,6 +4225,166 @@ async fn a_wildcard_key_reaches_no_watch_history() {
     let (_, v) = e.es(&u, &p, Method::POST, "/.watcher-history-*/_search?expand_wildcards=all", Some(json!({"query": {"match_all": {}}}))).await;
     assert_eq!(v["hits"]["total"]["value"], 1, "{v}");
     assert!(v["hits"]["hits"][0]["_source"].get("leaked").is_none(), "{v}");
+}
+
+/// Names are authorized as the request resolves them. An alias's index comes from wherever
+/// the request names it (the body's `index` too), and an alias can't reach more than its index
+/// grants; date math (`<.async-search>`) and `::failures` are resolved before the check; a
+/// clone's target is authorized as its source is.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn names_are_authorized_as_resolved() {
+    use reqwest::Method;
+    let e = env().await;
+    let c = e.post("/v1/search/clusters", json!({"name": "rn"})).await;
+    let (u, p) = creds(&c);
+    for (m, path, body) in [
+        (Method::PUT, "/mine/_doc/1?refresh=true", json!({"t": "mine"})),
+        (Method::PUT, "/secret/_doc/1?refresh=true", json!({"t": "top secret"})),
+        (Method::PUT, "/other/_doc/1?refresh=true", json!({"t": "other"})),
+        (Method::PUT, "/_index_template/logs", json!({"index_patterns": ["logs-*"], "data_stream": {}, "template": {"data_stream_options": {"failure_store": {"enabled": true}}}})),
+        (Method::PUT, "/_data_stream/logs-a", Value::Null),
+        (Method::POST, "/mine/_async_search?keep_on_completion=true&wait_for_completion_timeout=0", json!({})),
+        (Method::PUT, "/_security/role/limited", json!({"cluster": ["manage_search_application"], "indices": [{"names": ["mine*", "secret"], "privileges": ["manage"]}, {"names": ["mine*"], "privileges": ["read"]}]})),
+        (Method::PUT, "/_security/user/lim", json!({"password": "lim-pass-1", "roles": ["limited"]})),
+        (Method::PUT, "/_security/role/reader", json!({"indices": [{"names": ["*"], "privileges": ["read"]}]})),
+        (Method::PUT, "/_security/user/rd", json!({"password": "rd-pass-1", "roles": ["reader"]})),
+        (Method::PUT, "/_security/role/raw", json!({"indices": [{"names": ["mine*", "secret"], "privileges": ["manage"]}, {"names": ["mine*"], "privileges": ["indices:data/read/search"]}]})),
+        (Method::PUT, "/_security/user/raw", json!({"password": "raw-pass-1", "roles": ["raw"]})),
+        (Method::PUT, "/mine/_settings", json!({"index.blocks.write": true})),
+        (Method::PUT, "/_security/role/fsr", json!({"indices": [{"names": ["logs-a"], "privileges": ["read", "manage"]}, {"names": ["mine*"], "privileges": ["read", "manage", "read_failure_store"]}]})),
+        (Method::PUT, "/_security/user/fsr", json!({"password": "fsr-pass-1", "roles": ["fsr"]})),
+        (Method::PUT, "/_security/role/fsm", json!({"indices": [{"names": ["logs-*"], "privileges": ["manage_failure_store"]}]})),
+        (Method::PUT, "/_security/user/fsm", json!({"password": "fsm-pass-1", "roles": ["fsm"]})),
+        (Method::PUT, "/secret/_alias/secret-w", Value::Null),
+        (Method::PUT, "/mine/_alias/sec-a", Value::Null),
+        (Method::PUT, "/mine-000001", json!({"aliases": {"mine-roll": {"is_write_index": true}}})),
+    ] {
+        let (s, v) = e.es(&u, &p, m, path, Some(body).filter(|b| !b.is_null())).await;
+        assert!(s < 300, "{path}: {v}");
+    }
+    let lim = |m: Method, path: &str, body: Option<Value>| {
+        let e = &e;
+        let path = path.to_string();
+        async move { e.es("lim@rn", "lim-pass-1", m, &path, body).await }
+    };
+    let rd = |path: &str| {
+        let e = &e;
+        let path = path.to_string();
+        async move { e.es("rd@rn", "rd-pass-1", Method::GET, &path, None).await }
+    };
+    // The body's index is the alias's: `secret` would read through `mine-x`'s grants.
+    let (s, v) = lim(Method::PUT, "/mine/_alias/mine-x", Some(json!({"index": "secret"}))).await;
+    assert!(s == 403 && v.to_string().contains("more permissions than any of the indices"), "{s} {v}");
+    let (s, v) = lim(Method::PUT, "/mine/_alias/mine-y", Some(json!({"index": "other"}))).await;
+    assert!(s == 403 && v.to_string().contains("indices:admin/aliases"), "{s} {v}");
+    assert_eq!(lim(Method::GET, "/mine-x/_search", None).await.0, 404, "no alias was made");
+    let (s, v) = lim(Method::PUT, "/mine/_alias/mine-ok", None).await;
+    assert_eq!(s, 200, "an alias that gives no more than its index: {v}");
+    // Compared by action: a raw action granted on the alias's name counts as much as `read`.
+    let (s, v) = e.es("raw@rn", "raw-pass-1", Method::PUT, "/secret/_alias/mine-r", None).await;
+    assert!(s == 403 && v.to_string().contains("more permissions than any of the indices"), "{s} {v}");
+    // `_aliases` is authorized per action, never on every index: a user limited to `mine*` may.
+    let (s, v) = lim(Method::POST, "/_aliases", Some(json!({"actions": [{"add": {"index": "mine", "alias": "mine-x"}}]}))).await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = lim(Method::POST, "/_aliases", Some(json!({"actions": [{"add": {"index": "other", "alias": "mine-z"}}]}))).await;
+    assert!(s == 403 && !v.to_string().contains("secret"), "the action's own indices only: {s} {v}");
+    // Date math and selectors are resolved before the check.
+    assert_eq!(e.es(&u, &p, Method::GET, "/.async-search/_count", None).await.0, 200, "the premise: kept async results");
+    for path in ["/%3C.async-search%3E/_search", "/.async-search/_search", "/logs-a::failures/_search", "/%3Clogs-a%3E::failures/_search", "/_resolve/index/%3C.async-search%3E"] {
+        let (s, v) = rd(path).await;
+        assert_eq!(s, 403, "{path}: {v}");
+    }
+    // A failure store privilege grants only the actions of the privilege it narrows.
+    let fsm = |m: Method, path: &str, body: Option<Value>| {
+        let e = &e;
+        let path = path.to_string();
+        async move { e.es("fsm@rn", "fsm-pass-1", m, &path, body).await }
+    };
+    let (s, v) = fsm(Method::POST, "/logs-a::failures/_delete_by_query", Some(json!({"query": {"match_all": {}}}))).await;
+    assert_eq!(s, 403, "manage_failure_store writes nothing: {v}");
+    let (s, v) = fsm(Method::GET, "/logs-a::failures/_settings", None).await;
+    assert_ne!(s, 403, "{v}");
+    // An alias over a data stream can't give more on its failure store either: `mine-fx::failures`
+    // would read logs-a's failure documents.
+    let (s, v) = e.es("fsr@rn", "fsr-pass-1", Method::POST, "/_aliases", Some(json!({"actions": [{"add": {"index": "logs-a", "alias": "mine-fx"}}]}))).await;
+    assert!(s == 403 && v.to_string().contains("more permissions than any of the indices"), "{s} {v}");
+    // Nor can a search application, which reads through an alias of its name.
+    let (s, v) = lim(Method::PUT, "/_application/search_application/mine-app", Some(json!({"indices": ["secret"]}))).await;
+    assert!(s == 403 && v.to_string().contains("more permissions than any of the indices"), "{s} {v}");
+    // A multi get's and multi term vectors' items too.
+    for path in ["/_mget", "/_mtermvectors"] {
+        let (s, v) = e.es("rd@rn", "rd-pass-1", Method::POST, path, Some(json!({"docs": [{"_index": "<.async-search>", "_id": "x"}]}))).await;
+        assert_eq!((s, &v["docs"][0]["error"]["type"]), (200, &json!("security_exception")), "{path}: {v}");
+    }
+    // A resize's target needs nothing of its own, as on Elasticsearch, but can't hold more than
+    // its source, and the aliases it's made with are authorized as an alias request's.
+    let (s, v) = lim(Method::POST, "/secret/_clone/mine-sc", None).await;
+    assert!(s == 403 && v.to_string().contains("target index has more permissions than the source"), "{s} {v}");
+    let (s, v) = lim(Method::POST, "/secret/_clone/zz-copy", Some(json!({"aliases": {"mine-leak": {}}}))).await;
+    assert!(s == 403 && v.to_string().contains("indices:admin/aliases"), "secret read through mine-leak: {s} {v}");
+    assert_eq!(e.es(&u, &p, Method::GET, "/zz-copy", None).await.0, 404, "nothing was made");
+    let (s, v) = lim(Method::POST, "/mine/_clone/mine-copy", None).await;
+    assert_eq!(s, 200, "{v}");
+    // So are a create's and a rollover's: neither takes over another index's write alias.
+    let hijack = json!({"aliases": {"secret-w": {"is_write_index": true}}});
+    let (s, v) = lim(Method::PUT, "/mine-new", Some(hijack.clone())).await;
+    assert!(s == 403 && v.to_string().contains("indices:admin/aliases"), "{s} {v}");
+    let (s, v) = lim(Method::POST, "/mine-roll/_rollover", Some(hijack)).await;
+    assert!(s == 403 && v.to_string().contains("indices:admin/aliases"), "{s} {v}");
+    let (_, v) = e.es(&u, &p, Method::GET, "/_alias/secret-w", None).await;
+    assert_eq!(v, json!({"secret": {"aliases": {"secret-w": {}}}}), "the write alias is where it was");
+    assert_eq!(lim(Method::POST, "/mine-roll/_rollover", None).await.0, 200, "a rollover of the user's own");
+    // Removing aliases: a name spelled out must be the user's; a pattern reaches only theirs.
+    let (s, v) = lim(Method::DELETE, "/mine/_alias/sec-a", None).await;
+    assert!(s == 403 && v.to_string().contains("indices:admin/aliases"), "{s} {v}");
+    let (s, v) = lim(Method::POST, "/_aliases", Some(json!({"actions": [{"remove": {"index": "mine", "alias": "sec-a"}}]}))).await;
+    assert_eq!(s, 403, "{v}");
+    let (s, v) = lim(Method::DELETE, "/mine/_alias/*", None).await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = lim(Method::POST, "/_aliases", Some(json!({"actions": [{"remove": {"index": "mine", "alias": "sec*"}}]}))).await;
+    assert_eq!((s, &v["error"]["type"]), (404, &json!("aliases_not_found_exception")), "as on Elasticsearch: {v}");
+    let (_, v) = e.es(&u, &p, Method::GET, "/mine/_alias", None).await;
+    assert_eq!(v, json!({"mine": {"aliases": {"sec-a": {}}}}), "{v}");
+    // A pattern's closed indices are the caller's only where it may change aliases.
+    for (m, path) in [(Method::PUT, "/other/_alias/mine-o"), (Method::POST, "/other/_close")] {
+        assert_eq!(e.es(&u, &p, m, path, None).await.0, 200, "{path}");
+    }
+    // `o*` reaches the closed `other` for the request's check too (it expands as the handler does,
+    // #1084), where the caller may not change aliases: refused, as roll refuses `/*/` (stricter
+    // than Elasticsearch, which narrows the pattern; docs/search/compatibility.md).
+    let (s, v) = lim(Method::DELETE, "/o*/_alias/mine-o", None).await;
+    assert!(s == 403 && v.to_string().contains("indices:admin/aliases"), "{s} {v}");
+    let (_, v) = e.es(&u, &p, Method::GET, "/_alias/mine-o?expand_wildcards=all", None).await;
+    assert_eq!(v, json!({"other": {"aliases": {"mine-o": {}}}}), "{v}");
+}
+
+/// The same alias attack on OpenSearch: the body's index is authorized, and an alias can't
+/// reach more than its index grants.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_opensearch_alias_reaches_no_more_than_its_index() {
+    use reqwest::Method;
+    let e = env().await;
+    let c = e.post("/v1/search/clusters", json!({"name": "rno", "flavor": "opensearch"})).await;
+    let (u, p) = creds(&c);
+    let api = "/_plugins/_security/api";
+    for (m, path, body) in [
+        (Method::PUT, "/mine/_doc/1?refresh=true".to_string(), json!({"t": "mine"})),
+        (Method::PUT, "/secret/_doc/1?refresh=true".to_string(), json!({"t": "top secret"})),
+        (Method::PUT, format!("{api}/roles/limited"), json!({"index_permissions": [{"index_patterns": ["mine*", "secret"], "allowed_actions": ["manage_aliases"]}, {"index_patterns": ["mine*"], "allowed_actions": ["read"]}]})),
+        (Method::PUT, format!("{api}/internalusers/lim"), json!({"password": "Zq7-unrelated-Pw!93", "opendistro_security_roles": ["limited"]})),
+        (Method::PUT, format!("{api}/roles/searcher"), json!({"index_permissions": [{"index_patterns": ["mine*", "secret"], "allowed_actions": ["manage_aliases"]}, {"index_patterns": ["mine*"], "allowed_actions": ["search"]}]})),
+        (Method::PUT, format!("{api}/internalusers/srch"), json!({"password": "Zq7-unrelated-Pw!93", "opendistro_security_roles": ["searcher"]})),
+    ] {
+        let (s, v) = e.es(&u, &p, m, &path, Some(body)).await;
+        assert!(s < 300, "{path}: {v}");
+    }
+    let (s, v) = e.es("lim@rno", "Zq7-unrelated-Pw!93", Method::PUT, "/mine/_alias/mine-x", Some(json!({"index": "secret"}))).await;
+    assert_eq!(s, 403, "{v}");
+    assert_eq!(e.es("lim@rno", "Zq7-unrelated-Pw!93", Method::GET, "/mine-x/_search", None).await.0, 404, "no alias was made");
+    // Compared by action, so the `search` action group counts as much as `read`.
+    let (s, v) = e.es("srch@rno", "Zq7-unrelated-Pw!93", Method::PUT, "/secret/_alias/mine-s", None).await;
+    assert_eq!(s, 403, "{v}");
+    assert_eq!(e.es("srch@rno", "Zq7-unrelated-Pw!93", Method::POST, "/mine-s/_search", None).await.0, 404, "no alias was made");
 }
 
 /// Runs `POST {path}?wait_for_completion=false` as the cluster's owner and waits for its result
@@ -7299,6 +7464,96 @@ async fn catching_up_and_cutting_over() {
     assert_eq!(index_names(&a), ["live-v1"], "{a}");
     let (_, n) = e.shop("GET", "/live/_count", None).await;
     assert_eq!(n["count"], 4, "{n}");
+}
+
+/// An index API's wildcards are authorized as the API expands them: a data key on `tenant-a-*`
+/// can't open, set or map another tenant's closed index through a wildcard that, expanded as
+/// open indices only, would have matched nothing to check (`_open` expands closed indices,
+/// `PUT _settings` and `PUT _mapping` open and closed ones), on either flavor.
+#[tokio::test]
+async fn index_apis_authorize_the_indices_their_wildcards_reach() {
+    let e = env().await;
+    let e = &e;
+    let call = |k: &Value, m: reqwest::Method, path: &str, b: Option<Value>| {
+        let path = path.to_string();
+        let k = k.clone();
+        async move {
+            match k["api_key"].as_str() {
+                Some(key) => as_key(e, key, m, &path, b).await,
+                None => e.es(k["username"].as_str().unwrap(), k["password"].as_str().unwrap(), m, &path, b).await,
+            }
+        }
+    };
+    use reqwest::Method;
+    for flavor in ["elasticsearch", "opensearch"] {
+        let name = format!("wild-{flavor}");
+        let c = e.post("/v1/search/clusters", json!({"name": name, "flavor": flavor})).await;
+        let owner = json!({"username": c["username"], "password": c["password"]});
+        for path in ["/tenant-a-1/_doc/1?refresh=true", "/tenant-b-1/_doc/1?refresh=true"] {
+            let (s, v) = call(&owner, Method::PUT, path, Some(json!({"t": "x"}))).await;
+            assert!(s < 300, "{flavor} {path}: {s} {v}");
+        }
+        assert_eq!(call(&owner, Method::POST, "/tenant-b-1/_close", None).await.0, 200, "{flavor}");
+        let key = e.post(&format!("/v1/search/clusters/{name}/keys"), json!({"name": "a", "access": "data", "indices": ["tenant-a-*"]})).await;
+        for (m, path, body) in [
+            (Method::POST, "/tenant-b-*/_open", None),
+            (Method::PUT, "/tenant-b-*/_settings", Some(json!({"index.blocks.read_only": true}))),
+            (Method::PUT, "/tenant-b-*/_mapping", Some(json!({"properties": {"n": {"type": "long"}}}))),
+        ] {
+            let (s, v) = call(&key, m.clone(), path, body).await;
+            assert_eq!(s, 403, "{flavor} {m} {path}: {v}");
+        }
+        let (_, v) = call(&owner, Method::GET, "/_cat/indices/tenant-b-1?format=json&h=status&expand_wildcards=all", None).await;
+        assert_eq!(v[0]["status"], "close", "{flavor}: tenant-b-1 still closed: {v}");
+        let (_, v) = call(&owner, Method::GET, "/tenant-b-1/_settings?expand_wildcards=all", None).await;
+        assert!(v["tenant-b-1"]["settings"]["index"]["blocks"].is_null(), "{flavor}: no block set: {v}");
+        // Its own: opened.
+        assert_eq!(call(&owner, Method::POST, "/tenant-a-1/_close", None).await.0, 200, "{flavor}");
+        let (s, v) = call(&key, Method::POST, "/tenant-a-*/_open", None).await;
+        assert_eq!(s, 200, "{flavor}: {v}");
+    }
+}
+
+/// Elasticsearch: what reads or writes beyond the request's own indices takes the caller's
+/// privileges there. A local ES|QL `ENRICH` needs `monitor_enrich` (its policy's table is read
+/// by the system); a connector aimed at another index needs write there (its syncs write as
+/// whoever aimed it); SQL's `SHOW TABLES` lists only what the caller may read.
+#[tokio::test]
+async fn enrich_connectors_and_show_tables_take_the_callers_privileges() {
+    use reqwest::Method;
+    let e = env().await;
+    let c = e.post("/v1/search/clusters", json!({"name": "indirect"})).await;
+    let (owner, pw) = creds(&c);
+    for (m, path, body) in [
+        (Method::PUT, "/tenant-a-1/_doc/1?refresh=true", json!({"t": "x"})),
+        (Method::PUT, "/tenant-b-src/_doc/1?refresh=true", json!({"t": "x", "secret": "s-of-b"})),
+        (Method::PUT, "/_enrich/policy/p", json!({"match": {"indices": "tenant-b-src", "match_field": "t", "enrich_fields": ["secret"]}})),
+        (Method::POST, "/_enrich/policy/p/_execute", Value::Null),
+        (Method::PUT, "/content-b/_doc/1?refresh=true", json!({"t": "keep"})),
+        (Method::PUT, "/_connector/c1", json!({"index_name": "content-a", "service_type": "postgresql"})),
+        (Method::PUT, "/_security/role/r", json!({"cluster": ["manage_connector"], "indices": [{"names": ["tenant-a-*", "content-a"], "privileges": ["all"]}]})),
+        (Method::PUT, "/_security/user/u", json!({"password": "u-password-1", "roles": ["r"]})),
+    ] {
+        let (s, v) = e.es(&owner, &pw, m.clone(), path, Some(body).filter(|b| !b.is_null())).await;
+        assert!(s < 300, "{m} {path}: {s} {v}");
+    }
+    let user = "u@indirect";
+    let enrich = json!({"query": "FROM tenant-a-1 | ENRICH p ON t | KEEP secret"});
+    let (s, v) = e.es(&owner, &pw, Method::POST, "/_query", Some(enrich.clone())).await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = e.es(user, "u-password-1", Method::POST, "/_query", Some(enrich)).await;
+    assert_eq!(s, 403, "{v}");
+    assert!(v.to_string().contains("resolve_policy") && !v.to_string().contains("s-of-b"), "{v}");
+    let (s, v) = e.es(user, "u-password-1", Method::PUT, "/_connector/c1/_index_name", Some(json!({"index_name": "content-b"}))).await;
+    assert_eq!(s, 403, "aimed at another index: {v}");
+    let (s, v) = e.es(user, "u-password-1", Method::PUT, "/_connector/c1", Some(json!({"index_name": "content-b", "is_native": false}))).await;
+    assert_eq!(s, 403, "put again, aimed at another index: {v}");
+    let (_, v) = e.es(&owner, &pw, Method::GET, "/_connector/c1", None).await;
+    assert_eq!(v["index_name"], "content-a", "{v}");
+    let (s, v) = e.es(user, "u-password-1", Method::POST, "/_sql?format=json", Some(json!({"query": "SHOW TABLES"}))).await;
+    assert_eq!(s, 200, "{v}");
+    let names: Vec<&str> = v["rows"].as_array().unwrap().iter().filter_map(|r| r[1].as_str()).collect();
+    assert!(names.contains(&"tenant-a-1") && !names.contains(&"tenant-b-src") && !names.contains(&"content-b"), "{names:?}");
 }
 
 /// A/B tests on a search application (relevance-experiments.md): each visitor stays in one

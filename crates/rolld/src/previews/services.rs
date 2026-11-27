@@ -180,6 +180,10 @@ impl roll_previews::ports::Apps for RollApps {
             if let Some(hash) = &t.bypass_sha256 {
                 a["bypass_sha256"] = json!(hash);
             }
+            // Its webhook URLs (roll apps' gate: that path only, `?roll_hook=`, no cookie).
+            if !t.webhooks.is_empty() {
+                a["webhooks"] = json!(t.webhooks.iter().map(|(path, hash)| json!({ "path": path, "token_sha256": hash })).collect::<Vec<_>>());
+            }
             a
         });
         // The project's egress: with `roll`, roll apps runs it on a network with no route out (a

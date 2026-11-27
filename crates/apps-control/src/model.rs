@@ -289,7 +289,21 @@ pub struct Access {
     /// Other services of the project let in with roll's own token for them (Cloud Run's invoker,
     /// [`Access::callers`] entries: `api`, `api/production`, or an id): `x-roll-caller`.
     pub callers: Vec<String>,
+    /// A preview's webhook URLs (roll previews': a provider that can't send a header, Stripe's,
+    /// GitHub's): one exact path each, in with `?roll_hook=<token>`, the token's SHA-256 only.
+    pub webhooks: Vec<HookUrl>,
 }
+
+/// One webhook URL of a preview's ([`Access::webhooks`]).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct HookUrl {
+    pub path: String,
+    #[serde(rename = "token_sha256")]
+    pub token_hash: String,
+}
+
+/// The most webhook URLs a preview environment has.
+pub const MAX_HOOK_URLS: usize = 20;
 
 /// A cold start in parts (Cloud Run's startup latency): the runtime bringing the container up, then
 /// the app until it answered.
@@ -664,7 +678,7 @@ pub struct Run {
     pub pre_deploy: Option<String>,
     /// Runs once in a container of the live deployment's image before a preview (ephemeral)
     /// environment is deleted (Heroku's `pr-predestroy`): its data cleaned up, its webhooks
-    /// removed. Ten minutes at most; a failure is said, never holding the delete.
+    /// removed. Two minutes at most; a failure is said, never holding the delete.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub teardown: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2063,6 +2077,9 @@ pub struct Environment {
     /// Other services of the project let in with roll's token for them (`access.callers`).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub callers: Vec<String>,
+    /// The paths a preview's webhook URLs open (`access.webhooks`; their tokens never shown).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub webhook_paths: Vec<String>,
     /// Visitors may type its password (`access.password`; never returned).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub password: bool,
@@ -2086,6 +2103,11 @@ pub struct Environment {
     /// An image service's tag is watched: a new digest behind it deploys (Railway's image auto
     /// updates).
     pub follow_tag: bool,
+    /// A Git URL service's environment deploys the repository's new tags that match this
+    /// (`v*`), from its hook (Cloud Build's tag triggers): each once, never one that was there
+    /// when it was set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deploy_tags: Option<String>,
     /// Redeploys (the same image, the new values) when the project's secrets change.
     pub redeploy_on_secrets: bool,
     /// Its instances send OpenTelemetry traces to roll (`OTEL_*` set at each deploy).

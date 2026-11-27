@@ -847,9 +847,11 @@ pub enum Secrets {
         #[arg(value_parser = ["managed", "off"])]
         rotate: Option<String>,
     },
-    /// Who may push past the project's pre-receive hooks (`git push -o breakglass`): pushers'
-    /// logins as the git server names them, `token:<id>` for every push through one hook's
-    /// token, `*` for anyone; `off` for no one (the default). Without any: who may now.
+    /// Who may push past the project's pre-receive hooks (`git push -o breakglass`): a pusher's
+    /// login through one hook's token (`alice@token:<id>`; `alice` binds to each token whose hook
+    /// has named alice), `token:<id>` for every push through one hook's token, `*` for anyone;
+    /// `off` for no one (the default). Without any: who may now. Setting a list again binds the
+    /// bare logins it kept from before logins were bound.
     Breakglass { who: Vec<String> },
     /// When each key was last read and changed, and which are stale or unused.
     Insights {
@@ -1353,14 +1355,19 @@ pub enum SaasCmd {
     /// `[--account-id] --template`; databricks `--host [--lifetime-days]`; confluent `--owner
     /// [--resource [--confluent-environment]]`; sonarqube `[--host] [--sonar-kind] [--sonar-project]
     /// [--expires-days]`; jenkins `--host --jenkins-user`; salesforce `--domain --app-id
-    /// --consumer-id`. Datadog's credential is `<API key>:<application key>`, Confluent's
-    /// `KEY:SECRET`, Jenkins' an API token of the user, Salesforce's another external client app's
-    /// `KEY:SECRET`. `--credential-expires` is when the credential itself ends at the vendor: health
-    /// warns two weeks before.
+    /// --consumer-id`; prismacloud `--prisma-api --service-account [--prisma-id] [--expires-days]`;
+    /// paddle `--api-key-id [--expires-days]`. Datadog's credential is `<API key>:<application
+    /// key>`, Confluent's `KEY:SECRET`, Jenkins' an API token of the user, Salesforce's another
+    /// external client app's `KEY:SECRET`, Prisma Cloud's a System Admin's access key as
+    /// `ACCESS_KEY_ID:SECRET`. Paddle's is the rotatable API key itself: Paddle can only rotate a
+    /// key with itself, so the registration holds the key, every rotation replaces it there, and
+    /// Paddle ends the old secret after the link's grace (a day at most; roll can't end it sooner).
+    /// `--credential-expires` is when the credential itself ends at the vendor: health warns two
+    /// weeks before.
     Add {
         name: String,
         /// sendgrid, twilio, okta, entra, auth0, gitlab, openai, datadog, cloudflare, databricks,
-        /// confluent, sonarqube, jenkins or salesforce.
+        /// confluent, sonarqube, jenkins, salesforce, prismacloud or paddle.
         #[arg(long)]
         vendor: String,
         /// A scope each key gets: SendGrid's (none: full access), GitLab's (one at least) or a
@@ -1401,7 +1408,8 @@ pub enum SaasCmd {
         /// default), 50 owner (groups).
         #[arg(long)]
         access_level: Option<u8>,
-        /// Each GitLab token's lifetime in days (default 365), or a SonarQube token's (none: no end).
+        /// Each GitLab token's lifetime in days (default 365), or a SonarQube token's, a Prisma Cloud
+        /// access key's or a Paddle secret's (none: no end, or the Paddle key's own).
         #[arg(long)]
         expires_days: Option<u16>,
         /// The OpenAI project (proj_…) whose service account keys rotate.
@@ -1444,6 +1452,18 @@ pub enum SaasCmd {
         /// The Salesforce app's OAuth consumer whose key and secret rotate.
         #[arg(long = "consumer-id")]
         consumer_id: Option<String>,
+        /// Prisma Cloud's API host for the tenant (api.prismacloud.io, api2.eu.prismacloud.io…).
+        #[arg(long = "prisma-api")]
+        prisma_api: Option<String>,
+        /// The Prisma Cloud service account whose access keys rotate.
+        #[arg(long = "service-account")]
+        service_account: Option<String>,
+        /// The Prisma Cloud tenant's Prisma id (for an access key that reaches several tenants).
+        #[arg(long = "prisma-id")]
+        prisma_id: Option<String>,
+        /// The Paddle API key (apikey_…) that rotates itself.
+        #[arg(long = "api-key-id")]
+        api_key_id: Option<String>,
         /// When the registered credential ends at the vendor: a date (2027-03-31), RFC 3339 or how
         /// long from now (90d).
         #[arg(long = "credential-expires")]
@@ -3552,7 +3572,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                     println!("{}  {:<16} {:<9} {}{ends}", s(&r["id"]), s(&r["name"]), s(&r["vendor"]), target.join(" "));
                 }
             }
-            SaasCmd::Add { name, vendor, scopes, account_sid, domain, app_id, tenant, client_id, object_id, app_client_id, host, gitlab_project, gitlab_group, access_level, expires_days, openai_project, site, key, account_id, template, lifetime_days, owner, resource, confluent_environment, sonar_kind, sonar_project, jenkins_user, consumer_id, credential_expires } => {
+            SaasCmd::Add { name, vendor, scopes, account_sid, domain, app_id, tenant, client_id, object_id, app_client_id, host, gitlab_project, gitlab_group, access_level, expires_days, openai_project, site, key, account_id, template, lifetime_days, owner, resource, confluent_environment, sonar_kind, sonar_project, jenkins_user, consumer_id, prisma_api, service_account, prisma_id, api_key_id, credential_expires } => {
                 let credential_expires_at = match credential_expires.as_deref().map(expiry).transpose()? {
                     Some(None) => anyhow::bail!("--credential-expires is when the credential ends: a date, RFC 3339 or how long from now"),
                     Some(Some(t)) => Some(t),
@@ -3562,7 +3582,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 if !scopes.is_empty() {
                     target.insert("scopes".into(), json!(scopes));
                 }
-                for (k, v) in [("account_sid", account_sid), ("domain", domain), ("app_id", app_id), ("tenant", tenant), ("client_id", client_id), ("object_id", object_id), ("app_client_id", app_client_id), ("host", host), ("project", gitlab_project), ("group", gitlab_group), ("project_id", openai_project), ("site", site), ("key", key), ("account_id", account_id), ("template", template), ("owner", owner), ("resource", resource), ("environment", confluent_environment), ("kind", sonar_kind), ("project", sonar_project), ("user", jenkins_user), ("consumer_id", consumer_id)] {
+                for (k, v) in [("account_sid", account_sid), ("domain", domain), ("app_id", app_id), ("tenant", tenant), ("client_id", client_id), ("object_id", object_id), ("app_client_id", app_client_id), ("host", host), ("project", gitlab_project), ("group", gitlab_group), ("project_id", openai_project), ("site", site), ("key", key), ("account_id", account_id), ("template", template), ("owner", owner), ("resource", resource), ("environment", confluent_environment), ("kind", sonar_kind), ("project", sonar_project), ("user", jenkins_user), ("consumer_id", consumer_id), ("api", prisma_api), ("service_account", service_account), ("prisma_id", prisma_id), ("api_key_id", api_key_id)] {
                     if let Some(v) = v {
                         target.insert(k.into(), json!(v));
                     }
@@ -4486,7 +4506,15 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             }
             match v["breakglass"].as_array().filter(|a| !a.is_empty()) {
                 None => println!("No one may push past a pre-receive hook: `git push -o breakglass` is refused"),
-                Some(a) => println!("May push past a pre-receive hook (audited): {}", a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")),
+                Some(a) => {
+                    let who: Vec<&str> = a.iter().filter_map(Value::as_str).collect();
+                    println!("May push past a pre-receive hook (audited): {}", who.join(", "));
+                    // A list from before logins were bound: each bare login counts only through a
+                    // token whose hook named it, until the list is set again.
+                    if who.iter().any(|w| *w != "*" && !w.starts_with("token:") && !w.contains("@token:")) {
+                        println!("Bare logins aren't bound to a hook's token yet: `roll secrets breakglass {}` binds them", who.join(" "));
+                    }
+                }
             }
         }
         Secrets::Leaks { rotate } => {
@@ -4998,11 +5026,13 @@ async fn import_folders(c: &Client<'_>, env: &str, folders: &crate::managers::Fo
     Ok(())
 }
 
-/// What `import --check` found so far: keys the source has that are missing here or differ.
+/// What `import --check` found so far: keys the source has that are missing here or differ, and
+/// keys it couldn't compare (sensitive, linked or with references here).
 #[derive(Default)]
 struct CopyCheck {
     missing: usize,
     changed: usize,
+    unchecked: usize,
     folders: usize,
 }
 
@@ -5010,6 +5040,12 @@ impl CopyCheck {
     fn done(&self) -> anyhow::Result<()> {
         let plural = |n: usize| if n == 1 { "" } else { "s" };
         match self.missing + self.changed {
+            0 if self.unchecked > 0 => {
+                // Not a mismatch (1), not complete (0): a script can tell these apart.
+                let n = self.unchecked;
+                eprintln!("Every key roll could compare is here with the same value, but {n} key{} {} compared (sensitive, linked or with references here): check {} by hand.", plural(n), if n == 1 { "wasn't" } else { "weren't" }, if n == 1 { "it" } else { "them" });
+                std::process::exit(2);
+            }
             0 => {
                 eprintln!("The copy is complete: every key of the source is here with the same value ({} folder{}).", self.folders, plural(self.folders));
                 Ok(())
@@ -5041,6 +5077,7 @@ async fn check_folders(c: &Client<'_>, env: &str, name: &str, folders: &crate::m
         println!("  {same} the same");
         copy.missing += list("added").len();
         copy.changed += list("changed").len();
+        copy.unchecked += list("references").len() + list("linked").len() + entries.iter().filter(|e| !seen.contains(&e.key)).count();
         copy.folders += 1;
     }
     Ok(())

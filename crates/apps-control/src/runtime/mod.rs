@@ -217,6 +217,12 @@ pub trait Runtime: Send + Sync {
     async fn image_bytes(&self, _image: &str) -> Option<u64> {
         None
     }
+    /// A pinned image as `docker save` writes it (what `docker load` reads), streamed: a
+    /// deployment's image for its owner's own machine (`fly auth docker`'s). None where the
+    /// runtime can't hand one out.
+    async fn export_image(&self, _image: &str) -> anyhow::Result<Option<Box<dyn tokio::io::AsyncRead + Send + Unpin>>> {
+        Ok(None)
+    }
     /// The TCP ports a pulled image exposes (its `EXPOSE`), when the runtime can read them.
     async fn image_ports(&self, _image: &str) -> Vec<u16> {
         Vec::new()

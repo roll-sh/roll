@@ -136,8 +136,16 @@ pub async fn put(ctx: &Ctx<'_>) -> EsResult<Reply> {
     if body.get("template").is_none_or(Value::is_null) {
         ctx.warn("Using default search application template which is subject to change. We recommend storing a template to avoid breaking changes.");
     }
-    crate::xpack::security::check_alias_privileges(ctx, &indices, &name)?;
     let st = ctx.state();
+    // The application reads through an alias of its name: authorized as adding that alias over
+    // the indices its expressions resolve to now (no alias wider than its indices, none over
+    // document or field level security).
+    let opts = crate::meta::resolve::IndicesOptions { ignore_unavailable: true, allow_no_indices: true, ..crate::meta::resolve::IndicesOptions::LENIENT_EXPAND_OPEN };
+    let targets: Vec<String> = indices
+        .iter()
+        .flat_map(|i| crate::meta::resolve::resolve(&st, std::slice::from_ref(i), &opts, ctx.now_ms).ok().filter(|v| !v.is_empty()).unwrap_or_else(|| vec![i.clone()]))
+        .collect();
+    crate::xpack::security::AliasAuth::of(ctx).check(true, &targets, std::slice::from_ref(&name))?;
     for i in &indices {
         let exists = st.metadata.indices.contains_key(i) || st.metadata.data_streams.contains_key(i) || st.metadata.indices.values().any(|x| x.aliases.contains_key(i))
             || (i.contains('*') && st.metadata.indices.keys().any(|n| crate::xcontent::filter::glob_match(i, n)));

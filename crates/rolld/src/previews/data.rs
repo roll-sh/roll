@@ -83,6 +83,17 @@ impl Brancher for Postgres {
         true
     }
 
+    /// The granted locks other sessions hold on the branch's user tables (as the superuser, the
+    /// catalog's names only; nothing of the preview's code runs).
+    async fn locks(&self, parent: &str, branch: &str) -> anyhow::Result<Vec<(String, String)>> {
+        let p = self.0.get(&format!("/v1/projects/{}", seg(parent))).await?;
+        let b = p["branches"].as_array().and_then(|bs| bs.iter().find(|b| b["id"] == branch).cloned()).ok_or_else(|| anyhow::anyhow!("no Postgres branch {branch}"))?;
+        let ep = s(&b["endpoint"]["id"]).ok_or_else(|| anyhow::anyhow!("Postgres branch {branch} has no endpoint"))?;
+        let v = self.0.post(&format!("/v1/endpoints/{}/query", seg(&ep)), json!({ "sql": LOCKS_SQL })).await?;
+        let rows = v["results"].as_array().and_then(|r| r.last()).and_then(|r| r["rows"].as_array()).cloned().unwrap_or_default();
+        Ok(rows.iter().filter_map(|r| Some((r[0].as_str()?.to_string(), r[1].as_str()?.to_string()))).take(200).collect())
+    }
+
     /// A branch of `parent` with no role of its own: pg-control gives a branch's role the objects
     /// the superuser owns, so a base with one would keep the tables, and its branches' roles none.
     async fn make_base(&self, parent: &str, name: &str) -> anyhow::Result<Branched> {
@@ -269,6 +280,17 @@ impl Brancher for Postgres {
         Ok(rows.iter().filter_map(|r| column(r[0].as_str()?)).collect())
     }
 
+    /// [`Self::columns`] on a branch of the parent (one just made from it): read on the branch's
+    /// own compute, so a parent that sleeps isn't woken for it.
+    async fn branch_columns(&self, parent: &str, branch: &str, _kept: Option<&str>, max: usize) -> anyhow::Result<Vec<roll_previews::mask::Column>> {
+        let p = self.0.get(&format!("/v1/projects/{}", seg(parent))).await?;
+        let b = p["branches"].as_array().and_then(|bs| bs.iter().find(|b| b["id"] == branch).cloned()).ok_or_else(|| anyhow::anyhow!("no Postgres branch {branch}"))?;
+        let ep = s(&b["endpoint"]["id"]).ok_or_else(|| anyhow::anyhow!("{branch} has no endpoint"))?;
+        let v = self.0.post(&format!("/v1/endpoints/{}/query", seg(&ep)), json!({ "sql": columns_sql(max) })).await?;
+        let rows = v["results"].as_array().and_then(|r| r.last()).and_then(|r| r["rows"].as_array()).cloned().unwrap_or_default();
+        Ok(rows.iter().filter_map(|r| column(r[0].as_str()?)).collect())
+    }
+
     /// A branch's own bytes (its local data directory, else its objects), at Postgres's rates.
     async fn usage(&self, parent: &str, branch: &str) -> anyhow::Result<Usage> {
         let p = self.0.get(&format!("/v1/projects/{}", seg(parent))).await?;
@@ -372,6 +394,12 @@ SELECT line FROM (
   UNION ALL
   SELECT format('extension %I %s', e.extname, e.extversion) FROM pg_extension e
 ) x ORDER BY line";
+
+/// The granted locks other sessions hold on user tables, `(schema.table, mode)`.
+const LOCKS_SQL: &str = r"SET search_path = pg_catalog, pg_temp; SELECT format('%I.%I', n.nspname, c.relname), l.mode
+  FROM pg_locks l JOIN pg_class c ON c.oid = l.relation JOIN pg_namespace n ON n.oid = c.relnamespace
+  WHERE l.granted AND l.pid <> pg_backend_pid() AND c.relkind IN ('r', 'p', 'm')
+    AND n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg\_%'";
 
 // ── Redis ──
 
