@@ -92,7 +92,6 @@ impl<'a> Scope<'a> {
 pub fn reaches(caller: &Caller, action: Action, at: &Scope<'_>, key: &str) -> bool {
     !caller.grants.limits_keys() || caller.allows(action, &at.key(key))
 }
-}
 
 /// What a caller may do.
 pub trait Grants: Send + Sync + std::fmt::Debug {

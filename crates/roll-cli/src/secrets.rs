@@ -1925,6 +1925,10 @@ pub enum Tokens {
         /// Folders it reaches (default: all).
         #[arg(long = "for-path")]
         paths: Vec<String>,
+        /// Only this key of those folders (repeatable; default: every key): it reads, lists and
+        /// writes these alone.
+        #[arg(long = "key")]
+        keys: Vec<String>,
         /// read, reveal, write, delete, admin, scan (default: read and reveal).
         #[arg(long = "action")]
         actions: Vec<String>,
@@ -3994,10 +3998,10 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                     let rule = t["rules"].as_array().and_then(|r| r.iter().find(|r| r["product"] == "secrets")).cloned().unwrap_or_default();
                     let actions = rule["actions"].as_object().map(|a| a.iter().map(|(k, v)| if v == "ask" { format!("{k}?") } else { k.clone() }).collect::<Vec<_>>().join(",")).unwrap_or_default();
                     let state = if t["revoked_at"].is_null() { t["last_used_at"].as_i64().map(|at| format!("used {}", ago(at))).unwrap_or_else(|| "never used".into()) } else { "revoked".into() };
-                    println!("{}  {:<20} envs {}  paths {}  {}  {}", s(&t["id"]), s(&t["name"]), list(&rule["environments"]), list(&rule["paths"]), actions, state);
+                    println!("{}  {:<20} envs {}  paths {}  keys {}  {}  {}", s(&t["id"]), s(&t["name"]), list(&rule["environments"]), list(&rule["paths"]), list(&rule["keys"]), actions, state);
                 }
             }
-            Tokens::Create { name, envs, all_environments, paths, actions, scan_only, ttl_days, no_expiry, allow_ips } => {
+            Tokens::Create { name, envs, all_environments, paths, keys, actions, scan_only, ttl_days, no_expiry, allow_ips } => {
                 let actions = if scan_only {
                     vec!["scan".to_string()]
                 } else if actions.is_empty() {
@@ -4022,6 +4026,13 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 if !paths.is_empty() {
                     rule["paths"] = json!(paths);
                 }
+                let reach = if keys.is_empty() {
+                    reach
+                } else {
+                    let named = format!("{reach}, keys {}", keys.join(", "));
+                    rule["keys"] = json!(keys);
+                    named
+                };
                 let mut body = json!({ "name": name, "rules": [rule] });
                 // The API keeps a token without `expires_at` for good: the CLI sends one unless
                 // told not to.

@@ -595,6 +595,7 @@ resource "roll_secrets_token" "deploy" {
   name         = "deploy"
   environments = [roll_secrets_environment.production.slug]
   paths        = ["/api"]
+  keys         = ["STRIPE_KEY"]
   actions      = ["read", "reveal"]
   expires_at   = "2030-01-01T00:00:00Z"
 }
@@ -628,7 +629,7 @@ resource "roll_secrets_sync" "deploys" {
 						f.mu.Lock()
 						defer f.mu.Unlock()
 						rule := f.tokens["tok_1"]["rules"].([]any)[0].(map[string]any)
-						if fmt.Sprint(rule["resources"], rule["environments"], rule["paths"], rule["actions"]) != "[map[project:prj_a]] [production] [/api] map[read:allow reveal:allow]" || f.tokens["tok_1"]["expires_at"] != float64(1893456000000) {
+						if fmt.Sprint(rule["resources"], rule["environments"], rule["paths"], rule["keys"], rule["actions"]) != "[map[project:prj_a]] [production] [/api] [STRIPE_KEY] map[read:allow reveal:allow]" || f.tokens["tok_1"]["expires_at"] != float64(1893456000000) {
 							return fmt.Errorf("the token's rule: %v", f.tokens["tok_1"])
 						}
 						return nil
