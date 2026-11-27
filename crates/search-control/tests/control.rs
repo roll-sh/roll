@@ -7866,3 +7866,134 @@ async fn evaluate_scores_an_applications_variant_offline() {
     let (s, v) = e.call(Method::POST, &format!("/v1/search/clusters/{id}/indices/shop/evaluate"), Some(json!({"judgments": judgments, "configurations": [{"name": "x", "application": "shop", "variant": {"experiment": "e1", "variant": "nope"}}]}))).await;
     assert!(s == 400 && v.to_string().contains("no variant [nope]"), "{s} {v}");
 }
+
+/// The OTLP intake: an `otel` key writes logs over OTLP/HTTP in JSON and in protobuf (gzip'd, as
+/// a Collector sends them) into OpenTelemetry's data streams, as OTel-native documents, and can't
+/// read them back; a read key's records are refused with the cluster's 403.
+#[tokio::test]
+async fn otlp_logs_land_in_otel_data_streams_with_an_otel_key() {
+    use reqwest::Method;
+    let e = env().await;
+    let c = e.post("/v1/search/clusters", json!({"name": "otel"})).await;
+    let (u, p) = creds(&c);
+    let id = c["id"].as_str().unwrap().to_string();
+    let (s, v) = e.call(Method::POST, &format!("/v1/search/clusters/{id}/keys"), Some(json!({"name": "collector", "access": "otel", "indices": ["x"]}))).await;
+    assert!(s == 400 && v.to_string().contains("takes no indices"), "{s} {v}");
+    let (s, v) = e.call(Method::POST, &format!("/v1/search/clusters/{id}/keys"), Some(json!({"name": "collector", "access": "otel"}))).await;
+    assert_eq!(s, 200, "{v}");
+    let key = v["api_key"].as_str().unwrap().to_string();
+    let url = format!("{}/_otlp/v1/logs", e.es);
+
+    let json_logs = json!({"resourceLogs": [{"resource": {"attributes": [{"key": "service.name", "value": {"stringValue": "checkout"}}]},
+        "scopeLogs": [{"scope": {"name": "app"}, "logRecords": [{"timeUnixNano": "1700000000000000000", "severityText": "INFO", "severityNumber": 9,
+        "body": {"stringValue": "paid order 42"}, "attributes": [{"key": "order.id", "value": {"intValue": "42"}}]}]}]}]});
+    let r = e.http.post(&url).header("authorization", format!("ApiKey {key}")).json(&json_logs).send().await.unwrap();
+    assert_eq!((r.status().as_u16(), r.text().await.unwrap()), (200, "{}".to_string()));
+
+    // The same shape in protobuf: ExportLogsServiceRequest { resource_logs { scope_logs { log_records {
+    // time_unix_nano, body { string_value }, attributes { data_stream.dataset = "web" } } } } }.
+    fn ld(n: u8, b: &[u8]) -> Vec<u8> {
+        let mut out = vec![n << 3 | 2];
+        let mut len = b.len();
+        loop {
+            let byte = (len & 0x7f) as u8;
+            len >>= 7;
+            if len == 0 {
+                out.push(byte);
+                break;
+            }
+            out.push(byte | 0x80);
+        }
+        out.extend_from_slice(b);
+        out
+    }
+    let mut time = vec![1 << 3 | 1];
+    time.extend_from_slice(&1_700_000_001_000_000_000u64.to_le_bytes());
+    let attr = [ld(1, b"data_stream.dataset"), ld(2, &ld(1, b"web"))].concat();
+    let record = [time, ld(5, &ld(1, b"GET /cart 200")), ld(6, &attr)].concat();
+    let request = ld(1, &ld(2, &ld(2, &record)));
+    let gz = {
+        use std::io::Write;
+        let mut w = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        w.write_all(&request).unwrap();
+        w.finish().unwrap()
+    };
+    let r = e
+        .http
+        .post(&url)
+        .header("authorization", format!("ApiKey {key}"))
+        .header("content-type", "application/x-protobuf")
+        .header("content-encoding", "gzip")
+        .body(gz)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 200);
+    assert_eq!(r.headers().get("content-type").and_then(|h| h.to_str().ok()), Some("application/x-protobuf"));
+    assert!(r.bytes().await.unwrap().is_empty(), "nothing rejected");
+
+    assert_eq!(e.es(&u, &p, Method::POST, "/logs-*.otel-*/_refresh", None).await.0, 200);
+    let (s, v) = e.es(&u, &p, Method::POST, "/logs-*.otel-*/_search", Some(json!({"sort": ["@timestamp"]}))).await;
+    assert_eq!(s, 200, "{v}");
+    let hits = v["hits"]["hits"].as_array().unwrap();
+    assert_eq!(hits.len(), 2, "{v}");
+    assert_eq!(hits[0]["_source"]["body"]["text"], "paid order 42", "{v}");
+    assert_eq!(hits[0]["_source"]["resource"]["attributes"]["service.name"], "checkout", "{v}");
+    assert!(hits[0]["_index"].as_str().unwrap().contains("logs-generic.otel-default"), "{v}");
+    assert!(hits[1]["_index"].as_str().unwrap().contains("logs-web.otel-default"), "{v}");
+    // The key writes and never reads (a wildcard would just find nothing it may read).
+    let (s, v) = as_key(&e, &key, Method::POST, "/logs-generic.otel-default/_search", None).await;
+    assert_eq!(s, 403, "{v}");
+    // A read key's records are refused, not half-written.
+    let (_, v) = e.call(Method::POST, &format!("/v1/search/clusters/{id}/keys"), Some(json!({"name": "reader", "access": "read"}))).await;
+    let reader = v["api_key"].as_str().unwrap().to_string();
+    let r = e.http.post(&url).header("authorization", format!("ApiKey {reader}")).json(&json_logs).send().await.unwrap();
+    let (status, text) = (r.status().as_u16(), r.text().await.unwrap());
+    assert_eq!(e.es(&u, &p, Method::POST, "/logs-*.otel-*/_refresh", None).await.0, 200);
+    let (_, v) = e.es(&u, &p, Method::POST, "/logs-*.otel-*/_count", None).await;
+    assert_eq!((status, &v["count"]), (403, &json!(2)), "the read key's write: {text}");
+}
+
+/// `cluster.max_shards_per_node`: creating or opening past it is refused with Elasticsearch's
+/// error, closed indices don't count, and a key that may only create documents (an `otel` key
+/// through OTLP) can't add data streams past it.
+#[tokio::test]
+async fn the_shard_limit_holds_for_creates_opens_and_otel_keys() {
+    use reqwest::Method;
+    let e = env().await;
+    let c = e.post("/v1/search/clusters", json!({"name": "shards"})).await;
+    let (u, p) = creds(&c);
+    let id = c["id"].as_str().unwrap().to_string();
+    // The key first: whatever system index it needs is made before the limit is reached.
+    let (_, v) = e.call(Method::POST, &format!("/v1/search/clusters/{id}/keys"), Some(json!({"name": "collector", "access": "otel"}))).await;
+    let key = v["api_key"].as_str().unwrap().to_string();
+    // Shards open now (system indices included), then room for exactly two more indices.
+    let (_, v) = e.es(&u, &p, Method::GET, "/_cat/indices?format=json&expand_wildcards=all&h=pri,rep,status", None).await;
+    let open: u64 = v.as_array().unwrap().iter().filter(|i| i["status"] == "open").map(|i| {
+        let n = |k: &str| i[k].as_str().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+        n("pri") * (1 + n("rep"))
+    }).sum();
+    let max = open + 4;
+    let (s, v) = e.es(&u, &p, Method::PUT, "/_cluster/settings", Some(json!({"persistent": {"cluster.max_shards_per_node": max}}))).await;
+    assert_eq!(s, 200, "{v}");
+    // One primary and one replica each: two indices fill it.
+    for name in ["a", "b"] {
+        assert_eq!(e.es(&u, &p, Method::PUT, &format!("/{name}"), None).await.0, 200, "{name}");
+    }
+    let (s, v) = e.es(&u, &p, Method::PUT, "/c", None).await;
+    assert_eq!((s, &v["error"]["type"]), (400, &json!("validation_exception")), "{v}");
+    let expected = format!("this action would add [2] shards, but this cluster currently has [{max}]/[{max}] maximum normal shards open");
+    assert!(v["error"]["reason"].as_str().unwrap().contains(&expected), "{v}");
+    // A closed index's shards don't count; opening it again would pass the limit.
+    assert_eq!(e.es(&u, &p, Method::POST, "/a/_close", None).await.0, 200);
+    assert_eq!(e.es(&u, &p, Method::PUT, "/c", None).await.0, 200);
+    let (s, v) = e.es(&u, &p, Method::POST, "/a/_open", None).await;
+    assert_eq!((s, &v["error"]["type"]), (400, &json!("validation_exception")), "{v}");
+    // The otel key's records for a new data stream are refused, not created.
+    let logs = json!({"resourceLogs": [{"scopeLogs": [{"logRecords": [{"body": {"stringValue": "x"}}]}]}]});
+    let r = e.http.post(format!("{}/_otlp/v1/logs", e.es)).header("authorization", format!("ApiKey {key}")).json(&logs).send().await.unwrap();
+    let (status, text) = (r.status().as_u16(), r.text().await.unwrap());
+    assert!(status == 200 && text.contains("maximum normal shards open"), "{status} {text}");
+    let (_, v) = e.es(&u, &p, Method::GET, "/_data_stream/logs-*", None).await;
+    assert_eq!(v["data_streams"], json!([]), "no data stream was made: {v}");
+}

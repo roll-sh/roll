@@ -253,6 +253,7 @@ fn resize(st: &mut ClusterState, kind: ResizeType, source: &str, target: &str, r
         rollover_info: Default::default(),
         dialect: src.dialect,
     };
+    crate::meta::shard_limit::check_putting(st, target, &idx.settings)?;
     st.metadata.indices.insert(target.to_string(), Arc::new(idx));
     st.check_write_indices()?;
     st.check_hidden_aliases()?;

@@ -412,6 +412,18 @@ impl Source for CodeSource {
         Ok(Some(review.id))
     }
 
+    async fn work_item(&self, change: &str, title: &str, body: &str, labels: &[&str], outside: bool) -> anyhow::Result<Option<(u64, String)>> {
+        let Some(c) = self.code.db.change(change)? else { return Ok(None) };
+        let Some(r) = self.code.db.repo_by_id(&c.repo_id)? else { return Ok(None) };
+        let labels_owned: Vec<String> = labels.iter().map(|l| l.to_string()).collect();
+        if !outside && let Some(made) = self.code.open_github_issue(&r, title, body, &labels_owned).await? {
+            return Ok(Some(made));
+        }
+        let w = self.code.create_work_from(&r, &serde_json::json!({ "title": title, "body": body, "labels": labels }), outside)?;
+        let web = self.code.config.web_url.trim_end_matches('/');
+        Ok(Some((w.number, format!("{web}/{}/work", r.full_name()))))
+    }
+
     async fn git_commit(&self, repo: &str, revision: &str) -> anyhow::Result<Option<String>> {
         let r = self.repo(repo)?;
         let cs = self.code.store.resolve_or_404(&r.id, revision)?;

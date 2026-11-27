@@ -1155,6 +1155,12 @@ impl Code {
     }
 
     pub fn create_work(&self, r: &RepoRow, input: &Value) -> Result<WorkItem> {
+        self.create_work_from(r, input, false)
+    }
+
+    /// [`Self::create_work`] whose words may be someone's outside the team (`outside`: a preview
+    /// note a share link's guest left), marked so (MCP's lockdown withholds them).
+    pub fn create_work_from(&self, r: &RepoRow, input: &Value, outside: bool) -> Result<WorkItem> {
         let title = input.get("title").and_then(Value::as_str).map(str::trim).filter(|t| !t.is_empty()).ok_or_else(|| Error::Invalid("title is required".into()))?;
         let labels = Self::labels(input.get("labels"))?;
         let id = new_id("wi");
@@ -1169,7 +1175,7 @@ impl Code {
                 source: "native",
                 github_url: None,
                 state: WorkState::Open,
-                outside: false,
+                outside,
             },
         )?;
         let w = self.work_or_404(&id)?;

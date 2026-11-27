@@ -431,6 +431,8 @@ fn create_index_unhooked(st: &mut ClusterState, provided_name: &str, name: &str,
     if opensearch {
         crate::opensearch::check_adaptive_shard_selection(name, &settings)?;
     }
+    // `cluster.max_shards_per_node`: refused before anything is made.
+    crate::meta::shard_limit::check_adding(st, crate::meta::shard_limit::shards_of(&settings))?;
     if let Some(b) = &backing {
         data_stream_index_settings(&st.metadata, b.data_stream, &mut settings, &composed.mappings, now_ms)?;
         if let Some((start, end)) = b.past {
@@ -1185,6 +1187,9 @@ async fn open_indices(ctx: &Ctx<'_>) -> EsResult<Value> {
             let names = resolve::resolve(st, &exprs, &opts, now)?;
             let indices: Vec<Arc<IndexMeta>> = names.iter().map(|n| st.metadata.indices[n].clone()).collect();
             blocks::check(indices.iter().map(|i| i.as_ref()), Level::MetadataWrite)?;
+            // Opening closed indices opens their shards: `cluster.max_shards_per_node`.
+            let reopened = indices.iter().filter(|i| i.is_closed()).map(|i| crate::meta::shard_limit::shards_of(&i.settings)).fold(0u64, u64::saturating_add);
+            crate::meta::shard_limit::check_adding(st, reopened)?;
             for idx in indices {
                 if !idx.is_closed() {
                     continue;

@@ -318,16 +318,30 @@ impl Secrets {
         } else {
             format!("roll's role with sts:ExternalId = {}", external_id(project))
         };
-        let probe = format!("prj_probe_{}", names::new_id("p", 12));
-        match session(&*sts, &self.db, issuing.as_ref(), &probe, role_arn, &trust, "roll-check", 900, None) {
-            Ok(_) => return Err(Error::BadRequest(format!("{}'s trust takes any of roll's projects: trust {pinned}, so roll assumes it for this project and nobody else's", role_arn))),
-            // Only AWS refusing the made-up project shows the trust pins this one: any other error
-            // (throttling, AWS unable to fetch roll's keys) proves nothing, and nothing is registered.
-            Err(why) if !refused(&why) => return Err(Error::BadRequest(format!("roll couldn't check {}'s trust: {why}; try again", role_arn))),
-            Err(_) => {}
+        // A role kept for public certificates takes only their sessions (its trust's
+        // `sts:RoleSessionName` is `roll-public-cert-*`, docs/secrets.md): refused as `roll-check`,
+        // it's checked again under the name a certificate's check uses, the probe included (a
+        // refusal by name alone proves nothing about the project).
+        let mut first = None;
+        for name in ["roll-check".to_string(), session_name(crate::public_certs::CHECK_LABEL)] {
+            let probe = format!("prj_probe_{}", names::new_id("p", 12));
+            match session(&*sts, &self.db, issuing.as_ref(), &probe, role_arn, &trust, &name, 900, None) {
+                Ok(_) => return Err(Error::BadRequest(format!("{}'s trust takes any of roll's projects: trust {pinned}, so roll assumes it for this project and nobody else's", role_arn))),
+                // Only AWS refusing the made-up project shows the trust pins this one: any other error
+                // (throttling, AWS unable to fetch roll's keys) proves nothing, and nothing is registered.
+                Err(why) if !refused(&why) => return Err(Error::BadRequest(format!("roll couldn't check {}'s trust: {why}; try again", role_arn))),
+                Err(_) => {}
+            }
+            match session(&*sts, &self.db, issuing.as_ref(), project, role_arn, &trust, &name, 900, None) {
+                Ok(_) => return Ok(()),
+                Err(why) if refused(&why) && first.is_none() => first = Some(why),
+                Err(why) => return Err(Error::BadRequest(format!("roll couldn't assume {}: {why} (its trust policy must trust {pinned})", role_arn))),
+            }
         }
-        session(&*sts, &self.db, issuing.as_ref(), project, role_arn, &trust, "roll-check", 900, None).map_err(|why| Error::BadRequest(format!("roll couldn't assume {}: {why} (its trust policy must trust {pinned})", role_arn)))?;
-        Ok(())
+        let why = first.unwrap_or_default();
+        Err(Error::BadRequest(format!(
+            "roll couldn't assume {role_arn}: {why} (its trust policy must trust {pinned}; a condition on sts:RoleSessionName must take roll-check, or roll-public-cert-* for a role kept for public certificates)"
+        )))
     }
 
     /// Delete a role no key links to.

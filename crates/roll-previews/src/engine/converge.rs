@@ -1023,6 +1023,19 @@ impl Engine {
         }
         self.store.mark_step(&r.id, &r.head, "checks")?;
 
+        // 4d. The team's snapshots sent since the last converge: compared once for them all (a
+        // change's with main's; main's kept by head, then the changes waiting on it compared).
+        if self.store.runtime_fact::<bool>(&r.id, "snapshots_due")?.unwrap_or(false) {
+            self.store.set_runtime_fact::<bool>(&r.id, "snapshots_due", None)?;
+            if r.change_id.is_some() {
+                self.compare_with_default_branch(r).await;
+                let threshold = self.store.settings(&r.project_id).map_or(0.0, |s| s.github.visual_threshold);
+                let _ = self.store.carry_acceptance(&r.id, threshold);
+            } else {
+                self.store.keep_base_history(&r.id, r.build())?;
+                self.compare_waiting(r).await;
+            }
+        }
         // 5. Settled.
         let running = self.store.services(&r.id)?.iter().any(|x| x.state == ServiceState::Running);
         let error = (!problems.is_empty()).then(|| problems.join("; "));
@@ -1501,7 +1514,7 @@ impl Engine {
         want.iter().any(|id| !asked.contains(id))
     }
 
-    async fn compare_with_default_branch(&self, r: &Row) {
+    pub(super) async fn compare_with_default_branch(&self, r: &Row) {
         let Ok(Some(default)) = self.source.default_branch(&r.repo).await else { return };
         let Ok(rows) = self.store.rows(Some(&r.project_id)) else { return };
         let rows: Vec<Row> = rows.into_iter().filter(|x| x.change_id.is_none() && x.desired == Desired::Active).collect();
@@ -1522,7 +1535,7 @@ impl Engine {
 
     /// After branch preview `b`'s screenshot: the project's changes not compared with the default
     /// branch yet (their screenshots came first, as a new baseline's does) are now, and say so.
-    async fn compare_waiting(&self, b: &Row) {
+    pub(super) async fn compare_waiting(&self, b: &Row) {
         let Ok(rows) = self.store.rows(Some(&b.project_id)) else { return };
         // Every change again, not only those not compared yet: a change's screenshot run may
         // have compared it while this baseline's was half kept (its first page in, its other
