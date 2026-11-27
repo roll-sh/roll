@@ -18,7 +18,7 @@
 //! [`MAX_VALUE_BYTES`], or values nested past [`MAX_DEPTH`], is rejected and named in the
 //! answer's partial success; a malformed message fails the request.
 
-use super::wire::{Fields, Malformed, Wire};
+use super::wire::{Fields, Malformed};
 use crate::json::{Map, Value};
 use crate::obj;
 
