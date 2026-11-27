@@ -703,3 +703,96 @@ pub(super) fn restore(t: &Table, ctx: &ExecCtx) -> Option<(EstHeap, Vec<(u32, bt
     let btrees = btrees.into_iter().filter(|(i, _)| ixs.contains(i)).collect();
     Some((h, btrees, saved))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What a record keeps of an estimate, the places in key order.
+    fn kept(h: &EstHeap) -> (Vec<u8>, Vec<(u64, Tid)>) {
+        let mut e = Enc(Vec::new());
+        scalars(&mut e, h);
+        for r in &h.runs {
+            e.bytes(&r.0);
+            e.tid((r.1, r.2));
+        }
+        let mut moved: Vec<(u64, Tid)> = h.moved.iter().map(|(k, t)| (*k, *t)).collect();
+        moved.sort_unstable();
+        (e.0, moved)
+    }
+
+    /// Change records of an estimate's random changes (pages filled and added, versions
+    /// placed, runs begun and their last key moved, the fill key and tail page set and
+    /// dropped, the places dropped), each applied in turn to the full record, give it back.
+    #[test]
+    fn change_records_rebuild_the_estimate() {
+        let mut h = EstHeap {
+            pages: 100,
+            fill: 99,
+            room: 4000,
+            items: 20,
+            order: EstOrder::Placed,
+            writes: 7,
+            runs: vec![(b"key 0".to_vec(), 0, 1)],
+            tail: Some(Tail { page: 40, room: 112, items: 62, key: b"tail".to_vec() }),
+            ..Default::default()
+        };
+        let mut full = Enc(Vec::new());
+        encode_heap_full(&mut full, &h);
+        let mut copy = EstHeap::default();
+        decode_heap(&mut Dec(&full.0), true, &mut copy).expect("a full record");
+        h.sent = Some(Sent::of(&h));
+        h.log = Log { moved: Vec::new(), runs_saved: h.runs.len(), reset: false };
+        let (mut x, mut bytes) = (0x2545_F491_4F6C_DD1Du64, 0);
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        for round in 0..300 {
+            for _ in 0..next() % 4 {
+                h.writes += 1;
+                if h.room < 200 {
+                    (h.pages, h.fill, h.room, h.items) = (h.pages + 1, h.pages, 8000, 0);
+                } else {
+                    (h.room, h.items) = (h.room - 132, h.items + 1);
+                }
+                let k = next();
+                h.moved.insert(k, (h.fill, h.items));
+                h.log.moved.push((k, (h.fill, h.items)));
+            }
+            match next() % 16 {
+                0 => h.runs.push((format!("key {round}").into_bytes(), h.fill, 1)),
+                1 => h.runs.last_mut().expect("a run").0.push(b'x'),
+                2 => h.fill_key = Some(format!("fill {round}").into_bytes()),
+                3 => h.fill_key = None,
+                4 => h.tail = None,
+                5 => h.tail = Some(Tail { page: h.fill, room: h.room, items: h.items, key: b"t".to_vec() }),
+                6 => h.reusable += 300,
+                7 => {
+                    h.runs.clear();
+                    h.moved.clear();
+                    h.log.moved.clear();
+                    h.log.reset = true;
+                    h.runs.push((b"key".to_vec(), 0, 1));
+                    h.order = EstOrder::Unplaced;
+                }
+                8 => h.in_place = !h.in_place,
+                _ => {}
+            }
+            let mut e = Enc(Vec::new());
+            let mut sent = h.sent.take().expect("sent");
+            encode_heap_changes(&mut e, &h, &mut sent);
+            h.sent = Some(sent);
+            bytes += e.0.len();
+            let mut d = Dec(&e.0);
+            decode_heap_changes(&mut d, &mut copy).expect("a change record");
+            assert!(d.0.is_empty(), "round {round}: {} bytes left", d.0.len());
+            h.log = Log { moved: Vec::new(), runs_saved: h.runs.len(), reset: false };
+            assert!(kept(&h) == kept(&copy), "round {round}");
+        }
+        // (~1.5 places a record, ~12 bytes each: the rest is a few bytes.)
+        assert!(bytes < 300 * 40, "{bytes}");
+    }
+}

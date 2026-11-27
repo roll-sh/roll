@@ -89,6 +89,25 @@ fn loaded_tables_are_vacuumed_and_analyzed() {
     e.shutdown();
 }
 
+/// The counts a clean shutdown kept drive autovacuum after the restart, as PostgreSQL's (its
+/// workers read every table's entry): a table loaded while autovacuum was off is vacuumed and
+/// analyzed once the server starts again with it on.
+#[test]
+fn counts_kept_across_a_restart_drive_autovacuum() {
+    let dir = tempfile::tempdir().unwrap();
+    let e = engine(dir.path(), &[("autovacuum", "off")]);
+    let mut s = e.connect(1, "postgres", "postgres", "t").unwrap();
+    rows(&mut s, "CREATE TABLE av_t (a int, b text); INSERT INTO av_t SELECT i, 'x' || i % 7 FROM generate_series(1, 1500) i");
+    drop(s);
+    e.shutdown();
+    drop(e);
+    let e = engine(dir.path(), &[("autovacuum_naptime", "1")]);
+    let mut s = e.connect(1, "postgres", "postgres", "t").unwrap();
+    assert_eq!(wait_for(&mut s, COUNTS, &["1 | 1 | 0 | 0 | t | 0"], 20), ["1 | 1 | 0 | 0 | t | 0"]);
+    drop(s);
+    e.shutdown();
+}
+
 #[test]
 fn storage_parameters_and_settings_are_respected() {
     let dir = tempfile::tempdir().unwrap();

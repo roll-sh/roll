@@ -513,8 +513,6 @@ type MemKey = smallvec::SmallVec<[u8; 40]>;
 
 pub struct Memtable {
     map: SkipMap<MemKey, Option<Bytes>>,
-    /// Its values' bytes (`Values`).
-    values: Values,
     size: AtomicUsize,
     max_ts: AtomicU64,
     /// The relations it holds keys of (`hot::PrefixBits`): a read of another relation's
@@ -567,49 +565,11 @@ impl KeyFilter {
     }
 }
 
-/// A memtable's values, copied end to end into chunks of its own. A commit's values come as
-/// the buffers their rows were encoded into, each its own allocation with room to spare
-/// (a row grown past its first estimate doubles, `Bytes::from(Vec)` keeps the capacity and
-/// adds a header of its own): held as they came, a memtable's values took up to twice the
-/// bytes it counts. Chunks start small
-/// (an idle database's memtable holds a few catalog rows) and double up to a 32nd of the
-/// memtable; a value over `VALUE_MAX` keeps its own buffer.
-struct Values {
-    chunk: Mutex<(bytes::BytesMut, usize)>,
-    max: usize,
-}
-
-impl Values {
-    const VALUE_MAX: usize = 4 << 10;
-    const FIRST: usize = 4 << 10;
-
-    fn new(memtable_bytes: usize) -> Self {
-        Values { chunk: Mutex::new((bytes::BytesMut::new(), Self::FIRST)), max: (memtable_bytes / 32).clamp(Self::FIRST, 1 << 20) }
-    }
-
-    /// `v`'s bytes in a chunk (its own buffer past `VALUE_MAX`).
-    fn hold(&self, v: Bytes) -> Bytes {
-        if v.is_empty() || v.len() > Self::VALUE_MAX {
-            return v;
-        }
-        let mut g = self.chunk.lock();
-        let (buf, next) = &mut *g;
-        // (What a chunk has left is its capacity: each value is split off it.)
-        if buf.capacity() < v.len() {
-            *buf = bytes::BytesMut::with_capacity(*next);
-            *next = (*next * 2).min(self.max);
-        }
-        buf.extend_from_slice(&v);
-        buf.split().freeze()
-    }
-}
-
 impl Memtable {
     /// A memtable taking `bytes` before it is frozen (its key filter's size).
     fn new(wal_seq: u64, bytes: usize) -> Self {
         Memtable {
             map: SkipMap::new(),
-            values: Values::new(bytes),
             size: AtomicUsize::new(0),
             max_ts: AtomicU64::new(0),
             prefixes: hot::PrefixBits::default(),
@@ -628,7 +588,7 @@ impl Memtable {
         // its key.)
         self.prefixes.add(user);
         self.keys.add(sst::hash64_2(user));
-        self.map.insert(key, value.map(|v| self.values.hold(v)));
+        self.map.insert(key, value);
         self.size.fetch_add(n, Ordering::Relaxed);
         self.max_ts.fetch_max(ts, Ordering::Relaxed);
     }

@@ -209,6 +209,9 @@ pub struct StartupReport {
     /// The main thread's CPU (user, system; microseconds) and the time the start took.
     pub cpu: (i64, i64),
     pub elapsed: std::time::Duration,
+    /// The startup process's LOG line about the statistics file, when it was discarded
+    /// ("corrupted statistics file ...").
+    pub stats_log: Option<String>,
 }
 
 /// A connected client, for pg_stat_activity and cancel / terminate.
@@ -457,6 +460,9 @@ impl Engine {
             info!("database system was not properly shut down; resetting unlogged relations");
         }
         let (last_time, redo_start) = (registry.time, registry.wal_lsn);
+        // The cumulative statistics the last clean shutdown wrote (none after a crash: they
+        // start again), the file removed (pgstat_restore_stats / pgstat_discard_stats).
+        let (mut saved_stats, stats_log) = crate::exec::pgstat::file::take(&opts.data_dir, registry.wal_lsn, crashed);
         registry.running = true;
         registry.time = crate::types::datetime::Clock::system().now;
         // (Durable before anything is written: a crash from here on must be seen as one.)
@@ -522,6 +528,21 @@ impl Engine {
             }
         };
         let slots = crate::repl::slot::Slots::open(Some(opts.data_dir.clone()), count("max_replication_slots", 10)?)?;
+        if saved_stats.is_none() {
+            slots.discard_stats();
+        }
+        // Each database's restored statistics, until it opens (those to look at for
+        // autovacuum: `restored`).
+        let mut kept = HashMap::new();
+        let mut av_due = Vec::new();
+        for (oid, mut s) in saved_stats.as_mut().map(|s| std::mem::take(&mut s.dbs)).unwrap_or_default() {
+            if registry.databases.iter().any(|d| d.oid == oid) {
+                if crate::exec::pgstat::restored(&mut s) {
+                    av_due.push(oid);
+                }
+                kept.insert(oid, s);
+            }
+        }
         let max_wal_senders = count("max_wal_senders", 10)?;
         let proc_sizes = (count("max_connections", 100)?, count("autovacuum_worker_slots", 16)?);
         let procs = crate::txn::procs::Procs::new(proc_sizes.0, proc_sizes.1, count("max_worker_processes", 8)?, max_wal_senders);
@@ -574,6 +595,7 @@ impl Engine {
                 },
             ));
             let stats = crate::exec::pgstat::Fixed::starting_at(registry.wal_lsn);
+            crate::exec::pgstat::restore(&mut stats.lock(), saved_stats.as_ref(), crate::types::datetime::Clock::system().now);
             let weak = me.clone();
             let wal = crate::repl::lsn::WalPos::new(next_lsn.max(registry.wal_lsn), move |n| {
                 if let Some(e) = weak.upgrade() {
@@ -596,7 +618,7 @@ impl Engine {
                 cache,
                 stats,
                 registry: Mutex::new(registry),
-                open: Mutex::new(OpenDbs::default()),
+                open: Mutex::new(OpenDbs { kept, ..OpenDbs::default() }),
                 unlogged_reset: Mutex::new(unlogged_reset),
                 reopenable: Condvar::new(),
                 shared_lock: Mutex::new(()),
@@ -628,6 +650,9 @@ impl Engine {
             }
         });
         engine.init_shared()?;
+        if let Some(s) = &saved_stats {
+            crate::sql::func::pubsub::restore_subscription_stats(&engine.oids, &s.subscriptions);
+        }
         engine.repl.wal.persist_reserved();
         // (Never behind a position a slot has seen.)
         for s in engine.repl.slots.list() {
@@ -669,6 +694,9 @@ impl Engine {
             .autovacuum
             .start()
             .map_err(|e| internal(format!("spawn autovacuum launcher: {e}")))?;
+        for oid in av_due {
+            crate::autovacuum::Hook::new(&engine.autovacuum, oid).note(std::time::Instant::now());
+        }
         let resumed = engine.stats.lock().wal_lsn();
         *engine.startup.lock() = Some(StartupReport {
             crashed,
@@ -677,6 +705,7 @@ impl Engine {
             resumed,
             cpu: crate::autovacuum::thread_cpu(),
             elapsed: opening.elapsed(),
+            stats_log,
         });
         Ok(engine)
     }
@@ -1922,7 +1951,7 @@ impl Engine {
 
     /// Flush and close everything (server shutdown).
     pub fn shutdown(&self) {
-        self.stopped.store(true, Ordering::Release);
+        let first = !self.stopped.swap(true, Ordering::AcqRel);
         // (Apply workers hold sessions: they end before the databases close.)
         self.workers.shutdown();
         self.autovacuum.shutdown();
@@ -1940,7 +1969,9 @@ impl Engine {
                 })
                 .collect()
         };
+        let mut stats = Vec::new();
         for (db, _closing) in dbs {
+            stats.push((db.oid, crate::exec::pgstat::for_file(&db)));
             crate::exec::sizing::persist_estimates(&db);
             if let Err(e) = db.persist_sequences() {
                 warn!(database = %db.name, error = %e, "saving sequence positions failed");
@@ -1958,8 +1989,27 @@ impl Engine {
         // next start); they hold their databases.
         self.twophase.clear();
         // Where the WAL position resumes at the next start.
+        let lsn = self.stats.lock().wal_lsn();
+        // The cumulative statistics, for the next start (pgstat_write_statsfile), before the
+        // registry says the shutdown was clean.
+        if first {
+            for (oid, s) in &self.open.lock().kept {
+                stats.push((*oid, crate::exec::pgstat::Shared {
+                    tables: s.tables.clone(),
+                    funcs: s.funcs.clone(),
+                    db: s.db.clone(),
+                    shared_db: s.shared_db.clone(),
+                    ..Default::default()
+                }));
+            }
+            let mut saved = crate::exec::pgstat::saved(&self.stats.lock(), self.started, stats);
+            saved.subscriptions = crate::sql::func::pubsub::saved_subscription_stats(&self.oids);
+            if let Err(e) = crate::exec::pgstat::file::write(&self.opts.data_dir, &saved, lsn, self.opts.sync) {
+                warn!(error = %e, "could not write the statistics file");
+            }
+        }
         let mut r = self.registry.lock();
-        r.wal_lsn = self.stats.lock().wal_lsn();
+        r.wal_lsn = lsn;
         r.running = false;
         r.time = crate::types::datetime::Clock::system().now;
         if let Err(e) = self.save(&r) {

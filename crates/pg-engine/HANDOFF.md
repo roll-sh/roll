@@ -16249,6 +16249,92 @@ Harness: `~/.cache/a328/bench` (`stmt.sh`: per-statement cells, custom against g
 `prof.sh`: an LBR profile of one cell; `oltp.sh` from 322 with `PCM=<plan_cache_mode>`), the probe test and
 its trace prints in `~/.cache/a328/patches/` (`a328_probe.rs`, `probe-trace2.patch`; not for landing).
 
+## Short write transactions, round 21: where the 32 MB memtable's memory goes; compact estimate change records (agent 337)
+
+BENCH "Short write transactions, round 21" has the tables. Harness `~/.cache/a337/bench` (333's `split.sh` with
+`NTX`, the window's transaction count; `mem.sh` the memory timeline; `walsnap.sh` / `walparse.py` what a run puts
+in the memtable by key class; `tpch.sh` TPC-H over the wire with one client binary for both arms).
+
+**Memory (brief item 1): not the memtable.** TPC-B-like at 8 clients, warmed, plain dist of `cand/a333-2`: peak
+anon+shmem 580-600 MB, in the measured run. Split with a heap-profiled build (`--features heapprof`), a glibc counting
+shim, `smaps` at the peak and allocator switches:
+
+- the Rust heap's live bytes at the peak are 110 MB (the active and the frozen memtable rise and fall between 40 and
+  110 MB: nodes 12.8 MB, the estimate records and rows in their own allocations); glibc under 4 MB;
+- `MIMALLOC_PURGE_DELAY=0`, `MIMALLOC_ABANDONED_PAGE_PURGE=1`, an `mi_collect` in each committing thread after every
+  memtable flush (probe), and the memtable's values copied into chunks of its own (probe) move nothing (554-664 MB);
+- **it is the block cache** (`--cache-mb 2048`): anon climbs all run long and falls at the moment a compaction
+  replaces pgbench_accounts' L1 file (its blocks leave the cache: `SstReader`'s drop, `forget_file`). With
+  `--cache-mb 64` the whole run stays under the load's 222 MB. With an 8 MB memtable the table compacts four times
+  a window, so the cache never held more than ~130 MB of it; with 32 MB once, so it holds the table's blocks read
+  since (~350 MB). That is the +105-150 MB agent 333 measured: the cache inside its budget, as PostgreSQL's
+  shared buffers hold the same pages (its 653-693 MB). Idle sessions: 10.5 / 39.5 / 298 MB before, 10.5 / 37.3 /
+  293.9 MB after this round (1 / 100 / 1,000 sessions).
+
+(The arena's debug lines' `mapped=` is one cache shard's, not the cache's: sum the mapped and unmapped chunks.)
+
+**Bytes into the memtable (item 2).** What a warmed run puts in the memtable (`walsnap.sh`: the WAL of the memtable
+not flushed yet, by key class), a TPC-B-like commit counted as the memtable counts it (key + 8 + value + 48):
+1,072 bytes, 594 of them (55%) the size model's estimate records of pgbench_accounts (`estkeep`): a change record a
+commit, ~324 bytes (the heap's scalars whole, its tail page's key, the last run again, a btree header of 62 bytes and
+76 a changed leaf, the new version's place), a full record of 4.0-4.4 MB (the moved versions' places) folded in each
+time the changes reach its size, and a deletion for each change record at the fold.
+
+**What changed** (`cand/a337`): a change record holds only what differs from the record before (tag `0xe3`,
+`estkeep::encode_heap_changes`; `btest`'s `COMPACT` for a btree): a bit for each field that changed, numbers as
+varint differences, the tail page, fill key and runs only when they changed; a btree's header fields that changed,
+each changed leaf's slot and the values that differ from what it held when the summary was last made durable (kept
+with the leaf's dirty mark: `BtEst::dirty` holds the leaf as it was), as a whole-number step when the decoder's sum
+gives the value exactly (`Enc::fdiff`: an entry's bytes and counts are added in whole numbers), else its bits; a new
+leaf (split off) with its low key. What the encoder last made durable is kept beside the estimate (`EstHeap::sent`,
+`BtEst::sent`: set by a full record, a change record and `restore`; none: the next record is a full one, as after a
+temporary or unlogged table's changes were dropped). Records are read in the same order to the same estimate:
+recovery is exactly as before. Full records keep their form (a build before this one reads them); `0xe2` change records
+are still read, so a store written before upgrades in place. One-way: a build before this one finds a `0xe3`
+record, refuses the table's records and estimates the table afresh (as for a missing record), never a misread. A
+change record goes into the commit with its spare capacity dropped (`shrink_to_fit`: a full record's vector kept up
+to twice its megabytes in the memtable).
+
+Measured: the estimate records 594 -> 64 bytes a commit (change records 324 -> 55 bytes; a fold now every ~75,000
+change records instead of ~12,000), the memtable 1,072 -> 542 bytes a commit (with the folds' share ~606: -43%), so it
+fills and compacts half as often. By 333's measure (160,000 warmed, 160,000 counted under `enable_seqscan=off`)
+both builds see one compaction in nearly every window, so it shows level (8 clients 355.0k / 355.6k against 355.6k /
+355.2k); over 480,000 counted transactions (three windows) on the head: **365.3k -> 340.4k user instructions a
+transaction (-6.8%)**, the flush thread 67.8k -> 45.7k (three compactions -> two), the connection threads 297.6k ->
+294.8k, bytes written 9,587 -> 8,061; on `cand/a333-2` the same pair 397.3k -> 354.9k (flush 84.8k -> 45.6k, four
+compactions -> two). Level: point select, the 1,000-row range read right after a load, TPC-H SF 0.1's queries and
+load (instructions), peak anon+shmem; the bulk load +0.2 / +0.4% (its table has no index: one small record a commit).
+
+Checks: `btest::change_records_rebuild_the_summary` (400 rounds of compact records, splits among them, applied in turn
+give the summary byte for byte), `estkeep::change_records_rebuild_the_estimate` (300 change records of random changes:
+pages filled and added, places, runs begun and moved, the fill key and tail page set and dropped, the places dropped,
+each applied in turn to the full record's estimate; a mutant that drops the records' places fails it); quick-check
+with QC_CHECKED=1 and `QC_TESTS="big_tables crash_bulk storage_linked_gc"` on `176984d83` (on `2676ea37a`): 13 test
+binaries, clippy 16 warnings, none new in a changed file, tests 390 passed in 10 binaries (`crash_bulk`,
+`storage_linked_gc`, `big_tables` among them), checked 390 passed, regress 51,148 / 51,150 (0 newly differing),
+isolation 1,647 / 1,648, pg_dump 14,609 passed (no crash stage: the diff maps `exec/sizing` to none);
+`tools/crash-binary.py` seeds 1-3 and `--power drop` seeds 1-3 against the plain dist build of the change: ok.
+
+Found: no integration test restores an estimate from change records. `big_tables`' restart and crash tests restore
+full records only (their bulk statements fold at once), and a crash test of 300 one-row UPDATEs after
+`past_model_history` (tried, not kept) never calls `restore` on reopening (why was not found), so it passed with
+every change record refused. The unit tests above are what checks the records.
+
+**Compaction (item 3), analysis only.** Agent 292's block copy covers 1,500-2,600 of pgbench_accounts' ~46,000 L1
+blocks a compaction here (3-6%): between two compactions of a 32 MB memtable ~130,000 random UPDATEs reach a block
+2.8 times on average (e^-2.8 = 6% untouched; 292's UPDATE-only case wrote a narrow range). Halving the bytes doubles
+that, so copying covers less still; 4 kB blocks would take it to ~50% at four times the index entries and worse
+compression. What is left is the rewrite itself: zstd level 1 with the file's dictionary is about half of it; a
+negative level for L1 rewrites was not built (it trades read bytes for it).
+
+Dropped (patches in `~/.cache/a337/patches/`): the memtable's values copied into chunks of its own
+(`memtable-value-arena.patch`: no memory moved), an `mi_collect` in committing threads after each flush
+(`probe-collect.patch`).
+
+Left: a range deletion for a fold's change records (one deletion each now: ~37 bytes a commit, 6% of the memtable's
+bytes); the block cache's copy of an L1 file thrown away at each compaction (each compaction is followed by every
+read of the table missing the cache again); compaction's zstd level.
+
 ## Short write transactions, round 20: where TPC-B-like's run-to-run spread comes from; a small table's filtered scan of a kept hot range (agent 333)
 
 BENCH "Short write transactions, round 20" has the tables. Harness `~/.cache/a333/bench` (below).
@@ -24945,3 +25031,160 @@ apply session's progress, and one per unsynced slot save (a session's release of
    (ext4's journal makes more durable). dm-log-writes in a privileged container would replay real
    ext4 / XFS crash states; needs loop devices on the host.
 4. initdb and the first schema load are not cut (they run unwatched).
+
+## Cumulative statistics across restarts, pg_stat views compared (agent 335, 2026-11-26)
+
+Item 2 of agent 331's "Left": roll's cumulative statistics started from 0 at every start, clean
+or not; PostgreSQL 18.6 keeps them across a clean restart and discards them after a crash.
+Probes and scripts in `~/.cache/a335/scripts/` (`probe-views.py`, `cmpviews.py`, `startstop.py`),
+outputs in `~/.cache/a335/probe/` (`pg1.json` PostgreSQL 18.6 in my own `a335-pg`, `new2.json`
+roll, `cmp-new2.txt`).
+
+### What PostgreSQL 18.6 does (checked on `a335-pg`, the 18.6 image)
+
+- **Clean shutdown** (smart / fast): the checkpointer writes `pg_stat/pgstat.stat` as it exits
+  (pgstat_before_server_shutdown, after the shutdown checkpoint), tagged with the redo LSN.
+  **Not at checkpoints**: after CHECKPOINT `pg_stat/` stays empty (checked).
+- **Start** after a clean shutdown: the file is read (pgstat_restore_stats) and **removed**
+  (`pg_stat/` empty while running, checked). Everything comes back: tables' and indexes' counters
+  (n_tup_*, n_live_tup, n_dead_tup, n_mod_since_analyze, n_ins_since_vacuum, last_* times and
+  counts), functions, databases (with stats_reset), bgwriter / checkpointer / WAL / IO / SLRU /
+  archiver with their reset times, replication slots, subscriptions' counters and reset times.
+  A redo LSN other than the one the start begins from, or a file that doesn't parse: LOG
+  "corrupted statistics file", everything starts from 0 (pgstat_reset_after_failure).
+- **Start after a crash / immediate shutdown** (pgstat_discard_stats): the file removed unread,
+  every counter 0, every variable entry gone (a table's row reads 0s; pg_stat_database.stats_reset
+  NULL; a slot's and a subscription's stats_reset NULL); the fixed-numbered statistics' stats_reset
+  is the discard's time (the start). With no file at all (initdb) the same.
+- The shutdown checkpoint counts as requested (num_requested +1) but not done (num_done kept),
+  and its WAL (2 records, one checkpointer WAL write) is in the file.
+- pg_stat_recovery_prefetch isn't pgstat's: its stats_reset is every start's time.
+- stats_fetch_consistency and the pg_stat_reset* functions don't touch the file: a reset's time
+  is kept like any other value.
+
+### What changed
+
+- `exec/pgstat/file.rs` (new): the file `pg_stat/pgstat.stat`. A header (magic, format version,
+  the WAL position the shutdown recorded), the fixed-numbered statistics (reset times and the
+  time they were last discarded, checkpoints, WAL, pg_stat_io, SLRU), each database's table /
+  index / function entries and database entries, the subscriptions' counters; a CRC-32 of it all.
+  `write` through `storage::durable::replace` (fsync, rename, directory fsync: PostgreSQL's
+  durable_rename; agent 325's module), `take` reads and removes it (and a leftover `.tmp`).
+  Anything that doesn't decode (another format, another shutdown's WAL position, a torn or
+  truncated file, a flipped byte) or can't be read is discarded with PostgreSQL's LOG line
+  ("corrupted statistics file", "could not open statistics file"): a start never fails on it. The entry codecs name every field of their struct in a pattern, so a counter added to
+  `TabEntry` / `DbEntry` / `FuncCounts` doesn't compile until the file carries it.
+- `Engine::shutdown` (the first call): each open database's statistics (its backends' unflushed
+  counts flushed in, dropped objects' entries left out: `pgstat::for_file`) and those of
+  databases closed while idle, written before the registry records the clean shutdown.
+  `Engine::open`: the file taken before the registry says running; after a crash, or with no
+  file, nothing restored and the fixed-numbered statistics' reset time is this start
+  (`Fixed::since`, which `reset_time` falls back to; recovery_prefetch's is always the start).
+  A database's entries wait in `OpenDbs::kept` until it opens, as after an idle close.
+- Autovacuum after the restart: the restored user tables with modification counters are
+  marked changed and the launcher told about their databases (`pgstat::restored`), so the first
+  visit looks at them as PostgreSQL's launcher reads every table's entry.
+- Replication slots (their statistics live in `replslots.json`): zeroed after a crash or a start
+  without the file (`Slots::discard_stats`). Subscriptions' counters (in memory only) written to
+  and read from the file.
+- The shutdown checkpoint (`pgstat::checkpoint`): requested +1, its two records and checkpointer
+  WAL write counted before the file, done not counted, as PostgreSQL's file has them.
+
+Nothing here runs per statement: the file is written once at shutdown and read once at start.
+
+### Compared, every column of every cumulative view
+
+`probe-views.py`: a table with a primary key and an index, 1,000 rows, updates (HOT and of the
+indexed column), deletes, scans, a plpgsql function (track_functions = all), a sequence, a rolled
+back insert, a sort spilling to a temp file, ANALYZE and VACUUM of a second table, a logical slot
+(test_decoding) read, a subscription (connect = false) with its stats reset, pg_stat_reset_shared
+('bgwriter'), a single table's reset, CHECKPOINT; every cumulative pg_stat_* / pg_statio_* view
+dumped (user objects; pg_stat_io's client backend / checkpointer rows), then a clean restart and
+the dump again, more of the work, a kill (roll SIGKILL, PostgreSQL `pg_ctl stop -m immediate`)
+and the dump again. `cmpviews.py` compares each cell's transition (kept, grew, back to 0 / NULL,
+a new time) and user objects' counters exactly.
+
+| | before this change | now |
+|---|---|---|
+| user tables / indexes / functions / sequences, every counter and time, after the clean restart | 0 / NULL | **kept, as PostgreSQL's** (n_live_tup 995, n_dead_tup 66, n_mod_since_analyze 1065 ... equal) |
+| pg_stat_database (counts, stats_reset), its database-0 row | 0 / NULL | kept |
+| bgwriter / checkpointer / WAL / IO / SLRU / archiver reset times | the start | kept (PostgreSQL's: the first start's, or the last reset's) |
+| checkpointer num_requested / num_done, WAL records, checkpointer WAL writes after the clean restart | 0 | **+1 / kept / +2 / +1**, as PostgreSQL |
+| replication slot counters, stats_reset after a **crash** | kept (replslots.json) | 0, NULL |
+| subscription stats_reset after the clean restart | NULL | kept; after a crash NULL |
+| everything after a crash | 0 / the start | 0 / NULL, fixed reset times the start: as PostgreSQL |
+
+What differs still (none of it across a restart: the same before it):
+- Columns roll never counts (0 in every phase): pg_statio_* heap / index / sequence blocks,
+  pg_stat_database blks_read, blk_read/write_time, session_time, active_time,
+  idle_in_transaction_time, the database-0 row's tuple counts, pg_stat_bgwriter buffers_alloc,
+  pg_stat_checkpointer buffers_written / slru_written / write_time / sync_time, pg_stat_wal
+  wal_fpi, pg_stat_slru's counters but blks_zeroed of notify, pg_stat_io's reads / hits / bytes of
+  most rows, pg_stat_recovery_prefetch's counters.
+- pg_stat_database tup_returned / tup_fetched / blks_hit: PostgreSQL counts catalog reads (the
+  dump's own reads grow them on PostgreSQL only).
+- pg_stat_user_indexes idx_tup_read 66 for 67 (and 192 for 259 after the second round of
+  updates of the indexed column), the slot's total_bytes 9,060 for 10,048 (test_decoding's
+  bytes), pg_stat_io's vacuum reads of a 100-row table (PostgreSQL's were hits).
+- After a crash PostgreSQL's end-of-recovery checkpoint writes 11 buffers (pg_stat_io
+  checkpointer writes 11, fsyncs 6); roll counts 1 and 1.
+
+### Measured
+
+Plain dist builds, base `4c322b3d8` (the candidate's parent then; the later rebases brought
+other agents' changes only, and the LOG line, which runs at a start that discards the file)
+against the candidate. Start and
+clean-shutdown time (`startstop.py`, the server on lane B's CPUs through `tools/lane.sh b`, three
+cycles each; 7.4 / 6.2 foreign cores on the lane, so a rough reading):
+
+| | base: shutdown / start (ms) | candidate |
+|---|---|---|
+| idle server | 52, 32, 24 / 85, 110, 85 | 16, 16, 17 / 41, 33, 40 |
+| 10,000 tables of a row each | 696, 326, 67 / 108, 89, 50 (their counts gone after each) | 164, 117, 114 / 80, 146, 150 (10,000 tables' counts kept) |
+
+The idle server's difference is the lane's noise (nothing changed there but one small file).
+With 10,000 tables the file is about 2 MB (computed from the format, 190-225 bytes an entry, not
+measured); its write and read sit inside these runs' spread, the start up to about +60 ms.
+
+In process (agent 324's harness, `~/.cache/a335/inproc/`: `bench --target inproc oltp
+--clients 1`, a fresh 100,000-row database a run, perf stat user instructions of the bench
+process, (I30 s - I10 s) / (ops30 - ops10)), one pair each through `tools/lane.sh a` (6.5 / 7.7
+foreign cores: instructions only): point_select 35,268 -> 35,291 (+0.06%), TPC-B-like
+(short_txn) 257,428 -> 257,335 (-0.04%): level, as expected (no statement path changed).
+
+### Checks
+
+- `tools/quick-check.sh` with `QC_CHECKED=1 QC_TESTS=big_tables` on `9904fcf0e` (this
+  candidate's code on `2676ea37a`): clippy 16 warnings, none new in a changed file; 484 tests in
+  32 binaries, and again built `verify-checked`; crash seeds 1-3 x 2 and power_cut_at_every_point;
+  regress 51,148 / 51,150 (0 newly differing); isolation 1,647 / 1,648; pg_dump_tap 14,609
+  passed. (Before the last two rebases, on `4c322b3d8` without the LOG line: the same, 478 tests
+  in 27 binaries.)
+- `tools/crash-binary.py`: SIGKILL seeds 1, 2, 3 and `--power drop` seeds 1, 2, 3 (each ends with
+  a clean shutdown followed by a cut, and a start from what the cut left): all ok, on the plain
+  dist binary of the code on `4c322b3d8` and again on quick-check's verify binary of `9904fcf0e`.
+- A damaged file (`~/.cache/a335/scripts/badfile.py`, quick-check's binary): after a clean shutdown
+  the file truncated to half, overwritten with junk, emptied: each start went through, the
+  counts from 0, the file removed, and the startup process's LOG line as PostgreSQL's
+  (`corrupted statistics file "pg_stat/pgstat.stat"`, after "database system was shut down
+  at": through the `StartupReport`, `log::lifecycle::startup`).
+- Tests: `crash_unlogged`'s restart / crash child now also checks a table's counters, the
+  checkpointer's and the database's reset times and the file's removal across the clean
+  restart, and 0 / NULL / a new reset time after the SIGKILL; `autovacuum`'s
+  `counts_kept_across_a_restart_drive_autovacuum` (a table loaded with autovacuum off is vacuumed
+  and analyzed after a restart with it on). With the file never read (a mutant of `take`) the
+  autovacuum test fails; `file::tests` reads every prefix of a file, another shutdown's and a
+  flipped byte as discarded.
+
+### Dropped
+
+Nothing measured and dropped.
+
+### Left
+1. 331's item 1 (deletes into the page record without a per-row lookup): not done. The batched
+   DELETE's rows carry no TID, and feeding the record is an update of its set per deleted row:
+   not free on the bulk DELETE path, so not started.
+2. pg_stat_statements' own file (`pg_stat/pg_stat_statements.stat` in PostgreSQL, kept across a
+   clean restart): roll's store is still in memory only.
+3. The counters roll doesn't count at all (above), and PostgreSQL's catalog reads in the
+   database's tuple counts.

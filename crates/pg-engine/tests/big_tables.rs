@@ -773,52 +773,6 @@ fn past_model_crash_child() {
     });
 }
 
-/// One-row UPDATE commits past the model, each with a change record of what differs from the
-/// record before (`estkeep`'s compact form, a changed index's leaves among them): after a
-/// crash their records give the estimate the server had (sizes, the versions' places by the
-/// heap order, a float sum).
-#[test]
-fn one_row_updates_kept_across_a_crash() {
-    let tmp = tempfile::tempdir().unwrap();
-    let st = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "one_row_updates_crash_child", "--nocapture", "--test-threads=1"])
-        .env("ONE_ROW_CRASH_DIR", tmp.path())
-        .stdout(std::process::Stdio::null())
-        .status()
-        .unwrap();
-    assert!(!st.success(), "the child wasn't killed");
-    let want = std::fs::read_to_string(tmp.path().join("state")).unwrap();
-    with_max_versions(2000, || {
-        let eng = open(tmp.path());
-        let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
-        assert_eq!(past_model_state(&mut s), want);
-        drop(s);
-        eng.shutdown();
-    });
-}
-
-/// `one_row_updates_kept_across_a_crash`'s crash: the updates committed, then `kill -9`.
-#[test]
-fn one_row_updates_crash_child() {
-    let Ok(dir) = std::env::var("ONE_ROW_CRASH_DIR") else {
-        return;
-    };
-    with_max_versions(2000, || {
-        let eng = Engine::open(EngineOptions { sync: true, ..options(std::path::Path::new(&dir)) }).unwrap();
-        let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
-        past_model_history(&mut s);
-        for i in 0..300 {
-            let id = i * 97 % 30000 + 2;
-            let set = if i % 3 == 0 { "a = a + 1, c = c + 1" } else { "c = c + 1" };
-            run(&mut s, &format!("UPDATE t SET {set} WHERE id = {id}"));
-        }
-        std::fs::write(std::path::Path::new(&dir).join("state"), past_model_state(&mut s)).unwrap();
-        let me = std::process::id().to_string();
-        std::process::Command::new("kill").args(["-9", &me]).status().unwrap();
-        unreachable!("still alive after SIGKILL");
-    });
-}
-
 /// (The heap's and t_a's pages exactly; t_id's within a page of PostgreSQL's 167: the
 /// summary estimates where its leaves split.)
 const PAST_MODEL_SIZES: &str = "SELECT concat_ws(' ', pg_relation_size('t') / 8192, pg_relation_size('t_a') / 8192, abs(pg_relation_size('t_id') / 8192 - 167) <= 1)";
