@@ -206,8 +206,27 @@ impl SortMem {
         self.allowed - self.avail
     }
 
+    /// mergeruns' tape_buffer_mem, once the last run is written (its tuples freed): the
+    /// memtuples array given back, a slab slot of 1 kB for each of the `tapes` input tapes and
+    /// one more (`slab`: the sort's tuples aren't pass-by-value datums) and the heap's array
+    /// of `tapes` taken.
+    pub fn merge_buffer_mem(&self, tapes: usize, slab: bool) -> i64 {
+        let slab = if slab { (tapes as i64 + 1) * 1024 } else { 0 };
+        self.avail + self.tuple_mem + array_space(self.memtupsize) - slab - aset_chunk(tapes as i64 * SORT_TUPLE)
+    }
+
+    /// merge_read_buffer_size of a merge pass over `inputs` tapes holding `runs` runs, merge
+    /// order `max`, out of `mem`: as LogicalTapeRewindForRead rounds it (a block at least,
+    /// whole blocks).
+    pub fn read_buffer(mem: i64, inputs: usize, runs: usize, max: usize) -> i64 {
+        let outputs = runs.div_ceil(inputs.max(1)).min(max) as i64;
+        let b = ((mem - TAPE_BUFFER_OVERHEAD * outputs) / inputs.max(1) as i64).max(0).max(BLCKSZ);
+        b - b % BLCKSZ
+    }
+
     /// A tuple counted `tuplen` bytes arrives (puttuple_common): true when it and the
     /// tuples before it since the last run are dumped as a run now (dumptuples).
+    #[inline(always)]
     pub fn put(&mut self, tuplen: i64) -> bool {
         self.avail -= tuplen;
         self.tuple_mem += tuplen;
@@ -592,6 +611,17 @@ impl Blocks {
             self.free = b - self.hdr;
         }
         self.free -= size;
+    }
+
+    /// A chunk of `size` bytes taken from the block being filled when it fits there (no
+    /// block allocated: `allocated` unchanged); false, nothing taken, otherwise.
+    #[inline]
+    pub fn take(&mut self, size: i64) -> bool {
+        if size > self.free || size > self.limit {
+            return false;
+        }
+        self.free -= size;
+        true
     }
 
     /// MemoryContextReset: the first block kept.
