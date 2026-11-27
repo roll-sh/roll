@@ -19,12 +19,11 @@ You need:
 To try roll secrets, run one rolld on your own machine. It keeps everything in SQLite in one
 directory, and it listens on `127.0.0.1` only, so nothing else can reach it.
 
-rolld isn't in the CLI's releases yet. Build it from a clone with a current stable Rust (the
-first build takes a while):
+Download rolld with the CLI (Linux and macOS, x86_64 and ARM64). The install script checks both
+against the release's `SHA256SUMS` and puts them in `~/.local/bin`:
 
 ```sh
-git clone https://github.com/roll-sh/roll && cd roll
-cargo build --release -p rolld -p roll-cli
+curl -fsSL https://roll.sh/install.sh | sh -s -- --with-rolld
 ```
 
 Then start it with a key of its own:
@@ -32,8 +31,21 @@ Then start it with a key of its own:
 ```sh
 mkdir -p ~/roll-eval && openssl rand -hex 32 > ~/roll-eval/secrets.key && chmod 600 ~/roll-eval/secrets.key
 ROLL_SECRET_KEY="$(cat ~/roll-eval/secrets.key)" ROLL_HOME=~/roll-eval/home ROLL_PRODUCTS=tasks \
-  ./target/release/rolld --api 127.0.0.1:7070
+  rolld --api 127.0.0.1:7070
 ```
+
+If `~/.local/bin` isn't on your `PATH` yet, run `~/.local/bin/rolld` instead (the script tells you
+what to add to your profile). On Windows, run rolld in WSL: it has no Windows build.
+
+Or build it from a clone, with a current stable Rust (the first build takes a while):
+
+```sh
+git clone https://github.com/roll-sh/roll && cd roll
+cargo build --release -p rolld -p roll-cli
+```
+
+and start it with `./target/release/rolld` in place of `rolld` above. The build gives you the CLI
+too (`./target/release/roll`).
 
 - `ROLL_SECRET_KEY` encrypts every value. Keep the file: without it, the values can't be read
   again.
@@ -42,9 +54,8 @@ ROLL_SECRET_KEY="$(cat ~/roll-eval/secrets.key)" ROLL_HOME=~/roll-eval/home ROLL
 - With no `ROLL_ADMIN_TOKEN` on `127.0.0.1`, the API is open to this machine only, and every
   command runs as its operator.
 
-The build gives you the CLI too (`./target/release/roll`), or install it as step 1 shows. Skip
-step 2: `roll login` signs a person in through the dashboard, and this node has no dashboard and no
-accounts. With no login, the CLI goes to a local rolld on `127.0.0.1:7070`, so there's nothing to
+You have the CLI already, so skip step 1, and skip step 2 as well: `roll login` signs a person in
+through the dashboard, and this node has no dashboard and no accounts. With no login, the CLI goes to a local rolld on `127.0.0.1:7070`, so there's nothing to
 set. On another port, `export ROLL_API_URL=http://127.0.0.1:<port>`.
 
 Then, in your repository:

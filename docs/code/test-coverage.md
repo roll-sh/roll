@@ -1706,7 +1706,7 @@ only the scripted fake providers (`ROLL_AGENT_FAKE=1`).
 | "Orchestrate" (`thread.create {orchestrator: true, provider: "orchestrate"}`) | over `/events` (60 s bound): 2 subagent threads under the orchestrator (`orchestrate`, not orchestrators), their runs and `subagent` nodes completed, a completed wake run, the orchestrator idle with `All 2 parts done.` |
 | the dashboard (`vite build`, `node server.mjs`) | `/dashboard/agents` 200 with its title; the share page 200 titled after the thread, OpenGraph and `noindex`; its preview image a PNG; a missing share 404 |
 | `roll agent logout` | `up` stops (exit 1, "roll agent login"), the machine is gone, the share stays |
-| `install.sh` (`scripts/test-agents.sh`) | from a local release: this machine's asset, checksum checked, installed and runs; a wrong checksum installs nothing |
+| `install.sh` (`scripts/test-agents.sh`) | from a local release: this machine's asset, checksum checked, installed and runs; `--with-rolld` adds rolld (never by default); a wrong checksum, roll's or rolld's, installs nothing |
 
 ## Agents (providers)
 
