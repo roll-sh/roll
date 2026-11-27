@@ -538,6 +538,8 @@ async fn blockers_keep_changes_out_of_the_queue() {
             release_locks: Vec::new(),
             release_before_ms: None,
             main_on_change: None,
+            release_checks: None,
+            rehearsal: None,
             screenshot_url: None,
             expires_at: None,
             earlier: Vec::new(),
