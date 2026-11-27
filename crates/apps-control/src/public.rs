@@ -917,6 +917,16 @@ async fn check_access(apps: &Arc<Apps>, service: &str, env: &str, req: &mut Requ
     {
         return None;
     }
+    // A preview's webhook URL (roll previews' `roll_hook`: Stripe's, GitHub's, which can't send a
+    // header): its exact path with its token, any method, no cookie, no redirect, the token taken
+    // out of the query before the app sees it. Anything else falls to the gate as it would.
+    if !access.webhooks.is_empty()
+        && let Some(given) = query_value(req, "roll_hook")
+        && access.webhooks.iter().any(|h| h.path == req.uri().path() && same(&token_hash(&given), &h.token_hash))
+    {
+        drop_query_param(req, "roll_hook");
+        return None;
+    }
     // A roll previews share link (someone outside the team, until it ends) on a preview's
     // environment: asked of previews at every request, so a revoked one stops at once. Its cookie
     // never reaches the app, and its guest is no visitor session (`…/visitors` is people's).
@@ -1108,6 +1118,20 @@ pub(crate) fn host_only(apps: &Apps, name: String) -> String {
 }
 
 /// A query parameter's value, decoded (the last, when it's there more than once).
+/// `param` taken out of the request's query (every one of it), the rest left as it was.
+fn drop_query_param(req: &mut Request, param: &str) {
+    let prefix = format!("{param}=");
+    let rest: Vec<&str> = req.uri().query().unwrap_or("").split('&').filter(|p| !p.is_empty() && !p.starts_with(prefix.as_str()) && *p != param).collect();
+    let pq = if rest.is_empty() { req.uri().path().to_string() } else { format!("{}?{}", req.uri().path(), rest.join("&")) };
+    let mut parts = req.uri().clone().into_parts();
+    if let Ok(p) = pq.parse() {
+        parts.path_and_query = Some(p);
+        if let Ok(u) = axum::http::Uri::from_parts(parts) {
+            *req.uri_mut() = u;
+        }
+    }
+}
+
 fn query_value(req: &Request, param: &str) -> Option<String> {
     let prefix = format!("{param}=");
     req.uri().query()?.split('&').rev().find_map(|p| p.strip_prefix(prefix.as_str())).map(|v| percent_encoding::percent_decode_str(v).decode_utf8_lossy().into_owned())

@@ -981,7 +981,7 @@ impl Runtime {
         // A webhook URL (Stripe's, GitHub's): its token in the query, for its one path only, at
         // every request (no cookie, no redirect); the service gets the request without it.
         if let Some(t) = given("roll_hook").map(str::to_string)
-            && let Some(hook) = crate::visit::webhook_visit(&self.store, self.engine().ok().as_ref(), preview, &t, req.uri().path(), self.cfg.visitor_recheck).await
+            && let Some(hook) = crate::visit::webhook_visit(&self.store, self.engine().ok().as_ref(), preview, &t, service, req.uri().path(), self.cfg.visitor_recheck).await
         {
             let rest: Vec<&str> = query.split('&').filter(|kv| !kv.starts_with("roll_hook=") && !kv.is_empty()).collect();
             let path = req.uri().path().to_string();
@@ -3272,13 +3272,14 @@ mod tests {
         assert!(raw(with_share).await.starts_with("HTTP/1.1 401"), "revoked: out at once");
         // A webhook URL: its one path only, the service never seeing its token, no cookie; it
         // isn't a share link, and it's out at once when revoked.
-        let (hook, htoken) = rt.store.create_webhook(&row.id, "/hooks/stripe", "ada", None, "Stripe").unwrap();
+        let (hook, htoken) = rt.store.create_webhook(&row.id, "web", "/hooks/stripe", "ada", None, "Stripe").unwrap();
         let post_hook = format!("POST /hooks/stripe?roll_hook={htoken}&x=1 HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
         let hooked = raw(post_hook.clone()).await;
         assert!(hooked.ends_with("service saw /hooks/stripe?x=1") && !hooked.to_ascii_lowercase().contains("set-cookie"), "{hooked}");
         assert!(raw(format!("GET /hello?roll_hook={htoken} HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nConnection: close\r\n\r\n")).await.starts_with("HTTP/1.1 401"), "another path");
         assert!(raw(format!("GET /hello?roll_share={htoken} HTTP/1.1\r\nHost: web-pr1-shop.preview.test\r\nConnection: close\r\n\r\n")).await.starts_with("HTTP/1.1 401"), "not a share link");
         assert_eq!(rt.store.webhooks(&row.id).unwrap()[0].hits, 1);
+        assert!(rt.store.webhook_live(&row.id, &htoken, "api", "/hooks/stripe").unwrap().is_none(), "its own service's path only");
         rt.store.revoke_webhook(&row.id, &hook.id).unwrap();
         assert!(raw(post_hook).await.starts_with("HTTP/1.1 401"), "revoked: out at once");
         // The notes already left on a page: for the same visitors only.

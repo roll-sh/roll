@@ -576,6 +576,8 @@ impl Engine {
         let access_token = access.as_ref().and_then(|a| a.link_token().map(str::to_string));
         let signed_in = access.as_ref().is_some_and(|a| a.mode == crate::settings::Access::Team);
         let bypass = access.and_then(|a| a.bypass).filter(|_| access_token.is_some() || signed_in);
+        // Its webhook URLs, for a backend whose own gate serves the service (roll apps).
+        let webhooks = if access_token.is_some() || signed_in { self.store.webhook_hashes(&r.id)? } else { Vec::new() };
         // Every converge (at least every few minutes, for usage) pushes its expiry out: only a
         // preview nobody converges any more lets it lapse.
         let trusted = s.secrets.allow_production && r.trusted;
@@ -767,7 +769,10 @@ impl Engine {
             // The feedback button: the runtime's proxy adds it per request; roll apps at deploy.
             let feedback = s.feedback && r.change_id.is_some() && access_token.is_some();
             // Egress too: a service moves onto (or off) the preview's own network by restarting.
+            let hooks: Vec<(String, String)> = webhooks.iter().filter(|(svc, _, _)| *svc == spec.name).map(|(_, p, h)| (p.clone(), h.clone())).collect();
             let fingerprint = config_fingerprint(&vars, (access_token.is_some() || signed_in) && on_apps, bypass.as_deref().filter(|_| on_apps), trusted, feedback && on_apps)
+                // A webhook URL made or revoked: roll apps' gate is told again.
+                + &if on_apps && !hooks.is_empty() { format!("w{}", hooks.iter().map(|(p, h)| format!("{p}={}", &h[..h.len().min(12)])).collect::<Vec<_>>().join(",")) } else { String::new() }
                 + if signed_in && on_apps { "s" } else { "" }
                 + &if s.egress_for(r.trusted) == crate::settings::EgressRule::Roll { format!("e{}", s.egress_hosts.join(",")) } else { String::new() }
                 // Traces: a runtime service takes the OpenTelemetry variables when it starts;
@@ -869,6 +874,7 @@ impl Engine {
                     access_token: access_token.clone(),
                     signed_in,
                     bypass_sha256: bypass.clone(),
+                    webhooks: if on_apps { hooks.clone() } else { Vec::new() },
                     feedback,
                     egress: s.egress_for(r.trusted),
                     egress_hosts: s.egress_hosts.clone(),
@@ -1588,7 +1594,7 @@ impl Engine {
                 made.push((b.clone(), res.parent.clone(), fresh.r#ref.clone()));
                 let key = format!("{}:{}", res.kind.as_str(), res.parent);
                 if let Some(rules) = s.masking.get(&key).filter(|c| !c.is_empty()) {
-                    let (cols, _) = self.effective_masks(&r.id, &b, res.kind, &res.parent, rules).await;
+                    let (cols, _) = self.effective_masks(&b, res.kind, &res.parent, (&fresh.r#ref, fresh.kept.as_deref()), rules).await?;
                     if !cols.is_empty() {
                         b.mask(&res.parent, &fresh.r#ref, fresh.kept.as_deref(), &cols).await?;
                     }
@@ -1751,11 +1757,6 @@ impl Engine {
         if !b.branches_from_base() || res.mode != Mode::Branch || self.cfg.mask_base_for.is_zero() {
             return Ok(None);
         }
-        // Masked with what's masked by default too, as the parent's columns are when it's made;
-        // keyed by the rules: a column production gains later isn't in its data at all.
-        let (cols, by_default) = self.effective_masks(&r.id, b, res.kind, &res.parent, rules).await;
-        self.said_masked_by_default(&r.id, key, by_default)?;
-        let cols = &cols;
         let digest = mask_digest_of(Some(rules));
         let fresh_since = self.store.now_ms()? - self.cfg.mask_base_for.as_millis() as i64;
         // Another converge making it: waited for (as long as masking a copy would take), then
@@ -1767,19 +1768,33 @@ impl Engine {
             claim = self.store.claim_mask_base(res.kind, &res.parent, &digest, fresh_since, MASK_BASE_HOLD_MS)?;
         }
         let base = match claim {
-            crate::store::BaseClaim::Ready { r#ref, .. } => r#ref,
+            crate::store::BaseClaim::Ready { r#ref, .. } => {
+                // What it was masked with by default, said on this preview too (best effort: the
+                // base is masked either way).
+                match self.effective_masks(b, res.kind, &res.parent, (&r#ref, None), rules).await {
+                    Ok((_, by_default)) => self.said_masked_by_default(&r.id, key, by_default)?,
+                    Err(e) => warn!(preview = %r.id, error = %e, "previews: reading what a masked base masks by default"),
+                }
+                r#ref
+            }
             crate::store::BaseClaim::Busy => return Ok(None),
             crate::store::BaseClaim::Make { name: base } => {
+                // Masked with what's masked by default too, as its columns are when it's made
+                // (read on the base itself, so a parent that sleeps isn't woken), keyed by the
+                // rules: a column production gains later isn't in its data at all. A base whose
+                // columns can't be read isn't made.
                 let made = async {
                     let made = b.make_base(&res.parent, &base).await?;
-                    b.mask(&res.parent, &made.r#ref, made.kept.as_deref(), cols).await?;
-                    anyhow::Ok(made)
+                    let (cols, by_default) = self.effective_masks(b, res.kind, &res.parent, (&made.r#ref, made.kept.as_deref()), rules).await?;
+                    b.mask(&res.parent, &made.r#ref, made.kept.as_deref(), &cols).await?;
+                    anyhow::Ok((made, cols.len(), by_default))
                 }
                 .await;
                 match made {
-                    Ok(made) => {
+                    Ok((made, masked, by_default)) => {
+                        self.said_masked_by_default(&r.id, key, by_default)?;
                         self.store.mask_base_ready(res.kind, &res.parent, &base, &made.r#ref)?;
-                        self.store.log(&r.id, &format!("made {key}'s masked base {base}: {} column(s) masked once, for every preview masked so", cols.len()))?;
+                        self.store.log(&r.id, &format!("made {key}'s masked base {base}: {masked} column(s) masked once, for every preview masked so"))?;
                         made.r#ref
                     }
                     Err(e) => {
@@ -1819,9 +1834,9 @@ impl Engine {
         let kind = Kind::parse(kind)?;
         let digest = mask_digest_of(s.masking.get(key));
         if let Some(rules) = s.masking.get(key).filter(|c| !c.is_empty()) {
-            let (cols, by_default) = self.effective_masks(id, b, kind, parent, rules).await;
+            let kept = self.store.resources(id)?.into_iter().find(|x| x.kind == kind && x.parent == parent).and_then(|x| x.kept);
+            let (cols, by_default) = self.effective_masks(b, kind, parent, (branch, kept.as_deref()), rules).await?;
             if !cols.is_empty() {
-                let kept = self.store.resources(id)?.into_iter().find(|x| x.kind == kind && x.parent == parent).and_then(|x| x.kept);
                 b.mask(parent, branch, kept.as_deref(), &cols).await.map_err(|e| anyhow::anyhow!("masking {key}: {e:#}"))?;
                 self.store.log(id, &format!("masked {} column(s) of {key}", cols.len()))?;
             }
@@ -1834,35 +1849,31 @@ impl Engine {
     /// The masks a branch of `kind:parent` gets under its rules `rules`: the rules (but `keep`),
     /// and every column (a NoSQL table's outside its keys, a search index's field) of the parent
     /// that looks like people's data ([`crate::mask::suggest`]) and has no rule, with the rule
-    /// suggested for it: masked until
-    /// someone says otherwise (Tonic flags new sensitive columns, Neosync needs a rule for each),
-    /// so a column production gains doesn't reach a preview in the clear. Only where the project
-    /// has rules for the parent (one that masks nothing hands over its data as it says). Second,
-    /// those masked by default: (column, why). A parent whose columns can't be read gets its rules
-    /// alone, and the preview's activity says so.
-    pub(super) async fn effective_masks(&self, id: &str, b: &Arc<dyn Brancher>, kind: Kind, parent: &str, rules: &BTreeMap<String, String>) -> (BTreeMap<String, String>, Vec<(String, String)>) {
+    /// suggested for it: masked until someone says otherwise (Tonic flags new sensitive columns,
+    /// Neosync needs a rule for each), so a column production gains doesn't reach a preview in
+    /// the clear. Only where the project has rules for the parent (one that masks nothing hands
+    /// over its data as it says). Second, those masked by default: (column, why). The columns are
+    /// read on `at` (a branch just made from the parent, and its `kept`), so a parent that sleeps
+    /// isn't woken; ones that can't be read (or not within [`SUGGEST_READ_FOR`]) fail it, as
+    /// Neosync's and Tonic's do: what's masked by default isn't known, so nothing is handed over.
+    pub(super) async fn effective_masks(&self, b: &Arc<dyn Brancher>, kind: Kind, parent: &str, at: (&str, Option<&str>), rules: &BTreeMap<String, String>) -> anyhow::Result<(BTreeMap<String, String>, Vec<(String, String)>)> {
         let mut cols: BTreeMap<String, String> = rules.iter().filter(|(_, r)| r.trim() != crate::mask::KEEP).map(|(c, r)| (c.clone(), r.clone())).collect();
         let mut by_default = Vec::new();
         if !matches!(kind, Kind::Postgres | Kind::Nosql | Kind::Search) || rules.is_empty() {
-            return (cols, by_default);
+            return Ok((cols, by_default));
         }
-        match tokio::time::timeout(SUGGEST_READ_FOR, b.columns(parent, crate::mask::SUGGEST_COLUMNS_MAX)).await {
-            Ok(Ok(columns)) => {
-                for c in columns.iter().filter(|c| !rules.contains_key(&c.path)) {
-                    if let Some(sg) = crate::mask::suggest(kind, c) {
-                        by_default.push((c.path.clone(), sg.why.to_string()));
-                        cols.insert(c.path.clone(), sg.rule);
-                    }
-                }
-            }
-            Ok(Err(e)) => {
-                let _ = self.store.log(id, &format!("{}:{parent}: its columns couldn't be read, so only its rules mask it: {e:#}", kind.as_str()));
-            }
-            Err(_) => {
-                let _ = self.store.log(id, &format!("{}:{parent}: its columns weren't read within {} s, so only its rules mask it", kind.as_str(), SUGGEST_READ_FOR.as_secs()));
+        let columns = match tokio::time::timeout(SUGGEST_READ_FOR, b.branch_columns(parent, at.0, at.1, crate::mask::SUGGEST_COLUMNS_MAX)).await {
+            Ok(Ok(columns)) => columns,
+            Ok(Err(e)) => anyhow::bail!("{}:{parent}: its columns couldn't be read, so what's masked by default isn't known and nothing is handed over: {e:#}", kind.as_str()),
+            Err(_) => anyhow::bail!("{}:{parent}: its columns weren't read within {} s, so what's masked by default isn't known and nothing is handed over", kind.as_str(), SUGGEST_READ_FOR.as_secs()),
+        };
+        for c in columns.iter().filter(|c| !rules.contains_key(&c.path)) {
+            if let Some(sg) = crate::mask::suggest(kind, c) {
+                by_default.push((c.path.clone(), sg.why.to_string()));
+                cols.insert(c.path.clone(), sg.rule);
             }
         }
-        (cols, by_default)
+        Ok((cols, by_default))
     }
 
     /// What a branch of `key` was masked with by default, kept for the sheet and said once.

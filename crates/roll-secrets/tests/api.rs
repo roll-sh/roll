@@ -3370,6 +3370,9 @@ async fn health_lists_every_finding_in_every_environment_worst_first() {
         fn referenced(&self, repo: &str, keys: &[String]) -> Option<std::collections::BTreeSet<String>> {
             (repo == "acme/web").then(|| keys.iter().filter(|k| *k == "CERT").cloned().collect())
         }
+        fn public(&self, _: &str) -> Option<String> {
+            None
+        }
     }
     api.secrets.set_code_refs(Arc::new(Code));
     let p = api.project.clone();
@@ -3395,6 +3398,43 @@ async fn health_lists_every_finding_in_every_environment_worst_first() {
     let (_, seen) = api.req(Method::GET, "/health", None, Some(&reader)).await;
     let detail = seen.as_array().unwrap().iter().find(|f| f["issue"] == "public").map(|f| f["detail"].clone());
     assert_eq!(detail, Some(json!("NEXT_PUBLIC_ keys go into the browser bundle (Next.js), and this one holds a server credential")));
+}
+
+#[tokio::test]
+async fn health_flags_a_public_repository_whose_project_does_not_rotate_leaked_values() {
+    // roll code's visibility is a fake here: every repository below is public.
+    struct Code;
+    impl roll_secrets::health::CodeRefs for Code {
+        fn referenced(&self, _: &str, _: &[String]) -> Option<std::collections::BTreeSet<String>> {
+            None
+        }
+        fn public(&self, repo: &str) -> Option<String> {
+            Some(if repo == "acme/web" { "GitHub (acme/web)".into() } else { "roll code".into() })
+        }
+    }
+    let api = Api::new().await;
+    api.secrets.set_code_refs(Arc::new(Code));
+    let flagged = |v: &Value| v.as_array().unwrap().iter().filter(|f| f["issue"] == "public_repo_no_leak_rotation").map(|f| f["key"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+    let p = api.project.clone();
+    api.ok(Method::PUT, &format!("/v1/workspace/projects/{p}/resources/repo/acme%2Fweb"), Some(json!({ "x": 0, "y": 0 }))).await;
+    // leaks.rotate starts off: a value pushed there is world-readable, and nothing rotates it.
+    let found = api.ok(Method::GET, "/health", None).await;
+    assert_eq!(flagged(&found), ["acme/web"]);
+    let detail = found.as_array().unwrap().iter().find(|f| f["issue"] == "public_repo_no_leak_rotation").unwrap()["detail"].as_str().unwrap().to_string();
+    assert!(detail.contains("public on GitHub (acme/web)") && detail.contains("roll secrets leaks managed"), "{detail}");
+    // Managed: a leaked managed key rotates at once, so nothing to say.
+    api.ok(Method::PATCH, "", Some(json!({ "leaks": { "rotate": "managed" } }))).await;
+    assert!(flagged(&api.ok(Method::GET, "/health", None).await).is_empty());
+    // A person's canvas stands only for their own repositories: another owner's public one put
+    // there says nothing about this project, ada's own does.
+    let (_, mine) = api.as_ada(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "mine" }))).await;
+    let mine = mine["id"].as_str().unwrap().to_string();
+    for repo in ["zed%2Fsite", "ada%2Fapp"] {
+        let (s, _) = api.as_ada(Method::PUT, &format!("/v1/workspace/projects/{mine}/resources/repo/{repo}"), Some(json!({ "x": 0, "y": 0 }))).await;
+        assert!(s.is_success());
+    }
+    let (s, found) = api.as_ada(Method::GET, &format!("/v1/secrets/projects/{mine}/health"), None).await;
+    assert_eq!((s, flagged(&found)), (StatusCode::OK, vec!["ada/app".to_string()]));
 }
 
 #[tokio::test]

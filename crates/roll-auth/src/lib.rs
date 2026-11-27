@@ -577,8 +577,8 @@ pub async fn check(State(gate): State<Arc<Gate>>, mut req: Request, next: Next) 
         if !open_host_ok(&gate, req.headers(), authority.as_deref()) {
             return error(StatusCode::MISDIRECTED_REQUEST, "this rolld runs without ROLL_ADMIN_TOKEN, so it answers only requests to localhost, 127.0.0.1 or [::1]", "misdirected");
         }
-        if !open_origin_ok(&gate, req.method(), req.headers()) {
-            return error(StatusCode::FORBIDDEN, "this rolld runs without ROLL_ADMIN_TOKEN, so it takes writes only from a local page", "cross_origin");
+        if !open_origin_ok(&gate, req.headers()) {
+            return error(StatusCode::FORBIDDEN, "this rolld runs without ROLL_ADMIN_TOKEN, so it answers only local pages", "cross_origin");
         }
     }
     // The client's address, once, for whoever asks after (a session's networks, a product's log).
@@ -806,12 +806,11 @@ fn open_host_ok(gate: &Gate, headers: &HeaderMap, authority: Option<&str>) -> bo
         || matches!(&gate.origins, Origins::List(list) if list.iter().any(named))
 }
 
-/// Whether a write to an open gate may come from where its `Origin` says: a local page, the API's
-/// own or a dashboard's (or no `Origin`: not a browser's cross-site request).
-fn open_origin_ok(gate: &Gate, method: &Method, headers: &HeaderMap) -> bool {
-    if matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS) {
-        return true;
-    }
+/// Whether a request to an open gate may come from where its `Origin` says: a local page, the
+/// API's own or a dashboard's (or no `Origin`: a navigation, an image, or not a browser). Every
+/// method, a WebSocket upgrade's GET included: CORS never guards a socket, so a page elsewhere
+/// could otherwise open a shell or a tunnel on a loopback name.
+fn open_origin_ok(gate: &Gate, headers: &HeaderMap) -> bool {
     let Some(o) = headers.get(header::ORIGIN) else { return true };
     is_local(o) || gate.own_origin.as_ref() == Some(o) || matches!(&gate.origins, Origins::List(list) if list.contains(o))
 }
@@ -873,11 +872,14 @@ mod tests {
         }
         assert!(open_host_ok(&gate, &HeaderMap::new(), None), "no Host: not a page's");
         assert!(!open_host_ok(&gate, &HeaderMap::new(), Some("attacker.example")), "HTTP/2's authority counts");
-        let mut write = host("127.0.0.1:7070");
-        write.insert(header::ORIGIN, HeaderValue::from_static("http://attacker.example"));
-        assert!(!open_origin_ok(&gate, &Method::POST, &write) && open_origin_ok(&gate, &Method::GET, &write));
-        write.insert(header::ORIGIN, HeaderValue::from_static("http://localhost:3000"));
-        assert!(open_origin_ok(&gate, &Method::POST, &write));
+        // A page elsewhere is refused whatever it sends, a WebSocket upgrade (a GET) included.
+        let mut from = host("127.0.0.1:7070");
+        from.insert(header::UPGRADE, HeaderValue::from_static("websocket"));
+        from.insert(header::ORIGIN, HeaderValue::from_static("http://attacker.example"));
+        assert!(!open_origin_ok(&gate, &from));
+        from.insert(header::ORIGIN, HeaderValue::from_static("http://localhost:3000"));
+        assert!(open_origin_ok(&gate, &from));
+        assert!(open_origin_ok(&gate, &host("127.0.0.1:7070")), "no Origin: a navigation, or not a browser");
     }
 
     /// The loopback default can't be met by a look-alike host, and the token never prints.
