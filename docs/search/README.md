@@ -1809,8 +1809,10 @@ deterministic (#396).
      enforced, as Elasticsearch and OpenSearch do, on every create (explicit, auto-create, a data
      stream's backing index, rollover), on opening closed indices, and on restore, resize and
      downsample targets, so an `otel` key can't add data streams past it.
-   - OTLP metrics and OTLP over gRPC. Traces are in review (`feature/search-otlp-traces`: spans into
-     `traces-*.otel-*`, their events as log lines, on the logs intake's machinery).
+   - OTLP over gRPC. Traces landed in #1236 (spans into `traces-*.otel-*`, their events as log
+     lines). Metrics are in review (`feature/search-otlp-metrics`: `POST /_otlp/v1/metrics`, data
+     points grouped into `metrics-*.otel-*` time series documents as the elasticsearch exporter's
+     `otel` mode writes them, delta histograms as `histogram` fields).
    - `_plugins/_alerting` on OpenSearch-flavor clusters.
    - Visualizations.
 19. **Vector search's footprint** (docs/benchmarks/search.md, "Vector search": 1M × 384 against

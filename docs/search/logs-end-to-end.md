@@ -1,10 +1,11 @@
 # Logs end to end: design
 
 `## Next` item 18 in [README.md](README.md). Status: the OTLP/HTTP logs intake and `otel` keys landed in #1178 and #1213, the shard limit
-in #1224, and Watcher's Alerts tab in #1180. OTLP traces are in review (`feature/search-otlp-traces`:
-`otlp/traces.rs`): spans become `traces-*.otel-*` documents, and their events log documents
-beside them, as Elastic's exporter writes them, on the same budget and limits as logs. Metrics,
-gRPC, health alerts (in progress) and the rest are design.
+in #1224, Watcher's Alerts tab in #1180, and OTLP traces in #1236 (`otlp/traces.rs`): spans
+become `traces-*.otel-*` documents, and their events log documents beside them, as Elastic's
+exporter writes them, on the same budget and limits as logs. OTLP metrics are in review
+(`feature/search-otlp-metrics`: `otlp/metrics.rs`, below). gRPC, health alerts (in progress) and
+the rest are design.
 
 As built, where the design left a choice: protobuf is read by a decoder of its own
 (`otlp/wire.rs`, the wire format OTLP needs, every length checked against the bytes present)
@@ -34,6 +35,30 @@ rather than `prost`, one record at a time, off the reactor.
 - **Retries.** A request refused after part of it was written (a 429 on its second chunk) may be
   written twice when the client retries: OTLP is at least once, and `create` with generated ids
   doesn't recognise a record it already wrote.
+- **Metrics** (`otlp/metrics.rs`) follow the elasticsearch exporter's `otel` mapping mode,
+  read from its source (Apache-2.0):
+  - Data points are grouped into documents as its hasher groups them: one per data stream,
+    resource, scope, timestamp, start timestamp, unit, temporality and sorted attributes.
+    Grouping is per `ScopeMetrics`. Two blocks with the same resource and scope give two
+    documents, which a time series data stream keeps apart by `_metric_names_hash`.
+  - Each `create` line carries `dynamic_templates` (`gauge_double`, `counter_long`,
+    `histogram`, `summary`, …) and `dynamic_template_params` with the unit, for the built-in
+    `metrics-otel@mappings`, so the data stream is a time series one with each value typed.
+  - Histograms use the exporter's `TDigest` mapping: buckets at their midpoints in a
+    `histogram` field. Cumulative histograms are rejected, as it rejects them under that
+    mapping. Against Elasticsearch 9.5 with version detection on, today's exporter writes
+    `exponential_histogram` fields instead and keeps cumulative ones. roll doesn't yet.
+  - Its scope routing is followed (Collector self-telemetry, `encoding.format`,
+    `…/receiver/<name>receiver`), which logs and traces don't do yet.
+  - Attributes are written as it writes dimensions: routing keys and
+    `elasticsearch.mapping.hints` left out, key-value lists as JSON text. Mapping hints
+    (`_doc_count`, `aggregate_metric_double`, `histogram:raw`) aren't read, and exemplars
+    aren't written.
+  - A point with no timestamp gets the request's time. The exporter writes 0, which a time
+    series data stream refuses.
+  - The memory and value limits are logs', per data point, and a scope's points are held until
+    its documents are written. A refused document counts all of its data points in
+    `rejectedDataPoints`.
 - **Left.**
   - A per-item 429 inside the `_bulk` is reported in `partial_success` rather than retried (roll's
     `_bulk` doesn't make per-item 429s today).

@@ -397,13 +397,14 @@ struct Scoped<'a> {
 
 impl Scoped<'_> {
     fn take(&mut self, out: &mut Batch, budget: &mut Budget, m: &Metric, raw: Step<Raw>) -> Result<(), Fail> {
-        let refused = m.refused();
         match (raw, self.resource, self.scope) {
             (Step::Stop(f), _, _) => return Err(f),
             (_, Err(why), _) | (_, _, Err(why)) => out.reject(why.clone()),
-            (_, _, _) if refused.is_some() => out.reject(refused.unwrap_or_default()),
-            (Step::Reject(Rejected(why)), _, _) => out.reject(why),
-            (Step::Ok(raw), Ok(res), Ok(sc)) => add(out, budget, &mut self.groups, m, raw, sc, res, self.route, self.now_ms)?,
+            (raw, Ok(res), Ok(sc)) => match (m.refused(), raw) {
+                (Some(why), _) | (None, Step::Reject(Rejected(why))) => out.reject(why),
+                (None, Step::Ok(raw)) => add(out, budget, &mut self.groups, m, raw, sc, res, self.route, self.now_ms)?,
+                (None, Step::Stop(f)) => return Err(f),
+            },
         }
         budget.point_done();
         Ok(())
