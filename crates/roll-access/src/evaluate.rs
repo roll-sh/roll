@@ -211,6 +211,8 @@ pub(crate) fn target(access: &Access, row: &Row, params: &[(String, String)], qu
             r.filters_index = row.filters_index;
             if let Some(name) = row.path_query {
                 let path = query.and_then(|qs| url::form_urlencoded::parse(qs.as_bytes()).find(|(k, _)| k == name).map(|(_, v)| v.into_owned()));
+                // As roll secrets spells it (`/api/` is `/api`), so a rule and an approval name it one way.
+                let path = path.map(|p| if row.product == "secrets" { catalog::secret_path(&p).unwrap_or(p) } else { p });
                 r.path = Some(path.filter(|p| !p.is_empty()).unwrap_or_else(|| "/".into()));
             }
             Target::One(r)
@@ -669,6 +671,16 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
     if let Some(name) = decides.into_iter().flatten().find(|n| original.query().is_some_and(|q| url::form_urlencoded::parse(q.as_bytes()).filter(|(k, _)| k == n).count() > 1)) {
         ctx.audit(Some(row), None, None, "deny", None, StatusCode::BAD_REQUEST);
         return deny(StatusCode::BAD_REQUEST, "repeated_parameter", format!("?{name}= is given more than once"), json!({}));
+    }
+    // A secrets folder as roll secrets spells it, or refused before anyone is asked: `//` would be
+    // asked about (and remembered) as a folder, and reach every one.
+    if row.product == "secrets"
+        && let Some(name) = row.path_query
+        && let Some(p) = original.query().and_then(|q| url::form_urlencoded::parse(q.as_bytes()).find(|(k, _)| k == name).map(|(_, v)| v.into_owned()))
+        && catalog::secret_path(&p).is_none()
+    {
+        ctx.audit(Some(row), None, None, "deny", None, StatusCode::BAD_REQUEST);
+        return deny(StatusCode::BAD_REQUEST, "bad_request", format!("?{name}= is / or /folder/… with up to {} folders of A-Z, a-z, 0-9, _ and -", roll_secrets_ref::DEPTH_MAX), json!({}));
     }
     let mut target = {
         let (a, q, h) = (access.clone(), original.query().map(str::to_string), parts.headers.clone());

@@ -17,7 +17,8 @@ You need:
 ## 0. No server yet?
 
 To try roll secrets, run one rolld on your own machine. It keeps everything in SQLite in one
-directory, and it listens on `127.0.0.1` only, so nothing else can reach it.
+directory, listens on `127.0.0.1` only, and asks for a token of its own, so neither another user of
+the machine nor a web page you open can use it.
 
 Download rolld with the CLI (Linux and macOS, x86_64 and ARM64). The install script checks both
 against the release's `SHA256SUMS` and puts them in `~/.local/bin`:
@@ -26,16 +27,24 @@ against the release's `SHA256SUMS` and puts them in `~/.local/bin`:
 curl -fsSL https://roll.sh/install.sh | sh -s -- --with-rolld
 ```
 
-Then start it with a key of its own:
+Then start it with a key and an operator token of its own:
 
 ```sh
-mkdir -p ~/roll-eval && openssl rand -hex 32 > ~/roll-eval/secrets.key && chmod 600 ~/roll-eval/secrets.key
-ROLL_SECRET_KEY="$(cat ~/roll-eval/secrets.key)" ROLL_HOME=~/roll-eval/home ROLL_PRODUCTS=tasks \
-  rolld --api 127.0.0.1:7070
+mkdir -p ~/roll-eval && chmod 700 ~/roll-eval
+openssl rand -hex 32 > ~/roll-eval/secrets.key && openssl rand -hex 32 > ~/roll-eval/admin.token
+chmod 600 ~/roll-eval/secrets.key ~/roll-eval/admin.token
+ROLL_SECRET_KEY="$(cat ~/roll-eval/secrets.key)" ROLL_ADMIN_TOKEN="$(cat ~/roll-eval/admin.token)" \
+  ROLL_HOME=~/roll-eval/home ROLL_PRODUCTS=tasks rolld --api 127.0.0.1:7070
 ```
 
 If `~/.local/bin` isn't on your `PATH` yet, run `~/.local/bin/rolld` instead (the script tells you
 what to add to your profile). On Windows, run rolld in WSL: it has no Windows build.
+
+And in the shell you'll use the CLI from:
+
+```sh
+export ROLL_ADMIN_TOKEN="$(cat ~/roll-eval/admin.token)"
+```
 
 Or build it from a clone, with a current stable Rust (the first build takes a while):
 
@@ -51,12 +60,16 @@ too (`./target/release/roll`).
   again.
 - roll secrets is always on. `ROLL_PRODUCTS` must name at least one product, and `tasks` opens no
   port of its own, so rolld listens on `127.0.0.1:7070` only: no Postgres, no Docker.
-- With no `ROLL_ADMIN_TOKEN` on `127.0.0.1`, the API is open to this machine only, and every
-  command runs as its operator.
+- `ROLL_ADMIN_TOKEN` is the operator's token: every command that carries it runs as the operator.
+  Without one, rolld on `127.0.0.1` is open to every user and process on the machine. It still
+  answers only requests addressed to `localhost`, `127.0.0.1` or `[::1]`, so a web page can't
+  reach it by pointing a name of its own at your machine. Keep the token for anything you import
+  real values into.
 
 You have the CLI already, so skip step 1, and skip step 2 as well: `roll login` signs a person in
-through the dashboard, and this node has no dashboard and no accounts. With no login, the CLI goes to a local rolld on `127.0.0.1:7070`, so there's nothing to
-set. On another port, `export ROLL_API_URL=http://127.0.0.1:<port>`.
+through the dashboard, and this node has no dashboard and no accounts. With no login, the CLI goes
+to a local rolld on `127.0.0.1:7070`, so there's nothing to set. On another port,
+`export ROLL_API_URL=http://127.0.0.1:<port>`.
 
 Then, in your repository:
 

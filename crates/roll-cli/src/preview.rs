@@ -168,6 +168,21 @@ pub enum Preview {
         #[arg(long)]
         revoke: Option<String>,
     },
+    /// A URL into a private preview for a webhook (Stripe's, GitHub's): requests to exactly PATH
+    /// of its first service get past its privacy, its token in the URL's query, for the
+    /// preview's life. Printed once. --label says what it's for; --list shows them, --revoke ends
+    /// one.
+    Webhook {
+        preview: String,
+        #[arg(required_unless_present_any = ["list", "revoke"], conflicts_with_all = ["list", "revoke"])]
+        path: Option<String>,
+        #[arg(long, default_value = "", conflicts_with_all = ["list", "revoke"])]
+        label: String,
+        #[arg(long)]
+        list: bool,
+        #[arg(long)]
+        revoke: Option<String>,
+    },
     /// Its own variables, over the project's `env`: list them, set `NAME=value`, or --unset NAME.
     /// Its services redeploy with them.
     Env {
@@ -1159,6 +1174,37 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
                         }
                     }
                     (_, Some(_)) => println!("no share links"),
+                    _ => println!("revoked {}", s(&v["revoked"])),
+                }
+                return Ok(());
+            }
+            v
+        }
+        Preview::Webhook { preview, path, label, list, revoke } => {
+            let at = format!("/v1/previews/{preview}/webhooks");
+            let v = match (list, revoke, path) {
+                (_, Some(id), _) => {
+                    api.call(reqwest::Method::DELETE, &format!("{at}/{id}"), None).await?;
+                    json!({ "revoked": id })
+                }
+                (true, None, _) | (false, None, None) => api.get(&at).await?,
+                (false, None, Some(path)) => api.post(&at, json!({ "path": path, "label": label })).await?,
+            };
+            if !as_json {
+                match (&v["url"], v.as_array()) {
+                    (Value::String(url), _) => {
+                        println!("{url}");
+                        eprintln!("it's shown only now; roll preview webhook {preview} --revoke {} ends it", s(&v["id"]));
+                    }
+                    (_, Some(list)) if !list.is_empty() => {
+                        for x in list {
+                            let state = if x["revoked"] == true { "revoked" } else { "open" };
+                            let label = s(&x["label"]);
+                            let label = if label.is_empty() { String::new() } else { format!("  \"{label}\"") };
+                            println!("{}  {state}  {}  {} request(s)  by {}{label}", s(&x["id"]), s(&x["path"]), x["hits"].as_i64().unwrap_or(0), s(&x["created_by"]));
+                        }
+                    }
+                    (_, Some(_)) => println!("no webhook URLs"),
                     _ => println!("revoked {}", s(&v["revoked"])),
                 }
                 return Ok(());

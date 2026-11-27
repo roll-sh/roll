@@ -31,7 +31,15 @@ impl Engine {
     pub(super) async fn main_on_change(&self, r: &Row, s: &Settings) -> anyhow::Result<()> {
         let started = std::time::Instant::now();
         let mut made: Vec<(Arc<dyn Brancher>, String, String, String)> = Vec::new();
-        let ran = self.main_on_copies(r, s, &mut made).await;
+        let mut ran_here: Vec<String> = Vec::new();
+        let ran = self.main_on_copies(r, s, &mut made, &mut ran_here).await;
+        // What ran on roll's runtime stops (its variables go with it), then the copies go.
+        for name in ran_here {
+            self.main_runs.lock().remove(&(r.id.clone(), name.clone()));
+            if let Err(e) = self.apps.remove(&r.id, &format!("{name}@main")).await {
+                warn!(preview = %r.id, error = %e, "previews: stopping main's code on the copy");
+            }
+        }
         for (b, parent, branch, name) in made {
             if let Err(e) = b.delete(&parent, &branch, &name).await {
                 warn!(preview = %r.id, error = %e, "previews: deleting the copy main's code ran on");
@@ -53,19 +61,30 @@ impl Engine {
         Ok(())
     }
 
-    async fn main_on_copies(&self, r: &Row, s: &Settings, made: &mut Vec<(Arc<dyn Brancher>, String, String, String)>) -> anyhow::Result<Vec<crate::MainOnChangePage>> {
+    async fn main_on_copies(&self, r: &Row, s: &Settings, made: &mut Vec<(Arc<dyn Brancher>, String, String, String)>, ran_here: &mut Vec<String>) -> anyhow::Result<Vec<crate::MainOnChangePage>> {
         let main = self.main_preview(r).await?.ok_or_else(|| anyhow::anyhow!("the project has no preview of main"))?;
-        let mut builds = Vec::new();
+        // Each of main's services: its roll apps build, or, on roll's runtime, its revision run in
+        // the change's preview as `<name>@main` (only the change's repo's: the others run main's
+        // code in the change's preview already).
+        let mut runs = Vec::new();
         for svc in self.store.services(&main.id)? {
             if let Some(live) = self.apps.live_build(&main.id, &svc.name).await {
-                builds.push((svc, live));
+                runs.push((svc, Run::Apps(live.id)));
+            } else if svc.repo == r.repo
+                && let Some(rev) = svc.revision.clone().filter(|v| !v.is_empty())
+                && self.store.services(&r.id)?.iter().any(|x| x.name == svc.name)
+                && self.apps.can_swap(&r.id, &svc.name).await.unwrap_or(false)
+            {
+                runs.push((svc, Run::Here(rev)));
             }
         }
-        anyhow::ensure!(!builds.is_empty(), "main's preview has no build that can run on a copy (roll apps services can)");
-        // The change's branches as its release left them, copied; main's own in its variables
-        // swapped for them by value (the names roll makes from them too: `PGHOST`…).
+        anyhow::ensure!(!runs.is_empty(), "main's preview has no service of the change's repo that can run on a copy");
+        // The change's branches as its release left them, copied; the branches' variables in
+        // main's environment and in the change's swapped for the copy's by value (the names roll
+        // makes from them too: `PGHOST`…).
         let name = format!("{}-m", branch_name(&r.id));
-        let mut plain = self.resource_env(&main.id).await?;
+        let mut mains = self.resource_env(&main.id).await?;
+        let mut changes = self.resource_env(&r.id).await?;
         let mut branches: Vec<crate::ports::BranchVars> = Vec::new();
         let ours = self.store.resources(&main.id)?;
         for res in self.store.resources(&r.id)?.into_iter().filter(|x| x.kind == Kind::Postgres) {
@@ -74,39 +93,66 @@ impl Engine {
             let copy = b.snapshot(&res.parent, branch, &name).await?.ok_or_else(|| anyhow::anyhow!("postgres:{} can't be copied", res.parent))?;
             made.push((b.clone(), res.parent.clone(), copy.r#ref.clone(), name.clone()));
             let new = b.connect(&res.parent, &copy.r#ref, copy.kept.as_deref()).await?;
+            let swapped = crate::names::with_standard(res.kind, new.clone());
+            swap(&mut changes, &crate::names::with_standard(res.kind, b.connect(&res.parent, branch, res.kept.as_deref()).await?), &swapped);
             if let Some(m) = ours.iter().find(|x| x.kind == res.kind && x.parent == res.parent)
                 && let Some(main_branch) = &m.r#ref
             {
-                let old = crate::names::with_standard(res.kind, b.connect(&m.parent, main_branch, m.kept.as_deref()).await?);
-                let swapped = crate::names::with_standard(res.kind, new.clone());
-                for (k, v) in &old {
-                    if let Some((_, nv)) = swapped.iter().find(|(nk, _)| nk == k) {
-                        for kv in plain.iter_mut().filter(|(_, vv)| vv == v) {
-                            kv.1 = nv.clone();
-                        }
-                    }
-                }
+                swap(&mut mains, &crate::names::with_standard(res.kind, b.connect(&m.parent, main_branch, m.kept.as_deref()).await?), &swapped);
             }
             branches.push((res.kind, res.parent.clone(), new));
         }
         anyhow::ensure!(!branches.is_empty(), "the change has no Postgres branch");
-        let access = self.store.access(&main.id)?.filter(|a| a.required()).map(|a| a.token);
-        let (access, main_id) = (access.as_deref(), main.id.as_str());
+        let main_access = self.store.access(&main.id)?.filter(|a| a.required()).map(|a| a.token);
+        let own_access = self.store.access(&r.id)?.filter(|a| a.required()).map(|a| a.token);
         let mut paths = vec!["/".to_string()];
         paths.extend(s.github.pages.iter().filter(|p| *p != "/").cloned());
         paths.truncate(PAGES_MAX);
         let mut pages = Vec::new();
-        for (i, (svc, live)) in builds.iter().enumerate() {
-            let url = self.apps.view_build(main_id, &svc.name, &live.id, &plain, &branches).await?.ok_or_else(|| anyhow::anyhow!("{} can't run on a copy here", svc.name))?;
+        for (i, (svc, run)) in runs.iter().enumerate() {
+            // Where main's code on the copy answers: (preview, service, URL, link token).
+            let (at_preview, at_service, at_url, at_access) = match run {
+                Run::Apps(deployment) => {
+                    let url = self.apps.view_build(&main.id, &svc.name, deployment, &mains, &branches).await?.ok_or_else(|| anyhow::anyhow!("{} can't run on a copy here", svc.name))?;
+                    (main.id.as_str(), svc.name.clone(), url, main_access.as_deref())
+                }
+                Run::Here(rev) => {
+                    self.main_runs.lock().insert((r.id.clone(), svc.name.clone()), (rev.clone(), changes.clone()));
+                    ran_here.push(svc.name.clone());
+                    (r.id.as_str(), format!("{}@main", svc.name), String::new(), own_access.as_deref())
+                }
+            };
             // The project's pages are its first service's; the others are asked for `/`.
             for path in paths.iter().take(if i == 0 { PAGES_MAX } else { 1 }) {
-                // No answer (refused, timed out) is 0; a backend that can't read it, no page.
-                let read = |at: String| async move { self.apps.fetch(main_id, &svc.name, &at, access, path, false).await.map(|f| f.map(|f| f.status)).unwrap_or(Some(0)) };
-                let (Some(status), Some(main_status)) = (read(url.clone()).await, read(svc.url.clone()).await) else { continue };
+                let (Some(status), Some(main_status)) = (self.status_of(at_preview, &at_service, &at_url, at_access, path).await, self.status_of(&main.id, &svc.name, &svc.url, main_access.as_deref(), path).await) else { continue };
                 pages.push(crate::MainOnChangePage { service: svc.name.clone(), path: path.clone(), status, main_status });
             }
         }
         Ok(pages)
+    }
+
+    /// `path`'s status there: 0 when nothing answered (refused, timed out); `None` where the
+    /// backend can't read it (no page).
+    async fn status_of(&self, preview: &str, service: &str, url: &str, access: Option<&str>, path: &str) -> Option<u16> {
+        self.apps.fetch(preview, service, url, access, path, false).await.map(|f| f.map(|f| f.status)).unwrap_or(Some(0))
+    }
+}
+
+/// Where main's code runs on the copy: its roll apps deployment again (by id), or its revision on
+/// roll's runtime in the change's preview.
+enum Run {
+    Apps(String),
+    Here(String),
+}
+
+/// `env`'s values that are `old`'s swapped for `new`'s under the same name.
+fn swap(env: &mut [(String, String)], old: &[(String, String)], new: &[(String, String)]) {
+    for (k, v) in old {
+        if let Some((_, nv)) = new.iter().find(|(nk, _)| nk == k) {
+            for kv in env.iter_mut().filter(|(_, vv)| vv == v) {
+                kv.1 = nv.clone();
+            }
+        }
     }
 }
 

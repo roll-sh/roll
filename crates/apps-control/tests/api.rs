@@ -8844,6 +8844,24 @@ async fn a_public_git_url_deploys_its_branch_and_follows_new_commits() {
     let (st, d2) = call(&w.api, "POST", &hook, Some(tag("v2-final"))).await;
     assert!(st == StatusCode::ACCEPTED && d2["id"] != d["id"] && d2["message"] == "tag v2-final", "{d2}");
     settled(&w, &id, "staging", d2["id"].as_str().unwrap()).await;
+    // With no hook, the five-minute watch finds new tags too: the newest by version order, the
+    // older one marked as seen (never put live after it).
+    git.tags.lock().insert("v9".into(), code.parse().unwrap());
+    git.tags.lock().insert("v10".into(), api.parse().unwrap());
+    let started = w.apps.watch_git().await;
+    let mut tagged = Vec::new();
+    for d in &started {
+        let d = settled(&w, &id, "staging", d).await;
+        if d["message"].as_str().is_some_and(|m| m.starts_with("tag ")) {
+            tagged.push(d["message"].as_str().unwrap().to_string());
+        }
+    }
+    assert_eq!(tagged, ["tag v10"], "{started:?}");
+    for d in w.apps.watch_git().await {
+        let d = settled(&w, &id, "staging", &d).await;
+        assert!(!d["message"].as_str().unwrap_or("").starts_with("tag "), "nothing tagged again: {d}");
+    }
+    assert!(call(&w.api, "POST", &hook, Some(tag("v9"))).await.1["ignored"].as_str().unwrap().contains("already"), "v9 is seen, not deployed");
     assert_eq!(call(&w.api, "POST", &hook, Some(tag("release-1"))).await.1["ignored"].as_str().map(|s| s.contains("no environment deploys it")), Some(true));
     // Pull requests go to previews with their number, title and page: a same-repository one on
     // its branch, a fork's as `pull/N` once `refs/pull/N/head` agrees, a close with no commit.
