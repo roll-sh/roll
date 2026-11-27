@@ -2252,6 +2252,7 @@ async fn earlier_pushes_stay_reachable_at_their_own_urls() {
     assert_eq!(kept, ["cs_8a", "cs_8d", "cs_8c"], "the oldest kept went in its place");
     assert!(url.contains(&a) && e.engine.store.gone_push(&a).unwrap().is_none(), "its own link again, no longer gone: {url}");
     assert!(e.apps.removed.lock().contains(&(p.id.clone(), "web@cs_8b".into())));
+    assert!(matches!(e.engine.restart_push(&gone, "ada").await, Err(roll_previews::Error::Conflict(_))), "once a minute a preview");
     // A fork's earlier heads lost their approval with the push: they don't run.
     e.engine.store.update(&p.id, |r| r.trusted = false).unwrap();
     assert!(e.engine.env(&p.id, "web@cs_8c").await.is_err());

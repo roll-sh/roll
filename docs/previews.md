@@ -168,10 +168,12 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
   service and the push and linking the service's latest (on roll's preview domain and on a
   project's own, there only for that project's previews; the latest 30 a preview evicted, gone
   with the preview), not a 404 that reads as a broken preview. On roll's runtime, a trusted
-  change's page also starts it again on demand (Vercel keeps every deployment's URL): its "Start
-  this push again" (`/__roll/start-push` on that host, through the preview's own gate: the
-  link's token it carried, a share link or a session of a person signed in to roll, as any of its
-  pages) keeps it again in place of the oldest kept push of that service (whose container goes),
+  change's private preview's page also starts it again on demand (Vercel keeps every
+  deployment's URL): its "Start this push again" opens `/__roll/start-push` on that host, through
+  the preview's own gate (the link's token it carried, or roll's sign-in for team access), a page
+  that asks; only that page's own POST (this host's origin), from a visitor in by the link's
+  cookie or a person's session (not a share link, not the CI bypass), and at most once a minute
+  a preview, keeps it again in place of the oldest kept push of that service (whose container goes),
   at the same link, and the next request starts it, on the preview's data (its own copy went
   when it was dropped). A fork's earlier heads never start again
   (`engine.rs::earlier_pushes_stay_reachable_at_their_own_urls`,

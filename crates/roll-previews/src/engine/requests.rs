@@ -593,6 +593,12 @@ impl Engine {
         if !self.store.services(&r.id)?.iter().any(|s| s.name == gone.service) {
             return Err(Error::Conflict(format!("the preview no longer runs {}", gone.service)));
         }
+        // At most once a minute a preview: each start stops another push and drops its copy.
+        let now = self.store.now_ms()?;
+        if self.store.runtime_fact::<i64>(&r.id, "push_restarted_at")?.is_some_and(|at| now - at < 60_000) {
+            return Err(Error::Conflict("an earlier push was started again a moment ago: try again in a minute".into()));
+        }
+        self.store.set_runtime_fact(&r.id, "push_restarted_at", Some(&now))?;
         let domain = self.store.project_domain(&r.project_id)?;
         let evicted = self.store.pin(&r.id, &gone.service, &gone.revision, &|h| self.cfg.url_in(domain.as_ref(), h))?;
         for name in &evicted {
