@@ -24,6 +24,7 @@ pub mod names;
 pub mod resolve;
 pub mod routing;
 pub mod settings;
+pub mod shard_limit;
 pub mod snapshots;
 pub mod stack_templates;
 pub mod synonyms;

@@ -35,10 +35,10 @@ rather than `prost`, one record at a time, off the reactor.
 - **Left.**
   - A per-item 429 inside the `_bulk` is reported in `partial_success` rather than retried (roll's
     `_bulk` doesn't make per-item 429s today).
-  - The cluster-wide shard limit isn't enforced on auto-create. `MAX_TARGETS` guards one request
-    against accidental cardinality, not a key's holder: an `otel` key can still create data
-    streams one `_bulk` at a time, so until the limit is enforced (`## Next` item 18), hand
-    `otel` keys only to Collectors you run.
+  - `MAX_TARGETS` guards one request against accidental cardinality, not a key's holder. What
+    bounds an `otel` key's data streams is `cluster.max_shards_per_node` (1000 by default, two
+    shards a data stream), enforced on auto-create as Elasticsearch does, which only someone with
+    the cluster privilege can raise.
 
 ## Why
 
