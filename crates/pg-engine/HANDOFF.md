@@ -16249,6 +16249,92 @@ Harness: `~/.cache/a328/bench` (`stmt.sh`: per-statement cells, custom against g
 `prof.sh`: an LBR profile of one cell; `oltp.sh` from 322 with `PCM=<plan_cache_mode>`), the probe test and
 its trace prints in `~/.cache/a328/patches/` (`a328_probe.rs`, `probe-trace2.patch`; not for landing).
 
+## Short write transactions, round 21: where the 32 MB memtable's memory goes; compact estimate change records (agent 337)
+
+BENCH "Short write transactions, round 21" has the tables. Harness `~/.cache/a337/bench` (333's `split.sh` with
+`NTX`, the window's transaction count; `mem.sh` the memory timeline; `walsnap.sh` / `walparse.py` what a run puts
+in the memtable by key class; `tpch.sh` TPC-H over the wire with one client binary for both arms).
+
+**Memory (brief item 1): not the memtable.** TPC-B-like at 8 clients, warmed, plain dist of `cand/a333-2`: peak
+anon+shmem 580-600 MB, in the measured run. Split with a heap-profiled build (`--features heapprof`), a glibc counting
+shim, `smaps` at the peak and allocator switches:
+
+- the Rust heap's live bytes at the peak are 110 MB (the active and the frozen memtable rise and fall between 40 and
+  110 MB: nodes 12.8 MB, the estimate records and rows in their own allocations); glibc under 4 MB;
+- `MIMALLOC_PURGE_DELAY=0`, `MIMALLOC_ABANDONED_PAGE_PURGE=1`, an `mi_collect` in each committing thread after every
+  memtable flush (probe), and the memtable's values copied into chunks of its own (probe) move nothing (554-664 MB);
+- **it is the block cache** (`--cache-mb 2048`): anon climbs all run long and falls at the moment a compaction
+  replaces pgbench_accounts' L1 file (its blocks leave the cache: `SstReader`'s drop, `forget_file`). With
+  `--cache-mb 64` the whole run stays under the load's 222 MB. With an 8 MB memtable the table compacts four times
+  a window, so the cache never held more than ~130 MB of it; with 32 MB once, so it holds the table's blocks read
+  since (~350 MB). That is the +105-150 MB agent 333 measured: the cache inside its budget, as PostgreSQL's
+  shared buffers hold the same pages (its 653-693 MB). Idle sessions: 10.5 / 39.5 / 298 MB before, 10.5 / 37.3 /
+  293.9 MB after this round (1 / 100 / 1,000 sessions).
+
+(The arena's debug lines' `mapped=` is one cache shard's, not the cache's: sum the mapped and unmapped chunks.)
+
+**Bytes into the memtable (item 2).** What a warmed run puts in the memtable (`walsnap.sh`: the WAL of the memtable
+not flushed yet, by key class), a TPC-B-like commit counted as the memtable counts it (key + 8 + value + 48):
+1,072 bytes, 594 of them (55%) the size model's estimate records of pgbench_accounts (`estkeep`): a change record a
+commit, ~324 bytes (the heap's scalars whole, its tail page's key, the last run again, a btree header of 62 bytes and
+76 a changed leaf, the new version's place), a full record of 4.0-4.4 MB (the moved versions' places) folded in each
+time the changes reach its size, and a deletion for each change record at the fold.
+
+**What changed** (`cand/a337`): a change record holds only what differs from the record before (tag `0xe3`,
+`estkeep::encode_heap_changes`; `btest`'s `COMPACT` for a btree): a bit for each field that changed, numbers as
+varint differences, the tail page, fill key and runs only when they changed; a btree's header fields that changed,
+each changed leaf's slot and the values that differ from what it held when the summary was last made durable (kept
+with the leaf's dirty mark: `BtEst::dirty` holds the leaf as it was), as a whole-number step when the decoder's sum
+gives the value exactly (`Enc::fdiff`: an entry's bytes and counts are added in whole numbers), else its bits; a new
+leaf (split off) with its low key. What the encoder last made durable is kept beside the estimate (`EstHeap::sent`,
+`BtEst::sent`: set by a full record, a change record and `restore`; none: the next record is a full one, as after a
+temporary or unlogged table's changes were dropped). Records are read in the same order to the same estimate:
+recovery is exactly as before. Full records keep their form (a build before this one reads them); `0xe2` change records
+are still read, so a store written before upgrades in place. One-way: a build before this one finds a `0xe3`
+record, refuses the table's records and estimates the table afresh (as for a missing record), never a misread. A
+change record goes into the commit with its spare capacity dropped (`shrink_to_fit`: a full record's vector kept up
+to twice its megabytes in the memtable).
+
+Measured: the estimate records 594 -> 64 bytes a commit (change records 324 -> 55 bytes; a fold now every ~75,000
+change records instead of ~12,000), the memtable 1,072 -> 542 bytes a commit (with the folds' share ~606: -43%), so it
+fills and compacts half as often. By 333's measure (160,000 warmed, 160,000 counted under `enable_seqscan=off`)
+both builds see one compaction in nearly every window, so it shows level (8 clients 355.0k / 355.6k against 355.6k /
+355.2k); over 480,000 counted transactions (three windows) on the head: **365.3k -> 340.4k user instructions a
+transaction (-6.8%)**, the flush thread 67.8k -> 45.7k (three compactions -> two), the connection threads 297.6k ->
+294.8k, bytes written 9,587 -> 8,061; on `cand/a333-2` the same pair 397.3k -> 354.9k (flush 84.8k -> 45.6k, four
+compactions -> two). Level: point select, the 1,000-row range read right after a load, TPC-H SF 0.1's queries and
+load (instructions), peak anon+shmem; the bulk load +0.2 / +0.4% (its table has no index: one small record a commit).
+
+Checks: `btest::change_records_rebuild_the_summary` (400 rounds of compact records, splits among them, applied in turn
+give the summary byte for byte), `estkeep::change_records_rebuild_the_estimate` (300 change records of random changes:
+pages filled and added, places, runs begun and moved, the fill key and tail page set and dropped, the places dropped,
+each applied in turn to the full record's estimate; a mutant that drops the records' places fails it); quick-check
+with QC_CHECKED=1 and `QC_TESTS="big_tables crash_bulk storage_linked_gc"` on `176984d83` (on `2676ea37a`): 13 test
+binaries, clippy 16 warnings, none new in a changed file, tests 390 passed in 10 binaries (`crash_bulk`,
+`storage_linked_gc`, `big_tables` among them), checked 390 passed, regress 51,148 / 51,150 (0 newly differing),
+isolation 1,647 / 1,648, pg_dump 14,609 passed (no crash stage: the diff maps `exec/sizing` to none);
+`tools/crash-binary.py` seeds 1-3 and `--power drop` seeds 1-3 against the plain dist build of the change: ok.
+
+Found: no integration test restores an estimate from change records. `big_tables`' restart and crash tests restore
+full records only (their bulk statements fold at once), and a crash test of 300 one-row UPDATEs after
+`past_model_history` (tried, not kept) never calls `restore` on reopening (why was not found), so it passed with
+every change record refused. The unit tests above are what checks the records.
+
+**Compaction (item 3), analysis only.** Agent 292's block copy covers 1,500-2,600 of pgbench_accounts' ~46,000 L1
+blocks a compaction here (3-6%): between two compactions of a 32 MB memtable ~130,000 random UPDATEs reach a block
+2.8 times on average (e^-2.8 = 6% untouched; 292's UPDATE-only case wrote a narrow range). Halving the bytes doubles
+that, so copying covers less still; 4 kB blocks would take it to ~50% at four times the index entries and worse
+compression. What is left is the rewrite itself: zstd level 1 with the file's dictionary is about half of it; a
+negative level for L1 rewrites was not built (it trades read bytes for it).
+
+Dropped (patches in `~/.cache/a337/patches/`): the memtable's values copied into chunks of its own
+(`memtable-value-arena.patch`: no memory moved), an `mi_collect` in committing threads after each flush
+(`probe-collect.patch`).
+
+Left: a range deletion for a fold's change records (one deletion each now: ~37 bytes a commit, 6% of the memtable's
+bytes); the block cache's copy of an L1 file thrown away at each compaction (each compaction is followed by every
+read of the table missing the cache again); compaction's zstd level.
+
 ## Short write transactions, round 20: where TPC-B-like's run-to-run spread comes from; a small table's filtered scan of a kept hot range (agent 333)
 
 BENCH "Short write transactions, round 20" has the tables. Harness `~/.cache/a333/bench` (below).
