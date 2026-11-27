@@ -3254,6 +3254,11 @@ async fn a_note_becomes_a_work_item_once() {
     assert!(body.contains("on a phone") && body.contains("/cart") && body.contains("button.pay"), "{body}");
     assert!(e.code.comments.lock().iter().any(|(c, b, _, _)| c == "chg_nw" && b.contains(&format!("work item #{}", w.number))), "said on the change");
     assert_eq!(e.engine.open_notes(&p.id).await.unwrap()[0].work.as_ref(), Some(&w), "shown with the note");
+    // A token that may write previews but not the repo's code makes none: it's roll code's.
+    use tower::ServiceExt;
+    let mut req = axum::http::Request::post(format!("/v1/previews/{}/notes/rv_n1/work", p.id)).body(axum::body::Body::empty()).unwrap();
+    req.extensions_mut().insert(roll_auth::Grant { id: "tok_p".into(), name: "previews".into(), kind: roll_auth::GrantKind::Token, scope: std::sync::Arc::new(roll_auth::scope::Scope(Vec::new())), user: None, ask_otherwise: false });
+    assert_eq!(roll_previews::api::router(e.engine.clone()).oneshot(req).await.unwrap().status().as_u16(), 403);
 }
 
 /// A start's dynamic credentials (roll secrets' leases) live as long as it runs: renewed near
