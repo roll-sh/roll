@@ -446,8 +446,14 @@ fn pin(cpus: &[usize]) {
     }
 }
 
+/// Off Linux a configured list starts the pool as usual, unpinned, and says so once.
 #[cfg(not(target_os = "linux"))]
-fn pin(_cpus: &[usize]) {}
+fn pin(cpus: &[usize]) {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    if !cpus.is_empty() {
+        ONCE.call_once(|| tracing::warn!(?cpus, "pinning embedding workers to CPUs is Linux-only: they run unpinned here"));
+    }
+}
 
 /// `fut`, given until `deadline` (`None`: forever).
 async fn until<T>(deadline: Option<Instant>, fut: impl std::future::Future<Output = T>) -> Option<T> {
