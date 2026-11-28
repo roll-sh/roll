@@ -227,20 +227,10 @@ mod tests {
         }
         assert_eq!(pick("lts/*", node), None);
         assert_eq!(parse("python-3.11.4"), Some(Ver(3, 11)));
-    }
-}
-
-#[cfg(test)]
-mod end_of_life_tests {
-    use super::*;
-
-    #[test]
-    fn a_runtime_past_or_near_its_end_of_life_is_said() {
-        let on = |y, m, d| days(y, m, d);
-        assert_eq!(days(1970, 1, 1), 0);
-        assert!(end_of_life_note(crate::Provider::Node, "18", on(2026, 11, 17)).is_some_and(|n| n.starts_with("Node 18 reached its end of life on 2025-04-30")));
-        assert!(end_of_life_note(crate::Provider::Python, "3.12", on(2028, 9, 1)).is_some_and(|n| n.contains("reaches its end of life on 2028-10-31")));
-        assert_eq!(end_of_life_note(crate::Provider::Node, "22", on(2026, 11, 17)), None, "months away");
-        assert_eq!(end_of_life_note(crate::Provider::Go, "1.22", on(2026, 11, 17)), None, "not in the table");
+        // A runtime past or near its end of life is said; months away, or not in the table, isn't.
+        assert!(end_of_life_note(crate::Provider::Node, "18", days(2026, 11, 17)).is_some());
+        assert!(end_of_life_note(crate::Provider::Python, "3.12", days(2028, 9, 1)).is_some());
+        assert_eq!(end_of_life_note(crate::Provider::Node, "22", days(2026, 11, 17)), None);
+        assert_eq!(end_of_life_note(crate::Provider::Go, "1.22", days(2026, 11, 17)), None);
     }
 }

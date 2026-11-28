@@ -196,6 +196,7 @@ fn postgres() -> Router {
         .route("/v1/search/clusters/{id}/tasks/{task}", get(|| async { axum::Json(json!({ "completed": true })) }))
         .route("/v1/secrets/projects/{project}/environments/{env}/secrets", get(|| async { axum::Json(json!([])) }))
         .route("/v1/secrets/projects/{project}/environments/{env}/secrets/{key}/value", get(|| async { axum::Json(json!({ "value": "x" })) }))
+        .route("/v1/secrets/projects/{project}/environments/{env}/digest", get(|| async { axum::Json(json!({ "digest": "00" })) }))
         .route("/v1/secrets/projects/{project}/environments/{env}/secrets/{key}", axum::routing::put(|| async { axum::Json(json!({})) }))
         .route("/v1/secrets/projects/{project}/health", get(|| async { axum::Json(json!({ "findings": [] })) }))
         .route("/v1/secrets/projects/{project}/transit", get(|| async { axum::Json(json!([])) }))
@@ -1333,6 +1334,11 @@ async fn a_rule_can_grant_part_of_a_resource() {
         assert_eq!(d.call(&stripe, Method::GET, &at("/values"), None).await.0, StatusCode::OK);
         assert_eq!(d.call(&stripe, Method::GET, &at("/secrets"), None).await.0, StatusCode::OK);
         assert_eq!(d.call(&stripe, Method::GET, "/v1/secrets/projects/prj_a/health", None).await.0, StatusCode::FORBIDDEN);
+    // A whole folder's digest (a watch's) says why: the folder, never a key.
+    let (s, why) = d.call(&stripe, Method::GET, &at("/digest?path=/api"), None).await;
+    let why = why["error"].as_str().unwrap_or_default().to_string();
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    assert!(why.contains("only some keys of production:/api; a watch (the folder's digest) reads the whole folder") && !why.contains("STRIPE"), "{why}");
         assert_eq!(d.call(&stripe, Method::GET, "/v1/secrets/projects/prj_a/environments/staging/secrets/STRIPE_KEY/value", None).await.0, StatusCode::FORBIDDEN);
         let (s, _) = d.call(OPERATOR, Method::POST, "/v1/access/tokens", Some(json!({ "name": "x", "rules": [{ "product": "postgres", "resources": "*", "keys": ["A"], "actions": { "read": "allow" } }] }))).await;
         assert_eq!(s, StatusCode::BAD_REQUEST);

@@ -1377,23 +1377,37 @@ filtered listing; and the auth matrix's probe of storage's nested route (also br
 
 Ranked; the top item is in progress. Updated as work lands (the watchdog reads this list).
 
-Working order (2026-11-27, afternoon). Work in review or fixing first:
-- `ent-search` back to its minimum: #1084's API-time write check on connectors (fix in
-  progress);
-- item 32's branch reset (#1149, its third round: a dropped request's lock-out, clock-free
-  staleness);
-- item 30's read-only ES|QL (#1111, its third round in re-check);
-- item 14's semantic search on OpenSearch-flavor clusters (#1165, its second round in re-check);
-- item 11's RAG sanitizer, redesigned in its fifth round (#1068);
-- item 1's OpenSearch links (#1127, in re-check);
-- item 15's judgment lists, lists from clicks and OpenSearch's Search Relevance Workbench (#1189,
-  #1194, #1207, in review).
+Working order (2026-11-28). Work in review or fixing first:
+- item 32's branch reset (#1149, fourth round: a branch's lineage kept durably, so `own_bytes`
+  holds after its indices were recreated; roll previews' restore points wait on it);
+- item 1's OpenSearch links (#1127, third round: one parse of remote expressions, so a `-alias:`
+  exclusion is authorized as searched; the real index name on every target);
+- item 30's read-only ES|QL (#1111, third round: filtered aliases next to a wildcard or behind a
+  `::data` selector);
+- item 14's semantic search on OpenSearch-flavor clusters (#1165: approved; small fixes, then it
+  lands);
+- item 11's RAG sanitizer (#1068, fifth round: bare domains, entity-decoding clients, multi-turn
+  history);
+- item 18's health alerts (#1211, first round: fenced deliveries off the metering pass, a webhook
+  target's secret catalogued as reveal; Discord channels tied to their server landed in #1256);
+- item 15's judgment lists, lists from clicks and the Search Relevance Workbench (#1189, #1194,
+  #1207, #1235, first round: the Workbench reads as the caller, experiments pin their cluster,
+  clicks count only where shown).
 
 Then:
-- item 33's second slice (saved searches, surrounding documents, a field's chart; in its gate);
-- item 18's health alerts (in progress);
-- item 16 (cold start at size: one deciding A/B, in progress);
-- item 18's OTLP traces and metrics (the top open item).
+- item 18's OTLP metrics (#1265, in review), then OTLP over gRPC;
+- item 33's second slice (saved searches, surrounding documents, a field's chart);
+- item 18's `_plugins/_alerting` on OpenSearch-flavor clusters;
+- item 15: judgment-list routes classified by the list's index (`_from_clicks` then needs read on
+  its body index);
+- item 16 (cold start at size): download scheduling alone doesn't keep the win (first write
+  505 → 797 ms at load 120); the lazy-sections build on `feature/search-cold-start-at-size` is
+  rerun under one load before deciding.
+
+Landed 2026-11-27 (evening) and 28: lighter tests (#1245, #1255, #1260, #1262: 2,295 → 2,134
+tests, `rust (search)` on GitHub 44-56 → 31-39 s, its test step 38 → 11-16 s, `--unit` no longer
+runs other products' rolld and CLI tests); OTLP traces (#1236); connector APIs need only
+`manage_connector` again (#1227); cold start at size, measured (#1214).
 Landed 2026-11-26: the PIT and caches fix (#1021), a cluster's admin password kept in roll
 secrets and the MCP sweep's person flow (#1097), Terraform for synonyms sets and rulesets
 (#1071), inference endpoints from a secret answered redacted and limited to `api_key` services
@@ -1786,7 +1800,10 @@ deterministic (#396).
    downloaded before the first query because what a shard reads at open is spread over every part
    of every segment. Making doc values and points lazy, fetching waited-for ranges exactly and
    holding bulk downloads during the wake took 18% off the first query (48% off the first write):
-   kept out for now. Left: the same on S3 and for 10 and 50 GB indices, p99, Graviton, and the
+   kept out for now. Holding bulk downloads during the wake on its own, without lazy sections,
+   doesn't keep the win: at load 120, first query 425 → 439 ms and first write 505 → 797 ms
+   (opening segments got faster, WAL replay waited behind the held downloads). Left: the
+   lazy-sections build rerun under the same load as its base, then the same on S3 and for 10 and 50 GB indices, p99, Graviton, and the
    first query's own ranges after a short wake.
 17. **Private networking and customer keys** (design in
    [private-networking.md](private-networking.md); Elastic Cloud PrivateLink traffic filters and BYOK,
@@ -1806,8 +1823,8 @@ deterministic (#396).
      enforced, as Elasticsearch and OpenSearch do, on every create (explicit, auto-create, a data
      stream's backing index, rollover), on opening closed indices, and on restore, resize and
      downsample targets, so an `otel` key can't add data streams past it.
-   - OTLP metrics and OTLP over gRPC. Traces are in review (`feature/search-otlp-traces`: spans into
-     `traces-*.otel-*`, their events as log lines, on the logs intake's machinery).
+   - OTLP over gRPC. Traces landed in #1236 (spans into `traces-*.otel-*`, their events as log
+     lines); metrics are in review (#1265: data points into `metrics-*.otel-*`).
    - `_plugins/_alerting` on OpenSearch-flavor clusters.
    - Visualizations.
 19. **Vector search's footprint** (docs/benchmarks/search.md, "Vector search": 1M × 384 against
@@ -2029,8 +2046,9 @@ deterministic (#396).
    SIGKILL) is the shared lease TTL (`ClusterConfig::lease_ttl`, 10 s: redis 10.4, nosql 10.6 in
    the same run) plus ~1 s to load the cluster from S3 and replay its WAL. Search's part is the
    load; the TTL is roll cloud's fleet-wide choice.
-28. **CI**: the merge gate runs `search-codec`'s lib tests (`rust (search)`, 54 s on PR #29 with
-   main's cache: under the minute, no room for another crate). Test gaps a read-only analysis found on 2026-11-22
+28. **CI**: the merge gate runs `search-codec`'s lib tests (`rust (search)`, 31-39 s on main
+   since the test cut of 2026-11-28, its test step 11-16 s; about 20 s of the job is checkout,
+   toolchain and cache, shared by every job). Test gaps a read-only analysis found on 2026-11-22
    (main at d9aecc990), ranked; each test goes in `test:search`, not the merge gate (all landed, each
    failing against its guarded line: (1) with the egress fix in #771, 0d6daf6cc; (2), (3), (4), (7)
    and (8) in #768, 1c2b5e62c; (5), (6), (9), (10), (11) and the unused e2e file's removal in
@@ -2055,8 +2073,8 @@ deterministic (#396).
    `previews/data.rs`'s `a_masked_search_branch_shows_no_original_value` (a text field and its
    `.keyword`, an address in an array of objects, a dotted key, an index `logs.2024`: none in
    `_source`, `_terms_enum` or a terms aggregation on the branch), `tests/secrets.rs`'s
-   `an_apps_search_link_is_narrowed_and_unlinking_revokes_it` (and the drain's key revoked with the
-   drain) and `a_repository_key_follows_rotation_and_a_branch_gets_no_protected_key`, and
+   `an_apps_drain_appends_to_its_own_search_data_stream` (a service's narrowed link, and the
+   drain's key revoked with the drain) and `a_repository_key_follows_rotation_and_a_branch_gets_no_protected_key`, and
    `tests/auth.rs`'s `mcp_search_with_a_project_token`. (`search-store`'s mass-recovery
    WAL test flaked on a loaded host: a replay counted itself in the shared replay cache only
    after listing, so one could finish and empty it while the others listed; it now counts first.
@@ -2223,3 +2241,10 @@ deterministic (#396).
    documents (`search_after` both ways on the time field), a field's chart (top values, or a
    histogram over the query and range) with whole-range statistics where they're cheap, and
    timestamps in the viewer's zone.
+34. **Cross-cluster replication** (Elastic's follower indices, `_ccr`; OpenSearch's
+   `_plugins/_replication`; compatibility.md lists it as none): disaster recovery in another
+   region, and read-only copies near readers. roll can make a follower cheap: segments are already
+   in object storage and branches share them by key, so a follower in the same object store reads
+   the leader's segments and replays only its WAL tail, with no copy of the data. Design first: the
+   follower's lag and fencing on the fleet, a follower in another region's object store (copies
+   segments once), auto-follow patterns, pause and resume, and promotion when the leader is lost.
