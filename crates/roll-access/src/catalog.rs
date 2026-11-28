@@ -1056,6 +1056,16 @@ fn secrets_import_action(b: &Value) -> Action {
 }
 
 /// A replacing import writes the file's keys too.
+/// Rotating a link redeploys the environment it names, or every one that uses the link
+/// (production among them) when it names none: `deploy` too unless it names one other than
+/// production, as a deploy there is.
+fn apps_rotate_also(b: &Value) -> Vec<Action> {
+    match b.get("environment").and_then(Value::as_str) {
+        Some(e) if e != "production" => Vec::new(),
+        _ => vec![Action::Deploy],
+    }
+}
+
 fn secrets_import_also(b: &Value) -> Vec<Action> {
     if b["replace"] == true { vec![Action::Write] } else { Vec::new() }
 }
@@ -1497,6 +1507,10 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/search/clusters/{id}/password", "search", ADMIN, one(PG, "cluster")).capable(&[Action::Reveal]).lends(Lend::Each(search_secret_write)),
     // A deleted cluster back (its id still resolves while it is kept): a write, like a create.
     row("POST", "/v1/search/clusters/{id}/restore", "search", W, one(PG, "cluster")),
+    // A branch's indices back to a copy of it (roll previews' restore points): it discards what
+    // was written since, so a delete, as every reset is; the copy named in the body is one the
+    // caller may write (search checks it).
+    row("POST", "/v1/search/clusters/{id}/reset", "search", D, one(PG, "cluster")),
     // Any request as the cluster's owner. One that answers or sets a credential (decided by
     // search on the API the cluster routes it to) needs reveal too: the gate says whether the
     // grant has it (`capable`), without reading the body.
@@ -1926,6 +1940,9 @@ static ROWS: &[Row] = &[
     // its code reads them: reveal on that resource too.
     row("PUT", "/v1/apps/services/{id}/links/{kind}/{ref}", "apps", W, one(PG, "service")).lends(Lend::Path("kind", "ref")),
     row("DELETE", "/v1/apps/services/{id}/links/{kind}/{ref}", "apps", W, one(PG, "service")),
+    // A new credential for a link, the service redeployed with it and the old one revoked:
+    // admin on the service (its credentials), and reveal on the resource, as linking it.
+    row("POST", "/v1/apps/services/{id}/links/{kind}/{ref}/rotate", "apps", ADMIN, one(PG, "service")).lends(Lend::Path("kind", "ref")).needs_too(apps_rotate_also),
     row("*", "/v1/apps/services/{id}", "apps", M, one(PG, "service")),
     // A worker scaled on a stream group's lag has apps read that stream for it, and a web service's
     // pushes consume one (and dead-letter into it): read there too, write with a dead letter.

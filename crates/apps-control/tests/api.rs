@@ -2064,6 +2064,71 @@ async fn a_link_puts_its_variables_in_the_instances() {
     assert_eq!(MINTED.lock().len(), before + 2, "the same options make nothing");
     let listed = call(&w.api, "GET", &format!("/v1/apps/services/{rid}/links"), None).await.1;
     assert!(listed.as_array().unwrap().iter().any(|l| l["kind"] == "search" && l["access"] == "read" && l["indices"] == json!(["tenant-*"])), "{listed}");
+    // Rotated (Heroku's pg:credentials:rotate): a new key, the environments redeployed with it,
+    // the old one revoked only once nothing runs with it. A redeploy that fails keeps the old one.
+    let key_of = |line: &str| line.rsplit(' ').next().unwrap().to_string();
+    let old = key_of(MINTED.lock().iter().rev().find(|l| l.starts_with(&format!("link {rid} "))).unwrap());
+    let revoked = |k: &str| MINTED.lock().contains(&format!("unlink {k}"));
+    let rbase = format!("/v1/apps/services/{rid}/environments");
+    call(&w.api, "PUT", &format!("{rbase}/staging"), Some(json!({}))).await;
+    let (_, sd) = call(&w.api, "POST", &format!("{rbase}/staging/deploys"), Some(json!({}))).await;
+    let staged = settled(&w, &rid, "staging", sd["id"].as_str().unwrap()).await;
+    assert_eq!(staged["status"], "active", "{staged}");
+    call(&w.api, "PATCH", &format!("/v1/apps/services/{rid}"), Some(json!({"run": {"health_path": "/healthz", "health_timeout_s": 1}}))).await;
+    call(&w.api, "PATCH", &format!("{rbase}/production/variables"), Some(json!({"set": {"FAKE_ECHO": "ELASTICSEARCH_API_KEY", "FAKE_UNHEALTHY": "1"}}))).await;
+    let before = MINTED.lock().len();
+    let (st, e) = call(&w.api, "POST", &format!("{path}/rotate"), Some(json!({"environment": "production"}))).await;
+    assert_eq!(st, StatusCode::CONFLICT, "{e}");
+    assert!(e.to_string().contains("keeps its old credential"), "{e}");
+    let tried = key_of(&MINTED.lock()[before]);
+    let (_, v) = call(&w.api, "GET", &format!("{rbase}/production/variables/values"), None).await;
+    assert_eq!(v["ELASTICSEARCH_API_KEY"], format!("{old}-secret"), "the old one is back: {v}");
+    // The one that never went live is revoked; the old one, still in use, isn't.
+    for _ in 0..400 {
+        if revoked(&tried) {
+            break;
+        }
+        w.apps.revoke_pass().await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(revoked(&tried) && !revoked(&old), "{:?}", MINTED.lock());
+    call(&w.api, "PATCH", &format!("{rbase}/production/variables"), Some(json!({"unset": ["FAKE_UNHEALTHY"]}))).await;
+    let was = call(&w.api, "GET", &format!("{rbase}/production"), None).await.1["active"]["id"].as_str().unwrap().to_string();
+    let (st, r) = call(&w.api, "POST", &format!("{path}/rotate"), Some(json!({"environment": "production"}))).await;
+    assert_eq!((st, &r["live"], &r["waiting"]), (StatusCode::OK, &json!(true), &json!(["staging"])), "{r}");
+    let new = key_of(MINTED.lock().iter().rev().find(|l| l.starts_with(&format!("link {rid} "))).unwrap());
+    let dep = r["deployments"][0]["id"].as_str().unwrap();
+    let (_, body) = visit_deployment(&w, &host(&racer["environments"][0]["url"]), dep).await;
+    assert_eq!(body["vars"]["ELASTICSEARCH_API_KEY"], format!("{new}-secret"), "{body}");
+    // Production's old instances drained, staging still runs with the old key: kept.
+    for _ in 0..400 {
+        if !w.fake.instances(&rid).iter().any(|(_, d, _)| *d == was) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    w.apps.revoke_pass().await;
+    assert!(!revoked(&old), "staging still runs with it");
+    // Staging deployed again: nothing runs with it, and it goes, after the new one was made.
+    let (_, sd) = call(&w.api, "POST", &format!("{rbase}/staging/redeploy"), Some(json!({}))).await;
+    settled(&w, &rid, "staging", sd["id"].as_str().unwrap()).await;
+    for _ in 0..400 {
+        if revoked(&old) {
+            break;
+        }
+        w.apps.revoke_pass().await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let log = MINTED.lock().clone();
+    let at = |l: String| log.iter().position(|x| *x == l);
+    assert!(at(format!("unlink {old}")) > at(format!("link {rid} {new}")), "{log:?}");
+    assert!(!revoked(&new));
+    let (_, act) = call(&w.api, "GET", &format!("/v1/apps/services/{rid}/activity"), None).await;
+    assert!(act.to_string().contains("link.rotated") && !act.to_string().contains("-secret"), "audited, never a value: {act}");
+    // A link with no credential of its own has nothing to rotate.
+    call(&w.api, "PUT", &format!("/v1/apps/services/{rid}/links/postgres/main"), Some(json!({}))).await;
+    assert_eq!(call(&w.api, "POST", &format!("/v1/apps/services/{rid}/links/postgres/main/rotate"), None).await.0, StatusCode::BAD_REQUEST);
+    call(&w.api, "DELETE", &format!("/v1/apps/services/{rid}/links/postgres/main"), None).await;
     // A service link gives another web service's URLs, named for it: private on the project
     // network, public when it's public. Only another web service of the project links, and its
     // links go with it.
@@ -2074,6 +2139,7 @@ async fn a_link_puts_its_variables_in_the_instances() {
     let (st, l) = call(&w.api, "PUT", &format!("{links}/service/{pid}"), Some(json!({}))).await;
     assert_eq!((st, &l["vars"]), (StatusCode::OK, &json!(["PAY_URL", "PAY_PUBLIC_URL"])), "{l}");
     assert_eq!(call(&w.api, "PUT", &format!("{links}/service/{rid}"), Some(json!({}))).await.0, StatusCode::BAD_REQUEST, "not itself");
+    assert_eq!(call(&w.api, "POST", &format!("{links}/service/{pid}/rotate"), None).await.0, StatusCode::BAD_REQUEST, "nothing of its own to rotate");
     assert_eq!(call(&w.api, "PUT", &format!("{links}/service/{}", worker["id"].as_str().unwrap()), Some(json!({}))).await.0, StatusCode::BAD_REQUEST, "a worker has no URL");
     let base = format!("/v1/apps/services/{rid}/environments/production");
     call(&w.api, "PATCH", &format!("{base}/variables"), Some(json!({"set": {"FAKE_ECHO": "PAY_URL,PAY_PUBLIC_URL"}}))).await;
@@ -3324,9 +3390,12 @@ async fn a_previews_snapshot_goes_to_roll_previews_with_the_bypass() {
     struct Snaps(Mutex<Vec<(String, String, usize)>>);
     #[async_trait]
     impl apps_control::integrations::PreviewSnapshots for Snaps {
-        async fn snapshot(&self, _service: &str, env: &str, name: &str, png: bytes::Bytes) -> apps_control::Result<Value> {
+        async fn snapshot(&self, _service: &str, env: &str, name: &str, head: Option<&str>, png: bytes::Bytes) -> apps_control::Result<Value> {
             if name.is_empty() {
                 return Err(apps_control::Error::BadRequest("a snapshot has a name".into()));
+            }
+            if head.is_some_and(|h| h != "abc") {
+                return Err(apps_control::Error::Conflict("the preview serves abc".into()));
             }
             self.0.lock().push((env.to_string(), name.to_string(), png.len()));
             Ok(json!({ "page": "snap:".to_string() + name, "head": "abc" }))
@@ -3375,6 +3444,7 @@ async fn a_previews_snapshot_goes_to_roll_previews_with_the_bypass() {
     assert_eq!((st, v["page"].as_str()), (StatusCode::CREATED, Some("snap:home")), "{v}");
     assert_eq!(*snaps.0.lock(), [("pv-1".to_string(), "home".to_string(), 108)]);
     assert_eq!(send("", Some(bypass), png()).await.0, StatusCode::BAD_REQUEST, "roll previews' own refusal");
+    assert_eq!(send("home&head=0dd", Some(bypass), png()).await.0, StatusCode::CONFLICT, "a picture of an older head: roll previews' head check");
 }
 
 /// A hostname another environment holds is taken by whoever proves its DNS (Vercel's "linked to
@@ -3449,7 +3519,8 @@ async fn a_domains_records_are_written_with_the_customers_token() {
             Ok(vec![])
         }
         // Read once as the caller: nothing bound, no maker kept.
-        async fn use_once(&self, _: apps_control::integrations::Asker<'_>, _: &str, env: &str, _: &str, reference: &str, _: &str, to: Option<&'static str>) -> anyhow::Result<String> {
+        async fn use_once(&self, _: apps_control::integrations::Asker<'_>, _: &str, env: &str, _: &str, reference: &str, use_id: &'static str, _: &str, to: Option<&'static str>) -> anyhow::Result<String> {
+            assert_eq!(use_id, apps_control::integrations::DNS_USE);
             anyhow::ensure!((env, reference) == ("production", "roll://production/CF_TOKEN"), "you may not reveal {reference}");
             assert_eq!(to, Some("https://dns.example/v4"), "the writer's own API");
             Ok("cf-secret".into())

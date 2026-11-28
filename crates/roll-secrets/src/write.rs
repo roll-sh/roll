@@ -602,6 +602,8 @@ pub(crate) fn apply(c: &Conn<'_>, dek: &Dek, mac: &crate::Keyring, env: &EnvRow,
     let (mut ended, mut gone, mut folders, mut writes): (Vec<String>, Vec<String>, BTreeSet<String>, Vec<Write<'_>>) = (vec![], vec![], BTreeSet::new(), vec![]);
     let mut diffs = vec![];
     let mut dropped_credentials: BTreeMap<String, (Link, Json)> = BTreeMap::new();
+    // Keys opted in for one of roll's uses, or no longer: named in the audit row.
+    let mut opted: Vec<String> = vec![];
     for item in items {
         let cur = now_at.remove(&item.slot());
         let kind_of = if item.owner.is_empty() { SecretType::Shared } else { SecretType::Personal };
@@ -665,10 +667,7 @@ pub(crate) fn apply(c: &Conn<'_>, dek: &Dek, mac: &crate::Keyring, env: &EnvRow,
                 };
                 let comment_now = comment.clone().or_else(|| cur.as_ref().map(|c| c.comment.clone())).unwrap_or_default();
                 let tags_now = tags.clone().or_else(|| cur.as_ref().map(|c| c.tags.clone())).unwrap_or_default();
-                // Sensitive is for good: taking the tag off would hand the value back to people.
-                if cur.as_ref().is_some_and(|c| names::sensitive(&c.tags)) && !names::sensitive(&tags_now) {
-                    return Err(Error::BadRequest(format!("{} is sensitive for good: delete it and set it again to have a value people can read", item.key)));
-                }
+                opted.extend(tag_change(&Scope::at(project, &env.slug, &item.path).key(&item.key), &item.key, cur.as_ref().map(|c| c.tags.as_slice()), &tags_now, caller)?);
                 let weak = stored_value.as_ref().and_then(|v| crate::strength::weakness(&item.key, v.expose()));
                 // By the value only: a link's secret field is health's to judge (it asks the provider).
                 let public = crate::strength::browser_exposure(&item.key, stored_value.as_ref().map(|v| v.expose()), None);
@@ -811,12 +810,32 @@ pub(crate) fn apply(c: &Conn<'_>, dek: &Dek, mac: &crate::Keyring, env: &EnvRow,
     )?;
     let keys: Vec<String> = diffs.iter().map(|d| d.key.clone()).collect();
     let summary = summarize(&diffs);
-    let (action, summary) = (format!("secrets.{kind}"), format!("#{seq} {summary}"));
+    let (action, summary) = (format!("secrets.{kind}"), format!("#{seq} {summary}{}", opted.iter().map(|o| format!("; {o}")).collect::<String>()));
     match change_event(&writes, via, seq, &keys, across) {
         Some(event) => audit::record_event(c, mac, project, caller, &action, Some(&env.slug), Some(&change.path), &keys, &summary, now, event)?,
         None => audit::record(c, mac, project, caller, &action, Some(&env.slug), Some(&change.path), &keys, &summary, now)?,
     }
     Ok((change, diffs))
+}
+
+/// A write's change to a key's tags, refused or allowed as it is now (`cur`: none for a new key):
+/// sensitive is for good, since taking the tag off would hand the value back to people, and an
+/// opt-in for one of roll's uses (`names::USE_PREFIX`: a product may then act with a sensitive
+/// key wherever it reaches) is an admin's of the key's folder to add or remove, never a writer's.
+/// What it opts in or out, for the audit row.
+fn tag_change(at: &Scope<'_>, key: &str, cur: Option<&[String]>, new: &[String], caller: &Caller) -> Result<Vec<String>> {
+    if cur.is_some_and(names::sensitive) && !names::sensitive(new) {
+        return Err(Error::BadRequest(format!("{key} is sensitive for good: delete it and set it again to have a value people can read")));
+    }
+    let (before, after) = (names::uses(cur.unwrap_or_default()), names::uses(new));
+    if before == after {
+        return Ok(vec![]);
+    }
+    if !caller.allows(Action::Admin, at) {
+        return Err(Error::Forbidden(format!("only an admin of {key}'s folder may opt it in or out for one of roll's uses (its {}… tags)", names::USE_PREFIX)));
+    }
+    let added = after.difference(&before).map(|t| format!("{key} opted in for {t}"));
+    Ok(added.chain(before.difference(&after).map(|t| format!("{key} no longer opted in for {t}"))).collect())
 }
 
 /// A credential no secret holds any more: revoked by the sweeper at `at`.
@@ -1244,12 +1263,9 @@ impl Secrets {
             }
             let now_at = currents(c, &e.id, items.iter())?;
             for i in &items {
-                // `apply`'s own refusal: sensitive is for good.
-                if let (ItemAction::Set { tags: Some(new), .. }, Some(cur)) = (&i.action, now_at.get(&i.slot()))
-                    && names::sensitive(&cur.tags)
-                    && !names::sensitive(new)
-                {
-                    return Err(Error::BadRequest(format!("{} is sensitive for good: delete it and set it again to have a value people can read", i.key)));
+                // `apply`'s own refusals: sensitive is for good, and opt-ins are an admin's.
+                if let ItemAction::Set { tags: Some(new), .. } = &i.action {
+                    tag_change(&Scope::at(project, env, &i.path).key(&i.key), &i.key, now_at.get(&i.slot()).map(|c| c.tags.as_slice()), new, caller)?;
                 }
             }
             Ok(items.iter().map(|i| now_at.get(&i.slot()).map_or(SlotNow { version: 0, linked: false }, |c| SlotNow { version: c.version, linked: c.link.is_some() })).collect())

@@ -1127,9 +1127,11 @@ pub(crate) fn host_only(apps: &Apps, name: String) -> String {
 /// Where a preview's snapshots from the team's tests come in ([`snapshot`]).
 pub const SNAPSHOT_PATH: &str = "/__roll/snapshot";
 
-/// `POST /__roll/snapshot?name=` on a preview: with `x-roll-preview-bypass` matching the
-/// environment's bypass secret, its PNG (at most 2 MiB) to roll previews. Without the hook here or
-/// a bypass set it's a 404, as an app's own path would be.
+/// `POST /__roll/snapshot?name=&head=` on a preview: with `x-roll-preview-bypass` matching the
+/// environment's bypass secret, its PNG (at most 2 MiB) to roll previews, with the head the test
+/// ran against (hex, at most 64 bytes; none or empty is no check, as on roll previews' runtime),
+/// which roll previews refuses unless the preview serves it. Without the hook here or a bypass set
+/// it's a 404, as an app's own path would be.
 async fn snapshot(apps: &Arc<Apps>, service: &str, env: &str, req: Request) -> Response {
     const MAX: usize = 2 << 20;
     let Some(hook) = apps.preview_snapshots.get().cloned() else { return page(StatusCode::NOT_FOUND, "Not found", "There's nothing here.") };
@@ -1140,6 +1142,10 @@ async fn snapshot(apps: &Arc<Apps>, service: &str, env: &str, req: Request) -> R
         return (StatusCode::UNAUTHORIZED, axum::Json(serde_json::json!({ "error": "a snapshot takes the project's bypass secret (x-roll-preview-bypass)" }))).into_response();
     }
     let name = query_value(&req, "name").unwrap_or_default();
+    let head = query_value(&req, "head").filter(|h| !h.is_empty());
+    if head.as_deref().is_some_and(|h| h.len() > 64 || !h.bytes().all(|b| b.is_ascii_hexdigit())) {
+        return (StatusCode::BAD_REQUEST, axum::Json(serde_json::json!({ "error": "head: a changeset or git commit id (hex, at most 64)" }))).into_response();
+    }
     let body = match axum::body::to_bytes(req.into_body(), MAX).await {
         Ok(b) => b,
         Err(_) => return (StatusCode::PAYLOAD_TOO_LARGE, axum::Json(serde_json::json!({ "error": "a snapshot is at most 2 MiB" }))).into_response(),
@@ -1147,7 +1153,7 @@ async fn snapshot(apps: &Arc<Apps>, service: &str, env: &str, req: Request) -> R
     if !body.starts_with(b"\x89PNG\r\n\x1a\n") {
         return (StatusCode::BAD_REQUEST, axum::Json(serde_json::json!({ "error": "a snapshot is a PNG" }))).into_response();
     }
-    match hook.snapshot(service, env, &name, body).await {
+    match hook.snapshot(service, env, &name, head.as_deref(), body).await {
         Ok(v) => (StatusCode::CREATED, axum::Json(v)).into_response(),
         Err(crate::Error::Conflict(m)) => (StatusCode::CONFLICT, axum::Json(serde_json::json!({ "error": m }))).into_response(),
         Err(e) => (StatusCode::BAD_REQUEST, axum::Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
