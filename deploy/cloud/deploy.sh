@@ -11,6 +11,9 @@
 #                             definition ARN given), canary to 0
 #   deploy.sh current         the image tag the fleet runs (pass it as ImageTag to stack updates)
 #   deploy.sh status          services, deployments and alarms
+#   deploy.sh diagnose [hours]  read only: each deploy alarm's state and reason, the minutes its
+#                             metric breached in the last hours (default 24, at most 360), the
+#                             services' recent events and the stopped nodes' reasons
 #
 # Settings: ROLL_CLOUD_STACK (roll-cloud), AWS_REGION (us-east-1), BAKE_SECONDS (600),
 # ROLL_DEPLOY_STATE (where the previous revision is kept for `rollback`), CARGO_BUILD_JOBS.
@@ -159,7 +162,9 @@ on_deploy_exit() {
   local rc=$?
   trap - EXIT
   if [ "$rc" -ne 0 ]; then
-    log "deploy failed; rolling back"
+    log "deploy failed; what happened:"
+    explain "$DEPLOY_STARTED" || log "couldn't read why"
+    log "rolling back"
     cmd_rollback "$ROLLBACK_TO" || log "rollback failed: deploy.sh rollback $ROLLBACK_TO"
   fi
   exit "$rc"
@@ -195,6 +200,7 @@ cmd_deploy() {
   mkdir -p "$(dirname "$STATE")"
   printf '%s\n' "$prev" >"$STATE"
   ROLLBACK_TO=$prev
+  DEPLOY_STARTED=$(date -u +%s)
   trap on_deploy_exit EXIT
   trap 'exit 130' INT TERM
 
@@ -268,14 +274,116 @@ cmd_status() {
   aws cloudwatch describe-alarms --alarm-names "${names[@]}" --query 'MetricAlarms[].[AlarmName, StateValue]' --output text
 }
 
+# ── why: alarms, metrics, events and stopped tasks (read only; the deploy role's own rights) ──
+
+iso() { date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ; }
+
+# Every deploy alarm: its state, when it changed and why.
+alarm_reasons() {
+  local names
+  IFS=, read -r -a names <<<"$ALARMS"
+  aws cloudwatch describe-alarms --alarm-names "${names[@]}" --output json |
+    jq -r '.MetricAlarms[] | "  \(.AlarmName): \(.StateValue) since \(.StateUpdatedTimestamp)\n    \(.StateReason)"'
+}
+
+# For each deploy alarm, the minutes since epoch $1 its own metric (or metric math) breached its
+# threshold, from the alarm's definition: what tripped it, and when.
+breaches() {
+  local since=$1 names json
+  IFS=, read -r -a names <<<"$ALARMS"
+  json=$(aws cloudwatch describe-alarms --alarm-names "${names[@]}" --output json)
+  local i n
+  n=$(jq '.MetricAlarms | length' <<<"$json")
+  for (( i = 0; i < n; i++ )); do
+    local alarm queries name
+    alarm=$(jq -c ".MetricAlarms[$i]" <<<"$json")
+    name=$(jq -r '.AlarmName' <<<"$alarm")
+    queries=$(jq -c '
+      if (.Metrics // []) | length > 0 then
+        [.Metrics[] | del(.AccountId, .Period) | if .MetricStat then .MetricStat.Period = 60 else . end]
+      else
+        [{Id: "m", ReturnData: true, MetricStat: {Metric: {Namespace, MetricName, Dimensions: (.Dimensions // [])}, Period: 60, Stat: (.Statistic // .ExtendedStatistic)}}]
+      end' <<<"$alarm")
+    aws cloudwatch get-metric-data --metric-data-queries "$queries" \
+      --start-time "$(iso "$since")" --end-time "$(iso "$(date -u +%s)")" --scan-by TimestampAscending --output json |
+      jq -r --argjson a "$alarm" --arg name "$name" '
+        def breach(v): ($a.Threshold) as $t | $a.ComparisonOperator as $op
+          | if $op == "GreaterThanThreshold" then v > $t
+            elif $op == "GreaterThanOrEqualToThreshold" then v >= $t
+            elif $op == "LessThanThreshold" then v < $t
+            else v <= $t end;
+        [.MetricDataResults[] | . as $r | range(0; .Values | length) as $j
+          | select(breach($r.Values[$j])) | "\($r.Timestamps[$j][0:16]) \($r.Values[$j])"] as $hits
+        | "  \($name) (\($a.ComparisonOperator) \($a.Threshold)): \($hits | length) breaching minute(s)",
+          ($hits | if length > 60 then .[-60:] else . end | .[] | "    \(.)")'
+  done
+}
+
+# The fleet's 5xx answers by product, per minute, since epoch $1: which product the errors are.
+errors_by_product() {
+  local queries
+  queries='[{"Id":"e","Expression":"SEARCH('"'"'{RollCloud,product} MetricName=\"Http5xx\"'"'"', '"'"'Sum'"'"', 60)","Period":60,"ReturnData":true}]'
+  aws cloudwatch get-metric-data --metric-data-queries "$queries" \
+    --start-time "$(iso "$1")" --end-time "$(iso "$(date -u +%s)")" --scan-by TimestampAscending --output json |
+    jq -r '.MetricDataResults[] | select(any(.Values[]; . > 0)) | "  \(.Label): \([.Values[]] | add) in \([.Values[] | select(. > 0)] | length) minute(s), last at \(.Timestamps[[.Values[]] | to_entries | map(select(.value > 0)) | last.key][0:16])"'
+}
+
+# Service events since epoch $1 (ECS keeps the last 100).
+service_events() {
+  local name
+  for name in "$SERVICE" "$CANARY"; do
+    service "$name" | jq -r --argjson since "$1" '.serviceName as $s | .events | reverse[]
+      | select((.createdAt | sub("\\.[0-9]+"; "") | sub("[+-][0-9]{2}:[0-9]{2}$"; "Z") | fromdateiso8601) >= $since)
+      | "  \(.createdAt[0:19]) \($s): \(.message)"'
+  done
+}
+
+# Nodes that stopped (ECS keeps stopped tasks about an hour): why, and each container's exit.
+stopped_tasks() {
+  local name arns
+  for name in "$SERVICE" "$CANARY"; do
+    arns=$(aws ecs list-tasks --cluster "$CLUSTER" --service-name "$name" --desired-status STOPPED --max-items 100 --query 'taskArns' --output text)
+    [ -n "$arns" ] && [ "$arns" != None ] || continue
+    # shellcheck disable=SC2086 # one ARN per word
+    aws ecs describe-tasks --cluster "$CLUSTER" --tasks $arns --output json | jq -r --arg s "$name" '.tasks[]
+      | "  \($s) \(.taskArn | split("/")[-1]) rev \(.taskDefinitionArn | split(":")[-1]) started \(.startedAt // "never") stopped \(.stoppedAt // "?"): \(.stopCode // "") \(.stoppedReason // "")",
+        (.containers[] | "    \(.name): exit \(.exitCode // "none") \(.reason // "") health \(.healthStatus // "")")'
+  done
+}
+
+# Everything above since epoch $1: why a deploy failed (deploy prints it before rolling back).
+explain() {
+  local since=$1
+  log "alarms:"
+  alarm_reasons
+  log "breaching minutes since $(iso "$since"):"
+  breaches "$since"
+  log "5xx by product:"
+  errors_by_product "$since"
+  log "service events:"
+  service_events "$since"
+  log "stopped nodes:"
+  stopped_tasks
+}
+
+cmd_diagnose() {
+  outputs
+  local hours=${1:-24}
+  (( hours >= 1 && hours <= 360 )) || die "hours: 1 to 360 (CloudWatch keeps one-minute data for 15 days)"
+  log "fleet:"
+  cmd_status
+  log "running: $(image_of "$(task_def_of "$SERVICE")")"
+  explain $(( $(date -u +%s) - hours * 3600 ))
+}
+
 case "${1:-}" in
-  push | deploy | rollback | current | status)
+  push | deploy | rollback | current | status | diagnose)
     cmd=$1
     shift
     "cmd_$cmd" "$@"
     ;;
   *)
-    sed -n '2,16p' "$0" >&2
+    sed -n '2,19p' "$0" >&2
     exit 2
     ;;
 esac

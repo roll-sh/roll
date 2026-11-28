@@ -3269,32 +3269,27 @@ request's head, not GitHub's merge commit (#1252).
 
 In progress, each in a pull request of its own:
 - a leaked CI bypass secret (`rpb_`) revoked, as deploy hooks are (the review's one high finding);
-- team access on a project's own preview domain (the sign-in's ticket refused its host);
 - a snapshot's head checked on roll apps too (an older push's picture could stand for the head's);
-- what a note's reviewer saw, from their own browser (Jam, Marker.io);
-- writes replayed safely on fresh copies of both previews' data (Signadot, Speedscale), which
-  also takes GET replay off main's preview's own data (a replayed GET can act), on roll's
-  runtime (roll apps services next);
-- a member's preview of a project with a search cluster, checked end to end.
+- a note resolved when its fix lands (Marker.io's and Jam's two-way sync: its work item or
+  GitHub issue closing resolves it; Jira and Asana through an automation trigger after);
+- the page's own review in the toolbar (Vercel's toolbar, Chromatic's UI Review: whether this
+  page changed against main and what it adds, Accept opening roll);
+- an earlier push started again from the sheet, the CLI and MCP.
 
-1. **A note resolved when its fix lands** (Marker.io's and Jam's two-way sync): a note's work
-   item or GitHub issue closing resolves it, so the pull request comment stops listing fixed
-   notes; Jira and Asana through an automation trigger after.
-2. **The page's own review in the toolbar** (Vercel's toolbar, Chromatic's UI Review): a team
-   visitor sees whether this page changed against main and what it adds, with Accept opening
-   roll (never clickable by the page's own script).
-3. **A live dashboard, in review**: the Previews list follows the event feed (a long poll, `wait`)
-   instead of reading the list every 20 s; a calm list is read once a minute in case the feed
-   missed something, a busy one every 3 s as before. A screenshot that arrives after a preview is
-   up without a visual change still shows at the next read.
-4. **roll's reviewer reads the visual and API results** (Percy's Visual Review Agent): which of a
+Landed from it: team access on a project's own preview domain (#1258, roll apps' side #1277), a
+live Previews list following the event feed (#1269), what a note's reviewer saw from their own
+browser (#1264), writes replayed on fresh copies of both previews' data, GETs too (#1273), and a
+member's preview of a project with a search cluster checked (#1254).
+
+1. **roll's reviewer reads the visual and API results** (Percy's Visual Review Agent): which of a
    change's visual changes its diff explains, as the verdict's first line; model output never
    accepts anything.
-5. **An earlier push started from the sheet, the CLI and MCP**, not only from its own 410 page.
-6. **Restore points for search and buckets**: search's on roll search's reset from a copy (#1149;
-   200 put back, 409 dropped or busy, 503 recorded); buckets need a put-back on roll storage's
-   side.
-7. **Previews for the members thread's next products**: search is a member product (#808).
+2. **Restore points for search and buckets**: search's on roll search's reset from a copy (#1149:
+   the answer's `reset` says `applied`, `dropped` or `pending`; `dropped`, a 400 and a 404 are
+   final, `pending` is never sent again, and any other 409, 503 or 5xx is tried again at the next
+   converge); buckets need a put-back on roll storage's side.
+3. **Writes replayed on roll apps services** (their proxy keeps no bodies yet).
+4. **Previews for the members thread's next products**: search is a member product (#808).
    Checked on 2026-11-27: a member's previews of a project with a cluster keep their role (the
    data sheet is `reveal`, and a search branch answers 409 there; mask suggestions read only
    clusters the project trusts, which every member role reads; the columns are read as the
@@ -3312,7 +3307,7 @@ In progress, each in a pull request of its own:
    That isn't worth it while previews' own routes cover what members need.
 
    roll apps follows once its routes become member routes.
-8. **Watches on pg-control**: the data step's Postgres compute start; cheap branches on ext4
+5. **Watches on pg-control**: the data step's Postgres compute start; cheap branches on ext4
    through overlay volumes; recovery to a time seconds old (unowned).
 
 Not to build: more lab checks on the first page (each adds noise to every pull request), or a
