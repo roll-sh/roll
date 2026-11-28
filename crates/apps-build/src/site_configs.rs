@@ -230,12 +230,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn vercels_crons_are_paths_on_a_schedule() {
-        let c = vercel_crons(r#"{"crons": [{"path": "/api/cron", "schedule": "0 5 * * *"}, {"path": "relative", "schedule": "@daily"}, {"schedule": "@hourly"}]}"#);
-        assert_eq!(c, [crate::Cron { path: "/api/cron".into(), schedule: "0 5 * * *".into() }], "only absolute paths with a schedule");
-    }
-
-    #[test]
     fn vercel_and_netlify_rules_become_redirects_and_headers_lines() {
         let v = from_vercel(
             r#"{ "redirects": [{ "source": "/old/:slug", "destination": "/new/:slug" }, { "source": "/blog/:path*", "destination": "https://blog.example/:path*", "permanent": false }, { "source": "/re/(\\d+)", "destination": "/x" }],
@@ -252,5 +246,7 @@ mod tests {
         assert_eq!((n.redirects.as_str(), n.headers.as_str(), n.skipped.len()), ("/docs/* /guide/:splat 301\n/x /y 301 Country=us,ca Language=en\n", "/*\n  X-Frame-Options: DENY\n", 1), "a Role= condition is left out");
         let v = from_vercel(r#"{ "rewrites": [{ "source": "/beta/(.*)", "destination": "https://beta.example.com/$1", "has": [{ "type": "cookie", "key": "beta" }] }, { "source": "/x", "destination": "/y", "has": [{ "type": "header", "key": "x-a" }] }] }"#);
         assert_eq!((v.redirects.as_str(), v.skipped.len()), ("/beta/* https://beta.example.com/:splat 200 Cookie=beta\n", 1));
+        let c = vercel_crons(r#"{"crons": [{"path": "/api/cron", "schedule": "0 5 * * *"}, {"path": "relative", "schedule": "@daily"}, {"schedule": "@hourly"}]}"#);
+        assert_eq!(c, [crate::Cron { path: "/api/cron".into(), schedule: "0 5 * * *".into() }], "only absolute paths with a schedule");
     }
 }

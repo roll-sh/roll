@@ -2985,12 +2985,17 @@ mod tests {
     async fn an_instance_that_dies_is_replaced_and_a_wake_left_by_its_client_still_finishes() {
         let fake = Fake::new();
         let live = live(&fake);
-        let tpl = template_of("dep_aaaaaaaaaaaa", Run::default(), &[("FAKE_BOOT_MS", "150")]);
+        let tpl = template_of("dep_aaaaaaaaaaaa", Run::default(), &[("FAKE_BOOT_MS", "30")]);
         let prepared = live.prepare(&tpl, None).await.unwrap();
         live.commit(tpl, prepared).await;
         // The client gives up mid-wake: the wake finishes anyway, nothing is left Starting.
-        assert!(tokio::time::timeout(Duration::from_millis(20), live.acquire()).await.is_err());
-        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert!(tokio::time::timeout(Duration::from_millis(5), live.acquire()).await.is_err());
+        for _ in 0..400 {
+            if live.state() == InstanceState::Running {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
         assert_eq!(live.state(), InstanceState::Running);
         // Killed under it (well before it would go to sleep): the reaper notices, and the next
         // request starts a fresh one.
@@ -3022,7 +3027,7 @@ mod tests {
         let prepared = live.prepare(&old, None).await.unwrap();
         live.commit(old, prepared).await;
         // The new deployment boots slowly; a request comes in while the old instance is gone.
-        let new = template_of("dep_bbbbbbbbbbbb", run, &[("FAKE_BOOT_MS", "200")]);
+        let new = template_of("dep_bbbbbbbbbbbb", run, &[("FAKE_BOOT_MS", "50")]);
         let rollout = {
             let (live, new) = (live.clone(), new.clone());
             tokio::spawn(async move {
@@ -3030,7 +3035,9 @@ mod tests {
                 live.commit(new, p).await;
             })
         };
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        while fake.instances("svc_x").iter().any(|(_, dep, st)| dep == "dep_aaaaaaaaaaaa" && *st == FakeState::Running) {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
         let l = live.acquire().await.unwrap();
         assert_eq!(l.inst.deployment, "dep_bbbbbbbbbbbb", "the request waited for the new one");
         rollout.await.unwrap();

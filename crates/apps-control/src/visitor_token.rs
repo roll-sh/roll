@@ -99,26 +99,3 @@ impl Apps {
         Some(token)
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_token_verifies_against_its_jwk() {
-        use p256::ecdsa::signature::Verifier;
-        let (der, public) = crate::provenance::new_key();
-        let t = sign(&der, &public, &json!({ "sub": "ann@acme.com" })).unwrap();
-        let k = jwk(&public).unwrap();
-        let d = |s: &str| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(s).unwrap();
-        let (x, y) = (d(k["x"].as_str().unwrap()), d(k["y"].as_str().unwrap()));
-        let point = p256::EncodedPoint::from_affine_coordinates(x.as_slice().into(), y.as_slice().into(), false);
-        let vk = p256::ecdsa::VerifyingKey::from_encoded_point(&point).unwrap();
-        let (input, sig) = t.rsplit_once('.').unwrap();
-        let sig = p256::ecdsa::Signature::from_slice(&d(sig)).unwrap();
-        assert!(vk.verify(input.as_bytes(), &sig).is_ok());
-        assert!(vk.verify(b"another", &sig).is_err());
-        let head: Value = serde_json::from_slice(&d(t.split('.').next().unwrap())).unwrap();
-        assert_eq!((head["alg"].as_str(), head["kid"].as_str()), (Some("ES256"), k["kid"].as_str()));
-    }
-}

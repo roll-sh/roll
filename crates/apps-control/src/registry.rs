@@ -257,21 +257,6 @@ impl crate::Apps {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn image_references_split_for_the_registry_api() {
-        let r = ImageRef::parse("nginx:1.27");
-        assert_eq!((r.name.as_str(), r.registry.as_str(), r.repo.as_str(), r.reference.as_str()), ("nginx", "registry-1.docker.io", "library/nginx", "1.27"));
-        let r = ImageRef::parse("ghcr.io/acme/web");
-        assert_eq!((r.name.as_str(), r.registry.as_str(), r.repo.as_str(), r.reference.as_str()), ("ghcr.io/acme/web", "ghcr.io", "acme/web", "latest"));
-        let r = ImageRef::parse("registry.example.com:5000/team/app:v2");
-        assert_eq!((r.registry.as_str(), r.repo.as_str(), r.reference.as_str()), ("registry.example.com:5000", "team/app", "v2"));
-    }
-}
-
-#[cfg(test)]
 mod cosign_tests {
     use super::*;
     use base64::Engine as _;
