@@ -26571,6 +26571,14 @@ whole and nothing else. Found and fixed:
   error for that commit (a client retrying it commits it twice). It is a warning now, and the
   next commit to find the memtable full tries again.
 
+**Gates** (on `00dea1e91`, these commits on `9cfd1322f`): `tools/quick-check.sh` with
+`QC_CHECKED=1` and `QC_TESTS="disk_full crash_random"`: clippy 16 warnings, none new in a
+changed file; 421 tests in 27 binaries, again built `verify-checked`; crash seeds 1-3 x 2 and
+power_cut_at_every_point; regress 51,148 / 51,150, 0 newly differing; isolation 1,647 / 1,648;
+pg_dump_tap 14,609 passed. `wire_waits` 10 of 10 and `wire` 10 of 10 on the quick-check's verify
+binaries (load 37-86). `tools/crash-binary.py` seeds 1-3 and `--power drop` seeds 1-3 against
+that build's roll-engine (verify profile, not dist): ok. `tools/powercut/selftest.py`: ok.
+
 **Left.** The `Engine::open` mutex held through a database's whole open (recovery included)
 delays connections to every other database. The connect-time `shared_lock` wait (patch above).
 Item 2's error text, if it recurs.
