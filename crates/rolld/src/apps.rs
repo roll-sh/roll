@@ -452,6 +452,7 @@ impl RollResources {
             LinkKind::Bucket => Box::new(data::Bucket(api)),
             LinkKind::Stream => Box::new(data::Stream(api)),
             LinkKind::Queue => Box::new(data::Queue(api)),
+            LinkKind::Search => Box::new(data::Search(api)),
             _ => return None,
         })
     }
