@@ -92,7 +92,12 @@ async fn in_flight_bytes_are_budgeted_per_tenant() {
         .write_all(format!("POST /i/_doc HTTP/1.1\r\nHost: x\r\nAuthorization: {auth}\r\nContent-Type: application/json\r\nContent-Length: 900\r\n\r\n{{").as_bytes())
         .await
         .unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    let in_flight = || t.node.get_loaded("c1").map_or(0, |l| l.bytes_in_flight());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while in_flight() < 900 {
+        assert!(Instant::now() < deadline, "the stalled upload is reserved");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     // ...so the next large one is rejected like Elasticsearch's indexing pressure,
     let big = format!("{{\"f\":\"{}\"}}", "x".repeat(300));
     let r = send(t.addr, "POST", "/i/_doc", &[("Authorization", &auth), ("Content-Type", "application/json")], big.as_bytes()).await;
@@ -102,7 +107,10 @@ async fn in_flight_bytes_are_budgeted_per_tenant() {
     let r = send(t.addr, "POST", "/i/_doc", &[("Authorization", &basic("c2", "pw2")), ("Content-Type", "application/json")], big.as_bytes()).await;
     assert_eq!(r.status, 201, "{}", r.text());
     drop(stalled);
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    while in_flight() > 0 {
+        assert!(Instant::now() < deadline, "a closed upload gives its bytes back");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     let r = send(t.addr, "POST", "/i/_doc", &[("Authorization", &auth), ("Content-Type", "application/json")], big.as_bytes()).await;
     assert_eq!(r.status, 201, "{}", r.text());
 }

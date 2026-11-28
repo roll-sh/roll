@@ -1506,6 +1506,7 @@ previews are listed once those products are on.
 | `apps_delete_notification` | Stop sending a project's events there. | `DELETE /v1/apps/projects/{project}/notifications/{nid}` |
 | `apps_test_notification` | Send a test event now (not retried): whether it arrived. | `POST /v1/apps/projects/{project}/notifications/{nid}/test` |
 | `apps_notification_deliveries` | A notification's last 50 deliveries, newest first: what was sent and whether it arrived. | `GET /v1/apps/projects/{project}/notifications/{nid}/deliveries` |
+| `apps_redeliver_notification` | Send a delivered or failed delivery's event again, from its first try (its delivery id kept). Not an on-call event a later one undid. | `POST /v1/apps/projects/{project}/notifications/{nid}/deliveries/{did}/redeliver` |
 | `apps_list_drains` | Where a project's logs are sent (the URL's host only). | `GET /v1/apps/projects/{project}/drains` |
 | `apps_add_drain` | Send every matching service's logs out of roll: an HTTPS endpoint (signed; its signing secret comes back once), an OTLP collector, syslog over TLS, or an S3 bucket (apps #580; the AWS keys go as headers, which the audit log redacts), or the project's own roll storage bucket with nothing to paste (`bucket`, apps #590), or a data stream of the project's own roll search cluster as ECS documents with an append-only key (`search`). | `POST /v1/apps/projects/{project}/drains` |
 | `apps_update_drain` | Change what a drain sends or its headers: given ones replace (a new URL is a new drain). | `PATCH /v1/apps/projects/{project}/drains/{did}` |
@@ -1629,10 +1630,11 @@ From a 2026-11-26 comparison (the spec's anniversary post, Claude's connector do
    `:asked` when it passed on an approval (an older owner in a rolling restart decides again and
    fails closed); #1111's `approved_ask` becomes `outcome == Ask && (!decided_before ||
    approved_before)` after both are on main.
-4. **Lends that name their key (after roll secrets #1226 lands):** #1226 adds rules for single
+4. **Lends that name their key (this PR; roll secrets #1226 landed `keys`):** #1226 adds rules for single
    secret keys (`keys`); a lend naming its key (`Lent.key`: apps' DNS token, search's rotated
    password) then hands and remembers `keys: [KEY]` rather than the folder, so a root lend naming a
-   key is rememberable again (8 hours at most), and `lent_also_rule` keeps the key.
+   key is rememberable again (8 hours at most). `lent_also_rule` stays keyless: it's the route's own
+   product's (apps', search's), and only a secrets rule names keys.
 5. **Watched:** SEP-1913 (`sensitiveHint`, `privateHint` and `maliciousActivityHint` annotations, close to lockdown's marks) and the files extension (Claude says uploads are "rolling out soon").
 
 6. **Paging is the products'.** No list route takes a cursor (approvals take `limit` only). History

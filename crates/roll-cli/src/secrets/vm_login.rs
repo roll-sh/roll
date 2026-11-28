@@ -6,8 +6,10 @@
 //! - `ROLL_IDENTITY_KIND=azure`: the VM's managed identity token from Azure's instance metadata
 //!   service (`Metadata: true`; `ROLL_AZURE_CLIENT_ID` picks a user-assigned identity).
 //! - `ROLL_IDENTITY_KIND=machine` (or a bootstrap token set): a machine identity's credential, kept
-//!   in a 0600 file under the state directory, made from a bootstrap token once and replaced at half
-//!   its life. A spent credential presented again revokes every one of the machine's, so the file
+//!   in a 0600 file under the state directory (made 0700 when roll makes it), made from a bootstrap
+//!   token once and replaced at half its life. On Unix, a file or lock there that isn't this user's
+//!   or that its group or others can write is refused: another local user could have put it there.
+//!   The file names the server that made it, and is only ever sent there. A spent credential presented again revokes every one of the machine's, so the file
 //!   is only ever replaced under a lock, and a login with it holds the lock too. The login's token
 //!   is kept in the same file and reused by every process on the machine until a quarter of its
 //!   life (at least [`LOGIN_MARGIN_MS`]) is left: a machine holds a few live logins at most
@@ -71,6 +73,10 @@ struct Kept {
     /// The bootstrap token's SHA-256 it came from: the same token in the environment isn't
     /// exchanged again (that would revoke the machine), a new one is.
     bootstrap: String,
+    /// The server it was made by (`ROLL_API_URL`): neither it nor its login goes anywhere else.
+    /// Files kept before this have none, and get the current one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    api_base: Option<String>,
     /// The last login's token, shared by the machine's processes ([`Login::fresh`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     login: Option<Login>,
@@ -141,15 +147,35 @@ fn sha256(s: &str) -> String {
     sha2::Sha256::digest(s.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// The file written whole or not at all: a 0600 temporary file, synced, renamed over it.
-fn keep(path: &Path, k: &Kept) -> anyhow::Result<()> {
-    use std::io::Write;
+/// The credential file's directory, made 0700 (on Unix) where roll makes it; one that's there
+/// already is left as it is.
+fn make_dir(path: &Path) -> anyhow::Result<()> {
     let dir = path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
     let mut b = std::fs::DirBuilder::new();
     b.recursive(true);
     #[cfg(unix)]
     std::os::unix::fs::DirBuilderExt::mode(&mut b, 0o700);
-    b.create(dir).with_context(|| format!("making {}", dir.display()))?;
+    b.create(dir).with_context(|| format!("making {}", dir.display()))
+}
+
+/// Refuses a file another local user could have put at `path` or can change: on Unix it must be
+/// the effective user's and writable by no one else (OpenSSH's StrictModes asks the same of a key).
+/// A planted credential would log in as someone else's machine, and a planted lock stops every login.
+#[cfg(unix)]
+fn private(path: &Path, meta: &std::fs::Metadata) -> anyhow::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    // SAFETY: geteuid has no preconditions and can't fail.
+    let me = unsafe { libc::geteuid() };
+    let p = path.display();
+    anyhow::ensure!(meta.uid() == me, "{p} belongs to uid {}, not this user (uid {me}), so roll won't use it: another user may have put it there. Remove it, or if it's this machine's own, `chown {me} {p}`", meta.uid());
+    anyhow::ensure!(meta.mode() & 0o022 == 0, "{p} can be written by its group or others (mode {:o}), so roll won't use it: `chmod 600 {p}`", meta.mode() & 0o777);
+    Ok(())
+}
+
+/// The file written whole or not at all: a 0600 temporary file, synced, renamed over it.
+fn keep(path: &Path, k: &Kept) -> anyhow::Result<()> {
+    use std::io::Write;
+    make_dir(path)?;
     let tmp = path.with_extension("json.tmp");
     let _ = std::fs::remove_file(&tmp);
     let mut o = std::fs::OpenOptions::new();
@@ -173,16 +199,26 @@ fn keep(path: &Path, k: &Kept) -> anyhow::Result<()> {
 /// its life), then `login` with it, kept for the machine's other processes.
 pub(super) async fn machine_login(api: &Api, identity: &str, stale: Option<&str>) -> anyhow::Result<(String, i64)> {
     let path = credential_file(identity)?;
-    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
-        std::fs::create_dir_all(dir).with_context(|| format!("making {}", dir.display()))?;
-    }
+    make_dir(&path)?;
     let lock_path = path.with_extension("json.lock");
     let lock = tokio::task::spawn_blocking(move || -> anyhow::Result<std::fs::File> {
         let mut o = std::fs::OpenOptions::new();
         o.read(true).write(true).create(true).truncate(false);
         #[cfg(unix)]
         std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
-        let f = o.open(&lock_path).with_context(|| format!("opening {}", lock_path.display()))?;
+        let f = match o.open(&lock_path) {
+            Ok(f) => f,
+            Err(e) => {
+                // Another user's lock this one can't open: say whose, not just "permission denied".
+                #[cfg(unix)]
+                if let Ok(meta) = std::fs::metadata(&lock_path) {
+                    private(&lock_path, &meta)?;
+                }
+                return Err(anyhow::Error::new(e).context(format!("opening {}", lock_path.display())));
+            }
+        };
+        #[cfg(unix)]
+        private(&lock_path, &f.metadata()?)?;
         f.lock().with_context(|| format!("locking {}", lock_path.display()))?;
         Ok(f)
     })
@@ -192,11 +228,26 @@ pub(super) async fn machine_login(api: &Api, identity: &str, stale: Option<&str>
     out
 }
 
-async fn locked(api: &Api, identity: &str, path: &Path, stale: Option<&str>) -> anyhow::Result<(String, i64)> {
-    let kept: Option<Kept> = match std::fs::read_to_string(path) {
-        Ok(text) => Some(serde_json::from_str::<Kept>(&text).with_context(|| format!("{} isn't a machine credential file", path.display()))?).filter(|k| k.identity == identity),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+/// The credential file's text, if there is one: checked ([`private`]) on the file it reads, so
+/// what's read is what was checked.
+fn read_kept(path: &Path) -> anyhow::Result<Option<String>> {
+    use std::io::Read;
+    let mut f = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(anyhow::Error::new(e).context(format!("reading {}", path.display()))),
+    };
+    #[cfg(unix)]
+    private(path, &f.metadata()?)?;
+    let mut text = String::new();
+    f.read_to_string(&mut text).with_context(|| format!("reading {}", path.display()))?;
+    Ok(Some(text))
+}
+
+async fn locked(api: &Api, identity: &str, path: &Path, stale: Option<&str>) -> anyhow::Result<(String, i64)> {
+    let kept: Option<Kept> = match read_kept(path)? {
+        Some(text) => Some(serde_json::from_str::<Kept>(&text).with_context(|| format!("{} isn't a machine credential file", path.display()))?).filter(|k| k.identity == identity),
+        None => None,
     };
     // A bootstrap token this credential didn't come from: a new start (a machine re-enrolled).
     let fresh = bootstrap_token()?.filter(|t| kept.as_ref().is_none_or(|k| k.bootstrap != sha256(t)));
@@ -208,7 +259,19 @@ async fn locked(api: &Api, identity: &str, path: &Path, stale: Option<&str>) -> 
             eprintln!("roll: exchanged the bootstrap token for a machine credential, kept in {}", path.display());
             k
         }
-        (Some(k), _) => k,
+        (Some(k), _) => match &k.api_base {
+            // Made by another server: neither the credential nor its login is sent here.
+            Some(made) if *made != api.base => anyhow::bail!("the machine credential in {} was made by {made}, not {} (ROLL_API_URL), so roll won't send it or its login there: set ROLL_API_URL back, or give this server its own file (ROLL_MACHINE_CREDENTIAL_FILE) and a bootstrap token from `roll secrets identities bootstrap {identity}` on it", path.display(), api.base),
+            Some(_) => k,
+            // Kept before files named their server: this one, from now on.
+            None => {
+                let k = Kept { api_base: Some(api.base.clone()), ..k };
+                if let Err(e) = keep(path, &k) {
+                    eprintln!("roll: couldn't note the server in {}: {e:#}", path.display());
+                }
+                k
+            }
+        },
         (None, None) => anyhow::bail!("no machine credential in {} and no bootstrap token: set ROLL_BOOTSTRAP_TOKEN (or ROLL_BOOTSTRAP_TOKEN_FILE) to one made with `roll secrets identities bootstrap {identity}`", path.display()),
     };
     anyhow::ensure!(kept.expires_at > now, "the machine credential in {} has ended: the machine needs a new bootstrap token (roll secrets identities bootstrap {identity})", path.display());
@@ -272,5 +335,5 @@ async fn exchange(api: &Api, identity: &str, step: &str, body: Value, bootstrap:
     let credential = v["secret"].as_str().context("the answer has no machine credential")?.to_string();
     let expires_at = v["expires_at"].as_i64().context("the answer has no expiry")?;
     let refresh_at = v["refresh_at"].as_i64().unwrap_or(expires_at);
-    Ok(Kept { identity: identity.to_string(), credential, expires_at, refresh_at, bootstrap, login: None })
+    Ok(Kept { identity: identity.to_string(), credential, expires_at, refresh_at, bootstrap, api_base: Some(api.base.clone()), login: None })
 }

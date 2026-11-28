@@ -201,8 +201,8 @@ them (`api::Caller`):
   default repository are rolld's flags (`--search-*`), not routes. A cluster's data plane is
   unchanged: the REST port with the cluster's own credentials, which give what any tenant gets.
 
-`crates/search-control/tests/control.rs` `people_see_only_their_own_clusters` and
-`people_are_held_to_their_cluster_caps` cover it.
+`crates/search-control/tests/control.rs`
+`people_reach_only_their_own_clusters_within_their_caps` covers it.
 
 **Branches and what they inherit.** A branch starts from a copy of its parent's state, its
 recurring jobs and outside storage included. So that it never acts as its parent, a new
@@ -251,7 +251,7 @@ are then paused too (put them again to resume them).
   key works only on its own cluster, below): a page pointed at a branch, roll previews' included,
   needs a browser key of the branch's own.
 
-`a_branch_runs_none_of_its_parents_jobs` in the same file covers it.
+`a_branch_acts_as_none_of_its_parents` in the same file covers it.
 
 **IP allowlists** (Elastic Cloud's traffic filters, AWS OpenSearch Service's IP policies). A
 cluster's `ip_allowlist` lists the networks that may reach its endpoint: at most 64 entries,
@@ -348,7 +348,7 @@ applications). A web page calls a cluster directly, with no backend of its own i
   keys wakes both clusters); and it revokes the branch's copies (every one, recorded or not)
   before the branch is deleted, as it revokes its data key (a deleted cluster is restorable with
   its keys). `crates/search-control/tests/control.rs`
-  `browser_search_works_on_a_preview_branch` and rolld's
+  `browsers_search_with_browser_keys` and rolld's
   `a_search_branch_gets_browser_keys_of_its_own_for_the_previews_pages` cover it.
 - *Keys derived without a call to roll* (Algolia's `generateSecuredApiKey`, Typesense's
   `generateScopedSearchKey`, Meilisearch's tenant tokens; `search_es::xpack::security::derived`).
@@ -437,8 +437,7 @@ applications). A web page calls a cluster directly, with no backend of its own i
     derive` (for testing; the secret from `ROLL_SEARCH_SIGNING_SECRET`). One test vector
     (`crates/search-es/tests/fixtures/derived-key-vector.json`) is checked by the verifier, the
     CLI and the TypeScript helper. `crates/search-control/tests/control.rs`
-    `derived_keys_narrow_their_parent_and_die_with_it` and
-    `derived_keys_share_their_parents_rate_by_user` cover the rest.
+    `browsers_search_with_browser_keys` covers the rest.
 - *Usage and refusals per key* (Algolia's per-key usage and logs; `search_server::browser::Usage`):
   the cluster's owner counts every request a browser key makes and why one was refused: 429s by
   the bucket that held it back (`key_rate`, `address_rate`, `user_rate`, `concurrency`,
@@ -458,7 +457,7 @@ applications). A web page calls a cluster directly, with no backend of its own i
   totals, the list a `usage_24h` summary per key, the dashboard's Browser search section a
   sparkline per key, `roll search browser-keys usage <cluster> <key>` a table, and MCP
   `search_browser_key_usage`. `crates/search-control/tests/control.rs`
-  `browser_key_usage_counts_requests_and_429s_by_reason` covers it.
+  `browsers_search_with_browser_keys` covers it.
 - *A point-in-time branch takes its parent's security as it is now*, whatever key: users and their
   passwords, API keys, tokens, service tokens, roles, mappings and profiles (OpenSearch Security's
   configuration on an OpenSearch-flavor cluster) are copied from the parent's latest state into
@@ -734,10 +733,8 @@ Elasticsearch-flavor.
   with the coordinating cluster's own policy or lookup index.
 - **Left**: suggesters over several clusters.
 
-`crates/search-control/tests/control.rs` `cross_cluster_search_between_a_persons_own_clusters`,
-`a_sleeping_remote_wakes_and_a_gone_one_is_skipped`, `aggregations_across_clusters_equal_one_clusters`,
-`scroll_and_point_in_time_across_clusters`, `esql_across_clusters_answers_as_one_cluster` and
-`esql_across_clusters_reads_as_the_link_allows`, and `tests/cluster.rs`
+`crates/search-control/tests/control.rs` `cross_cluster_search_between_linked_clusters` and
+`results_across_clusters_equal_one_clusters`, and `tests/cluster.rs`
 `a_remote_on_another_node_is_searched_through_the_signed_forward` and
 `a_scroll_over_clusters_on_two_nodes_pages_through_either_front` cover it. The dashboard lists a
 cluster's remotes in its Settings (alias, cluster, `skip_unavailable`, state), and links or
@@ -1005,7 +1002,7 @@ documents or fields the direct shard reads give way to searches, which apply the
 level security covers every read path a field's content or name can come out of: `_source`
 (hits, gets, inner hits), `fields`, scripts' `params._source` and `doc` (script fields, runtime
 fields, sort scripts), term vectors, field caps and mappings (`control.rs`
-`field_security_hides_a_field_on_every_read_path`, 22 requests and 3 listings). They answer with Elasticsearch's own status and body, and pass the query string through
+`reads_beyond_the_request_take_the_callers_privileges`, 22 requests and 3 listings). They answer with Elasticsearch's own status and body, and pass the query string through
 (`refresh`, `routing`, `size`, …). A write names exactly one index; a name starting with `_` is
 refused (those are Elasticsearch's own APIs: use the console). Bodies may be up to the cluster's
 `max_body_mb`.
@@ -1112,7 +1109,7 @@ and in the dashboard (Settings → Audit log: a table filtered by time and event
   string or request body. A failed login names the user only when Basic credentials gave one.
   Changes are built field by field (a user's `has_password`, a grant's `has_password`), never by
   copying the body. OpenSearch's `log_request_body`, `write_log_diffs` and headers are accepted
-  and never acted on. `control.rs` `audit_entries_hold_no_secrets` looks for every credential and
+  and never acted on. `control.rs` `the_audit_log_records_what_matters_for_security` looks for every credential and
   marker of its requests in the answered and the stored entries.
 - **Storage:** object storage next to the cluster's data
   (`search/c/<cluster>/audit/<first ms>-<last ms>-<token>.ndjson.zst`). A node batches a
