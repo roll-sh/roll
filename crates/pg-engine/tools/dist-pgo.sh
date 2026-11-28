@@ -98,7 +98,11 @@ elif [ -z "$PROF" ]; then
     [ "$INSTR" = "$W/roll-engine-instrumented" ] || cp "$INSTR" "$W/roll-engine-instrumented"
     note "instrumented build: $INSTR ($(sha256sum "$INSTR" | cut -c1-16))"
   else
-    build "$W/t-gen" "-Cprofile-generate=$W/raw"
+    # Atomic counter updates: plain ones lose increments when threads run the same code at
+    # once (parallel scans, 8 clients), a different number each training (TPC-H's parallel
+    # decode 2.19-3.11 G counts in two trainings of one commit, 3.23 G atomic: HANDOFF
+    # "Reproducible PGO training").
+    build "$W/t-gen" "-Cprofile-generate=$W/raw -Cllvm-args=-instrprof-atomic-counter-update-all"
     cp "$W/t-gen/dist/roll-engine" "$W/roll-engine-instrumented"
     disk; [ -n "${PGO_KEEP:-}" ] || rm -rf "$W/t-gen"
   fi
@@ -118,7 +122,7 @@ if [ -z "$PROF" ]; then
   done
   # Each class's raw profiles (pgo-train.sh's <raw dir>/<class>) merged, then the classes
   # merged with the same weight: each one's counts multiplied by the whole number that brings
-  # its total to the largest class's (TPC-H's). LLVM takes as hot the blocks that make 99% of
+  # its total to 100 times the largest class's (TPC-H's). LLVM takes as hot the blocks that make 99% of
   # the merged counts: unweighted, TPC-H at SF 1 is 76% of them and the short transactions'
   # paths fall out of that set (93.8% of their counts in hot blocks against 97.5% with SF 0.2);
   # weighted the same, every class has more of its counts in hot blocks than with SF 0.2
@@ -138,7 +142,9 @@ if [ -z "$PROF" ]; then
   WEIGHTS=
   for c in $CLASSES; do
     eval "n=\$TOT_$c"
-    w=$(awk -v m="$MAX" -v n="$n" 'BEGIN {w = n > 0 ? int(m / n + 0.5) : 1; print (w < 1 ? 1 : w)}')
+    # (In hundredths of the largest class's total: whole multiples of it put a class's share up
+    # to 4% off equal, a different amount each training: bulk 6.16 -> 6.)
+    w=$(awk -v m="$MAX" -v n="$n" 'BEGIN {w = n > 0 ? int(100 * m / n + 0.5) : 100; print (w < 1 ? 1 : w)}')
     set -- "$@" -weighted-input="$w,$W/class-$c.profdata"
     WEIGHTS="$WEIGHTS $c=$n*$w"
   done
