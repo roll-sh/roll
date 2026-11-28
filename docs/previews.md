@@ -1953,6 +1953,29 @@ land on the change.
   button then says "No main preview"); a path that isn't one on that host (`//…`) is none. The
   script reads whether it's served by roll previews (`__ROLL_MAIN__`: `false` on roll apps' hosts,
   whose pages keep the button hidden and never send it to the app).
+- The toolbar's **Review** shows the page the reviewer is on against main's preview, without going
+  back to roll's sheet (Vercel's toolbar, Chromatic's UI Review). It lists each of the page's
+  entries in the change's visual review: the first page at `/` with its widths, modes and
+  browsers; another page by its path (`svc:/path` on another service); a state by the page it
+  starts on. For each entry it shows:
+  - its share of pixels changed against main's, and who accepted or refused it at this head;
+  - the accessibility, console, link and SEO problems it has that main's page doesn't, with the
+    page's own examples (the record's `page_health`, `page_a11y`, `page_links` and each page's
+    `against`: masked and cut as the sheet shows them);
+  - main's picture, this push's, and where they differ.
+
+  The button reads `Review · 2.4%` once the page differs. `GET /__roll/review.json?path=` on the
+  preview's own host answers it, and `GET /__roll/review.png?page=&pic=after|before|diff` serves
+  the pictures behind the same gate. Main's screenshots open only for signed-in sessions, so these
+  aren't the sheet's public signed links. Both are for a team visitor only, as Main is: someone in
+  through the link's cookie or a team session. A share link's guest, the CI bypass, a public
+  preview's visitor and another preview's visitor get a 404 or 401, and the request never reaches
+  the app. At most 12 entries per page, each with at most 10 accessibility kinds and 5 broken
+  links. A fork's preview gets its own picture only: its page script reads whatever this answers,
+  and main's pictures are main's data. **Accept in roll** opens roll's sheet at that page
+  (`?fb_page=<page>`), where the signed-in person accepts it with "Accept this page", as Resolve
+  does. The page only opens a link, so the page's own script can't accept for anyone.
+  `the_toolbar_shows_the_pages_own_review`.
 - A reviewer sets the project's feature flags for their own view (Vercel's Flags Explorer): with
   `flags` (`[{name, options}]`, at most 20, each name and option 1-60 letters, digits, `-`, `_` or
   `.`), the page's toolbar gets "Flags": each flag a choice (the app's own, or one of its
@@ -3230,9 +3253,9 @@ In progress, each in a pull request of its own:
 1. **A note resolved when its fix lands** (Marker.io's and Jam's two-way sync): a note's work
    item or GitHub issue closing resolves it, so the pull request comment stops listing fixed
    notes; Jira and Asana through an automation trigger after.
-2. **The page's own review in the toolbar** (Vercel's toolbar, Chromatic's UI Review): a team
-   visitor sees whether this page changed against main and what it adds, with Accept opening
-   roll (never clickable by the page's own script).
+2. **The page's own review in the toolbar, in review** (Vercel's toolbar, Chromatic's UI Review):
+   a team visitor sees whether this page changed against main and what it adds, with Accept
+   opening roll (never clickable by the page's own script). See "Feedback on the preview page".
 3. **A live dashboard, in review**: the Previews list follows the event feed (a long poll, `wait`)
    instead of reading the list every 20 s; a calm list is read once a minute in case the feed
    missed something, a busy one every 3 s as before. A screenshot that arrives after a preview is
