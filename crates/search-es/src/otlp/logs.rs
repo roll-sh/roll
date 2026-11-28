@@ -465,15 +465,46 @@ pub(super) fn render_as(mut c: Context, scope: bool, metrics: bool, budget: &mut
     Ok(Rendered { dataset, namespace, json })
 }
 
-/// Attributes as metrics' documents hold them (time series dimensions): the routing ones and
-/// `elasticsearch.mapping.hints` left out, a key-value list written as its JSON text.
+/// Attributes as metrics' documents hold them (time series dimensions), as the exporter writes
+/// them: the routing and exporter-control ones left out, and a key-value list (in an array too)
+/// written as its JSON text the way Go's `json.Marshal` prints it (keys sorted; `<`, `>`, `&`,
+/// U+2028 and U+2029 escaped), so one list sent in two orders is one series.
 pub(super) fn dimensions(m: &mut Map) {
-    m.retain(|k, _| !matches!(k.as_str(), "data_stream.type" | "data_stream.dataset" | "data_stream.namespace" | "elasticsearch.mapping.hints"));
-    for v in m.values_mut() {
-        if let Value::Obj(_) = v {
-            *v = Value::from(v.to_json());
+    m.retain(|k, _| {
+        !matches!(
+            k.as_str(),
+            "data_stream.type"
+                | "data_stream.dataset"
+                | "data_stream.namespace"
+                | "elasticsearch.mapping.hints"
+                | "elasticsearch.index"
+                | "elasticsearch.document_id"
+                | "elasticsearch.ingest_pipeline"
+                | "elastic.mapping.mode"
+        )
+    });
+    fn sorted(v: &Value) -> Value {
+        match v {
+            Value::Obj(o) => {
+                let mut keys: Vec<&String> = o.keys().collect();
+                keys.sort();
+                Value::Obj(keys.into_iter().map(|k| (k.clone(), sorted(&o[k.as_str()]))).collect())
+            }
+            Value::Arr(a) => Value::Arr(a.iter().map(sorted).collect()),
+            other => other.clone(),
         }
     }
+    fn stringify(v: &mut Value) {
+        match v {
+            Value::Obj(_) => {
+                let text = sorted(v).to_json().replace('<', "\\u003c").replace('>', "\\u003e").replace('&', "\\u0026").replace('\u{2028}', "\\u2028").replace('\u{2029}', "\\u2029");
+                *v = Value::from(text);
+            }
+            Value::Arr(a) => a.iter_mut().for_each(stringify),
+            _ => {}
+        }
+    }
+    m.values_mut().for_each(stringify);
 }
 
 /// A rendered context's charge given back (another replaces it).

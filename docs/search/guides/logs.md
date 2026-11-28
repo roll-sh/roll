@@ -205,33 +205,33 @@ are found in the logs.
 
 Metrics land in `metrics-<dataset>.otel-<namespace>`, a time series data stream (the built-in
 `metrics-otel@template`), written as Elastic's Collector exporter writes them in its `otel`
-mode:
+mode against Elasticsearch 9.5:
 - One document holds every data point that shares a resource, scope, attributes, timestamp and
   unit, each under `metrics.<name>`, with `@timestamp`, `start_timestamp`, `unit`, `attributes.*`,
   `resource.attributes.*` and `scope.*` beside them.
 - Gauges map as `double` or `long`, and monotonic cumulative sums as counters. Other sums map as
   gauges.
-- A histogram becomes a `histogram` field (`counts`, and each bucket's midpoint as its value),
-  and so does an exponential histogram. A summary becomes `{sum, value_count}`, without
-  quantiles.
+- An exponential histogram becomes an `exponential_histogram` field with its own buckets. A
+  histogram with explicit buckets becomes one too, with each bucket at its midpoint. Delta and
+  cumulative histograms are both kept, and their `temporality` field tells them apart. A summary
+  becomes `{sum, value_count}`, without quantiles.
 - A data point without its own `data_stream.dataset` goes where the exporter sends it: a
   Collector receiver's scope to its receiver's name (`metrics-hostmetricsreceiver.otel-default`),
   else `generic`.
 - Timestamps must be near now. A time series data stream takes 2 hours back and 30 minutes
   ahead by default, and refuses points outside that in `partial_success`.
-
-Histograms must use delta temporality. Cumulative histograms are rejected and counted in
-`partial_success`, as the exporter does when it writes `histogram` fields, because a `histogram`
-field can't hold a running total. Most SDKs send cumulative histograms by default, so set
-`OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=delta`, or add a Collector
-`cumulativetodelta` processor.
+- A point an SDK marks as holding no recorded value (a staleness marker) is skipped, and not
+  counted as rejected.
 
 Limits:
 - a record keeps 128 attributes, and the rest count in its `dropped_attributes_count`;
 - a value over 1 MiB is cut there, and the answer's `partial_success` says how many were;
 - a record nested more than 8 deep or holding more than 10,000 values is rejected, and
   `partial_success` counts it (for metrics, a data point, buckets included);
-- one request writes at most 64 data streams;
+- one request writes at most 64 data streams (a metrics data stream's past backing indices,
+  when `data_stream.past_tsdb_index_creation_enabled` is on, aren't counted; the shard limit
+  below still bounds them);
+- a metric's name or unit over 1 KiB is cut there, and counted with the cut values;
 - an OTLP/JSON body is at most 4 MiB, while protobuf, which Collectors send, goes to the cluster's
   `max_body_mb`;
 - a key that may not write a record's data stream gets a 403, and a busy cluster a 429 with

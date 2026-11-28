@@ -35,30 +35,44 @@ rather than `prost`, one record at a time, off the reactor.
 - **Retries.** A request refused after part of it was written (a 429 on its second chunk) may be
   written twice when the client retries: OTLP is at least once, and `create` with generated ids
   doesn't recognise a record it already wrote.
-- **Metrics** (`otlp/metrics.rs`) follow the elasticsearch exporter's `otel` mapping mode,
-  read from its source (Apache-2.0):
+- **Metrics** (`otlp/metrics.rs`) follow the elasticsearch exporter's `otel` mapping mode as
+  it writes against Elasticsearch 9.5 (version detection on, its default), read from its source
+  (Apache-2.0):
   - Data points are grouped into documents as its hasher groups them: one per data stream,
     resource, scope, timestamp, start timestamp, unit, temporality and sorted attributes.
     Grouping is per `ScopeMetrics`. Two blocks with the same resource and scope give two
     documents, which a time series data stream keeps apart by `_metric_names_hash`.
   - Each `create` line carries `dynamic_templates` (`gauge_double`, `counter_long`,
-    `histogram`, `summary`, …) and `dynamic_template_params` with the unit, for the built-in
+    `exponential_histogram`, `summary`, …) and `dynamic_template_params` with the unit, for the built-in
     `metrics-otel@mappings`, so the data stream is a time series one with each value typed.
-  - Histograms use the exporter's `TDigest` mapping: buckets at their midpoints in a
-    `histogram` field. Cumulative histograms are rejected, as it rejects them under that
-    mapping. Against Elasticsearch 9.5 with version detection on, today's exporter writes
-    `exponential_histogram` fields instead and keeps cumulative ones. roll doesn't yet.
+  - Both histogram kinds are `exponential_histogram` fields, and cumulative ones are kept with
+    `temporality: cumulative`. An exponential histogram keeps its own buckets. An explicit one
+    is converted as `ExplicitToNativeExponentialHistogram` does: centroids at scale 38, merged
+    when they share a bucket, and a delta histogram's `min` and `max` split into buckets of
+    their own. Bucket indices use the exporter's `log`-based `computeIndex`. A last-bit
+    difference between Go's and Rust's `ln` could move a centroid that sits on a bucket
+    boundary by one index.
   - Its scope routing is followed (Collector self-telemetry, `encoding.format`,
     `…/receiver/<name>receiver`), which logs and traces don't do yet.
-  - Attributes are written as it writes dimensions: routing keys and
-    `elasticsearch.mapping.hints` left out, key-value lists as JSON text. Mapping hints
-    (`_doc_count`, `aggregate_metric_double`, `histogram:raw`) aren't read, and exemplars
-    aren't written.
+  - Attributes are written as it writes dimensions. The routing keys, `elasticsearch.mapping.hints`
+    and its control attributes (`elasticsearch.index`, `elasticsearch.document_id`,
+    `elasticsearch.ingest_pipeline`, `elastic.mapping.mode`) are left out. Key-value lists,
+    in arrays too, are written as Go's `json.Marshal` prints them (keys sorted; `<`, `>` and
+    `&` escaped). Float formatting can still differ from Go's. Its geo attribute merging isn't
+    done. Mapping hints (`_doc_count`, `aggregate_metric_double`, `histogram:raw`) aren't read,
+    and exemplars aren't written.
+  - A point flagged `FLAG_NO_RECORDED_VALUE` (a Prometheus staleness marker) is skipped, not
+    rejected. The exporter rejects a flagged number (NaN) and writes a flagged histogram
+    empty. A nameless metric's points are counted as rejected without being decoded.
   - A point with no timestamp gets the request's time. The exporter writes 0, which a time
     series data stream refuses.
   - The memory and value limits are logs', per data point, and a scope's points are held until
-    its documents are written. A refused document counts all of its data points in
-    `rejectedDataPoints`.
+    its documents are written. What the grouping builds is charged before it's built: a fixed
+    `GROUP_COST` plus its strings for each new document, and both copies of a metric's name for
+    each point. Metric names and units are cut at 1 KiB, so a long name can't multiply per
+    point. A refused document counts all of its data points in `rejectedDataPoints`.
+  - Elasticsearch 9.5.5's own `/_otlp/v1/metrics` hasn't been compared with this yet. The
+    documents follow the exporter's source.
 - **Left.**
   - A per-item 429 inside the `_bulk` is reported in `partial_success` rather than retried (roll's
     `_bulk` doesn't make per-item 429s today).
