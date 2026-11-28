@@ -83,8 +83,8 @@ PEAK=0
 disk() { k=$(du -sk "$W" "$OUT" 2>/dev/null | awk '{s += $1} END {print s + 0}'); [ "$k" -le "$PEAK" ] || PEAK=$k; }
 : >"$OUT/BUILD.txt"
 note "commit $REV${DIRTY:+ (uncommitted changes)} $(rustc -V)"
-if [ -n "${PGO_TRAIN_SKIP:-}${PGO_BREADTH:-}${PGO_LLVM_ARGS:-}" ]; then
-  note "NOT THE SHIPPED RECIPE:${PGO_TRAIN_SKIP:+ PGO_TRAIN_SKIP=$PGO_TRAIN_SKIP}${PGO_BREADTH:+ PGO_BREADTH=$PGO_BREADTH}${PGO_LLVM_ARGS:+ PGO_LLVM_ARGS=$PGO_LLVM_ARGS}"
+if [ -n "${PGO_TRAIN_SKIP:-}${PGO_BREADTH:-}${PGO_LLVM_ARGS:-}${PGO_HOT_SHARE:-}${PGO_COLD_SHARE:-}${PGO_WEIGHTS:-}" ]; then
+  note "NOT THE SHIPPED RECIPE:${PGO_TRAIN_SKIP:+ PGO_TRAIN_SKIP=$PGO_TRAIN_SKIP}${PGO_BREADTH:+ PGO_BREADTH=$PGO_BREADTH}${PGO_LLVM_ARGS:+ PGO_LLVM_ARGS=$PGO_LLVM_ARGS}${PGO_HOT_SHARE:+ PGO_HOT_SHARE=$PGO_HOT_SHARE}${PGO_COLD_SHARE:+ PGO_COLD_SHARE=$PGO_COLD_SHARE}${PGO_WEIGHTS:+ PGO_WEIGHTS=$PGO_WEIGHTS}"
 fi
 RAWD=${RAWIN:-$W/raw}
 if [ -z "$PROF" ] && [ -n "$RAWIN" ]; then
@@ -103,7 +103,11 @@ elif [ -z "$PROF" ]; then
     [ "$INSTR" = "$W/roll-engine-instrumented" ] || cp "$INSTR" "$W/roll-engine-instrumented"
     note "instrumented build: $INSTR ($(sha256sum "$INSTR" | cut -c1-16))"
   else
-    build "$W/t-gen" "-Cprofile-generate=$W/raw"
+    # Atomic counter updates: plain ones lose increments when threads run the same code at
+    # once (parallel scans, 8 clients), a different number each training (TPC-H's parallel
+    # decode 2.19-3.11 G counts in two trainings of one commit, 3.23 G atomic: HANDOFF
+    # "Reproducible PGO training").
+    build "$W/t-gen" "-Cprofile-generate=$W/raw -Cllvm-args=-instrprof-atomic-counter-update-all"
     cp "$W/t-gen/dist/roll-engine" "$W/roll-engine-instrumented"
     disk; [ -n "${PGO_KEEP:-}" ] || rm -rf "$W/t-gen"
   fi
@@ -122,8 +126,8 @@ if [ -z "$PROF" ]; then
       || { echo "dist-pgo: training class $c did not run or wrote no profile ($RAWD/$c)" >&2; exit 1; }
   done
   # Each class's raw profiles (pgo-train.sh's <raw dir>/<class>) merged, then the classes
-  # merged with the same weight: each one's counts multiplied by the whole number that brings
-  # its total to the largest class's (TPC-H's). LLVM takes as hot the blocks that make 99% of
+  # merged with fixed weights, each one's counts multiplied by PGO_WEIGHTS' whole number for it:
+  # about the one that brings its total to the largest class's (TPC-H's). LLVM takes as hot the blocks that make 99% of
   # the merged counts: unweighted, TPC-H at SF 1 is 76% of them and the short transactions'
   # paths fall out of that set (93.8% of their counts in hot blocks against 97.5% with SF 0.2);
   # weighted the same, every class has more of its counts in hot blocks than with SF 0.2
@@ -143,7 +147,18 @@ if [ -z "$PROF" ]; then
   WEIGHTS=
   for c in $CLASSES; do
     eval "n=\$TOT_$c"
-    w=$(awk -v m="$MAX" -v n="$n" 'BEGIN {w = n > 0 ? int(m / n + 0.5) : 1; print (w < 1 ? 1 : w)}')
+    # Fixed weights, not each training's own: the whole number nearest max / n moved with the
+    # class's total (agent 346's pair: short x15 / x11), and a class sitting near a half (short
+    # 6.49 at 9cfd1322f) would change weight between two trainings. These are that rounding of
+    # the fixed-work training's totals at 9cfd1322f (every class within 0.05% of them in two
+    # trainings, short 5%). Exactly equal weights (PGO_WEIGHTS=equal, in hundredths) were
+    # measured too: TPC-H +0.8% user instructions against these (HANDOFF "Reproducible PGO
+    # training"). A class whose total moves a lot later can get a new number here.
+    case ${PGO_WEIGHTS:-} in
+    equal) w=$(awk -v m="$MAX" -v n="$n" 'BEGIN {w = n > 0 ? int(100 * m / n + 0.5) : 100; print (w < 1 ? 1 : w)}') ;;
+    *) w=$(printf '%s\n' ${PGO_WEIGHTS:-bulk=6 catalog=26 point=9 range=10 regress=32 short=6 startup=130 tpch=1} | sed -n "s/^$c=//p")
+       [ -n "$w" ] || { echo "dist-pgo: no weight for training class $c in PGO_WEIGHTS" >&2; exit 1; } ;;
+    esac
     set -- "$@" -weighted-input="$w,$W/class-$c.profdata"
     WEIGHTS="$WEIGHTS $c=$n*$w"
   done
@@ -194,6 +209,17 @@ T4=$(t)
 # (compiled as never run); one that is new has no data. LLVM warns for each: the warnings go to
 # <out>/build-use.log, and pgo-stale.py sums them up against the profile's hot functions.
 USE="-Cprofile-use=$PROF -Cllvm-args=-pgo-warn-missing-function"
+# LLVM's hot and cold counts as fixed shares of the profile's total, where it takes the counts
+# that make 99% and 99.9999% of the total: those followed the shape of every class (one class's
+# planning 5% apart moved the hot count 11% between two trainings of one commit, and every
+# function with counts in that band changed sides). The total itself is fixed by the training
+# (equal class weights, fixed work): two trainings within 0.01%. The shares are the 99% and
+# 99.9999% cutoffs' mean over four trainings of 2026-11-28 (1.61-1.86e-6, 1.29-1.33e-10).
+PTOT=$("$PROFDATA" show "$PROF" | awk '/^Total count:/ {print $3}')
+HOTC=$(awk -v t="$PTOT" -v f="$(echo "${PGO_HOT_SHARE:-1.75e-6}" | sed 's/^off$/1.75e-6/')" 'BEGIN {printf "%.0f", t * f}')
+COLDC=$(awk -v t="$PTOT" -v f="${PGO_COLD_SHARE:-1.3e-10}" 'BEGIN {c = t * f; printf "%.0f", c < 1 ? 1 : c}')
+# (PGO_HOT_SHARE=off: LLVM's own cutoffs, for measuring this against them; not the shipped recipe.)
+[ "${PGO_HOT_SHARE:-}" = off ] || USE="$USE -Cllvm-args=-profile-summary-hot-count=$HOTC -Cllvm-args=-profile-summary-cold-count=$COLDC"
 for a in ${PGO_LLVM_ARGS:-}; do USE="$USE -Cllvm-args=$a"; done
 note "rustflags $USE${DIST_RUSTFLAGS:+ $DIST_RUSTFLAGS}"
 build "$W/t-use" "$USE" >"$OUT/build-use.log" 2>&1 || { tail -40 "$OUT/build-use.log" >&2; echo "dist-pgo: the optimised build failed ($OUT/build-use.log)" >&2; exit 1; }
