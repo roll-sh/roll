@@ -6519,7 +6519,7 @@
         "tags": [
           "services"
         ],
-        "x-roll-action": "admin (its credentials; reveal on the resource, as linking it)"
+        "x-roll-action": "admin (its credentials; reveal on the resource, as linking it), and deploy unless `environment` names one other than production (none: every environment that uses it, production among them)"
       }
     },
     "/v1/apps/services/{id}/move": {
