@@ -611,16 +611,15 @@ export async function qrUrl(id: string, service?: string): Promise<string> {
   return URL.createObjectURL(await res.blob());
 }
 
-/** A picture of a note's element, as a screenshot run cropped it (an object URL; revoke it when
- * done), or `null` while it has none. */
-/** A note's crop as an object URL, and how it was taken when as its reviewer saw it
- * (`390x844, after 2 steps`). */
-export async function noteCropUrl(id: string, note: string): Promise<{ url: string; as: string | null } | null> {
+/** A note's picture as an object URL (revoke it when done), or `null` while it has none: its
+ * element as a screenshot run cropped it (`as`: how, when as its reviewer saw it, `390x844, after
+ * 2 steps`), or the one its reviewer took of their own tab (`own`). */
+export async function noteCropUrl(id: string, note: string): Promise<{ url: string; as: string | null; own: boolean } | null> {
   const res = await fetch(`${ROLL_API}${one(id)}/notes/${encodeURIComponent(note)}/crop`, withSession({ headers: apiHeaders(), cache: "no-store" }));
   onApiStatus(res.status);
   if (res.status === 404) return null;
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`.trim());
-  return { url: URL.createObjectURL(await res.blob()), as: res.headers.get("x-roll-crop-as") };
+  return { url: URL.createObjectURL(await res.blob()), as: res.headers.get("x-roll-crop-as"), own: res.headers.get("x-roll-crop-own") === "true" };
 }
 
 export async function screenshotUrl(id: string, previous = false, phone = false, base = false, page?: string, diff?: "base" | "previous"): Promise<string> {
@@ -677,6 +676,9 @@ export const previewsApi = {
   replay: (id: string) => call<NonNullable<Preview["replay"]>>("POST", `${one(id)}/replay`, {}),
   /** The open notes on its pages (the page's own list), each with the work item made of it. */
   notes: (id: string) => call<{ notes: { id: string; path: string; note: string; by: string; work?: { number: number; url: string } }[] }>("GET", `${one(id)}/notes`),
+  /** The picture its reviewer took of their own tab on the page (`fb_screen`, a token the page's
+   * button got), kept as the note's: its author's only, once. */
+  attachScreen: (id: string, note: string, screen: string) => call<{ note: string; crop_own: true }>("POST", `${one(id)}/notes/${encodeURIComponent(note)}/screen`, { screen }),
   /** The note made a work item on its change's repo by roll (once a note; a guest's marked as outside the team's words). */
   noteWork: (id: string, note: string) => call<{ number: number; url: string }>("POST", `${one(id)}/notes/${encodeURIComponent(note)}/work`, {}),
   /** The mail its services sent, caught instead of delivered (newest first; the last 50). */
@@ -708,7 +710,10 @@ export const previewsApi = {
   requests: (id: string) => call<{ requests: RequestLine[] }>("GET", `${one(id)}/requests`),
   /** What its running services use right now (cores of CPU, resident memory, the memory each runs with). */
   metrics: (id: string) => call<{ services: ServiceMetrics[] }>("GET", `${one(id)}/metrics`),
-  events: (after = 0, limit = 100) => call<{ events: PreviewEvent[]; next: number }>("GET", `/v1/previews/events?after=${after}&limit=${limit}`),
+  /** What happened to previews after `after`; with `wait` (1–25 s), the answer waits that long for one when there's none yet. */
+  events: (after = 0, limit = 100, wait?: number) => call<{ events: PreviewEvent[]; next: number }>("GET", `/v1/previews/events${query({ after, limit, wait })}`),
+  /** Where to follow the events from: the newest seq, so only what happens next is read. */
+  latestEvent: () => call<{ events: PreviewEvent[]; next: number }>("GET", "/v1/previews/events?latest=1"),
   /** Its services' errors in the last `minutes` (5–1440, 60 by default, rounded up to 15-minute steps), grouped, newest first; masked as its logs are. */
   errors: (id: string, minutes?: number) => call<{ minutes: number; groups: ErrorGroup[] }>("GET", `${one(id)}/errors${query({ minutes })}`),
   /** How many errors its services wrote in that span (a list's rows: nothing to mask, so no values are read). */

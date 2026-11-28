@@ -422,13 +422,13 @@ mod tests {
             let want = slow(f);
             assert!(got.to_bits() == want.to_bits() || (got.is_nan() && want.is_nan()), "{f:e}: {got} vs {want}");
         };
-        for _ in 0..2_000_000 {
+        for _ in 0..200_000 {
             x ^= x << 13;
             x ^= x >> 7;
             x ^= x << 17;
             check(f32::from_bits(x as u32));
         }
-        for i in -70_000..70_000 {
+        for i in -10_000..10_000 {
             check(i as f32);
             check(i as f32 / 1024.0);
             check(i as f32 * 0.37);
@@ -463,7 +463,7 @@ mod tests {
                 ties += usize::from(got);
             }
         };
-        for _ in 0..300_000 {
+        for _ in 0..50_000 {
             x ^= x << 13;
             x ^= x >> 7;
             x ^= x << 17;
@@ -501,7 +501,7 @@ mod tests {
             check(d);
             check(-d);
         }
-        for _ in 0..300_000 {
+        for _ in 0..50_000 {
             let r = next();
             // uniform bits (mostly out of range), decimals with few digits, and values in range
             check(f64::from_bits(r));

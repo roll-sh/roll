@@ -27,8 +27,9 @@ Repository permissions:
 | Metadata        | Read           | required by GitHub                                            |
 | Administration  | Read           | optional: read branch protection to show whether only roll can push |
 
-Subscribe to these events: **Push**, **Pull request**, **Issues**, **Issue comment**. Installation
-events are sent without subscribing.
+Subscribe to these events: **Push**, **Pull request**, **Issues**, **Issue comment**, **Public**
+and **Repository** (a repository made public or private, which roll secrets' Health reads; Metadata
+is enough). Installation events are sent without subscribing.
 
 roll also reads the App's own delivery log with its JWT (no extra permission): when rolld was
 down, it asks GitHub to redeliver what failed (Settings → Advanced shows the same log), and

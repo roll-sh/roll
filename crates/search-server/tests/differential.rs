@@ -1278,13 +1278,21 @@ async fn replay_cases() {
     // `ROLL_DIFF_REPLAY=<dir>`: replay another directory (a run's minimized failures).
     let dir = std::env::var_os("ROLL_DIFF_REPLAY").map(PathBuf::from).unwrap_or_else(|| manifest().join("tests/differential/cases"));
     let files = fixture_files(&dir);
+    // A fresh node per fixture (fixtures reuse index names), eight at a time.
+    use futures::StreamExt;
+    let replayed: Vec<_> = futures::stream::iter(&files)
+        .map(|f| async move {
+            let fx: Value = serde_json::from_slice(&std::fs::read(f).unwrap()).unwrap_or_else(|e| panic!("{}: {e}", f.display()));
+            let node = common::start_dev().await;
+            let roll = Target::new(&format!("http://{}", node.addr));
+            let res = replay(&roll, &fx).await;
+            (f, fx, res)
+        })
+        .buffered(8)
+        .collect()
+        .await;
     let mut failures = Vec::new();
-    for f in &files {
-        let fx: Value = serde_json::from_slice(&std::fs::read(f).unwrap()).unwrap_or_else(|e| panic!("{}: {e}", f.display()));
-        // A fresh node per fixture: fixtures reuse index names.
-        let node = common::start_dev().await;
-        let roll = Target::new(&format!("http://{}", node.addr));
-        let res = replay(&roll, &fx).await;
+    for (f, fx, res) in replayed {
         let name = f.file_name().unwrap().to_string_lossy();
         match (res, fx.get("known").and_then(Value::as_str)) {
             (None, None) => {}

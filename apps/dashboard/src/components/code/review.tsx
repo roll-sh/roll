@@ -250,17 +250,18 @@ const verdictIcon = (v: Verdict, dim: boolean) =>
   );
 
 /** Every review, oldest first: who, what verdict, stale or dismissed, and what they wrote. */
-/** The element a note on the preview's page is about, as the preview's screenshot run cropped it
- * (nothing until one has, or for a viewer who can't see the preview). */
+/** The element a note on the preview's page is about, as the preview's screenshot run cropped it,
+ * or the picture its reviewer took of their own tab (nothing until there's one, or for a viewer
+ * who can't see the preview). */
 function NoteCrop({ previewId, note }: { previewId: string; note: string }) {
-  const [src, setSrc] = useState<string | null>(null);
+  const [crop, setCrop] = useState<{ url: string; own: boolean } | null>(null);
   useEffect(() => {
     let url: string | null = null;
     let live = true;
     noteCropUrl(previewId, note).then(
       (c) => {
         url = c?.url ?? null;
-        if (live) setSrc(url);
+        if (live) setCrop(c);
         else if (url) URL.revokeObjectURL(url);
       },
       () => {},
@@ -270,7 +271,13 @@ function NoteCrop({ previewId, note }: { previewId: string; note: string }) {
       if (url) URL.revokeObjectURL(url);
     };
   }, [previewId, note]);
-  return src ? <img src={src} alt="The part of the preview's page the note is about" className="mt-2 max-h-56 max-w-full rounded-md border border-line" /> : null;
+  if (!crop) return null;
+  return (
+    <figure className="mt-2">
+      <img src={crop.url} alt={crop.own ? "Their screen when they left the note" : "The part of the preview's page the note is about"} className="max-h-56 max-w-full rounded-md border border-line" />
+      {crop.own && <figcaption className="mt-0.5 text-[11px] text-subtle">Their own screen, from their browser</figcaption>}
+    </figure>
+  );
 }
 
 export function ReviewTimeline({

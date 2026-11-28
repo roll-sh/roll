@@ -23,8 +23,9 @@ the machine nor a web page you open can use it.
 Download rolld with the CLI (Linux on x86_64 and ARM64, macOS on Apple silicon). The install script
 checks both against the release's `SHA256SUMS` and puts them in `~/.local/bin`. With
 [gh](https://cli.github.com) installed and logged in, it also checks each download's build
-provenance: a signature that roll's release workflow made and GitHub keeps outside the release.
-Replacing the files and `SHA256SUMS` in a release can't forge that. Set `ROLL_VERIFY=attestation`
+provenance: a signature that roll's release workflow made, from that release's own tag, and that
+GitHub keeps outside the release. Replacing the files and `SHA256SUMS` in a release can't forge
+that, and can't pass off an older genuine build under a newer tag either. Set `ROLL_VERIFY=attestation`
 to refuse to install without the provenance check:
 
 ```sh
@@ -56,7 +57,8 @@ To check a download by hand, as the script does:
 ```sh
 gh release download cli-vX.Y.Z --repo roll-sh/roll -p 'rolld-x86_64-unknown-linux-gnu.tar.gz' -p SHA256SUMS
 gh attestation verify rolld-x86_64-unknown-linux-gnu.tar.gz --repo roll-sh/roll \
-  --signer-workflow roll-sh/roll/.github/workflows/release-cli.yml
+  --signer-workflow roll-sh/roll/.github/workflows/release-cli.yml \
+  --source-ref refs/tags/cli-vX.Y.Z --deny-self-hosted-runners
 sha256sum -c --ignore-missing SHA256SUMS
 ```
 
@@ -78,9 +80,11 @@ too (`./target/release/roll`).
   port of its own, so rolld listens on `127.0.0.1:7070` only: no Postgres, no Docker.
 - `ROLL_ADMIN_TOKEN` is the operator's token: every command that carries it runs as the operator.
   Without one, rolld on `127.0.0.1` is open to every user and process on the machine. It still
-  answers only requests addressed to `localhost`, `127.0.0.1` or `[::1]`, so a web page can't
-  reach it by pointing a name of its own at your machine. Keep the token for anything you import
-  real values into.
+  answers only requests addressed to `localhost`, `127.0.0.1`, `[::1]` or a name under
+  `.localhost` (`api.localhost`, which browsers send to loopback themselves), so a web page can't
+  reach it by pointing a name of its own at your machine. Any other name gets 421 (a proxy,
+  `tailscale serve`, `ssh -R` to a name): set `ROLL_DASHBOARD_ORIGIN` to the URL you open it at,
+  or set the token. Keep the token for anything you import real values into.
 
 You have the CLI already, so skip step 1, and skip step 2 as well: `roll login` signs a person in
 through the dashboard, and this node has no dashboard and no accounts. With no login, the CLI goes

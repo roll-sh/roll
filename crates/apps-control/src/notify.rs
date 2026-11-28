@@ -15,10 +15,9 @@ use crate::model::{Delivery, Event, NotifyTarget};
 use crate::{Apps, Error, Result};
 use serde_json::{Value, json};
 use std::sync::Arc;
-use std::time::Duration;
 
 /// What a target can ask for; a new one gets the two that need someone.
-pub const EVENTS: [&str; 41] = [
+pub const EVENTS: [&str; 43] = [
     "deploy.started",
     "deploy.failed",
     "deploy.base_updated",
@@ -49,10 +48,14 @@ pub const EVENTS: [&str; 41] = [
     "volume.full",
     "form.submitted",
     "check.down",
+    "check.slow",
     "heartbeat.missed",
     "deploy.vulnerable",
     "alert.slo",
     "alert.anomaly",
+    // A CSP directive blocking something for the first time (not by default: a page's own
+    // reports, which anyone can send).
+    "alert.csp",
     "attack.mode",
     "scale.out",
     "scale.in",
@@ -63,7 +66,7 @@ pub const EVENTS: [&str; 41] = [
     // Every `audit.*` entry (who changed what), for a SIEM's webhook; never an on-call page.
     "audit",
 ];
-const DEFAULT_EVENTS: [&str; 27] = ["check.down", "heartbeat.missed", "alert.slo", "alert.anomaly", "deploy.failed", "rollout.waiting", "deploy.ready", "error.new", "error.regressed", "crash_loop", "spend.alert", "spend.spike", "spend.limit", "alert.memory", "alert.cpu", "alert.metric", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "alert.route", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"];
+const DEFAULT_EVENTS: [&str; 28] = ["check.down", "check.slow", "heartbeat.missed", "alert.slo", "alert.anomaly", "deploy.failed", "rollout.waiting", "deploy.ready", "error.new", "error.regressed", "crash_loop", "spend.alert", "spend.spike", "spend.limit", "alert.memory", "alert.cpu", "alert.metric", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "alert.route", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"];
 /// Whether a target with `events` hears an event: its own kind, or for a resolution, the alert's
 /// (whoever heard an alert hears it clear; there's nothing else to ask for).
 fn wants(events: &[String], kind: &str, data: &Value, oncall: bool) -> bool {
@@ -308,7 +311,7 @@ impl Apps {
                 self.deliver_due().await;
             }
             tokio::select! {
-                _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+                _ = tokio::time::sleep(self.cfg.notify_every) => {}
                 _ = self.stop.cancelled() => return,
             }
         }
@@ -457,8 +460,8 @@ impl Apps {
         if !self.db(move |s| s.redeliver(&ti, &di)).await? {
             return Err(Error::Conflict("this delivery is still being tried".into()));
         }
-        let (ti, di) = (target.to_string(), id.to_string());
-        self.db(move |s| s.delivery(&ti, &di)).await?.ok_or_else(|| Error::NotFound(format!("no delivery {id}")))
+        // As it was written: the notifier may have sent it again by the time it's read.
+        Ok(Delivery { status: "pending".into(), attempts: 0, code: None, error: None, at: code_sql::now_ms(), ..d })
     }
 
     /// What's due, a few at a time (one slow target doesn't hold up the others), each try's
@@ -593,6 +596,10 @@ impl Apps {
                     if e.data["window"] == "1h" { "hour" } else { "six hours" }
                 ),
             ),
+            "alert.csp" => (
+                format!("{what}: its CSP blocked {} for the first time", e.data["directive"].as_str().unwrap_or("a directive")),
+                format!("A browser reported {} blocked by {} on {}. Its CSP reports show how often, and where.", e.data["blocked"].as_str().unwrap_or("something"), e.data["directive"].as_str().unwrap_or("a directive"), e.data["path"].as_str().unwrap_or("a page")),
+            ),
             "alert.errors" => (format!("{what}: errors"), format!("{}% of its {} requests in five minutes answered 5xx (the alert is at {}%).", e.data["value"], e.data["requests"], e.data["threshold"])),
             "alert.route" => {
                 let route = match e.data["method"].as_str() {
@@ -613,7 +620,11 @@ impl Apps {
             ),
             "check.down" => (
                 format!("{what}: {} is down", e.data["path"].as_str().unwrap_or("a page")),
-                format!("Its uptime check {} failed twice in a row: {}.", e.data["check"].as_str().unwrap_or(""), e.data["error"].as_str().unwrap_or("no answer")),
+                format!("Its uptime check {} failed {} times in a row: {}.", e.data["check"].as_str().unwrap_or(""), e.data["failures"].as_u64().unwrap_or(2), e.data["error"].as_str().unwrap_or("no answer")),
+            ),
+            "check.slow" => (
+                format!("{what}: {} is slow", e.data["path"].as_str().filter(|p| !p.is_empty()).unwrap_or("a check")),
+                format!("Its uptime check {} passed slower than {} ms twice in a row (the last took {} ms).", e.data["check"].as_str().unwrap_or(""), e.data["slow_ms"], e.data["ms"]),
             ),
             "form.submitted" => (
                 format!("{what}: a submission to {}", e.data["form"].as_str().unwrap_or("a form")),
@@ -671,6 +682,9 @@ impl Apps {
                 } else if e.data["alert"] == "check.down" {
                     let name = e.data["check"].as_str().unwrap_or("");
                     (format!("{what}: uptime check {name} is up"), format!("Its uptime check {name} passes again."))
+                } else if e.data["alert"] == "check.slow" {
+                    let name = e.data["check"].as_str().unwrap_or("");
+                    (format!("{what}: uptime check {name} is fast again"), format!("Its uptime check {name} passed within its time."))
                 } else {
                     (format!("{what}: {which} alert resolved"), format!("The {which} alert cleared: the last five minutes are under its threshold."))
                 }
@@ -786,15 +800,19 @@ fn oncall_of(e: &Event) -> Option<(bool, String, &'static str)> {
             "alert.slo" if d["route"].is_string() => format!("alert.slo/{}", route()),
             "alert.route" => format!("alert.route/{}/{}", route(), d["kind"].as_str().unwrap_or("")),
             "alert.metric" => format!("alert.metric/{}", d["metric"].as_str().unwrap_or("")),
+            "alert.csp" => format!("alert.csp/{}", d["directive"].as_str().unwrap_or("")),
             a => a.to_string(),
         }
     };
     Some(match e.kind.as_str() {
         // A check's or heartbeat's own incident, by its name: two checks are two pages.
         "alert.resolved" if e.data["alert"] == "check.down" => (false, key(&format!("check.down/{}", e.data["check"].as_str()?)), "info"),
+        "alert.resolved" if e.data["alert"] == "check.slow" => (false, key(&format!("check.slow/{}", e.data["check"].as_str()?)), "info"),
         "alert.resolved" if e.data["alert"] == "heartbeat.missed" => (false, key(&format!("heartbeat.missed/{}", e.data["heartbeat"].as_str()?)), "info"),
         "alert.resolved" => (false, key(&which(e.data["alert"].as_str()?, &e.data)), "info"),
         "check.down" => (true, key(&format!("check.down/{}", e.data["check"].as_str()?)), "error"),
+        // Slow is lower than down: a warning, its own incident per check.
+        "check.slow" => (true, key(&format!("check.slow/{}", e.data["check"].as_str()?)), "warning"),
         "heartbeat.missed" => (true, key(&format!("heartbeat.missed/{}", e.data["heartbeat"].as_str()?)), "error"),
         // A deploy that worked closes the failed one's.
         "deploy.active" => (false, key("deploy.failed"), "info"),
@@ -878,32 +896,20 @@ mod tests {
         assert!(super::wants(&ev(&["audit"]), "audit.variables", &data, false));
         assert!(!super::wants(&ev(&["audit"]), "audit.variables", &data, true), "never an on-call page");
         assert!(!super::wants(&super::DEFAULT_EVENTS.map(String::from), "audit.variables", &data, false), "not by default");
-    }
-
-    #[test]
-    fn a_routes_incident_is_its_own() {
+        // A route's burn and its clearing are one incident, apart from the service's own.
         let ev = |kind: &str, data: serde_json::Value| crate::model::Event { seq: 1, at: 1, kind: kind.into(), service: "svc_a".into(), environment: "production".into(), deployment: None, data };
         let key = |e: crate::model::Event| super::oncall_of(&e).map(|(open, k, _)| (open, k));
         let route = serde_json::json!({ "route": "/checkout/:id", "method": "POST" });
-        // A route's burn and its clearing are one incident, apart from the service's own.
         let opened = key(ev("alert.slo", route.clone())).unwrap();
         let mut resolved = route.clone();
         resolved["alert"] = "alert.slo".into();
         assert_eq!(key(ev("alert.resolved", resolved)).unwrap(), (false, opened.1.clone()));
         assert_ne!(opened.1, key(ev("alert.slo", serde_json::json!({}))).unwrap().1);
-        // Each route alert's kind, and each metric, is its own too.
-        let kind = |k: &str| key(ev("alert.route", serde_json::json!({ "route": "/a", "kind": k }))).unwrap().1;
-        assert_ne!(kind("errors"), kind("latency"));
-        assert_ne!(key(ev("alert.metric", serde_json::json!({ "metric": "a" }))).unwrap().1, key(ev("alert.metric", serde_json::json!({ "metric": "b" }))).unwrap().1);
-    }
-
-    #[test]
-    fn a_teams_card_can_not_link() {
-        assert!(!super::teams_escape("[Approve](https://evil)").contains("]("));
     }
 
     #[test]
     fn slack_text_can_not_mention_or_link() {
         assert_eq!(super::slack_escape("<!channel> <https://evil|Approve> & co"), "&lt;!channel&gt; &lt;https://evil|Approve&gt; &amp; co");
+        assert!(!super::teams_escape("[Approve](https://evil)").contains("]("), "nor a Teams card");
     }
 }

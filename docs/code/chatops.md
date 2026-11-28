@@ -39,7 +39,12 @@ the durable action queue, bindings, triggers, steps, routes). GitHub's side reus
   exchange's answer; a `guild_id` in the redirect is ignored. One bot token for the server lives in
   its config, and `/roll` is registered in the guild. The pickers list a server's channels and
   roles as the bot; listing members needs the application's Server Members Intent (Developer
-  Portal, Bot), and only servers the owner installed it in are ever looked up.
+  Portal, Bot), and only servers the owner installed it in are ever looked up. Since one bot
+  serves every install, whatever posts or edits a message for an install (approval cards, roll
+  secrets' notices and roll search's, the `discord.post` step) first asks Discord which server the
+  channel is in (`GET /channels/{id}`) and refuses a channel outside the install's own, or a DM.
+  A `discord.post` step's `user` DM goes only to a member of the install's server (`GET
+  /guilds/{guild}/members/{user}`); the bot could otherwise DM anyone who shares any server with it.
 - **One owner per workspace or server** (`UNIQUE (platform, team_id)`). Everything that comes from
   the workspace is that owner's. Another owner installing it gets a conflict.
 - **Who may drive roll** is the install's: the installer (Slack's `authed_user`; Discord doesn't

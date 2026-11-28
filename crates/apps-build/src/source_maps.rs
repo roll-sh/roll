@@ -95,22 +95,3 @@ fn regex_lite_trailing_commas(s: &str) -> String {
     }
     out
 }
-
-#[cfg(test)]
-mod tests {
-    use crate::tests::tree as files;
-    use serde_json::json;
-
-    #[test]
-    fn a_build_with_source_maps_says_so() {
-        let none = files(&[]);
-        assert!(super::emitted(&none, &json!({"scripts": {"build": "esbuild src/index.ts --bundle --sourcemap --outfile=dist/index.js"}})).is_some());
-        assert!(super::emitted(&none, &json!({"scripts": {"build": "npm run build:server", "build:server": "tsup src --sourcemap"}})).is_some());
-        assert!(super::emitted(&none, &json!({"scripts": {"build": "esbuild src/index.ts --bundle"}})).is_none());
-        let ts = files(&[("tsconfig.json", "{\n  // the server\n  \"compilerOptions\": { \"outDir\": \"dist\", \"sourceMap\": true, },\n}\n")]);
-        assert!(super::emitted(&ts, &json!({"scripts": {"build": "tsc"}})).is_some_and(|w| w.contains("tsconfig.json")));
-        assert!(super::emitted(&ts, &json!({"scripts": {"build": "vite build"}})).is_none(), "tsc's tsconfig only for tsc");
-        let off = files(&[("tsconfig.json", "{\"compilerOptions\": {\"outDir\": \"dist\"}}")]);
-        assert!(super::emitted(&off, &json!({"scripts": {"build": "tsc"}})).is_none());
-    }
-}

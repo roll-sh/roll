@@ -912,6 +912,23 @@ impl Runtime {
         }
     }
 
+    /// A reviewer's picture of their own tab (`POST /__roll/screen`): from this page (its own
+    /// origin), at most [`crate::notes::SCREEN_MAX`], checked, kept for their note.
+    async fn own_screen(&self, preview: &str, guest: Option<&crate::store::LiveShare>, req: Request) -> Response {
+        let host = req.headers().get(header::HOST).and_then(|h| h.to_str().ok()).unwrap_or("").to_string();
+        let origin = req.headers().get(header::ORIGIN).and_then(|h| h.to_str().ok()).unwrap_or("");
+        if origin.split_once("://").map(|(_, h)| h) != Some(host.as_str()) {
+            return (StatusCode::FORBIDDEN, "pictures come from the preview's own pages").into_response();
+        }
+        let Ok(image) = axum::body::to_bytes(req.into_body(), crate::notes::SCREEN_MAX).await else { return (StatusCode::PAYLOAD_TOO_LARGE, "a picture is 1 MiB at most").into_response() };
+        let Ok(engine) = self.engine() else { return StatusCode::SERVICE_UNAVAILABLE.into_response() };
+        match engine.keep_screen(preview, guest, image.to_vec()).await {
+            Ok(token) => (StatusCode::CREATED, [(header::CACHE_CONTROL, "no-store")], axum::Json(serde_json::json!({ "screen": token }))).into_response(),
+            Err(crate::Error::Conflict(m)) => (StatusCode::TOO_MANY_REQUESTS, m).into_response(),
+            Err(e) => e.into_response(),
+        }
+    }
+
     /// `POST /__roll/snapshot?name=` with the project's bypass secret and a PNG (at most
     /// [`SCREENSHOT_MAX`]): the team's tests' picture, kept as page `snap:<name>`. 401 without
     /// the secret (a fork's preview never has one), 400 for anything but a PNG.
@@ -1400,6 +1417,9 @@ pub const FEEDBACK_PATH: &str = "/__roll/feedback.js";
 pub const FEEDBACK_NOTES_PATH: &str = "/__roll/feedback.json";
 /// Where a share link's guest posts a note from the button.
 pub const GUEST_NOTE_PATH: &str = "/__roll/notes";
+/// Where the button sends the picture a reviewer took of their own tab (`POST`, the image): kept
+/// for their note, its token answered.
+pub const SCREEN_PATH: &str = "/__roll/screen";
 /// The toolbar's Main: the page on main's preview (`?path=`), as `{url}` (a team visitor's only).
 pub const MAIN_PAGE_PATH: &str = "/__roll/main";
 /// On an earlier push's link its preview no longer keeps: start it again ([`Engine::restart_push`]).
@@ -3126,6 +3146,16 @@ async fn serve(rt: Arc<Runtime>, preview: String, service: String, mut req: Requ
     {
         let path = req.uri().query().unwrap_or("").split('&').filter_map(|kv| kv.split_once('=')).find(|(k, _)| *k == "path").map(|(_, v)| percent_decode(v)).unwrap_or_default();
         return rt.main_page(&preview, &service, &path).await;
+    }
+    if req.uri().path() == SCREEN_PATH
+        && req.method() == axum::http::Method::POST
+        && let Some(t) = &target
+    {
+        let guest = match t {
+            Feedback::Guest(share) => Some(share.clone()),
+            Feedback::Team(_) => None,
+        };
+        return rt.own_screen(&preview, guest.as_ref(), req).await;
     }
     if req.uri().path() == GUEST_NOTE_PATH
         && req.method() == axum::http::Method::POST

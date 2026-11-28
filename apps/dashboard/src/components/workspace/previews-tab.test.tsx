@@ -173,9 +173,11 @@ describe("the Previews tab", () => {
     expect(await screen.findByText("terminal sh_apps")).toBeInTheDocument();
   });
 
-  it("posts a note from the preview page's feedback button on the change, once", async () => {
+  it("posts a note from the preview page's feedback button on the change, once, with the reviewer's own picture", async () => {
     const u = userEvent.setup({ delay: null });
-    vi.mocked(codeApi.submitReview).mockResolvedValue({} as never);
+    vi.mocked(codeApi.submitReview).mockResolvedValue({ id: "rv_9" } as never);
+    api.attachScreen.mockResolvedValue({ note: "rv_9", crop_own: true });
+    const shot = "rsc_abcdefghijklmnopqrstuvwx";
     const posted = vi.fn();
     render(
       <MarkStateProvider>
@@ -183,7 +185,7 @@ describe("the Previews tab", () => {
           project={project}
           inventory={new Map()}
           open="pv_abc"
-          feedback={{ path: "/checkout", selector: "button.pay", viewport: "1280x800", note: "The button is cut off" }}
+          feedback={{ path: "/checkout", selector: "button.pay", viewport: "1280x800", note: "The button is cut off", screen: shot }}
           onFeedbackPosted={posted}
         />
       </MarkStateProvider>,
@@ -194,6 +196,7 @@ describe("the Previews tab", () => {
       body: expect.stringContaining("· `button.pay`\n\nThe button is cut off"),
     });
     expect(await screen.findByText(/Posted on the change/)).toBeInTheDocument();
+    expect(api.attachScreen).toHaveBeenCalledWith("pv_abc", "rv_9", shot);
     expect(posted).toHaveBeenCalledOnce();
   });
 

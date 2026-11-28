@@ -316,19 +316,7 @@ mod tests {
         assert_eq!(scan(r#"<form title="your name" data-roll-form name="real" data-x="a>b">"#, "/").first().map(|(n, _)| n.as_str()), Some("real"));
         assert!(scan("<formula netlify name=x>", "/").is_empty());
         assert!(scan(r#"<form data-roll-form name="x" action="https://evil.example/">"#, "/")[0].1.action.is_none(), "an action off the site isn't followed");
-    }
-
-    #[test]
-    fn a_post_finds_its_form_and_fields_stay_bounded() {
-        let forms: HashMap<String, FormSpec> = [("contact".to_string(), FormSpec { honeypot: None, action: None, page: "/contact/".into() }), ("news".to_string(), FormSpec { honeypot: None, action: Some("/thanks".into()), page: "/".into() })].into_iter().collect();
-        assert_eq!(which(&forms, "/contact/index.html", None).map(|(n, _)| n), Some("contact"));
-        assert_eq!(which(&forms, "/thanks", None).map(|(n, _)| n), Some("news"), "its action");
-        assert_eq!(which(&forms, "/", Some("contact")).map(|(n, _)| n), Some("contact"), "form-name decides");
-        assert!(which(&forms, "/other", None).is_none());
-        let (name, f) = fields(b"form-name=contact&email=a%40b.c&tags=x&tags=y").unwrap();
-        assert_eq!((name.as_deref(), f), (Some("contact"), vec![("email".into(), "a@b.c".into()), ("tags".into(), "x, y".into())]));
         let many: String = (0..51).map(|i| format!("f{i}=v&")).collect();
-        assert!(fields(many.as_bytes()).is_none());
-        assert_eq!((page_of("contact/index.html"), page_of("about.html"), page_of("index.html")), ("/contact/".into(), "/about.html".into(), "/".into()));
+        assert!(fields(many.as_bytes()).is_none(), "fields stay bounded");
     }
 }

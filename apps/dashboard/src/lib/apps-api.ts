@@ -675,6 +675,12 @@ export interface EnvironmentDiff {
   settings: { field: string; from: unknown; to: unknown; put: EnvironmentPut }[];
 }
 
+export interface Hsts {
+  max_age: number;
+  include_subdomains?: boolean;
+  preload?: boolean;
+}
+
 export interface EnvironmentPut {
   /** Attack mode by itself: once a minute's requests reach per_minute, a challenge for every visitor without a pass for minutes; null: never by itself. */
   attack_mode?: { per_minute: number; minutes?: number } | null;
@@ -707,6 +713,10 @@ export interface EnvironmentPut {
   traces?: boolean;
   /** Its pages measure their Web Vitals (a tag roll adds). */
   vitals?: boolean;
+  /** Its answers send their Content-Security-Policy reports to roll (`/__roll/csp`). */
+  csp_reports?: boolean;
+  /** Strict-Transport-Security over HTTPS: its own, false (none) or null (the default, two years). */
+  hsts?: Hsts | false | null;
   /** How long its logs are kept (null: 7 days). */
   log_retention_days?: 7 | 30 | 90 | null;
   /** Days its built deployments stay to roll back to past the newest ten (1–90); null: only those. */
@@ -838,6 +848,10 @@ export interface Environment extends EnvironmentSummary {
   traces?: boolean;
   /** Its pages measure their Web Vitals for roll. */
   vitals?: boolean;
+  /** Its answers send their Content-Security-Policy reports to roll (`…/csp-reports`). */
+  csp_reports?: boolean;
+  /** Its Strict-Transport-Security over HTTPS (null: none sent). */
+  hsts?: Hsts | null;
   /** Days its logs are kept: 7 (default), 30 or 90; a preview's are 7. */
   log_retention_days?: number;
   /** Days its built deployments stay to roll back to past the newest ten. */
@@ -1317,11 +1331,18 @@ export interface UptimeCheck {
   method?: "GET" | "HEAD" | "POST" | "PUT" | "PATCH" | "DELETE" | "OPTIONS";
   headers?: Record<string, string>;
   body?: string;
+  /** 50–60000 ms: two passes in a row slower than this are `check.slow` (degraded), until one isn't. Not a browser check's; a TCP check's is its connect. */
+  slow_ms?: number;
+  /** An HTTP check's, at most 5, all must hold: a JSON value at a dotted path (`$.items.0.id`), text its answer mustn't hold, or a header holding text (never a pattern). */
+  assert?: ({ json: string; equals: unknown } | { not_contains: string } | { header: string; matches: string })[];
+  /** 1–5: failures in a row before down (default 2), and passes in a row before up again (default 1). */
+  fail_after?: number;
+  recover_after?: number;
 }
 
 export interface UptimeCheckState {
   name: string;
-  /** null: not tried yet; false once it failed twice in a row. */
+  /** null: not tried yet; false once it failed `fail_after` times in a row, until `recover_after` passes. */
   up: boolean | null;
   failures: number;
   last_at: number | null;
@@ -1329,6 +1350,8 @@ export interface UptimeCheckState {
   ms: number | null;
   error: string | null;
   down_since: number | null;
+  /** Two passes in a row over its `slow_ms`, until one isn't. */
+  slow: boolean;
   /** A browser check's last failure kept (its screenshot and Playwright trace), as the owner knows. */
   failure_at?: number;
   /** A preview's: the deployment this result is of (production's browser checks, run on each of its heads). */
@@ -1391,6 +1414,25 @@ export interface Vitals {
   metrics: Partial<Record<VitalName, Vital>>;
   routes: { route: string; samples: number; metrics: Partial<Record<VitalName, Vital>> }[];
   cut: boolean;
+}
+
+/** What browsers reported an environment's CSP blocked (`csp_reports: true`), grouped. */
+export interface CspReports {
+  minutes: number;
+  on: boolean;
+  groups: CspGroup[];
+}
+
+export interface CspGroup {
+  directive: string;
+  /** An origin, a scheme (`data:`), a keyword (`inline`, `eval`) or `other`. */
+  blocked: string;
+  /** The document's path, ids folded as `:id`. */
+  path: string;
+  disposition: "enforce" | "report";
+  count: number;
+  first_seen: number;
+  last_seen: number;
 }
 
 export interface Analytics {
@@ -1512,9 +1554,11 @@ export type NotifyEvent =
   | "volume.backup_failed"
   | "volume.full"
   | "check.down"
+  | "check.slow"
   | "heartbeat.missed"
   | "deploy.vulnerable"
   | "alert.slo"
+  | "alert.csp"
   /** Every `audit.*` entry: who changed what (never paged). */
   | "audit";
 
@@ -1935,6 +1979,7 @@ export const appsApi = {
   routes: (id: string, e: string, minutes = 60) => call<RouteStats>("GET", `${env(id, e)}/routes${qs({ minutes })}`),
   analytics: (id: string, e: string, minutes = 1440) => call<Analytics>("GET", `${env(id, e)}/analytics${qs({ minutes })}`),
   vitals: (id: string, e: string, minutes = 1440) => call<Vitals>("GET", `${env(id, e)}/vitals${qs({ minutes })}`),
+  cspReports: (id: string, e: string, minutes = 1440) => call<CspReports>("GET", `${env(id, e)}/csp-reports${qs({ minutes })}`),
   setErrorState: (id: string, e: string, fingerprint: string, state: "open" | "resolved" | "muted") => call<{ fingerprint: string; state: string }>("PATCH", `${env(id, e)}/errors/${encodeURIComponent(fingerprint)}`, { state }),
   errors: (id: string, e: string, minutes = 1440) => call<{ minutes: number; groups: ErrorGroup[]; scanned: number; cut: boolean }>("GET", `${env(id, e)}/errors${qs({ minutes })}`),
   appMetrics: (id: string, e: string, minutes = 60) => call<AppMetrics>("GET", `${env(id, e)}/app-metrics${qs({ minutes })}`),

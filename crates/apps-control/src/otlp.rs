@@ -573,10 +573,7 @@ mod tests {
         assert_eq!(s.attrs, vec![("http.route".to_string(), "/items".to_string())]);
         // A length past the end, or a 2 GiB claim in a few bytes, is refused, not allocated.
         assert!(from_protobuf(&[0x0a, 0xff, 0xff, 0xff, 0xff, 0x07]).is_err());
-    }
-
-    #[test]
-    fn protobuf_logs_and_metrics_read_as_roll_keeps_them() {
+        // Logs and metrics, read as roll keeps them.
         let body = field(1, 2, b"payment failed");
         let lr = [field(1, 1, &7u64.to_le_bytes()), field(2, 0, &[17]), field(5, 2, &body), field(6, 2, &kv("order", "42")), field(9, 2, &[0xab; 16]), field(10, 2, &[0xcd; 8])].concat();
         let rl = [field(1, 2, &field(1, 2, &kv("service.name", "api"))), field(2, 2, &field(2, 2, &lr))].concat();
@@ -591,10 +588,7 @@ mod tests {
         let points = metrics_from_protobuf(&field(1, 2, &rm)).unwrap();
         assert_eq!((points[0].name.as_str(), points[0].value, points[0].counter, points[0].attrs.clone()), ("requests", 12.0, true, vec![("route".to_string(), "/".to_string())]));
         assert_eq!((points[1].kind.as_str(), points[1].unit.as_str(), points[1].value, points[1].count), ("histogram", "s", 1.5, Some(3)));
-    }
-
-    #[test]
-    fn a_json_request_reads_as_its_spans() {
+        // JSON, too.
         let v = serde_json::json!({ "resourceSpans": [{ "resource": { "attributes": [{ "key": "service.name", "value": { "stringValue": "web" } }] },
             "scopeSpans": [{ "spans": [{ "traceId": "AB".repeat(16), "spanId": "cd".repeat(8), "parentSpanId": "", "name": "render", "startTimeUnixNano": "10", "endTimeUnixNano": 30, "attributes": [{ "key": "n", "value": { "intValue": "3" } }] }] }] }] });
         let spans = from_json(&v).unwrap();
