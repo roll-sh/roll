@@ -199,6 +199,8 @@ export interface Preview {
   slower_routes?: { branch: string; routes: { name: string; count: number; p50_ms: number; main_p50_ms: number; grew?: GrewSpan | null; /** Its budget, when it's over it. */ budget_ms?: number | null }[] } | null;
   /** Earlier pushes of the change's services, still reachable (newest first), each on its own copy of the data where `own_data` names products. */
   earlier?: { service: string; revision: string; url: string; share_url: string | null; at: number; own_data?: string[] }[];
+  /** Earlier pushes it no longer keeps (newest first): their links answer 410; a `startable` one starts again (`startPush`). */
+  gone?: { service: string; revision: string; at: number; startable: boolean }[];
   /** Its secret values its pages serve at its head, by name and where (never the value). */
   served_secrets?: { key: string; path: string }[];
   /** What its latest screenshot run left out: pages past a run's ten, stories it didn't take. */
@@ -696,6 +698,8 @@ export const previewsApi = {
   wake: (id: string) => call<Preview>("POST", `${one(id)}/wake`),
   /** Re-branches every resource, or the ones named (`"<kind>:<parent>"`). */
   reset: (id: string, resources?: string[]) => call<Preview>("POST", `${one(id)}/reset`, resources?.length ? { resources } : {}),
+  /** An earlier push it no longer keeps, kept again in place of its service's oldest kept one (its link starts it on the next request). */
+  startPush: (id: string, revision: string, service?: string) => call<Preview>("POST", `${one(id)}/pushes/${encodeURIComponent(revision)}/start`, service ? { service } : {}),
   /** Rehearse its release on today's data (its next converge does). */
   rehearse: (id: string) => call<Preview>("POST", `${one(id)}/rehearse`, {}),
   /** Its restore points (its Postgres data saved, to put back later), oldest first, and how many it may keep. */

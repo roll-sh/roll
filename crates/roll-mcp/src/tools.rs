@@ -1856,6 +1856,7 @@ static TOOLS: &[Tool] = &[
         "/v1/previews/{id}/rehearse",
         &[req("id", "Preview id")],
     ),
+    t("previews_start_push", "Start an earlier push again", "Keep an earlier push a preview no longer keeps (previews_get's gone, where startable) again in place of the oldest kept push of its service, as Vercel keeps every deployment's URL: its own link answers again and starts it on the next request, on the preview's data. At most once a minute a preview; a 404 for a revision that isn't one of its gone pushes, a 409 for a fork's, a roll apps service's or one it still keeps.", "previews", "POST", "/v1/previews/{id}/pushes/{revision}/start", &[req("id", "Preview id"), req("revision", "The push's revision (a gone one's, from previews_get)"), b("service", Ty::Str, "Which service's push, when several went at that revision")]),
     t("previews_keep", "Keep a preview", "Keep a preview past its time to live, for some hours (0 lets it go; a landed or closed change still ends it).", "previews", "POST", "/v1/previews/{id}/keep", &[req("id", "Preview id"), breq("hours", Ty::Int, "0 to 720")]),
     t("previews_activity", "Preview activity", "What happened to a preview, newest first.", "previews", "GET", "/v1/previews/{id}/activity", &[req("id", "Preview id")]),
     t("previews_sleep", "Sleep a preview", "Stop a preview's services until it's woken (its data stays).", "previews", "POST", "/v1/previews/{id}/sleep", &[req("id", "Preview id")]),
@@ -2735,7 +2736,7 @@ mod tests {
         const FORK_WORDS: &[&str] = &[
             // The preview itself (`outside: !trusted`: its title is the fork's pull request's),
             // and every write that answers it.
-            "previews_list", "previews_get", "previews_wait", "previews_create", "previews_refresh", "previews_keep", "previews_sleep", "previews_wake", "previews_reset", "previews_rehearse",
+            "previews_list", "previews_get", "previews_wait", "previews_create", "previews_refresh", "previews_keep", "previews_sleep", "previews_wake", "previews_reset", "previews_rehearse", "previews_start_push",
             "previews_errors", "previews_traces", "previews_get_trace", "previews_routes", "previews_logs", "previews_requests", "previews_activity",
             "previews_list_mail", "previews_read_mail", "previews_screenshot", "previews_fetch", "previews_try", "previews_try_screenshot", "previews_note_crop", "previews_tables",
             // A share link's guests' notes (`by` `guest:…`).

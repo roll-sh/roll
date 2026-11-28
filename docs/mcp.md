@@ -1575,6 +1575,7 @@ previews are listed once those products are on.
 | `previews_requests` | A preview's latest 200 requests through roll (service, method, path, status, time), to find the one that failed. | `GET /v1/previews/{id}/requests` |
 | `previews_reset` | Branch a preview's resources again from their parents. | `POST /v1/previews/{id}/reset` |
 | `previews_rehearse` | A change's release once more on fresh, masked branches of its Postgres parents as they are now: its time and whether it fails on today's data (202; `previews_wait`, then its `rehearsal`). | `POST /v1/previews/{id}/rehearse` |
+| `previews_start_push` | An earlier push the preview no longer keeps (`previews_get`'s `gone`) kept again, its link starting it on the next request (write; once a minute a preview). | `POST /v1/previews/{id}/pushes/{revision}/start` |
 | `previews_keep` | Keep a preview past its time to live, for some hours. | `POST /v1/previews/{id}/keep` |
 | `previews_activity` | What happened to a preview, newest first. | `GET /v1/previews/{id}/activity` |
 | `previews_share` | A link for someone outside the team, for some hours (reveal: its token is in the answer). | `POST /v1/previews/{id}/shares` |

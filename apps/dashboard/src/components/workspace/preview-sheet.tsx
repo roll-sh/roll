@@ -326,11 +326,11 @@ export function PreviewSheet({
                 </ul>
               </>
             )}
-            {!!p.earlier?.length && (
+            {(!!p.earlier?.length || !!p.gone?.some((x) => x.startable)) && (
               <>
                 <Label>Earlier pushes</Label>
                 <ul className="space-y-1">
-                  {p.earlier.map((x) => (
+                  {p.earlier?.map((x) => (
                     <li key={`${x.service}@${x.revision}`} className="flex items-center gap-2 text-[12px]">
                       <span className="shrink-0 text-soft">{x.service}</span>
                       <span className="shrink-0 font-mono text-[10.5px] text-subtle">{x.revision.replace(/^cs_/, "").slice(0, 10)}</span>
@@ -345,6 +345,24 @@ export function PreviewSheet({
                       </a>
                     </li>
                   ))}
+                  {p.gone
+                    ?.filter((x) => x.startable)
+                    .slice(0, 5)
+                    .map((x) => (
+                      <li key={`gone:${x.service}@${x.revision}`} className="flex items-center gap-2 text-[12px]">
+                        <span className="shrink-0 text-soft">{x.service}</span>
+                        <span className="shrink-0 font-mono text-[10.5px] text-subtle">{x.revision.replace(/^cs_/, "").slice(0, 10)}</span>
+                        <span className="shrink-0 text-[10.5px] text-subtle">not kept</span>
+                        <button
+                          disabled={busy !== null || gone}
+                          onClick={() => run(`start:${x.service}@${x.revision}`, () => previewsApi.startPush(p.id, x.revision, x.service))}
+                          className="ml-auto shrink-0 text-[11px] text-muted hover:text-fg disabled:opacity-40"
+                          title={`Kept again in place of the oldest kept push of ${x.service}, on the preview's data; its link starts it on the next visit`}
+                        >
+                          {busy === `start:${x.service}@${x.revision}` ? <span className="shimmer">Starting…</span> : "Start again"}
+                        </button>
+                      </li>
+                    ))}
                 </ul>
               </>
             )}

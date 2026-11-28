@@ -2077,6 +2077,8 @@ static ROWS: &[Row] = &[
     // Putting a restore point back replaces the data the preview has now, as a reset does.
     row("POST", "/v1/previews/{id}/restore-points/{point}/restore", "previews", D, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
     row("POST", "/v1/previews/{id}/rehearse", "previews", D, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    // An earlier push it no longer keeps, started again (its 410 page's button, from roll).
+    row("POST", "/v1/previews/{id}/pushes/{revision}/start", "previews", W, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
     // A share link lets someone outside the team in, its token only in the answer: reveal, as the
     // bypass secret is. Listing (no tokens) is read and revoking one is delete, by the prefix.
     row("POST", "/v1/previews/{id}/shares", "previews", REVEAL, one(PG, "preview")).env(EnvFrom::Fixed("preview")),

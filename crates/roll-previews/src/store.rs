@@ -3337,6 +3337,12 @@ impl Store {
         })?)
     }
 
+    /// A preview's earlier pushes it no longer keeps (the latest [`GONE_KEPT`]), newest first:
+    /// each one's host (`apps:…` for a roll apps build), service, revision and when it went.
+    pub fn gone_pushes(&self, id: &str) -> Result<Vec<(String, String, String, i64)>> {
+        Ok(self.db.read(|c| c.query("SELECT host, service, revision, at FROM gone_pushes WHERE preview_id = ? ORDER BY at DESC, host", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))))?)
+    }
+
     /// [`Store::gone_push`] under a project's own preview domain (`base`): only that project's.
     pub fn gone_domain_push(&self, label: &str, base: &str) -> Result<Option<GonePush>> {
         let Some(project) = self.db.read(|c| c.query_row("SELECT project_id FROM project_domains WHERE base = ?", [base], |r| r.get::<_, String>(0)).optional())? else { return Ok(None) };
@@ -4297,6 +4303,16 @@ impl Store {
             p
         });
         let earlier = earlier.collect();
+        // A roll apps build's (`apps:` host) is roll apps' to keep; one of a service the preview
+        // no longer runs has nothing to start in.
+        let gone = self
+            .gone_pushes(&r.id)?
+            .into_iter()
+            .map(|(host, service, revision, at)| {
+                let startable = r.trusted && r.desired != Desired::Deleted && !host.starts_with("apps:") && services.iter().any(|(s, _)| s.name == service);
+                crate::Gone { service, revision, at, startable }
+            })
+            .collect();
         Ok(Preview {
             id: r.id,
             project: r.project_id,
@@ -4345,6 +4361,7 @@ impl Store {
             goes_at,
             reported_by,
             earlier,
+            gone,
             browser_checks,
             browser_checks_rule: match settings.browser_checks {
                 crate::settings::BrowserChecksRule::Report => None,

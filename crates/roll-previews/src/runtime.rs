@@ -2961,7 +2961,7 @@ async fn gone(rt: &Arc<Runtime>, g: crate::store::GonePush, mut req: Request) ->
             return (StatusCode::FORBIDDEN, "started from this page's own form only").into_response();
         }
         let Ok(engine) = rt.engine() else { return (StatusCode::SERVICE_UNAVAILABLE, "try again").into_response() };
-        return match engine.restart_push(&g, "a visitor").await {
+        return match engine.restart_push(&g, "a visitor", "from its link").await {
             Ok(_) => {
                 let mut r = StatusCode::SEE_OTHER.into_response();
                 r.headers_mut().insert(header::LOCATION, HeaderValue::from_static("/"));
