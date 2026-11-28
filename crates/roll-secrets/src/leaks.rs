@@ -251,19 +251,27 @@ enum Limit {
     Hour,
 }
 
+/// What a token's scanner may try (`Secrets::set_scan_candidates`; the constants above unless a
+/// test lowers them): candidates a minute and an hour. A pusher gets half, the project five times.
+#[derive(Clone, Copy)]
+pub(crate) struct Candidates {
+    pub minute: i64,
+    pub hour: i64,
+}
+
 impl Of {
     /// Calls a minute (none for the project), candidates a minute, candidates an hour.
-    fn caps(self) -> (Option<i64>, i64, i64) {
+    fn caps(self, t: Candidates) -> (Option<i64>, i64, i64) {
         match self {
-            Of::Pusher => (Some(SCANS_PER_MINUTE), SCAN_CANDIDATES_PER_MINUTE, SCAN_CANDIDATES_PER_HOUR),
-            Of::Token => (Some(TOKEN_SCANS_PER_MINUTE), TOKEN_SCAN_CANDIDATES_PER_MINUTE, TOKEN_SCAN_CANDIDATES_PER_HOUR),
-            Of::Project => (None, PROJECT_SCAN_CANDIDATES_PER_MINUTE, PROJECT_SCAN_CANDIDATES_PER_HOUR),
+            Of::Pusher => (Some(SCANS_PER_MINUTE), t.minute / 2, t.hour / 2),
+            Of::Token => (Some(TOKEN_SCANS_PER_MINUTE), t.minute, t.hour),
+            Of::Project => (None, t.minute * 5, t.hour * 5),
         }
     }
 
     /// `at most …`, for the 429 and the audit row.
-    fn said(self, limit: Limit, principal: &str, pusher: Option<&str>) -> String {
-        let (calls, minute, hour) = self.caps();
+    fn said(self, t: Candidates, limit: Limit, principal: &str, pusher: Option<&str>) -> String {
+        let (calls, minute, hour) = self.caps(t);
         let whose = match (self, pusher) {
             (Of::Pusher, Some(p)) => format!("{principal}'s budget for pusher {p}"),
             (Of::Pusher, None) => format!("{principal}'s budget for pushes naming no pusher"),
@@ -297,7 +305,8 @@ fn token_key(principal: &str) -> String {
 /// when it fits every budget, in one write: the budget it would overspend and when that has room
 /// again (ms) otherwise, so a refused push spends nothing and its retry isn't refused longer. With
 /// `learn`, a pusher it names is kept as one this token's hook names ([`learn_pusher`]).
-fn spend(c: &Conn<'_>, project: &str, principal: &str, pusher: Option<&str>, learn: bool, now: i64, n: i64) -> Result<Option<(Of, Limit, i64)>> {
+#[allow(clippy::too_many_arguments)]
+fn spend(c: &Conn<'_>, t: Candidates, project: &str, principal: &str, pusher: Option<&str>, learn: bool, now: i64, n: i64) -> Result<Option<(Of, Limit, i64)>> {
     let minute = now / 60_000;
     let next = (minute + 1) * 60_000;
     let (share, whole) = (budget_key(principal, pusher), token_key(principal));
@@ -311,7 +320,7 @@ fn spend(c: &Conn<'_>, project: &str, principal: &str, pusher: Option<&str>, lea
             )?,
             Of::Project => c.query("SELECT minute, 0, candidates FROM scan_project_counts WHERE project_id = ? AND minute > ? ORDER BY minute", params![project, minute - 60], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?,
         };
-        let (calls_cap, minute_cap, hour_cap) = of.caps();
+        let (calls_cap, minute_cap, hour_cap) = of.caps(t);
         let (calls, tried) = rows.iter().find(|r| r.0 == minute).map_or((0, 0), |r| (r.1, r.2));
         let hour: Vec<(i64, i64)> = rows.iter().map(|r| (r.0, r.2)).collect();
         let over = if calls_cap.is_some_and(|cap| calls >= cap) {
@@ -593,8 +602,9 @@ impl Secrets {
         if caller.principal != "operator" {
             let now = self.db.now_ms()?;
             // Break glass teaches roll no pusher: only an ordinary scan's pusher binds a login.
-            if let Some((of, limit, at)) = self.db.write(|c| spend(c, project, &caller.principal, push.pusher.as_deref(), !push.breakglass, now, n))? {
-                let limit = of.said(limit, &caller.principal, push.pusher.as_deref());
+            let t = self.scan_candidates();
+            if let Some((of, limit, at)) = self.db.write(|c| spend(c, t, project, &caller.principal, push.pusher.as_deref(), !push.breakglass, now, n))? {
+                let limit = of.said(t, limit, &caller.principal, push.pusher.as_deref());
                 self.audit_now(project, caller, action, None, None, &[], &format!("refused a scan of {} candidates ({n} tried){said}: over {limit}", candidates.len()));
                 return Err(Error::TooMany(format!("scan budget spent: at most {limit}, and this call would try {n} more; it has room again {}", wait(at, now))));
             }
@@ -668,6 +678,16 @@ impl Secrets {
     /// token is a hook's is asked of roll-access now, once per token (its rules and name can change
     /// after it scans). Setting an old list again binds it. What's stored comes back, with the
     /// hooks' names by token.
+    /// A token's scanner budget in candidates a minute and an hour (a test's lower caps; the
+    /// constants are the defaults). A pusher gets half, the project five times.
+    pub fn set_scan_candidates(&self, minute: i64, hour: i64) {
+        *self.scan_candidates.lock().unwrap_or_else(|e| e.into_inner()) = Candidates { minute, hour };
+    }
+
+    fn scan_candidates(&self) -> Candidates {
+        *self.scan_candidates.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     pub fn set_breakglass(&self, project: &str, who: Vec<String>, caller: &Caller) -> Result<(Vec<String>, BTreeMap<String, String>)> {
         caller.need(Action::Admin, &Scope::project(project))?;
         if !breakglass_ok(&who) {

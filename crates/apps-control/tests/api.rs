@@ -1469,6 +1469,53 @@ async fn an_environments_headers_are_on_its_answers() {
     assert_eq!(go("/elsewhere").await, (StatusCode::OK, None), "on to the app");
 }
 
+/// CSP reports (`csp_reports`): on, every answer names roll's endpoint and a policy that reports
+/// nowhere reports there (one with its own report-to is kept); both shapes of report are kept
+/// grouped, cut to origins and paths, at most 50 a body and 16 KiB; a directive's first report is
+/// `alert.csp`, once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn csp_reports_are_collected_and_grouped() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "web", json!({"port": 80, "min_instances": 1})).await;
+    let base = format!("/v1/apps/services/{}/environments/production", svc["id"].as_str().unwrap());
+    let hn = host(&svc["environments"][0]["url"]);
+    let send = |method: &str, path: &str, ctype: &str, body: String| {
+        let r = Request::builder().method(method).uri(path).header("host", hn.as_str()).header("content-type", ctype).body(Body::from(body)).unwrap();
+        w.public.clone().oneshot(r)
+    };
+    let h = |r: &axum::response::Response, k: &str| r.headers().get_all(k).iter().map(|v| v.to_str().unwrap().to_string()).collect::<Vec<_>>();
+    let rules = json!([{"set": {"Content-Security-Policy": "default-src 'self'"}}, {"path": "/own", "set": {"Content-Security-Policy": "img-src 'self'; report-to theirs"}, "replace": true}]);
+    assert_eq!(call(&w.api, "PUT", &base, Some(json!({"headers": rules}))).await.0, StatusCode::OK);
+    let r = send("GET", "/", "text/plain", String::new()).await.unwrap();
+    assert_eq!((h(&r, "reporting-endpoints"), h(&r, "content-security-policy")), (vec![], vec!["default-src 'self'".to_string()]), "off: untouched");
+    let legacy = json!({"csp-report": {"document-uri": "https://site.example/checkout?token=s3cret#x", "violated-directive": "script-src-elem", "blocked-uri": "https://evil.example/x.js?k=s3cret", "disposition": "enforce"}}).to_string();
+    assert_eq!(send("POST", "/__roll/csp", "application/csp-report", legacy.clone()).await.unwrap().status(), StatusCode::OK, "off: the app's own path");
+    let (st, env) = call(&w.api, "PUT", &base, Some(json!({"csp_reports": true}))).await;
+    assert_eq!((st, &env["csp_reports"]), (StatusCode::OK, &json!(true)), "{env}");
+    let r = send("GET", "/", "text/plain", String::new()).await.unwrap();
+    assert_eq!(h(&r, "reporting-endpoints"), [r#"roll="/__roll/csp""#]);
+    assert_eq!(h(&r, "content-security-policy"), ["default-src 'self'; report-uri /__roll/csp; report-to roll"]);
+    assert_eq!(h(&send("GET", "/own", "text/plain", String::new()).await.unwrap(), "content-security-policy"), ["img-src 'self'; report-to theirs"], "its own report-to kept");
+    // Both shapes: 60 in one Reporting API body (50 read), the legacy one, a report-only one.
+    let one = json!({"type": "csp-violation", "url": "https://site.example/checkout?token=s3cret", "body": {"documentURL": "https://site.example/checkout?token=s3cret", "blockedURL": "https://evil.example/y.js", "effectiveDirective": "script-src-elem", "disposition": "enforce"}});
+    let many = serde_json::to_string(&vec![one; 60]).unwrap();
+    assert!(many.len() < 16 * 1024);
+    let only = json!([{"type": "csp-violation", "body": {"documentURL": "https://site.example/users/42", "blockedURL": "data", "effectiveDirective": "img-src", "disposition": "report"}}]).to_string();
+    for (ctype, body) in [("application/reports+json", many), ("application/csp-report", legacy.clone()), ("application/reports+json", only)] {
+        assert_eq!(send("POST", "/__roll/csp", ctype, body).await.unwrap().status(), StatusCode::NO_CONTENT);
+    }
+    assert_eq!(send("POST", "/__roll/csp", "application/reports+json", "x".repeat(17 * 1024)).await.unwrap().status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(send("POST", "/__roll/csp", "application/csp-report", legacy).await.unwrap().status(), StatusCode::NO_CONTENT, "seen again");
+    let (st, v) = call(&w.api, "GET", &format!("{base}/csp-reports?minutes=60"), None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let groups: Vec<Value> = v["groups"].as_array().unwrap().iter().map(|g| json!([g["directive"], g["blocked"], g["path"], g["disposition"], g["count"]])).collect();
+    assert_eq!(groups, [json!(["script-src-elem", "https://evil.example", "/checkout", "enforce", 52]), json!(["img-src", "data:", "/users/:id", "report", 1])], "{v}");
+    assert!(!v.to_string().contains("s3cret"), "no query is kept: {v}");
+    let ev = call(&w.api, "GET", "/v1/apps/events?after=0", None).await.1;
+    let csp: Vec<Value> = ev["events"].as_array().unwrap().iter().filter(|e| e["kind"] == "alert.csp").map(|e| e["data"]["directive"].clone()).collect();
+    assert_eq!(csp, [json!("script-src-elem"), json!("img-src")], "once a directive: {ev}");
+}
+
 /// A GET that finds its instance gone (killed: nothing listens, and roll doesn't know yet) goes
 /// to a fresh instance instead of a 503; a request with a body isn't sent twice.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -2017,6 +2064,71 @@ async fn a_link_puts_its_variables_in_the_instances() {
     assert_eq!(MINTED.lock().len(), before + 2, "the same options make nothing");
     let listed = call(&w.api, "GET", &format!("/v1/apps/services/{rid}/links"), None).await.1;
     assert!(listed.as_array().unwrap().iter().any(|l| l["kind"] == "search" && l["access"] == "read" && l["indices"] == json!(["tenant-*"])), "{listed}");
+    // Rotated (Heroku's pg:credentials:rotate): a new key, the environments redeployed with it,
+    // the old one revoked only once nothing runs with it. A redeploy that fails keeps the old one.
+    let key_of = |line: &str| line.rsplit(' ').next().unwrap().to_string();
+    let old = key_of(MINTED.lock().iter().rev().find(|l| l.starts_with(&format!("link {rid} "))).unwrap());
+    let revoked = |k: &str| MINTED.lock().contains(&format!("unlink {k}"));
+    let rbase = format!("/v1/apps/services/{rid}/environments");
+    call(&w.api, "PUT", &format!("{rbase}/staging"), Some(json!({}))).await;
+    let (_, sd) = call(&w.api, "POST", &format!("{rbase}/staging/deploys"), Some(json!({}))).await;
+    let staged = settled(&w, &rid, "staging", sd["id"].as_str().unwrap()).await;
+    assert_eq!(staged["status"], "active", "{staged}");
+    call(&w.api, "PATCH", &format!("/v1/apps/services/{rid}"), Some(json!({"run": {"health_path": "/healthz", "health_timeout_s": 1}}))).await;
+    call(&w.api, "PATCH", &format!("{rbase}/production/variables"), Some(json!({"set": {"FAKE_ECHO": "ELASTICSEARCH_API_KEY", "FAKE_UNHEALTHY": "1"}}))).await;
+    let before = MINTED.lock().len();
+    let (st, e) = call(&w.api, "POST", &format!("{path}/rotate"), Some(json!({"environment": "production"}))).await;
+    assert_eq!(st, StatusCode::CONFLICT, "{e}");
+    assert!(e.to_string().contains("keeps its old credential"), "{e}");
+    let tried = key_of(&MINTED.lock()[before]);
+    let (_, v) = call(&w.api, "GET", &format!("{rbase}/production/variables/values"), None).await;
+    assert_eq!(v["ELASTICSEARCH_API_KEY"], format!("{old}-secret"), "the old one is back: {v}");
+    // The one that never went live is revoked; the old one, still in use, isn't.
+    for _ in 0..400 {
+        if revoked(&tried) {
+            break;
+        }
+        w.apps.revoke_pass().await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(revoked(&tried) && !revoked(&old), "{:?}", MINTED.lock());
+    call(&w.api, "PATCH", &format!("{rbase}/production/variables"), Some(json!({"unset": ["FAKE_UNHEALTHY"]}))).await;
+    let was = call(&w.api, "GET", &format!("{rbase}/production"), None).await.1["active"]["id"].as_str().unwrap().to_string();
+    let (st, r) = call(&w.api, "POST", &format!("{path}/rotate"), Some(json!({"environment": "production"}))).await;
+    assert_eq!((st, &r["live"], &r["waiting"]), (StatusCode::OK, &json!(true), &json!(["staging"])), "{r}");
+    let new = key_of(MINTED.lock().iter().rev().find(|l| l.starts_with(&format!("link {rid} "))).unwrap());
+    let dep = r["deployments"][0]["id"].as_str().unwrap();
+    let (_, body) = visit_deployment(&w, &host(&racer["environments"][0]["url"]), dep).await;
+    assert_eq!(body["vars"]["ELASTICSEARCH_API_KEY"], format!("{new}-secret"), "{body}");
+    // Production's old instances drained, staging still runs with the old key: kept.
+    for _ in 0..400 {
+        if !w.fake.instances(&rid).iter().any(|(_, d, _)| *d == was) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    w.apps.revoke_pass().await;
+    assert!(!revoked(&old), "staging still runs with it");
+    // Staging deployed again: nothing runs with it, and it goes, after the new one was made.
+    let (_, sd) = call(&w.api, "POST", &format!("{rbase}/staging/redeploy"), Some(json!({}))).await;
+    settled(&w, &rid, "staging", sd["id"].as_str().unwrap()).await;
+    for _ in 0..400 {
+        if revoked(&old) {
+            break;
+        }
+        w.apps.revoke_pass().await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let log = MINTED.lock().clone();
+    let at = |l: String| log.iter().position(|x| *x == l);
+    assert!(at(format!("unlink {old}")) > at(format!("link {rid} {new}")), "{log:?}");
+    assert!(!revoked(&new));
+    let (_, act) = call(&w.api, "GET", &format!("/v1/apps/services/{rid}/activity"), None).await;
+    assert!(act.to_string().contains("link.rotated") && !act.to_string().contains("-secret"), "audited, never a value: {act}");
+    // A link with no credential of its own has nothing to rotate.
+    call(&w.api, "PUT", &format!("/v1/apps/services/{rid}/links/postgres/main"), Some(json!({}))).await;
+    assert_eq!(call(&w.api, "POST", &format!("/v1/apps/services/{rid}/links/postgres/main/rotate"), None).await.0, StatusCode::BAD_REQUEST);
+    call(&w.api, "DELETE", &format!("/v1/apps/services/{rid}/links/postgres/main"), None).await;
     // A service link gives another web service's URLs, named for it: private on the project
     // network, public when it's public. Only another web service of the project links, and its
     // links go with it.
@@ -2027,6 +2139,7 @@ async fn a_link_puts_its_variables_in_the_instances() {
     let (st, l) = call(&w.api, "PUT", &format!("{links}/service/{pid}"), Some(json!({}))).await;
     assert_eq!((st, &l["vars"]), (StatusCode::OK, &json!(["PAY_URL", "PAY_PUBLIC_URL"])), "{l}");
     assert_eq!(call(&w.api, "PUT", &format!("{links}/service/{rid}"), Some(json!({}))).await.0, StatusCode::BAD_REQUEST, "not itself");
+    assert_eq!(call(&w.api, "POST", &format!("{links}/service/{pid}/rotate"), None).await.0, StatusCode::BAD_REQUEST, "nothing of its own to rotate");
     assert_eq!(call(&w.api, "PUT", &format!("{links}/service/{}", worker["id"].as_str().unwrap()), Some(json!({}))).await.0, StatusCode::BAD_REQUEST, "a worker has no URL");
     let base = format!("/v1/apps/services/{rid}/environments/production");
     call(&w.api, "PATCH", &format!("{base}/variables"), Some(json!({"set": {"FAKE_ECHO": "PAY_URL,PAY_PUBLIC_URL"}}))).await;
@@ -4693,6 +4806,7 @@ async fn on_call_targets_open_and_close_incidents() {
     let w = world_full(
         |c| {
             c.oncall_apis = apps_control::OncallApis { pagerduty_us: format!("http://{at}/pd"), pagerduty_eu: format!("http://{at}/pd-eu"), opsgenie_us: format!("http://{at}/og"), opsgenie_eu: format!("http://{at}/og-eu") };
+            c.web_url = Some("https://roll.example".into());
         },
         false,
         |_| {},
@@ -4785,6 +4899,94 @@ async fn on_call_targets_open_and_close_incidents() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     assert!(paged, "the held alert went out when the silence ended");
+    // Open alerts (Better Stack's): the failed deploy and the memory alert, newest first, until
+    // something closes their keys.
+    let alerts = format!("/v1/apps/projects/{}/alerts", w.project);
+    let kinds = |v: &Value| v.as_array().unwrap().iter().map(|a| a["kind"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+    let (st, list) = call(&w.api, "GET", &alerts, None).await;
+    assert_eq!((st, kinds(&list)), (StatusCode::OK, vec!["deploy.failed".to_string(), "alert.memory".into()]), "{list}");
+    assert_eq!(list[1]["acked"], Value::Null, "{list}");
+    // Acknowledged once: again changes nothing, an unknown one is a 404.
+    let failed = list[0]["id"].as_str().unwrap().to_string();
+    let (st, a) = call(&w.api, "POST", &format!("{alerts}/{failed}/ack"), None).await;
+    assert_eq!((st, a["acked"]["by"].is_string()), (StatusCode::OK, true), "{a}");
+    assert_eq!(call(&w.api, "POST", &format!("{alerts}/{failed}/ack"), None).await.1["acked"], a["acked"], "who acknowledged first stays");
+    assert_eq!(call(&w.api, "POST", &format!("{alerts}/alr_nope/ack"), None).await.0, StatusCode::NOT_FOUND);
+    let ev = call(&w.api, "GET", "/v1/apps/events?after=0", None).await.1;
+    let n = |k: &str| ev["events"].as_array().unwrap().iter().filter(|e| e["kind"] == k).count();
+    assert_eq!((n("alert.acked"), n("audit.alert.acked")), (1, 1), "an event targets can ask for, and the audit trail's");
+    // Escalation (Better Stack's policies): to another target, never itself nor round.
+    let (st, esc) = call(&w.api, "POST", &base, Some(json!({"kind": "webhook", "url": format!("http://{at}/esc"), "events": ["check.down"]}))).await;
+    assert_eq!(st, StatusCode::CREATED, "{esc}");
+    let esc_id = esc["id"].as_str().unwrap().to_string();
+    let target = format!("{base}/{pd_id}");
+    assert_eq!(call(&w.api, "PATCH", &target, Some(json!({"escalate": {"after_min": 15, "to": pd_id}}))).await.0, StatusCode::BAD_REQUEST, "not itself");
+    assert_eq!(call(&w.api, "PATCH", &target, Some(json!({"escalate": {"after_min": 2, "to": esc_id}}))).await.0, StatusCode::BAD_REQUEST, "5–1440 minutes");
+    let (st, t) = call(&w.api, "PATCH", &target, Some(json!({"escalate": {"after_min": 15, "to": esc_id}}))).await;
+    assert_eq!((st, t["escalate"]["to"].as_str()), (StatusCode::OK, Some(esc_id.as_str())), "{t}");
+    assert_eq!(call(&w.api, "PATCH", &format!("{base}/{esc_id}"), Some(json!({"escalate": {"after_min": 15, "to": pd_id}}))).await.0, StatusCode::BAD_REQUEST, "a loop");
+    // A resolve closes the memory alert (acknowledging it now is a conflict); it opens again.
+    let memory = list[1]["id"].as_str().unwrap().to_string();
+    let event = |kind: &'static str, data: Value| {
+        let (apps, sid) = (w.apps.clone(), id.clone());
+        async move { apps.db(move |s| s.add_event(kind, &sid, "production", None, &data)).await.unwrap() }
+    };
+    event("alert.resolved", json!({"alert": "alert.memory"})).await;
+    let mut list = Value::Null;
+    for _ in 0..400 {
+        list = call(&w.api, "GET", &alerts, None).await.1;
+        if kinds(&list) == ["deploy.failed"] {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(kinds(&list), ["deploy.failed"], "{list}");
+    assert_eq!(call(&w.api, "POST", &format!("{alerts}/{memory}/ack"), None).await.0, StatusCode::CONFLICT, "closed");
+    event("alert.memory", json!({"value": 99, "limit_mb": 512, "threshold": 90})).await;
+    for _ in 0..400 {
+        list = call(&w.api, "GET", &alerts, None).await.1;
+        if kinds(&list).len() == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let again = list[0]["id"].as_str().unwrap().to_string();
+    assert_eq!((list[0]["kind"].as_str(), again != memory), (Some("alert.memory"), true), "a new incident: {list}");
+    // Unacknowledged past its 15 minutes, but silenced: nothing escalates until it's over, then
+    // once, whatever passes run.
+    let escalated = || async { call(&w.api, "GET", &format!("{base}/{esc_id}/deliveries"), None).await.1.as_array().unwrap().iter().map(|d| d["kind"].as_str().unwrap().to_string()).collect::<Vec<_>>() };
+    let (_, quiet) = call(&w.api, "POST", &silences, Some(json!({"until": until, "reason": "load test", "alerts": ["alert.memory"]}))).await;
+    let later = code_sql::now_ms() + 16 * 60_000;
+    w.apps.escalate_due(later).await;
+    assert!(escalated().await.is_empty(), "silenced");
+    assert_eq!(call(&w.api, "DELETE", &format!("{silences}/{}", quiet["id"].as_str().unwrap()), None).await.0, StatusCode::NO_CONTENT);
+    w.apps.escalate_due(later + 2 * 60_000).await;
+    w.apps.escalate_due(later + 5 * 60_000).await;
+    assert_eq!(escalated().await, ["alert.memory"], "sent to its target once");
+    let mut sent = None;
+    for _ in 0..400 {
+        sent = got.lock().iter().find(|(u, ..)| u == "/esc").map(|(.., b)| b.clone());
+        if sent.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let sent = sent.expect("the escalation was delivered");
+    assert_eq!((sent["escalated"].as_bool(), sent["alert"].as_str()), (Some(true), Some(again.as_str())), "{sent}");
+    assert!(sent["title"].as_str().unwrap().starts_with("Escalated: "), "{sent}");
+    assert!(sent["ack_url"].as_str().unwrap().starts_with(&format!("https://roll.example/dashboard/apps/alerts?project={}&alert={again}", w.project)), "{sent}");
+    assert!(call(&w.api, "GET", &alerts, None).await.1[0]["escalated_at"].is_i64());
+    // Whoever it was escalated to hears it close.
+    event("alert.resolved", json!({"alert": "alert.memory"})).await;
+    let mut heard = Vec::new();
+    for _ in 0..400 {
+        heard = escalated().await;
+        if heard.len() == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(heard.contains(&"alert.resolved".to_string()), "{heard:?}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

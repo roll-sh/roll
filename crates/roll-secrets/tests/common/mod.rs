@@ -13,8 +13,8 @@ pub fn scratch() -> tempfile::TempDir {
 }
 
 /// Copy a fresh secrets database to `to`, as `Secrets::new` leaves one on an empty file (the
-/// schema, and the issuer's and the audit log's keys under the tests' keyring), made once per run:
-/// making the issuer's RSA key and running every migration was most of each test's time. On
+/// schema and the audit log's key under the tests' keyring; not the issuer's key, which each test
+/// still makes), made once per run: running every migration was most of each test's time. On
 /// Postgres (`ROLL_CODE_TEST_DATABASE`) each test makes its own, as before.
 pub fn fresh_secrets_db(to: &Path) {
     static TEMPLATE: OnceLock<(tempfile::TempDir, PathBuf)> = OnceLock::new();

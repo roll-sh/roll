@@ -409,6 +409,8 @@ pub struct Gate {
     pub traces: bool,
     /// Its pages carry roll's Web Vitals tag.
     pub vitals: bool,
+    /// Its answers name `/__roll/csp` for their CSP reports, which it takes ([`crate::csp`]).
+    pub csp_reports: bool,
     /// Its Strict-Transport-Security value, over HTTPS when the answer has none.
     pub hsts: Option<axum::http::HeaderValue>,
     /// Its challenge rules' key ([`crate::challenge`]), when it has such a rule or attack mode.

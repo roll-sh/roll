@@ -2895,6 +2895,9 @@ impl Apps {
             if n.is_multiple_of(10) {
                 self.flush_meters(false).await;
                 self.cron_pass(code_sql::now_ms()).await;
+                // Links' old credentials that nothing runs with any more.
+                let this = self.clone();
+                tokio::spawn(async move { this.revoke_pass().await });
             }
             if n.is_multiple_of(600) {
                 let day_ago = code_sql::now_ms() - 86_400_000;
@@ -3445,6 +3448,8 @@ impl Apps {
                         past_week += self.logs.stored_before(&key, week).await;
                     }
                 }
+                let (sid, en) = (svc.id.clone(), e.name.clone());
+                let _ = self.db(move |s| s.expire_csp_reports(&sid, &en, before)).await;
                 if past_week > 0 {
                     let (sid, en, gb) = (svc.id.clone(), e.name.clone(), past_week as f64 / 1e9);
                     let _ = self.db(move |s| s.meter_stored(&sid, &en, "logs", now / 3_600_000, gb)).await;

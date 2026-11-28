@@ -138,6 +138,10 @@ pub struct Settings {
     /// parents as they are now (`POST …/rehearse`, asked by roll at that head; off by default:
     /// each is a fresh branch, its masking and a release run).
     pub rehearse_when_queued: bool,
+    /// Trusted previews' writes (POST, PUT, PATCH, DELETE) to services on roll's runtime kept with
+    /// their bodies (sealed, bounded), so `POST …/replay` replays them on fresh copies of both
+    /// previews' data (off by default: a body can hold what a visitor typed).
+    pub replay_writes: bool,
     /// The release checked at each head (PlanetScale's deploy requests, pgroll's expand/contract):
     /// `check` rehearses it on the parents as they are now at every head of a change (not only
     /// when it's queued), beside main's code on its migrated data; `required` also keeps the
@@ -632,6 +636,7 @@ impl Default for Settings {
             seed: None,
             release: None,
             rehearse_when_queued: false,
+            replay_writes: false,
             release_checks: ReleaseChecksRule::Off,
             teardown: None,
             masking: BTreeMap::new(),

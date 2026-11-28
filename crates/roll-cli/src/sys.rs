@@ -54,6 +54,32 @@ fn on_path(name: &str) -> Option<PathBuf> {
     std::env::split_paths(&std::env::var_os("PATH")?).find_map(|dir| exts.split(';').filter(|e| !e.is_empty()).map(|e| dir.join(format!("{name}{e}"))).find(|c| c.is_file()))
 }
 
+/// roll's own credentials in this process's environment, by name: what a command roll starts for
+/// someone (`roll run`, `roll apps exec`, `roll secrets render --exec`) never inherits, so the
+/// program, its dependencies and its crash reporter never act as roll's operator or with the token
+/// that read their values. A name the command is given itself (`given`) stays.
+pub fn roll_credentials(given: &dyn Fn(&str) -> bool) -> Vec<std::ffi::OsString> {
+    std::env::vars_os()
+        .filter_map(|(k, v)| {
+            let n = k.to_str()?;
+            (is_roll_credential(n, v.to_str().unwrap_or("")) && !given(n)).then(|| k.clone())
+        })
+        .collect()
+}
+
+/// A `ROLL_*` variable that holds a credential: named like a token (or a file holding one), a key,
+/// a password or a secret, or a `_URI`/`_URL` whose value carries a user and password
+/// (`ROLL_MIGRATE_AMQP_URI`). `ROLL_API_URL`, `ROLL_PROJECT` and the like aren't.
+pub fn is_roll_credential(name: &str, value: &str) -> bool {
+    if !name.starts_with("ROLL_") {
+        return false;
+    }
+    let named = ["_TOKEN", "_TOKEN_FILE", "_KEY", "_PASSWORD", "_SECRET", "_CREDENTIAL_FILE"].iter().any(|s| name.ends_with(s));
+    let userinfo = (name.ends_with("_URI") || name.ends_with("_URL"))
+        && value.split_once("://").is_some_and(|(_, rest)| rest.split(['/', '?', '#']).next().is_some_and(|authority| authority.contains('@')));
+    named || userinfo
+}
+
 /// A command line for the shell: `sh -c` on Linux and macOS, `cmd /C` on Windows (the line as
 /// written, unquoted).
 #[cfg(windows)]

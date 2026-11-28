@@ -498,7 +498,7 @@ fn files_schema() -> Value {
 /// Tools that reach outside roll (MCP's `openWorldHint`): a model provider (an AI review, a coding
 /// agent's turns and automations) or a branch's remote (publishing an agent's work).
 /// Tools whose effect can't be undone: clients ask a person first.
-const DESTRUCTIVE: [&str; 2] = ["close_change", "stop_preview"];
+const DESTRUCTIVE: [&str; 3] = ["close_change", "stop_preview", "delete_agent_automation"];
 const OPEN_WORLD: [&str; 9] = ["request_ai_review", "create_agent_thread", "send_agent_message", "respond_agent_request", "claim_agent_work", "run_agent_automation", "retry_agent_automation_run", "enable_agent_automation", "publish_agent_thread"];
 
 /// The routes each tool calls, as `(tool, method, route)` in the router's pattern: a lookup it
@@ -572,6 +572,7 @@ pub const ROUTES: &[(&str, &str, &str)] = &[
     ("retry_agent_automation_run", "POST", "/v1/code/agents/{owner}/automations/runs/{run}/retry"),
     ("enable_agent_automation", "POST", "/v1/code/agents/{owner}/automations/{id}/enable"),
     ("disable_agent_automation", "POST", "/v1/code/agents/{owner}/automations/{id}/disable"),
+    ("delete_agent_automation", "DELETE", "/v1/code/agents/{owner}/automations/{id}"),
     ("get_agent_automation_catalog", "GET", "/v1/code/agents/{owner}/automations/catalog"),
     ("test_agent_automation", "POST", "/v1/code/agents/{owner}/automations/test"),
     ("list_agent_sandboxes", "GET", "/v1/code/agents/{owner}/sandboxes"),
@@ -900,7 +901,7 @@ fn every_tool() -> Vec<Value> {
                 "owner": s("The owner it goes under"),
                 "name": s("Its name: letters, digits, - and _"),
                 "description": s("One line on it"),
-                "visibility": json!({ "type": "string", "enum": ["private", "public"], "description": "default private" }),
+                "visibility": json!({ "type": "string", "enum": ["private", "public"], "description": "Default public: anyone can read it. private: only the owner can" }),
                 "default_branch": s("Default \"main\""),
             }),
             &["owner", "name"],
@@ -1033,7 +1034,7 @@ fn every_tool() -> Vec<Value> {
             "Create a roll code repository for the owner and clone it onto a machine as a project (default path: ~/roll/<owner>/<repo>). Answers the project's id. The owner's: agent tokens can't add projects.",
             json!({
                 "owner": owner.clone(), "machine": machine.clone(), "repo": s("The new repository's name"), "description": s("Description"),
-                "visibility": json!({ "type": "string", "enum": ["public", "private"] }), "path": s("Where to clone it (absolute, or under ~/roll)"),
+                "visibility": json!({ "type": "string", "enum": ["public", "private"], "description": "The repository's. Default public: anyone can read it. private: only the owner can" }), "path": s("Where to clone it (absolute, or under ~/roll)"),
                 "name": s("The project's name on the canvas"), "id": command_id
             }),
             &["owner", "machine", "repo"],
@@ -1086,6 +1087,7 @@ fn every_tool() -> Vec<Value> {
         tool("retry_agent_automation_run", "Retry an automation run", "Run a failed or cancelled run again from where it stopped. The owner's.", json!({ "owner": owner.clone(), "run": s("A run id (arn_…)") }), &["owner", "run"], false),
         tool("enable_agent_automation", "Turn an automation on", "Turn an automation on: new events start runs again. The owner's.", json!({ "owner": owner.clone(), "automation": s("An automation id (aut_…) or name") }), &["owner", "automation"], false),
         tool("disable_agent_automation", "Turn an automation off", "Turn an automation off: new events start nothing; runs going on go on. The owner's.", json!({ "owner": owner.clone(), "automation": s("An automation id (aut_…) or name") }), &["owner", "automation"], false),
+        tool("delete_agent_automation", "Delete an automation", "Delete an automation for good: it starts nothing again, its secrets and webhook are dropped, and its runs going on are cancelled. To stop it for a while, disable_agent_automation. The owner's.", json!({ "owner": owner.clone(), "automation": s("An automation id (aut_…) or name") }), &["owner", "automation"], false),
         tool(
             "get_agent_automation_catalog",
             "List automation triggers and steps",
@@ -1783,6 +1785,14 @@ async fn run(c: &Call<'_>, name: &str, args: &Value) -> std::result::Result<Outc
             let owner = c.owner(args)?;
             let run = str_arg(args, "run").ok_or_else(|| fail("run is required (arn_…)"))?;
             pass(c.post(&format!("/v1/code/agents/{}/automations/runs/{}/retry", seg(owner), seg(run)), json!({})).await)
+        }
+        "delete_agent_automation" => {
+            let owner = c.owner(args)?;
+            let a = str_arg(args, "automation").ok_or_else(|| fail("automation is required (aut_… or its name)"))?;
+            let id = c.automation_id(owner, a).await?;
+            // A 204: say which one went.
+            let r = c.delete(&format!("/v1/code/agents/{}/automations/{}", seg(owner), seg(&id))).await;
+            if r.ok() { ok(json!({ "deleted": id })) } else { r.error() }
         }
         "enable_agent_automation" | "disable_agent_automation" => {
             let owner = c.owner(args)?;

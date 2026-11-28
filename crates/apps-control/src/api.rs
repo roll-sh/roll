@@ -62,6 +62,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route("/v1/apps/services/{id}/links", get(links))
         .route("/v1/apps/services/{id}/activity", get(activity))
         .route("/v1/apps/services/{id}/links/{kind}/{ref}", put(put_link).delete(delete_link))
+        .route("/v1/apps/services/{id}/links/{kind}/{ref}/rotate", post(rotate_link))
         .route("/v1/apps/events", get(events))
         .route("/v1/apps/services/{id}/changes", get(changes))
         .route("/v1/apps/projects/{project}/notifications", get(targets).post(add_target))
@@ -88,6 +89,8 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route("/v1/apps/projects/{project}/notifications/{nid}/test", post(test_target))
         .route("/v1/apps/projects/{project}/notifications/{nid}/deliveries", get(deliveries))
         .route("/v1/apps/projects/{project}/notifications/{nid}/deliveries/{did}/redeliver", post(redeliver))
+        .route("/v1/apps/projects/{project}/alerts", get(alerts))
+        .route("/v1/apps/projects/{project}/alerts/{aid}/ack", post(ack_alert))
         .route("/v1/apps/services/{id}/registry", put(put_registry).delete(delete_registry))
         .route("/v1/apps/services/{id}/deploys", get(service_deploys))
         .route("/v1/apps/services/{id}/git-login", put(put_git_login).delete(delete_git_login))
@@ -142,6 +145,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/visitors/{{visitor}}"), axum::routing::delete(sign_out_visitor))
         .route(&format!("{env}/fetch"), get(fetch_page))
         .route(&format!("{env}/vitals"), get(vitals))
+        .route(&format!("{env}/csp-reports"), get(csp_reports))
         .route(&format!("{env}/app-metrics"), get(app_metrics))
         .route(&format!("{env}/errors"), get(errors))
         .route(&format!("{env}/errors/{{fingerprint}}"), axum::routing::patch(error_state))
@@ -634,6 +638,16 @@ async fn put_link(State(apps): S, Path((id, kind, r)): Path<(String, String, Str
     ok(l)
 }
 
+/// A new credential for the link, its environments redeployed with it, the old one revoked once
+/// nothing runs with it (`rotate.rs`). 202 while a redeploy is still going.
+async fn rotate_link(State(apps): S, Path((id, kind, r)): Path<(String, String, String)>, ext: Extensions, b: Bytes) -> R {
+    let rot = apps.rotate_link(&id, &kind, &r, if b.is_empty() { json!({}) } else { body(&b)? }, actor(&ext)).await?;
+    // Which environments, never a value.
+    let envs: Vec<&str> = rot.deployments.iter().map(|d| d.environment.as_str()).collect();
+    apps.audit("link.rotated", &id, "", actor(&ext), json!({ "kind": kind, "ref": r, "environments": envs })).await;
+    Ok((if rot.live { StatusCode::OK } else { StatusCode::ACCEPTED }, Json(rot)).into_response())
+}
+
 async fn delete_link(State(apps): S, Path((id, kind, r)): Path<(String, String, String)>, ext: Extensions) -> R {
     apps.delete_link(&id, &kind, &r).await?;
     apps.settings_changed();
@@ -728,6 +742,14 @@ async fn deliveries(State(apps): S, Path((project, nid)): Path<(String, String)>
 
 async fn redeliver(State(apps): S, Path((project, nid, did)): Path<(String, String, String)>) -> R {
     ok(apps.redeliver(&project, &nid, &did).await?)
+}
+
+async fn alerts(State(apps): S, Path(project): Path<String>) -> R {
+    ok(apps.alerts(&project).await?)
+}
+
+async fn ack_alert(State(apps): S, Path((project, aid)): Path<(String, String)>, ext: Extensions) -> R {
+    ok(apps.ack_alert(&project, &aid, actor(&ext)).await?)
 }
 
 #[derive(Deserialize)]
@@ -1719,6 +1741,10 @@ async fn app_metrics(State(apps): S, Path((id, env)): Path<(String, String)>, Qu
 
 async fn vitals(State(apps): S, Path((id, env)): Path<(String, String)>, Query(q): Query<VitalsQuery>) -> R {
     ok_marked(&apps, &id, &env, apps.vitals(&id, &env, q.minutes.unwrap_or(1440)).await?).await
+}
+
+async fn csp_reports(State(apps): S, Path((id, env)): Path<(String, String)>, Query(q): Query<VitalsQuery>) -> R {
+    ok_marked(&apps, &id, &env, apps.csp_reports(&id, &env, q.minutes.unwrap_or(1440)).await?).await
 }
 
 #[derive(Deserialize)]

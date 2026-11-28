@@ -1266,7 +1266,6 @@ async fn a_rule_can_grant_part_of_a_resource() {
         assert_eq!(d.call(&logs, Method::GET, "/v1/search/clusters/cl_1/indices", None).await.0, StatusCode::FORBIDDEN);
         assert_eq!(d.call(&logs, Method::POST, "/v1/search/clusters/cl_1/request", Some(json!({}))).await.0, StatusCode::FORBIDDEN);
         // Tightened to what it used: the two expressions it searched, nothing else.
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         // Who touched cl_1: the cluster and what's under it; an index alone; a pattern is literal.
         let who = |q: &str| {
             let (d, path) = (&d, format!("/v1/access/audit?{q}"));
@@ -1322,8 +1321,9 @@ async fn a_rule_can_grant_part_of_a_resource() {
     }
     {
         // A rule limited to some secret keys: a request about one key is decided by it, a folder's
-        // list and values (answered key by key) let it through, and what's answered only per
-        // environment and folder (health), a list or a create don't. Keys are secrets' only.
+        // list, values and digest (answered key by key) let it through, and what's answered only
+        // per environment and folder (a diff, health), a list or a create don't. Keys are secrets'
+        // only.
         let d = Daemon::new(50);
         let (stripe, _) = d.token(json!([{ "product": "secrets", "resources": [{ "id": "prj_a" }], "environments": ["production"], "keys": ["STRIPE_KEY"], "actions": { "read": "allow", "reveal": "allow", "write": "allow" } }]), json!({})).await;
         let at = |rest: &str| format!("/v1/secrets/projects/prj_a/environments/production{rest}");
@@ -1334,11 +1334,13 @@ async fn a_rule_can_grant_part_of_a_resource() {
         assert_eq!(d.call(&stripe, Method::GET, &at("/values"), None).await.0, StatusCode::OK);
         assert_eq!(d.call(&stripe, Method::GET, &at("/secrets"), None).await.0, StatusCode::OK);
         assert_eq!(d.call(&stripe, Method::GET, "/v1/secrets/projects/prj_a/health", None).await.0, StatusCode::FORBIDDEN);
-    // A whole folder's digest (a watch's) says why: the folder, never a key.
-    let (s, why) = d.call(&stripe, Method::GET, &at("/digest?path=/api"), None).await;
-    let why = why["error"].as_str().unwrap_or_default().to_string();
-    assert_eq!(s, StatusCode::FORBIDDEN);
-    assert!(why.contains("only some keys of production:/api; a watch (the folder's digest) reads the whole folder") && !why.contains("STRIPE"), "{why}");
+        // A watch's digest is worked out over its keys; a diff of the whole folder says why not:
+        // the folder, never a key.
+        assert_eq!(d.call(&stripe, Method::GET, &at("/digest?path=/api"), None).await.0, StatusCode::OK);
+        let (s, why) = d.call(&stripe, Method::POST, &at("/diff"), Some(json!({ "path": "/api", "text": "" }))).await;
+        let why = why["error"].as_str().unwrap_or_default().to_string();
+        assert_eq!(s, StatusCode::FORBIDDEN);
+        assert!(why.contains("only some keys of production:/api; a diff reads the whole folder") && !why.contains("STRIPE"), "{why}");
         assert_eq!(d.call(&stripe, Method::GET, "/v1/secrets/projects/prj_a/environments/staging/secrets/STRIPE_KEY/value", None).await.0, StatusCode::FORBIDDEN);
         let (s, _) = d.call(OPERATOR, Method::POST, "/v1/access/tokens", Some(json!({ "name": "x", "rules": [{ "product": "postgres", "resources": "*", "keys": ["A"], "actions": { "read": "allow" } }] }))).await;
         assert_eq!(s, StatusCode::BAD_REQUEST);
@@ -2669,7 +2671,12 @@ async fn the_checkup_names_what_needs_attention() {
     for t in [&wide, &fit] {
         assert_eq!(d.call(t, Method::GET, "/v1/projects", None).await.0, StatusCode::OK);
     }
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    // The audit writer records the calls after they're answered: wait for both, not a fixed time.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while ![&wide_id, &fit_id].iter().all(|id| d.access.store.activity().unwrap().contains_key(id.as_str())) {
+        assert!(std::time::Instant::now() < deadline, "the calls were never audited");
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
     let (_, list) = d.call(OPERATOR, Method::GET, "/v1/access/checkup", None).await;
     let kinds = |id: &str| -> Vec<String> {
         list.as_array().unwrap().iter().find(|e| e["grant"]["id"] == id).map(|e| e["findings"].as_array().unwrap().iter().map(|f| f["kind"].as_str().unwrap().to_string()).collect()).unwrap_or_default()
