@@ -198,9 +198,10 @@ USE="-Cprofile-use=$PROF -Cllvm-args=-pgo-warn-missing-function"
 # (equal class weights, fixed work): two trainings within 0.01%. The shares are the 99% and
 # 99.9999% cutoffs' mean over four trainings of 2026-11-28 (1.61-1.86e-6, 1.29-1.33e-10).
 PTOT=$("$PROFDATA" show "$PROF" | awk '/^Total count:/ {print $3}')
-HOTC=$(awk -v t="$PTOT" -v f="${PGO_HOT_SHARE:-1.75e-6}" 'BEGIN {printf "%.0f", t * f}')
+HOTC=$(awk -v t="$PTOT" -v f="$(echo "${PGO_HOT_SHARE:-1.75e-6}" | sed 's/^off$/1.75e-6/')" 'BEGIN {printf "%.0f", t * f}')
 COLDC=$(awk -v t="$PTOT" -v f="${PGO_COLD_SHARE:-1.3e-10}" 'BEGIN {c = t * f; printf "%.0f", c < 1 ? 1 : c}')
-USE="$USE -Cllvm-args=-profile-summary-hot-count=$HOTC -Cllvm-args=-profile-summary-cold-count=$COLDC"
+# (PGO_HOT_SHARE=off: LLVM's own cutoffs, for measuring this against them; not the shipped recipe.)
+[ "${PGO_HOT_SHARE:-}" = off ] || USE="$USE -Cllvm-args=-profile-summary-hot-count=$HOTC -Cllvm-args=-profile-summary-cold-count=$COLDC"
 for a in ${PGO_LLVM_ARGS:-}; do USE="$USE -Cllvm-args=$a"; done
 note "rustflags $USE${DIST_RUSTFLAGS:+ $DIST_RUSTFLAGS}"
 build "$W/t-use" "$USE" >"$OUT/build-use.log" 2>&1 || { tail -40 "$OUT/build-use.log" >&2; echo "dist-pgo: the optimised build failed ($OUT/build-use.log)" >&2; exit 1; }
