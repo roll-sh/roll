@@ -283,7 +283,8 @@ async fn world_full(setup: impl FnOnce(&mut AppsConfig), objects: bool, deps_set
     cfg.live.drain = Duration::from_millis(50);
     cfg.supersede_every = Duration::from_millis(50);
     cfg.notify_every = Duration::from_millis(20);
-    cfg.host_ttl = Duration::from_millis(20);
+    // Long: a change that forgets to drop a host's cached answer fails here, not by luck.
+    cfg.host_ttl = Duration::from_secs(30);
     cfg.drain_linger = Duration::from_millis(50);
     cfg.otlp_base = Some("http://127.0.0.1:7070".into());
     cfg.allow_private = true;
@@ -811,6 +812,26 @@ async fn a_signed_in_person_gets_into_a_gated_environment() {
     let landing = url::Url::parse(t["url"].as_str().unwrap_or("")).unwrap();
     assert_eq!((st, landing.host_str(), landing.path()), (StatusCode::OK, Some("admin-pr1.preview.acme.dev"), "/__roll/visit"), "{t}");
     assert_eq!(ask(Some("usr_ada"), "https://someone-else.preview.acme.dev/dash".into()).await.0, StatusCode::BAD_REQUEST, "a label it doesn't hold");
+    // Opened there: a session on the preview host, and the app's page answered.
+    let at_preview = |path: String, cookie: String| {
+        let r = Request::builder().uri(path).header("host", "admin-pr1.preview.acme.dev").header("accept", "text/html").header("cookie", cookie).body(Body::empty()).unwrap();
+        let public = w.public.clone();
+        async move {
+            let resp = public.oneshot(r).await.unwrap();
+            (resp.status(), resp.headers().clone())
+        }
+    };
+    let (st, hd) = at_preview(landing[url::Position::BeforePath..].to_string(), state.clone()).await;
+    assert_eq!(st, StatusCode::FOUND, "{hd:?}");
+    let preview_session = hd["set-cookie"].to_str().unwrap().split(';').next().unwrap().to_string();
+    assert_eq!(at_preview("/dash".into(), preview_session).await.0, StatusCode::OK);
+    // Its label under another project's active preview domain names nothing of it.
+    let p2 = w.apps.deps.workspace.as_ref().unwrap().create("", "other", "", None).unwrap().id;
+    let pd2 = format!("/v1/apps/projects/{p2}/preview-domain");
+    let (_, d2) = call(&w.api, "POST", &pd2, Some(json!({"hostname": "*.other.dev"}))).await;
+    w.dns.add("_roll-challenge.other.dev", "TXT", d2["token"].as_str().unwrap());
+    assert_eq!(call(&w.api, "POST", &format!("{pd2}/verify"), None).await.1["status"], "active");
+    assert_eq!(ask(Some("usr_ada"), "https://admin-pr1.other.dev/dash".into()).await.0, StatusCode::BAD_REQUEST, "another project's domain");
     // The ticket goes to the environment's own scheme and port, whatever `to` names: never over
     // another scheme, nor to whatever listens on another port of the address.
     let origin = svc["environments"][0]["url"].as_str().unwrap().trim_end_matches('/').to_string();
@@ -1144,6 +1165,13 @@ async fn an_image_service_scales_to_zero_and_wakes_on_the_first_request() {
     assert!(crowd.iter().all(|(st, _)| *st == StatusCode::OK), "{crowd:?}");
     assert!(Fake::count(&w.fake.counts.creates) - created <= 1, "one instance woke for all of them");
     assert_eq!(w.fake.instances(id).iter().filter(|(_, _, st)| *st == FakeState::Running).count(), 1);
+    // Put to sleep by hand (to stop paying now), then woken by hand.
+    let running = || w.fake.instances(id).iter().filter(|(_, _, st)| *st == FakeState::Running).count();
+    let (st, e) = call(&w.api, "POST", &format!("/v1/apps/services/{id}/environments/production/sleep"), None).await;
+    assert_eq!((st, running()), (StatusCode::OK, 0), "{e}");
+    assert_ne!(e["state"], "running", "{e}");
+    let (st, e) = call(&w.api, "POST", &format!("/v1/apps/services/{id}/environments/production/wake"), None).await;
+    assert_eq!((st, e["state"].as_str(), running()), (StatusCode::OK, Some("running"), 1), "{e}");
     // An unknown host is a 404 page, not an error.
     assert_eq!(visit(&w, "nope.apps.localhost", "/").await.0, StatusCode::NOT_FOUND);
 }
@@ -5716,6 +5744,13 @@ async fn a_closed_environments_build_gets_no_secret_values() {
     assert!(live.template().unwrap().spec.vars.iter().any(|(k, _)| k == "SESSION_KEY"), "its instances still get it");
     let nets = w.fake.build_networks.lock().clone();
     assert_eq!((nets.first(), nets.last()), (Some(&None), Some(&Some(format!("roll-apps-build-{}", w.project.strip_prefix("prj_").unwrap_or(&w.project))))), "{nets:?}");
+    // Open again and no longer runtime-only: the next build has it.
+    assert_eq!(call(&w.api, "PUT", &env, Some(json!({"egress": null}))).await.0, StatusCode::OK);
+    assert_eq!(call(&w.api, "PATCH", &format!("{env}/variables"), Some(json!({"runtime_only": {"SESSION_KEY": false}}))).await.0, StatusCode::OK);
+    let (_, d) = call(&w.api, "POST", &format!("{env}/deploys"), Some(json!({"no_cache": true}))).await;
+    settled(&w, &id, "production", d["id"].as_str().unwrap()).await;
+    let vars = w.fake.build_vars.lock().last().cloned().unwrap();
+    assert!(vars.contains(&"SESSION_KEY".to_string()), "{vars:?}");
 }
 
 /// A remote build cache for Turborepo and Nx (Vercel's Remote Cache): a build gets its

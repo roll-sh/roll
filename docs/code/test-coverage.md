@@ -1185,7 +1185,7 @@ otherwise. The module docs give the client retry policy and exactly what is asse
 
 | roll previews: a deploy hook builds its branches' previews again at their heads (every service, nothing cached), once a minute at most; anything but a live hook is a 404; a leaked one is revoked; its secret is a checksummed roll secret | `roll-previews/tests/engine.rs::a_deploy_hook_builds_its_branches_previews_again` |
 
-| roll previews: a project's own preview domain (roll apps' verified wildcard) puts its previews' URLs under it, and its names reach only that project's previews | `roll-previews/tests/engine.rs::a_projects_own_preview_domain_serves_only_its_previews` |
+| roll previews: a project's own preview domain (roll apps' verified wildcard) puts its previews' URLs under it, and its names reach only that project's previews; with team access, a signed-in person's ticket to a host there lands on that host, and the preview's name under another project's domain, or a name of nothing, gets none | `roll-previews/tests/engine.rs::a_projects_own_preview_domain_serves_only_its_previews` |
 | roll previews: `roll preview visitors` answers who signed in to a team preview lately | `roll-cli/tests/preview.rs::visitors_from_the_cli` |
 
 | roll previews: `roll preview masks` lists a project's mask suggestions (`--apply` adds them) | `roll-cli/tests/preview.rs::mask_suggestions_from_the_cli` |
@@ -1910,7 +1910,7 @@ holding a tiny ACP agent that answers `initialize`.
 
 | Feature | Tests |
 | --- | --- |
-| Image services: scale to zero, wake on the first request, a crowd waking one instance | `apps-control/tests/api.rs::an_image_service_scales_to_zero_and_wakes_on_the_first_request`, `apps-control/tests/api.rs::a_get_to_a_vanished_instance_goes_to_a_fresh_one` |
+| Image services: scale to zero, wake on the first request, a crowd waking one instance, slept and woken by hand | `apps-control/tests/api.rs::an_image_service_scales_to_zero_and_wakes_on_the_first_request`, `apps-control/tests/api.rs::a_get_to_a_vanished_instance_goes_to_a_fresh_one` |
 | Repo services: plan, build, deploy on push, the branch followed, supersede, commit statuses and CI waits; the commit and instance as variables | `apps-control/tests/api.rs::a_repo_service_builds_its_plan_deploys_on_push_and_rolls_back_without_a_build`, `apps-control/tests/api.rs::a_newer_push_stops_the_build_of_an_older_one`, `apps-control/tests/api.rs::deploys_report_on_their_commit_and_can_wait_for_ci` |
 | Uploads (`roll up`), the local plan, roll.toml `[app]` checked before a push | `apps-control/tests/api.rs::roll_up_deploys_an_uploaded_tree`, `roll-cli/tests/apps.rs::a_local_tree_is_planned_before_anything_is_made`, `apps-control/tests/api.rs::roll_toml_sets_run_settings_per_environment` |
 | Builds in real Docker: generated images per language, a Dockerfile's target, static sites | `apps-control/tests/docker.rs::generated_node_python_and_go_images_build_and_answer`, `apps-control/tests/docker.rs::deno_dotnet_and_elixir_trees_build_and_answer`, `apps-control/tests/docker.rs::a_static_site_builds_and_its_cold_starts_are_measured` |
