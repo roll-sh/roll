@@ -287,7 +287,8 @@ SSE answer to `events/stream`): checked before it opens (an unknown event, a too
 can't use, bad arguments, a read the gate refuses: the answer is the error, no stream), then
 `notifications/events/active` with its cursor (`truncated` for a gap) and the heartbeat granted
 (what the client asks, 15 s to 2 minutes, 30 s if it doesn't), each event as the stream reads it
-(every 15 seconds, as the caller and unattended, so each read is decided and audited as
+(every 15 seconds, or as it's recorded for a feed whose route waits for one: previews' takes
+`wait`, #1269; as the caller and unattended, so each read is decided and audited as
 `events/stream:<name>` and nothing asks a person), `notifications/events/heartbeat` with the cursor
 when nothing else went for its interval, `notifications/events/error` when a read failed for a
 moment, and `notifications/events/terminated` when the connection can't read the feed any more. roll
