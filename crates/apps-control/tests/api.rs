@@ -801,6 +801,16 @@ async fn a_signed_in_person_gets_into_a_gated_environment() {
     };
     assert_eq!(ask(None, to.clone()).await.0, StatusCode::FORBIDDEN);
     assert_eq!(ask(Some("usr_ada"), "https://evil.example/".into()).await.0, StatusCode::BAD_REQUEST);
+    // Under the project's active preview domain: its own label only (roll previews' team access).
+    let pd = format!("/v1/apps/projects/{}/preview-domain", w.project);
+    let (_, d) = call(&w.api, "POST", &pd, Some(json!({"hostname": "*.preview.acme.dev"}))).await;
+    w.dns.add("_roll-challenge.preview.acme.dev", "TXT", d["token"].as_str().unwrap());
+    assert_eq!(call(&w.api, "POST", &format!("{pd}/verify"), None).await.1["status"], "active");
+    assert_eq!(call(&w.api, "PUT", &env, Some(json!({"preview_host": "admin-pr1"}))).await.0, StatusCode::OK);
+    let (st, t) = ask(Some("usr_ada"), "https://admin-pr1.preview.acme.dev/dash".into()).await;
+    let landing = url::Url::parse(t["url"].as_str().unwrap_or("")).unwrap();
+    assert_eq!((st, landing.host_str(), landing.path()), (StatusCode::OK, Some("admin-pr1.preview.acme.dev"), "/__roll/visit"), "{t}");
+    assert_eq!(ask(Some("usr_ada"), "https://someone-else.preview.acme.dev/dash".into()).await.0, StatusCode::BAD_REQUEST, "a label it doesn't hold");
     // The ticket goes to the environment's own scheme and port, whatever `to` names: never over
     // another scheme, nor to whatever listens on another port of the address.
     let origin = svc["environments"][0]["url"].as_str().unwrap().trim_end_matches('/').to_string();
