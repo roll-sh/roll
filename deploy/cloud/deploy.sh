@@ -376,8 +376,19 @@ cmd_diagnose() {
   explain $(( $(date -u +%s) - hours * 3600 ))
 }
 
+# The AWS CLI on an Actions runner that lacks it (the workflow's arm64 runners).
+cmd_aws-cli() {
+  if ! command -v aws >/dev/null; then
+    local tmp=${RUNNER_TEMP:-/tmp}
+    curl -fsSL https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip -o "$tmp/awscli.zip"
+    unzip -q "$tmp/awscli.zip" -d "$tmp"
+    sudo "$tmp/aws/install"
+  fi
+  aws --version
+}
+
 case "${1:-}" in
-  push | deploy | rollback | current | status | diagnose)
+  push | deploy | rollback | current | status | diagnose | aws-cli)
     cmd=$1
     shift
     "cmd_$cmd" "$@"
