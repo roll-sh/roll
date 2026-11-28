@@ -624,28 +624,30 @@ pub const NESTS: &[&str] = &["/v1/storage"];
 /// The row for a request by its path alone (what a catch-all hides, or a tool's route).
 pub fn by_path(method: &str, path: &str) -> Option<Found> {
     let path = path.split('?').next().unwrap_or(path);
-    if OPERATOR_ONLY.iter().any(|(r, _)| match_pattern(r, path).is_some()) {
+    if OPERATOR_ONLY.iter().any(|(r, _)| score(r, path).is_some()) {
         return None;
     }
+    // Every row is tried (a request under a catch-all, each tool's route), so rows are scored
+    // without allocating; only the one that wins has its parameters read.
     let exact = ROWS
         .iter()
         .filter(|r| !r.route.ends_with('/'))
         .filter_map(|r| {
-            let (score, params) = match_pattern(r.route, path)?;
-            Some(((score, method_rank(r, method)?), r, params))
+            let rank = method_rank(r, method)?;
+            Some(((score(r.route, path)?, rank), r))
         })
-        .max_by_key(|(k, ..)| *k);
-    if let Some((_, row, params)) = exact {
-        return Some(Found { row, params: Some(params) });
+        .max_by_key(|(k, _)| *k);
+    if let Some((_, row)) = exact {
+        return Some(Found { row, params: match_pattern(row.route, path).map(|(_, p)| p) });
     }
     ROWS.iter()
         .filter(|r| r.route.ends_with('/'))
         .filter_map(|r| {
-            let params = match_prefix(r.route, path)?;
-            Some(((r.route.len(), method_rank(r, method)?), r, params))
+            let rank = method_rank(r, method)?;
+            prefix_fits(r.route, path).then_some(((r.route.len(), rank), r))
         })
-        .max_by_key(|(k, ..)| *k)
-        .map(|(_, row, params)| Found { row, params: Some(params) })
+        .max_by_key(|(k, _)| *k)
+        .map(|(_, row)| Found { row, params: match_prefix(row.route, path) })
 }
 
 /// How a route pattern is classified for grants, whatever the method: its product, `by path` (a
@@ -726,6 +728,37 @@ fn match_pattern(pattern: &str, path: &str) -> Option<(usize, Vec<(String, Strin
         }
     }
     (pat.len() == segs.len()).then_some((statics, params))
+}
+
+/// Whether `pattern` matches `path`, and how many of its segments are static: [`match_pattern`]'s
+/// score, allocating nothing.
+fn score(pattern: &str, path: &str) -> Option<usize> {
+    score_segments(pattern.trim_start_matches('/').split('/'), path.trim_start_matches('/').split('/'))
+}
+
+fn score_segments<'p, 's>(mut pat: impl Iterator<Item = &'p str>, mut segs: impl Iterator<Item = &'s str>) -> Option<usize> {
+    let mut statics = 0;
+    loop {
+        match (pat.next(), segs.next()) {
+            (None, None) => return Some(statics),
+            (Some(p), s) if p.strip_prefix("{*").is_some_and(|rest| rest.ends_with('}')) => return s.map(|_| statics),
+            (Some(p), Some(s)) => match p.strip_prefix('{').and_then(|p| p.strip_suffix('}')) {
+                Some(_) if !s.is_empty() => {}
+                Some(_) => return None,
+                None if p == s => statics += 1,
+                None => return None,
+            },
+            _ => return None,
+        }
+    }
+}
+
+/// [`match_prefix`] without its parameters.
+fn prefix_fits(prefix: &str, path: &str) -> bool {
+    let base = prefix.trim_end_matches('/').trim_start_matches('/');
+    let n = base.split('/').count();
+    let segs = path.trim_start_matches('/').split('/');
+    segs.clone().count() > n && score_segments(base.split('/'), segs.take(n)).is_some()
 }
 
 /// A prefix row (`/a/{x}/`) against a path with something after it.

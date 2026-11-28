@@ -378,9 +378,7 @@ async fn tools_follow_the_tokens_rules() {
     assert_eq!(log[0]["client"], "cursor 1.2", "{log}");
 
     // Every call is audited with its tool and redacted arguments.
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     d.tool(&reader, "postgres_query", json!({ "endpoint": "ep_x", "sql": "select 'password'", "approval": "apr_secret" })).await;
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     d.tool(OPERATOR, "postgres_list_projects", json!({})).await;
     let log = d.audit_until(|l| l.as_array().is_some_and(|a| a.iter().any(|e| e["grant_id"].is_null() && e["tool"] == "postgres_list_projects"))).await;
     assert!(log.as_array().unwrap().iter().any(|e| e["grant_id"].is_null() && e["tool"] == "postgres_list_projects"), "the operator's calls too: {log}");
