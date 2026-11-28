@@ -1098,6 +1098,17 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
     if !capable.is_empty() {
         parts.extensions.insert(roll_auth::Capable(capable));
     }
+    // A route that answers only the indices the grant reaches of its resource: which they are, as
+    // the gate decided it (the resource's project and all), the token's held within the person's
+    // session: the patterns of each the other reaches too. A request that went through on an
+    // approval of its `ask` (here, or on the node that forwarded it) reaches its `ask` rules too.
+    if row.filters_index
+        && let Target::One(r) = &target
+    {
+        let approved_ask = outcome == Outcome::Ask && (!decided_before || approved_before);
+        let reach = scope.indices_reaching_within(within_scope.as_deref(), r, action, approved_ask);
+        parts.extensions.insert(roll_auth::IndexScope(reach));
+    }
     parts.extensions.insert(roll_auth::Grant {
         id: ctx.grant.id.as_str().into(),
         name: ctx.grant.name.as_str().into(),

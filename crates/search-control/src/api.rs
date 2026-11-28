@@ -100,6 +100,8 @@ pub fn router(control: Arc<Control>) -> Router {
         .route("/v1/search/clusters/{id}/indices/{index}/refresh", post(index_refresh))
         .route("/v1/search/clusters/{id}/indices/{index}/analyze", post(index_analyze))
         .route("/v1/search/clusters/{id}/indices/{index}/search", post(index_search))
+        .route("/v1/search/clusters/{id}/esql", post(esql))
+        .route("/v1/search/clusters/{id}/indices/{index}/esql", post(index_esql))
         .route("/v1/search/clusters/{id}/indices/{index}/docs", post(doc_create))
         .route("/v1/search/clusters/{id}/indices/{index}/docs/{doc}", get(doc_get).put(doc_put).delete(doc_delete))
         .route("/v1/search/clusters/{id}/indices/{index}/bulk", post(index_bulk))
@@ -823,6 +825,85 @@ index_route!(index_search, "POST", "/search", "/_search", true, EsBody::Json);
 index_route!(doc_create, "POST", "/docs", "/_doc", false, EsBody::Json);
 index_route!(index_bulk, "POST", "/bulk", "/_bulk", false, EsBody::Ndjson);
 index_route!(index_delete_by_query, "POST", "/delete_by_query", "/_delete_by_query", true, EsBody::Json);
+
+// --- ES|QL, read-only: Elasticsearch's synchronous `POST /_query`, its body's query fields only.
+// Nothing is kept (no async query, no stored result), and ES|QL has no command that writes. A
+// query names its own indices, so the route bounds nothing by a path: the engine checks every
+// index the query reads (`FROM` and its `METADATA`, `LOOKUP JOIN`, an `ENRICH` policy's sources)
+// against the principal it runs as, scoped to the indices the caller's grant reaches.
+
+/// What an ES|QL route's body may say: a synchronous query's fields.
+const ESQL_FIELDS: &[&str] = &["query", "params", "columnar", "filter", "locale"];
+
+/// The query parameters it passes on: how the answer is written.
+const ESQL_PARAMS: &[&str] = &["format", "delimiter", "drop_null_columns"];
+
+/// `POST /v1/search/clusters/{id}/esql`: as the indices the gate's decision reaches
+/// (`roll_auth::IndexScope`: the token's index patterns, or every index for one reaching the whole
+/// cluster). The operator's, with no grant, runs as the cluster's own.
+async fn esql(State(c): State<AppState>, Path(id): Path<String>, method: Method, uri: axum::http::Uri, headers: HeaderMap, ext: Extensions, body: Body) -> Result<Response, ControlError> {
+    let scope = match roll_auth::IndexScope::on(&ext) {
+        // No grant's decision: the operator's (or an open daemon's, `Caller::of`) runs as the
+        // cluster's own. A grant or a person without one is refused, never the cluster's own.
+        None if matches!(Caller::of(&ext), Caller::All) && roll_auth::Grant::on(&ext).is_none() => None,
+        None => return Err(ControlError::Forbidden("this route runs only for the operator or a grant the gate decided".into())),
+        Some(roll_auth::IndexScope(None)) => Some("*".to_string()),
+        Some(roll_auth::IndexScope(Some(p))) if p.is_empty() => return Err(ControlError::Forbidden("the grant reaches no index of this cluster".into())),
+        Some(roll_auth::IndexScope(Some(p))) => Some(p.join(",")),
+    };
+    let api_path = format!("/v1/search/clusters/{}/esql", urlencoding::encode(&id));
+    esql_route(&c, &id, method, api_path, scope, uri.query(), &headers, body).await
+}
+
+/// `POST /v1/search/clusters/{id}/indices/{index}/esql`: as the path's indices (the gate decided
+/// the grant reaches them), whatever the query names.
+async fn index_esql(State(c): State<AppState>, Path((id, index)): Path<(String, String)>, method: Method, uri: axum::http::Uri, headers: HeaderMap, body: Body) -> Result<Response, ControlError> {
+    index_segment(&index, true)?;
+    let api_path = api_index_path(&id, &index, "/esql");
+    esql_route(&c, &id, method, api_path, Some(index), uri.query(), &headers, body).await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn esql_route(c: &Control, id: &str, method: Method, api_path: String, scope: Option<String>, query: Option<&str>, headers: &HeaderMap, body: Body) -> Result<Response, ControlError> {
+    let cluster = c.get(id).await?;
+    if cluster.flavor == "opensearch" {
+        return Err(ControlError::Invalid("ES|QL is Elasticsearch's: an OpenSearch-flavor cluster has no `_query` (use PPL through the console)".into()));
+    }
+    let mut held = Reservation::none();
+    let bytes = read_limited(body, (cluster.max_body_mb.max(1) as usize) << 20, declared(headers), c.node.body_budget(), &mut held).await.map_err(|e| read_error(&cluster, e))?;
+    let Ok(serde_json::Value::Object(mut given)) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return Err(ControlError::Invalid("the body must be a JSON object with `query`".into()));
+    };
+    if let Some(k) = given.keys().find(|k| !ESQL_FIELDS.contains(&k.as_str())) {
+        return Err(ControlError::Invalid(format!("unknown field [{k}]: an ES|QL query takes {}", ESQL_FIELDS.join(", "))));
+    }
+    if !given.get("query").is_some_and(serde_json::Value::is_string) {
+        return Err(ControlError::Invalid("`query` (a string) is required".into()));
+    }
+    let q = match query.filter(|q| !q.is_empty()) {
+        Some(qs) => {
+            for pair in qs.split('&').filter(|p| !p.is_empty()) {
+                let raw = pair.split('=').next().unwrap_or_default();
+                let k = urlencoding::decode(raw).map(|k| k.into_owned()).unwrap_or_else(|_| raw.to_string());
+                if !ESQL_PARAMS.contains(&k.as_str()) {
+                    return Err(ControlError::Invalid(format!("unknown parameter [{k}]: an ES|QL query takes {}", ESQL_PARAMS.join(", "))));
+                }
+            }
+            format!("?{qs}")
+        }
+        None => String::new(),
+    };
+    if let Some(resp) = forward(c, &cluster.name, method, &format!("{api_path}{q}"), headers, bytes.clone()).await {
+        return Ok(resp);
+    }
+    given.retain(|k, _| ESQL_FIELDS.contains(&k.as_str()));
+    let body = bytes::Bytes::from(serde_json::to_vec(&serde_json::Value::Object(given)).unwrap_or_default());
+    // The node charges what it runs from here.
+    drop(held);
+    let (status, ct, body) = c.es(&cluster.id, "POST", &format!("/_query{q}"), scope.as_deref(), Some("application/json"), body).await?;
+    let status = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
+    Ok((status, [(axum::http::header::CONTENT_TYPE, ct)], body).into_response())
+}
 
 /// `POST …/indices/{index}/evaluate`: one or two search configurations scored against a judgment
 /// list by the cluster's `_rank_eval` on that index, run as the index's routes run (the owner

@@ -329,7 +329,7 @@ pub fn authenticate(ctx: &Ctx) -> EsResult<()> {
     }
     let p = match &req.verified {
         Some(crate::rest::Verified::Derived(k)) => Some(derived::verified(ctx.cluster, k)?),
-        Some(crate::rest::Verified::ClusterUser(_)) => req.header(INDEX_SCOPE_HEADER).map(Principal::owner_scoped),
+        Some(crate::rest::Verified::ClusterUser(_)) => req.header(INDEX_SCOPE_HEADER).map(|s| Principal::owner_scoped(&scope_names(ctx, s))),
         None => match req.header("authorization") {
             Some(h) => Some(authenticate_header(ctx.cluster, h, &req.uri)?),
             None => None,
@@ -1713,6 +1713,50 @@ pub fn check_cluster_action_of(cluster: &crate::Cluster, p: &Principal, action: 
     Err(denied(p, action, None))
 }
 
+/// An index scope's names as a role grants them: as given, unless it excludes some
+/// (`logs-*,-logs-secret`), which a role's names can't say. Then each wildcard becomes the names
+/// it matches now, at the name level (indices, aliases, data streams and their aliases, as
+/// Elasticsearch's index abstractions are), explicit names stay as written, and each exclusion
+/// takes out what it matches of the names before it. An alias is never replaced by the indices
+/// behind it: a grant on an alias reaches them only through it (its filter included).
+fn scope_names(ctx: &Ctx, scope: &str) -> String {
+    let exprs = crate::meta::resolve::split_expressions(scope);
+    if !exprs.iter().any(|e| e.starts_with('-')) {
+        return scope.to_string();
+    }
+    let st = ctx.state();
+    let md = &st.metadata;
+    let mut all: Vec<&str> = md.indices.keys().map(String::as_str).collect();
+    all.extend(md.indices.values().flat_map(|i| i.aliases.keys().map(String::as_str)));
+    all.extend(md.data_streams.keys().map(String::as_str));
+    all.extend(md.data_stream_aliases.keys().map(String::as_str));
+    all.sort_unstable();
+    all.dedup();
+    let mut names: Vec<String> = Vec::new();
+    for e in &exprs {
+        match e.strip_prefix('-') {
+            Some(x) => names.retain(|n| !(n == x || (crate::meta::resolve::is_wildcard(x) && crate::xcontent::filter::glob_match(x, n)))),
+            None if crate::meta::resolve::is_wildcard(e) => names.extend(all.iter().filter(|n| crate::xcontent::filter::glob_match(e, n) && !names.iter().any(|m| m == **n)).map(|n| n.to_string()).collect::<Vec<_>>()),
+            None if !names.contains(e) => names.push(e.clone()),
+            None => {}
+        }
+    }
+    // Nothing left: a name nothing has, so the scope still reaches none.
+    if names.is_empty() { "\u{0}".to_string() } else { names.join(",") }
+}
+
+/// Whether the request runs as roll's own index-scoped principal ([`Principal::owner_scoped`]).
+pub fn is_index_scoped(ctx: &Ctx) -> bool {
+    principal(ctx).is_index_scoped()
+}
+
+impl Principal {
+    /// Whether it is roll's own index-scoped principal ([`Principal::owner_scoped`]).
+    pub fn is_index_scoped(&self) -> bool {
+        matches!(&self.kind, AuthKind::ApiKey(a) if a.id == INDEX_SCOPE_KEY)
+    }
+}
+
 /// Refuses unless the request's principal may run `action` on index `index` (a name, as given).
 pub fn check_index_action(ctx: &Ctx, action: &str, index: &str) -> EsResult<()> {
     if allows_indices(ctx, action, std::slice::from_ref(&index.to_string())) {
@@ -1723,11 +1767,15 @@ pub fn check_index_action(ctx: &Ctx, action: &str, index: &str) -> EsResult<()> 
 
 /// Whether the request's principal may run `action` on every index of `indices` (names).
 pub fn allows_indices(ctx: &Ctx, action: &str, indices: &[String]) -> bool {
-    let p = principal(ctx);
+    allows_indices_of(ctx.cluster, principal(ctx), action, indices)
+}
+
+/// [`allows_indices`] for principal `p`.
+pub fn allows_indices_of(cluster: &crate::Cluster, p: &Principal, action: &str, indices: &[String]) -> bool {
     if p.is_superuser() {
         return true;
     }
-    let eff = effective(&file_roles(ctx.cluster), &ctx.state(), p);
+    let eff = effective(&file_roles(cluster), &cluster.state(), p);
     indices.iter().all(|i| eff.allows_index(action, i))
 }
 

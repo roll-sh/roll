@@ -305,12 +305,60 @@ tokio::task_local! {
 /// loaded (after views are spliced in, for every source a policy is read for here): an `ENRICH`
 /// resolves its policy as the caller (`EnrichPolicyResolver`), `monitor_enrich` here, as a
 /// remote's part needs it there ([`ccs::admit_part`]). Outside a query nothing loads one.
-pub(super) fn enrich_allowed(cluster: &crate::Cluster, name: &str) -> EsResult<()> {
-    let _ = name;
-    match CALLER.try_with(|p| crate::xpack::security::check_cluster_action_of(cluster, p, ccs::RESOLVE_POLICY)) {
+///
+/// roll's own index-scoped principal (`/v1/search`'s ES|QL route, as a grant limited to some
+/// indices) holds no cluster privilege: the table is its policy's source indices, read here, so it
+/// needs `read` on every index the table was built from instead. A view's `ENRICH` is checked
+/// so too: views are spliced in before their policies load.
+///
+/// Called twice: before the tables load (`table` `None`: the cluster privilege, as the resolver
+/// checks it first), and with the enrich index about to be read (the sources check).
+pub(super) fn enrich_allowed(cluster: &crate::Cluster, name: &str, table: Option<&str>) -> EsResult<()> {
+    let check = |p: &crate::xpack::security::Principal| {
+        if !p.is_index_scoped() {
+            return crate::xpack::security::check_cluster_action_of(cluster, p, ccs::RESOLVE_POLICY);
+        }
+        let Some(table) = table else { return Ok(()) };
+        // The indices the table about to be read (enrich index `table`) was built from, a
+        // source deleted since included ([`crate::xpack::enrich::sources_of`]).
+        let built = crate::xpack::enrich::sources_of(&cluster.state(), table).unwrap_or_default();
+        if !built.is_empty() && crate::xpack::security::allows_indices_of(cluster, p, "indices:data/read/esql", &built) {
+            Ok(())
+        } else {
+            Err(EsError::security(403, format!("enrich policy [{name}] reads indices this request may not read")))
+        }
+    };
+    match CALLER.try_with(check) {
         Ok(r) => r,
         Err(_) => Err(EsError::illegal_state("an ENRICH policy loaded outside an ES|QL query")),
     }
+}
+
+/// Whether the running query's caller may read index `index` by its own name (not only through
+/// an alias): what reading its shards directly, or reaching it by a raw wildcard, needs. No
+/// caller set (outside a query): no.
+pub(super) fn caller_reads(cluster: &crate::Cluster, index: &str) -> bool {
+    CALLER.try_with(|p| crate::xpack::security::allows_indices_of(cluster, p, "indices:data/read/esql", &[index.to_string()])).unwrap_or(false)
+}
+
+/// The checks on a query's sources once its views are spliced in ([`exec`]'s `expand_views`):
+/// roll's index-scoped principal reads no remote cluster (`cluster:index`; `index::selector` and
+/// date math are local, [`crate::remote::split_expression`]), a `FROM` in a view included.
+pub(super) fn check_sources(cmds: &[parser::Cmd]) -> EsResult<()> {
+    if CALLER.try_with(|p| p.is_index_scoped()).unwrap_or(false) && names_remote(cmds) {
+        return Err(EsError::security(403, "this request may not read remote clusters"));
+    }
+    Ok(())
+}
+
+/// Whether `cmds` read a remote cluster's index, in subqueries too.
+fn names_remote(cmds: &[parser::Cmd]) -> bool {
+    cmds.iter().any(|c| match c {
+        parser::Cmd::From { sources, .. } | parser::Cmd::Ts { sources, .. } => sources.iter().any(|s| crate::remote::split_expression(s).is_some()),
+        parser::Cmd::Fork { branches, .. } => branches.iter().any(|b| names_remote(b)),
+        parser::Cmd::Union { branches, .. } => branches.iter().any(|b| names_remote(&b.cmds)),
+        _ => false,
+    })
 }
 
 /// Runs a request: the JSON response and the table (for text formats), both charged to `mem`

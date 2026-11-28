@@ -154,6 +154,7 @@ fn postgres() -> Router {
         .route("/v1/apps/services/{id}/environments/{env}/redeploy", post(|| async { axum::Json(json!({ "ok": true })) }))
         .route("/v1/apps/services/{id}/environments/{env}/domains/{host}/configure", post(|| async { axum::Json(json!({ "status": "active" })) }))
         .route("/v1/search/clusters/{id}/indices/{index}/search", post(|| async { axum::Json(json!({ "hits": [] })) }))
+        .route("/v1/search/clusters/{id}/esql", post(|ext: axum::http::Extensions| async move { axum::Json(json!({ "index_scope": roll_auth::IndexScope::on(&ext).map(|s| s.0.clone()) })) }))
         .route(
             "/v1/search/clusters",
             post(|| async { axum::Json(json!({ "id": "cl_new", "password": "fresh" })) })
@@ -3600,6 +3601,23 @@ async fn a_secret_written_as_the_caller_is_asked_for_and_only_it_is_allowed() {
     let (none, _) = d.token(json!([search("allow")]), json!({})).await;
     let (s, out) = d.call(&none, Method::POST, path, Some(body("production"))).await;
     assert_eq!((s, out["code"].as_str()), (StatusCode::FORBIDDEN, Some("forbidden")), "{out}");
+}
+
+/// ES|QL's route names no index of its cluster (`filters_index`): a token whose read there is
+/// `ask` and limited to some indices, approved once, reaches those indices for that request; it
+/// can't be approved for good, which would remember a rule for every index of the cluster.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_approved_ask_reaches_its_indices_on_a_route_naming_none() {
+    let d = Daemon::new(50);
+    let (token, _) = d.token(json!([{ "product": "search", "resources": [{ "id": "cl_1", "index": "tenant-a-*" }], "actions": { "read": "ask" } }]), json!({})).await;
+    let path = "/v1/search/clusters/cl_1/esql";
+    let (s, out) = d.call(&token, Method::POST, path, Some(json!({ "query": "FROM tenant-a-1" }))).await;
+    assert_eq!((s, out["code"].as_str()), (StatusCode::FORBIDDEN, Some("approval_pending")), "{out}");
+    let id = out["approval"].as_str().unwrap().to_string();
+    assert_eq!(d.call(OPERATOR, Method::POST, &format!("/v1/access/approvals/{id}/approve"), Some(json!({ "remember": "1h" }))).await.0, StatusCode::BAD_REQUEST, "never remembered");
+    assert_eq!(d.call(OPERATOR, Method::POST, &format!("/v1/access/approvals/{id}/approve"), None).await.0, StatusCode::OK);
+    let (s, out) = d.send(&token, Method::POST, path, Some(json!({ "query": "FROM tenant-a-1" })), &[("x-roll-approval", &id)]).await;
+    assert_eq!((s, &out["index_scope"]), (StatusCode::OK, &json!(["tenant-a-*"])), "{out}");
 }
 
 /// A domain's Cloudflare token is a `roll://` reference apps reads once as the caller (nothing

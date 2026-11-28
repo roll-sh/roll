@@ -26,6 +26,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub const POLICIES: &str = "enrich.policy";
+/// The indices each enrich index was built from, by its name ([`sources_of`]): written before
+/// the policy's alias moves to it, so a table read from it always has its record.
+pub const BUILT_FROM: &str = "enrich.built_from";
 const TYPES: [&str; 3] = ["match", "range", "geo_match"];
 const README: &str = "This index is managed by Elasticsearch and should not be modified in any way.";
 
@@ -155,6 +158,9 @@ pub async fn delete_policy(ctx: &Ctx<'_>) -> EsResult<Reply> {
     ctx.cluster
         .update(move |st| {
             store::remove(st, POLICIES, &name);
+            for i in &indices {
+                store::remove(st, BUILT_FROM, i);
+            }
             Ok(())
         })
         .await?;
@@ -255,6 +261,8 @@ async fn execute(cluster: &Cluster, name: &str, policy: &Value, now: i64) -> EsR
     if let (Some(q), Value::Obj(m)) = (cfg.get("query"), &mut src) {
         m.insert("query".into(), q.clone());
     }
+    let resolve_sources = || crate::meta::resolve::resolve(&cluster.state(), &indices, &crate::meta::resolve::IndicesOptions::LENIENT_EXPAND_OPEN, now).unwrap_or_default();
+    let mut built_from = resolve_sources();
     let reindex = obj! { "source" => src, "dest" => obj! { "index" => index.clone() } };
     // Source values the enrich mapping rejects (a `{lat, lon}` point into the `geo_shape`
     // match field) fail the execution as Elasticsearch's `EnrichPolicyRunner` does.
@@ -263,6 +271,16 @@ async fn execute(cluster: &Cluster, name: &str, policy: &Value, now: i64) -> EsR
         let _ = internal::call(cluster, "DELETE", &format!("/{}", enc(&index)), None).await;
         return Err(EsError::new(500, "exception", "Encountered bulk failures during reindex process"));
     }
+    // What the reindex may have read: the sources as they resolved before it and after it. Kept
+    // before the alias moves to the index, so no table is ever read from it without it.
+    for i in resolve_sources() {
+        if !built_from.contains(&i) {
+            built_from.push(i);
+        }
+    }
+    let built: Vec<Value> = built_from.into_iter().map(Value::from).collect();
+    let rec = index.clone();
+    cluster.update(move |st| store::put(st, BUILT_FROM, &rec, Value::Arr(built), now).map(|_| ())).await?;
     internal::call(cluster, "PUT", &format!("/{}/_settings", enc(&index)), Some(&obj! { "index.blocks.write" => true })).await?;
     // Move the alias and drop the previous enrich indices.
     let alias = alias_of(name);
@@ -275,9 +293,29 @@ async fn execute(cluster: &Cluster, name: &str, policy: &Value, now: i64) -> EsR
     let _ = internal::call(cluster, "POST", "/_aliases", Some(&obj! { "actions" => Value::Arr(actions) })).await;
     if !old.is_empty() {
         let _ = internal::call(cluster, "DELETE", &format!("/{}?expand_wildcards=all", enc(&old.join(","))), None).await;
+        cluster
+            .update(move |st| {
+                for o in &old {
+                    store::remove(st, BUILT_FROM, o);
+                }
+                Ok(())
+            })
+            .await?;
     }
     load(cluster, name, &index).await?;
     Ok(())
+}
+
+/// The indices enrich index `index` (a policy's table) was built from ([`BUILT_FROM`]): a
+/// source deleted since still holds rows in it. `None` without a record (a table built before
+/// they were recorded, or one whose record went with a re-execute that didn't finish loading):
+/// what the policy's sources resolve to now can't vouch for what the table holds, so a check
+/// against it fails closed until the policy runs again.
+pub fn sources_of(st: &crate::meta::ClusterState, index: &str) -> Option<Vec<String>> {
+    match st.metadata.xpack.get(BUILT_FROM, index) {
+        Some(Value::Arr(a)) => Some(a.iter().map(Value::to_es_string).collect()),
+        _ => None,
+    }
 }
 
 fn set_prop(props: &mut Map, path: &str, mapping: Value) {

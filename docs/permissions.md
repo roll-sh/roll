@@ -623,6 +623,14 @@ A rule can grant some indices of a search cluster: `{id: "cl_1", index: "logs-*,
   patterns (`logs-*`).
 - The cluster's own routes stay the cluster's: the index list, the console (`request`, any method
   and path as the cluster's owner), keys, branches and settings need a rule for the whole cluster.
+- ES|QL (`POST /v1/search/clusters/{id}/esql`, read) takes a rule limited to some indices too: the
+  row filters by index (`filters_index`), and the gate hands the product the indices its decision
+  reaches (`roll_auth::IndexScope`: `Scope::indices_reaching`; a person's token held within their
+  session keeps the patterns of each the other reaches too, so a narrower one stays; a request a
+  person approved reaches its `ask` rules too, for that request alone; none means the whole
+  cluster). The query runs as a principal scoped to them, and every
+  index it reads (`FROM` and `METADATA`, `LOOKUP JOIN`, an `ENRICH` policy's sources) is checked
+  there; remote clusters are refused. `…/indices/{index}/esql` runs it as `{index}`'s reader.
 - Search checks the rest at query time as the caller: a query's reads of other indices (terms
   lookups, `more_like_this`, lookup runtime fields, `indexed_shape`, templates after rendering, and
   the bodies of reindex, ES|QL, SQL and the other query-bearing APIs) and a body's `_index` values

@@ -87,6 +87,12 @@ async fn as_person(mut req: axum::extract::Request, next: axum::middleware::Next
         }
         req.extensions_mut().insert(roll_auth::Operator);
         req.extensions_mut().insert(roll_auth::Grant { id: "tok_t".into(), name: "t".into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(rules), user: None, ask_otherwise: false });
+        // `x-test-index-scope`: the indices the gate's decision reaches on a `filters_index` route
+        // (comma-separated patterns, `*` for the whole resource).
+        if let Some(s) = req.headers().get("x-test-index-scope").and_then(|v| v.to_str().ok()).map(str::to_string) {
+            let reach = (s != "*").then(|| s.split(',').map(str::to_string).collect());
+            req.extensions_mut().insert(roll_auth::IndexScope(reach));
+        }
     }
     let who = req.headers().get("x-test-as").and_then(|v| v.to_str().ok()).map(str::to_string);
     if let Some(who) = who {
@@ -7830,6 +7836,110 @@ async fn search_application_experiments() {
     let r = e.http.post(format!("{}/_application/search_application/shop/_search", e.es)).header("authorization", &owner).header("x-roll-user", "v1").json(&json!({"params": {"query": "shoes"}})).send().await.unwrap();
     assert_eq!(r.status().as_u16(), 200);
     assert!(r.headers().get("x-roll-variant").is_none());
+}
+
+/// `POST …/esql`, read-only ES|QL for a grant limited to `tenant-a-*`: it reads its indices, and
+/// every other index a query reads is refused, whether `FROM` names it, a `LOOKUP JOIN` or an
+/// `ENRICH` policy reads it; a field of an async or stored query is refused too.
+#[tokio::test]
+async fn esql_reads_only_the_indices_the_grant_reaches() {
+    use reqwest::Method;
+    let e = env().await;
+    let c = e.post("/v1/search/clusters", json!({"name": "esql"})).await;
+    let (owner, pw) = creds(&c);
+    for (m, path, body) in [
+        (Method::PUT, "/tenant-a-1/_doc/1?refresh=true", json!({"t": "x", "n": 1})),
+        (Method::PUT, "/tenant-b/_doc/1?refresh=true", json!({"t": "x", "secret": "s-of-b"})),
+        (Method::PUT, "/tenant-b-lookup", json!({"settings": {"index.mode": "lookup"}, "mappings": {"properties": {"t": {"type": "keyword"}, "secret": {"type": "keyword"}}}})),
+        (Method::PUT, "/tenant-b-lookup/_doc/1?refresh=true", json!({"t": "x", "secret": "s-of-b"})),
+        (Method::PUT, "/_enrich/policy/p", json!({"match": {"indices": "tenant-b", "match_field": "t", "enrich_fields": ["secret"]}})),
+        (Method::POST, "/_enrich/policy/p/_execute", Value::Null),
+        // A view over the grant's own index that enriches from tenant-b's table.
+        (Method::PUT, "/_query/view/v", json!({"query": "FROM tenant-a-1 | ENRICH p ON t"})),
+    ] {
+        let (s, v) = e.es(&owner, &pw, m.clone(), path, Some(body).filter(|b| !b.is_null())).await;
+        assert!(s < 300, "{m} {path}: {s} {v}");
+    }
+    let rules = json!([{"product": "search", "resources": [{"id": c["id"], "index": "tenant-a-*"}], "actions": {"read": "allow"}}]).to_string();
+    let esql = |body: Value| {
+        let (e, rules) = (&e, rules.clone());
+        async move {
+            let r = e.http.post(format!("{}/v1/search/clusters/esql/esql", e.api)).header("x-test-grant", rules).header("x-test-index-scope", "tenant-a-*").json(&body).send().await.unwrap();
+            let s = r.status().as_u16();
+            let t = r.text().await.unwrap();
+            (s, serde_json::from_str::<Value>(&t).unwrap_or(Value::String(t)))
+        }
+    };
+    let (s, v) = esql(json!({"query": "FROM tenant-a-* | KEEP n"})).await;
+    assert_eq!((s, &v["values"]), (200, &json!([[1]])), "{v}");
+    // A pattern resolved as the query runs reaches only the grant's indices (`METADATA _index`
+    // says which).
+    let (s, v) = esql(json!({"query": "FROM tenant-* METADATA _index | KEEP _index"})).await;
+    assert_eq!((s, &v["values"]), (200, &json!([["tenant-a-1"]])), "{v}");
+    for query in ["FROM tenant-b", "FROM tenant-a-1, tenant-b", "FROM tenant-a-1 | LOOKUP JOIN tenant-b-lookup ON t", "FROM tenant-a-1 | ENRICH p ON t", "FROM v", "FROM far:tenant-a-1", "FROM *:*"] {
+        let (s, v) = esql(json!({"query": query})).await;
+        assert!((s == 400 || s == 403) && !v.to_string().contains("s-of-b"), "{query}: {s} {v}");
+    }
+    let (s, v) = esql(json!({"query": "FROM tenant-a-*", "keep_on_completion": true})).await;
+    assert_eq!(s, 400, "{v}");
+    // An index's selector (`::failures`) is local, never taken for a remote cluster.
+    let (_, v) = esql(json!({"query": "FROM \"tenant-a-1::failures\""})).await;
+    assert!(!v.to_string().contains("remote clusters"), "{v}");
+    // The index form reads as the path's index only, whatever the query names.
+    let on_index = |index: &str, query: &str| {
+        let (e, rules, body, index) = (&e, rules.clone(), json!({"query": query}), index.to_string());
+        async move {
+            let r = e.http.post(format!("{}/v1/search/clusters/esql/indices/{index}/esql", e.api)).header("x-test-grant", rules).json(&body).send().await.unwrap();
+            let s = r.status().as_u16();
+            (s, r.text().await.unwrap())
+        }
+    };
+    let (s, v) = on_index("tenant-a-1", "FROM tenant-a-1 | KEEP n").await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = on_index("tenant-a-1", "FROM tenant-b").await;
+    assert!((s == 400 || s == 403) && !v.contains("s-of-b"), "{s} {v}");
+    // The path's exclusion holds too.
+    let (s, v) = on_index("tenant-*,-tenant-b", "FROM tenant-b").await;
+    assert!((s == 400 || s == 403) && !v.contains("s-of-b"), "an excluded index: {s} {v}");
+
+    // A filtered alias over a shared index, and a policy over an index of the grant's.
+    for (m, path, body) in [
+        (Method::PUT, "/shared", json!({"mappings": {"properties": {"tenant": {"type": "keyword"}, "secret": {"type": "keyword"}}}})),
+        (Method::PUT, "/shared/_doc/1?refresh=true", json!({"tenant": "a"})),
+        (Method::PUT, "/shared/_doc/2?refresh=true", json!({"tenant": "b", "secret": "s-of-b"})),
+        (Method::POST, "/_aliases", json!({"actions": [{"add": {"index": "shared", "alias": "pub-a", "filter": {"term": {"tenant": "a"}}}}]})),
+        (Method::PUT, "/tenant-a-2/_doc/1?refresh=true", json!({"t": "x", "label": "lab-a"})),
+        (Method::PUT, "/_enrich/policy/pa", json!({"match": {"indices": "tenant-a-2", "match_field": "t", "enrich_fields": ["label"]}})),
+        (Method::POST, "/_enrich/policy/pa/_execute", Value::Null),
+    ] {
+        let (s, v) = e.es(&owner, &pw, m.clone(), path, Some(body).filter(|b| !b.is_null())).await;
+        assert!(s < 300, "{m} {path}: {s} {v}");
+    }
+    // An `ENRICH` whose table the grant reaches runs.
+    let (s, v) = esql(json!({"query": "FROM tenant-a-1 | ENRICH pa ON t | KEEP label"})).await;
+    assert_eq!((s, &v["values"]), (200, &json!([["lab-a"]])), "{v}");
+    // A grant on the alias reads the rows its filter lets through, by the alias or not at all:
+    // never the index behind it (a path's exclusion doesn't make it one).
+    let alias_rules = json!([{"product": "search", "resources": [{"id": c["id"], "index": "pub-a"}], "actions": {"read": "allow"}}]).to_string();
+    let (s, v) = {
+        let r = e.http.post(format!("{}/v1/search/clusters/esql/esql", e.api)).header("x-test-grant", alias_rules.clone()).header("x-test-index-scope", "pub-a").json(&json!({"query": "FROM pub-a METADATA _source | KEEP tenant, _source"})).send().await.unwrap();
+        (r.status().as_u16(), r.text().await.unwrap())
+    };
+    assert!(s == 200 && v.contains("\"a\"") && !v.contains("s-of-b") && !v.contains("\"b\""), "{s} {v}");
+    // A wildcard beside the alias, or the alias with a selector, still reads only its rows.
+    for query in ["FROM pub-a, * | KEEP tenant", "FROM pub-a, sh* | KEEP tenant", "FROM \"pub-a::data\" | KEEP tenant"] {
+        let r = e.http.post(format!("{}/v1/search/clusters/esql/esql", e.api)).header("x-test-grant", alias_rules.clone()).header("x-test-index-scope", "pub-a").json(&json!({"query": query})).send().await.unwrap();
+        let (s, v) = (r.status().as_u16(), r.text().await.unwrap());
+        assert!(!v.contains("\"b\""), "{query}: {s} {v}");
+    }
+    let r = e.http.post(format!("{}/v1/search/clusters/esql/indices/pub-a::data/search", e.api)).header("x-test-grant", alias_rules.clone()).json(&json!({"query": {"match_all": {}}})).send().await.unwrap();
+    let (s, v) = (r.status().as_u16(), r.text().await.unwrap());
+    assert!(!v.contains("s-of-b") && !v.contains("\"b\""), "a search through the alias with a selector: {s} {v}");
+    for (index, query) in [("pub-a,-zz", "FROM shared METADATA _source"), ("pub-a", "FROM shared"), ("pub-a,-zz", "FROM pub-a METADATA _source")] {
+        let r = e.http.post(format!("{}/v1/search/clusters/esql/indices/{index}/esql", e.api)).header("x-test-grant", alias_rules.clone()).json(&json!({"query": query})).send().await.unwrap();
+        let (s, v) = (r.status().as_u16(), r.text().await.unwrap());
+        assert!(!v.contains("s-of-b"), "{index} {query}: {s} {v}");
+    }
 }
 
 /// `…/indices/{index}/update_by_query` re-embeds an index's own documents: a `semantic_text`

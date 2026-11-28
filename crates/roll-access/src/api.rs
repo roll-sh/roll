@@ -1170,6 +1170,11 @@ async fn remembered(a: &Arc<Access>, id: &str, remember: Option<&str>) -> crate:
     if catalog::find(&found.method, &found.route, &found.path).is_some_and(|f| f.row.filters_itself) {
         return Err(Error::BadRequest("this route spans every environment: approve it once".into()));
     }
+    // A route whose product reads only the indices the grant reaches names no index of its own:
+    // a rule from it would reach every index of the resource (search's ES|QL).
+    if catalog::find(&found.method, &found.route, &found.path).is_some_and(|f| f.row.filters_index) {
+        return Err(Error::BadRequest("this route reads whatever indices its request names: approve it once".into()));
+    }
     // The indices it was about stay part of it (`cl_1/logs-a` is cluster `cl_1`, index `logs-a`);
     // a secrets request names one key, and a name that isn't one would remember as a pattern; a
     // search request that excluded indices would remember as a rule reaching them.

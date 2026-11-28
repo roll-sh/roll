@@ -1523,6 +1523,10 @@ static ROWS: &[Row] = &[
     row("*", "/v1/search/clusters/{id}/indices/{index}", "search", M, one(PG, "cluster")).index("index"),
     row("*", "/v1/search/clusters/{id}/indices/{index}/", "search", M, one(PG, "cluster")).index("index"),
     row("POST", "/v1/search/clusters/{id}/indices/{index}/search", "search", R, one(PG, "cluster")).index("index"),
+    // ES|QL, read-only: a query names its own indices, so the engine checks each it reads against
+    // the indices the grant reaches (`IndexScope` on the cluster's route, the path's on an index's).
+    row("POST", "/v1/search/clusters/{id}/esql", "search", R, one(PG, "cluster")).filters_index(),
+    row("POST", "/v1/search/clusters/{id}/indices/{index}/esql", "search", R, one(PG, "cluster")).index("index"),
     // Analyzing text with an index's analyzers reads the index.
     row("POST", "/v1/search/clusters/{id}/indices/{index}/analyze", "search", R, one(PG, "cluster")).index("index"),
     // Scoring search configurations against judgments runs searches of the index, nothing else.

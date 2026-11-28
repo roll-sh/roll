@@ -1307,6 +1307,8 @@ previews are listed once those products are on.
 | `search_wait_task` | A search task once it completes (or as it is at the timeout): its response or error. | `GET /v1/search/clusters/{cluster}/tasks/{task}` |
 | `search_list_indices` | A cluster's indices. | `GET /v1/search/clusters/{cluster}/indices` |
 | `search_query` | Run an Elasticsearch _search body on an index: a query or a retriever (hybrid: `rrf` or `linear`), `knn`, aggregations, highlighting, `_source`, paging with `search_after`, `profile`. Every key roll search's parser takes is an argument or left out with why (`a_search_takes_what_a_search_body_takes`). | `POST /v1/search/clusters/{cluster}/indices/{index}/search` |
+| `search_esql` | Run a read-only ES\|QL query (Elasticsearch's synchronous _query) on a search cluster: nothing is written or kept, and every index the query reads (FROM and its METADATA, LOOKUP JOIN, an ENRICH policy's sources) is checked against the token's index scope. | `POST /v1/search/clusters/{cluster}/esql` |
+| `search_esql_index` | Run a read-only ES\|QL query (Elasticsearch's synchronous _query) as one index's reader: nothing is written or kept, and every index the query reads (FROM and its METADATA, LOOKUP JOIN, an ENRICH policy's sources) is checked against that index, within the token's index scope. | `POST /v1/search/clusters/{cluster}/indices/{index}/esql` |
 | `search_get_document` | A document by id. | `GET /v1/search/clusters/{cluster}/indices/{index}/docs/{doc}` |
 | `search_index_document` | Create or replace a document. | `PUT /v1/search/clusters/{cluster}/indices/{index}/docs/{doc}` |
 | `search_delete_document` | Delete a document. | `DELETE /v1/search/clusters/{cluster}/indices/{index}/docs/{doc}` |
