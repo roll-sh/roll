@@ -94,11 +94,14 @@ pub enum Source {
     Base { environment: String },
 }
 
-/// A read for one request ([`Secrets::use_once`]): the request's caller, the product's purpose,
-/// and the fixed host the value goes to, if the product named one.
+/// A read for one request ([`Secrets::use_once`]): the request's caller, the product's use (its
+/// fixed id, and the tag that opts a key in for it), its purpose, and the fixed host the value
+/// goes to, if the product named one.
 #[derive(Clone, Copy)]
 pub(crate) struct Once<'a> {
     pub by: &'a Caller,
+    pub use_id: &'static str,
+    pub opt_in: &'a str,
     pub purpose: &'a str,
     pub to: Option<&'static str>,
 }
@@ -972,6 +975,14 @@ CREATE TABLE IF NOT EXISTS read_counts (
 ) WITHOUT ROWID;
 ";
 
+/// Whether a caller whose rule reaches only some keys may `action` `e` of `slug:path`'s view: its
+/// key there, and, through an import or the base, in the folder it comes from too (another
+/// project's share stands in for access there).
+fn keeps(caller: &Caller, action: Action, project: &str, slug: &str, path: &str, e: &Entry) -> bool {
+    let k = e.row.key.as_str();
+    caller.allows(action, &Scope::at(project, slug, path).key(k)) && (e.row.project_id != project || (e.env == slug && e.row.path == path) || caller.allows(action, &Scope::at(project, &e.env, &e.row.path).key(k)))
+}
+
 impl Secrets {
     /// The effective entries of a folder; `shared` leaves out the caller's personal values.
     /// Imports and the base show through only where the caller may `action` them.
@@ -1000,16 +1011,7 @@ impl Secrets {
         if !caller.grants.limits_keys() {
             return Ok(entries);
         }
-        // A rule limited to some keys: each key here, and, through an import or the base, in the
-        // folder it comes from too (another project's share stands in for access there).
-        let here = Scope::at(project, slug, path);
-        Ok(entries
-            .into_iter()
-            .filter(|e| {
-                let k = e.row.key.as_str();
-                caller.allows(action, &here.key(k)) && (e.row.project_id != project || (e.env == slug && e.row.path == path) || caller.allows(action, &Scope::at(project, &e.env, &e.row.path).key(k)))
-            })
-            .collect())
+        Ok(entries.into_iter().filter(|e| keeps(caller, action, project, slug, path, e)).collect())
     }
 
     /// `e` as the API shows it. Its fingerprint only to a caller who may reveal it: a writer
@@ -1124,9 +1126,11 @@ impl Secrets {
     /// ephemeral environment (`caller_for`). What only a protected environment holds is refused as
     /// protected, a sensitive key for a reader that isn't a runtime, and a dynamic credential.
     /// With `placeholders`, a key bound to hosts is answered with its binding, sensitive or not:
-    /// the resolve then gives a placeholder.
+    /// the resolve then gives a placeholder. `opt_in`: a one-off read for a fixed host
+    /// ([`Secrets::use_once`]) also reads a sensitive key that carries this tag (its folder admin's
+    /// opt-in for that use), unless the resource is an untrusted copy.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn consumer_entry(&self, project: &str, slug: &str, path: &str, key: &str, caller: &Caller, untrusted: bool, placeholders: bool) -> std::result::Result<(Caller, Entry, Option<crate::placeholders::Hosts>), crate::consumers::Refusal> {
+    pub(crate) fn consumer_entry(&self, project: &str, slug: &str, path: &str, key: &str, caller: &Caller, untrusted: bool, placeholders: bool, opt_in: Option<&str>) -> std::result::Result<(Caller, Entry, Option<crate::placeholders::Hosts>), crate::consumers::Refusal> {
         use crate::consumers::Refusal;
         let missing = |e: Error| match e {
             Error::NotFound(m) => Refusal::NoSuchKey(m),
@@ -1163,7 +1167,11 @@ impl Secrets {
                 return Err(Refusal::Unusable(format!("{key} holds a ${{…}} reference: a placeholder stands only for a literal value")));
             }
         }
-        if bound.is_none() && names::sensitive(&e.row.tags) && !narrowed.runtime {
+        let opted = opt_in.filter(|_| !untrusted);
+        if bound.is_none() && names::sensitive(&e.row.tags) && !narrowed.runtime && !opted.is_some_and(|t| e.row.tags.iter().any(|x| x == t)) {
+            if let Some(t) = opted {
+                return Err(Refusal::Unusable(format!("{key} is sensitive, and its folder's admin hasn't opted it in for this use (the tag {t})")));
+            }
             let why = if untrusted || caller.runtime { why } else { not_runtime };
             return Err(Refusal::Unusable(format!("{key} is sensitive, and {why}: only a trusted runtime reads it")));
         }
@@ -1182,7 +1190,7 @@ impl Secrets {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn resolve_one(&self, project: &str, slug: &str, path: &str, key: &str, caller: &Caller, untrusted: bool, resource: &crate::consumers::ResourceRef, once: Option<Once<'_>>) -> std::result::Result<crate::consumers::Resolved, crate::consumers::Refusal> {
         use crate::consumers::{Refusal, Resolved};
-        let (narrowed, e, bound) = self.consumer_entry(project, slug, path, key, caller, untrusted, resource.wants_placeholders())?;
+        let (narrowed, e, bound) = self.consumer_entry(project, slug, path, key, caller, untrusted, resource.wants_placeholders(), once.and_then(|o| o.to.map(|_| o.opt_in)))?;
         let consumer = &caller.principal;
         let chosen = caller.maker.as_ref().map(|m| format!(", for {m} (who chose it)")).unwrap_or_default();
         if let Some(b) = bound {
@@ -1196,6 +1204,8 @@ impl Secrets {
         let mut r = Resolver::new(self, project, slug, &dek, &narrowed, true, consumer)?;
         r.no_dynamic = true;
         r.withhold_bound = resource.wants_placeholders();
+        // Past `consumer_entry`, a sensitive key a reader that isn't a runtime asked for was opted in.
+        r.opted_in = once.is_some() && names::sensitive(&e.row.tags) && !narrowed.runtime;
         let (value, problem) = r.entry(&e);
         let through = r.through_bound(&e).map(str::to_string);
         r.finish(slug)?;
@@ -1206,8 +1216,9 @@ impl Secrets {
             return Err(Refusal::Unusable(format!("{key} doesn't resolve: {p}")));
         }
         match once {
-            Some(Once { by, purpose, to }) => {
+            Some(Once { by, use_id, purpose, to, .. }) => {
                 let to = match to {
+                    Some(t) if names::sensitive(&e.row.tags) => format!(", a sensitive key, opted in for {use_id}, sent only to {t}"),
                     Some(t) => format!(", sent only to {t}"),
                     None => String::new(),
                 };
@@ -1375,7 +1386,8 @@ impl Secrets {
             }
         }
         let have: Vec<String> = values.keys().cloned().chain(left_out).collect();
-        for m in self.missing_required(project, &path, &have)? {
+        let here = Scope::at(project, slug, &path);
+        for m in self.missing_required(project, &path, &have)?.into_iter().filter(|m| crate::access::reaches(caller, Action::Reveal, &here, &m.key)) {
             problems.push(Problem { key: m.key, problem: format!("required, but {slug} doesn't set it") });
         }
         if resolve {
@@ -1498,12 +1510,17 @@ impl Secrets {
     /// [`Secrets::digest_of`], as computed: with its stamps.
     fn digested(&self, project: &str, slug: &str, path: &str, caller: &Caller) -> Result<std::sync::Arc<Digested>> {
         let path = names::path(path)?;
-        caller.need(Action::Read, &Scope::at(project, slug, &path))?;
+        caller.need(Action::Read, &Scope::at(project, slug, &path).by_key())?;
         // As the values are read: an untrusted ephemeral environment's digest leaves its protected
         // base out, so a deploy compares like with like.
         let narrowed = self.caller_for(project, slug, caller)?;
         let caller = &narrowed;
         let dek = self.project(project)?;
+        // A rule limited to some keys: a digest of those keys alone, worked out for this caller
+        // each time, never kept beside or taken from another reader's.
+        if caller.grants.limits_keys() {
+            return Ok(std::sync::Arc::new(self.compute_digest(project, slug, &path, &dek, caller)?));
+        }
         // Read first: a digest computed after it reflects at least this state, so one kept with it
         // is never newer than what it vouches for.
         let dead = self.dead_exports("x.to_project = ?", project)?;
@@ -1561,7 +1578,7 @@ impl Secrets {
     /// same for `caller`, `caller` passes every freeze it read past, and every live link's
     /// generation and fingerprint are as they were (the fingerprint read as a digest reads it).
     fn still(&self, project: &str, dek: &Dek, d: &Digested, caller: &Caller) -> Result<bool> {
-        if !d.asked.iter().all(|((action, env, path), ok)| caller.allows(*action, &Scope::at(project, env, path)) == *ok) {
+        if !d.asked.iter().all(|((action, env, path), ok)| caller.allows(*action, &Scope::at(project, env, path).by_key()) == *ok) {
             return Ok(false);
         }
         if !d.passed.iter().all(|(p, env, path)| caller.passes_freeze(p, env, path)) {
@@ -1585,7 +1602,7 @@ impl Secrets {
         // Every permission the digest depends on, with its answer: a kept digest is reused only
         // for a caller who gets the same answers (`still`).
         let asked: RefCell<BTreeMap<(Action, String, String), bool>> = RefCell::default();
-        let ask = |action: Action, env: &str, path: &str| *asked.borrow_mut().entry((action, env.to_string(), path.to_string())).or_insert_with(|| caller.allows(action, &Scope::at(project, env, path)));
+        let ask = |action: Action, env: &str, path: &str| *asked.borrow_mut().entry((action, env.to_string(), path.to_string())).or_insert_with(|| caller.allows(action, &Scope::at(project, env, path).by_key()));
         // Read as `values` reads it: imports and the base where the caller may reveal them. Where
         // each one it passed answers reading as it does revealing, that's also the folder as a
         // reference reads it, so a reference into this folder doesn't read it again.
@@ -1621,6 +1638,24 @@ impl Secrets {
             let entries = view_in(c, &env, path, principal, &reveal, Some(&passes), untrusted, DIGEST_COLUMNS, None, 0, &mut HashSet::new(), &dead)?;
             Ok::<_, Error>((env.branches, entries))
         })?;
+        // A rule limited to some keys: only the keys it reaches, here and in each folder a
+        // reference reads, so nothing else moves its digest. A key it may read but not reveal
+        // leaves the stamps unvouched: a resolve answers it differently.
+        let keyed = caller.grants.limits_keys();
+        let reached = |env: &str, at: &str, mut v: Vec<Entry>| {
+            if keyed {
+                v.retain(|e| {
+                    let read = keeps(caller, Action::Read, project, env, at, e);
+                    if read != keeps(caller, Action::Reveal, project, env, at, e) {
+                        refs_same.set(false);
+                    }
+                    read
+                });
+            }
+            v
+        };
+        let entries = reached(slug, path, entries);
+        let reaches = |k: &str| crate::access::reaches(caller, Action::Read, &Scope::at(project, slug, path), k);
         let mut h = Sha256::new();
         let mut dynamic = false;
         let mut live: Vec<(Link, i64, String)> = vec![];
@@ -1690,7 +1725,7 @@ impl Secrets {
                     Some(v) => v.clone(),
                     None => {
                         let v = match self.db.read(|c| view_in(c, &envs::by_slug(c, project, &env)?, &at, principal, &read, None, untrusted, DIGEST_COLUMNS, None, 0, &mut HashSet::new(), &dead)) {
-                            Ok(v) => v,
+                            Ok(v) => reached(&env, &at, v),
                             // A reference to an environment that isn't there reaches nothing.
                             Err(Error::NotFound(_)) => vec![],
                             // Nor does one that couldn't be read this time, and then the digest isn't kept.
@@ -1713,7 +1748,7 @@ impl Secrets {
         }
         let have: Vec<String> = entries.iter().map(|e| e.row.key.clone()).collect();
         let required = self.missing_required(project, path, &have)?;
-        for m in &required {
+        for m in required.iter().filter(|m| reaches(&m.key)) {
             h.update(format!("required\0{}\n", m.key));
         }
         let digest = h.finalize()[..16].iter().map(|b| format!("{b:02x}")).collect();
@@ -1736,7 +1771,7 @@ impl Secrets {
         let exact = walk.exact && refs_same.get();
         drop(walk);
         let stamps = if exact {
-            let rules: Vec<crate::required::Required> = self.db.read(|c| crate::required::of(c, project))?.into_iter().filter(|r| r.path == path).collect();
+            let rules: Vec<crate::required::Required> = self.db.read(|c| crate::required::of(c, project))?.into_iter().filter(|r| r.path == path && reaches(&r.key)).collect();
             let freezes: Vec<(String, String)> = self.db.read(|c| {
                 c.query(
                     "SELECT z.env_id, z.path FROM freezes z WHERE z.env_id IN (SELECT id FROM environments WHERE project_id = ?)
@@ -1760,7 +1795,7 @@ impl Secrets {
     /// the read does: whether values changed isn't told to whoever couldn't read them.
     pub fn unchanged(&self, project: &str, slug: &str, path: &str, etag: &str, dynamic: bool, caller: &Caller) -> Result<Option<String>> {
         let at = names::path(path)?;
-        caller.need(Action::Reveal, &Scope::at(project, slug, &at))?;
+        caller.need(Action::Reveal, &Scope::at(project, slug, &at).by_key())?;
         let (digest, unvouched) = self.digest_of(project, slug, &at, caller)?;
         if digest != etag || (dynamic && unvouched.dynamic) {
             return Ok(None);
@@ -1806,7 +1841,7 @@ impl Secrets {
     /// trusted for nothing else.
     pub fn values_delta(&self, project: &str, slug: &str, path: &str, held: &Held, dynamic: bool, caller: &Caller) -> Result<Delta> {
         let path = names::path(path)?;
-        caller.need(Action::Reveal, &Scope::at(project, slug, &path))?;
+        caller.need(Action::Reveal, &Scope::at(project, slug, &path).by_key())?;
         held.check()?;
         let narrowed = self.caller_for(project, slug, caller)?;
         // Taken before anything is read: whatever is read after is at least this new, so a stamp
@@ -1876,7 +1911,8 @@ impl Secrets {
         // Gone since the stamps were taken: no longer answered.
         removed.extend(changed.iter().filter(|k| !values.contains_key(&*k.key) && held.stamps.contains_key(&*k.key)).map(|k| k.key.to_string()));
         let all: Vec<String> = stamps.keys.iter().map(|k| k.key.to_string()).collect();
-        for m in self.missing_required(project, &path, &all)? {
+        let here = Scope::at(project, slug, &path);
+        for m in self.missing_required(project, &path, &all)?.into_iter().filter(|m| crate::access::reaches(&narrowed, Action::Reveal, &here, &m.key)) {
             problems.push(Problem { key: m.key, problem: format!("required, but {slug} doesn't set it") });
         }
         let typed: Vec<Problem> = self.type_problems(project, &path, &values)?.into_iter().filter(|t| !problems.iter().any(|p| p.key == t.key)).collect();
@@ -2182,6 +2218,9 @@ pub(crate) struct Resolver<'a> {
     pub by_key: bool,
     /// [`Resolver::by_key`]'s lookups, by environment, folder and key.
     keyed: HashMap<(String, String, String), Option<Entry>>,
+    /// The entry asked for is a sensitive key opted in for this read's use (`Secrets::use_once`,
+    /// checked by `consumer_entry`): it alone is read, never a sensitive key it references.
+    pub opted_in: bool,
 }
 
 /// How a read answers keys bound to hosts.
@@ -2203,7 +2242,7 @@ impl<'a> Resolver<'a> {
         // resolve, one key's reveal).
         let no_dynamic = caller.grants.untrusted();
         let branches = s.db.read(|c| envs::by_slug(c, project, slug))?.branches;
-        Ok(Resolver { s, project, dek, caller, resolve, consumer: consumer.into(), envs: HashMap::new(), views: HashMap::new(), done: HashMap::new(), stack: vec![], tainted: Default::default(), members: None, issued: BTreeMap::new(), no_dynamic, deks: HashMap::new(), branches, withhold_bound: false, through_bound: HashMap::new(), by_key: false, keyed: HashMap::new() })
+        Ok(Resolver { s, project, dek, caller, resolve, consumer: consumer.into(), envs: HashMap::new(), views: HashMap::new(), done: HashMap::new(), stack: vec![], tainted: Default::default(), members: None, issued: BTreeMap::new(), no_dynamic, deks: HashMap::new(), branches, withhold_bound: false, through_bound: HashMap::new(), by_key: false, keyed: HashMap::new(), opted_in: false })
     }
 
     /// `e`'s link, when it names a resource the read environment branched.
@@ -2284,7 +2323,7 @@ impl<'a> Resolver<'a> {
             return d.clone();
         }
         // A reference can't carry a sensitive value to someone who couldn't read it directly.
-        if names::sensitive(&e.row.tags) && !self.caller.runtime {
+        if names::sensitive(&e.row.tags) && !self.caller.runtime && !(self.opted_in && self.stack.is_empty()) {
             return (Value::default(), Some(format!("{} is sensitive: only roll's runtimes and syncs read it", e.row.key)));
         }
         if let Some(at) = self.stack.iter().position(|s| *s == id) {

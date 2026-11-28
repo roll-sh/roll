@@ -33,7 +33,7 @@ use bytes::Bytes;
 use parking_lot::Mutex;
 use search_es::{Cluster, MetaStore};
 use search_server::{Catalog, ClusterSpec, LifecycleHooks, ObjectStores, StoreProvider};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
 use std::time::{Duration, Instant};
@@ -61,7 +61,8 @@ pub(crate) struct Wakes {
 
 #[derive(Default)]
 struct WakeState {
-    deleting: HashSet<String>,
+    /// Clusters locked out of waking, by how many operations hold them (a delete, a reset).
+    deleting: HashMap<String, usize>,
     looked_up: HashMap<String, Instant>,
     loading: HashMap<String, Load>,
     next: u64,
@@ -69,15 +70,18 @@ struct WakeState {
 
 impl Wakes {
     pub(crate) fn is_deleting(&self, name: &str) -> bool {
-        self.inner.lock().deleting.contains(name)
+        self.inner.lock().deleting.contains_key(name)
     }
 
     pub(crate) fn set_deleting(&self, name: &str, on: bool) {
         let mut st = self.inner.lock();
         if on {
-            st.deleting.insert(name.to_string());
-        } else {
-            st.deleting.remove(name);
+            *st.deleting.entry(name.to_string()).or_default() += 1;
+        } else if let Some(n) = st.deleting.get_mut(name) {
+            *n -= 1;
+            if *n == 0 {
+                st.deleting.remove(name);
+            }
         }
     }
 
@@ -126,7 +130,7 @@ impl Catalog for SqlCatalog {
     async fn lookup(&self, cluster: &str) -> Option<ClusterSpec> {
         {
             let mut st = self.wakes.inner.lock();
-            if st.deleting.contains(cluster) {
+            if st.deleting.contains_key(cluster) {
                 return None;
             }
             // Stamped before reading: a change made after the read is after the stamp.
@@ -166,7 +170,7 @@ impl StoreProvider for GuardedStores {
             let mut st = self.wakes.inner.lock();
             // Checked and registered in one critical section with `set_deleting`: either the
             // delete sees this load and waits for it, or this load sees the delete.
-            anyhow::ensure!(!st.deleting.contains(cluster), "cluster [{cluster}] is being deleted");
+            anyhow::ensure!(!st.deleting.contains_key(cluster), "cluster [{cluster}] is being deleted or reset");
             anyhow::ensure!(exists, "cluster [{cluster}] no longer exists");
             st.next += 1;
             let token = st.next;

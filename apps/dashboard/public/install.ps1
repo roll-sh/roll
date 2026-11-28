@@ -85,14 +85,17 @@ try {
         $loggedIn = $false
         if ($gh) { & gh auth status *> $null; $loggedIn = $LASTEXITCODE -eq 0 }
         if ($loggedIn) {
-            & gh attestation verify (Join-Path $tmp $asset) --repo $Repo --signer-workflow "$Repo/.github/workflows/release-cli.yml" *> $null
-            if ($LASTEXITCODE -ne 0) { Die "$asset has no build provenance from $Repo's release workflow (gh attestation verify failed): not installing it" }
+            # From this very tag (an older genuine build under a newer tag fails), on GitHub's runners.
+            & gh attestation verify (Join-Path $tmp $asset) --repo $Repo --signer-workflow "$Repo/.github/workflows/release-cli.yml" --source-ref "refs/tags/$tag" --deny-self-hosted-runners *> $null
+            if ($LASTEXITCODE -ne 0) { Die "$asset has no build provenance from $Repo's release workflow at $tag (gh attestation verify failed): not installing it" }
             Say "checked against SHA256SUMS and the build provenance of $Repo's release workflow"
         } elseif ($verify -eq 'attestation') {
             Die "ROLL_VERIFY=attestation needs gh, logged in (gh auth login), to check $asset's build provenance"
         } else {
             Say "checked against SHA256SUMS only: with gh logged in, this script also checks build provenance (or run gh attestation verify <file> --repo $Repo on the zip)"
         }
+    } elseif ($verify -ne 'attestation') {
+        Say "checked against SHA256SUMS only (build provenance not checked: ROLL_VERIFY=$verify, from $Releases)"
     }
 
     Expand-Archive -Path (Join-Path $tmp $asset) -DestinationPath (Join-Path $tmp 'out')

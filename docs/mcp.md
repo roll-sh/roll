@@ -69,11 +69,11 @@ client keeps it for a minute (`ttlMs`). Connect to `/v1/mcp?toolsets=postgres,co
 list only those products' tools, as GitHub's MCP server does; the access tools (approvals,
 `access_check`) are always listed. Redis alone is 10 tools and the access tools 11, ~2.2k
 tokens instead of ~56k. A product too big for some clients on its own splits into areas, as GitHub's server splits its
-toolsets: apps is `apps.observe` (logs, metrics, errors, traces, vitals, SLOs, usage, push,
+toolsets: apps is `apps.observe` (logs, metrics, errors, traces, vitals, CSP reports, SLOs, usage, push,
 events: 21 tools, ~3.2k tokens), `apps.deploy` (deploys, promotions, rollbacks, jobs, cron runs,
 restarts: 39, ~5.9k), `apps.configure` (services, environments, variables, domains, volumes,
-forms, links, runtime config: 30, ~5.5k) and `apps.project` (drains, notifications, limits, the
-status page, the preview domain: 29, ~3.9k); secrets is `secrets.values` (keys, folders,
+forms, links, runtime config: 30, ~5.5k) and `apps.project` (drains, notifications, open alerts,
+limits, the status page, the preview domain: 31, ~4.1k); secrets is `secrets.values` (keys, folders,
 environments, changes, change and value requests, promotion, imports: 49, ~8.5k),
 `secrets.security` (audit, findings, leaks, reach, insights, shares, rotations, the backup
 schedule: 15, ~2.2k) and `secrets.integrations` (transit, leases, CAs, clouds, syncs and the other
@@ -1478,6 +1478,7 @@ previews are listed once those products are on.
 | `apps_app_metrics` | The app's own OpenTelemetry metrics, as series. | `GET /v1/apps/services/{service}/environments/{env}/app-metrics` |
 | `apps_analytics` | Page views, visitors, top pages, referrers, countries. | `GET /v1/apps/services/{service}/environments/{env}/analytics` |
 | `apps_vitals` | What visitors' browsers measured on an environment's pages: Web Vitals p75s, rated, overall and per route. | `GET /v1/apps/services/{service}/environments/{env}/vitals` |
+| `apps_csp_reports` | What visitors' browsers reported an environment's Content-Security-Policy blocked, grouped, the most frequent first. | `GET /v1/apps/services/{service}/environments/{env}/csp-reports` |
 | `apps_route_stats` | An environment's routes over the last minutes: requests, errors, p50/p95/max latency (apps-next). | `GET /v1/apps/services/{id}/environments/{env}/routes` |
 | `apps_import` | What a roll.toml, a docker-compose file or another platform's file (Render's render.yaml, fly.toml, railway.json, Heroku's app.json and Procfile) would make, without making anything; or a roll code repo's or a public Git repository's root roll.toml (`repo`, `git`). | `POST /v1/apps/import` |
 | `apps_export_project` | A project as a roll.toml, variables by name only (apps #26). | `POST /v1/apps/projects/{project}/export` |
@@ -1485,6 +1486,7 @@ previews are listed once those products are on.
 | `apps_delete_environment` | Delete an environment with its deploys and domains. | `DELETE /v1/apps/services/{id}/environments/{env}` |
 | `apps_link` | Give a service a roll resource's connection variables (reveal on the resource). | `PUT /v1/apps/services/{id}/links/{kind}/{ref}` |
 | `apps_unlink` | Stop giving a service a linked resource's variables. | `DELETE /v1/apps/services/{id}/links/{kind}/{ref}` |
+| `apps_rotate_link` | A new credential for a link: its environments redeployed with it, the old one revoked once nothing runs with it. | `POST /v1/apps/services/{service}/links/{kind}/{ref}/rotate` |
 | `apps_list_silences` | An environment's alert silences open now. | `GET /v1/apps/services/{id}/environments/{env}/silences` |
 | `apps_silence_alerts` | Quiet an environment's alerts until a time (events kept, resolves still sent). | `POST /v1/apps/services/{id}/environments/{env}/silences` |
 | `apps_end_silence` | End an alert silence early. | `DELETE /v1/apps/services/{id}/environments/{env}/silences/{sid}` |
@@ -1514,11 +1516,13 @@ previews are listed once those products are on.
 | `apps_list_project_services` | The services in one workspace project. | `GET /v1/apps/projects/{project}/services` |
 | `apps_list_notifications` | Where a project's deploy, crash and preview events are sent (webhook, Slack, Discord, email; the URL's host only). | `GET /v1/apps/projects/{project}/notifications` |
 | `apps_add_notification` | Notify a webhook, Slack, Discord, the project's owner by email, PagerDuty (`routing_key`) or Opsgenie (`api_key`) of a project's events; URLs and keys are stored sealed and never shown again (and redacted from the audit log, #586). | `POST /v1/apps/projects/{project}/notifications` |
-| `apps_update_notification` | Change which events, environments and services a notification gets: given ones replace. | `PATCH /v1/apps/projects/{project}/notifications/{nid}` |
+| `apps_update_notification` | Change which events, environments and services a notification gets, and where its unacknowledged alerts escalate: given ones replace. | `PATCH /v1/apps/projects/{project}/notifications/{nid}` |
 | `apps_delete_notification` | Stop sending a project's events there. | `DELETE /v1/apps/projects/{project}/notifications/{nid}` |
 | `apps_test_notification` | Send a test event now (not retried): whether it arrived. | `POST /v1/apps/projects/{project}/notifications/{nid}/test` |
 | `apps_notification_deliveries` | A notification's last 50 deliveries, newest first: what was sent and whether it arrived. | `GET /v1/apps/projects/{project}/notifications/{nid}/deliveries` |
 | `apps_redeliver_notification` | Send a delivered or failed delivery's event again, from its first try (its delivery id kept). Not an on-call event a later one undid. | `POST /v1/apps/projects/{project}/notifications/{nid}/deliveries/{did}/redeliver` |
+| `apps_list_alerts` | A project's open alerts, newest first: what each is about, who acknowledged it, whether it escalated. | `GET /v1/apps/projects/{project}/alerts` |
+| `apps_ack_alert` | Acknowledge an open alert so it isn't escalated (idempotent; a closed one is a conflict). | `POST /v1/apps/projects/{project}/alerts/{aid}/ack` |
 | `apps_list_drains` | Where a project's logs are sent (the URL's host only). | `GET /v1/apps/projects/{project}/drains` |
 | `apps_add_drain` | Send every matching service's logs out of roll: an HTTPS endpoint (signed; its signing secret comes back once), an OTLP collector, syslog over TLS, or an S3 bucket (apps #580; the AWS keys go as headers, which the audit log redacts), or the project's own roll storage bucket with nothing to paste (`bucket`, apps #590), or a data stream of the project's own roll search cluster as ECS documents with an append-only key (`search`). | `POST /v1/apps/projects/{project}/drains` |
 | `apps_update_drain` | Change what a drain sends or its headers: given ones replace (a new URL is a new drain). | `PATCH /v1/apps/projects/{project}/drains/{did}` |
@@ -1628,14 +1632,16 @@ From a 2026-11-24 gap review (every tool run as an agent would against a fresh r
 
 From a 2026-11-26 comparison (the spec's anniversary post, Claude's connector docs, Atlassian's, Stripe's and GitHub's changelogs; no core SEP went final since 2026-11-15):
 
-1. **roll code's own MCP server speaks 2026-07-28 (this PR).** The conformance suite found
-   `/v1/code/mcp` speaking only the handshake revisions (54 checks pass, 131 fail, errors to a
-   modern request with `id: null`). code-control's `mcp.rs` now serves the revision itself, its rules
-   shared with roll-mcp in `roll_auth::mcp` (forwarding to `/v1/mcp?toolsets=code` would have
-   refused roll code's own tokens, `rlc_`, automation and `rla_`, renamed every tool and widened the
-   list). Every caller kind gets what it gets in a session, `?lockdown=1` included; 131 checks pass,
-   the 64 in `tests/mcp-conformance/code-expected.yml` are fixtures, tasks, header routing and
-   undeclared capabilities.
+1. **roll code's reviewer learnings, an outsider's left out (this PR).** Until #639 a resolved
+   thread's learning took its latest reply, whoever wrote it, and every learning goes into the
+   reviewer's prompt: an outsider's words stored then still steered every later review. One whose
+   thread shows it came from an outside comment (or whose thread is gone) is now left out of
+   reviews and marked `outside` on `GET …/learnings`, and `list_review_learnings` maps onto it
+   (lockdown withholds the marked ones). That closes roll code's last `no tool yet` line;
+   `delete_agent_automation` closed the other (#1304).
+   - **The operator's call:** a signed-in person's cookie on `/v1/code/mcp` runs tools anonymously
+     (public reads only), in every revision, because tool calls forward no cookie. Forwarding it
+     would widen what a session's tools reach, so it waits for a decision.
 2. **#1111 reads the forwarded approval (after roll search #1111 lands; #1210 landed the bit).** From roll search's
    re-check of #1111: its `IndexScope` gives an approved `ask`'s indices when the owner's outcome is
    `ask`, but on a fleet the owner skips asking for a request another node decided, Allow or an
@@ -1727,7 +1733,7 @@ From a 2026-11-26 comparison (the spec's anniversary post, Claude's connector do
    stateless and search mode (`?tools=search`) covers clients that can't take the list; "remember this browser"; a preset that reveals development's values without asking
    (#354); a connection-level `?project=` (only a token's rules bound a project; a default that
    some tools can't honour would look like a boundary).
-16. **Landed 2026-11-26 and 27:** every tool-less credential route is one the gate protects, which found `PUT /v1/previews/{id}/env` answering every value to a grant that may only write (#1267); a `previews.event` stream hears events as they're recorded (#1275); lends naming their key hand and remember that key (#1246, with a review's fixes in #1251); `previews_replay` (#1233); the official MCP conformance suite as `pnpm test:mcp-conformance` and the 2026-07-28 gaps it found (#1231); structured authorization denials (SEP-2643) on every refusal by the gate and on tasks held while a person decides (#1218, #1221); `previews_note_to_work` (#1217); a forward's signed decision says when it passed on an approval (#1210); a body the gate decides from is the JSON object (imports: array) the route reads, closing write decided for admin or delete SQL and CQL sent as an array, and a replacing `.env` import needs delete and write (#1208); a secret lent at an environment's root approved once, its key on the card, and previews' webhook list and revoke tools (#1201); fixes from a review of #1182 and #1186 (a rule stored with `//` reaches nothing, `/api/` is `/api`, the check endpoint and import sources take folders as the gate does) and resolve, diff and `.env` import decided by their body's folder, with one folder parser for roll secrets and the gate (#1195); a missing document names itself and its index, `review_preview` reads `main_on_change` (#1191); a rule's index never holds an exclusion, which reached what it
+16. **Landed 2026-11-26 to 28:** `delete_agent_automation` on roll code's MCP (#1304); `rolld --test auth` 35-37 s → 18-23 s, the edge probed over shared connections eight at a time (#1295); catalogue lookups without per-row allocation and each tool's route looked up once (`PREPARED` 5 s → 0.3 s in a debug build), fixed waits on the audit writer, and roll code's repo tools saying a repository is public unless asked (#1285); roll code's `/v1/code/mcp` speaks 2026-07-28 itself, its rules shared with roll-mcp in `roll_auth::mcp`, 131 conformance checks passing (#1263); the access/MCP tests one per flow, 166 to 95 with every security invariant kept (#1266); every tool-less credential route is one the gate protects, which found `PUT /v1/previews/{id}/env` answering every value to a grant that may only write (#1267); a `previews.event` stream hears events as they're recorded (#1275); lends naming their key hand and remember that key (#1246, with a review's fixes in #1251); `previews_replay` (#1233); the official MCP conformance suite as `pnpm test:mcp-conformance` and the 2026-07-28 gaps it found (#1231); structured authorization denials (SEP-2643) on every refusal by the gate and on tasks held while a person decides (#1218, #1221); `previews_note_to_work` (#1217); a forward's signed decision says when it passed on an approval (#1210); a body the gate decides from is the JSON object (imports: array) the route reads, closing write decided for admin or delete SQL and CQL sent as an array, and a replacing `.env` import needs delete and write (#1208); a secret lent at an environment's root approved once, its key on the card, and previews' webhook list and revoke tools (#1201); fixes from a review of #1182 and #1186 (a rule stored with `//` reaches nothing, `/api/` is `/api`, the check endpoint and import sources take folders as the gate does) and resolve, diff and `.env` import decided by their body's folder, with one folder parser for roll secrets and the gate (#1195); a missing document names itself and its index, `review_preview` reads `main_on_change` (#1191); a rule's index never holds an exclusion, which reached what it
    excluded at the gate and in search's scoped principal (#1182, from the re-check of search #1111);
    the root folder spelled `//` is the root, so the 8-hour caps hold and a secrets folder has one
    spelling, refused at the gate where secrets would refuse it (#1186, from roll secrets' 43rd

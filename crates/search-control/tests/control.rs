@@ -717,6 +717,132 @@ async fn requests_are_held_to_the_nodes_budgets() {
     }
 }
 
+/// A reset or a delete whose request goes away (the client gives up while the reset waits for a
+/// wake to finish) runs to its end on its own: nothing stays locked out, so the branch answers
+/// with the copy's data, and once deleted, a cluster made under its name wakes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_reset_whose_request_goes_away_leaves_nothing_locked() {
+    use reqwest::Method;
+    let e = env().await;
+    let p = e.post("/v1/search/clusters", json!({"name": "rd"})).await;
+    let parent = format!("/v1/search/clusters/{}", p["id"].as_str().unwrap());
+    e.post(&format!("{parent}/request"), json!({"method": "PUT", "path": "/seed/_doc/0?refresh=true", "body": {"v": "seed"}})).await;
+    let b = e.post(&format!("{parent}/branches"), json!({"name": "pv-rd"})).await;
+    let branch = format!("/v1/search/clusters/{}", b["id"].as_str().unwrap());
+    let (u, pw) = creds(&b);
+    assert!(e.es(&u, &pw, Method::PUT, "/docs/_doc/1?refresh=true", Some(json!({"v": "A"}))).await.0 < 300);
+    let copy = e.post(&format!("{branch}/branches"), json!({"name": "pv-rd-copy"})).await;
+    assert!(e.es(&u, &pw, Method::PUT, "/docs/_doc/1?refresh=true", Some(json!({"v": "B"}))).await.0 < 300);
+    // A wake that takes a while, which the reset's unload waits for; its client gives up first.
+    asleep_with_slow_wake(&e, "pv-rd", Duration::from_millis(1500)).await;
+    let waking = spawn_get(&e, &u, &pw, "/docs/_doc/1");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let gone = e.http.post(format!("{}{branch}/reset", e.api)).json(&json!({"from": copy["id"]})).timeout(Duration::from_millis(300)).send().await;
+    assert!(gone.is_err(), "the client gave up: {gone:?}");
+    e.control.set_wake_delay(Duration::ZERO);
+    let _ = waking.await;
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let (s, v) = e.es(&u, &pw, Method::GET, "/docs/_doc/1", None).await;
+        if s == 200 && v["_source"]["v"] == "A" {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "the reset never completed: {s} {v}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    // The reset's own end (its outcome, its figures) may still be running: a 409 until then.
+    loop {
+        let (s, v) = e.call(Method::DELETE, &branch, None).await;
+        if s == 200 {
+            break;
+        }
+        assert!(s == 409 && std::time::Instant::now() < deadline, "{s} {v}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let again = e.post("/v1/search/clusters", json!({"name": "pv-rd"})).await;
+    let (u, pw) = creds(&again);
+    let (s, v) = e.es(&u, &pw, Method::PUT, "/fresh/_doc/1?refresh=true", Some(json!({"v": 1}))).await;
+    assert_eq!(s, 201, "a cluster made under the name wakes: {v}");
+}
+
+/// A branch reset to a copy of it (roll previews' restore points) holds what the copy held
+/// again, in place: the same id and password, its API key and browser key still work; an index
+/// made since is gone, one deleted since is back, and it writes on from there. A cluster outside
+/// the branch's line is refused, and a reset runs alone: a second one or a delete meanwhile is a
+/// 409.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_branch_resets_to_its_copy() {
+    use reqwest::Method;
+    let e = env().await;
+    let p = e.post("/v1/search/clusters", json!({"name": "rs"})).await;
+    let parent = format!("/v1/search/clusters/{}", p["id"].as_str().unwrap());
+    e.post(&format!("{parent}/request"), json!({"method": "PUT", "path": "/seed/_doc/0?refresh=true", "body": {"v": "seed"}})).await;
+    let b = e.post(&format!("{parent}/branches"), json!({"name": "pv-rs"})).await;
+    let id = b["id"].as_str().unwrap().to_string();
+    let branch = format!("/v1/search/clusters/{id}");
+    let (u, pw) = creds(&b);
+    let es = |m: Method, path: &str, body: Option<Value>| {
+        let (e, u, pw, path) = (&e, &u, &pw, path.to_string());
+        async move { e.es(u, pw, m, &path, body).await }
+    };
+    for (path, v) in [("/docs/_doc/1?refresh=true", "A"), ("/gone/_doc/1?refresh=true", "kept")] {
+        assert!(es(Method::PUT, path, Some(json!({"v": v}))).await.0 < 300, "{path}");
+    }
+    let (s, key) = es(Method::POST, "/_security/api_key", Some(json!({"name": "k"}))).await;
+    assert_eq!(s, 200, "{key}");
+    let (s, v) = e.call(Method::PATCH, &branch, Some(json!({"cors": {"allow_origin": ["https://pv.test"]}}))).await;
+    assert_eq!(s, 200, "{v}");
+    let site = e.post(&format!("{branch}/browser-keys"), json!({"name": "site", "indices": ["docs"]})).await;
+    let copy = e.post(&format!("{branch}/branches"), json!({"name": "pv-rs-copy"})).await;
+    // After the copy.
+    assert!(es(Method::PUT, "/docs/_doc/1?refresh=true", Some(json!({"v": "B"}))).await.0 < 300);
+    assert_eq!(es(Method::DELETE, "/gone", None).await.0, 200);
+    assert!(es(Method::PUT, "/later/_doc/1?refresh=true", Some(json!({"v": "B"}))).await.0 < 300);
+    // Only from a copy of the branch made without `at`.
+    let other = e.post("/v1/search/clusters", json!({"name": "rs-other"})).await;
+    for from in [json!("rs"), other["id"].clone(), json!(id)] {
+        let (s, v) = e.call(Method::POST, &format!("{branch}/reset"), Some(json!({"from": from}))).await;
+        assert_eq!(s, 400, "{from}: {v}");
+    }
+    let r = e.post(&format!("{branch}/reset"), json!({"from": copy["id"]})).await;
+    assert_eq!((&r["id"], &r["reset"]), (&json!(id), &json!("applied")), "{r}");
+    let (s, v) = es(Method::GET, "/docs/_doc/1", None).await;
+    assert_eq!((s, &v["_source"]["v"]), (200, &json!("A")), "{v}");
+    let (s, v) = es(Method::GET, "/gone/_doc/1", None).await;
+    assert_eq!((s, &v["_source"]["v"]), (200, &json!("kept")), "deleted after the copy, back: {v}");
+    assert_eq!(es(Method::GET, "/later", None).await.0, 404, "made after the copy");
+    let with_key = e.http.get(format!("{}/docs/_doc/1", e.es)).header("authorization", format!("ApiKey {}", key["encoded"].as_str().unwrap())).send().await.unwrap();
+    assert_eq!(with_key.status().as_u16(), 200, "the branch's API key");
+    let browser = e.http.post(format!("{}/docs/_search", e.es)).header("origin", "https://pv.test").header("authorization", format!("ApiKey {}", site["api_key"].as_str().unwrap())).json(&json!({})).send().await.unwrap();
+    assert_eq!(browser.status().as_u16(), 200, "the branch's browser key");
+    // It writes on from the copy; the copy and the parent are as they were.
+    assert!(es(Method::PUT, "/docs/_doc/2?refresh=true", Some(json!({"v": "C"}))).await.0 < 300);
+    assert_eq!(es(Method::GET, "/docs/_count", None).await.1["count"], 2);
+    let (cu, cp) = creds(&copy);
+    assert_eq!(e.es(&cu, &cp, Method::GET, "/docs/_count", None).await.1["count"], 1);
+    let (pu, ppw) = creds(&p);
+    assert_eq!(e.es(&pu, &ppw, Method::GET, "/_cat/indices?h=index&format=json", None).await.1, json!([{"index": "seed"}]));
+    // One operation at a time: while a reset runs (its load held up), a second reset and a
+    // delete answer 409; once it's done, the delete goes through.
+    e.control.set_wake_delay(Duration::from_millis(800));
+    let reset = format!("{branch}/reset");
+    let first = {
+        let req = e.http.post(format!("{}{reset}", e.api)).json(&json!({"from": copy["id"]}));
+        tokio::spawn(async move { req.send().await.unwrap().status().as_u16() })
+    };
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let (s, v) = e.call(Method::POST, &reset, Some(json!({"from": copy["id"]}))).await;
+    assert_eq!(s, 409, "a second reset: {v}");
+    let (s, v) = e.call(Method::DELETE, &branch, None).await;
+    assert_eq!(s, 409, "a delete: {v}");
+    assert_eq!(first.await.unwrap(), 200);
+    e.control.set_wake_delay(Duration::ZERO);
+    // The copy is a fixed point: the second reset puts back what the first did.
+    assert_eq!(es(Method::GET, "/docs/_count", None).await.1["count"], 1);
+    let (s, v) = e.call(Method::DELETE, &branch, None).await;
+    assert_eq!(s, 200, "{v}");
+}
+
 #[tokio::test]
 async fn branches() {
     let e = env().await;
@@ -4290,14 +4416,16 @@ async fn a_branch_acts_as_none_of_its_parents() {
         assert_eq!(v["status"]["state"]["active"], false, "{v}");
         let (s, v) = e.es(&u, &p, Method::PUT, "/_watcher/watch/ping/_deactivate", None).await;
         assert_eq!(s, 200, "{v}");
-        // Once the last execution recorded itself: as many calls as the parent's executions.
+        // Once the last execution recorded itself: as many calls as the parent's executions (the
+        // branch's inactive copy adds none). How many ran before the deactivation depends on load,
+        // so one is enough.
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
         loop {
             e.es(&u, &p, Method::POST, "/.watcher-history-*/_refresh?expand_wildcards=all", None).await;
             let (_, v) = e.es(&u, &p, Method::GET, "/.watcher-history-*/_count?expand_wildcards=all", None).await;
             let executions = v["count"].as_u64().unwrap() as usize;
             let calls = hooks.load(std::sync::atomic::Ordering::SeqCst);
-            if executions >= 2 && calls == executions {
+            if executions >= 1 && calls == executions {
                 break;
             }
             assert!(std::time::Instant::now() < deadline, "{calls} calls for {executions} executions: {v}");

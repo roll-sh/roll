@@ -25,6 +25,8 @@ on:
       - 'crates/roll-cli/**'
       - 'crates/roll-fetch/**'
       - '.github/workflows/release-cli.yml'
+  # Run a re-publish from the tag itself (`gh workflow run release-cli.yml --ref cli-vX.Y.Z -f
+  # tag=cli-vX.Y.Z`): the install scripts accept provenance made at `refs/tags/<tag>` only.
   workflow_dispatch:
     inputs:
       tag:
@@ -234,7 +236,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           for f in artifacts/roll-x86_64-unknown-linux-gnu.tar.gz artifacts/rolld-x86_64-unknown-linux-gnu.tar.gz; do
-            gh attestation verify "$f" --repo "${{ github.repository }}" --signer-workflow "${{ github.repository }}/.github/workflows/release-cli.yml"
+            gh attestation verify "$f" --repo "${{ github.repository }}" --signer-workflow "${{ github.repository }}/.github/workflows/release-cli.yml" \
+              --source-ref "refs/tags/$TAG" --deny-self-hosted-runners
           done
       - name: winget and Scoop manifests
         run: deploy/cli/render.sh "$TAG" artifacts/SHA256SUMS artifacts

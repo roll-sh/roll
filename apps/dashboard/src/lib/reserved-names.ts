@@ -46,6 +46,7 @@ export const RESERVED_NAMES = [
   "legal",
   "pricing",
   "privacy",
+  "products",
   "security",
   "status",
   "support",

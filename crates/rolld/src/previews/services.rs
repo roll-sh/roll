@@ -854,11 +854,11 @@ pub struct Snapshots {
 
 #[async_trait]
 impl apps_control::integrations::PreviewSnapshots for Snapshots {
-    async fn snapshot(&self, service: &str, env: &str, name: &str, png: bytes::Bytes) -> apps_control::Result<Value> {
+    async fn snapshot(&self, service: &str, env: &str, name: &str, head: Option<&str>, png: bytes::Bytes) -> apps_control::Result<Value> {
         let conflict = |m: &str| apps_control::Error::Conflict(m.to_string());
         let engine = self.engine.upgrade().ok_or_else(|| conflict("roll previews is stopping"))?;
         let preview = preview_on(&engine, &self.apps, service, env).await.ok_or_else(|| conflict("this service doesn't run that preview"))?;
-        match engine.snapshot(&preview, name, None, png.to_vec()).await {
+        match engine.snapshot(&preview, name, head, png.to_vec()).await {
             Ok(head) => Ok(json!({ "page": format!("snap:{name}"), "head": head })),
             Err(roll_previews::Error::BadRequest(m)) => Err(apps_control::Error::BadRequest(m)),
             Err(e) => Err(conflict(&e.to_string())),
@@ -1171,6 +1171,15 @@ impl roll_previews::ports::Apps for Services {
     /// roll apps' proxy).
     async fn can_swap(&self, preview: &str, service: &str) -> anyhow::Result<bool> {
         Ok(self.apps.find(preview, service).await?.is_none())
+    }
+
+    /// A replayed write: roll's runtime's services only (roll apps' proxy takes none from roll).
+    async fn send(&self, preview: &str, service: &str, method: &str, path: &str, content_type: Option<&str>, body: Vec<u8>) -> anyhow::Result<Option<roll_previews::ports::Fetched>> {
+        let name = service.split_once('@').map_or(service, |(n, _)| n);
+        if self.apps.find(preview, name).await?.is_some() {
+            return Ok(None);
+        }
+        self.runtime.send(preview, service, method, path, content_type, body).await
     }
 
     fn swap(&self, preview: &str, service: &str, to: Option<roll_previews::ports::Laptop>) {

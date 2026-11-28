@@ -12,10 +12,7 @@ use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio_rustls::rustls::pki_types::pem::PemObject;
-use tokio_rustls::rustls::pki_types::{CertificateDer, ServerName};
-use tokio_rustls::rustls::{self, ClientConfig, RootCertStore};
+use futures_util::StreamExt;
 
 const TOKEN: &str = "test-operator-token-0123456789abcdef";
 const DASHBOARD: &str = "https://roll.sh";
@@ -56,27 +53,14 @@ fn concrete(pattern: &str) -> String {
     pattern.split('/').map(|seg| if seg.starts_with('{') { "0" } else { seg }).collect::<Vec<_>>().join("/")
 }
 
-/// One GET through the edge's HTTPS listener: the status (0 when nothing answered in time).
-async fn https(port: u16, roots: &RootCertStore, host: &str, path: &str, auth: Option<&str>) -> u16 {
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let cfg = ClientConfig::builder_with_provider(provider).with_safe_default_protocol_versions().unwrap().with_root_certificates(roots.clone()).with_no_client_auth();
-    let tcp = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
-    let mut tls = tokio_rustls::TlsConnector::from(Arc::new(cfg)).connect(ServerName::try_from(host.to_string()).unwrap(), tcp).await.unwrap();
-    let auth = auth.map(|a| format!("Authorization: {a}\r\n")).unwrap_or_default();
-    tls.write_all(format!("GET {path} HTTP/1.1\r\nHost: {host}\r\n{auth}Connection: close\r\n\r\n").as_bytes()).await.unwrap();
-    // The status line is enough (an event stream never ends).
-    let mut head = Vec::new();
-    let read = tokio::time::timeout(Duration::from_secs(20), async {
-        let mut buf = [0u8; 1024];
-        while !head.windows(2).any(|w| w == b"\r\n") {
-            match tls.read(&mut buf).await {
-                Ok(0) | Err(_) => break,
-                Ok(n) => head.extend_from_slice(&buf[..n]),
-            }
-        }
-    });
-    let _ = read.await;
-    String::from_utf8_lossy(&head).split(' ').nth(1).and_then(|s| s.parse().ok()).unwrap_or(0)
+/// A probe's status. The body is read so the connection serves the next probe, except an event
+/// stream's, which never ends.
+async fn status_of(r: reqwest::Response) -> u16 {
+    let status = r.status().as_u16();
+    if !r.headers().get("content-type").is_some_and(|v| v.as_bytes().starts_with(b"text/event-stream")) {
+        let _ = r.bytes().await;
+    }
+    status
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -141,10 +125,16 @@ async fn every_control_plane_route_needs_the_operator_token() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     assert!(up, "rolld's API didn't come up:\n{}", output.lock().unwrap());
-    let mut roots = RootCertStore::empty();
-    for c in CertificateDer::pem_file_iter(certs.join("edge.crt")).unwrap() {
-        roots.add(c.unwrap()).unwrap();
-    }
+    // The edge's HTTPS listener, trusting only its certificate, every host it serves resolved to it:
+    // one client, so probes share connections rather than a TLS handshake each.
+    let edge_certs = reqwest::Certificate::from_pem_bundle(&std::fs::read(certs.join("edge.crt")).unwrap()).unwrap();
+    let edge = ["api.roll.test", "k0.kafka.r1.roll.test", "tasks.r1.roll.test"]
+        .into_iter()
+        .fold(reqwest::Client::builder().timeout(Duration::from_secs(20)).redirect(reqwest::redirect::Policy::none()).http1_only().tls_certs_only(edge_certs), |b, host| {
+            b.resolve(host, std::net::SocketAddr::from(([127, 0, 0, 1], https_port)))
+        })
+        .build()
+        .unwrap();
 
     let routes = routes.lock().unwrap().clone();
     for prefix in ["/v1/projects", "/v1/redis", "/v1/streams", "/kafka/v3", "/v1/tasks", "/v1/code", "/git", "/v1/queues", "/v1/storage", "/v1/nosql", "/internal/wal"] {
@@ -160,24 +150,32 @@ async fn every_control_plane_route_needs_the_operator_token() {
         _ => "tasks.r1.roll.test",
     };
     let send = |via: &'static str, host: String, path: String, auth: Option<String>| {
-        let (http, api, roots) = (http.clone(), api.clone(), roots.clone());
+        let (http, edge, api) = (http.clone(), edge.clone(), api.clone());
         async move {
-            if via == "internal" {
-                let mut req = http.get(format!("{api}{path}"));
-                if let Some(a) = &auth {
-                    req = req.header("authorization", a);
-                }
-                return match req.send().await {
-                    Ok(r) => r.status().as_u16(),
-                    Err(e) if e.is_timeout() => 0,
-                    Err(e) => panic!("GET {path}: {e}"),
-                };
+            let mut req = match via {
+                "internal" => http.get(format!("{api}{path}")),
+                // The Host the edge routes on, without the port, as a client on 443 sends it.
+                _ => edge.get(format!("https://{}:{https_port}{path}", edge_host(&host))).header("host", edge_host(&host)),
+            };
+            if let Some(a) = &auth {
+                req = req.header("authorization", a);
             }
-            https(https_port, &roots, edge_host(&host), &path, auth.as_deref()).await
+            match req.send().await {
+                Ok(r) => status_of(r).await,
+                Err(e) if e.is_timeout() || via == "edge" => 0,
+                Err(e) => panic!("GET {path}: {e}"),
+            }
         }
     };
     let operator = format!("Bearer {TOKEN}");
-    let mut wrong = Vec::new();
+    // Every probe and what it must not answer, then all of them a few at a time.
+    enum Want {
+        Not401,
+        // A product's own credential gets past the gate: a wrong one must not get further than the
+        // route's method (a GET on a POST route is a 405 either way).
+        Is401 { or_405: bool },
+    }
+    let mut probes = Vec::new();
     let (mut protected, mut public) = (0, 0);
     for (host, route, access) in &routes {
         // roll code, git and internal hops decide for themselves (code takes the token as its
@@ -189,29 +187,37 @@ async fn every_control_plane_route_needs_the_operator_token() {
         let vias: &[&'static str] = if host == "api" { &["internal", "edge"] } else { &["edge"] };
         for &via in vias {
             let at = format!("{via} {host} {route} ({access})");
-            let with_token = send(via, host.clone(), path.clone(), Some(operator.clone())).await;
-            if with_token == 401 {
-                wrong.push(format!("{at}: 401 with the operator's token"));
-            }
+            let mut probe = |who: &'static str, auth: Option<&str>, want: Want| probes.push((at.clone(), who, via, host.clone(), path.clone(), auth.map(str::to_string), want));
+            probe("the operator's token", Some(&operator), Want::Not401);
             if access.starts_with("public:") {
                 public += 1;
-                if send(via, host.clone(), path.clone(), None).await == 401 {
-                    wrong.push(format!("{at}: 401 without a token"));
-                }
+                probe("no token", None, Want::Not401);
                 continue;
             }
             protected += 1;
-            // A product's own credential gets past the gate: a wrong one must not get further
-            // than the route's method (a GET on a POST route is a 405 either way).
             let credential = access.starts_with("operator or") || access.starts_with("user or");
-            for (who, auth) in [("no token", None), ("a wrong token", Some("Bearer not-the-token")), ("Basic", Some("Basic eDp5"))] {
-                let status = send(via, host.clone(), path.clone(), auth.map(str::to_string)).await;
-                if status != 401 && !(credential && auth.is_some() && status == 405) {
-                    wrong.push(format!("{at}: {status} with {who}"));
-                }
-            }
+            probe("no token", None, Want::Is401 { or_405: false });
+            probe("a wrong token", Some("Bearer not-the-token"), Want::Is401 { or_405: credential });
+            probe("Basic", Some("Basic eDp5"), Want::Is401 { or_405: credential });
         }
     }
+    let answered: Vec<_> = futures_util::stream::iter(probes)
+        .map(|(at, who, via, host, path, auth, want)| {
+            let sent = send(via, host, path, auth);
+            async move { (at, who, want, sent.await) }
+        })
+        .buffer_unordered(8)
+        .collect()
+        .await;
+    let mut wrong: Vec<String> = answered
+        .into_iter()
+        .filter(|(.., want, status)| match want {
+            Want::Not401 => *status == 401,
+            Want::Is401 { or_405 } => *status != 401 && !(*or_405 && *status == 405),
+        })
+        .map(|(at, who, _, status)| format!("{at}: {status} with {who}"))
+        .collect();
+    wrong.sort();
     assert!(wrong.is_empty(), "{} routes misbehave:\n{}", wrong.len(), wrong.join("\n"));
     assert!(protected > 200 && public > 0, "protected {protected}, public {public}");
 
