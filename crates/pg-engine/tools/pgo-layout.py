@@ -11,10 +11,11 @@ when the binary has no symbol of that name (LLVM inlined every call to it). One 
 `<share %> <size | inlined> <symbol>`. tools/dist-pgo.sh writes it to <out>/layout.txt.
 
 diff: the functions whose size or inline state differs between two lists, hottest first, and
-the share of the counts they hold. Two builds of one commit with the same profile give none (the
-build is deterministic); two trainings of one commit gave 53 of the 300 before the fixed-work
-recipe. In an A/B pair, a function the change did not touch that differs is the training, not
-the change. Needs llvm-tools (llvm-profdata, llvm-nm: `rustup component add llvm-tools`).
+the share of the counts they hold. Two trainings of one commit gave 114 of the 300 (27.8% of the
+counts) with the recipe before 2026-11-28 and 89 (20.3%, by smaller amounts) with this one. An
+A/B pair built from one merged profile (dist-pgo.sh --profdata A --profdata B) gives the same
+counts to every function the change did not touch: one of those in the diff is the change
+moving inlining around it. Needs llvm-tools (llvm-profdata, llvm-nm: `rustup component add llvm-tools`).
 """
 import os
 import subprocess
