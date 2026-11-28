@@ -3,6 +3,7 @@ import { useLocation } from "@tanstack/react-router";
 import { ArrowUpRight, ChevronDown } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type PointerEvent, type ReactNode } from "react";
 import { Link } from "@/components/link";
+import { api } from "@/lib/roll-api";
 import { GROUPS, PRODUCTS, productHref } from "@/lib/marketing";
 import { useMarkState } from "../mark-state";
 import { InstallCommand } from "./install";
@@ -278,6 +279,32 @@ function FooterColumn({ title, children }: { title: string; children: ReactNode 
 
 const FOOT_LINK = `rounded-sm text-muted transition-colors duration-150 hover:text-fg ${FOCUS}`;
 
+/** What's live: the commit the API's node runs and when that node started (`GET /v1/info`). */
+function Deployed() {
+  const [info, setInfo] = useState<{ commit: string; since?: string } | null>(null);
+  useEffect(() => {
+    let live = true;
+    api
+      .info()
+      .then((i) => live && i.commit && setInfo({ commit: i.commit, since: i.started_at }))
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, []);
+  if (!info) return null;
+  const since = info.since ? new Date(info.since) : null;
+  return (
+    <span className="font-mono text-[11px] tracking-wide">
+      live{" "}
+      <a href={`https://github.com/roll-sh/roll/commit/${info.commit}`} target="_blank" rel="noreferrer" className={FOOT_LINK}>
+        {info.commit.slice(0, 7)}
+      </a>
+      {since && !Number.isNaN(since.getTime()) && <> · since {since.toISOString().slice(0, 16).replace("T", " ")} UTC</>}
+    </span>
+  );
+}
+
 /** The marketing pages' footer: Horizon and the install line, every product by family, and the rest of the site. */
 export function MarketingFooter() {
   const { state } = useMarkState();
@@ -328,6 +355,7 @@ export function MarketingFooter() {
       <div className="border-t border-line">
         <div className={`${WRAP} flex flex-wrap items-center justify-between gap-x-6 gap-y-2 py-6 text-[12.5px] text-subtle`}>
           <span>© {new Date().getFullYear()} roll</span>
+          <Deployed />
           <span className="font-mono text-[11px] tracking-wide">keep the code rolling</span>
         </div>
       </div>

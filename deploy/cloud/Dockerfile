@@ -85,9 +85,15 @@ COPY --chmod=755 deploy/cloud/entrypoint.sh /usr/local/bin/roll-cloud-entrypoint
 COPY --chmod=755 deploy/cloud/health.sh /usr/local/bin/roll-health
 USER roll
 WORKDIR /data
+# What's deployed, for `GET /v1/info` and the footer (deploy.sh push sets them). After every
+# RUN: a build argument changes the cache key of the RUN steps that follow it.
+ARG ROLL_COMMIT=""
+ARG ROLL_COMMITTED_AT=""
 # The rest of the node's settings come from the task definition (docs/cloud/README.md, "Node
 # settings") and, for ROLL_NODE_ID, ROLL_ZONE and ROLL_ADVERTISE_URL, from instance metadata.
 ENV ROLL_HOME=/data \
+    ROLL_COMMIT=${ROLL_COMMIT} \
+    ROLL_COMMITTED_AT=${ROLL_COMMITTED_AT} \
     ROLL_API=0.0.0.0:7070 \
     ROLL_CODE_DB_CA=/etc/roll/rds-global-bundle.pem \
     NODE_ENV=production

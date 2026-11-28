@@ -154,9 +154,19 @@ impl Products {
     }
 
     /// `GET /v1/info`: this node's version and the products it runs (the dashboard hides the
-    /// rest).
+    /// rest), and what's deployed: the commit its image was built from and when it was made
+    /// (`ROLL_COMMIT`, `ROLL_COMMITTED_AT`, set in the roll cloud image; null elsewhere), and when
+    /// this node started.
     pub fn info_route(self, node: String) -> axum::Router {
-        let body = json!({ "version": env!("CARGO_PKG_VERSION"), "node": node, "products": self.names() });
+        let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+        let body = json!({
+            "version": env!("CARGO_PKG_VERSION"),
+            "node": node,
+            "products": self.names(),
+            "commit": env("ROLL_COMMIT"),
+            "committed_at": env("ROLL_COMMITTED_AT"),
+            "started_at": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        });
         axum::Router::new().route("/v1/info", axum::routing::get(move || async move { Json(body.clone()) }))
     }
 }

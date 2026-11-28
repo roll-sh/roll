@@ -507,7 +507,10 @@ one out, and `--code-only`, `--queues-only`, `--nosql-only` and `--search-only` 
 - With Postgres off rolld never runs `docker` for computes. roll code's checks and previews
   run as Fargate tasks on the fleet (`ROLL_CODE_RUNNER=fargate`, "Isolated work"); elsewhere
   they use Docker on the host, and without it they fail while the node keeps serving.
-- `GET /v1/info` (no token) answers `{"version", "node", "products"}`; the dashboard hides the
+- `GET /v1/info` (no token) answers `{"version", "node", "products", "commit", "committed_at",
+  "started_at"}`: the commit and its time come from the image (`ROLL_COMMIT`,
+  `ROLL_COMMITTED_AT`; `deploy.sh push` sets them), `started_at` is the node's start, so roughly
+  when the deploy reached it. The marketing footer shows the commit; the dashboard hides the
   products a node doesn't run.
 - Every node of the fleet must run the same set: requests are forwarded to a resource's owner,
   whichever node that is.
