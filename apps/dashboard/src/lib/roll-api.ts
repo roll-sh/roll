@@ -74,6 +74,11 @@ export interface Info {
   version: string;
   node: string;
   products: Product[];
+  /** The commit this node's image was built from, and when it was made (null outside roll cloud). */
+  commit?: string | null;
+  committed_at?: string | null;
+  /** When this node started: about when the deploy reached it. */
+  started_at?: string;
 }
 
 export interface QueryResult {
