@@ -4892,7 +4892,10 @@ async fn a_failed_deploy_is_sent_to_the_projects_targets_signed_and_retried() {
     let again = |t: &Value, d: &str| format!("{base}/{}/deliveries/{d}/redeliver", t["id"].as_str().unwrap());
     let (st, d) = call(&w.api, "POST", &again(&hook, &did), None).await;
     assert_eq!((st, d["status"].as_str(), d["attempts"].as_u64()), (StatusCode::OK, Some("pending"), Some(0)), "{d}");
-    assert_eq!(call(&w.api, "POST", &again(&hook, &did), None).await.0, StatusCode::CONFLICT, "still being tried");
+    // The failing target's is still being tried (between its retries): not sent again.
+    let down_log = call(&w.api, "GET", &got_of(&down), None).await.1;
+    let pending = down_log.as_array().unwrap().iter().find(|d| d["status"] == "pending").unwrap()["id"].as_str().unwrap().to_string();
+    assert_eq!(call(&w.api, "POST", &again(&down, &pending), None).await.0, StatusCode::CONFLICT, "still being tried: {down_log}");
     assert_eq!(call(&w.api, "POST", &again(&staging, &did), None).await.0, StatusCode::NOT_FOUND, "another target's");
     let mut twice = 0;
     for _ in 0..1000 {
