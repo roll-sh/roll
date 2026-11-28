@@ -215,25 +215,17 @@ fn run_ingest(engine: &Engine, case: &Json, condition: bool) -> Result<Json, Str
     Ok(json!({ "doc": out }))
 }
 
+/// Ingest scripts and processor conditions: `ctx` and its metadata, `Processors.*`, Jackson's
+/// JSON errors (`Json.load`), and everyday scripts (parsing log lines, dates and numbers, string
+/// clean-up, streams, hashing) with their failures (`ingest.json`, `conditional.json`,
+/// `processors.json`, `jackson.json`, `ingest2.json`).
 #[test]
 fn ingest() {
     check_ingest("ingest.json", false);
-}
-
-#[test]
-fn ingest_conditions() {
     check_ingest("conditional.json", true);
-}
-
-/// `Processors.*` of ingest scripts, and Jackson's JSON errors (`Processors.json`, `Json.load`).
-#[test]
-fn ingest_processors() {
     check_ingest("processors.json", false);
-}
-
-#[test]
-fn ingest_json_errors() {
     check_ingest("jackson.json", false);
+    check_ingest("ingest2.json", false);
 }
 
 fn check_ingest(name: &str, condition: bool) {
@@ -382,20 +374,9 @@ fn check_bulk_write(file: &str, ctx_kind: Context) {
 }
 
 #[test]
-fn update_by_query() {
+fn update_by_query_and_reindex() {
     check_bulk_write("ubq.json", Context::UpdateByQuery);
-}
-
-#[test]
-fn reindex() {
     check_bulk_write("reindex.json", Context::Reindex);
-}
-
-/// Everyday ingest scripts: parsing log lines, dates and numbers, string clean-up, streams,
-/// `Json`, `Processors`, hashing, metadata and their failures (`ingest2.json`).
-#[test]
-fn ingest_everyday() {
-    check_ingest("ingest2.json", false);
 }
 
 /// Runs an ingest fixture named by `PAINLESS_ADHOC_INGEST` (a path; relative paths resolve in

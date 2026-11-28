@@ -274,23 +274,39 @@ struct EventsQuery {
     after: Option<i64>,
     limit: Option<usize>,
     latest: Option<String>,
+    /// Seconds to wait for an event when there's none after `after` yet (a long poll).
+    wait: Option<u64>,
 }
 
 /// What happened to previews after `after`, oldest first (`{events, next}`; `next` is where to
 /// ask from again, past the events the caller doesn't see too). `latest=1`: none, and the newest
-/// seq, to follow from now on.
+/// seq, to follow from now on. `wait`: with none yet, the answer waits up to that many seconds
+/// for one (at most [`crate::store::EVENTS_WAIT_MAX_S`]).
 async fn events(AxState(e): S, axum::Extension(visible): axum::Extension<Visible>, Query(q): Query<EventsQuery>) -> crate::Result<Json<Value>> {
     let latest = matches!(q.latest.as_deref(), Some("1" | "true"));
     if latest && q.after.is_some() {
         return Err(Error::BadRequest("latest or after, not both".into()));
     }
     let limit = q.limit.unwrap_or(100).clamp(1, 500);
+    let wait = match q.wait {
+        Some(w) if latest || w == 0 || w > crate::store::EVENTS_WAIT_MAX_S => {
+            return Err(Error::BadRequest(format!("wait is 1 to {} seconds, and not with latest", crate::store::EVENTS_WAIT_MAX_S)));
+        }
+        w => w.map(std::time::Duration::from_secs),
+    };
+    let after = q.after.unwrap_or(0);
+    let waited = match wait {
+        Some(w) => Some(e.store.wait_events(after, limit, w).await?),
+        None => None,
+    };
     blocking(e, move |e| {
         if latest {
             return Ok(json!({ "events": [], "next": e.store.latest_event()? }));
         }
-        let after = q.after.unwrap_or(0);
-        let got = e.store.events(after, limit)?;
+        let got = match waited {
+            Some(got) => got,
+            None => e.store.events(after, limit)?,
+        };
         let next = got.last().map_or(after, |x| x.seq);
         let seen: Vec<crate::Event> = got.into_iter().filter(|x| visible.sees(&x.project)).collect();
         Ok(json!({ "events": seen, "next": next }))

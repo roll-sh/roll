@@ -626,7 +626,7 @@ A rule can grant some indices of a search cluster: `{id: "cl_1", index: "logs-*,
 - Search checks the rest at query time as the caller: a query's reads of other indices (terms
   lookups, `more_like_this`, lookup runtime fields, `indexed_shape`, templates after rendering, and
   the bodies of reindex, ES|QL, SQL and the other query-bearing APIs) and a body's `_index` values
-  stay within `{index}` (search's `control.rs`, `per_index_routes`; feature/roll-search 5db7c2602
+  stay within `{index}` (search's `control.rs`, `documents`; feature/roll-search 5db7c2602
   and fae055c31), and a document an ingest pipeline moves (`_index`, `reroute`) is checked again
   as a write at the index it lands in (ea6be2f0f). ES|QL and SQL read as the caller too (0158b6d9c):
   `FROM`, wildcards, `LOOKUP JOIN` and SQL reach only the indices it may read.
@@ -666,8 +666,10 @@ Doppler grant one item or secret the same way; before, the smallest grant was a 
   values, a resolve, a batch of changes), and roll secrets asks the grant again per key, so it
   answers those keys alone and refuses a batch naming another (it names them). Anything else
   about the folder (a digest, a watch's delta, a `.env` import or diff, a promote, health and
-  leaks, which filter only by environment and folder) is a 403. A list, a create or the product as
-  a whole never matches a rule with keys.
+  leaks, which filter only by environment and folder) is a 403. Its message says the token
+  reaches only some keys of that folder and what it asked needs a rule without keys (the folder,
+  never a key), which is how `roll run --watch` and `roll secrets agent` know to stop at their
+  start. A list, a create or the product as a whole never matches a rule with keys.
 - **Covering**: a rule with keys covers another only if the other's keys are a subset of its own;
   one without keys covers a keyed one, never the reverse. Remembering, tighten and step-ups go by
   this, so a keyed approval can't be remembered as a rule over the folder.
