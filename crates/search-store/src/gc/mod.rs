@@ -178,7 +178,13 @@ impl Store {
                 _ => None,
             })
             .collect();
-        let mut orphan_copies: Vec<String> = Vec::new();
+        // A reset's state without its intent (a reset that failed before recording it, or whose
+        // leftovers' delete failed) goes with its copies.
+        let mut orphan_copies: Vec<String> = cluster_keys
+            .iter()
+            .filter(|(k, _)| matches!(keys::parse_cluster_key(k), Some(ClusterObject::ResetState { cluster }) if !resetting.contains(cluster)))
+            .map(|(k, _)| k.clone())
+            .collect();
         let manifest_keys: Vec<String> = cluster_keys
             .into_iter()
             .map(|(k, _)| k)

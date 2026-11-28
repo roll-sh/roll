@@ -1585,4 +1585,10 @@ async fn a_reset_needs_nothing_of_its_source_and_a_stale_one_is_dropped() {
     store.write_manifest("pv", &p, &ShardManifest { segments, max_seq_no: 2, local_checkpoint: 2, ..mm }).await.unwrap();
     assert_eq!(store.cluster_usage("pv").await.unwrap().own_bytes, before + 700, "and its own writes after it");
     store.detach_shard(wal).await.unwrap();
+    // A reset's state left without its intent (a reset that failed before recording it) goes with
+    // garbage collection.
+    let orphan = "search/c/pv/reset/1/state.zst";
+    objects.put(orphan, Bytes::from_static(b"{}")).await.unwrap();
+    store.collect_garbage(Duration::ZERO).await.unwrap();
+    assert!(!objects.exists(orphan).await.unwrap());
 }

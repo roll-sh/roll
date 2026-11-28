@@ -470,6 +470,8 @@ pub enum ClusterObject<'a> {
     ResetCopy { cluster: &'a str, index_uuid: &'a str, shard: u32 },
     /// A reset in progress (its copies are kept while it is).
     ResetIntent { cluster: &'a str },
+    /// The state a reset recorded (`reset/<at>/state.zst`), removed with its copies.
+    ResetState { cluster: &'a str },
 }
 
 pub fn parse_cluster_key(key: &str) -> Option<ClusterObject<'_>> {
@@ -496,6 +498,9 @@ pub fn parse_cluster_key(key: &str) -> Option<ClusterObject<'_>> {
         let (at, rest) = rest.split_once('/')?;
         if at.is_empty() || !at.bytes().all(|b| b.is_ascii_digit()) {
             return None;
+        }
+        if rest == "state.zst" {
+            return Some(ClusterObject::ResetState { cluster });
         }
         let (index_uuid, file) = rest.split_once('/')?;
         let shard = file.strip_suffix(".json")?;

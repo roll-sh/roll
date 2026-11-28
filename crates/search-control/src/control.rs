@@ -1701,7 +1701,9 @@ impl Control {
         // The data it shares is its parent's, whatever its shards say now (all deleted or made
         // since): what its `own_bytes` is counted against.
         let parent = match b.parent_id.as_deref() {
-            Some(id) => self.store.get(id).await?.map(|p| p.name),
+            // A parent whose delete is in flight still names the lineage (a failed delete brings
+            // it back).
+            Some(id) => self.store.live_name(id).await?,
             None => None,
         };
         let ticket = self
@@ -1764,6 +1766,18 @@ impl Control {
     /// [`Control::arc`] for an operation that must outlive its request.
     fn arc_for_operation(&self) -> Result<Arc<Control>> {
         self.arc().ok_or_else(|| ControlError::Unavailable("the node is shutting down".into()))
+    }
+
+    /// Carries out the reset `c` has waiting in the store alone (the engine can't load it), as
+    /// its owner: on a fleet it claims `c` first, as a load does, so the reset's writes are its
+    /// owner's and fenced against an older one's.
+    async fn complete_reset_in_store(&self, c: &SearchCluster) -> anyhow::Result<()> {
+        if self.cluster_leases().is_some() {
+            self.data.claim_next(&c.name).await?;
+        }
+        let r = self.data.load_cluster(&c.name).await.map(drop);
+        self.data.release_cluster(&c.name);
+        r
     }
 
     /// Carries out a reset `c` has waiting ([`Control::reset`] after a load that failed) before
@@ -2081,7 +2095,7 @@ impl Control {
         if !self.cfg.deleted_retention.is_zero()
             && let Err(e) = self.finish_pending_reset(&c).await
             // A cluster the engine can't load: the store carries its reset out on its own.
-            && let Err(e) = self.data.load_cluster(&c.name).await.map(drop).map_err(|e2| format!("{e}; and without the engine: {e2}"))
+            && let Err(e) = self.complete_reset_in_store(&c).await.map_err(|e2| format!("{e}; and without the engine: {e2}"))
         {
             // Half applied, giving it up would keep (and restore) a mix of both: retry until the
             // load can complete it.
