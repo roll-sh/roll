@@ -24052,6 +24052,151 @@ only).
 311's format 5 scans): plain 2.88 G against pgrust's 2.22 G (PGO not measured with it). q02's SubPlan (min
 supply cost a part, 1,309 runs) repeats too few values to gain; q20's never repeat.
 
+## Reproducible PGO training, and how to judge a change on the shipped build (agent 347, 2026-11-28)
+
+Agents 340, 342 and 345 could not judge their changes on the shipped build: two trainings of
+nearly the same code inlined untouched storage code differently, by more than the changes they
+were judging. BENCH "Reproducible PGO training" has every table. Every build here is a
+`tools/dist-pgo.sh` build of `9cfd1322f`'s pg-engine code. Two candidates:
+- `cand/a347` changes nothing in the shipped binary. It adds the rule below and its tools: a
+  training whose profile could not be written stops; `<out>/layout.txt` and
+  `tools/pgo-layout.py`; `--profdata` given twice merges the profiles; `--profile-only`;
+  `bench oltp --txns`.
+- `cand/a347-2` is the reproducible training recipe (section 2). On top of `cand/a347`.
+
+**The rule for judging a change on the shipped build (for agents' briefs).** Gate on the plain
+dist pair first, as before. When a change must also be judged on PGO (inlining, function
+boundaries, layout):
+1. Train each arm once: `tools/dist-pgo.sh --profile-only --out <arm>` in each arm's checkout.
+2. Build **both arms with the two trainings merged**: `tools/dist-pgo.sh --profdata
+   <base>/roll-engine.profdata --profdata <new>/roll-engine.profdata --out <arm>-m`, in each
+   arm's checkout.
+3. Run `tools/pgo-layout.py diff <base>-m/layout.txt <new>-m/layout.txt`. A hot function the
+   change did not touch in that list is the change moving inlining around it: report it.
+4. Read a cell only past its A/A (BENCH: TPC-H 0.13% a query, q13 0.36%; bulk 0.03% a step;
+   the 8-client 100-row read, the 1,000-row read and the 8-client point select 0.01-0.6%, after
+   a throwaway run in each hold). Read TPC-H on the total of the 22 and on queries that move
+   together, not on one query under 1%: any difference between two binaries moves where the
+   shipped flags' branch padding falls (below), and two builds of one recipe differ up to 1.0%
+   on a query (mean 0.43%) for that and the rest of the training's spread.
+
+Why step 2 works: LLVM keys a function's counts by its name and control-flow hash, and
+`llvm-profdata merge` keeps one record for each version. So both builds get the same counts for
+every function the change did not touch, and each changed function gets its own arm's counts.
+Checked: all 43 functions whose code differs between `9cfd1322f` and `8f691b51fe` (nine
+commits) keep both records in the merged profile. The pair costs two instrumented builds, two trainings and two optimised builds, one
+optimised build less a side than the own-trained pair.
+
+Never judge by two arms each built from its own training: that pair measures the training (up
+to 1.57% a TPC-H query and 2.76% a bulk step with today's recipe). Never build the base with
+only the new arm's profile: the base's changed functions lose their counts (agent 344).
+
+**1. Where two trainings of one commit differ, and why.** Two trainings B1 and B2 of today's
+recipe, from one instrumented build; tools in `~/.cache/a347/tools` (`pdiff.py`, `absdiff.py`,
+`fabs.py`).
+- *Lost counter updates.* The training is instrumentation PGO (`-Cprofile-generate`), not
+  sampling. Its counters are plain `incq`, not atomic, so threads running the same code at once
+  lose increments, a different number each run:
+  - TPC-H's single-threaded load agrees to the last digit (`parse_copy_data` 1.8503 G in every
+    training).
+  - Its parallel scans do not: `parscan::Pre::decode` read 2.787 G in B1, 3.026 G in B2 and
+    3.131 G in a third non-atomic training, against 3.2292 G in both atomic ones.
+  - So the TPC-H class, fixed work, read 60.09 / 61.07 G in B1 / B2.
+- *Seconds, not work.* The point, range and short classes ran for fixed seconds, so their counts
+  followed the machine's load: point 5.49 / 6.89 G and range 6.77 / 8.58 G in B1 / B2 (+26%).
+  Agent 346's pair: range 4.46 / 5.71 G, short 4.07 / 5.75 G.
+- *Class weights that follow the training.* Each class's weight was the whole number nearest
+  `max / n`, so it moved with the class's total (346's pair: short x15 = 61.0 G against x11 =
+  63.3 G).
+- *Autovacuum runs on a clock* (`autovacuum_naptime`). What its workers VACUUMed and ANALYZEd
+  differed between trainings: VACUUM 0.36 / 0.43 G of the TPC-H class, and the short class's
+  ANALYZE 0.019 / 0.065 G. The heap model's pruning after it followed: `Heap::prune_with` held
+  0.55% of all counts in one training and 1.27% in the other.
+- *LLVM's hot threshold is a percentile*: the count at the 99% cutoff of the merged profile. Any
+  class's shape moves it (892,539 / 834,859 counts in B1 / B2), and every function with counters
+  in that band changes side: 301 functions between B1 and B2.
+- *In the binaries:* 114 of the 300 hottest functions differ in size, holding 27.8% of the
+  counts:
+  - `Scan::fill_batch_rows` 66,646 / 87,205 bytes;
+  - `ScanNode::next_raw_ref` 47,244 / 76,642;
+  - `decode_value` 14,482 / 15,581;
+  - `Block::run_rows<Overlay>` out of line in B1, 5,259 of q10's 25,526 samples.
+
+**2. What makes them agree** (`cand/a347-2`):
+- the instrumented build updates its counters atomically (`-instrprof-atomic-counter-update-all`):
+  `Pre::decode` and `varlena_payload` are equal to the digit in two trainings, and the training
+  takes 16-23 minutes instead of 11-14;
+- every timed part runs a fixed number of operations (`bench oltp --txns N`, `pgbench -t`), about
+  what the instrumented engine did in its seconds; the training refuses a client without
+  `--txns`;
+- autovacuum is off in the training (`-c autovacuum=off`), with a `VACUUM ANALYZE` after each
+  part that writes, where its worker would have run;
+- fixed class weights (`PGO_WEIGHTS`, default bulk 6, catalog 26, point 9, range 10, regress 32,
+  short 6, startup 130, tpch 1: the rounding of this recipe's class totals at `9cfd1322f`);
+- LLVM's hot and cold counts are fixed shares of the profile's total (`-profile-summary-hot-count`
+  at 1.75e-6, `-profile-summary-cold-count` at 1.3e-10: the mean of four trainings' 99% and
+  99.9999% cutoffs, 1.61-1.86e-6 and 1.29-1.33e-10). `PGO_HOT_SHARE=off` restores LLVM's own
+  cutoffs for measurements.
+
+Two such trainings agree per class: TPC-H +0.005%, bulk +0.008%, range -0.02%, regress, catalog
+and startup within 0.04%. Two classes still differ:
+- point -0.30%: `server::IdleRead`'s polls follow timing;
+- short +4.8%: plans are made again when a table's size estimate moves past what a plan read
+  (`litplan::param_parsed`), and how many of 8-32 sessions see each move follows their
+  interleaving.
+
+Fixing the threshold halves the functions whose counters cross it (367 -> 188); what still
+crosses is planner, lock and short-class code, and `fill_batch_rows` no longer does. Between the
+two binaries 85 of the 300 hottest functions still differ in size (19.7% of the counts), by
+less than before (`fill_batch_rows` 43,753 / 42,875 bytes), and none of them between inlined
+and out of line: `Block::run_rows<Overlay>` is inlined in every build of the recipe.
+
+**Before / after** (BENCH has every query and step). Two trainings of one commit, user
+instructions:
+
+| row | A/A | before (B1 / B2) | after (I3 / I4) |
+|---|---|---|---|
+| TPC-H, the 22 | +0.00%, a query <= 0.13% (q13 0.36%) | +0.21%; a query up to 1.57% (q15), mean 0.44% | +0.12%; a query up to 1.01% (q13), 0.92% (q11), mean 0.43% |
+| bulk script | +0.00%, a step <= 0.03% | -0.24%; a step up to 2.76% (VACUUM) | +0.12%; a step up to 0.57% (count after DELETE) |
+| 100-row range read, 8 clients | +0.04% | +0.83% | +0.21% |
+| 1,000-row range read | +0.01% | +0.92% | +0.25% |
+| point select, 8 clients | ±0.6% | -0.59% | level (±0.4%) |
+
+So 0.3% is met on the reads, on every bulk step but one and on the TPC-H total; TPC-H's
+queries are not (mean 0.43% either way). Part of that is placement, not the profile: about 4.2% of
+TPC-H's user instructions are the NOPs of the shipped flag `-x86-branches-within-32B-boundaries`
+(I3's and I4's profiles built without it, J3 / J4: 71.215 / 71.186 G against 74.307 / 74.394 G),
+and where they fall moves with any difference between two binaries. Without it the two read a
+query apart by 0.27% on the mean, the largest q14 1.10%, q11 0.77%, q07 0.68%.
+
+**What it costs the shipped build** (the recipe's builds against today's two, means): TPC-H
+-0.05% (74.315 G against 74.353 G for B1 in the same hold), the bulk script -1.39% (CREATE INDEX
+and CREATE UNIQUE INDEX -11.0% each; ANALYZE +2.6%, VACUUM +0.9%), the 100-row read -1.2%, the
+1,000-row read -1.9%, the point select level. Equal class weights (in hundredths, `PGO_WEIGHTS=
+equal`) were measured as well: five builds read TPC-H 74.77-74.94 G (+0.5% against today's) at
+the same reads and bulk. That build also tested the recipe's other parts one at a time: R3
+(LLVM's own cutoffs), P5 (non-atomic counters) and V6 (autovacuum on) all read like N3. Whole
+numbers happened to give the short class 7.5% less weight (6 for 6.49), and TPC-H's code more of
+the hot share.
+
+**Left.**
+1. TPC-H's per-query spread: 0.27% mean without the padding, 0.43% with it, up to 1.1% on one
+   query. Instruction gates of the shipped build count the padding's NOPs (4.2% of TPC-H's): a
+   gate could count them apart (`perf stat` has no NOP event here; Intel PT or a static count
+   per hot block would) or read cycles on a quiet lane.
+2. The rest of the profile spread comes from re-planning in the short class and the server's read
+   polls, real behaviour that follows timing. More trainings merged would shrink it only by the
+   square root of their number. Pinning `#[inline]` was not done: no function flipped between
+   inlined and out of line under the new recipe.
+3. Short requests can't be read in user instructions at one client: the server's read spin (50
+   µs while cores are free, `server::IdleRead`) runs a timing-dependent number of times. Read
+   them at 8 clients, as above.
+4. A check in `dist-pgo.sh` that fails when a listed function's size or inline state differs
+   from a recorded expectation was not made: sizes change with every edit to those functions.
+   `layout.txt` and `pgo-layout.py diff` serve the comparison instead.
+5. The weights are constants of `9cfd1322f`'s class totals. A change that moves a class's total
+   a lot (another training part, a much cheaper path) can need a new number there.
+
 ## The standing on the shipped build, 2026-11-27 (agent 344)
 
 BENCH "Standing, 2026-11-27" re-measures roll's column of the standing on origin's `19c7a8758` with

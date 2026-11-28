@@ -2741,6 +2741,124 @@ Every result hash equal (and PostgreSQL's).
   repeated and NULL, EXISTS under OR, a second row for one value (21000 when that value comes),
   a STABLE PL/pgSQL function's NOTICE at every run, an UPDATE's SubPlan over the rows it changes.
 
+## Reproducible PGO training: two trainings of one commit before and after (2026-11-28, agent 347)
+
+HANDOFF "Reproducible PGO training" has what changed and the rule for judging a change on the
+shipped build. Every build is a `tools/dist-pgo.sh` build of `9cfd1322f`'s pg-engine code (the
+candidates change tools and docs only), each from a training of its own; the instrumented builds
+were made once and shared. The arms:
+- **B1, B2**: the recipe before this change, two trainings from one plain instrumented build.
+- **I3, I4**: `cand/a347-2`'s recipe, two trainings from one atomic-counter instrumented build.
+- **A1**: B1's binary under another name (the A/A).
+- **N3, N4**: I3's and I4's trainings with equal class weights (in hundredths), measured first.
+- **R3**: N3 with LLVM's own cutoffs (`PGO_HOT_SHARE=off`).
+- **P5**: the recipe on the plain (non-atomic) instrumented build.
+- **V6**: the recipe with autovacuum on.
+- **J3, J4**: I3's and I4's profiles built without `-x86-branches-within-32B-boundaries`.
+
+Harness `~/.cache/a347/bench` (agent 344's `lib.sh`, `tpch.sh`, `bulk.sh`; new `ocell.sh`): user
+instructions of the server's cgroup (`perf stat -a -G`), one pair a `tools/lane.sh` hold. Every
+lane carried 1.2-3.7 foreign cores on the server CPUs (lane.sh: 3-7.7 over the lane's 8), so
+instructions only, and no pair meets the 1.0 foreign core rule: that is why every row has an
+A/A. One binary's TPC-H total over the day: 74.353-74.424 G (B1, four passes).
+
+Reads (`ocell.sh`): one stopped data directory (pgbench `-i -s 32`, CHECKPOINT, quiet) copied for
+every run, `pgbench -M prepared --random-seed=1 -t` (fixed reads: 8 clients x 10,000 100-row
+ranges, 1 client x 4,000 1,000-row ranges, 8 clients x 30,000 point selects), a warm-up of the
+same reads first, a throwaway run first in each hold; medians of 2-4 runs a binary, user
+instructions a read. The first versions read ±2-20% for one binary, for three reasons:
+- fresh loads leave different LSM shapes (295.8k / 303.8k a read);
+- pgbench's seed picks other ranges, with cold blocks;
+- at one client the server's read spin (a fixed 50 µs while cores are free, `server::IdleRead`)
+  runs a different number of times (100-row reads and point selects ±1.6%; 8 clients fix it).
+
+| row | A/A (A1 / B1) | before: B1 / B2 | after: I3 / I4 |
+|---|---|---|---|
+| TPC-H, the 22 | 74.383 / 74.385 G (+0.00%); a query within 0.13%, q13 0.36% | 74.424 / 74.582 G (+0.21%); q15 +1.57%, q19 +1.00%, q06 +0.99% | 74.307 / 74.394 G (+0.12%); q13 -1.01%, q11 -0.92%, q20 -0.86% |
+| bulk script | 61.593 / 61.591 G; a step within 0.03% | 61.589 / 61.442 G (-0.24%); VACUUM +2.76%, ANALYZE +1.89% | 60.734 / 60.807 G (+0.12%); count after +0.57%, the rest within 0.29% |
+| 100-row read, 8 clients | 251,493 / 251,587 (+0.04%) | 251,587 / 253,678 (+0.83%) | 248,645 / 249,176 (+0.21%) |
+| 1,000-row read, 1 client | 1,661,500 / 1,661,594 (+0.01%) | 1,661,594 / 1,676,887 (+0.92%) | 1,630,205 / 1,634,356 (+0.25%) |
+| point select, 8 clients | 27,231-27,541 (±0.6%) | 27,257 / 27,096 (-0.59%) | 27,217-27,419 / 27,306-27,429 (level) |
+
+TPC-H per query and the bulk script per step (TRUNCATE, 0.069 G, is left out: the table's 0.001 G
+resolution is 1.4% of it):
+
+| query | A/A: A1 / B1 | before: B1 / B2 | after: I3 / I4 |
+|---|---|---|---|
+| q01 | 7.349 / 7.349 (-0.00%) | 7.350 / 7.348 (-0.03%) | 7.352 / 7.373 (+0.28%) |
+| q02 | 1.893 / 1.892 (-0.07%) | 1.893 / 1.889 (-0.18%) | 1.878 / 1.868 (-0.52%) |
+| q03 | 3.633 / 3.632 (-0.01%) | 3.635 / 3.641 (+0.17%) | 3.639 / 3.654 (+0.40%) |
+| q04 | 1.209 / 1.209 (-0.00%) | 1.209 / 1.218 (+0.75%) | 1.205 / 1.210 (+0.49%) |
+| q05 | 2.364 / 2.367 (+0.10%) | 2.364 / 2.377 (+0.56%) | 2.357 / 2.368 (+0.47%) |
+| q06 | 3.237 / 3.237 (+0.00%) | 3.237 / 3.269 (+0.99%) | 3.235 / 3.246 (+0.34%) |
+| q07 | 2.951 / 2.947 (-0.13%) | 2.947 / 2.954 (+0.22%) | 2.937 / 2.951 (+0.48%) |
+| q08 | 1.156 / 1.156 (-0.02%) | 1.157 / 1.158 (+0.10%) | 1.155 / 1.157 (+0.23%) |
+| q09 | 6.552 / 6.550 (-0.03%) | 6.549 / 6.561 (+0.19%) | 6.507 / 6.549 (+0.65%) |
+| q10 | 5.106 / 5.105 (-0.02%) | 5.111 / 5.146 (+0.68%) | 5.156 / 5.150 (-0.12%) |
+| q11 | 0.641 / 0.641 (-0.01%) | 0.643 / 0.639 (-0.52%) | 0.638 / 0.632 (-0.92%) |
+| q12 | 5.929 / 5.930 (+0.02%) | 5.930 / 5.921 (-0.15%) | 5.942 / 5.944 (+0.04%) |
+| q13 | 3.391 / 3.403 (+0.36%) | 3.414 / 3.401 (-0.38%) | 3.418 / 3.383 (-1.01%) |
+| q14 | 1.174 / 1.175 (+0.05%) | 1.175 / 1.174 (-0.06%) | 1.175 / 1.171 (-0.39%) |
+| q15 | 2.256 / 2.256 (+0.01%) | 2.256 / 2.292 (+1.57%) | 2.247 / 2.255 (+0.37%) |
+| q16 | 2.314 / 2.311 (-0.11%) | 2.312 / 2.316 (+0.18%) | 2.309 / 2.298 (-0.46%) |
+| q17 | 2.743 / 2.743 (-0.01%) | 2.744 / 2.743 (-0.03%) | 2.732 / 2.737 (+0.15%) |
+| q18 | 14.014 / 14.015 (+0.00%) | 14.030 / 14.038 (+0.06%) | 13.932 / 13.935 (+0.02%) |
+| q19 | 0.425 / 0.425 (+0.04%) | 0.425 / 0.429 (+1.00%) | 0.426 / 0.428 (+0.56%) |
+| q20 | 0.731 / 0.731 (-0.02%) | 0.731 / 0.731 (+0.08%) | 0.730 / 0.723 (-0.86%) |
+| q21 | 4.771 / 4.767 (-0.08%) | 4.771 / 4.791 (+0.42%) | 4.794 / 4.817 (+0.48%) |
+| q22 | 0.544 / 0.545 (+0.06%) | 0.545 / 0.547 (+0.38%) | 0.544 / 0.545 (+0.10%) |
+| the 22 | 74.383 / 74.385 (+0.00%) | 74.424 / 74.582 (+0.21%) | 74.307 / 74.394 (+0.12%) |
+
+| step | A/A: A1 / B1 | before: B1 / B2 | after: I3 / I4 |
+|---|---|---|---|
+| copy_in | 5.838 / 5.839 (+0.02%) | 5.839 / 5.839 (+0.00%) | 5.818 / 5.811 (-0.12%) |
+| create_index | 2.953 / 2.952 (-0.03%) | 2.953 / 2.925 (-0.95%) | 2.626 / 2.628 (+0.08%) |
+| create_unique_index | 2.562 / 2.562 (+0.00%) | 2.559 / 2.550 (-0.35%) | 2.281 / 2.276 (-0.22%) |
+| copy_out | 1.844 / 1.844 (+0.00%) | 1.844 / 1.850 (+0.33%) | 1.833 / 1.837 (+0.22%) |
+| insert_select | 3.955 / 3.955 (+0.00%) | 3.955 / 3.954 (-0.03%) | 3.945 / 3.948 (+0.08%) |
+| update_half | 10.413 / 10.414 (+0.01%) | 10.414 / 10.472 (+0.56%) | 10.389 / 10.394 (+0.05%) |
+| delete_quarter | 5.943 / 5.943 (+0.00%) | 5.942 / 5.934 (-0.13%) | 5.926 / 5.931 (+0.08%) |
+| vacuum | 1.302 / 1.302 (+0.00%) | 1.302 / 1.338 (+2.76%) | 1.314 / 1.317 (+0.23%) |
+| analyze | 0.424 / 0.424 (+0.00%) | 0.424 / 0.432 (+1.89%) | 0.435 / 0.436 (+0.23%) |
+| count_after | 0.354 / 0.354 (+0.00%) | 0.354 / 0.358 (+1.13%) | 0.349 / 0.351 (+0.57%) |
+| truncate | 0.069 / 0.069 (+0.00%) | 0.069 / 0.068 (-1.45%) | 0.069 / 0.068 (-1.45%) |
+| copy_pk | 15.079 / 15.079 (+0.00%) | 15.077 / 14.951 (-0.84%) | 14.962 / 15.006 (+0.29%) |
+| copy_sx | 10.855 / 10.852 (-0.03%) | 10.852 / 10.767 (-0.78%) | 10.782 / 10.802 (+0.19%) |
+| sum | 61.593 / 61.591 (-0.00%) | 61.589 / 61.442 (-0.24%) | 60.734 / 60.807 (+0.12%) |
+
+**Against the build before** (the shipped build must not get slower), the recipe's builds against
+B1 / B2:
+- TPC-H, the 22: I3 74.315 G against B1's 74.353 G in the same hold (-0.05%).
+- The bulk script -1.39%: CREATE INDEX -11.0%, CREATE UNIQUE INDEX -11.0%, COPY in -0.36%,
+  ANALYZE +2.6%, VACUUM +0.9%.
+- The 100-row read 248.6k against 251.7k (-1.2%); the 1,000-row read 1.630 M against 1.663 M
+  (-1.9%).
+- The point select 27,217-27,283 against 27,279 / 27,148 (level).
+
+Equal weights (N3, N4) read the same bulk and reads but TPC-H 74.83-74.94 G (+0.5%). The
+diagnostics R3 74.83, P5 74.92 and V6 74.77 G read the same, so the class weights account for
+it, not the threshold, the atomic counters or autovacuum.
+
+**Padding** (J3, J4, the same profiles as I3 and I4): the 22 read 71.215 / 71.186 G (-0.04%)
+against 74.307 / 74.394 G. About 4.2% of TPC-H's user instructions are the NOPs of
+`-x86-branches-within-32B-boundaries`. Per query, J3 / J4 differ 0.27% on the mean (I3 / I4:
+0.43%), the largest q14 1.10%, q11 0.77%, q07 0.68%.
+
+**Profiles** (`~/.cache/a347/tools`; class totals of two trainings, counts):
+
+| class | before: B1 / B2 | after: two trainings |
+|---|---|---|
+| TPC-H | 60.090 / 61.065 G (+1.6%) | 61.089 / 61.092 G (+0.005%) |
+| point | 5.485 / 6.892 G (+25.7%; fixed seconds) | 6.868 / 6.847 G (-0.30%) |
+| range | 6.773 / 8.579 G (+26.7%) | 6.391 / 6.389 G (-0.02%) |
+| short | 4.995 / 4.803 G (-3.8%) | 9.415 / 9.869 G (+4.8%) |
+| bulk, catalog, regress, startup | within 0.6% | within 0.04% |
+| hot threshold | 892,539 / 834,859 (-6.5%) | fixed share of the total |
+| hottest 300 functions differing in size | 114 (27.8% of the counts) | 85 (19.7%), smaller amounts, no inline flips |
+
+Recipe cost: the training takes 16-23 minutes, against 11-14, with atomic counters and fixed
+work; the builds are unchanged.
+
 ## Standing, 2026-11-27: roll PGO of today's head against PostgreSQL 18.6 and pgrust as measured (agent 344)
 
 roll's column only, re-measured on origin's `19c7a8758` (cand/a341-2 landed: the estimate records

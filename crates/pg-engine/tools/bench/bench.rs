@@ -550,6 +550,9 @@ fn run_clients(
 ) {
     let start_flag = std::sync::Barrier::new(clients + 1);
     let stop = AtomicBool::new(false);
+    // `--txns N`: each client runs exactly N operations and the run ends when all have, in
+    // place of `--secs` (the PGO training's fixed work: tools/pgo-train.sh).
+    let txns: u64 = cx.opt("txns", 0);
     let mut lat: Vec<u32> = Vec::new();
     let mut errors = 0u64;
     let mut first_err = String::new();
@@ -575,7 +578,9 @@ fn run_clients(
                     let mut errors = 0u64;
                     let mut first = String::new();
                     start_flag.wait();
-                    while !stop.load(Ordering::Relaxed) {
+                    let mut done = 0u64;
+                    while if txns > 0 { done < txns } else { !stop.load(Ordering::Relaxed) } {
+                        done += 1;
                         let t = Instant::now();
                         match op(conn.as_mut(), &ids, &mut rng) {
                             Ok(()) => lat.push(t.elapsed().as_nanos().min(u32::MAX as u128 * 1000) as u64 / 1000),
@@ -593,8 +598,10 @@ fn run_clients(
             .collect();
         start_flag.wait();
         let t0 = Instant::now();
-        std::thread::sleep(Duration::from_secs_f64(secs));
-        stop.store(true, Ordering::Relaxed);
+        if txns == 0 {
+            std::thread::sleep(Duration::from_secs_f64(secs));
+            stop.store(true, Ordering::Relaxed);
+        }
         for h in hs {
             let (l, e, f) = h.join().unwrap();
             lat.extend(l.into_iter().map(|x| x.min(u32::MAX as u64) as u32));
@@ -621,6 +628,9 @@ fn run_clients(
         ("errors", errors.to_string()),
         ("peak_mem_mb", mb(peak)),
     ];
+    if txns > 0 {
+        kv.push(("txns_per_client", txns.to_string()));
+    }
     if checked_oltp_case(case) {
         // Successful read operations return only after validation, so n is also checked_ops.
         kv.push(("validation_version", OLTP_VALIDATION_VERSION.to_string()));

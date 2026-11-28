@@ -12,7 +12,8 @@
 #      log in <out>/build-use.log; tools/pgo-stale.py reports how much of the profile no longer
 #      matches the code, with a WARNING past PGO_STALE_WARN percent (default 1) of the hot
 #      functions' counts (0 when the profile was trained on this commit).
-# With --profdata FILE, steps 1-4 are skipped and FILE is used; with --instrumented FILE, step 2
+# With --profdata FILE, steps 1-4 are skipped and FILE is used (given more than once, the files
+# merged: how an A/B pair is built, HANDOFF "Reproducible PGO training"); with --instrumented FILE, step 2
 # (FILE: an instrumented roll-engine of this commit, e.g. <PGO_DIR>/roll-engine-instrumented,
 # kept from an earlier run); with --raw DIR, steps 1-3 (DIR: pgo-train.sh's raw dir of an earlier
 # training of this commit, its class checks made again; no breadth phase). A profile only fits builds close to its commit (a function that
@@ -20,7 +21,9 @@
 # <out>/BUILD.txt records the commit, toolchain, each class's counts, the staleness, the times and
 # the hashes of the profile and the binary.
 #
-#   crates/pg-engine/tools/dist-pgo.sh [--profdata FILE | --instrumented FILE | --raw DIR] [--out DIR]
+#   crates/pg-engine/tools/dist-pgo.sh [--profdata FILE... | --instrumented FILE | --raw DIR] [--profile-only] [--out DIR]
+# --profile-only stops after the merged profile (<out>/roll-engine.profdata): an A/B pair's
+# trainings, before both arms are built from them merged (HANDOFF "Reproducible PGO training").
 #
 # Needs: the rustup toolchain with llvm-tools (`rustup component add llvm-tools`) and Docker (the
 # training's psql and pgbench, PostgreSQL 18.6's image by digest). Measured here (2026-11-23,
@@ -43,18 +46,20 @@ set -eu
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../../.." && pwd)
 if [ -z "${PGO_IN_HEAVY:-}" ]; then PGO_IN_HEAVY=1 exec "$HERE/heavy.sh" "$0" "$@"; fi
-PROF=; OUT=
+PROF=; PROFS=; OUT=; PONLY=
 INSTR=; RAWIN=
 while [ $# -gt 0 ]; do
   case $1 in
-    --profdata) PROF=$(realpath "$2"); shift 2 ;;
+    --profdata) PROFS="${PROFS:+$PROFS }$(realpath "$2")"; shift 2 ;;
     --instrumented) INSTR=$(realpath "$2"); shift 2 ;;
     --raw) RAWIN=$(realpath "$2"); shift 2 ;;
+    --profile-only) PONLY=1; shift ;;
     --out) OUT=$2; shift 2 ;;
-    *) echo "usage: dist-pgo.sh [--profdata FILE | --instrumented FILE | --raw DIR] [--out DIR]" >&2; exit 2 ;;
+    *) echo "usage: dist-pgo.sh [--profdata FILE... | --instrumented FILE | --raw DIR] [--profile-only] [--out DIR]" >&2; exit 2 ;;
   esac
 done
 export PATH="$HOME/.cargo/bin:$PATH"
+PROF=${PROFS%% *}
 W=${PGO_DIR:-$ROOT/target/pgo}
 OUT=${OUT:-$W/out}
 mkdir -p "$W" "$OUT"; W=$(realpath "$W"); OUT=$(realpath "$OUT")
@@ -166,8 +171,23 @@ if [ -z "$PROF" ]; then
   rm -rf "$W/raw" "$W/braw"
   PROF=$OUT/roll-engine.profdata
   note "client $((T1 - T0)) s, instrumented build $((T2 - T1)) s, training $((T3 - T2)) s"
+elif [ "$PROFS" != "$PROF" ]; then
+  # Several: one profile of them all, each kept as it is (a function whose code differs between
+  # them keeps a record for each version, and each build finds its own), counts of the same
+  # function summed: an A/B pair's two arms built with their two trainings merged have the same
+  # counts for every function the change did not touch (HANDOFF "Reproducible PGO training").
+  # shellcheck disable=SC2086
+  "$PROFDATA" merge -o "$OUT/roll-engine.profdata.new" $PROFS && mv "$OUT/roll-engine.profdata.new" "$OUT/roll-engine.profdata"
+  note "profile: merged $PROFS"
+  PROF=$OUT/roll-engine.profdata
 elif [ "$PROF" != "$OUT/roll-engine.profdata" ]; then
   cp "$PROF" "$OUT/roll-engine.profdata"; PROF=$OUT/roll-engine.profdata
+fi
+# (--profile-only: the training's profile without the optimised build, for an A/B pair's arms,
+# whose binaries are built from both profiles merged.)
+if [ -n "$PONLY" ]; then
+  note "profile $(sha256sum "$PROF" | cut -d' ' -f1) $(du -h "$PROF" | cut -f1) (--profile-only: no optimised build)"
+  echo "dist-pgo: $PROF"; exit 0
 fi
 T4=$(t)
 # A function whose code changed since the profile has a different hash and goes unprofiled
@@ -183,6 +203,10 @@ T5=$(t)
 STALE=$(python3 -I "$HERE/pgo-stale.py" "$PROF" "$OUT/build-use.log" "${PGO_STALE_WARN:-1}") \
   || { echo "dist-pgo: pgo-stale.py failed" >&2; exit 1; }
 echo "$STALE" | while IFS= read -r l; do note "$l"; done
+# The hottest functions' sizes or inline state, for comparing builds (pgo-layout.py diff).
+python3 -I "$HERE/pgo-layout.py" list "$PROF" "$OUT/roll-engine" >"$OUT/layout.txt" \
+  || { echo "dist-pgo: pgo-layout.py failed" >&2; exit 1; }
+note "layout: $(grep -c ' inlined ' "$OUT/layout.txt") of $(wc -l <"$OUT/layout.txt") hottest functions inlined everywhere ($OUT/layout.txt)"
 case $STALE in WARNING*) echo "$STALE" | head -1 >&2 ;; esac
 note "optimised build $((T5 - T4)) s, total $((T5 - T0)) s, peak disk $((PEAK / 1048576)) GB in $W and $OUT"
 note "profile $(sha256sum "$PROF" | cut -d' ' -f1) $(du -h "$PROF" | cut -f1)"
