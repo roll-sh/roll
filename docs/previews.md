@@ -3215,8 +3215,24 @@ In progress, each in a pull request of its own:
 6. **Restore points for search and buckets**: search's on roll search's reset from a copy (#1149;
    200 put back, 409 dropped or busy, 503 recorded); buckets need a put-back on roll storage's
    side.
-7. **Previews for the members thread's next products**: roll apps once its routes become member
-   routes.
+7. **Previews for the members thread's next products**: search is a member product (#808).
+   Checked on 2026-11-27: a member's previews of a project with a cluster keep their role (the
+   data sheet is `reveal`, and a search branch answers 409 there; mask suggestions read only
+   clusters the project trusts, which every member role reads; the columns are read as the
+   operator behind that filter). Teardown is previews' own: the operator changes the password,
+   then deletes. A branch that fails, a 503 included, fails the converge with the product's
+   error and is tried again on the backoff. By design, the preview's branch is in no project:
+   roll search homes only a person's branches (`Control::branched`), so through `/v1/search` it's
+   a 404 to every member, and members reach it through previews' own routes, by role (its
+   credentials are `reveal`). Homing it would take two changes outside previews:
+   - roll-access finding a cluster's project from its home, not only from canvases (previews'
+     copies can't go on the canvas, or the next preview would branch them);
+   - search's project-delete hooks skipping previews' branches (previews deletes them only after
+     the project is gone).
+
+   That isn't worth it while previews' own routes cover what members need.
+
+   roll apps follows once its routes become member routes.
 8. **Watches on pg-control**: the data step's Postgres compute start; cheap branches on ext4
    through overlay volumes; recovery to a time seconds old (unowned).
 
