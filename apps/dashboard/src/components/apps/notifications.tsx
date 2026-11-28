@@ -22,6 +22,7 @@ const EVENTS: { value: NotifyEvent; label: string }[] = [
   { value: "alert.capacity", label: "At capacity" },
   { value: "alert.route", label: "Route alert (one route's errors or latency)" },
   { value: "alert.anomaly", label: "Unusual for the hour" },
+  { value: "alert.csp", label: "A CSP directive blocked something for the first time" },
   { value: "attack.mode", label: "Attack mode on" },
   { value: "deploy.started", label: "A deploy began building" },
   { value: "scale.out", label: "Scaled out" },

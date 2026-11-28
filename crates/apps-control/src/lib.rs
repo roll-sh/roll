@@ -74,6 +74,7 @@ pub mod store;
 pub mod traces;
 pub mod visit;
 pub mod vitals;
+pub mod csp;
 pub mod heartbeats;
 pub mod slo;
 pub mod prom;
@@ -370,6 +371,8 @@ pub struct Apps {
     visit_denials: Mutex<HashMap<String, i64>>,
     /// Web Vitals beacons kept this minute, by environment: (minute, count).
     pub(crate) vitals_seen: Mutex<HashMap<String, (i64, u32)>>,
+    /// CSP report requests taken this minute, by environment: (minute, count).
+    pub(crate) csp_seen: Mutex<HashMap<String, (i64, u32)>>,
     /// Custom events taken this minute, per environment ([`track`]).
     pub(crate) events_seen: Mutex<HashMap<String, (i64, u32)>>,
     /// Form submissions taken this minute, per environment ([`forms`]).
@@ -746,6 +749,7 @@ impl Apps {
             visits: Mutex::new(HashMap::new()),
             visit_denials: Mutex::new(HashMap::new()),
             vitals_seen: Mutex::new(HashMap::new()),
+            csp_seen: Mutex::new(HashMap::new()),
             events_seen: Mutex::new(HashMap::new()),
             forms_seen: Mutex::new(HashMap::new()),
             check_states: Mutex::new(HashMap::new()),
@@ -1972,6 +1976,7 @@ impl Apps {
             feedback: r.feedback,
             vitals: r.vitals,
             hsts: r.hsts.clone(),
+            csp_reports: r.csp_reports,
             log_retention_days: r.log_retention_days.unwrap_or(crate::logs::KEEP_DAYS),
             keep_days: r.keep_days,
             approvals: r.approvals,
@@ -2094,7 +2099,7 @@ impl Apps {
                 settings.push(json!({ "field": format!("run.{k}"), "from": x, "to": y, "put": { "run": { k: x } } }));
             }
         }
-        for k in ["wait_for_ci", "follow_tag", "redeploy_on_secrets", "traces", "vitals", "hsts", "report", "egress", "allow_ips", "rate_limit", "firewall", "headers", "routes", "redirects", "checks", "log_retention_days", "keep_days", "approvals"] {
+        for k in ["wait_for_ci", "follow_tag", "redeploy_on_secrets", "traces", "vitals", "hsts", "csp_reports", "report", "egress", "allow_ips", "rate_limit", "firewall", "headers", "routes", "redirects", "checks", "log_retention_days", "keep_days", "approvals"] {
             let (x, y) = (a.get(k).cloned().unwrap_or(Value::Null), b.get(k).cloned().unwrap_or(Value::Null));
             if x != y {
                 // An environment's `hsts: null` reads as none sent, where a PUT's null is the default.
@@ -2146,7 +2151,7 @@ impl Apps {
     pub async fn put_environment_by(self: &Arc<Self>, service: &str, env: &str, body: Value, by: Option<String>) -> Result<Environment> {
         let o = body.as_object().cloned().unwrap_or_default();
         for k in o.keys() {
-            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "routes", "redirects", "checks", "heartbeats", "split", "mirror", "snippets", "config", "freeze", "pause_schedule", "paused", "held", "hostname", "traces", "egress", "vitals", "report", "preview_host", "log_retention_days", "keep_days", "approvals", "badge", "closed_by", "data", "scheduled", "attack_mode", "challenge_until", "preflight", "deploy_tags", "hsts"].contains(&k.as_str()) {
+            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "routes", "redirects", "checks", "heartbeats", "split", "mirror", "snippets", "config", "freeze", "pause_schedule", "paused", "held", "hostname", "traces", "egress", "vitals", "report", "preview_host", "log_retention_days", "keep_days", "approvals", "badge", "closed_by", "data", "scheduled", "attack_mode", "challenge_until", "preflight", "deploy_tags", "hsts", "csp_reports"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
@@ -2608,7 +2613,7 @@ impl Apps {
                 svc.for_env(&row).map_err(|e| Error::BadRequest(e.to_string().replace("no longer fit", "don't fit")))?;
             }
         }
-        for k in ["feedback", "follow_tag", "wait_for_ci", "redeploy_on_secrets", "traces", "vitals", "report", "badge"] {
+        for k in ["feedback", "follow_tag", "wait_for_ci", "redeploy_on_secrets", "traces", "vitals", "csp_reports", "report", "badge"] {
             if !matches!(o.get(k), None | Some(Value::Null | Value::Bool(_))) {
                 return Err(Error::BadRequest(format!("{k} is a boolean")));
             }
@@ -2898,6 +2903,13 @@ impl Apps {
         if let Some(Value::Bool(on)) = o.get("vitals") {
             let (sid, e, on) = (service.to_string(), env.to_string(), *on);
             self.db(move |s| s.set_vitals(&sid, &e, on)).await?;
+            self.live(service, env).forget_gate();
+            self.changed(service);
+        }
+        // CSP reports: its answers name roll's endpoint from the next request on.
+        if let Some(Value::Bool(on)) = o.get("csp_reports") {
+            let (sid, e, on) = (service.to_string(), env.to_string(), *on);
+            self.db(move |s| s.set_csp_reports(&sid, &e, on)).await?;
             self.live(service, env).forget_gate();
             self.changed(service);
         }
@@ -4656,7 +4668,7 @@ impl Apps {
             preview: row.ephemeral,
             headers: row.headers,
             hsts: row.hsts.as_ref().and_then(|h| axum::http::HeaderValue::from_str(&h.value()).ok()),
-            routes: row.routes, traces, vitals: row.vitals, challenge_key, attack_until: attack.until, split: row.split, mirror: row.mirror, snippets: snippets_of(&row.snippets),
+            routes: row.routes, traces, vitals: row.vitals, csp_reports: row.csp_reports, challenge_key, attack_until: attack.until, split: row.split, mirror: row.mirror, snippets: snippets_of(&row.snippets),
             redirects: row.redirects.as_deref().map(crate::site_rules::EnvRedirects::parse).filter(|r| !r.is_empty()).map(Arc::new) });
         live.set_gate(g.clone(), seen);
         Ok(g)
