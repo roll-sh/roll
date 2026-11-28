@@ -513,12 +513,8 @@ mod tests {
         assert_eq!(found[3].text.lines().count(), 5, "a cause and its tail stay on the trace");
         assert_eq!(found[5].fingerprint, found[6].fingerprint, "messages that differ by an id");
         assert_ne!(found[0].fingerprint, found[1].fingerprint);
-    }
-
-    /// Ruby (a Rails log's and a script's), PHP, .NET, Rust and Elixir traces join and group as
-    /// their own kinds, by their error and first frames, whatever their line numbers.
-    #[test]
-    fn more_languages_traces_group_by_their_error() {
+        // Ruby (a Rails log's and a script's), PHP, .NET, Rust and Elixir, by their error and
+        // first frames, whatever their line numbers.
         let ruby = |n: u32| vec![format!("app/models/order.rb:{n}:in 'charge': undefined method 'id' for nil (NoMethodError)"), format!("\tfrom app/controllers/orders_controller.rb:{}:in 'create'", n + 1), "\tfrom bin/rails:4:in '<main>'".to_string()];
         let rails = ["NoMethodError (undefined method `id' for nil:NilClass):", "app/models/order.rb:12:in `charge'", "app/controllers/orders_controller.rb:8:in `create'"];
         let php = ["PHP Fatal error:  Uncaught RuntimeException: card declined in /app/src/Pay.php:41", "Stack trace:", "#0 /app/src/Order.php(17): Pay->charge()", "#1 {main}", "  thrown in /app/src/Pay.php on line 41"];

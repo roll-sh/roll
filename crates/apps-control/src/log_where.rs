@@ -168,5 +168,14 @@ mod tests {
         assert!(w("level:warn user_id:42").matches(logfmt) && w(r#"msg:"slow query""#).matches(logfmt));
         assert!(!w("level:warn").matches("level warn, plain text"));
         assert!(Where::parse("no-colon").is_err() && Where::parse(r#"msg:"open"#).is_err() && Where::parse("a..b:x").is_err());
+        // A search's words: every one (any case), a phrase as written, -word absent, OR between.
+        let s = |q: &str, t: &str| crate::logs::Search::parse(q).unwrap().matches(t);
+        assert!(s("checkout error", "ERROR in Checkout for order 7") && !s("checkout error", "checkout ok"));
+        assert!(s("\"order 7\"", "for order 7") && !s("\"order 7\"", "order 17 of 7"));
+        assert!(s("error -health", "error saving") && !s("error -health", "error in /health"));
+        assert!(s("--verbose", "ran with --verbose") && s("-1", "exit -1"), "a flag or a number is a word");
+        assert!(s("timeout OR refused", "connection refused") && s("timeout OR refused", "read timeout") && !s("timeout OR refused", "ok"));
+        assert!(s("\"OR\"", "a OR b") && !s("\"OR\"", "a b"), "quoted, OR is a word");
+        assert_eq!(crate::logs::Search::parse("   "), None);
     }
 }

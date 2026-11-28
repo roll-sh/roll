@@ -675,6 +675,12 @@ export interface EnvironmentDiff {
   settings: { field: string; from: unknown; to: unknown; put: EnvironmentPut }[];
 }
 
+export interface Hsts {
+  max_age: number;
+  include_subdomains?: boolean;
+  preload?: boolean;
+}
+
 export interface EnvironmentPut {
   /** Attack mode by itself: once a minute's requests reach per_minute, a challenge for every visitor without a pass for minutes; null: never by itself. */
   attack_mode?: { per_minute: number; minutes?: number } | null;
@@ -707,6 +713,8 @@ export interface EnvironmentPut {
   traces?: boolean;
   /** Its pages measure their Web Vitals (a tag roll adds). */
   vitals?: boolean;
+  /** Strict-Transport-Security over HTTPS: its own, false (none) or null (the default, two years). */
+  hsts?: Hsts | false | null;
   /** How long its logs are kept (null: 7 days). */
   log_retention_days?: 7 | 30 | 90 | null;
   /** Days its built deployments stay to roll back to past the newest ten (1–90); null: only those. */
@@ -838,6 +846,8 @@ export interface Environment extends EnvironmentSummary {
   traces?: boolean;
   /** Its pages measure their Web Vitals for roll. */
   vitals?: boolean;
+  /** Its Strict-Transport-Security over HTTPS (null: none sent). */
+  hsts?: Hsts | null;
   /** Days its logs are kept: 7 (default), 30 or 90; a preview's are 7. */
   log_retention_days?: number;
   /** Days its built deployments stay to roll back to past the newest ten. */
@@ -1317,11 +1327,18 @@ export interface UptimeCheck {
   method?: "GET" | "HEAD" | "POST" | "PUT" | "PATCH" | "DELETE" | "OPTIONS";
   headers?: Record<string, string>;
   body?: string;
+  /** 50–60000 ms: two passes in a row slower than this are `check.slow` (degraded), until one isn't. Not a browser check's; a TCP check's is its connect. */
+  slow_ms?: number;
+  /** An HTTP check's, at most 5, all must hold: a JSON value at a dotted path (`$.items.0.id`), text its answer mustn't hold, or a header holding text (never a pattern). */
+  assert?: ({ json: string; equals: unknown } | { not_contains: string } | { header: string; matches: string })[];
+  /** 1–5: failures in a row before down (default 2), and passes in a row before up again (default 1). */
+  fail_after?: number;
+  recover_after?: number;
 }
 
 export interface UptimeCheckState {
   name: string;
-  /** null: not tried yet; false once it failed twice in a row. */
+  /** null: not tried yet; false once it failed `fail_after` times in a row, until `recover_after` passes. */
   up: boolean | null;
   failures: number;
   last_at: number | null;
@@ -1329,6 +1346,8 @@ export interface UptimeCheckState {
   ms: number | null;
   error: string | null;
   down_since: number | null;
+  /** Two passes in a row over its `slow_ms`, until one isn't. */
+  slow: boolean;
   /** A browser check's last failure kept (its screenshot and Playwright trace), as the owner knows. */
   failure_at?: number;
   /** A preview's: the deployment this result is of (production's browser checks, run on each of its heads). */
@@ -1512,6 +1531,7 @@ export type NotifyEvent =
   | "volume.backup_failed"
   | "volume.full"
   | "check.down"
+  | "check.slow"
   | "heartbeat.missed"
   | "deploy.vulnerable"
   | "alert.slo"

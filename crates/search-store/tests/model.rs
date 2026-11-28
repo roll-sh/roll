@@ -484,7 +484,8 @@ async fn run_model(sync: bool, pit: bool, seed: u64, steps: usize) {
     assert!(!pit || t.pit_branches > 0, "{t:?}");
 }
 
-/// Fixed seeds, plus `ROLL_MODEL_RUNS` random ones (printed, to reproduce a failure).
+/// Fixed seeds, plus `ROLL_MODEL_RUNS` random ones (printed, to reproduce a failure); a test runs
+/// its seeds at once.
 fn seeds(fixed: &[u64]) -> Vec<u64> {
     if let Some(seed) = std::env::var("ROLL_MODEL_SEED").ok().and_then(|v| u64::from_str_radix(v.trim_start_matches("0x"), 16).ok()) {
         return vec![seed];
@@ -498,21 +499,15 @@ fn seeds(fixed: &[u64]) -> Vec<u64> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn lifecycle_model_with_sync_objects() {
-    for seed in seeds(&[0x5eed_0001, 0xdead_beef, 0x1234_5678_9abc]) {
-        run_model(true, false, seed, 300).await;
-    }
+    futures::future::join_all(seeds(&[0x5eed_0001, 0xdead_beef, 0x1234_5678_9abc]).into_iter().map(|seed| run_model(true, false, seed, 300))).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn lifecycle_model_with_local_acks() {
-    for seed in seeds(&[0x5eed_0002, 0xfeed_f00d, 0x0bad_cafe]) {
-        run_model(false, false, seed, 300).await;
-    }
+    futures::future::join_all(seeds(&[0x5eed_0002, 0xfeed_f00d, 0x0bad_cafe]).into_iter().map(|seed| run_model(false, false, seed, 300))).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn lifecycle_model_with_point_in_time_branches() {
-    for seed in seeds(&[0x5eed_0003, 0x7177_0001, 0xabcd_ef01]) {
-        run_model(true, true, seed, 300).await;
-    }
+    futures::future::join_all(seeds(&[0x5eed_0003, 0x7177_0001, 0xabcd_ef01]).into_iter().map(|seed| run_model(true, true, seed, 300))).await;
 }

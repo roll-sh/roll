@@ -990,10 +990,14 @@ async fn judge(mut ctx: Ctx, req: Request, next: Next, j: Judge) -> Response {
             } else {
                 None
             };
+            let message = match keys_only(&scope, &target, &needs, own_outcome, lent.is_some() || asked_env.is_some(), &ctx.route) {
+                Some(m) => m,
+                None => format!("this token can't {action} {what}"),
+            };
             return deny(
                 StatusCode::FORBIDDEN,
                 "forbidden",
-                format!("this token can't {action} {what}"),
+                message,
                 json!({ "needs": { "product": about, "action": action, "resource": resource }, "widen": widen, "request": request, "step_up": step_up }),
             );
         }
@@ -1412,6 +1416,38 @@ pub(crate) fn rank(o: Outcome) -> u8 {
         Outcome::Ask => 1,
         Outcome::Allow => 2,
     }
+}
+
+/// The refusal of a request about a whole secrets folder that a rule limited to some keys would
+/// reach key by key (`roll_auth::scope::keys_only`), when that's what refused it: not a copy's or
+/// a lend's second check (`other`). It names the folder and the route, never a key.
+fn keys_only(scope: &Scope, target: &Target, needs: &[Action], own: Outcome, other: bool, route: &str) -> Option<String> {
+    let Target::One(r) = target else { return None };
+    if other || own != Outcome::Deny || r.product != "secrets" || r.key.is_some() || r.filters_keys || !scope.0.iter().any(|x| x.keys.is_some()) {
+        return None;
+    }
+    let by_key = Target::One(roll_auth::scope::Resource { filters_keys: true, ..r.clone() });
+    if weakest(needs, |a| scope.outcome(&by_key, a)).0 == Outcome::Deny {
+        return None;
+    }
+    let place = match (r.environment.as_deref(), r.path.as_deref()) {
+        (Some(e), Some(p)) if !roll_auth::scope::is_root(p) => format!("{e}:{p}"),
+        (Some(e), _) => e.to_string(),
+        _ => r.project.clone().or_else(|| r.id.clone()).unwrap_or_default(),
+    };
+    let what = match route.rsplit('/').next().unwrap_or_default() {
+        "digest" => "a watch (the folder's digest)",
+        "delta" => "a watch (the folder's delta)",
+        "diff" => "a diff",
+        "import" | "imports" => "an import",
+        "promote" => "a promote",
+        "health" => "health",
+        "leaks" => "a leak check",
+        "value-requests" => "a value request",
+        "folder-policies" => "folder policies",
+        _ => "this request",
+    };
+    Some(roll_auth::scope::keys_only(&place, what))
 }
 
 fn weakest(needs: &[Action], outcome: impl Fn(Action) -> Outcome) -> (Outcome, Action) {

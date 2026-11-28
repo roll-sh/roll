@@ -9,17 +9,13 @@ use std::path::Path;
 use search_painless::{Context, Engine, Settings};
 use serde_json::Value as Json;
 
+/// Templates, then whitespace in tags, negative and out-of-range indices, dotted sections,
+/// numbers as Jackson prints them, `join`/`url`/`toJson` over nested values, partials,
+/// standalone lines and delimiter changes (`mustache.json`, `mustache2.json`, cases in
+/// `mustache_cases2.json`).
 #[test]
 fn render_template() {
     check("mustache.json");
-}
-
-/// Whitespace in tags, negative and out-of-range indices, dotted sections, numbers as Jackson
-/// prints them, `join`/`url`/`toJson` over nested values, partials, standalone lines and
-/// delimiter changes (`mustache2.json`, cases in
-/// `mustache_cases2.json`).
-#[test]
-fn render_template_more() {
     check("mustache2.json");
 }
 

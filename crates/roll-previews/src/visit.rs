@@ -140,9 +140,10 @@ impl Engine {
     }
 
     /// `POST /v1/previews/{id}/visit {to}`, as a person signed in to roll (`session`, their roll
-    /// session): a one-use ticket to `to` (a URL at one of the preview's own hosts), as the URL
-    /// that opens it. Only a preview whose project has team access gives one. The URL is the
-    /// service's own (its scheme, host and port); only `to`'s path and query are kept.
+    /// session): a one-use ticket to `to` (a URL at one of the preview's own hosts, under roll's
+    /// preview domain or its project's own), as the URL that opens it. Only a preview whose
+    /// project has team access gives one. The URL is the service's own on the host asked for (its
+    /// scheme, host and port); only `to`'s path and query are kept.
     /// `handle` names them in the preview's activity and visitors once they're in.
     pub fn visit_ticket(&self, id: &str, user: &str, handle: &str, session: &str, to: &str) -> Result<String> {
         let row = self.store.row(id)?;
@@ -151,11 +152,19 @@ impl Engine {
         }
         let url = url::Url::parse(to).map_err(|_| Error::BadRequest("to is the URL of the page to open".into()))?;
         let host = url.host_str().unwrap_or("").to_ascii_lowercase();
-        let suffix = format!(".{}", self.cfg.domain);
-        let label = host
-            .strip_suffix(&suffix)
-            .filter(|label| matches!(url.scheme(), "http" | "https") && !label.contains('.') && self.store.service_for_host(label).ok().flatten().is_some_and(|(p, _)| p == id))
-            .ok_or_else(|| Error::BadRequest("to isn't at one of the preview's hosts".into()))?;
+        let ours = |found: Option<(String, String)>| found.is_some_and(|(p, _)| p == id);
+        // Under roll's preview domain, or under the preview's own project's (roll apps' verified
+        // wildcard): never another project's, whose names reach only its own previews.
+        let origin = if let Some(label) = host.strip_suffix(&format!(".{}", self.cfg.domain)) {
+            (!label.contains('.') && ours(self.store.service_for_host(label)?)).then(|| self.cfg.url(label))
+        } else if let Some((label, base)) = host.split_once('.')
+            && let Some(domain) = self.store.project_domain(&row.project_id)?.filter(|(b, _)| b == base)
+        {
+            ours(self.store.service_for_domain_host(label, base)?).then(|| self.cfg.url_in(Some(&domain), label))
+        } else {
+            None
+        };
+        let origin = origin.filter(|_| matches!(url.scheme(), "http" | "https")).ok_or_else(|| Error::BadRequest("to isn't at one of the preview's hosts".into()))?;
         if !self.may_open(user, session, &row.project_id) {
             return Err(Error::Forbidden("you can't open this project's previews".into()));
         }
@@ -168,7 +177,7 @@ impl Engine {
         if let Some(q) = url.query() {
             path = format!("{path}?{q}");
         }
-        Ok(format!("{}{PATH}?ticket={ticket}&to={}", self.cfg.url(label), encode(&local_path(&path))))
+        Ok(format!("{origin}{PATH}?ticket={ticket}&to={}", encode(&local_path(&path))))
     }
 }
 

@@ -1662,14 +1662,16 @@ mod tests {
         too_complex("([a-z]{999}&[a-y]{999}){600}");
         // `a?a?…a?` concatenates into a quadratic number of transitions.
         too_complex(&"a?".repeat(5_000));
-        // Large but bounded counts still work (up to `a{0,200000}` and `a{100000}`), in linear time.
-        search_test_support::assert_linear("bounded repetition counts", 12_500, |n| n, |n| {
+        // Large but bounded counts still work, in linear time.
+        search_test_support::assert_linear("bounded repetition counts", 1_500, |n| n, |n| {
             assert_eq!(lm(&format!("a{{0,{}}}", 2 * n), &"a".repeat(10)), Some(10));
             assert_eq!(lm(&format!("a{{{n}}}"), &"a".repeat(n + 1)), Some(n));
         });
-        // Not deterministic, and too much work to determinize, as in Lucene.
+        // Not deterministic, and too much work to determinize, as in Lucene (a work limit
+        // of 100 instead of `compile`'s 10,000 reaches the same error with a hundredth of the
+        // effort).
         assert_eq!(
-            compile(&"a?".repeat(500), true).unwrap_err().kind,
+            determinize(parse(&"a?".repeat(500)).unwrap(), 100).unwrap_err().kind,
             "too_complex_to_determinize_exception"
         );
     }

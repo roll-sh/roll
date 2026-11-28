@@ -201,8 +201,8 @@ them (`api::Caller`):
   default repository are rolld's flags (`--search-*`), not routes. A cluster's data plane is
   unchanged: the REST port with the cluster's own credentials, which give what any tenant gets.
 
-`crates/search-control/tests/control.rs` `people_see_only_their_own_clusters` and
-`people_are_held_to_their_cluster_caps` cover it.
+`crates/search-control/tests/control.rs`
+`people_reach_only_their_own_clusters_within_their_caps` covers it.
 
 **Branches and what they inherit.** A branch starts from a copy of its parent's state, its
 recurring jobs and outside storage included. So that it never acts as its parent, a new
@@ -251,7 +251,7 @@ are then paused too (put them again to resume them).
   key works only on its own cluster, below): a page pointed at a branch, roll previews' included,
   needs a browser key of the branch's own.
 
-`a_branch_runs_none_of_its_parents_jobs` in the same file covers it.
+`a_branch_acts_as_none_of_its_parents` in the same file covers it.
 
 **IP allowlists** (Elastic Cloud's traffic filters, AWS OpenSearch Service's IP policies). A
 cluster's `ip_allowlist` lists the networks that may reach its endpoint: at most 64 entries,
@@ -348,7 +348,7 @@ applications). A web page calls a cluster directly, with no backend of its own i
   keys wakes both clusters); and it revokes the branch's copies (every one, recorded or not)
   before the branch is deleted, as it revokes its data key (a deleted cluster is restorable with
   its keys). `crates/search-control/tests/control.rs`
-  `browser_search_works_on_a_preview_branch` and rolld's
+  `browsers_search_with_browser_keys` and rolld's
   `a_search_branch_gets_browser_keys_of_its_own_for_the_previews_pages` cover it.
 - *Keys derived without a call to roll* (Algolia's `generateSecuredApiKey`, Typesense's
   `generateScopedSearchKey`, Meilisearch's tenant tokens; `search_es::xpack::security::derived`).
@@ -437,8 +437,7 @@ applications). A web page calls a cluster directly, with no backend of its own i
     derive` (for testing; the secret from `ROLL_SEARCH_SIGNING_SECRET`). One test vector
     (`crates/search-es/tests/fixtures/derived-key-vector.json`) is checked by the verifier, the
     CLI and the TypeScript helper. `crates/search-control/tests/control.rs`
-    `derived_keys_narrow_their_parent_and_die_with_it` and
-    `derived_keys_share_their_parents_rate_by_user` cover the rest.
+    `browsers_search_with_browser_keys` covers the rest.
 - *Usage and refusals per key* (Algolia's per-key usage and logs; `search_server::browser::Usage`):
   the cluster's owner counts every request a browser key makes and why one was refused: 429s by
   the bucket that held it back (`key_rate`, `address_rate`, `user_rate`, `concurrency`,
@@ -458,7 +457,7 @@ applications). A web page calls a cluster directly, with no backend of its own i
   totals, the list a `usage_24h` summary per key, the dashboard's Browser search section a
   sparkline per key, `roll search browser-keys usage <cluster> <key>` a table, and MCP
   `search_browser_key_usage`. `crates/search-control/tests/control.rs`
-  `browser_key_usage_counts_requests_and_429s_by_reason` covers it.
+  `browsers_search_with_browser_keys` covers it.
 - *A point-in-time branch takes its parent's security as it is now*, whatever key: users and their
   passwords, API keys, tokens, service tokens, roles, mappings and profiles (OpenSearch Security's
   configuration on an OpenSearch-flavor cluster) are copied from the parent's latest state into
@@ -734,10 +733,8 @@ Elasticsearch-flavor.
   with the coordinating cluster's own policy or lookup index.
 - **Left**: suggesters over several clusters.
 
-`crates/search-control/tests/control.rs` `cross_cluster_search_between_a_persons_own_clusters`,
-`a_sleeping_remote_wakes_and_a_gone_one_is_skipped`, `aggregations_across_clusters_equal_one_clusters`,
-`scroll_and_point_in_time_across_clusters`, `esql_across_clusters_answers_as_one_cluster` and
-`esql_across_clusters_reads_as_the_link_allows`, and `tests/cluster.rs`
+`crates/search-control/tests/control.rs` `cross_cluster_search_between_linked_clusters` and
+`results_across_clusters_equal_one_clusters`, and `tests/cluster.rs`
 `a_remote_on_another_node_is_searched_through_the_signed_forward` and
 `a_scroll_over_clusters_on_two_nodes_pages_through_either_front` cover it. The dashboard lists a
 cluster's remotes in its Settings (alias, cluster, `skip_unavailable`, state), and links or
@@ -1009,7 +1006,7 @@ documents or fields the direct shard reads give way to searches, which apply the
 level security covers every read path a field's content or name can come out of: `_source`
 (hits, gets, inner hits), `fields`, scripts' `params._source` and `doc` (script fields, runtime
 fields, sort scripts), term vectors, field caps and mappings (`control.rs`
-`field_security_hides_a_field_on_every_read_path`, 22 requests and 3 listings). They answer with Elasticsearch's own status and body, and pass the query string through
+`reads_beyond_the_request_take_the_callers_privileges`, 22 requests and 3 listings). They answer with Elasticsearch's own status and body, and pass the query string through
 (`refresh`, `routing`, `size`, …). A write names exactly one index; a name starting with `_` is
 refused (those are Elasticsearch's own APIs: use the console). Bodies may be up to the cluster's
 `max_body_mb`.
@@ -1116,7 +1113,7 @@ and in the dashboard (Settings → Audit log: a table filtered by time and event
   string or request body. A failed login names the user only when Basic credentials gave one.
   Changes are built field by field (a user's `has_password`, a grant's `has_password`), never by
   copying the body. OpenSearch's `log_request_body`, `write_log_diffs` and headers are accepted
-  and never acted on. `control.rs` `audit_entries_hold_no_secrets` looks for every credential and
+  and never acted on. `control.rs` `the_audit_log_records_what_matters_for_security` looks for every credential and
   marker of its requests in the answered and the stored entries.
 - **Storage:** object storage next to the cluster's data
   (`search/c/<cluster>/audit/<first ms>-<last ms>-<token>.ndjson.zst`). A node batches a
@@ -1384,23 +1381,37 @@ filtered listing; and the auth matrix's probe of storage's nested route (also br
 
 Ranked; the top item is in progress. Updated as work lands (the watchdog reads this list).
 
-Working order (2026-11-27, afternoon). Work in review or fixing first:
-- `ent-search` back to its minimum: #1084's API-time write check on connectors (fix in
-  progress);
-- item 32's branch reset (#1149, its third round: a dropped request's lock-out, clock-free
-  staleness);
-- item 30's read-only ES|QL (#1111, its third round in re-check);
-- item 14's semantic search on OpenSearch-flavor clusters (#1165, its second round in re-check);
-- item 11's RAG sanitizer, redesigned in its fifth round (#1068);
-- item 1's OpenSearch links (#1127, in re-check);
-- item 15's judgment lists, lists from clicks and OpenSearch's Search Relevance Workbench (#1189,
-  #1194, #1207, in review).
+Working order (2026-11-28). Work in review or fixing first:
+- item 32's branch reset (#1149, fourth round: a branch's lineage kept durably, so `own_bytes`
+  holds after its indices were recreated; roll previews' restore points wait on it);
+- item 1's OpenSearch links (#1127, third round: one parse of remote expressions, so a `-alias:`
+  exclusion is authorized as searched; the real index name on every target);
+- item 30's read-only ES|QL (#1111, third round: filtered aliases next to a wildcard or behind a
+  `::data` selector);
+- item 14's semantic search on OpenSearch-flavor clusters (#1165: approved; small fixes, then it
+  lands);
+- item 11's RAG sanitizer (#1068, fifth round: bare domains, entity-decoding clients, multi-turn
+  history);
+- item 18's health alerts (#1211, first round: fenced deliveries off the metering pass, a webhook
+  target's secret catalogued as reveal; Discord channels tied to their server landed in #1256);
+- item 15's judgment lists, lists from clicks and the Search Relevance Workbench (#1189, #1194,
+  #1207, #1235, first round: the Workbench reads as the caller, experiments pin their cluster,
+  clicks count only where shown).
 
 Then:
-- item 33's second slice (saved searches, surrounding documents, a field's chart; in its gate);
-- item 18's health alerts (in progress);
-- item 16 (cold start at size: one deciding A/B, in progress);
-- item 18's OTLP traces and metrics (the top open item).
+- item 18's OTLP metrics (#1265, in review), then OTLP over gRPC;
+- item 33's second slice (saved searches, surrounding documents, a field's chart);
+- item 18's `_plugins/_alerting` on OpenSearch-flavor clusters;
+- item 15: judgment-list routes classified by the list's index (`_from_clicks` then needs read on
+  its body index);
+- item 16 (cold start at size): download scheduling alone doesn't keep the win (first write
+  505 → 797 ms at load 120); the lazy-sections build on `feature/search-cold-start-at-size` is
+  rerun under one load before deciding.
+
+Landed 2026-11-27 (evening) and 28: lighter tests (#1245, #1255, #1260, #1262: 2,295 → 2,134
+tests, `rust (search)` on GitHub 44-56 → 31-39 s, its test step 38 → 11-16 s, `--unit` no longer
+runs other products' rolld and CLI tests); OTLP traces (#1236); connector APIs need only
+`manage_connector` again (#1227); cold start at size, measured (#1214).
 Landed 2026-11-26: the PIT and caches fix (#1021), a cluster's admin password kept in roll
 secrets and the MCP sweep's person flow (#1097), Terraform for synonyms sets and rulesets
 (#1071), inference endpoints from a secret answered redacted and limited to `api_key` services
@@ -1796,7 +1807,10 @@ deterministic (#396).
    downloaded before the first query because what a shard reads at open is spread over every part
    of every segment. Making doc values and points lazy, fetching waited-for ranges exactly and
    holding bulk downloads during the wake took 18% off the first query (48% off the first write):
-   kept out for now. Left: the same on S3 and for 10 and 50 GB indices, p99, Graviton, and the
+   kept out for now. Holding bulk downloads during the wake on its own, without lazy sections,
+   doesn't keep the win: at load 120, first query 425 → 439 ms and first write 505 → 797 ms
+   (opening segments got faster, WAL replay waited behind the held downloads). Left: the
+   lazy-sections build rerun under the same load as its base, then the same on S3 and for 10 and 50 GB indices, p99, Graviton, and the
    first query's own ranges after a short wake.
 17. **Private networking and customer keys** (design in
    [private-networking.md](private-networking.md); Elastic Cloud PrivateLink traffic filters and BYOK,
@@ -1816,8 +1830,8 @@ deterministic (#396).
      enforced, as Elasticsearch and OpenSearch do, on every create (explicit, auto-create, a data
      stream's backing index, rollover), on opening closed indices, and on restore, resize and
      downsample targets, so an `otel` key can't add data streams past it.
-   - OTLP metrics and OTLP over gRPC. Traces are in review (`feature/search-otlp-traces`: spans into
-     `traces-*.otel-*`, their events as log lines, on the logs intake's machinery).
+   - OTLP over gRPC. Traces landed in #1236 (spans into `traces-*.otel-*`, their events as log
+     lines); metrics are in review (#1265: data points into `metrics-*.otel-*`).
    - `_plugins/_alerting` on OpenSearch-flavor clusters.
    - Visualizations.
 19. **Vector search's footprint** (docs/benchmarks/search.md, "Vector search": 1M × 384 against
@@ -2039,8 +2053,9 @@ deterministic (#396).
    SIGKILL) is the shared lease TTL (`ClusterConfig::lease_ttl`, 10 s: redis 10.4, nosql 10.6 in
    the same run) plus ~1 s to load the cluster from S3 and replay its WAL. Search's part is the
    load; the TTL is roll cloud's fleet-wide choice.
-28. **CI**: the merge gate runs `search-codec`'s lib tests (`rust (search)`, 54 s on PR #29 with
-   main's cache: under the minute, no room for another crate). Test gaps a read-only analysis found on 2026-11-22
+28. **CI**: the merge gate runs `search-codec`'s lib tests (`rust (search)`, 31-39 s on main
+   since the test cut of 2026-11-28, its test step 11-16 s; about 20 s of the job is checkout,
+   toolchain and cache, shared by every job). Test gaps a read-only analysis found on 2026-11-22
    (main at d9aecc990), ranked; each test goes in `test:search`, not the merge gate (all landed, each
    failing against its guarded line: (1) with the egress fix in #771, 0d6daf6cc; (2), (3), (4), (7)
    and (8) in #768, 1c2b5e62c; (5), (6), (9), (10), (11) and the unused e2e file's removal in
@@ -2065,8 +2080,8 @@ deterministic (#396).
    `previews/data.rs`'s `a_masked_search_branch_shows_no_original_value` (a text field and its
    `.keyword`, an address in an array of objects, a dotted key, an index `logs.2024`: none in
    `_source`, `_terms_enum` or a terms aggregation on the branch), `tests/secrets.rs`'s
-   `an_apps_search_link_is_narrowed_and_unlinking_revokes_it` (and the drain's key revoked with the
-   drain) and `a_repository_key_follows_rotation_and_a_branch_gets_no_protected_key`, and
+   `an_apps_drain_appends_to_its_own_search_data_stream` (a service's narrowed link, and the
+   drain's key revoked with the drain) and `a_repository_key_follows_rotation_and_a_branch_gets_no_protected_key`, and
    `tests/auth.rs`'s `mcp_search_with_a_project_token`. (`search-store`'s mass-recovery
    WAL test flaked on a loaded host: a replay counted itself in the shared replay cache only
    after listing, so one could finish and empty it while the others listed; it now counts first.
@@ -2233,3 +2248,10 @@ deterministic (#396).
    documents (`search_after` both ways on the time field), a field's chart (top values, or a
    histogram over the query and range) with whole-range statistics where they're cheap, and
    timestamps in the viewer's zone.
+34. **Cross-cluster replication** (Elastic's follower indices, `_ccr`; OpenSearch's
+   `_plugins/_replication`; compatibility.md lists it as none): disaster recovery in another
+   region, and read-only copies near readers. roll can make a follower cheap: segments are already
+   in object storage and branches share them by key, so a follower in the same object store reads
+   the leader's segments and replays only its WAL tail, with no copy of the data. Design first: the
+   follower's lag and fencing on the fleet, a follower in another region's object store (copies
+   segments once), auto-follow patterns, pause and resume, and promotion when the leader is lost.

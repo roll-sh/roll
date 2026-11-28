@@ -445,11 +445,22 @@ impl StepKind for DiscordStep {
         };
         let fail = |e: wire::Error| if e.transient() { StepOutcome::Retry(e.to_string()) } else { StepOutcome::Fail(e.to_string()) };
         let channel = match (c.user.clone().filter(|u| !u.is_empty()), c.channel.clone().filter(|c| !c.is_empty()).or_else(|| evs("channel"))) {
-            (Some(u), _) => match client.dm_channel(&u).await {
-                Ok(ch) => ch,
+            // A DM only to a member of the install's own server: one bot serves every install, and
+            // it can open a DM with anyone who shares any server with it.
+            (Some(u), _) => match client.guild_member(&install.team_id, &u).await {
+                Ok(Some(_)) if !install.team_id.is_empty() => match client.dm_channel(&u).await {
+                    Ok(ch) => ch,
+                    Err(e) => return fail(e),
+                },
+                Ok(_) => return StepOutcome::Fail(format!("{kind}: Discord user {u} isn't a member of this install's server")),
                 Err(e) => return fail(e),
             },
-            (None, Some(ch)) => ch,
+            // One bot serves every install: a channel is only the install's own server's.
+            (None, Some(ch)) => match client.channel_guild(&ch).await {
+                Ok(Some(g)) if !install.team_id.is_empty() && g == install.team_id => ch,
+                Ok(_) => return StepOutcome::Fail(format!("{kind}: Discord channel {ch} isn't in this install's server")),
+                Err(e) => return fail(e),
+            },
             (None, None) => return StepOutcome::Fail(format!("{kind} has no channel (and the event none)")),
         };
         match self.kind {

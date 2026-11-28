@@ -2053,6 +2053,9 @@ static ROWS: &[Row] = &[
     // A preview's own variables come back with their values: reveal (setting them is write, by
     // the prefix).
     row("GET", "/v1/previews/{id}/env", "previews", REVEAL, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    // Setting a preview's variables answers all of them, values too: hidden from a grant that
+    // can't reveal them (as reading them is).
+    row("PUT", "/v1/previews/{id}/env", "previews", W, one(PG, "preview")).env(EnvFrom::Fixed("preview")).reveals(&["vars"]),
     // The share link with its access token, as a QR code for a phone (previews-next): the token in
     // another encoding, so reveal as the link itself is.
     row("GET", "/v1/previews/{id}/qr.png", "previews", REVEAL, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
