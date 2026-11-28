@@ -1051,8 +1051,18 @@ impl Secrets {
         }
     }
 
+    /// The write of what [`Secrets::prepare`] issued is done ([`crate::links::LinkProvider::settled`]).
+    pub(crate) fn settle(&self, p: &Prepared) {
+        for f in &p.fresh {
+            if let Ok(provider) = self.links.get(&f.kind) {
+                provider.settled(&f.r#ref, &f.handle);
+            }
+        }
+    }
+
     /// Revoke what [`Secrets::prepare`] issued, after the write failed.
     pub(crate) fn discard(&self, p: &Prepared) {
+        self.settle(p);
         for f in &p.fresh {
             if let Ok(provider) = self.links.get(&f.kind)
                 && let Err(e) = provider.revoke(&f.r#ref, &f.handle)
@@ -1126,6 +1136,7 @@ impl Secrets {
         });
         match res {
             Ok((change, items)) => {
+                self.settle(&prepared);
                 // A decoy whose key this changed or deleted: its token goes now.
                 if items.iter().any(|d| d.what.iter().any(|w| w == "deleted" || w == "changed" || w == "link"))
                     && let Err(e) = self.end_decoys()
@@ -1147,8 +1158,22 @@ impl Secrets {
     /// there, as an import or a base does: every reader of this folder (its runtimes too) would
     /// read it.
     pub(crate) fn check_items(&self, project: &str, env: &str, items: &[Item], caller: &Caller) -> Result<()> {
+        // A grant limited to some keys: every key outside them is named at once.
+        if caller.grants.limits_keys() {
+            let outside: Vec<&str> = items
+                .iter()
+                .filter(|i| {
+                    let action = if matches!(i.action, ItemAction::Delete) { Action::Delete } else { Action::Write };
+                    !caller.allows(action, &Scope::at(project, env, &i.path).key(&i.key))
+                })
+                .map(|i| i.key.as_str())
+                .collect();
+            if !outside.is_empty() {
+                return Err(Error::Forbidden(format!("this token may not change {} in {env}: it reaches only some keys", outside.join(", "))));
+            }
+        }
         for i in items {
-            let at = Scope::at(project, env, &i.path);
+            let at = Scope::at(project, env, &i.path).key(&i.key);
             match &i.action {
                 ItemAction::Delete => caller.need(Action::Delete, &at)?,
                 ItemAction::Set { link, value, .. } => {
@@ -1158,7 +1183,7 @@ impl Secrets {
                     }
                     for r in value.as_ref().map(|v| crate::refs::refs(v.expose())).unwrap_or_default() {
                         let Some(e) = r.env.as_deref().filter(|e| *e != env || r.path != i.path) else { continue };
-                        if !caller.allows(Action::Reveal, &Scope::at(project, e, &r.path)) {
+                        if !caller.allows(Action::Reveal, &Scope::at(project, e, &r.path).key(&r.key)) {
                             return Err(Error::Forbidden(format!("{} references {}, which you may not reveal: everyone who reads {env} would read it", i.key, r.display())));
                         }
                     }
@@ -1183,7 +1208,8 @@ impl Secrets {
     /// their `if_version`s.
     fn batch_checks(&self, project: &str, env: &str, b: &Batch, caller: &Caller) -> Result<(Vec<Item>, Expect)> {
         let path = names::path(b.path.as_deref().unwrap_or("/"))?;
-        caller.need(Action::Write, &Scope::at(project, env, &path))?;
+        // Key by key: `check_items` asks each one.
+        caller.need(Action::Write, &Scope::at(project, env, &path).by_key())?;
         names::message(b.message.as_deref().unwrap_or_default())?;
         let items = items(&path, &b.ops, caller)?;
         self.check_items(project, env, &items, caller)?;
@@ -1304,7 +1330,7 @@ impl Secrets {
     #[allow(clippy::too_many_arguments)]
     pub fn delete_secret(&self, project: &str, env: &str, path: &str, key: &str, kind: Option<SecretType>, if_version: Option<i64>, caller: &Caller) -> Result<Written> {
         let path = names::path(path)?;
-        caller.need(Action::Delete, &Scope::at(project, env, &path))?;
+        caller.need(Action::Delete, &Scope::at(project, env, &path).key(key))?;
         let items = items(&path, &[Op::Delete { key: key.into(), kind, path: None, if_version }], caller)?;
         let expect = expectations(&[Op::Delete { key: key.into(), kind, path: None, if_version }])?;
         let a = self.commit_with(project, env, items, &expect, Via::Write, &format!("deleted {key}"), None, false, caller)?;

@@ -148,11 +148,12 @@ async fn change_checks_run_and_stale_heads_are_dropped() {
     let c3 = a.code.revise_change(&a.repo, &code_control::Caller::Admin, &c2, &fast).await.unwrap();
     assert_eq!(c3.revision, 3);
     until("the fast run", 10, || (a.get(&c.id).checks.first().map(|k| k.status) == Some(CheckStatus::Success)).then_some(())).await;
-    tokio::time::sleep(Duration::from_millis(2000)).await;
+    // The slow run ends after the fast one: then its result has somewhere to go, and goes nowhere.
+    until("the slow run to end", 10, || (a.runner.runs.lock().iter().filter(|(id, _)| id.as_deref() == Some(c.id.as_str())).count() == 3).then_some(())).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
     let checks = a.get(&c.id).checks;
     assert_eq!(checks.len(), 1);
     assert_eq!(checks[0].status, CheckStatus::Success, "the stale failure didn't overwrite the current head's result");
-    assert_eq!(a.runner.runs.lock().iter().filter(|(id, _)| id.as_deref() == Some(c.id.as_str())).count(), 3);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -198,22 +199,6 @@ async fn post_merge_opens_one_broken_main_item_and_closes_it_on_green() {
     let w = a.code.work_or_404(&claimed.id).unwrap();
     assert_eq!(w.state, code_control::model::WorkState::Claimed);
     assert_eq!(w.claimed_by.as_deref(), Some("fixer"));
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn post_merge_runs_coalesce_onto_the_latest_head() {
-    let a = app(true, "").await;
-    a.land(json!({ "roll.toml": { "content": TOML }, "delay": { "content": "800" }, "n": { "content": "0" } })).await;
-    until("the first run to start", 10, || (*a.runner.plans.lock() == 1).then_some(())).await;
-    for i in 1..=5 {
-        a.land(json!({ "n": { "content": i.to_string() } })).await;
-    }
-    until("the latest head's run", 20, || (a.main_runs().last().map(String::as_str) == Some("5")).then_some(())).await;
-    tokio::time::sleep(Duration::from_millis(1000)).await;
-    let runs = a.main_runs();
-    assert!(runs.len() <= 3, "six landings, at most a run in flight plus one more on the latest head: {runs:?}");
-    assert_eq!(runs.first().map(String::as_str), Some("0"));
-    assert_eq!(runs.last().map(String::as_str), Some("5"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

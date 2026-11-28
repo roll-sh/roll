@@ -399,7 +399,10 @@ The machine then keeps its own short-lived credential.
    ```
 
 The first login exchanges the token for a machine credential, which `roll` keeps in the unit's
-state directory and replaces on its own. A token or credential used twice revokes the machine. See
+state directory and replaces on its own. A token or credential used twice revokes the machine. If
+you set `ROLL_MACHINE_CREDENTIAL_FILE` instead, put it in a directory only the unit's user can
+write, never a shared one such as `/tmp`: `roll` refuses a file (or its lock) that another user
+owns or can write. See
 ["On a VM"](../secrets.md#on-a-vm).
 
 ## Windows

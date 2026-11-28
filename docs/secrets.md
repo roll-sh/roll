@@ -596,7 +596,15 @@ server](secrets/platforms.md#a-vm-or-a-server).
      `machine-<identity>.json` (0600, in a 0700 directory) under systemd's `$STATE_DIRECTORY`, else
      `$XDG_STATE_HOME/roll` (Windows: `%LOCALAPPDATA%\roll`, readable by you and the
      Administrators), else `~/.local/state/roll` (`ROLL_MACHINE_CREDENTIAL_FILE` names another),
-     and logs in with it (`POST /v1/secrets/login {identity, machine}`).
+     and logs in with it (`POST /v1/secrets/login {identity, machine}`). On Unix, a directory roll
+     makes for it is 0700, and the file and its lock (`machine-<identity>.json.lock`) must be owned by the user
+     running `roll` and writable by no one else: one that isn't is refused, naming the path and the
+     fix (`chmod 600` or `chown`). Otherwise another local user could plant a credential in a shared
+     directory, and the process would log in as their machine and run with their values; or plant
+     the lock and stop every login. The file also names the server that made it (`api_base`): with
+     `ROLL_API_URL` pointing elsewhere, the credential and its login are refused, never sent (a file
+     from before this has none and gets the current server). A machine that talks to two servers
+     needs a file for each.
   4. Every login after reads the file. Past half its life, the credential is replaced
      (`POST /v1/secrets/login/refresh {identity, credential}`): a new one is made, the old one is
      spent, and the file is written whole (a temporary file renamed over it). Replacing and logging
@@ -1313,7 +1321,9 @@ repository the project stands for, `counts_for_repo`, that anyone may read, whil
 it; `key` is the repository, `environment` empty, and the detail says where it's public, roll code
 or the GitHub repository it mirrors, and what to do, `roll secrets leaks managed` or the dashboard's
 "Leaked keys"; roll code says where from what it already keeps, a repository's visibility and its
-GitHub link's `private` as connecting and each delivery last said, never by asking GitHub; for
+GitHub link's `private` as connecting, each delivery and GitHub's `public` and `repository`
+(`publicized`, `privatized`) events last said, never by asking GitHub, on every node of a cluster
+(the control database is shared; one that doesn't answer is logged, not taken for private); for
 whoever reads the whole project; under a policy that keeps `leaks.rotate` managed it's the
 `off_policy` finding instead, never both), `expiring` (within two weeks: a key's
 `expires_at`, so a vendor's key roll hasn't rotated in time, or a SaaS rotator's
@@ -1804,7 +1814,12 @@ instead of at the first rotation:
   `grace_minutes`, and Paddle keeps an old secret a day at most, so a link with `grace_minutes` over
   1440 is refused. Two rotations at once would undo each other at Paddle (a new rotation cancels a
   pending one), so one claims the registration (409 for the other, for five minutes at most if its
-  node stops). The key's id never changes (`id` is `api_key_id`). With `expires_days`, each new
+  node stops), and holds it until the new secret is stored in the key, not only until Paddle has
+  answered. A rotation that read the key before another's was stored, and rotated after it (from
+  the secret that one stored), finds the key moved on when it comes to store its own; for most
+  vendors that's a lost race and its credential is revoked, but Paddle ends the secret it rotated
+  from, so its new secret, the newest and the only one that keeps working, is stored over the
+  other's. The key's id never changes (`id` is `api_key_id`). With `expires_days`, each new
   secret gets `new_key_expires_at` that many days ahead, and a link's `rotate_days` is at most
   `expires_days` less 14; without it, each keeps the key's own expiry, which the registration's
   `credential_expires_at` can give health. One environment per registration: the registration is one
@@ -3208,9 +3223,15 @@ the names with dns-01, renews them, and keys link to the result.
     (an UPSERT of the rest), and DELETEs the set only when nothing else is left, as it stands (a set
     that moved in between is read again and tried once more). Route 53 has no compare-and-swap, so
     two writers of one set can drop each other's value. roll's own orders never do: an order holds
-    its `_acme-challenge` names in the shared database (`public_cert_dns_claims`, taken in the same
-    write as the order's own claim and released after its cleanup), across projects and nodes, and
-    another order of a held name waits for the next pass. Another client can still write the set
+    its `_acme-challenge` record sets in the shared database (`public_cert_dns_claims`, by hosted
+    zone id and name, taken once the order has claimed its registration and found each name's zone,
+    and released after its cleanup), across projects and nodes, and another order of a held set
+    waits for the next pass. A set is one zone's: anyone can make a public hosted zone named
+    `example.com` in their own AWS account, and its set of `_acme-challenge.example.com` is another
+    set, so an order there never holds up an order in the zone the name is delegated to. An order
+    held for over an hour (by orders of the same names in the same zone) is the registration's
+    problem: `failing`, with `last_error` saying so, `rotation.failed` on its keys, and an hour
+    before it's tried again. Another client can still write the set
     from an older read, so once the changes are `INSYNC` roll reads each set back: a missing value
     is added again and waited on once more, and still missing fails the order (saying so) before
     the CA is asked to look. A role in use can't be deleted (409), and renaming it carries over.
@@ -4331,10 +4352,14 @@ refuses any push whose new commits add a value of the project, whoever pushes it
   a login no hook has named is refused (400), and so is one that several hooks' tokens have
   named, until it's named as `alice@token:<id>`. `alice@token:<id>` is taken once that token's
   hook has named a pusher. The answer, and `roll secrets breakglass`, print each binding with
-  its token's name (`alice@token:tok_… (git-hook)`), so a token that isn't the hook stands out. A
-  list set before logins were bound keeps its bare logins, each counting only through a
-  scan-only token whose hook named that login in an earlier scan; `roll secrets breakglass` shows
-  them, and setting the same list again binds them. The hook asks roll
+  its token's name (`alice@token:tok_… (git-hook)`), so a token that isn't the hook stands out.
+  "Scan-only" is the token as roll-access has it when it's asked, never as it was when it named
+  the pusher: a token's rules and name can change after it scans (`PATCH /v1/access/tokens/{id}`,
+  a remembered approval), so `roll secrets breakglass alice` looks up each token that named alice
+  now, and roll only remembers which token named whom. A list set before logins were bound keeps
+  its bare logins, each counting only through a token that is scan-only at the push and whose
+  hook named that login in an earlier scan; `roll secrets breakglass` shows them, and setting the
+  same list again binds them. The hook asks roll
   first: roll refuses a pusher the list doesn't name through this token (403, audited), and records the push as
   `secrets.scan.breakglass` with the pusher and refs before anything is read. It's still scanned,
   and the keys it found go in the same log. What it lets through is leaked: the value is in the
@@ -5906,8 +5931,8 @@ verifies them all.
 
 The roll-wide permission model (docs/permissions.md, `crates/roll-access`, branch
 `feature/roll-mcp`) decides who may do what: rolld's gate classifies each request by its route
-pattern and method into the product `secrets`, a resource (`{project, environments, paths}`) and one
-action:
+pattern and method into the product `secrets`, a resource (`{project, environments, paths, keys}`)
+and one action:
 
 | Action | Routes |
 | --- | --- |
@@ -5939,6 +5964,15 @@ that follow from it:
   environment, so none reaches them through a reference, an import or a base either.
 - **Folders.** A caller limited to some folders sees only their changes, change items, requests,
   audit rows and the leases of their secrets.
+- **Keys.** A rule with `keys: ["STRIPE_KEY"]` (docs/permissions.md, "Secrets' keys") reaches
+  only those keys of its folders: one key's routes (its value, versions, TOTP code, set, delete,
+  rotate, hosts, purge) at that key, and a folder's list, values (`roll run`, an export, `?seq=`),
+  resolve and batch of changes key by key: those keys alone, and a batch naming another is
+  refused with its name. A digest, a watch's delta, a `.env` import or diff, a promote, health
+  and leaks stay the folder's (403). `Scope::key` and `Scope::by_key` carry it to `Grants::allows`;
+  `access::reaches` asks it per key, and `Grants::limits_keys` skips that for every other caller.
+  `roll secrets tokens create … --key STRIPE_KEY` makes one. (Encryption keys are another
+  thing: `{id, index}`, below.)
 - **Fingerprints** are shown only to a caller who may reveal the value: a writer could otherwise
   test guesses against values it can't read. The grid's and compare's statuses still say whether
   two environments match, to a caller who can read both.
@@ -7072,7 +7106,7 @@ isn't in the workspace is 404.
 | `GET /v1/secrets/health` | | `{ok, key: "env"\|"kms"\|"file"\|"shares"\|"missing", resealed: "all"\|number\|null, customer_managed, issuer_pulled: {kid, pulled_at, detail}[], links: string[], syncs: string[]}` (`links`, `syncs`: the kinds registered; `issuer_pulled`: issuer keys an emergency rotation pulled in the last 30 days) |
 | `GET`, `POST /v1/secrets/unseal` | `{share}` (`POST`) | `{sealed, have?, need?, error?}`: a sealed node's progress (public; see "Starting sealed"); 429 with `Retry-After` past the limits |
 | `GET` | | `{project, environments: Environment[], previews: number, history_days: number \| null, validity_checks: "on" \| "off", leaks: {rotate: "managed" \| "off"}, breakglass: string[], deletion: {window_days, holds: string \| null}}` (`deletion`: what deleting the workspace project takes with it, as its refusal says it, and how many days it stays recoverable; `leaks.rotate`: "When a value leaks") |
-| `PATCH` | `{history_days?, validity_checks?: "on" \| "off", leaks?: {rotate: "managed" \| "off"}, breakglass?: string[]}` (`breakglass`: who may push past a pre-receive hook, at most 100 of a pusher's login through one hook's token, `alice@token:<id>` (taken once that token's hook has named a pusher), a bare `alice` (bound to the one scan-only token whose hook has named alice; 400 when none has, or several have), `token:<id>` and `*`; `[]` no one; the answer is the list as stored, and `breakglass_hooks: {"token:<id>": name}`, each bound token's name as its hook last scanned) | what changed, as given (`admin`; validity checks audited as `validity.checks`, leak rotation as `leaks.rotate`, break glass as `scan.breakglass`) |
+| `PATCH` | `{history_days?, validity_checks?: "on" \| "off", leaks?: {rotate: "managed" \| "off"}, breakglass?: string[]}` (`breakglass`: who may push past a pre-receive hook, at most 100 of a pusher's login through one hook's token, `alice@token:<id>` (taken once that token's hook has named a pusher), a bare `alice` (bound to the one scan-only token whose hook has named alice; 400 when none has, or several have), `token:<id>` and `*`; `[]` no one; the answer is the list as stored, and `breakglass_hooks: {"token:<id>": name}`, each bound scan-only token's name as roll-access has it now) | what changed, as given (`admin`; validity checks audited as `validity.checks`, leak rotation as `leaks.rotate`, break glass as `scan.breakglass`) |
 | `GET /grid?path=` | | `Grid` |
 | `GET /environments` | | `Environment[]` in order |
 | `POST /environments` | `NewEnvironment` | 201 `Environment` |

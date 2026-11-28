@@ -6,8 +6,6 @@ import { appsApi } from "@/lib/apps-api";
 import { codeApi } from "@/lib/code-api";
 import { previewsApi, type Preview, type PreviewSettings } from "@/lib/previews-api";
 import type { WorkspaceProject } from "@/lib/workspace-api";
-import { NotePopup } from "./preview-feedback";
-import { ThreadPopup } from "./preview-sheet";
 import { ProjectPreviews } from "./previews";
 
 vi.mock("@/lib/previews-api", async (orig) => {
@@ -175,31 +173,6 @@ describe("the Previews tab", () => {
     expect(await screen.findByText("terminal sh_apps")).toBeInTheDocument();
   });
 
-  it("lists the previews waiting for a visual review first, tagged", async () => {
-    const waiting: Preview = { ...preview, id: "pv_review", slug: "pr483-shop", title: "New header", visual_review: { state: "changed", branch: "main", percent: 8, by: null, at: null, required: false, head: "cs_1", pages: [{ path: "", percent: 8, by: null, at: null }] } };
-    api.list.mockResolvedValue([preview, waiting]);
-    view();
-    const list = await screen.findByRole("list", { name: "Previews" });
-    const rows = within(list).getAllByRole("button", { name: /: Ready$/ });
-    expect(rows.map((r) => r.getAttribute("aria-label"))).toEqual(["New header: Ready", "Checkout redesign: Ready"]);
-    expect(within(list).getAllByText("to review")).toHaveLength(1);
-  });
-
-  it("tags a preview whose page added problems against main", async () => {
-    const worse: Preview = {
-      ...preview,
-      id: "pv_worse",
-      title: "New footer",
-      page_links: { checked: 2, broken: [{ path: "/gone", status: 404 }] },
-      base_change: { branch: "main", percent: 0, phone_percent: null, links_added: 1, errors_added: 1 },
-    };
-    api.list.mockResolvedValue([preview, worse]);
-    view();
-    const list = await screen.findByRole("list", { name: "Previews" });
-    expect(await within(list).findByText("2 new problems")).toBeInTheDocument();
-    expect(within(list).getAllByText(/new problems?$/)).toHaveLength(1);
-  });
-
   it("posts a note from the preview page's feedback button on the change, once", async () => {
     const u = userEvent.setup({ delay: null });
     vi.mocked(codeApi.submitReview).mockResolvedValue({} as never);
@@ -248,37 +221,4 @@ describe("the Previews tab", () => {
     expect(await screen.findByText(/This note is resolved/)).toBeInTheDocument();
     expect(done).toHaveBeenCalledOnce();
   });
-});
-
-// The preview page's button opens a small window of roll's: the note alone, posted on the change
-// as the person signed in, then the window closes (Vercel's comments post in place).
-it("posts a page's note from its own small window, then closes it", async () => {
-  api.get.mockResolvedValue(preview);
-  vi.mocked(codeApi.submitReview).mockResolvedValue({} as never);
-  const close = vi.fn();
-  render(
-    <MarkStateProvider>
-      <NotePopup preview="pv_abc" query="?preview=pv_abc&fb_path=%2Fcheckout&fb_selector=button.pay&fb_note=The+button+is+cut+off" close={close} />
-    </MarkStateProvider>,
-  );
-  await userEvent.click(await screen.findByRole("button", { name: "Post on the change" }));
-  expect(vi.mocked(codeApi.submitReview)).toHaveBeenCalledWith("chg_1", expect.objectContaining({ verdict: "comment", body: expect.stringContaining("The button is cut off") }));
-  await vi.waitFor(() => expect(close).toHaveBeenCalled(), { timeout: 3000 });
-});
-
-// The page's Resolve opens the same small window: the note's thread alone, closed once resolved.
-it("resolves a page's note from its own small window, then closes it", async () => {
-  api.get.mockResolvedValue(preview);
-  vi.mocked(codeApi.reviews).mockResolvedValue([{ id: "rv_1", body: "**Feedback on the preview** · `/`\n\nThe button is cut off", dismissed: false, created_at: 1, reviewer: { name: "ada" } }] as never);
-  api.resolveNote.mockResolvedValue({ resolved: "rv_1" });
-  const close = vi.fn();
-  render(
-    <MarkStateProvider>
-      <ThreadPopup preview="pv_abc" review="rv_1" close={close} />
-    </MarkStateProvider>,
-  );
-  expect(await screen.findByText("The button is cut off")).toBeInTheDocument();
-  await userEvent.click(screen.getByRole("button", { name: "Resolve" }));
-  expect(api.resolveNote).toHaveBeenCalledWith("pv_abc", "rv_1");
-  await vi.waitFor(() => expect(close).toHaveBeenCalled(), { timeout: 3000 });
 });

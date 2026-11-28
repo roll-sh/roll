@@ -22,8 +22,23 @@ pub(crate) struct Sqlite {
     listeners: Mutex<std::collections::HashMap<String, tokio::sync::watch::Sender<u64>>>,
 }
 
+/// SQLite counts every allocation under one process-wide mutex (`SQLITE_CONFIG_MEMSTATUS`, on in
+/// the bundled build), so every connection of every database in the process queues on it: with a
+/// few databases busy at once most of the time went to that lock's futex. Nothing reads the
+/// counts. It only takes before SQLite initializes (the first connection anywhere in the
+/// process); rolld calls it first thing.
+pub fn uncounted_allocations() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    // SAFETY: before initialization `sqlite3_config` only sets a flag; after, it returns
+    // SQLITE_MISUSE and changes nothing.
+    ONCE.call_once(|| unsafe {
+        rusqlite::ffi::sqlite3_config(rusqlite::ffi::SQLITE_CONFIG_MEMSTATUS, 0 as std::ffi::c_int);
+    });
+}
+
 impl Sqlite {
     pub(crate) fn open(path: &Path, opts: &SqliteOptions) -> Result<Arc<Sqlite>> {
+        uncounted_allocations();
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).map_err(|e| Error::Other(format!("{}: {e}", dir.display())))?;
         }
