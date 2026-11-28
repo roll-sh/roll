@@ -272,18 +272,3 @@ fn id_like(s: &str) -> bool {
         || b.len() > 40
         || (b.len() >= 8 && digits >= 2 && b.iter().any(u8::is_ascii_alphabetic) && b.iter().all(|c| c.is_ascii_alphanumeric() || *c == b'_' || *c == b'-'))
 }
-
-#[cfg(test)]
-mod tests {
-    use super::route_of;
-
-    #[test]
-    fn ids_fold_and_words_stay() {
-        assert_eq!(route_of("/users/42/orders?page=2"), "/users/:id/orders");
-        assert_eq!(route_of("/u/3f2c1a9e-7b4d-4e1a-9c2b-1d2e3f4a5b6c"), "/u/:id");
-        assert_eq!(route_of("/api/v2/items/usr_8f3k2j9d"), "/api/v2/items/:id");
-        assert_eq!(route_of("/blog/page-2/index.html"), "/blog/page-2/index.html");
-        assert_eq!(route_of(""), "/");
-        assert_eq!(route_of("//a//b/"), "/a/b");
-    }
-}

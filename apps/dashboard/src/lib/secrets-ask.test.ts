@@ -23,7 +23,7 @@ function open(box: SealedSecret, context: string): string {
 }
 
 describe("secret requests' answers", () => {
-  it("seals each value so it opens only as that key of that request", async () => {
+  it("seals each value so it opens only as that key of that request, byte for byte the box roll's test opens", async () => {
     const boxes = await sealAnswer("vrq_test", PUBLIC, { VENDOR_KEY: "fake-key", VENDOR_SECRET: "fake-secret" });
     expect(Object.keys(boxes).sort()).toEqual(["VENDOR_KEY", "VENDOR_SECRET"]);
     expect(JSON.stringify(boxes)).not.toContain("fake-");
@@ -32,13 +32,11 @@ describe("secret requests' answers", () => {
     // Swapped between keys, or replayed on another request, it doesn't open.
     expect(() => open(boxes.VENDOR_KEY, answerContext("vrq_test", "VENDOR_SECRET"))).toThrow();
     expect(() => open(boxes.VENDOR_KEY, answerContext("vrq_other", "VENDOR_KEY"))).toThrow();
-  });
 
-  it("seals, byte for byte, the box roll's test opens (a fixed ephemeral key and nonce)", async () => {
     // `crates/roll-secrets/src/value_requests.rs`'s `opens_the_answer_pages_box`.
     const fixed = { ephemeral: new Uint8Array(32).fill(7), nonce: new Uint8Array(12).fill(9) };
-    const boxes = await sealAnswer("vrq_test", PUBLIC, { VENDOR_KEY: "fake-key" }, fixed);
-    expect(boxes.VENDOR_KEY).toEqual(VECTOR);
+    const vector = await sealAnswer("vrq_test", PUBLIC, { VENDOR_KEY: "fake-key" }, fixed);
+    expect(vector.VENDOR_KEY).toEqual(VECTOR);
   });
 });
 

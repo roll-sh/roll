@@ -313,9 +313,10 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     Never call a service directly from a tool. After adding or changing tools, or a product's routes
     or owner routing, run `pnpm test:mcp-sweep`: every tool called through `/v1/mcp` against a fresh
     rolld, so a path, query or body the product rejects, or an id it routes on differently, fails.
-    After changing the protocol itself (roll-mcp's methods, `modern.rs`, `tasks.rs`, `denials.rs`), run
+    After changing the protocol itself (roll-mcp's methods, `modern.rs`, `roll_auth::mcp`, `tasks.rs`, `denials.rs`), run
     `pnpm test:mcp-conformance`: the official MCP conformance suite against a fresh rolld, check by
-    check against `tests/mcp-conformance/expected.yml` (a listed check passing fails it too).
+    check against `tests/mcp-conformance/expected.yml` (a listed check passing fails it too), and
+    against roll code's `/v1/code/mcp` with `code-expected.yml` (run it after changing that too).
     A new route of a product with MCP tools gets a tool, or a line in
     `crates/roll-mcp/src/no-tool.txt` saying why not (a credential, a person's call, the
     operator's…; `no tool yet` for a gap): roll-mcp's tests fail on a route with neither.

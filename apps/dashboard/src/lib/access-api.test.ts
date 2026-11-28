@@ -223,6 +223,8 @@ describe("two-person approvals", () => {
     expect(rememberable({ resource: "prj_a", product: "secrets", scope_path: "/", route: "/v1/apps/services/{id}/environments/{env}/domains/{domain}/configure" })).toBe(false);
     expect(rememberable({ resource: "prj_a", product: "secrets", scope_path: "/dns", route: "/v1/apps/services/{id}/environments/{env}/domains/{domain}/configure" })).toBe(true);
     expect(rememberable({ resource: "prj_a", product: "secrets", scope_path: "/", route: "/v1/secrets/projects/{project}/environments/{env}/values" })).toBe(true);
+    // One naming its key is remembered for that key (8 hours at most at the root).
+    expect(rememberable({ resource: "prj_a", product: "secrets", scope_path: "/", scope_key: "CF_TOKEN", route: "/v1/apps/services/{id}/environments/{env}/domains/{domain}/configure" })).toBe(true);
   });
 });
 

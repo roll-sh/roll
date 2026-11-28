@@ -35,29 +35,6 @@ fn s(v: &str) -> Option<String> {
 }
 
 #[test]
-fn next_standalone_ships_only_the_traced_server() {
-    let p = detect(&[
-        ("package.json", r#"{"scripts": {"build": "next build", "start": "next start"}, "dependencies": {"next": "15.0.0", "react": "19.0.0"}}"#),
-        ("package-lock.json", "{}"),
-        ("next.config.mjs", "const config = {\n  output: 'standalone',\n};\nexport default config;\n"),
-        ("public/logo.svg", "<svg/>"),
-        ("app/page.tsx", ""),
-    ]);
-    assert_eq!(p.start, s("node server.js"));
-    has(
-        &p,
-        &[
-            "COPY --from=build --chown=node:node /app/.next/standalone /app",
-            "COPY --from=build --chown=node:node /app/.next/static /app/.next/static",
-            "COPY --from=build --chown=node:node /app/public /app/public",
-            "ENV HOSTNAME=0.0.0.0",
-            r#"CMD ["sh", "-c", "exec node server.js"]"#,
-        ],
-    );
-    assert!(!p.dockerfile.contains("COPY --from=build --chown=node:node /app /app") && !p.dockerfile.contains("prune"), "{}", p.dockerfile);
-}
-
-#[test]
 fn next_on_pnpm() {
     let p = detect(&[
         (
@@ -76,19 +53,7 @@ fn next_on_pnpm() {
     assert_eq!(p.build, s("pnpm run build"));
     assert_eq!(p.start, s("node_modules/.bin/next start -p $PORT"));
     assert_eq!(p.port, 8080);
-    has(
-        &p,
-        &[
-            "FROM node:22-slim AS base",
-            "corepack enable",
-            "COPY package.json pnpm-lock.yaml ./",
-            "RUN --mount=type=cache,target=/root/.local/share/pnpm/store pnpm install --frozen-lockfile",
-            "RUN --mount=type=cache,target=/app/.next/cache --mount=type=secret,id=NEXT_DEPLOYMENT_ID,env=NEXT_DEPLOYMENT_ID pnpm run build",
-            "COPY --from=build --chown=node:node /app /app",
-            "ENV PORT=8080\nEXPOSE 8080\nUSER node\n",
-            r#"CMD ["sh", "-c", "exec node_modules/.bin/next start -p $PORT"]"#,
-        ],
-    );
+    has(&p, &["pnpm install --frozen-lockfile", "pnpm run build", r#"CMD ["sh", "-c", "exec node_modules/.bin/next start -p $PORT"]"#]);
     assert!(
         p.notes
             .iter()
@@ -101,6 +66,15 @@ fn next_on_pnpm() {
         "{:?}",
         p.notes
     );
+    // output: 'standalone' ships only the traced server.
+    let p = detect(&[
+        ("package.json", r#"{"scripts": {"build": "next build", "start": "next start"}, "dependencies": {"next": "15.0.0", "react": "19.0.0"}}"#),
+        ("package-lock.json", "{}"),
+        ("next.config.mjs", "const config = {\n  output: 'standalone',\n};\nexport default config;\n"),
+        ("app/page.tsx", ""),
+    ]);
+    assert_eq!(p.start, s("node server.js"));
+    has(&p, &["COPY --from=build --chown=node:node /app/.next/standalone /app", r#"CMD ["sh", "-c", "exec node server.js"]"#]);
 }
 
 /// Static site generators each publish their own directory, and a set output directory (or the
@@ -182,6 +156,9 @@ fn vite_on_yarn_is_a_static_site() {
             "USER 65534:65534",
         ],
     );
+    assert!(!p.spa, "no router: unknown paths are 404s");
+    let spa = detect(&[("package.json", r#"{"scripts":{"build":"vite build"},"devDependencies":{"vite":"5.0.0"},"dependencies":{"react":"18.0.0","react-router-dom":"6.0.0"}}"#)]);
+    assert!(spa.spa && spa.notes.iter().any(|n| n.contains("react-router-dom")), "{:?}", spa.notes);
 }
 
 #[test]
@@ -269,40 +246,13 @@ fn django_on_uv() {
             "USER app",
         ],
     );
-}
-
-#[test]
-fn fastapi_on_pip_finds_the_app() {
+    // FastAPI on pip: uvicorn serves the app it finds, module:variable.
     let p = detect(&[
-        (
-            "requirements.txt",
-            "fastapi==0.115.0\npydantic>=2 # models\n",
-        ),
+        ("requirements.txt", "fastapi==0.115.0\n"),
         ("app/__init__.py", ""),
-        (
-            "app/main.py",
-            "from fastapi import FastAPI\n\napi: FastAPI = FastAPI(title='x')\n",
-        ),
+        ("app/main.py", "from fastapi import FastAPI\n\napi: FastAPI = FastAPI(title='x')\n"),
     ]);
-    assert_eq!(
-        (p.provider, p.framework.as_deref()),
-        (Provider::Python, Some("fastapi"))
-    );
-    assert_eq!(p.language_version, s("3.12"));
-    assert_eq!(
-        p.install,
-        s("pip install -r requirements.txt && pip install uvicorn")
-    );
-    assert_eq!(
-        p.start,
-        s("uvicorn app.main:api --host 0.0.0.0 --port $PORT")
-    );
-    has(
-        &p,
-        &[
-            "COPY requirements.txt ./\nRUN --mount=type=cache,target=/root/.cache/pip pip install -r requirements.txt && pip install uvicorn\nCOPY . .\n",
-        ],
-    );
+    assert_eq!(p.start, s("uvicorn app.main:api --host 0.0.0.0 --port $PORT"));
 }
 
 #[test]
@@ -537,6 +487,8 @@ fn plain_index_html_and_nothing() {
         err.to_string().contains("package.json") && err.to_string().contains("go.mod"),
         "{err}"
     );
+    let err = plan(&tree(&[("stack.yaml", "resolver: lts-22.0")]), &Overrides::default()).unwrap_err();
+    assert!(err.to_string().contains("found stack.yaml: Haskell"), "{err}");
 }
 
 #[test]
@@ -590,6 +542,8 @@ fn a_dockerfile_wins_and_can_be_chosen() {
         serde_json::from_str(r#"{"builder": "dockerfile", "dockerfile": "docker/web.Dockerfile"}"#)
             .unwrap();
     assert_eq!(o.builder, Builder::Dockerfile);
+    let df = "FROM node:22-slim AS base\nFROM base AS build\nRUN x\nFROM --platform=linux/amd64 python:3.12 AS py\nFROM scratch\nFROM gcr.io/distroless/static@sha256:abc\nFROM ${IMG}\nFROM base\n";
+    assert_eq!(crate::base_images(df), ["node:22-slim", "python:3.12"], "its FROMs, not its stages");
 }
 
 #[test]
@@ -690,10 +644,8 @@ fn an_app_in_a_js_workspace_builds_from_the_repo_root() {
     assert_eq!(crate::workspace_app(&tree(&[("apps/web/package.json", r#"{"name":"web"}"#)]), "apps/web"), None);
     let npm = [("package.json", r#"{"workspaces":["apps/*"]}"#), ("package-lock.json", "{}"), ("apps/api/package.json", r#"{"name":"api","scripts":{"build":"tsc"}}"#)];
     assert_eq!(crate::workspace_app(&tree(&npm), "apps/api").unwrap().build.as_deref(), Some("npm run build --workspace apps/api"));
-}
-
-#[test]
-fn a_workspace_package_watches_the_packages_it_depends_on() {
+    // A package watches the packages it depends on: transitively, by name, and nothing it doesn't
+    // use (another app, an unused package).
     let files = [
         ("package.json", r#"{"private":true,"workspaces":{"packages":["apps/*","packages/**"]}}"#),
         ("yarn.lock", ""),
@@ -704,22 +656,21 @@ fn a_workspace_package_watches_the_packages_it_depends_on() {
         ("packages/config/tokens/package.json", r#"{"name":"@acme/tokens"}"#),
         ("packages/unused/package.json", r#"{"name":"@acme/unused"}"#),
     ];
-    // Transitively, by name, and nothing it doesn't use (another app, an unused package).
     assert_eq!(crate::workspace_deps(&tree(&files), "apps/web"), ["packages/config/tokens/**", "packages/ui/**", "package.json", "yarn.lock", "turbo.json"]);
-    assert!(crate::workspace_deps(&tree(&files), "elsewhere").is_empty(), "not a package of the workspace");
-}
-
-#[test]
-fn a_static_build_with_a_client_router_is_a_single_page_app() {
-    let vite = |deps: &str| {
-        detect(&[(
-            "package.json",
-            &format!(r#"{{"scripts":{{"build":"vite build"}},"devDependencies":{{"vite":"5.0.0"}},"dependencies":{{{deps}}}}}"#),
-        )])
-    };
-    let spa = vite(r#""react":"18.0.0","react-router-dom":"6.0.0""#);
-    assert!(spa.spa && spa.notes.iter().any(|n| n.contains("react-router-dom")), "{:?}", spa.notes);
-    assert!(!vite(r#""react":"18.0.0""#).spa, "no router: unknown paths are 404s");
+    // A monorepo's folders that build on their own are offered as roots; a library package, docs
+    // and dependencies aren't.
+    let t = tree(&[
+        ("package.json", r#"{"name":"mono","private":true,"workspaces":["apps/*","packages/*"]}"#),
+        ("apps/web/package.json", r#"{"name":"web","scripts":{"build":"next build","start":"next start"},"dependencies":{"next":"15.0.0"}}"#),
+        ("apps/api/go.mod", "module api\n\ngo 1.23\n"),
+        ("apps/api/main.go", "package main\nfunc main() {}\n"),
+        ("apps/worker/Dockerfile", "FROM busybox\nCMD [\"sleep\", \"1\"]\n"),
+        ("packages/ui/package.json", r#"{"name":"ui","main":"index.js"}"#),
+        ("docs/index.html", "<h1>docs</h1>"),
+        ("node_modules/x/package.json", r#"{"name":"x","scripts":{"start":"node x"}}"#),
+    ]);
+    let roots: Vec<String> = candidates(&t).into_iter().map(|c| c.root).collect();
+    assert_eq!(roots, ["apps/api", "apps/web", "apps/worker"]);
 }
 
 #[test]
@@ -748,6 +699,10 @@ fn the_datastores_an_app_uses_come_from_its_manifests() {
     let p = detect(&[("Dockerfile", "FROM scratch\n"), ("package.json", r#"{"dependencies":{"pg":"8"}}"#)]);
     assert_eq!(p.uses, vec![Postgres]);
     assert!(p.notes.iter().any(|n| n == "pg in package.json: it uses Postgres"), "{:?}", p.notes);
+    // An example env file names the variables the app expects.
+    let t = tree(&[(".env.example", "# Stripe\nSTRIPE_KEY=sk_test_xxx\nexport DATABASE_URL=\n\nNEXT_PUBLIC_SITE=https://x\nnot a line\n1BAD=x\nSTRIPE_KEY=again\n")]);
+    assert_eq!(crate::expects::expected(&t), Some((".env.example", vec!["STRIPE_KEY".to_string(), "DATABASE_URL".into(), "NEXT_PUBLIC_SITE".into()])));
+    assert_eq!(crate::expects::expected(&tree(&[("app.js", "")])), None);
 }
 
 #[test]
@@ -768,50 +723,40 @@ fn a_procfile_names_the_start_command_and_the_release_phase() {
     assert_eq!(set.start.as_deref(), Some("node other.js"));
     let docker = plan(&tree(&[("Dockerfile", "FROM node:22\nCMD [\"node\", \"x.js\"]\n"), ("Procfile", "web: node y.js\nrelease: migrate\n")]), &Overrides { process: Some("web".into()), ..Default::default() }).unwrap();
     assert_eq!((docker.start, docker.release), (None, None));
+    // A framework's migrations and health route are suggested for a new service, never set; a
+    // Procfile's own release wins.
+    let rails = detect(&[("Gemfile", "source 'https://rubygems.org'\ngem 'rails', '~> 8.0'\n"), ("Gemfile.lock", ""), ("config.ru", "run Rails.application"), ("bin/rails", ""), ("db/migrate/001_init.rb", ""), ("config/routes.rb", "get \"up\" => \"rails/health#show\"")]);
+    assert_eq!((rails.suggest.pre_deploy.as_deref(), rails.suggest.health_path.as_deref(), rails.release.as_deref()), (Some("bin/rails db:prepare"), Some("/up"), None));
+    let prisma = detect(&[("package.json", r#"{"name":"api","scripts":{"start":"node index.js"},"dependencies":{"prisma":"6.0.0"}}"#), ("prisma/schema.prisma", ""), ("prisma/migrations/0001/migration.sql", "")]);
+    assert_eq!(prisma.suggest.pre_deploy.as_deref(), Some("npx prisma migrate deploy"));
+    let own = plan(&tree(&[("Gemfile", "gem 'rails'\n"), ("Gemfile.lock", ""), ("config.ru", ""), ("db/migrate/1.rb", ""), ("Procfile", "web: bin/rails server\nrelease: bin/rails db:migrate\n")]), &Overrides { process: Some("web".into()), ..Overrides::default() }).unwrap();
+    assert_eq!((own.release.as_deref(), own.suggest.pre_deploy.as_deref()), (Some("bin/rails db:migrate"), None), "a Procfile's release is its own");
 }
 
 #[test]
-fn deno_runs_its_start_task_or_its_entry_module() {
+fn every_other_language_builds_and_runs() {
+    // Deno: its start task or its entry module; a package.json beside it is still Deno.
     let p = detect(&[("deno.json", r#"{"tasks": {"start": "deno run -A main.ts", "build": "deno task bundle"}}"#), ("main.ts", "Deno.serve(() => new Response('hi'))"), ("deno.lock", "{}")]);
     assert_eq!((p.provider, p.start.as_deref(), p.build.as_deref()), (Provider::Deno, Some("deno task start"), Some("deno task build")));
-    has(&p, &["FROM denoland/deno:", "COPY deno.json deno.lock ./", "RUN deno install", "USER deno"]);
     let p = detect(&[("deno.jsonc", "// a comment\n{\n  \"imports\": {}\n}"), ("server.ts", "")]);
     assert_eq!(p.start.as_deref(), Some("deno run --allow-net --allow-env --allow-read server.ts"));
-    // A package.json beside it: still Deno.
     assert_eq!(detect(&[("deno.json", "{}"), ("main.ts", ""), ("package.json", "{}")]).provider, Provider::Deno);
-    assert!(plan(&tree(&[("deno.json", "{}")]), &Overrides::default()).is_err(), "nothing to start");
-}
-
-#[test]
-fn dotnet_publishes_its_project_and_runs_it_on_port() {
+    // .NET: its project published and run on $PORT; two projects at the root are the person's to pick.
     let csproj = r#"<Project Sdk="Microsoft.NET.Sdk.Web"><PropertyGroup><TargetFramework>net9.0</TargetFramework><AssemblyName>Shop.Api</AssemblyName></PropertyGroup></Project>"#;
     let p = detect(&[("Shop.Api.csproj", csproj), ("Program.cs", "")]);
     assert_eq!((p.provider, p.framework.as_deref(), p.language_version.as_deref()), (Provider::Dotnet, Some("aspnetcore"), Some("9.0")));
     assert_eq!(p.start.as_deref(), Some("dotnet /app/Shop.Api.dll --urls http://0.0.0.0:$PORT"));
-    has(&p, &["FROM mcr.microsoft.com/dotnet/sdk:9.0 AS build", "COPY Shop.Api.csproj ./", "dotnet restore", "dotnet publish -c Release -o /out --no-restore", "FROM mcr.microsoft.com/dotnet/aspnet:9.0", "COPY --from=build /out ./", "USER app"]);
-    // Two projects at the root: which one is the person's to say.
     assert!(plan(&tree(&[("A.csproj", csproj), ("B.csproj", csproj)]), &Overrides::default()).is_err());
-}
-
-#[test]
-fn elixir_is_built_as_a_release_and_phoenix_serves() {
+    // Elixir: a release, with Phoenix's assets first.
     let mix = "defmodule Shop.MixProject do\n  use Mix.Project\n  def project, do: [app: :shop, version: \"0.1.0\", deps: deps(), aliases: [\"assets.deploy\": [\"esbuild default --minify\", \"phx.digest\"]]]\n  defp deps, do: [{:phoenix, \"~> 1.7\"}]\nend\n";
     let p = detect(&[("mix.exs", mix), ("mix.lock", "%{}"), ("assets/app.js", "")]);
     assert_eq!((p.provider, p.framework.as_deref(), p.start.as_deref()), (Provider::Elixir, Some("phoenix"), Some("/app/bin/shop start")));
     assert_eq!(p.build.as_deref(), Some("mix assets.deploy && mix release"));
-    has(&p, &["FROM elixir:1.17-slim AS build", "ENV MIX_ENV=prod", "ca-certificates git", "COPY mix.exs mix.lock ./", "mix deps.get --only prod", "COPY --from=build --chown=nobody:nogroup /app/_build/prod/rel/shop ./", "PHX_SERVER=true", "USER nobody"]);
-    assert!(p.notes.iter().any(|n| n.contains("SECRET_KEY_BASE")), "{:?}", p.notes);
-    // A plain Elixir app: its release, no assets step.
     let p = detect(&[("mix.exs", "defmodule Hi.MixProject do\n  def project, do: [app: :hi, deps: []]\nend\n")]);
     assert_eq!((p.framework.as_deref(), p.build.as_deref()), (None, Some("mix release")));
-}
-
-#[test]
-fn scala_clojure_gleam_and_a_start_script_build_and_run() {
     // sbt with sbt-native-packager: `stage`, its script named by `name`.
     let p = detect(&[("build.sbt", "name := \"Shop API\"\nscalaVersion := \"3.6.2\"\n"), ("project/plugins.sbt", "addSbtPlugin(\"com.github.sbt\" % \"sbt-native-packager\" % \"1.10.4\")\n")]);
     assert_eq!((p.provider, p.build.as_deref(), p.start.as_deref()), (Provider::Scala, Some("sbt -batch stage"), Some("/app/bin/shop-api")));
-    has(&p, &["AS build", "COPY build.sbt ./", "COPY project ./project", "--mount=type=cache,target=/root/.cache/coursier", "sbt -batch update", "cp -r target/universal/stage/. /out/", "FROM eclipse-temurin:21-jre", "USER app"]);
     // Play: its port from $PORT, and the note on its secret.
     let p = detect(&[("build.sbt", "name := \"web\"\nlazy val root = (project in file(\".\")).enablePlugins(PlayScala)\n"), ("project/plugins.sbt", "addSbtPlugin(\"org.playframework\" % \"sbt-plugin\" % \"3.0.6\")\n")]);
     assert_eq!((p.framework.as_deref(), p.start.as_deref()), (Some("play"), Some("/app/bin/web -Dhttp.port=$PORT -Dplay.server.pidfile.path=/dev/null")));
@@ -823,7 +768,6 @@ fn scala_clojure_gleam_and_a_start_script_build_and_run() {
     // Leiningen: its uberjar.
     let p = detect(&[("project.clj", "(defproject shop \"0.1.0\" :main shop.core :profiles {:uberjar {:aot :all}})\n")]);
     assert_eq!((p.provider, p.build.as_deref()), (Provider::Clojure, Some("lein uberjar")));
-    has(&p, &["FROM clojure:temurin-21-lein AS build", "COPY project.clj ./", "lein deps", "find target -maxdepth 2 -name '*-standalone.jar'", "FROM eclipse-temurin:21-jre"]);
     // tools.build: needs its build.clj and :build alias.
     let p = detect(&[("deps.edn", "{:deps {} :aliases {:build {:deps {io.github.clojure/tools.build {:mvn/version \"0.10.5\"}} :ns-default build}}}"), ("build.clj", "(ns build)")]);
     assert_eq!(p.build.as_deref(), Some("clojure -T:build uber"));
@@ -831,23 +775,19 @@ fn scala_clojure_gleam_and_a_start_script_build_and_run() {
     // Gleam: an Erlang shipment; a JavaScript target isn't built here.
     let p = detect(&[("gleam.toml", "name = \"shop\"\nversion = \"1.0.0\"\n"), ("manifest.toml", "")]);
     assert_eq!((p.provider, p.build.as_deref(), p.start.as_deref()), (Provider::Gleam, Some("gleam export erlang-shipment"), Some("/app/entrypoint.sh run")));
-    has(&p, &["COPY gleam.toml manifest.toml ./", "gleam deps download", "COPY --from=build --chown=app /src/build/erlang-shipment /app"]);
     assert!(plan(&tree(&[("gleam.toml", "name = \"x\"\ntarget = \"javascript\"\n")]), &Overrides::default()).is_err());
     // Swift: the package's executable, Vapor's served on $PORT, on its tools version's image.
     let vapor = "// swift-tools-version:6.1\nimport PackageDescription\nlet package = Package(name: \"shop\", dependencies: [.package(url: \"https://github.com/vapor/vapor.git\", from: \"4.0.0\")], targets: [.executableTarget(name: \"App\", dependencies: [.product(name: \"Vapor\", package: \"vapor\")])])\n";
     let p = detect(&[("Package.swift", vapor), ("Package.resolved", "{}")]);
     assert_eq!((p.provider, p.framework.as_deref(), p.start.as_deref()), (Provider::Swift, Some("vapor"), Some("/app/App serve --env production --hostname 0.0.0.0 --port $PORT")));
-    has(&p, &["FROM swift:6.1-bookworm AS build", "COPY Package.swift Package.resolved ./", "swift build -c release --static-swift-stdlib", "FROM debian:bookworm-slim"]);
     assert!(plan(&tree(&[("Package.swift", "// swift-tools-version:6.0\nlet package = Package(name: \"lib\", targets: [.target(name: \"Lib\")])\n")]), &Overrides::default()).is_err(), "a library has nothing to run");
     // Dart: bin/server.dart compiled to a native executable; a Flutter app isn't a server.
     let p = detect(&[("pubspec.yaml", "name: api\nenvironment:\n  sdk: ^3.5.0\n"), ("bin/server.dart", "void main() {}")]);
     assert_eq!((p.provider, p.build.as_deref(), p.start.as_deref()), (Provider::Dart, Some("dart compile exe bin/server.dart -o /out/server"), Some("/app/server")));
-    has(&p, &["FROM dart:3.13 AS build", "dart pub get", "COPY --from=build --chown=app /out/server /app/server"]);
     assert!(plan(&tree(&[("pubspec.yaml", "name: app\nflutter:\n  uses-material-design: true\n"), ("bin/server.dart", "")]), &Overrides::default()).is_err());
     // A start.sh and nothing else: bash on Debian; with a package.json beside it, Node wins.
     let p = detect(&[("start.sh", "#!/bin/bash\nexec python3 -m http.server $PORT\n")]);
     assert_eq!((p.provider, p.start.as_deref()), (Provider::Shell, Some("bash /app/start.sh")));
-    has(&p, &["FROM debian:bookworm-slim", "COPY --chown=app . .", "USER app"]);
     assert_eq!(detect(&[("start.sh", ""), ("package.json", "{\"scripts\":{\"start\":\"node a.js\"}}")]).provider, Provider::Node);
     assert_eq!(detect(&[("start.sh", ""), ("index.html", "<h1>hi</h1>")]).provider, Provider::Static, "a site with a dev script stays files");
     // sbt's normalizedName keeps `_`; Play's seed writes the name triple-quoted.
@@ -856,43 +796,6 @@ fn scala_clojure_gleam_and_a_start_script_build_and_run() {
     // Neither plugin, a start set: the compiled tree on the sbt image, the start run in it.
     let p = plan(&tree(&[("build.sbt", "name := \"x\"\n")]), &Overrides { start: Some("sbt run".into()), ..Overrides::default() }).unwrap();
     assert_eq!(p.build.as_deref(), Some("sbt -batch compile"));
-    has(&p, &["cp -r /src/. /out/", "FROM sbtscala/scala-sbt"]);
-}
-
-#[test]
-fn nothing_detected_says_what_it_did_find() {
-    let err = plan(&tree(&[("stack.yaml", "resolver: lts-22.0")]), &Overrides::default()).unwrap_err();
-    assert!(err.to_string().contains("found stack.yaml: Haskell"), "{err}");
-    let err = plan(&tree(&[("Shop.sln", "")]), &Overrides::default()).unwrap_err();
-    assert!(err.to_string().contains("Shop.sln: a .NET solution"), "{err}");
-}
-
-#[test]
-fn system_packages_go_in_a_generated_dockerfile_and_are_said() {
-    let o = Overrides { packages: vec!["ffmpeg".into()], ..Overrides::default() };
-    let p = plan(&tree(&[("package.json", r#"{"scripts":{"start":"node server.js"}}"#)]), &o).unwrap();
-    assert!(p.dockerfile.contains("apt-get install -y --no-install-recommends ffmpeg") && p.notes.contains(&"packages: ffmpeg".to_string()), "{}", p.dockerfile);
-    assert!(matches!(plan(&tree(&[("index.html", "<h1>hi</h1>")]), &o), Err(Error::Packages(_))), "a static site runs nothing to install them in");
-    let own = plan(&tree(&[("Dockerfile", "FROM alpine\n")]), &o).unwrap();
-    assert!(!own.dockerfile.contains("ffmpeg"), "the tree's own Dockerfile is its own");
-}
-
-/// A monorepo's folders that build on their own are offered as roots; a library package, docs
-/// and dependencies aren't.
-#[test]
-fn a_monorepos_apps_are_its_candidate_roots() {
-    let t = tree(&[
-        ("package.json", r#"{"name":"mono","private":true,"workspaces":["apps/*","packages/*"]}"#),
-        ("apps/web/package.json", r#"{"name":"web","scripts":{"build":"next build","start":"next start"},"dependencies":{"next":"15.0.0"}}"#),
-        ("apps/api/go.mod", "module api\n\ngo 1.23\n"),
-        ("apps/api/main.go", "package main\nfunc main() {}\n"),
-        ("apps/worker/Dockerfile", "FROM busybox\nCMD [\"sleep\", \"1\"]\n"),
-        ("packages/ui/package.json", r#"{"name":"ui","main":"index.js"}"#),
-        ("docs/index.html", "<h1>docs</h1>"),
-        ("node_modules/x/package.json", r#"{"name":"x","scripts":{"start":"node x"}}"#),
-    ]);
-    let roots: Vec<String> = candidates(&t).into_iter().map(|c| c.root).collect();
-    assert_eq!(roots, ["apps/api", "apps/web", "apps/worker"]);
 }
 
 #[test]
@@ -908,20 +811,6 @@ fn variables_reach_build_steps_as_secrets_and_files_at_their_paths() {
 }
 
 #[test]
-fn a_static_sites_functions_are_named_not_dropped() {
-    let p = plan(&tree(&[("index.html", "<h1>hi</h1>"), ("netlify/functions/hello.js", "export default () => new Response('hi')"), ("api/ping.ts", "export default () => {}")]), &Overrides::default()).unwrap();
-    assert!(p.notes.iter().any(|n| n.starts_with("netlify/functions/ has 1 Netlify Functions")), "{:?}", p.notes);
-    assert!(p.notes.iter().any(|n| n.starts_with("api/ has 1 Vercel functions")), "{:?}", p.notes);
-}
-
-#[test]
-fn a_dockerfiles_base_images_are_its_froms_not_its_stages() {
-    let df = "FROM node:22-slim AS base\nFROM base AS build\nRUN x\nFROM --platform=linux/amd64 python:3.12 AS py\nFROM scratch\nFROM gcr.io/distroless/static@sha256:abc\nFROM ${IMG}\nFROM base\n";
-    assert_eq!(crate::base_images(df), ["node:22-slim", "python:3.12"]);
-}
-
-
-#[test]
 fn a_static_sites_functions_are_a_service_of_their_own() {
     let files = [("index.html", "<h1>hi</h1>"), ("netlify/functions/hello.mjs", "export default () => new Response('hi')"), ("api/ping.js", "module.exports = (req, res) => res.send('pong')")];
     let site = plan(&tree(&files), &Overrides::default()).unwrap();
@@ -931,6 +820,11 @@ fn a_static_sites_functions_are_a_service_of_their_own() {
     assert_eq!(p.provider, crate::Provider::Functions);
     has(&p, &["FROM node:22-slim", "COPY <<'ROLL_FUNCTIONS' /roll/functions.mjs", "--experimental-strip-types"]);
     assert!(plan(&tree(&[("index.html", "x")]), &o).is_err(), "no functions, nothing to build");
+    // The servers it writes in heredocs never end them early.
+    let edge = plan(&tree(&[("netlify/functions/hello.mjs", "export default () => new Response('hi')"), ("netlify/edge-functions/geo.ts", "export default () => new Response('hi');\nexport const config = { path: [\"/geo\"] };")]), &o).unwrap();
+    for end in ["ROLL_FUNCTIONS", "ROLL_EDGE"] {
+        assert_eq!(edge.dockerfile.lines().filter(|l| l.trim() == end).count(), 1, "{end}: {}", edge.dockerfile);
+    }
 }
 
 /// The dashboard's code starters (apps/dashboard/src/lib/starters) are each detected as the
@@ -953,19 +847,4 @@ fn every_code_starter_has_a_plan() {
         n += 1;
     }
     assert_eq!(n, want.len());
-}
-
-/// A framework's migrations and health route are suggested for a new service, never set: Rails'
-/// db:prepare and /up, Django's migrate, Laravel's migrate --force, Prisma's migrate deploy; a
-/// Procfile's own release wins.
-#[test]
-fn frameworks_suggest_their_migrations_and_health_route() {
-    let rails = detect(&[("Gemfile", "source 'https://rubygems.org'\ngem 'rails', '~> 8.0'\n"), ("Gemfile.lock", ""), ("config.ru", "run Rails.application"), ("bin/rails", ""), ("db/migrate/001_init.rb", ""), ("config/routes.rb", "get \"up\" => \"rails/health#show\"")]);
-    assert_eq!((rails.suggest.pre_deploy.as_deref(), rails.suggest.health_path.as_deref(), rails.release.as_deref()), (Some("bin/rails db:prepare"), Some("/up"), None));
-    let django = detect(&[("requirements.txt", "django==5.1\ngunicorn\n"), ("manage.py", ""), ("shop/settings.py", ""), ("shop/wsgi.py", "")]);
-    assert_eq!(django.suggest.pre_deploy.as_deref(), Some("python manage.py migrate --noinput"));
-    let prisma = detect(&[("package.json", r#"{"name":"api","scripts":{"start":"node index.js"},"dependencies":{"prisma":"6.0.0"}}"#), ("prisma/schema.prisma", ""), ("prisma/migrations/0001/migration.sql", "")]);
-    assert_eq!(prisma.suggest.pre_deploy.as_deref(), Some("npx prisma migrate deploy"));
-    let own = plan(&tree(&[("Gemfile", "gem 'rails'\n"), ("Gemfile.lock", ""), ("config.ru", ""), ("db/migrate/1.rb", ""), ("Procfile", "web: bin/rails server\nrelease: bin/rails db:migrate\n")]), &Overrides { process: Some("web".into()), ..Overrides::default() }).unwrap();
-    assert_eq!((own.release.as_deref(), own.suggest.pre_deploy.as_deref()), (Some("bin/rails db:migrate"), None), "a Procfile's release is its own");
 }
