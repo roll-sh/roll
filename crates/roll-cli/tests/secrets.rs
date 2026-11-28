@@ -739,7 +739,7 @@ async fn roll_run_watch_restarts_on_a_write_waits_out_failures_and_passes_sigter
         }
     };
     // Each start writes its value; SIGTERM writes `term` and exits 7.
-    let script = r#"trap 'echo term >> "$SEEN"; exit 7' TERM; echo "$GREETING" >> "$SEEN"; while :; do sleep 0.05; done"#;
+    let script = r#"trap 'echo term >> "$SEEN"; exit 7' TERM; echo "$GREETING $KEPT" >> "$SEEN"; while :; do sleep 0.05; done"#;
     // Every poll fails from the start: the first read (values, not the digest) still starts it.
     s.polls.failing.store(true, Ordering::SeqCst);
     let mut roll = tokio::process::Command::new(env!("CARGO_BIN_EXE_roll"))
@@ -756,16 +756,16 @@ async fn roll_run_watch_restarts_on_a_write_waits_out_failures_and_passes_sigter
         .kill_on_drop(true)
         .spawn()
         .unwrap();
-    wait_for("one\n").await;
+    wait_for("one same\n").await;
     let before = s.polls.asked.load(Ordering::SeqCst);
     tokio::time::sleep(Duration::from_millis(1500)).await;
     let polls = s.polls.asked.load(Ordering::SeqCst) - before;
     assert!((1..=4).contains(&polls), "{polls} failing polls in 1.5 s at a 1 s interval");
-    assert_eq!(seen(), "one\n", "a failing poll keeps the running command");
+    assert_eq!(seen(), "one same\n", "a failing poll keeps the running command");
 
     s.polls.failing.store(false, Ordering::SeqCst);
     ok(&s.api, &[], &[&at[..], &["set", "GREETING=two"]].concat(), None).await;
-    wait_for("one\nterm\ntwo\n").await;
+    wait_for("one same\nterm\ntwo same\n").await;
     let project = s.projects.list(roll_workspace::Scope::All).unwrap().into_iter().find(|p| p.name == "shop").unwrap().id;
     let filter = roll_secrets::AuditFilter { action: Some("secrets.export".into()), ..Default::default() };
     let reads = s.secrets.audit(&project, filter, &roll_secrets::Caller::operator()).unwrap();
@@ -775,7 +775,7 @@ async fn roll_run_watch_restarts_on_a_write_waits_out_failures_and_passes_sigter
     unsafe { libc::kill(roll.id().unwrap() as libc::pid_t, libc::SIGTERM) };
     let status = tokio::time::timeout(Duration::from_secs(10), roll.wait()).await.expect("roll exits with its command").unwrap();
     assert_eq!(status.code(), Some(7));
-    assert_eq!(seen(), "one\nterm\ntwo\nterm\n");
+    assert_eq!(seen(), "one same\nterm\ntwo same\nterm\n");
 }
 
 /// A token reaches what it's told to, for 90 days: no environment named is refused (or the
