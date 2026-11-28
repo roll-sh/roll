@@ -2562,6 +2562,24 @@ mod tests {
         // A `*` line speaks for the methods with no tool, so a tool on its path doesn't make it stale.
         let stale: Vec<String> = listed.iter().filter(|(m, r)| *m != "*" && covered(m, r)).map(|(m, r)| format!("{m} {r}")).collect();
         assert!(stale.is_empty(), "no-tool.txt lines for routes that have a tool now: remove them:\n{}", stale.join("\n"));
+        // A route kept tool-less for a credential is one the gate protects: its row decides reveal
+        // or admin, or decides from the body, or hides the answer's credential fields (`reveals`).
+        // Otherwise its line says it only sets one or answers none: a create that answers a secret
+        // to a grant that may only write is the gap (search's alerts in review, previews' env).
+        let unprotected: Vec<&str> = include_str!("no-tool.txt")
+            .lines()
+            .filter(|l| !l.starts_with('#') && l.contains("credential") && !l.contains("sets a credential (") && !l.contains("sets a credential:") && !l.contains("answers no credential"))
+            .filter(|l| {
+                let mut w = l.split_whitespace();
+                let (Some(m), Some(r)) = (w.next(), w.next()) else { return false };
+                let sample = r.split('/').map(|s| if s.starts_with('{') { "x" } else { s }).collect::<Vec<_>>().join("/");
+                catalog::by_path(if m == "*" { "GET" } else { m }, &sample).is_some_and(|f| {
+                    let decided = matches!(f.row.act, catalog::Act::Is(roll_auth::scope::Action::Reveal | roll_auth::scope::Action::Admin) | catalog::Act::Body(_));
+                    !decided && f.row.reveals.is_empty()
+                })
+            })
+            .collect();
+        assert!(unprotected.is_empty(), "tool-less credential routes the gate doesn't protect: decide reveal (or from the body), list the answer's credential fields in `reveals`, or say the line only `sets a credential (…)` or `answers no credential`:\n{}", unprotected.join("\n"));
         // A tool that removes, revokes or replaces something says so (clients ask a person before a
         // destructive call), unless it's marked undoable: the review that found five revoke tools
         // unmarked is why this is a test, not a habit.
