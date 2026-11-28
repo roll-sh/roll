@@ -177,9 +177,10 @@ fn touches_file(r: &RangeDel, m: &SstMeta) -> bool {
     user_key(&m.first_key) < r.end.as_slice() && r.start.as_slice() <= user_key(&m.last_key) && m.min_ts < r.ts
 }
 
-/// Whether `f` holds a version one of `live` hides (read in their ranges, up to the first).
+/// Whether `f` holds a version one of `live` hides (read in their ranges, up to the first;
+/// not a range its block index says it holds nothing in).
 fn holds_covered(f: &Arc<SstReader>, live: &[RangeDel]) -> Result<bool> {
-    for r in live.iter().filter(|r| touches_file(r, &f.meta)) {
+    for r in live.iter().filter(|r| touches_file(r, &f.meta) && f.may_hold_range(&r.start, &r.end)) {
         let mut merge = Merge::new(vec![Cursor::level(vec![f.clone()], &r.start, &r.end)], r.end.clone());
         while let Some(i) = merge.min()? {
             let (k, _) = merge.sources[i].head().expect("a head entry");

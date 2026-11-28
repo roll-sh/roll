@@ -990,6 +990,34 @@ impl SstWriter {
         Ok(())
     }
 
+    /// The block being made, whose last entry is more than the block's target, ended as two:
+    /// the entries before it, then it alone. A read of the keys before it doesn't decompress
+    /// it (an estimate record of megabytes), and the file's index tells it is one entry
+    /// (`SstReader::may_hold_range`). (Decided as the block ends, not as each entry comes:
+    /// a check an entry cost index builds and COPY +0.1-0.3%.) Its two blocks end in
+    /// `finish_block` again: the first was under its target, the second is one entry.
+    #[cold]
+    #[inline(never)]
+    fn end_apart(&mut self) -> Result<()> {
+        let (last, dirty) = (self.prev_key.clone(), self.dirty);
+        let raw = self.body2();
+        let ents = Block::load(&raw, &last, None)?.expand();
+        (self.block_entries, self.raw1) = (0, 0);
+        for i in 0..ents.len() {
+            if i + 1 == ents.len() {
+                self.dirty = dirty;
+                self.finish_block()?;
+            }
+            let k = ents.key(i);
+            self.put2(k, ents.value_ref(i));
+            self.block_entries += 1;
+            self.prev_key.clear();
+            self.prev_key.extend_from_slice(k);
+        }
+        self.dirty = dirty;
+        self.finish_block()
+    }
+
     /// Format 1's entry: the key's bytes after those it shares with the one before (none at
     /// a restart), then the value.
     fn put1(&mut self, key: &[u8], value: Option<&[u8]>) {
@@ -1009,7 +1037,10 @@ impl SstWriter {
 
     /// Format 2's entry, in the form `Block` reads (`Block::decode_with` makes the same of a
     /// format 1 block): the version left out when it is the block's, a value the key's tail
-    /// derives as that length, other values after the block's entries.
+    /// derives as that length, other values after the block's entries. (Inlined into
+    /// `add_from` as before `end_apart` called it too: out of line, a call an entry cost index
+    /// builds +1%.)
+    #[inline(always)]
     fn put2(&mut self, key: &[u8], value: Option<&[u8]>) {
         let b = &mut self.b2;
         let klen = key.len();
@@ -1059,7 +1090,9 @@ impl SstWriter {
     }
 
     /// Format 2's block body: the entries, their values, and what `Block::load` reads from
-    /// its end (the restarts as `Block::restarts` holds them).
+    /// its end (the restarts as `Block::restarts` holds them). (Inlined into `finish_block`
+    /// as before `end_apart` called it too.)
+    #[inline(always)]
     fn body2(&mut self) -> Vec<u8> {
         let b = &mut self.b2;
         let mut raw = std::mem::take(&mut self.block);
@@ -1099,6 +1132,12 @@ impl SstWriter {
     fn finish_block(&mut self) -> Result<()> {
         if self.block_entries == 0 {
             return Ok(());
+        }
+        // (Past twice its target by its last entry, which the block was under before: that
+        // entry, of more than the target, a block of its own. Decided here, once a block: a
+        // check in `add_from` changed its registers, +0.2% on index builds.)
+        if self.v2 && self.block_entries > 1 && self.raw1 >= self.target(index_entry(user_key(&self.prev_key))) << (self.stretched as u32 + 1) {
+            return self.end_apart();
         }
         let raw = if self.v2 { self.body2() } else { std::mem::take(&mut self.block) };
         let n = self.block_entries as u32;
@@ -3252,7 +3291,9 @@ impl Block {
     /// A format 2 block as it was decompressed (`SstWriter::body2`): its entries and values
     /// are the compact form already, the restarts read from its end, the last key from the
     /// file's block index. Its buffer is `into`'s of its length when that gives one (the
-    /// cache's arena, for a block going into the cache).
+    /// cache's arena, for a block going into the cache). (Inlined into the miss path as before
+    /// `SstWriter::end_apart` called it too.)
+    #[inline(always)]
     fn load(raw: &[u8], last_key: &[u8], into: Option<&dyn Fn(usize) -> Option<Buf>>) -> Result<Block> {
         let bad = || internal("bad sst block");
         let n = raw.len();
@@ -3747,12 +3788,9 @@ impl SstReader {
             pos += kl;
             let off = get_varint(&index_buf, &mut pos)?;
             let l = get_varint(&index_buf, &mut pos)? as u32;
-            if v2 {
-                // (The block's entry count: not used yet.)
-                get_varint(&index_buf, &mut pos)?;
-            }
+            let n = if v2 { get_varint(&index_buf, &mut pos)? as u32 } else { 0 };
             index.ends.push(index.keys.len() as u32);
-            index.at.push((off, l));
+            index.at.push((off, l, n));
         }
         index.keys.shrink_to_fit();
         index.index_words();
@@ -3825,7 +3863,7 @@ impl SstReader {
 
     /// Block `i` as the file stores it (its codec byte to its crc), checked, into `out`.
     pub fn stored_block(&self, i: usize, out: &mut Vec<u8>) -> Result<()> {
-        let (off, len) = self.index.at[i];
+        let (off, len, _) = self.index.at[i];
         out.resize(len as usize, 0);
         self.file.read_exact_at(out, off)?;
         let c = out.len().checked_sub(4).filter(|&c| c > 0).ok_or_else(|| internal("sst block too short"))?;
@@ -3909,7 +3947,7 @@ impl SstReader {
     /// Whether the file's first block is compressed (what the writer did with them all,
     /// but for blocks compression didn't shrink).
     pub fn first_block_compressed(&self) -> Result<bool> {
-        let Some((off, _)) = self.index.at.first() else { return Ok(false) };
+        let Some((off, _, _)) = self.index.at.first() else { return Ok(false) };
         let mut b = [0u8; 1];
         self.file.read_exact_at(&mut b, *off)?;
         Ok(b[0] != 0)
@@ -3935,6 +3973,20 @@ impl SstReader {
 
     pub fn block_count(&self) -> usize {
         self.index.at.len()
+    }
+
+    /// Whether the file may hold an entry whose user key is in [start, end) (an empty `end`:
+    /// unbounded), by its block index alone: not when the block a seek to `start` comes to
+    /// is one entry at or past `end`, as a big value is (`SstWriter::end_apart`: a table's
+    /// estimate record of megabytes, which a range deletion's check of the keys before it
+    /// would otherwise decompress whole).
+    pub fn may_hold_range(&self, start: &[u8], end: &[u8]) -> bool {
+        let b = self.index.find(start);
+        match self.index.at.get(b) {
+            None => false,
+            Some(&(_, _, 1)) if !end.is_empty() => user_key(self.index.key(b)) < end,
+            Some(_) => true,
+        }
     }
 
     /// Whether the file holds an entry whose user key is in [lo, hi] (both ends included):
@@ -4074,7 +4126,7 @@ impl SstReader {
     }
 
     fn body_in<R>(&self, i: usize, s: &mut Scratch, f: impl FnOnce(&[u8]) -> Result<R>) -> Result<R> {
-        let (off, len) = self.index.at[i];
+        let (off, len, _) = self.index.at[i];
         let len = len as usize;
         if s.read.len() < len {
             s.read.resize(len, 0);
@@ -4133,7 +4185,9 @@ impl SstReader {
 struct BlockIndex {
     keys: Vec<u8>,
     ends: Vec<u32>,
-    at: Vec<(u64, u32)>,
+    /// Each block's offset, stored length and entry count (format 2's index records it;
+    /// format 1's: 0, not known).
+    at: Vec<(u64, u32, u32)>,
     /// The bytes every last key starts with.
     common: usize,
     /// Each last key's 8 bytes after `common`, as a big-endian number (zeros past its
@@ -4185,7 +4239,9 @@ impl BlockIndex {
         self.words = words;
     }
 
-    /// The first block whose last key is >= `key` (`at.len()`: none).
+    /// The first block whose last key is >= `key` (`at.len()`: none). (Inlined into every
+    /// seek as before `SstReader::may_hold_range` called it too.)
+    #[inline(always)]
     fn find(&self, key: &[u8]) -> usize {
         let n = self.words.len();
         if n == 0 {
@@ -4278,7 +4334,7 @@ mod tests {
             for k in &keys {
                 ix.keys.extend_from_slice(k);
                 ix.ends.push(ix.keys.len() as u32);
-                ix.at.push((0, 0));
+                ix.at.push((0, 0, 0));
             }
             ix.index_words();
             for _ in 0..60 {
@@ -4335,6 +4391,34 @@ mod tests {
         // would fill.)
         let left = cached(&big);
         assert!(left.contains(&read) && left.len() < big.block_count() / 20, "{} of {}", left.len(), big.block_count());
+    }
+
+    /// A value of a block's size or more is a block of its own, which a range's check by
+    /// the block index alone (`may_hold_range`) tells holds nothing before it.
+    #[test]
+    fn a_big_value_is_a_block_of_its_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let k = |i: u32| {
+            let mut k = vec![0, 0, 0, 0, 0, 0, 0, 0x29];
+            k.extend_from_slice(&i.to_be_bytes());
+            k.extend_from_slice(&(!5u64).to_be_bytes());
+            k
+        };
+        let mut w = SstWriter::create(dir.path(), 1, true).unwrap();
+        let big = vec![7u8; 1 << 20];
+        for i in (0..20).chain([30]).chain(40..43) {
+            w.add(&k(i), Some(if i == 30 { &big[..] } else { &[1u8; 100][..] })).unwrap();
+        }
+        let r = SstReader::open(dir.path(), w.finish().unwrap(), BlockCache::new(16 << 20)).unwrap();
+        let counts: Vec<u32> = r.index.at.iter().map(|a| a.2).collect();
+        assert_eq!(counts, [20, 1, 3]);
+        let u = |i: u32| user_key(&k(i)).to_vec();
+        assert!(!r.may_hold_range(&u(21), &u(30)));
+        assert!(r.may_hold_range(&u(21), &u(31)) && r.may_hold_range(&u(5), &u(6)) && r.may_hold_range(&u(21), &[]));
+        assert!(!r.may_hold_range(&u(50), &u(60)));
+        let (b, mut pos) = (r.block(1).unwrap(), BlockPos::default());
+        b.seek(&k(30), &mut pos);
+        assert_eq!(b.value(&pos).unwrap().len(), 1 << 20);
     }
 
     /// A file of index entries alone has no bloom filter (every key passes); one with rows
@@ -4804,7 +4888,7 @@ mod tests {
         // A flipped byte of the dictionary (the bytes before the index).
         let d = write(5, Some((8 << 10, 256 << 10)), ents.len());
         let meta = d.meta.clone();
-        let at = d.index.at.last().map(|(o, l)| o + *l as u64).unwrap() + 100;
+        let at = d.index.at.last().map(|(o, l, _)| o + *l as u64).unwrap() + 100;
         drop(d);
         let f = std::fs::OpenOptions::new().read(true).write(true).open(sst_path(dir.path(), 5)).unwrap();
         let mut b = [0u8; 1];
@@ -4963,7 +5047,7 @@ mod tests {
                 std::fs::write(&path, b).unwrap();
                 SstReader::open(dir.path(), meta.clone(), BlockCache::new(1 << 20)).unwrap()
             };
-            let (off, len) = open(&good).index.at[1];
+            let (off, len, _) = open(&good).index.at[1];
             let (off, len) = (off as usize, len as usize);
             let mut b = good.clone();
             b[off + len / 2] ^= 0x10;
