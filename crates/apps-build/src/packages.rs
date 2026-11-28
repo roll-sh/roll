@@ -97,5 +97,10 @@ mod tests {
         assert!(out.contains("FROM node:22-alpine\nRUN apk add --no-cache ffmpeg libvips42\n"), "{out}");
         assert!(add("FROM golang:1.23 AS build\nFROM gcr.io/distroless/static-debian12:nonroot\n", &["ffmpeg".into()]).unwrap_err().contains("distroless"));
         assert!(check(&["ffmpeg; curl evil".into()]).is_err() && check(&["$(id)".into()]).is_err() && check(&["g++".into(), "libssl3=3.0.15-1".into()]).is_ok());
+        let o = crate::Overrides { packages: vec!["ffmpeg".into()], ..crate::Overrides::default() };
+        let tree = crate::tests::tree;
+        assert!(matches!(crate::plan(&tree(&[("index.html", "<h1>hi</h1>")]), &o), Err(crate::Error::Packages(_))), "a static site runs nothing to install them in");
+        let own = crate::plan(&tree(&[("Dockerfile", "FROM alpine\n")]), &o).unwrap();
+        assert!(!own.dockerfile.contains("ffmpeg"), "the tree's own Dockerfile is its own");
     }
 }

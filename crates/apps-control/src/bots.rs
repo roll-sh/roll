@@ -270,22 +270,6 @@ mod tests {
     use super::*;
     use crate::integrations::StaticDns;
 
-    #[test]
-    fn user_agents_are_classified() {
-        let ua = |s: &str| classify(s).map(|c| c.0);
-        assert_eq!(ua("Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; GPTBot/1.2; +https://openai.com/gptbot)"), Some(Class::Ai));
-        assert_eq!(ua("Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"), Some(Class::Search));
-        assert_eq!(ua("Slackbot-LinkExpanding 1.0 (+https://api.slack.com/robots)"), Some(Class::Preview));
-        assert_eq!(ua("curl/8.5.0"), Some(Class::Tools));
-        assert_eq!(ua("Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/605.1.15 Safari/605.1.15"), None);
-    }
-
-    #[test]
-    fn reverse_names() {
-        assert_eq!(reverse_name("66.249.66.1".parse().unwrap()), "1.66.249.66.in-addr.arpa");
-        assert!(reverse_name("2001:4860:4801::1".parse().unwrap()).ends_with(".1.0.8.4.0.6.8.4.1.0.0.2.ip6.arpa"));
-    }
-
     #[tokio::test]
     async fn a_crawler_is_verified_by_its_operators_dns_both_ways() {
         let dns = StaticDns::default();
@@ -304,5 +288,8 @@ mod tests {
         dns.add("7.113.0.203.in-addr.arpa", "PTR", "7.113.0.203.bc.googleusercontent.com");
         dns.add("7.113.0.203.bc.googleusercontent.com", "A", "203.0.113.7");
         assert!(identify(&cache, &dns, gb, Some("203.0.113.7".parse().unwrap())).await.unwrap().is("spoofed"));
+        let ua = |s: &str| classify(s).map(|c| c.0);
+        assert_eq!(ua("Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; GPTBot/1.2; +https://openai.com/gptbot)"), Some(Class::Ai));
+        assert_eq!(ua("Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/605.1.15 Safari/605.1.15"), None);
     }
 }

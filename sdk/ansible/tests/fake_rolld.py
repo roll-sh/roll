@@ -196,5 +196,5 @@ def serve():
     """A fake rolld on a free port in a thread; returns (url, server)."""
     Rolld.reset()
     server = ThreadingHTTPServer(("127.0.0.1", 0), Rolld)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
+    threading.Thread(target=server.serve_forever, args=(0.01,), daemon=True).start()
     return f"http://127.0.0.1:{server.server_address[1]}", server

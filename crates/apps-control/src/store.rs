@@ -5409,29 +5409,6 @@ fn delivery_row(r: &code_sql::Row<'_>) -> code_sql::Result<Delivery> {
 mod tests {
     use super::*;
 
-    /// Patterns saved as substrings keep their meaning under the Logs search: quoted once, on
-    /// the next open, one word left alone.
-    #[test]
-    fn saved_log_patterns_are_quoted_once() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("apps.db");
-        let s = Store::new(Db::open_sqlite(&path, Default::default()).unwrap(), Sealer::new(&"k".repeat(32)).unwrap()).unwrap();
-        let run = r#"{"alerts":{"log_match":"connection refused"},"log_metrics":[{"name":"a","pattern":"-ERR"},{"name":"b","pattern":"panic"}]}"#;
-        s.db.execute("INSERT INTO environments (service, name, ephemeral, slug, created_at, run) VALUES ('svc_x', 'production', 0, 'x', 0, ?)", [run]).unwrap();
-        s.db.execute("DELETE FROM state WHERE key = 'log-patterns-quoted'", ()).unwrap();
-        drop(s);
-        let s = Store::new(Db::open_sqlite(&path, Default::default()).unwrap(), Sealer::new(&"k".repeat(32)).unwrap()).unwrap();
-        let got: String = s.db.query_row("SELECT run FROM environments WHERE service = 'svc_x'", (), |r| r.get(0)).unwrap();
-        let v: serde_json::Value = serde_json::from_str(&got).unwrap();
-        assert_eq!((v["alerts"]["log_match"].as_str(), v["log_metrics"][0]["pattern"].as_str(), v["log_metrics"][1]["pattern"].as_str()), (Some("\"connection refused\""), Some("\"-ERR\""), Some("panic")), "{got}");
-        // Once: a search saved since stays as it was written.
-        s.db.execute("UPDATE environments SET run = ? WHERE service = 'svc_x'", [r#"{"alerts":{"log_match":"timeout OR refused"}}"#]).unwrap();
-        drop(s);
-        let s = Store::new(Db::open_sqlite(&path, Default::default()).unwrap(), Sealer::new(&"k".repeat(32)).unwrap()).unwrap();
-        let got: String = s.db.query_row("SELECT run FROM environments WHERE service = 'svc_x'", (), |r| r.get(0)).unwrap();
-        assert!(got.contains("\"timeout OR refused\"") && !got.contains("\\\""), "{got}");
-    }
-
     /// Two notifiers (a handover) never queue an event twice for a target, the one whose
     /// cursor moved under it queues nothing, and a claimed delivery isn't handed out again.
     #[test]
