@@ -10,7 +10,8 @@ pub const RESERVED: &[&str] = &[
     "twitter-image", "apple-icon", "static", "assets", "public",
     // Product and marketing pages.
     "about", "blog", "brand", "careers", "changelog", "community", "contact", "customers", "docs", "enterprise", "explore",
-    "features", "help", "jobs", "legal", "pricing", "privacy", "security", "status", "support", "terms", "trust",
+    "features", "help", "jobs", "legal", "pricing", "privacy", "products", "security", "status", "support", "terms",
+    "trust",
     // Accounts and auth.
     "account", "admin", "auth", "billing", "callback", "join", "login", "logout", "new", "oauth", "settings", "signin",
     "signout", "signup", "sso",

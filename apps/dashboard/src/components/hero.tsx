@@ -22,10 +22,10 @@ export function Hero() {
       </p>
 
       <h1 className="mt-8 max-w-2xl text-4xl font-semibold tracking-[-0.045em] text-balance sm:text-6xl">
-        Serverless infrastructure for everything.
+        A mark that's alive.
       </h1>
       <p className="mt-4 max-w-md text-[15px] text-muted text-pretty">
-        Every function, on every edge, optimized automatically. Ship code — roll handles the rest.
+        Horizon is the logo and the dot globe is the status. Both play the same six states, together, everywhere roll shows them.
       </p>
 
       <div className="mt-10 flex w-full justify-center">

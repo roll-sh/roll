@@ -10,6 +10,7 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as BrandRouteImport } from './routes/brand'
 import { Route as SigninRouteImport } from './routes/signin'
 import { Route as OwnerIndexRouteImport } from './routes/$owner/index'
 import { Route as OwnerRepoRouteRouteImport } from './routes/$owner/$repo/route'
@@ -22,6 +23,8 @@ import { Route as DashboardStreamsRouteImport } from './routes/dashboard/streams
 import { Route as DashboardTasksRouteImport } from './routes/dashboard/tasks'
 import { Route as OauthAuthorizeRouteImport } from './routes/oauth/authorize'
 import { Route as OauthDeviceRouteImport } from './routes/oauth/device'
+import { Route as ProductsIndexRouteImport } from './routes/products/index'
+import { Route as ProductsProductRouteImport } from './routes/products/$product'
 import { Route as RequestTokenRouteImport } from './routes/request/$token'
 import { Route as ShareIdRouteImport } from './routes/share/$id'
 import { Route as OwnerRepoIndexRouteImport } from './routes/$owner/$repo/index'
@@ -90,6 +93,11 @@ const IndexRoute = IndexRouteImport.update({
   path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const BrandRoute = BrandRouteImport.update({
+  id: '/brand',
+  path: '/brand',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const SigninRoute = SigninRouteImport.update({
   id: '/signin',
   path: '/signin',
@@ -148,6 +156,16 @@ const OauthAuthorizeRoute = OauthAuthorizeRouteImport.update({
 const OauthDeviceRoute = OauthDeviceRouteImport.update({
   id: '/oauth/device',
   path: '/oauth/device',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ProductsIndexRoute = ProductsIndexRouteImport.update({
+  id: '/products/',
+  path: '/products/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ProductsProductRoute = ProductsProductRouteImport.update({
+  id: '/products/$product',
+  path: '/products/$product',
   getParentRoute: () => rootRouteImport,
 } as any)
 const RequestTokenRoute = RequestTokenRouteImport.update({
@@ -479,6 +497,7 @@ const DashboardCodeOwnerRepoChangesNumberRoute =
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/brand': typeof BrandRoute
   '/signin': typeof SigninRoute
   '/$owner/$repo': typeof OwnerRepoRouteRouteWithChildren
   '/dashboard/account': typeof DashboardAccountRoute
@@ -489,10 +508,12 @@ export interface FileRoutesByFullPath {
   '/dashboard/tasks': typeof DashboardTasksRoute
   '/oauth/authorize': typeof OauthAuthorizeRoute
   '/oauth/device': typeof OauthDeviceRoute
+  '/products/$product': typeof ProductsProductRoute
   '/request/$token': typeof RequestTokenRoute
   '/share/$id': typeof ShareIdRoute
   '/$owner/': typeof OwnerIndexRoute
   '/dashboard/': typeof DashboardIndexRoute
+  '/products/': typeof ProductsIndexRoute
   '/$owner/$repo/git-receive-pack': typeof OwnerRepoGitReceivePackRoute
   '/$owner/$repo/git-upload-pack': typeof OwnerRepoGitUploadPackRoute
   '/$owner/$repo/search': typeof OwnerRepoSearchRoute
@@ -556,6 +577,7 @@ export interface FileRoutesByFullPath {
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/brand': typeof BrandRoute
   '/signin': typeof SigninRoute
   '/dashboard/account': typeof DashboardAccountRoute
   '/dashboard/databases': typeof DashboardDatabasesRoute
@@ -565,10 +587,12 @@ export interface FileRoutesByTo {
   '/dashboard/tasks': typeof DashboardTasksRoute
   '/oauth/authorize': typeof OauthAuthorizeRoute
   '/oauth/device': typeof OauthDeviceRoute
+  '/products/$product': typeof ProductsProductRoute
   '/request/$token': typeof RequestTokenRoute
   '/share/$id': typeof ShareIdRoute
   '/$owner': typeof OwnerIndexRoute
   '/dashboard': typeof DashboardIndexRoute
+  '/products': typeof ProductsIndexRoute
   '/$owner/$repo/git-receive-pack': typeof OwnerRepoGitReceivePackRoute
   '/$owner/$repo/git-upload-pack': typeof OwnerRepoGitUploadPackRoute
   '/$owner/$repo/search': typeof OwnerRepoSearchRoute
@@ -633,6 +657,7 @@ export interface FileRoutesByTo {
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/brand': typeof BrandRoute
   '/signin': typeof SigninRoute
   '/$owner/$repo': typeof OwnerRepoRouteRouteWithChildren
   '/dashboard/account': typeof DashboardAccountRoute
@@ -643,10 +668,12 @@ export interface FileRoutesById {
   '/dashboard/tasks': typeof DashboardTasksRoute
   '/oauth/authorize': typeof OauthAuthorizeRoute
   '/oauth/device': typeof OauthDeviceRoute
+  '/products/$product': typeof ProductsProductRoute
   '/request/$token': typeof RequestTokenRoute
   '/share/$id': typeof ShareIdRoute
   '/$owner/': typeof OwnerIndexRoute
   '/dashboard/': typeof DashboardIndexRoute
+  '/products/': typeof ProductsIndexRoute
   '/$owner/$repo/git-receive-pack': typeof OwnerRepoGitReceivePackRoute
   '/$owner/$repo/git-upload-pack': typeof OwnerRepoGitUploadPackRoute
   '/$owner/$repo/search': typeof OwnerRepoSearchRoute
@@ -712,6 +739,7 @@ export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
+    | '/brand'
     | '/signin'
     | '/$owner/$repo'
     | '/dashboard/account'
@@ -722,10 +750,12 @@ export interface FileRouteTypes {
     | '/dashboard/tasks'
     | '/oauth/authorize'
     | '/oauth/device'
+    | '/products/$product'
     | '/request/$token'
     | '/share/$id'
     | '/$owner/'
     | '/dashboard/'
+    | '/products/'
     | '/$owner/$repo/git-receive-pack'
     | '/$owner/$repo/git-upload-pack'
     | '/$owner/$repo/search'
@@ -789,6 +819,7 @@ export interface FileRouteTypes {
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
+    | '/brand'
     | '/signin'
     | '/dashboard/account'
     | '/dashboard/databases'
@@ -798,10 +829,12 @@ export interface FileRouteTypes {
     | '/dashboard/tasks'
     | '/oauth/authorize'
     | '/oauth/device'
+    | '/products/$product'
     | '/request/$token'
     | '/share/$id'
     | '/$owner'
     | '/dashboard'
+    | '/products'
     | '/$owner/$repo/git-receive-pack'
     | '/$owner/$repo/git-upload-pack'
     | '/$owner/$repo/search'
@@ -865,6 +898,7 @@ export interface FileRouteTypes {
   id:
     | '__root__'
     | '/'
+    | '/brand'
     | '/signin'
     | '/$owner/$repo'
     | '/dashboard/account'
@@ -875,10 +909,12 @@ export interface FileRouteTypes {
     | '/dashboard/tasks'
     | '/oauth/authorize'
     | '/oauth/device'
+    | '/products/$product'
     | '/request/$token'
     | '/share/$id'
     | '/$owner/'
     | '/dashboard/'
+    | '/products/'
     | '/$owner/$repo/git-receive-pack'
     | '/$owner/$repo/git-upload-pack'
     | '/$owner/$repo/search'
@@ -943,6 +979,7 @@ export interface FileRouteTypes {
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  BrandRoute: typeof BrandRoute
   SigninRoute: typeof SigninRoute
   OwnerRepoRouteRoute: typeof OwnerRepoRouteRouteWithChildren
   DashboardAccountRoute: typeof DashboardAccountRoute
@@ -953,10 +990,12 @@ export interface RootRouteChildren {
   DashboardTasksRoute: typeof DashboardTasksRoute
   OauthAuthorizeRoute: typeof OauthAuthorizeRoute
   OauthDeviceRoute: typeof OauthDeviceRoute
+  ProductsProductRoute: typeof ProductsProductRoute
   RequestTokenRoute: typeof RequestTokenRoute
   ShareIdRoute: typeof ShareIdRoute
   OwnerIndexRoute: typeof OwnerIndexRoute
   DashboardIndexRoute: typeof DashboardIndexRoute
+  ProductsIndexRoute: typeof ProductsIndexRoute
   DashboardAccessApprovalsRoute: typeof DashboardAccessApprovalsRoute
   DashboardAccessAuditRoute: typeof DashboardAccessAuditRoute
   DashboardAccessNewRoute: typeof DashboardAccessNewRoute
@@ -1010,6 +1049,13 @@ declare module '@tanstack/react-router' {
       path: '/'
       fullPath: '/'
       preLoaderRoute: typeof IndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/brand': {
+      id: '/brand'
+      path: '/brand'
+      fullPath: '/brand'
+      preLoaderRoute: typeof BrandRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/signin': {
@@ -1094,6 +1140,20 @@ declare module '@tanstack/react-router' {
       path: '/oauth/device'
       fullPath: '/oauth/device'
       preLoaderRoute: typeof OauthDeviceRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/products/': {
+      id: '/products/'
+      path: '/products'
+      fullPath: '/products/'
+      preLoaderRoute: typeof ProductsIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/products/$product': {
+      id: '/products/$product'
+      path: '/products/$product'
+      fullPath: '/products/$product'
+      preLoaderRoute: typeof ProductsProductRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/request/$token': {
@@ -1586,6 +1646,7 @@ const DashboardProjectsIdRouteWithChildren =
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  BrandRoute: BrandRoute,
   SigninRoute: SigninRoute,
   OwnerRepoRouteRoute: OwnerRepoRouteRouteWithChildren,
   DashboardAccountRoute: DashboardAccountRoute,
@@ -1596,10 +1657,12 @@ const rootRouteChildren: RootRouteChildren = {
   DashboardTasksRoute: DashboardTasksRoute,
   OauthAuthorizeRoute: OauthAuthorizeRoute,
   OauthDeviceRoute: OauthDeviceRoute,
+  ProductsProductRoute: ProductsProductRoute,
   RequestTokenRoute: RequestTokenRoute,
   ShareIdRoute: ShareIdRoute,
   OwnerIndexRoute: OwnerIndexRoute,
   DashboardIndexRoute: DashboardIndexRoute,
+  ProductsIndexRoute: ProductsIndexRoute,
   DashboardAccessApprovalsRoute: DashboardAccessApprovalsRoute,
   DashboardAccessAuditRoute: DashboardAccessAuditRoute,
   DashboardAccessNewRoute: DashboardAccessNewRoute,
