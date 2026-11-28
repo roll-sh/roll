@@ -1607,9 +1607,11 @@ impl Control {
     /// everything it applies kept under the branch ([`search_store::Store::begin_reset`], which on
     /// a fleet claims the branch first), and carried out by the load that follows, before the
     /// branch answers anything: through the manifests' compare-and-swap, as commit points that
-    /// name `from`'s segments. Answers once that load is done and the reset applied; 409 when it
-    /// was dropped (the branch written meanwhile by an owner that didn't see it); 503 when the
-    /// load failed (the reset still applies at the next one).
+    /// name `from`'s segments. Answers once that load is done and the reset applied; otherwise
+    /// [`ControlError::NotReset`]: dropped (409, the branch written meanwhile by an owner that
+    /// didn't see it) or pending (503, the load failed and the next one applies it). Any other
+    /// error isn't known to have put the reset in place; a retry converges (a reset completes a
+    /// pending one first).
     pub async fn reset(&self, b: &SearchCluster, from: &SearchCluster) -> Result<SearchCluster> {
         if b.id == from.id {
             return Err(ControlError::Invalid("from: a cluster can't be reset to itself".into()));
@@ -1656,6 +1658,10 @@ impl Control {
         let Some(ticket) = r? else { return self.get(&b.id).await };
         // The load carries the reset out before anything reads the branch.
         if let Err(e) = self.node.open(spec_for(b)).await {
+            // That load may have decided the reset before failing: a drop is said as one.
+            if let Ok(search_store::ResetOutcome::Dropped(why)) = self.data.reset_outcome(&b.name, ticket).await {
+                return Err(ControlError::NotReset { pending: false, message: format!("the reset of {} was dropped, and it stays as it was: {why}", b.name) });
+            }
             tracing::warn!(cluster = b.name, error = %e, "loading a reset branch failed; its next load carries the reset out");
             return Err(ControlError::NotReset { pending: true, message: format!("{} is reset; loading it failed and its next load completes it: {e}", b.name) });
         }
@@ -1692,9 +1698,15 @@ impl Control {
             return Err(lost());
         }
         let dialect = dialect(&b.flavor).unwrap_or(Dialect::Elasticsearch);
+        // The data it shares is its parent's, whatever its shards say now (all deleted or made
+        // since): what its `own_bytes` is counted against.
+        let parent = match b.parent_id.as_deref() {
+            Some(id) => self.store.get(id).await?.map(|p| p.name),
+            None => None,
+        };
         let ticket = self
             .data
-            .begin_reset(&b.name, &from.name, lease.is_some(), |branch, copy| search_es::branch::reset_state(branch, copy, dialect))
+            .begin_reset(&b.name, &from.name, parent.as_deref(), lease.is_some(), |branch, copy| search_es::branch::reset_state(branch, copy, dialect))
             .await
             .map_err(refused_or_internal)?;
         // A copy deleted while it was read (its catalog row goes after its storage) gives
@@ -2068,6 +2080,8 @@ impl Control {
         // whose reset can't be carried out is kept as it is, the reset given up.
         if !self.cfg.deleted_retention.is_zero()
             && let Err(e) = self.finish_pending_reset(&c).await
+            // A cluster the engine can't load: the store carries its reset out on its own.
+            && let Err(e) = self.data.load_cluster(&c.name).await.map(drop).map_err(|e2| format!("{e}; and without the engine: {e2}"))
         {
             // Half applied, giving it up would keep (and restore) a mix of both: retry until the
             // load can complete it.

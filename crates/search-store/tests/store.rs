@@ -1501,20 +1501,20 @@ async fn a_reset_needs_nothing_of_its_source_and_a_stale_one_is_dropped() {
     store.delete_shard("tgt", &c).await.unwrap();
     // A source that never stored a state (or whose delete removed it) gives nothing to reset to.
     store.write_manifest("nostate", &a, &m(1)).await.unwrap();
-    refused(store.begin_reset("tgt", "nostate", false, |_, _| Ok(b"{}".to_vec())).await.unwrap_err());
+    refused(store.begin_reset("tgt", "nostate", None, false, |_, _| Ok(b"{}".to_vec())).await.unwrap_err());
     store.write_cluster("src", &ClusterState::new("{\"v\":\"s\"}")).await.unwrap();
     for (s, cp) in [(&a, 2), (&c, 3)] {
         store.write_manifest("src", s, &m(cp)).await.unwrap();
     }
     let ticket = store
-        .begin_reset("tgt", "src", false, |t, f| {
+        .begin_reset("tgt", "src", None, false, |t, f| {
             assert_eq!((t, f), (&b"{\"v\":\"t\"}"[..], Some(&b"{\"v\":\"s\"}"[..])));
             Ok(b"{\"v\":\"merged\"}".to_vec())
         })
         .await
         .unwrap();
     refused(store.branch("tgt", "copy", None).await.unwrap_err());
-    refused(store.begin_reset("tgt", "src", false, |_, _| Ok(b"{}".to_vec())).await.unwrap_err());
+    refused(store.begin_reset("tgt", "src", None, false, |_, _| Ok(b"{}".to_vec())).await.unwrap_err());
     assert_eq!(store.reset_outcome("tgt", ticket).await.unwrap(), ResetOutcome::Pending);
     store.delete_cluster("src").await.unwrap();
     let st = store.load_cluster("tgt").await.unwrap().unwrap();
@@ -1529,7 +1529,7 @@ async fn a_reset_needs_nothing_of_its_source_and_a_stale_one_is_dropped() {
 
     store.write_cluster("src2", &ClusterState::new("{}")).await.unwrap();
     store.write_manifest("src2", &a, &m(9)).await.unwrap();
-    let ticket = store.begin_reset("tgt", "src2", false, |_, _| Ok(b"{\"v\":\"stale\"}".to_vec())).await.unwrap();
+    let ticket = store.begin_reset("tgt", "src2", None, false, |_, _| Ok(b"{\"v\":\"stale\"}".to_vec())).await.unwrap();
     // A commit point written after the reset was recorded: what the owner that wrote it served stands.
     store.write_manifest("tgt", &a, &m(7)).await.unwrap();
     assert_eq!(&store.load_cluster("tgt").await.unwrap().unwrap().json[..], b"{\"v\":\"merged\"}");
@@ -1539,7 +1539,7 @@ async fn a_reset_needs_nothing_of_its_source_and_a_stale_one_is_dropped() {
 
     // A copy made while the cluster was empty (nothing stored) resets it to no indices.
     let ticket = store
-        .begin_reset("tgt", "never-written", false, |_, f| {
+        .begin_reset("tgt", "never-written", None, false, |_, f| {
             assert!(f.is_none());
             Ok(b"{\"v\":\"empty\"}".to_vec())
         })
@@ -1549,9 +1549,10 @@ async fn a_reset_needs_nothing_of_its_source_and_a_stale_one_is_dropped() {
     assert_eq!(store.reset_outcome("tgt", ticket).await.unwrap(), ResetOutcome::Applied);
     assert!(store.read_latest_manifests("tgt").await.unwrap().is_empty());
 
-    // The reset's commit points keep the branch's lineage: what it holds of its parent counts as
-    // shared after the reset as before, and after the copy is deleted and collected; the copy's
-    // operation that was only in its write-ahead log still replays from the branch then.
+    // The reset's commit points keep the branch's lineage, even with none of its shards left
+    // carrying it: what it holds of its parent counts as shared after the reset as before, and
+    // after the copy is deleted and collected; the copy's operation that was only in its
+    // write-ahead log still replays from the branch then.
     let p = shard("idxP", 0);
     store.write_cluster("prod", &ClusterState::new("{}")).await.unwrap();
     let (shared, _) = make_segment(&store, 1000).await;
@@ -1570,7 +1571,10 @@ async fn a_reset_needs_nothing_of_its_source_and_a_stale_one_is_dropped() {
     let segments = vec![seg_ref(shared, 1000), seg_ref(own, 2000), seg_ref(later, 500)];
     store.write_manifest("pv", &p, &ShardManifest { segments, max_seq_no: 3, local_checkpoint: 3, ..mm.clone() }).await.unwrap();
     store.detach_shard(wal).await.unwrap();
-    let ticket = store.begin_reset("pv", "pv-copy", false, |t, _| Ok(t.to_vec())).await.unwrap();
+    // Its indices wiped since the copy: no live shard of it carries its lineage any more, which
+    // the reset takes from its catalog parent then.
+    store.delete_shard("pv", &p).await.unwrap();
+    let ticket = store.begin_reset("pv", "pv-copy", Some("prod"), false, |t, _| Ok(t.to_vec())).await.unwrap();
     store.load_cluster("pv").await.unwrap();
     assert_eq!(store.reset_outcome("pv", ticket).await.unwrap(), ResetOutcome::Applied);
     assert_eq!(store.cluster_usage("pv").await.unwrap().own_bytes, before, "counted against prod, not the copy");

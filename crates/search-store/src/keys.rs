@@ -297,10 +297,6 @@ pub fn reset_key(cluster: &str) -> String {
     format!("{CLUSTER_PREFIX}{cluster}/state/reset.json")
 }
 
-/// The state a reset in progress writes last.
-pub fn reset_state_key(cluster: &str) -> String {
-    format!("{CLUSTER_PREFIX}{cluster}/state/reset-state.zst")
-}
 
 /// What became of the cluster's last reset (`Store::reset_outcome`).
 pub fn reset_outcome_key(cluster: &str) -> String {
@@ -310,6 +306,16 @@ pub fn reset_outcome_key(cluster: &str) -> String {
 /// The commit points a reset in progress applies, copied under the cluster it resets.
 pub fn reset_copies_prefix(cluster: &str) -> String {
     format!("{CLUSTER_PREFIX}{cluster}/reset/")
+}
+
+/// Everything the reset recorded at `at_ms` wrote besides its intent: its copies and its state.
+pub fn reset_dir(cluster: &str, at_ms: u64) -> String {
+    format!("{CLUSTER_PREFIX}{cluster}/reset/{at_ms}/")
+}
+
+/// The state the reset recorded at `at_ms` writes last.
+pub fn reset_state_key(cluster: &str, at_ms: u64) -> String {
+    format!("{CLUSTER_PREFIX}{cluster}/reset/{at_ms}/state.zst")
 }
 
 /// One shard's commit point the reset recorded at `at_ms` applies (garbage collection keeps what

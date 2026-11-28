@@ -27,7 +27,7 @@
 //! ([`Store::reset_outcome`]), so the caller can tell a reset applied from one dropped.
 
 use crate::keys::{self, ShardId, ShardVersion, Version};
-use crate::manifest::{ClusterState, ShardManifest};
+use crate::manifest::{BranchBase, ClusterState, ShardManifest};
 use crate::wal::Listings;
 use crate::{Put, Refused, ShardTrack, Store, branch::Copied, now_ms};
 use bytes::Bytes;
@@ -100,7 +100,17 @@ impl Store {
     /// The reset's commit points keep `target`'s own lineage (the branch base its commit points
     /// had), so what `target` holds of its parent's data counts as shared as before
     /// ([`Store::cluster_usage`]), however long `from` lives.
-    pub async fn begin_reset(&self, target: &str, from: &str, claim: bool, merge: impl FnOnce(&[u8], Option<&[u8]>) -> anyhow::Result<Vec<u8>>) -> anyhow::Result<ResetTicket> {
+    /// `parent`: the cluster `target` was branched from (its catalog's), whose data it shares: the
+    /// lineage its reset commit points carry even when no live shard of it still does (its
+    /// indices all deleted or made since, or an empty restore point put back before).
+    pub async fn begin_reset(
+        &self,
+        target: &str,
+        from: &str,
+        parent: Option<&str>,
+        claim: bool,
+        merge: impl FnOnce(&[u8], Option<&[u8]>) -> anyhow::Result<Vec<u8>>,
+    ) -> anyhow::Result<ResetTicket> {
         keys::validate_cluster(target)?;
         keys::validate_cluster(from)?;
         anyhow::ensure!(target != from, "a cluster can't be reset to itself");
@@ -137,8 +147,14 @@ impl Store {
             return Err(Refused(format!("cluster [{target}] has never stored anything, or its state changed while it was read")).into());
         };
         let target_tops = tops(self.list_shard_histories(target).await?);
-        // Its own lineage, which the reset's commit points keep.
-        let lineage = self.read_latest_manifests(target).await?.into_iter().find_map(|(_, m)| m.base);
+        // Its own lineage, which the reset's commit points keep: its parent's, as a live shard
+        // carries it or, with none left that does, as the catalog names it.
+        let live = self.read_latest_manifests(target).await?.into_iter().find_map(|(_, m)| m.base);
+        let lineage = match (live, parent) {
+            (Some(b), Some(p)) if b.cluster == p => Some(b),
+            (_, Some(p)) => Some(BranchBase { cluster: p.to_string(), generation: 0, at_ms: None, branched_ms: now_ms() }),
+            (live, None) => live,
+        };
         // Its operations not flushed yet are read from object storage, whichever node wrote
         // them; this node's are shipped now.
         self.wal().sync_remote().await?;
@@ -168,36 +184,41 @@ impl Store {
         };
         if let Err(e) = self.write_reset(target, at, copies, state, &intent).await {
             // What it wrote before failing applies to nothing.
-            self.discard_reset(target).await;
+            self.discard_reset(target, at).await;
             return Err(e);
         }
         // Another node claimed it meanwhile and may serve it without the intent: given up here,
         // so it never applies over what that owner writes.
         if let Err(e) = self.check_owner(target).await {
-            self.discard_reset(target).await;
+            self.discard_reset(target, at).await;
             return Err(e);
         }
         Ok(ResetTicket { at_ms: at })
     }
 
-    /// Best effort: a reset that will never be carried out leaves nothing behind (garbage
-    /// collection removes copies whose intent is gone anyway).
-    async fn discard_reset(&self, target: &str) {
-        let _ = self.objects().delete(&keys::reset_key(target)).await;
-        let _ = self.objects().delete_prefix(&keys::reset_copies_prefix(target)).await;
-        let _ = self.objects().delete(&keys::reset_state_key(target)).await;
+    /// Best effort: the reset recorded at `at` will never be carried out, and leaves nothing
+    /// behind. Only its own objects: another node's reset of the cluster (a newer owner's) is
+    /// left alone.
+    async fn discard_reset(&self, target: &str, at: u64) {
+        if let Ok(Some(raw)) = self.objects().get(&keys::reset_key(target)).await
+            && serde_json::from_slice::<Intent>(&raw).is_ok_and(|i| i.at_ms == at)
+        {
+            let _ = self.objects().delete(&keys::reset_key(target)).await;
+        }
+        let _ = self.objects().delete_prefix(&keys::reset_dir(target, at)).await;
     }
 
+    /// Its copies and state under its own `reset/<at>/`, then the intent, created only where
+    /// none is: two resets never overwrite each other's.
     async fn write_reset(&self, target: &str, at: u64, copies: Vec<(ShardId, ShardManifest)>, state: Vec<u8>, intent: &Intent) -> anyhow::Result<()> {
-        // Leftovers of a reset that never got its intent written, and an earlier outcome.
-        self.objects().delete_prefix(&keys::reset_copies_prefix(target)).await?;
-        self.objects().delete(&keys::reset_outcome_key(target)).await?;
         futures::stream::iter(copies.into_iter().map(|(shard, m)| async move { self.objects().put(&keys::reset_copy_key(target, at, &shard), Bytes::from(m.to_json())).await }))
             .buffer_unordered(16)
             .try_collect::<Vec<()>>()
             .await?;
-        self.objects().put(&keys::reset_state_key(target), Bytes::from(ClusterState::new(state).encode(3)?)).await?;
-        self.objects().put(&keys::reset_key(target), Bytes::from(serde_json::to_vec(intent)?)).await?;
+        self.objects().put(&keys::reset_state_key(target, at), Bytes::from(ClusterState::new(state).encode(3)?)).await?;
+        if self.objects().put_new(&keys::reset_key(target), Bytes::from(serde_json::to_vec(intent)?)).await?.is_none() {
+            return Err(Refused(format!("cluster [{target}] has a reset pending; it applies when it next loads")).into());
+        }
         Ok(())
     }
 
@@ -221,12 +242,17 @@ impl Store {
 
     /// Whether the reset `cluster` has pending already wrote part of what it applies (a load
     /// that failed midway): giving it up then would keep a mix of both.
+    /// Started is anything moved since it was recorded: a shard revived or deleted, or the state.
     pub async fn reset_started(&self, cluster: &str) -> anyhow::Result<bool> {
         keys::validate_cluster(cluster)?;
         let Some(raw) = self.objects().get(&keys::reset_key(cluster)).await? else { return Ok(false) };
         let Ok(intent) = serde_json::from_slice::<Intent>(&raw) else { return Ok(false) };
-        let mark = intent.at_ms.to_string();
-        Ok(self.read_latest_manifests(cluster).await?.iter().any(|(_, m)| m.user_data.get(RESET_MARK) == Some(&mark)))
+        if self.list_versions(&keys::state_prefix(cluster), ".json.zst").await?.last().copied() != Some(intent.state) {
+            return Ok(true);
+        }
+        let then: BTreeMap<ShardId, ShardVersion> = intent.tops.iter().map(|(u, n, v)| (ShardId::new(u.clone(), *n), *v)).collect();
+        let now = tops(self.list_shard_histories(cluster).await?);
+        Ok(now.iter().any(|(s, v)| then.get(s) != Some(v)))
     }
 
     /// Gives up the reset `cluster` has pending (its source went away before it was recorded,
@@ -266,7 +292,7 @@ impl Store {
         let at = intent.at_ms;
         tracing::info!(cluster = target, from = intent.from, "carrying out a reset");
         let dropped = |why: &str| self.end_reset(target, at, ResetOutcome::Dropped(why.to_string()));
-        let state = match self.objects().get(&keys::reset_state_key(target)).await? {
+        let state = match self.objects().get(&keys::reset_state_key(target, at)).await? {
             Some(raw) => match ClusterState::decode(&raw) {
                 Ok(s) => s,
                 Err(_) => return dropped("its state is damaged").await,
@@ -349,10 +375,11 @@ impl Store {
         }
         self.objects().put(&keys::reset_outcome_key(target), Bytes::from(serde_json::to_vec(&Outcome { at_ms, outcome })?)).await?;
         self.objects().delete(&keys::reset_key(target)).await?;
-        for r in [self.objects().delete(&keys::reset_state_key(target)).await, self.objects().delete_prefix(&keys::reset_copies_prefix(target)).await.map(|_| ())] {
-            if let Err(e) = r {
-                tracing::warn!(cluster = target, error = %e, "deleting a finished reset's leftovers failed (garbage collection removes them)");
-            }
+        // Its own objects (all of `reset/` when its intent was unreadable: whose they were is
+        // unknown).
+        let dir = if at_ms == 0 { keys::reset_copies_prefix(target) } else { keys::reset_dir(target, at_ms) };
+        if let Err(e) = self.objects().delete_prefix(&dir).await {
+            tracing::warn!(cluster = target, error = %e, "deleting a finished reset's leftovers failed (garbage collection removes its copies)");
         }
         Ok(())
     }
