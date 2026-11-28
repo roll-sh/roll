@@ -1,5 +1,5 @@
 import { ArrowDown, ArrowUp, ChevronLeft, ChevronRight, Columns3, Pencil, Plus, RefreshCw, Search, SquareTerminal, Trash2, X } from "lucide-react";
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { formatBytes } from "@/lib/roll-api";
 import { esJson, esRaw, formatCount, indexPath, type SearchCluster, type SearchIndex } from "@/lib/search-api";
 import { mappingFields } from "@/lib/search-console";
@@ -927,8 +927,9 @@ function SourceView({
 
 /** A time on the histogram: with its date unless it's today (or the span crosses days), with
  * seconds when buckets are shorter than a minute. */
-function when(ms: number, o: { day: boolean; seconds: boolean }) {
+function when(ms: number, o: { day: boolean; seconds: boolean }, zone?: string) {
   return new Date(ms).toLocaleString("en-US", {
+    timeZone: zone,
     ...(o.day ? { month: "short", day: "numeric" } : {}),
     hour: "2-digit",
     minute: "2-digit",
@@ -939,9 +940,26 @@ function when(ms: number, o: { day: boolean; seconds: boolean }) {
 
 /**
  * Documents over time on a time-based index (Kibana Discover's histogram): the range presets, a
- * bar per bucket of the current query, and a click on a bar narrows the range to it.
+ * bar per bucket of the current query, and a click on a bar narrows the range to it. Times are in
+ * `zone` (the browser's when not given), which `extra` can name beside the field.
  */
-export function TimeHistogram({ field, range, buckets, total, onRange }: { field: string; range: TimeRange; buckets: TimeBucket[]; total?: { value: number; relation: string }; onRange: (r: TimeRange) => void }) {
+export function TimeHistogram({
+  field,
+  range,
+  buckets,
+  total,
+  zone,
+  extra,
+  onRange,
+}: {
+  field: string;
+  range: TimeRange;
+  buckets: TimeBucket[];
+  total?: { value: number; relation: string };
+  zone?: string;
+  extra?: ReactNode;
+  onRange: (r: TimeRange) => void;
+}) {
   const max = Math.max(1, ...buckets.map((b) => b.count));
   const span = buckets.length > 1 ? buckets[buckets.length - 1].key - buckets[0].key : 0;
   const step = buckets.length > 1 ? buckets[1].key - buckets[0].key : 0;
@@ -956,13 +974,14 @@ export function TimeHistogram({ field, range, buckets, total, onRange }: { field
         </div>
         {"gte" in range && (
           <button type="button" onClick={() => onRange({ last: null })} className={btn} title="Back to all time">
-            {when(range.gte, { day: true, seconds: range.lt - range.gte < 60_000 })} – {when(range.lt, { day: false, seconds: range.lt - range.gte < 60_000 })} <X className="size-3" />
+            {when(range.gte, { day: true, seconds: range.lt - range.gte < 60_000 }, zone)} – {when(range.lt, { day: false, seconds: range.lt - range.gte < 60_000 }, zone)} <X className="size-3" />
           </button>
         )}
         <span className="ml-auto font-mono text-[11px] text-subtle">
           by {field}
           {total && ` · ${formatCount(total.value)}${total.relation === "gte" ? "+" : ""} documents`}
         </span>
+        {extra}
       </div>
       {buckets.length > 0 ? (
         <>
@@ -973,7 +992,7 @@ export function TimeHistogram({ field, range, buckets, total, onRange }: { field
                 type="button"
                 role="listitem"
                 onClick={() => onRange({ gte: b.key, lt: end(i) })}
-                title={`${when(b.key, fmt)} · ${formatCount(b.count)}`}
+                title={`${when(b.key, fmt, zone)} · ${formatCount(b.count)}`}
                 className="group flex h-full min-w-0 flex-1 items-end"
               >
                 <span className="w-full rounded-t-sm bg-fg/20 transition-[height,background-color] duration-200 ease-out group-hover:bg-accent motion-reduce:transition-none" style={{ height: b.count ? `${Math.max(4, (100 * b.count) / max)}%` : "0" }} />
@@ -981,8 +1000,8 @@ export function TimeHistogram({ field, range, buckets, total, onRange }: { field
             ))}
           </div>
           <div className="flex justify-between font-mono text-[11px] text-subtle">
-            <span>{when(buckets[0].key, fmt)}</span>
-            <span>{when(end(buckets.length - 1), fmt)}</span>
+            <span>{when(buckets[0].key, fmt, zone)}</span>
+            <span>{when(end(buckets.length - 1), fmt, zone)}</span>
           </div>
         </>
       ) : (

@@ -1277,6 +1277,11 @@ previews are listed once those products are on.
 | `search_slowlog` | A cluster's slowest recent requests. | `GET /v1/search/clusters/{id}/slowlog` |
 | `search_audit` | A cluster's security audit log (failed logins, access denials, changes to users, roles and keys; never a secret). | `GET /v1/search/clusters/{id}/audit` |
 | `search_analytics` | What a cluster's users search for: top queries, queries with no results, click-through (indices that opt in). | `GET /v1/search/clusters/{id}/analytics` |
+| `search_list_saved_searches` | A cluster's saved Discover searches: name, view, who saved it. | `GET /v1/search/clusters/{cluster}/saved-searches` |
+| `search_get_saved_search` | One saved Discover search. | `GET /v1/search/clusters/{cluster}/saved-searches/{search}` |
+| `search_save_search` | Save a view under a name (at most 200 a cluster). | `POST /v1/search/clusters/{cluster}/saved-searches` |
+| `search_update_saved_search` | Rename a saved search or replace its view (destructive). | `PUT /v1/search/clusters/{cluster}/saved-searches/{search}` |
+| `search_delete_saved_search` | Delete a saved search. | `DELETE /v1/search/clusters/{cluster}/saved-searches/{search}` |
 | `search_suggestions` | An index's query suggestions from its search analytics: settings, last build, heaviest suggestions. | `GET /v1/search/clusters/{cluster}/indices/{index}/suggestions` |
 | `search_rebuild_suggestions` | Rebuild an index's suggestions index from its analytics now (write). | `POST /v1/search/clusters/{cluster}/indices/{index}/suggestions/rebuild` |
 | `search_usage` | A cluster's metering and cost against Elastic Cloud and Amazon OpenSearch. | `GET /v1/search/clusters/{cluster}/usage` |

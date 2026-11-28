@@ -6,9 +6,15 @@ import { DiscoverTab } from "./discover";
 
 const esJson = vi.hoisted(() => vi.fn());
 const esRaw = vi.hoisted(() => vi.fn());
+const saved = vi.hoisted(() => ({ savedSearch: vi.fn(), savedSearches: vi.fn(), saveSearch: vi.fn(), updateSavedSearch: vi.fn(), deleteSavedSearch: vi.fn() }));
 vi.mock("@/lib/search-api", async (orig) => {
   const real = await orig<typeof import("@/lib/search-api")>();
-  return { ...real, esJson, esRaw };
+  return { ...real, esJson, esRaw, searchApi: { ...real.searchApi, ...saved } };
+});
+// The viewer is in Budapest (the test runs in UTC).
+vi.mock("@/lib/search-discover", async (orig) => {
+  const real = await orig<typeof import("@/lib/search-discover")>();
+  return { ...real, viewerZone: () => "Europe/Budapest", shownZone: () => "Europe/Budapest" };
 });
 
 const cluster = { id: "c1", name: "logs", flavor: "elasticsearch" } as unknown as SearchCluster;
@@ -18,10 +24,10 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-it("shows a view's fields, its documents over time and its rows, and a field's top values", async () => {
+it("shows a view's fields, its documents over time and its rows in the viewer's zone, and a field's top values as filters", async () => {
   const user = userEvent.setup();
   const hits = [
-    { _index: "logs-web", _id: "1", _source: { "@timestamp": "2026-11-26T11:59:00Z", host: "web-1", message: "GET /cart 500" } },
+    { _index: "logs-web", _id: "1", _source: { "@timestamp": "2026-11-26T11:59:00Z", host: "web-1", message: "GET /cart 500" }, fields: { "@timestamp": [String(Date.UTC(2026, 10, 26, 11, 59))] } },
     { _index: "logs-web", _id: "2", _source: { "@timestamp": "2026-11-26T11:58:00Z", host: "web-2", message: "GET / 200" } },
   ];
   esJson.mockImplementation(async (_id: string, method: string, path: string) => {
@@ -49,8 +55,119 @@ it("shows a view's fields, its documents over time and its rows, and a field's t
   expect(body.query.bool.filter[1]).toEqual({ range: { "@timestamp": { gte: "now-24h" } } });
   expect(window.location.hash).toContain("tf=%40timestamp");
 
+  // Times are the viewer's zone's, and switch to UTC.
+  expect(screen.getByText("2026-11-26 12:59:00.000")).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "Times in Europe/Budapest: show them in UTC" }));
+  expect(screen.getByText("2026-11-26 11:59:00.000")).toBeInTheDocument();
+  expect(localStorage.getItem("roll.search.discover.zone")).toBe("utc");
+
+  // − leaves a value out with a filter pill (Kibana's), not an edit of the query.
   await user.click(within(fields).getByRole("button", { name: "host (keyword)" }));
   await user.click(await within(fields).findByRole("button", { name: "Filter out host: web-2" }));
-  expect(screen.getByRole("textbox", { name: "Query" })).toHaveValue('not host: "web-2"');
-  expect(window.location.hash).toContain("q=not+host");
+  expect(within(screen.getByRole("list", { name: "Filters" })).getByText("NOT host: web-2")).toBeInTheDocument();
+  expect(screen.getByRole("textbox", { name: "Query" })).toHaveValue("");
+  await vi.waitFor(() => expect(esRaw.mock.calls.at(-1)![3].query.bool.must_not).toEqual([{ match_phrase: { host: "web-2" } }]));
+  expect(window.location.hash).toContain("f=");
+});
+
+/** A cluster with one index, `logs-web`, its fields, and `esRaw` answering `hits` for every search. */
+function fakeCluster(hits: (body: Record<string, unknown>, path: string) => unknown[]) {
+  esJson.mockImplementation(async (_id: string, _method: string, path: string) => {
+    if (path.startsWith("/_resolve/index/")) return { indices: [{ name: "logs-web" }, { name: "logs-api" }], aliases: [], data_streams: [] };
+    if (path.includes("/_field_caps")) return { fields: { "@timestamp": { date: { type: "date", aggregatable: true } }, host: { keyword: { type: "keyword", aggregatable: true } } } };
+    return {};
+  });
+  esRaw.mockImplementation(async (_id: string, _method: string, path: string, body: Record<string, unknown>) => {
+    const value = { took: 1, hits: { total: { value: 1, relation: "eq" }, hits: hits(body, path) }, aggregations: { over_time: { buckets: [] } } };
+    return { value, text: JSON.stringify(value) };
+  });
+}
+
+const doc = (id: string, at: number, host: string) => ({ _index: "logs-web", _id: id, _source: { "@timestamp": new Date(at).toISOString(), host }, fields: { "@timestamp": [String(at)] }, sort: [at, Number(id)] });
+const T = Date.UTC(2026, 10, 26, 12, 0, 0);
+
+it("opens a saved search from the URL, and saves the view as a new one or over the one opened", async () => {
+  const user = userEvent.setup();
+  fakeCluster(() => [doc("1", T, "web-1")]);
+  const errors = { id: "ss_1", name: "errors", search: { view: "logs-api", time_field: "@timestamp", mode: "kql", query: "status >= 500", filters: [], range: { last: "1h" }, columns: ["host"], sort: null }, made_by: "ana", created_at: 1, updated_at: 1 };
+  saved.savedSearch.mockResolvedValue(errors);
+  saved.savedSearches.mockResolvedValue({ saved_searches: [errors] });
+  saved.updateSavedSearch.mockImplementation(async (_c: string, id: string, change: { search: unknown }) => ({ ...errors, id, search: change.search }));
+  saved.saveSearch.mockImplementation(async (_c: string, name: string, search: unknown) => ({ ...errors, id: "ss_2", name, search }));
+  window.location.hash = "#discover?saved=ss_1";
+  render(<DiscoverTab cluster={cluster} onOpenConsole={vi.fn()} />);
+
+  expect(await screen.findByRole("textbox", { name: "Query" })).toHaveValue("status >= 500");
+  await vi.waitFor(() => expect(screen.getByRole("combobox", { name: "View" })).toHaveValue("logs-api"));
+  expect(saved.savedSearch).toHaveBeenCalledWith("c1", "ss_1");
+  await vi.waitFor(() => expect(window.location.hash).toMatch(/^#discover\?saved=ss_1&view=logs-api/));
+  await user.click(screen.getByRole("button", { name: "Saved searches" }));
+  expect(await screen.findByRole("button", { name: "Open errors" })).toBeInTheDocument();
+  // Unchanged, there's nothing to save over it.
+  expect(screen.getByRole("button", { name: "Save to errors" })).toBeDisabled();
+
+  await user.clear(screen.getByRole("textbox", { name: "Query" }));
+  await user.type(screen.getByRole("textbox", { name: "Query" }), "status >= 400{Enter}");
+  await user.click(screen.getByRole("button", { name: "Save to errors" }));
+  expect(saved.updateSavedSearch).toHaveBeenCalledWith("c1", "ss_1", { search: expect.objectContaining({ view: "logs-api", query: "status >= 400", range: { last: "1h" } }) });
+
+  await user.type(screen.getByRole("textbox", { name: "Saved search name" }), "4xx and 5xx{Enter}");
+  expect(saved.saveSearch).toHaveBeenCalledWith("c1", "4xx and 5xx", expect.objectContaining({ query: "status >= 400", columns: ["host"] }));
+  expect(screen.getByRole("button", { name: "Saved searches" })).toHaveTextContent("4xx and 5xx");
+});
+
+it("shows a document among the ones just before and after it in time, with the filters and not the query", async () => {
+  const user = userEvent.setup();
+  fakeCluster((body, path) => {
+    if (path === "/logs-web/_search" && (body.query as { ids?: unknown }).ids) return [doc("5", T, "anchor-host")];
+    if (body.search_after) {
+      const asc = JSON.stringify(body.sort).includes('"asc"');
+      return asc ? [doc("6", T + 1000, "newer-host")] : [doc("4", T - 1000, "older-host")];
+    }
+    return [doc("5", T, "anchor-host")];
+  });
+  window.location.hash = `#discover?view=logs-web&col=host&q=status+%3E%3D+500&f=${encodeURIComponent('["host","anchor-host",false]')}`;
+  render(<DiscoverTab cluster={cluster} onOpenConsole={vi.fn()} />);
+
+  await user.click(await screen.findByText("anchor-host", { selector: "td" }));
+  await user.click(await screen.findByRole("button", { name: "Surrounding documents" }));
+  const around = await screen.findByRole("region", { name: "Surrounding documents" });
+  await within(around).findByText("older-host");
+  const rows = within(around).getAllByRole("row").slice(1).map((r) => r.textContent);
+  expect(rows.map((r) => r?.replace(/^.*\.\d{3}/, ""))).toEqual(["newer-host", "anchor-host", "older-host"]);
+  expect(within(around).getAllByRole("row").find((r) => r.getAttribute("aria-current"))).toHaveTextContent("anchor-host");
+  // Both sides search after the anchor's own sort values, over every time.
+  const after = esRaw.mock.calls.map((c) => c[3]).filter((b) => b?.search_after);
+  expect(after.map((b) => b.search_after)).toEqual([[T, 5], [T, 5]]);
+  expect(after.map((b) => b.query)).toEqual([0, 1].map(() => ({ bool: { filter: [{ match_phrase: { host: "anchor-host" } }] } })));
+
+  await user.click(within(around).getByRole("button", { name: "Documents" }));
+  expect(screen.queryByRole("region", { name: "Surrounding documents" })).not.toBeInTheDocument();
+});
+
+it("draws a field over the whole query and range, with its statistics, from the sidebar", async () => {
+  const user = userEvent.setup();
+  fakeCluster(() => [doc("1", T, "web-1")]);
+  const answers = esJson.getMockImplementation()!;
+  esJson.mockImplementation(async (id: string, method: string, path: string, body: { aggs?: Record<string, unknown> }) => {
+    if (body?.aggs?.bars) {
+      return { hits: { total: { value: 200 } }, aggregations: { bars: { sum_other_doc_count: 20, buckets: [{ key: "web-1", doc_count: 120 }, { key: "web-2", doc_count: 30 }] }, distinct: { value: 4 }, missing: { doc_count: 30 } } };
+    }
+    if (body?.aggs?.sample) return { aggregations: { sample: { doc_count: 1, top: { buckets: [{ key: "web-1", doc_count: 1 }] } } } };
+    return answers(id, method, path, body);
+  });
+  const onOpenConsole = vi.fn();
+  window.location.hash = "#discover?view=logs-web";
+  render(<DiscoverTab cluster={cluster} onOpenConsole={onOpenConsole} />);
+
+  const fields = await screen.findByRole("complementary", { name: "Fields" });
+  await user.click(await within(fields).findByRole("button", { name: "host (keyword)" }));
+  await user.click(await within(fields).findByRole("button", { name: "Visualize" }));
+  const chart = await screen.findByRole("region", { name: "Chart of host" });
+  expect(await within(chart).findByRole("list", { name: "Top values of host" })).toHaveTextContent("web-1120 60%");
+  expect(chart).toHaveTextContent("200 documents · present in 85% · 4 distinct");
+  // The request goes to the cluster, and opens in the console.
+  await user.click(within(chart).getByRole("button", { name: "Request" }));
+  await user.click(within(chart).getByRole("button", { name: /Console/ }));
+  expect(onOpenConsole.mock.calls[0][0]).toMatch(/^POST \/logs-web\/_search\n[\s\S]*"cardinality"/);
 });

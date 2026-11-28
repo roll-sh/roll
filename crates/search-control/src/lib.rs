@@ -24,6 +24,7 @@ pub mod migrate;
 pub mod pricing;
 pub mod remotes;
 pub mod saas;
+pub mod saved;
 pub mod secret_refs;
 pub mod sites;
 pub mod store;

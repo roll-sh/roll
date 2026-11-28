@@ -1549,6 +1549,13 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/search/clusters/{id}/audit", "search", R, one(PG, "cluster")),
     // Search analytics: the indices' query text, aggregated; a read of the cluster's data.
     row("GET", "/v1/search/clusters/{id}/analytics", "search", R, one(PG, "cluster")),
+    // Discover's saved searches (views of the cluster, kept in roll's catalogue): reading them is
+    // a read of the cluster, keeping, renaming or removing one a write (no data goes with it).
+    row("GET", "/v1/search/clusters/{id}/saved-searches", "search", R, one(PG, "cluster")),
+    row("POST", "/v1/search/clusters/{id}/saved-searches", "search", W, one(PG, "cluster")),
+    row("GET", "/v1/search/clusters/{id}/saved-searches/{search}", "search", R, one(PG, "cluster")),
+    row("PUT", "/v1/search/clusters/{id}/saved-searches/{search}", "search", W, one(PG, "cluster")),
+    row("DELETE", "/v1/search/clusters/{id}/saved-searches/{search}", "search", W, one(PG, "cluster")),
     row("*", "/v1/search/clusters/{id}/", "search", M, one(PG, "cluster")),
     // An index's routes are about those indices (`{index}`: a name, or on reads an expression),
     // so a rule can grant some of a cluster's indices. The console (`request`) and the index list

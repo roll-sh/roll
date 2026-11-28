@@ -8124,3 +8124,37 @@ async fn otlp_logs_land_in_otel_data_streams_with_an_otel_key() {
         assert_eq!(v["data_streams"], json!([]), "no data stream was made: {v}");
     }
 }
+
+/// Discover's saved searches are the cluster's, in roll's catalogue: kept under a unique name with
+/// who saved them, listed by name, renamed or given a new view, and removed; a view that isn't the
+/// dashboard's (an unknown key, another flavor's language, a filter of another shape) is a 400.
+/// Another person's cluster has none to read or write (404 on every route), as for the cluster's
+/// other routes; read and write are the catalogue's rows (`rolld --test auth`).
+#[tokio::test]
+async fn saved_searches_are_kept_per_cluster() {
+    use reqwest::Method;
+    let e = env().await;
+    let (_, c) = e.call_as("alice", Method::POST, "/v1/search/clusters", Some(json!({"name": "views"}))).await;
+    let base = format!("/v1/search/clusters/{}/saved-searches", c["id"].as_str().unwrap());
+    let view = json!({"view": "logs-*", "time_field": "@timestamp", "mode": "kql", "query": "status >= 500", "filters": [{"field": "host", "value": "web-1", "negate": true}], "range": {"last": "24h"}, "columns": ["host"], "sort": null});
+    let (s, saved) = e.call_as("alice", Method::POST, &base, Some(json!({"name": "Errors", "search": view}))).await;
+    assert_eq!((s, &saved["search"], saved["made_by"].as_str()), (201, &view, Some("usr_alice")), "{saved}");
+    let id = saved["id"].as_str().unwrap().to_string();
+    let one = format!("{base}/{id}");
+    let (s, v) = e.call_as("alice", Method::POST, &base, Some(json!({"name": " Errors ", "search": view}))).await;
+    assert_eq!(s, 409, "a name is the cluster's once: {v}");
+    for (bad, why) in [(json!({"view": "logs", "mode": "ppl"}), "kql, esql"), (json!({"view": "logs", "mode": "kql", "size": 5}), "no field [size]"), (json!({"view": "logs", "mode": "kql", "filters": [{"field": "a"}]}), "{field, value, negate}")] {
+        let (s, v) = e.call_as("alice", Method::POST, &base, Some(json!({"name": "B", "search": bad}))).await;
+        assert!(s == 400 && v.to_string().contains(why), "{s} {v}");
+    }
+    // Bob reaches none of it.
+    for (m, path, body) in [(Method::GET, &base, None), (Method::POST, &base, Some(json!({"name": "x", "search": view}))), (Method::GET, &one, None), (Method::PUT, &one, Some(json!({"name": "x"}))), (Method::DELETE, &one, None)] {
+        assert_eq!(e.call_as("bob", m.clone(), path, body).await.0, 404, "{m} {path}");
+    }
+    let (s, v) = e.call_as("alice", Method::PUT, &one, Some(json!({"name": "5xx", "search": {"view": "logs-*", "mode": "esql", "query": "STATS n = COUNT(*)"}}))).await;
+    assert_eq!((s, v["name"].as_str(), v["search"]["mode"].as_str()), (200, Some("5xx"), Some("esql")), "{v}");
+    let (_, list) = e.call_as("alice", Method::GET, &base, None).await;
+    assert_eq!(list["saved_searches"].as_array().map(|a| a.iter().map(|x| x["name"].clone()).collect::<Vec<_>>()), Some(vec![json!("5xx")]), "{list}");
+    assert_eq!(e.call_as("alice", Method::DELETE, &one, None).await.0, 204);
+    assert_eq!(e.call_as("alice", Method::GET, &one, None).await.0, 404);
+}
