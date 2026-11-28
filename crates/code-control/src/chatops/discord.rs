@@ -449,7 +449,12 @@ impl StepKind for DiscordStep {
                 Ok(ch) => ch,
                 Err(e) => return fail(e),
             },
-            (None, Some(ch)) => ch,
+            // One bot serves every install: a channel is only the install's own server's.
+            (None, Some(ch)) => match client.channel_guild(&ch).await {
+                Ok(Some(g)) if !install.team_id.is_empty() && g == install.team_id => ch,
+                Ok(_) => return StepOutcome::Fail(format!("{kind}: Discord channel {ch} isn't in this install's server")),
+                Err(e) => return fail(e),
+            },
             (None, None) => return StepOutcome::Fail(format!("{kind} has no channel (and the event none)")),
         };
         match self.kind {

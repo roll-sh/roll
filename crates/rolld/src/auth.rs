@@ -138,6 +138,9 @@ pub struct Auth {
     token: Option<AdminToken>,
     gate: Arc<Gate>,
     origins: Origins,
+    /// Previews' domain: others' pages on the API's listener, never a loopback name to an open
+    /// gate.
+    hosted: Vec<String>,
 }
 
 impl Auth {
@@ -145,6 +148,7 @@ impl Auth {
     /// reach this API, whose origin may send writes besides the dashboard's.
     pub fn sessions(&mut self, sessions: Arc<dyn roll_auth::Sessions>, api_url: &str) {
         self.gate = Gate::with_sessions(self.token.clone(), RULES.to_vec(), sessions, self.origins.clone(), api_url);
+        self.gate.set_hosted(self.hosted.clone());
     }
 }
 
@@ -188,7 +192,9 @@ impl Auth {
             Origins::List(l) => info!(origins = ?l, "CORS: the dashboard's origins"),
         }
         let gate = Gate::new(token.clone(), RULES.to_vec());
-        Ok(Self { token, gate, origins })
+        let hosted = vec![args.code_preview_domain.clone()];
+        gate.set_hosted(hosted.clone());
+        Ok(Self { token, gate, origins, hosted })
     }
 
     /// Whether requests need the token: products with credentials of their own then require

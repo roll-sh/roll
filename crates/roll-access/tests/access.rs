@@ -179,7 +179,12 @@ fn postgres() -> Router {
                     g.allows(&r, action) == roll_auth::scope::Outcome::Allow
                 };
                 use roll_auth::scope::Action::{Read, Write};
-                axum::Json(json!({ "here": at("production", "/ai", Write), "read": at("production", "/ai", Read), "below": at("production", "/ai/x", Write), "elsewhere": at("production", "/", Write), "staging": at("staging", "/ai", Write) }))
+                // And another key of the same folder, which nothing lent.
+                let other = {
+                    let r = roll_auth::scope::Resource { product: "secrets".into(), id: Some(project.clone()), project: Some(project.clone()), environment: Some("production".into()), path: Some("/ai".into()), key: Some("NOT_LENT".into()), ..Default::default() };
+                    g.allows(&r, Write) == roll_auth::scope::Outcome::Allow
+                };
+                axum::Json(json!({ "here": at("production", "/ai", Write), "read": at("production", "/ai", Read), "below": at("production", "/ai/x", Write), "elsewhere": at("production", "/", Write), "staging": at("staging", "/ai", Write), "other": other }))
             }),
         )
         .route("/v1/search/clusters/{id}/keys", post(|ext: axum::http::Extensions| async move { axum::Json(seen(&ext)) }))
@@ -3549,7 +3554,14 @@ async fn a_secret_written_as_the_caller_is_asked_for_and_only_it_is_allowed() {
     assert_eq!(d.call(OPERATOR, Method::POST, &format!("/v1/access/approvals/{id}/approve"), Some(json!({ "remember": "1h" }))).await.0, StatusCode::OK);
     let (s, seen) = d.send(&asks, Method::POST, path, Some(body("production")), &[("x-roll-approval", &id)]).await;
     assert_eq!(s, StatusCode::OK, "{seen}");
-    assert_eq!(seen, json!({ "here": true, "read": true, "below": true, "elsewhere": false, "staging": false }));
+    assert_eq!(seen, json!({ "here": true, "read": true, "below": true, "elsewhere": false, "staging": false, "other": false }));
+    // Approved once (nothing remembered): the rule handed to the product reaches the written key,
+    // never another key of the folder.
+    let (once, _) = d.token(json!([search("allow"), write_asks]), json!({})).await;
+    let id = asked(once.clone()).await;
+    assert_eq!(d.call(OPERATOR, Method::POST, &format!("/v1/access/approvals/{id}/approve"), None).await.0, StatusCode::OK);
+    let (s, seen) = d.send(&once, Method::POST, path, Some(body("production")), &[("x-roll-approval", &id)]).await;
+    assert_eq!((s, seen["here"].as_bool(), seen["other"].as_bool()), (StatusCode::OK, Some(true), Some(false)), "{seen}");
     // Remembered, it allows that folder again with no approval (and reading it, which the product
     // does), and nothing beside it: another folder asks again.
     let (s, seen) = d.call(&asks, Method::POST, path, Some(body("production"))).await;

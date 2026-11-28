@@ -2114,6 +2114,9 @@ pub struct Environment {
     pub traces: bool,
     /// Its pages measure their Web Vitals for roll (`…/vitals`).
     pub vitals: bool,
+    /// Its Strict-Transport-Security when roll serves HTTPS ([`HSTS_DEFAULT`] unless it says;
+    /// None: none sent).
+    pub hsts: Option<Hsts>,
     /// Where its deploy status badge is (Netlify's), when it has one (`badge: true`): an SVG for a
     /// README, answered to anyone.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2948,6 +2951,41 @@ impl Check {
             }
         }
         Ok(self)
+    }
+}
+
+/// An environment's Strict-Transport-Security (Vercel's, Netlify's `_headers`): on by default
+/// when roll serves HTTPS, added to its answers unless the app or its own headers send one.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Hsts {
+    /// Seconds, at most two years; 0 tells browsers to forget it.
+    pub max_age: u32,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub include_subdomains: bool,
+    /// For the browsers' preload list (hstspreload.org): with include_subdomains and a year at least.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub preload: bool,
+}
+
+/// What an environment answers with when it sets nothing: two years, its own name only.
+pub const HSTS_DEFAULT: Hsts = Hsts { max_age: 63_072_000, include_subdomains: false, preload: false };
+
+impl Hsts {
+    pub fn check(&self) -> Result<()> {
+        let bad = |m: &str| Err(Error::BadRequest(format!("hsts: {m}")));
+        if self.max_age > 63_072_000 {
+            return bad("max_age is at most 63072000 (two years)");
+        }
+        if self.preload && !(self.include_subdomains && self.max_age >= 31_536_000) {
+            return bad("preload needs include_subdomains and a max_age of a year (31536000) at least");
+        }
+        Ok(())
+    }
+
+    /// The header's value.
+    pub fn value(&self) -> String {
+        format!("max-age={}{}{}", self.max_age, if self.include_subdomains { "; includeSubDomains" } else { "" }, if self.preload { "; preload" } else { "" })
     }
 }
 
