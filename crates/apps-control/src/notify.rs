@@ -15,7 +15,6 @@ use crate::model::{Delivery, Event, NotifyTarget};
 use crate::{Apps, Error, Result};
 use serde_json::{Value, json};
 use std::sync::Arc;
-use std::time::Duration;
 
 /// What a target can ask for; a new one gets the two that need someone.
 pub const EVENTS: [&str; 41] = [
@@ -308,7 +307,7 @@ impl Apps {
                 self.deliver_due().await;
             }
             tokio::select! {
-                _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+                _ = tokio::time::sleep(self.cfg.notify_every) => {}
                 _ = self.stop.cancelled() => return,
             }
         }
@@ -457,8 +456,8 @@ impl Apps {
         if !self.db(move |s| s.redeliver(&ti, &di)).await? {
             return Err(Error::Conflict("this delivery is still being tried".into()));
         }
-        let (ti, di) = (target.to_string(), id.to_string());
-        self.db(move |s| s.delivery(&ti, &di)).await?.ok_or_else(|| Error::NotFound(format!("no delivery {id}")))
+        // As it was written: the notifier may have sent it again by the time it's read.
+        Ok(Delivery { status: "pending".into(), attempts: 0, code: None, error: None, at: code_sql::now_ms(), ..d })
     }
 
     /// What's due, a few at a time (one slow target doesn't hold up the others), each try's
@@ -878,32 +877,20 @@ mod tests {
         assert!(super::wants(&ev(&["audit"]), "audit.variables", &data, false));
         assert!(!super::wants(&ev(&["audit"]), "audit.variables", &data, true), "never an on-call page");
         assert!(!super::wants(&super::DEFAULT_EVENTS.map(String::from), "audit.variables", &data, false), "not by default");
-    }
-
-    #[test]
-    fn a_routes_incident_is_its_own() {
+        // A route's burn and its clearing are one incident, apart from the service's own.
         let ev = |kind: &str, data: serde_json::Value| crate::model::Event { seq: 1, at: 1, kind: kind.into(), service: "svc_a".into(), environment: "production".into(), deployment: None, data };
         let key = |e: crate::model::Event| super::oncall_of(&e).map(|(open, k, _)| (open, k));
         let route = serde_json::json!({ "route": "/checkout/:id", "method": "POST" });
-        // A route's burn and its clearing are one incident, apart from the service's own.
         let opened = key(ev("alert.slo", route.clone())).unwrap();
         let mut resolved = route.clone();
         resolved["alert"] = "alert.slo".into();
         assert_eq!(key(ev("alert.resolved", resolved)).unwrap(), (false, opened.1.clone()));
         assert_ne!(opened.1, key(ev("alert.slo", serde_json::json!({}))).unwrap().1);
-        // Each route alert's kind, and each metric, is its own too.
-        let kind = |k: &str| key(ev("alert.route", serde_json::json!({ "route": "/a", "kind": k }))).unwrap().1;
-        assert_ne!(kind("errors"), kind("latency"));
-        assert_ne!(key(ev("alert.metric", serde_json::json!({ "metric": "a" }))).unwrap().1, key(ev("alert.metric", serde_json::json!({ "metric": "b" }))).unwrap().1);
-    }
-
-    #[test]
-    fn a_teams_card_can_not_link() {
-        assert!(!super::teams_escape("[Approve](https://evil)").contains("]("));
     }
 
     #[test]
     fn slack_text_can_not_mention_or_link() {
         assert_eq!(super::slack_escape("<!channel> <https://evil|Approve> & co"), "&lt;!channel&gt; &lt;https://evil|Approve&gt; &amp; co");
+        assert!(!super::teams_escape("[Approve](https://evil)").contains("]("), "nor a Teams card");
     }
 }

@@ -1481,6 +1481,7 @@ static TOOLS: &[Tool] = &[
         bnull("redirects", Ty::Str, "its own redirects on any service, _redirects lines: `/old /new 308`, `/blog/* /posts/:splat` (301 unless 302, 303, 307 or 308); clear it for none"),
         bnull("egress", Ty::Any, "{mode: roll|open, hosts?}: roll lets its code reach roll and only these hosts (at most 20, *. for subdomains), from the next deploy; clear it for open"),
         b("vitals", Ty::Bool, "Measure its pages' Web Vitals in visitors' browsers (read them with apps_vitals)"),
+        bnull("hsts", Ty::Any, "Strict-Transport-Security over HTTPS: {max_age (at most 63072000), include_subdomains?, preload? (with include_subdomains and a year)}, false for none; clear it for the default (two years)"),
         bnull("config", Ty::Obj, "Runtime config its instances read at ROLL_CONFIG_URL (edge functions: context.config) without a deploy: at most 200 keys, 64 KiB; the first one needs a deploy to give them the address. Clear it for none"),
         bnull("freeze", Ty::Obj, "A deploy freeze: {until? (unix ms), windows?: [{from: \"fri 17:00\", to}], timezone?, reason?}, on until cleared when it has neither until nor windows. Setting or clearing one is an admin's call (clearing it would get past it)"),
         b("traces", Ty::Bool, "Send its OpenTelemetry traces and metrics to roll (OTEL_EXPORTER_OTLP_* from the next deploy)"),
@@ -2561,6 +2562,29 @@ mod tests {
         // A `*` line speaks for the methods with no tool, so a tool on its path doesn't make it stale.
         let stale: Vec<String> = listed.iter().filter(|(m, r)| *m != "*" && covered(m, r)).map(|(m, r)| format!("{m} {r}")).collect();
         assert!(stale.is_empty(), "no-tool.txt lines for routes that have a tool now: remove them:\n{}", stale.join("\n"));
+        // A route kept tool-less for a credential is one the gate protects: its row decides reveal
+        // or admin, or decides from the body, or hides the answer's credential fields (`reveals`).
+        // Otherwise its line says it only sets one or answers none: a create that answers a secret
+        // to a grant that may only write is the gap (search's alerts in review, previews' env).
+        let unprotected: Vec<&str> = include_str!("no-tool.txt")
+            .lines()
+            .filter(|l| !l.starts_with('#') && l.contains("credential"))
+            .filter(|l| {
+                let mut w = l.split_whitespace();
+                let (Some(m), Some(r)) = (w.next(), w.next()) else { return false };
+                // What the line says it is, after the route: only setting one, or answering none.
+                let why = w.collect::<Vec<_>>().join(" ");
+                if why.starts_with("sets a credential") || why.starts_with("answers no credential") {
+                    return false;
+                }
+                let sample = r.split('/').map(|s| if s.starts_with('{') { "x" } else { s }).collect::<Vec<_>>().join("/");
+                catalog::by_path(if m == "*" { "GET" } else { m }, &sample).is_some_and(|f| {
+                    let decided = matches!(f.row.act, catalog::Act::Is(roll_auth::scope::Action::Reveal | roll_auth::scope::Action::Admin) | catalog::Act::Body(_));
+                    !decided && f.row.reveals.is_empty()
+                })
+            })
+            .collect();
+        assert!(unprotected.is_empty(), "tool-less credential routes the gate doesn't protect: decide reveal (or from the body), list the answer's credential fields in `reveals`, or say the line only `sets a credential (…)` or `answers no credential`:\n{}", unprotected.join("\n"));
         // A tool that removes, revokes or replaces something says so (clients ask a person before a
         // destructive call), unless it's marked undoable: the review that found five revoke tools
         // unmarked is why this is a test, not a habit.

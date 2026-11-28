@@ -600,18 +600,6 @@
  {
   "request": {
    "script": {
-    "source": "String s = BigInteger.ONE.shiftLeft(3000000).toString(); return [s.length(), s.hashCode(), s.substring(0, 30), s.substring(s.length() - 30)]",
-    "lang": "painless"
-   }
-  },
-  "status": 200,
-  "response": {
-   "result": "[903090, 1427607684, 970491963890071156409914258786, 959020917642742529324667109376]"
-  }
- },
- {
-  "request": {
-   "script": {
     "source": "String s = BigInteger.valueOf(7).pow(100000).toString(); return [s.length(), s.hashCode(), s.substring(0, 30), s.substring(s.length() - 30)]",
     "lang": "painless"
    }

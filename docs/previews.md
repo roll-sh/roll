@@ -1266,7 +1266,7 @@ thirty-fourth review found them in the clear.
     segment that holds one is then expunged as the branch's own (`expunge_deletes_allowed` 0,
     `_forcemerge?only_expunge_deletes`), as Postgres masking's `VACUUM FULL` (live: the branch
     reads `[masked]` and its `_terms_enum` finds nothing, the parent reads `parent`; roll
-    search's `expunging_a_branch_rewrites_the_segments_it_shares` pins the sequence).
+    search's `documents` (control.rs) pins the sequence).
     A masked `semantic_text` field: a branch doesn't get its parent's inference endpoint's key
     (roll search's #988), so the masking's writes send `X-Roll-Unembedded: drop`. The masked text
     stays unembedded, and the real values' chunks and embeddings go, with no provider called. An
@@ -2131,7 +2131,7 @@ previews in it), the operator and admins see every project.
 | --- | --- | --- |
 | `GET /v1/previews?project=&state=` | | `Preview[]`, newest first, light (`Preview::light`): every count and state a row reads, without each page's accessibility issues, links and comparison, the first page's issues' markup and axe-core's words, or the words against main (by the bounds, about 130 KB a preview whose pages have the most violations, down to a few KB); `GET …/{id}` has all of it |
 | `POST /v1/previews` | `{project, repo, branch? , change?}` | 201 `Preview` (or 200 with the project's existing one). 404 unless the repo is on the project's canvas and the project stands for it (`Workspace::trusts`, as for the previews it makes itself: a preview builds and runs the repo). 409 when the change's preview is another project's (a change has one; it's never handed to another project); 400 when `X-Roll-Project` (the project roll-access decided the create on) names another project than the body |
-| `GET /v1/previews/events?after=&limit=&latest=` | | `{events: Event[], next}`: what happened to previews after the seq `after` (0 by default), oldest first, at most `limit` (1–500, 100 by default); `next` is where to ask from again (past events the caller doesn't see too: a signed-in person sees their projects'). `latest=1`: `{events: [], next}` with the newest seq, to follow from now on (400 with `after`). `type Event = {seq, at, kind: "created" \| "ready" \| "failed" \| "visual_change" \| "browser_checks_passed" \| "browser_checks_failed" \| "deleted", project, preview, change: string \| null, data: {head}}`: `ready` is up after a push or the first deploy (asleep once up counts), never a sleeping preview waking; `visual_change` is a visual change waiting for review, once a head; `browser_checks_passed` and `browser_checks_failed` say production's browser checks have all run on the head, once a head. Each event's `seq` is taken in the write that made it so, so commit order is seq order and a follower past one never misses an earlier one; kept 7 days. roll MCP's event feeds follow it |
+| `GET /v1/previews/events?after=&limit=&latest=&wait=` | | `{events: Event[], next}`: what happened to previews after the seq `after` (0 by default), oldest first, at most `limit` (1–500, 100 by default); `wait` (1–25 seconds, not with `latest`): with none yet, the answer waits that long for one (a long poll: woken at once by an event this node records, another node's read within 2 s), then answers empty; `next` is where to ask from again (past events the caller doesn't see too: a signed-in person sees their projects'). `latest=1`: `{events: [], next}` with the newest seq, to follow from now on (400 with `after`). `type Event = {seq, at, kind: "created" \| "ready" \| "failed" \| "visual_change" \| "browser_checks_passed" \| "browser_checks_failed" \| "deleted", project, preview, change: string \| null, data: {head}}`: `ready` is up after a push or the first deploy (asleep once up counts), never a sleeping preview waking; `visual_change` is a visual change waiting for review, once a head; `browser_checks_passed` and `browser_checks_failed` say production's browser checks have all run on the head, once a head. Each event's `seq` is taken in the write that made it so, so commit order is seq order and a follower past one never misses an earlier one; kept 7 days. roll MCP's event feeds follow it |
 | `GET /v1/previews/{id}` | | `Preview` |
 | `DELETE /v1/previews/{id}` | | 202 `Preview` (`desired: "deleted"`) |
 | `POST /v1/previews/{id}/refresh` | | `Preview`: redeploy now |
@@ -3209,8 +3209,10 @@ In progress, each in a pull request of its own:
 2. **The page's own review in the toolbar** (Vercel's toolbar, Chromatic's UI Review): a team
    visitor sees whether this page changed against main and what it adds, with Accept opening
    roll (never clickable by the page's own script).
-3. **A live dashboard**: the list and the sheet follow the preview event feed instead of polling
-   every 15 to 20 s, one slow poll kept as a fallback.
+3. **A live dashboard, in review**: the Previews list follows the event feed (a long poll, `wait`)
+   instead of reading the list every 20 s; a calm list is read once a minute in case the feed
+   missed something, a busy one every 3 s as before. A screenshot that arrives after a preview is
+   up without a visual change still shows at the next read.
 4. **roll's reviewer reads the visual and API results** (Percy's Visual Review Agent): which of a
    change's visual changes its diff explains, as the verdict's first line; model output never
    accepts anything.
@@ -3218,8 +3220,24 @@ In progress, each in a pull request of its own:
 6. **Restore points for search and buckets**: search's on roll search's reset from a copy (#1149;
    200 put back, 409 dropped or busy, 503 recorded); buckets need a put-back on roll storage's
    side.
-7. **Previews for the members thread's next products**: roll apps once its routes become member
-   routes.
+7. **Previews for the members thread's next products**: search is a member product (#808).
+   Checked on 2026-11-27: a member's previews of a project with a cluster keep their role (the
+   data sheet is `reveal`, and a search branch answers 409 there; mask suggestions read only
+   clusters the project trusts, which every member role reads; the columns are read as the
+   operator behind that filter). Teardown is previews' own: the operator changes the password,
+   then deletes. A branch that fails, a 503 included, fails the converge with the product's
+   error and is tried again on the backoff. By design, the preview's branch is in no project:
+   roll search homes only a person's branches (`Control::branched`), so through `/v1/search` it's
+   a 404 to every member, and members reach it through previews' own routes, by role (its
+   credentials are `reveal`). Homing it would take two changes outside previews:
+   - roll-access finding a cluster's project from its home, not only from canvases (previews'
+     copies can't go on the canvas, or the next preview would branch them);
+   - search's project-delete hooks skipping previews' branches (previews deletes them only after
+     the project is gone).
+
+   That isn't worth it while previews' own routes cover what members need.
+
+   roll apps follows once its routes become member routes.
 8. **Watches on pg-control**: the data step's Postgres compute start; cheap branches on ext4
    through overlay volumes; recovery to a time seconds old (unowned).
 

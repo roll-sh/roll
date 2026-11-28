@@ -63,18 +63,18 @@ fn ingest_nesting_fits_the_stack() {
     );
     let deep_value = format!(r#"{{"processors":[{{"set":{{"field":"b","value":{}}}}}]}}"#, nest("{\"a\":", "}", "1", 980));
     let mut reqs = vec![simulate(foreach, r#"{"a":"x"}"#.into()), simulate(deep_value, "{}".into())];
-    for i in 0..300 {
+    for i in 0..120 {
         reqs.push(json("PUT", &format!("/_ingest/pipeline/p{i}"), format!(r#"{{"processors":[{{"pipeline":{{"name":"p{}","ignore_missing_pipeline":true}}}}]}}"#, i + 1)));
     }
     reqs.push(json("PUT", "/i/_doc/1?pipeline=p0", r#"{"a":1}"#.into()));
-    reqs.push(json("PUT", "/i/_doc/2?pipeline=p200", r#"{"a":1}"#.into()));
+    reqs.push(json("PUT", "/i/_doc/2?pipeline=p20", r#"{"a":1}"#.into()));
     let r = run(reqs);
     assert_eq!(r[0].0, 200, "{}", reason(&r[0].1));
     assert_eq!(r[1].0, 200, "{}", reason(&r[1].1));
-    let (s, v) = &r[302];
+    let (s, v) = &r[122];
     assert!(*s >= 400 && reason(v).contains("Too many nested pipelines. Cannot have more than 100 nested pipelines"), "{s} {}", reason(v));
-    // p200 … p299: 100 pipelines.
-    assert_eq!(r[303].0, 201, "{}", reason(&r[303].1));
+    // p20 … p119: 100 pipelines.
+    assert_eq!(r[123].0, 201, "{}", reason(&r[123].1));
 }
 
 /// Grok compiles its expanded pattern on the caller's thread: groups nest at most 1000 deep

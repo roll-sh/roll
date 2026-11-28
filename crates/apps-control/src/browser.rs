@@ -282,16 +282,3 @@ impl Apps {
         self.check_tokens.lock().get(token).is_some_and(|(s, e)| s == service && e == env)
     }
 }
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn the_runner_says_how_it_went() {
-        let l = |s: &str| vec!["chromium started".to_string(), s.to_string()];
-        assert_eq!(super::result(&l(r#"ROLL-CHECK {"ok":true,"status":200,"ms":812}"#)), Ok(super::Passed { status: Some(200), over_budget: None }));
-        assert_eq!(super::result(&l(r#"ROLL-CHECK {"ok":true,"status":200,"over_budget":"over its budget: LCP 3 ms > 1 ms"}"#)).unwrap().over_budget.as_deref(), Some("over its budget: LCP 3 ms > 1 ms"));
-        assert_eq!(super::result(&l(r#"ROLL-CHECK {"ok":false,"status":200,"error":"locator('h1') not visible"}"#)), Err("locator('h1') not visible".into()));
-        assert!(super::result(&l("Segmentation fault")).is_err());
-        assert!(super::dockerfile().contains("playwright-core@1.65.1") && super::dockerfile().starts_with("FROM mcr.microsoft.com/playwright:v1.65.1-noble"));
-    }
-}

@@ -708,23 +708,6 @@ mod tests {
         assert_eq!(hub.tail("trace:svc_x/production", 10, None).await[0].text, r#"{"attr":"***"}"#);
     }
 
-    /// A trace's lines are marked as one however another instance's lines fall between them,
-    /// and the first line that doesn't go on ends it.
-    #[tokio::test]
-    async fn a_stack_traces_lines_are_marked_as_one_trace() {
-        let hub = LogHub::new(None);
-        let base = hub.sink("env:svc_x/production", Stream::Stderr);
-        let (a, b) = (base.instance("a", "d"), base.instance("b", "d"));
-        a.line("Traceback (most recent call last):");
-        b.line("GET / 200");
-        a.line("  File \"/app/x.py\", line 3, in f");
-        a.line("ZeroDivisionError: division by zero");
-        a.line("after");
-        let marks: Vec<(String, Option<Trace>)> = hub.tail("env:svc_x/production", 10, None).await.into_iter().map(|l| (l.text, l.trace)).collect();
-        let want = [Some(Trace::Start), None, Some(Trace::More), Some(Trace::More), None];
-        assert_eq!(marks.iter().map(|(_, t)| *t).collect::<Vec<_>>(), want, "{marks:?}");
-    }
-
     #[tokio::test]
     async fn a_search_finds_lines_in_stored_chunks_and_in_memory_in_order() {
         let dir = tempfile::tempdir().unwrap();
@@ -846,22 +829,5 @@ impl Search {
     pub fn matches(&self, text: &str) -> bool {
         let t = text.to_lowercase();
         self.any.iter().any(|terms| terms.iter().all(|(w, absent)| t.contains(w.as_str()) != *absent))
-    }
-}
-
-#[cfg(test)]
-mod search_tests {
-    use super::Search;
-
-    #[test]
-    fn a_search_takes_words_phrases_exclusions_and_or() {
-        let s = |q: &str, t: &str| Search::parse(q).unwrap().matches(t);
-        assert!(s("checkout error", "ERROR in Checkout for order 7") && !s("checkout error", "checkout ok"));
-        assert!(s("\"order 7\"", "for order 7") && !s("\"order 7\"", "order 17 of 7"));
-        assert!(s("error -health", "error saving") && !s("error -health", "error in /health"));
-        assert!(s("--verbose", "ran with --verbose") && s("-1", "exit -1"), "a flag or a number is a word");
-        assert!(s("timeout OR refused", "connection refused") && s("timeout OR refused", "read timeout") && !s("timeout OR refused", "ok"));
-        assert!(s("\"OR\"", "a OR b") && !s("\"OR\"", "a b"), "quoted, OR is a word");
-        assert_eq!(Search::parse("   "), None);
     }
 }

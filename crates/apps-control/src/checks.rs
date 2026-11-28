@@ -252,10 +252,7 @@ mod tests {
         assert!(with(None, &[], Some("{}")).check().is_err(), "a GET has no body");
         assert!(with(None, &[("Host", "evil")], None).check().is_err() && with(None, &[("x-roll-check", "x")], None).check().is_err());
         assert!(with(None, &[("X-A", "a\r\nX-B: b")], None).check().is_err());
-    }
-
-    #[test]
-    fn an_answer_passes_by_its_status_and_text() {
+        // An answer passes by its status and text.
         let c = |status: Option<u16>, contains: Option<&str>| Check { name: "x".into(), path: "/".into(), tcp: false, every_s: 60, timeout_s: 10, status, contains: contains.map(String::from), browser: None, budgets: None, from: None, host: None, method: None, headers: None, body: None };
         assert!(passes(&c(None, None), 301, b"").is_ok(), "2xx or 3xx by default");
         assert_eq!(passes(&c(None, None), 503, b""), Err("answered 503".into()));
