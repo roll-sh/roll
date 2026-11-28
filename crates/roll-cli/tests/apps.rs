@@ -56,6 +56,8 @@ impl T {
             .current_dir(self.work.path())
             .env("ROLL_API_URL", &self.api)
             .env_remove("ROLL_API_KEY")
+            // A credential of roll's in the caller's shell, which `exec`'s command never gets.
+            .env("ROLL_FAKE_TOKEN", "fake-inherited-token")
             .stdin(Stdio::null())
             .output()
             .await

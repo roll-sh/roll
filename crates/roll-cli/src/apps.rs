@@ -897,6 +897,10 @@ pub enum AppsCmd {
         /// Leave linked services' private URLs as they are: no tunnels.
         #[arg(long)]
         no_tunnels: bool,
+        /// Pass roll's own credentials (ROLL_ADMIN_TOKEN, ROLL_TOKEN and the like) on to the
+        /// command; by default it gets none unless the service sets that name itself.
+        #[arg(long)]
+        keep_roll_credentials: bool,
         /// The command, after `--`.
         #[arg(last = true, required = true)]
         command: Vec<String>,
@@ -3970,10 +3974,10 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             svc
         }
-        AppsCmd::Dev { name, mut target, no_tunnels, command } => {
+        AppsCmd::Dev { name, mut target, no_tunnels, keep_roll_credentials, command } => {
             target.service = name.or(target.service);
             let svc = service(api, &target).await?;
-            return dev(api, &svc, &target.env, no_tunnels, &command).await;
+            return dev(api, &svc, &target.env, no_tunnels, keep_roll_credentials, &command).await;
         }
         AppsCmd::Export { project, output, force } => {
             let project = match project {
@@ -6043,7 +6047,7 @@ fn secret_from_stdin(what: &str) -> anyhow::Result<String> {
 /// `roll apps dev`: `command` run here with environment `env`'s values (the reveal route's) in
 /// its environment only, never a file, argv or a log; a tunnel to each linked service a value
 /// names, unless `no_tunnels`; Ctrl-C passed on, and its exit roll's.
-async fn dev(api: &Api, svc: &Value, env: &str, no_tunnels: bool, command: &[String]) -> anyhow::Result<()> {
+async fn dev(api: &Api, svc: &Value, env: &str, no_tunnels: bool, keep_roll_credentials: bool, command: &[String]) -> anyhow::Result<()> {
     let base = env_path(svc, env);
     let (values, listed) = (api.get(&format!("{base}/variables/values")).await?, api.get(&format!("{base}/variables")).await?);
     // Names that steer this machine's own programs (a loader, a shell, a runtime's flags): an
@@ -6130,12 +6134,12 @@ async fn dev(api: &Api, svc: &Value, env: &str, no_tunnels: bool, command: &[Str
     // roll's own credentials (the token that read these values among them) aren't the app's,
     // as `roll run` keeps them from its command.
     let mut cmd = tokio::process::Command::new(crate::sys::program(&command[0]));
-    cmd.args(&command[1..]).envs(vars);
-    for (k, _) in std::env::vars_os() {
-        if k.to_str().is_some_and(crate::secrets::is_roll_credential) {
+    if !keep_roll_credentials {
+        for k in crate::sys::roll_credentials(&|n| vars.iter().any(|(k, _)| k == n)) {
             cmd.env_remove(k);
         }
     }
+    cmd.args(&command[1..]).envs(vars);
     // Ctrl-C from the terminal reaches the command itself; one sent to roll alone (and SIGTERM,
     // SIGHUP; on Windows, the console closing) is passed on. roll stays up until it exits.
     let mut signals = crate::mask::Signals::new()?;

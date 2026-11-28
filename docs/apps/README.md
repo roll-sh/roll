@@ -3113,7 +3113,7 @@ calls name) is a 403, so no service can sign a call to another. Trust the exact 
 never `…:*`, which takes trusted previews' tokens too. Not yet: a per-request header for web
 services (Vercel's `x-vercel-oidc-token`): the URL is one local `GET`.
 `api.rs::an_instance_reads_its_oidc_token_for_an_allowed_audience`, and through the real issuer
-rolld's `secrets::tests::an_apps_instance_token_names_its_environment_and_an_untrusted_preview_gets_none`.
+rolld's `secrets::tests::a_service_gets_an_issuer_token_only_from_a_project_that_stands_for_it`.
 
 ## Runtime config
 
@@ -3818,8 +3818,9 @@ Left out, each named on stderr:
   could otherwise run code on the laptop running `dev`.
 
 roll's own credentials in the shell (`ROLL_API_KEY`, `ROLL_TOKEN`, any `ROLL_*_TOKEN`, `_KEY`,
-`_PASSWORD`, `_SECRET`) aren't passed on, as `roll run` keeps them from its command: the app and
-its dependencies never act with the token that read its values. Before the command starts, stderr
+`_PASSWORD`, `_SECRET`, a `_URL` holding a password) aren't passed on, as `roll run` keeps them
+from its command: the app and its dependencies never act with the token that read its values.
+`--keep-roll-credentials` passes them on; a name the environment sets itself is always its own. Before the command starts, stderr
 lists the names it gets, never a value.
 
 A linked service's private URL (`http://<name>.<env>.internal:<port>`) is pointed at a local
