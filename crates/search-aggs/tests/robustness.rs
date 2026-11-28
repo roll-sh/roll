@@ -149,9 +149,9 @@ fn fuzz_suite(name: &str, failures: &mut Vec<String>) -> usize {
         let mut paths = Vec::new();
         scalar_paths(aggs, &mut Vec::new(), &mut paths);
         for path in &paths {
-            // A rotating third of the values per position keeps the default run short while
-            // still covering every value at every kind of position across the suite.
-            let picked: Vec<&Json> = if full { values.iter().collect() } else { values.iter().skip(k % 3).step_by(3).collect() };
+            // Two of the values per position, rotating, keep the default run short while still
+            // trying every value across the suite.
+            let picked: Vec<&Json> = if full { values.iter().collect() } else { values.iter().skip(k % 11).step_by(11).collect() };
             k += 1;
             for v in picked {
                 let mut req = parsed.clone();

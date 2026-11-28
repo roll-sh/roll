@@ -6366,7 +6366,7 @@ fn replace_private(path: &str, text: &str) -> anyhow::Result<()> {
 async fn render_watch(c: &Client<'_>, env: &str, file: &str, tpl: &str, out: &str, mut text: String, mut leases: Vec<String>, follow: Digests, interval: u64, exec: Option<&str>) -> anyhow::Result<()> {
     // The environment's digest, and every one its references read, as the first render's answers
     // gave them (a second render would read and issue everything again).
-    let mut last = digests_since(c, &Digests::new(), &follow).await;
+    let mut last = first_digests(c, &follow).await?;
     let mut follow: Vec<String> = follow.into_keys().collect();
     let mut renew = tokio::time::interval_at(tokio::time::Instant::now() + RENEW_EVERY, RENEW_EVERY);
     loop {
@@ -7118,6 +7118,7 @@ async fn run_env(c: &Client<'_>, at: &At, r: &Run, held: &mut Option<Value>) -> 
     let v = match (read, &r.fallback) {
         (Ok(Ok(v)), _) => v,
         // Refused (a revoked token, no such environment): never the fallback.
+        (Ok(Err((status, message))), _) if r.watch && keys_only_refusal(status, &message) => bail!("--watch can't follow this folder: {message} (without --watch, roll run reads the token's own keys)"),
         (Ok(Err((status, message))), _) if !status.is_server_error() => bail!("{message}"),
         (Ok(Err((_, message))), None) => bail!("{message}"),
         (Err(e), None) => return Err(e),
@@ -7366,6 +7367,34 @@ async fn digests_since(c: &Client<'_>, before: &Digests, follow: &Digests) -> Di
     out
 }
 
+/// [`digests_since`] at a watch's start. A folder whose digest roll refuses because the token
+/// reaches only some of its keys can't be followed: the watch stops here, saying so once, instead
+/// of failing every poll.
+async fn first_digests(c: &Client<'_>, follow: &Digests) -> anyhow::Result<Digests> {
+    let mut asked = Digests::new();
+    for p in follow.iter().filter(|(_, d)| d.is_empty()).map(|(p, _)| p) {
+        match c.call(Method::GET, p, None).await {
+            Ok(v) => {
+                asked.insert(p.clone(), s(&v["digest"]));
+            }
+            Err(e) if keys_only(&e) => bail!("--watch can't follow this folder: {e}"),
+            Err(_) => {}
+        }
+    }
+    Ok(digests_since(c, &asked, follow).await)
+}
+
+/// roll refused a request about a whole folder because the token's rule reaches only some of its
+/// keys (`roll_auth::scope::keys_only`).
+fn keys_only_refusal(status: reqwest::StatusCode, message: &str) -> bool {
+    status == reqwest::StatusCode::FORBIDDEN && message.contains(roll_auth::scope::KEYS_ONLY)
+}
+
+/// [`keys_only_refusal`], from a call's error.
+pub(crate) fn keys_only(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| c.downcast_ref::<crate::ApiStatus>().is_some_and(|s| keys_only_refusal(s.status, &s.message)))
+}
+
 /// No answer from rolld, or a failing one (a 5xx): what `--fallback` starts through. A refusal
 /// (a 4xx: a revoked token, a customer's key that refused, 423) never is.
 pub(crate) fn no_answer(e: &anyhow::Error) -> bool {
@@ -7537,7 +7566,7 @@ async fn watch(c: &Client<'_>, at: &At, r: &Run, mut env: Vec<Var>, mut leases: 
     // The environment's digest, and every referenced one's (an env file's `roll://…`), as the
     // first read's answers gave them (started from a fallback: one that reloads at the first
     // answer).
-    let mut last = digests_since(c, &Digests::new(), &follow).await;
+    let mut last = first_digests(c, &follow).await?;
     let mut follow: Vec<String> = follow.into_keys().collect();
     let every = std::time::Duration::from_secs(r.interval.max(1));
     // Dynamic credentials outlive their first lease: renewed every 10 minutes while it runs.

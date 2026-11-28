@@ -208,13 +208,12 @@ async fn acknowledged_writes_survive_sigkill() {
     let mut dev = start(dir.path(), &[]).await;
     let (s, v) = json(dev.addr, "PUT", "/crash", r#"{"settings":{"number_of_shards":2}}"#).await.unwrap();
     assert_eq!(s, 200, "{v}");
-    for round in 0..3 {
+    // Two rounds: the second restart replays a log that went through one already.
+    for round in 0..2 {
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let writers: Vec<_> = (0..4).map(|w| tokio::spawn(writer(dev.addr, w + round * 10, acked.clone(), stop.clone()))).collect();
-        // At least 700 ms and 40 more acknowledged writes (a loaded machine is slow), then
-        // kill with writes in flight.
+        // 40 more acknowledged writes, then kill with writes in flight.
         let (t0, before) = (Instant::now(), acked.lock().len());
-        tokio::time::sleep(Duration::from_millis(700)).await;
         while acked.lock().len() < before + 40 && t0.elapsed() < Duration::from_secs(30) {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }

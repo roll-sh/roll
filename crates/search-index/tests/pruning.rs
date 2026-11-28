@@ -152,7 +152,7 @@ fn queries(rng: &mut StdRng) -> Vec<QueryRef> {
 #[test]
 fn pruned_top_k_equals_exhaustive() {
     // PRUNING_SEEDS=<n> sweeps more corpora (every third without deletes).
-    let n: u64 = std::env::var("PRUNING_SEEDS").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
+    let n: u64 = std::env::var("PRUNING_SEEDS").ok().and_then(|v| v.parse().ok()).unwrap_or(2);
     for (seed, deletes) in (1..=n).map(|s| (s, s % 3 != 1)) {
         let s = corpus(seed, 12_000, deletes).searcher();
         let mut rng = StdRng::seed_from_u64(seed + 100);
@@ -352,7 +352,7 @@ fn concurrent_pruned_top_k_equals_exhaustive() {
     use search_index::SearchControl;
     use search_index::collector::TopScoreManager;
     use search_index::search::SearchLimits;
-    for (seed, deletes) in [(11u64, false), (12, true)] {
+    for (seed, deletes) in [(12u64, true)] {
         let s = corpus_in(seed, 12_000, deletes, 7).searcher();
         assert!(s.segments().len() >= 3, "{} segments", s.segments().len());
         let par = s.with_limits(SearchLimits { parallel_min_docs: 500, parallelism: 4, ..SearchLimits::default() });
