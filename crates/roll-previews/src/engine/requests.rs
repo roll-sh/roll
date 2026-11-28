@@ -124,6 +124,44 @@ impl Engine {
         Ok(crate::notes::NoteWork { number, url: at })
     }
 
+    /// Notes whose work item (or its GitHub issue) someone who speaks for the team closed,
+    /// resolved by roll and said on the change once (Marker.io's and Jam's two-way sync): only
+    /// from that state, never from anyone's words; a reopen leaves the note resolved. roll
+    /// code's `work` events nudge a pass; the state is read again every pass, so none is missed.
+    pub async fn tend_fixed_notes(&self) {
+        let open = match self.store.open_note_work() {
+            Ok(o) => o,
+            Err(e) => {
+                tracing::warn!(error = %e, "previews: reading the notes' work items");
+                return;
+            }
+        };
+        for (preview, note, change, number) in open {
+            let closed = match self.source.work_closed(&change, number).await {
+                Ok(Some(what)) => what,
+                Ok(None) => continue,
+                Err(e) => {
+                    tracing::warn!(preview = %preview, error = %e, "previews: reading a note's work item");
+                    continue;
+                }
+            };
+            // Once: only the write that resolves it says so.
+            match self.store.resolve_note(&preview, &note, crate::notes::ROLL) {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(e) => {
+                    tracing::warn!(preview = %preview, error = %e, "previews: resolving a fixed note");
+                    continue;
+                }
+            }
+            let _ = self.store.log(&preview, &format!("roll resolved a note: {closed} closed"));
+            let said = code_control::review::preview_note::reply_body(&note, &format!("Resolved by roll: {closed} closed."));
+            if let Err(e) = self.source.say(&change, &said).await {
+                tracing::warn!(preview = %preview, error = %e, "previews: saying a note was resolved by its fix");
+            }
+        }
+    }
+
     /// [`Engine::notes_of`] by the preview's environment name (`pv-<id>`, as roll apps knows it).
     pub async fn notes_for(&self, env: &str, path: &str) -> anyhow::Result<Vec<crate::notes::Note>> {
         match Engine::preview_of_env(env) {

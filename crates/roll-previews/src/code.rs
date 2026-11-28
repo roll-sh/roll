@@ -31,8 +31,8 @@ pub struct CodeSource {
 }
 
 impl CodeSource {
-    /// Follow roll code: its `change` events nudge the engine (the reconciler reads the
-    /// database itself, so a dropped event costs one interval at most).
+    /// Follow roll code: its `change` and `work` events nudge the engine (the reconciler reads
+    /// the database itself, so a dropped event costs one interval at most).
     pub fn new(code: Arc<Code>) -> Arc<CodeSource> {
         let (nudge, _) = broadcast::channel(16);
         let mut events = code.subscribe();
@@ -40,7 +40,7 @@ impl CodeSource {
         tokio::spawn(async move {
             loop {
                 match events.recv().await {
-                    Ok(e) if e.kind == "change" => {
+                    Ok(e) if e.kind == "change" || e.kind == "work" => {
                         let _ = tx.send(());
                     }
                     Ok(_) => {}
@@ -424,6 +424,19 @@ impl Source for CodeSource {
         let w = self.code.create_work_from(&r, &serde_json::json!({ "title": title, "body": body, "labels": labels }), outside)?;
         let web = self.code.config.web_url.trim_end_matches('/');
         Ok(Some((w.number, format!("{web}/{}/work", r.full_name()))))
+    }
+
+    async fn work_closed(&self, change: &str, number: u64) -> anyhow::Result<Option<String>> {
+        let Some(c) = self.code.db.change(change)? else { return Ok(None) };
+        Ok(self.code.work_closed_by_team(&c.repo_id, number)?)
+    }
+
+    async fn say(&self, change: &str, body: &str) -> anyhow::Result<()> {
+        let Some(c) = self.code.db.change(change)? else { return Ok(()) };
+        let Some(r) = self.code.db.repo_by_id(&c.repo_id)? else { return Ok(()) };
+        let input = serde_json::json!({ "verdict": "comment", "body": body });
+        self.code.submit_review(&r, &c, &code_control::review::Reviewer::roll(), &input, &code_control::review::Origin::ROLL).await?;
+        Ok(())
     }
 
     async fn git_commit(&self, repo: &str, revision: &str) -> anyhow::Result<Option<String>> {

@@ -60,10 +60,28 @@ impl Code {
         let gh = |e: code_github::Error| crate::Error::Internal(e.into());
         let issue = hub.client.create_issue(l.installation_id, &l.owner, &l.repo, title, body, labels).await.map_err(gh)?;
         let draft = super::sync::issue_draft(&hub, &issue);
-        super::sync::upsert_issue(self, r, &draft)?;
+        super::sync::upsert_issue(self, r, &draft, false)?;
         let number = self.db.work_by_source(&r.id, &draft.external_id)?.map_or(issue.number, |w| w.number);
         let url = issue.html_url.unwrap_or_else(|| format!("{}/{}/issues/{}", hub.config.web_base, l.full_name(), issue.number));
         Ok(Some((number, url)))
+    }
+
+    /// What closed work item `number` of the repo, when someone who speaks for the team did:
+    /// done or closed in roll (a fix that landed, a writer), or its GitHub issue (one roll's App
+    /// opened) closed by someone GitHub says can push. `None` while it's open, and for a close
+    /// GitHub can't vouch for. roll previews resolves a note made this item by it (docs/previews.md).
+    pub fn work_closed_by_team(&self, repo_id: &str, number: u64) -> Result<Option<String>> {
+        let Some(w) = self.db.work_by_number(repo_id, number)? else { return Ok(None) };
+        if !matches!(w.state, WorkState::Done | WorkState::Closed) {
+            return Ok(None);
+        }
+        let Some(issue) = w.source.strip_prefix("github#") else { return Ok(Some(format!("work item #{number}"))) };
+        Ok(match mark(self, &format!("issue-closed:{}", w.id))?.as_deref() {
+            Some("github") => None,
+            Some(super::CLOSED_BY_WRITER) => Some(format!("GitHub issue #{issue}")),
+            // Finished in roll (GitHub hears it from roll).
+            _ => Some(format!("work item #{number}")),
+        })
     }
 }
 

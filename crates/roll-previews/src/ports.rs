@@ -580,6 +580,17 @@ pub trait Source: Send + Sync {
     async fn work_item(&self, _change: &str, _title: &str, _body: &str, _labels: &[&str], _outside: bool) -> anyhow::Result<Option<(u64, String)>> {
         Ok(None)
     }
+    /// What closed work item `number` of the change's repo, when someone who speaks for the team
+    /// did (roll code's `Code::work_closed_by_team`: done or closed in roll, or its GitHub issue
+    /// closed by someone who can push): a note made that item is resolved by it. `None` while
+    /// it's open, for anyone else's close, and where this source can't tell.
+    async fn work_closed(&self, _change: &str, _number: u64) -> anyhow::Result<Option<String>> {
+        Ok(None)
+    }
+    /// A comment on the change said by roll itself (no person): a note resolved by its fix.
+    async fn say(&self, _change: &str, _body: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
     /// The git commit of a changeset.
     async fn git_commit(&self, _repo: &str, _revision: &str) -> anyhow::Result<Option<String>> {
         Ok(None)

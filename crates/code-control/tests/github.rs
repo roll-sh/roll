@@ -2531,3 +2531,60 @@ async fn what_github_did_while_roll_was_down_is_caught_up() {
     // A second look finds nothing new.
     assert_eq!(a.code.github_reconcile_now(&repo_id).await.unwrap(), Default::default());
 }
+
+/// A preview note's work item closed by the team is what resolves the note (roll previews asks
+/// `Code::work_closed_by_team`): done in roll, or its GitHub issue (roll's App opened it) closed
+/// by someone GitHub says can push. A close GitHub can't vouch for, another issue's close, or a
+/// later edit never counts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_notes_issue_closed_by_the_team_resolves_it() {
+    let g = github_mock().await;
+    let tmp = tempfile::tempdir().unwrap();
+    seed(tmp.path(), &format!("{}/git/acme/app.git", g.base));
+    let a = app(None);
+    enable(&a, &g, quiet_mirror());
+    let repo_id = connect(&a).await;
+    let closed = |n: u64| a.code.work_closed_by_team(&repo_id, n).unwrap();
+    // A work item in roll (a guest's note), done there.
+    let item = a.ok("POST", "/v1/code/repos/acme/app/work", Some(json!({ "title": "Preview feedback: a guest's" }))).await;
+    let n0 = item["number"].as_u64().unwrap();
+    assert_eq!(closed(n0), None, "open");
+    a.ok("PATCH", &format!("/v1/code/work/{}", item["id"].as_str().unwrap()), Some(json!({ "state": "done" }))).await;
+    assert_eq!(closed(n0), Some(format!("work item #{n0}")));
+
+    // A team note's GitHub issue, closed by someone who can't push: not the team's word.
+    let row = a.code.find_repo("acme", "app").unwrap();
+    let (n, url) = a.code.open_github_issue(&row, "Preview feedback: cut off", "the note", &["preview-feedback".to_string()]).await.unwrap().unwrap();
+    let gh: u64 = url.rsplit('/').next().unwrap().parse().unwrap();
+    g.mock.perms.lock().insert("maintainer".into(), "write".into());
+    let issue = g.mock.issues.lock().iter().find(|i| i["number"] == gh).cloned().unwrap();
+    let event = |action: &str, state: &str, sender: &str| {
+        let mut i = issue.clone();
+        i["state"] = json!(state);
+        json!({ "action": action, "issue": i, "repository": repo_json(&g.mock), "sender": { "login": sender, "id": 7 }, "installation": { "id": INSTALLATION } })
+    };
+    let ar = &a;
+    let state = |n: u64| async move { ar.ok("GET", &format!("/v1/code/repos/acme/app/work/{n}"), None).await["state"].clone() };
+    assert_eq!(hook(&a, "issues", "n-1", &event("closed", "closed", "stranger"), SECRET).await, StatusCode::OK);
+    assert_eq!(state(n).await, "done", "closed in roll all the same");
+    assert_eq!(closed(n), None, "a close GitHub can't vouch for");
+    // Reopened, then closed by a maintainer: theirs counts, and an edit after doesn't undo it.
+    assert_eq!(hook(&a, "issues", "n-2", &event("reopened", "open", "stranger"), SECRET).await, StatusCode::OK);
+    assert_eq!(state(n).await, "open");
+    assert_eq!(hook(&a, "issues", "n-3", &event("closed", "closed", "maintainer"), SECRET).await, StatusCode::OK);
+    assert_eq!(closed(n), Some(format!("GitHub issue #{gh}")));
+    assert_eq!(hook(&a, "issues", "n-4", &event("edited", "closed", "stranger"), SECRET).await, StatusCode::OK);
+    assert_eq!(closed(n), Some(format!("GitHub issue #{gh}")));
+
+    // Someone else's issue closed by the maintainer: not a note's.
+    let mut theirs = issue_json(7, "Not a note", "open", &[]);
+    theirs["author_association"] = json!("MEMBER");
+    let opened = json!({ "action": "opened", "issue": theirs, "repository": repo_json(&g.mock), "installation": { "id": INSTALLATION } });
+    assert_eq!(hook(&a, "issues", "n-5", &opened, SECRET).await, StatusCode::OK);
+    theirs["state"] = json!("closed");
+    let shut = json!({ "action": "closed", "issue": theirs, "repository": repo_json(&g.mock), "sender": { "login": "maintainer", "id": 7 }, "installation": { "id": INSTALLATION } });
+    assert_eq!(hook(&a, "issues", "n-6", &shut, SECRET).await, StatusCode::OK);
+    let w7 = a.ok("GET", "/v1/code/repos/acme/app/work", None).await.as_array().unwrap().iter().find(|w| w["source"] == "github#7").cloned().unwrap();
+    assert_eq!(w7["state"], "done");
+    assert_eq!(closed(w7["number"].as_u64().unwrap()), None);
+}

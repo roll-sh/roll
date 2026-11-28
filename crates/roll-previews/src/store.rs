@@ -2814,13 +2814,28 @@ impl Store {
     }
 
     /// `by` resolved a note left on the preview's page (its review's id): the page stops listing
-    /// it. Resolving one already resolved changes nothing.
-    pub fn resolve_note(&self, preview: &str, review: &str, by: &str) -> Result<()> {
+    /// it. Resolving one already resolved changes nothing (`false`).
+    pub fn resolve_note(&self, preview: &str, review: &str, by: &str) -> Result<bool> {
         let now = self.now_ms()?;
         self.db.write(|c| {
-            c.execute("INSERT INTO resolved_notes (preview_id, review_id, by, at) VALUES (?, ?, ?, ?) ON CONFLICT (preview_id, review_id) DO NOTHING", params![preview, review, by, now])?;
-            Ok::<_, Error>(())
+            let n = c.execute("INSERT INTO resolved_notes (preview_id, review_id, by, at) VALUES (?, ?, ?, ?) ON CONFLICT (preview_id, review_id) DO NOTHING", params![preview, review, by, now])?;
+            Ok::<_, Error>(n > 0)
         })
+    }
+
+    /// The notes made work items that nobody has resolved, on a change's preview: (preview,
+    /// note, change, the item's number).
+    pub fn open_note_work(&self) -> Result<Vec<(String, String, String, u64)>> {
+        let rows: Vec<(String, String, String, i64)> = self.db.read(|c| {
+            c.query(
+                "SELECT w.preview_id, w.review_id, p.change_id, w.number FROM note_work w JOIN previews p ON p.id = w.preview_id \
+                 WHERE w.number > 0 AND p.change_id IS NOT NULL \
+                 AND NOT EXISTS (SELECT 1 FROM resolved_notes r WHERE r.preview_id = w.preview_id AND r.review_id = w.review_id) ORDER BY w.at",
+                params![],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+        })?;
+        Ok(rows.into_iter().map(|(p, n, c, num)| (p, n, c, num as u64)).collect())
     }
 
     /// The notes resolved on a preview's page (their reviews' ids).

@@ -1992,6 +1992,22 @@ land on the change.
   without write on the repo gets its refusal). It takes its service
   and title, and its sample as the preview shows it (masked), in a block nothing in it can close,
   labelled `preview-error` (`lib/preview-work.ts`).
+- A note resolves itself when its fix lands (Marker.io's and Jam's two-way sync with their
+  trackers): once its work item is done or closed in roll (a change that fixes it landing, or a
+  writer closing it), or its GitHub issue is closed by someone GitHub says can push (the `issues`
+  webhook's `closed`, its sender's collaborator permission admin, maintain or write: an
+  `OWNER`, `MEMBER` or `COLLABORATOR`), roll resolves the note, says "Resolved by roll: work item
+  #N closed." (or "GitHub issue #N") as the note's reply on the change, by roll itself, never a
+  person, and the pull request's comment and the sheet stop listing it. Only the item made from
+  the note counts, matched by the number previews keeps for it (never by text), and only an issue
+  roll's App opened; a close GitHub can't vouch for (a triager, someone without access) leaves
+  the note open, and no one's words resolve one. Roll code keeps who closed it with the issue's
+  close (`issue-closed:` marks: a later edit keeps it); previews reads that state every pass
+  (`Engine::tend_fixed_notes`, nudged by roll code's `work` events, so a dropped event costs one
+  interval, never the resolve), resolves each note once and says it once. A reopen leaves the
+  note resolved. `a_notes_issue_closed_by_the_team_resolves_it`, `a_note_becomes_a_work_item_once`.
+  Jira and Asana are one-way: their notes don't come back resolved yet (`## Next`: through an
+  automation trigger).
 - A note is resolved from the page too (Vercel Comments): its Resolve opens roll
   (`?fb_resolve=<review id>`), where the sheet shows the note and anyone on the project resolves
   it (`POST …/notes/{review}/resolve`, kept by previews: roll code's comment reviews aren't
@@ -3200,9 +3216,10 @@ In progress, each in a pull request of its own:
   also takes GET replay off main's preview's own data (a replayed GET can act);
 - a member's preview of a project with a search cluster, checked end to end.
 
-1. **A note resolved when its fix lands** (Marker.io's and Jam's two-way sync): a note's work
-   item or GitHub issue closing resolves it, so the pull request comment stops listing fixed
-   notes; Jira and Asana through an automation trigger after.
+1. **A note resolved when its fix lands** (Marker.io's and Jam's two-way sync): in review. A
+   note's work item closing, or its GitHub issue closed by someone who can push, resolves it, so
+   the pull request comment stops listing fixed notes. Next: Jira and Asana, through an
+   automation trigger (a tracker's close calling roll back), which are one-way today.
 2. **The page's own review in the toolbar** (Vercel's toolbar, Chromatic's UI Review): a team
    visitor sees whether this page changed against main and what it adds, with Accept opening
    roll (never clickable by the page's own script).

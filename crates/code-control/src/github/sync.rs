@@ -8,7 +8,7 @@ use crate::{Caller, Code, Error, Result, cs_id};
 use axum::http::{HeaderMap, StatusCode};
 use bytes::Bytes;
 use code_git::{Credentials, FetchArgs, ObjectId};
-use code_github::webhook::{InstallationAction, RepositoriesAction};
+use code_github::webhook::{InstallationAction, IssueAction, RepositoriesAction};
 use code_github::{ChangeDraft, DraftState, Event, PrState, PushDraft, WorkItemDraft, mapping};
 use code_store::{ChangesetId, Edit, Expect, Kind, Mode, NewChangeset, Oid, Signature};
 use code_sql::{OptionalExtension, params};
@@ -124,7 +124,7 @@ async fn import(code: &Arc<Code>, hub: &Hub, repo_id: &str) -> Result<()> {
     for issue in hub.client.list_issues(link.installation_id, &link.owner, &link.repo, None).await.map_err(gh)? {
         let d = issue_draft(hub, &issue);
         if d.state == DraftState::Open {
-            upsert_issue(code, &r, &d)?;
+            upsert_issue(code, &r, &d, false)?;
         }
     }
     let prs = hub.client.list_pull_requests(link.installation_id, &link.owner, &link.repo, "open").await.map_err(gh)?;
@@ -265,7 +265,10 @@ pub(crate) fn issue_draft(hub: &super::Hub, issue: &code_github::model::Issue) -
     d
 }
 
-pub(crate) fn upsert_issue(code: &Code, r: &RepoRow, d: &WorkItemDraft) -> Result<()> {
+/// `closed_by_writer`: GitHub's `closed` event of an issue roll's App opened (a preview note's),
+/// by someone GitHub says can push ([`super::commands::can_write`]): their close resolves the
+/// note (`Code::work_closed_by_team`).
+pub(crate) fn upsert_issue(code: &Code, r: &RepoRow, d: &WorkItemDraft, closed_by_writer: bool) -> Result<()> {
     let state = match d.state {
         DraftState::Open => WorkState::Open,
         DraftState::Completed => WorkState::Done,
@@ -314,8 +317,15 @@ pub(crate) fn upsert_issue(code: &Code, r: &RepoRow, d: &WorkItemDraft) -> Resul
                 s => {
                     w.state = s;
                     w.lease_until = None;
-                    // Closed on GitHub: nothing to tell GitHub back.
-                    super::set_mark(code, &format!("issue-closed:{}", w.id), "github")?;
+                    // Closed on GitHub: nothing to tell GitHub back. Who closed it is the
+                    // `closed` event's word only: a later edit of the closed issue, or roll's own
+                    // close of an item finished in roll, keeps the mark it has.
+                    let key = format!("issue-closed:{}", w.id);
+                    if closed_by_writer {
+                        super::set_mark(code, &key, super::CLOSED_BY_WRITER)?;
+                    } else if !finished {
+                        super::set_mark(code, &key, "github")?;
+                    }
                 }
             }
             code.db.update_work(&w)?;
@@ -789,7 +799,15 @@ async fn handle_repo(code: &Arc<Code>, hub: &Hub, r: &RepoRow, link: &Link, even
             if e.issue.is_pull_request() {
                 return Ok(());
             }
-            upsert_issue(code, r, &issue_draft(hub, &e.issue))
+            // A preview note's issue (roll's App opened it) closed by someone GitHub says can
+            // push: never anyone else's close, nor a word in the issue.
+            let by_writer = e.action == IssueAction::Closed
+                && e.issue.user.as_ref().is_some_and(|u| u.login == hub.config.bot_login())
+                && match e.sender.as_ref() {
+                    Some(s) => super::commands::can_write(hub, link, &s.login).await,
+                    None => false,
+                };
+            upsert_issue(code, r, &issue_draft(hub, &e.issue), by_writer)
         }
         Event::CheckRun(e) if e.requested_action.is_some() => super::notify::visual_action(code, hub, r, link, e).await,
         Event::CheckRun(_) | Event::Status(_) | Event::Visibility(_) => Ok(()),

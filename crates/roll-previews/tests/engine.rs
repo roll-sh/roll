@@ -1738,6 +1738,15 @@ async fn a_note_becomes_a_work_item_once() {
     assert!(body.contains("on a phone") && body.contains("/cart") && body.contains("button.pay"), "{body}");
     assert!(e.code.comments.lock().iter().any(|(c, b, _, _)| c == "chg_nw" && b.contains(&format!("work item #{}", w.number))), "said on the change");
     assert_eq!(e.engine.open_notes(&p.id).await.unwrap()[0].work.as_ref(), Some(&w), "shown with the note");
+    // Its item closed by the team (code-control's `github.rs::a_notes_issue_closed_by_the_team_resolves_it`
+    // decides who counts): resolved by roll, said once, never again.
+    e.engine.pass().await.unwrap();
+    assert_eq!(e.engine.open_notes(&p.id).await.unwrap().len(), 1, "open until its item closes");
+    e.code.closed.lock().insert(w.number, format!("work item #{}", w.number));
+    e.engine.pass().await.unwrap();
+    e.engine.pass().await.unwrap();
+    assert!(e.engine.open_notes(&p.id).await.unwrap().is_empty(), "resolved by its fix");
+    assert_eq!(*e.code.said.lock(), [("chg_nw".to_string(), format!("**Reply on the preview** · `rv_n1`\n\nResolved by roll: work item #{} closed.", w.number))], "said once, by roll");
     // A token that may write previews but not the repo's code makes none: it's roll code's.
     use tower::ServiceExt;
     let mut req = axum::http::Request::post(format!("/v1/previews/{}/notes/rv_n1/work", p.id)).body(axum::body::Body::empty()).unwrap();
