@@ -1321,7 +1321,9 @@ repository the project stands for, `counts_for_repo`, that anyone may read, whil
 it; `key` is the repository, `environment` empty, and the detail says where it's public, roll code
 or the GitHub repository it mirrors, and what to do, `roll secrets leaks managed` or the dashboard's
 "Leaked keys"; roll code says where from what it already keeps, a repository's visibility and its
-GitHub link's `private` as connecting and each delivery last said, never by asking GitHub; for
+GitHub link's `private` as connecting, each delivery and GitHub's `public` and `repository`
+(`publicized`, `privatized`) events last said, never by asking GitHub, on every node of a cluster
+(the control database is shared; one that doesn't answer is logged, not taken for private); for
 whoever reads the whole project; under a policy that keeps `leaks.rotate` managed it's the
 `off_policy` finding instead, never both), `expiring` (within two weeks: a key's
 `expires_at`, so a vendor's key roll hasn't rotated in time, or a SaaS rotator's

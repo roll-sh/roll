@@ -953,6 +953,7 @@ Parsing (`code-github/tests`) and the effect in roll against a mock GitHub
 | `installation.suspend` / `unsuspend` | parse + effect | `code-github/tests/events.rs::installation_actions`, `github.rs::pull_request_issue_and_installation_actions` |
 | `installation.new_permissions_accepted` | parse + effect | `code-github/tests/events.rs::installation_actions`, `github.rs::pull_request_issue_and_installation_actions` |
 | `installation_repositories.added` / `removed` | parse + effect | `code-github/tests/github.rs::webhook_events`, `code-github/tests/events.rs::installation_actions`, `github.rs::pull_request_issue_and_installation_actions` |
+| `public`, `repository.publicized` / `privatized` → the link's `private` (roll secrets' Health) | effect | `github.rs::pull_request_issue_and_installation_actions` |
 | unknown events (star, deployment, check_suite) | parse + effect | `code-github/tests/events.rs::deleted_refs_and_malformed_payloads`, `code-github/tests/github.rs::webhook_events`, `github.rs::pull_request_issue_and_installation_actions` |
 | delivery: signature forms, unsigned 401, malformed 400, dedupe, a failed delivery processed on redelivery, 25 MB bodies | effect | `code-github/tests/events.rs::signature_header_forms`, `github.rs::connect_import_webhooks_and_mirror`, `github.rs::pull_request_issue_and_installation_actions`, `github.rs::automations_hear_github_with_comment_authority_and_forks`, `routes.rs::github_webhook_statuses` |
 
