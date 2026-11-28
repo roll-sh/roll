@@ -3453,6 +3453,11 @@ it, and leaves out dynamic keys and what doesn't resolve instead of failing the 
     the product's settings chooses where the value goes (their own S3 endpoint), so the key is
     refused when it's chosen, and at every read if it's tagged later. It reaches only
     operator-written storage targets (`resolve_for`, "Other roll products").
+  - A product's one-off use for a person's request (`Secrets::use_once`: roll apps writing a
+    domain's records) reads it only when an admin of its folder opted it in for that one use,
+    with the tag `use-<product>-<use>` (`roll secrets allow-use apps.dns CF_TOKEN` tags it
+    `use-apps-dns`), and only for the product's fixed host ("Other roll products"). A writer
+    can't add or remove a `use-…` tag.
 - Nothing tests a guess against it either: no fingerprint, weakness or typed-key misfit shows for
   it, comparing environments says `hidden`, a local file's diff skips it, and the leak scan
   (`POST …/leaks`) doesn't match it. roll code's own scans of pushed code still do: a sensitive
@@ -3520,6 +3525,7 @@ roll secrets get     KEY [--raw]
 roll secrets totp    KEY [--wait]                               # a TOTP key's current code and the seconds left
 roll secrets set     KEY=VALUE… | KEY (value from stdin) [--comment] [--tag]
 roll secrets rm      KEY…
+roll secrets allow-use apps.dns KEY… [--off]                   # a sensitive key for one of roll's uses (the folder's admin only)
 roll secrets import  .env [--overwrite]                         # one change (.env or JSON)
 roll secrets edit                                               # the folder in $EDITOR, one change
 roll secrets set     KEY --generate 48                          # a random value made locally
@@ -5155,17 +5161,29 @@ Agent's templates do).
     writing a domain's records): `Secrets::use_once(resource, reference, caller, purpose, to)`.
     The checks `bind_ref` makes, as the caller now: the one project that holds and stands for the
     resource, reveal on the folder, no protected environment for an untrusted copy, and no
-    untrusted caller. Never a sensitive key, even with `to` (the one host the product sends the
-    value to, fixed in its code: roll apps' `roll_edge::acme::Cloudflare::API`): someone who may
-    reveal the folder but not read the key would have roll act with it wherever it reaches (a DNS
-    token writes records in every zone it can edit). An opt-in the key's owner sets on the key is
-    a later design.
+    untrusted caller. `to` is the one host the product sends the value to, fixed in its code
+    (roll apps' `roll_edge::acme::Cloudflare::API`).
+    - A sensitive key only by its owner's opt-in, as AWS resource policies and Vault's per-path
+      policies let a secret's owner name its one consumer. Otherwise someone who may reveal the
+      folder but not read the key would have roll act with it wherever it reaches (a DNS token
+      writes records in every zone it can edit).
+    - The opt-in is for one named use: `use_id`, a fixed id the product passes, a constant next
+      to its fixed host (`apps.dns`, `apps_control::integrations::DNS_USE`). A key is opted in by
+      the tag `use-<product>-<use>` (`use-apps-dns`; `roll secrets allow-use apps.dns CF_TOKEN`,
+      `--off` to take it away). A tag rather than a field because tags already travel with the
+      key's versions: history, rollback, copies and promotes, change requests and the dashboard
+      carry it with no new field in the contract.
+    - Only an admin of the key's folder adds or removes a `use-…` tag, by any write (a set, a
+      rollback, a copy, an applied change request): a writer's is a 403. The change's audit row
+      names it (`#12 1 changed; CF_TOKEN opted in for use-apps-dns`).
+    - Read only with `to`, for that exact use, and never for an untrusted copy. A person's or a
+      token's `bind_ref`/`resolve_as` never reads it, opted in or not.
     No `Maker` is recorded, since nothing reads it later, so an approval of an `ask` there stands
     in for reveal: the permissions catalogue lends the reference's folder (`Lend::Each`), and the
     gate asks a person about that folder. Audited as `secrets.use` by the caller, naming the
-    resource, the purpose and the host (`used KEY once for apps:service:web (writing a domain's
-    records at Cloudflare), as usr_…, a sensitive key sent only to
-    https://api.cloudflare.com/client/v4`).
+    resource, the purpose, the use for a sensitive key, and the host (`used KEY once for
+    apps:service:web (writing a domain's records at Cloudflare), as usr_…, a sensitive key, opted
+    in for apps.dns, sent only to https://api.cloudflare.com/client/v4`).
   - **A deployer, for the resource's own runtime** (roll apps' git login: a person pastes a deploy
     token, tagged sensitive, and the service's login refers to it):
     `Secrets::bind_ref_runtime(resource, reference, caller, runtime_env)`. The contract is the

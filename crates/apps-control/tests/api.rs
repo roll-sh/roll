@@ -3519,7 +3519,8 @@ async fn a_domains_records_are_written_with_the_customers_token() {
             Ok(vec![])
         }
         // Read once as the caller: nothing bound, no maker kept.
-        async fn use_once(&self, _: apps_control::integrations::Asker<'_>, _: &str, env: &str, _: &str, reference: &str, _: &str, to: Option<&'static str>) -> anyhow::Result<String> {
+        async fn use_once(&self, _: apps_control::integrations::Asker<'_>, _: &str, env: &str, _: &str, reference: &str, use_id: &'static str, _: &str, to: Option<&'static str>) -> anyhow::Result<String> {
+            assert_eq!(use_id, apps_control::integrations::DNS_USE);
             anyhow::ensure!((env, reference) == ("production", "roll://production/CF_TOKEN"), "you may not reveal {reference}");
             assert_eq!(to, Some("https://dns.example/v4"), "the writer's own API");
             Ok("cf-secret".into())
