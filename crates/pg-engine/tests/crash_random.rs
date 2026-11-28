@@ -1024,7 +1024,8 @@ fn power_cut_at_every_point() {
         let out = c.output().unwrap();
         let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
         if at.is_none() {
-            return (stdout, out.status.code());
+            // (The uncut run's own failure, a full disk's ENOSPC say, is in its stderr.)
+            return (format!("{stdout}{}", String::from_utf8_lossy(&out.stderr)), out.status.code());
         }
         assert!(out.status.code().is_none(), "cut at {at:?}: {}", String::from_utf8_lossy(&out.stderr));
         let acked = stdout.lines().filter_map(|l| l.strip_prefix("acked ")?.parse::<u64>().ok()).max();

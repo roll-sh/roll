@@ -88,6 +88,36 @@ impl WalWriter {
         self.max_ts = self.max_ts.max(ts);
     }
 
+    /// `append`, with the file's space for the record taken first (zero-filled ahead, as
+    /// `flush` would): on a full disk the commit fails here, taken back before it is applied
+    /// anywhere, and later commits go on once there is space. (A group commit's record is
+    /// written by the fsync it waits for, after its writes are in the memtable: a write
+    /// failing then can't be taken back, and the store closed, every later statement failing
+    /// with "database is closed".) Writes into zero-filled space need none.
+    pub fn append_reserved(&mut self, ts: u64, entries: &[Entry]) -> Result<()> {
+        let (len, bytes, max_ts) = (self.buf.len(), self.bytes, self.max_ts);
+        self.append(ts, entries);
+        if self.prealloc > 0
+            && self.bytes > self.zeroed
+            && let Err(e) = self.zero_fill(self.bytes)
+        {
+            self.buf.truncate(len);
+            (self.bytes, self.max_ts) = (bytes, max_ts);
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// Zero-fill the file from `zeroed` to `end` at least, `prealloc` ahead.
+    fn zero_fill(&mut self, end: u64) -> Result<()> {
+        // (A zero record length ends replay: the zeroes past the last record are no records.)
+        let to = end.max(self.zeroed + self.prealloc);
+        let zeros = vec![0u8; (to - self.zeroed) as usize];
+        self.file.write_all_at(&zeros, self.zeroed)?;
+        self.zeroed = to;
+        Ok(())
+    }
+
     /// `append`, written now (with the records appended before it). On an error it is taken
     /// back: the commit fails.
     pub fn append_now(&mut self, ts: u64, entries: &[Entry]) -> Result<()> {
@@ -109,12 +139,7 @@ impl WalWriter {
         }
         let end = self.written + self.buf.len() as u64;
         if self.prealloc > 0 && end > self.zeroed {
-            // (A zero record length ends replay: the zeroes past the last record are no
-            // records.)
-            let to = end.max(self.zeroed + self.prealloc);
-            let zeros = vec![0u8; (to - self.zeroed) as usize];
-            self.file.write_all_at(&zeros, self.zeroed)?;
-            self.zeroed = to;
+            self.zero_fill(end)?;
         }
         self.file.write_all_at(&self.buf, self.written)?;
         self.written = end;

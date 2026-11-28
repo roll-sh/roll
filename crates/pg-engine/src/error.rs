@@ -384,6 +384,10 @@ impl std::error::Error for Error {}
 
 impl From<std::io::Error> for Error {
     fn from(e: std::io::Error) -> Self {
+        // (errcode_for_file_access: ENOSPC and EDQUOT are disk_full; mdextend's hint.)
+        if matches!(e.kind(), std::io::ErrorKind::StorageFull | std::io::ErrorKind::QuotaExceeded) {
+            return Error::new(code::DISK_FULL, format!("I/O error: {e}")).hint("Check free disk space.");
+        }
         Error::new(code::IO_ERROR, format!("I/O error: {e}"))
     }
 }

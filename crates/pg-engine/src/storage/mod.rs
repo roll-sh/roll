@@ -1871,8 +1871,9 @@ impl Store {
                 return Ok(self.visible_ts());
             }
             ts = self.assigned.load(Ordering::Acquire) + 1;
-            // (Written by the fsync that makes it durable: `wait_durable`.)
-            c.wal.append(ts, &writes);
+            // (Written by the fsync that makes it durable, `wait_durable`, into space taken
+            // now: a full disk fails this commit alone, cleanly.)
+            c.wal.append_reserved(ts, &writes)?;
             self.assigned.store(ts, Ordering::Release);
             self.sync_assigned.store(ts, Ordering::Release);
             ranged = self.note_rdels(writes.iter().map(|(k, v)| (k.as_slice(), v.as_deref())), ts);
@@ -1889,7 +1890,7 @@ impl Store {
         self.wait_durable(ts)?;
         after(ts);
         if let Some(m) = &rotate {
-            self.rotate_full(m)?;
+            self.rotate_full(m);
         }
         if rotate.is_some() || ranged {
             self.schedule_background();
@@ -1946,7 +1947,7 @@ impl Store {
         self.wal_writer_delay.store(wal_writer_delay_ms.max(1), Ordering::Relaxed);
         self.wal_writer();
         if let Some(m) = &rotate {
-            self.rotate_full(m)?;
+            self.rotate_full(m);
             self.schedule_background();
         }
         Ok(ts)
@@ -2045,7 +2046,7 @@ impl Store {
             }
         }
         if let Some(m) = &rotate {
-            self.rotate_full(m)?;
+            self.rotate_full(m);
         }
         if rotate.is_some() || ingest || ranged {
             self.schedule_background();
@@ -2396,12 +2397,17 @@ impl Store {
     /// memtable that took over, holding the few commits made meanwhile. Each such file of a few
     /// entries (and its WAL file, made and synced) counted towards L0's compaction trigger as a
     /// full one: under 8 clients, a compaction every two memtables instead of four.
-    fn rotate_full(&self, mem: &Arc<Memtable>) -> Result<()> {
+    /// The commit is made and acknowledged by then: a rotation that fails (a full disk's new
+    /// WAL file) fails no commit, and the next commit to find the memtable full tries again.
+    /// (It made a durable, visible commit report an error: retried, it was made twice.)
+    fn rotate_full(&self, mem: &Arc<Memtable>) {
         let mut c = self.commit.lock();
         if self.closed.load(Ordering::Acquire) || !Arc::ptr_eq(&self.view.load().mem, mem) {
-            return Ok(());
+            return;
         }
-        self.rotate_locked(&mut c)
+        if let Err(e) = self.rotate_locked(&mut c) {
+            warn!(dir = %self.dir.display(), error = %e, "starting a new memtable failed");
+        }
     }
 
     /// `rotate`; but once the store is closed only `close`'s own rotation (`closing`) runs:
