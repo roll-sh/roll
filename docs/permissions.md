@@ -226,7 +226,7 @@ endpoint for an hour's access token, rather than holding a long-lived token in a
   mint another kind of credential.
 - **Tests:** `roll-access/tests/access.rs::a_machine_client_trades_its_credential_for_a_token_its_rules_bound`
   (secret and key, rules bounding the token, a replayed assertion, a leaked secret, a revoked
-  client); `a_persons_machine_client_acts_as_them`; `a_ci_job_signs_in_with_its_own_oidc_token`
+  client); `a_persons_token_acts_as_them`; `a_ci_job_signs_in_with_its_own_oidc_token`
   (the right repository and branch sign in, within the rules; another repository, branch, audience,
   key or an expired token is `invalid_grant`; a shared issuer's wildcard tenant is refused); `roll-cli/tests/token.rs::a_machine_client_from_the_cli_trades_its_secret_for_a_token_held_to_its_rules`.
 

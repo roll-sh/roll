@@ -887,96 +887,97 @@ pub fn cors(origins: &Origins) -> CorsLayer {
 mod tests {
     use super::*;
 
-    /// An open gate answers only loopback names (a rebound name is refused), and takes writes
-    /// only from local pages.
+    /// An open gate answers only loopback names (a rebound name is refused) and takes writes only from
+    /// local pages; the loopback default can't be met by a look-alike origin, and the token never prints.
     #[test]
-    fn an_open_gate_answers_loopback_hosts_only() {
-        struct NoSessions;
-        impl Sessions for NoSessions {
-            fn cookie(&self) -> &str {
-                "roll_session"
+    fn an_open_gate_answers_local_pages_only_and_its_token_never_prints() {
+        {
+            // An open gate answers only loopback names (a rebound name is refused), and takes writes
+            // only from local pages.
+            struct NoSessions;
+            impl Sessions for NoSessions {
+                fn cookie(&self) -> &str {
+                    "roll_session"
+                }
+                fn resolve<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<Option<Session>, String>> {
+                    Box::pin(async { Ok(None) })
+                }
             }
-            fn resolve<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<Option<Session>, String>> {
-                Box::pin(async { Ok(None) })
+            let gate = Gate::new(None, Vec::new());
+            gate.set_hosted(vec!["preview.localhost.".into()]);
+            let host = |h: &'static str| {
+                let mut m = HeaderMap::new();
+                m.insert(header::HOST, HeaderValue::from_static(h));
+                m
+            };
+            for (h, ok) in [
+                ("127.0.0.1:7070", true),
+                ("localhost", true),
+                ("[::1]:7070", true),
+                ("LOCALHOST:7070", true),
+                ("attacker.example:7070", false),
+                ("localhost.attacker.example", false),
+                ("127.0.0.1.nip.io:7070", false),
+                // Browsers resolve `*.localhost` to loopback themselves: no page can rebind one.
+                ("api.localhost:7070", true),
+                ("a.b.localhost", true),
+                ("localhost.attacker.example.localhost.evil", false),
+                ("evil.localhost:7070.attacker.example", false),
+                ("evil.localhost@attacker.example", false),
+                (".localhost", false),
+                // Others' pages (previews) are under the preview domain: never a loopback name.
+                ("chg-abc.preview.localhost:7070", false),
+                ("preview.localhost", false),
+                ("evil-preview.localhost", true),
+            ] {
+                assert_eq!(open_host_ok(&gate, &host(h), None), ok, "{h}");
             }
+            // A name the operator opens it at (a proxy, tailscale serve), listed as a URL may be.
+            let named = Gate::with_sessions(None, Vec::new(), Arc::new(NoSessions), Origins::parse("https://roll.example.test/, http://box.example.test:80").unwrap(), "http://127.0.0.1:7070");
+            assert!(open_host_ok(&named, &host("roll.example.test"), None) && open_host_ok(&named, &host("box.example.test"), None));
+            assert!(!open_host_ok(&named, &host("roll.example.test:8443"), None));
+            assert!(open_host_ok(&gate, &HeaderMap::new(), None), "no Host: not a page's");
+            assert!(!open_host_ok(&gate, &HeaderMap::new(), Some("attacker.example")), "HTTP/2's authority counts");
+            // A page elsewhere is refused whatever it sends, a WebSocket upgrade (a GET) included.
+            let mut from = host("127.0.0.1:7070");
+            from.insert(header::UPGRADE, HeaderValue::from_static("websocket"));
+            from.insert(header::ORIGIN, HeaderValue::from_static("http://attacker.example"));
+            assert!(!open_origin_ok(&gate, &from));
+            from.insert(header::ORIGIN, HeaderValue::from_static("http://localhost:3000"));
+            assert!(open_origin_ok(&gate, &from));
+            // A `*.localhost` page is any local server's (a preview's too): never a local origin.
+            for o in ["http://chg-abc.preview.localhost:7070", "http://api.localhost:7070"] {
+                from.insert(header::ORIGIN, HeaderValue::from_str(o).unwrap());
+                assert!(!open_origin_ok(&gate, &from), "{o}");
+            }
+            assert!(open_origin_ok(&gate, &host("127.0.0.1:7070")), "no Origin: a navigation, or not a browser");
         }
-        let gate = Gate::new(None, Vec::new());
-        gate.set_hosted(vec!["preview.localhost.".into()]);
-        let host = |h: &'static str| {
-            let mut m = HeaderMap::new();
-            m.insert(header::HOST, HeaderValue::from_static(h));
-            m
-        };
-        for (h, ok) in [
-            ("127.0.0.1:7070", true),
-            ("localhost", true),
-            ("[::1]:7070", true),
-            ("LOCALHOST:7070", true),
-            ("attacker.example:7070", false),
-            ("localhost.attacker.example", false),
-            ("127.0.0.1.nip.io:7070", false),
-            // Browsers resolve `*.localhost` to loopback themselves: no page can rebind one.
-            ("api.localhost:7070", true),
-            ("a.b.localhost", true),
-            ("localhost.attacker.example.localhost.evil", false),
-            ("evil.localhost:7070.attacker.example", false),
-            ("evil.localhost@attacker.example", false),
-            (".localhost", false),
-            // Others' pages (previews) are under the preview domain: never a loopback name.
-            ("chg-abc.preview.localhost:7070", false),
-            ("preview.localhost", false),
-            ("evil-preview.localhost", true),
-        ] {
-            assert_eq!(open_host_ok(&gate, &host(h), None), ok, "{h}");
+        {
+            // The loopback default can't be met by a look-alike host, and the token never prints.
+            for (origin, ok) in [
+                ("http://localhost:3000", true),
+                ("http://127.0.0.1", true),
+                ("http://[::1]:5173", true),
+                ("http://localhost.evil.example", false),
+                ("http://localhost:3000.evil.example", false),
+                ("http://127.0.0.1@evil.example", false),
+            ] {
+                assert_eq!(is_local(&HeaderValue::from_static(origin)), ok, "{origin}");
+            }
+            assert!(Origins::parse("https://roll.sh/path").is_err() && Origins::parse("*").is_err());
+            assert!(AdminToken::new("short").is_err());
+            let t = AdminToken::new("0123456789abcdef0123456789abcdef").unwrap();
+            assert!(t.matches("0123456789abcdef0123456789abcdef") && !t.matches("0123456789abcdef0123456789abcdeX"));
+            assert!(!format!("{t:?}").contains("0123"));
         }
-        // A name the operator opens it at (a proxy, tailscale serve), listed as a URL may be.
-        let named = Gate::with_sessions(None, Vec::new(), Arc::new(NoSessions), Origins::parse("https://roll.example.test/, http://box.example.test:80").unwrap(), "http://127.0.0.1:7070");
-        assert!(open_host_ok(&named, &host("roll.example.test"), None) && open_host_ok(&named, &host("box.example.test"), None));
-        assert!(!open_host_ok(&named, &host("roll.example.test:8443"), None));
-        assert!(open_host_ok(&gate, &HeaderMap::new(), None), "no Host: not a page's");
-        assert!(!open_host_ok(&gate, &HeaderMap::new(), Some("attacker.example")), "HTTP/2's authority counts");
-        // A page elsewhere is refused whatever it sends, a WebSocket upgrade (a GET) included.
-        let mut from = host("127.0.0.1:7070");
-        from.insert(header::UPGRADE, HeaderValue::from_static("websocket"));
-        from.insert(header::ORIGIN, HeaderValue::from_static("http://attacker.example"));
-        assert!(!open_origin_ok(&gate, &from));
-        from.insert(header::ORIGIN, HeaderValue::from_static("http://localhost:3000"));
-        assert!(open_origin_ok(&gate, &from));
-        // A `*.localhost` page is any local server's (a preview's too): never a local origin.
-        for o in ["http://chg-abc.preview.localhost:7070", "http://api.localhost:7070"] {
-            from.insert(header::ORIGIN, HeaderValue::from_str(o).unwrap());
-            assert!(!open_origin_ok(&gate, &from), "{o}");
+        {
+            let mut h = HeaderMap::new();
+            h.append(header::COOKIE, HeaderValue::from_static("a=1; roll_session=tok; b=2"));
+            assert_eq!(cookie(&h, "roll_session"), Some("tok"));
+            assert_eq!(cookie(&h, "roll"), None);
+            assert_eq!(origin_of("https://API.roll.sh/v1"), Some("https://api.roll.sh".into()));
+            assert_ne!(csrf_token("a"), csrf_token("b"));
         }
-        assert!(open_origin_ok(&gate, &host("127.0.0.1:7070")), "no Origin: a navigation, or not a browser");
     }
 
-    /// The loopback default can't be met by a look-alike host, and the token never prints.
-    #[test]
-    fn local_origins_and_the_token() {
-        for (origin, ok) in [
-            ("http://localhost:3000", true),
-            ("http://127.0.0.1", true),
-            ("http://[::1]:5173", true),
-            ("http://localhost.evil.example", false),
-            ("http://localhost:3000.evil.example", false),
-            ("http://127.0.0.1@evil.example", false),
-        ] {
-            assert_eq!(is_local(&HeaderValue::from_static(origin)), ok, "{origin}");
-        }
-        assert!(Origins::parse("https://roll.sh/path").is_err() && Origins::parse("*").is_err());
-        assert!(AdminToken::new("short").is_err());
-        let t = AdminToken::new("0123456789abcdef0123456789abcdef").unwrap();
-        assert!(t.matches("0123456789abcdef0123456789abcdef") && !t.matches("0123456789abcdef0123456789abcdeX"));
-        assert!(!format!("{t:?}").contains("0123"));
-    }
-
-    #[test]
-    fn cookies_and_origins() {
-        let mut h = HeaderMap::new();
-        h.append(header::COOKIE, HeaderValue::from_static("a=1; roll_session=tok; b=2"));
-        assert_eq!(cookie(&h, "roll_session"), Some("tok"));
-        assert_eq!(cookie(&h, "roll"), None);
-        assert_eq!(origin_of("https://API.roll.sh/v1"), Some("https://api.roll.sh".into()));
-        assert_ne!(csrf_token("a"), csrf_token("b"));
-    }
 }
