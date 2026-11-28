@@ -168,8 +168,9 @@ type OidcIssued = HashMap<(String, String, String), (i64, crate::OidcToken)>;
 /// How often the leader looks for masked bases to delete.
 const BASES_SWEPT_EVERY: Duration = Duration::from_secs(600);
 
-/// Main's code running on a copy of a change's data on roll's runtime: main's revision, and the
-/// copy's variables (main_on_change.rs).
+/// Code running on a copy of a preview's data on roll's runtime: main's on a change's
+/// (main_on_change.rs), or the preview's own for replayed writes (replay.rs): its revision, and
+/// the copy's variables.
 type MainRun = (String, Vec<(String, String)>);
 
 pub struct Engine {
@@ -274,9 +275,9 @@ pub struct Engine {
     secrets_told: Mutex<HashMap<String, Vec<String>>>,
     /// The rules' references last left out per preview, their writers unable to now (told once).
     refs_told: Mutex<HashMap<String, Vec<String>>>,
-    /// Main's code run on roll's runtime in a change's preview (`web@main`), by (preview,
-    /// service): main's revision and the copy's variables, only while it runs (held in memory:
-    /// they're credentials).
+    /// Code run on roll's runtime on a copy of a preview's data, by (preview, service as it runs:
+    /// `web@main`, `web@replay`): its revision and the copy's variables, only while it runs (held
+    /// in memory: they're credentials).
     main_runs: Mutex<HashMap<(String, String), MainRun>>,
     /// Keys bound to hosts its egress doesn't allow, last told per preview.
     bound_told: Mutex<HashMap<String, Vec<String>>>,

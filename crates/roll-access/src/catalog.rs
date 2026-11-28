@@ -1785,8 +1785,10 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/secrets/projects/{project}/environments/{env}/secrets", "secrets", R, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path").filters_keys(),
     // A batch writes only keys the grant reaches: roll secrets refuses one naming others.
     row("POST", "/v1/secrets/projects/{project}/environments/{env}/changes", "secrets", W, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path").filters_keys(),
-    // A watcher's read of what changed since the values it holds: values, so reveal.
-    row("POST", "/v1/secrets/projects/{project}/environments/{env}/values/delta", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
+    // A watcher's read of what changed since the values it holds: values, so reveal. It and the
+    // folder's digest (what a watch polls) are worked out over the keys the grant reaches.
+    row("POST", "/v1/secrets/projects/{project}/environments/{env}/values/delta", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path").filters_keys(),
+    row("GET", "/v1/secrets/projects/{project}/environments/{env}/digest", "secrets", R, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path").filters_keys(),
     row("GET", "/v1/secrets/projects/{project}/environments/{env}/secrets/{key}/value", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path").secret_key(),
     // A TOTP key's current code is a credential: reveal, never the prefix's read.
     row("GET", "/v1/secrets/projects/{project}/environments/{env}/secrets/{key}/totp", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path").secret_key(),
@@ -1881,6 +1883,9 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/apps/projects/{project}/notifications/{nid}/test", "apps", W, one(&["project"], "project")),
     row("GET", "/v1/apps/projects/{project}/notifications/{nid}/deliveries", "apps", R, one(&["project"], "project")),
     row("POST", "/v1/apps/projects/{project}/notifications/{nid}/deliveries/{did}/redeliver", "apps", W, one(&["project"], "project")),
+    // A project's open alerts, and acknowledging one (it stops its escalation): read and write.
+    row("GET", "/v1/apps/projects/{project}/alerts", "apps", R, one(&["project"], "project")),
+    row("POST", "/v1/apps/projects/{project}/alerts/{aid}/ack", "apps", W, one(&["project"], "project")),
     // A project's log drains: every service's output POSTed out of roll, signed. Adding one sends
     // runtime output elsewhere and its signing secret comes back once: reveal. The URL is never
     // answered (only its host).
@@ -2077,6 +2082,10 @@ static ROWS: &[Row] = &[
     // Putting a restore point back replaces the data the preview has now, as a reset does.
     row("POST", "/v1/previews/{id}/restore-points/{point}/restore", "previews", D, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
     row("POST", "/v1/previews/{id}/rehearse", "previews", D, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    // Its recent GETs, and with `replay_writes` its kept writes, asked of it and main's preview
+    // again: the writes only on fresh copies of both previews' data, deleted after, so nothing
+    // the previews serve from changes: write, as a visit's own write is.
+    row("POST", "/v1/previews/{id}/replay", "previews", W, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
     // A share link lets someone outside the team in, its token only in the answer: reveal, as the
     // bypass secret is. Listing (no tokens) is read and revoking one is delete, by the prefix.
     row("POST", "/v1/previews/{id}/shares", "previews", REVEAL, one(PG, "preview")).env(EnvFrom::Fixed("preview")),

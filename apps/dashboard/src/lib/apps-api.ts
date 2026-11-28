@@ -1512,12 +1512,36 @@ export interface NotifyTarget {
   services: string[];
   /** Preview (ephemeral) environments' events too. */
   previews: boolean;
+  /** An alert it was sent, still open and unacknowledged `after_min` on, goes to target `to` once. */
+  escalate?: NotifyEscalation;
   created_at: number;
   /** Only in the answer to its creation, for a webhook: what its requests are signed with. */
   secret?: string;
 }
 
+export interface NotifyEscalation {
+  /** 5–1440 minutes. */
+  after_min: number;
+  /** Another of the project's targets. */
+  to: string;
+}
+
+/** An open alert: from its opening event until one closing it (its resolve, a deploy that works). */
+export interface OpenAlert {
+  /** `alr_…`, the same for the whole incident. */
+  id: string;
+  kind: string;
+  service: string;
+  environment: string;
+  /** The opening message's title. */
+  about: string;
+  opened_at: number;
+  acked: { by: string; at: number } | null;
+  escalated_at: number | null;
+}
+
 export type NotifyEvent =
+  | "alert.acked"
   | "alert.anomaly"
   | "attack.mode"
   | "deploy.started"
@@ -1820,10 +1844,12 @@ export const appsApi = {
   projectUsage: (project: string, month?: string) => call<ProjectUsage>("GET", `/v1/apps/projects/${enc(project)}/usage${qs({ month })}`),
   setLimits: (project: string, body: { alert_usd: number | null; hard_usd: number | null }) => call<SpendLimits>("PUT", `/v1/apps/projects/${enc(project)}/limits`, body),
   /** PagerDuty takes its integration's `routing_key`, Opsgenie its `api_key` (sealed, never returned), each with a `region`. */
-  addNotifyTarget: (project: string, body: { kind: NotifyTarget["kind"]; url?: string; routing_key?: string; api_key?: string; region?: "us" | "eu"; events?: NotifyEvent[]; environments?: string[]; services?: string[]; previews?: boolean }) => call<NotifyTarget>("POST", `/v1/apps/projects/${enc(project)}/notifications`, body),
+  addNotifyTarget: (project: string, body: { kind: NotifyTarget["kind"]; url?: string; routing_key?: string; api_key?: string; region?: "us" | "eu"; events?: NotifyEvent[]; environments?: string[]; services?: string[]; previews?: boolean; escalate?: NotifyEscalation }) => call<NotifyTarget>("POST", `/v1/apps/projects/${enc(project)}/notifications`, body),
   /** Its events and filters (given ones replace); its URL and secret stay. */
-  updateNotifyTarget: (project: string, id: string, body: { events?: NotifyEvent[]; environments?: string[]; services?: string[]; previews?: boolean }) =>
+  updateNotifyTarget: (project: string, id: string, body: { events?: NotifyEvent[]; environments?: string[]; services?: string[]; previews?: boolean; escalate?: NotifyEscalation | null }) =>
     call<NotifyTarget>("PATCH", `/v1/apps/projects/${enc(project)}/notifications/${enc(id)}`, body),
+  alerts: (project: string) => call<OpenAlert[]>("GET", `/v1/apps/projects/${enc(project)}/alerts`),
+  ackAlert: (project: string, id: string) => call<OpenAlert>("POST", `/v1/apps/projects/${enc(project)}/alerts/${enc(id)}/ack`),
   removeNotifyTarget: (project: string, id: string) => call<null>("DELETE", `/v1/apps/projects/${enc(project)}/notifications/${enc(id)}`),
   testNotifyTarget: (project: string, id: string) => call<{ ok: boolean; code: number | null; error: string | null }>("POST", `/v1/apps/projects/${enc(project)}/notifications/${enc(id)}/test`),
   notifyDeliveries: (project: string, id: string) => call<NotifyDelivery[]>("GET", `/v1/apps/projects/${enc(project)}/notifications/${enc(id)}/deliveries`),
