@@ -6,7 +6,12 @@ import { formatUsd } from "@/lib/roll-api";
 
 /** How often the list is read: quickly while a preview is changing, calmly otherwise. */
 export const POLL_BUSY_MS = 3_000;
-export const POLL_CALM_MS = 20_000;
+/** A calm list is read again this often in case the event feed missed something (it follows the feed). */
+export const POLL_CALM_MS = 60_000;
+/** How long one read of the event feed waits for an event (the server's longest). */
+export const FEED_WAIT_S = 25;
+/** After a failed read of the feed, the next is this much later. */
+const FEED_RETRY_MS = 5_000;
 
 export const STATE_LABEL: Record<PreviewState, string> = {
   queued: "Queued",
@@ -62,9 +67,10 @@ export const money = formatUsd;
 export const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 /**
- * A project's previews, newest first, read every few seconds while one is creating, updating or
- * deleting and calmly otherwise. `put` takes a preview an action answered with, and reads again
- * soon if it's busy.
+ * A project's previews, newest first: read again when the event feed says one of them changed
+ * (made, up, failed, a visual change, gone), every few seconds while one is creating, updating or
+ * deleting, and calmly otherwise in case the feed missed something. `put` takes a preview an
+ * action answered with, and reads again soon if it's busy.
  */
 export function usePreviews(projectId: string) {
   const [list, setList] = useState<Preview[] | null>(null);
@@ -98,6 +104,8 @@ export function usePreviews(projectId: string) {
     };
   }, [load]);
 
+  useEffect(() => followFeed(projectId, () => void load()), [projectId, load]);
+
   const put = useCallback(
     (p: Preview) => {
       setList((l) => (l ? (l.some((x) => x.id === p.id) ? l.map((x) => (x.id === p.id ? p : x)) : [p, ...l]) : [p]));
@@ -110,6 +118,36 @@ export function usePreviews(projectId: string) {
   );
 
   return { list, error, reload: load, put };
+}
+
+/**
+ * Follows the preview event feed from now on, calling `changed` for each event of `projectId`'s
+ * previews: one long poll at a time (each waits up to [`FEED_WAIT_S`] for an event). Returns the
+ * function that stops it.
+ */
+export function followFeed(projectId: string, changed: () => void): () => void {
+  let live = true;
+  let retry: ReturnType<typeof setTimeout> | undefined;
+  const run = async () => {
+    let next: number | null = null;
+    while (live) {
+      try {
+        if (next === null) next = (await previewsApi.latestEvent()).next;
+        const r = await previewsApi.events(next, 100, FEED_WAIT_S);
+        if (!live) return;
+        next = r.next;
+        if (r.events.some((e) => e.project === projectId)) changed();
+      } catch {
+        if (!live) return;
+        await new Promise<void>((ok) => (retry = setTimeout(ok, FEED_RETRY_MS)));
+      }
+    }
+  };
+  void run();
+  return () => {
+    live = false;
+    clearTimeout(retry);
+  };
 }
 
 /** The mark state a set of previews holds: deploying while one changes, asleep when all sleep. */
