@@ -24197,6 +24197,31 @@ the hot share.
 5. The weights are constants of `9cfd1322f`'s class totals. A change that moves a class's total
    a lot (another training part, a much cheaper path) can need a new number there.
 
+**The rule's first use: `cand/a349-3` (the error type boxed program-wide) on the shipped build.**
+Base `8f691b51fe`, change `724d778dba`, each trained once with `cand/a347-2`'s recipe
+(`--profile-only`; staleness 0 of 3,141 hot functions in both builds of the merged profile), both
+built from the two profiles merged (BENCH "Reproducible PGO training", the a349 table). User
+instructions, base -> change:
+- TPC-H, the 22: 74.712 -> 74.656 G (-0.07%) and 74.709 -> 74.642 G (-0.09%) in two holds,
+  every result hash equal. The queries agent 349 called out (plain dist +1.4 / +0.9 / +0.8% for
+  q01 / q06 / q12): q01 +0.94%, q06 -0.19%, q12 +0.35%, q15 -0.50%, q17 -0.8%. Past the ~1%
+  placement noise of two builds of one recipe only q02 (+1.3 / +1.6%) and q19 (+1.0%) rise; q18
+  -0.8%, q13 -0.7%, q16 -0.6 / -0.7%.
+- The bulk script 61.637 -> 61.086 G (-0.89%): copy_pk -1.58%, copy_sx -1.78%, COPY out -1.85%;
+  CREATE UNIQUE INDEX +1.13%, INSERT … SELECT +1.01%.
+- The 100-row read (8 clients) 249,270 -> 247,309 (-0.79%); the 1,000-row read 1,634,250 ->
+  1,619,300 (-0.91%).
+- The point select (8 clients) and TPC-B-like (8 clients, 160,000 transactions) can't be read
+  here: 6.7-7.0 foreign cores on lane A. One binary read 27,570-28,816 a select (the change
+  about 1% lower) and 271k / 360k a transaction at 789 / 2,018 tps (the change 317k / 329k).
+  TPC-B-like needs agent 333's split measure (warmed, `enable_seqscan=off`, per thread).
+- Layout: 103 of the 300 hottest functions differ (26.4% of the counts). The change rewrites
+  every function returning `Result`, so this diff can't single out untouched code. The one
+  inlining flip in the list: `scan::split_header_tid`, inlined in the base and out of line in
+  the change (1,431 bytes).
+So on the shipped build the change is level on TPC-H's total, -0.9% on bulk and the range reads.
+q01's +0.94% sits at the edge of the placement noise.
+
 ## The standing on the shipped build, 2026-11-27 (agent 344)
 
 BENCH "Standing, 2026-11-27" re-measures roll's column of the standing on origin's `19c7a8758` with
