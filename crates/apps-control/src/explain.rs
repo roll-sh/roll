@@ -276,19 +276,16 @@ mod tests {
     }
 
     #[test]
-    fn the_newest_lines_go_and_what_is_left_out_is_said() {
-        let lines: Vec<LogLine> = (0..5000).map(|i| line(&format!("line {i} {}", "x".repeat(40)))).collect();
-        let (text, left) = tail_text(&lines, 4096);
-        assert!(text.ends_with(&format!("line 4999 {}\n", "x".repeat(40))));
-        assert!(text.len() <= 4096 && left > 4900);
-        assert_eq!(text.lines().count() + left, 5000);
-    }
-
-    #[test]
     fn an_answer_is_bounded_and_needs_its_fields() {
         let long = "y".repeat(10_000);
         let e = read(&json!({ "summary": long, "cause": "the lockfile", "steps": ["a", "", "b", "c", "d", "e", "f"], "confidence": "certain" }), "m", 1, 0).unwrap();
         assert_eq!((e.summary.len(), e.steps.len(), e.confidence.as_str()), (300, 5, "low"));
         assert!(read(&json!({ "summary": "x", "steps": [] }), "m", 1, 0).is_none());
+        // The newest log lines go, and what's left out is said.
+        let lines: Vec<LogLine> = (0..200).map(|i| line(&format!("line {i} {}", "x".repeat(40)))).collect();
+        let (text, left) = tail_text(&lines, 4096);
+        assert!(text.ends_with(&format!("line 199 {}\n", "x".repeat(40))));
+        assert!(text.len() <= 4096 && left > 100);
+        assert_eq!(text.lines().count() + left, 200);
     }
 }

@@ -8,12 +8,21 @@ use roll_secrets::links::{Field, Link, LinkProvider, Links, Mode};
 use roll_secrets::{Action, Batch, Caller, Import, Keyring, Op, Options, Scope, Secrets};
 use std::sync::Arc;
 
+mod common;
+use common::{fresh_secrets_db, scratch};
+
+
 fn node(dir: &std::path::Path, ws: Arc<roll_workspace::Workspace>) -> Arc<Secrets> {
     node_with(dir, ws, Default::default(), None)
 }
 
 fn secrets_db(dir: &std::path::Path) -> code_sql::Db {
-    code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.join("secrets.db")), "secrets").unwrap()
+    let file = dir.join("secrets.db");
+    // The first node's open makes it; the others open what's there.
+    if !file.exists() {
+        fresh_secrets_db(&file);
+    }
+    code_sql::Db::open_or_test(&code_sql::Target::Sqlite(file), "secrets").unwrap()
 }
 
 fn node_with(dir: &std::path::Path, ws: Arc<roll_workspace::Workspace>, links: Links, clouds: Option<Clouds>) -> Arc<Secrets> {
@@ -89,7 +98,7 @@ fn set(key: &str, value: &str) -> Op {
 
 #[test]
 fn two_nodes_racing_on_one_environment_lose_no_change_and_share_no_number() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scratch();
     let ws_db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("workspace.db")), "workspace").unwrap();
     let ws = Arc::new(roll_workspace::Workspace::new(ws_db).unwrap());
     let project = ws.create("", "shop", "", None).unwrap().id;
@@ -157,7 +166,7 @@ fn two_nodes_racing_on_one_environment_lose_no_change_and_share_no_number() {
 
 #[test]
 fn a_digest_one_node_keeps_moves_at_once_with_what_another_node_changes() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scratch();
     let ws_db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("workspace.db")), "workspace").unwrap();
     let ws = Arc::new(roll_workspace::Workspace::new(ws_db).unwrap());
     let project = ws.create("", "shop", "", None).unwrap().id;
@@ -200,7 +209,7 @@ fn a_digest_one_node_keeps_moves_at_once_with_what_another_node_changes() {
 #[test]
 fn two_nodes_rotating_the_issuers_key_publish_one_key_and_never_sign_with_a_pulled_one() {
     use std::sync::atomic::{AtomicBool, Ordering};
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scratch();
     let ws_db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("workspace.db")), "workspace").unwrap();
     let ws = Arc::new(roll_workspace::Workspace::new(ws_db).unwrap());
     let project = ws.create("", "shop", "", None).unwrap().id;
@@ -321,7 +330,7 @@ fn two_nodes_rotating_the_issuers_key_publish_one_key_and_never_sign_with_a_pull
 /// node failing.
 #[test]
 fn two_nodes_sweeping_a_deleted_project_close_its_log_once_and_purge_it_once() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scratch();
     let ws_db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("workspace.db")), "workspace").unwrap();
     let ws = Arc::new(roll_workspace::Workspace::new(ws_db).unwrap());
     let project = ws.create("", "shop", "", None).unwrap().id;
@@ -377,7 +386,7 @@ fn two_nodes_sweeping_a_deleted_project_close_its_log_once_and_purge_it_once() {
 
 #[test]
 fn two_nodes_writing_events_never_leave_a_gap_a_follower_has_passed() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scratch();
     let ws_db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("workspace.db")), "workspace").unwrap();
     let ws = Arc::new(roll_workspace::Workspace::new(ws_db).unwrap());
     let project = ws.create("", "shop", "", None).unwrap().id;

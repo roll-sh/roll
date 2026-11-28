@@ -101,7 +101,16 @@ impl Apps {
         let host = url.host_str().unwrap_or("").to_ascii_lowercase();
         let (sid, e) = (service.to_string(), env.to_string());
         let (row, domains) = self.db(move |s| Ok((s.environment(&sid, &e)?, s.domains(&sid, &e)?))).await?;
-        let ours = host == format!("{}.{}", row.slug, self.cfg.domain) || domains.iter().any(|d| d.hostname == host && d.status == crate::model::DomainStatus::Active);
+        // Its own names: the roll domain's, its active custom domains, and its label under its
+        // project's active preview domain (`pr-7.preview.acme.dev`; never another project's).
+        let (sid, e, h) = (service.to_string(), env.to_string(), host.clone());
+        let preview = self
+            .db(move |s| match h.split_once('.') {
+                Some((label, base)) if !label.is_empty() => Ok(s.preview_target(&format!("*.{base}"), label)?.is_some_and(|(ts, te)| ts == sid && te == e)),
+                _ => Ok(false),
+            })
+            .await?;
+        let ours = host == format!("{}.{}", row.slug, self.cfg.domain) || domains.iter().any(|d| d.hostname == host && d.status == crate::model::DomainStatus::Active) || preview;
         if !ours || !matches!(url.scheme(), "http" | "https") {
             return Err(Error::BadRequest("to isn't at one of the environment's names".into()));
         }

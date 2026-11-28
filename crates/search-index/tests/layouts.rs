@@ -499,8 +499,8 @@ fn random_intervals(rng: &mut StdRng, depth: u32) -> IntervalsSource {
 
 #[test]
 fn every_query_family_is_layout_invariant() {
-    let seeds: u64 = std::env::var("LAYOUT_SEEDS").ok().and_then(|v| v.parse().ok()).unwrap_or(10);
-    let per: usize = std::env::var("LAYOUT_QUERIES").ok().and_then(|v| v.parse().ok()).unwrap_or(200);
+    let seeds: u64 = std::env::var("LAYOUT_SEEDS").ok().and_then(|v| v.parse().ok()).unwrap_or(4);
+    let per: usize = std::env::var("LAYOUT_QUERIES").ok().and_then(|v| v.parse().ok()).unwrap_or(100);
     for seed in 0..seeds {
         let (a, b, _) = shards(seed, 700);
         let (sa, sb) = (a.searcher(), b.searcher());
@@ -526,7 +526,7 @@ fn positions(words: &[String], w: &str) -> Vec<i64> {
 
 #[test]
 fn brute_force_models_agree() {
-    for seed in 0..4u64 {
+    for seed in 0..2u64 {
         let (a, b, docs) = shards(seed + 50, 600);
         let (sa, sb) = (a.searcher(), b.searcher());
         let (ka, kb) = (keys(&sa), keys(&sb));

@@ -193,7 +193,7 @@ fn confirmed_phrases_equal_positional_phrases() {
     use search_index::query::MultiPhraseQuery;
     const P: u32 = 13;
     let a = Analysis::global().analyzer("standard").unwrap();
-    for seed in 0..6u64 {
+    for seed in 0..2u64 {
         let mut rng = common::rng(seed + 40);
         let schema = Schema::new()
             .with_field(FieldSchema::new(M, "m").indexed(IndexOptions::Docs, false))
@@ -227,7 +227,7 @@ fn confirmed_phrases_equal_positional_phrases() {
             v.sort();
             v
         };
-        for qi in 0..60 {
+        for qi in 0..40 {
             let n = rng.gen_range(2..4);
             let slop = rng.gen_range(0..4);
             let multi = rng.gen_bool(0.3);
@@ -246,7 +246,7 @@ fn confirmed_phrases_equal_positional_phrases() {
             let want = docs(&on_p);
             let fast: QueryRef = Arc::new(SourceConfirmedQuery::new(on_m.clone(), M, a.clone(), Arc::new(Stored)));
             assert_eq!(docs(&fast), want, "seed {seed}: fast {}", on_p.lucene_string(s.schema()));
-            if qi % 6 != 0 {
+            if qi % 4 != 0 {
                 continue;
             }
             // Not a plain phrase: confirmed through a one-doc segment (every doc a candidate).

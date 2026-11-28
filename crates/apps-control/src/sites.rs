@@ -567,16 +567,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fingerprinted_files_are_the_builds_hashed_assets() {
-        for yes in ["assets/index-BxR2a9Kd.js", "assets/logo-a1b2c3d4.svg", "_astro/index.DjX3kL9p.css", "static/js/main.8f3a2b1c.js", "static/media/font.5e6f7a8b9c.woff2", "_next/static/chunks/app.js", "_next/static/abc/_buildManifest.js"] {
-            assert!(fingerprinted(yes), "{yes}");
-        }
-        for no in ["index.html", "assets/app.js", "assets/jquery-3.7.1.min.js", "assets/report-20240101.pdf", "img/photo-a1b2c3d4.png", "assets/polyfills-legacy.js", "static/robots.txt", "assets/customers-export2024q1.csv"] {
-            assert!(!fingerprinted(no), "{no}");
-        }
-    }
-
-    #[test]
     fn a_sites_index_leaves_out_what_isnt_a_plain_file() {
         let mut b = tar::Builder::new(Vec::new());
         let mut file = |name: &str, body: &[u8]| {

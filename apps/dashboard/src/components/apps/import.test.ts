@@ -35,12 +35,12 @@ describe("importing a project's file", () => {
       "~ link jobs to cache",
       "! api has an image source; the file makes it a repo one: rename one of them",
     ]);
+    // A new service's variables: what's made for it, and what reads as a secret, is sealed from
+    // the start; a reference isn't.
+    const app = { source: { kind: "image" as const, image: "x" }, branch: null, run: {}, links: [], variables: { NODE_ENV: "production" }, generate: ["SESSION_SECRET"], ask: [{ name: "STRIPE_KEY", ask: "Your Stripe key", default: null }, { name: "REGION", ask: "Where", default: "eu" }] };
+    const vars = variablesFor(app, { STRIPE_KEY: "sk_test_1" }, () => "made");
+    expect(vars).toEqual({ NODE_ENV: "production", SESSION_SECRET: "made", STRIPE_KEY: "sk_test_1", REGION: "eu" });
+    expect(sealedFor(app, { ...vars, API_TOKEN: "${{ api.TOKEN }}" })).toEqual(["SESSION_SECRET", "STRIPE_KEY"]);
   });
 
-  it("fills a new service's variables: the file's values, a secret made, a question's answer or its default", () => {
-    const app = { source: { kind: "image" as const, image: "x" }, branch: null, run: {}, links: [], variables: { NODE_ENV: "production" }, generate: ["SESSION_SECRET"], ask: [{ name: "STRIPE_KEY", ask: "Your Stripe key", default: null }, { name: "REGION", ask: "Where", default: "eu" }] };
-    expect(variablesFor(app, { STRIPE_KEY: "sk_test_1" }, () => "made")).toEqual({ NODE_ENV: "production", SESSION_SECRET: "made", STRIPE_KEY: "sk_test_1", REGION: "eu" });
-    // What's made for it, and what reads as a secret, is sealed from the start; a reference isn't.
-    expect(sealedFor(app, { ...variablesFor(app, { STRIPE_KEY: "sk_test_1" }, () => "made"), API_TOKEN: "${{ api.TOKEN }}" })).toEqual(["SESSION_SECRET", "STRIPE_KEY"]);
-  });
 });

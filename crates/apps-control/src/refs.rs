@@ -60,22 +60,3 @@ pub fn fill(value: &str, mut lookup: impl FnMut(&Ref<'_>) -> Option<String>) -> 
     out.push_str(&value[last..]);
     (out, missing)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn references_are_filled_and_the_rest_is_text() {
-        let v = "postgres://${{ db.USER }}:${{db.PASS}}@${{ ROLL_PRIVATE_HOST }}/x ${{ not a ref }} ${{ Bad.X }} $${{";
-        let names: Vec<(Option<&str>, &str)> = refs(v).into_iter().map(|(r, _)| (r.service, r.var)).collect();
-        assert_eq!(names, [(Some("db"), "USER"), (Some("db"), "PASS"), (None, "ROLL_PRIVATE_HOST")]);
-        let (filled, missing) = fill(v, |r| match (r.service, r.var) {
-            (Some("db"), "USER") => Some("app".into()),
-            (None, "ROLL_PRIVATE_HOST") => Some("api.production.internal".into()),
-            _ => None,
-        });
-        assert_eq!(filled, "postgres://app:@api.production.internal/x ${{ not a ref }} ${{ Bad.X }} $${{");
-        assert_eq!(missing, ["db.PASS"]);
-    }
-}

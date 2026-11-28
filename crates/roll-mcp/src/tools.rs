@@ -126,7 +126,6 @@ fn as_text(v: &Value) -> String {
     }
 }
 
-
 /// The candidate closest to `word` by edit distance, when it's close enough to be a slip (a third
 /// of the word's length, at least 2): "stauts" finds "status", "lmit" finds "limit".
 pub fn nearest<'a>(word: &str, candidates: impl IntoIterator<Item = &'a str>) -> Option<&'a str> {
@@ -1486,6 +1485,7 @@ static TOOLS: &[Tool] = &[
         bnull("redirects", Ty::Str, "its own redirects on any service, _redirects lines: `/old /new 308`, `/blog/* /posts/:splat` (301 unless 302, 303, 307 or 308); clear it for none"),
         bnull("egress", Ty::Any, "{mode: roll|open, hosts?}: roll lets its code reach roll and only these hosts (at most 20, *. for subdomains), from the next deploy; clear it for open"),
         b("vitals", Ty::Bool, "Measure its pages' Web Vitals in visitors' browsers (read them with apps_vitals)"),
+        bnull("hsts", Ty::Any, "Strict-Transport-Security over HTTPS: {max_age (at most 63072000), include_subdomains?, preload? (with include_subdomains and a year)}, false for none; clear it for the default (two years)"),
         bnull("config", Ty::Obj, "Runtime config its instances read at ROLL_CONFIG_URL (edge functions: context.config) without a deploy: at most 200 keys, 64 KiB; the first one needs a deploy to give them the address. Clear it for none"),
         bnull("freeze", Ty::Obj, "A deploy freeze: {until? (unix ms), windows?: [{from: \"fri 17:00\", to}], timezone?, reason?}, on until cleared when it has neither until nor windows. Setting or clearing one is an admin's call (clearing it would get past it)"),
         b("traces", Ty::Bool, "Send its OpenTelemetry traces and metrics to roll (OTEL_EXPORTER_OTLP_* from the next deploy)"),
@@ -1502,7 +1502,7 @@ static TOOLS: &[Tool] = &[
         b("keep_days", Ty::Int, "Days its built deployments stay to roll back to, past the newest ten (1-90; null: only those)"),
         b("badge", Ty::Bool, "A deploy status badge anyone can load at /_roll/badge/<service>/<env>.svg on the apps listener"),
         b("approvals", Ty::Int, "0-3 people other than a deployment's author approve it before it goes live (admin; never a preview's)"),
-        bnull("checks", Ty::Arr, "Uptime and browser checks: [{name, path (an HTTP check's), tcp? (a TCP service's checks: its port connected to, contains read in its banner; no path), every_s? (30-3600), timeout_s?, status?, contains?, browser? (a Playwright script: the body of an async function given page, context and url; it fails by throwing), budgets? {lcp_ms, cls, ttfb_ms, kb, requests}, from? (roll, or public: over the internet as a visitor, its DNS, TLS and gates), host? (a public check's custom domain), method? (GET, HEAD, POST, PUT, PATCH, DELETE or OPTIONS), headers? (at most 10; ${NAME} is the environment's variable), body? (≤4 KiB, with POST, PUT, PATCH or DELETE)}]; clear it for none"),
+        bnull("checks", Ty::Arr, "Uptime and browser checks: [{name, path (an HTTP check's), tcp? (a TCP service's checks: its port connected to, contains read in its banner; no path), every_s? (30-3600), timeout_s?, status?, contains?, browser? (a Playwright script: the body of an async function given page, context and url; it fails by throwing), budgets? {lcp_ms, cls, ttfb_ms, kb, requests}, from? (roll, or public: over the internet as a visitor, its DNS, TLS and gates), host? (a public check's custom domain), method? (GET, HEAD, POST, PUT, PATCH, DELETE or OPTIONS), headers? (at most 10; ${NAME} is the environment's variable), body? (≤4 KiB, with POST, PUT, PATCH or DELETE), slow_ms? (50-60000: two passes in a row slower than it are check.slow, degraded; a TCP check's is its connect), assert? (an HTTP check's, at most 5, all must hold: {json: \"$.a.b\" (dotted, $.items.0 for an index, no wildcards), equals: any JSON} | {not_contains} | {header, matches: plain text}), fail_after? (1-5, default 2: failures in a row before down), recover_after? (1-5, default 1: passes in a row before up)}]; clear it for none"),
         bnull("pause_schedule", Ty::Obj, "Paused by the clock: {windows: [{from: \"fri 19:00\", to}], timezone?}; a person's pause or resume inside a window holds until it ends; clear it for none"),
         bnull("mirror", Ty::Obj, "{environment, percent (1-100)}: a copy of that share of GET and HEAD requests goes to another environment of this service; clear it to stop"),
         bnull("snippets", Ty::Arr, "At most 5 [{at: head|body_end, html}]: its own HTML put before </head> or </body> of every HTML page (an analytics or chat tag); clear it for none"),
@@ -1653,7 +1653,7 @@ static TOOLS: &[Tool] = &[
     t("apps_link", "Link a resource", "Give a service a roll resource's connection variables (DATABASE_URL and the like, with prefix if given): kind is postgres, redis, bucket, stream, queue, nosql, service (another service of the project: its private and public URLs), tasks (a roll tasks tenant: an API key of the link's own and the tenant's signing keys) or search (a search cluster: a data-only key of the link's own, narrowed with indices and access: a SaaS's tenants' indices, a frontend's read-only key, a log shipper's append-only one; changing them makes a new key and revokes the old). Needs reveal on the resource; the next deploy picks it up.", "apps", "PUT", "/v1/apps/services/{service}/links/{kind}/{ref}", &[SERVICE, req_choice("kind", &["postgres", "redis", "bucket", "stream", "queue", "nosql", "search", "service", "tasks"], "Resource kind (service: another service of the project)"), req("ref", "The resource's id or name"), b("prefix", Ty::Str, "Variable name prefix"), b("indices", Ty::Arr, "Search only: the key's index names or patterns (tenant-*)"), b("access", Ty::Str, "Search only: read, or append (create documents on exact names); none: read and write documents")]),
     t("apps_unlink", "Unlink a resource", "Stop giving a service a linked resource's variables (from the next deploy).", "apps", "DELETE", "/v1/apps/services/{service}/links/{kind}/{ref}", &[SERVICE, req_choice("kind", &["postgres", "redis", "bucket", "stream", "queue", "nosql", "search", "service", "tasks"], "Link kind"), req("ref", "The resource's id or name")]),
     t("apps_list_silences", "Alert silences", "An environment's alert silences open now: until when, which alerts (none listed: all), and why.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/silences", &[SERVICE, ENV]),
-    t("apps_silence_alerts", "Silence alerts", "Quiet an environment's alerts until a time (unix ms, at most 30 days ahead), or every week in its windows (every): they reach no notification target, on-call included, while events are still kept and resolves still go out. alerts narrows it to some kinds (check.down, heartbeat.missed, crash_loop, alert.memory, alert.cpu, alert.metric, alert.errors, alert.latency, alert.capacity, alert.log, alert.route, alert.slo, alert.anomaly, cron.failed, deploy.failed).", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/silences", &[SERVICE, ENV, b("until", Ty::Int, "When it ends, unix ms (a one-off's, required: within 30 days; a repeating one's within a year, a year by default)"), breq("reason", Ty::Str, "Why (shown with it)"), b("alerts", Ty::Arr, "The alert kinds it quiets (none: all)"), b("every", Ty::Obj, "A repeating one, quiet only inside its weekly windows: {windows: [{from: \"sat 02:00\", to: \"sat 04:00\"}], timezone? (IANA, default UTC)}")]),
+    t("apps_silence_alerts", "Silence alerts", "Quiet an environment's alerts until a time (unix ms, at most 30 days ahead), or every week in its windows (every): they reach no notification target, on-call included, while events are still kept and resolves still go out. alerts narrows it to some kinds (check.down, check.slow, heartbeat.missed, crash_loop, alert.memory, alert.cpu, alert.metric, alert.errors, alert.latency, alert.capacity, alert.log, alert.route, alert.slo, alert.anomaly, cron.failed, deploy.failed).", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/silences", &[SERVICE, ENV, b("until", Ty::Int, "When it ends, unix ms (a one-off's, required: within 30 days; a repeating one's within a year, a year by default)"), breq("reason", Ty::Str, "Why (shown with it)"), b("alerts", Ty::Arr, "The alert kinds it quiets (none: all)"), b("every", Ty::Obj, "A repeating one, quiet only inside its weekly windows: {windows: [{from: \"sat 02:00\", to: \"sat 04:00\"}], timezone? (IANA, default UTC)}")]),
     t("apps_end_silence", "End a silence", "End an alert silence early: alerts go out again from now.", "apps", "DELETE", "/v1/apps/services/{service}/environments/{env}/silences/{sid}", &[SERVICE, ENV, req("sid", "The silence (sil_…)")]),
     t("apps_claim_domain", "Claim a domain held elsewhere", "Take a hostname another environment holds by proving it's yours: the first call answers the TXT record to add (claimed false, txt {name, value}); once DNS has it, the next call moves the domain here, verified (claimed true, domain), and the holder is told.", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/domains/{host}/claim", &[SERVICE, ENV, req("host", "The domain")]).open_world(),
     t("apps_configure_domain", "Write a domain's DNS records", "Write a custom domain's records (its CNAME, and the TXT challenge where it needs one) at the customer's Cloudflare with their API token, then check it: cloudflare_token is a roll:// reference to a token scoped to Zone:DNS:Edit on that zone, read as the caller (who must be able to reveal it, not marked sensitive) for this call only: where the caller's reveal there is ask, the gate asks for that folder first. The name's A or AAAA records (its old host) answer a 409 naming them unless replace is true.", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/domains/{host}/configure", &[SERVICE, ENV, req("host", "The domain"), breq("cloudflare_token", Ty::Str, "A roll:// reference to the Cloudflare API token"), b("replace", Ty::Bool, "Delete the name's A and AAAA records for roll's CNAME")]).open_world(),
@@ -1988,152 +1988,173 @@ static PREPARED: std::sync::LazyLock<std::collections::HashMap<&'static str, Pre
 
 #[cfg(test)]
 mod tests {
-    /// A slip finds its name; something unlike every name finds none.
-    #[test]
-    fn nearest_finds_slips() {
-        let names = ["status", "limit", "service", "environment"];
-        assert_eq!(super::nearest("stauts", names), Some("status"));
-        assert_eq!(super::nearest("lmit", names), Some("limit"));
-        assert_eq!(super::nearest("enviroment", names), Some("environment"));
-        assert_eq!(super::nearest("zebra", names), None);
-        let all: Vec<&str> = super::all().iter().map(|t| t.name).collect();
-        assert_eq!(super::nearest("apps_list_service", all.iter().copied()), Some("apps_list_services"));
-    }
 
-    /// An argument with a fixed set of values publishes it as `enum`, and a value outside the set is
-    /// refused before any call, naming the set.
-    #[test]
-    fn a_choice_is_published_and_checked() {
-        let t = super::all().iter().find(|t| t.name == "apps_rollout").unwrap();
-        assert_eq!(t.build_definition()["inputSchema"]["properties"]["action"]["enum"], serde_json::json!(["advance", "all", "abort"]));
-        let call = |action: &str| t.request(&serde_json::json!({ "service": "svc_1", "env": "production", "deploy": "dpl_1", "action": action }));
-        assert_eq!(call("go").err().unwrap(), "apps_rollout: action is one of advance, all, abort (not \"go\")");
-        assert!(call("abort").is_ok());
-        assert!(call("").is_err(), "a required choice can't be empty");
-        let vulns = super::all().iter().find(|t| t.name == "apps_deploy_vulnerabilities").unwrap();
-        let empty = vulns.request(&serde_json::json!({ "service": "svc_1", "env": "production", "deploy": "dpl_1", "severity": "" })).unwrap();
-        assert!(!empty.uri.contains("severity"), "an optional one left empty is left out: {}", empty.uri);
-    }
-
-    /// A choice copies its set from the product that takes it: a value the product adds has to
-    /// reach the tool, or roll's MCP refuses it before the route ever sees it. Each set is read
-    /// from the product's own names (its `as_str` or table), or from roll-auth's types.
+    /// A choice copies its set from the product that takes it: a value the product adds has to reach
+    /// the tool, or roll's MCP refuses it before the route ever sees it. Each set is read from the
+    /// product's own names (its `as_str` or table), or from roll-auth's types. A choice is published as
+    /// `enum` and checked before any call, naming the set; values listed in prose are a choice; a slip
+    /// of a name finds the name meant.
     #[test]
     fn choices_match_their_products() {
-        // The quoted values in `src` between `from` and the first `to` after it.
-        fn quoted(src: &str, from: &str, to: &str, pattern: &str) -> Vec<String> {
-            let body = src.split(from).nth(1).and_then(|r| r.split(to).next()).unwrap_or_else(|| panic!("{from} moved"));
-            let mut out: Vec<String> = body.match_indices(pattern).map(|(i, m)| body[i + m.len()..].split('"').next().unwrap().to_string()).collect();
-            out.sort();
-            out.dedup();
-            out
+        {
+            // The quoted values in `src` between `from` and the first `to` after it.
+            fn quoted(src: &str, from: &str, to: &str, pattern: &str) -> Vec<String> {
+                let body = src.split(from).nth(1).and_then(|r| r.split(to).next()).unwrap_or_else(|| panic!("{from} moved"));
+                let mut out: Vec<String> = body.match_indices(pattern).map(|(i, m)| body[i + m.len()..].split('"').next().unwrap().to_string()).collect();
+                out.sort();
+                out.dedup();
+                out
+            }
+            let arms = |src: &str, from: &str| quoted(src, from, "\n}\n", "=> \"");
+            let workspace = arms(include_str!("../../roll-workspace/src/lib.rs"), "impl Kind {");
+            let links = arms(include_str!("../../apps-control/src/model.rs"), "impl LinkKind {");
+            // A list of string literals: every other piece between quotes.
+            let model = include_str!("../../apps-control/src/model.rs");
+            let list = model.split("pub const DRAIN_FORMATS").nth(1).and_then(|r| r.split("];").next()).expect("DRAIN_FORMATS moved");
+            let drains: Vec<String> = list.split('"').skip(1).step_by(2).map(str::to_string).collect();
+            let evictions = quoted(include_str!("../../redis-engine/src/config.rs"), "const POLICIES", "];", "(\"");
+            let messages = arms(include_str!("../../tasks/src/model.rs"), "impl MsgState {");
+            let runs = arms(include_str!("../../tasks/src/model.rs"), "impl RunStatus {");
+            let previews = arms(include_str!("../../roll-previews/src/lib.rs"), "impl State {");
+            let exchanges = quoted(include_str!("../../mq-core/src/exchange.rs"), "fn name(", "\n    }\n", "=> \"");
+            // `any` matches every task in a lookup; an endpoint is made for one.
+            let tasks = quoted(include_str!("../../search-es/src/xpack/inference/mod.rs"), "pub fn name(self)", "\n    }\n", "=> \"").into_iter().filter(|t| t != "any").collect();
+            let roles: Vec<String> = roll_auth::roles::Role::ALL.iter().map(|r| r.as_str().to_string()).collect();
+            let actions: Vec<String> = roll_auth::scope::Action::ALL.iter().map(|a| a.as_str().to_string()).collect();
+            let sets: Vec<(&str, &str, Vec<String>)> = vec![
+                ("workspace_place_resource", "kind", workspace.clone()),
+                ("workspace_remove_resource", "kind", workspace),
+                ("apps_link", "kind", links.clone()),
+                ("apps_unlink", "kind", links),
+                ("apps_add_drain", "format", drains),
+                ("redis_create_database", "eviction_policy", evictions.clone()),
+                ("redis_update_database", "eviction_policy", evictions),
+                ("tasks_list_messages", "state", messages),
+                ("tasks_list_runs", "status", runs),
+                ("previews_list", "state", previews),
+                ("queues_declare_exchange", "type", exchanges),
+                ("search_create_inference_endpoint", "task_type", tasks),
+                ("workspace_invite_member", "role", roles.clone()),
+                ("workspace_set_member_role", "role", roles.clone()),
+                ("workspace_set_group_role", "role", roles.into_iter().filter(|r| r != "owner").collect()),
+                ("access_request_access", "action", actions),
+            ];
+            // The rest: each from the one place its product decides it (a match, an enum, a list).
+            let between = |src: &'static str, from: &str, to: &str| -> &'static str { src.split(from).nth(1).and_then(|r| r.split(to).next()).unwrap_or_else(|| panic!("{from} moved")) };
+            let after = |body: &str, pattern: &str| -> Vec<String> { body.match_indices(pattern).map(|(i, m)| body[i + m.len()..].split(['"', '\'']).next().unwrap().to_string()).collect() };
+            let list = |body: &str| -> Vec<String> { body.split('"').skip(1).step_by(2).map(str::to_string).collect() };
+            // A match's keys: the string before each `" =>` (the last of `"a" | "b" =>`).
+            let keys = |body: &str| -> Vec<String> {
+                let chunks: Vec<&str> = body.split("\" =>").collect();
+                chunks[..chunks.len() - 1].iter().filter_map(|c| c.rsplit('"').next()).map(str::to_string).collect()
+            };
+            // A serde enum's variants, lowercased (`rename_all = "lowercase"`).
+            let variants = |body: &str| -> Vec<String> { body.lines().map(str::trim).filter_map(|l| l.strip_suffix(',')).filter(|v| v.chars().all(char::is_alphanumeric) && v.starts_with(char::is_uppercase)).map(str::to_lowercase).collect() };
+            let notify = include_str!("../../apps-control/src/notify.rs");
+            let notification_kinds: Vec<String> = between(notify, "\"kind is ", "\"").replace(" or ", ", ").split(", ").map(str::to_string).collect();
+            let mut severity = keys(between(include_str!("../../apps-control/src/model.rs"), "impl Severity {", "\n}\n"));
+            assert!(include_str!("../../apps-control/src/vulns.rs").contains("s != \"unknown\""), "the vulnerabilities route moved: does it still take unknown?");
+            severity.push("unknown".into());
+            let types = after(between(include_str!("../../roll-secrets/src/api.rs"), "fn kind_of(", "\n}\n"), "Some(\"");
+            let envs = after(between(include_str!("../../roll-secrets/src/envs.rs"), "impl Kind {", "\n}\n"), "=> \"");
+            let destinations = after(between(include_str!("../../mq-control/src/api.rs"), "destination_type must be ", ", not"), "'").into_iter().step_by(2).collect::<Vec<_>>();
+            let flavors = keys(between(include_str!("../../search-control/src/control.rs"), "pub fn dialect(flavor: &str)", "\n}\n"));
+            let status_page = include_str!("../../apps-control/src/status_page.rs");
+            let (new_incident, incident_update) = (list(between(status_page, "const NEW_STATES", "];")), list(between(status_page, "const UPDATE_STATES", "];")));
+            let more: Vec<(&str, &str, Vec<String>)> = vec![
+                ("access_request_access", "for", keys(between(include_str!("../../roll-access/src/api.rs"), "fn request_duration(", "\n}\n"))),
+                ("access_list_approvals", "state", roll_access::store::APPROVAL_STATES.iter().map(|s| s.to_string()).collect()),
+                ("nosql_create_database", "dialect", list(between(include_str!("../../nosql-control/src/api.rs"), "\"dialects\": [", "]"))),
+                ("queues_declare_queue", "type", keys(between(include_str!("../../mq-core/src/queue/config.rs"), "impl QueueType {", "\n}\n"))),
+                ("queues_set_policy", "apply_to", list(between(include_str!("../../mq-mgmt/src/api/admin.rs"), "const APPLY_TO", "];"))),
+                ("queues_bind", "destination_type", destinations.clone()),
+                ("queues_unbind", "destination_type", destinations),
+                ("search_create_cluster", "flavor", flavors.clone()),
+                ("search_update_cluster", "flavor", flavors),
+                ("search_cluster_metrics", "range", keys(between(include_str!("../../search-control/src/control.rs"), "impl MetricsRange {", "\n}\n"))),
+                ("search_browser_key_usage", "window", keys(between(include_str!("../../search-control/src/control.rs"), "impl MetricsRange {", "\n}\n"))),
+                ("search_analytics", "range", keys(between(include_str!("../../search-control/src/analytics.rs"), "impl Range {", "\n}\n"))),
+                ("search_delete_by_query", "conflicts", keys(between(include_str!("../../search-es/src/api/by_query_request.rs"), "fn set_conflicts(", "\n    }\n"))),
+                ("search_update_by_query", "conflicts", keys(between(include_str!("../../search-es/src/api/by_query_request.rs"), "fn set_conflicts(", "\n    }\n"))),
+                ("secrets_create_environment", "kind", envs.clone()),
+                ("secrets_ensure_environment", "kind", envs),
+                ("secrets_get", "type", types.clone()),
+                ("secrets_set", "type", types.clone()),
+                ("secrets_delete", "type", types.clone()),
+                ("secrets_versions", "type", types.clone()),
+                ("secrets_version_value", "type", types),
+                ("secrets_list_requests", "state", list(between(include_str!("../../roll-secrets/src/requests.rs"), "const STATES", "];"))),
+                ("apps_rollout", "action", variants(between(include_str!("../../apps-control/src/model.rs"), "pub enum RolloutAction {", "}"))),
+                ("apps_set_error_state", "state", variants(between(include_str!("../../apps-control/src/errors.rs"), "pub enum Lifecycle {", "}"))),
+                ("apps_logs", "stream", variants(between(include_str!("../../apps-control/src/logs.rs"), "pub enum Stream {", "}"))),
+                ("apps_update_incident", "state", incident_update),
+                ("apps_create_incident", "state", new_incident),
+                ("apps_set_private_network", "kind", after(between(include_str!("../../apps-control/src/peering.rs"), "let kind = match o.get(\"kind\")", "};"), "Some(\"")),
+                ("apps_add_notification", "kind", notification_kinds),
+                ("apps_add_notification", "region", after(notify, "(\"pagerduty\", \"")),
+                ("apps_deploy_vulnerabilities", "severity", severity),
+                ("storage_presign", "method", after(between(include_str!("../../s3-control/src/control.rs"), "pub fn presign(", "\n    }\n"), "!= \"")),
+                ("previews_screenshot", "diff", list(between(include_str!("../../roll-previews/src/api.rs"), "Some(d @ (", "))"))),
+            ];
+            let sets: Vec<(&str, &str, Vec<String>)> = sets.into_iter().chain(more).collect();
+            let mut covered = std::collections::BTreeSet::new();
+            for (tool, param, mut want) in sets {
+                want.sort();
+                want.dedup();
+                covered.insert((tool, param));
+                let t = super::all().iter().find(|t| t.name == tool).unwrap_or_else(|| panic!("{tool}"));
+                let Some(Ty::Choice(values)) = t.params.iter().find(|p| p.name == param).map(|p| p.ty) else { panic!("{tool}.{param} isn't a choice") };
+                let mut got: Vec<String> = values.iter().map(|v| v.to_string()).collect();
+                got.sort();
+                assert_eq!(got, want, "{tool}.{param}: its choice (left) isn't the product's set (right)");
+            }
+            // Every choice is read from its product: a new one joins the list above.
+            let unread: Vec<String> = super::all().iter().flat_map(|t| t.params.iter().filter(|p| matches!(p.ty, Ty::Choice(_)) && !covered.contains(&(t.name, p.name))).map(move |p| format!("{}.{}", t.name, p.name))).collect();
+            assert!(unread.is_empty(), "choices not read from their product here: {unread:?}");
         }
-        let arms = |src: &str, from: &str| quoted(src, from, "\n}\n", "=> \"");
-        let workspace = arms(include_str!("../../roll-workspace/src/lib.rs"), "impl Kind {");
-        let links = arms(include_str!("../../apps-control/src/model.rs"), "impl LinkKind {");
-        // A list of string literals: every other piece between quotes.
-        let model = include_str!("../../apps-control/src/model.rs");
-        let list = model.split("pub const DRAIN_FORMATS").nth(1).and_then(|r| r.split("];").next()).expect("DRAIN_FORMATS moved");
-        let drains: Vec<String> = list.split('"').skip(1).step_by(2).map(str::to_string).collect();
-        let evictions = quoted(include_str!("../../redis-engine/src/config.rs"), "const POLICIES", "];", "(\"");
-        let messages = arms(include_str!("../../tasks/src/model.rs"), "impl MsgState {");
-        let runs = arms(include_str!("../../tasks/src/model.rs"), "impl RunStatus {");
-        let previews = arms(include_str!("../../roll-previews/src/lib.rs"), "impl State {");
-        let exchanges = quoted(include_str!("../../mq-core/src/exchange.rs"), "fn name(", "\n    }\n", "=> \"");
-        // `any` matches every task in a lookup; an endpoint is made for one.
-        let tasks = quoted(include_str!("../../search-es/src/xpack/inference/mod.rs"), "pub fn name(self)", "\n    }\n", "=> \"").into_iter().filter(|t| t != "any").collect();
-        let roles: Vec<String> = roll_auth::roles::Role::ALL.iter().map(|r| r.as_str().to_string()).collect();
-        let actions: Vec<String> = roll_auth::scope::Action::ALL.iter().map(|a| a.as_str().to_string()).collect();
-        let sets: Vec<(&str, &str, Vec<String>)> = vec![
-            ("workspace_place_resource", "kind", workspace.clone()),
-            ("workspace_remove_resource", "kind", workspace),
-            ("apps_link", "kind", links.clone()),
-            ("apps_unlink", "kind", links),
-            ("apps_add_drain", "format", drains),
-            ("redis_create_database", "eviction_policy", evictions.clone()),
-            ("redis_update_database", "eviction_policy", evictions),
-            ("tasks_list_messages", "state", messages),
-            ("tasks_list_runs", "status", runs),
-            ("previews_list", "state", previews),
-            ("queues_declare_exchange", "type", exchanges),
-            ("search_create_inference_endpoint", "task_type", tasks),
-            ("workspace_invite_member", "role", roles.clone()),
-            ("workspace_set_member_role", "role", roles.clone()),
-            ("workspace_set_group_role", "role", roles.into_iter().filter(|r| r != "owner").collect()),
-            ("access_request_access", "action", actions),
-        ];
-        // The rest: each from the one place its product decides it (a match, an enum, a list).
-        let between = |src: &'static str, from: &str, to: &str| -> &'static str { src.split(from).nth(1).and_then(|r| r.split(to).next()).unwrap_or_else(|| panic!("{from} moved")) };
-        let after = |body: &str, pattern: &str| -> Vec<String> { body.match_indices(pattern).map(|(i, m)| body[i + m.len()..].split(['"', '\'']).next().unwrap().to_string()).collect() };
-        let list = |body: &str| -> Vec<String> { body.split('"').skip(1).step_by(2).map(str::to_string).collect() };
-        // A match's keys: the string before each `" =>` (the last of `"a" | "b" =>`).
-        let keys = |body: &str| -> Vec<String> {
-            let chunks: Vec<&str> = body.split("\" =>").collect();
-            chunks[..chunks.len() - 1].iter().filter_map(|c| c.rsplit('"').next()).map(str::to_string).collect()
-        };
-        // A serde enum's variants, lowercased (`rename_all = "lowercase"`).
-        let variants = |body: &str| -> Vec<String> { body.lines().map(str::trim).filter_map(|l| l.strip_suffix(',')).filter(|v| v.chars().all(char::is_alphanumeric) && v.starts_with(char::is_uppercase)).map(str::to_lowercase).collect() };
-        let notify = include_str!("../../apps-control/src/notify.rs");
-        let notification_kinds: Vec<String> = between(notify, "\"kind is ", "\"").replace(" or ", ", ").split(", ").map(str::to_string).collect();
-        let mut severity = keys(between(include_str!("../../apps-control/src/model.rs"), "impl Severity {", "\n}\n"));
-        assert!(include_str!("../../apps-control/src/vulns.rs").contains("s != \"unknown\""), "the vulnerabilities route moved: does it still take unknown?");
-        severity.push("unknown".into());
-        let types = after(between(include_str!("../../roll-secrets/src/api.rs"), "fn kind_of(", "\n}\n"), "Some(\"");
-        let envs = after(between(include_str!("../../roll-secrets/src/envs.rs"), "impl Kind {", "\n}\n"), "=> \"");
-        let destinations = after(between(include_str!("../../mq-control/src/api.rs"), "destination_type must be ", ", not"), "'").into_iter().step_by(2).collect::<Vec<_>>();
-        let flavors = keys(between(include_str!("../../search-control/src/control.rs"), "pub fn dialect(flavor: &str)", "\n}\n"));
-        let status_page = include_str!("../../apps-control/src/status_page.rs");
-        let (new_incident, incident_update) = (list(between(status_page, "const NEW_STATES", "];")), list(between(status_page, "const UPDATE_STATES", "];")));
-        let more: Vec<(&str, &str, Vec<String>)> = vec![
-            ("access_request_access", "for", keys(between(include_str!("../../roll-access/src/api.rs"), "fn request_duration(", "\n}\n"))),
-            ("access_list_approvals", "state", roll_access::store::APPROVAL_STATES.iter().map(|s| s.to_string()).collect()),
-            ("nosql_create_database", "dialect", list(between(include_str!("../../nosql-control/src/api.rs"), "\"dialects\": [", "]"))),
-            ("queues_declare_queue", "type", keys(between(include_str!("../../mq-core/src/queue/config.rs"), "impl QueueType {", "\n}\n"))),
-            ("queues_set_policy", "apply_to", list(between(include_str!("../../mq-mgmt/src/api/admin.rs"), "const APPLY_TO", "];"))),
-            ("queues_bind", "destination_type", destinations.clone()),
-            ("queues_unbind", "destination_type", destinations),
-            ("search_create_cluster", "flavor", flavors.clone()),
-            ("search_update_cluster", "flavor", flavors),
-            ("search_cluster_metrics", "range", keys(between(include_str!("../../search-control/src/control.rs"), "impl MetricsRange {", "\n}\n"))),
-            ("search_browser_key_usage", "window", keys(between(include_str!("../../search-control/src/control.rs"), "impl MetricsRange {", "\n}\n"))),
-            ("search_analytics", "range", keys(between(include_str!("../../search-control/src/analytics.rs"), "impl Range {", "\n}\n"))),
-            ("search_delete_by_query", "conflicts", keys(between(include_str!("../../search-es/src/api/by_query_request.rs"), "fn set_conflicts(", "\n    }\n"))),
-            ("search_update_by_query", "conflicts", keys(between(include_str!("../../search-es/src/api/by_query_request.rs"), "fn set_conflicts(", "\n    }\n"))),
-            ("secrets_create_environment", "kind", envs.clone()),
-            ("secrets_ensure_environment", "kind", envs),
-            ("secrets_get", "type", types.clone()),
-            ("secrets_set", "type", types.clone()),
-            ("secrets_delete", "type", types.clone()),
-            ("secrets_versions", "type", types.clone()),
-            ("secrets_version_value", "type", types),
-            ("secrets_list_requests", "state", list(between(include_str!("../../roll-secrets/src/requests.rs"), "const STATES", "];"))),
-            ("apps_rollout", "action", variants(between(include_str!("../../apps-control/src/model.rs"), "pub enum RolloutAction {", "}"))),
-            ("apps_set_error_state", "state", variants(between(include_str!("../../apps-control/src/errors.rs"), "pub enum Lifecycle {", "}"))),
-            ("apps_logs", "stream", variants(between(include_str!("../../apps-control/src/logs.rs"), "pub enum Stream {", "}"))),
-            ("apps_update_incident", "state", incident_update),
-            ("apps_create_incident", "state", new_incident),
-            ("apps_set_private_network", "kind", after(between(include_str!("../../apps-control/src/peering.rs"), "let kind = match o.get(\"kind\")", "};"), "Some(\"")),
-            ("apps_add_notification", "kind", notification_kinds),
-            ("apps_add_notification", "region", after(notify, "(\"pagerduty\", \"")),
-            ("apps_deploy_vulnerabilities", "severity", severity),
-            ("storage_presign", "method", after(between(include_str!("../../s3-control/src/control.rs"), "pub fn presign(", "\n    }\n"), "!= \"")),
-            ("previews_screenshot", "diff", list(between(include_str!("../../roll-previews/src/api.rs"), "Some(d @ (", "))"))),
-        ];
-        let sets: Vec<(&str, &str, Vec<String>)> = sets.into_iter().chain(more).collect();
-        let mut covered = std::collections::BTreeSet::new();
-        for (tool, param, mut want) in sets {
-            want.sort();
-            want.dedup();
-            covered.insert((tool, param));
-            let t = super::all().iter().find(|t| t.name == tool).unwrap_or_else(|| panic!("{tool}"));
-            let Some(Ty::Choice(values)) = t.params.iter().find(|p| p.name == param).map(|p| p.ty) else { panic!("{tool}.{param} isn't a choice") };
-            let mut got: Vec<String> = values.iter().map(|v| v.to_string()).collect();
-            got.sort();
-            assert_eq!(got, want, "{tool}.{param}: its choice (left) isn't the product's set (right)");
+        {
+            // An argument with a fixed set of values publishes it as `enum`, and a value outside the set is
+            // refused before any call, naming the set.
+            let t = super::all().iter().find(|t| t.name == "apps_rollout").unwrap();
+            assert_eq!(t.build_definition()["inputSchema"]["properties"]["action"]["enum"], serde_json::json!(["advance", "all", "abort"]));
+            let call = |action: &str| t.request(&serde_json::json!({ "service": "svc_1", "env": "production", "deploy": "dpl_1", "action": action }));
+            assert_eq!(call("go").err().unwrap(), "apps_rollout: action is one of advance, all, abort (not \"go\")");
+            assert!(call("abort").is_ok());
+            assert!(call("").is_err(), "a required choice can't be empty");
+            let vulns = super::all().iter().find(|t| t.name == "apps_deploy_vulnerabilities").unwrap();
+            let empty = vulns.request(&serde_json::json!({ "service": "svc_1", "env": "production", "deploy": "dpl_1", "severity": "" })).unwrap();
+            assert!(!empty.uri.contains("severity"), "an optional one left empty is left out: {}", empty.uri);
         }
-        // Every choice is read from its product: a new one joins the list above.
-        let unread: Vec<String> = super::all().iter().flat_map(|t| t.params.iter().filter(|p| matches!(p.ty, Ty::Choice(_)) && !covered.contains(&(t.name, p.name))).map(move |p| format!("{}.{}", t.name, p.name))).collect();
-        assert!(unread.is_empty(), "choices not read from their product here: {unread:?}");
+        {
+            // An argument described only as its values ("a, b or c") is a [`Ty::Choice`] with the route's
+            // own set: prose lists drifted from their routes (queues' exchange types named 5 of 9, apps'
+            // notification kinds 6 of 8). The ones left are sets a route widens or is changing.
+            const OPEN: &[(&str, &str)] = &[
+                // Change names too (`create_token`), not only allow, deny or ask.
+                ("access_audit_log", "decision"),
+            ];
+            let word = |w: &str| !w.is_empty() && w.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "_-".contains(c));
+            let mut prose = Vec::new();
+            for t in super::all() {
+                for p in t.params.iter().filter(|p| p.ty == Ty::Str && !OPEN.contains(&(t.name, p.name))) {
+                    let Some((head, last)) = p.desc.rsplit_once(" or ") else { continue };
+                    if word(last) && head.trim_end_matches(',').split(", ").all(word) {
+                        prose.push(format!("{}.{}: {:?}", t.name, p.name, p.desc));
+                    }
+                }
+            }
+            assert!(prose.is_empty(), "values in prose: make each a Ty::Choice of the route's set\n{}", prose.join("\n"));
+        }
+        {
+            // A slip finds its name; something unlike every name finds none.
+            let names = ["status", "limit", "service", "environment"];
+            assert_eq!(super::nearest("stauts", names), Some("status"));
+            assert_eq!(super::nearest("lmit", names), Some("limit"));
+            assert_eq!(super::nearest("enviroment", names), Some("environment"));
+            assert_eq!(super::nearest("zebra", names), None);
+            let all: Vec<&str> = super::all().iter().map(|t| t.name).collect();
+            assert_eq!(super::nearest("apps_list_service", all.iter().copied()), Some("apps_list_services"));
+        }
     }
 
     /// Whether a call can wait for a person is judged on everything it can be decided as: a body
@@ -2150,21 +2171,6 @@ mod tests {
         assert_eq!((plain.actions.as_slice(), plain.others), (&[Action::Read][..], false));
     }
 
-    /// `secrets_list_saas` names every vendor roll secrets rotates for: the list is prose, and new
-    /// vendors kept landing without it (SonarQube and Jenkins, then Salesforce).
-    #[test]
-    fn the_saas_tool_names_every_vendor() {
-        let saas = include_str!("../../roll-secrets/src/saas.rs");
-        // `Vendor::name`'s arms: each vendor's own name.
-        let names = saas.split("pub fn name(&self) -> &'static str {").nth(1).and_then(|r| r.split("\n    }\n").next()).expect("Vendor::name moved");
-        let said = super::all().iter().find(|t| t.name == "secrets_list_saas").unwrap().description.to_lowercase();
-        let vendors: Vec<&str> = names.match_indices(" { .. } => \"").map(|(i, m)| names[i + m.len()..].split('"').next().unwrap()).collect();
-        assert!(vendors.len() >= 14, "the vendor list moved: {vendors:?}");
-        let missing: Vec<&&str> = vendors.iter().filter(|v| !said.contains(**v)).collect();
-        assert!(missing.is_empty(), "secrets_list_saas doesn't name {missing:?}");
-    }
-
-    /// An argument described only as its values ("a, b or c") is a [`Ty::Choice`] with the route's
     /// `search_query` sends what Elasticsearch's _search body takes: every key roll search parses
     /// there (`SearchSource`) is an argument or left out here with why. With five arguments a
     /// workflow asked for `profile` the tool refused, and hybrid search had no way in.
@@ -2201,27 +2207,6 @@ mod tests {
         assert!(missing.is_empty(), "search_query doesn't take {missing:?}: add each as an argument or to LEFT_OUT with why");
         let stale: Vec<&str> = LEFT_OUT.iter().map(|(n, _)| *n).filter(|n| takes(n) || !keys.iter().any(|k| k == n)).collect();
         assert!(stale.is_empty(), "LEFT_OUT names {stale:?}, which search_query takes or SearchSource no longer parses");
-    }
-
-    /// own set: prose lists drifted from their routes (queues' exchange types named 5 of 9, apps'
-    /// notification kinds 6 of 8). The ones left are sets a route widens or is changing.
-    #[test]
-    fn a_list_of_values_is_a_choice() {
-        const OPEN: &[(&str, &str)] = &[
-            // Change names too (`create_token`), not only allow, deny or ask.
-            ("access_audit_log", "decision"),
-        ];
-        let word = |w: &str| !w.is_empty() && w.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "_-".contains(c));
-        let mut prose = Vec::new();
-        for t in super::all() {
-            for p in t.params.iter().filter(|p| p.ty == Ty::Str && !OPEN.contains(&(t.name, p.name))) {
-                let Some((head, last)) = p.desc.rsplit_once(" or ") else { continue };
-                if word(last) && head.trim_end_matches(',').split(", ").all(word) {
-                    prose.push(format!("{}.{}: {:?}", t.name, p.name, p.desc));
-                }
-            }
-        }
-        assert!(prose.is_empty(), "values in prose: make each a Ty::Choice of the route's set\n{}", prose.join("\n"));
     }
 
     use super::*;
@@ -2566,6 +2551,29 @@ mod tests {
         // A `*` line speaks for the methods with no tool, so a tool on its path doesn't make it stale.
         let stale: Vec<String> = listed.iter().filter(|(m, r)| *m != "*" && covered(m, r)).map(|(m, r)| format!("{m} {r}")).collect();
         assert!(stale.is_empty(), "no-tool.txt lines for routes that have a tool now: remove them:\n{}", stale.join("\n"));
+        // A route kept tool-less for a credential is one the gate protects: its row decides reveal
+        // or admin, or decides from the body, or hides the answer's credential fields (`reveals`).
+        // Otherwise its line says it only sets one or answers none: a create that answers a secret
+        // to a grant that may only write is the gap (search's alerts in review, previews' env).
+        let unprotected: Vec<&str> = include_str!("no-tool.txt")
+            .lines()
+            .filter(|l| !l.starts_with('#') && l.contains("credential"))
+            .filter(|l| {
+                let mut w = l.split_whitespace();
+                let (Some(m), Some(r)) = (w.next(), w.next()) else { return false };
+                // What the line says it is, after the route: only setting one, or answering none.
+                let why = w.collect::<Vec<_>>().join(" ");
+                if why.starts_with("sets a credential") || why.starts_with("answers no credential") {
+                    return false;
+                }
+                let sample = r.split('/').map(|s| if s.starts_with('{') { "x" } else { s }).collect::<Vec<_>>().join("/");
+                catalog::by_path(if m == "*" { "GET" } else { m }, &sample).is_some_and(|f| {
+                    let decided = matches!(f.row.act, catalog::Act::Is(roll_auth::scope::Action::Reveal | roll_auth::scope::Action::Admin) | catalog::Act::Body(_));
+                    !decided && f.row.reveals.is_empty()
+                })
+            })
+            .collect();
+        assert!(unprotected.is_empty(), "tool-less credential routes the gate doesn't protect: decide reveal (or from the body), list the answer's credential fields in `reveals`, or say the line only `sets a credential (…)` or `answers no credential`:\n{}", unprotected.join("\n"));
         // A tool that removes, revokes or replaces something says so (clients ask a person before a
         // destructive call), unless it's marked undoable: the review that found five revoke tools
         // unmarked is why this is a test, not a habit.

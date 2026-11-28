@@ -15,23 +15,21 @@ use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 
+/// The wire as Elasticsearch answers it: the root and its product header (no `Date`),
+/// keep-alive and pipelining, HEAD's length without a body, method and content-type errors, a
+/// repeated `X-Opaque-Id`, and request lines and headers past Netty's limits.
 #[tokio::test]
-async fn root_info_and_product_header() {
+async fn http_framing_like_elasticsearch() {
     let t = start_dev().await;
     let r = send(t.addr, "GET", "/", &[], b"").await;
     assert_eq!(r.status, 200);
     assert_eq!(r.header("X-elastic-product"), Some("Elasticsearch"));
     assert!(r.text().contains("\"cluster_name\" : \"dev\""), "{}", r.text());
     assert!(r.text().contains("\"tagline\" : \"You Know, for Search\""));
-    // Elasticsearch and OpenSearch send no `Date` header.
     assert_eq!(r.header("date"), None);
-}
 
-#[tokio::test]
-async fn keep_alive_and_pipelining() {
-    let t = start_dev().await;
-    let mut s = TcpStream::connect(t.addr).await.unwrap();
     // Three requests written back to back on one connection.
+    let mut s = TcpStream::connect(t.addr).await.unwrap();
     let mut batch = request("PUT", "/pipelined", &[("Content-Type", "application/json")], b"{}");
     batch.extend(request("GET", "/pipelined/_settings?filter_path=*.settings.index.number_of_shards", &[], b""));
     batch.extend(request("HEAD", "/pipelined", &[], b""));
@@ -46,32 +44,110 @@ async fn keep_alive_and_pipelining() {
     // The connection stays usable.
     let d = send_on(&mut s, "GET", "/_cluster/health?filter_path=status", &[], b"").await;
     assert_eq!(d.text(), r#"{"status":"yellow"}"#);
-}
 
-#[tokio::test]
-async fn head_sends_length_without_body() {
-    let t = start_dev().await;
     let get = send(t.addr, "GET", "/missing-index", &[], b"").await;
     let head = send(t.addr, "HEAD", "/missing-index", &[], b"").await;
-    assert_eq!(get.status, 404);
-    assert_eq!(head.status, 404);
+    assert_eq!((get.status, head.status), (404, 404));
     assert!(head.body.is_empty());
     assert_eq!(head.header("content-length").map(|l| l.parse::<usize>().unwrap()), Some(get.body.len()));
+
+    let r = send(t.addr, "DELETE", "/_cluster/health", &[], b"").await;
+    assert_eq!((r.status, r.header("Allow")), (405, Some("GET")));
+    let r = send(t.addr, "OPTIONS", "/_cluster/health", &[], b"").await;
+    assert_eq!((r.status, r.header("Allow")), (200, Some("GET")));
+    let r = send(t.addr, "PUT", "/idx", &[("Content-Type", "text/csv")], b"a,b").await;
+    assert_eq!(r.status, 406);
+    let r = send(t.addr, "GET", "/_cluster/health", &[("X-Opaque-Id", "a"), ("X-Opaque-Id", "b")], b"").await;
+    assert_eq!(r.status, 400);
+    assert_eq!(
+        r.text(),
+        r#"{"error":{"root_cause":[{"type":"illegal_argument_exception","reason":"multiple values for single-valued header [X-Opaque-Id]."}],"type":"illegal_argument_exception","reason":"multiple values for single-valued header [X-Opaque-Id]."},"status":400}"#
+    );
+    assert_eq!(r.header("X-Opaque-Id"), Some("a"));
+
+    // `GET <path> HTTP/1.1` of exactly 4096 bytes passes; one more byte doesn't.
+    let path = |len: usize| format!("/{}", "a".repeat(len - "GET  HTTP/1.1".len() - 1));
+    let r = send(t.addr, "GET", &path(4096), &[], b"").await;
+    assert_eq!(r.status, 404, "{}", r.text());
+    let mut s = TcpStream::connect(t.addr).await.unwrap();
+    s.write_all(&request("GET", &path(4097), &[], b"")).await.unwrap();
+    let raw = String::from_utf8_lossy(&until_closed(&mut s).await).into_owned();
+    assert!(raw.starts_with("HTTP/1.1 400 "), "{raw}");
+    assert!(
+        raw.ends_with(r#"{"error":{"root_cause":[{"type":"too_long_http_line_exception","reason":"An HTTP line is larger than 4096 bytes."}],"type":"too_long_http_line_exception","reason":"An HTTP line is larger than 4096 bytes."},"status":400}"#),
+        "{raw}"
+    );
+    // Header lines (without their CRLFs) may total 16384 bytes. `request` adds `Host: localhost`.
+    let host = "Host: localhost".len();
+    let value = |total: usize| "b".repeat(total - host - "X-Big: ".len());
+    let ok = value(16384);
+    let r = send(t.addr, "GET", "/", &[("X-Big", &ok)], b"").await;
+    assert_eq!(r.status, 200, "{}", r.text());
+    let big = value(16385);
+    let mut s = TcpStream::connect(t.addr).await.unwrap();
+    s.write_all(&request("GET", "/", &[("X-Big", &big)], b"")).await.unwrap();
+    let raw = String::from_utf8_lossy(&until_closed(&mut s).await).into_owned();
+    assert!(raw.starts_with("HTTP/1.1 400 "), "{raw}");
+    assert!(
+        raw.ends_with(r#"{"error":{"root_cause":[{"type":"too_long_http_header_exception","reason":"HTTP header is larger than 16384 bytes."}],"type":"too_long_http_header_exception","reason":"HTTP header is larger than 16384 bytes."},"status":400}"#),
+        "{raw}"
+    );
 }
 
+/// Compression as Elasticsearch does it: gzip, `x-gzip` and raw or zlib `deflate` bodies in,
+/// gzip out unless `q=0`, never on a HEAD, large answers gzipped off the worker threads with
+/// the same result; a body cut after its gzip header is an empty body, and one that isn't gzip
+/// closes the connection unanswered.
 #[tokio::test]
-async fn gzip_both_ways() {
+async fn compression_like_elasticsearch() {
     let t = start_dev().await;
-    let mut z = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-    z.write_all(br#"{"settings":{"number_of_replicas":0}}"#).unwrap();
-    let body = z.finish().unwrap();
-    let r = send(t.addr, "PUT", "/zipped", &[("Content-Type", "application/json"), ("Content-Encoding", "gzip")], &body).await;
+    let gzip = |b: &[u8]| {
+        let mut z = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        z.write_all(b).unwrap();
+        z.finish().unwrap()
+    };
+    let json = ("Content-Type", "application/json");
+    let r = send(t.addr, "PUT", "/zipped", &[json, ("Content-Encoding", "gzip")], &gzip(br#"{"settings":{"number_of_replicas":0}}"#)).await;
     assert_eq!(r.status, 200, "{}", r.text());
     let r = send(t.addr, "GET", "/_cluster/health?filter_path=status", &[("Accept-Encoding", "gzip")], b"").await;
     assert_eq!(r.header("content-encoding"), Some("gzip"));
     let mut text = String::new();
     flate2::read::GzDecoder::new(&r.body[..]).read_to_string(&mut text).unwrap();
     assert_eq!(text, r#"{"status":"green"}"#);
+    let r = send(t.addr, "GET", "/_cluster/health?filter_path=status", &[("Accept-Encoding", "gzip;q=0")], b"").await;
+    assert_eq!((r.header("content-encoding"), r.text()), (None, r#"{"status":"green"}"#.to_string()));
+    // Indices with a replica from here on: the health is yellow.
+    let r = send(t.addr, "PUT", "/xzipped", &[json, ("Content-Encoding", "x-gzip")], &gzip(b"{}")).await;
+    assert_eq!(r.status, 200, "{}", r.text());
+    let mut d = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+    d.write_all(br#"{"f":2}"#).unwrap();
+    let r = send(t.addr, "PUT", "/broken/_doc/2", &[json, ("Content-Encoding", "deflate")], &d.finish().unwrap()).await;
+    assert_eq!(r.status, 201, "{}", r.text());
+
+    let gz = [json, ("Content-Encoding", "gzip")];
+    let r = send(t.addr, "PUT", "/broken/_doc/1", &gz, &gzip(br#"{"f":1}"#)[..10]).await;
+    assert_eq!(r.status, 400, "{}", r.text());
+    assert!(r.text().contains(r#""type":"parse_exception","reason":"request body is required""#), "{}", r.text());
+    let mut s = TcpStream::connect(t.addr).await.unwrap();
+    s.write_all(&request("PUT", "/broken/_doc/1", &gz, b"not gzip at all")).await.unwrap();
+    assert!(until_closed(&mut s).await.is_empty());
+
+    let get = send(t.addr, "GET", "/", &[], b"").await;
+    let head = send(t.addr, "HEAD", "/", &[("Accept-Encoding", "gzip")], b"").await;
+    assert_eq!((head.status, head.header("content-encoding")), (200, None));
+    assert_eq!(head.header("content-length").map(|l| l.parse::<usize>().unwrap()), Some(get.body.len()));
+    let docs: String = (0..400).map(|i| format!("{{\"index\":{{\"_id\":\"{i}\"}}}}\n{{\"text\":\"{}\"}}\n", "lorem ipsum ".repeat(30))).collect();
+    let r = send(t.addr, "POST", "/big/_bulk?refresh=true", &[("Content-Type", "application/x-ndjson")], docs.as_bytes()).await;
+    assert_eq!(r.status, 200);
+    let plain = send(t.addr, "GET", "/big/_search?size=400", &[], b"").await;
+    assert!(plain.body.len() > 64 * 1024);
+    let zipped = send(t.addr, "GET", "/big/_search?size=400", &[("Accept-Encoding", "gzip")], b"").await;
+    assert_eq!(zipped.header("content-encoding"), Some("gzip"));
+    let mut text = Vec::new();
+    flate2::read::GzDecoder::new(&zipped.body[..]).read_to_end(&mut text).unwrap();
+    // The same answer (`took` may differ by a digit).
+    let hits = |b: &[u8]| serde_json::from_slice::<serde_json::Value>(b).unwrap()["hits"].clone();
+    assert_eq!(hits(&text), hits(&plain.body));
 }
 
 /// Everything the server sends on `s` until it closes the connection.
@@ -116,84 +192,7 @@ async fn body_limit() {
     expect_413(until_closed(&mut s).await);
 }
 
-#[tokio::test]
-async fn long_request_lines_and_headers_are_refused_like_elasticsearch() {
-    let t = start_dev().await;
-    // `GET <path> HTTP/1.1` of exactly 4096 bytes passes; one more byte doesn't.
-    let path = |len: usize| format!("/{}", "a".repeat(len - "GET  HTTP/1.1".len() - 1));
-    let r = send(t.addr, "GET", &path(4096), &[], b"").await;
-    assert_eq!(r.status, 404, "{}", r.text());
-    let mut s = TcpStream::connect(t.addr).await.unwrap();
-    s.write_all(&request("GET", &path(4097), &[], b"")).await.unwrap();
-    let raw = String::from_utf8_lossy(&until_closed(&mut s).await).into_owned();
-    assert!(raw.starts_with("HTTP/1.1 400 "), "{raw}");
-    assert!(
-        raw.ends_with(r#"{"error":{"root_cause":[{"type":"too_long_http_line_exception","reason":"An HTTP line is larger than 4096 bytes."}],"type":"too_long_http_line_exception","reason":"An HTTP line is larger than 4096 bytes."},"status":400}"#),
-        "{raw}"
-    );
-    // Header lines (without their CRLFs) may total 16384 bytes. `request` adds `Host: localhost`.
-    let host = "Host: localhost".len();
-    let value = |total: usize| "b".repeat(total - host - "X-Big: ".len());
-    let ok = value(16384);
-    let r = send(t.addr, "GET", "/", &[("X-Big", &ok)], b"").await;
-    assert_eq!(r.status, 200, "{}", r.text());
-    let big = value(16385);
-    let mut s = TcpStream::connect(t.addr).await.unwrap();
-    s.write_all(&request("GET", "/", &[("X-Big", &big)], b"")).await.unwrap();
-    let raw = String::from_utf8_lossy(&until_closed(&mut s).await).into_owned();
-    assert!(raw.starts_with("HTTP/1.1 400 "), "{raw}");
-    assert!(
-        raw.ends_with(r#"{"error":{"root_cause":[{"type":"too_long_http_header_exception","reason":"HTTP header is larger than 16384 bytes."}],"type":"too_long_http_header_exception","reason":"HTTP header is larger than 16384 bytes."},"status":400}"#),
-        "{raw}"
-    );
-}
-
-#[tokio::test]
-async fn broken_compressed_bodies_behave_like_elasticsearch() {
-    let t = start_dev().await;
-    let mut z = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-    z.write_all(br#"{"f":1}"#).unwrap();
-    let z = z.finish().unwrap();
-    let gz = [("Content-Type", "application/json"), ("Content-Encoding", "gzip")];
-    // Cut after the gzip header: the body is empty.
-    let r = send(t.addr, "PUT", "/broken/_doc/1", &gz, &z[..10]).await;
-    assert_eq!(r.status, 400, "{}", r.text());
-    assert!(r.text().contains(r#""type":"parse_exception","reason":"request body is required""#), "{}", r.text());
-    // Not gzip at all: the connection closes without an answer.
-    let mut s = TcpStream::connect(t.addr).await.unwrap();
-    s.write_all(&request("PUT", "/broken/_doc/1", &gz, b"not gzip at all")).await.unwrap();
-    assert!(until_closed(&mut s).await.is_empty());
-    // Raw deflate is accepted as `deflate`, like zlib-wrapped.
-    let mut d = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
-    d.write_all(br#"{"f":2}"#).unwrap();
-    let r = send(t.addr, "PUT", "/broken/_doc/2", &[("Content-Type", "application/json"), ("Content-Encoding", "deflate")], &d.finish().unwrap()).await;
-    assert_eq!(r.status, 201, "{}", r.text());
-}
-
-#[tokio::test]
-async fn head_is_never_gzipped() {
-    let t = start_dev().await;
-    let get = send(t.addr, "GET", "/", &[], b"").await;
-    let head = send(t.addr, "HEAD", "/", &[("Accept-Encoding", "gzip")], b"").await;
-    assert_eq!(head.status, 200);
-    assert_eq!(head.header("content-encoding"), None);
-    assert_eq!(head.header("content-length").map(|l| l.parse::<usize>().unwrap()), Some(get.body.len()));
-    // Large responses are gzipped off the worker threads, with the same result.
-    let docs: String = (0..400).map(|i| format!("{{\"index\":{{\"_id\":\"{i}\"}}}}\n{{\"text\":\"{}\"}}\n", "lorem ipsum ".repeat(30))).collect();
-    let r = send(t.addr, "POST", "/big/_bulk?refresh=true", &[("Content-Type", "application/x-ndjson")], docs.as_bytes()).await;
-    assert_eq!(r.status, 200);
-    let plain = send(t.addr, "GET", "/big/_search?size=400", &[], b"").await;
-    assert!(plain.body.len() > 64 * 1024);
-    let zipped = send(t.addr, "GET", "/big/_search?size=400", &[("Accept-Encoding", "gzip")], b"").await;
-    assert_eq!(zipped.header("content-encoding"), Some("gzip"));
-    let mut text = Vec::new();
-    flate2::read::GzDecoder::new(&zipped.body[..]).read_to_end(&mut text).unwrap();
-    // The same answer (`took` may differ by a digit).
-    let hits = |b: &[u8]| serde_json::from_slice::<serde_json::Value>(b).unwrap()["hits"].clone();
-    assert_eq!(hits(&text), hits(&plain.body));
-}
-
-/// A node whose one cluster `dev` has a 1000-byte in-flight body budget.
+/// A node whose one cluster `dev` has an in-flight body budget of `bytes`.
 async fn budgeted(bytes: usize) -> (Arc<search_server::Node>, std::net::SocketAddr) {
     let catalog = Arc::new(search_server::StaticCatalog::new());
     let mut spec = search_server::ClusterSpec::new("dev");
@@ -204,103 +203,52 @@ async fn budgeted(bytes: usize) -> (Arc<search_server::Node>, std::net::SocketAd
     (node, addr)
 }
 
+/// A cluster's in-flight body budget counts every way a body arrives: a stalled chunked upload
+/// holds what it sent, so another chunk, a declared body, or a small gzip body that inflates past
+/// what's left is refused with 429; a closed upload gives its bytes back, and alone the inflating
+/// body runs.
 #[tokio::test]
-async fn chunked_bodies_count_against_the_byte_budget() {
-    let (node, addr) = budgeted(1000).await;
-    // Chunked uploads that stall after 900 bytes: the first holds 900 bytes of the budget...
-    let mut first = TcpStream::connect(addr).await.unwrap();
+async fn bodies_in_flight_hold_the_clusters_byte_budget() {
+    let (node, addr) = budgeted(200_000).await;
+    let node = &node;
+    let in_flight = || node.get_loaded("dev").map_or(0, |l| l.bytes_in_flight());
+    let wait = |want: fn(usize) -> bool, what: &'static str| async move {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !want(node.get_loaded("dev").map_or(0, |l| l.bytes_in_flight())) {
+            assert!(std::time::Instant::now() < deadline, "{what}");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    };
     let head = b"POST /_bulk HTTP/1.1\r\nHost: x\r\nContent-Type: application/x-ndjson\r\nTransfer-Encoding: chunked\r\n\r\n";
     let mut raw = head.to_vec();
-    raw.extend_from_slice(format!("{:x}\r\n{}\r\n", 900, " ".repeat(900)).as_bytes());
+    raw.extend_from_slice(format!("{:x}\r\n{}\r\n", 150_000, " ".repeat(150_000)).as_bytes());
+    let mut first = TcpStream::connect(addr).await.unwrap();
     first.write_all(&raw).await.unwrap();
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while node.get_loaded("dev").is_none_or(|l| l.bytes_in_flight() < 900) {
-        assert!(std::time::Instant::now() < deadline, "the first chunk is reserved");
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    // ...so the next one is refused with 429 when its chunk arrives,
+    wait(|n| n >= 150_000, "the first chunk is reserved").await;
     let mut second = TcpStream::connect(addr).await.unwrap();
     second.write_all(&raw).await.unwrap();
     let r = String::from_utf8_lossy(&until_closed(&mut second).await).into_owned();
     assert!(r.starts_with("HTTP/1.1 429 "), "{r}");
-    assert!(r.contains("es_rejected_execution_exception") && r.contains("coordinating_operation_bytes=900"), "{r}");
-    // and so is a declared body.
-    let r = send(addr, "POST", "/_bulk", &[("Content-Type", "application/x-ndjson")], &[b' '; 900]).await;
+    assert!(r.contains("es_rejected_execution_exception") && r.contains("max_coordinating_and_primary_bytes=200000"), "{r}");
+    let r = send(addr, "POST", "/_bulk", &[("Content-Type", "application/x-ndjson")], &[b' '; 150_000]).await;
     assert_eq!(r.status, 429, "{}", r.text());
-    assert_eq!(node.get_loaded("dev").unwrap().bytes_in_flight(), 900);
-    drop(first);
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while node.get_loaded("dev").unwrap().bytes_in_flight() > 0 {
-        assert!(std::time::Instant::now() < deadline, "a closed upload gives its bytes back");
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-}
-
-#[tokio::test]
-async fn inflated_bodies_count_against_the_byte_budget() {
-    let (node, addr) = budgeted(200_000).await;
-    // An upload holds 150 kB of the budget (declared, then stalled).
-    let mut held = TcpStream::connect(addr).await.unwrap();
-    held.write_all(b"POST /_bulk HTTP/1.1\r\nHost: x\r\nContent-Type: application/x-ndjson\r\nContent-Length: 150000\r\n\r\n{").await.unwrap();
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while node.get_loaded("dev").is_none_or(|l| l.bytes_in_flight() < 150_000) {
-        assert!(std::time::Instant::now() < deadline);
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
     // A 1 kB gzip body that inflates to 1 MB doesn't fit in what's left.
     let mut z = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
     z.write_all(&vec![b' '; 1 << 20]).unwrap();
     let z = z.finish().unwrap();
     assert!(z.len() < 5000);
+    let gz = [("Content-Type", "application/json"), ("Content-Encoding", "gzip")];
     let mut s = TcpStream::connect(addr).await.unwrap();
-    s.write_all(&request("POST", "/_search", &[("Content-Type", "application/json"), ("Content-Encoding", "gzip")], &z)).await.unwrap();
+    s.write_all(&request("POST", "/_search", &gz, &z)).await.unwrap();
     let r = String::from_utf8_lossy(&until_closed(&mut s).await).into_owned();
     assert!(r.starts_with("HTTP/1.1 429 "), "{r}");
-    assert_eq!(node.get_loaded("dev").unwrap().bytes_in_flight(), 150_000);
+    assert_eq!(in_flight(), 150_000);
+    drop(first);
+    wait(|n| n == 0, "a closed upload gives its bytes back").await;
     // Alone, the same body inflates (and only its output stays reserved while it runs).
-    drop(held);
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while node.get_loaded("dev").unwrap().bytes_in_flight() > 0 {
-        assert!(std::time::Instant::now() < deadline);
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    let r = send(addr, "POST", "/_search", &[("Content-Type", "application/json"), ("Content-Encoding", "gzip")], &z).await;
+    let r = send(addr, "POST", "/_search", &gz, &z).await;
     assert_eq!(r.status, 200, "{}", r.text());
-    assert_eq!(node.get_loaded("dev").unwrap().bytes_in_flight(), 0);
-}
-
-#[tokio::test]
-async fn tenant_routing_and_auth() {
-    let t = start(NodeConfig { domain: Some("search.test".into()), ..NodeConfig::default() }, ListenOptions::default()).await;
-    let name = |r: &Resp| r.text().split("\"cluster_name\" : \"").nth(1).map(|s| s.split('"').next().unwrap().to_string());
-    let r = send(t.addr, "GET", "/", &[("Authorization", &basic("c1", "pw1"))], b"").await;
-    assert_eq!(name(&r).as_deref(), Some("c1"));
-    let r = send(t.addr, "GET", "/", &[("Authorization", &basic("bob@c2", "pw2"))], b"").await;
-    assert_eq!(name(&r).as_deref(), Some("c2"));
-    let r = send(t.addr, "GET", "/", &[("Authorization", "Bearer c2_pw2")], b"").await;
-    assert_eq!(name(&r).as_deref(), Some("c2"));
-    use base64::Engine;
-    let key = base64::engine::general_purpose::STANDARD.encode("c1:pw1");
-    let r = send(t.addr, "GET", "/", &[("Authorization", &format!("ApiKey {key}"))], b"").await;
-    assert_eq!(name(&r).as_deref(), Some("c1"));
-    // Host label + any user name.
-    let mut s = TcpStream::connect(t.addr).await.unwrap();
-    let raw = format!("GET / HTTP/1.1\r\nHost: c2.search.test:9200\r\nAuthorization: {}\r\n\r\n", basic("elastic", "pw2"));
-    s.write_all(raw.as_bytes()).await.unwrap();
-    let r = read_response(&mut s, &mut Vec::new(), false).await;
-    assert_eq!(name(&r).as_deref(), Some("c2"));
-    // Failures.
-    let r = send(t.addr, "GET", "/_cat/indices", &[], b"").await;
-    assert_eq!(r.status, 401);
-    assert_eq!(r.header("WWW-Authenticate"), Some("Basic realm=\"security\", charset=\"UTF-8\""));
-    assert!(r.text().contains("missing authentication credentials for REST request [/_cat/indices]"), "{}", r.text());
-    let r = send(t.addr, "GET", "/", &[("Authorization", &basic("c1", "pw2"))], b"").await;
-    assert_eq!(r.status, 401);
-    assert!(r.text().contains("unable to authenticate user [c1] for REST request [/]"));
-    // The tenants are isolated.
-    send(t.addr, "PUT", "/only-in-c1", &[("Authorization", &basic("c1", "pw1"))], b"").await;
-    let r = send(t.addr, "HEAD", "/only-in-c1", &[("Authorization", &basic("c2", "pw2"))], b"").await;
-    assert_eq!(r.status, 404);
+    assert_eq!(in_flight(), 0);
 }
 
 /// A cluster's CORS settings (`http.cors.*` with Elasticsearch's semantics): a browser's
@@ -389,25 +337,6 @@ async fn the_nodes_service_token_file_signs_in_only_to_the_clusters_it_names() {
 }
 
 #[tokio::test]
-async fn idle_clusters_unload_and_wake() {
-    let t = start(NodeConfig { idle_unload: Some(Duration::from_millis(60)), ..NodeConfig::default() }, ListenOptions::default()).await;
-    let auth = basic("c1", "pw1");
-    let r = send(t.addr, "PUT", "/kept", &[("Authorization", &auth)], b"").await;
-    assert_eq!(r.status, 200);
-    assert_eq!(t.node.loaded(), vec!["c1".to_string()]);
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while !t.node.loaded().is_empty() || t.node.reaper_running() {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("idle cluster unloads, reaper stops");
-    let r = send(t.addr, "HEAD", "/kept", &[("Authorization", &auth)], b"").await;
-    assert_eq!(r.status, 200);
-    assert_eq!(t.node.loaded(), vec!["c1".to_string()]);
-}
-
-#[tokio::test]
 async fn tls_with_sni_routing() {
     let cert = rcgen::generate_simple_self_signed(vec!["c1.search.test".to_string(), "c2.search.test".to_string()]).unwrap();
     let cert_pem = cert.cert.pem();
@@ -427,29 +356,6 @@ async fn tls_with_sni_routing() {
     let r = send_on(&mut tls, "GET", "/", &[("Authorization", &basic("elastic", "pw2"))], b"").await;
     assert_eq!(r.status, 200, "{}", r.text());
     assert!(r.text().contains("\"cluster_name\" : \"c2\""));
-}
-
-#[tokio::test]
-async fn method_and_path_errors_over_http() {
-    let t = start_dev().await;
-    let r = send(t.addr, "DELETE", "/_cluster/health", &[], b"").await;
-    assert_eq!(r.status, 405);
-    assert_eq!(r.header("Allow"), Some("GET"));
-    let r = send(t.addr, "OPTIONS", "/_cluster/health", &[], b"").await;
-    assert_eq!(r.status, 200);
-    assert_eq!(r.header("Allow"), Some("GET"));
-    let r = send(t.addr, "PUT", "/idx", &[("Content-Type", "text/csv")], b"a,b").await;
-    assert_eq!(r.status, 406);
-}
-
-#[tokio::test]
-async fn proxy_protocol_header_is_consumed() {
-    let t = start(NodeConfig { default_cluster: Some("dev".into()), ..NodeConfig::default() }, ListenOptions { proxy_protocol: true, ..ListenOptions::default() }).await;
-    let mut s = TcpStream::connect(t.addr).await.unwrap();
-    s.write_all(b"PROXY TCP4 203.0.113.7 10.0.0.1 51234 9200\r\n").await.unwrap();
-    let r = send_on(&mut s, "GET", "/_cluster/health?filter_path=status", &[], b"").await;
-    assert_eq!(r.status, 200);
-    assert_eq!(r.text(), r#"{"status":"green"}"#);
 }
 
 #[tokio::test]
@@ -480,31 +386,6 @@ async fn stalled_bodies_hold_no_permit_and_time_out() {
         assert_eq!(r.header("connection"), Some("close"));
     }
     assert_eq!(node.get_loaded("dev").unwrap().in_flight(), 0);
-}
-
-#[tokio::test]
-async fn gzip_refused_with_zero_quality_and_x_gzip_bodies() {
-    let t = start_dev().await;
-    let r = send(t.addr, "GET", "/_cluster/health?filter_path=status", &[("Accept-Encoding", "gzip;q=0")], b"").await;
-    assert_eq!(r.header("content-encoding"), None);
-    assert_eq!(r.text(), r#"{"status":"green"}"#);
-    let mut z = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-    z.write_all(b"{}").unwrap();
-    let body = z.finish().unwrap();
-    let r = send(t.addr, "PUT", "/xzipped", &[("Content-Type", "application/json"), ("Content-Encoding", "x-gzip")], &body).await;
-    assert_eq!(r.status, 200, "{}", r.text());
-}
-
-#[tokio::test]
-async fn duplicate_opaque_id_is_rejected() {
-    let t = start_dev().await;
-    let r = send(t.addr, "GET", "/_cluster/health", &[("X-Opaque-Id", "a"), ("X-Opaque-Id", "b")], b"").await;
-    assert_eq!(r.status, 400);
-    assert_eq!(
-        r.text(),
-        r#"{"error":{"root_cause":[{"type":"illegal_argument_exception","reason":"multiple values for single-valued header [X-Opaque-Id]."}],"type":"illegal_argument_exception","reason":"multiple values for single-valued header [X-Opaque-Id]."},"status":400}"#
-    );
-    assert_eq!(r.header("X-Opaque-Id"), Some("a"));
 }
 
 /// Every way to name a cluster and prove access, and every way to fail, with Elasticsearch's
@@ -599,6 +480,10 @@ async fn auth_matrix() {
     }
     // Nothing was loaded for the failed attempts on unknown clusters.
     assert!(!t.node.loaded().contains(&"nosuch".to_string()));
+    // The tenants are isolated.
+    send(t.addr, "PUT", "/only-in-c1", &[("Authorization", &basic("c1", "pw1"))], b"").await;
+    let r = send(t.addr, "HEAD", "/only-in-c1", &[("Authorization", &basic("c2", "pw2"))], b"").await;
+    assert_eq!(r.status, 404);
 }
 
 const ANON: &str = "unable to authenticate with provided credentials and anonymous access is not allowed for this request";

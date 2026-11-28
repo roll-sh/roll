@@ -669,7 +669,7 @@ async fn a_web_service_builds_in_codebuild_runs_as_tasks_wakes_and_sleeps() {
     // Running, it's metered by its size (Fargate can't say what it uses, and bills by size).
     let live = w.apps.live(&id, "production");
     live.tick().await;
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    tokio::time::sleep(Duration::from_millis(20)).await;
     live.tick().await;
     let (_, m) = call(&w.api, "GET", &format!("{base}/metrics?minutes=5"), None).await;
     let cpu: f64 = m["cpu"].as_array().unwrap().iter().filter_map(Value::as_f64).sum();
@@ -681,21 +681,19 @@ async fn a_web_service_builds_in_codebuild_runs_as_tasks_wakes_and_sleeps() {
     assert_eq!(live.state(), InstanceState::Stopped);
     assert_eq!(w.fake.calls("StopTask").len(), 2);
     assert!(w.fake.aws.lock().tasks.values().all(|t| t["desiredStatus"] == "STOPPED"));
-}
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_failed_build_fails_the_deploy_and_leaves_nothing() {
-    let w = world().await;
-    let id = upload_service(&w, "broken").await;
-    let d = upload(&w, &id, &[("index.html", "<h1>hi</h1>"), ("FAIL_BUILD", "")]).await;
+    // A failed build fails its deploy and leaves nothing.
+    let (runs, defs, kept) = (w.fake.calls("RunTask").len(), w.fake.calls("RegisterTaskDefinition").len(), w.fake.keys("apps/"));
+    let broken = upload_service(&w, "broken").await;
+    let d = upload(&w, &broken, &[("index.html", "<h1>hi</h1>"), ("FAIL_BUILD", "")]).await;
     assert_eq!(d["status"], "failed", "{d}");
     let error = d["error"].as_str().unwrap_or_default();
     assert!(error.contains("the build failed") && error.contains("FAILED in BUILD") && error.contains("exit status 1"), "{d}");
-    let (_, log) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/deploys/{}/logs", d["id"].as_str().unwrap()), None).await;
+    let (_, log) = call(&w.api, "GET", &format!("/v1/apps/services/{broken}/environments/production/deploys/{}/logs", d["id"].as_str().unwrap()), None).await;
     assert!(log.to_string().contains("did not complete successfully"), "{log}");
-    assert!(w.fake.calls("RunTask").is_empty() && w.fake.calls("RegisterTaskDefinition").is_empty());
+    assert_eq!((w.fake.calls("RunTask").len(), w.fake.calls("RegisterTaskDefinition").len()), (runs, defs));
     assert!(w.fake.aws.lock().secrets.is_empty());
-    assert_eq!(w.fake.keys("apps/"), Vec::<String>::new());
+    assert_eq!(w.fake.keys("apps/"), kept);
 }
 
 /// An image from a private registry: its digest read with the login, and the task pulling with
@@ -744,47 +742,6 @@ async fn a_private_image_pulls_with_its_registry_secret() {
     assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None).await.0, StatusCode::NO_CONTENT);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_cron_run_is_a_task_and_reports_its_exit_code() {
-    let w = world().await;
-    let (st, cron) = call(
-        &w.api,
-        "POST",
-        "/v1/apps/services",
-        Some(json!({ "project": w.project, "name": "nightly", "source": {"kind": "image", "image": "busybox:1.37"}, "run": {"type": "cron", "schedule": "0 3 * * *"}, "variables": {"FAKE_EXIT": "3"} })),
-    )
-    .await;
-    assert_eq!(st, StatusCode::CREATED, "{cron}");
-    let id = cron["id"].as_str().unwrap().to_string();
-    let d = settled(&w, &id, cron["environments"][0]["latest"]["id"].as_str().unwrap()).await;
-    assert_eq!(d["status"], "active", "{d}");
-    // Pinned by the registry's digest, nothing built.
-    assert_eq!(d["image"], format!("busybox@{DIGEST}"));
-    assert!(w.fake.calls("StartBuild").is_empty());
-    let base = format!("/v1/apps/services/{id}/environments/production");
-    let (st, run) = call(&w.api, "POST", &format!("{base}/runs"), None).await;
-    assert_eq!(st, StatusCode::ACCEPTED, "{run}");
-    let mut last = Value::Null;
-    for _ in 0..500 {
-        let (_, runs) = call(&w.api, "GET", &format!("{base}/runs"), None).await;
-        last = runs[0].clone();
-        if last["status"] != "running" {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    assert_eq!((last["status"].as_str(), last["exit_code"].as_i64()), (Some("failed"), Some(3)), "{last}");
-    let runs = w.fake.calls("RunTask");
-    assert_eq!(runs.len(), 1);
-    assert_isolated(&runs[0], &id, &[]);
-    let defs = w.fake.calls("RegisterTaskDefinition");
-    assert!(defs[0]["containerDefinitions"][0].get("portMappings").is_none(), "a job has no port: {}", defs[0]);
-    // Its output reached the environment's log.
-    let (lines, _) = w.apps.logs.follow(&format!("env:{id}/production"), 100);
-    assert!(lines.iter().any(|l| l.text == "the job ran"), "{lines:?}");
-    assert_eq!(w.fake.keys("apps/env/"), Vec::<String>::new());
-}
-
 /// rolld starting again (a new process, or the node that takes a dead one's service over) keeps
 /// the task the last one ran: the next visitor gets the same task, nothing run or stopped.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -825,18 +782,6 @@ async fn a_restart_keeps_the_running_task() {
     assert_eq!(w.fake.calls("StopTask").len(), stops + 1);
 }
 
-/// An environment file a node wrote and died before deleting (its variables, secrets among
-/// them) is swept: nothing waits on it any more.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_environment_file_a_dead_node_left_is_swept() {
-    let w = world().await;
-    w.fake.objects.lock().insert(format!("{BUCKET}/apps/env/roll-apps-x-production-abcdef-0-zz.env"), b"SECRET=left-behind".to_vec());
-    w.fake.objects.lock().insert(format!("{BUCKET}/apps/other/keep.txt"), b"not an env file".to_vec());
-    w.apps.deps.runtime.sweep(&Default::default()).await;
-    assert_eq!(w.fake.keys("apps/env/"), Vec::<String>::new());
-    assert_eq!(w.fake.keys("apps/other/"), vec!["apps/other/keep.txt".to_string()], "only environment files");
-}
-
 /// A value over several lines (a PEM key) reaches the task through its deployment's secret (an
 /// ECS environment file holds one line each), never in a request. The secret is made once and
 /// lasts as long as the deployment may run: runs one after another (no instance in between)
@@ -849,7 +794,7 @@ async fn a_multi_line_value_reaches_the_task_through_its_deployments_secret() {
         &w.api,
         "POST",
         "/v1/apps/services",
-        Some(json!({ "project": w.project, "name": "signer", "source": {"kind": "image", "image": "public/api:1"}, "run": {"type": "cron", "schedule": "0 3 * * *"}, "variables": {"SIGNING_KEY": pem, "MODE": "live"} })),
+        Some(json!({ "project": w.project, "name": "signer", "source": {"kind": "image", "image": "public/api:1"}, "run": {"type": "cron", "schedule": "0 3 * * *"}, "variables": {"SIGNING_KEY": pem, "MODE": "live", "FAKE_EXIT": "3"} })),
     )
     .await;
     assert_eq!(st, StatusCode::CREATED, "{svc}");
@@ -869,6 +814,17 @@ async fn a_multi_line_value_reaches_the_task_through_its_deployments_secret() {
         w.fake.aws.lock().envs.values().filter(|e| e.get("SIGNING_KEY").map(String::as_str) == Some(pem) && e.get("MODE").map(String::as_str) == Some("live")).count()
     };
     assert_eq!((run().await, run().await), (1, 2));
+    // Each run is a task on the isolated network, pinned by the registry's digest (nothing
+    // built), with no port, its output in the environment's log and its exit code said.
+    let last = call(&w.api, "GET", &format!("{base}/runs"), None).await.1[0].clone();
+    assert_eq!((last["status"].as_str(), last["exit_code"].as_i64()), (Some("failed"), Some(3)), "{last}");
+    assert!(w.fake.calls("StartBuild").is_empty());
+    assert!(w.fake.calls("RegisterTaskDefinition")[0]["containerDefinitions"][0].get("portMappings").is_none(), "a job has no port");
+    for r in w.fake.calls("RunTask") {
+        assert_isolated(&r, &id, &[]);
+    }
+    let (lines, _) = w.apps.logs.follow(&format!("env:{id}/production"), 100);
+    assert!(lines.iter().any(|l| l.text == "the job ran"), "{lines:?}");
     let defs = || w.fake.calls("RegisterTaskDefinition").len();
     assert_eq!((w.fake.calls("PutSecretValue").len(), defs()), (0, 1), "no new version, one task definition");
     for op in ["RegisterTaskDefinition", "RunTask"] {
@@ -888,9 +844,15 @@ async fn a_multi_line_value_reaches_the_task_through_its_deployments_secret() {
         a.secrets.insert(other.clone(), "{}".into());
         a.made.insert(other.clone(), 1_000_000_000.0);
     }
+    // An environment file a node wrote and died before deleting (its variables, secrets among
+    // them) is swept too, and only environment files.
+    w.fake.objects.lock().insert(format!("{BUCKET}/apps/env/roll-apps-x-production-abcdef-0-zz.env"), b"SECRET=left-behind".to_vec());
+    w.fake.objects.lock().insert(format!("{BUCKET}/apps/other/keep.txt"), b"not an env file".to_vec());
     w.apps.deps.runtime.sweep(&in_use).await;
     assert!(w.fake.aws.lock().secrets.contains_key(&name));
     w.apps.deps.runtime.sweep(&Default::default()).await;
+    assert_eq!(w.fake.keys("apps/env/"), Vec::<String>::new());
+    assert_eq!(w.fake.keys("apps/other/"), vec!["apps/other/keep.txt".to_string()]);
     assert!(!w.fake.aws.lock().secrets.contains_key(&name), "swept");
     assert!(w.fake.aws.lock().secrets.contains_key(&other), "another fleet's is never swept");
     // Deleted under this node (another node's sweep): the next run makes it again and runs.

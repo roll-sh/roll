@@ -156,190 +156,193 @@ fn node_id(listing: &Value) -> String {
     listing.get("nodes").and_then(Value::as_object).and_then(|n| n.keys().next().cloned()).expect("a node")
 }
 
+/// Searches are tasks as Elasticsearch lists, gets and cancels them: a search and its shard's
+/// query phase, an `_msearch` with its items' searches as children (cancelled with it), and a
+/// search template's own task, which can't be cancelled.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn searches_are_tasks_and_cancel_like_elasticsearch() {
     let t = start_dev().await;
     slow_index(t.addr, 5).await;
-    let addr = t.addr;
-    let search = tokio::spawn(async move { send(addr, "GET", "/slow/_search", &[("Content-Type", "application/json"), ("X-Opaque-Id", "opq1")], script_search(ENDLESS).as_bytes()).await });
-    // The shard's task starts once the request has been parsed and its shards resolved.
-    wait_for_task(t.addr, "indices:data/read/search[phase/query]").await;
-    let listing = json(&send(t.addr, "GET", "/_tasks?detailed=true&actions=indices:data/read/search*", &[], b"").await);
-    let node = node_id(&listing);
-    // The search and its shard's query phase, as Elasticsearch lists them.
-    let tasks = listing.get("nodes").and_then(|n| n.get(&node)).and_then(|n| n.get("tasks")).cloned().unwrap();
-    let ours = sorted_tasks(&tasks, &node).replace(ENDLESS, CAPTURED);
-    let es_node = "WVzIze1MQxq6OakrtfZpmQ";
-    assert_eq!(ours, sorted_tasks(&fixture("tasks_detailed_while_searching"), es_node));
-    let id = tasks.as_object().unwrap().iter().find(|(_, v)| v.get("action").and_then(Value::as_str) == Some("indices:data/read/search")).map(|(k, _)| k.clone()).unwrap();
-    // `GET _tasks/<id>` of a running search.
-    let got = json(&send(t.addr, "GET", &format!("/_tasks/{id}"), &[], b"").await);
-    let mut want = masked(&fixture("task_get_running"), es_node);
-    // The captured search had no `X-Opaque-Id`.
-    if let Some(h) = at_mut(&mut want, "task/headers").and_then(Value::as_object_mut) {
-        h.insert("X-Opaque-Id".into(), "opq1".into());
-    }
-    assert_eq!(masked(&got, &node).to_json().replace(ENDLESS, CAPTURED), want.to_json());
-    // Cancelling it answers with the task, now cancelled.
-    let cancel = send(t.addr, "POST", &format!("/_tasks/{id}/_cancel"), &[], b"").await;
-    let mut cancel = json(&cancel);
-    for n in at_mut(&mut cancel, "nodes").and_then(Value::as_object_mut).unwrap().values_mut() {
-        let n = n.as_object_mut().unwrap();
-        for k in ["attributes", "roles", "name", "host", "ip", "transport_address"] {
-            n.shift_remove(k);
+
+    {
+        let addr = t.addr;
+        let search = tokio::spawn(async move { send(addr, "GET", "/slow/_search", &[("Content-Type", "application/json"), ("X-Opaque-Id", "opq1")], script_search(ENDLESS).as_bytes()).await });
+        // The shard's task starts once the request has been parsed and its shards resolved.
+        wait_for_task(t.addr, "indices:data/read/search[phase/query]").await;
+        let listing = json(&send(t.addr, "GET", "/_tasks?detailed=true&actions=indices:data/read/search*", &[], b"").await);
+        let node = node_id(&listing);
+        // The search and its shard's query phase, as Elasticsearch lists them.
+        let tasks = listing.get("nodes").and_then(|n| n.get(&node)).and_then(|n| n.get("tasks")).cloned().unwrap();
+        let ours = sorted_tasks(&tasks, &node).replace(ENDLESS, CAPTURED);
+        let es_node = "WVzIze1MQxq6OakrtfZpmQ";
+        assert_eq!(ours, sorted_tasks(&fixture("tasks_detailed_while_searching"), es_node));
+        let id = tasks.as_object().unwrap().iter().find(|(_, v)| v.get("action").and_then(Value::as_str) == Some("indices:data/read/search")).map(|(k, _)| k.clone()).unwrap();
+        // `GET _tasks/<id>` of a running search.
+        let got = json(&send(t.addr, "GET", &format!("/_tasks/{id}"), &[], b"").await);
+        let mut want = masked(&fixture("task_get_running"), es_node);
+        // The captured search had no `X-Opaque-Id`.
+        if let Some(h) = at_mut(&mut want, "task/headers").and_then(Value::as_object_mut) {
+            h.insert("X-Opaque-Id".into(), "opq1".into());
         }
+        assert_eq!(masked(&got, &node).to_json().replace(ENDLESS, CAPTURED), want.to_json());
+        // Cancelling it answers with the task, now cancelled.
+        let cancel = send(t.addr, "POST", &format!("/_tasks/{id}/_cancel"), &[], b"").await;
+        let mut cancel = json(&cancel);
+        for n in at_mut(&mut cancel, "nodes").and_then(Value::as_object_mut).unwrap().values_mut() {
+            let n = n.as_object_mut().unwrap();
+            for k in ["attributes", "roles", "name", "host", "ip", "transport_address"] {
+                n.shift_remove(k);
+            }
+        }
+        let mut want = masked(&fixture("cancel_by_id"), es_node);
+        if let Some(h) = at_mut(&mut want, "nodes/NODE/tasks/NODE:N/headers").and_then(Value::as_object_mut) {
+            h.insert("X-Opaque-Id".into(), "opq1".into());
+        }
+        assert_eq!(masked(&cancel, &node).to_json(), want.to_json());
+        // The search stops with Elasticsearch's error.
+        let r = tokio::time::timeout(Duration::from_secs(30), search).await.expect("the cancelled search answers").unwrap();
+        assert_eq!(r.status, 400);
+        assert_eq!(masked(&json(&r), &node).to_json(), masked(&fixture("cancelled_search"), es_node).to_json());
+        // Nothing of it stays registered.
+        let after = json(&send(t.addr, "GET", "/_tasks?actions=indices:data/read/search*", &[], b"").await);
+        assert_eq!(after.to_json(), r#"{"nodes":{}}"#);
     }
-    let mut want = masked(&fixture("cancel_by_id"), es_node);
-    if let Some(h) = at_mut(&mut want, "nodes/NODE/tasks/NODE:N/headers").and_then(Value::as_object_mut) {
-        h.insert("X-Opaque-Id".into(), "opq1".into());
+
+    {
+        let addr = t.addr;
+        let body = format!("{{\"index\":\"slow\"}}\n{}\n", script_search(ENDLESS));
+        let ms = tokio::spawn(async move { send(addr, "POST", "/_msearch", &[("Content-Type", "application/x-ndjson")], body.as_bytes()).await });
+        wait_for_task(t.addr, "indices:data/read/search[phase/query]").await;
+        let listing = json(&send(t.addr, "GET", "/_tasks?detailed=true", &[], b"").await);
+        let node = node_id(&listing);
+        let tasks = listing.get("nodes").and_then(|n| n.get(&node)).and_then(|n| n.get("tasks")).and_then(Value::as_object).unwrap().clone();
+        let by_action = |a: &str| tasks.iter().find(|(_, v)| v.get("action").and_then(Value::as_str) == Some(a)).map(|(k, v)| (k.clone(), v.clone())).unwrap();
+        let (msearch_id, msearch) = by_action("indices:data/read/msearch");
+        let (search_id, search) = by_action("indices:data/read/search");
+        let (_, shard) = by_action("indices:data/read/search[phase/query]");
+        assert_eq!(search.get("parent_task_id").and_then(Value::as_str), Some(msearch_id.as_str()));
+        assert_eq!(shard.get("parent_task_id").and_then(Value::as_str), Some(search_id.as_str()));
+        let desc = msearch.get("description").and_then(Value::as_str).unwrap();
+        assert!(desc.starts_with("requests[1]: indices[slow], search_type[QUERY_THEN_FETCH], source[{\"query\":{\"script_score\""), "{desc}");
+        // Cancelling the parent cancels the item's search (a ban on its children).
+        let r = send(t.addr, "POST", "/_tasks/_cancel?actions=indices:data/read/msearch", &[], b"").await;
+        assert_eq!(r.status, 200);
+        let r = tokio::time::timeout(Duration::from_secs(30), ms).await.expect("the msearch answers").unwrap();
+        let v = json(&r);
+        assert_eq!(at(&v, "responses/0/status").and_then(Value::as_i64), Some(400), "{}", r.text());
+        // A search template's own task can't be cancelled.
+        let addr = t.addr;
+        let tmpl = format!(r#"{{"source":{}}}"#, script_search(ENDLESS));
+        let st = tokio::spawn(async move { send(addr, "GET", "/slow/_search/template", &[("Content-Type", "application/json")], tmpl.as_bytes()).await });
+        wait_for_task(t.addr, "indices:data/read/search[phase/query]").await;
+        let listing = json(&send(t.addr, "GET", "/_tasks?detailed=true", &[], b"").await);
+        let tasks = listing.get("nodes").and_then(|n| n.get(&node)).and_then(|n| n.get("tasks")).and_then(Value::as_object).unwrap().clone();
+        let tid = tasks.iter().find(|(_, v)| v.get("action").and_then(Value::as_str) == Some("indices:data/read/search/template")).map(|(k, _)| k.clone()).unwrap();
+        let r = json(&send(t.addr, "POST", &format!("/_tasks/{tid}/_cancel"), &[], b"").await);
+        assert_eq!(masked(&r, &node).to_json(), masked(&fixture("cancel_not_cancellable"), "WVzIze1MQxq6OakrtfZpmQ").to_json());
+        let r = send(t.addr, "POST", "/_tasks/_cancel?actions=indices:data/read/search", &[], b"").await;
+        assert_eq!(r.status, 200);
+        assert_eq!(tokio::time::timeout(Duration::from_secs(30), st).await.expect("the template search answers").unwrap().status, 400);
     }
-    assert_eq!(masked(&cancel, &node).to_json(), want.to_json());
-    // The search stops with Elasticsearch's error.
-    let r = tokio::time::timeout(Duration::from_secs(30), search).await.expect("the cancelled search answers").unwrap();
-    assert_eq!(r.status, 400);
-    assert_eq!(masked(&json(&r), &node).to_json(), masked(&fixture("cancelled_search"), es_node).to_json());
-    // Nothing of it stays registered.
-    let after = json(&send(t.addr, "GET", "/_tasks?actions=indices:data/read/search*", &[], b"").await);
-    assert_eq!(after.to_json(), r#"{"nodes":{}}"#);
 }
 
+/// Full thread pools refuse work as Elasticsearch's do (`es_rejected_execution_exception`), on a
+/// node with one search thread and a queue of one, one write thread and no queue, and two
+/// node-wide running slots.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn msearch_children_and_non_cancellable_templates() {
-    let t = start_dev().await;
-    slow_index(t.addr, 2).await;
-    let addr = t.addr;
-    let body = format!("{{\"index\":\"slow\"}}\n{}\n", script_search(ENDLESS));
-    let ms = tokio::spawn(async move { send(addr, "POST", "/_msearch", &[("Content-Type", "application/x-ndjson")], body.as_bytes()).await });
-    wait_for_task(t.addr, "indices:data/read/search[phase/query]").await;
-    let listing = json(&send(t.addr, "GET", "/_tasks?detailed=true", &[], b"").await);
-    let node = node_id(&listing);
-    let tasks = listing.get("nodes").and_then(|n| n.get(&node)).and_then(|n| n.get("tasks")).and_then(Value::as_object).unwrap().clone();
-    let by_action = |a: &str| tasks.iter().find(|(_, v)| v.get("action").and_then(Value::as_str) == Some(a)).map(|(k, v)| (k.clone(), v.clone())).unwrap();
-    let (msearch_id, msearch) = by_action("indices:data/read/msearch");
-    let (search_id, search) = by_action("indices:data/read/search");
-    let (_, shard) = by_action("indices:data/read/search[phase/query]");
-    assert_eq!(search.get("parent_task_id").and_then(Value::as_str), Some(msearch_id.as_str()));
-    assert_eq!(shard.get("parent_task_id").and_then(Value::as_str), Some(search_id.as_str()));
-    let desc = msearch.get("description").and_then(Value::as_str).unwrap();
-    assert!(desc.starts_with("requests[1]: indices[slow], search_type[QUERY_THEN_FETCH], source[{\"query\":{\"script_score\""), "{desc}");
-    // Cancelling the parent cancels the item's search (a ban on its children).
-    let r = send(t.addr, "POST", "/_tasks/_cancel?actions=indices:data/read/msearch", &[], b"").await;
-    assert_eq!(r.status, 200);
-    let r = tokio::time::timeout(Duration::from_secs(30), ms).await.expect("the msearch answers").unwrap();
-    let v = json(&r);
-    assert_eq!(at(&v, "responses/0/status").and_then(Value::as_i64), Some(400), "{}", r.text());
-    // A search template's own task can't be cancelled.
-    let addr = t.addr;
-    let tmpl = format!(r#"{{"source":{}}}"#, script_search(ENDLESS));
-    let st = tokio::spawn(async move { send(addr, "GET", "/slow/_search/template", &[("Content-Type", "application/json")], tmpl.as_bytes()).await });
-    wait_for_task(t.addr, "indices:data/read/search[phase/query]").await;
-    let listing = json(&send(t.addr, "GET", "/_tasks?detailed=true", &[], b"").await);
-    let tasks = listing.get("nodes").and_then(|n| n.get(&node)).and_then(|n| n.get("tasks")).and_then(Value::as_object).unwrap().clone();
-    let tid = tasks.iter().find(|(_, v)| v.get("action").and_then(Value::as_str) == Some("indices:data/read/search/template")).map(|(k, _)| k.clone()).unwrap();
-    let r = json(&send(t.addr, "POST", &format!("/_tasks/{tid}/_cancel"), &[], b"").await);
-    assert_eq!(masked(&r, &node).to_json(), masked(&fixture("cancel_not_cancellable"), "WVzIze1MQxq6OakrtfZpmQ").to_json());
-    let r = send(t.addr, "POST", "/_tasks/_cancel?actions=indices:data/read/search", &[], b"").await;
-    assert_eq!(r.status, 200);
-    assert_eq!(tokio::time::timeout(Duration::from_secs(30), st).await.expect("the template search answers").unwrap().status, 400);
-}
-
-/// A dev node whose pools are sized by node settings.
-async fn pooled(settings: &[(&str, &str)]) -> TestNode {
+async fn full_thread_pools_queue_then_reject_like_elasticsearch() {
+    let settings = [("thread_pool.search.size", "1"), ("thread_pool.search.queue_size", "1"), ("thread_pool.write.size", "1"), ("thread_pool.write.queue_size", "0")];
     let node_settings = settings.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
-    start(NodeConfig { default_cluster: Some("dev".into()), node_settings, ..NodeConfig::default() }, ListenOptions::default()).await
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_full_search_pool_queues_then_rejects() {
-    let t = pooled(&[("thread_pool.search.size", "1"), ("thread_pool.search.queue_size", "1")]).await;
-    slow_index(t.addr, 3).await;
-    let addr = t.addr;
-    let running = tokio::spawn(async move { send(addr, "GET", "/slow/_search", &[("Content-Type", "application/json")], script_search(ENDLESS).as_bytes()).await });
-    wait_for_task(t.addr, "indices:data/read/search").await;
-    // The second waits in the queue, the third is refused.
-    let queued = tokio::spawn(async move { send(addr, "GET", "/slow/_search?size=0", &[], b"").await });
-    for _ in 0..500 {
-        let r = send(t.addr, "GET", "/_cat/thread_pool/search?h=active,queue", &[], b"").await;
-        if r.text().trim() == "1 1" {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    let r = send(t.addr, "GET", "/slow/_search?size=0", &[], b"").await;
-    assert_eq!(r.status, 429, "{}", r.text());
-    let v = json(&r);
-    let node = at(&v, "error/failed_shards/0/node").and_then(Value::as_str).unwrap().to_string();
-    let es = masked(&fixture("search_rejected"), "WVzIze1MQxq6OakrtfZpmQ").to_json().replace("queue capacity = 2", "queue capacity = 1").replace("pool size = 2, active threads = 2, queued tasks = 2", "pool size = 1, active threads = 1, queued tasks = 1");
-    assert_eq!(masked(&v, &node).to_json(), es);
-    let stats = send(t.addr, "GET", "/_nodes/stats/thread_pool?filter_path=nodes.*.thread_pool.search", &[], b"").await;
-    assert!(stats.text().contains(r#""search":{"threads":1,"queue":1,"active":1,"rejected":1,"largest":1,"completed":"#), "{}", stats.text());
-    // Once the running search is cancelled, the queued one runs.
-    send(t.addr, "POST", "/_tasks/_cancel?actions=indices:data/read/search", &[], b"").await;
-    assert_eq!(tokio::time::timeout(Duration::from_secs(30), running).await.unwrap().unwrap().status, 400);
-    assert_eq!(tokio::time::timeout(Duration::from_secs(30), queued).await.unwrap().unwrap().status, 200);
-    let r = send(t.addr, "GET", "/_cat/thread_pool/search?h=name,active,queue,rejected,size,queue_size", &[], b"").await;
-    assert_eq!(r.text(), "search 0 0 1 1 1\n");
-}
-
-/// A request waiting for its thread pool holds no node-wide running slot: with two running
-/// slots, one search running and one queued behind it, the tenant's other requests still run.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn requests_queued_for_a_pool_hold_no_running_slot() {
-    let node_settings = vec![("thread_pool.search.size".to_string(), "1".to_string()), ("thread_pool.search.queue_size".to_string(), "5".to_string())];
     let t = start(NodeConfig { default_cluster: Some("dev".into()), node_settings, max_running: 2, ..NodeConfig::default() }, ListenOptions::default()).await;
     slow_index(t.addr, 3).await;
-    let addr = t.addr;
-    let running = tokio::spawn(async move { send(addr, "GET", "/slow/_search", &[("Content-Type", "application/json")], script_search(ENDLESS).as_bytes()).await });
-    wait_for_task(t.addr, "indices:data/read/search").await;
-    let queued = tokio::spawn(async move { send(addr, "GET", "/slow/_search?size=0", &[], b"").await });
-    for _ in 0..500 {
-        let r = send(t.addr, "GET", "/_cat/thread_pool/search?h=active,queue", &[], b"").await;
-        if r.text().trim() == "1 1" {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    // Both running slots would be taken if the queued search held one.
-    for _ in 0..3 {
-        let r = tokio::time::timeout(Duration::from_secs(10), send(t.addr, "GET", "/_cluster/health", &[], b"")).await.expect("health runs beside the queued search");
-        assert_eq!(r.status, 200);
-        let r = tokio::time::timeout(Duration::from_secs(10), send(t.addr, "GET", "/slow/_doc/missing", &[], b"")).await.expect("a get runs beside it too");
-        assert_eq!(r.status, 404);
-    }
-    send(t.addr, "POST", "/_tasks/_cancel?actions=indices:data/read/search", &[], b"").await;
-    assert_eq!(tokio::time::timeout(Duration::from_secs(30), running).await.unwrap().unwrap().status, 400);
-    assert_eq!(tokio::time::timeout(Duration::from_secs(30), queued).await.unwrap().unwrap().status, 200);
-}
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_full_write_pool_refuses_every_bulk_item() {
-    let t = pooled(&[("thread_pool.write.size", "1"), ("thread_pool.write.queue_size", "0")]).await;
-    let r = send(t.addr, "PUT", "/w1", &[], b"").await;
-    assert_eq!(r.status, 200);
-    let cluster = t.node.get_loaded("dev").unwrap().cluster.clone();
-    // Holds the only write slot.
-    let held = cluster.thread_pools.pool(search_es::thread_pool::PoolName::Write).admit().await.ok().unwrap();
-    let r = send(t.addr, "POST", "/w1/_bulk", &[("Content-Type", "application/x-ndjson")], b"{\"index\":{\"_id\":\"a\"}}\n{\"n\":1}\n").await;
-    assert_eq!(r.status, 200, "{}", r.text());
-    let v = json(&r);
-    let node = cluster.node.id.clone();
-    let mut want = masked(&fixture("bulk_rejected"), "WVzIze1MQxq6OakrtfZpmQ");
-    // The captured bulk ran an ingest pipeline.
-    want.as_object_mut().unwrap().shift_remove("ingest_took");
-    if let Some(item) = at_mut(&mut want, "items/0/index") {
-        item.as_object_mut().unwrap().insert("_id".into(), "a".into());
+    {
+        let addr = t.addr;
+        let running = tokio::spawn(async move { send(addr, "GET", "/slow/_search", &[("Content-Type", "application/json")], script_search(ENDLESS).as_bytes()).await });
+        wait_for_task(t.addr, "indices:data/read/search").await;
+        // The second waits in the queue, the third is refused.
+        let queued = tokio::spawn(async move { send(addr, "GET", "/slow/_search?size=0", &[], b"").await });
+        for _ in 0..500 {
+            let r = send(t.addr, "GET", "/_cat/thread_pool/search?h=active,queue", &[], b"").await;
+            if r.text().trim() == "1 1" {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let r = send(t.addr, "GET", "/slow/_search?size=0", &[], b"").await;
+        assert_eq!(r.status, 429, "{}", r.text());
+        let v = json(&r);
+        let node = at(&v, "error/failed_shards/0/node").and_then(Value::as_str).unwrap().to_string();
+        let es = masked(&fixture("search_rejected"), "WVzIze1MQxq6OakrtfZpmQ").to_json().replace("queue capacity = 2", "queue capacity = 1").replace("pool size = 2, active threads = 2, queued tasks = 2", "pool size = 1, active threads = 1, queued tasks = 1");
+        assert_eq!(masked(&v, &node).to_json(), es);
+        let stats = send(t.addr, "GET", "/_nodes/stats/thread_pool?filter_path=nodes.*.thread_pool.search", &[], b"").await;
+        assert!(stats.text().contains(r#""search":{"threads":1,"queue":1,"active":1,"rejected":1,"largest":1,"completed":"#), "{}", stats.text());
+        // Once the running search is cancelled, the queued one runs.
+        send(t.addr, "POST", "/_tasks/_cancel?actions=indices:data/read/search", &[], b"").await;
+        assert_eq!(tokio::time::timeout(Duration::from_secs(30), running).await.unwrap().unwrap().status, 400);
+        assert_eq!(tokio::time::timeout(Duration::from_secs(30), queued).await.unwrap().unwrap().status, 200);
+        let r = send(t.addr, "GET", "/_cat/thread_pool/search?h=name,active,queue,rejected,size,queue_size", &[], b"").await;
+        assert_eq!(r.text(), "search 0 0 1 1 1\n");
     }
-    let ours = masked(&v, &node).to_json();
-    let want = want.to_json().replace("queue capacity = 1", "queue capacity = 0").replace("queued tasks = 1", "queued tasks = 0");
-    assert_eq!(ours, want);
-    // A single-document write fails with the rejection itself.
-    let r = send(t.addr, "PUT", "/w1/_doc/b", &[("Content-Type", "application/json")], b"{}").await;
-    assert_eq!(r.status, 429);
-    assert_eq!(at(&json(&r), "error/type").cloned().and_then(|v| v.as_str().map(str::to_string)).as_deref(), Some("es_rejected_execution_exception"));
-    drop(held);
-    assert_eq!(send(t.addr, "PUT", "/w1/_doc/b", &[("Content-Type", "application/json")], b"{}").await.status, 201);
-    let r = send(t.addr, "GET", "/_cat/thread_pool/write?h=rejected,completed", &[], b"").await;
-    assert_eq!(r.text(), "2 2\n");
+
+    // A request waiting for its thread pool holds no node-wide running slot: with two running
+    // slots, one search running and one queued behind it, the tenant's other requests still run.
+    {
+        let addr = t.addr;
+        let running = tokio::spawn(async move { send(addr, "GET", "/slow/_search", &[("Content-Type", "application/json")], script_search(ENDLESS).as_bytes()).await });
+        wait_for_task(t.addr, "indices:data/read/search").await;
+        let queued = tokio::spawn(async move { send(addr, "GET", "/slow/_search?size=0", &[], b"").await });
+        for _ in 0..500 {
+            let r = send(t.addr, "GET", "/_cat/thread_pool/search?h=active,queue", &[], b"").await;
+            if r.text().trim() == "1 1" {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        // Both running slots would be taken if the queued search held one.
+        for _ in 0..3 {
+            let r = tokio::time::timeout(Duration::from_secs(10), send(t.addr, "GET", "/_cluster/health", &[], b"")).await.expect("health runs beside the queued search");
+            assert_eq!(r.status, 200);
+            let r = tokio::time::timeout(Duration::from_secs(10), send(t.addr, "GET", "/slow/_doc/missing", &[], b"")).await.expect("a get runs beside it too");
+            assert_eq!(r.status, 404);
+        }
+        send(t.addr, "POST", "/_tasks/_cancel?actions=indices:data/read/search", &[], b"").await;
+        assert_eq!(tokio::time::timeout(Duration::from_secs(30), running).await.unwrap().unwrap().status, 400);
+        assert_eq!(tokio::time::timeout(Duration::from_secs(30), queued).await.unwrap().unwrap().status, 200);
+    }
+
+    {
+        let r = send(t.addr, "PUT", "/w1", &[], b"").await;
+        assert_eq!(r.status, 200);
+        let cluster = t.node.get_loaded("dev").unwrap().cluster.clone();
+        // The index setup above went through the pool too.
+        let completed = |r: Resp| r.text().trim().parse::<u64>().unwrap();
+        let before = completed(send(t.addr, "GET", "/_cat/thread_pool/write?h=completed", &[], b"").await);
+        // Holds the only write slot.
+        let held = cluster.thread_pools.pool(search_es::thread_pool::PoolName::Write).admit().await.ok().unwrap();
+        let r = send(t.addr, "POST", "/w1/_bulk", &[("Content-Type", "application/x-ndjson")], b"{\"index\":{\"_id\":\"a\"}}\n{\"n\":1}\n").await;
+        assert_eq!(r.status, 200, "{}", r.text());
+        let v = json(&r);
+        let node = cluster.node.id.clone();
+        let mut want = masked(&fixture("bulk_rejected"), "WVzIze1MQxq6OakrtfZpmQ");
+        // The captured bulk ran an ingest pipeline.
+        want.as_object_mut().unwrap().shift_remove("ingest_took");
+        if let Some(item) = at_mut(&mut want, "items/0/index") {
+            item.as_object_mut().unwrap().insert("_id".into(), "a".into());
+        }
+        let ours = masked(&v, &node).to_json();
+        let want = want.to_json().replace("queue capacity = 1", "queue capacity = 0").replace("queued tasks = 1", "queued tasks = 0");
+        assert_eq!(ours, want);
+        // A single-document write fails with the rejection itself.
+        let r = send(t.addr, "PUT", "/w1/_doc/b", &[("Content-Type", "application/json")], b"{}").await;
+        assert_eq!(r.status, 429);
+        assert_eq!(at(&json(&r), "error/type").cloned().and_then(|v| v.as_str().map(str::to_string)).as_deref(), Some("es_rejected_execution_exception"));
+        drop(held);
+        assert_eq!(send(t.addr, "PUT", "/w1/_doc/b", &[("Content-Type", "application/json")], b"{}").await.status, 201);
+        let r = send(t.addr, "GET", "/_cat/thread_pool/write?h=rejected", &[], b"").await;
+        assert_eq!(r.text(), "2\n");
+        assert_eq!(completed(send(t.addr, "GET", "/_cat/thread_pool/write?h=completed", &[], b"").await), before + 2);
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
