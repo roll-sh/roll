@@ -514,6 +514,23 @@ CREATE TABLE IF NOT EXISTS links (
     prefix TEXT NOT NULL,
     PRIMARY KEY (service, kind, ref)
 ) WITHOUT ROWID;
+-- A link's credential to revoke once nothing runs with it (a rotation's old one, or the new one
+-- of a rotation rolled back): every deployment of the service made after `since` and up to
+-- `until` (unix ms, the database's clock) may hold it. `sealed` is what revoking it needs
+-- (`Minted::kept`, which can hold a key), found by its SHA-256; a pass claims a row before it
+-- revokes (`claimed_at`).
+CREATE TABLE IF NOT EXISTS link_revocations (
+    service TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    ref TEXT NOT NULL,
+    hash TEXT NOT NULL,
+    sealed TEXT NOT NULL,
+    since INTEGER NOT NULL,
+    until INTEGER NOT NULL,
+    claimed_at INTEGER,
+    tries INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (service, kind, ref, hash)
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS domains (
     hostname TEXT PRIMARY KEY,
     service TEXT NOT NULL,
@@ -836,6 +853,18 @@ pub struct Snapshot {
 }
 
 pub type LinkRow = (LinkKind, String, String, Option<crate::integrations::Minted>);
+
+/// A link credential waiting to be revoked ([`Store::link_revocations`]): `kept` is what
+/// [`crate::integrations::Resources::unlink`] takes.
+pub struct Revocation {
+    pub service: String,
+    pub kind: LinkKind,
+    pub r#ref: String,
+    pub hash: String,
+    pub kept: String,
+    pub since: i64,
+    pub until: i64,
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ServiceRow {
@@ -2810,6 +2839,105 @@ impl Store {
             0 => Err(Error::NotFound(format!("service {service} has no {} link {ref:?}", kind.as_str()))),
             _ => Ok(()),
         }
+    }
+
+    /// The link's credential now, opened, inside a write: its `kept`, if it has one.
+    fn link_kept(&self, c: &code_sql::Conn<'_>, service: &str, kind: LinkKind, r#ref: &str) -> Result<Option<String>> {
+        let aad = format!("link:{service}:{}:{ref}", kind.as_str());
+        let now: Option<Option<String>> = c.query_row("SELECT minted FROM links WHERE service = ? AND kind = ? AND ref = ?", [service, kind.as_str(), r#ref], |r| r.get(0)).optional()?;
+        Ok(now.flatten().map(|s| self.sealer.open(&aad, &s)).transpose()?.and_then(|j| serde_json::from_str::<crate::integrations::Minted>(&j).ok()).map(|m| m.kept))
+    }
+
+    fn revocation_row(&self, service: &str, kind: LinkKind, r#ref: &str, kept: &str) -> (String, String) {
+        let hash = Sha256::digest(kept.as_bytes()).iter().map(|b| format!("{b:02x}")).collect();
+        (hash, self.sealer.seal(&format!("link-revoke:{service}:{}:{ref}", kind.as_str()), kept))
+    }
+
+    /// A rotation: the link's credential `old` replaced by `new` if it still has `old` (a
+    /// compare-and-swap), and `old` waiting to be revoked once no deployment made up to `until`
+    /// runs, in the same transaction. False when the link has another credential now (or none).
+    pub fn rotate_link_minted(&self, service: &str, kind: LinkKind, r#ref: &str, old: &str, new: &crate::integrations::Minted, until: i64) -> Result<bool> {
+        let sealed = self.sealer.seal(&format!("link:{service}:{}:{ref}", kind.as_str()), &serde_json::to_string(new).expect("JSON"));
+        let (hash, kept) = self.revocation_row(service, kind, r#ref, old);
+        self.db.write(|c| {
+            if self.link_kept(c, service, kind, r#ref)?.as_deref() != Some(old) {
+                return Ok(false);
+            }
+            c.execute("UPDATE links SET minted = ? WHERE service = ? AND kind = ? AND ref = ?", params![sealed, service, kind.as_str(), r#ref])?;
+            c.execute(
+                "INSERT INTO link_revocations (service, kind, ref, hash, sealed, since, until) VALUES (?, ?, ?, ?, ?, 0, ?) ON CONFLICT (service, kind, ref, hash) DO UPDATE SET until = excluded.until",
+                params![service, kind.as_str(), r#ref, hash, kept, until],
+            )?;
+            Ok(true)
+        })
+    }
+
+    /// A rotation whose redeploy failed: the link's `old` credential back in place of `new` (if it
+    /// still has `new`), `old` no longer waiting to be revoked, and `new` waiting instead for the
+    /// deployments made in `window`, after its start and up to its end (those that went live with it). False
+    /// when the link moved on meanwhile (rotated again, unlinked): then nothing changes.
+    pub fn roll_back_link_minted(&self, service: &str, kind: LinkKind, r#ref: &str, old: &crate::integrations::Minted, new: &str, window: (i64, i64)) -> Result<bool> {
+        let (since, until) = window;
+        let sealed = self.sealer.seal(&format!("link:{service}:{}:{ref}", kind.as_str()), &serde_json::to_string(old).expect("JSON"));
+        let (old_hash, _) = self.revocation_row(service, kind, r#ref, &old.kept);
+        let (hash, kept) = self.revocation_row(service, kind, r#ref, new);
+        self.db.write(|c| {
+            if self.link_kept(c, service, kind, r#ref)?.as_deref() != Some(new) {
+                return Ok(false);
+            }
+            c.execute("UPDATE links SET minted = ? WHERE service = ? AND kind = ? AND ref = ?", params![sealed, service, kind.as_str(), r#ref])?;
+            c.execute("DELETE FROM link_revocations WHERE service = ? AND kind = ? AND ref = ? AND hash = ?", params![service, kind.as_str(), r#ref, old_hash])?;
+            c.execute(
+                "INSERT INTO link_revocations (service, kind, ref, hash, sealed, since, until) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (service, kind, ref, hash) DO NOTHING",
+                params![service, kind.as_str(), r#ref, hash, kept, since, until],
+            )?;
+            Ok(true)
+        })
+    }
+
+    /// Every link credential waiting to be revoked, opened.
+    pub fn link_revocations(&self) -> Result<Vec<Revocation>> {
+        let rows: Vec<(String, String, String, String, String, i64, i64)> = self.db.query(
+            "SELECT service, kind, ref, hash, sealed, since, until FROM link_revocations ORDER BY until",
+            params![],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
+        )?;
+        rows.into_iter()
+            .map(|(service, k, r, hash, sealed, since, until)| {
+                let kept = self.sealer.open(&format!("link-revoke:{service}:{k}:{r}"), &sealed)?;
+                Ok(Revocation { kind: LinkKind::parse(&k)?, service, r#ref: r, hash, kept, since, until })
+            })
+            .collect()
+    }
+
+    /// One pass's claim on a revocation (another's lapses after five minutes): whether it's this
+    /// one's to revoke.
+    pub fn claim_revocation(&self, r: &Revocation, now: i64) -> Result<bool> {
+        Ok(self.db.execute(
+            "UPDATE link_revocations SET claimed_at = ? WHERE service = ? AND kind = ? AND ref = ? AND hash = ? AND (claimed_at IS NULL OR claimed_at < ?)",
+            params![now, r.service, r.kind.as_str(), r.r#ref, r.hash, now - 300_000],
+        )? == 1)
+    }
+
+    /// A claimed revocation done (`ok`), or failed: then let go for the next pass, and how many
+    /// times it failed.
+    pub fn finish_revocation(&self, r: &Revocation, ok: bool) -> Result<i64> {
+        let key = params![r.service, r.kind.as_str(), r.r#ref, r.hash];
+        if ok {
+            self.db.execute("DELETE FROM link_revocations WHERE service = ? AND kind = ? AND ref = ? AND hash = ?", key)?;
+            return Ok(0);
+        }
+        self.db.execute("UPDATE link_revocations SET claimed_at = NULL, tries = tries + 1 WHERE service = ? AND kind = ? AND ref = ? AND hash = ?", key)?;
+        Ok(self.db.query_row("SELECT tries FROM link_revocations WHERE service = ? AND kind = ? AND ref = ? AND hash = ?", key, |r| r.get(0)).optional()?.unwrap_or(0))
+    }
+
+    /// A service's deployments made after `since` and up to `until` (unix ms): id, environment,
+    /// status.
+    pub fn deployments_made(&self, service: &str, since: i64, until: i64) -> Result<Vec<(String, String, DeployStatus)>> {
+        let rows: Vec<(String, String, String)> =
+            self.db.query("SELECT id, env, status FROM deployments WHERE service = ? AND created_at > ? AND created_at <= ?", params![service, since, until], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        // (One it can't read counts as still to go live.)
+        Ok(rows.into_iter().map(|(id, env, st)| (id, env, DeployStatus::parse(&st).unwrap_or(DeployStatus::Queued))).collect())
     }
 
     // ── domains ──

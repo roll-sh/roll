@@ -2895,6 +2895,9 @@ impl Apps {
             if n.is_multiple_of(10) {
                 self.flush_meters(false).await;
                 self.cron_pass(code_sql::now_ms()).await;
+                // Links' old credentials that nothing runs with any more.
+                let this = self.clone();
+                tokio::spawn(async move { this.revoke_pass().await });
             }
             if n.is_multiple_of(600) {
                 let day_ago = code_sql::now_ms() - 86_400_000;

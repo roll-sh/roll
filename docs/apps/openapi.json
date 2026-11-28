@@ -6364,6 +6364,61 @@
         "x-roll-action": "write"
       }
     },
+    "/v1/apps/services/{id}/links/{kind}/{ref}/rotate": {
+      "post": {
+        "description": "Answers `{ kind, ref, deployments: { environment, id, status }[], waiting: string[], live }`: a new credential made as linking makes one, stored in place of the old (sealed), the environments redeployed with it and followed until they're live. The old one is revoked once no deployment made before the rotation runs, is live or is still to go live in an environment that uses the link (its instances drained; `waiting`: the ones not redeployed, which keep it until their next deploy), by a pass every 10 s that survives a restart. 202 when a redeploy is still going or waits for an approval. 409 when a redeploy failed or couldn't start: the old credential is put back and still works, the new one is revoked once nothing runs with it; 409 when the link changed meanwhile. 400 for a link with no credential of its own (`postgres`, `redis`, `nosql`, `service`) or an environment that doesn't use it; 404 for no such link. Audited as `audit.link.rotated` (the environments, never a value).",
+        "operationId": "postServicesIdLinksKindRefRotate",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "kind",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "ref",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "description": "`{ environment? }` (only that one redeployed; default: every environment that uses the link, not previews or one with data of its own)"
+        },
+        "responses": {
+          "200": {
+            "description": "`{ kind, ref, deployments: { environment, id, status }[], waiting: string[], live }`: a new credential made as linking makes one, stored in place of the old (sealed), the environments redeployed with it and followed until they're live. The old one is revoked once no deployment made before the rotation runs, is live or is still to go live in an environment that uses the link (its instances drained; `waiting`: the ones not redeployed, which keep it until their next deploy), by a pass every 10 s that survives a restart. 202 when a redeploy is still going or waits for an approval. 409 when a redeploy failed or couldn't start: the old credential is put back and still works, the new one is revoked once nothing runs with it; 409 when the link changed meanwhile. 400 for a link with no credential of its own (`postgres`, `redis`, `nosql`, `service`) or an environment that doesn't use it; 404 for no such link. Audited as `audit.link.rotated` (the environments, never a value)"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Rotate link",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "admin (its credentials; reveal on the resource, as linking it)"
+      }
+    },
     "/v1/apps/services/{id}/move": {
       "post": {
         "description": "Answers `{ id, project, redeployed: { environment, deployment }[], failed: { environment, error }[] }`; 409 naming what ties it to its project (links either way, routes either way, routes there to its name, `roll://` references, a private network, running sandboxes, project secrets without `switch`), a service of its name or a preview label taken there; 403 for another owner's project, or a scoped token or session without admin on apps there (README, \"Moving a service\").",

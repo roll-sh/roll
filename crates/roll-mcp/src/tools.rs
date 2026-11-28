@@ -477,7 +477,7 @@ fn apps_area(method: &str, path: &str) -> Area {
             _ => return Area::Unplaced,
         },
         ["services", "activity"] | ["events"] => "observe",
-        ["services", "links"] | ["services", "restore"] | ["services", "move"] | ["import"] | ["plan"] | ["quote"] => "configure",
+        ["services", "links"] | ["services", "links", "rotate"] | ["services", "restore"] | ["services", "move"] | ["import"] | ["plan"] | ["quote"] => "configure",
         ["projects", "drains" | "notifications" | "limits" | "usage" | "status-page" | "preview-domain" | "export" | "signing" | "board", ..] => "project",
         _ => return Area::Unplaced,
     };
@@ -1668,6 +1668,7 @@ static TOOLS: &[Tool] = &[
         &[SERVICE, ENV, req("deploy", "Deploy id (from apps_deploy, apps_redeploy or apps_promote)")],
     )
     .until(deploy_over),
+    t("apps_rotate_link", "Rotate a link's credential", "Give a link a new credential of its own (a leaked search key, bucket key, stream or queue user, tasks key; Heroku's pg:credentials:rotate): the environments that use it (or the one named) are redeployed with it, and the old one is revoked once nothing runs with it any more. A redeploy that fails keeps the old one (409, and nothing is revoked that runs). 400 for a link with no credential of its own (postgres, redis, nosql, service); 202 while a redeploy is still going or waits for an approval.", "apps", "POST", "/v1/apps/services/{service}/links/{kind}/{ref}/rotate", &[SERVICE, req("kind", "Link kind: one with a credential of its own (bucket, stream, queue, search, tasks)"), req("ref", "The resource's id or name"), b("environment", Ty::Str, "Only this environment (the others keep the old credential until their next deploy, and it's revoked after)")]).destructive(),
     t("apps_list_links", "List links", "The databases, buckets, streams and other services a service is linked to.", "apps", "GET", "/v1/apps/services/{service}/links", &[SERVICE]),
     t("apps_vitals", "Web Vitals", "What visitors' browsers measured on an environment's pages (with vitals on): LCP, INP, CLS, FCP and TTFB p75s rated good, needs-improvement or poor, overall and for the 20 routes with the most page loads.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/vitals", &[SERVICE, ENV, q("minutes", Ty::Int, "How far back, 60-10080 (default 1440)")]),
     t("apps_route_stats", "Route stats", "An environment's routes from its access log over the last minutes (5-60, default 60): requests, 5xx and 4xx errors, p50/p95/max latency per route (ids folded as :id), the busiest, most failing and slowest 50 of each. Start here when a service is slow or failing.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/routes", &[SERVICE, ENV, q("minutes", Ty::Int, "How far back, 5-60 (default 60)")]),

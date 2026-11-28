@@ -64,6 +64,7 @@ pub mod otlp;
 pub mod public;
 pub mod push;
 pub mod resp_cache;
+pub mod rotate;
 pub mod runtime;
 pub mod sandboxes;
 pub mod peering;
@@ -3969,6 +3970,7 @@ impl Apps {
         let (rows, options) = self.db(move |s| Ok((s.links_minted(&sid)?, s.link_options(&sid)?))).await?;
         let mut out = Vec::new();
         for (kind, r, prefix, minted) in rows {
+            let rotates = minted.is_some() && kind != LinkKind::Service;
             let names = self.link_values(&svc, kind, &r, "production", minted).await;
             let vars = names
                 .map(|mut v| {
@@ -3977,7 +3979,7 @@ impl Apps {
                 })
                 .unwrap_or_default();
             let opts: integrations::LinkOptions = options.get(&(kind.as_str().to_string(), r.clone())).and_then(|o| serde_json::from_str(o).ok()).unwrap_or_default();
-            out.push(Link { kind, r#ref: r, prefix, vars, indices: None, access: None }.narrowed(&opts));
+            out.push(Link { kind, r#ref: r, prefix, vars, indices: None, access: None, rotates }.narrowed(&opts));
         }
         Ok(out)
     }
@@ -4064,7 +4066,8 @@ impl Apps {
         };
         let mut vars = vars;
         integrations::pg_parts(kind, &mut vars);
-        Ok(Link { kind, r#ref: r#ref.to_string(), vars: vars.into_iter().map(|(k, _)| format!("{prefix}{k}")).collect(), prefix, indices: None, access: None }.narrowed(&options))
+        let rotates = minted.is_some() && kind != LinkKind::Service;
+        Ok(Link { kind, r#ref: r#ref.to_string(), vars: vars.into_iter().map(|(k, _)| format!("{prefix}{k}")).collect(), prefix, indices: None, access: None, rotates }.narrowed(&options))
     }
 
     /// A link's variables now, as `service` gets them in `env`: another service's URLs (apps'

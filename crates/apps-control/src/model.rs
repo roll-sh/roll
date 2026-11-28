@@ -3780,6 +3780,9 @@ pub struct Link {
     pub indices: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub access: Option<String>,
+    /// It has a credential of its own, which `POST …/rotate` replaces.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub rotates: bool,
 }
 
 impl Link {

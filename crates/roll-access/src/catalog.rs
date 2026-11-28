@@ -1886,6 +1886,9 @@ static ROWS: &[Row] = &[
     // its code reads them: reveal on that resource too.
     row("PUT", "/v1/apps/services/{id}/links/{kind}/{ref}", "apps", W, one(PG, "service")).lends(Lend::Path("kind", "ref")),
     row("DELETE", "/v1/apps/services/{id}/links/{kind}/{ref}", "apps", W, one(PG, "service")),
+    // A new credential for a link, the service redeployed with it and the old one revoked:
+    // admin on the service (its credentials), and reveal on the resource, as linking it.
+    row("POST", "/v1/apps/services/{id}/links/{kind}/{ref}/rotate", "apps", ADMIN, one(PG, "service")).lends(Lend::Path("kind", "ref")),
     row("*", "/v1/apps/services/{id}", "apps", M, one(PG, "service")),
     // A worker scaled on a stream group's lag has apps read that stream for it, and a web service's
     // pushes consume one (and dead-letter into it): read there too, write with a dead letter.
