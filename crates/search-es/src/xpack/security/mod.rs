@@ -1556,7 +1556,7 @@ fn narrow_exprs(
     let ignore_unavailable = ignore_unavailable && crate::xpack::internal::caller().is_none();
     // Linked remote clusters' expressions are authorized there, with the principal's
     // `remote_indices` privileges (`crate::remote::links`).
-    let (linked, mut exprs): (Vec<String>, Vec<String>) = exprs.into_iter().partition(|e| crate::remote::links::names_link(ctx, e));
+    let (linked, exprs): (Vec<String>, Vec<String>) = exprs.into_iter().partition(|e| crate::remote::links::names_link(ctx, e));
     if exprs.is_empty() && !linked.is_empty() {
         return Ok(None);
     }
@@ -1564,6 +1564,56 @@ fn narrow_exprs(
         v.extend(linked.iter().cloned());
         v
     };
+    // A loopback's expressions read this cluster's own indices: each loopback's group (as the
+    // search plans it, `remote::plan`) is narrowed as local names, never as the literal
+    // `alias:index` a local pattern like `lo*` would match.
+    let st = ctx.state();
+    let Some(plan) = crate::remote::plan(ctx.cluster, &st, &exprs)? else {
+        return Ok(narrow_local(ctx, p, eff, action, exprs, opts, ignore_unavailable)?.map(with_linked));
+    };
+    drop(st);
+    let mut out: Vec<String> = Vec::new();
+    let mut changed = false;
+    if let Some(local) = plan.local {
+        match narrow_local(ctx, p, eff, action, local.clone(), opts, ignore_unavailable)? {
+            Some(v) => {
+                changed = true;
+                out.extend(v);
+            }
+            None => out.extend(local),
+        }
+    }
+    for (alias, group) in plan.remote {
+        let narrowed = narrow_local(ctx, p, eff, action, group.clone(), opts, ignore_unavailable)?;
+        changed |= narrowed.is_some();
+        out.extend(narrowed.unwrap_or(group).iter().map(|e| format!("{alias}:{e}")));
+    }
+    if !changed {
+        return Ok(None);
+    }
+    // Remotes searched elsewhere or skipped (no loopback among them) keep their expressions.
+    let st = ctx.state();
+    let loopbacks: Vec<crate::remote::Remote> = crate::remote::remotes_in(ctx.cluster.dialect, &st).into_iter().filter(|r| r.is_loopback(ctx.cluster)).collect();
+    for e in &exprs {
+        if let crate::remote::Expr::Remote(pattern, _) = crate::remote::read_expression(ctx.cluster.dialect, e)
+            && !loopbacks.iter().any(|r| crate::xcontent::filter::glob_match(pattern, &r.alias))
+        {
+            out.push(e.clone());
+        }
+    }
+    Ok(Some(with_linked(out)))
+}
+
+/// [`narrow_exprs`] on local expressions (a loopback's group, as local names).
+fn narrow_local(
+    ctx: &Ctx,
+    p: &Principal,
+    eff: &Effective,
+    action: &str,
+    mut exprs: Vec<String>,
+    opts: &crate::meta::resolve::IndicesOptions,
+    ignore_unavailable: bool,
+) -> EsResult<Option<Vec<String>>> {
     let wildcard = |e: &str| e.contains('*') || e == "_all";
     if !exprs.is_empty() && !exprs.iter().any(|e| wildcard(e)) {
         let mut names: Vec<String> = exprs.iter().map(|e| authz_name(e, ctx.now_ms)).collect();
@@ -1604,7 +1654,7 @@ fn narrow_exprs(
     if !denied_on.is_empty() {
         return Err(denied(p, action, Some(&denied_on)));
     }
-    Ok(Some(with_linked(if out.is_empty() { vec!["-*".to_string()] } else { out })))
+    Ok(Some(if out.is_empty() { vec!["-*".to_string()] } else { out }))
 }
 
 /// The name an index expression is authorized as, by every index check (the request's own

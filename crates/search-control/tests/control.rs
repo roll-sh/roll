@@ -5510,6 +5510,14 @@ async fn cross_cluster_search_between_linked_clusters() {
         }
         let (s, v) = e.es(&user, "pass-word-1", Method::GET, "/*:secret/_search", None).await;
         assert!(s != 200 || v["hits"]["hits"].as_array().is_some_and(|h| h.is_empty()), "{s} {v}");
+        // A loopback's part is authorized as local names, never as the literal `me:secret` a role
+        // on `me*` would match; a wildcard there is narrowed to what the user may read.
+        let (s, v) = e.es(&user, "pass-word-1", Method::GET, "/me:*/_search", None).await;
+        let shown: Vec<&str> = v["hits"]["hits"].as_array().map(|h| h.iter().filter_map(|h| h["_index"].as_str()).collect()).unwrap_or_default();
+        assert_eq!((s, shown), (200, vec!["me:app"]), "{v}");
+        assert_eq!(e.es(&app, &app_pw, Method::PUT, "/_security/role/me_star", Some(json!({ "indices": [{ "names": ["me*"], "privileges": ["read"] }] }))).await.0, 200);
+        assert_eq!(e.es(&app, &app_pw, Method::PUT, "/_security/user/m", Some(json!({ "password": "pass-word-2", "roles": ["me_star"] }))).await.0, 200);
+        assert_eq!(e.es(&format!("m@{app}"), "pass-word-2", Method::GET, "/me:secret/_search", None).await.0, 403);
         assert!(!v.to_string().contains("secret doc"), "{v}");
         let r = e.http.post(format!("{}/_msearch", e.es)).basic_auth(&user, Some("pass-word-1")).header("content-type", "application/x-ndjson").body("{\"index\":\"*:secret\"}\n{}\n").send().await.unwrap();
         let m = r.text().await.unwrap();

@@ -214,23 +214,26 @@ pub fn plan(cluster: &Cluster, st: &ClusterState, expressions: &[String]) -> EsR
                 }
             }
             Expr::Exclude(pattern, index) => {
+                let mut not_included: Vec<&str> = Vec::new();
                 for r in matching(&configured, pattern)? {
                     // A link's legs were split off already (`links::split` applies exclusions to them).
                     let named = remote.contains_key(&r.alias) || skipped.contains(&r.alias) || linked.contains(&r.alias) || links::is_link(cluster, r);
-                    if !named {
-                        if pattern.contains('*') {
-                            continue;
+                    if index != "*" {
+                        // An index exclusion of a remote not named (yet) excludes nothing.
+                        if let Some(exprs) = remote.get_mut(&r.alias) {
+                            exprs.push(format!("-{index}"));
                         }
-                        return Err(EsError::illegal_argument(format!(
-                            "Attempt to exclude cluster [{}] failed as it is not included in the list of clusters to be included (note: the \"include\" expression must precede the \"exclude\" expression)",
-                            r.alias
-                        )));
-                    }
-                    if index == "*" {
+                    } else if named {
                         removed.push(r.alias.clone());
-                    } else if let Some(exprs) = remote.get_mut(&r.alias) {
-                        exprs.push(format!("-{index}"));
+                    } else {
+                        not_included.push(&r.alias);
                     }
+                }
+                let note = "in the list of clusters to be included (note: the \"include\" expression must precede the \"exclude\" expression)";
+                match not_included.as_slice() {
+                    [] => {}
+                    [one] => return Err(EsError::illegal_argument(format!("Attempt to exclude cluster [{one}] failed as it is not included {note}"))),
+                    many => return Err(EsError::illegal_argument(format!("Attempt to exclude clusters [{}] failed as they are not included {note}", many.join(", ")))),
                 }
             }
         }
