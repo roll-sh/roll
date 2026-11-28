@@ -27,12 +27,48 @@ permissions:
   issues: write
 
 jobs:
-  deploy:
+  # The image, apart from the deploy, so the next merge builds while the previous one bakes and
+  # rolls: a deploy starts with its image ready. One build at a time; a newer merge's build waits,
+  # and only the newest waiting one runs.
+  build:
     # Skipped until the stack exists and the repository variable names its deploy role.
-    if: vars.AWS_DEPLOY_ROLE_ARN != '' && !inputs.diagnose
+    if: vars.AWS_DEPLOY_ROLE_ARN != '' && !inputs.diagnose && inputs.tag == ''
     runs-on: ubuntu-24.04-arm
     environment: production
-    timeout-minutes: 240
+    timeout-minutes: 120
+    concurrency:
+      group: deploy-build
+      cancel-in-progress: false
+    env:
+      AWS_REGION: us-east-1
+      ROLL_CLOUD_STACK: roll-cloud
+      TAG: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: us-east-1
+          role-duration-seconds: 7200
+      - name: AWS CLI
+        run: deploy/cloud/deploy.sh aws-cli
+      - uses: docker/setup-buildx-action@v3
+      - name: Build and push
+        shell: bash
+        run: deploy/cloud/deploy.sh push "$TAG" 2>&1 | tee -a "$RUNNER_TEMP/deploy.log"
+      - name: Report the failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: deploy/cloud/report.sh failed "$RUNNER_TEMP/deploy.log"
+
+  deploy:
+    needs: build
+    # After its build (or with `tag`, none). A build that a newer one replaced deploys nothing.
+    if: always() && vars.AWS_DEPLOY_ROLE_ARN != '' && !inputs.diagnose && (needs.build.result == 'success' || (needs.build.result == 'skipped' && inputs.tag != ''))
+    runs-on: ubuntu-24.04-arm
+    environment: production
+    timeout-minutes: 120
     # One deploy at a time; a newer merge waits, and only the newest waiting one runs.
     concurrency:
       group: deploy-production
@@ -49,19 +85,8 @@ jobs:
           aws-region: us-east-1
           role-duration-seconds: 7200
       - name: AWS CLI
-        run: |
-          if ! command -v aws >/dev/null; then
-            curl -fsSL https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip -o "$RUNNER_TEMP/awscli.zip"
-            unzip -q "$RUNNER_TEMP/awscli.zip" -d "$RUNNER_TEMP"
-            sudo "$RUNNER_TEMP/aws/install"
-          fi
-          aws --version
-      - uses: docker/setup-buildx-action@v3
-      # Each step's output also goes to deploy.log, for the issue a failure opens.
-      - name: Build and push
-        if: inputs.tag == ''
-        shell: bash
-        run: deploy/cloud/deploy.sh push "$TAG" 2>&1 | tee -a "$RUNNER_TEMP/deploy.log"
+        run: deploy/cloud/deploy.sh aws-cli
+      # Its output also goes to deploy.log, for the issue a failure opens.
       - name: Canary, bake, roll
         shell: bash
         run: deploy/cloud/deploy.sh deploy "$TAG" 2>&1 | tee -a "$RUNNER_TEMP/deploy.log"
