@@ -900,7 +900,7 @@ fn every_tool() -> Vec<Value> {
                 "owner": s("The owner it goes under"),
                 "name": s("Its name: letters, digits, - and _"),
                 "description": s("One line on it"),
-                "visibility": json!({ "type": "string", "enum": ["private", "public"], "description": "default private" }),
+                "visibility": json!({ "type": "string", "enum": ["private", "public"], "description": "Default public: anyone can read it. private: only the owner can" }),
                 "default_branch": s("Default \"main\""),
             }),
             &["owner", "name"],
@@ -1033,7 +1033,7 @@ fn every_tool() -> Vec<Value> {
             "Create a roll code repository for the owner and clone it onto a machine as a project (default path: ~/roll/<owner>/<repo>). Answers the project's id. The owner's: agent tokens can't add projects.",
             json!({
                 "owner": owner.clone(), "machine": machine.clone(), "repo": s("The new repository's name"), "description": s("Description"),
-                "visibility": json!({ "type": "string", "enum": ["public", "private"] }), "path": s("Where to clone it (absolute, or under ~/roll)"),
+                "visibility": json!({ "type": "string", "enum": ["public", "private"], "description": "The repository's. Default public: anyone can read it. private: only the owner can" }), "path": s("Where to clone it (absolute, or under ~/roll)"),
                 "name": s("The project's name on the canvas"), "id": command_id
             }),
             &["owner", "machine", "repo"],

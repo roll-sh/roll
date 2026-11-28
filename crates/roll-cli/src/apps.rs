@@ -886,6 +886,10 @@ pub enum AppsCmd {
     Exec {
         #[command(flatten)]
         target: Target,
+        /// Pass roll's own credentials (ROLL_ADMIN_TOKEN, ROLL_TOKEN and the like) on to the
+        /// command; by default it gets none unless the service sets that name itself.
+        #[arg(long)]
+        keep_roll_credentials: bool,
         #[arg(trailing_var_arg = true, required = true, allow_hyphen_values = true)]
         command: Vec<String>,
     },
@@ -1112,6 +1116,15 @@ pub enum AppsCmd {
     /// How fast its pages are for real visitors (its environment's Web Vitals on, `roll apps env
     /// --vitals true`): each metric's p75 and rating, and the busiest routes'.
     Vitals {
+        #[command(flatten)]
+        target: Target,
+        /// How far back, in minutes (60–10080; default a day).
+        #[arg(long, default_value_t = 1440)]
+        minutes: i64,
+    },
+    /// What browsers reported its pages' Content-Security-Policy blocked (its environment's CSP
+    /// reports on, `roll apps env --csp-reports true`), grouped, the most frequent first.
+    CspReports {
         #[command(flatten)]
         target: Target,
         /// How far back, in minutes (60–10080; default a day).
@@ -1522,6 +1535,10 @@ pub enum AppsCmd {
         /// to its HTML pages), or not.
         #[arg(long)]
         vitals: Option<bool>,
+        /// Collect its pages' Content-Security-Policy reports (`true`: its answers name roll's
+        /// `/__roll/csp`, and a policy that reports nowhere reports there), or not.
+        #[arg(long)]
+        csp_reports: Option<bool>,
         /// Its Strict-Transport-Security over HTTPS: `off`, `default` (two years), or a max-age in
         /// seconds with `,subdomains` and `,preload` (`31536000,subdomains,preload`).
         #[arg(long, value_name = "HSTS")]
@@ -3958,7 +3975,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             svc
         }
-        AppsCmd::Exec { target, command } => {
+        AppsCmd::Exec { target, keep_roll_credentials, command } => {
             let svc = service(api, &target).await?;
             let base = env_path(&svc, &target.env);
             let (values, listed) = (api.get(&format!("{base}/variables/values")).await?, api.get(&format!("{base}/variables")).await?);
@@ -4034,12 +4051,13 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             if !internal.is_empty() {
                 eprintln!("{} name a private address (*.internal) that only resolves inside roll: `roll apps proxy` reaches one from here", internal.join(", "));
             }
-            let status = tokio::process::Command::new(&command[0])
-                .args(&command[1..])
-                .envs(vars)
-                .status()
-                .await
-                .with_context(|| format!("couldn't run {}", command[0]))?;
+            let mut cmd = tokio::process::Command::new(&command[0]);
+            if !keep_roll_credentials {
+                for k in crate::sys::roll_credentials(&|n| vars.iter().any(|(k, _)| k == n)) {
+                    cmd.env_remove(k);
+                }
+            }
+            let status = cmd.args(&command[1..]).envs(vars).status().await.with_context(|| format!("couldn't run {}", command[0]))?;
             for t in tunneled {
                 t.abort();
             }
@@ -4983,6 +5001,24 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
+        AppsCmd::CspReports { target, minutes } => {
+            let svc = service(api, &target).await?;
+            let v = api.get(&format!("{}/csp-reports?minutes={minutes}", env_path(&svc, &target.env))).await?;
+            if !json_out {
+                let groups = v["groups"].as_array().cloned().unwrap_or_default();
+                if v["on"] != true {
+                    println!("CSP reports are off (roll apps env --csp-reports true)");
+                }
+                if groups.is_empty() {
+                    println!("no reports in the last {} minutes", v["minutes"]);
+                }
+                for g in &groups {
+                    println!("{:>7}  {:<18} {:<36} {:<30} {}", g["count"], s(&g["directive"]), s(&g["blocked"]), s(&g["path"]), if g["disposition"] == "report" { "report-only" } else { "" });
+                }
+                return Ok(());
+            }
+            v
+        }
         AppsCmd::Traces { target, minutes, min_ms, trace } => {
             let svc = service(api, &target).await?;
             let base = env_path(&svc, &target.env);
@@ -5772,7 +5808,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Env { target, all_services, branch, no_branch, variables_from, data, wait_for_ci, run, follow_tag, deploy_tags, redeploy_on_secrets, vitals, hsts, egress, egress_host, private, open, signed_in, sso, maintenance, serve, pause, resume, resume_deploys, hold, allow_ip, allow_any, rate_limit, no_rate_limit, firewall, no_firewall, header, no_headers, route, no_routes, redirects, no_redirects, error_page, maintenance_page, roll_pages, freeze, unfreeze, rotate_config, set } => {
+        AppsCmd::Env { target, all_services, branch, no_branch, variables_from, data, wait_for_ci, run, follow_tag, deploy_tags, redeploy_on_secrets, vitals, csp_reports, hsts, egress, egress_host, private, open, signed_in, sso, maintenance, serve, pause, resume, resume_deploys, hold, allow_ip, allow_any, rate_limit, no_rate_limit, firewall, no_firewall, header, no_headers, route, no_routes, redirects, no_redirects, error_page, maintenance_page, roll_pages, freeze, unfreeze, rotate_config, set } => {
             let svc = service(api, &target).await?;
             if rotate_config {
                 let e = api.post(&format!("{}/config/rotate", env_path(&svc, &target.env)), json!({})).await?;
@@ -5814,6 +5850,9 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             if let Some(v) = vitals {
                 body.insert("vitals".into(), json!(v));
+            }
+            if let Some(v) = csp_reports {
+                body.insert("csp_reports".into(), json!(v));
             }
             if let Some(h) = &hsts {
                 body.insert("hsts".into(), hsts_body(h)?);

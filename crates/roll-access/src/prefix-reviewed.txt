@@ -259,7 +259,6 @@ POST /v1/secrets/projects/{project}/environments/{env}/rollback
 DELETE /v1/secrets/projects/{project}/environments/{env}/secrets/{key}
 GET /v1/secrets/projects/{project}/environments/{env}/secrets/{key}
 PUT /v1/secrets/projects/{project}/environments/{env}/secrets/{key}
-POST /v1/secrets/projects/{project}/environments/{env}/secrets/{key}/rotate
 GET /v1/secrets/projects/{project}/environments/{env}/secrets/{key}/versions
 GET /v1/secrets/projects/{project}/grid
 DELETE /v1/secrets/projects/{project}/identities/{id}

@@ -142,6 +142,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/visitors/{{visitor}}"), axum::routing::delete(sign_out_visitor))
         .route(&format!("{env}/fetch"), get(fetch_page))
         .route(&format!("{env}/vitals"), get(vitals))
+        .route(&format!("{env}/csp-reports"), get(csp_reports))
         .route(&format!("{env}/app-metrics"), get(app_metrics))
         .route(&format!("{env}/errors"), get(errors))
         .route(&format!("{env}/errors/{{fingerprint}}"), axum::routing::patch(error_state))
@@ -1719,6 +1720,10 @@ async fn app_metrics(State(apps): S, Path((id, env)): Path<(String, String)>, Qu
 
 async fn vitals(State(apps): S, Path((id, env)): Path<(String, String)>, Query(q): Query<VitalsQuery>) -> R {
     ok_marked(&apps, &id, &env, apps.vitals(&id, &env, q.minutes.unwrap_or(1440)).await?).await
+}
+
+async fn csp_reports(State(apps): S, Path((id, env)): Path<(String, String)>, Query(q): Query<VitalsQuery>) -> R {
+    ok_marked(&apps, &id, &env, apps.csp_reports(&id, &env, q.minutes.unwrap_or(1440)).await?).await
 }
 
 #[derive(Deserialize)]
