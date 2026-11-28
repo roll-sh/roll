@@ -41,6 +41,47 @@ os.rename(os.path.join(r, 'mv'), os.path.join(r, 'sub2', 'mv')); dsync('sub2')  
 '''
 
 
+# A kill inside a rename (1) or a removal (2), before or after the change (POWERCUT_KILL): the
+# cut must work either way (agent 341's TOOL ERROR: a spill file's rename made, its record not).
+KILLED = r'''
+import os, sys
+r = sys.argv[1]
+fd = os.open(os.path.join(r, 'a'), os.O_WRONLY | os.O_CREAT, 0o644); os.write(fd, b'a'); os.fsync(fd); os.close(fd)
+fd = os.open(r, os.O_RDONLY); os.fsync(fd); os.close(fd)
+try:
+    os.rename(os.path.join(r, 'nope'), os.path.join(r, 'b'))   # fails: cancelled, not counted
+except FileNotFoundError:
+    pass
+os.rename(os.path.join(r, 'a'), os.path.join(r, 'b'))
+os.unlink(os.path.join(r, 'c'))
+'''
+
+
+def killed_cases(t, lib):
+    bad = []
+    for at in ('1:0', '1:1', '2:0', '2:1'):
+        root = os.path.join(t, 'k' + at.replace(':', ''))
+        os.mkdir(root)
+        with open(os.path.join(root, 'c'), 'wb') as f:
+            f.write(b'c')
+        pc = rebuild.PowerCut(root, os.path.join(t, 'kstate' + at.replace(':', '')), lib, sys.executable)
+        os.makedirs(pc.state)
+        env = dict(os.environ, POWERCUT_KILL=at, **pc.env())
+        rc = subprocess.call([sys.executable, '-I', '-c', KILLED, root], env=env)
+        if rc != -9:
+            bad.append(f'kill {at}: the child exited {rc}, not killed')
+            continue
+        try:
+            pc.cut('drop', 0)
+        except rebuild.ToolError as e:
+            bad.append(f'kill {at}: {e}')
+            continue
+        got = {f: open(os.path.join(root, f), 'rb').read() for f in sorted(os.listdir(root))}
+        if got != {'a': b'a', 'c': b'c'}:
+            bad.append(f'kill {at}: {got}')
+    return bad
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix='a325-powercut-') as t:
         lib = rebuild.build_lib(t)
@@ -64,6 +105,7 @@ def main():
                 'log': b'L+synced', 'trunc': b'truncated?', 'big': b'0123456789', 'sub2/g': b'g',
                 'mv': b'm', 'sub2/mv': b'm'}
         bad = [f'{k}: {got.get(k)!r}, want {want.get(k)!r}' for k in sorted(set(got) | set(want)) if got.get(k) != want.get(k)]
+        bad += killed_cases(t, lib)
         print('powercut selftest:', 'ok' if not bad else 'FAILED', stats)
         for b in bad:
             print('  ' + b)

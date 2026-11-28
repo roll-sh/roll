@@ -293,10 +293,20 @@ def cut(state, mode='drop', seed=0, keep_old=None):
     root = snap['path']
     grave = os.path.join(state, 'grave')
     recs = records(os.path.join(state, 'log')) if os.path.exists(os.path.join(state, 'log')) else []
+    # (A rename or removal that failed after its record: N names it.)
+    failed = {r[2] for r in recs if r[0] == 'N'}
+    recs = [r for r in recs if r[0] != 'N' and r[1] not in failed]
     rep = Replay(snap, recs)
     if rep.issues:
         raise ToolError('the record is not consistent:\n  ' + '\n  '.join(rep.issues[:20]))
     diffs = check_real(rep, root)
+    # A rename or removal is recorded before it is made: the kill may have come between the
+    # two, so the last one may not have happened (the directory says).
+    if diffs and recs and recs[-1][0] in 'RU':
+        undone = Replay(snap, recs[:-1])
+        left = check_real(undone, root)
+        if len(left) < len(diffs):
+            recs, rep, diffs = recs[:-1], undone, left
     if len(diffs) > 1:
         raise ToolError('the record does not match the directory (an operation powercut.so missed?):\n  ' + '\n  '.join(diffs[:20]))
     rng = random.Random(seed)

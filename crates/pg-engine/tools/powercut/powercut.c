@@ -10,8 +10,11 @@
  * record is one write(2) to <log>, so a SIGKILL keeps all of them (the host's page cache), and
  * the real files keep everything written: the cut is made afterwards, from the record.
  *
- * Every change under <root> is made under one mutex, with its record written before it (data)
- * or right after it (names), so the record is the order the kernel saw:
+ * Every change under <root> is made under one mutex, with its record written before it (data,
+ * renames, removals) or right after it (a new file, directory or link: its inode is known then),
+ * so the record is the order the kernel saw. A kill between a record and its change leaves at
+ * most the last record not done, or the last change not recorded; the rebuild tells which from
+ * the directory:
  *   W  a write (write, pwrite, writev, pwritev, copy_file_range, sendfile): the file's inode,
  *      offset, length, its size before, and the bytes it overwrote (an undo record: the new
  *      bytes are in the file itself);
@@ -26,6 +29,8 @@
  *   U  unlink / rmdir: not done, the entry is renamed into <grave> instead (its data stays for
  *      a cut that brings the entry back);
  *   L  a hard link;
+ *   N  a rename or removal recorded that then failed: the record named by its sequence number
+ *      did not happen;
  *   X  something this layer can't model (a symlink, a rename across <root>'s edge, an fd past
  *      its table): the rebuild refuses to cut such a run.
  * Reads, and files outside <root>, are passed straight through.
@@ -37,6 +42,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -595,6 +601,20 @@ static int do_truncate(const char *p, uint64_t to, int (*real)(const char *, off
 int truncate(const char *p, off_t l) { return do_truncate(p, (uint64_t)l, real_truncate); }
 int truncate64(const char *p, off64_t l) { return do_truncate(p, (uint64_t)l, (int (*)(const char *, off_t))real_truncate64); }
 
+/* POWERCUT_KILL=<n>:<0|1> (selftest.py): SIGKILL in the n-th rename or removal recorded, after
+ * its record and before the change (0) or after the change (1). The caller holds mu. */
+static void kill_point(uint64_t rs, int after) {
+	static long n, at = -1, when;
+	if (at < 0) {
+		const char *v = getenv("POWERCUT_KILL");
+		at = 0;
+		if (v && sscanf(v, "%ld:%ld", &at, &when) != 2) at = 0;
+	}
+	if (!rs || !at) return;
+	if (!after) n++;
+	if (n == at && after == when) raise(SIGKILL);
+}
+
 static int do_rename(int fd1, const char *p1, int fd2, const char *p2, unsigned flags) {
 	char a1[PATH_MAX], a2[PATH_MAX];
 	int ok1 = on && resolve(fd1, p1, a1), ok2 = on && resolve(fd2, p2, a2);
@@ -610,17 +630,24 @@ static int do_rename(int fd1, const char *p1, int fd2, const char *p2, unsigned 
 		snprintf(keep, sizeof keep, "%s/o%llu.%llu", grave, (unsigned long long)s2.st_ino, (unsigned long long)seq);
 		if (real_link(a2, keep)) die("link a replaced file into the grave");
 	}
-	int r = flags ? real_renameat2(AT_FDCWD, a1, AT_FDCWD, a2, flags) : real_rename(a1, a2);
-	int e = errno;
-	if (r == 0 && have1) {
-		uint64_t p1i, p2i;
-		const char *n1, *n2;
-		if (!parent_of(a1, &p1i, &n1) || !parent_of(a2, &p2i, &n2)) die("find a rename's parents");
+	/* Recorded before it is made (a kill between the two leaves the record's last entry not
+	 * done, which the rebuild checks against the directory), cancelled if it fails. A rename
+	 * recorded after it was made lost its record to a kill in between: both its names then
+	 * differed from the record (agent 341's spill file moved into base/). */
+	uint64_t p1i, p2i, rs = 0;
+	const char *n1, *n2;
+	if (have1 && parent_of(a1, &p1i, &n1) && parent_of(a2, &p2i, &n2)) {
 		uint64_t over = keep[0] ? (uint64_t)s2.st_ino : 0;
 		/* The grave link is o<inode>.<this record's seq> (nothing was recorded since its name). */
-		emit('R', s1.st_ino, p1i, p2i, over, n1, n2, NULL, 0);
-	} else if (keep[0]) {
-		real_unlinkat(AT_FDCWD, keep, 0);
+		rs = emit('R', s1.st_ino, p1i, p2i, over, n1, n2, NULL, 0);
+	}
+	kill_point(rs, 0);
+	int r = flags ? real_renameat2(AT_FDCWD, a1, AT_FDCWD, a2, flags) : real_rename(a1, a2);
+	int e = errno;
+	kill_point(rs, 1);
+	if (r != 0) {
+		if (rs) emit('N', rs, 0, 0, 0, NULL, NULL, NULL, 0);
+		if (keep[0]) real_unlinkat(AT_FDCWD, keep, 0);
 	}
 	pthread_mutex_unlock(&mu);
 	errno = e;
@@ -663,15 +690,18 @@ static int do_remove(int dirfd, const char *p, int flags) {
 		e = ENOTEMPTY;
 	} else {
 		char to[PATH_MAX];
+		uint64_t pino;
+		const char *name;
+		if (!parent_of(abs, &pino, &name)) die("find a removed entry's parent");
+		/* As a rename: recorded first (the grave name is this record's seq), cancelled if
+		 * the move fails. */
 		snprintf(to, sizeof to, "%s/g%llu.%llu", grave, (unsigned long long)st.st_ino, (unsigned long long)seq);
+		uint64_t rs = emit('U', st.st_ino, pino, S_ISDIR(st.st_mode), 0, name, NULL, NULL, 0);
+		kill_point(rs, 0);
 		r = real_rename(abs, to);
 		e = errno;
-		if (r == 0) {
-			uint64_t pino;
-			const char *name;
-			if (!parent_of(abs, &pino, &name)) die("find a removed entry's parent");
-			emit('U', st.st_ino, pino, S_ISDIR(st.st_mode), 0, name, NULL, NULL, 0);
-		}
+		kill_point(rs, 1);
+		if (r != 0) emit('N', rs, 0, 0, 0, NULL, NULL, NULL, 0);
 	}
 	pthread_mutex_unlock(&mu);
 	errno = e;
