@@ -10666,6 +10666,18 @@ after it. Any read of a key between those 66 entries and the record decompressed
   on both since; n1d / n1e +0.2-0.3% on the index builds: the branch kept `key` / `value` live through
   `add_from`, its registers changed). In `finish_block` `add_from` is the base's code.
 
+**CREATE (UNIQUE) INDEX (cand/a348-2, `session/ddl/parbuild.rs`, `catalog/relsize.rs`).** The parallel
+build sized every entry's index tuple value by value (`IndexTupleSize::push`, `datum_bytes`,
+`type_layout`: 5.5% of the unique build's samples, 4.5% of CREATE INDEX's). With every key and
+INCLUDE column of fixed length the size of a tuple without nulls is the same for all
+(`relsize::fixed_index_tuple`), worked out once; a row with a null is sized as before; debug builds
+check each against `index_tuple`.
+Measured (n1f / n2, two pairs, both orders): CREATE INDEX 3.023 / 3.021 -> 2.913 / 2.911 G
+(-3.64% both), CREATE UNIQUE INDEX 2.678 / 2.675 -> 2.566 / 2.568 (-4.18 / -4.00%), every other step
+level; b0 / n2b once: -3.64 / -3.93%, the whole script -0.39%. More than the profile's 4.5-5.5%: the
+row path also lost the per-value calls' loads and branches around them.
+
+
 **What CREATE UNIQUE INDEX does beyond CREATE INDEX** (the brief's question; b0's profiles): no second
 sort and no other writer. The unique build is cheaper than CREATE INDEX here (2.67 against 3.02 G):
 it sizes no heap rows (the first build's measure is kept) and its keys come sorted. What it does
