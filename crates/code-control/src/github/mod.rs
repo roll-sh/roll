@@ -403,6 +403,10 @@ pub(crate) fn set_import(code: &Code, repo_id: &str, state: &str, commits: usize
 
 // ── marks: idempotency for notifications, deliveries and check-run ids ──
 
+/// An `issue-closed:` mark's value for a close on GitHub by someone GitHub says can push (an
+/// issue roll's App opened); `github` is anyone else's.
+pub(crate) const CLOSED_BY_WRITER: &str = "github-writer";
+
 pub(crate) fn mark(code: &Code, key: &str) -> Result<Option<String>> {
     Ok(code.db.sql().query_row("SELECT value FROM github_marks WHERE key = ?", [key], |r| r.get(0)).optional()?)
 }

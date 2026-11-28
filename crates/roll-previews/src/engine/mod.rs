@@ -519,6 +519,9 @@ impl Engine {
         self.tend_leases().await;
         self.tend_drains().await;
         self.tend_tells().await;
+        if (self.leader)() {
+            self.tend_fixed_notes().await;
+        }
         self.tend_routes();
         self.note_refused_egress().await;
         // Services those converges deployed at a new head, woken so their first visit is warm (a

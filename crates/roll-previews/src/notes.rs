@@ -156,6 +156,10 @@ pub const MAX_REPLIES: usize = 20;
 /// The reply a resolve leaves on the note (roll's Resolve, [`crate::Engine::resolve_note`]).
 pub const RESOLVED: &str = "Resolved.";
 
+/// Who resolves a note whose work item closed ([`crate::Engine::tend_fixed_notes`]): roll, no
+/// person.
+pub const ROLL: &str = "roll";
+
 /// Notes an hour one share link's guests may leave.
 pub const GUEST_PER_HOUR: usize = 10;
 
