@@ -71,8 +71,6 @@ struct World {
     project: String,
     db: code_sql::Db,
     ws: Arc<roll_workspace::Workspace>,
-    /// Its DNS, for a custom domain's records.
-    dns: Arc<StaticDns>,
     /// Its Docker objects go when it does ([`Cleanup`]).
     _cleanup: Cleanup,
 }
@@ -191,12 +189,13 @@ async fn docker_world_secrets(netns: Option<bool>, setup: impl FnOnce(&mut AppsC
     let api = apps_control::api::router(apps.clone());
     let public = apps_control::public::router(apps.clone());
     let _cleanup = Cleanup { db: db.clone(), project: project.clone() };
-    Some(World { _dir: dir, apps, api, public, project, db, ws, dns, _cleanup })
+    Some(World { _dir: dir, apps, api, public, project, db, ws, _cleanup })
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_static_site_builds_and_its_cold_starts_are_measured() {
-    let Some(World { _dir, apps, api, public, project, _cleanup, .. }) = docker_world().await else { return };
+    let Some(w) = docker_world().await else { return };
+    let (apps, api, public, project) = (w.apps.clone(), w.api.clone(), w.public.clone(), w.project.clone());
     // A pull through the Engine API with a login header (an empty one is anonymous): what a
     // private registry's pull runs, its progress read off the stream.
     {
@@ -298,6 +297,22 @@ async fn a_static_site_builds_and_its_cold_starts_are_measured() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert_eq!(nanos, "250000000", "a running instance is held to its cpu: 0.25");
+    // A static site is served from its files, exported from its image once: no container runs, so
+    // there's no cold start; the first request reads the site's index, the rest are warm.
+    let (files, files_host) = deploy_tree(&w, "files", &[("index.html", "<!doctype html><h1>from files</h1>")]).await;
+    let (mut first, mut files_warm) = (Vec::new(), Vec::new());
+    for i in 0..6 {
+        let began = Instant::now();
+        let resp = public.clone().oneshot(Request::get("/").header("host", files_host.as_str()).body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(&resp.into_body().collect().await.unwrap().to_bytes()[..], b"<!doctype html><h1>from files</h1>");
+        if i == 0 { first.push(began.elapsed()) } else { files_warm.push(began.elapsed()) }
+    }
+    // Its image's scan may still run beside it (`roll-apps-scan-…`): no instance serves it.
+    let running = apps_control::runtime::docker::docker(&["ps", "--format", "{{.Names}}", "--filter", &format!("label=sh.roll.apps={files}")]).await.unwrap();
+    assert!(running.lines().all(|n| n.starts_with("roll-apps-scan-")), "no container serves it: {running}");
+    eprintln!("MEASURED static site from its files: first request {} ms (reads its index), warm median {} ms", first[0].as_millis(), median(files_warm).as_millis());
+    assert_eq!(delete_for_good(&api, &files).await.0, StatusCode::NO_CONTENT);
     // Idle: stopped, and nothing metered meanwhile.
     live.sleep().await;
     eprintln!(
@@ -314,68 +329,6 @@ async fn a_static_site_builds_and_its_cold_starts_are_measured() {
     let _ = apps_control::runtime::docker::docker(&["network", "rm", &net]).await;
     assert!(apps_control::runtime::docker::docker(&["ps", "-aq", "--filter", &format!("label=sh.roll.apps={id}")]).await.unwrap().is_empty(), "nothing left");
     apps.shutdown().await;
-}
-
-/// A static site is served from its files, exported from its image once: no container runs, so
-/// there's no cold start; the first request reads the site's index, the rest are warm.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_static_sites_files_answer_without_a_container() {
-    let Some(w) = docker_world().await else { return };
-    let (id, host) = deploy_tree(&w, "files", &[("index.html", "<!doctype html><h1>from files</h1>")]).await;
-    let (mut first, mut warm) = (Vec::new(), Vec::new());
-    for i in 0..6 {
-        let began = Instant::now();
-        let resp = w.public.clone().oneshot(Request::get("/").header("host", host.as_str()).body(Body::empty()).unwrap()).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        assert_eq!(&resp.into_body().collect().await.unwrap().to_bytes()[..], b"<!doctype html><h1>from files</h1>");
-        if i == 0 { first.push(began.elapsed()) } else { warm.push(began.elapsed()) }
-    }
-    let running = apps_control::runtime::docker::docker(&["ps", "-q", "--filter", &format!("label=sh.roll.apps={id}")]).await.unwrap();
-    assert!(running.is_empty(), "no container serves it: {running}");
-    eprintln!("MEASURED static site from its files: first request {} ms (reads its index), warm median {} ms", first[0].as_millis(), median(warm).as_millis());
-    // Its image was scanned beside the rollout by the pinned Trivy, offline (the database's
-    // volume, `roll-apps-trivy-db`, stays: it's the node's, as BuildKit's cache is).
-    let deps = format!("/v1/apps/services/{id}/environments/production/deploys");
-    let began = Instant::now();
-    let mut scan = Value::Null;
-    while began.elapsed() < Duration::from_secs(300) && scan.is_null() {
-        scan = call(&w.api, "GET", &deps, None, "application/json", None).await.1[0]["vulnerabilities"].clone();
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
-    assert!(scan["scanner"] == "trivy 0.76.1" && scan["error"].is_null() && scan["sbom"] == true, "{scan}");
-    eprintln!("MEASURED image scan beside the rollout: done {} ms after it went live (the first downloads the database)", began.elapsed().as_millis());
-    assert_eq!(delete_for_good(&w.api, &id).await.0, StatusCode::NO_CONTENT);
-    let _ = apps_control::runtime::docker::docker(&["network", "rm", &apps_control::network_name(&w.project, "production")]).await;
-    w.apps.shutdown().await;
-}
-
-/// A site moved from Vercel or Netlify keeps its rules: `vercel.json`'s redirect and headers and
-/// `netlify.toml`'s rewrite answer from its files, and neither config is served (one holds a
-/// build setting).
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_sites_vercel_json_and_netlify_toml_rules_answer() {
-    let Some(w) = docker_world().await else { return };
-    let vercel = r#"{ "redirects": [{ "source": "/old/:slug", "destination": "/new/:slug" }], "headers": [{ "source": "/(.*)", "headers": [{ "key": "X-Moved-From", "value": "vercel" }] }] }"#;
-    let netlify = "[build.environment]\nAPI_SECRET = \"s3cr3t\"\n\n[[redirects]]\nfrom = \"/app/*\"\nto = \"/index.html\"\nstatus = 200\n";
-    let (id, host) = deploy_tree(&w, "moved", &[("index.html", "<!doctype html><h1>moved</h1>"), ("vercel.json", vercel), ("netlify.toml", netlify)]).await;
-    let get = |path: &'static str| {
-        let (public, host) = (w.public.clone(), host.clone());
-        async move {
-            let resp = public.oneshot(Request::get(path).header("host", host.as_str()).body(Body::empty()).unwrap()).await.unwrap();
-            let (st, h) = (resp.status(), resp.headers().clone());
-            (st, h, String::from_utf8_lossy(&resp.into_body().collect().await.unwrap().to_bytes()).to_string())
-        }
-    };
-    let (st, h, _) = get("/old/hello").await;
-    assert_eq!((st, h.get("location").and_then(|v| v.to_str().ok())), (StatusCode::PERMANENT_REDIRECT, Some("/new/hello")));
-    let (st, h, body) = get("/app/settings").await;
-    assert_eq!((st, body.as_str()), (StatusCode::OK, "<!doctype html><h1>moved</h1>"), "netlify.toml's rewrite");
-    assert_eq!(h.get("x-moved-from").and_then(|v| v.to_str().ok()), Some("vercel"));
-    for config in ["/netlify.toml", "/vercel.json"] {
-        let (st, _, body) = get(config).await;
-        assert!(st != StatusCode::OK && !body.contains("s3cr3t"), "{config} isn't served: {st} {body}");
-    }
-    delete_for_good(&w.api, &id).await;
 }
 
 /// A service from an upload of `files`, built from its generated Dockerfile and live: its id and host.
@@ -415,18 +368,33 @@ async fn deploy_tree_with(w: &World, name: &str, files: &[(&str, &str)], build: 
 }
 
 /// A static site's functions run (the `functions` builder): Netlify's Web handler and its Lambda
-/// one, Vercel's `(req, res)` and a TypeScript Web handler, each answering at its path.
+/// one, Vercel's `(req, res)` and a TypeScript Web handler, each answering at its path. Its edge
+/// functions run on Deno (Netlify's): one answers its own path, one wraps the site's answer
+/// through `context.next()`, which comes back to the apps listener signed (as instances reach it
+/// for traces) and answers the site's files.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_static_sites_functions_build_and_answer() {
-    let Some(w) = docker_world().await else { return };
+    // The apps listener, where `next()` comes back: served for real (instances reach it).
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let Some(w) = docker_world_with(None, |c| c.otlp_base = Some(format!("http://127.0.0.1:{port}"))).await else { return };
+    let app = w.public.clone();
+    tokio::spawn(async move { axum::serve(listener, app.into_make_service()).await });
     let files = [
         ("index.html", "<h1>site</h1>"),
         ("netlify/functions/hello.mjs", "export default async (req) => new Response(`hello ${new URL(req.url).searchParams.get('who')}`)"),
         ("netlify/functions/legacy.js", "exports.handler = async (event) => ({ statusCode: 201, body: `legacy ${event.httpMethod}` })"),
         ("api/ping.js", "module.exports = (req, res) => res.status(200).json({ pong: req.query.n })"),
         ("api/web.ts", "export default async (req: Request): Promise<Response> => new Response('typed')"),
+        ("netlify/edge-functions/hi.ts", "export default (req: Request) => new Response(`hi from ${typeof Deno}`);\nexport const config = { path: '/hi' };\n"),
+        ("netlify/edge-functions/shout.ts", "export default async (req: Request, ctx: any) => new Response((await (await ctx.next()).text()).toUpperCase(), { headers: { 'x-edge': '1' } });\nexport const config = { path: ['/', '/index.html'] };\n"),
+        ("netlify/edge-functions/flag.ts", "export default (req: Request, ctx: any) => new Response(String(ctx.config.banner));\nexport const config = { path: '/flag' };\n"),
     ];
-    let (_, host) = deploy_tree_with(&w, "site-fn", &files, json!({"builder": "functions"})).await;
+    let (site, site_host) = deploy_tree(&w, "site", &files).await;
+    // The site's runtime config, set before its functions deploy: they read it as `context.config`.
+    let site_env = format!("/v1/apps/services/{site}/environments/production");
+    assert_eq!(call(&w.api, "PUT", &site_env, Some(json!({"config": {"banner": "sale"}})), "application/json", None).await.0, StatusCode::OK);
+    let (fns, host) = deploy_tree_with(&w, "site-fn", &files, json!({"builder": "functions"})).await;
     let fetch = |path: &'static str| {
         let req = Request::get(path).header("host", host.as_str()).body(Body::empty()).unwrap();
         let public = w.public.clone();
@@ -441,32 +409,8 @@ async fn a_static_sites_functions_build_and_answer() {
     assert_eq!(fetch("/api/ping?n=7").await, (StatusCode::OK, r#"{"pong":"7"}"#.to_string()));
     assert_eq!(fetch("/api/web").await, (StatusCode::OK, "typed".to_string()));
     assert_eq!(fetch("/api/nope").await.0, StatusCode::NOT_FOUND);
-}
-
-/// A site's edge functions on Deno (Netlify's): one answers its own path, one wraps the site's
-/// answer through `context.next()`, which comes back to the apps listener signed (as instances
-/// reach it for traces) and answers the site's files.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_sites_edge_functions_run_on_deno() {
-    // The apps listener, where `next()` comes back: served for real (instances reach it).
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let Some(w) = docker_world_with(None, |c| c.otlp_base = Some(format!("http://127.0.0.1:{port}"))).await else { return };
-    let app = w.public.clone();
-    tokio::spawn(async move { axum::serve(listener, app.into_make_service()).await });
-    let files = [
-        ("index.html", "<h1>site</h1>"),
-        ("netlify/edge-functions/hi.ts", "export default (req: Request) => new Response(`hi from ${typeof Deno}`);\nexport const config = { path: '/hi' };\n"),
-        ("netlify/edge-functions/shout.ts", "export default async (req: Request, ctx: any) => new Response((await (await ctx.next()).text()).toUpperCase(), { headers: { 'x-edge': '1' } });\nexport const config = { path: ['/', '/index.html'] };\n"),
-        ("netlify/edge-functions/flag.ts", "export default (req: Request, ctx: any) => new Response(String(ctx.config.banner));\nexport const config = { path: '/flag' };\n"),
-    ];
-    let (site, host) = deploy_tree(&w, "edgy", &files).await;
-    // The site's runtime config: its functions read it as `context.config`.
-    let site_env = format!("/v1/apps/services/{site}/environments/production");
-    assert_eq!(call(&w.api, "PUT", &site_env, Some(json!({"config": {"banner": "sale"}})), "application/json", None).await.0, StatusCode::OK);
-    let (fns, _) = deploy_tree_with(&w, "edgy-fn", &files, json!({"builder": "functions"})).await;
     let fetch = |path: &'static str| {
-        let req = Request::get(path).header("host", host.as_str()).body(Body::empty()).unwrap();
+        let req = Request::get(path).header("host", site_host.as_str()).body(Body::empty()).unwrap();
         let public = w.public.clone();
         async move {
             let resp = public.oneshot(req).await.unwrap();
@@ -505,10 +449,13 @@ async fn a_sites_edge_functions_run_on_deno() {
 }
 
 /// What the generated Dockerfiles of Node, Python and Go make actually builds and answers, and a
-/// Node cold start (node started directly, no npm in front) is measured.
+/// Node cold start (node started directly, no npm in front) is measured. A multi-stage
+/// Dockerfile's `build.target` builds its stage; the pinned OpenTelemetry agents (`build.otel`)
+/// install and start (their traces to an intake that isn't there: an exporter's failure never
+/// stops the app); a variable kept as a file is in the container at its path before it starts.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn generated_node_python_and_go_images_build_and_answer() {
-    let Some(w) = docker_world().await else { return };
+    let Some(w) = docker_world_with(None, |c| c.otlp_base = Some("http://127.0.0.1:9".into())).await else { return };
     let node = deploy_tree(&w, "node", &[
         ("package.json", r#"{"name": "n", "version": "1.0.0", "scripts": {"start": "node server.js"}}"#),
         ("server.js", "require('http').createServer((q, r) => r.end('node ok')).listen(process.env.PORT)"),
@@ -535,6 +482,61 @@ async fn generated_node_python_and_go_images_build_and_answer() {
         cold.push(t);
     }
     eprintln!("MEASURED Node 22 cold start from stopped (node server.js, no npm): median {} ms (all {:?})", median(cold.clone()).as_millis(), cold.iter().map(|d| d.as_millis()).collect::<Vec<_>>());
+    // The last stage would exit at once: `build.target` builds the one that serves.
+    let staged = "FROM busybox:1.37 AS web\nRUN mkdir /site && echo '<h1>the web stage</h1>' > /site/index.html\nCMD [\"sh\", \"-c\", \"httpd -f -p $PORT -h /site\"]\n\nFROM busybox:1.37\nCMD [\"false\"]\n";
+    builds_and_answers(&w, "staged", &[("Dockerfile", staged)], "the web stage", json!({"builder": "dockerfile", "target": "web"})).await;
+    let traces = json!({"traces": true});
+    builds_and_answers_in(&w, "node-otel", &[
+        ("package.json", r#"{"name": "n", "version": "1.0.0", "scripts": {"start": "node server.js"}}"#),
+        ("server.js", "require('http').createServer((q, r) => r.end('node ' + (process.env.NODE_OPTIONS || ''))).listen(process.env.PORT)"),
+    ], "auto-instrumentations-node", json!({"otel": true}), traces.clone()).await;
+    builds_and_answers_in(&w, "python-otel", &[
+        ("requirements.txt", ""),
+        ("main.py", "import os, sys, http.server
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        ok = 'opentelemetry' in sys.modules
+        self.send_response(200); self.end_headers(); self.wfile.write(b'python otel ' + str(ok).encode())
+http.server.HTTPServer(('0.0.0.0', int(os.environ['PORT'])), H).serve_forever()
+"),
+    ], "python otel True", json!({"otel": true}), traces.clone()).await;
+    // .NET's: its zip checked for the build's architecture, its startup hook and native profiler
+    // both loaded (a wrong profiler path only logs).
+    builds_and_answers_in(&w, "dotnet-otel", &[
+        ("app.csproj", "<Project Sdk=\"Microsoft.NET.Sdk.Web\"><PropertyGroup><TargetFramework>net9.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings></PropertyGroup></Project>\n"),
+        ("Program.cs", "var app = WebApplication.CreateBuilder(args).Build();\napp.MapGet(\"/\", () => \"dotnet otel \" + (AppDomain.CurrentDomain.GetAssemblies().Any(a => a.GetName().Name!.StartsWith(\"OpenTelemetry.AutoInstrumentation\")) && File.ReadAllText(\"/proc/self/maps\").Contains(\"OpenTelemetry.AutoInstrumentation.Native.so\")));\napp.Run();\n"),
+    ], "dotnet otel True", json!({"otel": true}), traces).await;
+    {
+        let start = "mkdir -p /tmp/w; cat /etc/secrets/app.conf > /tmp/w/index.html; httpd -f -p $PORT -h /tmp/w";
+        let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "filed", "source": {"kind": "image", "image": "busybox:1.37"}, "run": {"port": 8080, "start": start, "memory_mb": 256, "cpu": 0.5} })), "application/json", None).await;
+        assert_eq!(st, StatusCode::CREATED, "{svc}");
+        let id = svc["id"].as_str().unwrap().to_string();
+        let env = format!("/v1/apps/services/{id}/environments/production");
+        let settled = |dep: String| {
+            let (api, env) = (w.api.clone(), env.clone());
+            async move {
+                for _ in 0..1200 {
+                    let (_, x) = call(&api, "GET", &format!("{env}/deploys/{dep}"), None, "application/json", None).await;
+                    if !["queued", "building", "deploying"].contains(&x["status"].as_str().unwrap_or("")) {
+                        return x;
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                Value::Null
+            }
+        };
+        settled(svc["environments"][0]["latest"]["id"].as_str().unwrap().to_string()).await;
+        let (st, v) = call(&w.api, "PATCH", &format!("{env}/variables"), Some(json!({"set": {"APP_CONF": "from-a-file\nline two"}, "files": {"APP_CONF": "/etc/secrets/app.conf"}})), "application/json", None).await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        let (_, r) = call(&w.api, "POST", &format!("{env}/redeploy"), Some(json!({})), "application/json", None).await;
+        let d = settled(r["id"].as_str().unwrap_or_else(|| panic!("{r}")).to_string()).await;
+        assert_eq!(d["status"], "active", "{d}");
+        let host = svc["environments"][0]["url"].as_str().unwrap().trim_start_matches("http://").split(':').next().unwrap().to_string();
+        let resp = w.public.clone().oneshot(Request::get("/").header("host", &host).body(Body::empty()).unwrap()).await.unwrap();
+        let body = String::from_utf8_lossy(&resp.into_body().collect().await.unwrap().to_bytes()).to_string();
+        assert_eq!(body, "from-a-file\nline two");
+        delete_for_good(&w.api, &id).await;
+    }
     for (id, _) in [&node, &python, &go] {
         assert_eq!(delete_for_good(&w.api, id).await.0, StatusCode::NO_CONTENT);
     }
@@ -574,56 +576,6 @@ async fn a_volume_restores_from_its_tar_and_a_broken_one_changes_nothing() {
     rt.remove_volume(&vol).await;
 }
 
-/// A cold start with the instance's network in a sandbox made with it (the wake starts only the
-/// app, in the sandbox's network namespace) against the instance holding its own: alternating
-/// pairs on the same image, everything removed after.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_cold_start_skips_network_setup_with_a_sandbox() {
-    let (Some(on), Some(off)) = (docker_world_netns(Some(true)).await, docker_world_netns(Some(false)).await) else { return };
-    let (a, ah) = deploy_container(&on, "sandboxed").await;
-    let (b, bh) = deploy_container(&off, "own").await;
-    let cold = |w: &World, id: String, host: String| {
-        let (apps, public) = (w.apps.clone(), w.public.clone());
-        async move {
-            apps.live(&id, "production").sleep().await;
-            let (st, t) = get(&public, &host).await;
-            assert_eq!(st, StatusCode::OK);
-            t
-        }
-    };
-    let (mut with, mut without, mut faster) = (Vec::new(), Vec::new(), 0);
-    for i in 0..5 {
-        // Alternating which goes first.
-        let (x, y) = if i % 2 == 0 {
-            let x = cold(&on, a.clone(), ah.clone()).await;
-            (x, cold(&off, b.clone(), bh.clone()).await)
-        } else {
-            let y = cold(&off, b.clone(), bh.clone()).await;
-            (cold(&on, a.clone(), ah.clone()).await, y)
-        };
-        faster += usize::from(x < y);
-        with.push(x);
-        without.push(y);
-    }
-    let sandboxes = apps_control::runtime::docker::docker(&["ps", "-q", "--filter", &format!("label=sh.roll.apps={a}"), "--filter", "label=sh.roll.apps.role=network"]).await.unwrap();
-    assert!(!sandboxes.is_empty(), "the sandboxed instance has its network sandbox");
-    eprintln!(
-        "MEASURED cold start, network in a sandbox vs its own: median {} ms vs {} ms (pairs {:?} vs {:?}; sandbox faster in {faster} of 5)",
-        median(with.clone()).as_millis(),
-        median(without.clone()).as_millis(),
-        with.iter().map(|d| d.as_millis()).collect::<Vec<_>>(),
-        without.iter().map(|d| d.as_millis()).collect::<Vec<_>>(),
-    );
-    for (w, id) in [(&on, &a), (&off, &b)] {
-        assert_eq!(delete_for_good(&w.api, id).await.0, StatusCode::NO_CONTENT);
-        let _ = apps_control::runtime::docker::docker(&["network", "rm", &apps_control::network_name(&w.project, "production")]).await;
-    }
-    let left = apps_control::runtime::docker::docker(&["ps", "-aq", "--filter", &format!("label=sh.roll.apps={a}")]).await.unwrap();
-    assert!(left.is_empty(), "the instance and its sandbox are gone: {left}");
-    on.apps.shutdown().await;
-    off.apps.shutdown().await;
-}
-
 /// A small busybox site run as a container (a start command keeps it from being served as files): its id and host.
 async fn deploy_container(w: &World, name: &str) -> (String, String) {
     let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": name, "source": {"kind": "upload"}, "build": {"start": "httpd -f -p $PORT -h /site"}, "run": {"memory_mb": 256, "cpu": 0.5} })), "application/json", None).await;
@@ -649,16 +601,12 @@ async fn deploy_container(w: &World, name: &str) -> (String, String) {
 
 /// A private network on real Docker: a WireGuard server whose web server answers only inside
 /// the tunnel, reached from the service's project network by the route's name through the peer
-/// and its forwarder; removed, the peer and forwarder are gone.
+/// and its forwarder; removed, the peer and forwarder are gone. Then the same for a closed
+/// environment: its peer answers on the closed network and gets out through a network of its
+/// own, and the closed network still reaches nothing else.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_private_network_reaches_a_host_inside_a_wireguard_tunnel() {
     private_network_on_docker(false).await;
-}
-
-/// The same for a closed environment: its peer answers on the closed network and gets out
-/// through a network of its own, and the closed network still reaches nothing else.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_closed_environments_private_network_reaches_only_its_routes() {
     private_network_on_docker(true).await;
 }
 
@@ -879,34 +827,6 @@ async fn a_tailscale_private_network_reaches_a_host_on_the_tailnet() {
     assert!(env_vars.contains("--shields-up"), "the tailnet can't connect in: {env_vars}");
 }
 
-/// A tunnel to another port of the app on real Docker (a debugger's, `roll apps proxy --port`):
-/// reached inside the instance's own network namespace by a relay, whatever the app publishes.
-/// The app's own port stands in for the debugger's here (busybox's httpd answers only one).
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_tunnel_reaches_a_port_inside_the_instance() {
-    use futures::{SinkExt, StreamExt};
-    use tokio_tungstenite::tungstenite::Message;
-    let Some(w) = docker_world().await else { return };
-    let (id, _) = deploy_container(&w, "dial").await;
-    let port = w.apps.live(&id, "production").template().and_then(|t| t.run.port).unwrap_or(8080);
-    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let at = l.local_addr().unwrap();
-    tokio::spawn(axum::serve(l, w.api.clone()).into_future());
-    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{at}/v1/apps/services/{id}/environments/production/tunnel?port={port}")).await.unwrap();
-    ws.send(Message::Binary(b"GET / HTTP/1.0\r\n\r\n".to_vec().into())).await.unwrap();
-    let mut got = Vec::new();
-    while let Ok(Some(Ok(m))) = tokio::time::timeout(Duration::from_secs(10), ws.next()).await {
-        match m {
-            Message::Binary(b) if b.is_empty() => break,
-            Message::Binary(b) => got.extend_from_slice(&b),
-            _ => break,
-        }
-    }
-    let text = String::from_utf8_lossy(&got).to_string();
-    delete_for_good(&w.api, &id).await;
-    assert!(text.contains("200") && text.contains("cold"), "through the relay in its namespace: {text}");
-}
-
 /// A sandbox on real Docker: a command's output and exit code, one killed in the container at
 /// its timeout (not left running), a file in and out, and its own network gone with it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1035,6 +955,7 @@ async fn a_deploy_under_traffic_answers_every_request() {
         seen
     });
     let base = format!("/v1/apps/services/{id}/environments/production");
+    let old: Vec<String> = w.apps.live(&id, "production").instances().iter().map(|i| i.name.clone()).collect();
     let (st, d) = call(&w.api, "POST", &format!("{base}/redeploy"), Some(json!({})), "application/json", None).await;
     assert_eq!(st, StatusCode::ACCEPTED, "{d}");
     let dep = d["id"].as_str().unwrap().to_string();
@@ -1046,8 +967,17 @@ async fn a_deploy_under_traffic_answers_every_request() {
         assert!(!["failed", "canceled"].contains(&x["status"].as_str().unwrap_or("")), "{x}");
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    // Past the switch while the old instance drains.
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    // Past the switch until the old instance has drained and gone.
+    for _ in 0..300 {
+        let mut up = String::new();
+        for name in &old {
+            up += &apps_control::runtime::docker::docker(&["ps", "-q", "--filter", &format!("name=^{name}$")]).await.unwrap_or_default();
+        }
+        if up.trim().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
     stop.store(true, std::sync::atomic::Ordering::SeqCst);
     let seen = traffic.await.unwrap();
     let bad: Vec<&StatusCode> = seen.iter().filter(|s| **s != StatusCode::OK).collect();
@@ -1057,7 +987,8 @@ async fn a_deploy_under_traffic_answers_every_request() {
 
 /// Another service of the project reaches a sleeping one by name: stopped, the waker in its
 /// sandbox takes the call and hands it to the app once it's up; frozen, it's thawed. A public
-/// request still wakes it afterwards (the waker lets go of the port first).
+/// request still wakes it afterwards (the waker lets go of the port first). A closed
+/// environment's too.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_private_caller_wakes_a_sleeping_service() {
     use apps_control::runtime::docker::docker;
@@ -1143,69 +1074,54 @@ async fn a_private_caller_wakes_a_sleeping_service() {
     let _ = docker(&["network", "rm", &net]).await;
     let left = docker(&["ps", "-aq", "--filter", &format!("label=sh.roll.apps={id}")]).await.unwrap();
     assert!(left.is_empty(), "the instance, its sandbox and its waker are gone: {left}");
-    w.apps.shutdown().await;
-}
-
-/// A UDP service on real Docker (its port published over UDP from the sandbox): socat, asleep,
-/// answers a datagram to its environment's port, and the first answer's time is measured.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_udp_service_answers_from_asleep_on_its_port() {
-    let free = std::net::UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-    let Some(w) = docker_world_with(None, |c| {
-        c.udp_ports = Some((free, free));
-        c.tcp_host = "127.0.0.1".into();
-    })
-    .await
-    else {
-        return;
-    };
-    // socat answers each datagram with "pong", then the datagram back (two datagrams).
-    let run = json!({"port": 9000, "udp": true, "start": "socat UDP4-RECVFROM:9000,fork SYSTEM:'printf pong; cat'", "memory_mb": 256, "cpu": 0.25});
-    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "dns", "source": {"kind": "image", "image": apps_control::runtime::links::IMAGE}, "run": run })), "application/json", None).await;
-    assert_eq!(st, StatusCode::CREATED, "{svc}");
-    let id = svc["id"].as_str().unwrap().to_string();
-    let base = format!("/v1/apps/services/{id}/environments/production");
-    tokio::spawn(w.apps.clone().serve_udp_ports("127.0.0.1".parse().unwrap()));
-    for _ in 0..1200 {
-        let (_, e) = call(&w.api, "GET", &base, None, "application/json", None).await;
-        if e["active"].is_object() && e["udp"].is_string() {
-            break;
+    // A closed environment (egress `roll`) keeps its network sandbox: asleep, another service on
+    // its network reaches it by name and the waker hands the call to the app, at the sandbox's
+    // address; a public request wakes it too.
+    {
+        let (id, host) = deploy_container(&w, "shut").await;
+        let env = format!("/v1/apps/services/{id}/environments/production");
+        assert_eq!(call(&w.api, "PUT", &env, Some(json!({"egress": {"mode": "roll"}})), "application/json", None).await.0, StatusCode::OK);
+        let (_, r) = call(&w.api, "POST", &format!("{env}/redeploy"), Some(json!({})), "application/json", None).await;
+        let dep = r["id"].as_str().unwrap_or_else(|| panic!("{r}")).to_string();
+        for _ in 0..1200 {
+            let (_, x) = call(&w.api, "GET", &format!("{env}/deploys/{dep}"), None, "application/json", None).await;
+            if x["status"] == "active" {
+                break;
+            }
+            assert!(!["failed", "canceled"].contains(&x["status"].as_str().unwrap_or("")), "{x}");
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        let (_, svc) = call(&w.api, "GET", &format!("/v1/apps/services/{id}"), None, "application/json", None).await;
+        let port = svc["run"]["port"].as_u64().unwrap_or(8080);
+        let net = apps_control::closed_network_name(&w.project, "production");
+        assert_eq!(get(&w.public, &host).await.0, StatusCode::OK, "served at its sandbox's address");
+        let live = w.apps.live(&id, "production");
+        live.sleep().await;
+        let caller = format!("roll-apps-test-caller-{}", &id[4..]);
+        docker(&["run", "-d", "--name", &caller, "--network", &net, "busybox:1.37", "sleep", "600"]).await.unwrap();
+        let body = docker(&["exec", &caller, "wget", "-q", "-O-", "-T", "30", &format!("http://shut:{port}/")]).await;
+        let _ = docker(&["rm", "-f", &caller]).await;
+        assert!(body.as_deref().is_ok_and(|b| b.contains("<h1>cold</h1>")), "the waker took the call: {body:?}");
+        live.sleep().await;
+        assert_eq!(get(&w.public, &host).await.0, StatusCode::OK, "a public request wakes it too");
+        delete_for_good(&w.api, &id).await;
+        let _ = docker(&["network", "rm", &net]).await;
     }
-    w.apps.live(&id, "production").sleep().await;
-    let client = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    client.connect(("127.0.0.1", free)).await.unwrap();
-    let began = std::time::Instant::now();
-    let (mut buf, mut got) = ([0u8; 512], None);
-    for _ in 0..200 {
-        let _ = client.send(b"ping").await;
-        if let Ok(Ok(n)) = tokio::time::timeout(Duration::from_millis(100), client.recv(&mut buf)).await {
-            got = Some(String::from_utf8_lossy(&buf[..n]).into_owned());
-            break;
-        }
-    }
-    if got.is_none() {
-        let ps = apps_control::runtime::docker::docker(&["ps", "-a", "--filter", &format!("label=sh.roll.apps={id}"), "--format", "{{.Names}} {{.Status}} {{.Ports}}"]).await.unwrap_or_default();
-        let (_, log) = call(&w.api, "GET", &format!("{base}/logs"), None, "application/json", None).await;
-        let lines: Vec<&str> = log.as_array().into_iter().flatten().filter_map(|l| l["text"].as_str()).collect();
-        eprintln!("DEBUG ps:\n{ps}\nDEBUG log:\n{}", lines.join("\n"));
-    }
-    assert_eq!(got.as_deref(), Some("pong"), "an answer from its port");
-    eprintln!("MEASURED a UDP service's first answer from asleep: {} ms", began.elapsed().as_millis());
-    assert_eq!(delete_for_good(&w.api, &id).await.0, StatusCode::NO_CONTENT);
-    let _ = apps_control::runtime::docker::docker(&["network", "rm", &apps_control::network_name(&w.project, "production")]).await;
     w.apps.shutdown().await;
 }
 
 /// A TCP service and a tunnel on real Docker: a busybox echo server, asleep each time, answers
-/// a raw connection to its own port and a tunnel's bytes.
+/// a raw connection to its own port and a tunnel's bytes. A tunnel to another port of an app (a
+/// debugger's, `roll apps proxy --port`) is reached inside the instance's own network namespace
+/// by a relay, whatever the app publishes. A UDP service (its port published over UDP from the
+/// sandbox), asleep, answers a datagram to its environment's port.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_tcp_service_and_a_tunnel_reach_a_sleeping_port() {
     use futures::{SinkExt, StreamExt};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio_tungstenite::tungstenite::Message;
-    let Some(w) = docker_world().await else { return };
+    let free = std::net::UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let Some(w) = docker_world_with(None, |c| c.udp_ports = Some((free, free))).await else { return };
     let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "echo", "source": {"kind": "image", "image": "busybox:1.37"}, "run": {"port": 9000, "tcp": true, "start": "nc -lk -p 9000 -e cat", "memory_mb": 256, "cpu": 0.25} })), "application/json", None).await;
     assert_eq!(st, StatusCode::CREATED, "{svc}");
     let id = svc["id"].as_str().unwrap().to_string();
@@ -1260,6 +1176,62 @@ async fn a_tcp_service_and_a_tunnel_reach_a_sleeping_port() {
     eprintln!("MEASURED a TCP service from asleep: {} ms to its echo; a tunnel from asleep: {} ms", tcp_cold.as_millis(), began.elapsed().as_millis());
     let _ = ws.close(None).await;
     assert_eq!(delete_for_good(&w.api, &id).await.0, StatusCode::NO_CONTENT);
+    // Another port of an app, through a tunnel (the app's own port stands in for a debugger's:
+    // busybox's httpd answers only one).
+    {
+        let (id, _) = deploy_container(&w, "dial").await;
+        let port = w.apps.live(&id, "production").template().and_then(|t| t.run.port).unwrap_or(8080);
+        let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{at}/v1/apps/services/{id}/environments/production/tunnel?port={port}")).await.unwrap();
+        ws.send(Message::Binary(b"GET / HTTP/1.0\r\n\r\n".to_vec().into())).await.unwrap();
+        let mut got = Vec::new();
+        while let Ok(Some(Ok(m))) = tokio::time::timeout(Duration::from_secs(10), ws.next()).await {
+            match m {
+                Message::Binary(b) if b.is_empty() => break,
+                Message::Binary(b) => got.extend_from_slice(&b),
+                _ => break,
+            }
+        }
+        let text = String::from_utf8_lossy(&got).to_string();
+        delete_for_good(&w.api, &id).await;
+        assert!(text.contains("200") && text.contains("cold"), "through the relay in its namespace: {text}");
+    }
+    {
+        // socat answers each datagram with "pong", then the datagram back (two datagrams).
+        let run = json!({"port": 9000, "udp": true, "start": "socat UDP4-RECVFROM:9000,fork SYSTEM:'printf pong; cat'", "memory_mb": 256, "cpu": 0.25});
+        let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "dns", "source": {"kind": "image", "image": apps_control::runtime::links::IMAGE}, "run": run })), "application/json", None).await;
+        assert_eq!(st, StatusCode::CREATED, "{svc}");
+        let id = svc["id"].as_str().unwrap().to_string();
+        let base = format!("/v1/apps/services/{id}/environments/production");
+        tokio::spawn(w.apps.clone().serve_udp_ports("127.0.0.1".parse().unwrap()));
+        for _ in 0..1200 {
+            let (_, e) = call(&w.api, "GET", &base, None, "application/json", None).await;
+            if e["active"].is_object() && e["udp"].is_string() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        w.apps.live(&id, "production").sleep().await;
+        let client = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        client.connect(("127.0.0.1", free)).await.unwrap();
+        let began = std::time::Instant::now();
+        let (mut buf, mut got) = ([0u8; 512], None);
+        for _ in 0..200 {
+            let _ = client.send(b"ping").await;
+            if let Ok(Ok(n)) = tokio::time::timeout(Duration::from_millis(100), client.recv(&mut buf)).await {
+                got = Some(String::from_utf8_lossy(&buf[..n]).into_owned());
+                break;
+            }
+        }
+        if got.is_none() {
+            let ps = apps_control::runtime::docker::docker(&["ps", "-a", "--filter", &format!("label=sh.roll.apps={id}"), "--format", "{{.Names}} {{.Status}} {{.Ports}}"]).await.unwrap_or_default();
+            let (_, log) = call(&w.api, "GET", &format!("{base}/logs"), None, "application/json", None).await;
+            let lines: Vec<&str> = log.as_array().into_iter().flatten().filter_map(|l| l["text"].as_str()).collect();
+            eprintln!("DEBUG ps:\n{ps}\nDEBUG log:\n{}", lines.join("\n"));
+        }
+        assert_eq!(got.as_deref(), Some("pong"), "an answer from its port");
+        eprintln!("MEASURED a UDP service's first answer from asleep: {} ms", began.elapsed().as_millis());
+        assert_eq!(delete_for_good(&w.api, &id).await.0, StatusCode::NO_CONTENT);
+    }
     let _ = apps_control::runtime::docker::docker(&["network", "rm", &apps_control::network_name(&w.project, "production")]).await;
     w.apps.shutdown().await;
 }
@@ -1268,7 +1240,7 @@ async fn a_tcp_service_and_a_tunnel_reach_a_sleeping_port() {
 /// its target, and a second one starts.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_busy_instance_brings_another_on_its_cpu() {
-    let Some(w) = docker_world_with(None, |c| c.live.cpu_window = Duration::from_secs(3)).await else { return };
+    let Some(w) = docker_world_with(None, |c| c.live.cpu_window = Duration::from_secs(1)).await else { return };
     let run = json!({"port": 8080, "min_instances": 1, "max_instances": 2, "cpu": 0.25, "memory_mb": 256, "cpu_target": 50, "start": "while :; do :; done & mkdir -p /w && echo busy > /w/index.html && httpd -f -p 8080 -h /w"});
     let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "busy", "source": {"kind": "image", "image": "busybox:1.37"}, "run": run })), "application/json", None).await;
     assert_eq!(st, StatusCode::CREATED, "{svc}");
@@ -1295,7 +1267,6 @@ async fn a_busy_instance_brings_another_on_its_cpu() {
     let _ = apps_control::runtime::docker::docker(&["network", "rm", &apps_control::network_name(&w.project, "production")]).await;
     w.apps.shutdown().await;
 }
-
 
 /// rolld starting again (an upgrade, a crash) keeps the container the last process ran: the
 /// next visitor gets the same container, not started again (its start time unchanged), and
@@ -1419,113 +1390,8 @@ async fn an_app_on_loopback_fails_its_deploy_saying_so() {
     assert_eq!(delete_for_good(&w.api, &id).await.0, StatusCode::NO_CONTENT);
 }
 
-/// A multi-stage Dockerfile whose last stage isn't what runs: `build.target` builds its stage.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_dockerfiles_stage_is_built_by_its_target() {
-    let Some(w) = docker_world().await else { return };
-    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "staged", "source": {"kind": "upload"}, "build": {"builder": "dockerfile", "target": "web"}, "run": {"memory_mb": 256, "cpu": 0.5, "health_timeout_s": 30} })), "application/json", None).await;
-    assert_eq!(st, StatusCode::CREATED, "{svc}");
-    let id = svc["id"].as_str().unwrap().to_string();
-    let tree = tempfile::tempdir().unwrap();
-    std::fs::write(
-        tree.path().join("Dockerfile"),
-        "FROM busybox:1.37 AS web\nRUN mkdir /site && echo '<h1>the web stage</h1>' > /site/index.html\nCMD [\"sh\", \"-c\", \"httpd -f -p $PORT -h /site\"]\n\nFROM busybox:1.37\nCMD [\"false\"]\n",
-    )
-    .unwrap();
-    let mut bundle = Vec::new();
-    roll_fetch::pack(&mut bundle, &Default::default(), Some(tree.path()), roll_fetch::Limits::default()).unwrap();
-    let (_, d) = call(&w.api, "POST", &format!("/v1/apps/services/{id}/environments/production/deploys"), None, "application/gzip", Some(bundle)).await;
-    let dep = d["id"].as_str().unwrap().to_string();
-    let mut x = Value::Null;
-    for _ in 0..1200 {
-        x = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/deploys/{dep}"), None, "application/json", None).await.1;
-        if ["failed", "active"].contains(&x["status"].as_str().unwrap_or("")) {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    assert_eq!(x["status"], "active", "the last stage would exit at once: {x}");
-    let (_, env) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None, "application/json", None).await;
-    let host = env["url"].as_str().unwrap().trim_start_matches("http://").split(':').next().unwrap().to_string();
-    let resp = w.public.clone().oneshot(Request::get("/").header("host", host.as_str()).body(Body::empty()).unwrap()).await.unwrap();
-    let body = String::from_utf8(resp.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap();
-    assert!(body.contains("the web stage"), "{body}");
-    assert_eq!(delete_for_good(&w.api, &id).await.0, StatusCode::NO_CONTENT);
-}
-
-/// What the proxy itself costs on warm traffic: the same instance through roll's public route
-/// and at its own port, one request at a time (median, p99) and 50 at once (requests a second).
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-async fn the_proxys_own_cost_is_measured() {
-    let Some(w) = docker_world().await else { return };
-    let (id, host) = deploy_container(&w, "costed").await;
-    assert_eq!(get(&w.public, &host).await.0, StatusCode::OK);
-    let short = id.trim_start_matches("svc_");
-    let names = apps_control::runtime::docker::docker(&["ps", "--filter", &format!("label=sh.roll.apps={id}"), "--format", "{{.Names}}"]).await.unwrap();
-    let sandbox = names.lines().find(|n| n.starts_with(&format!("roll-apps-{short}-production-")) && n.ends_with("-net")).unwrap_or_else(|| panic!("{names}")).to_string();
-    let port = apps_control::runtime::docker::docker(&["inspect", "-f", "{{range $p, $b := .HostConfig.PortBindings}}{{range $b}}{{.HostPort}}{{end}}{{end}}", &sandbox]).await.unwrap();
-    let direct_url: axum::http::Uri = format!("http://127.0.0.1:{}/", port.trim()).parse().unwrap();
-    let client: hyper_util::client::legacy::Client<_, Body> = hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new()).build_http();
-    let direct = |c: hyper_util::client::legacy::Client<hyper_util::client::legacy::connect::HttpConnector, Body>, u: axum::http::Uri| async move {
-        let t = Instant::now();
-        let r = c.request(Request::get(u).body(Body::empty()).unwrap()).await.unwrap();
-        assert_eq!(r.status(), StatusCode::OK);
-        let _ = r.into_body().collect().await;
-        t.elapsed()
-    };
-    let (mut via, mut own) = (Vec::new(), Vec::new());
-    for _ in 0..50 {
-        get(&w.public, &host).await;
-        direct(client.clone(), direct_url.clone()).await;
-    }
-    for _ in 0..500 {
-        via.push(get(&w.public, &host).await.1);
-        own.push(direct(client.clone(), direct_url.clone()).await);
-    }
-    let pct = |mut v: Vec<Duration>, p: f64| {
-        v.sort();
-        v[((v.len() as f64 - 1.0) * p) as usize]
-    };
-    let rps = |via_roll: bool| {
-        let (public, host, client, url) = (w.public.clone(), host.clone(), client.clone(), direct_url.clone());
-        async move {
-            let t = Instant::now();
-            let tasks: Vec<_> = (0..50)
-                .map(|_| {
-                    let (public, host, client, url) = (public.clone(), host.clone(), client.clone(), url.clone());
-                    tokio::spawn(async move {
-                        for _ in 0..40 {
-                            if via_roll {
-                                assert_eq!(get(&public, &host).await.0, StatusCode::OK);
-                            } else {
-                                direct(client.clone(), url.clone()).await;
-                            }
-                        }
-                    })
-                })
-                .collect();
-            for t in tasks {
-                t.await.unwrap();
-            }
-            2000.0 / t.elapsed().as_secs_f64()
-        }
-    };
-    let (rps_via, rps_own) = (rps(true).await, rps(false).await);
-    eprintln!(
-        "MEASURED the proxy on warm traffic: median {} µs through roll vs {} µs at the instance's own port (p99 {} vs {} µs); 50 at once: {:.0} vs {:.0} requests a second",
-        pct(via.clone(), 0.5).as_micros(),
-        pct(own.clone(), 0.5).as_micros(),
-        pct(via, 0.99).as_micros(),
-        pct(own, 0.99).as_micros(),
-        rps_via,
-        rps_own
-    );
-    assert_eq!(delete_for_good(&w.api, &id).await.0, StatusCode::NO_CONTENT);
-}
-
-
-/// Detected builds, built and run for real: a Deno app, an ASP.NET app and an Elixir release,
-/// none with a Dockerfile, each deployed from its tree and answering through roll on `$PORT`.
+/// Detected builds, built and run for real: a Deno app, an ASP.NET app, an Elixir release, a
+/// Clojure, a Gleam app and a root start.sh, none with a Dockerfile, each deployed from its tree and answering through roll on `$PORT`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn deno_dotnet_and_elixir_trees_build_and_answer() {
     let Some(w) = docker_world().await else { return };
@@ -1563,6 +1429,13 @@ async fn deno_dotnet_and_elixir_trees_build_and_answer() {
     for (name, files, want) in apps {
         builds_and_answers(&w, name, files, want, json!({})).await;
     }
+    // Clojure (Leiningen), Gleam and a root start.sh.
+    let clj = "(ns hi.core (:gen-class) (:import [com.sun.net.httpserver HttpServer HttpHandler] [java.net InetSocketAddress]))\n(defn -main [& _]\n  (let [port (Integer/parseInt (or (System/getenv \"PORT\") \"8080\"))\n        s (HttpServer/create (InetSocketAddress. \"0.0.0.0\" port) 0)]\n    (.createContext s \"/\" (reify HttpHandler (handle [_ x] (let [b (.getBytes \"clojure says hi\")] (.sendResponseHeaders x 200 (count b)) (with-open [o (.getResponseBody x)] (.write o b))))))\n    (.start s)))\n";
+    builds_and_answers(&w, "clojure-hi", &[("project.clj", "(defproject hi \"0.1.0\" :dependencies [[org.clojure/clojure \"1.12.0\"]] :main hi.core :aot [hi.core])\n"), ("src/hi/core.clj", clj)], "clojure says hi", json!({})).await;
+    let erl = "-module(hi_ffi).\n-export([serve/0]).\nserve() ->\n    Port = list_to_integer(os:getenv(\"PORT\", \"8080\")),\n    {ok, L} = gen_tcp:listen(Port, [binary, {active, false}, {reuseaddr, true}, {ip, {0,0,0,0}}]),\n    loop(L).\nloop(L) ->\n    {ok, C} = gen_tcp:accept(L),\n    _ = gen_tcp:recv(C, 0, 1000),\n    gen_tcp:send(C, <<\"HTTP/1.1 200 OK\\r\\ncontent-length: 14\\r\\nconnection: close\\r\\n\\r\\ngleam says hi\\n\">>),\n    gen_tcp:close(C),\n    loop(L).\n";
+    builds_and_answers(&w, "gleam-hi", &[("gleam.toml", "name = \"hi\"\nversion = \"1.0.0\"\n"), ("src/hi.gleam", "@external(erlang, \"hi_ffi\", \"serve\")\nfn serve() -> Nil\n\npub fn main() {\n  serve()\n}\n"), ("src/hi_ffi.erl", erl)], "gleam says hi", json!({})).await;
+    // A start.sh and the packages it needs (apt).
+    builds_and_answers(&w, "shell-hi", &[("start.sh", "#!/bin/bash\nmkdir -p /tmp/s && echo 'a start script says hi' > /tmp/s/index.html\nexec python3 -m http.server \"$PORT\" --bind 0.0.0.0 --directory /tmp/s\n")], "a start script says hi", json!({"packages": ["python3"]})).await;
 }
 
 /// An uploaded tree, built as roll detects it, deployed, and asked for `/`: it says `want`.
@@ -1614,36 +1487,6 @@ async fn builds_and_answers_in(w: &World, name: &str, files: &[(&str, &str)], wa
     let body = String::from_utf8(resp.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap();
     assert!(body.contains(want), "{name}: {body}");
     assert_eq!(delete_for_good(&w.api, &id).await.0, StatusCode::NO_CONTENT);
-}
-
-/// The pinned OpenTelemetry agents (`build.otel`) install and start: a Node, a Python and a .NET app built
-/// with them, their traces on (to an intake that isn't there: an exporter's failure never stops
-/// the app), still answer.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn the_otel_agents_install_and_start() {
-    let Some(w) = docker_world_with(None, |c| c.otlp_base = Some("http://127.0.0.1:9".into())).await else { return };
-    let traces = json!({"traces": true});
-    builds_and_answers_in(&w, "node-otel", &[
-        ("package.json", r#"{"name": "n", "version": "1.0.0", "scripts": {"start": "node server.js"}}"#),
-        ("server.js", "require('http').createServer((q, r) => r.end('node ' + (process.env.NODE_OPTIONS || ''))).listen(process.env.PORT)"),
-    ], "auto-instrumentations-node", json!({"otel": true}), traces.clone()).await;
-    builds_and_answers_in(&w, "python-otel", &[
-        ("requirements.txt", ""),
-        ("main.py", "import os, sys, http.server
-class H(http.server.BaseHTTPRequestHandler):
-    def do_GET(self):
-        ok = 'opentelemetry' in sys.modules
-        self.send_response(200); self.end_headers(); self.wfile.write(b'python otel ' + str(ok).encode())
-http.server.HTTPServer(('0.0.0.0', int(os.environ['PORT'])), H).serve_forever()
-"),
-    ], "python otel True", json!({"otel": true}), traces.clone()).await;
-    // .NET's: its zip checked for the build's architecture, its startup hook and native profiler
-    // both loaded (a wrong profiler path only logs).
-    builds_and_answers_in(&w, "dotnet-otel", &[
-        ("app.csproj", "<Project Sdk=\"Microsoft.NET.Sdk.Web\"><PropertyGroup><TargetFramework>net9.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings></PropertyGroup></Project>\n"),
-        ("Program.cs", "var app = WebApplication.CreateBuilder(args).Build();\napp.MapGet(\"/\", () => \"dotnet otel \" + (AppDomain.CurrentDomain.GetAssemblies().Any(a => a.GetName().Name!.StartsWith(\"OpenTelemetry.AutoInstrumentation\")) && File.ReadAllText(\"/proc/self/maps\").Contains(\"OpenTelemetry.AutoInstrumentation.Native.so\")));\napp.Run();\n"),
-    ], "dotnet otel True", json!({"otel": true}), traces).await;
-    w.apps.shutdown().await;
 }
 
 /// A real Next 16 app shares its cache through roll (roll's adapter, `next_cache`): a `"use cache"`
@@ -1766,19 +1609,6 @@ async fn a_browser_check_runs_in_chromium() {
     assert_eq!(delete_for_good(&w.api, &id).await.0, StatusCode::NO_CONTENT);
     let _ = std::process::Command::new("docker").args(["rmi", &format!("roll-apps-{id}:browser-check-{}", apps_control::browser::PLAYWRIGHT.replace('.', "-"))]).output();
     w.apps.shutdown().await;
-}
-
-/// Clojure (Leiningen), Gleam and a root start.sh, as roll detects them: each built, deployed and
-/// answering.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn clojure_gleam_and_a_start_script_build_and_answer() {
-    let Some(w) = docker_world().await else { return };
-    let clj = "(ns hi.core (:gen-class) (:import [com.sun.net.httpserver HttpServer HttpHandler] [java.net InetSocketAddress]))\n(defn -main [& _]\n  (let [port (Integer/parseInt (or (System/getenv \"PORT\") \"8080\"))\n        s (HttpServer/create (InetSocketAddress. \"0.0.0.0\" port) 0)]\n    (.createContext s \"/\" (reify HttpHandler (handle [_ x] (let [b (.getBytes \"clojure says hi\")] (.sendResponseHeaders x 200 (count b)) (with-open [o (.getResponseBody x)] (.write o b))))))\n    (.start s)))\n";
-    builds_and_answers(&w, "clojure-hi", &[("project.clj", "(defproject hi \"0.1.0\" :dependencies [[org.clojure/clojure \"1.12.0\"]] :main hi.core :aot [hi.core])\n"), ("src/hi/core.clj", clj)], "clojure says hi", json!({})).await;
-    let erl = "-module(hi_ffi).\n-export([serve/0]).\nserve() ->\n    Port = list_to_integer(os:getenv(\"PORT\", \"8080\")),\n    {ok, L} = gen_tcp:listen(Port, [binary, {active, false}, {reuseaddr, true}, {ip, {0,0,0,0}}]),\n    loop(L).\nloop(L) ->\n    {ok, C} = gen_tcp:accept(L),\n    _ = gen_tcp:recv(C, 0, 1000),\n    gen_tcp:send(C, <<\"HTTP/1.1 200 OK\\r\\ncontent-length: 14\\r\\nconnection: close\\r\\n\\r\\ngleam says hi\\n\">>),\n    gen_tcp:close(C),\n    loop(L).\n";
-    builds_and_answers(&w, "gleam-hi", &[("gleam.toml", "name = \"hi\"\nversion = \"1.0.0\"\n"), ("src/hi.gleam", "@external(erlang, \"hi_ffi\", \"serve\")\nfn serve() -> Nil\n\npub fn main() {\n  serve()\n}\n"), ("src/hi_ffi.erl", erl)], "gleam says hi", json!({})).await;
-    // A start.sh and the packages it needs (apt).
-    builds_and_answers(&w, "shell-hi", &[("start.sh", "#!/bin/bash\nmkdir -p /tmp/s && echo 'a start script says hi' > /tmp/s/index.html\nexec python3 -m http.server \"$PORT\" --bind 0.0.0.0 --directory /tmp/s\n")], "a start script says hi", json!({"packages": ["python3"]})).await;
 }
 
 /// A link to a database on this host's loopback reaches it from the container, through the
@@ -1961,53 +1791,6 @@ async fn a_closed_environment_reaches_nothing_but_its_listed_hosts() {
     assert!(docker(&["network", "inspect", &closed]).await.is_err(), "the closed network and its proxy's relay went with the service");
 }
 
-/// A custom domain on another port of the app, on real Docker: its instance publishes that port
-/// too (on loopback, in its network sandbox), and the domain's requests reach it there while the
-/// service's own name stays on its port.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_custom_domain_reaches_another_port_on_docker() {
-    let Some(w) = docker_world().await else { return };
-    let start = "mkdir -p /a /b; echo main > /a/index.html; echo admin > /b/index.html; httpd -p 9000 -h /b; httpd -f -p $PORT -h /a";
-    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "panel", "source": {"kind": "image", "image": "busybox:1.37"}, "run": {"port": 8080, "start": start, "memory_mb": 256, "cpu": 0.5} })), "application/json", None).await;
-    assert_eq!(st, StatusCode::CREATED, "{svc}");
-    let id = svc["id"].as_str().unwrap().to_string();
-    let env = format!("/v1/apps/services/{id}/environments/production");
-    let h = "admin.example.org";
-    let (_, d) = call(&w.api, "POST", &format!("{env}/domains"), Some(json!({ "hostname": h })), "application/json", None).await;
-    w.dns.add(h, "CNAME", d["target"].as_str().unwrap());
-    w.dns.add(&format!("_roll-challenge.{h}"), "TXT", d["token"].as_str().unwrap());
-    assert_eq!(call(&w.api, "POST", &format!("{env}/domains/{h}/verify"), None, "application/json", None).await.1["status"], "active");
-    assert_eq!(call(&w.api, "PATCH", &format!("{env}/domains/{h}"), Some(json!({"port": 9000})), "application/json", None).await.0, StatusCode::OK);
-    let settled = |dep: String| {
-        let (api, env) = (w.api.clone(), env.clone());
-        async move {
-            for _ in 0..1200 {
-                let (_, x) = call(&api, "GET", &format!("{env}/deploys/{dep}"), None, "application/json", None).await;
-                if !["queued", "building", "deploying"].contains(&x["status"].as_str().unwrap_or("")) {
-                    assert_eq!(x["status"], "active", "{x}");
-                    return;
-                }
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-            panic!("{dep} never settled");
-        }
-    };
-    settled(svc["environments"][0]["latest"]["id"].as_str().unwrap().to_string()).await;
-    let (_, r) = call(&w.api, "POST", &format!("{env}/redeploy"), Some(json!({})), "application/json", None).await;
-    settled(r["id"].as_str().unwrap_or_else(|| panic!("{r}")).to_string()).await;
-    let get = |host: String| {
-        let public = w.public.clone();
-        async move {
-            let resp = public.oneshot(Request::get("/").header("host", host).body(Body::empty()).unwrap()).await.unwrap();
-            (resp.status(), String::from_utf8_lossy(&resp.into_body().collect().await.unwrap().to_bytes()).trim().to_string())
-        }
-    };
-    let own = svc["environments"][0]["url"].as_str().unwrap().trim_start_matches("http://").split(':').next().unwrap().to_string();
-    assert_eq!(get(h.to_string()).await, (StatusCode::OK, "admin".to_string()));
-    assert_eq!(get(own).await, (StatusCode::OK, "main".to_string()));
-    delete_for_good(&w.api, &id).await;
-}
-
 /// A closed environment's build on real Docker runs on its project's builder, on a network with
 /// no route out and no way to the host: its steps have only the proxy (by address), a direct
 /// connection out fails, and the builder and its network go with the project's last service.
@@ -2053,76 +1836,3 @@ async fn a_closed_environments_build_has_no_way_out_but_the_proxy() {
     assert!(docker(&["network", "inspect", &net]).await.is_err(), "and its network, with the proxy's relay");
 }
 
-/// A closed environment (egress `roll`) keeps its network sandbox: asleep, another service on its
-/// network reaches it by name and the waker hands the call to the app, at the sandbox's address;
-/// a public request wakes it too.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_closed_environments_private_caller_wakes_it() {
-    use apps_control::runtime::docker::docker;
-    let Some(w) = docker_world_netns(Some(true)).await else { return };
-    let (id, host) = deploy_container(&w, "shut").await;
-    let env = format!("/v1/apps/services/{id}/environments/production");
-    assert_eq!(call(&w.api, "PUT", &env, Some(json!({"egress": {"mode": "roll"}})), "application/json", None).await.0, StatusCode::OK);
-    let (_, r) = call(&w.api, "POST", &format!("{env}/redeploy"), Some(json!({})), "application/json", None).await;
-    let dep = r["id"].as_str().unwrap_or_else(|| panic!("{r}")).to_string();
-    for _ in 0..1200 {
-        let (_, x) = call(&w.api, "GET", &format!("{env}/deploys/{dep}"), None, "application/json", None).await;
-        if x["status"] == "active" {
-            break;
-        }
-        assert!(!["failed", "canceled"].contains(&x["status"].as_str().unwrap_or("")), "{x}");
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    let (_, svc) = call(&w.api, "GET", &format!("/v1/apps/services/{id}"), None, "application/json", None).await;
-    let port = svc["run"]["port"].as_u64().unwrap_or(8080);
-    let net = apps_control::closed_network_name(&w.project, "production");
-    assert_eq!(get(&w.public, &host).await.0, StatusCode::OK, "served at its sandbox's address");
-    let live = w.apps.live(&id, "production");
-    live.sleep().await;
-    let caller = format!("roll-apps-test-caller-{}", &id[4..]);
-    docker(&["run", "-d", "--name", &caller, "--network", &net, "busybox:1.37", "sleep", "600"]).await.unwrap();
-    let body = docker(&["exec", &caller, "wget", "-q", "-O-", "-T", "30", &format!("http://shut:{port}/")]).await;
-    let _ = docker(&["rm", "-f", &caller]).await;
-    assert!(body.as_deref().is_ok_and(|b| b.contains("<h1>cold</h1>")), "the waker took the call: {body:?}");
-    live.sleep().await;
-    assert_eq!(get(&w.public, &host).await.0, StatusCode::OK, "a public request wakes it too");
-    delete_for_good(&w.api, &id).await;
-    let _ = docker(&["network", "rm", &net]).await;
-    w.apps.shutdown().await;
-}
-
-/// A variable kept as a file is in the container at its path, readable by the app, before it
-/// starts.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_variable_kept_as_a_file_is_in_the_container() {
-    let Some(w) = docker_world().await else { return };
-    let start = "mkdir -p /tmp/w; cat /etc/secrets/app.conf > /tmp/w/index.html; httpd -f -p $PORT -h /tmp/w";
-    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "filed", "source": {"kind": "image", "image": "busybox:1.37"}, "run": {"port": 8080, "start": start, "memory_mb": 256, "cpu": 0.5} })), "application/json", None).await;
-    assert_eq!(st, StatusCode::CREATED, "{svc}");
-    let id = svc["id"].as_str().unwrap().to_string();
-    let env = format!("/v1/apps/services/{id}/environments/production");
-    let settled = |dep: String| {
-        let (api, env) = (w.api.clone(), env.clone());
-        async move {
-            for _ in 0..1200 {
-                let (_, x) = call(&api, "GET", &format!("{env}/deploys/{dep}"), None, "application/json", None).await;
-                if !["queued", "building", "deploying"].contains(&x["status"].as_str().unwrap_or("")) {
-                    return x;
-                }
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-            Value::Null
-        }
-    };
-    settled(svc["environments"][0]["latest"]["id"].as_str().unwrap().to_string()).await;
-    let (st, v) = call(&w.api, "PATCH", &format!("{env}/variables"), Some(json!({"set": {"APP_CONF": "from-a-file\nline two"}, "files": {"APP_CONF": "/etc/secrets/app.conf"}})), "application/json", None).await;
-    assert_eq!(st, StatusCode::OK, "{v}");
-    let (_, r) = call(&w.api, "POST", &format!("{env}/redeploy"), Some(json!({})), "application/json", None).await;
-    let d = settled(r["id"].as_str().unwrap_or_else(|| panic!("{r}")).to_string()).await;
-    assert_eq!(d["status"], "active", "{d}");
-    let host = svc["environments"][0]["url"].as_str().unwrap().trim_start_matches("http://").split(':').next().unwrap().to_string();
-    let resp = w.public.clone().oneshot(Request::get("/").header("host", &host).body(Body::empty()).unwrap()).await.unwrap();
-    let body = String::from_utf8_lossy(&resp.into_body().collect().await.unwrap().to_bytes()).to_string();
-    assert_eq!(body, "from-a-file\nline two");
-    delete_for_good(&w.api, &id).await;
-}

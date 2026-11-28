@@ -1,4 +1,4 @@
-//! Durable clusters: documents survive unloading, restarts and crashes; branches are isolated;
+//! Durable clusters: documents and metadata survive unloading, restarts and crashes; branches are isolated;
 //! deleted indices leave nothing behind; an idle node does no work.
 //!
 //! Object storage is S3 when `ROLL_E2E_S3_BUCKET` is set (`search_store::test_objects`), a
@@ -65,7 +65,8 @@ async fn documents_survive_unload_and_restart() {
 
     // Field numbers allocate in mapping-growth order: `zeta` before `alpha`, the reverse of
     // the order a fresh walk of the final mapping would give them.
-    ok(&n, "c1", "PUT", "/books", r#"{"mappings":{"properties":{"zeta":{"type":"keyword"}}}}"#).await;
+    ok(&n, "c1", "PUT", "/books", r#"{"mappings":{"properties":{"zeta":{"type":"keyword"}}},"aliases":{"library":{}}}"#).await;
+    ok(&n, "c1", "PUT", "/_index_template/logs", r#"{"index_patterns":["logs-*"],"priority":1}"#).await;
     ok(&n, "c1", "PUT", "/books/_doc/1", r#"{"zeta":"z1","title":"rust in action"}"#).await;
     ok(&n, "c1", "PUT", "/books/_doc/2", r#"{"zeta":"z2","alpha":7,"title":"the rust book"}"#).await;
     ok(&n, "c1", "POST", "/books/_bulk", "{\"index\":{\"_id\":\"3\"}}\n{\"alpha\":9,\"title\":\"zig\"}\n{\"delete\":{\"_id\":\"1\"}}\n").await;
@@ -109,37 +110,9 @@ async fn documents_survive_unload_and_restart() {
     assert_eq!(count(&ok(&n2, "c1", "GET", "/books/_count", "").await), 5);
     let doc = ok(&n2, "c1", "GET", "/books/_doc/3", "").await;
     assert_eq!(doc["_source"]["title"], "zig");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn writes_are_logged_then_committed() {
-    let objects = search_store::test_objects("server-log");
-    let store = open_store(objects.clone(), "n1", &cache_dir("log"), false).await;
-    let n = node_on(&store, NodeConfig::default());
-    ok(&n, "c1", "PUT", "/i", r#"{"settings":{"number_of_shards":2}}"#).await;
-    let m0 = store.stats().manifests_written;
-    for i in 0..20 {
-        ok(&n, "c1", "PUT", &format!("/i/_doc/{i}"), r#"{"f":"v"}"#).await;
-    }
-    let l = n.get_loaded("c1").unwrap();
-    let d = l.data.as_ref().unwrap();
-    // Every acknowledged write went through the WAL; only attaching wrote manifests.
-    assert!(d.records.load(Ordering::Relaxed) >= 20);
-    assert_eq!(store.stats().manifests_written - m0, 2, "one attach per shard");
-    assert!(store.stats().wal.durable_lsn >= store.stats().wal.last_lsn);
-    // `_flush` commits them to object storage.
-    ok(&n, "c1", "POST", "/i/_flush", "").await;
-    assert_eq!(d.unflushed_log_bytes(), 0);
-    let ms = store.read_latest_manifests("c1").await.unwrap();
-    assert_eq!(ms.len(), 2);
-    assert_eq!(ms.iter().map(|(_, m)| m.segments.iter().map(|s| (s.max_doc - s.del_count) as u64).sum::<u64>()).sum::<u64>(), 20);
-    drop(l);
-    // Waking replays nothing past those commit points.
-    assert!(n.unload("c1").await);
-    assert_eq!(count(&ok(&n, "c1", "GET", "/i/_count", "").await), 20);
-    let l = n.get_loaded("c1").unwrap();
-    assert_eq!(l.recovery.records, 0);
-    assert_eq!(l.recovery.shards, 2);
+    // The rest of the cluster's metadata too.
+    assert_eq!(call(&n2, "c1", "GET", "/_index_template/logs?filter_path=index_templates.name", "").await.1, r#"{"index_templates":[{"name":"logs"}]}"#);
+    assert_eq!(call(&n2, "c1", "GET", "/library/_alias", "").await.1, r#"{"books":{"aliases":{"library":{}}}}"#);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

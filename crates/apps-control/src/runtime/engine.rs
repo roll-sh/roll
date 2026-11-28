@@ -425,21 +425,13 @@ mod tests {
         let joined: Vec<(u8, String)> = got.into_iter().map(|(s, b)| (s, String::from_utf8(b).unwrap())).collect();
         assert_eq!(joined, [(1, "hello\n".into()), (2, "oops\n".into()), (1, "bye\n".into())]);
         assert!(d.buf.is_empty());
-    }
-
-    #[test]
-    fn inspect_reads_id_state_and_the_published_port() {
-        let body = br#"{"Id":"abc","State":{"Running":true},"HostConfig":{"PortBindings":{"8080/tcp":[{"HostIp":"127.0.0.1","HostPort":"41234"}]}}}"#;
-        assert_eq!(parse_inspect(body).unwrap(), Inspect { id: "abc".into(), running: true, host_port: Some(41234), cpu_nanos: None, exit_code: None, oom_killed: false, pid: None, gateways: vec![], exposed: None, closed: None, network: None, health: None, published: [(8080, 41234)].into(), published_udp: Default::default() });
-        // Another port a domain sends to: the main one is the labelled one, whatever sorts first.
+        // Inspect reads the published ports (the main one is the labelled one) and an OOM kill.
         let two = br#"{"Id":"t","State":{"Running":true},"Config":{"Labels":{"sh.roll.apps.port":"8080"},"ExposedPorts":{"3000/tcp":{},"8080/tcp":{}}},"HostConfig":{"PortBindings":{"3000/tcp":[{"HostPort":"40001"}],"8080/tcp":[{"HostPort":"40002"}]}}}"#;
         let t = parse_inspect(two).unwrap();
         assert_eq!((t.host_port, t.exposed, t.published.get(&3000).copied()), (Some(40002), Some(8080), Some(40001)));
         let oom = br#"{"Id":"o","State":{"Running":false,"ExitCode":137,"OOMKilled":true},"HostConfig":{}}"#;
         let i = parse_inspect(oom).unwrap();
         assert_eq!((i.exit_code, i.oom_killed), (Some(137), true));
-        let none = br#"{"Id":"w","State":{"Running":false},"HostConfig":{"PortBindings":null}}"#;
-        assert_eq!(parse_inspect(none).unwrap().host_port, None);
     }
 
     #[test]

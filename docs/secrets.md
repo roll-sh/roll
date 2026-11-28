@@ -649,8 +649,7 @@ The Go and Python clients log in with OIDC tokens and AWS only, not yet with `gc
 machine credential.
 
 Tests: `crates/roll-cli/tests/secrets.rs` (`the_local_agent_answers_only_requests_that_carry_its_token`,
-`a_change_reaches_the_local_agents_cache_through_the_digest`,
-`a_revoked_logins_local_agent_answers_a_refusal_within_one_poll`,
+with a change through the digest, `a_revoked_logins_local_agent_answers_a_refusal_within_one_poll`,
 `the_local_agent_on_a_gce_vm_logs_in_with_the_metadata_servers_identity_token`,
 `a_bootstrap_token_becomes_a_machine_credential_kept_on_disk_and_replaced_at_half_life`); the
 identity login's renewal is `relogin_tests` in `crates/roll-cli/src/secrets.rs`, which the agent
@@ -5969,7 +5968,15 @@ that follow from it:
   rotate, hosts, purge) at that key, and a folder's list, values (`roll run`, an export, `?seq=`),
   resolve and batch of changes key by key: those keys alone, and a batch naming another is
   refused with its name. A digest, a watch's delta, a `.env` import or diff, a promote, health
-  and leaks stay the folder's (403). `Scope::key` and `Scope::by_key` carry it to `Grants::allows`;
+  and leaks stay the folder's (403). That 403 says why when a keyed rule would reach the folder
+  key by key: "this token reaches only some keys of production:/api; a watch (the folder's
+  digest) reads the whole folder, so it needs a rule without keys" (the folder, never a key;
+  `roll_auth::scope::keys_only`, from the gate and from `Caller::need`). So a keyed token can't
+  watch: `roll run --watch`, `roll secrets render --watch` and `roll secrets agent` (for its
+  `-e` folder and `--prefetch` ones) stop at their start with that message and exit non-zero
+  instead of failing every poll. Plain `roll run` reads the token's keys, and the agent with
+  `--ttl 0` keeps nothing and reads them on every request. There's no per-key watch yet.
+  `Scope::key` and `Scope::by_key` carry it to `Grants::allows`;
   `access::reaches` asks it per key, and `Grants::limits_keys` skips that for every other caller.
   `roll secrets tokens create … --key STRIPE_KEY` makes one. (Encryption keys are another
   thing: `{id, index}`, below.)
@@ -7697,11 +7704,12 @@ That's 205–219 ms of CPU per identity down to 7–18 ms, across all runs. The 
 change, which now also works out the stamps, cost the same as before: 0.3 s on SQLite and 0.6–0.8
 + 0.9–1.0 s on Postgres, for all 1,000.
 
-`a_watchers_delta_returns_what_changed_and_is_audited` and
-`a_permission_change_since_the_answer_held_gets_the_full_set` (`tests/api.rs`) and
-`roll_run_watch_reads_a_change_through_a_delta` (`roll-cli/tests/secrets.rs`) cover it, and each
-runtime client has a watch test against its own fake rolld that reads a one-key change through the
-route and falls back to a full read on a 404 (an older rolld).
+`a_watchers_delta_returns_what_changed_and_is_audited` (`tests/api.rs`, a permission change since
+the answer held too) and
+`roll_run_watch_restarts_on_a_write_waits_out_failures_and_passes_sigterm_on`
+(`roll-cli/tests/secrets.rs`) cover it, and each runtime client has a watch test against its own
+fake rolld that reads a one-key change through the route and falls back to a full read on a 404
+(an older rolld).
 
 ### Large changes
 
