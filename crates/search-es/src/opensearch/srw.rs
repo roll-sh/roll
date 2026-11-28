@@ -472,6 +472,9 @@ fn has_ubi_fields(cluster: &Cluster, index: &str) -> bool {
     has(&["query_id"]) && has(&["action_name"]) && has(&["event_attributes", "object", "object_id"])
 }
 
+/// One query's UBI events: (document, position) → (impressions, clicks).
+type EventCells = std::collections::HashMap<(String, u32), (u64, u64)>;
+
 /// The ratings COEC makes of UBI events (`impression` and `click`, each with its query's text,
 /// document and position), as the plugin stores them: per query in the order first met,
 /// `{docId, rating}` with the rating a string to three decimals. The events are read as the
@@ -495,7 +498,7 @@ async fn ubi_ratings(ctx: &Ctx<'_>, index: &str, max_rank: u32, start: &str, end
     let mut page = internal::call_as(ctx, ctx.cluster, "POST", &format!("/{}/_search?scroll=1m", crate::xpack::enc(index)), Some(&body)).await?;
     // Per query (in the order first met): its cells, (document, position) → (impressions, clicks).
     let mut order: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    let mut queries: Vec<(String, std::collections::HashMap<(String, u32), (u64, u64)>)> = Vec::new();
+    let mut queries: Vec<(String, EventCells)> = Vec::new();
     let mut read = 0usize;
     let scroll_id = loop {
         let hits = page.pointer(&["hits", "hits"]).and_then(Value::as_array).cloned().unwrap_or_default();
