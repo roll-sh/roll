@@ -3791,11 +3791,10 @@ impl<'c, 'a> Interp<'c, 'a> {
                         let (rows, cols, _) = self.execute(q, using, true).map_err(|e| {
                             // (The string turned out a SELECT INTO.)
                             if self.last_sql.as_deref().is_some_and(select_into) {
-                                Error {
-                                    code: code::SYNTAX_ERROR,
-                                    message: "SELECT INTO query does not return tuples".into(),
-                                    ..e
-                                }
+                                let mut e = e;
+                                e.code = code::SYNTAX_ERROR;
+                                e.message = "SELECT INTO query does not return tuples".into();
+                                e
                             } else {
                                 e
                             }

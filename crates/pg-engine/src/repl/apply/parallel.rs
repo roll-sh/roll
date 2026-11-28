@@ -986,7 +986,7 @@ impl Worker<'_> {
         let ts = r.u64()?;
         if self.pa.is_some() {
             // apply_handle_commit_internal, as the worker's transaction.
-            self.repl.origins.xact_setup(self.pid, end_lsn, ts as i64).map_err(|e| e.message)?;
+            self.repl.origins.xact_setup(self.pid, end_lsn, ts as i64).map_err(|e| e.into_data().message)?;
             let res = self.sess.apply_commit().map_err(error_text);
             self.repl.origins.xact_reset(self.pid);
             self.txn = None;

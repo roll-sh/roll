@@ -2828,7 +2828,9 @@ impl Binder<'_, '_> {
             return e;
         }
         let shown = |t: &DataType| self.cat.format_type(&t.without_typmod(), None, &self.ctx.search_path);
-        Error { message: format!("operator does not exist: {} {op} {}", shown(l), shown(r)), ..e }
+        let mut e = e;
+        e.message = format!("operator does not exist: {} {op} {}", shown(l), shown(r));
+        e
     }
 
     /// The `=` IS DISTINCT FROM and NULLIF compare with (make_distinct_op's
@@ -5097,10 +5099,11 @@ impl Binder<'_, '_> {
                 // The error names the function as written.
                 self.resolve_call(name, &f.args, f.func_variadic, f.location)
                     .map_err(|e| match schema {
-                        Some(s) if e.message.starts_with(&format!("function {name}(")) => Error {
-                            message: e.message.replacen(name, &format!("{s}.{name}"), 1),
-                            ..e
-                        },
+                        Some(s) if e.message.starts_with(&format!("function {name}(")) => {
+                            let mut e = e;
+                            e.message = e.message.replacen(name, &format!("{s}.{name}"), 1);
+                            e
+                        }
                         _ => e,
                     })?
             }
@@ -5513,14 +5516,9 @@ impl Binder<'_, '_> {
                 None => func::type_list(&[a.ty()]),
             })
             .collect();
-        let e = func::no_function(name, &[]);
-        Err(with_pos(
-            Error {
-                message: format!("function {name}({}) does not exist", shown.join(", ")),
-                ..e
-            },
-            loc,
-        ))
+        let mut e = func::no_function(name, &[]);
+        e.message = format!("function {name}({}) does not exist", shown.join(", "));
+        Err(with_pos(e, loc))
     }
 
     // ── aggregates ──

@@ -209,7 +209,7 @@ impl Binder<'_, '_> {
             // (Postgres reads it when simplifying the expression: errors have no position.)
             return self
                 .coerce_implicit(e, &DataType::Json)
-                .map_err(|e| crate::error::Error { position: None, ..e });
+                .map_err(|e| e.without_position());
         }
         if format_json
             && matches!(
@@ -468,7 +468,7 @@ impl Binder<'_, '_> {
                     {
                         self
                         .coerce_implicit(e, &DataType::Json)
-                            .map_err(|e| Error { position: None, ..e })?
+                            .map_err(|e| e.without_position())?
                     }
                     DataType::Unknown => self.coerce_implicit(e, &DataType::Text)?,
                     DataType::Jsonb => self.coerce_with(e, &DataType::Json, CastContext::Explicit, &|from| {

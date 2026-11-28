@@ -50,7 +50,7 @@ fn run(s: &mut Session, sql: &str) {
 fn err(s: &mut Session, sql: &str) -> String {
     match s.query(sql) {
         Ok(_) => panic!("{sql}: no error"),
-        Err(e) => match e.hint {
+        Err(e) => match &e.hint {
             Some(h) => format!("{} {} HINT: {h}", e.code, e.message),
             None => format!("{} {}", e.code, e.message),
         },
@@ -398,7 +398,7 @@ fn server_programs() {
     // The exit status, as wait_result_to_str describes it, in the error's detail.
     let failed = |s: &mut Session, sql: &str| match s.query(sql) {
         Ok(_) => panic!("{sql}: no error"),
-        Err(e) => format!("{} {} DETAIL: {}", e.code, e.message, e.detail.unwrap_or_default()),
+        Err(e) => format!("{} {} DETAIL: {}", e.code, e.message, e.detail.clone().unwrap_or_default()),
     };
     assert_eq!(
         failed(&mut s, "COPY t FROM PROGRAM 'exit 3'"),

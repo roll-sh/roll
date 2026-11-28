@@ -62,7 +62,7 @@ fn err(s: &mut Session, sql: &str) -> String {
         Ok(_) => panic!("{sql}: no error"),
         Err(e) => {
             s.query("ROLLBACK").ok();
-            format!("{} {}", e.message, e.detail.unwrap_or_default())
+            format!("{} {}", e.message, e.detail.clone().unwrap_or_default())
         }
     }
 }

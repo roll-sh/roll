@@ -2729,10 +2729,7 @@ impl Ddl<'_, '_> {
                     };
                     // Postgres reports a missing subtype without a position.
                     let (t, d) = resolve_type_name(&self.cat, self.search_path(), tn)
-                        .map_err(|e| Error {
-                            position: None,
-                            ..e
-                        })?;
+                        .map_err(|e| e.without_position())?;
                     subtype = Some(t);
                     subtype_domain = d;
                 }
@@ -3210,7 +3207,7 @@ impl Ddl<'_, '_> {
         }
         for (cname, e) in pending_checks {
             // (Parsed without the statement's text: errors carry no position.)
-            b.bind_domain_check(&e, &base).map_err(|e| Error { position: None, ..e })?;
+            b.bind_domain_check(&e, &base).map_err(|e| e.without_position())?;
             d.checks.push((cname, ast::deparse_expr(&e)?));
         }
         // Postgres makes the array type first, then the domain, then its constraints.
@@ -4476,7 +4473,7 @@ impl Ddl<'_, '_> {
             {
                 let word = object_type_word(kind).to_lowercase();
                 e.message = e.message.replacen("function name", &format!("{word} name"), 1);
-                e.hint = e.hint.map(|h| h.replace("the function", &format!("the {word}")).into());
+                e.hint = e.hint.take().map(|h| h.replace("the function", &format!("the {word}")).into());
             }
             e
         })?;

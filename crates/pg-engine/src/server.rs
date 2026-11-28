@@ -732,10 +732,8 @@ fn cstr(b: &mut BytesMut, s: &str) {
 /// An immediate shutdown (SIGQUIT): quickdie's WARNING_CLIENT_ONLY to every client, whose
 /// connection then closes (PostgreSQL's backends exit right after it).
 pub fn quit_clients(engine: &Engine) {
-    let e = Error {
-        severity: crate::error::Severity::Warning,
-        ..Error::new(code::ADMIN_SHUTDOWN, "terminating connection due to immediate shutdown command")
-    };
+    let e = Error::new(code::ADMIN_SHUTDOWN, "terminating connection due to immediate shutdown command")
+        .at_severity(crate::error::Severity::Warning);
     let mut b = BytesMut::new();
     b.put_u8(b'N');
     b.put_i32(0);

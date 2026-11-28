@@ -166,7 +166,7 @@ impl Ddl<'_, '_> {
                 // transformPartitionSpec's parse state has no query text: no positions.
                 let e = b
                     .bind_over_table(&ta, node, Clause::PartitionKey)
-                    .map_err(|e| Error { position: None, ..e })?;
+                    .map_err(|e| e.without_position())?;
                 // CheckAttributeType (CHKATYPE_IS_PARTKEY), before anything else.
                 let ety = e.ty();
                 if matches!(ety, DataType::Record | DataType::Unknown)
@@ -481,10 +481,7 @@ impl Ddl<'_, '_> {
                     "cannot use column reference in partition bound expression",
                 );
                 match err.position {
-                    Some(_) => Error {
-                        position: err.position,
-                        ..e
-                    },
+                    Some(p) => e.position(p),
                     None => with_pos(e, ast::location(n)),
                 }
             } else {

@@ -154,6 +154,7 @@ impl Session {
             dblocale::createdb(&o.locale, template, src, &env, superuser, &mut r)
         };
         for (e, l) in msgs {
+            let e = e.into_data();
             let mut n = match l {
                 IcuLevel::Warning => warning(e.code, e.message),
                 _ => {

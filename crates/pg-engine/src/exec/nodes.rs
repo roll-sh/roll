@@ -2733,7 +2733,7 @@ mod projection_tests {
                 let got = project_moving(&exprs, &moves, row, ctx);
                 match (got, want) {
                     (Ok(g), Ok(w)) => assert_eq!(g, w),
-                    (Err(g), Err(w)) => assert_eq!((g.code, g.message), (w.code, w.message)),
+                    (Err(g), Err(w)) => assert_eq!((g.code, &g.message), (w.code, &w.message)),
                     _ => panic!("projection disagrees with evaluation"),
                 }
             }

@@ -727,7 +727,7 @@ fn behavior(o: FuncOpts, empty: bool, default: &Value, ret: &T, c: &FnCtx) -> Re
                 b.word()
             ),
         )
-        .detail(e.message)),
+        .detail(e.into_data().message)),
         r => r,
     }
 }

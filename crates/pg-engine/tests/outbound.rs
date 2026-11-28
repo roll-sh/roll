@@ -40,7 +40,7 @@ fn run(s: &mut Session, sql: &str) -> Vec<String> {
 fn err(s: &mut Session, sql: &str) -> String {
     match s.query(sql) {
         Ok(_) => panic!("{sql}: no error"),
-        Err(e) => format!("{} {} DETAIL: {}", e.code, e.message, e.detail.unwrap_or_default()),
+        Err(e) => format!("{} {} DETAIL: {}", e.code, e.message, e.detail.clone().unwrap_or_default()),
     }
 }
 

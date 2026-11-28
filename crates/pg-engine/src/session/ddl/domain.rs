@@ -21,10 +21,7 @@ impl Ddl<'_, '_> {
         };
         let (ty, domain) =
             crate::sql::binder::resolve_type_name(&self.cat, self.search_path(), &tn).map_err(
-                |e| Error {
-                    position: None,
-                    ..e
-                },
+                |e| e.without_position(),
             )?;
         match domain.and_then(|o| self.cat.domains.get(&o)) {
             Some(d) => Ok(d.clone()),
@@ -228,7 +225,7 @@ impl Ddl<'_, '_> {
                         // (Parsed without the statement's text: errors carry no position.)
                         self.binder()
                             .bind_domain_check(e, &d.base)
-                            .map_err(|e| crate::error::Error { position: None, ..e })?;
+                            .map_err(|e| e.without_position())?;
                         let sql = ast::deparse_expr(e)?;
                         let name = if c.conname.is_empty() {
                             let base = format!("{}_check", d.name);

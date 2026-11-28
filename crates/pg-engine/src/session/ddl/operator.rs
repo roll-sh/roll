@@ -266,10 +266,7 @@ impl Ddl<'_, '_> {
                         return Err(invalid("SETOF type not allowed for operator argument"));
                     }
                     let (ty, dom) = resolve_type_name(&self.cat, self.search_path(), tn)
-                        .map_err(|e| Error {
-                            position: None,
-                            ..e
-                        })?;
+                        .map_err(|e| e.without_position())?;
                     self.require_type_usage(&ty, dom)?;
                     // (typenameTypeId: an argument type has no modifier; `bit` isn't bit(1).)
                     let ty = ty.without_typmod();
@@ -485,10 +482,7 @@ impl Ddl<'_, '_> {
                             return Ok(None);
                         }
                         Err(e) => {
-                            return Err(Error {
-                                position: None,
-                                ..e
-                            });
+                            return Err(e.without_position());
                         }
                     }
                 }

@@ -120,6 +120,7 @@ impl Hash for Uuid128 {
 
 const _: () = assert!(std::mem::size_of::<Value>() == 24);
 const _: () = assert!(std::mem::size_of::<Option<Value>>() == 24);
+const _: () = assert!(std::mem::size_of::<crate::error::Result<Value>>() == 24);
 
 #[derive(Clone, Debug)]
 pub enum Value {

@@ -444,7 +444,7 @@ pub fn parse_type_string(s: &str) -> Result<pb::TypeName> {
         }
     }
     match crate::sql::parse::parse(&format!("SELECT NULL::{s}")) {
-        Err(e) => Err(syntax(e.message, None)),
+        Err(e) => Err(syntax(e.into_data().message, None)),
         Ok(_) => Err(syntax(
             format!("syntax error at or near \"{}\"", tok_text(0)),
             Some(toks[0].start as u32),

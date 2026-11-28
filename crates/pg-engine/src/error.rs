@@ -2,8 +2,16 @@
 
 use std::fmt;
 
+/// An error: one pointer to its fields (`ErrorData`), so `Result<Value>` is a `Value`'s 24 bytes
+/// and `Result<()>` a word; the fields are reached through `Deref` / `DerefMut`.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Error(Box<ErrorData>);
+
+const _: () = assert!(std::mem::size_of::<Error>() == 8);
+const _: () = assert!(std::mem::size_of::<Result<()>>() == 8);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Error {
+pub struct ErrorData {
     pub code: &'static str,
     pub message: String,
     pub detail: Option<String>,
@@ -217,11 +225,70 @@ impl fmt::Display for Severity {
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
+impl std::ops::Deref for Error {
+    type Target = ErrorData;
+    #[inline(always)]
+    fn deref(&self) -> &ErrorData {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for Error {
+    #[inline(always)]
+    fn deref_mut(&mut self) -> &mut ErrorData {
+        &mut self.0
+    }
+}
+
+impl From<ErrorData> for Error {
+    fn from(d: ErrorData) -> Self {
+        Error(Box::new(d))
+    }
+}
+
+/// As the fields' struct printed it before it was boxed (`Error { code: .. }`).
+impl fmt::Debug for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let d = &*self.0;
+        f.debug_struct("Error")
+            .field("code", &d.code)
+            .field("message", &d.message)
+            .field("detail", &d.detail)
+            .field("hint", &d.hint)
+            .field("position", &d.position)
+            .field("severity", &d.severity)
+            .field("context", &d.context)
+            .field("objects", &d.objects)
+            .field("stacked", &d.stacked)
+            .finish()
+    }
+}
+
 impl Error {
+    /// Its fields, moved out.
+    pub fn into_data(self) -> ErrorData {
+        *self.0
+    }
+    /// Without a position (an error raised in text the client didn't send).
+    pub fn without_position(mut self) -> Self {
+        self.position = None;
+        self
+    }
+    /// At `severity`.
+    pub fn at_severity(mut self, severity: Severity) -> Self {
+        self.severity = severity;
+        self
+    }
     pub fn new(code: &'static str, message: impl Into<String>) -> Self {
-        Self {
+        Self::boxed(code, message.into())
+    }
+    /// `new`'s allocation, out of line: errors are the cold path.
+    #[cold]
+    #[inline(never)]
+    fn boxed(code: &'static str, message: String) -> Self {
+        Error(Box::new(ErrorData {
             code,
-            message: message.into(),
+            message,
             detail: None,
             hint: None,
             position: None,
@@ -229,7 +296,7 @@ impl Error {
             context: None,
             objects: None,
             stacked: false,
-        }
+        }))
     }
     fn objects_mut(&mut self) -> &mut Objects {
         self.objects.get_or_insert_with(Default::default)

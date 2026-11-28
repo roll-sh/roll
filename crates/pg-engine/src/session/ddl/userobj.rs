@@ -130,8 +130,8 @@ impl Ddl<'_, '_> {
             return Err(crate::error::internal("cast types"));
         };
         let shown = |tn: &pb::TypeName| names(&tn.names).join(".");
-        let src = self.type_name_oid(stn).map_err(|e| Error { position: None, ..e })?;
-        let dst = self.type_name_oid(ttn).map_err(|e| Error { position: None, ..e })?;
+        let src = self.type_name_oid(stn).map_err(|e| e.without_position())?;
+        let dst = self.type_name_oid(ttn).map_err(|e| e.without_position())?;
         let (st, tt) = (typtype(&self.cat, src), typtype(&self.cat, dst));
         if st == 'p' {
             return Err(Error::new(
@@ -329,7 +329,7 @@ impl Ddl<'_, '_> {
                     self.notice(msg);
                     return Ok(None);
                 }
-                Err(e) => return Err(Error { position: None, ..e }),
+                Err(e) => return Err(e.without_position()),
             }
         }
         let (src, dst) = (oids[0], oids[1]);
@@ -662,7 +662,7 @@ impl Ddl<'_, '_> {
         let Some(tn) = &s.type_name else {
             return Err(crate::error::internal("transform type"));
         };
-        let ty = self.type_name_oid(tn).map_err(|e| Error { position: None, ..e })?;
+        let ty = self.type_name_oid(tn).map_err(|e| e.without_position())?;
         let shown = names(&tn.names).join(".");
         match typtype(&self.cat, ty) {
             'p' => {
@@ -886,7 +886,7 @@ impl Ddl<'_, '_> {
                             format!("type \"{}\" does not exist", names(&tn.names).join(".")),
                         );
                     }
-                    Err(e) => return Err(Error { position: None, ..e }),
+                    Err(e) => return Err(e.without_position()),
                 };
                 let Some(l) = self.cat.language_by_name(lang) else {
                     if missing_ok {

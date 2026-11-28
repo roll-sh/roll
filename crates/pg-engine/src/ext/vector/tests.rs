@@ -148,9 +148,9 @@ fn run(sym: &str, args: &[Value]) -> String {
         Ok(v) => show(&v),
         Err(e) => {
             let mut s = format!("ERROR {} {}", e.code, e.message);
-            if let Some(d) = e.detail {
+            if let Some(d) = &e.detail {
                 s.push_str(" | ");
-                s.push_str(&d);
+                s.push_str(d);
             }
             s
         }
@@ -320,7 +320,7 @@ fn binary_round_trip() {
 
 #[test]
 fn binary_errors() {
-    let err = |k: u16, b: &[u8]| super::recv(k, b, -1).unwrap_err().message;
+    let err = |k: u16, b: &[u8]| super::recv(k, b, -1).unwrap_err().into_data().message;
     let f = |v: f32| v.to_be_bytes();
     assert_eq!(err(VECTOR, &[0, 0, 0, 0]), "vector must have at least 1 dimension");
     assert_eq!(err(VECTOR, &[0xff, 0xff, 0, 0]), "vector must have at least 1 dimension");

@@ -192,7 +192,7 @@ impl Ddl<'_, '_> {
                     let node = crate::sql::binder::ast::parse_expr(cooked.as_deref().unwrap_or(sql))?;
                     self.binder()
                         .bind_domain_check(&node, &new_base)
-                        .map_err(|e| Error { position: None, ..e })?;
+                        .map_err(|e| e.without_position())?;
                 }
             }
         }

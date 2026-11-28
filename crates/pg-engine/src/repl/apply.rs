@@ -398,7 +398,7 @@ fn open_worker<'a>(
     let (pid, _, _) = e.register_backend(None, None, 0);
     e.assign_proc(pid, crate::txn::procs::ProcKind::BgWorker);
     let backend = Backend { e, workers, pid, relid };
-    let msg = |err: Error| err.message;
+    let msg = |err: Error| err.into_data().message;
     let mut sess = e.connect(pid, &dbname, &e.bootstrap_superuser(), &sub.name).map_err(msg)?;
     let owner = sess
         .state
@@ -851,6 +851,7 @@ impl Worker<'_> {
                 if self.sess.status() != crate::session::TxnStatus::Idle {
                     let _ = self.sess.query("ROLLBACK");
                 }
+                let err = err.into_data();
                 Err(match &err.detail {
                     Some(d) => format!("{}\nDETAIL:  {d}", err.message),
                     None => err.message,
@@ -908,7 +909,7 @@ impl Worker<'_> {
             let got = t
                 .borrow_mut()
                 .lock(&key, crate::txn::locks::LockMode::AccessShare, crate::txn::locks::WaitPolicy::SkipLocked, &|| format!("subscription {subid}"))
-                .map_err(|e| e.message)?;
+                .map_err(|e| e.into_data().message)?;
             if got {
                 break;
             }
@@ -928,7 +929,7 @@ impl Worker<'_> {
                 r.lsn = *lsn;
             }
         }
-        t.borrow_mut().set_catalog_from(c, &from).map_err(|e| e.message)?;
+        t.borrow_mut().set_catalog_from(c, &from).map_err(|e| e.into_data().message)?;
         for (relid, state, lsn) in changes {
             self.states.insert(*relid, (*state, *lsn));
         }
@@ -947,7 +948,7 @@ impl Worker<'_> {
         if let Some(s) = c.subscriptions.get_mut(&self.sub.oid) {
             f(s);
         }
-        t.borrow_mut().set_catalog(c).map_err(|e| e.message)
+        t.borrow_mut().set_catalog(c).map_err(|e| e.into_data().message)
     }
 
     /// clear_subscription_skip_lsn: subskiplsn back to 0/0 with the skipped transaction's
@@ -1028,7 +1029,7 @@ impl Worker<'_> {
             let filter = if quals.is_empty() { String::new() } else { format!(" WHERE {}", quals.join(" OR ")) };
             format!("(SELECT {collist} FROM {only}{}{filter})", qualified(nsp, rel))
         };
-        let r = c.exec(&format!("COPY {source} TO STDOUT{with}"), &intr).map_err(|e| e.message)?;
+        let r = c.exec(&format!("COPY {source} TO STDOUT{with}"), &intr).map_err(|e| e.into_data().message)?;
         if r.status != Status::CopyOut {
             let m = r.error.map_or_else(|| c.error_text(), |e| e.text().trim_end_matches('\n').to_string());
             return Err(format!("could not start initial contents copy for table \"{nsp}.{rel}\": {m}"));
@@ -1044,7 +1045,7 @@ impl Worker<'_> {
             Ok(s) => s,
             Err(e) => {
                 let _ = self.sess.query("ROLLBACK");
-                return Err(e.message);
+                return Err(e.into_data().message);
             }
         };
         let r = self.copy_rows(&mut c, &into, binary, &intr);
@@ -1059,13 +1060,13 @@ impl Worker<'_> {
         }
         let rows = r?;
         c.copy_finish(&intr)
-            .map_err(|e| e.message)?
+            .map_err(|e| e.into_data().message)?
             .map_err(|m| format!("error while copying table \"{nsp}.{rel}\": {m}"))?;
         walrcv::exec(&mut c, "COMMIT", &intr).map_err(fail)?;
         // FINISHEDCOPY with the copy, the origin at the slot's consistent point (where the
         // catch-up, or a worker started again after a failure, streams from).
         self.set_states(&[(relid, 'f', 0)])?;
-        self.repl.origins.xact_setup(self.pid, point, 0).map_err(|e| e.message)?;
+        self.repl.origins.xact_setup(self.pid, point, 0).map_err(|e| e.into_data().message)?;
         let r = self.query("COMMIT");
         self.repl.origins.xact_reset(self.pid);
         r?;
@@ -1082,7 +1083,7 @@ impl Worker<'_> {
         let mut header: Option<Vec<u8>> = None;
         let mut whole = 0usize;
         loop {
-            intr().map_err(|e| e.message)?;
+            intr().map_err(|e| e.into_data().message)?;
             match c.copy_read(Duration::from_secs(1))? {
                 Some(Some(d)) => buf.extend_from_slice(&d),
                 Some(None) => break,
@@ -1127,7 +1128,7 @@ impl Worker<'_> {
     }
 
     fn copy_in(&mut self, into: &str, data: &[u8]) -> Result<u64, String> {
-        let r = self.sess.query_copy(into, data).map_err(|e| e.message)?;
+        let r = self.sess.query_copy(into, data).map_err(|e| e.into_data().message)?;
         Ok(r.last().and_then(|r| r.tag.rsplit(' ').next()?.parse().ok()).unwrap_or(0))
     }
 
@@ -1522,7 +1523,7 @@ impl Worker<'_> {
                 if t.skipping {
                     self.clear_skip_lsn(t.final_lsn)?;
                 }
-                self.repl.origins.xact_setup(self.pid, end_lsn, ts).map_err(|e| e.message)?;
+                self.repl.origins.xact_setup(self.pid, end_lsn, ts).map_err(|e| e.into_data().message)?;
                 let r = self.sess.apply_commit().map_err(|e| match &e.detail {
                     Some(d) => format!("{}\nDETAIL:  {d}", e.message),
                     None => e.message.to_string(),
@@ -1672,7 +1673,7 @@ impl Worker<'_> {
             }
             return Ok(());
         }
-        self.repl.origins.xact_setup(self.pid, end_lsn, ts).map_err(|e| e.message)?;
+        self.repl.origins.xact_setup(self.pid, end_lsn, ts).map_err(|e| e.into_data().message)?;
         let verb = if commit { "COMMIT" } else { "ROLLBACK" };
         let r = self.query(&format!("{verb} PREPARED {}", walrcv::literal(&gid)));
         self.repl.origins.xact_reset(self.pid);
@@ -1852,6 +1853,7 @@ impl Worker<'_> {
                     let _ = self.sess.query("ROLLBACK");
                 }
                 self.txn = None;
+                let err = err.into_data();
                 let mut m = err.message;
                 if let Some(d) = &err.detail {
                     m.push_str(&format!("\nDETAIL:  {d}"));

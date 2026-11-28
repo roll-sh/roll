@@ -274,7 +274,7 @@ impl Ddl<'_, '_> {
             return Err(Error::new(code::SYNTAX_ERROR, format!("{} requires a type name", d.defname)));
         };
         let (t, dom) = crate::sql::binder::resolve_type_name(&self.cat, self.search_path(), tn)
-            .map_err(|e| Error { position: None, ..e })?;
+            .map_err(|e| e.without_position())?;
         self.require_type_usage(&t, dom)?;
         let pseudo = t.category() == crate::types::Category::Pseudo && !t.is_polymorphic();
         if pseudo && !(is_internal(&t) && self.is_superuser()) {
@@ -319,7 +319,7 @@ impl Ddl<'_, '_> {
                                 self.search_path(),
                                 tn,
                             )
-                            .map_err(|e| Error { position: None, ..e })?;
+                            .map_err(|e| e.without_position())?;
                             if matches!(&ty, DataType::Base(b) if b.is_shell()) {
                                 return Err(invalid(&format!(
                                     "aggregate cannot accept shell type {}",
@@ -472,7 +472,7 @@ impl Ddl<'_, '_> {
                     return Err(invalid("aggregate input type must be specified"));
                 };
                 let t = crate::sql::binder::resolve_type_name(&self.cat, self.search_path(), tn)
-                    .map_err(|e| Error { position: None, ..e })?
+                    .map_err(|e| e.without_position())?
                     .0;
                 args = vec![(None, t)];
             }

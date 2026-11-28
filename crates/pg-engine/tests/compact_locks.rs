@@ -143,7 +143,7 @@ fn compact_unique_keys_wait_for_their_writer() {
         let mut waits = Vec::new();
         for id in [10002, 14000] {
             let e = b.query(&format!("INSERT INTO t VALUES ({id}, -{id}, 1) ON CONFLICT (id) DO NOTHING")).unwrap_err();
-            waits.push((id, e.context.unwrap_or_default().to_string()));
+            waits.push((id, e.context.clone().unwrap_or_default().to_string()));
         }
         // A waiting writer gets the unique violation once A commits.
         let e2 = e.clone();

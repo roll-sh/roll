@@ -1257,7 +1257,7 @@ impl Ddl<'_, '_> {
                 // (ALTER TABLE ADD COLUMN cooks it without the statement's text.)
                 None => self
                     .check_generated(t, idx, &g, gen_raw)
-                    .map_err(|e| Error { position: None, ..e })?,
+                    .map_err(|e| e.without_position())?,
             }
         }
         Ok(())
@@ -1301,13 +1301,12 @@ impl Ddl<'_, '_> {
             if err.code == code::UNDEFINED_COLUMN
                 || err.code == code::UNDEFINED_TABLE && !err.message.starts_with("relation \"")
             {
-                Error {
-                    position: err.position,
-                    ..Error::new(
-                        code::FEATURE_NOT_SUPPORTED,
-                        "cannot use column reference in DEFAULT expression",
-                    )
-                }
+                let mut e = Error::new(
+                    code::FEATURE_NOT_SUPPORTED,
+                    "cannot use column reference in DEFAULT expression",
+                );
+                e.position = err.position;
+                e
             } else {
                 err
             }
@@ -1381,10 +1380,7 @@ impl Ddl<'_, '_> {
         let ta = Arc::new(t.clone());
         let e = b.bind_over_table(&ta, n, Clause::Generated).map_err(|e| {
             if raw.is_none() {
-                Error {
-                    position: None,
-                    ..e
-                }
+                e.without_position()
             } else {
                 e
             }
@@ -2897,7 +2893,7 @@ impl Ddl<'_, '_> {
         let ta = Arc::new(t.clone());
         let e = b
             .bind_over_table(&ta, n, Clause::Check)
-            .map_err(|e| if raw.is_none() { Error { position: None, ..e } } else { e })?;
+            .map_err(|e| if raw.is_none() { e.without_position() } else { e })?;
         let mut sub = false;
         e.walk(&mut |x| {
             // A user function's body isn't a subquery of the constraint.
@@ -5069,7 +5065,7 @@ impl Ddl<'_, '_> {
                         let ty = t.columns[idx].ty.clone();
                         // (ATExecColumnDefault cooks it without the query text: no position.)
                         self.check_default(e, &ty, &cmd.name)
-                            .map_err(|e| Error { position: None, ..e })?;
+                            .map_err(|e| e.without_position())?;
                         // (SET DEFAULT NULL removes the default: a NULL constant isn't stored.)
                         t.columns[idx].default = if t.columns[idx].domain.is_none()
                             && self.is_null_default(e, &ty)
@@ -6649,7 +6645,7 @@ impl Ddl<'_, '_> {
         // carry no position).
         let nt = Arc::new(t.clone());
         let rules = crate::sql::binder::table_rules(&nt, self.ctx)
-            .map_err(|e| Error { position: None, ..e })?;
+            .map_err(|e| e.without_position())?;
         for (_, row) in self.table_rows(&t)? {
             crate::exec::dml::check_row(&rules, &row, self.ctx).map_err(|e| {
                 if e.code == code::CHECK_VIOLATION {
@@ -6700,7 +6696,7 @@ impl Ddl<'_, '_> {
         })?;
         let nt = Arc::new(t.clone());
         let rules = crate::sql::binder::table_rules(&nt, self.ctx)
-            .map_err(|e| Error { position: None, ..e })?;
+            .map_err(|e| e.without_position())?;
         for (_, row) in self.table_rows(t)? {
             crate::exec::dml::check_row(&rules, &row, self.ctx).map_err(|e| {
                 if e.code == code::CHECK_VIOLATION {

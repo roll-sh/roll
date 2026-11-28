@@ -2226,6 +2226,7 @@ pub fn raising(err: Error, ty: DataType) -> Expr {
         Some(s) => Expr::Const(Value::text(s), DataType::Text),
         None => Expr::Const(Value::Null, DataType::Text),
     };
+    let err = err.into_data();
     let args = vec![
         text(Some(err.code.to_string())),
         text(Some(err.message)),

@@ -60,7 +60,7 @@ fn ext(s: &mut pg_engine::session::Session, name: &str, sql: &str, params: &[Opt
             _ => Ok(String::new()),
         }
     })();
-    let r = r.map_err(|e: pg_engine::Error| e.message);
+    let r = r.map_err(|e: pg_engine::Error| e.into_data().message);
     s.sync().unwrap();
     r
 }
