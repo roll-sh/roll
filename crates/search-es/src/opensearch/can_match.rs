@@ -63,7 +63,7 @@ pub fn filter(ctx: &crate::rest::Ctx, req: &SearchRequest, targets: Vec<Target>)
         for (i, t) in targets.iter().enumerate() {
             let Ok(searcher) = t.searcher() else { continue };
             let table = t.table();
-            let mut qctx = QueryCtx::new(ctx.cluster, &st, &t.idx, &table, &searcher, req.now_ms, t.reader());
+            let mut qctx = QueryCtx::new(ctx.cluster, &st, &t.idx, &table, &searcher, req.now_ms, t.reader()).in_remote(t.cluster.clone());
             qctx.runtime_mappings = req.source.runtime_mappings.clone();
             if let Err(e) = crate::search::sort::build(&qctx, &req.source.sort[..1]) {
                 failures.push((i, e));
@@ -81,7 +81,7 @@ pub fn filter(ctx: &crate::rest::Ctx, req: &SearchRequest, targets: Vec<Target>)
             continue;
         };
         let table = t.table();
-        let mut qctx = QueryCtx::new(ctx.cluster, &st, &t.idx, &table, &searcher, req.now_ms, t.reader());
+        let mut qctx = QueryCtx::new(ctx.cluster, &st, &t.idx, &table, &searcher, req.now_ms, t.reader()).in_remote(t.cluster.clone());
         qctx.runtime_mappings = req.source.runtime_mappings.clone();
         let alias_none = t.filter.alias.as_ref().is_some_and(|f| matches!(rewrite(&qctx, f, es), Rewritten::None))
             || t.filter.security.as_ref().is_some_and(|f| qctx.for_security().is_ok_and(|s| matches!(rewrite(&s, f, es), Rewritten::None)));

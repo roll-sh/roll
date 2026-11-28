@@ -2269,7 +2269,7 @@ impl Control {
     /// An OpenSearch-flavor cluster's link: a role and an internal user named
     /// `roll-link-<random>`, the user holding only that role.
     async fn mint_os_link(&self, c: &SearchCluster, url: &str) -> Result<LinkCredential> {
-        let (name, password) = self.os_user(c, OS_LINK_PREFIX, Some(os_link_role(None)), "roll: an app's link", None).await?;
+        let (name, password) = self.os_user(c, OS_LINK_PREFIX, Some(os_link_role(None)), "roll: an app's link", None, &[]).await?;
         let mut u = reqwest::Url::parse(url).map_err(|e| ControlError::Internal(anyhow::anyhow!("cluster {} has no URL: {e}", c.name)))?;
         let userinfo = (u.set_username(&format!("{name}@{}", c.name)), u.set_password(Some(&password)));
         if userinfo != (Ok(()), Ok(())) {
@@ -2283,8 +2283,9 @@ impl Control {
     /// API, the security index restricted), else (`None`) `all_access`, which can use the security REST
     /// API like the cluster's own admin (an `admin` key is the cluster's password by another
     /// name, so it could also make a user without an expiry). `expires_ms`: it can't sign in from then on
-    /// (`EXPIRES_ATTRIBUTE`, checked by the cluster). Returns its name and password.
-    async fn os_user(&self, c: &SearchCluster, prefix: &str, role: Option<Value>, description: &str, expires_ms: Option<i64>) -> Result<(String, String)> {
+    /// (`EXPIRES_ATTRIBUTE`, checked by the cluster). `attributes`: more of its attributes (a
+    /// remote link's `REMOTE_LINK_ATTRIBUTE`). Returns its name and password.
+    pub(crate) async fn os_user(&self, c: &SearchCluster, prefix: &str, role: Option<Value>, description: &str, expires_ms: Option<i64>, attributes: &[(&str, &str)]) -> Result<(String, String)> {
         let name = format!("{prefix}{}", random_string(12));
         let password = random_string(40);
         let api = "/_plugins/_security/api";
@@ -2296,8 +2297,15 @@ impl Control {
             }
         }
         let mut user = json!({ "password": password, "opendistro_security_roles": [if data { name.as_str() } else { "all_access" }], "description": description });
+        let mut attrs = serde_json::Map::new();
         if let Some(ms) = expires_ms {
-            user["attributes"] = json!({ search_es::xpack::security::opensearch::EXPIRES_ATTRIBUTE: ms.to_string() });
+            attrs.insert(search_es::xpack::security::opensearch::EXPIRES_ATTRIBUTE.into(), json!(ms.to_string()));
+        }
+        for (k, v) in attributes {
+            attrs.insert((*k).into(), json!(v));
+        }
+        if !attrs.is_empty() {
+            user["attributes"] = Value::Object(attrs);
         }
         let resp = self.call(c, EsRequest::json("PUT", &format!("{api}/internalusers/{name}"), serde_json::to_vec(&user).unwrap_or_default())).await;
         if resp.status >= 300 {
@@ -2327,7 +2335,7 @@ impl Control {
     /// cluster's security back as it was, so it is kept with the row and the restore applies it
     /// before it answers ([`Self::apply_revokes`]). `false`: `id` is no deleted cluster (purged,
     /// or never was).
-    async fn keep_revoke(&self, id: &str, credential: &str) -> Result<bool> {
+    pub(crate) async fn keep_revoke(&self, id: &str, credential: &str) -> Result<bool> {
         if credential.len() > 512 {
             return Ok(false);
         }
@@ -2435,7 +2443,7 @@ impl Control {
         if c.flavor == "opensearch" {
             let role = access.os_role(&indices, named)?;
             let expires_ms = expires_in_s.map(|s| crate::meter::now_ms().saturating_add(s.saturating_mul(1000)));
-            let (user, password) = self.os_user(&c, OS_KEY_PREFIX, role, &format!("roll key: {name}"), expires_ms).await?;
+            let (user, password) = self.os_user(&c, OS_KEY_PREFIX, role, &format!("roll key: {name}"), expires_ms, &[]).await?;
             let mut out = json!({ "id": user, "name": name, "access": access.as_str(), "username": format!("{user}@{}", c.name), "password": password, "url": connection_of(&self.cfg, &c.name)["url"] });
             if access != KeyAccess::Admin {
                 out["indices"] = json!(indices);

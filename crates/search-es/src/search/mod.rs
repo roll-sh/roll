@@ -117,6 +117,10 @@ pub struct Target {
     /// The document and field level security of the reader (its documents are in
     /// `filter` already).
     pub security: Option<crate::xpack::security::dls::ReadSecurity>,
+    /// The loopback remote a cross-cluster search reads this shard through (`None`: a local
+    /// shard). Display only: `idx` keeps the real index, which security and queries on
+    /// `_index` read, as the remote's own shard would.
+    pub cluster: Option<Arc<str>>,
 }
 
 impl SearchRequest {
@@ -132,6 +136,14 @@ fn denies_scripts(security: Option<&crate::xpack::security::dls::ReadSecurity>) 
 }
 
 impl Target {
+    /// The index as responses name it: `alias:index` for a loopback remote's shard.
+    pub fn shown(&self) -> String {
+        match &self.cluster {
+            Some(alias) => format!("{alias}:{}", self.idx.name),
+            None => self.idx.name.clone(),
+        }
+    }
+
     /// Whose reads the target's queries make ([`query::Reader`]).
     pub fn reader(&self) -> query::Reader {
         query::Reader::of(self.security.clone())
@@ -585,7 +597,7 @@ pub fn shard_targets(cluster: &Cluster, st: &ClusterState, req: &SearchRequest) 
         }
         let boost = boosts.iter().find(|(names, _)| names.iter().any(|n| *n == idx.name)).map(|(_, b)| *b).unwrap_or(1.0);
         for i in ids {
-            out.push(Target { idx: idx.clone(), engine: engine.clone(), shard: engine.shard(i).clone(), filter: filter.clone(), boost, searcher: None, security: req.security.clone() });
+            out.push(Target { idx: idx.clone(), engine: engine.clone(), shard: engine.shard(i).clone(), filter: filter.clone(), boost, searcher: None, security: req.security.clone(), cluster: None });
         }
     }
     Ok(out)
@@ -1305,7 +1317,7 @@ fn query_phase_inner(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, 
         None => t.searcher()?,
     };
     let table = t.table();
-    let mut qctx = QueryCtx::new(cluster, st, &t.idx, &table, &searcher, req.now_ms, t.reader());
+    let mut qctx = QueryCtx::new(cluster, st, &t.idx, &table, &searcher, req.now_ms, t.reader()).in_remote(t.cluster.clone());
     qctx.shard = t.shard.id;
     qctx.runtime_mappings = src.runtime_mappings.clone();
     qctx.filter = t.filter.clone();
@@ -1439,7 +1451,7 @@ fn query_phase_inner(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, 
         Some(a) => {
             let mut lookup = aggs::Lookup::new(cluster, st, t, &table, &searcher, req.now_ms).with_parent_fields(&src.fields).with_runtime_mappings(src.runtime_mappings.clone());
             if !src.rescore.is_empty() {
-                lookup = lookup.with_rescore(prepare_rescore(&QueryCtx::new(cluster, st, &t.idx, &table, &searcher, req.now_ms, t.reader()), src));
+                lookup = lookup.with_rescore(prepare_rescore(&QueryCtx::new(cluster, st, &t.idx, &table, &searcher, req.now_ms, t.reader()).in_remote(t.cluster.clone()), src));
             }
             let max_buckets = st.metadata.cluster_setting("search.max_buckets").and_then(|v| v.parse::<usize>().ok());
             let max_buckets = match req.browser() {
@@ -1991,7 +2003,8 @@ fn request_cache_key(req: &SearchRequest, t: &Target) -> String {
     // The mapping and analysis settings decide how the request's queries are built
     // (`MappingLookup.cacheKey()`): an update to either busts the entries.
     let fls = t.security.as_ref().and_then(|s| s.fields(crate::xpack::security::dls::READ, &t.idx.name));
-    let mut k = format!("{:?}|{:?}|{:?}|{}|{}.{}", req.source, t.filter, fls, req.typed_keys, t.idx.mapping_version, t.idx.settings_version);
+    // A loopback's shard names its hits `alias:index` (`top_hits`): keyed apart from the local one.
+    let mut k = format!("{:?}|{:?}|{:?}|{}|{}.{}|{:?}", req.source, t.filter, fls, req.typed_keys, t.idx.mapping_version, t.idx.settings_version, t.cluster);
     if reads_other_documents(req, t) {
         // What it read lives in other indices: key on every refresh anywhere.
         k.push_str(&format!("|{}", crate::engine::refresh_epoch()));
@@ -2360,12 +2373,8 @@ impl Collector for ByRef<'_> {
 /// name), which `_shard_doc` values encode.
 fn shard_request_indices(targets: &[Target]) -> Vec<usize> {
     // `ShardId.compareTo` (shard number, index name, index uuid), then the cluster alias with
-    // the local cluster first (`SearchShardIterator`); a remote shard's index is
-    // `alias:index` here (local index names can't hold `:`).
-    let key = |t: &Target| {
-        let (alias, name) = t.idx.name.split_once(':').unwrap_or(("", t.idx.name.as_str()));
-        (t.shard.id, name.to_string(), t.idx.uuid.clone(), alias.to_string())
-    };
+    // the local cluster first (`SearchShardIterator`).
+    let key = |t: &Target| (t.shard.id, t.idx.name.clone(), t.idx.uuid.clone(), t.cluster.as_deref().unwrap_or("").to_string());
     let mut order: Vec<usize> = (0..targets.len()).collect();
     order.sort_by_cached_key(|&i| key(&targets[i]));
     let mut out = vec![0; targets.len()];
@@ -2797,7 +2806,7 @@ fn execute_targets(cluster: &Cluster, req: &SearchRequest, targets: &[Target]) -
     } else {
         let t = &targets[results[0].target];
         let table = t.table();
-        let mut qctx = QueryCtx::new(cluster, &st, &t.idx, &table, &results[0].searcher, req.now_ms, t.reader());
+        let mut qctx = QueryCtx::new(cluster, &st, &t.idx, &table, &results[0].searcher, req.now_ms, t.reader()).in_remote(t.cluster.clone());
         // Sorts on the request's runtime fields resolve them here too.
         qctx.runtime_mappings = src.runtime_mappings.clone();
         let b = sort::build(&qctx, &src.sort)?;
@@ -2808,7 +2817,7 @@ fn execute_targets(cluster: &Cluster, req: &SearchRequest, targets: &[Target]) -
     } else {
         let t = &targets[results[0].target];
         let table = t.table();
-        let mut qctx = QueryCtx::new(cluster, &st, &t.idx, &table, &results[0].searcher, req.now_ms, t.reader());
+        let mut qctx = QueryCtx::new(cluster, &st, &t.idx, &table, &results[0].searcher, req.now_ms, t.reader()).in_remote(t.cluster.clone());
         // Sorts on the request's runtime fields resolve them here too.
         qctx.runtime_mappings = src.runtime_mappings.clone();
         sort::build(&qctx, &src.sort)?.formats
@@ -2829,7 +2838,7 @@ fn execute_targets(cluster: &Cluster, req: &SearchRequest, targets: &[Target]) -
                 return f.clone();
             }
             let table = t.table();
-            let mut qctx = QueryCtx::new(cluster, &st, &t.idx, &table, &r.searcher, req.now_ms, t.reader());
+            let mut qctx = QueryCtx::new(cluster, &st, &t.idx, &table, &r.searcher, req.now_ms, t.reader()).in_remote(t.cluster.clone());
             // Sorts on the request's runtime fields resolve them here too.
             qctx.runtime_mappings = src.runtime_mappings.clone();
             let f = sort::build(&qctx, &src.sort).ok().map(|b| Arc::new(b.formats));
@@ -3063,7 +3072,7 @@ fn execute_targets(cluster: &Cluster, req: &SearchRequest, targets: &[Target]) -
                         top_hits: top_hits.clone(),
                         matched: r.total > 0,
                     };
-                    Some(profile::shard_os(&cluster.node.id, &t.idx.name, t.shard.id as usize, p, profile::fetch_os(&fetch_times[ri], &f)))
+                    Some(profile::shard_os(&cluster.node.id, &t.shown(), t.shard.id as usize, p, profile::fetch_os(&fetch_times[ri], &f)))
                 })
                 .collect();
             return obj! { "shards" => Value::Arr(shards) };
@@ -3079,7 +3088,7 @@ fn execute_targets(cluster: &Cluster, req: &SearchRequest, targets: &[Target]) -
                     ph.push("InnerHitsPhase");
                 }
                 let fetch = (fetch_times[ri].hits > 0).then(|| profile::fetch(&fetch_times[ri], stored_none, &ph));
-                Some(profile::shard(&cluster.node.id, &t.idx.name, t.shard.id as usize, p, fetch))
+                Some(profile::shard(&cluster.node.id, &t.shown(), t.shard.id as usize, p, fetch))
             })
             .collect();
         obj! { "shards" => Value::Arr(shards), "request" => profile::request(src, &req.indices) }
@@ -3329,10 +3338,10 @@ fn render_hit(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, t: &Tar
     let mut m = Map::new();
     let explain = src.explain == Some(true);
     if explain {
-        m.insert("_shard".into(), Value::Str(format!("[{}][{}]", t.idx.name, t.shard.id)));
+        m.insert("_shard".into(), Value::Str(format!("[{}][{}]", t.shown(), t.shard.id)));
         m.insert("_node".into(), Value::Str(cluster.node.id.clone()));
     }
-    m.insert("_index".into(), Value::Str(t.idx.name.clone()));
+    m.insert("_index".into(), Value::Str(t.shown()));
     let stored = r.searcher.stored(h.doc).map_err(crate::engine::convert::index_error)?;
     let id = hits::stored_id(&stored).unwrap_or_default();
     // `stored_fields: _none_` loads no stored fields at all, `_id` included; Elasticsearch's
@@ -3418,7 +3427,7 @@ fn render_hit(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, t: &Tar
         spec.semantic = crate::xpack::inference::highlight::probes(src.query.as_ref());
         // The stored fields read at the top serve the highlighter too.
         let source = crate::fetch::source_bytes(&stored).map(crate::fetch::parse_source).transpose()?;
-        let qctx = QueryCtx::new(cluster, st, &t.idx, &table, &r.searcher, req.now_ms, t.reader());
+        let qctx = QueryCtx::new(cluster, st, &t.idx, &table, &r.searcher, req.now_ms, t.reader()).in_remote(t.cluster.clone());
         let id = m.get("_id").and_then(Value::as_str).unwrap_or_default().to_string();
         let mut out = highlight::highlight_hit(&qctx, &spec, &r.query, source.as_ref(), &id, &r.searcher, Some(h.doc), Some(&stored), Some(&r.match_weights))?;
         // Percolated documents are highlighted with the stored query that matched them.
@@ -3458,7 +3467,7 @@ fn render_hit(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, t: &Tar
     if explain {
         let mut e = r.searcher.explain(&r.query, h.doc).map_err(crate::engine::convert::index_error)?;
         if !r.rescored.is_empty() {
-            let qctx = QueryCtx::new(cluster, st, &t.idx, &table, &r.searcher, req.now_ms, t.reader());
+            let qctx = QueryCtx::new(cluster, st, &t.idx, &table, &r.searcher, req.now_ms, t.reader()).in_remote(t.cluster.clone());
             e = explain_rescored(&qctx, &r.searcher, src, &r.rescored, h.doc, e)?;
         }
         m.insert("_explanation".into(), explanation_json(&e));
@@ -3466,7 +3475,7 @@ fn render_hit(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, t: &Tar
     if !r.inner_hits.is_empty() {
         let stored = r.searcher.stored(h.doc).map_err(crate::engine::convert::index_error)?;
         let source = crate::fetch::source_bytes(&stored).map(crate::fetch::parse_source).transpose()?;
-        let qctx = QueryCtx::new(cluster, st, &t.idx, &table, &r.searcher, req.now_ms, t.reader());
+        let qctx = QueryCtx::new(cluster, st, &t.idx, &table, &r.searcher, req.now_ms, t.reader()).in_remote(t.cluster.clone());
         let mut ih = inner::render(&qctx, t, r, h.doc, &hits::stored_id(&stored).unwrap_or_default(), source.as_ref(), vectors_kept(req).as_deref(), req.total_as_int)?;
         // `stored_fields: _none_` reaches nested inner hits (their sub-context reads the
         // search's stored fields context): they print no `_id` either.
@@ -3596,7 +3605,7 @@ fn complete_top_hit(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, t
     let index = mk.get("index").and_then(Value::as_str).unwrap_or_default();
     let shard = mk.get("shard").and_then(Value::as_i64).unwrap_or(-1);
     let Some(doc) = mk.get("doc").and_then(Value::as_i64).map(|d| d as u32) else { return Ok(()) };
-    let Some(r) = results.iter().find(|r| targets[r.target].idx.name == index && targets[r.target].shard.id as i64 == shard) else { return Ok(()) };
+    let Some(r) = results.iter().find(|r| targets[r.target].shown() == index && targets[r.target].shard.id as i64 == shard) else { return Ok(()) };
     let t = &targets[r.target];
     let table = t.table();
     let src = &req.source;
@@ -3619,7 +3628,7 @@ fn complete_top_hit(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, t
         if let Some(root) = root {
             let stored = r.searcher.stored(root).map_err(crate::engine::convert::index_error)?;
             let source = crate::fetch::source_bytes(&stored).map(crate::fetch::parse_source).transpose()?;
-            let qctx = QueryCtx::new(cluster, st, &t.idx, &table, &r.searcher, req.now_ms, t.reader());
+            let qctx = QueryCtx::new(cluster, st, &t.idx, &table, &r.searcher, req.now_ms, t.reader()).in_remote(t.cluster.clone());
             let id = m.get("_id").and_then(Value::as_str).unwrap_or_default().to_string();
             let out = highlight::highlight_hit(&qctx, &spec, &r.query, source.as_ref(), &id, &r.searcher, Some(root), Some(&stored), Some(&r.match_weights))?;
             if !out.is_empty() {
@@ -3652,7 +3661,7 @@ fn complete_top_hit(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, t
     }
     if mk.get("explain").is_some() {
         let e = r.searcher.explain(&r.query, doc).map_err(crate::engine::convert::index_error)?;
-        m.shift_insert(0, "_shard".into(), Value::Str(format!("[{}][{}]", t.idx.name, t.shard.id)));
+        m.shift_insert(0, "_shard".into(), Value::Str(format!("[{}][{}]", t.shown(), t.shard.id)));
         m.shift_insert(1, "_node".into(), Value::Str(cluster.node.id.clone()));
         insert_before(m, "_explanation", explanation_json(&e), &["inner_hits"]);
     }
@@ -3661,7 +3670,7 @@ fn complete_top_hit(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, t
     if !nested && !r.inner_hits.is_empty() {
         let stored = r.searcher.stored(doc).map_err(crate::engine::convert::index_error)?;
         let source = crate::fetch::source_bytes(&stored).map(crate::fetch::parse_source).transpose()?;
-        let qctx = QueryCtx::new(cluster, st, &t.idx, &table, &r.searcher, req.now_ms, t.reader());
+        let qctx = QueryCtx::new(cluster, st, &t.idx, &table, &r.searcher, req.now_ms, t.reader()).in_remote(t.cluster.clone());
         m.insert("inner_hits".into(), inner::render(&qctx, t, r, doc, &hits::stored_id(&stored).unwrap_or_default(), source.as_ref(), vectors_kept(req).as_deref(), req.total_as_int)?);
     }
     Ok(())
@@ -3945,7 +3954,7 @@ pub fn explanation_json(e: &search_index::Explanation) -> Value {
 pub fn shard_failure(node: &str, t: &Target, e: &EsError) -> Value {
     obj! {
         "shard" => t.shard.id as i64,
-        "index" => t.idx.name.as_str(),
+        "index" => t.shown(),
         "node" => node,
         "reason" => e.to_value(false),
     }
@@ -3963,7 +3972,7 @@ fn with_query_failures(e: EsError, node: &str, targets: &[Target], failures: &[(
     let mut seen: Vec<(String, String)> = Vec::new();
     for (i, f) in failures {
         let t = &targets[*i];
-        let key = (t.idx.name.clone(), format!("{}:{}", f.kind, f.reason()));
+        let key = (t.shown(), format!("{}:{}", f.kind, f.reason()));
         if seen.contains(&key) {
             continue;
         }
@@ -3981,7 +3990,7 @@ pub fn all_shards_failed(node: &str, targets: &[Target], failures: &[(usize, EsE
     for (i, e) in failures {
         let t = &targets[*i];
         // Grouped: one failure per (index, cause) like `ExceptionsHelper.groupBy`.
-        let key = (t.idx.name.clone(), format!("{}:{}", e.kind, e.reason()));
+        let key = (t.shown(), format!("{}:{}", e.kind, e.reason()));
         if seen.contains(&key) {
             continue;
         }
@@ -4419,7 +4428,7 @@ pub fn run(ctx: &Ctx, mut req: SearchRequest) -> EsResult<SearchOutcome> {
     if !errs.is_empty() {
         return Err(EsError::action_request_validation(&errs));
     }
-    let ccs = if ctx.cluster.dialect == crate::cluster::Dialect::Elasticsearch { crate::remote::plan(ctx.cluster, &st, &req.indices)? } else { None };
+    let ccs = crate::remote::plan(ctx.cluster, &st, &req.indices)?;
     let targets = match &ccs {
         None => {
             crate::meta::resolve::reject_remote(&req.indices)?;
@@ -4430,10 +4439,10 @@ pub fn run(ctx: &Ctx, mut req: SearchRequest) -> EsResult<SearchOutcome> {
     drop(st);
     let total = targets.len();
     let per_cluster: Vec<(Option<String>, usize)> = match &ccs {
-        Some(plan) => {
+        Some(_) => {
             let mut v: Vec<(Option<String>, usize)> = Vec::new();
             for t in &targets {
-                let c = t.idx.name.split_once(':').map(|(a, _)| a.to_string()).filter(|a| plan.remote.iter().any(|(r, _)| r == a));
+                let c = t.cluster.as_deref().map(str::to_string);
                 match v.iter_mut().find(|(k, _)| *k == c) {
                     Some(e) => e.1 += 1,
                     None => v.push((c, 1)),
@@ -4456,13 +4465,13 @@ pub fn run(ctx: &Ctx, mut req: SearchRequest) -> EsResult<SearchOutcome> {
     if let Some(plan) = &ccs {
         let mrt = ctx.query("ccs_minimize_roundtrips").is_none_or(|v| v != "false");
         ctx.cluster.ccs.record(plan, out.took_ms, out.failures.is_empty(), mrt);
-        out.clusters = Some(clusters_section(plan, &per_cluster, &out));
+        out.clusters = Some(crate::remote::clusters_for(ctx.cluster.dialect, clusters_section(plan, &per_cluster, &out)));
     }
     Ok(out)
 }
 
 /// The shards a cross-cluster search runs on: the local expressions' and, for each loopback
-/// remote, its expressions' shards with indices named `alias:index`.
+/// remote, its expressions' shards, shown as `alias:index` ([`Target::cluster`]).
 fn ccs_targets(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, plan: &crate::remote::Plan) -> EsResult<Vec<Target>> {
     let mut out = Vec::new();
     if let Some(local) = &plan.local {
@@ -4473,10 +4482,9 @@ fn ccs_targets(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, plan: 
     for (alias, exprs) in &plan.remote {
         let mut r = req.clone();
         r.indices = exprs.clone();
+        let alias: Arc<str> = Arc::from(alias.as_str());
         for mut t in shard_targets(cluster, st, &r)? {
-            let mut idx = (*t.idx).clone();
-            idx.name = format!("{alias}:{}", idx.name);
-            t.idx = Arc::new(idx);
+            t.cluster = Some(alias.clone());
             out.push(t);
         }
     }
@@ -4744,7 +4752,7 @@ pub fn explain(ctx: &Ctx) -> EsResult<Reply> {
         },
     };
     let fls = security.as_ref().and_then(|s| s.fields(crate::xpack::security::dls::READ, &idx.name));
-    let t = Target { idx: idx.clone(), engine: engine.clone(), shard: shard.clone(), filter, boost: 1.0, searcher: Some(searcher.clone()), security };
+    let t = Target { idx: idx.clone(), engine: engine.clone(), shard: shard.clone(), filter, boost: 1.0, searcher: Some(searcher.clone()), security, cluster: None };
     // The reader's fields only: those its field level security hides are unmapped.
     let table = t.table();
     let qctx = QueryCtx::new(ctx.cluster, &st, &idx, &table, &searcher, ctx.now_ms, t.reader());
@@ -4824,7 +4832,7 @@ fn complete_completion_options(cluster: &Cluster, st: &ClusterState, req: &Searc
                 let (Some(index), Some(id)) = (m.get("_index").and_then(Value::as_str), m.get("_id").and_then(Value::as_str)) else { continue };
                 let found = results.iter().find_map(|r| {
                     let t = &targets[r.target];
-                    if t.idx.name != index {
+                    if t.shown() != index {
                         return None;
                     }
                     find_doc(&r.searcher, id).map(|d| (r, t, d))
@@ -4833,7 +4841,7 @@ fn complete_completion_options(cluster: &Cluster, st: &ClusterState, req: &Searc
                 let table = t.table();
                 let stored = r.searcher.stored(doc).map_err(crate::engine::convert::index_error)?;
                 let source = crate::fetch::source_bytes(&stored).map(crate::fetch::parse_source).transpose()?;
-                let qctx = QueryCtx::new(cluster, st, &t.idx, &table, &r.searcher, req.now_ms, t.reader());
+                let qctx = QueryCtx::new(cluster, st, &t.idx, &table, &r.searcher, req.now_ms, t.reader()).in_remote(t.cluster.clone());
                 if let Some(hl) = &src.highlight {
                     let spec = match &mut spec {
                         Some(s) => s,
@@ -4852,7 +4860,7 @@ fn complete_completion_options(cluster: &Cluster, st: &ClusterState, req: &Searc
                 if src.explain == Some(true) && !suggest_only {
                     let e = r.searcher.explain(&r.query, doc).map_err(crate::engine::convert::index_error)?;
                     let at = m.get_index_of("_index").unwrap_or(0);
-                    m.shift_insert(at, "_shard".into(), Value::Str(format!("[{}][{}]", t.idx.name, t.shard.id)));
+                    m.shift_insert(at, "_shard".into(), Value::Str(format!("[{}][{}]", t.shown(), t.shard.id)));
                     m.shift_insert(at + 1, "_node".into(), Value::Str(cluster.node.id.clone()));
                     m.insert("_explanation".into(), explanation_json(&e));
                 }
@@ -4997,7 +5005,7 @@ pub fn count(ctx: &Ctx) -> EsResult<Reply> {
         let r = (|| -> EsResult<u64> {
             let searcher = t.searcher()?;
             let table = t.table();
-            let qctx = QueryCtx::new(ctx.cluster, &st, &t.idx, &table, &searcher, ctx.now_ms, t.reader());
+            let qctx = QueryCtx::new(ctx.cluster, &st, &t.idx, &table, &searcher, ctx.now_ms, t.reader()).in_remote(t.cluster.clone());
             check_inner_hit_names(&req.source)?;
             let q = shard_query(&qctx, t, &req.source).map_err(|e| query::shard_exception(&t.idx, e))?;
             match (req.source.min_score, req.source.terminate_after) {

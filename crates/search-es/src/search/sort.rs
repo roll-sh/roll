@@ -156,7 +156,7 @@ pub fn build(ctx: &QueryCtx, sorts: &[Sort]) -> EsResult<BuiltSort> {
                 // `_index` (`ConstantIndexFieldData`) and `constant_keyword` fields hold one value
                 // per shard: no doc has doc values, and every doc sorts as that value.
                 let constant = if field == "_index" {
-                    Some(Some(ctx.idx.name.clone()))
+                    Some(Some(ctx.shown_index()))
                 } else {
                     ctx.field(field).filter(|f| f.kind == Kind::ConstantKeyword).map(|f| f.constant_value.clone())
                 };

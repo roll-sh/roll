@@ -42,6 +42,12 @@ pub fn create(ctx: &Ctx) -> EsResult<Reply> {
     };
     let ka_value = TimeValue::parse(ka, "keep_alive")?;
     let ka = check_keep_alive(ctx, ka_value)?;
+    // OpenSearch 3.9 makes no point in time over a remote cluster's index (checked: a 400 from its
+    // null cluster alias, whatever the link).
+    let exprs = ctx.param("index").map(crate::meta::resolve::split_expressions).unwrap_or_default();
+    if crate::remote::links::split(ctx, &exprs)?.is_some_and(|s| !s.legs.is_empty()) {
+        return Err(EsError::illegal_argument("invalid id: [null]"));
+    }
     let mut req = crate::search::parse_request(ctx, None, None)?;
     req.source = Default::default();
     let st = ctx.state();

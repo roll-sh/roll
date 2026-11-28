@@ -65,10 +65,48 @@ pub fn target(address: &str, domain: Option<&str>) -> Option<String> {
     crate::control::valid_name(&label).then_some(label)
 }
 
-/// Whether `local` can name `target` as a remote at all: two Elasticsearch-flavor clusters, not the
-/// same one. Who may link them is the caller's decision ([`Control::link_remote`]).
+/// Whether `local` can name `target` as a remote at all: two clusters of one flavor (Elasticsearch
+/// and OpenSearch don't link to each other, as outside roll), not the same one. Who may link them
+/// is the caller's decision ([`Control::link_remote`]).
 pub fn linkable(local: &SearchCluster, target: &SearchCluster) -> bool {
-    local.id != target.id && local.flavor == "elasticsearch" && target.flavor == "elasticsearch"
+    local.id != target.id && local.flavor == target.flavor && matches!(local.flavor.as_str(), "elasticsearch" | "opensearch")
+}
+
+/// Whether a link's credentials are an OpenSearch-flavor link's user (else a `cross_cluster` key).
+fn is_os_link(key_id: &str) -> bool {
+    key_id.starts_with(search_es::xpack::security::opensearch::REMOTE_LINK_PREFIX)
+}
+
+/// An OpenSearch-flavor link's ceiling, the one role of its user on the target, from the link's
+/// `access` (`{"search": [{"names": [...]}]}`, every non-hidden index when unset): reading and the
+/// shard lookups a scroll's part asks for, on those names only, and the read-only composite
+/// requests; no other cluster or security
+/// permission.
+fn os_ceiling(access: Option<&Value>, local: &str) -> Result<Value> {
+    let bad = || ControlError::Invalid("access: an OpenSearch-flavor link takes {\"search\": [{\"names\": [...]}]}: index names or patterns, none hidden".into());
+    let mut names = Vec::new();
+    match access {
+        None => names.push("*".to_string()),
+        Some(Value::Object(a)) if a.len() == 1 => {
+            for e in a.get("search").and_then(Value::as_array).filter(|s| !s.is_empty()).ok_or_else(bad)? {
+                let e = e.as_object().filter(|e| e.len() == 1).ok_or_else(bad)?;
+                for n in e.get("names").and_then(Value::as_array).filter(|n| !n.is_empty()).ok_or_else(bad)? {
+                    // No templates (`${user.name}`, `${attr.…}`: filled from the identity the
+                    // linking cluster sends) and no `/regex/`: names and `*` patterns only.
+                    let n = n.as_str().filter(|n| !n.is_empty() && n.len() <= 255 && !n.starts_with(['.', '-', '_']) && !n.contains([':', ',', ' ', '$', '{', '}', '/'])).ok_or_else(bad)?;
+                    names.push(n.to_string());
+                }
+            }
+        }
+        Some(_) => return Err(bad()),
+    }
+    Ok(json!({
+        "description": format!("roll: remote cluster link from {local}"),
+        // The read-only composite requests (`_msearch`, scrolls), whose items are then checked
+        // on their indices.
+        "cluster_permissions": ["cluster_composite_ops_ro"],
+        "index_permissions": [{ "index_patterns": names, "allowed_actions": ["read", "indices:admin/shards/search_shards"] }],
+    }))
 }
 
 /// Who a link the operator (or an admin) made was made by.
@@ -141,6 +179,10 @@ impl Links for ControlLinks {
         }
         let Some(encoded) = c.open_remote_credentials(&row) else { return Err(unreachable(Some("its credentials can't be opened on this node"))) };
         let Some((key_id, secret)) = decode_key(&encoded) else { return Err(unreachable(Some("its credentials aren't an API key"))) };
+        // Made for the target's flavor: a cluster that switched since has the other kind.
+        if is_os_link(&key_id) != (t.flavor == "opensearch") {
+            return Err(unreachable(Some("its credentials were made for the cluster's other flavor: link it again through roll's API")));
+        }
         Ok(c.send_link(&t, &key_id, &secret, req).await)
     }
 }
@@ -215,7 +257,9 @@ impl Control {
     async fn send_link(&self, t: &SearchCluster, key_id: &str, secret: &str, mut req: EsRequest) -> EsResponse {
         link_headers(&mut req);
         let token = base64::engine::general_purpose::STANDARD.encode(format!("{key_id}@{}:{secret}", t.name));
-        req.headers.push(("Authorization".into(), format!("ApiKey {token}")));
+        // An OpenSearch-flavor link's user signs in with Basic auth, a cross-cluster key as itself.
+        let scheme = if is_os_link(key_id) { "Basic" } else { "ApiKey" };
+        req.headers.push(("Authorization".into(), format!("{scheme} {token}")));
         self.on_owner(&t.name, req).await
     }
 
@@ -274,7 +318,16 @@ impl Control {
             Ok(t) if may_admin(&t) && linkable(&c, &t) => t,
             _ => return Err(no_target(target)),
         };
+        let os = t.flavor == "opensearch";
         let (key_id, encoded, minted) = match api_key {
+            Some(_) if os => return Err(ControlError::Invalid("api_key: OpenSearch-flavor clusters have no cross-cluster API keys; leave it out and roll makes the link's user on the target".into())),
+            None if os => {
+                let made_on = t.id.clone();
+                let (name, password) = self
+                    .os_user(&t, search_es::xpack::security::opensearch::REMOTE_LINK_PREFIX, Some(os_ceiling(access.as_ref(), &c.name)?), &format!("roll: remote cluster link from {} as {alias}", c.name), None, &[(search_es::xpack::security::opensearch::REMOTE_LINK_ATTRIBUTE, made_on.as_str())])
+                    .await?;
+                (name.clone(), base64::engine::general_purpose::STANDARD.encode(format!("{name}:{password}")), true)
+            }
             Some(k) => {
                 let Some((key_id, secret)) = decode_key(k) else { return Err(ControlError::Invalid("api_key: the encoded cross-cluster API key (base64 of id:secret)".into())) };
                 // It must authenticate on the target as one of its cross-cluster keys.
@@ -309,8 +362,10 @@ impl Control {
         let replaced = self.store.put_remote(&row).await?;
         let mut settings = serde_json::Map::new();
         let prefix = format!("cluster.remote.{alias}");
+        // OpenSearch takes a transport address (`host:port`; its default port).
+        let address = if os { format!("{}:9300", t.name) } else { t.name.clone() };
         settings.insert(format!("{prefix}.mode"), json!("proxy"));
-        settings.insert(format!("{prefix}.proxy_address"), json!(t.name));
+        settings.insert(format!("{prefix}.proxy_address"), json!(address));
         settings.insert(format!("{prefix}.seeds"), Value::Null);
         if let Some(s) = skip_unavailable {
             settings.insert(format!("{prefix}.skip_unavailable"), json!(s.to_string()));
@@ -328,10 +383,14 @@ impl Control {
             let v: Value = serde_json::from_slice(&r.body).unwrap_or(Value::Null);
             return Err(ControlError::Internal(anyhow::anyhow!("setting remote {alias} of cluster {} failed ({}): {}", c.name, r.status, v["error"]["reason"])));
         }
-        if let Some(old) = replaced.filter(|o| o.minted && o.key_id != key_id) {
-            let _ = self.revoke_remote_key(&old.target_id, &old.key_id).await;
+        // The credentials it replaced go now; a failure is the caller's to know (the new link
+        // works, the old user or key is still on the target), never swallowed.
+        if let Some(old) = replaced.filter(|o| o.minted && o.key_id != key_id)
+            && let Err(e) = self.revoke_remote_key(&old.target_id, &old.key_id).await
+        {
+            return Err(ControlError::Internal(anyhow::anyhow!("remote {alias} of cluster {} is linked with new credentials, but its old ones ({}) couldn't be revoked on the target: {e}", c.name, old.key_id)));
         }
-        let mut out = json!({ "alias": alias, "cluster": t.name, "cluster_id": t.id, "mode": "proxy", "proxy_address": t.name, "key_id": key_id, "minted": minted });
+        let mut out = json!({ "alias": alias, "cluster": t.name, "cluster_id": t.id, "mode": "proxy", "proxy_address": address, "key_id": key_id, "minted": minted });
         if let Some(s) = skip_unavailable {
             out["skip_unavailable"] = json!(s);
         }
@@ -343,6 +402,11 @@ impl Control {
     pub async fn unlink_remote(&self, id: &str, alias: &str) -> Result<()> {
         let c = self.get(id).await?;
         let Some(row) = self.store.remote(&c.id, alias).await? else { return Err(ControlError::NotFound(format!("cluster {} has no remote {alias}", c.name))) };
+        // The target's key or user first: a failure leaves the link as it was, for a retry
+        // (gone already counts as revoked).
+        if row.minted {
+            self.revoke_remote_key(&row.target_id, &row.key_id).await?;
+        }
         let mut settings = serde_json::Map::new();
         for k in ["mode", "proxy_address", "seeds", "skip_unavailable", "server_name", "proxy_socket_connections", "node_connections", "transport.ping_schedule", "transport.compress"] {
             settings.insert(format!("cluster.remote.{alias}.{k}"), Value::Null);
@@ -352,9 +416,6 @@ impl Control {
             return Err(ControlError::Internal(anyhow::anyhow!("removing remote {alias} of cluster {} failed ({})", c.name, r.status)));
         }
         self.store.delete_remote(&c.id, alias).await?;
-        if row.minted {
-            self.revoke_remote_key(&row.target_id, &row.key_id).await?;
-        }
         Ok(())
     }
 
@@ -367,13 +428,30 @@ impl Control {
         Ok(())
     }
 
-    /// Revokes cross-cluster key `key_id` on cluster `target_id` (gone already counts).
+    /// Revokes cross-cluster key `key_id` on cluster `target_id`, or an OpenSearch-flavor link's
+    /// user (gone already counts). On a deleted target the revoke is kept for its restore
+    /// (`keep_revoke`, as `revoke_link` keeps one), which would bring the key or user back.
     async fn revoke_remote_key(&self, target_id: &str, key_id: &str) -> Result<()> {
         let t = match self.get(target_id).await {
             Ok(t) => t,
-            Err(ControlError::NotFound(_)) => return Ok(()),
+            Err(ControlError::NotFound(_)) => {
+                let kept = if is_os_link(key_id) { format!("osuser:{key_id}") } else { format!("key:{key_id}") };
+                return self.keep_revoke(target_id, &kept).await.map(drop);
+            }
             Err(e) => return Err(e),
         };
+        if is_os_link(key_id) {
+            // An OpenSearch-flavor link's user and its one role.
+            let api = "/_plugins/_security/api";
+            // The user, then its one role (gone already counts, so a retry finishes the job).
+            let gone = |status: u16| status < 300 || status == 404;
+            let r = self.call(&t, EsRequest::new("DELETE", &format!("{api}/internalusers/{}", urlencoding::encode(key_id)))).await;
+            if !gone(r.status) {
+                return Err(ControlError::Internal(anyhow::anyhow!("removing remote link user {key_id} of cluster {} failed ({})", t.name, r.status)));
+            }
+            let r = self.call(&t, EsRequest::new("DELETE", &format!("{api}/roles/{}", urlencoding::encode(key_id)))).await;
+            return if gone(r.status) { Ok(()) } else { Err(ControlError::Internal(anyhow::anyhow!("removing remote link role {key_id} of cluster {} failed ({})", t.name, r.status))) };
+        }
         let body = serde_json::to_vec(&json!({ "ids": [key_id] })).unwrap_or_default();
         let r = self.call(&t, EsRequest::json("DELETE", "/_security/api_key", body)).await;
         if r.status < 300 || r.status == 404 { Ok(()) } else { Err(ControlError::Internal(anyhow::anyhow!("revoking remote key {key_id} of cluster {} failed ({})", t.name, r.status))) }

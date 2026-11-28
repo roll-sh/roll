@@ -5516,6 +5516,14 @@ async fn cross_cluster_search_between_linked_clusters() {
         let r = e.http.post(format!("{}/_msearch", e.es)).basic_auth(&user, Some("pass-word-1")).header("content-type", "application/x-ndjson").body("{\"index\":\"*:secret\"}\n{}\n").send().await.unwrap();
         let m = r.text().await.unwrap();
         assert!(!m.contains("secret doc"), "{m}");
+        // A loopback's part is authorized as local names, never as the literal `me:secret` a role
+        // on `me*` would match; a wildcard there is narrowed to what the user may read.
+        let (s, v) = e.es(&user, "pass-word-1", Method::GET, "/me:*/_search", None).await;
+        let shown: Vec<&str> = v["hits"]["hits"].as_array().map(|h| h.iter().filter_map(|h| h["_index"].as_str()).collect()).unwrap_or_default();
+        assert_eq!((s, shown), (200, vec!["me:app"]), "{v}");
+        assert_eq!(e.es(&app, &app_pw, Method::PUT, "/_security/role/me_star", Some(json!({ "indices": [{ "names": ["me*"], "privileges": ["read"] }] }))).await.0, 200);
+        assert_eq!(e.es(&app, &app_pw, Method::PUT, "/_security/user/m", Some(json!({ "password": "pass-word-2", "roles": ["me_star"] }))).await.0, 200);
+        assert_eq!(e.es(&format!("m@{app}"), "pass-word-2", Method::GET, "/me:secret/_search", None).await.0, 403);
     }
 
     // A remote link holds by its maker's rights: once roll-access says they may no longer administer
@@ -8123,4 +8131,178 @@ async fn otlp_logs_land_in_otel_data_streams_with_an_otel_key() {
         let (_, v) = e.es(&u, &p, Method::GET, "/_data_stream/logs-*", None).await;
         assert_eq!(v["data_streams"], json!([]), "no data stream was made: {v}");
     }
+}
+
+/// A request to the Elasticsearch port with a cluster's own credentials.
+async fn es_as(e: &Env, c: &(String, String), method: reqwest::Method, p: &str, body: Option<Value>) -> (u16, Value) {
+    e.es(&c.0, &c.1, method, p, body).await
+}
+
+/// OpenSearch-flavor clusters link as OpenSearch's do (docs/search/architecture.md,
+/// "Cross-cluster search"): the remote maps the user sent with its own mappings, within the
+/// link's ceiling. A user mapped only on the local cluster is refused there (the whole request:
+/// `skip_unavailable` is off by default), a mapped one reads what the remote maps it to, DLS
+/// variables take the local user's attributes, the link's user never signs in by itself, a
+/// point in time doesn't span clusters, and unlinking removes the user on the remote.
+#[tokio::test]
+async fn opensearch_flavor_clusters_link_with_the_remotes_own_mappings() {
+    use reqwest::Method;
+    let e = env().await;
+    let near = creds(&e.post("/v1/search/clusters", json!({"name": "os-near", "flavor": "opensearch"})).await);
+    let far = creds(&e.post("/v1/search/clusters", json!({"name": "os-far", "flavor": "opensearch"})).await);
+    for (p, doc) in [("/docs/_doc/1", json!({"tenant": "a", "body": "one"})), ("/docs/_doc/2", json!({"tenant": "b", "body": "two"})), ("/secret/_doc/1", json!({"tenant": "a"}))] {
+        assert_eq!(es_as(&e, &far, Method::PUT, &format!("{p}?refresh=true"), Some(doc)).await.0, 201);
+    }
+    let api = "/_plugins/_security/api";
+    let dls = json!({"index_permissions": [{"index_patterns": ["docs"], "dls": "{\"term\":{\"tenant\":\"${attr.internal.tenant}\"}}", "allowed_actions": ["read"]}]});
+    for (c, p, body) in [
+        (&near, "internalusers/alice", json!({"password": "Zq7-Mountain-River-91"})),
+        (&near, "internalusers/bob", json!({"password": "Zq7-Mountain-River-92"})),
+        (&near, "internalusers/carol", json!({"password": "Zq7-Mountain-River-93", "attributes": {"tenant": "a"}})),
+        (&near, "rolesmapping/readall", json!({"users": ["alice"]})),
+        (&far, "rolesmapping/readall", json!({"users": ["bob"]})),
+        (&far, "roles/tenant_docs", dls),
+        (&far, "rolesmapping/tenant_docs", json!({"users": ["carol"]})),
+    ] {
+        let (s, v) = es_as(&e, c, Method::PUT, &format!("{api}/{p}"), Some(body)).await;
+        assert!(s < 300, "{p}: {s} {v}");
+    }
+    // Elasticsearch and OpenSearch clusters don't link to each other.
+    e.post("/v1/search/clusters", json!({"name": "es-x"})).await;
+    let (s, _) = e.call(Method::PUT, "/v1/search/clusters/os-near/remotes/x", Some(json!({"cluster": "es-x"}))).await;
+    assert_eq!(s, 404);
+    let (s, link) = e.call(Method::PUT, "/v1/search/clusters/os-near/remotes/r", Some(json!({"cluster": "os-far", "access": {"search": [{"names": ["docs*"]}]}}))).await;
+    assert_eq!((s, link["minted"].as_bool()), (200, Some(true)), "{link}");
+    let user = link["key_id"].as_str().unwrap().to_string();
+    assert!(user.starts_with("roll-remote-"), "{link}");
+
+    // The owner: the ceiling, in OpenSearch's `_clusters` shape.
+    let (s, v) = es_as(&e, &near, Method::GET, "/r:docs/_search", None).await;
+    assert_eq!((s, v["hits"]["total"]["value"].as_i64()), (200, Some(2)), "{v}");
+    assert_eq!(v["_clusters"], json!({"total": 1, "successful": 1, "skipped": 0}), "{v}");
+    let (s, v) = es_as(&e, &near, Method::GET, "/r:secret/_search", None).await;
+    assert_eq!((s, v["error"]["type"].as_str()), (403, Some("security_exception")), "outside the ceiling: {v}");
+    let (_, info) = es_as(&e, &near, Method::GET, "/_remote/info", None).await;
+    assert_eq!(info["r"]["connected"], true, "{info}");
+    // Users: the remote's mappings decide, with the local user's attributes.
+    let (s, v) = e.es("alice@os-near", "Zq7-Mountain-River-91", Method::GET, "/r:docs/_search", None).await;
+    assert_eq!(s, 403, "{v}");
+    assert_eq!(v["error"]["reason"], "no permissions for [indices:data/read/search] and User [name=alice, backend_roles=[], requestedTenant=null]", "{v}");
+    let (s, v) = e.es("bob@os-near", "Zq7-Mountain-River-92", Method::GET, "/r:docs/_search", None).await;
+    assert_eq!((s, v["hits"]["total"]["value"].as_i64()), (200, Some(2)), "{v}");
+    let (s, v) = e.es("carol@os-near", "Zq7-Mountain-River-93", Method::GET, "/r:docs/_search", None).await;
+    assert_eq!((s, v["hits"]["hits"][0]["_source"]["tenant"].as_str(), v["hits"]["total"]["value"].as_i64()), (200, Some("a"), Some(1)), "{v}");
+    // Skipped instead, once the remote may be.
+    assert_eq!(es_as(&e, &near, Method::PUT, "/_cluster/settings", Some(json!({"persistent": {"cluster.remote.r.skip_unavailable": true}}))).await.0, 200);
+    let (s, v) = e.es("alice@os-near", "Zq7-Mountain-River-91", Method::GET, "/r:docs/_search", None).await;
+    assert_eq!((s, &v["_clusters"]), (200, &json!({"total": 1, "successful": 0, "skipped": 1})), "{v}");
+    let (s, v) = es_as(&e, &near, Method::POST, "/r:docs/_search/point_in_time?keep_alive=1m", None).await;
+    assert_eq!((s, v["error"]["reason"].as_str()), (400, Some("invalid id: [null]")), "{v}");
+
+    // A loopback reads this cluster's own indices: authorized as them, in every API that plans
+    // remotes. A user with no index permission is refused; the owner reads.
+    let transport = |c: &'static str| {
+        let e = &e;
+        async move {
+            let (_, n) = e.call(Method::POST, &format!("/v1/search/clusters/{c}/request"), Some(json!({"method": "GET", "path": "/_nodes/_local"}))).await;
+            let n = body(&n);
+            n["nodes"].as_object().unwrap().values().next().unwrap()["transport_address"].as_str().unwrap().to_string()
+        }
+    };
+    let loopback = |alias: &str, address: String| json!({"persistent": {format!("cluster.remote.{alias}.mode"): "proxy", format!("cluster.remote.{alias}.proxy_address"): address}});
+    assert_eq!(es_as(&e, &near, Method::PUT, "/_cluster/settings", Some(loopback("loop", transport("os-near").await))).await.0, 200);
+    assert_eq!(es_as(&e, &near, Method::PUT, "/secret-near/_doc/1?refresh=true", Some(json!({"x": 1, "email": "a@example.com", "note": "hidden"}))).await.0, 201);
+    assert_eq!(es_as(&e, &near, Method::PUT, "/other-near/_doc/1?refresh=true", Some(json!({"x": 2}))).await.0, 201);
+    assert!(es_as(&e, &near, Method::PUT, &format!("{api}/internalusers/nobody"), Some(json!({"password": "Zq7-Mountain-River-88"}))).await.0 < 300);
+    // Remote expressions read as the search reads them: `-*:*` names the aliases starting with
+    // `-` (OpenSearch has no remote exclusions, and takes such an alias), and none holds `:`.
+    assert_eq!(es_as(&e, &near, Method::PUT, "/_cluster/settings", Some(loopback("-loop", transport("os-near").await))).await.0, 200);
+    assert_eq!(es_as(&e, &near, Method::PUT, "/_cluster/settings", Some(loopback("a:b", transport("os-near").await))).await.0, 400);
+    for p in ["/loop:*/_search", "/loop:*,-*:*/_search", "/-loop:secret-near/_search", "/loop:secret*/_count", "/loop:*/_field_caps?fields=x", "/_cat/indices/loop:*"] {
+        let (s, v) = e.es("nobody@os-near", "Zq7-Mountain-River-88", Method::GET, p, None).await;
+        assert_eq!(s, 403, "{p}: {v}");
+    }
+    // An `_msearch` item: a user who may run `_msearch` and read `secret-near` only.
+    let partial = json!({"cluster_permissions": ["cluster_composite_ops_ro"], "index_permissions": [{"index_patterns": ["secret-near"], "allowed_actions": ["read"]}]});
+    for (p, body) in [("roles/partial", partial), ("internalusers/partial", json!({"password": "Zq7-Mountain-River-87"})), ("rolesmapping/partial", json!({"users": ["partial"]}))] {
+        assert!(es_as(&e, &near, Method::PUT, &format!("{api}/{p}"), Some(body)).await.0 < 300, "{p}");
+    }
+    let r = e.http.post(format!("{}/_msearch", e.es)).basic_auth("partial@os-near", Some("Zq7-Mountain-River-87")).header("content-type", "application/x-ndjson").body("{\"index\":\"loop:*\"}\n{}\n{\"index\":\"loop:secret-near\"}\n{}\n").send().await.unwrap();
+    let m: Value = r.json().await.unwrap();
+    assert_eq!((m["responses"][0]["error"]["type"].as_str(), m["responses"][1]["hits"]["total"]["value"].as_i64()), (Some("security_exception"), Some(1)), "{m}");
+    let (s, v) = es_as(&e, &near, Method::GET, "/loop:secret-near/_search", None).await;
+    assert_eq!((s, v["hits"]["total"]["value"].as_i64()), (200, Some(1)), "{v}");
+    // Through a loopback, a user's field and document security on the indices still apply.
+    let fls = json!({"index_permissions": [{"index_patterns": ["secret-near", "other-near"], "fls": ["x", "email"], "masked_fields": ["email"], "allowed_actions": ["read"]}]});
+    // A role's `_index` is the real index's name, through a loopback too.
+    let dls = json!({"index_permissions": [{"index_patterns": ["secret-near", "other-near"], "dls": "{\"bool\":{\"must_not\":{\"term\":{\"_index\":\"secret-near\"}}}}", "allowed_actions": ["read"]}]});
+    for (p, body) in [
+        ("roles/near_fls", fls),
+        ("internalusers/masky", json!({"password": "Zq7-Mountain-River-86"})),
+        ("rolesmapping/near_fls", json!({"users": ["masky"]})),
+        ("roles/near_dls", dls),
+        ("internalusers/dlsy", json!({"password": "Zq7-Mountain-River-85"})),
+        ("rolesmapping/near_dls", json!({"users": ["dlsy"]})),
+    ] {
+        assert!(es_as(&e, &near, Method::PUT, &format!("{api}/{p}"), Some(body)).await.0 < 300, "{p}");
+    }
+    let source = |user: &'static str, pw: &'static str, p: &'static str| {
+        let e = &e;
+        async move {
+            let (s, v) = e.es(user, pw, Method::GET, p, None).await;
+            assert_eq!(s, 200, "{p}: {v}");
+            v["hits"]["hits"].as_array().unwrap().iter().map(|h| h["_source"].clone()).collect::<Vec<Value>>()
+        }
+    };
+    let local = source("masky@os-near", "Zq7-Mountain-River-86", "/secret-near/_search").await;
+    assert!(local.len() == 1 && local[0].get("note").is_none() && local[0]["email"] != "a@example.com", "{local:?}");
+    assert_eq!(source("masky@os-near", "Zq7-Mountain-River-86", "/loop:secret-near/_search").await, local);
+    let local = source("dlsy@os-near", "Zq7-Mountain-River-85", "/secret-near,other-near/_search").await;
+    assert_eq!(local, vec![json!({"x": 2})]);
+    assert_eq!(source("dlsy@os-near", "Zq7-Mountain-River-85", "/loop:secret-near,loop:other-near/_search").await, local);
+    // The remote's refusals below as the remote's 403 (skip_unavailable off again).
+    assert_eq!(es_as(&e, &near, Method::PUT, "/_cluster/settings", Some(json!({"persistent": {"cluster.remote.r.skip_unavailable": false}}))).await.0, 200);
+    // Across a real link, the remote's field security for the user sent.
+    let far_fls = json!({"index_permissions": [{"index_patterns": ["docs"], "fls": ["tenant"], "allowed_actions": ["read"]}]});
+    for (c, p, body) in [
+        (&far, "roles/far_fls", far_fls),
+        (&far, "rolesmapping/far_fls", json!({"users": ["fran"]})),
+        (&near, "internalusers/fran", json!({"password": "Zq7-Mountain-River-84"})),
+    ] {
+        assert!(es_as(&e, c, Method::PUT, &format!("{api}/{p}"), Some(body)).await.0 < 300, "{p}");
+    }
+    let (s, v) = e.es("fran@os-near", "Zq7-Mountain-River-84", Method::GET, "/r:docs/_search", None).await;
+    let sources: Vec<Value> = v["hits"]["hits"].as_array().map(|h| h.iter().map(|h| h["_source"].clone()).collect()).unwrap_or_default();
+    assert!(s == 200 && sources.len() == 2 && sources.iter().all(|x| x.get("body").is_none() && x.get("tenant").is_some()), "{s} {v}");
+    // A link's request names no further remote, the remote's loopback included.
+    assert_eq!(es_as(&e, &far, Method::PUT, "/_cluster/settings", Some(loopback("back", transport("os-far").await))).await.0, 200);
+    let (s, v) = es_as(&e, &near, Method::GET, "/r:back:docs/_search", None).await;
+    assert_eq!(s, 403, "{v}");
+    // Hidden and dot-prefixed indices of the remote are out of any ceiling; so is inference.
+    assert_eq!(es_as(&e, &far, Method::PUT, "/docs-hidden", Some(json!({"settings": {"index.hidden": true}}))).await.0, 200);
+    assert_eq!(es_as(&e, &far, Method::PUT, "/.docs-dot", Some(json!({"aliases": {"docs-alias-of-dot": {}}}))).await.0, 200);
+    for p in ["/r:docs-hidden/_search", "/r:docs*/_search?expand_wildcards=all", "/r:docs-alias-of-dot/_search"] {
+        let (s, v) = es_as(&e, &near, Method::GET, p, None).await;
+        assert_eq!(s, 403, "{p}: {v}");
+    }
+    let sem = json!({"mappings": {"properties": {"t": {"type": "semantic_text", "inference_id": ".multilingual-e5-small-elasticsearch"}}}});
+    assert_eq!(es_as(&e, &far, Method::PUT, "/docs-sem", Some(sem)).await.0, 200);
+    // A link's query runs no inference there (the flavor runs none for a query anyway).
+    let (s, v) = es_as(&e, &near, Method::POST, "/r:docs-sem/_search", Some(json!({"query": {"semantic": {"field": "t", "query": "a"}}}))).await;
+    assert_eq!(s, 400, "{v}");
+    // The ceiling takes names and `*` patterns only.
+    for names in [json!(["${user.name}"]), json!(["/docs.*/"])] {
+        let (s, v) = e.call(Method::PUT, "/v1/search/clusters/os-near/remotes/bad", Some(json!({"cluster": "os-far", "access": {"search": [{"names": names}]}}))).await;
+        assert_eq!(s, 400, "{v}");
+    }
+
+    // The link's user signs in only on roll's own link requests, whatever its password.
+    let bound = json!({"password": "Zq7-Mountain-River-90", "opendistro_security_roles": [user], "attributes": {"roll_remote_link": link["cluster_id"]}});
+    let (s, v) = es_as(&e, &far, Method::PUT, &format!("{api}/internalusers/{user}"), Some(bound)).await;
+    assert!(s < 300, "{v}");
+    assert_eq!(e.es(&format!("{user}@os-far"), "Zq7-Mountain-River-90", Method::GET, "/docs/_search", None).await.0, 401);
+
+    // Unlinked: the user is gone on the remote.
+    assert_eq!(e.call(Method::DELETE, "/v1/search/clusters/os-near/remotes/r", None).await.0, 204);
+    assert_eq!(es_as(&e, &far, Method::GET, &format!("{api}/internalusers/{user}"), None).await.0, 404);
 }

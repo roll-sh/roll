@@ -108,6 +108,9 @@ pub async fn rewrite(ctx: &Ctx<'_>, q: &mut Query, targets: &Targets, size: Opti
             distinct.push(t);
         }
     }
+    if !distinct.is_empty() {
+        super::refuse_over_link(ctx)?;
+    }
     admit(ctx, targets, &distinct)?;
     let mut embedded: Vec<((String, String), super::results::Results)> = Vec::new();
     for Wanted { id, text, what, field } in distinct {

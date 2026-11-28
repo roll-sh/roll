@@ -314,6 +314,12 @@ pub fn authenticate(ctx: &Ctx) -> EsResult<()> {
     let req = ctx.request;
     // A linked remote cluster's request: the node keeps the header only on roll's own calls.
     if let Some(access) = req.header(crate::remote::links::REMOTE_ACCESS_HEADER) {
+        // OpenSearch: the link's own internal user ([`opensearch::authenticate_link`]).
+        if ctx.cluster.dialect == crate::cluster::Dialect::OpenSearch {
+            let p = req.header("authorization").and_then(|h| authenticate_native_link(ctx.cluster, h, access)).ok_or_else(opensearch::unauthorized)?;
+            let _ = ctx.principal.set(p);
+            return Ok(());
+        }
         // Cross-cluster keys are Elasticsearch's ([`es_credentials`]).
         if !es_credentials(ctx.cluster) {
             return Err(opensearch::unauthorized());
@@ -476,6 +482,15 @@ pub fn authenticate_native(cluster: &Cluster, header: &str) -> Option<Principal>
 /// header): a `cross_cluster` key of this cluster only.
 pub fn authenticate_native_link(cluster: &Cluster, header: &str, access: &str) -> Option<Principal> {
     let (scheme, value) = header.trim().split_once(' ')?;
+    // OpenSearch: a link's own internal user, for the user it was sent for.
+    if cluster.dialect == crate::cluster::Dialect::OpenSearch {
+        if !scheme.eq_ignore_ascii_case("basic") {
+            return None;
+        }
+        let text = String::from_utf8(b64_decode(value.trim()).ok()?).ok()?;
+        let (user, password) = text.split_once(':')?;
+        return opensearch::authenticate_link(cluster, user, password, access);
+    }
     if !scheme.eq_ignore_ascii_case("apikey") || !es_credentials(cluster) {
         return None;
     }
@@ -502,6 +517,28 @@ pub struct Effective {
     pub failure_parents: std::collections::HashMap<String, String>,
     /// The cluster's dialect ([`Effective::restricted`]).
     pub dialect: crate::cluster::Dialect,
+    /// A linked OpenSearch cluster's user: the names it never reaches, whatever a role's or the
+    /// ceiling's patterns say ([`off_limits_to_links`]). `None` for everyone else.
+    pub off_limits: Option<std::collections::HashSet<String>>,
+}
+
+/// What a linked cluster's user never reaches here: dot-prefixed, hidden and restricted indices,
+/// hidden or system data streams, and every alias over any of them. A data stream's backing
+/// index (`.ds-…`) is reached through its data stream, so only a reachable one's are.
+fn off_limits_to_links(st: &crate::meta::ClusterState) -> std::collections::HashSet<String> {
+    let mut off = std::collections::HashSet::new();
+    for (name, idx) in st.metadata.indices.iter() {
+        if name.starts_with('.') || idx.is_hidden() || privileges::is_restricted(name) {
+            off.insert(name.clone());
+            off.extend(idx.aliases.keys().cloned());
+        }
+    }
+    for ds in st.metadata.data_streams.values() {
+        if ds.hidden || ds.system || ds.name.starts_with('.') {
+            off.insert(ds.name.clone());
+        }
+    }
+    off
 }
 
 impl Effective {
@@ -552,7 +589,19 @@ impl Effective {
         self.allows(|p| p.allows_cluster(action))
     }
 
+    /// Whether `index` is off limits to the principal ([`Effective::off_limits`]): a name in the
+    /// set, or a dot-prefixed name that isn't a reachable data stream's backing index.
+    fn off_limits(&self, index: &str) -> bool {
+        let Some(off) = &self.off_limits else { return false };
+        // A data stream's `::failures` or `::data` selector is the data stream's.
+        let index = index.strip_suffix("::failures").or_else(|| index.strip_suffix("::data")).unwrap_or(index);
+        off.contains(index) || (index.starts_with('.') && self.parents.get(index).or_else(|| self.failure_parents.get(index)).is_none_or(|ds| off.contains(ds)))
+    }
+
     pub fn allows_index(&self, action: &str, index: &str) -> bool {
+        if self.off_limits(index) {
+            return false;
+        }
         // A data stream's failure store (`logs::failures`, or one of its `.fs-` indices) by the
         // failure store privileges alone, as Elasticsearch authorizes it: `read` on the data
         // stream doesn't reach it.
@@ -591,6 +640,9 @@ impl Effective {
     }
 
     pub fn has_index_privilege(&self, privilege: &str, index: &str) -> bool {
+        if self.off_limits(index) {
+            return false;
+        }
         if let Some(behind) = self.history_aliases.get(index)
             && !behind.iter().all(|i| self.allows(|p| p.has_index_privilege(privilege, i)))
         {
@@ -707,7 +759,8 @@ pub fn effective(file: &FileRoles, st: &crate::meta::ClusterState, p: &Principal
             let d = tokens::service_account_descriptor(&p.username).unwrap_or(Value::Null);
             (vec![Permission::of_descriptor(&d)], None)
         }
-        AuthKind::OpenSearch(id) => (opensearch::permissions(st, p, id), None),
+        // A link's user: what this cluster gives the user sent, within the link's ceiling.
+        AuthKind::OpenSearch(id) => (opensearch::permissions(st, p, id), id.link.as_ref().map(|l| opensearch::role_permissions(st, &l.ceiling, p, id))),
         _ => (permissions_of_roles(file, st, &p.roles), None),
     };
     let parents = st.metadata.data_streams.values().flat_map(|d| d.indices.iter().map(|i| (i.clone(), d.name.clone()))).collect();
@@ -717,8 +770,9 @@ pub fn effective(file: &FileRoles, st: &crate::meta::ClusterState, p: &Principal
             history_aliases.entry(alias.clone()).or_default().push(name.clone());
         }
     }
+    let off_limits = matches!(&p.kind, AuthKind::OpenSearch(id) if id.link.is_some()).then(|| off_limits_to_links(st));
     let failure_parents = st.metadata.data_streams.values().flat_map(|d| d.failure_indices.iter().map(|i| (i.clone(), d.name.clone()))).collect();
-    Effective { own, limited_by, also, parents, history_aliases, failure_parents, dialect: st.metadata.dialect }
+    Effective { own, limited_by, also, parents, history_aliases, failure_parents, dialect: st.metadata.dialect, off_limits }
 }
 
 /// Read APIs whose wildcard index expressions Elasticsearch expands to the indices the user
@@ -1386,25 +1440,56 @@ pub fn authorize_search(ctx: &Ctx, exprs: &[String], opts: &crate::meta::resolve
 /// OpenSearch's check of an index request (`do_not_fail_on_forbidden` off): every index its
 /// expressions resolve to (or every index when it names none) must be permitted; nothing is
 /// narrowed to the permitted ones.
+///
+/// Remote expressions (`<alias>:<index>`) are read exactly as the search reads them
+/// ([`crate::remote::plan`]), and each group it searches is authorized on its own: the local
+/// expressions, and each loopback's (this cluster's own indices, so as local names; a linked
+/// cluster's user may not name one at all: it would read past the link's ceiling). A linked
+/// remote's are the remote's to authorize, as OpenSearch's are (`crate::remote::links`), and
+/// unreachable remotes read nothing here. Planning and resolving fail closed: an error is the
+/// request's, never an empty list that authorizes nothing.
 fn check_all(ctx: &Ctx, p: &Principal, eff: &Effective, action: &str, exprs: Vec<String>, opts: &crate::meta::resolve::IndicesOptions) -> EsResult<()> {
     let st = ctx.state();
+    let named = !exprs.is_empty();
+    let groups: Vec<Vec<String>> = match crate::remote::plan(ctx.cluster, &st, &exprs)? {
+        None => vec![exprs],
+        Some(plan) => {
+            if p.os().is_some_and(|id| id.link.is_some()) && !plan.remote.is_empty() {
+                let aliases: Vec<String> = plan.remote.iter().map(|(a, _)| format!("{a}:")).collect();
+                return Err(denied(p, action, Some(&aliases)));
+            }
+            plan.local.into_iter().chain(plan.remote.into_iter().map(|(_, e)| e)).collect()
+        }
+    };
+    if named && groups.is_empty() {
+        return Ok(());
+    }
     let mut names: Vec<String> = Vec::new();
-    // No index: every index the request reads, as its wildcard resolves (dot-prefixed ones too).
+    for exprs in groups {
+        names.extend(group_names(ctx, &st, &exprs, opts)?);
+    }
+    // OpenSearch's 403 names no index (its audit entry does).
+    if names.iter().all(|n| eff.allows_index(action, n)) { Ok(()) } else { Err(denied(p, action, Some(&names))) }
+}
+
+/// The indices one group of expressions reads ([`check_all`]); naming none (or only
+/// exclusions), every index, as its wildcard resolves (dot-prefixed ones too).
+fn group_names(ctx: &Ctx, st: &crate::meta::ClusterState, exprs: &[String], opts: &crate::meta::resolve::IndicesOptions) -> EsResult<Vec<String>> {
+    let mut names: Vec<String> = Vec::new();
     if exprs.iter().all(|e| e.starts_with('-')) {
         let list: Vec<String> = std::iter::once("*".to_string()).chain(exprs.iter().cloned()).collect();
-        names.extend(crate::meta::resolve::resolve(&st, &list, opts, ctx.now_ms).unwrap_or_default());
+        names.extend(crate::meta::resolve::resolve(st, &list, opts, ctx.now_ms)?);
     }
     for e in exprs.iter().filter(|e| !e.starts_with('-')) {
         if e.contains('*') || e == "_all" {
             let mut list = vec![e.clone()];
             list.extend(exprs.iter().filter(|x| x.starts_with('-')).cloned());
-            names.extend(crate::meta::resolve::resolve(&st, &list, opts, ctx.now_ms).unwrap_or_default());
+            names.extend(crate::meta::resolve::resolve(st, &list, opts, ctx.now_ms)?);
         } else {
             names.push(authz_name(e, ctx.now_ms));
         }
     }
-    // OpenSearch's 403 names no index (its audit entry does).
-    if names.iter().all(|n| eff.allows_index(action, n)) { Ok(()) } else { Err(denied(p, action, Some(&names))) }
+    Ok(names)
 }
 
 /// Wildcards (and no index at all) expand to the matching indices the principal may access;
@@ -1471,7 +1556,7 @@ fn narrow_exprs(
     let ignore_unavailable = ignore_unavailable && crate::xpack::internal::caller().is_none();
     // Linked remote clusters' expressions are authorized there, with the principal's
     // `remote_indices` privileges (`crate::remote::links`).
-    let (linked, mut exprs): (Vec<String>, Vec<String>) = exprs.into_iter().partition(|e| crate::remote::links::names_link(ctx, e));
+    let (linked, exprs): (Vec<String>, Vec<String>) = exprs.into_iter().partition(|e| crate::remote::links::names_link(ctx, e));
     if exprs.is_empty() && !linked.is_empty() {
         return Ok(None);
     }
@@ -1479,6 +1564,56 @@ fn narrow_exprs(
         v.extend(linked.iter().cloned());
         v
     };
+    // A loopback's expressions read this cluster's own indices: each loopback's group (as the
+    // search plans it, `remote::plan`) is narrowed as local names, never as the literal
+    // `alias:index` a local pattern like `lo*` would match.
+    let st = ctx.state();
+    let Some(plan) = crate::remote::plan(ctx.cluster, &st, &exprs)? else {
+        return Ok(narrow_local(ctx, p, eff, action, exprs, opts, ignore_unavailable)?.map(with_linked));
+    };
+    drop(st);
+    let mut out: Vec<String> = Vec::new();
+    let mut changed = false;
+    if let Some(local) = plan.local {
+        match narrow_local(ctx, p, eff, action, local.clone(), opts, ignore_unavailable)? {
+            Some(v) => {
+                changed = true;
+                out.extend(v);
+            }
+            None => out.extend(local),
+        }
+    }
+    for (alias, group) in plan.remote {
+        let narrowed = narrow_local(ctx, p, eff, action, group.clone(), opts, ignore_unavailable)?;
+        changed |= narrowed.is_some();
+        out.extend(narrowed.unwrap_or(group).iter().map(|e| format!("{alias}:{e}")));
+    }
+    if !changed {
+        return Ok(None);
+    }
+    // Remotes searched elsewhere or skipped (no loopback among them) keep their expressions.
+    let st = ctx.state();
+    let loopbacks: Vec<crate::remote::Remote> = crate::remote::remotes_in(ctx.cluster.dialect, &st).into_iter().filter(|r| r.is_loopback(ctx.cluster)).collect();
+    for e in &exprs {
+        if let crate::remote::Expr::Remote(pattern, _) = crate::remote::read_expression(ctx.cluster.dialect, e)
+            && !loopbacks.iter().any(|r| crate::xcontent::filter::glob_match(pattern, &r.alias))
+        {
+            out.push(e.clone());
+        }
+    }
+    Ok(Some(with_linked(out)))
+}
+
+/// [`narrow_exprs`] on local expressions (a loopback's group, as local names).
+fn narrow_local(
+    ctx: &Ctx,
+    p: &Principal,
+    eff: &Effective,
+    action: &str,
+    mut exprs: Vec<String>,
+    opts: &crate::meta::resolve::IndicesOptions,
+    ignore_unavailable: bool,
+) -> EsResult<Option<Vec<String>>> {
     let wildcard = |e: &str| e.contains('*') || e == "_all";
     if !exprs.is_empty() && !exprs.iter().any(|e| wildcard(e)) {
         let mut names: Vec<String> = exprs.iter().map(|e| authz_name(e, ctx.now_ms)).collect();
@@ -1519,7 +1654,7 @@ fn narrow_exprs(
     if !denied_on.is_empty() {
         return Err(denied(p, action, Some(&denied_on)));
     }
-    Ok(Some(with_linked(if out.is_empty() { vec!["-*".to_string()] } else { out })))
+    Ok(Some(if out.is_empty() { vec!["-*".to_string()] } else { out }))
 }
 
 /// The name an index expression is authorized as, by every index check (the request's own
@@ -1784,8 +1919,13 @@ fn request_indices(ctx: &Ctx) -> Vec<String> {
     let mut out = Vec::new();
     for e in exprs {
         if e.contains('*') || e == "_all" {
-            if let Ok(names) = crate::meta::resolve::resolve(&st, std::slice::from_ref(&e), &opts, ctx.now_ms) {
-                out.extend(names);
+            match crate::meta::resolve::resolve(&st, std::slice::from_ref(&e), &opts, ctx.now_ms) {
+                Ok(names) => out.extend(names),
+                // Fails closed: a remote's expression (which never resolves here) is checked as
+                // the name it is, never dropped from what's authorized. A local one that doesn't
+                // resolve fails the request itself the same way.
+                Err(_) if crate::remote::split_expression(e.trim_start_matches('-')).is_some() => out.push(e.trim_start_matches('-').to_string()),
+                Err(_) => {}
             }
         } else {
             out.push(authz_name(&e, ctx.now_ms));

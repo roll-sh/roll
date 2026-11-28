@@ -34,7 +34,7 @@ use std::time::{Duration, Instant};
 use parking_lot::Mutex;
 
 use super::links::{self, Answer, Leg, Split};
-use super::{Remote, remotes};
+use super::Remote;
 use crate::error::{EsError, EsResult};
 use crate::json::{Map, Value};
 use crate::obj;
@@ -222,7 +222,7 @@ fn release_at_expiry(e: &Arc<Entry>) {
 /// The remote `alias` as the cluster has it now, when it still links to `target`.
 fn current_remote(ctx: &Ctx, alias: &str, target: &str) -> Option<Remote> {
     let links = ctx.cluster.config.links.as_deref()?;
-    remotes(&ctx.state()).into_iter().find(|r| r.alias == alias && r.link(links).as_deref() == Some(target))
+    crate::remote::remotes_in(ctx.cluster.dialect, &ctx.state()).into_iter().find(|r| r.alias == alias && r.link(links).as_deref() == Some(target))
 }
 
 /// A remote part's request, running.

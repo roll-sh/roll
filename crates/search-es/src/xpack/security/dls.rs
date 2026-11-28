@@ -557,3 +557,4 @@ mod tests {
         assert!(!f.allows("a") && !f.allows("c"));
     }
 }
+
