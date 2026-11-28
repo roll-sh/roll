@@ -97,13 +97,21 @@ textarea{min-height:72px;resize:vertical}
 .acts{display:flex;gap:6px;margin-top:6px}
 .shot{display:flex;align-items:center;gap:8px}
 .shot img{height:40px;max-width:96px;border-radius:4px;border:1px solid rgba(255,255,255,.14);object-fit:cover}
+.review .head{display:flex;align-items:center;gap:8px}
+.review .pct{margin-left:auto;font-variant-numeric:tabular-nums;color:#ededed}
+.review .pics{display:flex;gap:6px;margin-top:6px}
+.review .pics a{flex:1;min-width:0;display:grid;gap:2px;color:#8f8f8f;text-decoration:none;font-size:10.5px}
+.review .pics img{width:100%;height:64px;object-fit:cover;object-position:top;border-radius:4px;border:1px solid rgba(255,255,255,.14);background:#000}
+.review .bad{color:#ff6166}
+.review .accept{color:#4c8dff}
 .box{position:fixed;pointer-events:none;border:2px solid #4c8dff;border-radius:4px;background:rgba(76,141,255,.08);display:none}
 @media (prefers-reduced-motion:no-preference){.box{transition:all .12s ease-out}}
 </style>
 <div class="box"></div>
 <div class="list" hidden role="list" aria-label="Feedback on this page"></div>
 <form class="list flags" hidden aria-label="Flags for your view"></form>
-<div class="bar"><button class="count mainbtn" type="button" hidden aria-label="This page on main's preview">Main</button><button class="count flagbtn" type="button" hidden aria-label="Flags for your view">Flags</button><button class="count" type="button" hidden aria-label="Feedback on this page"></button><button class="btn" type="button" aria-label="Leave feedback on this page"><span class="dot"></span>Feedback</button></div>
+<div class="list review" hidden role="list" aria-label="This page against main's"></div>
+<div class="bar"><button class="count reviewbtn" type="button" hidden aria-label="This page against main's" aria-expanded="false">Review</button><button class="count mainbtn" type="button" hidden aria-label="This page on main's preview">Main</button><button class="count flagbtn" type="button" hidden aria-label="Flags for your view">Flags</button><button class="count" type="button" hidden aria-label="Feedback on this page"></button><button class="btn" type="button" aria-label="Leave feedback on this page"><span class="dot"></span>Feedback</button></div>
 <form class="card" hidden>
   <div class="muted">On <code class="where"></code></div>
   <input class="name" placeholder="Your name" aria-label="Your name" maxlength="40" hidden>
@@ -113,7 +121,7 @@ textarea{min-height:72px;resize:vertical}
   <div class="row"><button type="button" class="cancel">Cancel</button><button type="submit" class="go">Post in roll</button></div>
 </form>`;
   const $ = (s) => root.querySelector(s);
-  const btn = $(".btn"), form = $("form.card"), box = $(".box"), note = $("textarea"), where = $(".where"), count = $(".count:not(.flagbtn):not(.mainbtn)"), list = $("div.list");
+  const btn = $(".btn"), form = $("form.card"), box = $(".box"), note = $("textarea"), where = $(".where"), count = $(".count:not(.flagbtn):not(.mainbtn):not(.reviewbtn)"), list = $("div.list");
   let picking = false, picked = null;
   const name = $("input.name"), said = $(".said");
   // The reviewer's own picture of this tab (Jam's, Marker.io's), only when they click: the
@@ -195,6 +203,96 @@ textarea{min-height:72px;resize:vertical}
       if (url) window.open(url, "_blank", "noopener");
       else mainBtn.textContent = "No main preview";
     });
+  }
+  // Review (Chromatic's UI Review, on the page): this page against main's preview, as roll's
+  // record has it: how much each of its entries differs (the first page's widths, modes and
+  // browsers too, a state that starts here), main's picture and this one's, and the problems it
+  // has that main's page doesn't. Accepting is roll's: "Accept in roll" opens the sheet at that
+  // page, so nothing on this page (its own script included) can accept for anyone.
+  const reviewBtn = $(".reviewbtn"), reviewList = $("div.review");
+  const LABEL = (k) => (k === "" ? "This page" : k.startsWith("@") ? `At ${k.slice(1)}px` : k.startsWith("mode:") ? `Mode ${k.slice(5)}` : k.startsWith("browser:") ? `In ${k.slice(8)}` : k.startsWith("state:") ? `State ${k.slice(6)}` : k);
+  const el = (tag, cls, text) => { const n = document.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; };
+  const plural = (n, one, many) => `${n} new ${n === 1 ? one : many}`;
+  const reviewEntry = (pg, branch) => {
+    const item = el("div", "note");
+    item.setAttribute("role", "listitem");
+    const head = el("div", "head");
+    head.append(el("code", null, LABEL(String(pg.page || ""))));
+    const pct = typeof pg.percent === "number" ? pg.percent : null;
+    head.append(el("span", "pct", pct === null ? "not compared" : pct > 0 ? `${Math.max(pct, 0.1).toFixed(1)}% changed` : `same as ${branch}`));
+    item.append(head);
+    const added = pg.added || {}, problems = pg.problems || {};
+    const said = [];
+    if (added.a11y > 0) said.push(plural(added.a11y, "accessibility problem", "accessibility problems"));
+    if (added.errors > 0) said.push(plural(added.errors, "console error or failed request", "console errors or failed requests"));
+    if (added.links > 0) said.push(plural(added.links, "broken link", "broken links"));
+    if (added.seo > 0) said.push(plural(added.seo, "SEO problem", "SEO problems"));
+    if (said.length) item.append(el("p", "bad", `${said.join(" · ")} against ${branch}`));
+    const detail = [];
+    if (added.a11y > 0) for (const i of problems.a11y || []) detail.push(`${i.kind} ×${i.count}`);
+    if (added.links > 0) for (const b of problems.links || []) detail.push(`${b.path} ${b.status || "no answer"}`);
+    if (added.errors > 0) for (const e of [problems.first_error, problems.first_failed]) if (e) detail.push(e);
+    if (problems.errors > 0) detail.push(`${problems.errors} ${problems.errors === 1 ? "error" : "errors"} while it loaded`);
+    for (const d of detail.slice(0, 6)) item.append(el("div", "muted", d));
+    if (pg.unstable) item.append(el("div", "muted", "It moves by itself: the difference may be only that"));
+    const pics = pg.pictures || {};
+    if (pct > 0 && pics.after) {
+      const row = el("div", "pics");
+      for (const [k, name] of [["before", branch], ["after", "This push"], ["diff", "Where it differs"]]) {
+        if (typeof pics[k] !== "string" || !pics[k].startsWith("/__roll/")) continue;
+        const a = el("a");
+        a.href = pics[k];
+        a.target = "_blank";
+        a.rel = "noopener";
+        const img = el("img");
+        img.alt = `${name}: ${LABEL(String(pg.page || ""))}`;
+        img.loading = "lazy";
+        img.src = pics[k];
+        a.append(img, el("span", null, name));
+        row.append(a);
+      }
+      item.append(row);
+    }
+    const acts = el("div", "acts");
+    if (pg.accepted_by) acts.append(el("span", "muted", `Accepted by ${pg.accepted_by}`));
+    else if (pg.refused) acts.append(el("span", "muted", `Refused by ${pg.refused.by}${pg.refused.reason ? `: ${pg.refused.reason}` : ""}`));
+    if (pct > 0 && !pg.accepted_by && TARGET) {
+      const b = el("button", "resolve accept", "Accept in roll");
+      b.type = "button";
+      b.addEventListener("click", () => window.open(`${TARGET}&${new URLSearchParams({ fb_page: String(pg.page || "") })}`, "_blank", "noopener"));
+      acts.append(b);
+    }
+    if (acts.childNodes.length) item.append(acts);
+    return item;
+  };
+  const review = (r) => {
+    if (!r || !r.compared || !Array.isArray(r.pages) || !r.pages.length) return;
+    const branch = typeof r.branch === "string" ? r.branch : "main";
+    const most = Math.max(0, ...r.pages.map((p) => (typeof p.percent === "number" ? p.percent : 0)));
+    const added = r.pages.reduce((n, p) => n + Object.values(p.added || {}).reduce((m, k) => m + (k > 0 ? k : 0), 0), 0);
+    reviewBtn.textContent = `Review${most > 0 ? ` · ${Math.max(most, 0.1).toFixed(1)}%` : ""}${added ? ` · ${added} new` : ""}`;
+    reviewBtn.title = most > 0 || added ? `This page differs from ${branch}'s preview${added ? `: ${added} new ${added === 1 ? "problem" : "problems"}` : ""}` : `This page looks like ${branch}'s preview`;
+    reviewBtn.hidden = false;
+    reviewList.replaceChildren(...r.pages.map((p) => reviewEntry(p, branch)));
+  };
+  if (MAIN && !GUEST) {
+    reviewBtn.addEventListener("click", () => {
+      reviewList.hidden = !reviewList.hidden;
+      reviewBtn.setAttribute("aria-expanded", String(!reviewList.hidden));
+    });
+    let seen = null;
+    const loadReview = () => {
+      if (seen === location.pathname) return;
+      seen = location.pathname;
+      reviewBtn.hidden = reviewList.hidden = true;
+      fetch(`/__roll/review.json?path=${encodeURIComponent(location.pathname)}`, { credentials: "same-origin" })
+        .then((r) => (r.ok ? r.json() : null))
+        .then(review)
+        .catch(() => {});
+    };
+    loadReview();
+    // A client-side page change: this page's review, not the last one's.
+    setInterval(loadReview, 1000);
   }
   // Flags: each a select (the app's own choice, or one of its options); applied for this
   // browser only, by reloading with the cookie set.

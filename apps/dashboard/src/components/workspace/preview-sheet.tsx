@@ -96,6 +96,7 @@ export function PreviewSheet({
   onClose,
   feedback,
   resolve,
+  reviewPage,
   onFeedbackPosted,
 }: {
   preview: Preview;
@@ -110,6 +111,8 @@ export function PreviewSheet({
   feedback?: PreviewFeedback;
   /** A note the preview page's Resolve names (its review id), to resolve on the change. */
   resolve?: string;
+  /** The page the preview page's Review opened roll for (its key, `""` the first): its review first. */
+  reviewPage?: string;
   /** It was posted (the link that brought it is spent). */
   onFeedbackPosted?: () => void;
 }) {
@@ -183,6 +186,7 @@ export function PreviewSheet({
                 <NoteThread previewId={p.id} change={p.change} review={resolve} where={p} onDone={onFeedbackPosted} />
               </div>
             )}
+            {reviewPage !== undefined && <PageFromReview p={p} page={reviewPage} busy={busy} gone={gone} run={run} />}
             {p.state === "awaiting_approval" &&
               (p.pull?.fork ? (
                 <div className="mb-3 flex items-center gap-2 rounded-lg border border-accent/40 bg-accent/[0.06] px-2.5 py-2 text-[11.5px] text-muted">
@@ -2732,5 +2736,36 @@ function MainOnChangeLine({ m }: { m: NonNullable<Preview["main_on_change"]> }) 
     <span className="min-w-0 break-words font-mono text-[11px] text-danger tabular-nums" title={title}>
       main's code breaks on this data: {broke.slice(0, 3).map((x) => `${x.path} ${said(x.status)} (main ${said(x.main_status)})`).join(" · ")}
     </span>
+  );
+}
+
+/** The page a preview page's Review opened roll for: how much it differs from main's and who
+ * accepted it at this push, with its own Accept (the page only links here: accepting is a signed-in
+ * person's, in roll). */
+function PageFromReview({ p, page, busy, gone, run }: { p: Preview; page: string; busy: string | null; gone: boolean; run: (key: string, fn: () => Promise<Preview>) => Promise<boolean> }) {
+  const review = p.visual_review;
+  const pg = review?.pages.find((x) => x.path === page);
+  const label = page === "" ? "Its first page" : pageLabel(page);
+  return (
+    <div className="mb-3 flex items-center gap-2 rounded-lg border border-line-2 px-2.5 py-2 text-[11.5px]" aria-label="The page you came from">
+      <span className="min-w-0 flex-1 text-muted">
+        <span className="font-mono text-[11px] text-fg">{label}</span>{" "}
+        {!review || !pg
+          ? `has nothing to review against ${review?.branch ?? "main"} at this push.`
+          : pg.by
+            ? `was accepted by ${pg.by} at this push.`
+            : `differs from ${review.branch} by ${Math.max(pg.percent, 0.1).toFixed(1)}%${pg.refused ? `; refused by ${pg.refused.by}` : ""}.`}
+      </span>
+      {review && pg && !pg.by && (
+        <button
+          type="button"
+          disabled={busy !== null || gone}
+          onClick={() => run(`accept:${pg.path}`, () => previewsApi.acceptVisual(p.id, review.head, pg.path))}
+          className="h-6 shrink-0 rounded-md border border-line-2 px-2 text-[11.5px] text-fg hover:bg-white/[0.05] disabled:opacity-40"
+        >
+          {busy === `accept:${pg.path}` ? "Accepting…" : "Accept this page"}
+        </button>
+      )}
+    </div>
   );
 }

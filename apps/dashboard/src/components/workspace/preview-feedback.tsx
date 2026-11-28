@@ -86,6 +86,13 @@ export function feedbackFrom(query: string): PreviewFeedback | undefined {
   };
 }
 
+/** The page a preview page's Review opened roll for (`?fb_page=<page key>`, `""` the first page),
+ * or none: the sheet shows that page's review with its Accept. */
+export function reviewPageFrom(query: string): string | undefined {
+  const page = new URLSearchParams(query).get("fb_page");
+  return page !== null && page.length <= 2000 && ![...page].some((c) => c.charCodeAt(0) < 32 || c.charCodeAt(0) === 127) ? page : undefined;
+}
+
 /** The note a preview page's Reply or Resolve opened roll for (`?fb_reply=` / `?fb_resolve=<review
  * id>`), or none: the sheet shows its thread with both. */
 export function resolveFrom(query: string): string | undefined {

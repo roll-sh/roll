@@ -455,4 +455,108 @@ mod tests {
         assert!(store.shares(&id).unwrap().iter().all(|s| s.revoked), "ended for good");
         assert_eq!(opened("ada's share link ended: they may no longer open the project's previews"), 1);
     }
+
+    /// The toolbar's Review: someone in through roll (here the link's cookie) gets the page's own
+    /// review against main's (its share of pixels changed, the problems main's page doesn't
+    /// have, the pictures), a fork's without main's pictures; nobody without access, nor another
+    /// preview's visitor, gets any of it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_toolbar_shows_the_pages_own_review() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&code_sql::Target::Sqlite(dir.path().join("p.db")), Default::default()).unwrap());
+        let ws = Arc::new(roll_workspace::Workspace::open(&code_sql::Target::Sqlite(dir.path().join("ws.db")), Default::default()).unwrap());
+        let project = ws.create("usr_ada", "shop", "", None).unwrap().id;
+        let new = crate::store::New {
+            project_id: project.clone(),
+            key: "pr1".into(),
+            project_name: "shop".into(),
+            repo: "acme/web".into(),
+            change_id: Some("chg_1".into()),
+            branch: None,
+            number: Some(1),
+            title: "t".into(),
+            github_pr: Some(1),
+            head: "cs_1".into(),
+            trusted: true,
+            state: crate::State::Ready,
+            expires_at: None,
+            created_by: "roll".into(),
+        };
+        let mut previews = Vec::new();
+        for (key, change) in [("pr1", Some("chg_1")), ("pr2", Some("chg_2")), ("main", None)] {
+            let (row, _) = store.create(&crate::store::New { key: key.into(), change_id: change.map(Into::into), branch: change.is_none().then(|| "main".into()), ..new.clone() }).unwrap();
+            store.want_service(&row.id, "web", "acme/web", "cs_1", 512, &|h| format!("http://{h}.preview.test")).unwrap();
+            previews.push(row.id);
+        }
+        let (id, other, main) = (previews[0].clone(), previews[1].clone(), previews[2].clone());
+        let rules: Settings = serde_json::from_value(serde_json::json!({ "enabled": true, "visual_review": "check", "github": { "screenshot": true, "pages": ["/pricing"] } })).unwrap();
+        store.put_settings(&project, &rules).unwrap();
+        // Main's pages, and the change's: its /pricing all changed, with two images main's lacks.
+        let png = |v: u8| {
+            let mut out = Vec::new();
+            image::RgbaImage::from_pixel(4, 4, image::Rgba([v, v, v, 255])).write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png).unwrap();
+            out
+        };
+        let pricing = |v: u8, missing_alt: u32| {
+            let issues = (missing_alt > 0).then(|| crate::A11yIssue { kind: "images".into(), count: missing_alt, first: None, impact: None, help: None }).into_iter().collect();
+            let report = crate::PageReport { a11y: Some(crate::PageA11y { issues, lang: true, title: true, seo: None }), ..Default::default() };
+            vec![crate::ports::PageShot { path: "/pricing".into(), png: png(v), errors: 0, report }]
+        };
+        for (preview, shade, missing) in [(&main, 0, 0), (&id, 255, 2)] {
+            store.set_screenshot(preview, "cs_1", &png(0), None, None).unwrap();
+            store.set_page_shots(preview, "cs_1", &pricing(shade, missing), &["/pricing".into()]).unwrap();
+        }
+        store.compare_with_base(&id, &main, "main", None).unwrap();
+        let cfg = RuntimeConfig { domain: "preview.test".into(), dashboard: Some("https://roll.test".into()), ..Default::default() };
+        let rt = Runtime::new(cfg, Arc::new(code_preview::docker::Docker), Arc::new(NoTrees), store.clone());
+        let engine = Engine::new(crate::engine::Config { domain: "preview.test".into(), ..Default::default() }, store.clone(), ws, Arc::new(NoCode), Vec::new(), rt.clone(), Arc::new(NoSecrets), Box::new(|| false));
+        rt.attach(&engine);
+        let app = crate::api::router(engine.clone()).layer(axum::middleware::from_fn_with_state(rt.clone(), crate::runtime::route));
+        // As someone in through `preview`'s link (its cookie), or nobody.
+        let get = |host: &str, path: String, preview: Option<&str>| {
+            let mut b = Request::get(path).header(header::HOST, host);
+            if let Some(p) = preview {
+                b = b.header(header::COOKIE, format!("roll_access_{p}={}", store.access(p).unwrap().unwrap().token));
+            }
+            let req = b.body(axum::body::Body::empty()).unwrap();
+            let app = app.clone();
+            async move {
+                let r = app.oneshot(req).await.unwrap();
+                let status = r.status().as_u16();
+                (status, axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap().to_vec())
+            }
+        };
+        let (host, elsewhere) = ("web-pr1-shop.preview.test", "web-pr2-shop.preview.test");
+        let review = |host: &str, path: &str, who: Option<&str>| {
+            let asked = get(host, format!("/__roll/review.json?path={}", super::encode(path)), who);
+            async move {
+                let (status, body) = asked.await;
+                (status, serde_json::from_slice::<serde_json::Value>(&body).unwrap_or_default())
+            }
+        };
+        let (id_s, other_s) = (id.as_str(), other.as_str());
+        // In through roll: /pricing changed whole, with the two problems main's page doesn't have.
+        let (status, r) = review(host, "/pricing", Some(id_s)).await;
+        assert_eq!(status, 200, "{r}");
+        let page = &r["pages"][0];
+        assert_eq!((r["pages"].as_array().map(Vec::len), page["page"].as_str(), page["percent"].as_f64(), page["added"]["a11y"].as_u64()), (Some(1), Some("/pricing"), Some(100.0), Some(2)), "{r}");
+        let before = page["pictures"]["before"].as_str().unwrap().to_string();
+        let (status, picture) = get(host, before.clone(), Some(id_s)).await;
+        assert!(status == 200 && picture.starts_with(b"\x89PNG"), "main's picture: {status}");
+        // The first page is the same as main's; a path that's none of its pages has nothing.
+        let (_, r) = review(host, "/", Some(id_s)).await;
+        assert_eq!((r["pages"][0]["page"].as_str(), r["pages"][0]["percent"].as_f64()), (Some(""), Some(0.0)), "{r}");
+        assert_eq!(review(host, "/elsewhere", Some(id_s)).await.1["pages"], serde_json::json!([]));
+        // A fork's page script reads what the panel does: never main's pictures.
+        store.update(&id, |r| r.trusted = false).unwrap();
+        assert!(review(host, "/pricing", Some(id_s)).await.1["pages"][0]["pictures"]["before"].is_null());
+        assert_eq!(get(host, before.clone(), Some(id_s)).await.0, 404);
+        // Nobody without access; another preview's link doesn't open this one's, and its own
+        // visitor gets its own page (nothing compared), never this one's.
+        assert_eq!(review(host, "/pricing", None).await.0, 401);
+        assert_eq!(review(host, "/pricing", Some(other_s)).await.0, 401);
+        let (status, r) = review(elsewhere, "/pricing", Some(other_s)).await;
+        assert_eq!((status, r["pages"].clone()), (200, serde_json::json!([])), "{r}");
+        assert_eq!(get(elsewhere, before, Some(other_s)).await.0, 404);
+    }
 }

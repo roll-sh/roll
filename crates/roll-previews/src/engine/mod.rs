@@ -1018,6 +1018,7 @@ mod drains;
 mod env;
 mod main_on_change;
 mod masks;
+mod page_review;
 mod points;
 mod replay;
 pub use points::MAX_POINTS;

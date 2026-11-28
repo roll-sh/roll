@@ -821,6 +821,30 @@ impl Runtime {
         }
     }
 
+    /// The toolbar's Review of `path` ([`Engine::page_review`]).
+    async fn page_review(&self, preview: &str, service: &str, path: &str) -> Response {
+        let headers = [(header::CONTENT_TYPE, "application/json"), (header::CACHE_CONTROL, "private, no-store")];
+        match self.engine() {
+            Ok(e) => match e.page_review(preview, service, path).await {
+                Ok(v) => (headers, axum::Json(v)).into_response(),
+                Err(err) => err.into_response(),
+            },
+            Err(_) => (StatusCode::SERVICE_UNAVAILABLE, "try again").into_response(),
+        }
+    }
+
+    /// One of its pictures ([`Engine::page_review_picture`]), 404 when there's none.
+    async fn page_review_picture(&self, preview: &str, page: &str, pic: &str) -> Response {
+        let png = match self.engine() {
+            Ok(e) => e.page_review_picture(preview, page, pic).await.ok().flatten(),
+            Err(_) => return (StatusCode::SERVICE_UNAVAILABLE, "try again").into_response(),
+        };
+        match png {
+            Some(png) => ([(header::CONTENT_TYPE, "image/png"), (header::CACHE_CONTROL, "private, no-store"), (header::X_CONTENT_TYPE_OPTIONS, "nosniff")], png).into_response(),
+            None => (StatusCode::NOT_FOUND, "no such picture").into_response(),
+        }
+    }
+
     async fn feedback_notes(&self, preview: &str, path: &str) -> Response {
         let here = match self.engine() {
             Ok(e) => e.notes_of(preview, path).await.unwrap_or_default(),
@@ -1422,6 +1446,10 @@ pub const GUEST_NOTE_PATH: &str = "/__roll/notes";
 pub const SCREEN_PATH: &str = "/__roll/screen";
 /// The toolbar's Main: the page on main's preview (`?path=`), as `{url}` (a team visitor's only).
 pub const MAIN_PAGE_PATH: &str = "/__roll/main";
+/// The toolbar's Review: the page's own review against main's (`?path=`), as JSON, and each
+/// entry's picture (`REVIEW_PICTURE_PATH?page=&pic=after|before|diff`); a team visitor's only.
+pub const REVIEW_PATH: &str = "/__roll/review.json";
+pub const REVIEW_PICTURE_PATH: &str = "/__roll/review.png";
 /// On an earlier push's link its preview no longer keeps: start it again ([`Engine::restart_push`]).
 pub const START_PUSH_PATH: &str = "/__roll/start-push";
 /// Where the team's tests send a snapshot (`POST ?name=`, a PNG, the project's bypass secret).
@@ -3146,6 +3174,16 @@ async fn serve(rt: Arc<Runtime>, preview: String, service: String, mut req: Requ
     {
         let path = req.uri().query().unwrap_or("").split('&').filter_map(|kv| kv.split_once('=')).find(|(k, _)| *k == "path").map(|(_, v)| percent_decode(v)).unwrap_or_default();
         return rt.main_page(&preview, &service, &path).await;
+    }
+    // The toolbar's Review: a team visitor's only (a guest, a public preview's visitor: nothing,
+    // and never the service's to answer).
+    if req.uri().path() == REVIEW_PATH || req.uri().path() == REVIEW_PICTURE_PATH {
+        if !matches!(&target, Some(Feedback::Team(_))) {
+            return (StatusCode::NOT_FOUND, "the page's review is for its team, in roll").into_response();
+        }
+        let query = req.uri().query().unwrap_or("").to_string();
+        let param = |k: &str| query.split('&').filter_map(|kv| kv.split_once('=')).find(|(n, _)| *n == k).map(|(_, v)| percent_decode(v)).unwrap_or_default();
+        return if req.uri().path() == REVIEW_PATH { rt.page_review(&preview, &service, &param("path")).await } else { rt.page_review_picture(&preview, &param("page"), &param("pic")).await };
     }
     if req.uri().path() == SCREEN_PATH
         && req.method() == axum::http::Method::POST
