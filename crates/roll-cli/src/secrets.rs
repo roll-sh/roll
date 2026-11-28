@@ -6412,9 +6412,17 @@ async fn render_watch(c: &Client<'_>, env: &str, file: &str, tpl: &str, out: &st
                 eprintln!("roll secrets render: {which} changed, wrote {out}");
                 if let Some(cmd) = exec {
                     #[cfg(windows)]
-                    let ran = tokio::process::Command::from(crate::sys::shell(cmd)).status().await;
+                    let mut c = tokio::process::Command::from(crate::sys::shell(cmd));
                     #[cfg(not(windows))]
-                    let ran = tokio::process::Command::new("sh").arg("-c").arg(cmd).status().await;
+                    let mut c = {
+                        let mut c = tokio::process::Command::new("sh");
+                        c.arg("-c").arg(cmd);
+                        c
+                    };
+                    for k in crate::sys::roll_credentials(&|_| false) {
+                        c.env_remove(k);
+                    }
+                    let ran = c.status().await;
                     match ran {
                         Ok(st) if st.success() => {}
                         Ok(st) => eprintln!("roll secrets render: {cmd} exited with {st}"),
@@ -7523,13 +7531,7 @@ fn roll_credentials_to_drop(r: &Run, env: &[Var]) -> Vec<std::ffi::OsString> {
         return Vec::new();
     }
     let set: std::collections::HashSet<&str> = env.iter().map(|v| v.name.as_str()).collect();
-    std::env::vars_os().filter_map(|(k, _)| k.to_str().filter(|n| is_roll_credential(n) && !set.contains(n)).map(|_| k.clone())).collect()
-}
-
-/// A `ROLL_*` variable named like a credential: a token (or a file holding one), a key, a
-/// password or a secret. `ROLL_API_URL`, `ROLL_PROJECT` and the like aren't.
-pub(crate) fn is_roll_credential(name: &str) -> bool {
-    name.starts_with("ROLL_") && ["_TOKEN", "_TOKEN_FILE", "_KEY", "_PASSWORD", "_SECRET", "_CREDENTIAL_FILE"].iter().any(|s| name.ends_with(s))
+    crate::sys::roll_credentials(&|n| set.contains(n))
 }
 
 #[allow(clippy::too_many_arguments)]

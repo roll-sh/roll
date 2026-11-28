@@ -9,7 +9,8 @@ const NAME = /^[a-z0-9-]{1,32}$/;
 /**
  * An environment's uptime checks (Cloud Monitoring's): a path GET'd every so often through its
  * own proxy; two failures in a row are `check.down` for its notification targets, the next
- * pass resolves it. A check wakes a service that scales to zero. With a browser script (Checkly's,
+ * pass resolves it. With "slower than", two slow passes in a row are `check.slow` (degraded on a
+ * status page) until one isn't. A check wakes a service that scales to zero. With a browser script (Checkly's,
  * through Vercel) the page loads in Chromium and the script runs against it, every 5 min at most.
  * A TCP service's checks connect to its port instead, its banner holding `contains`.
  */
@@ -21,8 +22,9 @@ export function ChecksPanel({ service, tcp, env, runner }: { service: string; tc
   const [contains, setContains] = useState("");
   const [script, setScript] = useState("");
   const [outside, setOutside] = useState(false);
+  const [slow, setSlow] = useState("");
   const save = (next: UptimeCheck[]) => runner.run("checks", () => appsApi.putEnvironment(service, env.name, { checks: next.length ? next : null }));
-  const ok = NAME.test(name) && !checks.some((c) => c.name === name) && (tcp || (path.startsWith("/") && !/\s/.test(path))) && Number(every) >= (script.trim() ? 300 : 30) && Number(every) <= 3600 && script.length <= 16384 && checks.length < 5;
+  const ok = NAME.test(name) && !checks.some((c) => c.name === name) && (tcp || (path.startsWith("/") && !/\s/.test(path))) && Number(every) >= (script.trim() ? 300 : 30) && Number(every) <= 3600 && script.length <= 16384 && checks.length < 5 && (!slow.trim() || (!script.trim() && Number(slow) >= 50 && Number(slow) <= 60000));
   const busy = runner.busy !== null;
   // A failure's file, opened (the screenshot) or saved (the trace) from a blob: the routes need the session.
   const open = async (check: string, which: "screenshot" | "trace") => {
@@ -39,15 +41,16 @@ export function ChecksPanel({ service, tcp, env, runner }: { service: string; tc
         <ul className="divide-y divide-line border-b border-line">
           {checks.map((c) => {
             const st = env.check_states?.find((s) => s.name === c.name);
-            const tone = st?.up === false ? "bg-danger" : st?.up ? "bg-accent" : "bg-subtle";
+            const tone = st?.up === false ? "bg-danger" : st?.slow ? "bg-fg" : st?.up ? "bg-accent" : "bg-subtle";
             return (
               <li key={c.name} className="flex flex-wrap items-center gap-x-3 gap-y-1 px-5 py-2.5 text-[12.5px]">
-                <i className={`size-1.5 rounded-full ${tone}`} aria-label={st?.up === false ? "down" : st?.up ? "up" : "not tried yet"} />
+                <i className={`size-1.5 rounded-full ${tone}`} aria-label={st?.up === false ? "down" : st?.slow ? "slow" : st?.up ? "up" : "not tried yet"} />
                 <span className="font-medium">{c.name}</span>
                 <code className="min-w-0 flex-1 truncate font-mono text-[12px]">
                   {c.tcp ? "TCP port" : <>{c.browser ? "Browser" : (c.method ?? "GET")} {c.from === "public" ? `${c.host ?? "its URL"} ` : ""}{c.path}</>}
                   {c.from === "public" ? " · from outside" : ""}
                   {c.contains ? ` · contains ${JSON.stringify(c.contains)}` : ""}
+                  {c.slow_ms ? ` · slower than ${c.slow_ms} ms is slow` : ""}
                 </code>
                 <span className="text-[11.5px] text-subtle">
                   every {c.every_s ?? 60}s
@@ -59,6 +62,7 @@ export function ChecksPanel({ service, tcp, env, runner }: { service: string; tc
                     {c.budgets ? ` (budgets: ${Object.entries(c.budgets).map(([k, v]) => `${k} ${v}`).join(", ")})` : ""}
                   </span>
                 )}
+                {st?.up && st.slow && <span className="w-full text-[11.5px] text-muted">Slow: degraded on a status page until a pass within {c.slow_ms} ms</span>}
                 {st?.over_budget && <span className="w-full truncate text-[11.5px] text-muted">{st.over_budget}</span>}
                 {st?.error && <span className="w-full truncate text-[11.5px] text-danger">{st.error}</span>}
                 {c.browser && st?.failure_at != null && (
@@ -84,12 +88,13 @@ export function ChecksPanel({ service, tcp, env, runner }: { service: string; tc
         onSubmit={(e) => {
           e.preventDefault();
           const how = tcp ? { tcp: true } : { path: path.trim(), ...(script.trim() ? { browser: script, timeout_s: 60 } : outside ? { from: "public" as const } : {}) };
-          void save([...checks, { name, every_s: Number(every), ...(contains.trim() ? { contains: contains.trim() } : {}), ...how }]).then((r) => {
+          void save([...checks, { name, every_s: Number(every), ...(contains.trim() ? { contains: contains.trim() } : {}), ...(slow.trim() ? { slow_ms: Number(slow) } : {}), ...how }]).then((r) => {
             if (!r) return;
             setName("");
             setPath("/");
             setContains("");
             setScript("");
+            setSlow("");
           });
         }}
       >
@@ -101,6 +106,7 @@ export function ChecksPanel({ service, tcp, env, runner }: { service: string; tc
             <input type="checkbox" checked={outside} disabled={!!script.trim()} onChange={(e) => setOutside(e.target.checked)} /> from outside
           </label>
         )}
+        <input value={slow} onChange={(e) => setSlow(e.target.value.replace(/\D/g, ""))} disabled={!!script.trim()} placeholder="slower than … ms" aria-label="Slower than (ms)" inputMode="numeric" title="two passes in a row slower than this notify (check.slow), 50–60000 ms" className={`${input} w-36 text-[12px]`} />
         <select value={every} onChange={(e) => setEvery(e.target.value)} aria-label="Every" className={`${input} w-28 text-[12px]`}>
           {[["30", "30 s"], ["60", "1 min"], ["300", "5 min"], ["900", "15 min"], ["3600", "1 h"]].map(([v, l]) => (
             <option key={v} value={v}>

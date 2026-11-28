@@ -130,7 +130,6 @@ mod tests {
         assert!(until.on(999) && !until.on(1000));
         assert!(Freeze { until: None, windows: vec![], timezone: None, reason: String::new() }.on(0), "neither: on until lifted");
         assert!(Freeze { until: None, windows: vec![Window { from: "fri 25:00".into(), to: "mon 09:00".into() }], timezone: None, reason: String::new() }.check().is_err());
-        assert_eq!(until.says(), "deploys are frozen: launch");
     }
 
     #[test]

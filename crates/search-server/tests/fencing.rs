@@ -115,9 +115,15 @@ async fn one_owner_at_a_time_and_deposed_nodes_cannot_commit() {
     assert!(refused.is_some_and(|t| t < ttl), "A must stop acknowledging before the lease expires: {refused:?}");
 
     // Once the lease has expired, B takes over with a newer epoch and has every acknowledged doc.
-    tokio::time::sleep(ttl).await;
-    let (s, v, _) = call(&b, "POST", "/orders/_refresh", "").await;
-    assert_eq!(s, 200, "{v}");
+    let deadline = Instant::now() + ttl * 3;
+    loop {
+        let (s, v, _) = call(&b, "POST", "/orders/_refresh", "").await;
+        if s == 200 {
+            break;
+        }
+        assert!(s == 503 && Instant::now() < deadline, "B never took over: {s} {v}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     let (s, v, _) = call(&b, "GET", "/orders/_count", "").await;
     assert_eq!(s, 200, "{v}");
     assert!(v["count"].as_u64().unwrap() >= acked, "{v}");

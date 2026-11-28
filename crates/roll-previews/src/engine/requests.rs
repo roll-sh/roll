@@ -48,8 +48,10 @@ impl Engine {
         let work = self.store.note_work(preview)?;
         for n in &mut here {
             n.work = work.get(&n.id).map(|(number, url)| crate::notes::NoteWork { number: *number, url: url.clone() });
-            n.crop = cropped.contains_key(&n.id);
-            n.crop_as = cropped.get(&n.id).cloned().flatten();
+            let (seen, own) = cropped.get(&n.id).cloned().unzip();
+            n.crop = seen.is_some();
+            n.crop_as = seen.flatten();
+            n.crop_own = own.flatten().is_some();
         }
         Ok(here)
     }
@@ -680,7 +682,55 @@ impl Engine {
         };
         self.store.fill_guest_slot(id, &slot, &review)?;
         self.store.log(id, &format!("{by} left a note through share link {}", share.id))?;
+        // The picture of their tab they took, when they did: the note's, as a guest's. The note
+        // stands without it (one gone past its half hour).
+        if !n.screen.is_empty()
+            && let Some((image, mime)) = self.store.take_screen(id, &n.screen, &format!("share:{}", share.id))?
+        {
+            self.store.set_own_crop(id, &review, &image, &mime, "guest")?;
+        }
         Ok(review)
+    }
+
+    /// `POST /__roll/screen`: a picture a reviewer took of their own tab in their browser, checked
+    /// ([`crate::notes::screen_ok`]) and kept until their note claims it (the token it answers):
+    /// a share link's guest's within their link's notes an hour, the team's for whoever posts
+    /// the note in roll ([`Engine::attach_screen`]).
+    pub async fn keep_screen(&self, id: &str, guest: Option<&crate::store::LiveShare>, image: Vec<u8>) -> Result<String> {
+        if let Some(share) = guest {
+            if !share.notes {
+                return Err(Error::Forbidden("this share link doesn't take notes".into()));
+            }
+            let since = self.store.now_ms()? - 3_600_000;
+            if self.store.guest_notes_since(id, &share.id, since)? >= crate::notes::GUEST_PER_HOUR {
+                return Err(Error::Conflict(format!("{} notes an hour through one share link: try again later", crate::notes::GUEST_PER_HOUR)));
+            }
+        }
+        let owner = guest.map_or_else(|| "team".to_string(), |s| format!("share:{}", s.id));
+        let (store, id) = (self.store.clone(), id.to_string());
+        tokio::task::spawn_blocking(move || {
+            let mime = crate::notes::screen_ok(&image).map_err(Error::BadRequest)?;
+            store.keep_screen(&id, &owner, &image, mime)
+        })
+        .await
+        .map_err(|e| Error::Internal(format!("checking a picture: {e}")))?
+    }
+
+    /// `POST …/notes/{note}/screen`: the picture its reviewer took on the page (its token, from
+    /// the page's button), kept as the note's, the reviewer's own. Only its author attaches one
+    /// (`by`: every name the caller goes by; `None` for the operator), and a token is taken once.
+    pub async fn attach_screen(&self, id: &str, note: &str, token: &str, by: Option<&[String]>) -> Result<()> {
+        let r = self.store.row(id)?;
+        let change = r.change_id.as_deref().ok_or_else(|| Error::BadRequest("only a change's preview has notes".into()))?;
+        let notes = self.source.feedback(change).await.map_err(|e| Error::Internal(format!("{e:#}")))?;
+        let n = notes.iter().find(|n| n.id == note).ok_or_else(|| Error::NotFound(format!("no note {note} on this preview's change")))?;
+        let author = n.by.trim_start_matches('@');
+        if by.is_some_and(|names| !names.iter().any(|b| b.trim_start_matches('@').eq_ignore_ascii_case(author))) {
+            return Err(Error::Forbidden("only the note's own author attaches their picture".into()));
+        }
+        let (image, mime) = self.store.take_screen(id, token, "team")?.ok_or_else(|| Error::NotFound("no such picture waiting (they wait half an hour)".into()))?;
+        self.store.set_own_crop(id, note, &image, &mime, "team")?;
+        Ok(())
     }
 
     /// A review just made on `change` by `by` (`body`): a note tells `change_author`, a reply

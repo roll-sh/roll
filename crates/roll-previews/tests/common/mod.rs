@@ -394,6 +394,10 @@ pub struct FakeApps {
     /// what each such start was given: (preview, service, revision, variables).
     pub env_source: Mutex<Option<std::sync::Weak<dyn roll_previews::ports::EnvSource>>>,
     pub started: Mutex<Vec<(String, String, String, Vars)>>,
+    /// Writes sent to a service (`send`): (preview, service, method); what each answers by
+    /// `<preview> <method> <path>` (unset: 200).
+    pub sent: Mutex<Vec<(String, String, String)>>,
+    pub sent_status: Mutex<HashMap<String, u16>>,
     /// What a service answers on its health path (unset: the backend can't tell).
     pub answers: Mutex<Option<(u16, String)>>,
     /// How many health checks find the service still starting (asked again later).
@@ -539,6 +543,19 @@ impl Apps for FakeApps {
         if let Some(body) = self.json.lock().get(&format!("{preview} {path}")) {
             return Ok(Some(roll_previews::ports::Fetched { status, headers: vec![("content-type".into(), "application/json".into())], body: body.clone().into_bytes(), truncated: false }));
         }
+        Ok(Some(roll_previews::ports::Fetched { status, headers: Vec::new(), body: Vec::new(), truncated: false }))
+    }
+    async fn send(&self, preview: &str, service: &str, method: &str, path: &str, _: Option<&str>, _: Vec<u8>) -> anyhow::Result<Option<roll_previews::ports::Fetched>> {
+        if !self.runtime.load(Ordering::SeqCst) {
+            return Ok(None);
+        }
+        let source = self.env_source.lock().as_ref().and_then(|w| w.upgrade());
+        if let Some(source) = source {
+            let (t, vars) = source.env(preview, service).await?;
+            self.started.lock().push((preview.to_string(), service.to_string(), t.revision, vars));
+        }
+        self.sent.lock().push((preview.to_string(), service.to_string(), method.to_string()));
+        let status = self.sent_status.lock().get(&format!("{preview} {method} {path}")).copied().unwrap_or(200);
         Ok(Some(roll_previews::ports::Fetched { status, headers: Vec::new(), body: Vec::new(), truncated: false }))
     }
     fn requests(&self, preview: &str) -> Vec<roll_previews::RequestLine> {

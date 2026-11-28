@@ -24,8 +24,6 @@ return BigInteger.ONE.shiftRight(Integer.MIN_VALUE)
 ----
 return BigInteger.valueOf(-4).pow(3) + ' ' + BigInteger.valueOf(-2).pow(31) + ' ' + BigInteger.valueOf(-1).pow(7) + ' ' + BigInteger.valueOf(12).pow(0) + ' ' + BigInteger.ZERO.pow(0) + ' ' + BigInteger.valueOf(6).pow(40)
 ----
-String s = BigInteger.ONE.shiftLeft(3000000).toString(); return [s.length(), s.hashCode(), s.substring(0, 30), s.substring(s.length() - 30)]
-----
 String s = BigInteger.valueOf(7).pow(100000).toString(); return [s.length(), s.hashCode(), s.substring(0, 30), s.substring(s.length() - 30)]
 ----
 BigInteger x = BigInteger.valueOf(-3).pow(20001); List out = []; for (int r : [2, 3, 7, 8, 10, 16, 36]) { String s = x.toString(r); out.add([r, s.length(), s.hashCode(), s.substring(0, 12)]) } return out

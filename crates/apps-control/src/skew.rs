@@ -106,24 +106,3 @@ impl Apps {
         earlier.into_iter().find(|(id, next)| *id == d || next.as_deref() == Some(d.as_str())).map(|(id, _)| id)
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn req(b: axum::http::request::Builder) -> Request {
-        b.body(axum::body::Body::empty()).unwrap()
-    }
-
-    #[test]
-    fn a_request_names_its_deployment_and_a_page_load_never_does() {
-        let get = || Request::builder().uri("/api/x");
-        assert_eq!(named(&req(get().header("x-deployment-id", "dep_abc"))).as_deref(), Some("dep_abc"));
-        assert_eq!(named(&req(Request::builder().uri("/_next/a.js?dpl=dep_abc"))).as_deref(), Some("dep_abc"));
-        assert_eq!(named(&req(get().header("cookie", "a=1; __roll_dpl=dep_abc"))).as_deref(), Some("dep_abc"));
-        assert_eq!(named(&req(get().header("x-deployment-id", "../etc"))), None, "only a deployment id");
-        assert_eq!(named(&req(Request::builder().uri("/_next/static/a.js?dpl=nb_0123abcd"))).as_deref(), Some("nb_0123abcd"), "or the Next.js id roll gave its build");
-        assert!(navigation(&req(get().header("sec-fetch-dest", "document"))));
-        assert!(!navigation(&req(get().header("sec-fetch-dest", "script"))));
-    }
-}

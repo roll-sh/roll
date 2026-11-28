@@ -190,10 +190,7 @@ mod tests {
         let side = parse("[app.run]\nport = 80\n[[app.run.sidecars]]\nname = \"proxy\"\nimage = \"envoy:1\"\nvariables = [\"DATABASE_URL\"]\n").unwrap().unwrap();
         let (_, r, _) = side.apply(&Build::default(), &Run::default(), None).unwrap();
         assert_eq!((r.sidecars[0].name.as_str(), r.sidecars[0].variables.as_slice(), r.sidecars[0].memory_mb), ("proxy", ["DATABASE_URL".to_string()].as_slice(), 128));
-    }
-
-    #[test]
-    fn run_settings_and_an_environments_block_go_on_top() {
+        // Run settings and an environment's block go on top.
         let text = "[app]\nstart = \"node a.js\"\n[app.run]\nconcurrency = 20\n[app.environments.production]\nwatch = [\"web/**\"]\n[app.environments.production.run]\nmin_instances = 1\n";
         let app = parse(text).unwrap().unwrap();
         let (b, r, said) = app.apply(&Build::default(), &Run::default(), Some(EnvScope { name: "production", ephemeral: false })).unwrap();

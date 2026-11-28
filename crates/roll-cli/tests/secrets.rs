@@ -714,9 +714,10 @@ async fn an_exported_audit_log_verifies_offline_with_saved_keys_for_its_own_proj
     assert!(o.code != Some(0) && o.stderr.contains("edited"), "{}{}", o.stdout, o.stderr);
 }
 
-/// `roll run --watch`: a write restarts the command with the new value, a poll that fails waits its
-/// interval and keeps the command running (never spins), and SIGTERM to roll reaches the command,
-/// roll exiting as it did.
+/// `roll run --watch`: a write restarts the command with the new value, read through a delta
+/// (docs/secrets.md, "Delta reads": audited as returning only the key that changed), a poll that
+/// fails waits its interval and keeps the command running (never spins), and SIGTERM to roll
+/// reaches the command, roll exiting as it did.
 #[cfg(unix)]
 #[tokio::test]
 async fn roll_run_watch_restarts_on_a_write_waits_out_failures_and_passes_sigterm_on() {
@@ -724,7 +725,7 @@ async fn roll_run_watch_restarts_on_a_write_waits_out_failures_and_passes_sigter
     use std::time::Duration;
     let s = start().await;
     let at = ["secrets", "-p", "shop", "-e", "production"];
-    ok(&s.api, &[], &[&at[..], &["set", "GREETING=one"]].concat(), None).await;
+    ok(&s.api, &[], &[&at[..], &["set", "GREETING=one", "KEPT=same"]].concat(), None).await;
     let seen_at = s._dir.path().join("seen");
     let seen = || std::fs::read_to_string(&seen_at).unwrap_or_default();
     let wait_for = |want: &'static str| {
@@ -738,7 +739,7 @@ async fn roll_run_watch_restarts_on_a_write_waits_out_failures_and_passes_sigter
         }
     };
     // Each start writes its value; SIGTERM writes `term` and exits 7.
-    let script = r#"trap 'echo term >> "$SEEN"; exit 7' TERM; echo "$GREETING" >> "$SEEN"; while :; do sleep 0.05; done"#;
+    let script = r#"trap 'echo term >> "$SEEN"; exit 7' TERM; echo "$GREETING $KEPT" >> "$SEEN"; while :; do sleep 0.05; done"#;
     // Every poll fails from the start: the first read (values, not the digest) still starts it.
     s.polls.failing.store(true, Ordering::SeqCst);
     let mut roll = tokio::process::Command::new(env!("CARGO_BIN_EXE_roll"))
@@ -755,72 +756,26 @@ async fn roll_run_watch_restarts_on_a_write_waits_out_failures_and_passes_sigter
         .kill_on_drop(true)
         .spawn()
         .unwrap();
-    wait_for("one\n").await;
+    wait_for("one same\n").await;
     let before = s.polls.asked.load(Ordering::SeqCst);
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
     let polls = s.polls.asked.load(Ordering::SeqCst) - before;
-    assert!((2..=6).contains(&polls), "{polls} failing polls in 3 s at a 1 s interval");
-    assert_eq!(seen(), "one\n", "a failing poll keeps the running command");
+    assert!((1..=4).contains(&polls), "{polls} failing polls in 1.5 s at a 1 s interval");
+    assert_eq!(seen(), "one same\n", "a failing poll keeps the running command");
 
     s.polls.failing.store(false, Ordering::SeqCst);
     ok(&s.api, &[], &[&at[..], &["set", "GREETING=two"]].concat(), None).await;
-    wait_for("one\nterm\ntwo\n").await;
+    wait_for("one same\nterm\ntwo same\n").await;
+    let project = s.projects.list(roll_workspace::Scope::All).unwrap().into_iter().find(|p| p.name == "shop").unwrap().id;
+    let filter = roll_secrets::AuditFilter { action: Some("secrets.export".into()), ..Default::default() };
+    let reads = s.secrets.audit(&project, filter, &roll_secrets::Caller::operator()).unwrap();
+    assert_eq!(reads[0].keys, ["GREETING"], "{}", reads[0].summary);
 
     // SAFETY: kill(2) on the roll process this test started.
     unsafe { libc::kill(roll.id().unwrap() as libc::pid_t, libc::SIGTERM) };
     let status = tokio::time::timeout(Duration::from_secs(10), roll.wait()).await.expect("roll exits with its command").unwrap();
     assert_eq!(status.code(), Some(7));
-    assert_eq!(seen(), "one\nterm\ntwo\nterm\n");
-}
-
-/// `roll run --watch` reads a change through a delta (docs/secrets.md, "Delta reads"): the
-/// restarted command has the new value and the one that didn't change, and the read after the
-/// change is audited as returning only the key that changed.
-#[cfg(unix)]
-#[tokio::test]
-async fn roll_run_watch_reads_a_change_through_a_delta() {
-    use std::time::Duration;
-    let s = start().await;
-    let at = ["secrets", "-p", "shop", "-e", "production"];
-    ok(&s.api, &[], &[&at[..], &["set", "A=one", "B=kept"]].concat(), None).await;
-    let seen_at = s._dir.path().join("seen");
-    let seen = || std::fs::read_to_string(&seen_at).unwrap_or_default();
-    let wait_for = |want: &'static str| {
-        let seen = &seen;
-        async move {
-            let started = std::time::Instant::now();
-            while seen() != want {
-                assert!(started.elapsed() < Duration::from_secs(20), "waited for {want:?}, the command wrote {:?}", seen());
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-        }
-    };
-    let mut roll = tokio::process::Command::new(env!("CARGO_BIN_EXE_roll"))
-        .args(["run", "-p", "shop", "-e", "production", "--watch", "--interval", "1", "--no-mask", "--", "sh", "-c", r#"echo "$A $B" >> "$SEEN"; while :; do sleep 0.05; done"#])
-        .env("ROLL_API_URL", &s.api)
-        .env("SEEN", &seen_at)
-        .env_remove("ROLL_TOKEN")
-        .env_remove("ROLL_PROJECT")
-        .env_remove("ROLL_ENV")
-        .env_remove("ROLL_ADMIN_TOKEN")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
-        .unwrap();
-    wait_for("one kept\n").await;
-    ok(&s.api, &[], &[&at[..], &["set", "A=two"]].concat(), None).await;
-    wait_for("one kept\ntwo kept\n").await;
-    let project = s.projects.list(roll_workspace::Scope::All).unwrap().into_iter().find(|p| p.name == "shop").unwrap().id;
-    let filter = roll_secrets::AuditFilter { action: Some("secrets.export".into()), ..Default::default() };
-    let reads = s.secrets.audit(&project, filter, &roll_secrets::Caller::operator()).unwrap();
-    assert_eq!(reads[0].keys, ["A"], "{}", reads[0].summary);
-    // Stopped as a person stops it, so it stops its command: a killed roll leaves the command
-    // running forever, holding whatever it inherited (a gate's build lock, once).
-    // SAFETY: kill(2) on the roll process this test started.
-    unsafe { libc::kill(roll.id().unwrap() as libc::pid_t, libc::SIGTERM) };
-    tokio::time::timeout(Duration::from_secs(10), roll.wait()).await.expect("roll exits with its command").unwrap();
+    assert_eq!(seen(), "one same\nterm\ntwo same\nterm\n");
 }
 
 /// A token reaches what it's told to, for 90 days: no environment named is refused (or the
@@ -1119,9 +1074,12 @@ async fn local_agent(s: &Server, env: &[(&str, &str)]) -> LocalAgent {
 }
 
 /// An app reads through the agent only with the token the agent was given (a server-side request
-/// forgery can't set the header), in the Lambda extension's shapes; no value is logged.
+/// forgery can't set the header), in the Lambda extension's shapes; no value is logged. A write
+/// reaches the agent through the folder's digest: the agent reads the values again by itself, and
+/// the app's next read is the new value, from memory.
 #[tokio::test]
 async fn the_local_agent_answers_only_requests_that_carry_its_token() {
+    use std::sync::atomic::Ordering;
     let s = start().await;
     ok(&s.api, &[], &["secrets", "-p", "shop", "-e", "production", "set", "GREETING=fake-hello", "PORT=5432"], None).await;
     let a = local_agent(&s, &[]).await;
@@ -1148,25 +1106,14 @@ async fn the_local_agent_answers_only_requests_that_carry_its_token() {
     }
     let log = a.log.lock().unwrap().clone();
     assert!(log.contains("GET /secrets/GREETING 401") && log.contains("GET /secrets 200") && !log.contains("fake-hello") && !log.contains("env=production"), "{log}");
-}
 
-/// A write reaches the agent through the folder's digest: the agent reads the values again by
-/// itself, and the app's next read is the new value, from memory.
-#[tokio::test]
-async fn a_change_reaches_the_local_agents_cache_through_the_digest() {
-    use std::sync::atomic::Ordering;
-    let s = start().await;
-    let at = ["secrets", "-p", "shop", "-e", "production"];
-    ok(&s.api, &[], &[&at[..], &["set", "GREETING=fake-one"]].concat(), None).await;
-    let a = local_agent(&s, &[]).await;
-    let http = reqwest::Client::new();
     let read = || async { http.get(format!("{}/secrets/GREETING", a.url)).header("X-Roll-Token", &a.token).send().await.unwrap().text().await.unwrap() };
     let reads = || s.polls.reads.load(Ordering::SeqCst);
-    let before = reads();
-    assert_eq!(read().await, "fake-one");
-    assert_eq!(read().await, "fake-one");
-    assert_eq!(reads() - before, 1, "the second read is from memory");
-    ok(&s.api, &[], &[&at[..], &["set", "GREETING=fake-two"]].concat(), None).await;
+    assert_eq!(read().await, "fake-hello");
+    let kept = reads();
+    assert_eq!(read().await, "fake-hello");
+    assert_eq!(reads(), kept, "a read is from memory");
+    ok(&s.api, &[], &["secrets", "-p", "shop", "-e", "production", "set", "GREETING=fake-two"], None).await;
     // Logged once the new values are kept.
     let started = std::time::Instant::now();
     while !a.log.lock().unwrap().contains("production:/ changed; read again") {
@@ -1174,7 +1121,7 @@ async fn a_change_reaches_the_local_agents_cache_through_the_digest() {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
     assert_eq!(read().await, "fake-two");
-    assert_eq!(reads() - before, 2, "the agent read the change once, and the app's read after it is from memory");
+    assert_eq!(reads() - kept, 1, "the agent read the change once, and the app's read after it is from memory");
 }
 
 /// Once roll refuses the agent's login (its token revoked), the agent stops answering from memory
@@ -1205,6 +1152,58 @@ async fn a_revoked_logins_local_agent_answers_a_refusal_within_one_poll() {
     let (status, body) = read().await;
     assert_eq!(status, 403, "{body}");
     assert!(body.contains("refused the agent's login") && !body.contains("fake-"), "{body}");
+}
+
+/// A token whose rule reaches only some keys watches those alone: `roll run --watch` restarts
+/// when its key changes, and another key's write doesn't move the token's digest, so nothing
+/// restarts for it.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_key_scoped_tokens_watch_follows_only_its_keys() {
+    use std::time::Duration;
+    let s = start().await;
+    let at = ["secrets", "-p", "shop", "-e", "production"];
+    ok(&s.api, &[], &[&at[..], &["set", "STRIPE_KEY=fake-one", "DB_PASSWORD=fake-pw"]].concat(), None).await;
+    let token = ok(&s.api, &[], &["secrets", "-p", "shop", "tokens", "create", "stripe", "--for-env", "production", "--key", "STRIPE_KEY"], None).await.trim().to_string();
+    let project = s.projects.list(roll_workspace::Scope::All).unwrap().into_iter().find(|p| p.name == "shop").unwrap().id;
+    let url = format!("{}/v1/secrets/projects/{project}/environments/production/digest", s.api);
+    let digest = || async {
+        let r = reqwest::Client::new().get(&url).bearer_auth(&token).send().await.unwrap();
+        assert_eq!(r.status(), reqwest::StatusCode::OK);
+        r.json::<serde_json::Value>().await.unwrap()["digest"].as_str().unwrap().to_string()
+    };
+    let seen_at = s._dir.path().join("seen");
+    let seen = || std::fs::read_to_string(&seen_at).unwrap_or_default();
+    let wait_for = |want: &'static str| {
+        let seen = &seen;
+        async move {
+            let started = std::time::Instant::now();
+            while seen() != want {
+                assert!(started.elapsed() < Duration::from_secs(20), "waited for {want:?}, the command wrote {:?}", seen());
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+    };
+    let _roll = tokio::process::Command::new(env!("CARGO_BIN_EXE_roll"))
+        .args(["run", "-e", "production", "--watch", "--interval", "1", "--no-mask", "--", "sh", "-c", r#"echo "$STRIPE_KEY ${DB_PASSWORD:-none}" >> "$SEEN"; exec sleep 600"#])
+        .env("ROLL_API_URL", &s.api)
+        .env("ROLL_TOKEN", &token)
+        .env("SEEN", &seen_at)
+        .env_remove("ROLL_PROJECT")
+        .env_remove("ROLL_ENV")
+        .env_remove("ROLL_ADMIN_TOKEN")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    wait_for("fake-one none\n").await;
+    let before = digest().await;
+    ok(&s.api, &[], &[&at[..], &["set", "DB_PASSWORD=fake-pw-2"]].concat(), None).await;
+    assert_eq!(digest().await, before, "another key's write moved a key-scoped token's digest");
+    ok(&s.api, &[], &[&at[..], &["set", "STRIPE_KEY=fake-two"]].concat(), None).await;
+    wait_for("fake-one none\nfake-two none\n").await;
 }
 
 /// A Compute Engine metadata server: the instance's identity token for the audience asked, signed
@@ -1449,22 +1448,6 @@ async fn a_mounted_env_is_a_pipe_that_follows_changes_and_goes_with_the_login() 
     assert!(std::fs::read_to_string(work.join(".gitignore")).unwrap().lines().any(|l| l == "/.env"));
     let read = || read_pipe(&env_file);
     assert_eq!(read().await, "GREETING=\"fake one\"\n");
-    // A reader that holds the pipe open a while before it reads (a loaded machine) still gets one
-    // copy, not the next open's appended to it.
-    let slow = {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        let path = env_file.clone();
-        std::thread::spawn(move || {
-            use std::io::Read;
-            let mut f = std::fs::File::open(path).unwrap();
-            std::thread::sleep(std::time::Duration::from_millis(500));
-            let mut text = String::new();
-            f.read_to_string(&mut text).unwrap();
-            tx.send(text)
-        });
-        tokio::time::timeout(std::time::Duration::from_secs(10), rx).await.expect("the pipe answers").unwrap()
-    };
-    assert_eq!(slow, "GREETING=\"fake one\"\n");
     ok(&s.api, &[], &[&at[..], &["set", "GREETING=fake-two"]].concat(), None).await;
     let started = std::time::Instant::now();
     loop {

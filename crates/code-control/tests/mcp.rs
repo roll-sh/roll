@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 const MCP: &str = "/v1/code/mcp";
 
 /// The tools docs/code/mcp.md lists.
-const TOOLS: [&str; 73] = [
+const TOOLS: [&str; 74] = [
     "list_repos", "search", "fetch", "search_code", "read_file", "list_tree", "log", "blame", "get_changeset", "compare", "create_change", "revise_change", "land", "get_change",
     "list_changes", "claim_work", "heartbeat_work", "release_work", "complete_work", "list_work", "create_work", "comment", "review", "queue_status",
     "request_ai_review", "list_agent_machines", "list_agent_threads", "create_agent_thread", "send_agent_message", "respond_agent_request",
@@ -21,12 +21,13 @@ const TOOLS: [&str; 73] = [
     "close_change", "report_check", "set_commit_status", "list_refs", "create_repo", "resolve_thread", "reopen_thread", "apply_suggestion", "request_review",
     "get_commit_statuses", "get_work", "update_work", "release_agent_work", "update_change", "set_change_lane",
     "get_ai_review_pricing", "get_review_usage", "list_ai_reviews", "get_reviewer", "get_review_rules", "get_repo_audit", "start_preview",
-    "stop_preview", "retry_agent_automation_run", "enable_agent_automation", "disable_agent_automation", "get_agent_automation_catalog", "test_agent_automation",
+    "stop_preview", "retry_agent_automation_run", "enable_agent_automation", "disable_agent_automation", "delete_agent_automation", "get_agent_automation_catalog",
+    "test_agent_automation",
     "list_agent_sandboxes", "stop_agent_sandbox", "get_agent_sandbox_usage",
 ];
 /// The agents tools (not repo-scoped: `agent_tools_drive_a_machine_like_their_routes`,
 /// `agent_tools_work_in_roll_code_like_their_routes` and `automation_tools_map_onto_their_routes`).
-const AGENT_TOOLS: usize = 24;
+const AGENT_TOOLS: usize = 25;
 /// The ones that only read (`readOnlyHint`).
 const READ_ONLY: [&str; 31] = [
     "list_repos", "search", "fetch", "search_code", "read_file", "list_tree", "log", "blame", "get_changeset", "compare", "get_change", "list_changes", "list_work", "queue_status", "list_refs",
@@ -145,11 +146,11 @@ async fn transport_sessions_and_protocol() {
         assert_eq!(t["annotations"]["readOnlyHint"], read_only, "{}", t["name"]);
         // A model provider or a branch's remote is outside roll; a repo's own reads and writes aren't.
         let open = ["request_ai_review", "create_agent_thread", "publish_agent_thread", "retry_agent_automation_run"].contains(&t["name"].as_str().unwrap());
-        // What can't be undone asks a person first: a closed change, a preview's data.
-        let destructive = ["close_change", "stop_preview"].contains(&t["name"].as_str().unwrap());
+        // What can't be undone asks a person first: a closed change, a preview's data, an automation.
+        let destructive = ["close_change", "stop_preview", "delete_agent_automation"].contains(&t["name"].as_str().unwrap());
         assert_eq!(t["annotations"]["destructiveHint"], destructive, "{}", t["name"]);
         // A read, or only PUTs and DELETEs: retrying it is safe.
-        let idempotent = read_only || ["dequeue_change", "stop_preview", "release_agent_work"].contains(&t["name"].as_str().unwrap());
+        let idempotent = read_only || ["dequeue_change", "stop_preview", "release_agent_work", "delete_agent_automation"].contains(&t["name"].as_str().unwrap());
         assert_eq!(t["annotations"]["idempotentHint"], idempotent, "{}", t["name"]);
         if open || ["read_file", "land", "comment"].contains(&t["name"].as_str().unwrap()) {
             assert_eq!(t["annotations"]["openWorldHint"], open, "{}", t["name"]);
@@ -191,6 +192,73 @@ async fn transport_sessions_and_protocol() {
     assert_eq!(a.send(del(c.session.clone())).await.status(), StatusCode::NOT_FOUND);
     let (s, _, _) = c.post(json!({ "jsonrpc": "2.0", "id": 16, "method": "ping" }), &[]).await;
     assert_eq!(s, StatusCode::NOT_FOUND, "an ended session is gone");
+}
+
+/// A 2026-07-28 request (the stateless revision): no initialize and no session, the request's
+/// `_meta` and headers say what it is, and every answer carries the revision's fields. An owner's
+/// token lists and calls the same tools, with the same rights, as in a session; a malformed
+/// request's error carries its id.
+#[tokio::test]
+async fn modern_clients_need_no_session() {
+    let a = app(Some("root"));
+    let root = Some("root");
+    a.req("POST", "/v1/code/owners", Some(json!({ "name": "acme", "kind": "org" })), root).await;
+    let (_, t) = a.req("POST", "/v1/code/owners/acme/tokens", Some(json!({ "name": "t" })), root).await;
+    let owner = t["token"].as_str().unwrap().to_string();
+    a.req("POST", "/v1/code/repos", Some(json!({ "owner": "acme", "name": "web", "visibility": "private" })), root).await;
+    a.req("POST", "/v1/code/repos/acme/web/land", Some(json!({ "message": "m", "files": { "a.txt": { "content": "hi\n" } } })), root).await;
+    let rpc = |id: u64, method: &str, params: Value| {
+        let mut params = params;
+        params["_meta"] = json!({ "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} });
+        json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params })
+    };
+    let headers = |method: &'static str, name: Option<&'static str>| {
+        let mut h = vec![("mcp-protocol-version", "2026-07-28"), ("mcp-method", method)];
+        h.extend(name.map(|n| ("mcp-name", n)));
+        h
+    };
+    let c = Client::new(&a, Some(&owner));
+
+    let (s, h, v) = c.post(rpc(1, "server/discover", json!({})), &headers("server/discover", None)).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert!(!h.contains_key("mcp-session-id"));
+    assert_eq!(v["result"]["supportedVersions"][0], "2026-07-28");
+    assert_eq!((v["result"]["resultType"].as_str(), v["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["name"].as_str()), (Some("complete"), Some("roll-code")), "{v}");
+
+    let (s, _, v) = c.post(rpc(2, "tools/list", json!({})), &headers("tools/list", None)).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let mut names: Vec<&str> = v["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+    names.sort_unstable();
+    let mut documented = TOOLS.to_vec();
+    documented.sort_unstable();
+    assert_eq!(names, documented, "the same tools, by the same names, as a session lists");
+    assert_eq!((v["result"]["cacheScope"].as_str(), v["result"]["ttlMs"].is_u64()), (Some("private"), true));
+
+    let read = rpc(3, "tools/call", json!({ "name": "read_file", "arguments": { "repo": "acme/web", "path": "a.txt" } }));
+    let (s, _, v) = c.post(read.clone(), &headers("tools/call", Some("read_file"))).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!((v["id"].as_u64(), v["result"]["isError"].as_bool(), v["result"]["structuredContent"]["content"].as_str()), (Some(3), Some(false), Some("hi\n")), "{v}");
+    // Without the owner's token, the repo is as private as it is to the HTTP API.
+    let (_, _, v) = Client::new(&a, None).post(read, &headers("tools/call", Some("read_file"))).await;
+    assert_eq!(v["result"]["isError"], true, "{v}");
+
+    // Malformed: no capabilities, a header that names another tool, a handshake method. Each
+    // error is the request's own (its id), never `id: null`.
+    let mut bare = rpc(4, "tools/list", json!({}));
+    bare["params"]["_meta"].as_object_mut().unwrap().remove("io.modelcontextprotocol/clientCapabilities");
+    let (s, _, v) = c.post(bare, &headers("tools/list", None)).await;
+    assert_eq!((s, v["id"].as_u64(), v["error"]["code"].as_i64()), (StatusCode::BAD_REQUEST, Some(4), Some(-32602)), "{v}");
+    let call = rpc(5, "tools/call", json!({ "name": "read_file", "arguments": {} }));
+    let (s, _, v) = c.post(call, &headers("tools/call", Some("land"))).await;
+    assert_eq!((s, v["id"].as_u64(), v["error"]["code"].as_i64()), (StatusCode::BAD_REQUEST, Some(5), Some(-32020)), "{v}");
+    let (s, _, v) = c.post(rpc(6, "initialize", json!({})), &headers("initialize", None)).await;
+    assert_eq!((s, v["id"].as_u64(), v["error"]["code"].as_i64()), (StatusCode::NOT_FOUND, Some(6), Some(-32601)), "{v}");
+    let (s, _, v) = Client::new(&a, Some("rlc_never_issued")).post(rpc(7, "tools/list", json!({})), &headers("tools/list", None)).await;
+    assert_eq!((s, v["id"].as_u64()), (StatusCode::UNAUTHORIZED, Some(7)), "{v}");
+
+    // Lockdown holds on this revision too.
+    let (_, _, v) = c.post(rpc(8, "server/discover", json!({})), &[headers("server/discover", None), vec![("x-mcp-lockdown", "1")]].concat()).await;
+    assert!(v["result"]["instructions"].as_str().unwrap().contains("lockdown"), "{v}");
 }
 
 /// `Accept: text/event-stream` (without `application/json`): each response comes as a `message`
@@ -321,6 +389,9 @@ async fn protocol_edges() {
     // No resources or prompts, but the methods answer.
     assert_eq!(c.rpc("resources/list", json!({})).await["result"]["resources"], json!([]));
     assert_eq!(c.rpc("prompts/list", json!({})).await["result"]["prompts"], json!([]));
+    assert_eq!(c.rpc("resources/templates/list", json!({})).await["result"]["resourceTemplates"], json!([]));
+    assert_eq!(c.rpc("resources/read", json!({ "uri": "x://y" })).await["error"]["data"]["uri"], "x://y");
+    assert_eq!(c.rpc("prompts/get", json!({ "name": "p" })).await["error"]["code"], -32602);
     // tools/call: no arguments means {} (the tool's own error); no name is an unknown tool.
     let v = c.rpc("tools/call", json!({ "name": "queue_status" })).await;
     assert_eq!(v["result"]["isError"], true);
@@ -1470,6 +1541,9 @@ async fn automation_tools_map_onto_their_routes() {
     let tried = owner.tool("test_agent_automation", json!({ "owner": "acme", "spec": spec, "event": event })).await;
     assert_eq!(tried, a.req("POST", "/v1/code/agents/acme/automations/test", Some(json!({ "automation": spec, "event": event })), root).await.1);
     assert!(tried["trigger"].is_boolean(), "{tried}");
+    // Deleted by name: its route has nothing there any more.
+    assert_eq!(owner.tool("delete_agent_automation", json!({ "owner": "acme", "automation": "Hello again" })).await["deleted"], id.as_str());
+    assert_eq!(a.req("GET", &format!("/v1/code/agents/acme/automations/{id}"), None, root).await.0, StatusCode::NOT_FOUND);
     // Sandboxes: the list and a month's use as their routes answer; an unknown one isn't found.
     assert_eq!(owner.tool("list_agent_sandboxes", json!({ "owner": "acme" })).await, a.req("GET", "/v1/code/agents/acme/sandboxes", None, root).await.1);
     assert_eq!(owner.tool("get_agent_sandbox_usage", json!({ "owner": "acme" })).await, a.req("GET", "/v1/code/agents/acme/sandboxes/usage", None, root).await.1);
@@ -1534,6 +1608,7 @@ fn every_tool_says_whether_it_holds_an_outsiders_words() {
         ("retry_agent_automation_run", "the owner's agents"),
         ("enable_agent_automation", "the owner's agents"),
         ("disable_agent_automation", "the owner's agents"),
+        ("delete_agent_automation", "the owner's agents"),
         ("get_agent_automation_catalog", "the owner's agents"),
         ("test_agent_automation", "the owner's agents"),
         ("list_agent_sandboxes", "the owner's agents"),

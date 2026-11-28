@@ -233,20 +233,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_routes_minutes_are_counted_apart_and_taken_once_finished() {
-        let mut m = super::RouteMeter::default();
-        m.request(60_000, "POST /checkout/:id".into(), 40.0, 500);
-        m.request(61_000, "POST /checkout/:id".into(), 60.0, 200);
-        m.request(62_000, "/api/*".into(), 120.0, 200);
-        m.request(125_000, "/api/*".into(), 80.0, 200);
-        // Minute 2 is still going at 125 s: only minute 1 is taken, each route on its own.
-        let rows: Vec<(String, i64, i64, i64)> = m.take(125_000, false).into_iter().map(|(r, x)| (r, x.minute, x.requests, x.errors)).collect();
-        assert_eq!(rows, [("/api/*".to_string(), 1, 1, 0), ("POST /checkout/:id".to_string(), 1, 2, 1)]);
-        assert!(m.take(125_000, false).is_empty(), "taken once");
-        assert_eq!(m.take(125_000, true).len(), 1, "a shutdown takes the current one too");
-    }
-
-    #[test]
     fn minutes_roll_over_and_idle_costs_nothing() {
         let mut m = Meter::default();
         for i in 0..100 {
@@ -266,5 +252,15 @@ mod tests {
         m.sample(180_000, 0.0, 0, 0.0, 0);
         assert!(m.take(240_000, true).is_empty());
         assert_eq!(p.cost(&UsageAdd::default()), 0.0);
+        // A route's minutes are counted apart, and taken once they're finished.
+        let mut m = super::RouteMeter::default();
+        m.request(60_000, "POST /checkout/:id".into(), 40.0, 500);
+        m.request(61_000, "POST /checkout/:id".into(), 60.0, 200);
+        m.request(62_000, "/api/*".into(), 120.0, 200);
+        m.request(125_000, "/api/*".into(), 80.0, 200);
+        let rows: Vec<(String, i64, i64, i64)> = m.take(125_000, false).into_iter().map(|(r, x)| (r, x.minute, x.requests, x.errors)).collect();
+        assert_eq!(rows, [("/api/*".to_string(), 1, 1, 0), ("POST /checkout/:id".to_string(), 1, 2, 1)]);
+        assert!(m.take(125_000, false).is_empty(), "taken once");
+        assert_eq!(m.take(125_000, true).len(), 1, "a shutdown takes the current one too");
     }
 }

@@ -97,6 +97,14 @@ impl Code {
         self.discord().map(|(_, c)| c).ok_or_else(|| "Discord isn't configured on this node".into())
     }
 
+    /// roll's Discord bot, for a channel of `install`'s own server only: one bot serves every
+    /// install, so a channel id from a tenant would otherwise reach any server the bot is in.
+    async fn discord_for(&self, install: &Install, channel: &str) -> Result<&code_chat::discord::Client, String> {
+        let client = self.discord_client()?;
+        in_guild(client, &install.team_id, channel).await?;
+        Ok(client)
+    }
+
     /// Post an approval card to a Slack channel or Discord channel; its message id.
     pub async fn post_access_card(&self, install: &str, channel: &str, c: &AccessCard) -> Result<String, String> {
         let i = self.install(install)?;
@@ -107,7 +115,7 @@ impl Code {
             }
             super::Platform::Discord => {
                 let payload = code_chat::discord::request(&card(c));
-                self.discord_client()?.create_message(channel, &payload).await.map(|p| p.id).map_err(|e| e.to_string())
+                self.discord_for(&i, channel).await?.create_message(channel, &payload).await.map(|p| p.id).map_err(|e| e.to_string())
             }
         }
     }
@@ -131,7 +139,7 @@ impl Code {
             }
             super::Platform::Discord => {
                 let payload = serde_json::json!({ "content": text, "allowed_mentions": { "parse": [] } });
-                self.discord_client()?.create_message(channel, &payload).await.map(|_| ()).map_err(|e| e.to_string())
+                self.discord_for(&i, channel).await?.create_message(channel, &payload).await.map(|_| ()).map_err(|e| e.to_string())
             }
         }
     }
@@ -146,9 +154,17 @@ impl Code {
             }
             super::Platform::Discord => {
                 let payload = code_chat::discord::request(&card(c));
-                self.discord_client()?.edit_message(channel, ts, &payload).await.map(|_| ()).map_err(|e| e.to_string())
+                self.discord_for(&i, channel).await?.edit_message(channel, ts, &payload).await.map(|_| ()).map_err(|e| e.to_string())
             }
         }
+    }
+}
+
+/// Refuses `channel` unless it's a channel of `guild` (a DM has none, so it's refused too).
+pub(super) async fn in_guild(client: &code_chat::discord::Client, guild: &str, channel: &str) -> Result<(), String> {
+    match client.channel_guild(channel).await.map_err(|e| e.to_string())? {
+        Some(g) if !guild.is_empty() && g == guild => Ok(()),
+        _ => Err(format!("Discord channel {channel} isn't in this install's server")),
     }
 }
 

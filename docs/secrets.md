@@ -649,8 +649,7 @@ The Go and Python clients log in with OIDC tokens and AWS only, not yet with `gc
 machine credential.
 
 Tests: `crates/roll-cli/tests/secrets.rs` (`the_local_agent_answers_only_requests_that_carry_its_token`,
-`a_change_reaches_the_local_agents_cache_through_the_digest`,
-`a_revoked_logins_local_agent_answers_a_refusal_within_one_poll`,
+with a change through the digest, `a_revoked_logins_local_agent_answers_a_refusal_within_one_poll`,
 `the_local_agent_on_a_gce_vm_logs_in_with_the_metadata_servers_identity_token`,
 `a_bootstrap_token_becomes_a_machine_credential_kept_on_disk_and_replaced_at_half_life`); the
 identity login's renewal is `relogin_tests` in `crates/roll-cli/src/secrets.rs`, which the agent
@@ -1437,6 +1436,12 @@ A link is `{kind, ref, field, mode, options}`:
   midnight on the next day), a due rotation waits for the window to open and runs inside it, so a
   credential changes only when you expect it to; `next_due` says when that is. A window goes with
   `rotate_days`, on a managed link.
+  Keys of one environment that share a credential (a login's username and password, in any
+  folder) rotate together: rotating one rewrites them all, so a
+  person or token needs write on each of them, as for any other write of them. Without it the
+  rotation is refused before anything is issued (403 saying how many other keys share it, never
+  which), and the answer lists only the keys the caller may read. roll's own rotations (scheduled,
+  for a leak, a recovered project's) rewrite every key that shares the credential.
 - **`dynamic`** (short-lived credentials): each resolve that asks for it (`roll run`, an app's
   start) issues a fresh credential with a TTL (`ttl_minutes`, default 60, at least 15 minutes, at most 7 days), recorded
   as a **lease**. Leases are revoked when they expire, or at once with `DELETE …/leases/{id}`, and
@@ -1819,7 +1824,8 @@ instead of at the first rotation:
   the secret that one stored), finds the key moved on when it comes to store its own; for most
   vendors that's a lost race and its credential is revoked, but Paddle ends the secret it rotated
   from, so its new secret, the newest and the only one that keeps working, is stored over the
-  other's. The key's id never changes (`id` is `api_key_id`). With `expires_days`, each new
+  other's. It replaces only that: if the key's link or value changed since for another reason (a
+  person re-linked it, or set a value by hand), the rotation is stale (409) and leaves it alone. The key's id never changes (`id` is `api_key_id`). With `expires_days`, each new
   secret gets `new_key_expires_at` that many days ahead, and a link's `rotate_days` is at most
   `expires_days` less 14; without it, each keeps the key's own expiry, which the registration's
   `credential_expires_at` can give health. One environment per registration: the registration is one
@@ -3618,6 +3624,8 @@ roll completions bash|zsh|fish|powershell
   `ROLL_TOKEN`, `ROLL_FALLBACK_KEY`…) is dropped from its environment unless the project sets
   that name itself, so an app and its dependencies never act as roll's operator or with the token
   that read its values. `--keep-roll-credentials` passes them on (a script that calls `roll`).
+  A `_URI` or `_URL` name whose value carries a password counts too. `roll apps exec` and
+  `roll secrets render --exec` drop the same names.
 - `roll run --watch [--interval 5]` keeps the command as a child and restarts it (SIGTERM, then
   SIGKILL after 10 s) when the environment changes. It polls `…/digest`, a hash of the folder's
   effective keys, versions, fingerprints and links, and of what their references reach (in this
@@ -5968,8 +5976,17 @@ that follow from it:
   only those keys of its folders: one key's routes (its value, versions, TOTP code, set, delete,
   rotate, hosts, purge) at that key, and a folder's list, values (`roll run`, an export, `?seq=`),
   resolve and batch of changes key by key: those keys alone, and a batch naming another is
-  refused with its name. A digest, a watch's delta, a `.env` import or diff, a promote, health
-  and leaks stay the folder's (403). `Scope::key` and `Scope::by_key` carry it to `Grants::allows`;
+  refused with its name. Its digest and a watch's delta are worked out over those keys too, so a
+  keyed token watches: the digest hashes only the keys it reaches (here, in what imports and the
+  base show through, and in what their references read), the required keys among them and the
+  rules about them, so a write to any other key never moves it, and it's computed for that
+  caller each time (never kept beside or taken from another reader's). `roll run --watch`,
+  `roll secrets render --watch`, `roll secrets agent` and the SDKs' watches use it as they are.
+  A `.env` import or diff, a promote, health and leaks stay the folder's (403), and that 403 says
+  why when a keyed rule would reach the folder key by key: "this token reaches only some keys of
+  production:/api; a diff reads the whole folder, so it needs a rule without keys" (the folder,
+  never a key; `roll_auth::scope::keys_only`, from the gate and from `Caller::need`).
+  `Scope::key` and `Scope::by_key` carry it to `Grants::allows`;
   `access::reaches` asks it per key, and `Grants::limits_keys` skips that for every other caller.
   `roll secrets tokens create … --key STRIPE_KEY` makes one. (Encryption keys are another
   thing: `{id, index}`, below.)
@@ -7157,7 +7174,7 @@ isn't in the workspace is 404.
 | `GET /environments/{env}/reach?path=&key=` | | `Reach` (a project admin's): tokens and identities that reach it, syncs, live leases and attributed shares, projects it's shared with, folders that import it, readers in 30 days, `frozen` |
 | `POST /environments/{env}/reach/cut-off?path=&key=` | `{why, tokens?, identities?, leases?, placeholders?, shares?, syncs?, backups?, freeze?}` | `CutOff`: what was cut, what was left to the operator (`skipped`: tokens reaching beyond the project) and what failed, with why (a project admin's; idempotent) |
 | `DELETE /environments/{env}/reach/cut-off?path=` | | 204: the folder's freeze lifted (a project admin's; 404 when it isn't frozen) |
-| `GET /environments/{env}/digest?path=&since=&wait=` | | `{digest}` (read: changes when the values would; a live link counts its value's keyed fingerprint as the product answers, read at most every 10 s, and at once when roll rotates it or the product's own password, reset or restore route changes it). With `since` (a digest the caller has) and `wait` (seconds, at most 25), a long poll: it answers as soon as the digest differs, else with the same one when `wait` runs out (at most 32 held per principal and 4096 per node; past that it answers at once); `roll run --watch`, `roll secrets render --watch` and the TS, Go and Python watches use it (and roll apps' redeploys in process, through `SecretSource::wait_digest`: one held poll per environment), so a change to the project's own values reaches them in a second or two (a live link's product-side change, or another project's shared folder, within about 10 s) |
+| `GET /environments/{env}/digest?path=&since=&wait=` | | `{digest}` (read: changes when the values would; a rule limited to some keys gets the digest of those keys alone, which no other key's write moves; a live link counts its value's keyed fingerprint as the product answers, read at most every 10 s, and at once when roll rotates it or the product's own password, reset or restore route changes it). With `since` (a digest the caller has) and `wait` (seconds, at most 25), a long poll: it answers as soon as the digest differs, else with the same one when `wait` runs out (at most 32 held per principal and 4096 per node; past that it answers at once); `roll run --watch`, `roll secrets render --watch` and the TS, Go and Python watches use it (and roll apps' redeploys in process, through `SecretSource::wait_digest`: one held poll per environment), so a change to the project's own values reaches them in a second or two (a live link's product-side change, or another project's shared folder, within about 10 s) |
 | `POST /environments/{env}/resolve` | `{path?, consumer, seal_to?, untrusted?, dynamic?, codes?, placeholders?, placeholder_minutes?, maker?}` | `Values` or `{sealed, context, problems, leases, dynamic, linked, followed, placeholders}` (`placeholders: true`: each key bound to hosts is an `rlph_…` placeholder in `values`, named in `placeholders`, for 1 to 43,200 minutes (default 1,440); refused for a workload identity's login; `maker`: who made the consumer, who must reveal here; not a sensitive key's for a reader that couldn't read it unless its binding has `untrusted`; not a key holding a reference, which is left out as a problem; `dynamic: false`: a consumer that can't renew leases, such as a preview's service, gets no dynamic credential; those keys are left out, named in `dynamic`; a key linked to a resource the ephemeral environment branched is left out and named in `followed`, in the clear beside a sealed box: names only) |
 | `GET /environments/{env}/changes?before=&limit=` | | `Change[]` newest first |
 | `POST /environments/{env}/changes` | `Batch` | 201 `Applied` |
@@ -7697,11 +7714,12 @@ That's 205–219 ms of CPU per identity down to 7–18 ms, across all runs. The 
 change, which now also works out the stamps, cost the same as before: 0.3 s on SQLite and 0.6–0.8
 + 0.9–1.0 s on Postgres, for all 1,000.
 
-`a_watchers_delta_returns_what_changed_and_is_audited` and
-`a_permission_change_since_the_answer_held_gets_the_full_set` (`tests/api.rs`) and
-`roll_run_watch_reads_a_change_through_a_delta` (`roll-cli/tests/secrets.rs`) cover it, and each
-runtime client has a watch test against its own fake rolld that reads a one-key change through the
-route and falls back to a full read on a 404 (an older rolld).
+`a_watchers_delta_returns_what_changed_and_is_audited` (`tests/api.rs`, a permission change since
+the answer held too) and
+`roll_run_watch_restarts_on_a_write_waits_out_failures_and_passes_sigterm_on`
+(`roll-cli/tests/secrets.rs`) cover it, and each runtime client has a watch test against its own
+fake rolld that reads a one-key change through the route and falls back to a full read on a 404
+(an older rolld).
 
 ### Large changes
 

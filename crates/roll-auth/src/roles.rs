@@ -212,19 +212,6 @@ mod tests {
     use super::*;
     use crate::scope::{Outcome, Resource, Target};
 
-    /// A refusal names the weakest role that may: what each role's rules allow, weakest first.
-    #[test]
-    fn the_weakest_role_that_may() {
-        assert_eq!(weakest_allowed("secrets", Action::Read), Some(Role::Viewer));
-        assert_eq!(weakest_allowed("secrets", Action::Write), Some(Role::Developer));
-        assert_eq!(weakest_allowed("secrets", Action::Admin), Some(Role::Admin));
-        assert_eq!(weakest_allowed("workspace", Action::Admin), Some(Role::Admin));
-        assert_eq!(weakest_allowed("workspace", Action::Delete), Some(Role::Owner));
-        assert_eq!(weakest_allowed("search", Action::Read), Some(Role::Viewer));
-        assert_eq!(weakest_allowed("search", Action::Admin), Some(Role::Admin));
-        assert_eq!(weakest_allowed("storage", Action::Read), None, "not a member product");
-    }
-
     fn secret(env: &str, protected: bool) -> Target {
         Target::One(Resource { project: Some("prj_a".into()), environment: Some(env.into()), protected: Some(protected), ..Resource::new("secrets", "prj_a") })
     }
@@ -233,38 +220,51 @@ mod tests {
         session_scope(&[Membership { project: "prj_a".into(), role, environments }])
     }
 
-    /// Each role allows and denies what docs/members.md's role table says, and nobody grants more
-    /// than they hold.
+    /// Each role allows and denies what docs/members.md's role table says, nobody grants more than they
+    /// hold, and a refusal names the weakest role that may.
     #[test]
     fn roles_are_rules() {
-        let (viewer, dev, admin, owner) = (scope(Role::Viewer, None), scope(Role::Developer, None), scope(Role::Admin, None), scope(Role::Owner, None));
-        assert_eq!(viewer.outcome(&secret("development", false), Action::Read), Outcome::Allow);
-        assert_eq!(viewer.outcome(&secret("development", false), Action::Reveal), Outcome::Deny, "D2: a viewer sees no values");
-        assert_eq!(dev.outcome(&secret("development", false), Action::Reveal), Outcome::Allow);
-        // What a new project has: development and staging plain, production protected.
-        assert_eq!(dev.outcome(&secret("staging", false), Action::Write), Outcome::Allow);
-        assert_eq!(dev.outcome(&secret("production", true), Action::Reveal), Outcome::Deny, "D3: not a protected environment");
-        assert_eq!(dev.outcome(&secret("production", true), Action::Read), Outcome::Allow);
-        // A project made before production started protected: still only when named.
-        assert_eq!(dev.outcome(&secret("production", false), Action::Reveal), Outcome::Deny, "D3: production only when named");
-        assert_eq!(dev.outcome(&secret("production", false), Action::Write), Outcome::Deny);
-        assert_eq!(dev.outcome(&secret("development", false), Action::Delete), Outcome::Deny);
-        let named = scope(Role::Developer, Some(vec!["production".into()]));
-        assert_eq!(named.outcome(&secret("production", true), Action::Reveal), Outcome::Allow, "production when named");
-        assert_eq!(named.outcome(&secret("production", false), Action::Reveal), Outcome::Allow);
-        assert_eq!(named.outcome(&secret("development", false), Action::Reveal), Outcome::Deny, "only the named ones");
-        assert_eq!(admin.outcome(&secret("production", true), Action::Reveal), Outcome::Allow, "D4");
-        assert_eq!(admin.outcome(&secret("production", true), Action::Admin), Outcome::Allow);
-        let project = Target::One(Resource { project: Some("prj_a".into()), ..Resource::new("workspace", "prj_a") });
-        assert_eq!(admin.outcome(&project, Action::Delete), Outcome::Deny);
-        assert_eq!(owner.outcome(&project, Action::Delete), Outcome::Allow);
-        assert_eq!(dev.outcome(&Target::One(Resource { project: Some("prj_b".into()), ..Resource::new("secrets", "prj_b") }), Action::Read), Outcome::Deny);
-        // Granting: up to your own role, never past it.
-        assert!(may_grant(&admin, "prj_a", Role::Admin, None) && may_grant(&admin, "prj_a", Role::Developer, Some(&["production".into()])));
-        assert!(!may_grant(&admin, "prj_a", Role::Owner, None), "an admin can't make an owner");
-        assert!(may_grant(&owner, "prj_a", Role::Owner, None));
-        assert!(!may_grant(&owner, "prj_b", Role::Viewer, None), "nothing in another project");
-        assert!(!may_grant(&viewer, "prj_a", Role::Developer, None));
-        assert!(names_project(&viewer, "prj_a") && !names_project(&viewer, "prj_b"));
+        {
+            let (viewer, dev, admin, owner) = (scope(Role::Viewer, None), scope(Role::Developer, None), scope(Role::Admin, None), scope(Role::Owner, None));
+            assert_eq!(viewer.outcome(&secret("development", false), Action::Read), Outcome::Allow);
+            assert_eq!(viewer.outcome(&secret("development", false), Action::Reveal), Outcome::Deny, "D2: a viewer sees no values");
+            assert_eq!(dev.outcome(&secret("development", false), Action::Reveal), Outcome::Allow);
+            // What a new project has: development and staging plain, production protected.
+            assert_eq!(dev.outcome(&secret("staging", false), Action::Write), Outcome::Allow);
+            assert_eq!(dev.outcome(&secret("production", true), Action::Reveal), Outcome::Deny, "D3: not a protected environment");
+            assert_eq!(dev.outcome(&secret("production", true), Action::Read), Outcome::Allow);
+            // A project made before production started protected: still only when named.
+            assert_eq!(dev.outcome(&secret("production", false), Action::Reveal), Outcome::Deny, "D3: production only when named");
+            assert_eq!(dev.outcome(&secret("production", false), Action::Write), Outcome::Deny);
+            assert_eq!(dev.outcome(&secret("development", false), Action::Delete), Outcome::Deny);
+            let named = scope(Role::Developer, Some(vec!["production".into()]));
+            assert_eq!(named.outcome(&secret("production", true), Action::Reveal), Outcome::Allow, "production when named");
+            assert_eq!(named.outcome(&secret("production", false), Action::Reveal), Outcome::Allow);
+            assert_eq!(named.outcome(&secret("development", false), Action::Reveal), Outcome::Deny, "only the named ones");
+            assert_eq!(admin.outcome(&secret("production", true), Action::Reveal), Outcome::Allow, "D4");
+            assert_eq!(admin.outcome(&secret("production", true), Action::Admin), Outcome::Allow);
+            let project = Target::One(Resource { project: Some("prj_a".into()), ..Resource::new("workspace", "prj_a") });
+            assert_eq!(admin.outcome(&project, Action::Delete), Outcome::Deny);
+            assert_eq!(owner.outcome(&project, Action::Delete), Outcome::Allow);
+            assert_eq!(dev.outcome(&Target::One(Resource { project: Some("prj_b".into()), ..Resource::new("secrets", "prj_b") }), Action::Read), Outcome::Deny);
+            // Granting: up to your own role, never past it.
+            assert!(may_grant(&admin, "prj_a", Role::Admin, None) && may_grant(&admin, "prj_a", Role::Developer, Some(&["production".into()])));
+            assert!(!may_grant(&admin, "prj_a", Role::Owner, None), "an admin can't make an owner");
+            assert!(may_grant(&owner, "prj_a", Role::Owner, None));
+            assert!(!may_grant(&owner, "prj_b", Role::Viewer, None), "nothing in another project");
+            assert!(!may_grant(&viewer, "prj_a", Role::Developer, None));
+            assert!(names_project(&viewer, "prj_a") && !names_project(&viewer, "prj_b"));
+        }
+        {
+            // A refusal names the weakest role that may: what each role's rules allow, weakest first.
+            assert_eq!(weakest_allowed("secrets", Action::Read), Some(Role::Viewer));
+            assert_eq!(weakest_allowed("secrets", Action::Write), Some(Role::Developer));
+            assert_eq!(weakest_allowed("secrets", Action::Admin), Some(Role::Admin));
+            assert_eq!(weakest_allowed("workspace", Action::Admin), Some(Role::Admin));
+            assert_eq!(weakest_allowed("workspace", Action::Delete), Some(Role::Owner));
+            assert_eq!(weakest_allowed("search", Action::Read), Some(Role::Viewer));
+            assert_eq!(weakest_allowed("search", Action::Admin), Some(Role::Admin));
+            assert_eq!(weakest_allowed("storage", Action::Read), None, "not a member product");
+        }
     }
 }

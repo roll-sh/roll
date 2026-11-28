@@ -972,6 +972,14 @@ CREATE TABLE IF NOT EXISTS read_counts (
 ) WITHOUT ROWID;
 ";
 
+/// Whether a caller whose rule reaches only some keys may `action` `e` of `slug:path`'s view: its
+/// key there, and, through an import or the base, in the folder it comes from too (another
+/// project's share stands in for access there).
+fn keeps(caller: &Caller, action: Action, project: &str, slug: &str, path: &str, e: &Entry) -> bool {
+    let k = e.row.key.as_str();
+    caller.allows(action, &Scope::at(project, slug, path).key(k)) && (e.row.project_id != project || (e.env == slug && e.row.path == path) || caller.allows(action, &Scope::at(project, &e.env, &e.row.path).key(k)))
+}
+
 impl Secrets {
     /// The effective entries of a folder; `shared` leaves out the caller's personal values.
     /// Imports and the base show through only where the caller may `action` them.
@@ -1000,16 +1008,7 @@ impl Secrets {
         if !caller.grants.limits_keys() {
             return Ok(entries);
         }
-        // A rule limited to some keys: each key here, and, through an import or the base, in the
-        // folder it comes from too (another project's share stands in for access there).
-        let here = Scope::at(project, slug, path);
-        Ok(entries
-            .into_iter()
-            .filter(|e| {
-                let k = e.row.key.as_str();
-                caller.allows(action, &here.key(k)) && (e.row.project_id != project || (e.env == slug && e.row.path == path) || caller.allows(action, &Scope::at(project, &e.env, &e.row.path).key(k)))
-            })
-            .collect())
+        Ok(entries.into_iter().filter(|e| keeps(caller, action, project, slug, path, e)).collect())
     }
 
     /// `e` as the API shows it. Its fingerprint only to a caller who may reveal it: a writer
@@ -1375,7 +1374,8 @@ impl Secrets {
             }
         }
         let have: Vec<String> = values.keys().cloned().chain(left_out).collect();
-        for m in self.missing_required(project, &path, &have)? {
+        let here = Scope::at(project, slug, &path);
+        for m in self.missing_required(project, &path, &have)?.into_iter().filter(|m| crate::access::reaches(caller, Action::Reveal, &here, &m.key)) {
             problems.push(Problem { key: m.key, problem: format!("required, but {slug} doesn't set it") });
         }
         if resolve {
@@ -1498,12 +1498,17 @@ impl Secrets {
     /// [`Secrets::digest_of`], as computed: with its stamps.
     fn digested(&self, project: &str, slug: &str, path: &str, caller: &Caller) -> Result<std::sync::Arc<Digested>> {
         let path = names::path(path)?;
-        caller.need(Action::Read, &Scope::at(project, slug, &path))?;
+        caller.need(Action::Read, &Scope::at(project, slug, &path).by_key())?;
         // As the values are read: an untrusted ephemeral environment's digest leaves its protected
         // base out, so a deploy compares like with like.
         let narrowed = self.caller_for(project, slug, caller)?;
         let caller = &narrowed;
         let dek = self.project(project)?;
+        // A rule limited to some keys: a digest of those keys alone, worked out for this caller
+        // each time, never kept beside or taken from another reader's.
+        if caller.grants.limits_keys() {
+            return Ok(std::sync::Arc::new(self.compute_digest(project, slug, &path, &dek, caller)?));
+        }
         // Read first: a digest computed after it reflects at least this state, so one kept with it
         // is never newer than what it vouches for.
         let dead = self.dead_exports("x.to_project = ?", project)?;
@@ -1561,7 +1566,7 @@ impl Secrets {
     /// same for `caller`, `caller` passes every freeze it read past, and every live link's
     /// generation and fingerprint are as they were (the fingerprint read as a digest reads it).
     fn still(&self, project: &str, dek: &Dek, d: &Digested, caller: &Caller) -> Result<bool> {
-        if !d.asked.iter().all(|((action, env, path), ok)| caller.allows(*action, &Scope::at(project, env, path)) == *ok) {
+        if !d.asked.iter().all(|((action, env, path), ok)| caller.allows(*action, &Scope::at(project, env, path).by_key()) == *ok) {
             return Ok(false);
         }
         if !d.passed.iter().all(|(p, env, path)| caller.passes_freeze(p, env, path)) {
@@ -1585,7 +1590,7 @@ impl Secrets {
         // Every permission the digest depends on, with its answer: a kept digest is reused only
         // for a caller who gets the same answers (`still`).
         let asked: RefCell<BTreeMap<(Action, String, String), bool>> = RefCell::default();
-        let ask = |action: Action, env: &str, path: &str| *asked.borrow_mut().entry((action, env.to_string(), path.to_string())).or_insert_with(|| caller.allows(action, &Scope::at(project, env, path)));
+        let ask = |action: Action, env: &str, path: &str| *asked.borrow_mut().entry((action, env.to_string(), path.to_string())).or_insert_with(|| caller.allows(action, &Scope::at(project, env, path).by_key()));
         // Read as `values` reads it: imports and the base where the caller may reveal them. Where
         // each one it passed answers reading as it does revealing, that's also the folder as a
         // reference reads it, so a reference into this folder doesn't read it again.
@@ -1621,6 +1626,24 @@ impl Secrets {
             let entries = view_in(c, &env, path, principal, &reveal, Some(&passes), untrusted, DIGEST_COLUMNS, None, 0, &mut HashSet::new(), &dead)?;
             Ok::<_, Error>((env.branches, entries))
         })?;
+        // A rule limited to some keys: only the keys it reaches, here and in each folder a
+        // reference reads, so nothing else moves its digest. A key it may read but not reveal
+        // leaves the stamps unvouched: a resolve answers it differently.
+        let keyed = caller.grants.limits_keys();
+        let reached = |env: &str, at: &str, mut v: Vec<Entry>| {
+            if keyed {
+                v.retain(|e| {
+                    let read = keeps(caller, Action::Read, project, env, at, e);
+                    if read != keeps(caller, Action::Reveal, project, env, at, e) {
+                        refs_same.set(false);
+                    }
+                    read
+                });
+            }
+            v
+        };
+        let entries = reached(slug, path, entries);
+        let reaches = |k: &str| crate::access::reaches(caller, Action::Read, &Scope::at(project, slug, path), k);
         let mut h = Sha256::new();
         let mut dynamic = false;
         let mut live: Vec<(Link, i64, String)> = vec![];
@@ -1690,7 +1713,7 @@ impl Secrets {
                     Some(v) => v.clone(),
                     None => {
                         let v = match self.db.read(|c| view_in(c, &envs::by_slug(c, project, &env)?, &at, principal, &read, None, untrusted, DIGEST_COLUMNS, None, 0, &mut HashSet::new(), &dead)) {
-                            Ok(v) => v,
+                            Ok(v) => reached(&env, &at, v),
                             // A reference to an environment that isn't there reaches nothing.
                             Err(Error::NotFound(_)) => vec![],
                             // Nor does one that couldn't be read this time, and then the digest isn't kept.
@@ -1713,7 +1736,7 @@ impl Secrets {
         }
         let have: Vec<String> = entries.iter().map(|e| e.row.key.clone()).collect();
         let required = self.missing_required(project, path, &have)?;
-        for m in &required {
+        for m in required.iter().filter(|m| reaches(&m.key)) {
             h.update(format!("required\0{}\n", m.key));
         }
         let digest = h.finalize()[..16].iter().map(|b| format!("{b:02x}")).collect();
@@ -1736,7 +1759,7 @@ impl Secrets {
         let exact = walk.exact && refs_same.get();
         drop(walk);
         let stamps = if exact {
-            let rules: Vec<crate::required::Required> = self.db.read(|c| crate::required::of(c, project))?.into_iter().filter(|r| r.path == path).collect();
+            let rules: Vec<crate::required::Required> = self.db.read(|c| crate::required::of(c, project))?.into_iter().filter(|r| r.path == path && reaches(&r.key)).collect();
             let freezes: Vec<(String, String)> = self.db.read(|c| {
                 c.query(
                     "SELECT z.env_id, z.path FROM freezes z WHERE z.env_id IN (SELECT id FROM environments WHERE project_id = ?)
@@ -1760,7 +1783,7 @@ impl Secrets {
     /// the read does: whether values changed isn't told to whoever couldn't read them.
     pub fn unchanged(&self, project: &str, slug: &str, path: &str, etag: &str, dynamic: bool, caller: &Caller) -> Result<Option<String>> {
         let at = names::path(path)?;
-        caller.need(Action::Reveal, &Scope::at(project, slug, &at))?;
+        caller.need(Action::Reveal, &Scope::at(project, slug, &at).by_key())?;
         let (digest, unvouched) = self.digest_of(project, slug, &at, caller)?;
         if digest != etag || (dynamic && unvouched.dynamic) {
             return Ok(None);
@@ -1806,7 +1829,7 @@ impl Secrets {
     /// trusted for nothing else.
     pub fn values_delta(&self, project: &str, slug: &str, path: &str, held: &Held, dynamic: bool, caller: &Caller) -> Result<Delta> {
         let path = names::path(path)?;
-        caller.need(Action::Reveal, &Scope::at(project, slug, &path))?;
+        caller.need(Action::Reveal, &Scope::at(project, slug, &path).by_key())?;
         held.check()?;
         let narrowed = self.caller_for(project, slug, caller)?;
         // Taken before anything is read: whatever is read after is at least this new, so a stamp
@@ -1876,7 +1899,8 @@ impl Secrets {
         // Gone since the stamps were taken: no longer answered.
         removed.extend(changed.iter().filter(|k| !values.contains_key(&*k.key) && held.stamps.contains_key(&*k.key)).map(|k| k.key.to_string()));
         let all: Vec<String> = stamps.keys.iter().map(|k| k.key.to_string()).collect();
-        for m in self.missing_required(project, &path, &all)? {
+        let here = Scope::at(project, slug, &path);
+        for m in self.missing_required(project, &path, &all)?.into_iter().filter(|m| crate::access::reaches(&narrowed, Action::Reveal, &here, &m.key)) {
             problems.push(Problem { key: m.key, problem: format!("required, but {slug} doesn't set it") });
         }
         let typed: Vec<Problem> = self.type_problems(project, &path, &values)?.into_iter().filter(|t| !problems.iter().any(|p| p.key == t.key)).collect();
