@@ -26473,3 +26473,106 @@ path is unchanged; a transaction's end reads one thread-local flag).
    It changes what a CHECKPOINT costs and the start state harnesses take after one (agent 333's
    measure runs one before counting), so not done here.
 4. idx_tup_read 66 for 67 and a slot's total_bytes (test_decoding's bytes) as 335 found.
+
+## Failures seen once under load: which were the server's (agent 350, 2026-11-28)
+
+No performance work. The changed lines run at a commit (one comparison more, the WAL's 1 MiB
+zero-fill moved earlier under the same lock), at a connection's end and in a session's drop:
+none on a point select's path, so no point-select pair was run (it would need two dist builds
+and measure code placement only).
+
+**1. `cancel_30` (agent 342's checked build): the test's.** `protocol::Conn::keyed` read the
+startup's replies with `QUIET` (400 ms), the window for replies the recording says don't come;
+a startup it expects to succeed needs `ANSWER`. Startup on this machine with nothing to wait on
+(an in-process server, the base's verify-checked build, 12 CPUs shared with other agents'
+builds, load 42): p50 1.3-3.6 ms, p99 15-107 ms, max 30-195 ms; a checked build at load 50-200
+passes 400 ms without any server-side wait. In `protocol_cases` the cases run one after another
+on an engine of their own (one database, no shared-catalog DDL), so neither global lock a
+connection takes before its first reply was held for long. Fix: `keyed` waits `ANSWER`.
+What a connection waits on before its first reply (for the next one who looks): the thread
+spawn, `backends` and `procs` mutexes, `Engine::open` (held through a whole database open,
+recovery included: a connection to one database waits for another's), `shared_lock` in
+`ensure_synced` twice (auth_catalog and connect; held by a commit that changes shared catalogs
+through its WAL fsync and by `publish`'s sync of every open database). PostgreSQL's startup
+waits on neither. A lock-free check for a catalog already current was tried and dropped: during
+a CREATE/DROP ROLE storm (20 databases open, fsync on) startup still went p99 46 -> 107 ms with
+it (every role commit moves the version, so connects take the locked path), and the base can't
+run that measurement; `~/.cache/a350/patches/ensure-synced-lock-free.patch`.
+
+**2. `temp:21`-`29` right after `\c` (agent 311, 2026-11-27 00:39): not reproduced; two
+orderings fixed.** Unit 21 is the new session's first `CREATE TEMP TABLE temptest ... ON COMMIT
+DELETE ROWS`; 22-29 follow from it failing (23 BEGIN and 27 COMMIT print nothing under psql
+-q). The engine's error text is gone (the next quick-check reused the report directory), and
+no ENOSPC was logged anywhere around 00:39. psql's `\c` connects the new session before it
+terminates the old one, so the new one has another proc slot (pg_temp_N) than the old one.
+Repro (in-process server, verify-checked): the regress sequence on a new session while the old
+one terminates, 3,600 rounds at 24 sessions on the base, and 800 rounds with 4 more sessions
+running DDL (tables, indexes, views, functions, types, sequences, temp tables, grants,
+comments, ANALYZE) on the change: no error, none in the noise sessions either. Fixed on the
+way, both PostgreSQL's order:
+- The server sent the end (FIN) before the session's teardown (since 79b7e4b59, 2026-10-30, a
+  reset workaround that agent 336's `Closing` drain has made unneeded): a client that read EOF
+  and connected again could still find the old session's temporary tables, locks and backend
+  entry. Now the session, its proc slot and its backend entry go first, then the FIN
+  (RemoveTempRelationsCallback, ProcKill and pgstat_beshutdown_hook run before the exit closes
+  PostgreSQL's socket). Checked: 300 rounds of create a temp table, Terminate, read to EOF, then
+  another session's `pg_class` (relpersistence 't') and `pg_stat_activity` counts: 0 of 300
+  found either.
+- A session whose temporary objects outlast its 20 cleanup tries now sets the database's
+  `temp_leftovers`, so the next session in its slot drops them before it uses pg_temp_N
+  (InitTempTableNamespace's RemoveTempRelations); they were that session's own tables before.
+- `tools/quick-check.sh` keeps a failing regress run's report and engine log
+  (`$QC_DIR/kept/regress-<time>/`), so the next once-only difference keeps its error text.
+
+**3. `gist:53`-`59` (train of 2026-11-27 23:19): the full disk, as far as the evidence goes.**
+Unit 53 is gist's `create temp table gist_ios_tupdesc`, 54-59 its uses: one statement failed.
+The pass's report and engine log are gone: the train copies them at the end of the pass, at
+23:31, when the disk was full (pass.0 has no pgr/, pass.1 does). The same pass's tests stage
+logged ENOSPC from 23:11 on. Same statement shape as item 2, which didn't reproduce: if it
+recurs on a disk with space, item 2's kept report has the error.
+
+**4. `power_cut_at_every_point`'s `left == right` (same train): the test's own writes, not
+durability.** The assertion was `crash_random.rs:1055`, the uncut reference run's exit code
+(left `Some(101)`, right `Some(0)`): its child (a plain store workload, no cut) panicked, and the
+cut runs, the only ones that check acknowledged commits, never ran. The same pass's crash-power
+stage shows the power-cut layer's own shadow write panicking on the full disk
+(`powerloss.rs:162`, "powerloss: record a write"). The reference run's stderr is now in the
+message. The engine's own behaviour on a full disk is item 6.
+
+**5. crash-binary's TOOL ERROR (agent 341, `--power drop --seed 3`): the tool's.**
+`powercut.so` wrote a rename's record after the kernel made the rename. A SIGKILL in between
+left the rename made and unrecorded: two entries differing from the record (the spill file's old
+name with its inode in the record, the new `base/` name with it in the directory), which the
+rebuild allows only one of. That is agent 341's error exactly. The base's layer with a kill at
+that point, a deterministic reproduction, gives the same two lines. Fix: a rename and a removal
+are recorded before they are made, a failed one cancelled by an `N` record, and `rebuild.py`
+takes the last one as not done when the directory says so. `selftest.py` kills inside a rename
+and a removal, before and after the change (`POWERCUT_KILL=<n>:<0|1>`), and checks the cut.
+
+**6. ENOSPC mid-statement (new test `tests/disk_full.rs`, 3 s).** A 48 MB tmpfs of its own in a
+user and mount namespace (`unshare -Urm`: no root, nothing shared fills; it passes with a note
+where user namespaces are off). It fills all but 4 MB, then commits batches (100 rows, every
+fifth 2,000: an SST of its own) with fsync on until three fail. For each failure it checks
+53100, an idle session, a transaction block's batch failing and the block aborted to ROLLBACK,
+and the server reading on that session and a new one. Then it frees the space and carries on,
+and ends without a shutdown (a crash). The data opened again holds every acknowledged batch
+whole and nothing else. Found and fixed:
+- A group commit's writes went into the memtable before its WAL record was written (by the fsync
+  it waits for). A write failing then could not be taken back: the store closed, and every later
+  statement on the database failed with XX000 "database is closed" until no session held it.
+  Now the record's space is zero-filled ahead under the commit lock before the commit applies
+  (`WalWriter::append_reserved`): ENOSPC fails that commit alone, and later ones go on. Writes
+  into zero-filled space need no new blocks (ext4, xfs, tmpfs; not a copy-on-write filesystem,
+  where PostgreSQL's preallocated segments don't help either). Without it the test fails 4 of 4
+  (XX000 at the first full batch); with it, 53100 and the rest as above.
+- ENOSPC and EDQUOT are 53100 with "Check free disk space." (errcode_for_file_access, mdextend),
+  not 58030.
+- A memtable rotation that failed after the commit was made durable and visible returned an
+  error for that commit (a client retrying it commits it twice). It is a warning now, and the
+  next commit to find the memtable full tries again.
+
+**Left.** The `Engine::open` mutex held through a database's whole open (recovery included)
+delays connections to every other database. The connect-time `shared_lock` wait (patch above).
+Item 2's error text, if it recurs. A WAL fsync failing after `append_now` wrote the record in
+`commit_with` leaves the record in the file with the commit reported failed: PostgreSQL PANICs
+there, and the store doesn't close in that one path.
