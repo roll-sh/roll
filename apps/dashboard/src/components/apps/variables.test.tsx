@@ -5,7 +5,7 @@ import type { Environment } from "@/lib/apps-api";
 import { VariablesTab } from "./variables";
 import type { Runner } from "./shared";
 
-const api = vi.hoisted(() => ({ variables: vi.fn(), setVariables: vi.fn(), reveal: vi.fn(), services: vi.fn(), links: vi.fn(), link: vi.fn(), unlink: vi.fn(), pending: vi.fn() }));
+const api = vi.hoisted(() => ({ variables: vi.fn(), setVariables: vi.fn(), reveal: vi.fn(), services: vi.fn(), links: vi.fn(), link: vi.fn(), unlink: vi.fn(), rotateLink: vi.fn(), pending: vi.fn() }));
 vi.mock("@/lib/apps-api", async (orig) => ({ ...(await orig<typeof import("@/lib/apps-api")>()), appsApi: api }));
 const sec = vi.hoisted(() => ({ set: vi.fn() }));
 vi.mock("@/lib/secrets-api", async (orig) => ({ ...(await orig<typeof import("@/lib/secrets-api")>()), secretsApi: () => sec }));
@@ -21,6 +21,21 @@ describe("VariablesTab", () => {
     api.links.mockResolvedValue([]);
     api.pending.mockResolvedValue({});
     api.setVariables.mockResolvedValue(listed);
+  });
+
+  it("rotates a link's own credential only once confirmed", async () => {
+    api.links.mockResolvedValue([
+      { kind: "search", ref: "logs", prefix: "", vars: ["ELASTICSEARCH_URL", "ELASTICSEARCH_API_KEY"], rotates: true },
+      { kind: "postgres", ref: "main", prefix: "", vars: ["DATABASE_URL"] },
+    ]);
+    api.rotateLink.mockResolvedValue({ kind: "search", ref: "logs", deployments: [], waiting: [], live: true });
+    render(<VariablesTab service="svc_1" project="prj_1" env={env} runner={runner} onRedeploy={() => {}} />);
+    const rotate = await screen.findAllByRole("button", { name: "Rotate" });
+    expect(rotate).toHaveLength(1);
+    await userEvent.click(rotate[0]);
+    expect(api.rotateLink).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole("button", { name: /sure\? rotate/i }));
+    await waitFor(() => expect(api.rotateLink).toHaveBeenCalledWith("svc_1", "search", "logs"));
   });
 
   it("seals a new secret-looking variable by default", async () => {
