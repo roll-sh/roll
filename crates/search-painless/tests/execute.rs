@@ -218,185 +218,91 @@ fn known_diffs(name: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn check(name: &str) {
-    let (n, failures) = run_file(name);
-    let known = known_diffs(name);
-    let mut unexpected = 0;
-    for (src, f) in &failures {
-        if known.contains(src) {
-            if std::env::var("PAINLESS_KNOWN").is_ok() {
-                eprintln!("---- (known) {f}");
+/// Runs fixture files and fails if any case differs from Elasticsearch, after running them all.
+fn check(names: &[&str]) {
+    let mut bad = Vec::new();
+    for name in names {
+        let (n, failures) = run_file(name);
+        let known = known_diffs(name);
+        let mut unexpected = 0;
+        for (src, f) in &failures {
+            if known.contains(src) {
+                if std::env::var("PAINLESS_KNOWN").is_ok() {
+                    eprintln!("---- (known) {f}");
+                }
+            } else {
+                unexpected += 1;
+                eprintln!("---- {f}");
             }
-        } else {
-            unexpected += 1;
-            eprintln!("---- {f}");
+        }
+        let fixed: Vec<&String> = known.iter().filter(|k| !failures.iter().any(|(s, _)| s == *k)).collect();
+        for k in &fixed {
+            eprintln!("---- now passing, remove from known_diffs.json: {k}");
+        }
+        if unexpected > 0 || !fixed.is_empty() {
+            bad.push(format!("{name}: {unexpected} of {n} cases differ from Elasticsearch ({} known)", failures.len() - unexpected));
         }
     }
-    let fixed: Vec<&String> = known.iter().filter(|k| !failures.iter().any(|(s, _)| s == *k)).collect();
-    for k in &fixed {
-        eprintln!("---- now passing, remove from known_diffs.json: {k}");
-    }
-    if unexpected > 0 || !fixed.is_empty() {
-        panic!("{name}: {unexpected} of {n} cases differ from Elasticsearch ({} known)", failures.len() - unexpected);
-    }
+    assert!(bad.is_empty(), "{}", bad.join("\n"));
 }
 
+/// The language: casts, operators, promotions, boxing, `def` dispatch, lambdas and references,
+/// statements, regexes, syntax and compile errors, everyday scripts, `subList` views (`lang*.json`
+/// but the JDK library's, the scripts of Elasticsearch's own Painless language tests in
+/// `estests.json`, `views.json`), and the review's captures (`review1.json`: `BigInteger` range
+/// overflow, `HexFormat`, `parseUnsigned*`/`decode`, case-insensitive compares, the JDK 27 zone
+/// IDs, `StrictMath` bit-exact with fdlibm).
 #[test]
 fn language() {
-    check("lang.json");
+    check(&["lang.json", "lang2.json", "lang3.json", "lang4.json", "lang5.json", "lang8.json", "estests.json", "views.json", "review1.json"]);
 }
 
+/// The JDK library: collections, streams and the JDK frames of their failures (`lang6.json`,
+/// `lang7.json`, `lang9.json`), `java.lang.Math` (`math.json`), `java.nio` buffers (`nio.json`).
+#[test]
+fn java_library() {
+    check(&["lang6.json", "lang7.json", "lang9.json", "math.json", "nio.json"]);
+}
+
+/// `java.time` (week fields, locale-dependent text, zone names and rules), `TimeZone`,
+/// `Calendar` and the `java.text` date formats, `java.util.Locale` (`time*.json`,
+/// `legacy_dates.json`, `locale.json`).
+#[test]
+fn time_and_locales() {
+    check(&["time.json", "time2.json", "time3.json", "legacy_dates.json", "locale.json"]);
+}
+
+/// Strings and text: `String.format`, characters, `java.text` number formats and
+/// normalization, `MessageFormat`/`ChoiceFormat` (`format.json`, `chars.json`, `text.json`,
+/// `message.json`).
+#[test]
+fn text_and_formats() {
+    check(&["format.json", "chars.json", "text.json", "message.json"]);
+}
+
+/// Document contexts: `params` typing, score, filter and runtime-field scripts, the field API,
+/// doc-value reads, loops and conversions, vector fields of every element type (`docs*.json`,
+/// `docloops.json`, `vectors2.json`).
 #[test]
 fn documents() {
-    check("docs.json");
-}
-
-#[test]
-fn time() {
-    check("time.json");
-}
-
-#[test]
-fn string_format() {
-    check("format.json");
-}
-
-#[test]
-fn java_math() {
-    check("math.json");
-}
-
-#[test]
-fn characters() {
-    check("chars.json");
-}
-
-#[test]
-fn language_more() {
-    check("lang2.json");
-}
-
-#[test]
-fn time_week_fields() {
-    check("time2.json");
-}
-
-#[test]
-fn language_scripts() {
-    check("lang3.json");
-}
-
-#[test]
-fn language_errors() {
-    check("lang4.json");
-}
-
-#[test]
-fn language_everyday() {
-    check("lang5.json");
-}
-
-#[test]
-fn language_library() {
-    check("lang6.json");
-}
-
-/// `java.text` number formats, symbols and normalization (`text.json`).
-#[test]
-fn java_text() {
-    check("text.json");
+    check(&["docs.json", "docs2.json", "docs3.json", "docloops.json", "vectors2.json"]);
 }
 
 #[test]
 fn moving_functions() {
-    check("movfn.json");
+    check(&["movfn.json"]);
 }
 
 #[test]
 fn grok_and_dissect() {
-    check("extract.json");
+    check(&["extract.json"]);
 }
 
-/// Collections, streams, sorting and the JDK frames of their failures; syntax errors; boxed
-/// receivers; compile-phase ordering (`lang7.json`).
+/// Deep and large values: nesting limits of `Json.dump`, deep `toString`/`hashCode`/`equals`,
+/// dropping deeply nested values, array sizes (`limits.json`).
 #[test]
-fn language_jdk() {
-    check("lang7.json");
-}
-
-/// Locale-dependent `java.time` text, localized formatters, zone names, day periods and
-/// `ZoneRules` (`time3.json`).
-#[test]
-fn time_locales() {
-    check("time3.json");
-}
-
-/// `java.util.Locale`: tags, `toString`, builders, display names (`locale.json`).
-#[test]
-fn locales() {
-    check("locale.json");
-}
-
-/// `params` typing and document contexts: score, filter, runtime fields, the field API
-/// (`docs2.json`).
-#[test]
-fn documents_more() {
-    check("docs2.json");
-}
-
-/// The scripts of Elasticsearch's own Painless language tests (casts, operators, promotions,
-/// boxing, `def` dispatch, lambdas and references, statements, regexes; `estests.json`, built by
-/// `capture_estests.py`).
-#[test]
-fn elasticsearch_language_tests() {
-    check("estests.json");
-}
-
-/// `java.util.TimeZone`, `Calendar`, `GregorianCalendar`, `Calendar.Builder` and the
-/// `java.text` date formats (`legacy_dates.json`).
-#[test]
-fn legacy_dates() {
-    check("legacy_dates.json");
-}
-
-/// `subList` views: write-through to the parent, `ConcurrentModificationException` after the
-/// parent changes structurally (`views.json`).
-#[test]
-fn sub_list_views() {
-    check("views.json");
-}
-
-/// `MessageFormat.format` and `ChoiceFormat` (`message.json`).
-#[test]
-fn message_formats() {
-    check("message.json");
-}
-
-/// `java.nio` buffers: `ByteBuffer`, its typed views, `CharBuffer` as a `CharSequence` (`nio.json`).
-#[test]
-fn nio_buffers() {
-    check("nio.json");
-}
-
-/// Stream pipelines as the JDK runs them (late-bound list sources and their concurrent
-/// modification checks, `toArray` generators, the JDK frames of failures inside the pipeline,
-/// reuse of consumed streams), `forEach`/`removeIf`/`compute*` concurrent modification, lambda
-/// bodies that must return on every path, regex inputs, the ISO formatters' lenient offsets
-/// and structure, `TemporalQuery`/`TemporalAdjuster` lambdas, `Debug.explain` (`lang9.json`).
-#[test]
-fn language_jdk_more() {
-    check("lang9.json");
-}
-
-/// Review regressions (`review1.json`, captured from Elasticsearch 9.5.5): `BigInteger` range
-/// overflow with the JDK's frames (`shiftLeft`, `pow`, `BigDecimal.setScale`/`movePoint*`/`pow`)
-/// and large-value radix conversion; `HexFormat.parseHex`, `parseUnsigned*` and `decode` messages
-/// and frames; `equalsIgnoreCase` with simple case mappings; `DecimalFormat.toPattern` failing
-/// like the JDK's `StringBuilder`; the JDK 27 zone ID set, `SystemV/*` zones, `SHORT_IDS` and zone
-/// names in parsing; `StrictMath` bit-exact with fdlibm.
-#[test]
-fn review_regressions() {
-    check("review1.json");
+fn limits() {
+    check(&["limits.json"]);
 }
 
 /// Runs a fixture file named by `PAINLESS_ADHOC` (a path; relative paths resolve in
@@ -404,45 +310,6 @@ fn review_regressions() {
 #[test]
 fn adhoc() {
     if let Ok(p) = std::env::var("PAINLESS_ADHOC") {
-        check(&p);
+        check(&[&p]);
     }
-}
-
-/// Deep and large values: nesting limits of `Json.dump`, deep `toString`/`hashCode`/`equals`,
-/// dropping deeply nested values, array sizes (`limits.json`).
-#[test]
-fn limits() {
-    check("limits.json");
-}
-
-/// Vector functions and the vector field API over `float`, `byte`, `bit` and `bfloat16`
-/// `dense_vector` fields, indexed and not (`vectors2.json`).
-#[test]
-fn vector_element_types() {
-    check("vectors2.json");
-}
-
-/// Loops over `doc['field']` and its `size()`/`isEmpty()` for every field type (compiled to
-/// direct doc-values reads; `docloops.json`).
-#[test]
-fn doc_value_loops() {
-    check("docloops.json");
-}
-
-/// Everyday scripts across the library (streams, collectors, maps, strings, regexes, numbers,
-/// statements, exceptions), identity of string constants, and the positions of brace errors
-/// after a map access (`lang8.json`).
-#[test]
-fn language_everyday_more() {
-    check("lang8.json");
-}
-
-/// Score and filter scripts over doc values (dates, geo points, decay functions), indexed
-/// doc-value reads `doc['f'].get(i)` / `doc['f'][i]` with their conversions and errors, the
-/// shapes the fast path reads in place (keyword compares and `contains`, date millis, vector
-/// functions), string identity of doc values, and runtime-field emits of every type
-/// (`docs3.json`).
-#[test]
-fn documents_indexed() {
-    check("docs3.json");
 }

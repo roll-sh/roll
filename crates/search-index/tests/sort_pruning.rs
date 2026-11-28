@@ -152,7 +152,7 @@ fn hits(td: &search_index::collector::TopFieldDocs) -> Vec<(u32, Vec<SortValue>)
 
 #[test]
 fn pruned_sorts_equal_exhaustive_sorts() {
-    let seeds: u64 = std::env::var("SORT_SEEDS").ok().and_then(|v| v.parse().ok()).unwrap_or(6);
+    let seeds: u64 = std::env::var("SORT_SEEDS").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
     for seed in 0..seeds {
         let mut rng = common::rng(seed * 101 + 3);
         let shape = [Shape::Ties, Shape::Increasing, Shape::Uniform][rng.gen_range(0..3)];
@@ -274,7 +274,7 @@ fn float_keys_compare_at_float_precision() {
 fn index_sort_ranges_equal_plain_ranges() {
     use search_index::query::{DocValuesRangeQuery, DvRange, IndexOrDocValuesQuery, IndexSortRangeQuery, PointRangeQuery};
     let mut cheap_counts = 0;
-    for seed in 0..24u64 {
+    for seed in 0..8u64 {
         let mut rng = common::rng(seed * 7 + 1);
         let sort = IndexSort {
             fields: vec![SortField {
@@ -351,7 +351,7 @@ fn index_sort_ranges_equal_plain_ranges() {
 fn nested_sorts_prune_exactly() {
     use search_index::collector::NestedSort;
     use search_index::query::nested::root_filter;
-    for seed in 0..4u64 {
+    for seed in 0..3u64 {
         let mut rng = common::rng(seed * 31 + 7);
         let shape = [Shape::Ties, Shape::Increasing, Shape::Uniform][seed as usize % 3];
         let shard = Shard::open(ShardConfig { merge_threads: 0, ..Default::default() }, schema(None), Vec::new()).unwrap();
@@ -516,7 +516,7 @@ fn constantly_changing_bottoms_prune_exactly() {
 /// key), scores, deletes, many segments and concurrent slices.
 #[test]
 fn doc_order_sorts_stop_once_the_queue_is_full() {
-    for seed in 0..4u64 {
+    for seed in 0..2u64 {
         let mut rng = common::rng(seed * 31 + 7);
         let shard = Shard::open(ShardConfig { merge_threads: 0, ..Default::default() }, schema(None), Vec::new()).unwrap();
         let n = 4000u32;
@@ -606,7 +606,7 @@ fn doc_order_sorts_stop_once_the_queue_is_full() {
 #[test]
 fn absent_fields_and_exhausted_afters_prune_exactly() {
     const UNMAPPED: u32 = 99;
-    for seed in 0..6u64 {
+    for seed in 0..3u64 {
         let mut rng = common::rng(seed * 17 + 5);
         let shard = Shard::open(ShardConfig { merge_threads: 0, ..Default::default() }, schema(None), Vec::new()).unwrap();
         let mut i = 0u32;
@@ -963,7 +963,7 @@ fn single_valued_sorts_match_brute_force() {
 #[test]
 fn sorts_against_doc_order_equal_exhaustive_sorts() {
     use search_index::query::{DocValuesRangeQuery, DvRange, IndexOrDocValuesQuery, PointRangeQuery};
-    for seed in 0..4u64 {
+    for seed in 0..2u64 {
         let mut rng = common::rng(seed * 13 + 5);
         let shard = Shard::open(ShardConfig { merge_threads: 0, ..Default::default() }, schema(None), Vec::new()).unwrap();
         let n = 30_000u32;

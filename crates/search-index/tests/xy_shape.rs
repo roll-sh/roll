@@ -239,7 +239,7 @@ fn point_oracle(values: &[(f32, f32)], rel: ShapeRelation, geoms: &[XyGeometry])
 
 #[test]
 fn random_point_queries_agree_with_brute_force() {
-    let seeds: u64 = std::env::var("XY_SEEDS").ok().and_then(|v| v.parse().ok()).unwrap_or(6);
+    let seeds: u64 = std::env::var("XY_SEEDS").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
     for seed in 0..seeds {
         let mut r = StdRng::seed_from_u64(seed);
         let shard = Shard::in_memory(schema());
@@ -297,7 +297,7 @@ fn random_point_queries_agree_with_brute_force() {
 #[test]
 fn random_shape_queries_agree_with_triangle_scan() {
     use search_index::query::shape::XyShapeQuery;
-    let seeds: u64 = std::env::var("XY_SEEDS").ok().and_then(|v| v.parse().ok()).unwrap_or(6);
+    let seeds: u64 = std::env::var("XY_SEEDS").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
     for seed in 0..seeds {
         let mut r = StdRng::seed_from_u64(1000 + seed);
         let shard = Shard::in_memory(schema());

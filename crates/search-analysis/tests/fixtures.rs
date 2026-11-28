@@ -338,6 +338,16 @@ fn compare(
     }
 }
 
+/// One fixture file's run: its cases, mismatches, known divergences, mismatch report and
+/// `FIXTURES_DUMP` lines.
+struct FileOutcome {
+    cases: usize,
+    failed: usize,
+    diverged: usize,
+    report: String,
+    dumped: Vec<String>,
+}
+
 #[test]
 fn elasticsearch_fixtures() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
@@ -358,20 +368,20 @@ fn elasticsearch_fixtures() {
     };
     let filter = std::env::var("FIXTURES").ok();
     let verbose = std::env::var_os("FIXTURES_VERBOSE").is_some();
-    let mut dump =
+    let mut dump_file =
         std::env::var_os("FIXTURES_DUMP").map(|p| std::fs::File::create(p).expect("FIXTURES_DUMP"));
+    let dump = dump_file.is_some();
     let mut files: Vec<_> = std::fs::read_dir(&dir)
         .unwrap()
         .filter_map(|e| e.ok())
         .map(|e| e.path())
         .collect();
     files.sort();
-    let (mut total, mut failed, mut diverged) = (0, 0, 0);
-    let mut report = String::new();
-    for file in files
-        .iter()
-        .filter(|p| p.extension().is_some_and(|e| e == "json"))
-    {
+    let files: Vec<_> = files.into_iter().filter(|p| p.extension().is_some_and(|e| e == "json")).collect();
+    let check_file = |file: &Path| -> FileOutcome {
+        let mut report = String::new();
+        let mut dumped = Vec::new();
+        let mut diverged = 0;
         let group = file.file_stem().unwrap().to_string_lossy().to_string();
         let data: Value = serde_json::from_str(&std::fs::read_to_string(file).unwrap()).unwrap();
         let texts = &data["texts"];
@@ -410,14 +420,12 @@ fn elasticsearch_fixtures() {
             }
             if let Some(diff) = diff {
                 g_failed += 1;
-                if let Some(f) = dump.as_mut() {
-                    use std::io::Write;
+                if dump {
                     let actual = match &actual {
                         Ok(v) => v.clone(),
                         Err(e) => serde_json::json!({"error": e.to_json()}),
                     };
-                    let line = serde_json::json!({"name": name, "request": case["request"], "index": case.get("index"), "actual": actual});
-                    writeln!(f, "{line}").expect("FIXTURES_DUMP");
+                    dumped.push(serde_json::json!({"name": name, "request": case["request"], "index": case.get("index"), "actual": actual}).to_string());
                 }
                 let line = if verbose {
                     diff
@@ -430,9 +438,41 @@ fn elasticsearch_fixtures() {
                 ));
             }
         }
-        total += g_total;
-        failed += g_failed;
         eprintln!("{group}: {}/{g_total} match", g_total - g_failed);
+        FileOutcome { cases: g_total, failed: g_failed, diverged, report, dumped }
+    };
+    // The files run on threads of their own (each a fixture family; a few take most of the time).
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).min(files.len());
+    let mut results: Vec<(usize, FileOutcome)> = std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..threads)
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut out = Vec::new();
+                    loop {
+                        let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some(file) = files.get(i) else { break out };
+                        out.push((i, check_file(file)));
+                    }
+                })
+            })
+            .collect();
+        workers.into_iter().flat_map(|w| w.join().unwrap()).collect()
+    });
+    results.sort_by_key(|r| r.0);
+    let (mut total, mut failed, mut diverged) = (0, 0, 0);
+    let mut report = String::new();
+    for (_, r) in results {
+        total += r.cases;
+        failed += r.failed;
+        diverged += r.diverged;
+        report.push_str(&r.report);
+        if let Some(out) = dump_file.as_mut() {
+            use std::io::Write;
+            for line in r.dumped {
+                writeln!(out, "{line}").expect("FIXTURES_DUMP");
+            }
+        }
     }
     if failed > 0 {
         eprintln!("{report}");
