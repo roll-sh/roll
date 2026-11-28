@@ -13,20 +13,18 @@ const MAX_RATIO: f64 = 24.0;
 /// Asserts that `run`'s work grows linearly with its input, not quadratically: `run` on
 /// `input(SCALE * small)` takes less than [`MAX_RATIO`] times the CPU of `run` on `input(small)`.
 ///
-/// `input` isn't measured, and each size runs three times, keeping the fastest. Pick `small` so
-/// that `run` takes a few milliseconds on it, and so that `run`'s fixed costs don't hide the
-/// growth.
+/// `input` isn't measured. The two sizes run three times each, taking turns, and each keeps its
+/// fastest run: a sibling hyperthread's load slows a thread's CPU time too, and taking turns
+/// lets both sizes see the same load. Pick `small` so that `run` takes a few milliseconds on it,
+/// and so that `run`'s fixed costs don't hide the growth.
 pub fn assert_linear<I>(what: &str, small: usize, input: impl Fn(usize) -> I, mut run: impl FnMut(I)) {
-    let mut fastest = |size: usize| {
-        (0..3)
-            .map(|_| {
-                let i = input(size);
-                cpu_time(|| run(i)).1
-            })
-            .min()
-            .unwrap()
-    };
-    let (a, b) = (fastest(small), fastest(small * SCALE));
+    let (mut a, mut b) = (Duration::MAX, Duration::MAX);
+    for _ in 0..3 {
+        for (size, best) in [(small, &mut a), (small * SCALE, &mut b)] {
+            let i = input(size);
+            *best = (*best).min(cpu_time(|| run(i)).1);
+        }
+    }
     let ratio = b.as_secs_f64() / a.as_secs_f64().max(1e-6);
     assert!(
         ratio < MAX_RATIO,
@@ -64,7 +62,9 @@ mod tests {
     #[test]
     #[should_panic(expected = "quadratic loop: 8x the input took")]
     fn quadratic_work_fails() {
-        super::assert_linear("quadratic loop", 400, |n| n, |n| {
+        // 1,000 makes the small run a million steps: large enough that fixed costs and timer
+        // resolution don't flatten the ratio (400 measured under 24x at load 60).
+        super::assert_linear("quadratic loop", 1_000, |n| n, |n| {
             for i in 0..n {
                 for j in 0..n {
                     std::hint::black_box(i ^ j);

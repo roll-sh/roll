@@ -16,6 +16,8 @@
 //! - A person or a token names it for one request and nothing keeps it (roll apps' Cloudflare
 //!   token, writing a domain's records): [`Secrets::use_once`] with the request's caller, read as
 //!   them that once (an approved `ask` is enough) and audited as `secrets.use` by them. No maker.
+//!   A sensitive key only by its folder admin's opt-in for that one use (`use-apps-dns`), for the
+//!   product's fixed host.
 //! - A deployer chose it for the resource's own runtime (roll apps' git login, a deploy token a
 //!   person pasted, tagged sensitive): [`Secrets::bind_ref_runtime`] with the one environment the
 //!   product checked they may deploy to. A reference to exactly that environment is a runtime
@@ -305,31 +307,35 @@ impl Secrets {
     /// makes: the one project that holds and stands for `resource`, `reveal` on the folder for the
     /// caller (an approval of an `ask` there is enough, since it's this request's: the gate lends
     /// it), no protected environment for an untrusted copy, and no caller that's itself untrusted.
-    /// Never a sensitive key, `to` or not: a person who may reveal the folder but not read the
-    /// key would otherwise have roll act with it wherever it reaches (a DNS token writing records
-    /// in every zone it can edit), so it waits for an opt-in on the key its owner sets. `to` is
-    /// the one fixed host the product sends the value to, a constant in its code
-    /// (`roll_edge::acme::Cloudflare::API`), named in the audit. Audited as `secrets.use` by the
-    /// caller, naming the resource, `purpose` (a fixed phrase of the product's, never a value) and
-    /// `to`.
-    pub fn use_once(&self, resource: &ResourceRef, reference: &str, caller: &Caller, purpose: &str, to: Option<&'static str>) -> Result<Resolved, Refusal> {
+    /// A sensitive key only with its folder admin's opt-in for this one use, and only for `to`:
+    /// otherwise a person who may reveal the folder but not read the key would have roll act with
+    /// it wherever it reaches (a DNS token writing records in every zone it can edit). `use_id` is
+    /// the product's fixed id for the use (`apps.dns`), and a key is opted in by the tag
+    /// [`crate::names::use_tag`] makes of it (`use-apps-dns`), which only an admin of its folder
+    /// adds or removes; never for an untrusted copy. `to` is the one fixed host the product sends the
+    /// value to, a constant in its code (`roll_edge::acme::Cloudflare::API`), named in the audit.
+    /// Audited as `secrets.use` by the caller, naming the resource, `purpose` (a fixed phrase of
+    /// the product's, never a value), the use when the key is sensitive, and `to`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn use_once(&self, resource: &ResourceRef, reference: &str, caller: &Caller, use_id: &'static str, purpose: &str, to: Option<&'static str>) -> Result<Resolved, Refusal> {
         if to.is_some_and(|t| !t.starts_with("https://") || t.contains('@')) {
             return Err(Refusal::Failed(Error::Internal("a fixed host is an https:// URL with no credentials".into())));
         }
+        let opt_in = crate::names::use_tag(use_id).ok_or_else(|| Refusal::Failed(Error::Internal(format!("{use_id} isn't a use id (<product>.<use>, a-z and 0-9)"))))?;
         let r = required(reference)?;
         let project = self.project_for(resource, r.project.as_deref())?;
         if caller.grants.untrusted() {
             return Err(Refusal::NotAllowed(format!("{} runs code nobody vetted, so it reads no roll:// reference", caller.principal)));
         }
         self.may_reveal_for(&project, &r, caller)?;
-        // Read with the caller's rights, never as a runtime (so a sensitive key is refused, even for
-        // a fixed host: `consumer_entry`), and named for the resource (with a `:`, so no person's
-        // own overrides are read: `Caller::personal`).
+        // Read with the caller's rights, never as a runtime (so a sensitive key is refused unless
+        // it's opted in for this use and the value goes only to `to`: `consumer_entry`), and named
+        // for the resource (with a `:`, so no person's own overrides are read: `Caller::personal`).
         let by = caller.made_by().to_string();
         let mut reader = caller.clone().not_runtime().acting_as(format!("{} for {by}", resource.consumer()));
         reader.maker = Some(by);
         let resource = &ResourceRef { placeholders: false, ..resource.clone() };
-        self.resolve_one(&project, &r.env, &r.path, &r.key, &reader, resource.untrusted, resource, Some(crate::read::Once { by: caller, purpose, to }))
+        self.resolve_one(&project, &r.env, &r.path, &r.key, &reader, resource.untrusted, resource, Some(crate::read::Once { by: caller, use_id, opt_in: &opt_in, purpose, to }))
     }
 
     /// The digest of the folder `reference` reads, as `maker` may now: refused exactly as
@@ -403,7 +409,7 @@ impl Secrets {
     }
 
     fn digest_one(&self, project: &str, r: &Reference, caller: &Caller, resource: &ResourceRef) -> Result<String, Refusal> {
-        let (reader, e, _) = self.consumer_entry(project, &r.env, &r.path, &r.key, caller, resource.untrusted, resource.wants_placeholders())?;
+        let (reader, e, _) = self.consumer_entry(project, &r.env, &r.path, &r.key, caller, resource.untrusted, resource.wants_placeholders(), None)?;
         // A reader limited to some keys never reads the folder's digest: the key's own, which moves
         // with each version it's written at.
         if reader.grants.limits_keys() {

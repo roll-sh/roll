@@ -331,7 +331,20 @@ impl Secrets {
 /// A change across folders is recorded at `/` with its keys by folder (`data.folders`, names only,
 /// write.rs): a reader of any one of them sees it, with only the readable folders and their keys,
 /// so it never learns a key's name in a folder it can't read.
+/// A rotation's `sharing` (the keys holding the same credential, by folder) is trimmed the same
+/// way, and dropped when the reader would see only the one key.
 fn readable(d: &mut Map<String, Value>, keys: &mut Vec<String>, path: &str, reads: impl Fn(&str) -> bool) -> bool {
+    let seen = readable_folders(d, keys, path, &reads);
+    if seen && let Some(Value::Object(s)) = d.get_mut("sharing") {
+        s.retain(|p, _| reads(p));
+        if s.values().map(|v| v.as_array().map_or(0, Vec::len)).sum::<usize>() <= 1 {
+            d.remove("sharing");
+        }
+    }
+    seen
+}
+
+fn readable_folders(d: &mut Map<String, Value>, keys: &mut Vec<String>, path: &str, reads: &impl Fn(&str) -> bool) -> bool {
     let Some(Value::Object(folders)) = d.get("folders") else { return reads(path) };
     if reads(path) {
         return true;
@@ -383,5 +396,16 @@ mod tests {
         assert_eq!(parse_kinds(Some("request.*, sync.failed")).unwrap(), vec![Kind::RequestPending, Kind::RequestDecided, Kind::SyncFailed]);
         assert!(parse_kinds(Some("request")).is_err());
         assert!(parse_kinds(Some("nope.*")).is_err());
+    }
+
+    /// A rotation names the keys sharing its credential only in folders the reader may read.
+    #[test]
+    fn a_rotations_sharing_keys_show_only_in_readable_folders() {
+        let event = || json!({ "mode": "managed", "sharing": { "/": ["DB_PASSWORD"], "/ops": ["ROOT_PASSWORD"] } }).as_object().unwrap().clone();
+        let (mut all, mut root) = (event(), event());
+        assert!(readable(&mut all, &mut vec!["DB_PASSWORD".into()], "/", |_| true));
+        assert_eq!(all["sharing"], json!({ "/": ["DB_PASSWORD"], "/ops": ["ROOT_PASSWORD"] }));
+        assert!(readable(&mut root, &mut vec!["DB_PASSWORD".into()], "/", |p| p == "/"));
+        assert!(!root.contains_key("sharing"), "nothing of /ops: {root:?}");
     }
 }

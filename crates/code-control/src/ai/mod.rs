@@ -888,6 +888,31 @@ impl Code {
         }
     }
 
+    /// A repo's learnings, each with whether it may hold an outsider's words: until #639 a resolved
+    /// thread's learning took the latest reply, whoever wrote it. Its thread still says whose that
+    /// was (the stored reason is the start of that reply's text); a learning whose thread is gone
+    /// can't be told, so it counts as outside. roll's reviewer leaves those out (a learning steers
+    /// every later review), and the route marks them, which MCP's lockdown withholds.
+    pub fn learnings_marked(&self, repo_id: &str) -> Result<Vec<(store::Learning, bool)>> {
+        let mut out = Vec::new();
+        for l in self.db.learnings(repo_id)? {
+            let outside = l.source == "resolved"
+                && match (l.thread.as_deref(), l.text.split_once(" was dismissed: ")) {
+                    (Some(t), Some((_, reason))) => self.db.thread(t)?.is_none_or(|th| {
+                        th.comments.iter().any(|c| c.outside && c.author.kind != ReviewerKind::Roll && !reason.is_empty() && c.body.trim().starts_with(reason))
+                    }),
+                    _ => true,
+                };
+            out.push((l, outside));
+        }
+        Ok(out)
+    }
+
+    /// The learnings roll's reviewer reads: none that may hold an outsider's words.
+    pub(crate) fn trusted_learnings(&self, repo_id: &str) -> Result<Vec<store::Learning>> {
+        Ok(self.learnings_marked(repo_id)?.into_iter().filter(|(_, outside)| !outside).map(|(l, _)| l).collect())
+    }
+
     /// A roll review was dismissed with a reason: remember it.
     pub(crate) fn ai_on_dismissed(&self, r: &RepoRow, reviewer: &Reviewer, by: &str, reason: &str) {
         if reviewer.kind != ReviewerKind::Roll || reason.trim().is_empty() {
