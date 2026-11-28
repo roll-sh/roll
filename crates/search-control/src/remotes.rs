@@ -429,11 +429,15 @@ impl Control {
     }
 
     /// Revokes cross-cluster key `key_id` on cluster `target_id`, or an OpenSearch-flavor link's
-    /// user (gone already counts).
+    /// user (gone already counts). On a deleted target the revoke is kept for its restore
+    /// (`keep_revoke`, as `revoke_link` keeps one), which would bring the key or user back.
     async fn revoke_remote_key(&self, target_id: &str, key_id: &str) -> Result<()> {
         let t = match self.get(target_id).await {
             Ok(t) => t,
-            Err(ControlError::NotFound(_)) => return Ok(()),
+            Err(ControlError::NotFound(_)) => {
+                let kept = if is_os_link(key_id) { format!("osuser:{key_id}") } else { format!("key:{key_id}") };
+                return self.keep_revoke(target_id, &kept).await.map(drop);
+            }
             Err(e) => return Err(e),
         };
         if is_os_link(key_id) {

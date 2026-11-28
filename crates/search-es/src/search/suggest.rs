@@ -600,7 +600,7 @@ fn completion_suggest(targets: &[Target], prefix: &str, c: &Map, opts: &super::h
             m.insert("text".into(), Value::Str(text));
             match hit.filter(|_| readers[ti].is_some()) {
                 Some(hit) => {
-                    m.insert("_index".into(), Value::Str(targets[ti].idx.name.clone()));
+                    m.insert("_index".into(), Value::Str(targets[ti].shown()));
                     m.extend(hit);
                 }
                 None => {
@@ -874,7 +874,7 @@ fn phrase_suggest(cluster: &crate::Cluster, targets: &[Target], text: &str, p: &
                 let rendered = t.render_json(&crate::scripting::to_serde(&Value::Obj(vars))).map_err(crate::scripting::script_error)?;
                 let qv = crate::json::parse(rendered.as_bytes()).map_err(|e| EsError::x_content_parse_bare(e.to_string()))?.unwrap_or(Value::Obj(Map::new()));
                 let (query, _) = crate::query::parse_query(&qv, None, &[])?;
-                let qctx = super::query::QueryCtx::new(cluster, &st, &tg.idx, &table, &searcher, crate::time::now_millis(), tg.reader());
+                let qctx = super::query::QueryCtx::new(cluster, &st, &tg.idx, &table, &searcher, crate::time::now_millis(), tg.reader().in_remote(tg.cluster.clone());
                 let q = qctx.to_query(&query)?;
                 let matched = searcher.count(&q).map_err(crate::engine::convert::index_error)? > 0;
                 if !matched && !prune {

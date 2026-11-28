@@ -273,10 +273,10 @@ pub fn inner_hits(qctx: &QueryCtx, t: &Target, r: &ShardResult, doc: u32, def: &
         let id = super::hits::stored_id(&stored).unwrap_or_default();
         let mut h = Map::new();
         if spec.explain {
-            h.insert("_shard".into(), Value::Str(format!("[{}][{}]", t.idx.name, t.shard.id)));
+            h.insert("_shard".into(), Value::Str(format!("[{}][{}]", t.shown(), t.shard.id)));
             h.insert("_node".into(), Value::Str(qctx.cluster.node.id.clone()));
         }
-        h.insert("_index".into(), Value::Str(t.idx.name.clone()));
+        h.insert("_index".into(), Value::Str(t.shown()));
         h.insert("_id".into(), Value::Str(id.clone()));
         // Sorted inner hits print no score (`TopFieldCollector` leaves it NaN).
         let shown = if sorted { None } else { Some(*score) };

@@ -2335,7 +2335,7 @@ impl Control {
     /// cluster's security back as it was, so it is kept with the row and the restore applies it
     /// before it answers ([`Self::apply_revokes`]). `false`: `id` is no deleted cluster (purged,
     /// or never was).
-    async fn keep_revoke(&self, id: &str, credential: &str) -> Result<bool> {
+    pub(crate) async fn keep_revoke(&self, id: &str, credential: &str) -> Result<bool> {
         if credential.len() > 512 {
             return Ok(false);
         }

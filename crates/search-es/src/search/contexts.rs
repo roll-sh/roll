@@ -348,7 +348,7 @@ pub fn start_scroll(ctx: &Ctx, req: &SearchRequest, targets: Vec<Target>, out: &
     // A shard that failed this first page keeps no context (its reader context is freed), so
     // later pages and the clear-scroll count leave it out.
     let failed: Vec<(&str, i64)> = out.failures.iter().filter_map(|f| Some((f.get("index")?.as_str()?, f.get("shard")?.as_i64()?))).collect();
-    let keep: Vec<bool> = targets.iter().map(|t| !failed.iter().any(|(i, s)| *i == t.idx.name && *s == t.shard.id as i64)).collect();
+    let keep: Vec<bool> = targets.iter().map(|t| !failed.iter().any(|(i, s)| *i == t.shown() && *s == t.shard.id as i64)).collect();
     let mut renumber = vec![usize::MAX; targets.len()];
     let mut kept = 0;
     for (i, k) in keep.iter().enumerate() {
@@ -613,7 +613,7 @@ pub(crate) fn open_pit_for(ctx: &Ctx, mut req: SearchRequest, ka: Duration, inde
         for t in targets {
             let searcher = t.searcher()?;
             let table = t.table();
-            let qctx = super::query::QueryCtx::new(ctx.cluster, &st, &t.idx, &table, &searcher, ctx.now_ms, t.reader());
+            let qctx = super::query::QueryCtx::new(ctx.cluster, &st, &t.idx, &table, &searcher, ctx.now_ms, t.reader().in_remote(t.cluster.clone());
             let q = qctx.to_filter(f).map_err(|e| super::query::shard_exception(&t.idx, e))?;
             if searcher.count(&q).map_err(crate::engine::convert::index_error)? > 0 {
                 kept.push(t);

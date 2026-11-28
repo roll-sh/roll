@@ -5270,7 +5270,11 @@ async fn opensearch_flavor_clusters_link_with_the_remotes_own_mappings() {
     assert_eq!(es_as(&e, &near, Method::PUT, "/secret-near/_doc/1?refresh=true", Some(json!({"x": 1, "email": "a@example.com", "note": "hidden"}))).await.0, 201);
     assert_eq!(es_as(&e, &near, Method::PUT, "/other-near/_doc/1?refresh=true", Some(json!({"x": 2}))).await.0, 201);
     assert!(es_as(&e, &near, Method::PUT, &format!("{api}/internalusers/nobody"), Some(json!({"password": "Zq7-Mountain-River-88"}))).await.0 < 300);
-    for p in ["/loop:*/_search", "/loop:secret*/_count", "/loop:*/_field_caps?fields=x", "/_cat/indices/loop:*"] {
+    // Remote expressions read as the search reads them: `-*:*` names no remote here (an alias
+    // may start with `-`, as OpenSearch's may), and an alias never holds `:`.
+    assert_eq!(es_as(&e, &near, Method::PUT, "/_cluster/settings", Some(loopback("-loop", transport("os-near").await))).await.0, 200);
+    assert_eq!(es_as(&e, &near, Method::PUT, "/_cluster/settings", Some(loopback("a:b", transport("os-near").await))).await.0, 400);
+    for p in ["/loop:*/_search", "/loop:*,-*:*/_search", "/-loop:secret-near/_search", "/loop:secret*/_count", "/loop:*/_field_caps?fields=x", "/_cat/indices/loop:*"] {
         let (s, v) = e.es("nobody@os-near", "Zq7-Mountain-River-88", Method::GET, p, None).await;
         assert_eq!(s, 403, "{p}: {v}");
     }
@@ -5286,7 +5290,8 @@ async fn opensearch_flavor_clusters_link_with_the_remotes_own_mappings() {
     assert_eq!((s, v["hits"]["total"]["value"].as_i64()), (200, Some(1)), "{v}");
     // Through a loopback, a user's field and document security on the indices still apply.
     let fls = json!({"index_permissions": [{"index_patterns": ["secret-near", "other-near"], "fls": ["x", "email"], "masked_fields": ["email"], "allowed_actions": ["read"]}]});
-    let dls = json!({"index_permissions": [{"index_patterns": ["secret-near", "other-near"], "dls": "{\"term\":{\"x\":2}}", "allowed_actions": ["read"]}]});
+    // A role's `_index` is the real index's name, through a loopback too.
+    let dls = json!({"index_permissions": [{"index_patterns": ["secret-near", "other-near"], "dls": "{\"bool\":{\"must_not\":{\"term\":{\"_index\":\"secret-near\"}}}}", "allowed_actions": ["read"]}]});
     for (p, body) in [
         ("roles/near_fls", fls),
         ("internalusers/masky", json!({"password": "Zq7-Mountain-River-86"})),

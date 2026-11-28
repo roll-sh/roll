@@ -543,6 +543,9 @@ pub struct Lookup<'a> {
     st: &'a ClusterState,
     table: Arc<FieldTable>,
     index: String,
+    /// The index as hits name it ([`super::Target::shown`]).
+    shown: String,
+    remote: Option<Arc<str>>,
     uuid: String,
     now: i64,
     shard: (u32, u32),
@@ -581,6 +584,8 @@ impl<'a> Lookup<'a> {
             st,
             table: table.clone(),
             index: t.idx.name.clone(),
+            shown: t.shown(),
+            remote: t.cluster.clone(),
             uuid: t.idx.uuid.clone(),
             now,
             shard: (t.shard.id, t.idx.number_of_shards()),
@@ -617,7 +622,7 @@ impl Lookup<'_> {
     /// A hit sort on a runtime field (it shadows a mapped field of the name).
     fn runtime_sort(&self, field: &str, reverse: bool) -> search_aggs::Result<Option<search_aggs::HitSort>> {
         let err = |e: EsError| search_aggs::AggError::new(e.status, e.kind.to_string(), e.reason().to_string());
-        let ctx = QueryCtx::new(self.cluster, self.st, &self.idx, &self.table, &self.searcher, self.now, crate::search::query::Reader::of(self.security.clone()));
+        let ctx = QueryCtx::new(self.cluster, self.st, &self.idx, &self.table, &self.searcher, self.now, crate::search::query::Reader::of(self.security.clone())).in_remote(self.remote.clone());
         let rf = super::runtime::RuntimeScope::ambient().filter(|s| s.index_name() == self.idx.name).and_then(|s| s.field(field).cloned()).or_else(|| ctx.runtime_field(field));
         let Some(rf) = rf.filter(|f| f.ty != super::runtime::RtType::GeoPoint) else { return Ok(None) };
         ctx.no_scripts().map_err(err)?;
@@ -628,7 +633,7 @@ impl Lookup<'_> {
     fn computed_sort(&self, item: &Json) -> search_aggs::Result<search_aggs::HitSort> {
         let err = |e: EsError| search_aggs::AggError::new(e.status, e.kind.to_string(), e.reason().to_string());
         let sorts = crate::search_source::parse_sorts_value(&from_json(item)).map_err(err)?;
-        let ctx = QueryCtx::new(self.cluster, self.st, &self.idx, &self.table, &self.searcher, self.now, crate::search::query::Reader::of(self.security.clone()));
+        let ctx = QueryCtx::new(self.cluster, self.st, &self.idx, &self.table, &self.searcher, self.now, crate::search::query::Reader::of(self.security.clone())).in_remote(self.remote.clone());
         match sorts.into_iter().next() {
             Some(crate::search_source::Sort::Script { script, ty, order, .. }) => {
                 let reverse = order == Some(crate::search_source::SortOrder::Desc);
@@ -707,7 +712,7 @@ impl FieldLookup for Lookup<'_> {
             }
             // `ConstantFieldType`s: one value for the whole shard.
             let constant = match name {
-                "_index" => Some(self.idx.name.clone()),
+                "_index" => Some(self.shown.clone()),
                 "_index_mode" => Some(crate::meta::index_mode::IndexMode::of(&self.idx.settings).name().to_string()),
                 _ => None,
             };
@@ -802,7 +807,7 @@ impl FieldLookup for Lookup<'_> {
     fn query(&self, query: &Json) -> search_aggs::Result<QueryRef> {
         let v = from_json(query);
         let q = crate::query::parse_query(&v, None, &[]).map_err(|e| search_aggs::AggError::new(e.status, e.kind.to_string(), e.reason().to_string()))?.0;
-        let ctx = QueryCtx::new(self.cluster, self.st, &self.idx, &self.table, &self.searcher, self.now, crate::search::query::Reader::of(self.security.clone()));
+        let ctx = QueryCtx::new(self.cluster, self.st, &self.idx, &self.table, &self.searcher, self.now, crate::search::query::Reader::of(self.security.clone())).in_remote(self.remote.clone());
         ctx.to_query(&q).map_err(|e| search_aggs::AggError::new(e.status, e.kind.to_string(), e.reason().to_string()))
     }
 
@@ -839,7 +844,7 @@ impl FieldLookup for Lookup<'_> {
             // with nested fields.
             Arc::new(search_index::query::MatchAllQuery)
         };
-        let mut ctx = QueryCtx::new(self.cluster, self.st, &self.idx, &self.table, &self.searcher, self.now, crate::search::query::Reader::of(self.security.clone()));
+        let mut ctx = QueryCtx::new(self.cluster, self.st, &self.idx, &self.table, &self.searcher, self.now, crate::search::query::Reader::of(self.security.clone())).in_remote(self.remote.clone());
         ctx.runtime_mappings = self.runtime_mappings.clone();
         match self.filter.build(&ctx) {
             Ok(Some(f)) => Arc::new(search_index::query::BooleanQuery::new().add(search_index::query::Occur::Filter, f).add(search_index::query::Occur::Filter, root)),
@@ -892,7 +897,7 @@ impl FieldLookup for Lookup<'_> {
     fn fetcher(&self) -> Option<Arc<dyn search_aggs::TopHitsFetcher>> {
         Some(Arc::new(Fetcher {
             table: self.table.clone(),
-            index: self.index.clone(),
+            index: self.shown.clone(),
             idx: self.idx.clone(),
             shard: self.shard.0,
             parent_fields: self.parent_fields.clone(),

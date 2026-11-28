@@ -167,7 +167,7 @@ fn nested_hits(
         // The `_nested` identity: every enclosing nested level with its offset in its parent.
         let identity = block.identity(table, seg, *d);
         let mut h = Map::new();
-        h.insert("_index".into(), Value::Str(t.idx.name.clone()));
+        h.insert("_index".into(), Value::Str(t.shown()));
         h.insert("_id".into(), Value::Str(parent_id.clone()));
         h.insert("_nested".into(), identity.as_ref().map(NestedIdentity::to_value).unwrap_or(Value::Null));
         // Nested documents share their root's version and sequence number.

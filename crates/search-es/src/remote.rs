@@ -128,6 +128,42 @@ pub fn split_expression(e: &str) -> Option<(&str, &str)> {
     Some((&e[..i], &e[i + 1..]))
 }
 
+/// One index expression of a search as the search reads it: [`plan`], [`links::split`] and the
+/// authorization of the search (which authorizes [`plan`]'s answer) never read one differently.
+#[derive(Debug, PartialEq)]
+pub enum Expr<'a> {
+    /// A local expression (exclusions included).
+    Local(&'a str),
+    /// `<pattern>:<index>`: `index` on every remote whose alias `pattern` matches.
+    Remote(&'a str, &'a str),
+    /// Elasticsearch's `-<pattern>:<index>` (`RemoteClusterAware.groupClusterIndices`): `*`
+    /// leaves the remotes `pattern` matches out of the search, any other `index` is excluded
+    /// there. OpenSearch has no remote exclusions: there `-x:y` is a remote expression of an
+    /// alias `-x`, which OpenSearch accepts (or, matching none, an unknown remote).
+    Exclude(&'a str, &'a str),
+}
+
+pub fn read_expression(dialect: crate::cluster::Dialect, e: &str) -> Expr<'_> {
+    if dialect == crate::cluster::Dialect::Elasticsearch
+        && let Some((pattern, index)) = e.strip_prefix('-').and_then(split_expression)
+    {
+        return Expr::Exclude(pattern, index);
+    }
+    match split_expression(e) {
+        Some((pattern, index)) => Expr::Remote(pattern, index),
+        None => Expr::Local(e),
+    }
+}
+
+/// The remotes `pattern` matches; naming none without a wildcard is an unknown remote.
+fn matching<'r>(configured: &'r [Remote], pattern: &str) -> EsResult<Vec<&'r Remote>> {
+    let matched: Vec<&Remote> = configured.iter().filter(|r| crate::xcontent::filter::glob_match(pattern, &r.alias)).collect();
+    if matched.is_empty() && !pattern.contains('*') {
+        return Err(EsError::new(404, "no_such_remote_cluster_exception", format!("no such remote cluster: [{pattern}]")));
+    }
+    Ok(matched)
+}
+
 /// How a cross-cluster search's expressions split over clusters.
 pub struct Plan {
     /// Local expressions (`None`: the search names only remote clusters).
@@ -140,9 +176,10 @@ pub struct Plan {
     pub wildcards: bool,
 }
 
-/// Splits `expressions` over the local cluster and the remotes they name; `None` when they
-/// name no remote cluster. Unknown aliases and unreachable remotes that may not be skipped
-/// fail like Elasticsearch's.
+/// Splits `expressions` over the local cluster and the remotes they name ([`read_expression`]);
+/// `None` when they name no remote cluster. Unknown aliases and unreachable remotes that may
+/// not be skipped fail like Elasticsearch's; so do Elasticsearch's exclusions of a remote the
+/// expressions before them don't name, and of every cluster.
 pub fn plan(cluster: &Cluster, st: &ClusterState, expressions: &[String]) -> EsResult<Option<Plan>> {
     if !expressions.iter().any(|e| split_expression(e.trim_start_matches('-')).is_some()) {
         return Ok(None);
@@ -151,33 +188,62 @@ pub fn plan(cluster: &Cluster, st: &ClusterState, expressions: &[String]) -> EsR
     let mut local: Vec<String> = Vec::new();
     let mut remote: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut skipped: Vec<String> = Vec::new();
+    // Links the expressions name: `links::search` searches them, before this plan.
+    let mut linked: Vec<String> = Vec::new();
+    let mut removed: Vec<String> = Vec::new();
     let mut wildcards = false;
     for e in expressions {
-        let Some((pattern, index)) = split_expression(e) else {
-            local.push(e.clone());
-            continue;
-        };
-        if pattern.contains('*') {
-            wildcards = true;
-        }
-        let matched: Vec<&Remote> = configured.iter().filter(|r| crate::xcontent::filter::glob_match(pattern, &r.alias)).collect();
-        if matched.is_empty() && !pattern.contains('*') {
-            return Err(EsError::new(404, "no_such_remote_cluster_exception", format!("no such remote cluster: [{pattern}]")));
-        }
-        for r in matched {
-            // Links are searched by `links::search`, before this plan.
-            if links::is_link(cluster, r) {
-                continue;
-            }
-            if r.is_loopback(cluster) {
-                remote.entry(r.alias.clone()).or_default().push(index.to_string());
-            } else if r.skip_unavailable {
-                if !skipped.contains(&r.alias) {
-                    skipped.push(r.alias.clone());
+        match read_expression(cluster.dialect, e) {
+            Expr::Local(_) => local.push(e.clone()),
+            Expr::Remote(pattern, index) => {
+                wildcards |= pattern.contains('*');
+                for r in matching(&configured, pattern)? {
+                    if links::is_link(cluster, r) {
+                        if !linked.contains(&r.alias) {
+                            linked.push(r.alias.clone());
+                        }
+                    } else if r.is_loopback(cluster) {
+                        remote.entry(r.alias.clone()).or_default().push(index.to_string());
+                    } else if r.skip_unavailable {
+                        if !skipped.contains(&r.alias) {
+                            skipped.push(r.alias.clone());
+                        }
+                    } else {
+                        return Err(EsError::new(500, "connect_transport_exception", format!("[{}] unable to connect to remote cluster", r.alias)));
+                    }
                 }
-            } else {
-                return Err(EsError::new(500, "connect_transport_exception", format!("[{}] unable to connect to remote cluster", r.alias)));
             }
+            Expr::Exclude(pattern, index) => {
+                for r in matching(&configured, pattern)? {
+                    // A link's legs were split off already (`links::split` applies exclusions to them).
+                    let named = remote.contains_key(&r.alias) || skipped.contains(&r.alias) || linked.contains(&r.alias) || links::is_link(cluster, r);
+                    if !named {
+                        if pattern.contains('*') {
+                            continue;
+                        }
+                        return Err(EsError::illegal_argument(format!(
+                            "Attempt to exclude cluster [{}] failed as it is not included in the list of clusters to be included (note: the \"include\" expression must precede the \"exclude\" expression)",
+                            r.alias
+                        )));
+                    }
+                    if index == "*" {
+                        removed.push(r.alias.clone());
+                    } else if let Some(exprs) = remote.get_mut(&r.alias) {
+                        exprs.push(format!("-{index}"));
+                    }
+                }
+            }
+        }
+    }
+    if !removed.is_empty() {
+        remote.retain(|a, _| !removed.contains(a));
+        skipped.retain(|a| !removed.contains(a));
+        linked.retain(|a| !removed.contains(a));
+        if local.is_empty() && remote.is_empty() && skipped.is_empty() && linked.is_empty() {
+            return Err(EsError::illegal_argument(format!(
+                "The '-' exclusions in the index expression list excludes all indexes. Nothing to search. Input: [{}]",
+                expressions.join(",")
+            )));
         }
     }
     Ok(Some(Plan { local: (!local.is_empty()).then_some(local), remote: remote.into_iter().collect(), skipped, wildcards }))
@@ -392,6 +458,10 @@ mod tests {
         assert_eq!(split_expression("c1:idx::data"), Some(("c1", "idx::data")));
         assert_eq!(split_expression("<logs-{now/d}>"), None);
         assert_eq!(split_expression("idx"), None);
+        use crate::cluster::Dialect::{Elasticsearch, OpenSearch};
+        assert_eq!(read_expression(Elasticsearch, "-*:*"), Expr::Exclude("*", "*"));
+        assert_eq!(read_expression(OpenSearch, "-*:*"), Expr::Remote("-*", "*"));
+        assert_eq!(read_expression(Elasticsearch, "-idx"), Expr::Local("-idx"));
     }
 
     #[test]

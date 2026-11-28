@@ -1441,58 +1441,55 @@ pub fn authorize_search(ctx: &Ctx, exprs: &[String], opts: &crate::meta::resolve
 /// expressions resolve to (or every index when it names none) must be permitted; nothing is
 /// narrowed to the permitted ones.
 ///
-/// Remote expressions (`<alias>:<index>`): a linked remote's are the remote's to authorize, as
-/// OpenSearch's are (`crate::remote::links`), so a user needs nothing here for them; a loopback's
-/// read this cluster's own indices, so their index part is authorized as local names (and a
-/// linked cluster's user may not name one at all: it would read past the link's ceiling); any
-/// other remote's read nothing here (the search refuses or skips them). Resolving fails closed:
-/// an error is the request's, never an empty list that authorizes nothing.
+/// Remote expressions (`<alias>:<index>`) are read exactly as the search reads them
+/// ([`crate::remote::plan`]), and each group it searches is authorized on its own: the local
+/// expressions, and each loopback's (this cluster's own indices, so as local names; a linked
+/// cluster's user may not name one at all: it would read past the link's ceiling). A linked
+/// remote's are the remote's to authorize, as OpenSearch's are (`crate::remote::links`), and
+/// unreachable remotes read nothing here. Planning and resolving fail closed: an error is the
+/// request's, never an empty list that authorizes nothing.
 fn check_all(ctx: &Ctx, p: &Principal, eff: &Effective, action: &str, exprs: Vec<String>, opts: &crate::meta::resolve::IndicesOptions) -> EsResult<()> {
     let st = ctx.state();
     let named = !exprs.is_empty();
-    let linked_user = p.os().is_some_and(|id| id.link.is_some());
-    let loopbacks: Vec<crate::remote::Remote> = crate::remote::remotes_in(ctx.cluster.dialect, &st).into_iter().filter(|r| r.is_loopback(ctx.cluster)).collect();
-    let mut local: Vec<String> = Vec::with_capacity(exprs.len());
-    for e in exprs {
-        let (neg, bare) = match e.strip_prefix('-') {
-            Some(b) => ("-", b),
-            None => ("", e.as_str()),
-        };
-        let Some((pattern, index)) = crate::remote::split_expression(bare) else {
-            local.push(e);
-            continue;
-        };
-        if crate::remote::links::names_link(ctx, bare) {
-            continue;
-        }
-        if loopbacks.iter().any(|r| crate::xcontent::filter::glob_match(pattern, &r.alias)) {
-            if linked_user {
-                return Err(denied(p, action, Some(std::slice::from_ref(&e))));
+    let groups: Vec<Vec<String>> = match crate::remote::plan(ctx.cluster, &st, &exprs)? {
+        None => vec![exprs],
+        Some(plan) => {
+            if p.os().is_some_and(|id| id.link.is_some()) && !plan.remote.is_empty() {
+                let aliases: Vec<String> = plan.remote.iter().map(|(a, _)| format!("{a}:")).collect();
+                return Err(denied(p, action, Some(&aliases)));
             }
-            local.push(format!("{neg}{index}"));
+            plan.local.into_iter().chain(plan.remote.into_iter().map(|(_, e)| e)).collect()
         }
-    }
-    if named && local.is_empty() {
+    };
+    if named && groups.is_empty() {
         return Ok(());
     }
-    let exprs = local;
     let mut names: Vec<String> = Vec::new();
-    // No index: every index the request reads, as its wildcard resolves (dot-prefixed ones too).
+    for exprs in groups {
+        names.extend(group_names(ctx, &st, &exprs, opts)?);
+    }
+    // OpenSearch's 403 names no index (its audit entry does).
+    if names.iter().all(|n| eff.allows_index(action, n)) { Ok(()) } else { Err(denied(p, action, Some(&names))) }
+}
+
+/// The indices one group of expressions reads ([`check_all`]); naming none (or only
+/// exclusions), every index, as its wildcard resolves (dot-prefixed ones too).
+fn group_names(ctx: &Ctx, st: &crate::meta::ClusterState, exprs: &[String], opts: &crate::meta::resolve::IndicesOptions) -> EsResult<Vec<String>> {
+    let mut names: Vec<String> = Vec::new();
     if exprs.iter().all(|e| e.starts_with('-')) {
         let list: Vec<String> = std::iter::once("*".to_string()).chain(exprs.iter().cloned()).collect();
-        names.extend(crate::meta::resolve::resolve(&st, &list, opts, ctx.now_ms)?);
+        names.extend(crate::meta::resolve::resolve(st, &list, opts, ctx.now_ms)?);
     }
     for e in exprs.iter().filter(|e| !e.starts_with('-')) {
         if e.contains('*') || e == "_all" {
             let mut list = vec![e.clone()];
             list.extend(exprs.iter().filter(|x| x.starts_with('-')).cloned());
-            names.extend(crate::meta::resolve::resolve(&st, &list, opts, ctx.now_ms)?);
+            names.extend(crate::meta::resolve::resolve(st, &list, opts, ctx.now_ms)?);
         } else {
             names.push(authz_name(e, ctx.now_ms));
         }
     }
-    // OpenSearch's 403 names no index (its audit entry does).
-    if names.iter().all(|n| eff.allows_index(action, n)) { Ok(()) } else { Err(denied(p, action, Some(&names))) }
+    Ok(names)
 }
 
 /// Wildcards (and no index at all) expand to the matching indices the principal may access;

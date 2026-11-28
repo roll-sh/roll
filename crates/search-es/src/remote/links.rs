@@ -479,7 +479,21 @@ pub fn split(ctx: &Ctx, expressions: &[String]) -> EsResult<Option<Split>> {
     let mut local = Vec::new();
     let mut legs: BTreeMap<String, (Remote, String, Vec<String>)> = BTreeMap::new();
     let mut wildcards = false;
+    let mut removed: Vec<String> = Vec::new();
     for e in expressions {
+        // Elasticsearch's exclusions apply to the legs named before them; the local plan
+        // (`remote::plan`) applies them to its own remotes and checks them.
+        if let super::Expr::Exclude(pattern, index) = super::read_expression(ctx.cluster.dialect, e) {
+            for r in configured.iter().filter(|r| glob_match(pattern, &r.alias)) {
+                if index == "*" {
+                    removed.push(r.alias.clone());
+                } else if let Some(leg) = legs.get_mut(&r.alias) {
+                    leg.2.push(format!("-{index}"));
+                }
+            }
+            local.push(e.clone());
+            continue;
+        }
         let Some((pattern, index)) = split_expression(e) else {
             local.push(e.clone());
             continue;
@@ -498,6 +512,7 @@ pub fn split(ctx: &Ctx, expressions: &[String]) -> EsResult<Option<Split>> {
             }
         }
     }
+    legs.retain(|alias, _| !removed.contains(alias));
     if legs.is_empty() {
         return Ok(None);
     }

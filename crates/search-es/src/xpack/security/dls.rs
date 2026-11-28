@@ -358,7 +358,6 @@ impl ReadSecurity {
     /// A set's entries granting `action` on `index` (or on its data stream); without one, the
     /// entries granting it on an alias of the index, which the index was read through.
     fn granting<'a>(&self, set: &'a [Permission], action: &str, index: &str) -> Vec<&'a IndexGrant> {
-        let index = local_name(index);
         let parent = self.0.eff.parents.get(index);
         let restricted = self.0.eff.restricted(index);
         let entries = |names: &dyn Fn(&str) -> bool| -> Vec<&'a IndexGrant> {
@@ -527,17 +526,6 @@ fn user_params(p: &Principal) -> Value {
         "email" => p.email.clone(),
         "roles" => Value::Arr(p.roles.iter().map(Value::from).collect()),
         "metadata" => p.metadata.clone(),
-    }
-}
-
-/// The index a name stands for in this cluster: a loopback remote's targets are named
-/// `<alias>:<index>` for display (`search::ccs_targets`), but are this cluster's own indices,
-/// whose document and field security apply. Index names never hold `:`; a data stream's
-/// `::failures` or `::data` selector is no alias.
-fn local_name(name: &str) -> &str {
-    match name.split_once(':') {
-        Some((alias, index)) if !alias.is_empty() && !index.is_empty() && !index.starts_with(':') => index,
-        _ => name,
     }
 }
 

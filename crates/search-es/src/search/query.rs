@@ -93,6 +93,11 @@ pub struct QueryCtx<'a> {
     pub percolate: RefCell<Vec<Arc<super::percolate::Percolated>>>,
     /// Whose reads the query's lookups of other documents make (inner hits fetch through it).
     pub security: Reader,
+    /// The loopback remote the shard is searched through ([`super::Target::cluster`]): the
+    /// request's queries, sorts and aggregations see `_index` as `alias:index`, as a remote's
+    /// shard does (`SearchIndexNameMatcher`, `IndexFieldMapper`). A security filter's context
+    /// never has one ([`QueryCtx::for_security`]): a role's `_index` is the real index.
+    pub remote: Option<Arc<str>>,
 }
 
 /// The reader a query reads other documents for (a `percolate` or `indexed_shape` document):
@@ -267,6 +272,21 @@ impl<'a> QueryCtx<'a> {
             unmapped: RefCell::new(None),
             percolate: RefCell::new(Vec::new()),
             security,
+            remote: None,
+        }
+    }
+
+    /// This context on a loopback remote's shard ([`QueryCtx::remote`]).
+    pub fn in_remote(mut self, remote: Option<Arc<str>>) -> QueryCtx<'a> {
+        self.remote = remote;
+        self
+    }
+
+    /// `_index` as the request's queries, sorts and aggregations see it.
+    pub fn shown_index(&self) -> String {
+        match &self.remote {
+            Some(alias) => format!("{alias}:{}", self.idx.name),
+            None => self.idx.name.clone(),
         }
     }
 
@@ -757,7 +777,7 @@ impl<'a> QueryCtx<'a> {
                     let s = value_text(v);
                     self.index_matches(&if case_insensitive { s.to_lowercase() } else { s })
                 });
-                Ok(if any { arc(MatchAllQuery) } else { match_none(&format!("The index [{}] doesn't match", self.idx.name)) })
+                Ok(if any { arc(MatchAllQuery) } else { match_none(&format!("The index [{}] doesn't match", self.shown_index())) })
             }
             "_tsid" if crate::engine::tsdb::is_time_series(self.idx) => Err(EsError::illegal_argument("[_tsid] is not searchable")),
             "_routing" => Ok(terms_on(ROUTING_FIELD, values.iter().map(value_text).collect())),
@@ -871,6 +891,12 @@ impl<'a> QueryCtx<'a> {
     /// an alias or data stream that holds the index matches it too.
     pub fn index_matches(&self, pattern: &str) -> bool {
         use crate::xcontent::filter::glob_match;
+        // `cluster:index` matches a remote's shard by its alias; a bare pattern a local shard only.
+        let pattern = match (pattern.split_once(':'), self.remote.as_deref()) {
+            (None, None) => pattern,
+            (Some((c, i)), Some(alias)) if glob_match(c, alias) => i,
+            _ => return false,
+        };
         // `expand_wildcards=open`: a wildcard skips hidden names, except dot-prefixed ones
         // when the pattern starts with a dot too.
         let wild = pattern.contains('*');

@@ -58,6 +58,11 @@ const AFFIXES: &[(&str, &str, Affix)] = &[
 ];
 
 fn affix(key: &str) -> Option<Affix> {
+    // A remote's alias never holds `:`, which splits `alias:index` (both references: "not
+    // recognized").
+    if key.strip_prefix("cluster.remote.").is_some_and(|rest| rest.split_once('.').is_some_and(|(alias, _)| alias.contains(':'))) {
+        return None;
+    }
     AFFIXES
         .iter()
         .find(|(p, s, _)| key.len() > p.len() + s.len() && key.starts_with(p) && key.ends_with(s) && (!s.is_empty() || !key[p.len()..].is_empty()))
