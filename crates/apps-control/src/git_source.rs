@@ -654,14 +654,10 @@ mod tests {
             o2.insert(c.id, c.clone());
             assert!(write_commit(&o2, c.id, tempfile::tempdir().unwrap().path()).is_err());
         }
-    }
-
-    #[test]
-    fn only_public_https_urls() {
+        // Only public https URLs, with no credentials in them.
         assert!(check_url("https://github.com/acme/site", false).is_ok());
-        assert!(check_url("http://github.com/acme/site", false).is_err());
-        assert!(check_url("https://user:token@github.com/acme/site", false).is_err());
-        assert!(check_url("https://127.0.0.1/acme/site", false).is_err());
-        assert!(check_url("https://github.com/", false).is_err());
+        for bad in ["http://github.com/acme/site", "https://user:token@github.com/acme/site", "https://127.0.0.1/acme/site", "https://github.com/"] {
+            assert!(check_url(bad, false).is_err(), "{bad}");
+        }
     }
 }

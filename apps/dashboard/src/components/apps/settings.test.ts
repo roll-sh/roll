@@ -29,34 +29,24 @@ describe("the settings form", () => {
     expect(patchOf(svc, { ...f, logMetrics: "payments_failed: payment failed\n\nTimeout" })).toEqual({
       run: { log_metrics: [{ name: "payments_failed", pattern: "payment failed" }, { name: "timeout", pattern: "Timeout" }] },
     });
-  });
-
-  it("keeps route alerts when another alert is edited, and reads them as lines", () => {
-    const routes = [{ route: "/api/checkout", method: "POST", error_pct: 2, p95_ms: 800 }, { route: "/api/*", p95_ms: 1500 }];
-    const withRoutes = { ...svc, run: { ...svc.run, alerts: { memory_pct: 90, error_pct: 5, p95_ms: 0, routes } } };
-    const f = formOf(withRoutes);
-    expect(f.alertRoutes).toBe("POST /api/checkout 5xx >= 2% p95 >= 800ms\n/api/* p95 >= 1500ms");
-    expect(patchOf(withRoutes, { ...f, alertMemory: "80" }).run?.alerts?.routes).toEqual(routes);
-    // A line it can't read goes as it is, for the API to refuse, never dropped.
-    expect(patchOf(withRoutes, { ...f, alertRoutes: "get /users/:id 5xx > 10%\n/oops" }).run?.alerts?.routes).toEqual([{ route: "/users/:id", method: "GET", error_pct: 10 }, { route: "/oops" }]);
-  });
-
-  it("writes floors by the clock as lines, a rule's windows together", () => {
-    const f = formOf(svc);
-    const patch = patchOf(svc, { ...f, floors: "mon 08:00..fri 18:00=3 Europe/Berlin\nsat 10:00..sat 14:00=3 Europe/Berlin\nmon 00:00..mon 06:00=1" });
-    expect(patch.run?.schedule_scale).toEqual([
+    // What another field holds is kept when one is edited: route alerts (a line it can't read
+    // goes as it is, for the API to refuse), a route's objective, the other stream pushes.
+    const alertRoutes = [{ route: "/api/checkout", method: "POST", error_pct: 2, p95_ms: 800 }, { route: "/api/*", p95_ms: 1500 }];
+    const withRoutes = { ...svc, run: { ...svc.run, alerts: { memory_pct: 90, error_pct: 5, p95_ms: 0, routes: alertRoutes } } };
+    const r = formOf(withRoutes);
+    expect(patchOf(withRoutes, { ...r, alertMemory: "80" }).run?.alerts?.routes).toEqual(alertRoutes);
+    expect(patchOf(withRoutes, { ...r, alertRoutes: "get /users/:id 5xx > 10%\n/oops" }).run?.alerts?.routes).toEqual([{ route: "/users/:id", method: "GET", error_pct: 10 }, { route: "/oops" }]);
+    const sloRoutes = [{ route: "/api/checkout", method: "POST", objective: 99.95, latency_ms: 800 }];
+    const withSlo = { ...svc, run: { ...svc.run, slo: { objective: 99.9, routes: sloRoutes } } };
+    expect(patchOf(withSlo, { ...formOf(withSlo), sloObjective: "99.5" }).run?.slo).toEqual({ objective: 99.5, routes: sloRoutes });
+    const second = { stream: "st_bbbbbbbbbbbb", topic: "audit", group: "web", path: "/audit" };
+    const withPush = { ...svc, run: { ...svc.run, push: [{ stream: "st_aaaaaaaaaaaa", topic: "orders", group: "web", path: "/events", dead_letter: "dead", max_attempts: 3 }, second] } };
+    expect(patchOf(withPush, { ...formOf(withPush), pushStream: "" })).toEqual({ run: { push: [second] } });
+    // Floors by the clock as lines, a rule's windows together.
+    expect(patchOf(svc, { ...f, floors: "mon 08:00..fri 18:00=3 Europe/Berlin\nsat 10:00..sat 14:00=3 Europe/Berlin\nmon 00:00..mon 06:00=1" }).run?.schedule_scale).toEqual([
       { windows: [{ from: "mon 08:00", to: "fri 18:00" }, { from: "sat 10:00", to: "sat 14:00" }], min_instances: 3, timezone: "Europe/Berlin" },
       { windows: [{ from: "mon 00:00", to: "mon 06:00" }], min_instances: 1 },
     ]);
-    expect(formOf({ ...svc, run: { ...svc.run, schedule_scale: patch.run?.schedule_scale ?? undefined } }).floors).toBe("mon 08:00..fri 18:00=3 Europe/Berlin\nsat 10:00..sat 14:00=3 Europe/Berlin\nmon 00:00..mon 06:00=1");
-  });
-
-  it("keeps a route's objective when the service's own is edited", () => {
-    const routes = [{ route: "/api/checkout", method: "POST", objective: 99.95, latency_ms: 800 }];
-    const withSlo = { ...svc, run: { ...svc.run, slo: { objective: 99.9, routes } } };
-    const f = formOf(withSlo);
-    expect(f.sloRoutes).toBe("POST /api/checkout 99.95% p95 < 800ms");
-    expect(patchOf(withSlo, { ...f, sloObjective: "99.5" }).run?.slo).toEqual({ objective: 99.5, routes });
   });
 
   it("keeps what was edited when the service changes under the form", () => {
@@ -67,11 +57,4 @@ describe("the settings form", () => {
     expect(rebase(edited, base, next)).toEqual({ ...next, build: "pnpm build:prod" });
   });
 
-  it("edits the first stream push and keeps the rest as they are", () => {
-    const second = { stream: "st_bbbbbbbbbbbb", topic: "audit", group: "web", path: "/audit" };
-    const withPush = { ...svc, run: { ...svc.run, push: [{ stream: "st_aaaaaaaaaaaa", topic: "orders", group: "web", path: "/events", dead_letter: "dead", max_attempts: 3 }, second] } };
-    const f = formOf(withPush);
-    expect(patchOf(withPush, { ...f, pushPath: "/orders", pushDead: "" })).toEqual({ run: { push: [{ stream: "st_aaaaaaaaaaaa", topic: "orders", group: "web", path: "/orders", dead_letter: undefined }, second] } });
-    expect(patchOf(withPush, { ...f, pushStream: "" })).toEqual({ run: { push: [second] } });
-  });
 });

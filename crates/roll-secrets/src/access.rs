@@ -717,6 +717,10 @@ impl Caller {
             (Some(e), _) => e.to_string(),
             _ => at.project.to_string(),
         };
+        // A rule that reaches the folder key by key, asked about the folder as a whole: say so.
+        if at.key.is_none() && !at.by_key && self.grants.limits_keys() && self.allows(action, &at.by_key()) {
+            return Err(crate::Error::Forbidden(roll_auth::scope::keys_only(&place, "this request")));
+        }
         if let Some(k) = at.key {
             place = format!("{place} ({k})");
         }

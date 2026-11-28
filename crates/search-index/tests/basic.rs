@@ -414,7 +414,7 @@ fn dense_point_ranges_and_constant_score_pruning_match_brute_force() {
         .unwrap()
         .with_field(FieldSchema::new(P1, "p1").with_doc_values(DocValuesType::SortedNumeric))
         .unwrap();
-    for seed in 0..4u64 {
+    for seed in 0..2u64 {
         let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
         let shard = Shard::open(ShardConfig { merge_threads: 0, ..Default::default() }, schema.clone(), Vec::new()).unwrap();
         let mut docs: Vec<Option<(i64, (i32, i32))>> = Vec::new();

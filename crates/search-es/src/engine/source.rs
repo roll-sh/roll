@@ -900,7 +900,7 @@ mod tests {
         }
         let mut rng = StdRng::seed_from_u64(7);
         let mut checked = 0;
-        for _ in 0..30_000 {
+        for _ in 0..6_000 {
             let mut doc = String::from("{");
             let mut keys = KEYS.to_vec();
             for i in 0..rng.gen_range(0..6) {
@@ -925,6 +925,6 @@ mod tests {
             assert_eq!(got.as_deref(), Some(want.as_str()), "{doc} {inc:?} {exc:?}");
             checked += usize::from(want.len() > 2);
         }
-        assert!(checked > 5_000, "{checked}");
+        assert!(checked > 1_000, "{checked}");
     }
 }

@@ -202,110 +202,121 @@ fn headers_of(step: &Value, has_body: bool) -> Vec<(String, String)> {
     h
 }
 
-#[tokio::test]
+/// Every scenario replays on its own cluster, all of them at once.
+#[tokio::test(flavor = "multi_thread")]
 async fn responses_match_elasticsearch() {
-    let mut failures = Vec::new();
-    let mut checked = 0;
-    for (file, scenario) in scenarios() {
-        let mut cfg = ClusterConfig::new("docker-cluster");
-        cfg.unsealed_secrets = true;
-        cfg.node_name = "es-node".into();
-        // Scenarios captured from OpenSearch run against the opensearch dialect.
-        if scenario.get("dialect").and_then(Value::as_str) == Some("opensearch") {
-            cfg.dialect = search_es::Dialect::OpenSearch;
-            // OpenSearch's default of `action.destructive_requires_name`.
-            cfg.destructive_requires_name = false;
-        }
-        // Node settings the reference cluster was started with (`path.repo` for fs snapshot
-        // repositories).
-        if let Some(Value::Obj(m)) = scenario.get("node_settings") {
-            for (k, v) in m {
-                cfg.node_settings.push((k.clone(), v.to_es_string()));
-            }
-        }
-        let cluster = Cluster::open(cfg, Arc::new(MemoryStore::new())).await.unwrap();
-        let mut ism_clock = 0i64;
-        for (i, step) in scenario.get("steps").and_then(Value::as_array).unwrap().iter().enumerate() {
-            let req = step.get("req").and_then(Value::as_str).unwrap();
-            let label = format!("{file} #{i} {req}");
-            let (method, uri) = split_req(req);
-            let body = body_of(step);
-            let mut r = EsRequest::new(method, uri);
-            r.headers = headers_of(step, body.is_some());
-            if let Some(b) = &body {
-                r.body = b.clone().into();
-            }
-            // `ism_run`: the ISM jobs of these indices run once first (captured by moving their
-            // job's start time on the reference cluster, see `capture`).
-            // The reference cluster's runs are seconds apart (retry backoffs pass), so each run
-            // here happens 10 s after the previous one on a clock of its own.
-            if let Some(Value::Arr(names)) = step.get("ism_run") {
-                let names: Vec<String> = names.iter().filter_map(|v| v.as_str().map(str::to_string)).collect();
-                ism_clock += 10_000;
-                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
-                search_es::opensearch::ism_run::run_at(&cluster, &names, now + ism_clock).await;
-            }
-            let resp = search_es::handle(&cluster, r).await;
-            // An ISM template applies only to indices created strictly after its
-            // `last_updated_time` (milliseconds); a real cluster never answers the policy PUT
-            // and the next index creation within the same millisecond, this in-process one can.
-            if method == "PUT" && uri.starts_with("/_plugins/_ism/policies/") {
-                tokio::time::sleep(std::time::Duration::from_millis(2)).await;
-            }
-            if let Some(reason) = step.get("skip").and_then(Value::as_str) {
-                let _ = reason;
-                continue;
-            }
-            let Some(status) = step.get("status").and_then(Value::as_i64) else { continue };
-            checked += 1;
-            let got_text = if resp.head { String::new() } else { String::from_utf8_lossy(&resp.body).into_owned() };
-            if resp.status as i64 != status {
-                failures.push(format!("{label}: status {} != {status}\n  got:      {got_text}\n  expected: {}", resp.status, step.get("response").map(Value::to_json).or_else(|| step.get("text").map(Value::to_json)).unwrap_or_default()));
-                continue;
-            }
-            let keys = step_masks(step);
-            if let Some(expected) = step.get("response") {
-                let mut exp = expected.clone();
-                let mut got = if resp.head { Value::Str(String::new()) } else { parse(&resp.body).ok().flatten().unwrap_or(Value::Str(got_text.clone())) };
-                mask(&mut exp, &keys);
-                mask(&mut got, &keys);
-                if got != exp {
-                    failures.push(format!("{label}:\n  got:      {}\n  expected: {}", got.to_json(), exp.to_json()));
-                    continue;
-                }
-                // Key order is checked too (`ROLL_ES_FIXTURES_LOOSE=1` relaxes it while iterating).
-                let strict = std::env::var("ROLL_ES_FIXTURES_LOOSE").is_err() && step.get("unordered").and_then(Value::as_bool) != Some(true);
-                if strict && got.to_json() != exp.to_json() {
-                    failures.push(format!("{label}: key order\n  got:      {}\n  expected: {}", got.to_json(), exp.to_json()));
-                    continue;
-                }
-            } else if let Some(text) = step.get("text").and_then(Value::as_str)
-                && mask_text(&got_text, &keys) != mask_text(text, &keys)
-            {
-                failures.push(format!("{label}:\n  got:      {got_text:?}\n  expected: {text:?}"));
-                continue;
-            }
-            if let Some(Value::Obj(hs)) = step.get("response_headers") {
-                for (k, v) in hs {
-                    let got: Vec<String> = resp.headers.iter().filter(|(hk, _)| hk.eq_ignore_ascii_case(k)).map(|(_, v)| v.clone()).collect();
-                    let exp: Vec<String> = match v {
-                        Value::Arr(a) => a.iter().map(Value::to_es_string).collect(),
-                        other => vec![other.to_es_string()],
-                    };
-                    let normalize = |v: &Vec<String>| -> Vec<String> {
-                        v.iter().map(|s| if k.eq_ignore_ascii_case("warning") { warning_text(s) } else { s.to_ascii_lowercase().replace(' ', "") }).collect()
-                    };
-                    if normalize(&got) != normalize(&exp) {
-                        failures.push(format!("{label}: header {k}\n  got:      {got:?}\n  expected: {exp:?}"));
-                    }
-                }
-            }
-        }
+    let runs: Vec<_> = scenarios().into_iter().map(|(file, scenario)| tokio::spawn(replay(file, scenario))).collect();
+    let (mut failures, mut checked) = (Vec::new(), 0);
+    for run in runs {
+        let (f, n) = run.await.unwrap();
+        failures.extend(f);
+        checked += n;
     }
     if !failures.is_empty() {
         panic!("{} of {checked} steps differ from Elasticsearch:\n\n{}", failures.len(), failures.join("\n\n"));
     }
     assert!(checked > 0);
+}
+
+/// Replays one scenario; its differences and the number of steps checked.
+async fn replay(file: String, scenario: Value) -> (Vec<String>, usize) {
+    let mut failures = Vec::new();
+    let mut checked = 0;
+    let mut cfg = ClusterConfig::new("docker-cluster");
+    cfg.unsealed_secrets = true;
+    cfg.node_name = "es-node".into();
+    // Scenarios captured from OpenSearch run against the opensearch dialect.
+    if scenario.get("dialect").and_then(Value::as_str) == Some("opensearch") {
+        cfg.dialect = search_es::Dialect::OpenSearch;
+        // OpenSearch's default of `action.destructive_requires_name`.
+        cfg.destructive_requires_name = false;
+    }
+    // Node settings the reference cluster was started with (`path.repo` for fs snapshot
+    // repositories).
+    if let Some(Value::Obj(m)) = scenario.get("node_settings") {
+        for (k, v) in m {
+            cfg.node_settings.push((k.clone(), v.to_es_string()));
+        }
+    }
+    let cluster = Cluster::open(cfg, Arc::new(MemoryStore::new())).await.unwrap();
+    let mut ism_clock = 0i64;
+    for (i, step) in scenario.get("steps").and_then(Value::as_array).unwrap().iter().enumerate() {
+        let req = step.get("req").and_then(Value::as_str).unwrap();
+        let label = format!("{file} #{i} {req}");
+        let (method, uri) = split_req(req);
+        let body = body_of(step);
+        let mut r = EsRequest::new(method, uri);
+        r.headers = headers_of(step, body.is_some());
+        if let Some(b) = &body {
+            r.body = b.clone().into();
+        }
+        // `ism_run`: the ISM jobs of these indices run once first (captured by moving their
+        // job's start time on the reference cluster, see `capture`).
+        // The reference cluster's runs are seconds apart (retry backoffs pass), so each run
+        // here happens 10 s after the previous one on a clock of its own.
+        if let Some(Value::Arr(names)) = step.get("ism_run") {
+            let names: Vec<String> = names.iter().filter_map(|v| v.as_str().map(str::to_string)).collect();
+            ism_clock += 10_000;
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
+            search_es::opensearch::ism_run::run_at(&cluster, &names, now + ism_clock).await;
+        }
+        let resp = search_es::handle(&cluster, r).await;
+        // An ISM template applies only to indices created strictly after its
+        // `last_updated_time` (milliseconds); a real cluster never answers the policy PUT
+        // and the next index creation within the same millisecond, this in-process one can.
+        if method == "PUT" && uri.starts_with("/_plugins/_ism/policies/") {
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        }
+        if let Some(reason) = step.get("skip").and_then(Value::as_str) {
+            let _ = reason;
+            continue;
+        }
+        let Some(status) = step.get("status").and_then(Value::as_i64) else { continue };
+        checked += 1;
+        let got_text = if resp.head { String::new() } else { String::from_utf8_lossy(&resp.body).into_owned() };
+        if resp.status as i64 != status {
+            failures.push(format!("{label}: status {} != {status}\n  got:      {got_text}\n  expected: {}", resp.status, step.get("response").map(Value::to_json).or_else(|| step.get("text").map(Value::to_json)).unwrap_or_default()));
+            continue;
+        }
+        let keys = step_masks(step);
+        if let Some(expected) = step.get("response") {
+            let mut exp = expected.clone();
+            let mut got = if resp.head { Value::Str(String::new()) } else { parse(&resp.body).ok().flatten().unwrap_or(Value::Str(got_text.clone())) };
+            mask(&mut exp, &keys);
+            mask(&mut got, &keys);
+            if got != exp {
+                failures.push(format!("{label}:\n  got:      {}\n  expected: {}", got.to_json(), exp.to_json()));
+                continue;
+            }
+            // Key order is checked too (`ROLL_ES_FIXTURES_LOOSE=1` relaxes it while iterating).
+            let strict = std::env::var("ROLL_ES_FIXTURES_LOOSE").is_err() && step.get("unordered").and_then(Value::as_bool) != Some(true);
+            if strict && got.to_json() != exp.to_json() {
+                failures.push(format!("{label}: key order\n  got:      {}\n  expected: {}", got.to_json(), exp.to_json()));
+                continue;
+            }
+        } else if let Some(text) = step.get("text").and_then(Value::as_str)
+            && mask_text(&got_text, &keys) != mask_text(text, &keys)
+        {
+            failures.push(format!("{label}:\n  got:      {got_text:?}\n  expected: {text:?}"));
+            continue;
+        }
+        if let Some(Value::Obj(hs)) = step.get("response_headers") {
+            for (k, v) in hs {
+                let got: Vec<String> = resp.headers.iter().filter(|(hk, _)| hk.eq_ignore_ascii_case(k)).map(|(_, v)| v.clone()).collect();
+                let exp: Vec<String> = match v {
+                    Value::Arr(a) => a.iter().map(Value::to_es_string).collect(),
+                    other => vec![other.to_es_string()],
+                };
+                let normalize = |v: &Vec<String>| -> Vec<String> {
+                    v.iter().map(|s| if k.eq_ignore_ascii_case("warning") { warning_text(s) } else { s.to_ascii_lowercase().replace(' ', "") }).collect()
+                };
+                if normalize(&got) != normalize(&exp) {
+                    failures.push(format!("{label}: header {k}\n  got:      {got:?}\n  expected: {exp:?}"));
+                }
+            }
+        }
+    }
+    (failures, checked)
 }
 
 /// The quoted text of a `Warning` header (the agent part names the build).
