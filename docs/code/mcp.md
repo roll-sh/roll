@@ -115,6 +115,7 @@ Repos are `"owner/repo"`. Changes are `"chg_…"` or `"owner/repo#N"`, and work 
 | `cancel_agent_automation_run` | cancel a run going on (the owner's) | `POST …/automations/runs/{run}/cancel` |
 | `retry_agent_automation_run` | a failed or cancelled run goes on from where it stopped (the owner's; `openWorldHint`, as `run_agent_automation`) | `POST …/automations/runs/{run}/retry` |
 | `enable_agent_automation`, `disable_agent_automation` | turn an automation on or off (by id or name; runs going on go on) | `POST …/automations/{id}/enable`, `/disable` |
+| `delete_agent_automation` | delete one for good (by id or name; its secrets and webhook dropped, its runs going on cancelled; destructive) | `DELETE …/automations/{id}` |
 | `get_agent_automation_catalog` | every trigger and step kind, with each config's JSON Schema | `GET …/automations/catalog` |
 | `test_agent_automation` | what a spec would do with an event, saving and running nothing | `POST …/automations/test` |
 | `list_agent_sandboxes`, `stop_agent_sandbox`, `get_agent_sandbox_usage` | the owner's sandboxes; stop one (its billing stops); a month's running hours and price | `GET /agents/{owner}/sandboxes`, `POST …/{id}/stop`, `GET …/usage` |

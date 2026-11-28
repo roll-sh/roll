@@ -327,6 +327,87 @@ body {
   animation: rise 0.35s ease-out backwards;
 }
 
+/* Marketing: a strip that scrolls forever (its content is doubled, so -50% is one full loop). */
+@keyframes marquee {
+  to {
+    transform: translateX(-50%);
+  }
+}
+
+/* Marketing: the time left on the product tour's open tab. */
+@keyframes tour {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
+
+/* Marketing: something travelling a wire (how-it-works' request): set `offset-path` on it. */
+@keyframes along {
+  from {
+    offset-distance: 0%;
+  }
+  to {
+    offset-distance: 100%;
+  }
+}
+
+/*
+ * Marketing: the product tour's camera. The screenshots are the dark dashboard in either scheme,
+ * so what's laid over them (the shade around the part in focus) doesn't follow the page's scheme.
+ */
+:root {
+  --shot-shade: rgb(0 0 0 / 46%);
+  --shot-ease: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/*
+ * Marketing: the bento's line art (components/marketing/art). Anything with `data-a` moves, and
+ * only while its card is on screen (`data-live`); under reduced motion it's the still drawing.
+ */
+.art [data-a] {
+  animation-play-state: paused;
+}
+.art[data-live="true"] [data-a] {
+  animation-play-state: running;
+}
+@media (prefers-reduced-motion: reduce) {
+  .art [data-a] {
+    animation: none !important;
+  }
+}
+.art svg * {
+  vector-effect: non-scaling-stroke;
+}
+/* Dashes marching along a line: records, requests, messages. `--flow` is one dash period. */
+@keyframes art-flow {
+  to {
+    stroke-dashoffset: var(--flow, -24);
+  }
+}
+@keyframes art-pulse {
+  0%,
+  100% {
+    opacity: 0.3;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+/* A ring that grows out of a dot and fades: something just happened here. */
+@keyframes art-ping {
+  0% {
+    transform: scale(0.4);
+    opacity: 0.9;
+  }
+  70%,
+  100% {
+    transform: scale(1);
+    opacity: 0;
+  }
+}
 /* Detail drawers slide in from the right. */
 @keyframes drawer-in {
   from {
@@ -964,3 +1045,21 @@ body {
     translate: 0;
   }
 }
+
+/* marketing: header & hero */
+/* What a menu's tile shows changes with the product pointed at: the new one fades up into place. */
+@keyframes nav-swap {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+}
+.nav-swap {
+  animation: nav-swap 0.2s cubic-bezier(0.23, 1, 0.32, 1) backwards;
+}
+@media (prefers-reduced-motion: reduce) {
+  .nav-swap {
+    animation: none;
+  }
+}
+/* end marketing: header & hero */

@@ -1167,6 +1167,17 @@ export interface Link {
   indices?: string[];
   /** A search link's key: read, or append (create documents on exact names); none: read and write. */
   access?: "read" | "append";
+  /** A credential of its own, which {@link appsApi.rotateLink} replaces. */
+  rotates?: true;
+}
+
+/** A link's rotation: the redeploys it made, and the environments that keep the old credential until their next deploy. */
+export interface Rotation {
+  kind: LinkKind;
+  ref: string;
+  deployments: { environment: string; id: string; status: DeployStatus }[];
+  waiting: string[];
+  live: boolean;
 }
 
 /** `reference`: one of its own with `${{ … }}` in it, filled in at the deploy. */
@@ -1818,6 +1829,9 @@ export const appsApi = {
   link: (id: string, kind: LinkKind, ref: string, prefix?: string) =>
     call<Link>("PUT", `${svc(id)}/links/${kind}/${enc(ref)}`, prefix ? { prefix } : {}),
   unlink: (id: string, kind: LinkKind, ref: string) => call<null>("DELETE", `${svc(id)}/links/${kind}/${enc(ref)}`),
+  /** A new credential for the link, its environments redeployed with it; the old one is revoked once nothing runs with it. */
+  rotateLink: (id: string, kind: LinkKind, ref: string, environment?: string) =>
+    call<Rotation>("POST", `${svc(id)}/links/${kind}/${enc(ref)}/rotate`, environment ? { environment } : {}),
 
   environments: (id: string) => call<Environment[]>("GET", `${svc(id)}/environments`),
   environment: (id: string, e: string) => call<Environment>("GET", env(id, e)),
