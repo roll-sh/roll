@@ -1,0 +1,745 @@
+{
+  "description": "The Search Relevance Workbench's stats: its counters and their filters, what counts, and the switches that turn them off",
+  "dialect": "opensearch",
+  "steps": [
+    {
+      "req": "GET /_plugins/_search_relevance/stats",
+      "status": 200,
+      "response": {
+        "_nodes": {
+          "total": 1,
+          "successful": 1,
+          "failed": 0
+        },
+        "cluster_name": "docker-cluster",
+        "info": {
+          "cluster_version": "3.9.0"
+        },
+        "all_nodes": {
+          "judgments": {
+            "import_judgment_rating_generations": 0,
+            "llm_judgment_rating_generations": 0,
+            "ubi_judgment_rating_generations": 0
+          },
+          "experiments": {
+            "experiment_hybrid_optimizer_executions": 0,
+            "experiment_pairwise_comparison_executions": 0,
+            "experiment_executions": 0,
+            "experiment_pointwise_evaluation_executions": 0
+          }
+        },
+        "nodes": {
+          "XIkkJ--vR9Gj_3Z6HOCttw": {
+            "judgments": {
+              "import_judgment_rating_generations": 0,
+              "llm_judgment_rating_generations": 0,
+              "ubi_judgment_rating_generations": 0
+            },
+            "experiments": {
+              "experiment_hybrid_optimizer_executions": 0,
+              "experiment_pairwise_comparison_executions": 0,
+              "experiment_executions": 0,
+              "experiment_pointwise_evaluation_executions": 0
+            }
+          }
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_plugins/_search_relevance/stats/experiment_executions",
+      "status": 200,
+      "response": {
+        "_nodes": {
+          "total": 1,
+          "successful": 1,
+          "failed": 0
+        },
+        "cluster_name": "docker-cluster",
+        "info": {},
+        "all_nodes": {
+          "experiments": {
+            "experiment_executions": 0
+          }
+        },
+        "nodes": {
+          "XIkkJ--vR9Gj_3Z6HOCttw": {
+            "experiments": {
+              "experiment_executions": 0
+            }
+          }
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_plugins/_search_relevance/stats/import_judgment_rating_generations,experiment_executions",
+      "status": 200,
+      "response": {
+        "_nodes": {
+          "total": 1,
+          "successful": 1,
+          "failed": 0
+        },
+        "cluster_name": "docker-cluster",
+        "info": {},
+        "all_nodes": {
+          "judgments": {
+            "import_judgment_rating_generations": 0
+          },
+          "experiments": {
+            "experiment_executions": 0
+          }
+        },
+        "nodes": {
+          "XIkkJ--vR9Gj_3Z6HOCttw": {
+            "judgments": {
+              "import_judgment_rating_generations": 0
+            },
+            "experiments": {
+              "experiment_executions": 0
+            }
+          }
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_plugins/_search_relevance/stats/cluster_version",
+      "status": 200,
+      "response": {
+        "_nodes": {
+          "total": 1,
+          "successful": 1,
+          "failed": 0
+        },
+        "cluster_name": "docker-cluster",
+        "info": {
+          "cluster_version": "3.9.0"
+        },
+        "all_nodes": {},
+        "nodes": {
+          "XIkkJ--vR9Gj_3Z6HOCttw": {}
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_plugins/_search_relevance/stats/nope",
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "request [/_plugins/_search_relevance/stats/nope] contains unrecognized stat: [nope]"
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "request [/_plugins/_search_relevance/stats/nope] contains unrecognized stat: [nope]"
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_plugins/_search_relevance/stats/judgments",
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "request [/_plugins/_search_relevance/stats/judgments] contains unrecognized stat: [judgments]"
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "request [/_plugins/_search_relevance/stats/judgments] contains unrecognized stat: [judgments]"
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_plugins/_search_relevance/nope/stats",
+      "status": 200,
+      "response": {
+        "_nodes": {
+          "total": 1,
+          "successful": 1,
+          "failed": 0
+        },
+        "cluster_name": "docker-cluster",
+        "info": {
+          "cluster_version": "3.9.0"
+        },
+        "all_nodes": {
+          "judgments": {
+            "import_judgment_rating_generations": 0,
+            "llm_judgment_rating_generations": 0,
+            "ubi_judgment_rating_generations": 0
+          },
+          "experiments": {
+            "experiment_hybrid_optimizer_executions": 0,
+            "experiment_pairwise_comparison_executions": 0,
+            "experiment_executions": 0,
+            "experiment_pointwise_evaluation_executions": 0
+          }
+        },
+        "nodes": {
+          "XIkkJ--vR9Gj_3Z6HOCttw": {
+            "judgments": {
+              "import_judgment_rating_generations": 0,
+              "llm_judgment_rating_generations": 0,
+              "ubi_judgment_rating_generations": 0
+            },
+            "experiments": {
+              "experiment_hybrid_optimizer_executions": 0,
+              "experiment_pairwise_comparison_executions": 0,
+              "experiment_executions": 0,
+              "experiment_pointwise_evaluation_executions": 0
+            }
+          }
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_plugins/_search_relevance/stats?include_metadata=true",
+      "mask": [
+        "minutes_since_last_event",
+        "trailing_interval_value"
+      ],
+      "status": 200,
+      "response": {
+        "_nodes": {
+          "total": 1,
+          "successful": 1,
+          "failed": 0
+        },
+        "cluster_name": "docker-cluster",
+        "info": {
+          "cluster_version": {
+            "value": "3.9.0",
+            "stat_type": "info_string"
+          }
+        },
+        "all_nodes": {
+          "judgments": {
+            "import_judgment_rating_generations": {
+              "value": 0,
+              "stat_type": "timestamped_event_counter",
+              "trailing_interval_value": 0,
+              "minutes_since_last_event": 29929826
+            },
+            "llm_judgment_rating_generations": {
+              "value": 0,
+              "stat_type": "timestamped_event_counter",
+              "trailing_interval_value": 0,
+              "minutes_since_last_event": 29929826
+            },
+            "ubi_judgment_rating_generations": {
+              "value": 0,
+              "stat_type": "timestamped_event_counter",
+              "trailing_interval_value": 0,
+              "minutes_since_last_event": 29929826
+            }
+          },
+          "experiments": {
+            "experiment_hybrid_optimizer_executions": {
+              "value": 0,
+              "stat_type": "timestamped_event_counter",
+              "trailing_interval_value": 0,
+              "minutes_since_last_event": 29929826
+            },
+            "experiment_pairwise_comparison_executions": {
+              "value": 0,
+              "stat_type": "timestamped_event_counter",
+              "trailing_interval_value": 0,
+              "minutes_since_last_event": 29929826
+            },
+            "experiment_executions": {
+              "value": 0,
+              "stat_type": "timestamped_event_counter",
+              "trailing_interval_value": 0,
+              "minutes_since_last_event": 29929826
+            },
+            "experiment_pointwise_evaluation_executions": {
+              "value": 0,
+              "stat_type": "timestamped_event_counter",
+              "trailing_interval_value": 0,
+              "minutes_since_last_event": 29929826
+            }
+          }
+        },
+        "nodes": {
+          "XIkkJ--vR9Gj_3Z6HOCttw": {
+            "judgments": {
+              "import_judgment_rating_generations": {
+                "value": 0,
+                "stat_type": "timestamped_event_counter",
+                "trailing_interval_value": 0,
+                "minutes_since_last_event": 29929826
+              },
+              "llm_judgment_rating_generations": {
+                "value": 0,
+                "stat_type": "timestamped_event_counter",
+                "trailing_interval_value": 0,
+                "minutes_since_last_event": 29929826
+              },
+              "ubi_judgment_rating_generations": {
+                "value": 0,
+                "stat_type": "timestamped_event_counter",
+                "trailing_interval_value": 0,
+                "minutes_since_last_event": 29929826
+              }
+            },
+            "experiments": {
+              "experiment_hybrid_optimizer_executions": {
+                "value": 0,
+                "stat_type": "timestamped_event_counter",
+                "trailing_interval_value": 0,
+                "minutes_since_last_event": 29929826
+              },
+              "experiment_pairwise_comparison_executions": {
+                "value": 0,
+                "stat_type": "timestamped_event_counter",
+                "trailing_interval_value": 0,
+                "minutes_since_last_event": 29929826
+              },
+              "experiment_executions": {
+                "value": 0,
+                "stat_type": "timestamped_event_counter",
+                "trailing_interval_value": 0,
+                "minutes_since_last_event": 29929826
+              },
+              "experiment_pointwise_evaluation_executions": {
+                "value": 0,
+                "stat_type": "timestamped_event_counter",
+                "trailing_interval_value": 0,
+                "minutes_since_last_event": 29929826
+              }
+            }
+          }
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_plugins/_search_relevance/stats?flat_stat_paths=true",
+      "unordered": true,
+      "status": 200,
+      "response": {
+        "_nodes": {
+          "total": 1,
+          "successful": 1,
+          "failed": 0
+        },
+        "cluster_name": "docker-cluster",
+        "info": {
+          "cluster_version": "3.9.0"
+        },
+        "all_nodes": {
+          "experiments.experiment_pairwise_comparison_executions": 0,
+          "experiments.experiment_pointwise_evaluation_executions": 0,
+          "judgments.ubi_judgment_rating_generations": 0,
+          "experiments.experiment_executions": 0,
+          "judgments.llm_judgment_rating_generations": 0,
+          "judgments.import_judgment_rating_generations": 0,
+          "experiments.experiment_hybrid_optimizer_executions": 0
+        },
+        "nodes": {
+          "XIkkJ--vR9Gj_3Z6HOCttw": {
+            "experiments.experiment_pairwise_comparison_executions": 0,
+            "experiments.experiment_pointwise_evaluation_executions": 0,
+            "judgments.ubi_judgment_rating_generations": 0,
+            "experiments.experiment_executions": 0,
+            "judgments.llm_judgment_rating_generations": 0,
+            "judgments.import_judgment_rating_generations": 0,
+            "experiments.experiment_hybrid_optimizer_executions": 0
+          }
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "PUT /esm-p",
+      "body": {
+        "settings": {
+          "number_of_replicas": 0
+        }
+      },
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "index": "esm-p"
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "PUT /esm-p/_doc/1?refresh=true",
+      "body": {
+        "t": "a"
+      },
+      "status": 201,
+      "response": {
+        "_index": "esm-p",
+        "_id": "1",
+        "_version": 1,
+        "result": "created",
+        "forced_refresh": true,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "failed": 0
+        },
+        "_seq_no": 0,
+        "_primary_term": 1
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "PUT /_plugins/_search_relevance/query_sets",
+      "body": {
+        "name": "esm-q",
+        "description": "d",
+        "sampling": "manual",
+        "querySetQueries": [
+          {
+            "queryText": "a"
+          }
+        ]
+      },
+      "stash": {
+        "qs": "query_set_id"
+      },
+      "status": 200,
+      "response": {
+        "query_set_id": "eccd2dd1-6e46-4ed7-bf46-72d5f3268e12",
+        "query_set_result": "CREATED"
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "PUT /_plugins/_search_relevance/search_configurations",
+      "body": {
+        "name": "esm-c",
+        "index": "esm-p",
+        "query": "{\"query\": {\"match_all\": {}}}"
+      },
+      "stash": {
+        "c": "search_configuration_id"
+      },
+      "status": 200,
+      "response": {
+        "search_configuration_id": "9d456f4d-b9f8-4ebd-b69e-565e5fe5c608",
+        "search_configuration_result": "CREATED"
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "PUT /_plugins/_search_relevance/judgments",
+      "body": {
+        "name": "esm-j",
+        "type": "IMPORT_JUDGMENT",
+        "judgmentRatings": [
+          {
+            "query": "a",
+            "ratings": [
+              {
+                "docId": "1",
+                "rating": "1"
+              }
+            ]
+          }
+        ]
+      },
+      "stash": {
+        "j": "judgment_id"
+      },
+      "status": 200,
+      "response": {
+        "judgment_id": "5be917fe-d609-4454-be44-3fb0aca3ff41"
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "PUT /_plugins/_search_relevance/judgments",
+      "body": {
+        "name": "esm-x",
+        "type": "NOPE"
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "Invalid or missing judgment type"
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "Invalid or missing judgment type",
+          "caused_by": {
+            "type": "illegal_argument_exception",
+            "reason": "No enum constant org.opensearch.searchrelevance.model.JudgmentType.NOPE"
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "PUT /_plugins/_search_relevance/experiments",
+      "body": {
+        "querySetId": "${qs}",
+        "searchConfigurationList": [
+          "${c}"
+        ],
+        "judgmentList": [
+          "${j}"
+        ],
+        "size": 3,
+        "type": "POINTWISE_EVALUATION"
+      },
+      "status": 200,
+      "response": {
+        "experiment_id": "9e4c1ae8-4d15-4376-a662-6998524134d8",
+        "experiment_result": "CREATED"
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "PUT /_plugins/_search_relevance/experiments",
+      "body": {
+        "querySetId": "nope",
+        "searchConfigurationList": [
+          "${c}"
+        ],
+        "judgmentList": [
+          "${j}"
+        ],
+        "size": 3,
+        "type": "POINTWISE_EVALUATION"
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "search_relevance_exception",
+              "reason": "QuerySet [nope] does not exist"
+            }
+          ],
+          "type": "search_relevance_exception",
+          "reason": "QuerySet [nope] does not exist"
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_plugins/_search_relevance/stats",
+      "capture_sleep_ms": 3000,
+      "status": 200,
+      "response": {
+        "_nodes": {
+          "total": 1,
+          "successful": 1,
+          "failed": 0
+        },
+        "cluster_name": "docker-cluster",
+        "info": {
+          "cluster_version": "3.9.0"
+        },
+        "all_nodes": {
+          "judgments": {
+            "import_judgment_rating_generations": 1,
+            "llm_judgment_rating_generations": 0,
+            "ubi_judgment_rating_generations": 0
+          },
+          "experiments": {
+            "experiment_hybrid_optimizer_executions": 0,
+            "experiment_pairwise_comparison_executions": 0,
+            "experiment_executions": 1,
+            "experiment_pointwise_evaluation_executions": 1
+          }
+        },
+        "nodes": {
+          "XIkkJ--vR9Gj_3Z6HOCttw": {
+            "judgments": {
+              "import_judgment_rating_generations": 1,
+              "llm_judgment_rating_generations": 0,
+              "ubi_judgment_rating_generations": 0
+            },
+            "experiments": {
+              "experiment_hybrid_optimizer_executions": 0,
+              "experiment_pairwise_comparison_executions": 0,
+              "experiment_executions": 1,
+              "experiment_pointwise_evaluation_executions": 1
+            }
+          }
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_plugins/_search_relevance/stats/import_judgment_rating_generations?include_metadata=true&flat_stat_paths=true",
+      "mask": [
+        "minutes_since_last_event",
+        "trailing_interval_value"
+      ],
+      "status": 200,
+      "response": {
+        "_nodes": {
+          "total": 1,
+          "successful": 1,
+          "failed": 0
+        },
+        "cluster_name": "docker-cluster",
+        "info": {},
+        "all_nodes": {
+          "judgments.import_judgment_rating_generations": {
+            "value": 1,
+            "stat_type": "timestamped_event_counter",
+            "trailing_interval_value": 0,
+            "minutes_since_last_event": 0
+          }
+        },
+        "nodes": {
+          "XIkkJ--vR9Gj_3Z6HOCttw": {
+            "judgments.import_judgment_rating_generations": {
+              "value": 1,
+              "stat_type": "timestamped_event_counter",
+              "trailing_interval_value": 0,
+              "minutes_since_last_event": 0
+            }
+          }
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "PUT /_cluster/settings",
+      "body": {
+        "persistent": {
+          "plugins.search_relevance.stats_enabled": false
+        }
+      },
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "persistent": {
+          "plugins": {
+            "search_relevance": {
+              "stats_enabled": "false"
+            }
+          }
+        },
+        "transient": {}
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_plugins/_search_relevance/stats",
+      "status": 403,
+      "text": "Search Relevance Workbench stats is disabled",
+      "response_headers": {
+        "content-type": "text/plain; charset=UTF-8"
+      }
+    },
+    {
+      "req": "PUT /_cluster/settings",
+      "body": {
+        "persistent": {
+          "plugins.search_relevance.stats_enabled": null,
+          "plugins.search_relevance.workbench_enabled": false
+        }
+      },
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "persistent": {
+          "plugins": {
+            "search_relevance": {
+              "workbench_enabled": "false"
+            }
+          }
+        },
+        "transient": {}
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_plugins/_search_relevance/stats",
+      "status": 403,
+      "text": "Search Relevance Workbench is disabled",
+      "response_headers": {
+        "content-type": "text/plain; charset=UTF-8"
+      }
+    },
+    {
+      "req": "PUT /_cluster/settings",
+      "body": {
+        "persistent": {
+          "plugins.search_relevance.workbench_enabled": null
+        }
+      },
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "persistent": {},
+        "transient": {}
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    }
+  ],
+  "node_settings": {
+    "path.repo": "/repo"
+  }
+}

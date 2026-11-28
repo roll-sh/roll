@@ -366,6 +366,7 @@ pub fn action_of(api: &str) -> (Scope, String) {
         "sm.start_policy" => Some((Cluster, "cluster:admin/opensearch/snapshot_management/policy/start")),
         "sm.stop_policy" => Some((Cluster, "cluster:admin/opensearch/snapshot_management/policy/stop")),
         "search_relevance.put_query_sets" => Some((Cluster, "cluster:admin/opensearch/search_relevance/queryset/put")),
+        "search_relevance.stats" => Some((Cluster, "cluster:admin/search_relevance_stats_action")),
         "search_relevance.post_query_sets" => Some((Cluster, "cluster:admin/opensearch/search_relevance/queryset/create")),
         "search_relevance.get_query_sets" => Some((Cluster, "cluster:admin/opensearch/search_relevance/queryset/get")),
         "search_relevance.delete_query_sets" => Some((Cluster, "cluster:admin/opensearch/search_relevance/queryset/delete")),

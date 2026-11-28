@@ -852,6 +852,17 @@ async fn index_evaluate(State(c): State<AppState>, Path((id, index)): Path<(Stri
             return Err(ControlError::Invalid(format!("judgment list [{name}] judges no queries")));
         }
     }
+    // A Workbench list lives in the plugin's store: the caller's decision must reach it too.
+    if let Some(jid) = spec.workbench.clone() {
+        let store = crate::judgments::WORKBENCH_INDEX;
+        if !roll_auth::OtherIndex::reaches(&ext, store, roll_auth::scope::Action::Read) {
+            return Err(ControlError::Forbidden(format!("this grant doesn't read [{store}], where the Workbench keeps judgment lists: pass the judgments inline, or grant read on it too")));
+        }
+        spec.judgments = c.workbench_list(&id, &jid).await?;
+        if spec.judgments.is_empty() {
+            return Err(ControlError::Invalid(format!("Workbench judgment list [{jid}] judges no queries")));
+        }
+    }
     crate::evaluate::check_ratings_name(&spec, &index).map_err(ControlError::Invalid)?;
     let mut answers = Vec::with_capacity(spec.configurations.len());
     for conf in &spec.configurations {

@@ -312,6 +312,55 @@ pub fn coec(buckets: &[&search_es::analytics::Bucket], p: &FromClicks) -> Vec<St
     out
 }
 
+/// The index the Search Relevance Workbench keeps judgment lists in (OpenSearch's plugin).
+pub const WORKBENCH_INDEX: &str = "search-relevance-judgment";
+
+/// A Workbench rating as `_rank_eval` takes it: a whole number from 0 to 100 as it is, anything
+/// else (a click model's or an LLM's fraction) graded as a click list's are: 0 for none, else
+/// rounded up, at most 3.
+fn workbench_grade(r: f64, whole: bool) -> i64 {
+    if whole {
+        r.clamp(0.0, 100.0) as i64
+    } else if r <= 0.0 {
+        0
+    } else {
+        r.ceil().clamp(1.0, 3.0) as i64
+    }
+}
+
+/// A Workbench judgment list's document (`_source` of `search-relevance-judgment`) as judged
+/// queries. It must be `COMPLETED`; its ratings are strings, graded per [`workbench_grade`]: whole
+/// numbers as they are when every rating of the list is one, else all of them graded.
+pub fn workbench_judgments(id: &str, doc: &Value) -> std::result::Result<Vec<Judgment>, ControlError> {
+    let status = doc["status"].as_str().unwrap_or("");
+    if status != "COMPLETED" {
+        return Err(ControlError::Conflict(format!("Workbench judgment list [{id}] is {status}, not COMPLETED")));
+    }
+    let lists = doc["judgmentRatings"].as_array().cloned().unwrap_or_default();
+    let number = |r: &Value| r["rating"].as_f64().or_else(|| r["rating"].as_str().and_then(|s| s.trim().parse::<f64>().ok())).filter(|f| f.is_finite());
+    let whole = lists.iter().flat_map(|q| q["ratings"].as_array().cloned().unwrap_or_default()).all(|r| number(&r).is_some_and(|f| f.fract() == 0.0 && (0.0..=100.0).contains(&f)));
+    let mut out = Vec::new();
+    for q in &lists {
+        let Some(query) = q["query"].as_str().filter(|s| !s.is_empty() && s.len() <= 1024) else { continue };
+        let ratings: Vec<(String, String, i64)> = q["ratings"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|r| Some((String::new(), r["docId"].as_str().filter(|d| !d.is_empty() && d.len() <= 512)?.to_string(), workbench_grade(number(r)?, whole))))
+            .collect();
+        if ratings.len() > MAX_RATINGS {
+            return Err(ControlError::Invalid(format!("Workbench judgment list [{id}] rates {} documents for [{query}]: an evaluation takes at most {MAX_RATINGS}", ratings.len())));
+        }
+        if !ratings.is_empty() {
+            out.push(Judgment { query: query.to_string(), ratings });
+        }
+    }
+    if out.len() > MAX_QUERIES {
+        return Err(ControlError::Invalid(format!("Workbench judgment list [{id}] judges {} queries: an evaluation takes at most {MAX_QUERIES}", out.len())));
+    }
+    Ok(out)
+}
+
 /// The cluster's answer as an error: its status and reason.
 fn refused(status: u16, out: &[u8]) -> ControlError {
     let v: Value = serde_json::from_slice(out).unwrap_or(Value::Null);
@@ -473,6 +522,22 @@ impl Control {
         self.put_judgment_list(id, name, &ratings, "clicks", more).await
     }
 
+    /// The Search Relevance Workbench's judgment list `jid` (OpenSearch-flavor clusters), read from
+    /// the plugin's own store narrowed to it.
+    pub async fn workbench_list(&self, id: &str, jid: &str) -> Result<Vec<Judgment>> {
+        let c = self.get(id).await?;
+        if c.flavor != "opensearch" {
+            return Err(ControlError::Invalid("[judgment_id] names a Search Relevance Workbench judgment list: OpenSearch-flavor clusters keep those".into()));
+        }
+        let body = json!({ "size": 1, "query": { "term": { "_id": jid } } });
+        let (status, v) = self.list_call(id, "POST", &format!("/{WORKBENCH_INDEX}/_search"), WORKBENCH_INDEX, Some(("application/json", body.to_string()))).await?;
+        let doc = v["hits"]["hits"][0]["_source"].clone();
+        if status == 404 || doc.is_null() {
+            return Err(ControlError::NotFound(format!("no Workbench judgment list [{jid}]")));
+        }
+        workbench_judgments(jid, &doc)
+    }
+
     /// The metering pass's part, for the clusters loaded here: deletes the lists built from clicks
     /// whose source lost its analytics, or that are past their days ([`orphaned`]).
     pub(crate) async fn run_judgment_lists(&self) {
@@ -507,6 +572,16 @@ impl Control {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workbench_ratings_are_graded() {
+        let doc = json!({ "status": "COMPLETED", "judgmentRatings": [{ "query": "red", "ratings": [{ "docId": "1", "rating": "3" }, { "docId": "2", "rating": "0" }] }] });
+        assert_eq!(workbench_judgments("j", &doc).unwrap()[0].ratings, [(String::new(), "1".into(), 3), (String::new(), "2".into(), 0)]);
+        let clicks = json!({ "status": "COMPLETED", "judgmentRatings": [{ "query": "red", "ratings": [{ "docId": "1", "rating": "0.467" }, { "docId": "2", "rating": "1.400" }, { "docId": "3", "rating": "0.000" }, { "docId": "4", "rating": "7.0" }] }] });
+        let graded: Vec<i64> = workbench_judgments("j", &clicks).unwrap()[0].ratings.iter().map(|r| r.2).collect();
+        assert_eq!(graded, [1, 2, 0, 3]);
+        assert!(matches!(workbench_judgments("j", &json!({ "status": "PROCESSING" })), Err(ControlError::Conflict(_))));
+    }
 
     #[test]
     fn names_and_keys() {

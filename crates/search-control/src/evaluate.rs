@@ -63,6 +63,9 @@ pub struct Spec {
     /// The stored list the judgments come from (`judgments_list`): `judgments` is empty until the
     /// route reads it.
     pub list: Option<String>,
+    /// Or the Search Relevance Workbench's judgment list (`judgment_id`, OpenSearch-flavor
+    /// clusters), read the same way.
+    pub workbench: Option<String>,
     pub configurations: Vec<Configuration>,
     /// `_rank_eval`'s `metric`.
     pub metric: Value,
@@ -176,15 +179,17 @@ pub(crate) fn parse_judgments(v: Option<&Value>) -> Result<Vec<Judgment>, String
 pub fn parse(body: &[u8]) -> Result<Spec, String> {
     let v: Value = serde_json::from_slice(body).map_err(|e| bad(format!("the body isn't JSON: {e}")))?;
     let Some(m) = v.as_object() else { return Err(bad("the body is an object {judgments, configurations, metric?}")) };
-    only(m, "the body", &["judgments", "judgments_list", "configurations", "metric"])?;
-    let (judgments, list) = match (m.get("judgments"), m.get("judgments_list")) {
-        (j, None) => (parse_judgments(j)?, None),
-        (None, Some(Value::String(name))) => {
+    only(m, "the body", &["judgments", "judgments_list", "judgment_id", "configurations", "metric"])?;
+    let (judgments, list, workbench) = match (m.get("judgments"), m.get("judgments_list"), m.get("judgment_id")) {
+        (j, None, None) => (parse_judgments(j)?, None, None),
+        (None, Some(Value::String(name)), None) => {
             crate::judgments::index_name(name).map_err(bad)?;
-            (Vec::new(), Some(name.clone()))
+            (Vec::new(), Some(name.clone()), None)
         }
-        (None, Some(_)) => return Err(bad("[judgments_list] is a stored judgment list's name")),
-        (Some(_), Some(_)) => return Err(bad("the judgments come in [judgments] or from a stored [judgments_list], one of them")),
+        (None, None, Some(Value::String(id))) if !id.is_empty() && id.len() <= 128 => (Vec::new(), None, Some(id.clone())),
+        (None, Some(_), None) => return Err(bad("[judgments_list] is a stored judgment list's name")),
+        (None, None, Some(_)) => return Err(bad("[judgment_id] is a Search Relevance Workbench judgment list's id")),
+        _ => return Err(bad("the judgments come in [judgments], from a stored [judgments_list] or from a Workbench [judgment_id], one of them")),
     };
     let Some(cs) = m.get("configurations").and_then(Value::as_array).filter(|c| (1..=2).contains(&c.len())) else {
         return Err(bad("[configurations] is a list of one or two {name, request | template}"));
@@ -198,7 +203,7 @@ pub fn parse(body: &[u8]) -> Result<Spec, String> {
         Some(Value::Object(o)) if o.len() == 1 => Value::Object(o.clone()),
         Some(_) => return Err(bad("[metric] names one of _rank_eval's metrics: {\"dcg\": {\"k\": 10, \"normalize\": true}}, precision, recall, mean_reciprocal_rank or expected_reciprocal_rank")),
     };
-    Ok(Spec { judgments, list, configurations, metric })
+    Ok(Spec { judgments, list, workbench, configurations, metric })
 }
 
 /// Whether `index` names one index, alias or data stream (no pattern, list or exclusion): a
@@ -325,6 +330,9 @@ pub fn answer(spec: &Spec, answers: &[Value]) -> Value {
     let mut out = json!({ "metric": spec.metric, "queries": spec.judgments.len(), "configurations": configurations });
     if let Some(l) = &spec.list {
         out["judgments_list"] = json!(l);
+    }
+    if let Some(id) = &spec.workbench {
+        out["judgment_id"] = json!(id);
     }
     if let [a, b] = per_query.as_slice() {
         let mut changed: Vec<(usize, f64, f64)> = Vec::new();

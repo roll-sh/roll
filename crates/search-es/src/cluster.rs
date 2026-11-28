@@ -288,6 +288,8 @@ pub struct Cluster {
     pub jobs: crate::opensearch::jobs::Jobs,
     /// Search analytics of the indices that turned them on ([`crate::analytics`]).
     pub analytics: crate::analytics::Analytics,
+    /// The Search Relevance Workbench's counters since the cluster loaded (opensearch dialect).
+    pub srw: crate::opensearch::srw::Stats,
     /// The cluster's own handle, once its owner allowed background work
     /// ([`Cluster::enable_background_tasks`]).
     background: std::sync::OnceLock<std::sync::Weak<Cluster>>,
@@ -773,6 +775,7 @@ impl Cluster {
         };
         Ok(Cluster {
             analytics,
+            srw: Default::default(),
             changes,
             name: config.name.clone(),
             dialect: config.dialect,
@@ -825,6 +828,8 @@ impl Cluster {
         self.jobs.kick(self);
         // Restores from Elasticsearch repositories a previous owner left running go on here.
         crate::api::snapshots::resume_elasticsearch_restores(self);
+        // Workbench experiments a previous owner left running ended with it.
+        crate::opensearch::srw::fail_interrupted(self);
     }
 
     /// A strong handle for background work, when enabled.

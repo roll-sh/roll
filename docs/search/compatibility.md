@@ -161,7 +161,7 @@ Reproduce the YAML numbers with `scripts/search-yaml-suites.sh roll` (set `ROLL_
   notifications (none are sent). OpenSearch's YAML suites have no snapshot management tests
   (the index-management plugin tests it in Kotlin).
 - OpenSearch's Search Relevance Workbench (`_plugins/_search_relevance/*`, `os_srw.json`, 43
-  steps from a fresh OpenSearch 3.9.0):
+  steps, and `os_srw_stats.json`, 24, from a fresh OpenSearch 3.9.0):
   - **Stores.** Its six plain stores, each made on first use with the plugin's mapping (one shard,
     `auto_expand_replicas: 0-1`); a delete makes its store too, as the plugin's does.
   - **Answers.** A collection's `GET` is the store's own search response, newest first (with a
@@ -192,9 +192,15 @@ Reproduce the YAML numbers with `scripts/search-yaml-suites.sh roll` (set `ROLL_
   - **Not copied.** The plugin's run order: it stores results and pairwise snapshots in the order
     its runs finish, which the fixture masks. Its null-pointer 500s for missing fields: roll
     answers 400 naming the field.
+  - **Stats.** The seven counters since the cluster loaded and `cluster_version`, a stat filter
+    (400 for an unknown one), `include_metadata`, `flat_stat_paths`, and the plain-text 403 under
+    `stats_enabled: false`. Only accepted work counts. The node filter is ignored, as OpenSearch
+    ignores it.
+  - **Interrupted runs.** An experiment its node stopped running stays `PROCESSING` on the
+    plugin. roll marks it `ERROR` when the cluster loads again.
   - **Not run.** `LLM_JUDGMENT` (an ML Commons model, sending documents to a model provider),
     `HYBRID_OPTIMIZER` (neural-search hybrid pipelines) and scheduled experiments: each answers
-    400. `stats`: no route yet.
+    400.
 - OpenSearch search request extras (`os_search_ext.json`, 21 steps): `phase_took`,
   `cancel_after_time_interval`, the bundled plugins' `ext` sections (`rerank`, `ml_inference`,
   `ubi` with its response `query_id`; other names fail as OpenSearch fails them), the `template`
