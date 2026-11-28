@@ -9,6 +9,7 @@
 use crate::error::EsResult;
 use std::collections::HashMap;
 use std::sync::LazyLock;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 struct Bucket {
@@ -17,6 +18,16 @@ struct Bucket {
 }
 
 static BUCKETS: LazyLock<parking_lot::Mutex<HashMap<String, Bucket>>> = LazyLock::new(Default::default);
+
+/// Multiplies every endpoint's rate: 1 except in tests that replay recorded endpoints, whose
+/// captured `requests_per_minute` (as low as 3) would otherwise make them wait for minutes.
+static SPEED: AtomicU32 = AtomicU32::new(1);
+
+/// Runs every endpoint's limit `factor` times faster in this process (tests only).
+#[doc(hidden)]
+pub fn speed_up_for_tests(factor: u32) {
+    SPEED.store(factor.max(1), Ordering::Relaxed);
+}
 
 /// Buckets idle this long are forgotten (a full bucket is the same as none).
 const IDLE: Duration = Duration::from_secs(600);
@@ -46,7 +57,8 @@ fn reserve(key: &str, per_minute: f64, limit: Duration, now: Instant) -> Option<
 pub async fn acquire(cluster: &str, inference_id: &str, per_minute: Option<i64>, timeout: Duration) -> EsResult<()> {
     let Some(rpm) = per_minute.filter(|r| *r > 0) else { return Ok(()) };
     let key = format!("{cluster}\u{0}{inference_id}");
-    match reserve(&key, rpm as f64, timeout, Instant::now()) {
+    let rpm = rpm as f64 * f64::from(SPEED.load(Ordering::Relaxed));
+    match reserve(&key, rpm, timeout, Instant::now()) {
         None => Err(super::http::timed_out(inference_id)),
         Some(d) if d.is_zero() => Ok(()),
         Some(d) => {

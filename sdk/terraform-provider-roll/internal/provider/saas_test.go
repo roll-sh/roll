@@ -23,7 +23,8 @@ const (
 
 // A SaaS rotator as code: registered with a write-only credential, the credential replaced in place
 // (a PATCH, so linked keys keep working) with its end date, another target replacing it, imported;
-// the credential never in the plan or the state.
+// the credential never in the plan or the state. (roll's defaults and its lowercased host aren't a
+// change: the framework plans again after each apply and fails on a diff.)
 func TestSaasRotatorAsCode(t *testing.T) {
 	t.Parallel()
 	f := &fakeRolld{envs: map[string]*environment{}, keys: map[string]map[string]any{}, identities: map[string]map[string]any{}, syncs: map[string]map[string]any{}, tokens: map[string]map[string]any{}}
@@ -87,12 +88,6 @@ resource "roll_secrets_saas_rotator" "gitlab" {
 					sent(fakeGitlabAdmin),
 					notKept,
 				),
-			},
-			{
-				// roll's defaults and its lowercased host aren't a change.
-				Config:           hcl("gitlab", "acme/web", 1, "2030-01-01T00:00:00Z"),
-				ConfigVariables:  vars(fakeGitlabAdmin),
-				ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()}},
 			},
 			{
 				// A new credential, its end and a new name: in place, the registration kept.
