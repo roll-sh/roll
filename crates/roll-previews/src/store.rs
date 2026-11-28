@@ -3499,10 +3499,14 @@ impl Store {
                     (host, u)
                 }
             };
+            // Strictly after the service's newest push, so the oldest is always the one that goes
+            // (pushes within one millisecond would otherwise tie, and either could go).
+            let newest: i64 = c.query_row("SELECT COALESCE(MAX(at), 0) FROM pinned WHERE preview_id = ? AND service = ?", params![id, service], |r| r.get(0))?;
+            let at = now.max(newest + 1);
             c.execute(
                 "INSERT INTO pinned (preview_id, service, revision, host, url, at) VALUES (?, ?, ?, ?, ?, ?) \
                  ON CONFLICT (preview_id, service, revision) DO UPDATE SET at = excluded.at",
-                params![id, service, revision, host, url, now],
+                params![id, service, revision, host, url, at],
             )?;
             // Kept again (started on demand): its link isn't a gone push's any more.
             c.execute("DELETE FROM gone_pushes WHERE host = ?", [host.as_str()])?;
