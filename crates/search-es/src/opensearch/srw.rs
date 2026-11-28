@@ -631,7 +631,9 @@ async fn put_experiment(ctx: &Ctx<'_>) -> EsResult<Reply> {
         judgments,
         ratings: lists,
         size,
-        owner: Some(crate::xpack::security::principal(ctx).clone()),
+        // As snapshot management keeps its user: the cluster's owner (no user of its own) runs
+        // with the cluster's authority, anyone else as themselves.
+        owner: internal::stored_user(crate::xpack::security::principal(ctx)).as_ref().and_then(internal::principal_of),
         cancelled,
         task,
     };
