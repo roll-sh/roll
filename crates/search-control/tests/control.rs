@@ -5270,8 +5270,8 @@ async fn opensearch_flavor_clusters_link_with_the_remotes_own_mappings() {
     assert_eq!(es_as(&e, &near, Method::PUT, "/secret-near/_doc/1?refresh=true", Some(json!({"x": 1, "email": "a@example.com", "note": "hidden"}))).await.0, 201);
     assert_eq!(es_as(&e, &near, Method::PUT, "/other-near/_doc/1?refresh=true", Some(json!({"x": 2}))).await.0, 201);
     assert!(es_as(&e, &near, Method::PUT, &format!("{api}/internalusers/nobody"), Some(json!({"password": "Zq7-Mountain-River-88"}))).await.0 < 300);
-    // Remote expressions read as the search reads them: `-*:*` names no remote here (an alias
-    // may start with `-`, as OpenSearch's may), and an alias never holds `:`.
+    // Remote expressions read as the search reads them: `-*:*` names the aliases starting with
+    // `-` (OpenSearch has no remote exclusions, and takes such an alias), and none holds `:`.
     assert_eq!(es_as(&e, &near, Method::PUT, "/_cluster/settings", Some(loopback("-loop", transport("os-near").await))).await.0, 200);
     assert_eq!(es_as(&e, &near, Method::PUT, "/_cluster/settings", Some(loopback("a:b", transport("os-near").await))).await.0, 400);
     for p in ["/loop:*/_search", "/loop:*,-*:*/_search", "/-loop:secret-near/_search", "/loop:secret*/_count", "/loop:*/_field_caps?fields=x", "/_cat/indices/loop:*"] {
