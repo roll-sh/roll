@@ -942,7 +942,9 @@ service"), and a call the issuer gives no token for is `cron.failed` saying so. 
   2 MiB, handed to roll previews (`PreviewSnapshots`) and never to the app: 401 without the
   secret, 413 past the size, 400 for what isn't a PNG or a name roll previews refuses, 409 when
   the preview can't take one, a 404 where roll previews isn't on the node or no bypass is set.
-  roll previews is told the service too, and checks the preview runs on it. A `pv-<id>`
+  roll previews is told the service too, and checks the preview runs on it. `&head=` (the head
+  the test ran against; hex, at most 64, else a 400) is passed on and checked as on roll's own
+  runtime: a picture of a head the preview doesn't serve is a 409. A `pv-<id>`
   environment is roll previews' preview `pv_<id>` (its share links, notes and snapshots find it by
   that name), so only roll previews (the operator, in process) makes one: a person's or a token's
   PUT of a new one is a 403, a deploy into one that isn't there a 404.

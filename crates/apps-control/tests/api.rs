@@ -3390,9 +3390,12 @@ async fn a_previews_snapshot_goes_to_roll_previews_with_the_bypass() {
     struct Snaps(Mutex<Vec<(String, String, usize)>>);
     #[async_trait]
     impl apps_control::integrations::PreviewSnapshots for Snaps {
-        async fn snapshot(&self, _service: &str, env: &str, name: &str, png: bytes::Bytes) -> apps_control::Result<Value> {
+        async fn snapshot(&self, _service: &str, env: &str, name: &str, head: Option<&str>, png: bytes::Bytes) -> apps_control::Result<Value> {
             if name.is_empty() {
                 return Err(apps_control::Error::BadRequest("a snapshot has a name".into()));
+            }
+            if head.is_some_and(|h| h != "abc") {
+                return Err(apps_control::Error::Conflict("the preview serves abc".into()));
             }
             self.0.lock().push((env.to_string(), name.to_string(), png.len()));
             Ok(json!({ "page": "snap:".to_string() + name, "head": "abc" }))
@@ -3441,6 +3444,7 @@ async fn a_previews_snapshot_goes_to_roll_previews_with_the_bypass() {
     assert_eq!((st, v["page"].as_str()), (StatusCode::CREATED, Some("snap:home")), "{v}");
     assert_eq!(*snaps.0.lock(), [("pv-1".to_string(), "home".to_string(), 108)]);
     assert_eq!(send("", Some(bypass), png()).await.0, StatusCode::BAD_REQUEST, "roll previews' own refusal");
+    assert_eq!(send("home&head=0dd", Some(bypass), png()).await.0, StatusCode::CONFLICT, "a picture of an older head: roll previews' head check");
 }
 
 /// A hostname another environment holds is taken by whoever proves its DNS (Vercel's "linked to

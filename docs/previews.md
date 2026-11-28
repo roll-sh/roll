@@ -2703,8 +2703,8 @@ type Settings = {
     drops the earlier head's, so the review only shows what this head's tests sent. A fork's
     preview has no bypass secret, so it takes none. On a service roll apps runs, its proxy
     takes the same request on the `pv-` host of a private preview (the environment holds the
-    secret's hash) and hands it to roll previews (its `PreviewSnapshots` hook, roll apps #1205),
-    which takes it only once that preview is known to run on that service: an environment's
+    secret's hash) and hands it to roll previews (its `PreviewSnapshots` hook, roll apps #1205)
+    with its `head`, checked as above (hex, at most 64, else a 400), which takes it only once that preview is known to run on that service: an environment's
     name alone proves nothing (`engine.rs::the_teams_snapshots_join_the_visual_review`,
     `scripts/preview-apps.sh`'s snapshot step):
 
