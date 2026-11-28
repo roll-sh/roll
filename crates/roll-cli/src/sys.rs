@@ -54,9 +54,6 @@ fn on_path(name: &str) -> Option<PathBuf> {
     std::env::split_paths(&std::env::var_os("PATH")?).find_map(|dir| exts.split(';').filter(|e| !e.is_empty()).map(|e| dir.join(format!("{name}{e}"))).find(|c| c.is_file()))
 }
 
-/// A command line for the shell: `sh -c` on Linux and macOS, `cmd /C` on Windows (the line as
-/// written, unquoted).
-#[cfg(windows)]
 /// roll's own credentials in this process's environment, by name: what a command roll starts for
 /// someone (`roll run`, `roll apps exec`, `roll secrets render --exec`) never inherits, so the
 /// program, its dependencies and its crash reporter never act as roll's operator or with the token
@@ -83,6 +80,9 @@ pub fn is_roll_credential(name: &str, value: &str) -> bool {
     named || userinfo
 }
 
+/// A command line for the shell: `sh -c` on Linux and macOS, `cmd /C` on Windows (the line as
+/// written, unquoted).
+#[cfg(windows)]
 pub fn shell(line: &str) -> std::process::Command {
     use std::os::windows::process::CommandExt;
     let mut c = std::process::Command::new("cmd");
