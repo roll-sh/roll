@@ -2046,8 +2046,9 @@ deterministic (#396).
    SIGKILL) is the shared lease TTL (`ClusterConfig::lease_ttl`, 10 s: redis 10.4, nosql 10.6 in
    the same run) plus ~1 s to load the cluster from S3 and replay its WAL. Search's part is the
    load; the TTL is roll cloud's fleet-wide choice.
-28. **CI**: the merge gate runs `search-codec`'s lib tests (`rust (search)`, 54 s on PR #29 with
-   main's cache: under the minute, no room for another crate). Test gaps a read-only analysis found on 2026-11-22
+28. **CI**: the merge gate runs `search-codec`'s lib tests (`rust (search)`, 31-39 s on main
+   since the test cut of 2026-11-28, its test step 11-16 s; about 20 s of the job is checkout,
+   toolchain and cache, shared by every job). Test gaps a read-only analysis found on 2026-11-22
    (main at d9aecc990), ranked; each test goes in `test:search`, not the merge gate (all landed, each
    failing against its guarded line: (1) with the egress fix in #771, 0d6daf6cc; (2), (3), (4), (7)
    and (8) in #768, 1c2b5e62c; (5), (6), (9), (10), (11) and the unused e2e file's removal in
@@ -2240,3 +2241,10 @@ deterministic (#396).
    documents (`search_after` both ways on the time field), a field's chart (top values, or a
    histogram over the query and range) with whole-range statistics where they're cheap, and
    timestamps in the viewer's zone.
+34. **Cross-cluster replication** (Elastic's follower indices, `_ccr`; OpenSearch's
+   `_plugins/_replication`; compatibility.md lists it as none): disaster recovery in another
+   region, and read-only copies near readers. roll can make a follower cheap: segments are already
+   in object storage and branches share them by key, so a follower in the same object store reads
+   the leader's segments and replays only its WAL tail, with no copy of the data. Design first: the
+   follower's lag and fencing on the fleet, a follower in another region's object store (copies
+   segments once), auto-follow patterns, pause and resume, and promotion when the leader is lost.
