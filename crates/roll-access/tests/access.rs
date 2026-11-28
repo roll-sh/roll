@@ -197,7 +197,6 @@ fn postgres() -> Router {
         .route("/v1/secrets/projects/{project}/environments/{env}/secrets", get(|| async { axum::Json(json!([])) }))
         .route("/v1/secrets/projects/{project}/environments/{env}/secrets/{key}/value", get(|| async { axum::Json(json!({ "value": "x" })) }))
         .route("/v1/secrets/projects/{project}/environments/{env}/digest", get(|| async { axum::Json(json!({ "digest": "00" })) }))
-        .route("/v1/secrets/projects/{project}/environments/{env}/diff", post(|| async { axum::Json(json!({})) }))
         .route("/v1/secrets/projects/{project}/environments/{env}/secrets/{key}", axum::routing::put(|| async { axum::Json(json!({})) }))
         .route("/v1/secrets/projects/{project}/health", get(|| async { axum::Json(json!({ "findings": [] })) }))
         .route("/v1/secrets/projects/{project}/transit", get(|| async { axum::Json(json!([])) }))
