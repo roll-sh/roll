@@ -771,6 +771,101 @@ The last against PGO, select-only at 8 clients, 3 alternating pairs: user instru
 31,777 -> 32,105 / 31,587 -> 34,607 / 34,026 -> 31,978, user cycles 69,268 -> 69,872 / 68,855 ->
 72,931 / 69,927 -> 68,111 (foreign 1.25-1.88): no direction, dropped.
 
+## Errors boxed: `Result<Value>` 120 -> 24 bytes (2026-11-28, agent 349)
+
+HANDOFF "Errors boxed" has what changed. Plain dist builds (`tools/dist.sh`): **b0** `9cfd1322f`,
+**n1** b0 + `Error(Box<ErrorData>)`. Harness: agent 342's (`mem.sh`, `tpair.sh`, `reads.sh`,
+`split.sh`, `bulk.sh`, `tprof.sh`) copied to `~/.cache/a349/bench`, with 346's DISTINCT probes in
+`mem-my.txt` and a simple-protocol point select (`reads.sh S1s`). One pair a `tools/lane.sh` hold;
+every hold read 3.6-6.9 foreign cores: instruction counts only, walls not compared.
+
+### Sizes (bytes; `size_of`, read from the compiler on both commits)
+
+| type | b0 | n1 |
+|---|---:|---:|
+| `Error` | 120 | 8 |
+| `Result<()>` | 120 | 8 |
+| `Result<bool>` | 120 | 16 |
+| `Result<Value>`, `Result<Option<Value>>` | 120 | 24 |
+| `Result<Row>`, `Result<Option<Row>>` (`Node::next`) | 120 | 24 |
+| `pipe::Item` / `Result<Option<Item>>` (`Node::next_item`) | 72 / 120 | 72 / 72 |
+| `Value`, `Row` (`Vec<Value>`), `Option<Row>` | 24 | 24 |
+| `RowBatch` | 104 | 104 |
+| `Expr` | 88 | 88 |
+| `SortKey` | 104 | 104 |
+| `BoxNode` (`Box<dyn Node>`) | 16 | 16 |
+| `(Vec<Value>, Row)` (a keyed sort row) | 48 | 48 |
+| `DataType` | 32 | 32 |
+| `Plan` | 216 | 216 |
+| roll-engine text (MB) | 65.32 | 63.09 |
+
+### TPC-H SF1, user instructions a query (G; lane C; pair 2 in the other order)
+
+Rows and hashes equal in every cell.
+
+| query | b0 | n1 | pair 1 | pair 2 |
+|---|---:|---:|---:|---:|
+| q01 | 7.2885 | 7.3912 | +1.41% | +1.42% |
+| q02 | 2.2148 | 2.1856 | -1.32% | -1.12% |
+| q03 | 4.0852 | 4.0204 | -1.59% | -1.56% |
+| q04 | 1.3420 | 1.3233 | -1.40% | -1.33% |
+| q05 | 2.7438 | 2.7062 | -1.37% | -1.43% |
+| q06 | 3.3680 | 3.3975 | +0.88% | +0.87% |
+| q07 | 3.4240 | 3.3635 | -1.77% | -1.88% |
+| q08 | 1.3453 | 1.3236 | -1.61% | -1.69% |
+| q09 | 7.5545 | 7.4483 | -1.41% | -1.22% |
+| q10 | 5.5145 | 5.4945 | -0.36% | -0.28% |
+| q11 | 0.7512 | 0.7347 | -2.20% | -0.12% |
+| q12 | 5.8747 | 5.9202 | +0.77% | +0.77% |
+| q13 | 3.8559 | 3.8509 | -0.13% | -0.44% |
+| q14 | 1.3603 | 1.3362 | -1.78% | -2.05% |
+| q15 | 2.3020 | 2.3164 | +0.62% | +0.62% |
+| q16 | 2.7834 | 2.7700 | -0.48% | -0.48% |
+| q17 | 2.8577 | 2.8670 | +0.33% | +0.35% |
+| q18 | 15.4009 | 15.3257 | -0.49% | -0.39% |
+| q19 | 0.4697 | 0.4680 | -0.36% | -0.33% |
+| q20 | 0.8465 | 0.8381 | -0.99% | -1.03% |
+| q21 | 5.2463 | 5.1874 | -1.12% | -1.13% |
+| q22 | 0.6204 | 0.6182 | -0.34% | -0.27% |
+| total | 81.2495 | 80.8869 | -0.45% | -0.40% |
+
+q01 by precise samples (`instructions:upp`, period 1,000,003, 20 runs an arm), n1's normalized by
+`Lanes::eval` (the same machine code in both; 15,352 / 16,759 samples): `Pre::decode` 46,264 ->
+47,549 (680 -> 1,357 on NOPs), `Partials::batch_run` 31,966 -> 32,105 (980 -> 1,145 on NOPs),
+`VB::eval` 3,329 -> 3,477, `Block::run_rows_to` (same code) 13,195 -> 13,240; all 115,370 ->
+116,868 (+1.3%; perf stat's +1.4%).
+
+### Reads, bulk and TPC-B-like (user instructions an operation)
+
+| case | pair | b0 | n1 | |
+|---|---|---:|---:|---|
+| 1,000-row range read, 8 clients x 2,000 (connection threads; lane B) | 1 | 2,076,516 | 2,092,844 | +0.8% |
+| | 2 (reversed) | 2,036,805 | 2,024,983 | -0.6% |
+| point select, simple protocol, 1 client x 100,000 (lane A) | 1 | 54,098 | 53,856 | -0.4% |
+| | 2 (reversed) | 53,285 | 53,733 | +0.8% |
+| point select, prepared, same LSM state (lane A) | 1 | 51,549 | 52,515 | +1.9% |
+| | 3 | 52,337 | 51,457 | -1.7% |
+| | 5 | 50,442 | 47,296 | -6.2% |
+| bulk insert, 50 x 20,000 rows (server cgroup, a row; lane C) | 1 | 10,191 | 9,974 | -2.1% |
+| | 2 (reversed) | 10,124 | 10,139 | +0.2% |
+| TPC-B-like, 8 clients, 160,000 warmed, enable_seqscan off (connection threads; lane A) | 1 | 292,768 | 280,781 | -4.1% |
+
+### Peak memory a query (MB over the level before; 1M rows, lane C; two pairs, the second reversed)
+
+Hashes equal in every cell. The change holds no row differently; the cells move with the probe's
+0.05 s sampling.
+
+| query | b0 | n1 |
+|---|---:|---:|
+| `count(*)`, `last_value(s)` `OVER (ORDER BY a RANGE BETWEEN 50 PRECEDING AND 50 FOLLOWING EXCLUDE CURRENT ROW)`, 1 GB | 215.5 / 225.5 | 220.1 / 215.5 |
+| `sum(id)`, `lag(s)`, `rank()` `OVER (PARTITION BY id % 10 ORDER BY a)`, 1 GB | 273.9 / 273.9 | 279.8 / 273.9 |
+| `row_number()`, `sum(id)` `OVER (ORDER BY a ROWS BETWEEN 5 PRECEDING AND 5 FOLLOWING)`, 1 GB | 169.1 / 178.1 | 178.9 / 178.2 |
+| `t a JOIN t b ON a.id = b.a`, 1 GB | 294.7 / 294.8 | 294.1 / 295.9 |
+| `SELECT id, a, s FROM t ORDER BY s`, 1 GB | 207.9 / 214.1 | 215.5 / 220.6 |
+| `count(DISTINCT s), count(DISTINCT a)` (4 MB) | 14.1 / 22.5 | 22.9 / 22.2 |
+| `id % 10, count(DISTINCT s) ... GROUP BY id % 10` | 13.3 / 13.5 | 14.2 / 17.1 |
+| enable_hashagg off, `a % 100000, count(*), max(s) ... GROUP BY` | 11.2 / 11.3 | 9.7 / 9.0 |
+
 ## Executor values at 24 bytes: the uuid as two words (2026-11-27, agent 342)
 
 HANDOFF "Executor values at 24 bytes" has what changed. Plain dist builds (`tools/dist.sh`): **b0**

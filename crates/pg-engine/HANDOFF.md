@@ -15320,6 +15320,64 @@ against 47.1: the held row is the scan's (a, s), PostgreSQL's ((a % 100000), s),
 not found); a DISTINCT aggregate over a misestimated input (decided on the planner's rows,
 not when its set passes work_mem: a set that grows past it isn't moved to a sort).
 
+## Errors boxed: `Result<Value>` 120 -> 24 bytes (agent 349)
+
+BENCH "Errors boxed" has the tables. Plain dist builds (`tools/dist.sh`): **b0** `9cfd1322f`,
+**n1** b0 + this change (`cand/a349`'s code).
+
+**What changed.** `error::Error` was the fields' struct itself, 120 bytes (code, message, detail,
+hint, position, severity, context, objects, stacked), returned inline by every `Result`: a
+`Result<Value>` was 120 bytes, a `Result<()>` 120, so each `?` and each expression evaluation
+moved 15 words where its value had 3 (or none). `Error` is now one pointer, `Error(Box<ErrorData>)`;
+`ErrorData` is the old struct, field for field, reached through `Deref` / `DerefMut` (`e.code`,
+`e.message = ..` as before). `Error::new` makes it out of line (`Error::boxed`, `#[cold]`
+`#[inline(never)]`: one allocation, the error path only). `Debug` prints it as before (`Error {
+code: .. }`), `Clone` / `PartialEq` compare the fields; nothing about what an error carries or how
+it is sent changed (the wire writer reads the same fields in the same order). The 24 places that
+built an `Error` by struct update (`Error { position: None, ..e }`, `Error { severity: .., ..new }`,
+a message replaced) use `without_position()`, `at_severity()` or assign the field; the 30-odd
+that moved a field out of an owned error (`e.message`) take `into_data()` first. `const` asserts:
+`size_of::<Error>() == 8`, `Result<()>` 8, `Result<Value>` 24 (`types/value.rs`).
+
+**Sizes** (BENCH): `Result<Value>`, `Result<Option<Value>>`, `Result<Row>` and the node interface's
+`Result<Option<Row>>` 120 -> 24, `Result<()>` 120 -> 8, `Result<bool>` 120 -> 16,
+`Result<Option<pipe::Item>>` 120 -> 72. roll-engine's text 65.32 -> 63.09 MB (-3.4%: the
+120-byte copies on every `?` / error return are gone).
+
+**Checks** (on `eeb1a4033`, the candidate's code on `9cfd1322f`): `tools/quick-check.sh` with
+`QC_CHECKED=1`: 482 tests in 26 binaries, again under `verify-checked`; regress 51,148 / 51,150
+units match, 0 newly differing (every ErrorResponse field the suite compares); isolation 1,647 /
+1,648; pg_dump 14,609 passed, 0 failed. `tools/crash-binary.py` seed 1 (7 rounds and the clean
+restart) against n1's plain dist build: ok.
+
+**Measured** (BENCH; lanes read 4-7 foreign cores the whole time, so instruction counts only).
+TPC-H SF1, the 22 once each in a perf window, two alternating pairs: 81.25 -> 80.89 G (-0.45 /
+-0.40%), every result hash equal; 17 queries down 0.1-2.2% in both pairs (q03, q07, q08, q14
+-1.6..-2.0%). Up in both: q01 +1.41 / +1.42%, q06 +0.88 / +0.87, q12 +0.77 / +0.77, q15 +0.62 /
++0.62, q17 +0.33 / +0.35. q01 profiled (`instructions:upp`, 20 runs an arm, normalized by
+`Lanes::eval`, whose machine code is the same in both): the extra is in `Pre::decode`
+(+2.8%: half of it executed alignment NOPs, `-x86-branches-within-32B-boundaries`, the rest its
+per-value loop's blocks placed differently: n1's numeric decode ends in a jump to the store where
+b0's falls through), `Partials::batch_run` (+0.4%, all NOPs) and `VB::eval` (+4%); the three
+call the same functions in both binaries, are smaller in n1 (7,684 -> 7,306, 29,000 -> 28,709,
+13,272 -> 12,909 bytes) and execute no error code per row: fat LTO placing unchanged source
+differently once 2.2 MB of copies left the program, not work the change adds. Decided on plain dist
+pairs (the brief's rule until agent 347's reproducible PGO training reports; the shipped PGO build
+places these blocks by profile). TPC-B-like (agent 333's measure, 8 clients, 160,000 warmed,
+enable_seqscan off, connection threads exactly): 292,768 -> 280,781 a transaction (-4.1%, one
+pair). Bulk insert 10,191 / 10,124 -> 9,974 / 10,139 a row (-2.1 / +0.2%). 1,000-row range read
+2,076,516 / 2,036,805 -> 2,092,844 / 2,024,983 (+0.8 / -0.6%). Point select, simple protocol
+54,098 / 53,285 -> 53,856 / 53,733 (-0.4 / +0.8%); prepared, five pairs on the same LSM state:
++1.9, -1.7, -6.2% and two on different states (agent 342's 9% spread by the load's LSM state):
+level. Peak memory of 342's and 346's probes: level within the probes' spread (the change holds
+no row differently), hashes equal.
+
+**Left.** `pipe::Item` is 72 bytes for its `Part` variant (a partial aggregation's chunk, one a
+chunk of rows): `Part(Box<Part>)` would make it and `Result<Option<Item>>` 32. `Expr` (88) and
+`SortKey` (104) have no padding to drop (a big variant inline: a representation change).
+`RowBatch` (104, five words of vectors) neither. Rows as `Box<[Value]>` where held: HANDOFF
+"Held sort keys" (`cand/a349-2`) takes the exact-room part instead.
+
 ## Query memory, round 8: the DISTINCT spill's cost paid back, spilled batches and UNION's arms streamed, DISTINCT's group estimate over computed columns, a sorted SetOp's Sorts under EXPLAIN ANALYZE; bounded window frames streamed past 4 MB dropped (agent 343)
 
 BENCH.md "Query memory, round 8" has the tables. Plain dist builds (`tools/dist.sh`): **n1**
