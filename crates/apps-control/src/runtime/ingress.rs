@@ -129,7 +129,7 @@ mod tests {
         let mut caller = tokio::net::TcpStream::connect(addr).await.unwrap();
         caller.write_all(b"ping").await.unwrap();
         // The socket comes after the caller (a sandbox still starting).
-        tokio::time::sleep(Duration::from_millis(60)).await;
+        tokio::time::sleep(Duration::from_millis(5)).await;
         let server = tokio::net::UnixListener::bind(dir.join(SOCKET)).unwrap();
         let (mut s, _) = server.accept().await.unwrap();
         let mut got = [0u8; 4];

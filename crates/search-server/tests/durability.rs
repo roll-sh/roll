@@ -57,7 +57,7 @@ async fn open_store(objects: search_store::Objects, node: &str, cache: &std::pat
 
 fn catalog() -> Arc<StaticCatalog> {
     let catalog = Arc::new(StaticCatalog::new());
-    for c in ["c1", "c2", "child"] {
+    for c in ["c1", "c2", "child", "tasks", "mapping", "ml", "stats", "stats-child", "synonyms", "figures", "empty"] {
         catalog.insert(ClusterSpec::new(c).with_password("pw"));
     }
     catalog
@@ -334,33 +334,264 @@ async fn point_in_time_branches_replay_up_to_the_branch_point() {
     assert_eq!(count(&ok(&n, "c1", "GET", "/p/_count", "").await), 13);
 }
 
-/// A `wait_for_completion=false` task's result lives in the `.tasks` index, so it outlives
-/// the cluster's unload (Elasticsearch: a node restart).
+/// An unload is invisible: what an Elasticsearch node that never restarted would still hold is
+/// there after a wake (each part on a cluster of its own, one node and store).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn stored_task_results_survive_unload() {
-    let store = open_store(search_store::test_objects("server-tasks"), "n1", &cache_dir("tasks"), 0).await;
+async fn what_a_running_node_holds_survives_an_unload() {
+    let store = open_store(search_store::test_objects("server-running"), "n1", &cache_dir("running"), 0).await;
     let n = node_on(&store);
-    let mut bulk = String::new();
-    for i in 0..20 {
-        bulk.push_str(&format!("{{\"index\":{{\"_id\":\"{i}\"}}}}\n{{\"n\":{i}}}\n"));
+
+    // A `wait_for_completion=false` task's result lives in the `.tasks` index, so it outlives
+    // the cluster's unload (Elasticsearch: a node restart).
+    {
+        let mut bulk = String::new();
+        for i in 0..20 {
+            bulk.push_str(&format!("{{\"index\":{{\"_id\":\"{i}\"}}}}\n{{\"n\":{i}}}\n"));
+        }
+        ok(&n, "tasks", "POST", "/q/_bulk?refresh=true", &bulk).await;
+        let t = ok(&n, "tasks", "POST", "/q/_delete_by_query?wait_for_completion=false", r#"{"query":{"range":{"n":{"lt":5}}}}"#).await;
+        let task = t["task"].as_str().unwrap().to_string();
+        let done = ok(&n, "tasks", "GET", &format!("/_tasks/{task}?wait_for_completion=true&timeout=10s"), "").await;
+        assert_eq!(done["completed"], true, "{done}");
+        assert_eq!(done["response"]["deleted"], 5, "{done}");
+        // The result reached `.tasks` before the cluster may idle out.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !n.unload("tasks").await {
+            assert!(Instant::now() < deadline, "the cluster unloads once its task ended");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let after = ok(&n, "tasks", "GET", &format!("/_tasks/{task}"), "").await;
+        assert_eq!(after["completed"], true, "{after}");
+        assert_eq!(after["response"]["deleted"], 5, "{after}");
+        assert_eq!(after["task"]["action"], done["task"]["action"]);
+        assert_eq!(count(&ok(&n, "tasks", "GET", "/q/_count", "").await), 15);
     }
-    ok(&n, "c1", "POST", "/q/_bulk?refresh=true", &bulk).await;
-    let t = ok(&n, "c1", "POST", "/q/_delete_by_query?wait_for_completion=false", r#"{"query":{"range":{"n":{"lt":5}}}}"#).await;
-    let task = t["task"].as_str().unwrap().to_string();
-    let done = ok(&n, "c1", "GET", &format!("/_tasks/{task}?wait_for_completion=true&timeout=10s"), "").await;
-    assert_eq!(done["completed"], true, "{done}");
-    assert_eq!(done["response"]["deleted"], 5, "{done}");
-    // The result reached `.tasks` before the cluster may idle out.
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !n.unload("c1").await {
-        assert!(Instant::now() < deadline, "the cluster unloads once its task ended");
-        tokio::time::sleep(Duration::from_millis(20)).await;
+
+    // Every mapping parameter survives the cluster state's round trip through storage: a
+    // document written after a wake is indexed exactly like one written before it. (A custom
+    // normalizer named `lowercase` makes `normalizer_skip_store_original_value: true` a
+    // non-default that must be persisted; synthetic source then rebuilds sorted values.)
+    {
+        let mapping = r#"{"settings":{"analysis":{"normalizer":{"lowercase":{"type":"custom","filter":["lowercase"]}}},"index":{"mapping.source.mode":"synthetic"}},
+        "mappings":{"properties":{"k":{"type":"keyword","normalizer":"lowercase","normalizer_skip_store_original_value":true},
+        "i":{"type":"keyword","normalizer":"lowercase","normalizer_skip_store_original_value":true,"ignore_above":10}}}}"#;
+        ok(&n, "mapping", "PUT", "/s", mapping).await;
+        let doc = r#"{"k":["may the force be with you!","do or do not"],"i":["May the FORCE be with You!","Do or Do Not"]}"#;
+        ok(&n, "mapping", "PUT", "/s/_doc/1", doc).await;
+        let before = ok(&n, "mapping", "GET", "/s/_doc/1", "").await["_source"].clone();
+        assert_eq!(before["k"], serde_json::json!(["do or do not", "may the force be with you!"]), "{before}");
+        let m = ok(&n, "mapping", "GET", "/s/_mapping", "").await;
+        assert_eq!(m["s"]["mappings"]["properties"]["k"]["normalizer_skip_store_original_value"], true, "{m}");
+        assert!(n.unload("mapping").await);
+        ok(&n, "mapping", "PUT", "/s/_doc/2", doc).await;
+        assert_eq!(ok(&n, "mapping", "GET", "/s/_doc/2", "").await["_source"], before);
+        assert!(n.unload("mapping").await);
+        assert_eq!(ok(&n, "mapping", "GET", "/s/_doc/1", "").await["_source"], before);
+        assert_eq!(ok(&n, "mapping", "GET", "/s/_doc/2", "").await["_source"], before);
     }
-    let after = ok(&n, "c1", "GET", &format!("/_tasks/{task}"), "").await;
-    assert_eq!(after["completed"], true, "{after}");
-    assert_eq!(after["response"]["deleted"], 5, "{after}");
-    assert_eq!(after["task"]["action"], done["task"]["action"]);
-    assert_eq!(count(&ok(&n, "c1", "GET", "/q/_count", "").await), 15);
+
+    // Trained model deployments are cluster state on Elasticsearch, restarted after a restart:
+    // a deployment started before a crash runs again after the wake (counters start over, as in
+    // a restarted process); a graceful unload also keeps the counters (the wake is invisible);
+    // one stopped stays stopped.
+    {
+        ok(&n, "ml", "PUT", "/_ml/trained_models/m1", r#"{"model_type":"pytorch","inference_config":{"pass_through":{}}}"#).await;
+        ok(&n, "ml", "PUT", "/_ml/trained_models/m1/vocabulary", r#"{"vocabulary":["[PAD]","[UNK]","a"]}"#).await;
+        ok(&n, "ml", "PUT", "/_ml/trained_models/m1/definition/0", r#"{"total_definition_length":4,"definition":"UEsDBA==","total_parts":1}"#).await;
+        let started = ok(&n, "ml", "POST", "/_ml/trained_models/m1/deployment/_start?deployment_id=d1&number_of_allocations=1", "").await;
+        assert_eq!(started["assignment"]["task_parameters"]["deployment_id"], "d1", "{started}");
+        ok(&n, "ml", "POST", "/_ml/trained_models/d1/_infer", r#"{"docs":[{"text_field":"a"}]}"#).await;
+        let stats = |n: Arc<Node>| async move {
+            let s = ok(&n, "ml", "GET", "/_ml/trained_models/m1/_stats", "").await;
+            s["trained_model_stats"][0]["deployment_stats"].clone()
+        };
+        let before = stats(n.clone()).await;
+        assert_eq!(before["inference_count"], 1, "{before}");
+
+        // A crash: the assignment was saved with the request that started it.
+        assert!(n.force_unload("ml").await);
+        let after = stats(n.clone()).await;
+        assert_eq!(after["deployment_id"], "d1", "the deployment runs again: {after}");
+        assert_eq!(after["state"], "started");
+        assert_eq!(after["start_time"], before["start_time"]);
+        assert_eq!(after["inference_count"], 0, "a new process");
+        ok(&n, "ml", "POST", "/_ml/trained_models/d1/_infer", r#"{"docs":[{"text_field":"a"}]}"#).await;
+        ok(&n, "ml", "POST", "/_ml/trained_models/d1/_infer", r#"{"docs":[{"text_field":"a"}]}"#).await;
+        assert!(n.unload("ml").await);
+        let kept = stats(n.clone()).await;
+        assert_eq!((kept["inference_count"].clone(), kept["nodes"][0]["inference_cache_hit_count"].clone()), (2.into(), 1.into()), "{kept}");
+
+        // Stopped, then a graceful unload: it stays stopped.
+        ok(&n, "ml", "POST", "/_ml/trained_models/d1/deployment/_stop", "").await;
+        assert!(n.unload("ml").await);
+        assert_eq!(stats(n.clone()).await, Value::Null);
+        let (s, v) = call(&n, "ml", "POST", "/_ml/trained_models/d1/_infer", r#"{"docs":[{"text_field":"a"}]}"#).await;
+        assert!(s >= 400, "{s} {v}");
+    }
+
+    // An unload doesn't reset `_stats` (an Elasticsearch node that never restarted keeps
+    // counting, and keeps field data loaded): indexing, get and search counters, search groups,
+    // field usage and loaded field data carry over, written with the unload's commit even when
+    // only reads happened since the last one. Branches start without them.
+    {
+        ok(&n, "stats", "PUT", "/s", r#"{"settings":{"number_of_shards":1},"mappings":{"properties":{"name":{"type":"text","fielddata":true}}}}"#).await;
+        for d in 0..3 {
+            ok(&n, "stats", "PUT", &format!("/s/_doc/{d}"), r#"{"name":"the quick fox"}"#).await;
+        }
+        ok(&n, "stats", "DELETE", "/s/_doc/2", "").await;
+        ok(&n, "stats", "GET", "/s/_doc/0", "").await;
+        ok(&n, "stats", "POST", "/s/_flush", "").await;
+        // Only reads after the last commit.
+        ok(&n, "stats", "POST", "/s/_refresh", "").await;
+        ok(&n, "stats", "POST", "/s/_search", r#"{"stats":["g1"],"query":{"match":{"name":"quick"}},"aggs":{"t":{"terms":{"field":"name"}}}}"#).await;
+        let read = |n: Arc<Node>| async move {
+            let s = ok(&n, "stats", "GET", "/s/_stats?groups=g1&fielddata_fields=name", "").await;
+            let t = &s["indices"]["s"]["total"];
+            assert!(t["fielddata"]["fields"]["name"]["memory_size_in_bytes"].as_i64().unwrap_or(0) > 0, "{s}");
+            let u = ok(&n, "stats", "GET", "/s/_field_usage_stats", "").await;
+            let u = &u["s"]["shards"][0];
+            (
+                [
+                    &t["indexing"]["index_total"],
+                    &t["indexing"]["delete_total"],
+                    &t["get"]["total"],
+                    &t["search"]["query_total"],
+                    &t["search"]["groups"]["g1"]["query_total"],
+                    &t["flush"]["total"],
+                    &t["translog"]["operations"],
+                ]
+                    .map(|v| v.as_i64().unwrap_or(-1)),
+                u["tracking_id"].clone(),
+                u["stats"]["fields"]["name"]["any"].clone(),
+            )
+        };
+        let before = read(n.clone()).await;
+        assert_eq!(before.0, [3, 1, 1, 1, 1, 1, 0], "{before:?}");
+        assert_eq!(before.2, 1, "{before:?}");
+        assert!(n.unload("stats").await);
+        let after = read(n.clone()).await;
+        assert_eq!(after, before, "the stats calls themselves count nothing");
+        ok(&n, "stats", "PUT", "/s/_doc/9", r#"{"name":"x"}"#).await;
+        assert_eq!(read(n.clone()).await.0[0], 4, "counting goes on");
+        // A branch has the parent's documents, not its history.
+        n.branch("stats", "stats-child").await.unwrap();
+        let s = ok(&n, "stats-child", "GET", "/s/_stats", "").await;
+        let t = &s["indices"]["s"]["total"];
+        assert_eq!((t["docs"]["count"].as_i64(), t["indexing"]["index_total"].as_i64()), (Some(3), Some(0)), "{s}");
+    }
+
+    // Analyzers keep the synonym rules they loaded until something reloads them (a set changed
+    // with `refresh=false`, or replaced by rules the chain can't build with `lenient: false`):
+    // an unload doesn't reload them, as an Elasticsearch node that never restarted wouldn't;
+    // closing and opening the index does.
+    {
+        ok(&n, "synonyms", "PUT", "/_synonyms/set1", r#"{"synonyms_set":[{"synonyms":"foo => bar"}]}"#).await;
+        let tk = "tokenizer";
+        let index = format!(
+            r#"{{"settings":{{"analysis":{{"filter":{{"syn":{{"type":"synonym","synonyms_set":"set1","updateable":true,"lenient":false}},"stop":{{"type":"stop","stopwords":["baz"]}}}},"analyzer":{{"a":{{"type":"custom","{tk}":"whitespace","filter":["lowercase","stop","syn"]}}}}}}}},"mappings":{{"properties":{{"t":{{"type":"text","search_analyzer":"a"}}}}}}}}"#
+        );
+        ok(&n, "synonyms", "PUT", "/i", &index).await;
+        ok(&n, "synonyms", "PUT", "/i/_doc/1", r#"{"t":"x"}"#).await;
+        let token = |v: Value| v["tokens"][0]["token"].as_str().unwrap_or_else(|| panic!("{v}")).to_string();
+        let analyze = r#"{"analyzer":"a","text":"foo"}"#;
+        assert_eq!(token(ok(&n, "synonyms", "POST", "/i/_analyze", analyze).await), "bar");
+        // Stored without a reload: the analyzer keeps "bar", across unloads.
+        ok(&n, "synonyms", "PUT", "/_synonyms/set1?refresh=false", r#"{"synonyms_set":[{"synonyms":"foo => qux"}]}"#).await;
+        assert_eq!(token(ok(&n, "synonyms", "POST", "/i/_analyze", analyze).await), "bar");
+        assert!(n.unload("synonyms").await);
+        assert_eq!(token(ok(&n, "synonyms", "POST", "/i/_analyze", analyze).await), "bar", "a wake is no reload");
+        assert!(n.unload("synonyms").await);
+        assert_eq!(token(ok(&n, "synonyms", "POST", "/i/_analyze", analyze).await), "bar");
+        ok(&n, "synonyms", "POST", "/i/_reload_search_analyzers", "").await;
+        assert_eq!(token(ok(&n, "synonyms", "POST", "/i/_analyze", analyze).await), "qux");
+        assert!(n.unload("synonyms").await);
+        assert_eq!(token(ok(&n, "synonyms", "POST", "/i/_analyze", analyze).await), "qux");
+        // Rules the chain can't build ("baz" is a stop word): the reload fails, the index keeps
+        // its analyzer and its shards, across an unload too.
+        ok(&n, "synonyms", "PUT", "/_synonyms/set1", r#"{"synonyms_set":[{"synonyms":"foo => bar, baz"}]}"#).await;
+        assert!(n.unload("synonyms").await);
+        let stats = ok(&n, "synonyms", "GET", "/i/_stats", "").await;
+        assert_eq!(stats["indices"]["i"]["health"], "yellow", "started (one replica, unassigned): {stats}");
+        assert_eq!(token(ok(&n, "synonyms", "POST", "/i/_analyze", analyze).await), "qux");
+        assert_eq!(count(&ok(&n, "synonyms", "GET", "/i/_count", "").await), 1);
+        // The same for an index without documents (its shards open only for the unload).
+        ok(&n, "synonyms", "PUT", "/_synonyms/set1", r#"{"synonyms_set":[{"synonyms":"foo => bar"}]}"#).await;
+        ok(&n, "synonyms", "PUT", "/e", &index).await;
+        assert_eq!(token(ok(&n, "synonyms", "POST", "/e/_analyze", analyze).await), "bar");
+        ok(&n, "synonyms", "PUT", "/_synonyms/set1", r#"{"synonyms_set":[{"synonyms":"foo => bar, baz"}]}"#).await;
+        assert!(n.unload("synonyms").await);
+        assert_eq!(token(ok(&n, "synonyms", "POST", "/e/_analyze", analyze).await), "bar", "the empty index keeps its rules");
+        // Reopening the index builds from the sets: it can't start.
+        ok(&n, "synonyms", "POST", "/i/_close", "").await;
+        ok(&n, "synonyms", "POST", "/i/_open", "").await;
+        assert!(ok(&n, "synonyms", "GET", "/i/_stats", "").await["indices"].as_object().is_some_and(|m| m.is_empty()));
+        assert!(n.unload("synonyms").await);
+        assert!(ok(&n, "synonyms", "GET", "/i/_stats", "").await["indices"].as_object().is_some_and(|m| m.is_empty()));
+    }
+
+    // What a running Elasticsearch node holds without a restart survives an unload too: the
+    // translog figures (the unload's commit is no flush Elasticsearch would make) and the request
+    // cache (its entries are rebuilt on use and count as the hits they are).
+    {
+        ok(&n, "figures", "PUT", "/r", r#"{"settings":{"number_of_shards":1}}"#).await;
+        for d in 0..3 {
+            ok(&n, "figures", "PUT", &format!("/r/_doc/{d}"), r#"{"k":"a"}"#).await;
+        }
+        ok(&n, "figures", "POST", "/r/_refresh", "").await;
+        let agg = r#"{"size":0,"aggs":{"k":{"terms":{"field":"k.keyword"}}}}"#;
+        let first = ok(&n, "figures", "POST", "/r/_search?request_cache=true", agg).await;
+        ok(&n, "figures", "POST", "/r/_search?request_cache=true", agg).await;
+        let figures = |n: Arc<Node>| async move {
+            let s = ok(&n, "figures", "GET", "/r/_stats/translog,request_cache", "").await;
+            let t = &s["indices"]["r"]["primaries"];
+            [
+                &t["translog"]["operations"],
+                &t["translog"]["uncommitted_operations"],
+                &t["request_cache"]["hit_count"],
+                &t["request_cache"]["miss_count"],
+                &t["request_cache"]["memory_size_in_bytes"],
+            ]
+            .map(|v| v.as_i64().unwrap_or(-1))
+        };
+        let before = figures(n.clone()).await;
+        assert_eq!(before[..4], [3, 3, 1, 1], "{before:?}");
+        assert!(before[4] > 0, "{before:?}");
+        assert!(n.unload("figures").await);
+        assert_eq!(figures(n.clone()).await, before);
+        let again = ok(&n, "figures", "POST", "/r/_search?request_cache=true", agg).await;
+        assert_eq!(again["aggregations"], first["aggregations"]);
+        let after = figures(n.clone()).await;
+        assert_eq!(after, [3, 3, 2, 1, before[4]], "a hit, and the same memory");
+        // A refresh that changes the searcher drops the cache; a flush trims the translog.
+        ok(&n, "figures", "PUT", "/r/_doc/9", r#"{"k":"b"}"#).await;
+        ok(&n, "figures", "POST", "/r/_refresh", "").await;
+        ok(&n, "figures", "POST", "/r/_flush", "").await;
+        ok(&n, "figures", "POST", "/r/_search?request_cache=true", agg).await;
+        assert_eq!(figures(n.clone()).await[..4], [0, 0, 2, 2]);
+        assert!(n.unload("figures").await);
+        assert_eq!(figures(n.clone()).await[..4], [0, 0, 2, 2]);
+    }
+
+    // An index without documents has nothing to commit, but its unload still keeps what a running
+    // node would report: a `_flush`'s count (its shards opened only for the unload) and search
+    // counts.
+    {
+        ok(&n, "empty", "PUT", "/e", r#"{"settings":{"number_of_shards":2}}"#).await;
+        ok(&n, "empty", "PUT", "/q", r#"{"settings":{"number_of_shards":1}}"#).await;
+        ok(&n, "empty", "POST", "/e/_flush", "").await;
+        ok(&n, "empty", "POST", "/q/_search", "{}").await;
+        let figures = |n: Arc<Node>| async move {
+            let s = ok(&n, "empty", "GET", "/_stats/flush,search", "").await;
+            let i = &s["indices"];
+            [&i["e"]["primaries"]["flush"]["total"], &i["q"]["primaries"]["search"]["query_total"]].map(|v| v.as_i64().unwrap_or(-1))
+        };
+        assert_eq!(figures(n.clone()).await, [2, 1]);
+        assert!(n.unload("empty").await);
+        assert_eq!(figures(n.clone()).await, [2, 1]);
+        assert!(n.unload("empty").await);
+        assert_eq!(figures(n.clone()).await, [2, 1]);
+        assert_eq!(count(&ok(&n, "empty", "GET", "/e/_count", "").await), 0);
+    }
 }
 
 /// Async results (async search, EQL, ES|QL) and SQL cursors outlive the cluster's instance,
@@ -412,32 +643,6 @@ async fn async_results_survive_unload_and_crash() {
     let last = ok(&n, "c1", "POST", "/_sql?format=json", &format!(r#"{{"cursor":"{next}"}}"#)).await;
     assert_eq!(last["rows"][0][0], 10, "{last}");
     assert_eq!(ok(&n, "c1", "GET", &format!("/_eql/search/status/{eql_id}"), "").await["is_running"], false);
-}
-
-/// Every mapping parameter survives the cluster state's round trip through storage: a
-/// document written after a wake is indexed exactly like one written before it. (A custom
-/// normalizer named `lowercase` makes `normalizer_skip_store_original_value: true` a
-/// non-default that must be persisted; synthetic source then rebuilds sorted values.)
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn documents_written_after_a_wake_are_indexed_like_before() {
-    let store = open_store(search_store::test_objects("server-mapwake"), "n1", &cache_dir("mapwake"), 0).await;
-    let n = node_on(&store);
-    let mapping = r#"{"settings":{"analysis":{"normalizer":{"lowercase":{"type":"custom","filter":["lowercase"]}}},"index":{"mapping.source.mode":"synthetic"}},
-        "mappings":{"properties":{"k":{"type":"keyword","normalizer":"lowercase","normalizer_skip_store_original_value":true},
-        "i":{"type":"keyword","normalizer":"lowercase","normalizer_skip_store_original_value":true,"ignore_above":10}}}}"#;
-    ok(&n, "c1", "PUT", "/s", mapping).await;
-    let doc = r#"{"k":["may the force be with you!","do or do not"],"i":["May the FORCE be with You!","Do or Do Not"]}"#;
-    ok(&n, "c1", "PUT", "/s/_doc/1", doc).await;
-    let before = ok(&n, "c1", "GET", "/s/_doc/1", "").await["_source"].clone();
-    assert_eq!(before["k"], serde_json::json!(["do or do not", "may the force be with you!"]), "{before}");
-    let m = ok(&n, "c1", "GET", "/s/_mapping", "").await;
-    assert_eq!(m["s"]["mappings"]["properties"]["k"]["normalizer_skip_store_original_value"], true, "{m}");
-    assert!(n.unload("c1").await);
-    ok(&n, "c1", "PUT", "/s/_doc/2", doc).await;
-    assert_eq!(ok(&n, "c1", "GET", "/s/_doc/2", "").await["_source"], before);
-    assert!(n.unload("c1").await);
-    assert_eq!(ok(&n, "c1", "GET", "/s/_doc/1", "").await["_source"], before);
-    assert_eq!(ok(&n, "c1", "GET", "/s/_doc/2", "").await["_source"], before);
 }
 
 /// An idle unload is invisible: writes nobody refreshed stay unsearchable across it (the
@@ -505,102 +710,6 @@ async fn an_unload_keeps_unrefreshed_writes_unsearchable() {
     assert!(n.unload("c1").await);
     ok(&n, "c1", "POST", "/off/_open", "").await;
     assert_eq!(count(&ok(&n, "c1", "GET", "/off/_count?q=f:new", "").await), 5);
-}
-
-/// Trained model deployments are cluster state on Elasticsearch, restarted after a restart:
-/// a deployment started before a crash runs again after the wake (counters start over, as in
-/// a restarted process); a graceful unload also keeps the counters (the wake is invisible);
-/// one stopped stays stopped.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn trained_model_deployments_survive_unload_and_crash() {
-    let store = open_store(search_store::test_objects("server-ml"), "n1", &cache_dir("ml"), 0).await;
-    let n = node_on(&store);
-    ok(&n, "c1", "PUT", "/_ml/trained_models/m1", r#"{"model_type":"pytorch","inference_config":{"pass_through":{}}}"#).await;
-    ok(&n, "c1", "PUT", "/_ml/trained_models/m1/vocabulary", r#"{"vocabulary":["[PAD]","[UNK]","a"]}"#).await;
-    ok(&n, "c1", "PUT", "/_ml/trained_models/m1/definition/0", r#"{"total_definition_length":4,"definition":"UEsDBA==","total_parts":1}"#).await;
-    let started = ok(&n, "c1", "POST", "/_ml/trained_models/m1/deployment/_start?deployment_id=d1&number_of_allocations=1", "").await;
-    assert_eq!(started["assignment"]["task_parameters"]["deployment_id"], "d1", "{started}");
-    ok(&n, "c1", "POST", "/_ml/trained_models/d1/_infer", r#"{"docs":[{"text_field":"a"}]}"#).await;
-    let stats = |n: Arc<Node>| async move {
-        let s = ok(&n, "c1", "GET", "/_ml/trained_models/m1/_stats", "").await;
-        s["trained_model_stats"][0]["deployment_stats"].clone()
-    };
-    let before = stats(n.clone()).await;
-    assert_eq!(before["inference_count"], 1, "{before}");
-
-    // A crash: the assignment was saved with the request that started it.
-    assert!(n.force_unload("c1").await);
-    let after = stats(n.clone()).await;
-    assert_eq!(after["deployment_id"], "d1", "the deployment runs again: {after}");
-    assert_eq!(after["state"], "started");
-    assert_eq!(after["start_time"], before["start_time"]);
-    assert_eq!(after["inference_count"], 0, "a new process");
-    ok(&n, "c1", "POST", "/_ml/trained_models/d1/_infer", r#"{"docs":[{"text_field":"a"}]}"#).await;
-    ok(&n, "c1", "POST", "/_ml/trained_models/d1/_infer", r#"{"docs":[{"text_field":"a"}]}"#).await;
-    assert!(n.unload("c1").await);
-    let kept = stats(n.clone()).await;
-    assert_eq!((kept["inference_count"].clone(), kept["nodes"][0]["inference_cache_hit_count"].clone()), (2.into(), 1.into()), "{kept}");
-
-    // Stopped, then a graceful unload: it stays stopped.
-    ok(&n, "c1", "POST", "/_ml/trained_models/d1/deployment/_stop", "").await;
-    assert!(n.unload("c1").await);
-    assert_eq!(stats(n.clone()).await, Value::Null);
-    let (s, v) = call(&n, "c1", "POST", "/_ml/trained_models/d1/_infer", r#"{"docs":[{"text_field":"a"}]}"#).await;
-    assert!(s >= 400, "{s} {v}");
-}
-
-/// An unload doesn't reset `_stats` (an Elasticsearch node that never restarted keeps
-/// counting, and keeps field data loaded): indexing, get and search counters, search groups,
-/// field usage and loaded field data carry over, written with the unload's commit even when
-/// only reads happened since the last one. Branches start without them.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn shard_statistics_survive_unload() {
-    let store = open_store(search_store::test_objects("server-stats"), "n1", &cache_dir("stats"), 0).await;
-    let n = node_on(&store);
-    ok(&n, "c1", "PUT", "/s", r#"{"settings":{"number_of_shards":1},"mappings":{"properties":{"name":{"type":"text","fielddata":true}}}}"#).await;
-    for d in 0..3 {
-        ok(&n, "c1", "PUT", &format!("/s/_doc/{d}"), r#"{"name":"the quick fox"}"#).await;
-    }
-    ok(&n, "c1", "DELETE", "/s/_doc/2", "").await;
-    ok(&n, "c1", "GET", "/s/_doc/0", "").await;
-    ok(&n, "c1", "POST", "/s/_flush", "").await;
-    // Only reads after the last commit.
-    ok(&n, "c1", "POST", "/s/_refresh", "").await;
-    ok(&n, "c1", "POST", "/s/_search", r#"{"stats":["g1"],"query":{"match":{"name":"quick"}},"aggs":{"t":{"terms":{"field":"name"}}}}"#).await;
-    let read = |n: Arc<Node>| async move {
-        let s = ok(&n, "c1", "GET", "/s/_stats?groups=g1&fielddata_fields=name", "").await;
-        let t = &s["indices"]["s"]["total"];
-        assert!(t["fielddata"]["fields"]["name"]["memory_size_in_bytes"].as_i64().unwrap_or(0) > 0, "{s}");
-        let u = ok(&n, "c1", "GET", "/s/_field_usage_stats", "").await;
-        let u = &u["s"]["shards"][0];
-        (
-            [
-                &t["indexing"]["index_total"],
-                &t["indexing"]["delete_total"],
-                &t["get"]["total"],
-                &t["search"]["query_total"],
-                &t["search"]["groups"]["g1"]["query_total"],
-                &t["flush"]["total"],
-                &t["translog"]["operations"],
-            ]
-                .map(|v| v.as_i64().unwrap_or(-1)),
-            u["tracking_id"].clone(),
-            u["stats"]["fields"]["name"]["any"].clone(),
-        )
-    };
-    let before = read(n.clone()).await;
-    assert_eq!(before.0, [3, 1, 1, 1, 1, 1, 0], "{before:?}");
-    assert_eq!(before.2, 1, "{before:?}");
-    assert!(n.unload("c1").await);
-    let after = read(n.clone()).await;
-    assert_eq!(after, before, "the stats calls themselves count nothing");
-    ok(&n, "c1", "PUT", "/s/_doc/9", r#"{"name":"x"}"#).await;
-    assert_eq!(read(n.clone()).await.0[0], 4, "counting goes on");
-    // A branch has the parent's documents, not its history.
-    n.branch("c1", "child").await.unwrap();
-    let s = ok(&n, "child", "GET", "/s/_stats", "").await;
-    let t = &s["indices"]["s"]["total"];
-    assert_eq!((t["docs"]["count"].as_i64(), t["indexing"]["index_total"].as_i64()), (Some(3), Some(0)), "{s}");
 }
 
 /// Snapshot contents are durable: a snapshot pins each shard's commit point in object storage
@@ -701,128 +810,6 @@ async fn snapshot_contents_survive_unload_crash_gc_and_branches() {
     assert_eq!((status, e["error"]["type"].as_str()), (500, Some("snapshot_restore_exception")), "{e}");
     ok(&n, "c1", "DELETE", "/_snapshot/r/s2", "").await;
     assert!(store.list_pins("c1").await.unwrap().is_empty());
-}
-
-/// Analyzers keep the synonym rules they loaded until something reloads them (a set changed
-/// with `refresh=false`, or replaced by rules the chain can't build with `lenient: false`):
-/// an unload doesn't reload them, as an Elasticsearch node that never restarted wouldn't;
-/// closing and opening the index does.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn loaded_synonym_rules_survive_unload_until_a_reload() {
-    let store = open_store(search_store::test_objects("server-syn"), "n1", &cache_dir("syn"), 0).await;
-    let n = node_on(&store);
-    ok(&n, "c1", "PUT", "/_synonyms/set1", r#"{"synonyms_set":[{"synonyms":"foo => bar"}]}"#).await;
-    let tk = "tokenizer";
-    let index = format!(
-        r#"{{"settings":{{"analysis":{{"filter":{{"syn":{{"type":"synonym","synonyms_set":"set1","updateable":true,"lenient":false}},"stop":{{"type":"stop","stopwords":["baz"]}}}},"analyzer":{{"a":{{"type":"custom","{tk}":"whitespace","filter":["lowercase","stop","syn"]}}}}}}}},"mappings":{{"properties":{{"t":{{"type":"text","search_analyzer":"a"}}}}}}}}"#
-    );
-    ok(&n, "c1", "PUT", "/i", &index).await;
-    ok(&n, "c1", "PUT", "/i/_doc/1", r#"{"t":"x"}"#).await;
-    let token = |v: Value| v["tokens"][0]["token"].as_str().unwrap_or_else(|| panic!("{v}")).to_string();
-    let analyze = r#"{"analyzer":"a","text":"foo"}"#;
-    assert_eq!(token(ok(&n, "c1", "POST", "/i/_analyze", analyze).await), "bar");
-    // Stored without a reload: the analyzer keeps "bar", across unloads.
-    ok(&n, "c1", "PUT", "/_synonyms/set1?refresh=false", r#"{"synonyms_set":[{"synonyms":"foo => qux"}]}"#).await;
-    assert_eq!(token(ok(&n, "c1", "POST", "/i/_analyze", analyze).await), "bar");
-    assert!(n.unload("c1").await);
-    assert_eq!(token(ok(&n, "c1", "POST", "/i/_analyze", analyze).await), "bar", "a wake is no reload");
-    assert!(n.unload("c1").await);
-    assert_eq!(token(ok(&n, "c1", "POST", "/i/_analyze", analyze).await), "bar");
-    ok(&n, "c1", "POST", "/i/_reload_search_analyzers", "").await;
-    assert_eq!(token(ok(&n, "c1", "POST", "/i/_analyze", analyze).await), "qux");
-    assert!(n.unload("c1").await);
-    assert_eq!(token(ok(&n, "c1", "POST", "/i/_analyze", analyze).await), "qux");
-    // Rules the chain can't build ("baz" is a stop word): the reload fails, the index keeps
-    // its analyzer and its shards, across an unload too.
-    ok(&n, "c1", "PUT", "/_synonyms/set1", r#"{"synonyms_set":[{"synonyms":"foo => bar, baz"}]}"#).await;
-    assert!(n.unload("c1").await);
-    let stats = ok(&n, "c1", "GET", "/i/_stats", "").await;
-    assert_eq!(stats["indices"]["i"]["health"], "yellow", "started (one replica, unassigned): {stats}");
-    assert_eq!(token(ok(&n, "c1", "POST", "/i/_analyze", analyze).await), "qux");
-    assert_eq!(count(&ok(&n, "c1", "GET", "/i/_count", "").await), 1);
-    // The same for an index without documents (its shards open only for the unload).
-    ok(&n, "c1", "PUT", "/_synonyms/set1", r#"{"synonyms_set":[{"synonyms":"foo => bar"}]}"#).await;
-    ok(&n, "c1", "PUT", "/e", &index).await;
-    assert_eq!(token(ok(&n, "c1", "POST", "/e/_analyze", analyze).await), "bar");
-    ok(&n, "c1", "PUT", "/_synonyms/set1", r#"{"synonyms_set":[{"synonyms":"foo => bar, baz"}]}"#).await;
-    assert!(n.unload("c1").await);
-    assert_eq!(token(ok(&n, "c1", "POST", "/e/_analyze", analyze).await), "bar", "the empty index keeps its rules");
-    // Reopening the index builds from the sets: it can't start.
-    ok(&n, "c1", "POST", "/i/_close", "").await;
-    ok(&n, "c1", "POST", "/i/_open", "").await;
-    assert!(ok(&n, "c1", "GET", "/i/_stats", "").await["indices"].as_object().is_some_and(|m| m.is_empty()));
-    assert!(n.unload("c1").await);
-    assert!(ok(&n, "c1", "GET", "/i/_stats", "").await["indices"].as_object().is_some_and(|m| m.is_empty()));
-}
-
-/// What a running Elasticsearch node holds without a restart survives an unload too: the
-/// translog figures (the unload's commit is no flush Elasticsearch would make) and the request
-/// cache (its entries are rebuilt on use and count as the hits they are).
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn translog_and_request_cache_figures_survive_unload() {
-    let store = open_store(search_store::test_objects("server-inst"), "n1", &cache_dir("inst"), 0).await;
-    let n = node_on(&store);
-    ok(&n, "c1", "PUT", "/r", r#"{"settings":{"number_of_shards":1}}"#).await;
-    for d in 0..3 {
-        ok(&n, "c1", "PUT", &format!("/r/_doc/{d}"), r#"{"k":"a"}"#).await;
-    }
-    ok(&n, "c1", "POST", "/r/_refresh", "").await;
-    let agg = r#"{"size":0,"aggs":{"k":{"terms":{"field":"k.keyword"}}}}"#;
-    let first = ok(&n, "c1", "POST", "/r/_search?request_cache=true", agg).await;
-    ok(&n, "c1", "POST", "/r/_search?request_cache=true", agg).await;
-    let figures = |n: Arc<Node>| async move {
-        let s = ok(&n, "c1", "GET", "/r/_stats/translog,request_cache", "").await;
-        let t = &s["indices"]["r"]["primaries"];
-        [
-            &t["translog"]["operations"],
-            &t["translog"]["uncommitted_operations"],
-            &t["request_cache"]["hit_count"],
-            &t["request_cache"]["miss_count"],
-            &t["request_cache"]["memory_size_in_bytes"],
-        ]
-        .map(|v| v.as_i64().unwrap_or(-1))
-    };
-    let before = figures(n.clone()).await;
-    assert_eq!(before[..4], [3, 3, 1, 1], "{before:?}");
-    assert!(before[4] > 0, "{before:?}");
-    assert!(n.unload("c1").await);
-    assert_eq!(figures(n.clone()).await, before);
-    let again = ok(&n, "c1", "POST", "/r/_search?request_cache=true", agg).await;
-    assert_eq!(again["aggregations"], first["aggregations"]);
-    let after = figures(n.clone()).await;
-    assert_eq!(after, [3, 3, 2, 1, before[4]], "a hit, and the same memory");
-    // A refresh that changes the searcher drops the cache; a flush trims the translog.
-    ok(&n, "c1", "PUT", "/r/_doc/9", r#"{"k":"b"}"#).await;
-    ok(&n, "c1", "POST", "/r/_refresh", "").await;
-    ok(&n, "c1", "POST", "/r/_flush", "").await;
-    ok(&n, "c1", "POST", "/r/_search?request_cache=true", agg).await;
-    assert_eq!(figures(n.clone()).await[..4], [0, 0, 2, 2]);
-    assert!(n.unload("c1").await);
-    assert_eq!(figures(n.clone()).await[..4], [0, 0, 2, 2]);
-}
-
-/// An index without documents has nothing to commit, but its unload still keeps what a running
-/// node would report: a `_flush`'s count (its shards opened only for the unload) and search
-/// counts.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_empty_index_keeps_its_statistics_across_unload() {
-    let store = open_store(search_store::test_objects("server-empty"), "n1", &cache_dir("empty"), 0).await;
-    let n = node_on(&store);
-    ok(&n, "c1", "PUT", "/e", r#"{"settings":{"number_of_shards":2}}"#).await;
-    ok(&n, "c1", "PUT", "/q", r#"{"settings":{"number_of_shards":1}}"#).await;
-    ok(&n, "c1", "POST", "/e/_flush", "").await;
-    ok(&n, "c1", "POST", "/q/_search", "{}").await;
-    let figures = |n: Arc<Node>| async move {
-        let s = ok(&n, "c1", "GET", "/_stats/flush,search", "").await;
-        let i = &s["indices"];
-        [&i["e"]["primaries"]["flush"]["total"], &i["q"]["primaries"]["search"]["query_total"]].map(|v| v.as_i64().unwrap_or(-1))
-    };
-    assert_eq!(figures(n.clone()).await, [2, 1]);
-    assert!(n.unload("c1").await);
-    assert_eq!(figures(n.clone()).await, [2, 1]);
-    assert!(n.unload("c1").await);
-    assert_eq!(figures(n.clone()).await, [2, 1]);
-    assert_eq!(count(&ok(&n, "c1", "GET", "/e/_count", "").await), 0);
 }
 
 /// A merge installed after the last refresh doesn't make unrefreshed writes searchable at the

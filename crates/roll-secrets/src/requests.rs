@@ -641,6 +641,7 @@ impl Secrets {
             }
             return Err(e);
         }
+        self.settle(&prepared);
         self.request(project, slug, id, caller)
     }
 

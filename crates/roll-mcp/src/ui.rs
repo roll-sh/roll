@@ -124,53 +124,56 @@ pub fn read() -> Value {
 mod tests {
     use super::*;
 
+    /// roll's table view: it goes on tools that read rows, a changing answer names the read that
+    /// refreshes it (only reads are ever named), and the view asks its host only for what it needs: open
+    /// roll's pages, read again through the gate, tell the model what it shows, and send the person's
+    /// own question. A new method is a decision (a view runs inside the host, beside the person's chat).
     #[test]
-    fn tables_go_on_tools_that_read_rows() {
-        assert!(shows("postgres_query", true) && shows("apps_list_services", true) && shows("apps_logs", true));
-        assert!(!shows("postgres_execute", false) && !shows("postgres_get_project", true));
-        assert!(shows("access_wait_approval", false));
-        assert!(shows("apps_wait_deploy", true) && shows("apps_get_job", true) && !shows("apps_get_service", true));
-        assert!(shows("previews_wait", true) && shows("tasks_wait_run", true));
-        assert!(declared(&json!({ "extensions": { EXT: { "mimeTypes": [MIME] } } })) && !declared(&json!({})));
-    }
-
-    /// What the view may ask its host, and nothing else: open roll's pages, read again through the
-    /// gate, tell the model what it shows, and send the person's own question. A new method is a
-    /// decision (a view runs inside the host, beside the person's chat).
-    #[test]
-    fn the_view_asks_its_host_only_for_what_it_needs() {
-        let html = include_str!("ui/table.html");
-        let mut sent: Vec<&str> = ["request(\"", "notify(\""].iter().flat_map(|call| html.split(call).skip(1).filter_map(|rest| rest.split('"').next())).collect();
-        sent.sort_unstable();
-        sent.dedup();
-        assert_eq!(sent, ["tools/call", "ui/initialize", "ui/message", "ui/notifications/initialized", "ui/notifications/size-changed", "ui/open-link", "ui/update-model-context"]);
-        // What leaves the view is a column's name, never a row's text.
-        assert!(html.contains("const safeName") && html.matches("safeName(").count() >= 4);
-    }
-
-    #[test]
-    fn a_changing_answer_names_the_read_that_refreshes_it() {
-        let args = json!({ "service": "svc_1", "env": "production", "deploy": "dep_1" });
-        let mut building = json!({ "structuredContent": { "status": "building" } });
-        mark_pending("apps_get_deploy", &args, &mut building, |_| true);
-        assert_eq!(building["_meta"][PENDING], json!({ "tool": "apps_get_deploy", "arguments": args }));
-        let mut live = json!({ "structuredContent": { "status": "active" } });
-        mark_pending("apps_wait_deploy", &args, &mut live, |_| true);
-        assert!(live.get("_meta").is_none());
-        // A wait the view would hold open is cut short.
-        let mut run = json!({ "structuredContent": { "status": "running" } });
-        mark_pending("tasks_wait_run", &json!({ "id": "run_1", "timeout": "5m" }), &mut run, |_| true);
-        assert_eq!(run["_meta"][PENDING]["arguments"], json!({ "id": "run_1", "timeout": "10s" }));
-        // A call waiting for a person: its approval, read again while the connection can.
-        let pending = json!({ "structuredContent": { "status": "approval_pending", "approval": "apr_1", "http_status": 202 } });
-        let (mut with, mut without) = (pending.clone(), pending);
-        mark_pending("apps_deploy", &json!({}), &mut with, |_| true);
-        assert_eq!(with["_meta"][PENDING], json!({ "tool": "access_wait_approval", "arguments": { "approval_id": "apr_1", "wait": 20 } }));
-        mark_pending("apps_deploy", &json!({}), &mut without, |t| t != "access_wait_approval");
-        assert!(without.get("_meta").is_none());
-        // Only reads are ever named.
-        for name in SETTLES.keys() {
-            assert_eq!(crate::tools::all().iter().find(|t| t.name == *name).unwrap().method, "GET", "{name}");
+    fn the_table_view_goes_on_reads_and_asks_its_host_for_little() {
+        {
+            assert!(shows("postgres_query", true) && shows("apps_list_services", true) && shows("apps_logs", true));
+            assert!(!shows("postgres_execute", false) && !shows("postgres_get_project", true));
+            assert!(shows("access_wait_approval", false));
+            assert!(shows("apps_wait_deploy", true) && shows("apps_get_job", true) && !shows("apps_get_service", true));
+            assert!(shows("previews_wait", true) && shows("tasks_wait_run", true));
+            assert!(declared(&json!({ "extensions": { EXT: { "mimeTypes": [MIME] } } })) && !declared(&json!({})));
+        }
+        {
+            let args = json!({ "service": "svc_1", "env": "production", "deploy": "dep_1" });
+            let mut building = json!({ "structuredContent": { "status": "building" } });
+            mark_pending("apps_get_deploy", &args, &mut building, |_| true);
+            assert_eq!(building["_meta"][PENDING], json!({ "tool": "apps_get_deploy", "arguments": args }));
+            let mut live = json!({ "structuredContent": { "status": "active" } });
+            mark_pending("apps_wait_deploy", &args, &mut live, |_| true);
+            assert!(live.get("_meta").is_none());
+            // A wait the view would hold open is cut short.
+            let mut run = json!({ "structuredContent": { "status": "running" } });
+            mark_pending("tasks_wait_run", &json!({ "id": "run_1", "timeout": "5m" }), &mut run, |_| true);
+            assert_eq!(run["_meta"][PENDING]["arguments"], json!({ "id": "run_1", "timeout": "10s" }));
+            // A call waiting for a person: its approval, read again while the connection can.
+            let pending = json!({ "structuredContent": { "status": "approval_pending", "approval": "apr_1", "http_status": 202 } });
+            let (mut with, mut without) = (pending.clone(), pending);
+            mark_pending("apps_deploy", &json!({}), &mut with, |_| true);
+            assert_eq!(with["_meta"][PENDING], json!({ "tool": "access_wait_approval", "arguments": { "approval_id": "apr_1", "wait": 20 } }));
+            mark_pending("apps_deploy", &json!({}), &mut without, |t| t != "access_wait_approval");
+            assert!(without.get("_meta").is_none());
+            // Only reads are ever named.
+            for name in SETTLES.keys() {
+                assert_eq!(crate::tools::all().iter().find(|t| t.name == *name).unwrap().method, "GET", "{name}");
+            }
+        }
+        {
+            // What the view may ask its host, and nothing else: open roll's pages, read again through the
+            // gate, tell the model what it shows, and send the person's own question. A new method is a
+            // decision (a view runs inside the host, beside the person's chat).
+            let html = include_str!("ui/table.html");
+            let mut sent: Vec<&str> = ["request(\"", "notify(\""].iter().flat_map(|call| html.split(call).skip(1).filter_map(|rest| rest.split('"').next())).collect();
+            sent.sort_unstable();
+            sent.dedup();
+            assert_eq!(sent, ["tools/call", "ui/initialize", "ui/message", "ui/notifications/initialized", "ui/notifications/size-changed", "ui/open-link", "ui/update-model-context"]);
+            // What leaves the view is a column's name, never a row's text.
+            assert!(html.contains("const safeName") && html.matches("safeName(").count() >= 4);
         }
     }
+
 }

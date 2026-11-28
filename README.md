@@ -55,7 +55,9 @@ pnpm build
 
 ### The control-plane API's token
 
-`rolld` on 127.0.0.1 needs no token. Anywhere else it refuses to start without
+`rolld` on 127.0.0.1 needs no token; it then answers only requests to `localhost`, `127.0.0.1`,
+`[::1]`, a name under `.localhost` or `ROLL_DASHBOARD_ORIGIN`'s host (421 otherwise), and refuses a
+page elsewhere (403). Anywhere else it refuses to start without
 `ROLL_ADMIN_TOKEN` (32 characters or more), the operator token every control-plane API takes as
 `Authorization: Bearer`; `roll` sends it from the same variable, and the dashboard asks for it in
 the header. CORS answers `ROLL_DASHBOARD_ORIGIN` (on loopback, the local dashboard). The routes

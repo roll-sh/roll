@@ -58,6 +58,24 @@ async fn a_change_gets_a_full_preview_that_follows_pushes_and_goes_when_it_lands
     assert_eq!(*e.code.forgotten.lock(), vec![p.id.clone()]);
 }
 
+/// A follower of the event feed (the dashboard, roll MCP's feeds) waiting for what comes next
+/// hears a preview made at once, not at its next poll; with nothing new, the wait ends empty.
+#[tokio::test]
+async fn a_follower_waiting_on_the_feed_hears_a_preview_made_at_once() {
+    let e = env(json!({ "enabled": true }));
+    let from = e.engine.store.latest_event().unwrap();
+    let store = e.engine.store.clone();
+    let waiting = tokio::spawn(async move { store.wait_events(from, 10, std::time::Duration::from_secs(25)).await });
+    e.code.open(change("chg_f", 9));
+    let started = std::time::Instant::now();
+    e.engine.pass().await.unwrap();
+    let heard = waiting.await.unwrap().unwrap();
+    assert!(started.elapsed() < std::time::Duration::from_secs(10), "woken by the write, not the end of the wait");
+    assert_eq!(heard.first().map(|x| x.kind.as_str()), Some("created"), "{heard:?}");
+    let last = e.engine.store.latest_event().unwrap();
+    assert!(e.engine.store.wait_events(last, 10, std::time::Duration::from_millis(200)).await.unwrap().is_empty());
+}
+
 #[tokio::test]
 async fn a_fork_waits_for_approval_and_a_failed_step_is_retried() {
     let e = env(json!({ "enabled": true, "resources": { "redis:rdb_cache": "skip" }, "seed": { "image": "node:22", "run": "npm run seed" } }));
@@ -1264,7 +1282,7 @@ async fn a_signed_in_person_sees_only_their_own_projects_previews() {
     assert_eq!(roll_previews::api::router(e.engine.clone()).oneshot(req).await.unwrap().status().as_u16(), 400);
     // A member (a viewer here) passes previews' own check once roll-access decided the request by
     // their role (their session's grant beside it; roll-access/tests/access.rs::
-    // a_members_role_decides_what_they_do_to_a_preview: a viewer reads it, never its credentials).
+    // a_members_role_decides_what_they_do: a viewer reads it, never its credentials).
     // Without a decision (past the gate), only an owner does.
     struct Addresses;
     impl roll_workspace::People for Addresses {
@@ -1966,4 +1984,20 @@ async fn a_projects_own_preview_domain_serves_only_its_previews() {
     e.engine.store.set_project_domain("prj_other", Some(("preview.other.dev", false)), &none, &none).unwrap();
     assert_eq!(e.engine.store.service_for_domain_host(&web.host, "preview.other.dev").unwrap(), None, "only the domain's own project's previews");
     assert_eq!(e.engine.store.service_for_domain_host(&web.host, "preview.unknown.dev").unwrap(), None);
+    // Team access there: a signed-in person's ticket lands on the domain's host they asked for;
+    // the preview's name under another project's domain, or a name of nothing, gets none.
+    struct Anyone;
+    impl roll_previews::ports::Visitors for Anyone {
+        fn may_open(&self, _: &str, _: &str, _: &str) -> bool {
+            true
+        }
+    }
+    let _ = e.engine.visitors.set(Arc::new(Anyone));
+    let s = e.engine.store.settings(&e.project).unwrap().patched(&json!({ "access": "team" })).unwrap();
+    e.engine.store.put_settings(&e.project, &s).unwrap();
+    let ticket = |to: String| e.engine.visit_ticket(&p.id, "usr_ada", "ada", "ses_1", &to);
+    let url = ticket(format!("https://{}.preview.acme.dev/cart?x=1", web.host)).unwrap();
+    assert!(url.starts_with(&format!("http://{}.preview.acme.dev/__roll/visit?ticket=rlv_", web.host)) && url.ends_with("&to=%2Fcart%3Fx%3D1"), "{url}");
+    assert!(matches!(ticket(format!("http://{}.preview.other.dev/", web.host)), Err(roll_previews::Error::BadRequest(_))), "another project's domain");
+    assert!(matches!(ticket("http://nothing.preview.acme.dev/".into()), Err(roll_previews::Error::BadRequest(_))));
 }
