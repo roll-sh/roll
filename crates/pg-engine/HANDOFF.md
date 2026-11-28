@@ -15406,6 +15406,10 @@ the bytes a held row or key vector wastes were not its 8-byte header but its cap
 units match, 0 newly differing; isolation 1,647 / 1,648; pg_dump 14,609 passed, 0 failed.
 `tools/crash-binary.py` seed 1 against n3's plain dist build: ok. Result hashes equal in every
 cell measured.
+Both commits rebased onto `2febb986c` (agent 350's ENOSPC / teardown work, which adds a
+`DISK_FULL` branch to `From<io::Error>` through `Error::new(..).hint(..)`: unchanged by the boxing)
+as `cand/a349-3` (`7e9da8dd5`): quick-check with `QC_CHECKED=1` again, 491 tests in 28 binaries
+also checked, regress 0 newly differing, isolation 1,647 / 1,648, pg_dump 14,609 / 0 failed.
 
 **Measured** (BENCH). Peak memory, 1M rows, work_mem 1 GB: an Incremental Sort of 400,000-row
 prefix groups (`enable_seqscan` off over `u2_k`) 187.1-187.2 -> 166.0-167.6 MB (-11%), two
