@@ -607,6 +607,9 @@ struct Plan<'a> {
     /// values has only these decoded (`storage::row::decode_cols`), not the whole row.
     read: Vec<u32>,
     at: Vec<usize>,
+    /// Each index tuple's size when its key and INCLUDE values have no null, all of them
+    /// of fixed length (`relsize::fixed_index_tuple`): not worked out a row at a time.
+    fixed: Option<usize>,
 }
 
 impl Plan<'_> {
@@ -675,7 +678,13 @@ impl Plan<'_> {
         let k = &g.entries.data[at..];
         let nk = self.cols.len();
         vals.extend(self.ix.include.iter().enumerate().map(|(n, &i)| value(nk + n, i)));
-        let size = relsize::index_tuple(&self.ix_types, &vals, &text);
+        let size = match self.fixed {
+            Some(size) if !vals.iter().any(Value::is_null) => {
+                debug_assert_eq!(size, relsize::index_tuple(&self.ix_types, &vals, &text));
+                size
+            }
+            _ => relsize::index_tuple(&self.ix_types, &vals, &text),
+        };
         if size > crate::exec::rowsize::INDEX_SIZE_MASK {
             return Err(crate::exec::rowsize::form_error(size));
         }
@@ -947,6 +956,7 @@ impl Ddl<'_, '_> {
             (dir, budget)
         });
         let _spill_dir = spill.as_ref().map(|(d, _)| SpillDir(d.clone()));
+        let fixed = relsize::fixed_index_tuple(&ix_types);
         let plan = Plan {
             t,
             ix,
@@ -968,6 +978,7 @@ impl Ddl<'_, '_> {
                 && ix.columns.iter().enumerate().all(|(i, c)| !c.desc && !c.nulls_first && bix.colls.get(i).is_none_or(Option::is_none)),
             read,
             at,
+            fixed,
         };
         let chunks = Mutex::new(chunks);
         let stop = AtomicBool::new(false);
