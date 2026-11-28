@@ -153,14 +153,6 @@ async fn serve(api: &Api, args: &super::AtArgs, a: LocalAgent, scm: Manager<'_>)
     let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, a.port)).await.with_context(|| format!("127.0.0.1:{} is taken: pick another with --port", a.port))?;
     let addr = listener.local_addr()?;
     let store = Arc::new(Store::new("roll secrets agent", api.with_header(None), &project, ttl, a.cache_size));
-    // A folder is kept only while its digest is followed, which a token reaching only some keys of
-    // it can't do: said once, now, for the folders the agent knows of.
-    if !ttl.is_zero() {
-        let (env, path) = defaults(&at);
-        for f in prefetch.iter().cloned().chain(env.map(|env| Folder { env, path })) {
-            store.followable(&f).await?;
-        }
-    }
     if !prefetch.is_empty() {
         let reads = prefetch.iter().map(|f| {
             let store = store.clone();
@@ -513,16 +505,6 @@ impl Store {
                     }
                 },
             }
-        }
-    }
-
-    /// Refused when roll won't give `f`'s digest because the token reaches only some of its keys:
-    /// nothing of it could be kept. Anything else is left for a request to find.
-    async fn followable(&self, f: &Folder) -> anyhow::Result<()> {
-        let url = format!("{}/environments/{}/digest?path={}", self.project, enc(&f.env), enc(&f.path));
-        match tokio::time::timeout(READ_TIMEOUT, self.api.call(Method::GET, &url, None)).await {
-            Ok(Err(e)) if super::keys_only(&e) => anyhow::bail!("{}: {f} can't be kept: {e} (with --ttl 0, every request reads roll instead and nothing is kept)", self.name),
-            _ => Ok(()),
         }
     }
 

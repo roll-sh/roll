@@ -401,15 +401,11 @@ pub fn is_root(path: &str) -> bool {
     path.trim_end_matches('/').is_empty()
 }
 
-/// What every refusal of [`keys_only`] says: clients that follow a whole folder (`roll run
-/// --watch`, `roll secrets agent`) look for it to stop at their start.
-pub const KEYS_ONLY: &str = "reaches only some keys of";
-
-/// The refusal of a request about a whole secrets folder (a digest, a watch's delta, a diff, an
-/// import) to a grant whose rule would reach it but for its `keys`. `place` is the folder
-/// (`production`, `production:/api`); it never names a key.
+/// The refusal of a request about a whole secrets folder (a diff, an import, a promote, health)
+/// to a grant whose rule would reach it but for its `keys`. `place` is the folder (`production`,
+/// `production:/api`); it never names a key.
 pub fn keys_only(place: &str, what: &str) -> String {
-    format!("this token {KEYS_ONLY} {place}; {what} reads the whole folder, so it needs a rule without keys")
+    format!("this token reaches only some keys of {place}; {what} reads the whole folder, so it needs a rule without keys")
 }
 
 /// A rule's folder in its one spelling: `/`, or `/a/b` with no empty, `.` or `..` folder and no

@@ -197,6 +197,7 @@ fn postgres() -> Router {
         .route("/v1/secrets/projects/{project}/environments/{env}/secrets", get(|| async { axum::Json(json!([])) }))
         .route("/v1/secrets/projects/{project}/environments/{env}/secrets/{key}/value", get(|| async { axum::Json(json!({ "value": "x" })) }))
         .route("/v1/secrets/projects/{project}/environments/{env}/digest", get(|| async { axum::Json(json!({ "digest": "00" })) }))
+        .route("/v1/secrets/projects/{project}/environments/{env}/diff", post(|| async { axum::Json(json!({})) }))
         .route("/v1/secrets/projects/{project}/environments/{env}/secrets/{key}", axum::routing::put(|| async { axum::Json(json!({})) }))
         .route("/v1/secrets/projects/{project}/health", get(|| async { axum::Json(json!({ "findings": [] })) }))
         .route("/v1/secrets/projects/{project}/transit", get(|| async { axum::Json(json!([])) }))
@@ -2262,8 +2263,8 @@ async fn a_rule_can_grant_one_encryption_key() {
 }
 
 /// A rule limited to some secret keys: a request about one key is decided by it, a folder's
-/// list and values (answered key by key) let it through, and what's answered only per
-/// environment and folder (health), a list or a create don't. Keys are secrets' only.
+/// list, values and digest (answered key by key) let it through, and what's answered only per
+/// environment and folder (a diff, health), a list or a create don't. Keys are secrets' only.
 #[tokio::test]
 async fn a_rule_can_grant_some_secret_keys() {
     let d = Daemon::new(50);
@@ -2276,11 +2277,13 @@ async fn a_rule_can_grant_some_secret_keys() {
     assert_eq!(d.call(&stripe, Method::GET, &at("/values"), None).await.0, StatusCode::OK);
     assert_eq!(d.call(&stripe, Method::GET, &at("/secrets"), None).await.0, StatusCode::OK);
     assert_eq!(d.call(&stripe, Method::GET, "/v1/secrets/projects/prj_a/health", None).await.0, StatusCode::FORBIDDEN);
-    // A whole folder's digest (a watch's) says why: the folder, never a key.
-    let (s, why) = d.call(&stripe, Method::GET, &at("/digest?path=/api"), None).await;
+    // A watch's digest is worked out over its keys; a diff of the whole folder says why not: the
+    // folder, never a key.
+    assert_eq!(d.call(&stripe, Method::GET, &at("/digest?path=/api"), None).await.0, StatusCode::OK);
+    let (s, why) = d.call(&stripe, Method::POST, &at("/diff"), Some(json!({ "path": "/api", "text": "" }))).await;
     let why = why["error"].as_str().unwrap_or_default().to_string();
     assert_eq!(s, StatusCode::FORBIDDEN);
-    assert!(why.contains("only some keys of production:/api; a watch (the folder's digest) reads the whole folder") && !why.contains("STRIPE"), "{why}");
+    assert!(why.contains("only some keys of production:/api; a diff reads the whole folder") && !why.contains("STRIPE"), "{why}");
     assert_eq!(d.call(&stripe, Method::GET, "/v1/secrets/projects/prj_a/environments/staging/secrets/STRIPE_KEY/value", None).await.0, StatusCode::FORBIDDEN);
     let (s, _) = d.call(OPERATOR, Method::POST, "/v1/access/tokens", Some(json!({ "name": "x", "rules": [{ "product": "postgres", "resources": "*", "keys": ["A"], "actions": { "read": "allow" } }] }))).await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
