@@ -1808,6 +1808,8 @@ static ROWS: &[Row] = &[
     row("PUT", "/v1/secrets/projects/{project}/environments/{env}/secrets/{key}/hosts", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path").secret_key(),
     row("DELETE", "/v1/secrets/projects/{project}/environments/{env}/secrets/{key}/hosts", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path").secret_key(),
     // Purging a secret's history can't be undone.
+    // A rotation rewrites every key sharing the credential: roll-secrets asks write on each.
+    row("POST", "/v1/secrets/projects/{project}/environments/{env}/secrets/{key}/rotate", "secrets", W, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path").secret_key(),
     row("POST", "/v1/secrets/projects/{project}/environments/{env}/secrets/{key}/purge", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path").secret_key(),
     // A change request's current and proposed values, for its approvers.
     row("GET", "/v1/secrets/projects/{project}/environments/{env}/requests/{id}/values", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
