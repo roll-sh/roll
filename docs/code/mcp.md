@@ -95,6 +95,7 @@ Repos are `"owner/repo"`. Changes are `"chg_…"` or `"owner/repo#N"`, and work 
 | `list_ai_reviews` | roll's review jobs for a change, oldest first (state, stage, progress, the review made) | `GET /changes/{id}/ai-jobs` |
 | `get_ai_review_pricing`, `get_review_usage` | what an AI review costs by mode; an owner's spend in a month (by repo, mode, key; the cap left) | `GET /pricing`, `GET /owners/{owner}/usage` |
 | `get_reviewer`, `get_review_rules` | how roll reviews a repo (effective settings, model, jobs, index); what a change needs to land | `GET /repos/{r}/reviewer`, `/review-settings` |
+| `list_review_learnings` | what roll's reviewer was taught for the repo; one that may hold an outsider's words is `outside` (the reviewer leaves it out; lockdown withholds it) | `GET /repos/{r}/learnings` |
 | `get_repo_audit` | what changed in the queue and settings (bypasses, pauses, lanes, approved runs, webhooks, review settings, dismissals, stored credentials), newest first (writers) | `GET /repos/{r}/audit` |
 | `start_preview`, `stop_preview` | make a change's preview (it starts on its first visit), or remove it with its database (`destructiveHint`) | `POST`/`DELETE /changes/{id}/preview` |
 | `list_agent_machines` | the owner's machines running `roll agent up` (online, providers) | `GET /agents/{owner}/machines` |
