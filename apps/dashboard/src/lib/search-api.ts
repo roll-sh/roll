@@ -417,6 +417,9 @@ export const searchApi = {
   /** Makes or replaces a stored judgment list with these judged queries. */
   putJudgmentList: (id: string, name: string, judgments: Judgment[], source: "manual" | "import" = "manual") =>
     call<JudgmentList>("PUT", `${cl(id)}/judgments/${encodeURIComponent(name)}`, { judgments, source }),
+  /** Makes or replaces a stored judgment list from an index's click analytics (COEC). */
+  judgmentsFromClicks: (id: string, name: string, body: { index: string; min_searches?: number; max_rank?: number; days?: number }) =>
+    call<JudgmentList>("POST", `${cl(id)}/judgments/${encodeURIComponent(name)}/_from_clicks`, body),
   deleteJudgmentList: (id: string, name: string) => call<{ deleted: string }>("DELETE", `${cl(id)}/judgments/${encodeURIComponent(name)}`),
   /** An index's query suggestions: settings, last build, heaviest suggestions (never wakes the cluster). */
   suggestions: (id: string, index: string) => call<SuggestionsStatus>("GET", `${cl(id)}/indices/${encodeURIComponent(index)}/suggestions`),

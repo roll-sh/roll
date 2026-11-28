@@ -3,6 +3,10 @@
 //! branches, snapshots, restores and exports like any other index and nothing outside the
 //! cluster holds them. `evaluate` reads one by name (`judgments_list`).
 //!
+//! A list can also be built from the index's click analytics (`POST …/judgments/{name}/_from_clicks`,
+//! [`coec`]): clicks over expected clicks at each position, as OpenSearch's implicit judgments
+//! rate them, from counts alone ([`search_es::analytics::Shown`]).
+//!
 //! The routes (`GET /v1/search/clusters/{id}/judgments`, `GET|PUT|DELETE …/judgments/{name}`) run
 //! as the cluster's other routes do, the owner narrowed to the list's index, and touch only an
 //! index whose mapping marks it a list (`_meta.roll_judgments`): one that merely has the name is
@@ -195,6 +199,119 @@ pub fn parse_put(body: &[u8]) -> std::result::Result<(Vec<Judgment>, String), St
     Ok((crate::evaluate::parse_judgments(m.get("judgments"))?, source))
 }
 
+/// What `_from_clicks` builds from: `{index, min_searches?, max_rank?, days?}`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FromClicks {
+    pub index: String,
+    /// Searches a query needs in the window to be judged.
+    pub min_searches: u64,
+    /// Positions counted (1 to [`search_es::analytics::MAX_RANK`]).
+    pub max_rank: u32,
+    /// Days of the daily ring read (1 to 30).
+    pub days: u32,
+}
+
+pub fn parse_from_clicks(body: &[u8]) -> std::result::Result<FromClicks, String> {
+    let v: Value = if body.is_empty() { json!({}) } else { serde_json::from_slice(body).map_err(|e| format!("the body isn't JSON: {e}"))? };
+    let Some(m) = v.as_object() else { return Err("the body is an object {index, min_searches?, max_rank?, days?}".into()) };
+    if let Some(k) = m.keys().find(|k| !["index", "min_searches", "max_rank", "days"].contains(&k.as_str())) {
+        return Err(format!("the body has no field [{k}] (it takes index, min_searches, max_rank, days)"));
+    }
+    let index = m.get("index").and_then(Value::as_str).filter(|i| !i.is_empty() && !i.contains([',', '*']) && i.len() <= 255).ok_or("[index] is the index whose click analytics rate the documents")?;
+    let n = |k: &str, default: u64, max: u64| match m.get(k) {
+        None | Some(Value::Null) => Ok(default),
+        Some(v) => v.as_u64().filter(|n| (1..=max).contains(n)).ok_or(format!("[{k}] is a whole number from 1 to {max}")),
+    };
+    let rank = u64::from(search_es::analytics::MAX_RANK);
+    let min_searches = match m.get("min_searches") {
+        None | Some(Value::Null) => 10,
+        Some(v) => v.as_u64().filter(|n| (MIN_SEARCHES..=1_000_000).contains(n)).ok_or(format!("[min_searches] is a whole number from {MIN_SEARCHES} to 1000000"))?,
+    };
+    Ok(FromClicks { index: index.to_string(), min_searches, max_rank: n("max_rank", rank, rank)? as u32, days: n("days", 30, 30)? as u32 })
+}
+
+/// The fewest searches a query needs to be judged from clicks: one person's unusual searches
+/// alone never make a rating (not an anonymity guarantee: see docs/search/README.md).
+pub const MIN_SEARCHES: u64 = 5;
+/// Days a list built from clicks lasts after its window ends, as analytics' own rows do; saved
+/// again as `manual` or `import` it's the owner's for good.
+pub const CLICK_LIST_DAYS: i64 = 30;
+
+/// Whether a list built from clicks (its mapping's `_meta.roll_judgments`) is past its days at
+/// `now` (unix seconds).
+pub fn expired(meta: &Value, now: i64) -> bool {
+    meta["source"] == "clicks" && meta["clicks"]["to"].as_i64().is_some_and(|to| now > to + CLICK_LIST_DAYS * 86_400)
+}
+
+/// The lists built from clicks to delete in `st`: past their days, or whose source index lost
+/// its analytics, went, or was replaced (another uuid). Deleted in the metering pass, beside the
+/// analytics rows, as suggestions built from analytics are.
+pub fn orphaned(st: &search_es::meta::ClusterState, now: i64) -> Vec<String> {
+    let ix = &st.metadata.indices;
+    ix.values()
+        .filter(|i| i.name.starts_with(PREFIX))
+        .filter(|i| {
+            let meta = serde_json::from_str::<Value>(&i.mapping_json(false).to_json()).ok().map(|v| v["_meta"][META].clone()).unwrap_or(Value::Null);
+            if meta["source"] != "clicks" {
+                return false;
+            }
+            let source = meta["clicks"]["index"].as_str().unwrap_or("");
+            let uuid = meta["clicks"]["index_uuid"].as_str();
+            let live = ix.get(source).is_some_and(|s| search_es::analytics::enabled(s) && uuid.is_none_or(|u| u == s.uuid));
+            !live || expired(&meta, now)
+        })
+        .map(|i| i.name.clone())
+        .collect()
+}
+
+fn round3(v: f64) -> f64 {
+    (v * 1000.0).round() / 1000.0
+}
+
+/// Ratings from click analytics (COEC, clicks over expected clicks, as OpenSearch's
+/// `UBI_JUDGMENT` with `clickModel: coec` computes them): CTR at each position is its clicks over
+/// its impressions, over every query of `buckets`; a document shown for a query with at least
+/// `min_searches` searches is rated its clicks over Σ impressions × CTR(position). Its grade (the
+/// `rating` evaluate takes) is 0 without a click, else COEC rounded up, at most 3; the counts
+/// stay beside it. At most [`MAX_QUERIES`] queries (the most searched) of [`MAX_RATINGS`]
+/// documents (those shown most).
+pub fn coec(buckets: &[&search_es::analytics::Bucket], p: &FromClicks) -> Vec<Stored> {
+    use std::collections::HashMap;
+    let mut searches: HashMap<&str, u64> = HashMap::new();
+    for b in buckets {
+        for (q, s) in b.top.iter() {
+            *searches.entry(q).or_default() += s.searches;
+        }
+    }
+    let cells = buckets.iter().flat_map(|b| b.shown.map.iter().flat_map(|(q, cs)| cs.iter().map(move |((d, pos), c)| (&**q, &**d, *pos, c.impressions, c.clicks))));
+    let judged = search_es::analytics::coec(cells, p.max_rank, |q| searches.get(q).is_some_and(|n| *n >= p.min_searches));
+    let mut by_query = HashMap::new();
+    for j in &judged {
+        by_query.entry(j.query.as_str()).or_insert_with(Vec::new).push(j);
+    }
+    let mut queries: Vec<_> = by_query.into_iter().collect();
+    queries.sort_unstable_by(|a, b| searches[b.0].cmp(&searches[a.0]).then_with(|| a.0.cmp(b.0)));
+    queries.truncate(MAX_QUERIES);
+    let mut out = Vec::new();
+    for (q, mut ds) in queries {
+        ds.sort_unstable_by(|a, b| b.impressions.cmp(&a.impressions).then_with(|| a.doc.cmp(&b.doc)));
+        ds.truncate(MAX_RATINGS);
+        for j in ds {
+            let rating = if j.clicks == 0 { 0 } else { j.coec.ceil().clamp(1.0, 3.0) as i64 };
+            let mut extra = Map::new();
+            extra.insert("coec".into(), json!(j.coec));
+            extra.insert("searches".into(), json!(searches[q]));
+            extra.insert("impressions".into(), json!(j.impressions));
+            extra.insert("clicks".into(), json!(j.clicks));
+            extra.insert("expected_clicks".into(), json!(round3(j.expected)));
+            // No index: a rating is about the document whichever copy of it is evaluated (a
+            // reindexed `-v2`, an alias); the source index is in the list's `_meta`.
+            out.push(Stored { query: q.to_string(), index: String::new(), doc_id: j.doc.clone(), rating, extra });
+        }
+    }
+    out
+}
+
 /// The cluster's answer as an error: its status and reason.
 fn refused(status: u16, out: &[u8]) -> ControlError {
     let v: Value = serde_json::from_slice(out).unwrap_or(Value::Null);
@@ -263,6 +380,9 @@ impl Control {
     pub async fn judgment_list(&self, id: &str, name: &str) -> Result<(Value, Vec<Judgment>)> {
         let index = index_name(name).map_err(ControlError::Invalid)?;
         let Some(meta) = self.list_meta(id, name).await? else { return Err(ControlError::NotFound(format!("no judgment list [{name}]"))) };
+        if expired(&meta, crate::control::now()) {
+            return Err(ControlError::NotFound(format!("judgment list [{name}] was built from clicks and expired {CLICK_LIST_DAYS} days after its window: build it again, or save it as manual to keep it")));
+        }
         let mut ratings = Vec::new();
         let mut after: Option<Value> = None;
         loop {
@@ -322,6 +442,57 @@ impl Control {
         Ok(json!({ "name": name, "index": index, "source": source, "queries": queries, "ratings": ratings.len() }))
     }
 
+    /// `POST …/judgments/{name}/_from_clicks`: list `name` becomes the ratings [`coec`] makes of
+    /// index `p.index`'s click analytics over the last `p.days` days (the daily ring, with what
+    /// this node, the cluster's owner, counted since the last pass). Refused for an index without
+    /// analytics on, and when no query qualifies (an empty list would pass any CI gate).
+    pub async fn judgments_from_clicks(&self, id: &str, name: &str, p: &FromClicks) -> Result<Value> {
+        index_name(name).map_err(ControlError::Invalid)?;
+        let c = self.get(id).await?;
+        let (status, v) = self.list_call(id, "GET", &format!("/{}/_settings?flat_settings=true", urlencoding::encode(&p.index)), &p.index, None).await?;
+        let settings = v.as_object().and_then(|o| o.get(&p.index)).map(|i| i["settings"].clone()).unwrap_or(Value::Null);
+        let on = settings[search_es::analytics::SETTING].as_str() == Some("true");
+        let uuid = settings["index.uuid"].as_str().unwrap_or("").to_string();
+        if status == 404 || !on {
+            return Err(ControlError::Invalid(format!("[{}] has no click analytics: judgments from clicks need {} on the index", p.index, search_es::analytics::SETTING)));
+        }
+        let to = crate::control::now();
+        let from = {
+            let t = to - i64::from(p.days) * 86_400;
+            t - t.rem_euclid(86_400) + 86_400
+        };
+        let pending = self.node.peek_observations(&c.name, &c.id).analytics;
+        let mut owned: Vec<search_es::analytics::Bucket> = self.store.analytics_since(&c.id, Some(&p.index), 86_400, from).await?.into_iter().map(|(_, _, b)| b).collect();
+        owned.extend(pending.hours.into_iter().filter(|(i, h, _)| *i == p.index && (*h as i64).saturating_mul(3600) >= from).map(|(_, _, b)| b));
+        let ratings = coec(&owned.iter().collect::<Vec<_>>(), p);
+        if ratings.is_empty() {
+            return Err(ControlError::Invalid(format!("no query of [{}] was searched {} times with its results shown in the last {} days", p.index, p.min_searches, p.days)));
+        }
+        let mut more = Map::new();
+        more.insert("clicks".into(), json!({ "index": p.index, "index_uuid": uuid, "min_searches": p.min_searches, "max_rank": p.max_rank, "days": p.days, "from": from, "to": to }));
+        self.put_judgment_list(id, name, &ratings, "clicks", more).await
+    }
+
+    /// The metering pass's part, for the clusters loaded here: deletes the lists built from clicks
+    /// whose source lost its analytics, or that are past their days ([`orphaned`]).
+    pub(crate) async fn run_judgment_lists(&self) {
+        for name in self.node.loaded() {
+            let Some(l) = self.node.get_loaded(&name) else { continue };
+            let st = l.cluster.state();
+            drop(l);
+            let gone = orphaned(&st, crate::control::now());
+            if gone.is_empty() {
+                continue;
+            }
+            let Ok(c) = self.get(&name).await else { continue };
+            for index in gone {
+                if let Err(e) = self.list_call(&c.id, "DELETE", &format!("/{index}"), &index, None).await {
+                    tracing::warn!(cluster = name, index, error = %e, "deleting a judgment list built from clicks failed");
+                }
+            }
+        }
+    }
+
     /// `DELETE …/judgments/{name}`: the list's index goes.
     pub async fn delete_judgment_list(&self, id: &str, name: &str) -> Result<Value> {
         let index = index_name(name).map_err(ControlError::Invalid)?;
@@ -367,5 +538,31 @@ mod tests {
         ]));
         let bad = json!({ "_id": "x", "_source": { "query": "red", "doc_id": "1", "rating": 101 } });
         assert!(stored(&bad).unwrap_err().contains("0 to 100"));
+    }
+
+    /// The events OpenSearch 3.9.0's `UBI_JUDGMENT` (`clickModel: coec`) rated, as roll's counts:
+    /// "red shoe" searched 5 times showing documents 1 to 4 at positions 1 to 4, document 2
+    /// clicked at 2 three times and document 1 at 1 once; "model 3" twice showing 3 then 1, 3
+    /// clicked twice. OpenSearch rated them 0.467, 1.400, 0.000, 0.000 and 2.333, 0.000.
+    #[test]
+    fn clicks_rate_as_opensearch_rates_them() {
+        use search_es::analytics::{Bucket, Cell};
+        let mut b = Bucket::decode(r#"{"q": [["red shoe", 5], ["model 3", 2]]}"#, 10, 10);
+        let mut put = |q: &str, d: &str, p: u32, impressions: u64, clicks: u64| {
+            b.shown.map.entry(q.into()).or_default().insert((d.into(), p), Cell { impressions, clicks });
+        };
+        for (d, p) in [("1", 1), ("2", 2), ("3", 3), ("4", 4)] {
+            put("red shoe", d, p, 5, match d { "1" => 1, "2" => 3, _ => 0 });
+        }
+        put("model 3", "3", 1, 2, 2);
+        put("model 3", "1", 2, 2, 0);
+        let p = FromClicks { index: "products".into(), min_searches: 2, max_rank: 20, days: 30 };
+        let rated: Vec<(String, String, f64, i64)> = coec(&[&b], &p).into_iter().map(|r| (r.query, r.doc_id, r.extra["coec"].as_f64().unwrap(), r.rating)).collect();
+        let want = [("red shoe", "1", 0.467, 1), ("red shoe", "2", 1.4, 2), ("red shoe", "3", 0.0, 0), ("red shoe", "4", 0.0, 0), ("model 3", "1", 0.0, 0), ("model 3", "3", 2.333, 3)];
+        let mut got = rated.clone();
+        got.sort_by(|a, b| (b.0.clone(), a.1.clone()).cmp(&(a.0.clone(), b.1.clone())));
+        assert_eq!(got, want.iter().map(|(q, d, v, r)| (q.to_string(), d.to_string(), *v, *r)).collect::<Vec<_>>());
+        // Too few searches: not judged.
+        assert!(coec(&[&b], &FromClicks { min_searches: 6, ..p }).is_empty());
     }
 }

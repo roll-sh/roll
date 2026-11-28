@@ -102,6 +102,7 @@ pub fn router(control: Arc<Control>) -> Router {
         .route("/v1/search/clusters/{id}/synonyms/{set}/{rule}", get(synonym_rule_get).put(synonym_rule_put).delete(synonym_rule_delete))
         .route("/v1/search/clusters/{id}/judgments", get(judgment_lists))
         .route("/v1/search/clusters/{id}/judgments/{name}", get(judgment_list_get).put(judgment_list_put).delete(judgment_list_delete))
+        .route("/v1/search/clusters/{id}/judgments/{name}/_from_clicks", post(judgment_list_from_clicks))
         .route("/v1/search/clusters/{id}/query_rules", get(rulesets_list))
         .route("/v1/search/clusters/{id}/query_rules/{ruleset}", get(ruleset_get).put(ruleset_put).delete(ruleset_delete))
         .route("/v1/search/clusters/{id}/query_rules/{ruleset}/test", post(ruleset_test))
@@ -926,6 +927,13 @@ async fn judgment_list_put(State(c): State<AppState>, Path((id, name)): Path<(St
     drop(held);
     let ratings = crate::judgments::flatten(&judgments);
     Ok(Json(c.put_judgment_list(&id, &name, &ratings, &source, serde_json::Map::new()).await?))
+}
+
+/// `POST …/judgments/{name}/_from_clicks`: makes or replaces list `name` from an index's click
+/// analytics (`{index, min_searches?, max_rank?, days?}`, [`crate::judgments::coec`]).
+async fn judgment_list_from_clicks(State(c): State<AppState>, Path((id, name)): Path<(String, String)>, body: bytes::Bytes) -> ApiResult<Value> {
+    let p = crate::judgments::parse_from_clicks(&body).map_err(ControlError::Invalid)?;
+    Ok(Json(c.judgments_from_clicks(&id, &name, &p).await?))
 }
 
 /// `DELETE …/judgments/{name}`: the list's index goes.

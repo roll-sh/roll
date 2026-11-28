@@ -3035,6 +3035,8 @@ impl Control {
         }
         // After the analytics above are in the catalog.
         Box::pin(self.run_suggestions()).await;
+        // Lists built from clicks go with their source's analytics, and after their days.
+        Box::pin(self.run_judgment_lists()).await;
         Ok(())
     }
 

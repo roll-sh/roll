@@ -8135,6 +8135,94 @@ async fn evaluate_scores_configurations_on_judged_queries() {
     }
 }
 
+/// Judgments from clicks: searches with analytics on count what they showed at each position,
+/// `search_click` events what was clicked there, and `_from_clicks` rates each document as
+/// OpenSearch's implicit judgments do (COEC) on the same events, after the metering pass too.
+#[tokio::test]
+async fn judgments_are_built_from_clicks() {
+    use reqwest::Method;
+    let e = env().await;
+    let c = e.post("/v1/search/clusters", json!({"name": "clicked"})).await;
+    let (user, pw) = creds(&c);
+    let id = c["id"].as_str().unwrap().to_string();
+    let es = |m: Method, p: &str, b: Option<Value>| {
+        let (user, pw, p, e) = (user.clone(), pw.clone(), p.to_string(), &e);
+        async move {
+            let (s, v) = e.es(&user, &pw, m, &p, b).await;
+            assert!(s < 300, "{p}: {s} {v}");
+            v
+        }
+    };
+    for (doc, rank, m3) in [("1", 1, 2), ("2", 2, 3), ("3", 3, 1), ("4", 4, 4)] {
+        es(Method::PUT, &format!("/products/_doc/{doc}?refresh=true"), Some(json!({"rank": rank, "m3": m3}))).await;
+    }
+    let from_clicks = format!("/v1/search/clusters/{id}/judgments/clicked/_from_clicks");
+    let build = |body: Value| e.call(Method::POST, &from_clicks, Some(body));
+    let (s, v) = build(json!({"index": "products"})).await;
+    assert!(s == 400 && v.to_string().contains("index.roll.analytics.enabled"), "{s} {v}");
+    es(Method::PUT, "/products/_settings", Some(json!({"index.roll.analytics.enabled": true}))).await;
+    es(Method::PUT, "/_application/analytics/web", None).await;
+    // Each search shows its documents in a fixed order: "red shoe" 1 to 4, "model 3" 3 then 1.
+    let shown = async |text: &str, ids: &[&str], by: &str| {
+        let mut sort = serde_json::Map::new();
+        sort.insert(by.to_string(), json!("asc"));
+        let body = json!({"query": {"ids": {"values": ids}}, "sort": [sort]});
+        let r = e.http.post(format!("{}/products/_search", e.es)).basic_auth(&user, Some(&pw)).header("x-roll-search-query", text).json(&body).send().await.unwrap();
+        assert_eq!(r.status().as_u16(), 200);
+    };
+    let click = async |query: &str, doc: &str, shown: &[&str]| {
+        let items: Vec<Value> = shown.iter().map(|d| json!({"document": {"index": "products", "id": d}})).collect();
+        let ev = json!({"session": {"id": "s1"}, "user": {"id": "u1"}, "document": {"index": "products", "id": doc}, "search": {"query": query, "results": {"items": items}}});
+        es(Method::POST, "/_application/analytics/web/event/search_click", Some(ev)).await;
+    };
+    let red = ["1", "2", "3", "4"];
+    for _ in 0..5 {
+        shown("red shoe", &red, "rank").await;
+    }
+    for _ in 0..2 {
+        shown("model 3", &["3", "1"], "m3").await;
+        click("model 3", "3", &["3", "1"]).await;
+    }
+    for _ in 0..3 {
+        click("red shoe", "2", &red).await;
+    }
+    click("red shoe", "1", &red).await;
+    // A click on a document no search showed (a made-up id, at a position nothing filled)
+    // counts nowhere: the ratings and CTR below are OpenSearch's for the events above alone.
+    click("red shoe", "9", &["9"]).await;
+    click("red shoe", "4", &["4"]).await;
+    let (s, v) = build(json!({"index": "products", "min_searches": 2})).await;
+    assert!(s == 400 && v.to_string().contains("from 5"), "one person's searches never make a rating: {s} {v}");
+    // What the node counted, then what the catalog keeps after the metering pass. "model 3"
+    // (2 searches) isn't judged, yet its cells count toward CTR at each position.
+    for pass in [false, true] {
+        if pass {
+            e.control.sample().await.unwrap();
+        }
+        let (s, v) = build(json!({"index": "products", "min_searches": 5})).await;
+        assert_eq!((s, &v["source"], &v["ratings"]), (200, &json!("clicks"), &json!(4)), "{v}");
+        let mut rows: Vec<(String, String, f64, i64)> = Vec::new();
+        let hits = es(Method::POST, "/roll-judgments-clicked/_search", Some(json!({"size": 20}))).await;
+        for h in hits["hits"]["hits"].as_array().unwrap() {
+            let s = &h["_source"];
+            rows.push((s["query"].as_str().unwrap().into(), s["doc_id"].as_str().unwrap().into(), s["coec"].as_f64().unwrap(), s["rating"].as_i64().unwrap()));
+        }
+        rows.sort_by(|a, b| (&b.0, &a.1).cmp(&(&a.0, &b.1)));
+        let want: Vec<(String, String, f64, i64)> = [("red shoe", "1", 0.467, 1), ("red shoe", "2", 1.4, 2), ("red shoe", "3", 0.0, 0), ("red shoe", "4", 0.0, 0)]
+            .iter()
+            .map(|(q, d, v, r)| (q.to_string(), d.to_string(), *v, *r))
+            .collect();
+        assert_eq!(rows, want, "after the pass: {pass}");
+    }
+    let (s, v) = build(json!({"index": "products", "min_searches": 6})).await;
+    assert!(s == 400 && v.to_string().contains("searched 6 times"), "{s} {v}");
+    // Turning analytics off deletes the lists built from them in the next pass.
+    es(Method::PUT, "/products/_settings", Some(json!({"index.roll.analytics.enabled": false}))).await;
+    e.control.sample().await.unwrap();
+    let (s, _) = e.call(Method::GET, &format!("/v1/search/clusters/{id}/judgments/clicked"), None).await;
+    assert_eq!(s, 404);
+}
+
 /// The OTLP intake and an `otel` key, held to the cluster's shard limit like any create.
 #[tokio::test]
 async fn otlp_logs_land_in_otel_data_streams_with_an_otel_key() {
