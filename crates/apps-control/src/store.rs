@@ -2480,12 +2480,13 @@ impl Store {
     }
 
     /// One more check run or ping (`ok`), or failure or miss, on `day` (days since 1970), and
-    /// what it is now (`up`: a check is down only after its failures in a row, not one try):
+    /// what it is now (`up`, `degraded` or `down`: a check is down only after its failures in a
+    /// row, not one try, and degraded while it's slow):
     /// what it was before, when that changed. Once a day, days and resolved incidents past
     /// [`crate::status_page::DAYS`] go.
-    pub fn status_day_add(&self, key: &str, day: i64, ok: bool, up: bool) -> Result<Option<Option<String>>> {
+    pub fn status_day_add(&self, key: &str, day: i64, ok: bool, now: &str) -> Result<Option<Option<String>>> {
         let (g, b) = if ok { (1, 0) } else { (0, 1) };
-        let (last_key, now) = (format!("status-last:{key}"), if up { "up" } else { "down" });
+        let last_key = format!("status-last:{key}");
         let changed = self.db.write(|c| {
             c.execute(
                 "INSERT INTO status_days (key, day, ok, bad) VALUES (?, ?, ?, ?) ON CONFLICT (key, day) DO UPDATE SET ok = status_days.ok + excluded.ok, bad = status_days.bad + excluded.bad",
