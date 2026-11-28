@@ -1732,9 +1732,9 @@ async fn a_reviewers_own_screen_is_kept_with_their_note() {
     };
     let jpeg = encode(8, 8, image::ImageFormat::Jpeg);
     assert!(jpeg.len() < 1024, "a few hundred bytes");
-    let refused = [b"<svg onload=alert(1)>".to_vec(), encode(1601, 1, image::ImageFormat::Png), [&jpeg[..jpeg.len() / 2], &[0; 16]].concat(), vec![0xff; roll_previews::notes::SCREEN_MAX + 1]];
+    let refused = [b"<svg onload=alert(1)>".to_vec(), encode(1601, 1, image::ImageFormat::Png), [&jpeg[..jpeg.len() / 2], &[0; 16]].concat(), [&jpeg[..], &vec![0; roll_previews::notes::SCREEN_MAX][..]].concat()];
     for bad in refused {
-        assert!(matches!(e.engine.keep_screen(&p.id, None, bad).await, Err(roll_previews::Error::BadRequest(_))), "not an image, too wide, cut short, too big");
+        assert!(matches!(e.engine.keep_screen(&p.id, None, bad).await, Err(roll_previews::Error::BadRequest(_))), "not an image, too wide, cut short, too big (a whole picture with a megabyte after it)");
     }
     let token = e.engine.keep_screen(&p.id, None, jpeg.clone()).await.unwrap();
     let note = roll_previews::notes::Note { id: "rv_own".into(), path: "/cart".into(), selector: "button.pay".into(), note: "Cut off".into(), by: "ada".into(), at: 1, replies: Vec::new(), crop: false, crop_as: None, crop_own: false, seen: Default::default(), outside: false, work: None };
