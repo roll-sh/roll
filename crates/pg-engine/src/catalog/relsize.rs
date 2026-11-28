@@ -723,6 +723,20 @@ pub fn index_tuple(
     size.size()
 }
 
+/// `index_tuple`'s size of a key with no nulls when every one of `types` has a fixed length:
+/// the same for all such keys (each datum aligned, then its length, as `datum_bytes` adds it).
+pub fn fixed_index_tuple(types: &[DataType]) -> Option<usize> {
+    let mut off = 8;
+    for ty in types {
+        let (len, al) = type_layout(ty);
+        if len <= 0 {
+            return None;
+        }
+        off = align(off, al) + len as usize;
+    }
+    Some(align(off, MAXALIGN))
+}
+
 /// `index_tuple` attribute by attribute: after each `push`, `size` is the tuple's size
 /// holding the attributes pushed so far (each prefix's in one pass). A null bitmap moves
 /// every later datum by 8 bytes (the header grows from 8 to 16 bytes, and nothing is
