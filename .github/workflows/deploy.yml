@@ -23,6 +23,8 @@ on:
 permissions:
   contents: read
   id-token: write
+  # A failed deploy opens (or comments on) an issue; the next green one closes it (report.sh).
+  issues: write
 
 jobs:
   deploy:
@@ -55,11 +57,14 @@ jobs:
           fi
           aws --version
       - uses: docker/setup-buildx-action@v3
+      # Each step's output also goes to deploy.log, for the issue a failure opens.
       - name: Build and push
         if: inputs.tag == ''
-        run: deploy/cloud/deploy.sh push "$TAG"
+        shell: bash
+        run: deploy/cloud/deploy.sh push "$TAG" 2>&1 | tee -a "$RUNNER_TEMP/deploy.log"
       - name: Canary, bake, roll
-        run: deploy/cloud/deploy.sh deploy "$TAG"
+        shell: bash
+        run: deploy/cloud/deploy.sh deploy "$TAG" 2>&1 | tee -a "$RUNNER_TEMP/deploy.log"
       # deploy.sh rolls back on its own failures; this covers a cancelled job (or a runner that
       # died mid-rollback). It's a no-op when the fleet already runs the previous revision.
       - name: Roll back
@@ -70,6 +75,17 @@ jobs:
           else
             echo "nothing was deployed"
           fi
+      # Loud: a failure stays visible as an open issue until a deploy goes out.
+      - name: Report the failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: deploy/cloud/report.sh failed "$RUNNER_TEMP/deploy.log"
+      - name: Close the failure issue
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: deploy/cloud/report.sh deployed
 
   # Read only, beside a running deploy: alarms, the minutes their metrics breached, the services'
   # events and the stopped nodes' reasons.

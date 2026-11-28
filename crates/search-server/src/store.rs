@@ -43,7 +43,8 @@ struct ClusterMeta {
 #[async_trait]
 impl MetaStore for ClusterMeta {
     async fn load(&self) -> anyhow::Result<Option<Bytes>> {
-        Ok(self.store.read_cluster(&self.cluster).await?.map(|s| s.json))
+        // A reset due is carried out first (`Store::begin_reset`).
+        Ok(self.store.load_cluster(&self.cluster).await?.map(|s| s.json))
     }
 
     async fn save(&self, _version: u64, state: Bytes) -> anyhow::Result<()> {

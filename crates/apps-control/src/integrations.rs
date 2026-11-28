@@ -253,10 +253,11 @@ pub trait SecretSource: Send + Sync {
     }
     /// `reference`'s value for one request of `who`'s on `service` in `env` (a domain's
     /// Cloudflare token), read as them that once and kept by nothing: refused unless they may
-    /// reveal it now (an approval of an `ask` there is enough), never a sensitive key (roll
-    /// secrets' #1238). Audited as their use, for `purpose`, sent only to `to`.
+    /// reveal it now (an approval of an `ask` there is enough), and a sensitive key only when its
+    /// folder's admin opted it in for `use_id` (a fixed id: [`DNS_USE`]) and `to` is set. Audited
+    /// as their use, for `purpose`, sent only to `to`.
     #[allow(clippy::too_many_arguments)]
-    async fn use_once(&self, _who: Asker<'_>, _project: &str, _env: &str, _service: &str, _reference: &str, _purpose: &str, _to: Option<&'static str>) -> anyhow::Result<String> {
+    async fn use_once(&self, _who: Asker<'_>, _project: &str, _env: &str, _service: &str, _reference: &str, _use_id: &'static str, _purpose: &str, _to: Option<&'static str>) -> anyhow::Result<String> {
         anyhow::bail!("roll secrets isn't on this node")
     }
 }
@@ -273,14 +274,20 @@ pub struct Note {
 }
 
 /// roll previews' snapshots from a team's own tests (a Playwright test's PNG for the visual
-/// review): `POST /__roll/snapshot?name=` on a preview's host, with the project's bypass secret.
-/// rolld fills it with roll previews' engine, which checks the preview (`env`, `pv-<id>`) runs on
-/// `service` before taking anything. Its answer is the snapshot's (`{page, head}`); a bad name is
-/// a `BadRequest`, a preview that can't take one (full, going, another service's) a `Conflict`.
+/// review): `POST /__roll/snapshot?name=&head=` on a preview's host, with the project's bypass
+/// secret. rolld fills it with roll previews' engine, which checks the preview (`env`, `pv-<id>`)
+/// runs on `service` before taking anything. `head` is the head the test ran against: a picture of
+/// a head the preview doesn't serve is a `Conflict`. Its answer is the snapshot's (`{page, head}`);
+/// a bad name is a `BadRequest`, a preview that can't take one (full, going, another service's, at
+/// another head) a `Conflict`.
 #[async_trait]
 pub trait PreviewSnapshots: Send + Sync {
-    async fn snapshot(&self, service: &str, env: &str, name: &str, png: bytes::Bytes) -> crate::Result<serde_json::Value>;
+    async fn snapshot(&self, service: &str, env: &str, name: &str, head: Option<&str>, png: bytes::Bytes) -> crate::Result<serde_json::Value>;
 }
+
+/// roll apps' use of a customer's DNS token (`SecretSource::use_once`): a sensitive token is read
+/// for it only when its folder's admin opted it in (roll secrets' tag `use-apps-dns`).
+pub const DNS_USE: &str = "apps.dns";
 
 /// Writes a custom domain's records at the customer's DNS provider with a token of theirs (rolld:
 /// Cloudflare, through roll-edge's client). The token is used for one call and never kept.

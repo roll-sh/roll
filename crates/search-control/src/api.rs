@@ -49,6 +49,11 @@ impl IntoResponse for ControlError {
             ControlError::Forbidden(_) => StatusCode::FORBIDDEN,
             ControlError::Busy(_) => StatusCode::TOO_MANY_REQUESTS,
             ControlError::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
+            ControlError::NotReset { pending, .. } => {
+                let status = if *pending { StatusCode::SERVICE_UNAVAILABLE } else { StatusCode::CONFLICT };
+                let reset = if *pending { "pending" } else { "dropped" };
+                return (status, Json(json!({ "error": self.to_string(), "reset": reset }))).into_response();
+            }
             ControlError::Internal(e) => {
                 tracing::warn!(error = %e, "search control error");
                 StatusCode::INTERNAL_SERVER_ERROR
@@ -67,6 +72,7 @@ pub fn router(control: Arc<Control>) -> Router {
         .route("/v1/search/clusters/{id}/password", post(rotate))
         .route("/v1/search/clusters/{id}/unload", post(unload))
         .route("/v1/search/clusters/{id}/restore", post(restore))
+        .route("/v1/search/clusters/{id}/reset", post(reset))
         .route("/v1/search/clusters/{id}/indices", get(indices))
         .route("/v1/search/clusters/{id}/request", post(request))
         .route("/v1/search/clusters/{id}/usage", get(usage))
@@ -94,6 +100,9 @@ pub fn router(control: Arc<Control>) -> Router {
         .route("/v1/search/clusters/{id}/synonyms", get(synonyms_list))
         .route("/v1/search/clusters/{id}/synonyms/{set}", get(synonyms_get).put(synonyms_put).delete(synonyms_delete))
         .route("/v1/search/clusters/{id}/synonyms/{set}/{rule}", get(synonym_rule_get).put(synonym_rule_put).delete(synonym_rule_delete))
+        .route("/v1/search/clusters/{id}/judgments", get(judgment_lists))
+        .route("/v1/search/clusters/{id}/judgments/{name}", get(judgment_list_get).put(judgment_list_put).delete(judgment_list_delete))
+        .route("/v1/search/clusters/{id}/judgments/{name}/_from_clicks", post(judgment_list_from_clicks))
         .route("/v1/search/clusters/{id}/query_rules", get(rulesets_list))
         .route("/v1/search/clusters/{id}/query_rules/{ruleset}", get(ruleset_get).put(ruleset_put).delete(ruleset_delete))
         .route("/v1/search/clusters/{id}/query_rules/{ruleset}/test", post(ruleset_test))
@@ -505,10 +514,10 @@ async fn update(State(c): State<AppState>, caller: Caller, Path(id): Path<String
     Ok(Json(view(&c, &caller, d, false).await?))
 }
 
-async fn remove(State(c): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
+async fn remove(State(c): State<AppState>, Path(id): Path<String>) -> Result<Response, ControlError> {
     let d = c.get(&id).await?;
     c.delete(&d.id).await?;
-    Ok(Json(json!({ "deleted": d.id, "name": d.name })))
+    Ok(Json(json!({ "deleted": d.id, "name": d.name })).into_response())
 }
 
 #[derive(Deserialize)]
@@ -531,6 +540,32 @@ async fn branch(State(c): State<AppState>, caller: Caller, Path(id): Path<String
         c.branched(&parent, &d).await?;
     }
     Ok(Json(view(&c, &caller, d, true).await?).into_response())
+}
+
+/// `POST …/reset`'s body: the copy (or other branch) the branch is reset to, by id or name.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResetReq {
+    from: String,
+}
+
+/// Resets a branch in place to a copy of it ([`Control::reset`]).
+async fn reset(State(c): State<AppState>, caller: Caller, Path(id): Path<String>, body: bytes::Bytes) -> Result<Response, ControlError> {
+    let r: ResetReq = serde_json::from_slice(&body).map_err(|e| ControlError::Invalid(format!("invalid request: {e}")))?;
+    let b = c.get(&id).await?;
+    // The copy is one the caller may write, as branching it needs (the branch's check is the
+    // gate's); one it can't see is a 404.
+    let from = match c.get(&r.from).await {
+        Ok(f) if caller.may(&f, roll_auth::scope::Action::Write).await => f,
+        Ok(f) if caller.sees(&f).await => return Err(ControlError::Forbidden(format!("resetting from {} needs write on it", f.name))),
+        Ok(_) | Err(ControlError::NotFound(_)) => return Err(ControlError::NotFound(format!("no search cluster {}", r.from))),
+        Err(e) => return Err(e),
+    };
+    // On the branch's owner already: `per_cluster` sends every per-cluster route there.
+    let d = c.reset(&b, &from).await?;
+    let mut v = serde_json::to_value(view(&c, &caller, d, false).await?).map_err(|e| ControlError::Internal(e.into()))?;
+    v["reset"] = json!("applied");
+    Ok(Json(v).into_response())
 }
 
 async fn branches(State(c): State<AppState>, caller: Caller, Path(id): Path<String>) -> ApiResult<Vec<ClusterView>> {
@@ -828,14 +863,28 @@ index_route!(index_delete_by_query, "POST", "/delete_by_query", "/_delete_by_que
 /// list by the cluster's `_rank_eval` on that index, run as the index's routes run (the owner
 /// narrowed to the index), and compared query by query ([`crate::evaluate`]). A configuration the
 /// cluster refuses answers the cluster's own error.
-async fn index_evaluate(State(c): State<AppState>, Path((id, index)): Path<(String, String)>, headers: HeaderMap, body: Body) -> Result<Response, ControlError> {
+///
+/// A stored list (`judgments_list`) is read from its own index, so the caller's decision must
+/// reach that index too ([`roll_auth::OtherIndex`]): a token limited to some indices passes its
+/// judgments inline or is granted the list's index as well.
+async fn index_evaluate(State(c): State<AppState>, Path((id, index)): Path<(String, String)>, headers: HeaderMap, ext: Extensions, body: Body) -> Result<Response, ControlError> {
     let seg = index_segment(&index, true)?;
     let cluster = c.get(&id).await?;
     let mut held = Reservation::none();
     let bytes = read_limited(body, (cluster.max_body_mb.max(1) as usize) << 20, declared(&headers), c.node.body_budget(), &mut held).await.map_err(|e| read_error(&cluster, e))?;
-    let spec = crate::evaluate::parse(&bytes).map_err(ControlError::Invalid)?;
-    crate::evaluate::check_ratings_name(&spec, &index).map_err(ControlError::Invalid)?;
+    let mut spec = crate::evaluate::parse(&bytes).map_err(ControlError::Invalid)?;
     drop(held);
+    if let Some(name) = spec.list.clone() {
+        let list_index = crate::judgments::index_name(&name).map_err(ControlError::Invalid)?;
+        if !roll_auth::OtherIndex::reaches(&ext, &list_index, roll_auth::scope::Action::Read) {
+            return Err(ControlError::Forbidden(format!("this grant doesn't read [{list_index}], the judgment list's index: pass the judgments inline, or allow read on it too (a rule that asks doesn't ask here: it refuses)")));
+        }
+        spec.judgments = c.judgment_list(&id, &name).await?.1;
+        if spec.judgments.is_empty() {
+            return Err(ControlError::Invalid(format!("judgment list [{name}] judges no queries")));
+        }
+    }
+    crate::evaluate::check_ratings_name(&spec, &index).map_err(ControlError::Invalid)?;
     let mut answers = Vec::with_capacity(spec.configurations.len());
     for conf in &spec.configurations {
         let body = match &conf.application {
@@ -854,6 +903,42 @@ async fn index_evaluate(State(c): State<AppState>, Path((id, index)): Path<(Stri
         answers.push(serde_json::from_slice::<Value>(&out).map_err(|e| ControlError::Internal(anyhow::anyhow!("rank_eval answered no JSON: {e}")))?);
     }
     Ok(Json(crate::evaluate::answer(&spec, &answers)).into_response())
+}
+
+/// `GET …/judgments`: the cluster's judgment lists ([`crate::judgments`]).
+async fn judgment_lists(State(c): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
+    Ok(Json(c.judgment_lists(&id).await?))
+}
+
+/// `GET …/judgments/{name}`: how the list was built and its judged queries, in `evaluate`'s shape.
+async fn judgment_list_get(State(c): State<AppState>, Path((id, name)): Path<(String, String)>) -> ApiResult<Value> {
+    let (meta, judgments) = c.judgment_list(&id, &name).await?;
+    Ok(Json(json!({ "name": name, "index": crate::judgments::index_name(&name).unwrap_or_default(), "meta": meta, "judgments": crate::judgments::judgments_json(&judgments) })))
+}
+
+/// `PUT …/judgments/{name}`: makes or replaces list `name` with the judged queries given
+/// (`{judgments, source?}`, `evaluate`'s shape).
+async fn judgment_list_put(State(c): State<AppState>, Path((id, name)): Path<(String, String)>, headers: HeaderMap, body: Body) -> ApiResult<Value> {
+    crate::judgments::index_name(&name).map_err(ControlError::Invalid)?;
+    let cluster = c.get(&id).await?;
+    let mut held = Reservation::none();
+    let bytes = read_limited(body, (cluster.max_body_mb.max(1) as usize) << 20, declared(&headers), c.node.body_budget(), &mut held).await.map_err(|e| read_error(&cluster, e))?;
+    let (judgments, source) = crate::judgments::parse_put(&bytes).map_err(ControlError::Invalid)?;
+    drop(held);
+    let ratings = crate::judgments::flatten(&judgments);
+    Ok(Json(c.put_judgment_list(&id, &name, &ratings, &source, serde_json::Map::new()).await?))
+}
+
+/// `POST …/judgments/{name}/_from_clicks`: makes or replaces list `name` from an index's click
+/// analytics (`{index, min_searches?, max_rank?, days?}`, [`crate::judgments::coec`]).
+async fn judgment_list_from_clicks(State(c): State<AppState>, Path((id, name)): Path<(String, String)>, body: bytes::Bytes) -> ApiResult<Value> {
+    let p = crate::judgments::parse_from_clicks(&body).map_err(ControlError::Invalid)?;
+    Ok(Json(c.judgments_from_clicks(&id, &name, &p).await?))
+}
+
+/// `DELETE …/judgments/{name}`: the list's index goes.
+async fn judgment_list_delete(State(c): State<AppState>, Path((id, name)): Path<(String, String)>) -> ApiResult<Value> {
+    Ok(Json(c.delete_judgment_list(&id, &name).await?))
 }
 
 /// An application's configuration as `_rank_eval` takes it: each judged query rendered by the

@@ -1721,6 +1721,7 @@ contexts of x-pack's version allowlist), `EsObj::Version`, `contexts::version_al
 | PATCH  | `/v1/search/clusters/{id}`                       | settings: idle timeout, flavor, limits, `protected` |
 | DELETE | `/v1/search/clusters/{id}`                       | |
 | POST   | `/v1/search/clusters/{id}/branches`              | branch `{name, at?}` |
+| POST   | `/v1/search/clusters/{id}/reset`                 | reset a branch in place to `{from}`, a copy of it; the answer's `reset` is `applied` (200), `dropped` (409) or `pending` (503); any other 409, 503 or 5xx: retry, it converges; 400 and 404 are final |
 | POST   | `/v1/search/clusters/{id}/password`              | rotate (with `secret`: kept in roll secrets, answered without it) |
 | POST   | `/v1/search/clusters/{id}/unload`                | put it to sleep now |
 | GET    | `/v1/search/clusters/{id}/indices`               | indices with docs, size, health |
@@ -1729,7 +1730,12 @@ contexts of x-pack's version allowlist), `EsObj::Version`, `contexts::version_al
 | GET    | `/v1/search/clusters/{id}/metrics`               | request rate, latency percentiles, errors and rejections by kind (`?range=1h\|24h\|14d`) |
 | GET    | `/v1/search/clusters/{id}/slowlog`               | the search and indexing slow logs, newest first (at most 500) |
 | POST   | `/v1/search/clusters/{id}/indices/{index}/update_by_query` | `_update_by_query` on that one index (`{query?, script?, max_docs?, conflicts?, slices?}`); 202 `{task}` with `wait_for_completion=false` |
-| POST   | `/v1/search/clusters/{id}/indices/{index}/evaluate` | one or two configurations scored by `_rank_eval` against `judgments` and compared query by query (`{judgments, configurations, metric?}`) |
+| POST   | `/v1/search/clusters/{id}/indices/{index}/evaluate` | one or two configurations scored by `_rank_eval` against `judgments` (or a stored `judgments_list`) and compared query by query (`{judgments \| judgments_list, configurations, metric?}`) |
+| GET    | `/v1/search/clusters/{id}/judgments` | the stored judgment lists (`{lists: [{name, index, source, queries, ratings, built_at}]}`) |
+| GET    | `/v1/search/clusters/{id}/judgments/{name}` | one list: `{name, index, meta, judgments}`, `judgments` in `evaluate`'s shape |
+| PUT    | `/v1/search/clusters/{id}/judgments/{name}` | make or replace a list (`{judgments, source?}`): `{name, index, source, queries, ratings}` |
+| DELETE | `/v1/search/clusters/{id}/judgments/{name}` | delete a list and its index |
+| POST   | `/v1/search/clusters/{id}/judgments/{name}/_from_clicks` | make or replace a list from an index's click analytics (`{index, min_searches?, max_rank?, days?}`, COEC) |
 | GET    | `/v1/search/clusters/{id}/tasks/{task}`          | `_tasks/<task>`: status, and the result once `completed` |
 
 Errors follow the other control planes: `{"error": "..."}` with 400/404/409/500, plus 413 when a

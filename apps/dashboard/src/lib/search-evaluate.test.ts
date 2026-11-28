@@ -1,7 +1,7 @@
 // Tests of offline evaluation's dashboard logic: judged queries from JSON or CSV (vitest).
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { parseConfiguration, parseJudgments } from "./search-evaluate";
+import { parseConfiguration, parseJudgments, validListName } from "./search-evaluate";
 
 test("judged queries come from CSV grouped by query, or from JSON as the route takes them", () => {
   const csv = "Query,doc_id,Rating\nred shoes,1,3\nblue,9,0\nred shoes,7,1\n";
@@ -15,4 +15,9 @@ test("judged queries come from CSV grouped by query, or from JSON as the route t
   // A bare search body is the request; an application stays one.
   assert.deepEqual(parseConfiguration("b", '{"application":"shop"}'), { name: "b", application: "shop" });
   assert.deepEqual(parseConfiguration("a", '{"query":{"match":{"t":"{{query}}"}}}'), { name: "a", request: { query: { match: { t: "{{query}}" } } } });
+});
+
+test("a judgment list's name is what the control plane takes", () => {
+  for (const ok of ["shop", "shop-v2", "a_1"]) assert.equal(validListName(ok), true, ok);
+  for (const bad of ["", "-x", "Shop", "a/b", "x".repeat(65)]) assert.equal(validListName(bad), false, bad);
 });

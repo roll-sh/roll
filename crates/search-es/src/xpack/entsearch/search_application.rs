@@ -754,7 +754,7 @@ fn record_index_event(ctx: &Ctx, body: &Map, outcome: crate::analytics::Outcome)
     };
     let id = doc.and_then(|d| d.get("id")).map(Value::to_es_string);
     let search = body.get("search");
-    let position = id.and_then(|id| {
+    let position = id.as_ref().and_then(|id| {
         let items = search?.get("results")?.get("items")?.as_array()?;
         let at = items.iter().position(|it| it.get("document").and_then(|d| d.get("id")).map(Value::to_es_string).as_deref() == Some(id.as_str()))?;
         let page = search.and_then(|s| s.get("page"));
@@ -763,7 +763,7 @@ fn record_index_event(ctx: &Ctx, body: &Map, outcome: crate::analytics::Outcome)
         u32::try_from(before.saturating_add(at as u64 + 1)).ok()
     });
     match outcome {
-        crate::analytics::Outcome::Click => a.record_click(&index, &query, position),
+        crate::analytics::Outcome::Click => a.record_click(&index, &query, id.as_deref(), position),
         crate::analytics::Outcome::Conversion(value) => a.record_conversion(&index, &query, value),
     }
 }
