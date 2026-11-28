@@ -2749,6 +2749,34 @@ async fn one_pusher_spends_its_share_and_made_up_pushers_only_the_tokens_budget(
     }
 }
 
+/// The candidates a scanner may try (what stops a scan token brute-forcing stored values through
+/// `POST …/scan`): a pusher's half of its token's minute, the token's across every pusher it names.
+/// The caps are lowered for the test; the constants are the defaults.
+#[tokio::test]
+async fn a_scanners_candidates_are_capped_per_pusher_and_per_token() {
+    let api = Api::new().await;
+    api.secrets.set_scan_candidates(100, 300);
+    let scan = |pusher: &str, n: usize| json!({ "candidates": (0..n).map(|i| format!("fake-candidate-{i:08}")).collect::<Vec<_>>(), "pusher": pusher, "refs": ["refs/heads/main"] });
+    let minute = || api.db.now_ms().unwrap() / 60_000;
+    for attempt in 0.. {
+        let started = minute();
+        let token = api.token(json!({ "name": format!("hook-{attempt}"), "actions": ["scan"] }));
+        let alice = api.req(Method::POST, "/scan", Some(scan("alice", 50)), Some(&token)).await.0;
+        let alice_more = api.req(Method::POST, "/scan", Some(scan("alice", 1)), Some(&token)).await;
+        let bob = api.req(Method::POST, "/scan", Some(scan("bob", 50)), Some(&token)).await.0;
+        let carol = api.req(Method::POST, "/scan", Some(scan("carol", 1)), Some(&token)).await;
+        if minute() != started && attempt < 3 {
+            continue;
+        }
+        assert_eq!((alice, bob), (StatusCode::OK, StatusCode::OK));
+        let said = alice_more.1["error"].as_str().unwrap_or_default();
+        assert!(alice_more.0 == StatusCode::TOO_MANY_REQUESTS && said.contains("candidates tried a minute") && said.contains("for pusher alice"), "{alice_more:?}");
+        let said = carol.1["error"].as_str().unwrap_or_default();
+        assert!(carol.0 == StatusCode::TOO_MANY_REQUESTS && said.contains("across every pusher its hook names"), "{carol:?}");
+        break;
+    }
+}
+
 /// A login on the break-glass list is a pusher as one hook's token names it: `alice` is refused
 /// until a hook has named alice, then bound to that hook's token (a scan-only one), not to a
 /// reveal+scan token that named alice too, so that token can't break glass; the answer names the
