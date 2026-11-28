@@ -45,6 +45,7 @@ outputs() {
   CACHE=$(out CacheRepositoryUri)
   ALARMS=$(out DeployAlarms)
   SUPPLIED=$(out SuppliedSecrets)
+  NODE_LOGS=$(out NodeLogGroup)
   [ -n "$CLUSTER" ] && [ -n "$REPO" ] || die "stack $STACK has no outputs (is it created?)"
 }
 
@@ -182,8 +183,13 @@ cmd_deploy() {
   [ "$(jq -r '.desiredCount' <<<"$s")" -gt 0 ] || die "$SERVICE runs no nodes: bootstrap the stack first (deploy/cloud/README.md)"
   [ "$(jq '.deployments | length' <<<"$s")" = 1 ] || die "$SERVICE has a deployment in progress"
   [ "$(service "$CANARY" | jq -r '.desiredCount')" = 0 ] || die "$CANARY is running: another deploy, or one that didn't clean up (deploy.sh rollback)"
-  local secret
+  # The secrets filled in after creation that the nodes read: an OAuth client's only once its
+  # sign-in is on (its client id parameter set).
+  local secret used
+  used=$(aws ecs describe-task-definition --task-definition "$(jq -r '.taskDefinition' <<<"$s")" --output json |
+    jq -r '[.taskDefinition.containerDefinitions[].secrets[]?.valueFrom] | join(",")')
   for secret in ${SUPPLIED//,/ }; do
+    [[ ",$used," == *",$secret,"* ]] || continue
     [ "$(aws secretsmanager list-secret-version-ids --secret-id "$secret" --query 'length(Versions)' --output text)" -gt 1 ] ||
       die "secret $secret still has its placeholder (deploy/cloud/README.md, \"Fill in the secrets\")"
   done
@@ -351,6 +357,21 @@ stopped_tasks() {
   done
 }
 
+# Nodes that crashed since epoch $1 (what the task-failures alarm counts), each with the last
+# lines it wrote: a crash's error is the plain text after its JSON log lines.
+crashes() {
+  local events ids id
+  events=$(aws logs filter-log-events --log-group-name "/aws/events/$STACK/task-failures" --start-time "$(( $1 * 1000 ))" --output json 2>/dev/null) ||
+    { echo "  (can't read /aws/events/$STACK/task-failures)"; return 0; }
+  jq -r '.events[].message | fromjson | .detail | "  \(.stoppedAt) \(.group) rev \(.taskDefinitionArn | split(":")[-1]) \(.taskArn | split("/")[-1]): \(.stopCode) \(.containers | map("\(.name) exit \(.exitCode // "none")") | join(", "))"' <<<"$events"
+  ids=$(jq -r '[.events[].message | fromjson | .detail.taskArn | split("/")[-1]] | unique | .[-3:][]' <<<"$events")
+  for id in $ids; do
+    echo "  last lines of $id:"
+    aws logs get-log-events --log-group-name "$NODE_LOGS" --log-stream-name "node/rolld/$id" --limit 200 --output json 2>/dev/null |
+      jq -r '[.events[].message | select(startswith("{") | not)] | .[-8:][] | "    \(.[0:300])"' || echo "    (no log stream)"
+  done
+}
+
 # Everything above since epoch $1: why a deploy failed (deploy prints it before rolling back).
 explain() {
   local since=$1
@@ -364,6 +385,8 @@ explain() {
   service_events "$since"
   log "stopped nodes:"
   stopped_tasks
+  log "crashed nodes:"
+  crashes "$since"
 }
 
 cmd_diagnose() {
