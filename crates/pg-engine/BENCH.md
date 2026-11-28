@@ -771,6 +771,60 @@ The last against PGO, select-only at 8 clients, 3 alternating pairs: user instru
 31,777 -> 32,105 / 31,587 -> 34,607 / 34,026 -> 31,978, user cycles 69,268 -> 69,872 / 68,855 ->
 72,931 / 69,927 -> 68,111 (foreign 1.25-1.88): no direction, dropped.
 
+## Held sort keys: exactly as many as the keys, a sorted row never regrown (2026-11-28, agent 349)
+
+HANDOFF "Held sort keys" has what changed. Plain dist builds: **n1** `eeb1a4033` (boxed errors),
+**n3** n1 + exact key vectors and a sorted aggregate's row made at its size. Harness as in
+"Errors boxed" (`~/.cache/a349/bench`: `mem2.sh` with 346's u2 table, `mem-sk2.txt`; `fpair.sh`
+`inc`, `oagg2`). Foreign load 3.3-7.2 cores in every hold: instruction counts only.
+
+### Peak memory a query (MB over the level before; 1M rows, lane C; pair 2 reversed)
+
+| query | n1 | n2 | n3 |
+|---|---:|---:|---:|
+| `SELECT k, s FROM u2 ORDER BY k, s`, enable_seqscan off (Incremental Sort, 400,000-row prefix groups), 1 GB | 187.1 / 186.8 / 187.2 | 166.5 / 167.6 | 166.0 |
+| `string_agg(s, ',' ORDER BY a), string_agg(s, ',' ORDER BY id)` (the second sorts its own rows), 1 GB | 370.2 / 366.4 / 370.2 | 275.8 / 306.0 | 282.7 |
+
+(n2: an earlier form, the same rows held, its sorted aggregate's row reserved after `eval_all`.
+Three holds: n1 / n2, n2 / n1, n1 / n3. Hashes equal in every cell.)
+
+### Fitting queries, user instructions (40 runs; lane C)
+
+| query | n1 | n3 | pair 1 | pair 2 |
+|---|---:|---:|---:|---:|
+| `SELECT k, s FROM u ORDER BY k, s OFFSET 0` (Incremental Sort, 20,000 rows) | 8.6561 G | 8.5877 G | -0.79% | -0.79% |
+| two `string_agg(s, ',' ORDER BY ..)` of different orders (20,000 rows) | 7.8845 G | 7.7032 G | -2.30% | -2.27% |
+
+### TPC-H SF1, user instructions a query (G; lane C; pair 2 reversed)
+
+Rows and hashes equal in every cell.
+
+| query | n1 | n3 | pair 1 | pair 2 |
+|---|---:|---:|---:|---:|
+| q01 | 7.3913 | 7.3914 | +0.00% | -0.00% |
+| q02 | 2.1847 | 2.1850 | +0.01% | +0.14% |
+| q03 | 4.0210 | 4.0197 | -0.03% | -0.03% |
+| q04 | 1.3232 | 1.3231 | -0.01% | +0.01% |
+| q05 | 2.7072 | 2.7064 | -0.03% | +0.15% |
+| q06 | 3.3976 | 3.3976 | +0.00% | -0.00% |
+| q07 | 3.3671 | 3.3668 | -0.01% | +0.22% |
+| q08 | 1.3234 | 1.3231 | -0.02% | -0.09% |
+| q09 | 7.4457 | 7.4500 | +0.06% | +0.00% |
+| q10 | 5.4976 | 5.4983 | +0.01% | -0.07% |
+| q11 | 0.7347 | 0.7349 | +0.03% | +0.34% |
+| q12 | 5.9198 | 5.9201 | +0.01% | +0.02% |
+| q13 | 3.8525 | 3.8453 | -0.19% | +0.01% |
+| q14 | 1.3370 | 1.3319 | -0.38% | +0.02% |
+| q15 | 2.3161 | 2.3162 | +0.00% | -0.00% |
+| q16 | 2.7702 | 2.7701 | -0.00% | +0.00% |
+| q17 | 2.8628 | 2.8658 | +0.10% | -0.15% |
+| q18 | 15.3245 | 15.3264 | +0.01% | +0.01% |
+| q19 | 0.4680 | 0.4678 | -0.03% | -0.00% |
+| q20 | 0.8378 | 0.8381 | +0.04% | -0.06% |
+| q21 | 5.1871 | 5.1877 | +0.01% | +0.07% |
+| q22 | 0.6184 | 0.6183 | -0.03% | +0.05% |
+| total | 80.8877 | 80.8839 | -0.00% | +0.02% |
+
 ## Errors boxed: `Result<Value>` 120 -> 24 bytes (2026-11-28, agent 349)
 
 HANDOFF "Errors boxed" has what changed. Plain dist builds (`tools/dist.sh`): **b0** `9cfd1322f`,

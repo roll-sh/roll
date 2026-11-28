@@ -15378,6 +15378,46 @@ chunk of rows): `Part(Box<Part>)` would make it and `Result<Option<Item>>` 32. `
 `RowBatch` (104, five words of vectors) neither. Rows as `Box<[Value]>` where held: HANDOFF
 "Held sort keys" (`cand/a349-2`) takes the exact-room part instead.
 
+## Held sort keys: exactly as many as the keys, a sorted row never regrown (agent 349)
+
+BENCH "Held sort keys" has the tables. Plain dist builds: **n1** `eeb1a4033` (`cand/a349`'s code),
+**n3** n1 + this change (`cand/a349-2`'s code). `cand/a349-2` is `cand/a349` plus this commit and
+these docs (stacked: measured on item 1's code; the change itself doesn't depend on it).
+
+**What changed.** Item 2 of the brief (rows as `Box<[Value]>` where held) measured at its root:
+the bytes a held row or key vector wastes were not its 8-byte header but its capacity.
+- Sort keys evaluated beside a row (`nodes::key_values`): `sort_rows_bounded`'s keyed rows, an
+  Incremental Sort's rows (`IncrSortNode`, its spilled group's next row), a buffered aggregate's
+  ORDER BY values (`Buffered::Rows`) were `collect::<Result<Vec<_>>>()`, whose size hint is 0:
+  room for four values (96 bytes) for one or two keys. Now exactly the keys.
+- A sorted aggregate's row (`Buffered::Sort`: an aggregate whose ORDER BY the input isn't sorted
+  by, as the second of two with different orders) was its arguments (`eval_all`, exact) then a push
+  of each key that isn't an argument: regrown to twice the width (two arguments and a key: 96 bytes
+  for 72) and copied, a row each. It is now made with room for the keys
+  (`SortBuf::appended`; the first row, before the sort exists, reserves). `ExtSort::put` reserves
+  exactly for its appended keys too (a Sort whose keys aren't columns: none of the measured plans,
+  where the keys come computed from below).
+- `Box<[Value]>` itself, for every held row: not taken. The 8 bytes a row are a type change through
+  every interface that passes rows on (`Vec<Row>` in and out of sorts, hash tables, tuplestores);
+  the capacity was the waste.
+
+**Checks** (on `10a429287`, the candidate's code on `cand/a349`): `tools/quick-check.sh` with
+`QC_CHECKED=1`: 491 tests in 28 binaries, again under `verify-checked`; regress 51,148 / 51,150
+units match, 0 newly differing; isolation 1,647 / 1,648; pg_dump 14,609 passed, 0 failed.
+`tools/crash-binary.py` seed 1 against n3's plain dist build: ok. Result hashes equal in every
+cell measured.
+
+**Measured** (BENCH). Peak memory, 1M rows, work_mem 1 GB: an Incremental Sort of 400,000-row
+prefix groups (`enable_seqscan` off over `u2_k`) 187.1-187.2 -> 166.0-167.6 MB (-11%), two
+`string_agg(s, ',' ORDER BY ..)` of different orders (the second sorts its own rows) 366.4-370.2
+-> 275.8-306.0 MB (-17..-25%; n2 / n3 cells, the same rows held). Fitting queries (20,000 rows, user instructions, 40 runs, two
+alternating pairs): the Incremental Sort -0.79 / -0.79%, the two ordered aggregates -2.30 /
+-2.27% (an n2 form that reserved after `eval_all` was +0.23 / +0.20%: a realloc a row as before,
+placed differently; the row is now made at its size). TPC-H SF1, two alternating pairs: 80.888 ->
+80.884 G (-0.00 / +0.02%); every query within +0.1% on one pair at least, none above it on both
+(q11 +0.03 / +0.34, q07 -0.01 / +0.22: their spread). Reads, bulk and TPC-B-like run none of
+the changed code: not measured.
+
 ## Query memory, round 8: the DISTINCT spill's cost paid back, spilled batches and UNION's arms streamed, DISTINCT's group estimate over computed columns, a sorted SetOp's Sorts under EXPLAIN ANALYZE; bounded window frames streamed past 4 MB dropped (agent 343)
 
 BENCH.md "Query memory, round 8" has the tables. Plain dist builds (`tools/dist.sh`): **n1**
