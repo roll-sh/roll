@@ -1681,6 +1681,40 @@ kept, and one environment's held alerts never wait behind another's (one still q
 again within 30 s, at once when a silence is ended early). `api.rs::on_call_targets_open_and_close_incidents`,
 `silences::tests::a_repeating_silence_quiets_only_in_its_windows`.
 
+### Acknowledging and escalating
+
+Without PagerDuty (Better Stack's escalation policies): an alert is **open** from its opening
+event (a check down, a heartbeat missed, a failed deploy, a metric, log, route, objective or
+anomaly alert) until an event closes its key (the on-call key, `roll:<service>/<environment>/…`:
+its `alert.resolved`, or a deploy that goes live for a failed one). The notifier keeps them as it
+reads the event log, in the cursor's own transaction, so each is opened and closed once on any
+node; a repeat while it's open is the same alert, and previews' aren't listed. `GET
+/v1/apps/projects/{project}/alerts` (Project settings → Notifications' "Open alerts", `roll apps
+alerts`, MCP's `apps_list_alerts`) lists the open ones, newest first (at most 100), each with an id
+stable for the incident (its key and opening event, hashed), what it's about (the message's
+title), when it opened, and who acknowledged it. `POST …/alerts/{id}/ack` (`roll apps alerts --ack
+alr_…`, `apps_ack_alert`; write on the project) acknowledges one: idempotent (who did first
+stays), a 409 once it's closed, audited (`audit.alert.acked`), and an `alert.acked` event a target
+can ask for (never an on-call page). An acknowledged alert stays open until it clears.
+
+A target's `escalate: {after_min, to}` (5–1440 minutes, another of the project's targets; never
+itself, nor a loop back through theirs: `roll apps notifications --edit ntf_… --escalate-after 15
+--escalate-to ntf_…`, the target's "Escalate" in Notifications) sends an alert it was sent that's
+still open and unacknowledged `after_min` later to `to`, once, as "Escalated: …" (a webhook's body
+says `"escalated": true`), and `to` hears it close too. One hop: what's escalated doesn't escalate
+again. The clock starts when the alert is queued to the target (a silence's held alert: when it's
+let go), and the notifier's pass claims each escalation in one write with its delivery, so a
+restart or another node never sends it twice. Nothing escalates while its environment is silenced
+for its kind; it's looked at again each minute, and goes once the silence is over if it's still
+open. Deleting a target clears escalations to it.
+
+Slack, Discord, Teams, Google Chat and email messages of an open alert carry an "Acknowledge"
+link to the dashboard (`https://<dashboard>/dashboard/apps/alerts?project=…&alert=…`), and a
+webhook's body its `alert` and `ack_url`: the page asks the person to sign in and acknowledges as
+them, so a link holds no token and a forwarded one acknowledges nothing by itself. An alert
+nothing closed in 30 days is dropped (its check or service is gone), a closed one after a week
+(`api.rs::on_call_targets_open_and_close_incidents`).
+
 ## Commit statuses and waiting for CI
 
 A repo deployment reports on its commit as a roll code status (`roll/apps/<service>/<env>`,
@@ -5013,9 +5047,6 @@ scanning"), then objectives ("SLOs"), then Prometheus scraping ("The app's Prome
    `alert.resolved`; "degraded" on the status page), `checks[].assert: [{json: "$.db", equals:
    "ok"} | {not_contains} | {header, matches}]` (at most 5), and `fail_after` / `recover_after`
    (1–5, today a constant 2 and 1).
-2. **Acknowledging and escalating an alert without PagerDuty** (Better Stack's escalation
-   policies): `POST /v1/apps/projects/{project}/alerts/{key}/ack`, a target's `escalate: {after_min,
-   to}` that fires when an open key isn't acked; Slack's and email's messages carry an ack link.
 3. **CSP and Reporting API reports** (Report URI, Cloudflare Page Shield): `csp_reports: true` on an
    environment adds `Reporting-Endpoints` to roll's `/__roll/csp`; `GET …/csp-reports` groups them by
    directive and blocked URI, and a new directive is `alert.csp`.

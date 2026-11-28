@@ -71,8 +71,8 @@ tokens instead of ~56k. A product too big for some clients on its own splits int
 toolsets: apps is `apps.observe` (logs, metrics, errors, traces, vitals, SLOs, usage, push,
 events: 21 tools, ~3.2k tokens), `apps.deploy` (deploys, promotions, rollbacks, jobs, cron runs,
 restarts: 39, ~5.9k), `apps.configure` (services, environments, variables, domains, volumes,
-forms, links, runtime config: 30, ~5.5k) and `apps.project` (drains, notifications, limits, the
-status page, the preview domain: 29, ~3.9k); secrets is `secrets.values` (keys, folders,
+forms, links, runtime config: 30, ~5.5k) and `apps.project` (drains, notifications, open alerts,
+limits, the status page, the preview domain: 31, ~4.1k); secrets is `secrets.values` (keys, folders,
 environments, changes, change and value requests, promotion, imports: 49, ~8.5k),
 `secrets.security` (audit, findings, leaks, reach, insights, shares, rotations, the backup
 schedule: 15, ~2.2k) and `secrets.integrations` (transit, leases, CAs, clouds, syncs and the other
@@ -1507,11 +1507,13 @@ previews are listed once those products are on.
 | `apps_list_project_services` | The services in one workspace project. | `GET /v1/apps/projects/{project}/services` |
 | `apps_list_notifications` | Where a project's deploy, crash and preview events are sent (webhook, Slack, Discord, email; the URL's host only). | `GET /v1/apps/projects/{project}/notifications` |
 | `apps_add_notification` | Notify a webhook, Slack, Discord, the project's owner by email, PagerDuty (`routing_key`) or Opsgenie (`api_key`) of a project's events; URLs and keys are stored sealed and never shown again (and redacted from the audit log, #586). | `POST /v1/apps/projects/{project}/notifications` |
-| `apps_update_notification` | Change which events, environments and services a notification gets: given ones replace. | `PATCH /v1/apps/projects/{project}/notifications/{nid}` |
+| `apps_update_notification` | Change which events, environments and services a notification gets, and where its unacknowledged alerts escalate: given ones replace. | `PATCH /v1/apps/projects/{project}/notifications/{nid}` |
 | `apps_delete_notification` | Stop sending a project's events there. | `DELETE /v1/apps/projects/{project}/notifications/{nid}` |
 | `apps_test_notification` | Send a test event now (not retried): whether it arrived. | `POST /v1/apps/projects/{project}/notifications/{nid}/test` |
 | `apps_notification_deliveries` | A notification's last 50 deliveries, newest first: what was sent and whether it arrived. | `GET /v1/apps/projects/{project}/notifications/{nid}/deliveries` |
 | `apps_redeliver_notification` | Send a delivered or failed delivery's event again, from its first try (its delivery id kept). Not an on-call event a later one undid. | `POST /v1/apps/projects/{project}/notifications/{nid}/deliveries/{did}/redeliver` |
+| `apps_list_alerts` | A project's open alerts, newest first: what each is about, who acknowledged it, whether it escalated. | `GET /v1/apps/projects/{project}/alerts` |
+| `apps_ack_alert` | Acknowledge an open alert so it isn't escalated (idempotent; a closed one is a conflict). | `POST /v1/apps/projects/{project}/alerts/{aid}/ack` |
 | `apps_list_drains` | Where a project's logs are sent (the URL's host only). | `GET /v1/apps/projects/{project}/drains` |
 | `apps_add_drain` | Send every matching service's logs out of roll: an HTTPS endpoint (signed; its signing secret comes back once), an OTLP collector, syslog over TLS, or an S3 bucket (apps #580; the AWS keys go as headers, which the audit log redacts), or the project's own roll storage bucket with nothing to paste (`bucket`, apps #590), or a data stream of the project's own roll search cluster as ECS documents with an append-only key (`search`). | `POST /v1/apps/projects/{project}/drains` |
 | `apps_update_drain` | Change what a drain sends or its headers: given ones replace (a new URL is a new drain). | `PATCH /v1/apps/projects/{project}/drains/{did}` |

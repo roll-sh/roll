@@ -4644,6 +4644,7 @@ async fn on_call_targets_open_and_close_incidents() {
     let w = world_full(
         |c| {
             c.oncall_apis = apps_control::OncallApis { pagerduty_us: format!("http://{at}/pd"), pagerduty_eu: format!("http://{at}/pd-eu"), opsgenie_us: format!("http://{at}/og"), opsgenie_eu: format!("http://{at}/og-eu") };
+            c.web_url = Some("https://roll.example".into());
         },
         false,
         |_| {},
@@ -4736,6 +4737,94 @@ async fn on_call_targets_open_and_close_incidents() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     assert!(paged, "the held alert went out when the silence ended");
+    // Open alerts (Better Stack's): the failed deploy and the memory alert, newest first, until
+    // something closes their keys.
+    let alerts = format!("/v1/apps/projects/{}/alerts", w.project);
+    let kinds = |v: &Value| v.as_array().unwrap().iter().map(|a| a["kind"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+    let (st, list) = call(&w.api, "GET", &alerts, None).await;
+    assert_eq!((st, kinds(&list)), (StatusCode::OK, vec!["deploy.failed".to_string(), "alert.memory".into()]), "{list}");
+    assert_eq!(list[1]["acked"], Value::Null, "{list}");
+    // Acknowledged once: again changes nothing, an unknown one is a 404.
+    let failed = list[0]["id"].as_str().unwrap().to_string();
+    let (st, a) = call(&w.api, "POST", &format!("{alerts}/{failed}/ack"), None).await;
+    assert_eq!((st, a["acked"]["by"].is_string()), (StatusCode::OK, true), "{a}");
+    assert_eq!(call(&w.api, "POST", &format!("{alerts}/{failed}/ack"), None).await.1["acked"], a["acked"], "who acknowledged first stays");
+    assert_eq!(call(&w.api, "POST", &format!("{alerts}/alr_nope/ack"), None).await.0, StatusCode::NOT_FOUND);
+    let ev = call(&w.api, "GET", "/v1/apps/events?after=0", None).await.1;
+    let n = |k: &str| ev["events"].as_array().unwrap().iter().filter(|e| e["kind"] == k).count();
+    assert_eq!((n("alert.acked"), n("audit.alert.acked")), (1, 1), "an event targets can ask for, and the audit trail's");
+    // Escalation (Better Stack's policies): to another target, never itself nor round.
+    let (st, esc) = call(&w.api, "POST", &base, Some(json!({"kind": "webhook", "url": format!("http://{at}/esc"), "events": ["check.down"]}))).await;
+    assert_eq!(st, StatusCode::CREATED, "{esc}");
+    let esc_id = esc["id"].as_str().unwrap().to_string();
+    let target = format!("{base}/{pd_id}");
+    assert_eq!(call(&w.api, "PATCH", &target, Some(json!({"escalate": {"after_min": 15, "to": pd_id}}))).await.0, StatusCode::BAD_REQUEST, "not itself");
+    assert_eq!(call(&w.api, "PATCH", &target, Some(json!({"escalate": {"after_min": 2, "to": esc_id}}))).await.0, StatusCode::BAD_REQUEST, "5–1440 minutes");
+    let (st, t) = call(&w.api, "PATCH", &target, Some(json!({"escalate": {"after_min": 15, "to": esc_id}}))).await;
+    assert_eq!((st, t["escalate"]["to"].as_str()), (StatusCode::OK, Some(esc_id.as_str())), "{t}");
+    assert_eq!(call(&w.api, "PATCH", &format!("{base}/{esc_id}"), Some(json!({"escalate": {"after_min": 15, "to": pd_id}}))).await.0, StatusCode::BAD_REQUEST, "a loop");
+    // A resolve closes the memory alert (acknowledging it now is a conflict); it opens again.
+    let memory = list[1]["id"].as_str().unwrap().to_string();
+    let event = |kind: &'static str, data: Value| {
+        let (apps, sid) = (w.apps.clone(), id.clone());
+        async move { apps.db(move |s| s.add_event(kind, &sid, "production", None, &data)).await.unwrap() }
+    };
+    event("alert.resolved", json!({"alert": "alert.memory"})).await;
+    let mut list = Value::Null;
+    for _ in 0..400 {
+        list = call(&w.api, "GET", &alerts, None).await.1;
+        if kinds(&list) == ["deploy.failed"] {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(kinds(&list), ["deploy.failed"], "{list}");
+    assert_eq!(call(&w.api, "POST", &format!("{alerts}/{memory}/ack"), None).await.0, StatusCode::CONFLICT, "closed");
+    event("alert.memory", json!({"value": 99, "limit_mb": 512, "threshold": 90})).await;
+    for _ in 0..400 {
+        list = call(&w.api, "GET", &alerts, None).await.1;
+        if kinds(&list).len() == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let again = list[0]["id"].as_str().unwrap().to_string();
+    assert_eq!((list[0]["kind"].as_str(), again != memory), (Some("alert.memory"), true), "a new incident: {list}");
+    // Unacknowledged past its 15 minutes, but silenced: nothing escalates until it's over, then
+    // once, whatever passes run.
+    let escalated = || async { call(&w.api, "GET", &format!("{base}/{esc_id}/deliveries"), None).await.1.as_array().unwrap().iter().map(|d| d["kind"].as_str().unwrap().to_string()).collect::<Vec<_>>() };
+    let (_, quiet) = call(&w.api, "POST", &silences, Some(json!({"until": until, "reason": "load test", "alerts": ["alert.memory"]}))).await;
+    let later = code_sql::now_ms() + 16 * 60_000;
+    w.apps.escalate_due(later).await;
+    assert!(escalated().await.is_empty(), "silenced");
+    assert_eq!(call(&w.api, "DELETE", &format!("{silences}/{}", quiet["id"].as_str().unwrap()), None).await.0, StatusCode::NO_CONTENT);
+    w.apps.escalate_due(later + 2 * 60_000).await;
+    w.apps.escalate_due(later + 5 * 60_000).await;
+    assert_eq!(escalated().await, ["alert.memory"], "sent to its target once");
+    let mut sent = None;
+    for _ in 0..400 {
+        sent = got.lock().iter().find(|(u, ..)| u == "/esc").map(|(.., b)| b.clone());
+        if sent.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let sent = sent.expect("the escalation was delivered");
+    assert_eq!((sent["escalated"].as_bool(), sent["alert"].as_str()), (Some(true), Some(again.as_str())), "{sent}");
+    assert!(sent["title"].as_str().unwrap().starts_with("Escalated: "), "{sent}");
+    assert!(sent["ack_url"].as_str().unwrap().starts_with(&format!("https://roll.example/dashboard/apps/alerts?project={}&alert={again}", w.project)), "{sent}");
+    assert!(call(&w.api, "GET", &alerts, None).await.1[0]["escalated_at"].is_i64());
+    // Whoever it was escalated to hears it close.
+    event("alert.resolved", json!({"alert": "alert.memory"})).await;
+    let mut heard = Vec::new();
+    for _ in 0..400 {
+        heard = escalated().await;
+        if heard.len() == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(heard.contains(&"alert.resolved".to_string()), "{heard:?}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

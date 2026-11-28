@@ -1846,6 +1846,9 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/apps/projects/{project}/notifications/{nid}/test", "apps", W, one(&["project"], "project")),
     row("GET", "/v1/apps/projects/{project}/notifications/{nid}/deliveries", "apps", R, one(&["project"], "project")),
     row("POST", "/v1/apps/projects/{project}/notifications/{nid}/deliveries/{did}/redeliver", "apps", W, one(&["project"], "project")),
+    // A project's open alerts, and acknowledging one (it stops its escalation): read and write.
+    row("GET", "/v1/apps/projects/{project}/alerts", "apps", R, one(&["project"], "project")),
+    row("POST", "/v1/apps/projects/{project}/alerts/{aid}/ack", "apps", W, one(&["project"], "project")),
     // A project's log drains: every service's output POSTed out of roll, signed. Adding one sends
     // runtime output elsewhere and its signing secret comes back once: reveal. The URL is never
     // answered (only its host).

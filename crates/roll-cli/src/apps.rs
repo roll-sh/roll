@@ -1342,6 +1342,24 @@ pub enum AppsCmd {
         /// adds this once, so it's for one removed before).
         #[arg(long, conflicts_with_all = ["add", "remove", "edit", "test", "deliveries"])]
         email: bool,
+        /// With `--add`, `--email` or `--edit`: an alert it was sent that's still open and not
+        /// acknowledged this many minutes on (5–1440) goes to `--escalate-to`, once.
+        #[arg(long, value_name = "MIN", requires = "escalate_to")]
+        escalate_after: Option<u32>,
+        /// With `--escalate-after`: the project's target it escalates to (its id).
+        #[arg(long, value_name = "ID", requires = "escalate_after")]
+        escalate_to: Option<String>,
+        /// With `--edit`: escalate nowhere any more.
+        #[arg(long, requires = "edit", conflicts_with = "escalate_after")]
+        no_escalate: bool,
+    },
+    /// The project's open alerts, newest first (who acknowledged each); `--ack ID` acknowledges
+    /// one, so it isn't escalated (it stays open until it clears).
+    Alerts {
+        #[command(flatten)]
+        target: Target,
+        #[arg(long, value_name = "ID")]
+        ack: Option<String>,
     },
     /// The project's status page: shown (its address and incidents); made or changed (`--title`,
     /// `--item SERVICE/ENV/check:NAME` or `…/heartbeat:NAME`: every check and heartbeat without
@@ -5365,10 +5383,11 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 v
             }
         }
-        AppsCmd::Notifications { target, add, kind, region, events, only_env, only_service, previews, every_env, every_service, remove, test, edit, deliveries, redeliver, email } => {
-            if add.is_none() && edit.is_none() && !email && (events.is_some() || !only_env.is_empty() || !only_service.is_empty() || previews.is_some()) {
-                bail!("--events, --only-env, --only-service and --previews go with --add, --email or --edit");
+        AppsCmd::Notifications { target, add, kind, region, events, only_env, only_service, previews, every_env, every_service, remove, test, edit, deliveries, redeliver, email, escalate_after, escalate_to, no_escalate } => {
+            if add.is_none() && edit.is_none() && !email && (events.is_some() || !only_env.is_empty() || !only_service.is_empty() || previews.is_some() || escalate_after.is_some()) {
+                bail!("--events, --only-env, --only-service, --previews and --escalate-after go with --add, --email or --edit");
             }
+            let escalate = escalate_after.zip(escalate_to).map(|(after_min, to)| json!({ "after_min": after_min, "to": to }));
             let (add, kind) = if email { (Some(String::new()), "email".to_string()) } else { (add, kind) };
             let svc = service(api, &target).await?;
             let path = format!("/v1/apps/projects/{}/notifications", enc(&s(&svc["project"])));
@@ -5393,8 +5412,14 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 if every_service {
                     body.insert("services".into(), json!([]));
                 }
+                if let Some(e) = &escalate {
+                    body.insert("escalate".into(), e.clone());
+                }
+                if no_escalate {
+                    body.insert("escalate".into(), Value::Null);
+                }
                 if body.is_empty() {
-                    bail!("nothing to change: --events, --only-env, --only-service or --previews");
+                    bail!("nothing to change: --events, --only-env, --only-service, --previews or --escalate-after");
                 }
                 let t = api.call(reqwest::Method::PATCH, &format!("{path}/{}", enc(&id)), Some(Value::Object(body))).await?;
                 if !json_out {
@@ -5423,6 +5448,9 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 }
                 if let Some(e) = events {
                     body["events"] = json!(e);
+                }
+                if let Some(e) = escalate {
+                    body["escalate"] = e;
                 }
                 let t = api.post(&path, body).await?;
                 if !json_out {
@@ -5616,6 +5644,33 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             out.flush()?;
             eprintln!("{} MiB of {deployment}'s image", n >> 20);
             return Ok(());
+        }
+        AppsCmd::Alerts { target, ack } => {
+            let svc = service(api, &target).await?;
+            let path = format!("/v1/apps/projects/{}/alerts", enc(&s(&svc["project"])));
+            let when = |v: &Value| v.as_i64().and_then(chrono::DateTime::from_timestamp_millis).map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string()).unwrap_or_default();
+            if let Some(id) = ack {
+                let a = api.post(&format!("{path}/{}/ack", enc(&id)), json!({})).await?;
+                if !json_out {
+                    println!("{}  acknowledged by {} at {}", s(&a["id"]), s(&a["acked"]["by"]), when(&a["acked"]["at"]));
+                    return Ok(());
+                }
+                a
+            } else {
+                let v = api.get(&path).await?;
+                if !json_out {
+                    for a in v.as_array().into_iter().flatten() {
+                        let state = match a["acked"]["by"].as_str() {
+                            Some(by) => format!("acked by {by}"),
+                            None if a["escalated_at"].is_i64() => "escalated".into(),
+                            None => "open".into(),
+                        };
+                        println!("{}  {}  {:<16} {}  {}", s(&a["id"]), when(&a["opened_at"]), state, s(&a["kind"]), s(&a["about"]));
+                    }
+                    return Ok(());
+                }
+                v
+            }
         }
         AppsCmd::Silence { target, duration, reason, alerts, every, timezone, end } => {
             let svc = service(api, &target).await?;
