@@ -492,14 +492,20 @@ impl Secrets {
                         let v = parts.get(&l.field).cloned().ok_or_else(|| Error::Link(format!("{} didn't issue {}", l.kind, l.field)))?;
                         items.push(Item { path: p, key: k, owner: String::new(), action: ItemAction::Set { value: Some(v), comment: None, tags: None, link: None, link_state: Some(new_state.clone()), expires_at: None } });
                     }
-                    let keys: Vec<String> = items.iter().map(|i| i.key.clone()).collect();
+                    // The keys holding the credential, by folder: the feed shows each reader only
+                    // the folders it may read (events.rs, `readable`).
+                    let mut sharing_by_folder: std::collections::BTreeMap<&str, Vec<&str>> = Default::default();
+                    for i in &items {
+                        sharing_by_folder.entry(i.path.as_str()).or_default().push(i.key.as_str());
+                    }
+                    let shared = serde_json::json!(sharing_by_folder);
                     let r = crate::write::apply(c, &dek, self.keys()?, &env, &items, crate::write::Via::Rotation, &format!("rotated {} {}", link.kind, link.r#ref), caller, now)?;
                     // The partner of `rotation.failed`, in the rotation's own transaction (its
                     // value change is the row before, `secret.changed` via rotation).
                     let version: i64 = c.query_row("SELECT version FROM secrets WHERE env_id = ? AND path = ? AND key = ? AND owner = ''", [&env.id, &path, key], |x| x.get(0))?;
                     let mut data = serde_json::json!({ "mode": "managed", "version": version, "change": r.0.seq, "scheduled": caller.principal == ROTATION });
-                    if keys.len() > 1 {
-                        data["sharing"] = serde_json::json!(keys);
+                    if items.len() > 1 {
+                        data["sharing"] = shared;
                     }
                     if leak {
                         data["via"] = serde_json::json!("leak");
