@@ -11,11 +11,14 @@ on:
         description: An image tag already in ECR to deploy (a commit SHA). Empty builds this commit.
         required: false
         default: ""
-
-# One deploy at a time; a newer merge waits, and only the newest waiting one runs.
-concurrency:
-  group: deploy-production
-  cancel-in-progress: false
+      diagnose:
+        description: Only read why deploys fail (deploy.sh diagnose); deploys nothing.
+        type: boolean
+        default: false
+      hours:
+        description: How far back diagnose reads (1 to 360).
+        required: false
+        default: "24"
 
 permissions:
   contents: read
@@ -24,10 +27,14 @@ permissions:
 jobs:
   deploy:
     # Skipped until the stack exists and the repository variable names its deploy role.
-    if: vars.AWS_DEPLOY_ROLE_ARN != ''
+    if: vars.AWS_DEPLOY_ROLE_ARN != '' && !inputs.diagnose
     runs-on: ubuntu-24.04-arm
     environment: production
     timeout-minutes: 240
+    # One deploy at a time; a newer merge waits, and only the newest waiting one runs.
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
     env:
       AWS_REGION: us-east-1
       ROLL_CLOUD_STACK: roll-cloud
@@ -63,3 +70,23 @@ jobs:
           else
             echo "nothing was deployed"
           fi
+
+  # Read only, beside a running deploy: alarms, the minutes their metrics breached, the services'
+  # events and the stopped nodes' reasons.
+  diagnose:
+    if: vars.AWS_DEPLOY_ROLE_ARN != '' && inputs.diagnose
+    runs-on: ubuntu-24.04-arm
+    environment: production
+    timeout-minutes: 30
+    env:
+      AWS_REGION: us-east-1
+      ROLL_CLOUD_STACK: roll-cloud
+      HOURS: ${{ inputs.hours }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: us-east-1
+      - name: Diagnose
+        run: deploy/cloud/deploy.sh diagnose "$HOURS"
