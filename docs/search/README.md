@@ -630,7 +630,8 @@ one flavor (Elasticsearch and OpenSearch clusters don't link to each other, as o
   index's capabilities merged as local ones are), `_resolve/index`, `_resolve/cluster` and
   `_remote/info`. An expression is authorized on the remotes only when every remote its alias
   pattern matches is a link; `*:index` over a link and a loopback remote is authorized locally,
-  whole.
+  whole. A loopback's part is authorized (and its wildcards narrowed) as this cluster's own
+  index names, grouped as the search plans it, never as the literal `alias:index`.
 - **Aggregations**: every aggregation, pipelines included, answers what one cluster holding all
   the data would. Each cluster reduces its part partially and the local cluster does the final
   reduce from their internal state (`search-aggs` `wire`): HyperLogLog sketches, t-digests and
