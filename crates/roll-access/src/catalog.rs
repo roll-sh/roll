@@ -1056,6 +1056,16 @@ fn secrets_import_action(b: &Value) -> Action {
 }
 
 /// A replacing import writes the file's keys too.
+/// Rotating a link redeploys the environment it names, or every one that uses the link
+/// (production among them) when it names none: `deploy` too unless it names one other than
+/// production, as a deploy there is.
+fn apps_rotate_also(b: &Value) -> Vec<Action> {
+    match b.get("environment").and_then(Value::as_str) {
+        Some(e) if e != "production" => Vec::new(),
+        _ => vec![Action::Deploy],
+    }
+}
+
 fn secrets_import_also(b: &Value) -> Vec<Action> {
     if b["replace"] == true { vec![Action::Write] } else { Vec::new() }
 }
@@ -1926,7 +1936,7 @@ static ROWS: &[Row] = &[
     row("DELETE", "/v1/apps/services/{id}/links/{kind}/{ref}", "apps", W, one(PG, "service")),
     // A new credential for a link, the service redeployed with it and the old one revoked:
     // admin on the service (its credentials), and reveal on the resource, as linking it.
-    row("POST", "/v1/apps/services/{id}/links/{kind}/{ref}/rotate", "apps", ADMIN, one(PG, "service")).lends(Lend::Path("kind", "ref")),
+    row("POST", "/v1/apps/services/{id}/links/{kind}/{ref}/rotate", "apps", ADMIN, one(PG, "service")).lends(Lend::Path("kind", "ref")).needs_too(apps_rotate_also),
     row("*", "/v1/apps/services/{id}", "apps", M, one(PG, "service")),
     // A worker scaled on a stream group's lag has apps read that stream for it, and a web service's
     // pushes consume one (and dead-letter into it): read there too, write with a dead letter.
