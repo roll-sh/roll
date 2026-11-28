@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 const MCP: &str = "/v1/code/mcp";
 
 /// The tools docs/code/mcp.md lists.
-const TOOLS: [&str; 73] = [
+const TOOLS: [&str; 75] = [
     "list_repos", "search", "fetch", "search_code", "read_file", "list_tree", "log", "blame", "get_changeset", "compare", "create_change", "revise_change", "land", "get_change",
     "list_changes", "claim_work", "heartbeat_work", "release_work", "complete_work", "list_work", "create_work", "comment", "review", "queue_status",
     "request_ai_review", "list_agent_machines", "list_agent_threads", "create_agent_thread", "send_agent_message", "respond_agent_request",
@@ -20,18 +20,20 @@ const TOOLS: [&str; 73] = [
     "run_agent_automation", "list_agent_automation_runs", "get_agent_automation_run", "cancel_agent_automation_run", "enqueue_change", "dequeue_change",
     "close_change", "report_check", "set_commit_status", "list_refs", "create_repo", "resolve_thread", "reopen_thread", "apply_suggestion", "request_review",
     "get_commit_statuses", "get_work", "update_work", "release_agent_work", "update_change", "set_change_lane",
-    "get_ai_review_pricing", "get_review_usage", "list_ai_reviews", "get_reviewer", "get_review_rules", "get_repo_audit", "start_preview",
-    "stop_preview", "retry_agent_automation_run", "enable_agent_automation", "disable_agent_automation", "get_agent_automation_catalog", "test_agent_automation",
+    "get_ai_review_pricing", "get_review_usage", "list_ai_reviews", "get_reviewer", "get_review_rules", "list_review_learnings", "get_repo_audit",
+    "start_preview",
+    "stop_preview", "retry_agent_automation_run", "enable_agent_automation", "disable_agent_automation", "delete_agent_automation", "get_agent_automation_catalog",
+    "test_agent_automation",
     "list_agent_sandboxes", "stop_agent_sandbox", "get_agent_sandbox_usage",
 ];
 /// The agents tools (not repo-scoped: `agent_tools_drive_a_machine_like_their_routes`,
 /// `agent_tools_work_in_roll_code_like_their_routes` and `automation_tools_map_onto_their_routes`).
-const AGENT_TOOLS: usize = 24;
+const AGENT_TOOLS: usize = 25;
 /// The ones that only read (`readOnlyHint`).
-const READ_ONLY: [&str; 31] = [
+const READ_ONLY: [&str; 32] = [
     "list_repos", "search", "fetch", "search_code", "read_file", "list_tree", "log", "blame", "get_changeset", "compare", "get_change", "list_changes", "list_work", "queue_status", "list_refs",
     "get_commit_statuses", "get_work", "get_ai_review_pricing", "get_review_usage", "list_ai_reviews", "get_reviewer", "get_review_rules",
-    "get_repo_audit", "get_agent_automation_catalog", "list_agent_sandboxes", "get_agent_sandbox_usage",
+    "list_review_learnings", "get_repo_audit", "get_agent_automation_catalog", "list_agent_sandboxes", "get_agent_sandbox_usage",
     "list_agent_machines", "list_agent_threads", "list_agent_automations", "list_agent_automation_runs", "get_agent_automation_run",
 ];
 
@@ -145,11 +147,11 @@ async fn transport_sessions_and_protocol() {
         assert_eq!(t["annotations"]["readOnlyHint"], read_only, "{}", t["name"]);
         // A model provider or a branch's remote is outside roll; a repo's own reads and writes aren't.
         let open = ["request_ai_review", "create_agent_thread", "publish_agent_thread", "retry_agent_automation_run"].contains(&t["name"].as_str().unwrap());
-        // What can't be undone asks a person first: a closed change, a preview's data.
-        let destructive = ["close_change", "stop_preview"].contains(&t["name"].as_str().unwrap());
+        // What can't be undone asks a person first: a closed change, a preview's data, an automation.
+        let destructive = ["close_change", "stop_preview", "delete_agent_automation"].contains(&t["name"].as_str().unwrap());
         assert_eq!(t["annotations"]["destructiveHint"], destructive, "{}", t["name"]);
         // A read, or only PUTs and DELETEs: retrying it is safe.
-        let idempotent = read_only || ["dequeue_change", "stop_preview", "release_agent_work"].contains(&t["name"].as_str().unwrap());
+        let idempotent = read_only || ["dequeue_change", "stop_preview", "release_agent_work", "delete_agent_automation"].contains(&t["name"].as_str().unwrap());
         assert_eq!(t["annotations"]["idempotentHint"], idempotent, "{}", t["name"]);
         if open || ["read_file", "land", "comment"].contains(&t["name"].as_str().unwrap()) {
             assert_eq!(t["annotations"]["openWorldHint"], open, "{}", t["name"]);
@@ -768,6 +770,7 @@ async fn tools_map_onto_their_routes() {
     let reviewer = c.tool("get_reviewer", json!({ "repo": repo })).await;
     assert_eq!(reviewer["effective"], a.ok("GET", &format!("{p}/reviewer"), None).await["effective"]);
     same(c.tool("get_review_rules", json!({ "repo": repo })).await, a.ok("GET", &format!("{p}/review-settings"), None).await);
+    assert_eq!(c.tool("list_review_learnings", json!({ "repo": repo })).await["items"], a.ok("GET", &format!("{p}/learnings"), None).await);
     same(c.tool("get_repo_audit", json!({ "repo": repo })).await, a.ok("GET", &format!("{p}/audit"), None).await);
     same(c.tool("get_ai_review_pricing", json!({})).await, a.ok("GET", "/v1/code/pricing", None).await);
     same(c.tool("get_review_usage", json!({ "owner": "acme" })).await, a.ok("GET", "/v1/code/owners/acme/usage", None).await);
@@ -1158,6 +1161,7 @@ async fn every_tool_is_authorized_like_its_route() {
                 ("list_ai_reviews", json!({ "change": ch }), get(format!("/v1/code/changes/{ch}/ai-jobs")), true),
                 ("get_reviewer", json!({ "repo": f.repo }), get(format!("{p}/reviewer")), true),
                 ("get_review_rules", json!({ "repo": f.repo }), get(format!("{p}/review-settings")), true),
+                ("list_review_learnings", json!({ "repo": f.repo }), get(format!("{p}/learnings")), true),
                 ("get_repo_audit", json!({ "repo": f.repo }), get(format!("{p}/audit")), false),
                 ("start_preview", json!({ "change": ch }), post(format!("/v1/code/changes/{ch}/preview"), json!({})), false),
                 ("stop_preview", json!({ "change": ch }), ("DELETE", format!("/v1/code/changes/{ch}/preview"), None), false),
@@ -1540,6 +1544,9 @@ async fn automation_tools_map_onto_their_routes() {
     let tried = owner.tool("test_agent_automation", json!({ "owner": "acme", "spec": spec, "event": event })).await;
     assert_eq!(tried, a.req("POST", "/v1/code/agents/acme/automations/test", Some(json!({ "automation": spec, "event": event })), root).await.1);
     assert!(tried["trigger"].is_boolean(), "{tried}");
+    // Deleted by name: its route has nothing there any more.
+    assert_eq!(owner.tool("delete_agent_automation", json!({ "owner": "acme", "automation": "Hello again" })).await["deleted"], id.as_str());
+    assert_eq!(a.req("GET", &format!("/v1/code/agents/acme/automations/{id}"), None, root).await.0, StatusCode::NOT_FOUND);
     // Sandboxes: the list and a month's use as their routes answer; an unknown one isn't found.
     assert_eq!(owner.tool("list_agent_sandboxes", json!({ "owner": "acme" })).await, a.req("GET", "/v1/code/agents/acme/sandboxes", None, root).await.1);
     assert_eq!(owner.tool("get_agent_sandbox_usage", json!({ "owner": "acme" })).await, a.req("GET", "/v1/code/agents/acme/sandboxes/usage", None, root).await.1);
@@ -1561,6 +1568,8 @@ fn every_tool_says_whether_it_holds_an_outsiders_words() {
         "get_change", "list_changes", "revise_change", "update_change", "close_change", "start_preview", "enqueue_change", "set_change_lane", "queue_status",
         "list_work", "get_work", "claim_work", "heartbeat_work", "update_work", "complete_work", "release_work", "claim_agent_work",
         "resolve_thread", "reopen_thread", "request_review", "get_commit_statuses",
+        // A learning from before an outsider's reply stopped becoming one.
+        "list_review_learnings",
         // An automation run for an issue anyone opened (a trigger that takes `anyone`'s).
         "list_agent_automation_runs", "get_agent_automation_run",
     ];
@@ -1604,6 +1613,7 @@ fn every_tool_says_whether_it_holds_an_outsiders_words() {
         ("retry_agent_automation_run", "the owner's agents"),
         ("enable_agent_automation", "the owner's agents"),
         ("disable_agent_automation", "the owner's agents"),
+        ("delete_agent_automation", "the owner's agents"),
         ("get_agent_automation_catalog", "the owner's agents"),
         ("test_agent_automation", "the owner's agents"),
         ("list_agent_sandboxes", "the owner's agents"),

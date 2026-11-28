@@ -1,4 +1,4 @@
-import { ClipboardPaste, Copy, Eye, EyeOff, FileText, KeyRound, Link2, Lock, LockOpen, Plus, Rocket, Server, Trash2, Undo2 } from "lucide-react";
+import { ClipboardPaste, Copy, Eye, EyeOff, FileText, KeyRound, Link2, Lock, LockOpen, Plus, Rocket, RotateCw, Server, Trash2, Undo2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { appsApi, describePending, parseEnv, toEnv, VARIABLE_NAME, type Environment, type Link, type LinkKind, type VariableSource, type Variables } from "@/lib/apps-api";
 import { KIND_LABEL, resourceKey, type ResourceView } from "@/lib/workspace-resources";
@@ -538,6 +538,23 @@ function Links({ service, project, runner, onChange }: { service: string; projec
             <span className="text-[12px] text-subtle">{l.kind}</span>
             {l.prefix && <span className="rounded border border-line-2 px-1.5 font-mono text-[10.5px] text-muted">{l.prefix}_</span>}
             <span className="min-w-0 flex-1 truncate font-mono text-[11.5px] text-muted">{l.vars.join(" ")}</span>
+            {l.rotates && (
+              <SureButton
+                className="p-1 text-subtle hover:text-fg"
+                label="Rotate"
+                title="Rotate: a new credential, every environment that uses it redeployed, the old one revoked once nothing runs with it"
+                sure="Sure? Rotate"
+                disabled={runner.busy !== null}
+                onSure={async () => {
+                  if (await runner.run(`rotate:${l.ref}`, () => appsApi.rotateLink(service, l.kind, l.ref))) {
+                    await load();
+                    onChange();
+                  }
+                }}
+              >
+                <RotateCw className="size-3.5" />
+              </SureButton>
+            )}
             <SureButton
               className="p-1 text-subtle hover:text-fg"
               label="Unlink"

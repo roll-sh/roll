@@ -348,6 +348,20 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
           </button>
         </div>
 
+        <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
+          <div>
+            <p className="text-[13px] font-medium">CSP reports</p>
+            <p className="mt-1 text-[12px] text-muted">
+              {env.csp_reports
+                ? "Browsers report what its Content-Security-Policy blocks to roll (a policy with its own report-to keeps it); the Metrics tab groups them."
+                : "Collect what its Content-Security-Policy blocks in visitors' browsers: roll names itself as the reporting endpoint, kept as origins and paths only."}
+            </p>
+          </div>
+          <button className={btn} disabled={busy} aria-pressed={!!env.csp_reports} onClick={() => runner.run("csp_reports", () => appsApi.putEnvironment(service.id, env.name, { csp_reports: !env.csp_reports }))}>
+            {env.csp_reports ? "Turn off" : "Turn on"}
+          </button>
+        </div>
+
         {!env.ephemeral && (
           <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
             <div className="min-w-0">

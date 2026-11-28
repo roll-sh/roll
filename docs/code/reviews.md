@@ -317,7 +317,9 @@ A crate with no HTTP routes of its own. code-control drives it (`src/ai/`), and 
   - someone replies to a roll thread with a reason and resolves it (one learning per thread). The
     reason is the latest reply from someone who may decide on the repo: a reply from outside (a
     fork's author, a GitHub commenter who can't push, a signed-in reader of a public repo) never
-    becomes a learning, since learnings steer every later review
+    becomes a learning, since learnings steer every later review. One made before that rule (#639)
+    from an outsider's reply (its thread says whose; a thread gone counts as outside) is marked
+    `outside` in the list, left out of every review, and withheld by MCP's lockdown
   - a roll review is dismissed with a reason
 
   Learnings from these are repo-wide. `POST …/learnings {text, path}` adds one scoped to a glob.

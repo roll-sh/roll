@@ -452,6 +452,9 @@ impl Secrets {
                     asked.options.insert("grace_minutes".into(), serde_json::json!(0));
                 }
                 let supersedes = provider.supersedes(&link);
+                // Asked before issuing too: a self-rotating vendor's issue already ends the old key.
+                let shared = self.db.read(|c| sharing(c, &env.id, &path, key, old.as_deref()))?;
+                reaches_sharing(caller, project, slug, &path, key, &shared, leak)?;
                 let now = self.db.now_ms()?;
                 let issued = provider.issue(&link.r#ref, &cred, &asked, &format!("roll secrets {slug} {key} (rotated)"), None)?;
                 let handle = issued.handle.clone();
@@ -463,40 +466,46 @@ impl Secrets {
                     // rotation (a user, another node's sweeper) won, this one's credential is revoked,
                     // unless each new credential ends the one before it (Paddle's): then this one is
                     // the newest, as the vendor's claim was held through the other's write, and the
-                    // only one still working, so it replaces what the other stored.
-                    let now_state: Option<String> =
-                        c.query_row("SELECT link_state FROM secrets WHERE env_id = ? AND path = ? AND key = ? AND owner = ''", [&env.id, &path, key], |r| r.get(0)).optional()?.flatten();
-                    let now_cred = now_state.and_then(|s| serde_json::from_str::<Json>(&s).ok()).and_then(|s| s.get("credential").and_then(Json::as_str).map(String::from));
+                    // only one still working, so it replaces what the other stored. Only that: a
+                    // link or a value a person changed since is left alone.
+                    let now_row: Option<(Option<String>, Option<String>, String)> =
+                        c.query_row("SELECT link, link_state, fp FROM secrets WHERE env_id = ? AND path = ? AND key = ? AND owner = ''", [&env.id, &path, key], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
+                    let (now_link, now_state, now_fp) = now_row.unwrap_or_default();
+                    let now_state = now_state.and_then(|s| serde_json::from_str::<Json>(&s).ok());
+                    let now_cred = now_state.as_ref().and_then(|s| s.get("credential")).and_then(Json::as_str).map(String::from);
+                    let raced = |s: &Json| {
+                        let claim = |h: &Json| h.get("claim").and_then(Json::as_i64);
+                        now_link.as_deref().and_then(|l| serde_json::from_str::<Link>(l).ok()).as_ref() == Some(&link)
+                            && matches!((s.get("handle").and_then(claim), claim(&handle)), (Some(theirs), Some(ours)) if theirs <= ours)
+                            && crate::write::open_parts(&dek, project, s).ok().and_then(|p| p.get(&link.field).map(|v| dek.fingerprint(v.expose()))) == Some(now_fp.clone())
+                    };
                     let replacing = match now_cred {
                         now_cred if now_cred == old => old.clone(),
-                        Some(now_cred) if supersedes => Some(now_cred),
-                        _ => return Err(Error::Conflict("stale", format!("{key} was rotated meanwhile"))),
+                        Some(now_cred) if supersedes && now_state.as_ref().is_some_and(raced) => Some(now_cred),
+                        _ => return Err(Error::Conflict("stale", format!("{key} was rotated or changed meanwhile"))),
                     };
-                    // Every secret of the environment that shares the credential.
-                    let sharing: Vec<(String, String, String, String)> = match &replacing {
-                        Some(old) => c.query(
-                            "SELECT path, key, link, link_state FROM secrets WHERE env_id = ? AND link_state LIKE ?",
-                            [env.id.as_str(), &format!("%\"credential\":\"{old}\"%")],
-                            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-                        )?,
-                        None => c.query("SELECT path, key, link, link_state FROM secrets WHERE env_id = ? AND path = ? AND key = ? AND owner = ''", [&env.id, &path, key], |r| {
-                            Ok((r.get(0)?, r.get(1)?, r.get::<_, Option<String>>(2)?.unwrap_or_default(), r.get::<_, Option<String>>(3)?.unwrap_or_default()))
-                        })?,
-                    };
+                    let sharing = sharing(c, &env.id, &path, key, replacing.as_deref())?;
+                    reaches_sharing(caller, project, slug, &path, key, &sharing, leak)?;
                     let mut items = vec![];
-                    for (p, k, l, _) in sharing {
+                    for (p, k, l) in sharing {
                         let l: Link = serde_json::from_str(&l).map_err(|_| Error::Internal("a stored link isn't JSON".into()))?;
                         let v = parts.get(&l.field).cloned().ok_or_else(|| Error::Link(format!("{} didn't issue {}", l.kind, l.field)))?;
                         items.push(Item { path: p, key: k, owner: String::new(), action: ItemAction::Set { value: Some(v), comment: None, tags: None, link: None, link_state: Some(new_state.clone()), expires_at: None } });
                     }
-                    let keys: Vec<String> = items.iter().map(|i| i.key.clone()).collect();
+                    // The keys holding the credential, by folder: the feed shows each reader only
+                    // the folders it may read (events.rs, `readable`).
+                    let mut sharing_by_folder: std::collections::BTreeMap<&str, Vec<&str>> = Default::default();
+                    for i in &items {
+                        sharing_by_folder.entry(i.path.as_str()).or_default().push(i.key.as_str());
+                    }
+                    let shared = serde_json::json!(sharing_by_folder);
                     let r = crate::write::apply(c, &dek, self.keys()?, &env, &items, crate::write::Via::Rotation, &format!("rotated {} {}", link.kind, link.r#ref), caller, now)?;
                     // The partner of `rotation.failed`, in the rotation's own transaction (its
                     // value change is the row before, `secret.changed` via rotation).
                     let version: i64 = c.query_row("SELECT version FROM secrets WHERE env_id = ? AND path = ? AND key = ? AND owner = ''", [&env.id, &path, key], |x| x.get(0))?;
                     let mut data = serde_json::json!({ "mode": "managed", "version": version, "change": r.0.seq, "scheduled": caller.principal == ROTATION });
-                    if keys.len() > 1 {
-                        data["sharing"] = serde_json::json!(keys);
+                    if items.len() > 1 {
+                        data["sharing"] = shared;
                     }
                     if leak {
                         data["via"] = serde_json::json!("leak");
@@ -533,12 +542,14 @@ impl Secrets {
                 });
                 provider.settled(&link.r#ref, &handle);
                 match res {
-                    Ok(((change, items), due)) => {
+                    Ok(((change, mut items), due)) => {
                         for id in due {
                             if let Err(e) = self.revoke_one(&id) {
                                 tracing::warn!(%project, env = %slug, %key, "revoking a leaked credential failed (the sweeper retries): {e}");
                             }
                         }
+                        // The other keys it rewrote are named (with fingerprints) only to a reader.
+                        items.retain(|d| (d.path == path && d.key == key) || caller.allows(Action::Read, &Scope::at(project, slug, &d.path).key(&d.key)));
                         Ok(Applied { change: Some(change), items, warnings: vec![], request: None })
                     }
                     Err(e) => {
@@ -711,4 +722,27 @@ pub(crate) fn managed_in(c: &code_sql::Conn<'_>, cond: &str, arg: &str) -> Resul
         .filter_map(|(l, s)| Some((serde_json::from_str::<Link>(&l).ok()?, serde_json::from_str::<Json>(&s).ok()?)))
         .filter(|(_, s)| s.get("credential").and_then(Json::as_str).is_some_and(|c| seen.insert(c.to_string())))
         .collect())
+}
+
+/// The secrets of environment `env` that a rotation of `key` rewrites: every one on credential
+/// `cred`, in any folder (`key` alone without one), as `(path, key, link)`.
+fn sharing(c: &code_sql::Conn<'_>, env: &str, path: &str, key: &str, cred: Option<&str>) -> Result<Vec<(String, String, String)>> {
+    Ok(match cred {
+        Some(cred) => c.query("SELECT path, key, link FROM secrets WHERE env_id = ? AND link_state LIKE ?", [env, &format!("%\"credential\":\"{cred}\"%")], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?,
+        None => c.query("SELECT path, key, link FROM secrets WHERE env_id = ? AND path = ? AND key = ? AND owner = ''", [env, path, key], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get::<_, Option<String>>(2)?.unwrap_or_default()))
+        })?,
+    })
+}
+
+/// A rotation rewrites every key on the credential, so its caller needs write on each, like any
+/// other write of them. A leak's is roll's (its request was): the leaked credential goes
+/// everywhere. The refusal says how many keys, never which: they may be past the caller's reach.
+fn reaches_sharing(caller: &Caller, project: &str, env: &str, path: &str, key: &str, sharing: &[(String, String, String)], leak: bool) -> Result<()> {
+    if leak || sharing.iter().all(|(p, k, _)| caller.allows(Action::Write, &Scope::at(project, env, p).key(k))) {
+        return Ok(());
+    }
+    let others = sharing.iter().filter(|(p, k, _)| !(p == path && k == key)).count();
+    let (n, share) = if others == 1 { ("1 other key".to_string(), "shares") } else { (format!("{others} other keys"), "share") };
+    Err(Error::Forbidden(format!("{n} {share} {key}'s credential: rotating it rewrites them too, so it needs write on each")))
 }

@@ -1127,9 +1127,11 @@ pub(crate) fn host_only(apps: &Apps, name: String) -> String {
 /// Where a preview's snapshots from the team's tests come in ([`snapshot`]).
 pub const SNAPSHOT_PATH: &str = "/__roll/snapshot";
 
-/// `POST /__roll/snapshot?name=` on a preview: with `x-roll-preview-bypass` matching the
-/// environment's bypass secret, its PNG (at most 2 MiB) to roll previews. Without the hook here or
-/// a bypass set it's a 404, as an app's own path would be.
+/// `POST /__roll/snapshot?name=&head=` on a preview: with `x-roll-preview-bypass` matching the
+/// environment's bypass secret, its PNG (at most 2 MiB) to roll previews, with the head the test
+/// ran against (hex, at most 64 bytes; none or empty is no check, as on roll previews' runtime),
+/// which roll previews refuses unless the preview serves it. Without the hook here or a bypass set
+/// it's a 404, as an app's own path would be.
 async fn snapshot(apps: &Arc<Apps>, service: &str, env: &str, req: Request) -> Response {
     const MAX: usize = 2 << 20;
     let Some(hook) = apps.preview_snapshots.get().cloned() else { return page(StatusCode::NOT_FOUND, "Not found", "There's nothing here.") };
@@ -1140,6 +1142,10 @@ async fn snapshot(apps: &Arc<Apps>, service: &str, env: &str, req: Request) -> R
         return (StatusCode::UNAUTHORIZED, axum::Json(serde_json::json!({ "error": "a snapshot takes the project's bypass secret (x-roll-preview-bypass)" }))).into_response();
     }
     let name = query_value(&req, "name").unwrap_or_default();
+    let head = query_value(&req, "head").filter(|h| !h.is_empty());
+    if head.as_deref().is_some_and(|h| h.len() > 64 || !h.bytes().all(|b| b.is_ascii_hexdigit())) {
+        return (StatusCode::BAD_REQUEST, axum::Json(serde_json::json!({ "error": "head: a changeset or git commit id (hex, at most 64)" }))).into_response();
+    }
     let body = match axum::body::to_bytes(req.into_body(), MAX).await {
         Ok(b) => b,
         Err(_) => return (StatusCode::PAYLOAD_TOO_LARGE, axum::Json(serde_json::json!({ "error": "a snapshot is at most 2 MiB" }))).into_response(),
@@ -1147,7 +1153,7 @@ async fn snapshot(apps: &Arc<Apps>, service: &str, env: &str, req: Request) -> R
     if !body.starts_with(b"\x89PNG\r\n\x1a\n") {
         return (StatusCode::BAD_REQUEST, axum::Json(serde_json::json!({ "error": "a snapshot is a PNG" }))).into_response();
     }
-    match hook.snapshot(service, env, &name, body).await {
+    match hook.snapshot(service, env, &name, head.as_deref(), body).await {
         Ok(v) => (StatusCode::CREATED, axum::Json(v)).into_response(),
         Err(crate::Error::Conflict(m)) => (StatusCode::CONFLICT, axum::Json(serde_json::json!({ "error": m }))).into_response(),
         Err(e) => (StatusCode::BAD_REQUEST, axum::Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
@@ -1788,6 +1794,20 @@ pub(crate) async fn proxy(apps: Arc<Apps>, service: &str, env: &str, deployment:
         {
             r.headers_mut().insert(header::STRICT_TRANSPORT_SECURITY, v.clone());
         }
+        // CSP reports (`crate::csp`): roll's endpoint named, and each policy that reports nowhere
+        // sent there (the app's own report-to or report-uri kept).
+        if g.csp_reports {
+            r.headers_mut().append(axum::http::HeaderName::from_static("reporting-endpoints"), HeaderValue::from_static(crate::csp::ENDPOINTS));
+            for name in [header::CONTENT_SECURITY_POLICY, header::CONTENT_SECURITY_POLICY_REPORT_ONLY] {
+                let policies: Vec<HeaderValue> = r.headers().get_all(&name).iter().map(crate::csp::with_reporting).collect();
+                if !policies.is_empty() {
+                    r.headers_mut().remove(&name);
+                    for v in policies {
+                        r.headers_mut().append(name.clone(), v);
+                    }
+                }
+            }
+        }
     }
     if deployment.is_some() || gate.as_ref().is_some_and(|g| g.preview) {
         r.headers_mut().insert("x-robots-tag", HeaderValue::from_static("noindex"));
@@ -2016,6 +2036,14 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
         let country = req.headers().get("cf-ipcountry").and_then(|v| v.to_str().ok()).filter(|c| c.len() == 2 && c.bytes().all(|b| b.is_ascii_alphabetic())).map(|c| c.to_ascii_uppercase());
         let Ok(body) = axum::body::to_bytes(req.into_body(), crate::vitals::MAX_BODY).await else { return StatusCode::PAYLOAD_TOO_LARGE.into_response() };
         return apps.vitals_beacon(service, env, &body, country).into_response();
+    }
+    // CSP reports: browsers' reports on the environment's own host, both shapes, bounded.
+    if gate.csp_reports && req.uri().path() == crate::csp::BEACON && req.method() == axum::http::Method::POST {
+        if !crate::csp::report_type(req.headers().get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok())) {
+            return StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response();
+        }
+        let Ok(body) = axum::body::to_bytes(req.into_body(), crate::csp::MAX_BODY).await else { return StatusCode::PAYLOAD_TOO_LARGE.into_response() };
+        return apps.csp_beacon(service, env, &body).await.into_response();
     }
     // Custom events: on every environment's own host, as its access log's page views are.
     if req.uri().path() == crate::track::SCRIPT_PATH && req.method() == axum::http::Method::GET {

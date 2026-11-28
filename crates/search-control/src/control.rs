@@ -68,6 +68,11 @@ pub enum ControlError {
     /// Something it depends on can't answer now (HTTP 503): try again.
     #[error("{0}")]
     Unavailable(String),
+    /// A reset that was recorded but isn't in place: dropped (HTTP 409, final: the branch stays
+    /// as it was) or still pending (HTTP 503: the branch's next load applies it). The answer's
+    /// `reset` says which, so a caller never tells them apart from other 409s and 503s by text.
+    #[error("{message}")]
+    NotReset { pending: bool, message: String },
     #[error(transparent)]
     Internal(#[from] anyhow::Error),
 }
@@ -505,6 +510,18 @@ fn random_string(n: usize) -> String {
     bytes.iter().map(|b| ALPHABET[*b as usize % ALPHABET.len()] as char).collect()
 }
 
+/// A store error as the API answers it: the store's refusals ([`search_store::Refused`]) are 409s.
+/// One fenced by another node's claim (it moved) is too: a retry runs on the new owner.
+fn refused_or_internal(e: anyhow::Error) -> ControlError {
+    if let Some(r) = e.downcast_ref::<search_store::Refused>() {
+        return ControlError::Conflict(r.0.clone());
+    }
+    if let Some(f) = e.downcast_ref::<search_store::Fenced>() {
+        return ControlError::Conflict(format!("cluster {} moved to another node; retry", f.cluster));
+    }
+    ControlError::Internal(e)
+}
+
 /// The 409 for a write past a person's cap: the cap, their count, and how it's raised.
 fn over(o: Over) -> ControlError {
     ControlError::Conflict(match o {
@@ -850,6 +867,73 @@ fn point_json(at: i64, s: &search_server::metrics::Stats, seconds: i64) -> Value
     v
 }
 
+/// What runs on a cluster ([`Control::operation`]): a delete or a reset alone, branches of it
+/// side by side.
+enum Ops {
+    Alone,
+    Branches(usize),
+}
+
+/// An operation running on a cluster ([`Control::operation`]); ends when dropped.
+pub(crate) struct Operation<'a> {
+    control: &'a Control,
+    id: String,
+}
+
+impl Drop for Operation<'_> {
+    fn drop(&mut self) {
+        let mut ops = self.control.operations.lock();
+        if let Some(Ops::Branches(n)) = ops.get_mut(&self.id)
+            && *n > 1
+        {
+            *n -= 1;
+            return;
+        }
+        ops.remove(&self.id);
+    }
+}
+
+/// A cluster locked out of waking for a delete or a reset ([`Control::lock_out`]). Released
+/// however the operation ends, when it returns, fails or panics: a lock-out left counted would
+/// keep the cluster (and a later one of its name) from ever waking on this node. A catalog row
+/// hidden from other nodes for it is shown again unless the operation ends it ([`LockOut::end`]).
+pub(crate) struct LockOut {
+    control: Arc<Control>,
+    name: String,
+    /// The catalog row hidden from other nodes' lookups (a delete on a fleet), by id.
+    hidden: Option<String>,
+    ended: bool,
+}
+
+impl LockOut {
+    /// The operation's own end (under `specs`): the lock-out goes, and the caller decides about
+    /// the hidden row and the spec.
+    fn end(mut self) -> Option<String> {
+        self.ended = true;
+        self.control.wakes.set_deleting(&self.name, false);
+        self.hidden.take()
+    }
+}
+
+impl Drop for LockOut {
+    fn drop(&mut self) {
+        if self.ended {
+            return;
+        }
+        self.control.wakes.set_deleting(&self.name, false);
+        let (c, name, hidden) = (self.control.clone(), self.name.clone(), self.hidden.take());
+        tokio::spawn(async move {
+            if let Some(id) = hidden
+                && let Err(e) = c.store.set_deleting(&id, false).await
+            {
+                tracing::warn!(cluster = name, error = %e, "showing a search cluster again after a stopped operation failed");
+            }
+            let _g = c.specs.lock().await;
+            c.apply_spec(&name).await;
+        });
+    }
+}
+
 pub struct Control {
     pub cfg: SearchConfig,
     pub store: Arc<Store>,
@@ -872,6 +956,8 @@ pub struct Control {
     /// Loaded clusters whose new settings need a reload (dialect, the
     /// `destructive_requires_name` default): unloaded once no request runs.
     reloads: Mutex<HashSet<String>>,
+    /// Clusters (by catalog id) a delete or a reset is running on: one at a time ([`Operation`]).
+    operations: Mutex<HashMap<String, Ops>>,
     reloader: AtomicBool,
     me: OnceLock<Weak<Control>>,
     /// When each loaded cluster's figures were last read from storage (ms), by catalog id.
@@ -997,6 +1083,7 @@ impl Control {
             specs: tokio::sync::Mutex::new(()),
             passwords: tokio::sync::Mutex::new(()),
             reloads: Mutex::new(HashSet::new()),
+            operations: Mutex::new(HashMap::new()),
             reloader: AtomicBool::new(false),
             me: OnceLock::new(),
             refreshed: Mutex::new(HashMap::new()),
@@ -1327,6 +1414,7 @@ impl Control {
             reindex_whitelist: Vec::new(),
             protected: false,
             project_id: None,
+            parent_now: false,
         }
     }
 
@@ -1400,6 +1488,9 @@ impl Control {
     /// that took the name meanwhile is never branched in its place.
     pub async fn branch(&self, parent: &SearchCluster, name: &str, at: Option<i64>, o: ClusterOptions, made_by: Option<&str>, caps: Caps) -> Result<SearchCluster> {
         let p = self.store.get(&parent.id).await?.ok_or_else(|| ControlError::NotFound(format!("no search cluster {}", parent.id)))?;
+        // Side by side with other branches of it, never while it is reset or deleted: a reset
+        // carried out mid-copy would give the branch some of each.
+        let _op = self.operation(&p, false, "branch")?;
         let now = now();
         if let Some(t) = at {
             self.check_window(&p, t, now)?;
@@ -1418,6 +1509,7 @@ impl Control {
                 parent_at: Some(at.unwrap_or(now).min(now)),
                 // Its first load marks what it inherits (`search_es::branch`).
                 inherit_pending: true,
+                parent_now: at.is_none(),
                 made_by: made_by.filter(|_| p.owner.is_none()).map(str::to_string),
                 // The remotes the parent may read from aren't the branch's.
                 reindex_whitelist: Vec::new(),
@@ -1439,6 +1531,8 @@ impl Control {
         }
         // A parent that was never written to has nothing to copy: the branch starts empty too.
         if self.data.cluster_exists(&p.name).await? {
+            // What it holds, a reset waiting for its next load included.
+            self.finish_pending_reset(&p).await?;
             let r = match at {
                 None => self.node.branch(&p.name, &c.name).await,
                 Some(t) => self.data.branch(&p.name, &c.name, Some((t.max(0) as u64) * 1000)).await,
@@ -1497,6 +1591,202 @@ impl Control {
         let dialect = dialect(&c.flavor).unwrap_or(Dialect::Elasticsearch);
         let json = search_es::xpack::security::adopt_current_security(&branch.json, &current.json, dialect, now_ms())?;
         self.data.write_cluster(&c.name, &search_store::ClusterState::new(json)).await?;
+        Ok(())
+    }
+
+    /// Resets branch `b` in place to `from`, a copy of it made without `at` (roll previews'
+    /// restore points), for which the caller needs Write on `from` as for branching it: its
+    /// indices, data streams and their aliases become `from`'s, and the rest stays its own: its
+    /// id, name, parent, password, data key, browser keys and their origins, users, keys and
+    /// settings (`search_es::branch::reset_state`). Anything else for `from` is refused (400).
+    ///
+    /// One operation at a time per cluster: a delete, another reset or a branch of it running
+    /// answers 409. It runs on a task of its own, so a request that goes away doesn't stop it
+    /// halfway. The branch is unloaded for it (its running requests are waited for, 409 if they
+    /// don't end within 30 s) and refuses requests meanwhile. The reset is recorded durably,
+    /// everything it applies kept under the branch ([`search_store::Store::begin_reset`], which on
+    /// a fleet claims the branch first), and carried out by the load that follows, before the
+    /// branch answers anything: through the manifests' compare-and-swap, as commit points that
+    /// name `from`'s segments. Answers once that load is done and the reset applied; otherwise
+    /// [`ControlError::NotReset`]: dropped (409, the branch written meanwhile by an owner that
+    /// didn't see it) or pending (503, the load failed and the next one applies it). Any other
+    /// error isn't known to have put the reset in place; a retry converges (a reset completes a
+    /// pending one first).
+    pub async fn reset(&self, b: &SearchCluster, from: &SearchCluster) -> Result<SearchCluster> {
+        if b.id == from.id {
+            return Err(ControlError::Invalid("from: a cluster can't be reset to itself".into()));
+        }
+        if b.parent_id.is_none() {
+            return Err(ControlError::Invalid(format!("{} is not a branch: only a branch can be reset", b.name)));
+        }
+        if from.parent_id.as_deref() != Some(b.id.as_str()) || !from.parent_now {
+            return Err(ControlError::Invalid(format!("from: {} isn't a copy of {} made from it as it was then (a branch of it made without `at`)", from.name, b.name)));
+        }
+        if from.flavor != b.flavor {
+            return Err(ControlError::Invalid(format!("from: {} is {}, {} is {}", from.name, from.flavor, b.name, b.flavor)));
+        }
+        let me = self.arc_for_operation()?;
+        let (b, from) = (b.clone(), from.clone());
+        tokio::spawn(async move { me.reset_run(&b, &from).await }).await.map_err(|e| ControlError::Internal(anyhow::anyhow!("the reset stopped: {e}")))?
+    }
+
+    async fn reset_run(&self, b: &SearchCluster, from: &SearchCluster) -> Result<SearchCluster> {
+        let _op = self.operation(b, true, "reset")?;
+        // On a fleet, its lease for the whole reset: a handoff waits for it.
+        let lease = match self.cluster_leases() {
+            Some(l) => match l.cluster().lease(&crate::cluster::key(&b.name)).await.map_err(|e| ControlError::Internal(anyhow::anyhow!("{e}")))? {
+                Some(g) => Some(g),
+                None => return Err(ControlError::Conflict(format!("cluster {} is served by another node; retry", b.name))),
+            },
+            None => None,
+        };
+        // A reset recorded by an earlier call whose load failed is carried out first; while it
+        // can't be, this one isn't recorded (a retryable 409, never this reset's 503).
+        if let Err(e) = self.finish_pending_reset(b).await {
+            return Err(ControlError::Conflict(format!("an earlier reset of {} is still pending and couldn't be completed, so this one wasn't recorded; retry: {e}", b.name)));
+        }
+        // Its source can't be deleted while it's read (an empty copy reads the same as a deleted
+        // one): side by side with its branches, never during its delete.
+        let _from_op = self.operation(from, false, "reset")?;
+        let lock = self.lock_out(b, false).await?;
+        let r = self.reset_inner(b, from, lease.as_ref()).await;
+        {
+            let _g = self.specs.lock().await;
+            lock.end();
+            self.apply_spec(&b.name).await;
+        }
+        let Some(ticket) = r? else { return self.get(&b.id).await };
+        // The load carries the reset out before anything reads the branch.
+        if let Err(e) = self.node.open(spec_for(b)).await {
+            // That load may have decided the reset before failing: a drop is said as one.
+            if let Ok(search_store::ResetOutcome::Dropped(why)) = self.data.reset_outcome(&b.name, ticket).await {
+                return Err(ControlError::NotReset { pending: false, message: format!("the reset of {} was dropped, and it stays as it was: {why}", b.name) });
+            }
+            tracing::warn!(cluster = b.name, error = %e, "loading a reset branch failed; its next load carries the reset out");
+            return Err(ControlError::NotReset { pending: true, message: format!("{} is reset; loading it failed and its next load completes it: {e}", b.name) });
+        }
+        match self.data.reset_outcome(&b.name, ticket).await? {
+            search_store::ResetOutcome::Applied => {}
+            search_store::ResetOutcome::Dropped(why) => {
+                return Err(ControlError::NotReset { pending: false, message: format!("the reset of {} was dropped, and it stays as it was: {why}", b.name) });
+            }
+            search_store::ResetOutcome::Pending => return Err(ControlError::NotReset { pending: true, message: format!("{} is reset; its next load completes it", b.name) }),
+        }
+        if let Err(e) = self.refresh_stats(&b.id, now_ms()).await {
+            tracing::warn!(cluster = b.name, error = %e, "reading a reset branch's figures failed");
+            self.meter.mark_dirty(&b.id);
+        }
+        self.get(&b.id).await
+    }
+
+    /// Unloads `b` and records its reset; `None` when there is nothing to reset (neither has
+    /// stored anything).
+    async fn reset_inner(&self, b: &SearchCluster, from: &SearchCluster, lease: Option<&roll_cluster::Guard>) -> Result<Option<search_store::ResetTicket>> {
+        self.settle(&b.name).await;
+        if !self.unload_retrying(&b.name, Duration::from_secs(30)).await {
+            return Err(ControlError::Conflict(format!("cluster {} has requests running; retry", b.name)));
+        }
+        if !self.data.cluster_exists(&b.name).await? {
+            if !self.data.cluster_exists(&from.name).await? {
+                return Ok(None);
+            }
+            // Nothing of its own to keep (not even its security): it never stored anything.
+            return Err(ControlError::Invalid(format!("{} has never stored anything; write to it once before resetting it", b.name)));
+        }
+        let lost = || ControlError::Conflict(format!("cluster {} moved to another node; retry", b.name));
+        if lease.is_some_and(|g| !g.is_valid()) {
+            return Err(lost());
+        }
+        let dialect = dialect(&b.flavor).unwrap_or(Dialect::Elasticsearch);
+        // The data it shares is its parent's, whatever its shards say now (all deleted or made
+        // since): what its `own_bytes` is counted against.
+        let parent = match b.parent_id.as_deref() {
+            // A parent whose delete is in flight still names the lineage (a failed delete brings
+            // it back).
+            Some(id) => self.store.live_name(id).await?,
+            None => None,
+        };
+        let ticket = self
+            .data
+            .begin_reset(&b.name, &from.name, parent.as_deref(), lease.is_some(), |branch, copy| search_es::branch::reset_state(branch, copy, dialect))
+            .await
+            .map_err(refused_or_internal)?;
+        // A copy deleted while it was read (its catalog row goes after its storage) gives
+        // nothing to reset to: the reset is given up before anything loads it.
+        let gone = match self.store.get(&from.id).await {
+            Ok(row) => row.is_none(),
+            Err(e) => {
+                tracing::warn!(cluster = from.name, error = %e, "checking a reset's source failed");
+                true
+            }
+        };
+        if gone || lease.is_some_and(|g| !g.is_valid()) {
+            self.data.cancel_reset(&b.name, if gone { "its source was deleted" } else { "the cluster moved to another node" }).await?;
+            return Err(if gone { ControlError::Conflict(format!("from: {} was deleted meanwhile; nothing was reset", from.name)) } else { lost() });
+        }
+        Ok(Some(ticket))
+    }
+
+    /// Claims `c` for an operation (409 while one that excludes it runs): a delete or a reset
+    /// alone (`alone`), branches of it side by side, never during either.
+    fn operation(&self, c: &SearchCluster, alone: bool, what: &str) -> Result<Operation<'_>> {
+        let mut ops = self.operations.lock();
+        match (ops.get_mut(&c.id), alone) {
+            (None, true) => {
+                ops.insert(c.id.clone(), Ops::Alone);
+            }
+            (None, false) => {
+                ops.insert(c.id.clone(), Ops::Branches(1));
+            }
+            (Some(Ops::Branches(n)), false) => *n += 1,
+            _ => return Err(ControlError::Conflict(format!("cluster {} is being deleted, reset or branched; retry the {what} once that's done", c.name))),
+        }
+        Ok(Operation { control: self, id: c.id.clone() })
+    }
+
+    /// Locks `c` out of waking for a delete or a reset (`hide`: and out of other nodes'
+    /// lookups, a delete on a fleet), until the returned guard ends or is dropped.
+    async fn lock_out(&self, c: &SearchCluster, hide: bool) -> Result<LockOut> {
+        let control = self.arc_for_operation()?;
+        // From here a wake can't open it, and a loaded (or waking) instance checks against an
+        // unguessable secret.
+        let _g = self.specs.lock().await;
+        self.wakes.set_deleting(&c.name, true);
+        let mut lock = LockOut { control, name: c.name.clone(), hidden: None, ended: false };
+        if hide && self.cluster_leases().is_some() {
+            // Other nodes' lookups no longer find it (none can wake it: this node holds its lease
+            // while the delete runs here).
+            self.store.set_deleting(&c.id, true).await?;
+            lock.hidden = Some(c.id.clone());
+        }
+        self.apply_spec(&c.name).await;
+        Ok(lock)
+    }
+
+    /// [`Control::arc`] for an operation that must outlive its request.
+    fn arc_for_operation(&self) -> Result<Arc<Control>> {
+        self.arc().ok_or_else(|| ControlError::Unavailable("the node is shutting down".into()))
+    }
+
+    /// Carries out the reset `c` has waiting in the store alone (the engine can't load it), as
+    /// its owner: on a fleet it claims `c` first, as a load does, so the reset's writes are its
+    /// owner's and fenced against an older one's.
+    async fn complete_reset_in_store(&self, c: &SearchCluster) -> anyhow::Result<()> {
+        if self.cluster_leases().is_some() {
+            self.data.claim_next(&c.name).await?;
+        }
+        let r = self.data.load_cluster(&c.name).await.map(drop);
+        self.data.release_cluster(&c.name);
+        r
+    }
+
+    /// Carries out a reset `c` has waiting ([`Control::reset`] after a load that failed) before
+    /// its storage is copied or reset again: a branch of it, its copy kept when it is deleted.
+    async fn finish_pending_reset(&self, c: &SearchCluster) -> Result<()> {
+        if !self.data.reset_pending(&c.name).await? {
+            return Ok(());
+        }
+        self.node.open(spec_for(c)).await.map_err(|e| ControlError::Unavailable(format!("{} has a reset to complete and couldn't load: {e}", c.name)))?;
         Ok(())
     }
 
@@ -1788,32 +2078,43 @@ impl Control {
     /// is free. With a retention window (`deleted_retention`) its storage is kept until the
     /// window ends, for [`Self::restore`]; without one, it goes now. Branches keep working:
     /// segments they share are deleted by garbage collection only once nothing references them.
+    ///
+    /// It runs on a task of its own, so a request that goes away doesn't stop it halfway; a
+    /// reset or a branch of it running is a 409.
     pub async fn delete(&self, id: &str) -> Result<()> {
+        let me = self.arc_for_operation()?;
+        let id = id.to_string();
+        tokio::spawn(async move { me.delete_run(&id).await }).await.map_err(|e| ControlError::Internal(anyhow::anyhow!("the delete stopped: {e}")))?
+    }
+
+    async fn delete_run(&self, id: &str) -> Result<()> {
         let c = self.get(id).await?;
+        let _op = self.operation(&c, true, "delete")?;
+        // Kept for restoring, its storage is copied: what it holds, a reset waiting included. One
+        // whose reset can't be carried out is kept as it is, the reset given up.
+        if !self.cfg.deleted_retention.is_zero()
+            && let Err(e) = self.finish_pending_reset(&c).await
+            // A cluster the engine can't load: the store carries its reset out on its own.
+            && let Err(e) = self.complete_reset_in_store(&c).await.map_err(|e2| format!("{e}; and without the engine: {e2}"))
         {
-            // From here the catalog hides the cluster, a wake can't open it, and a loaded (or
-            // waking) instance checks against an unguessable secret.
-            let _g = self.specs.lock().await;
-            self.wakes.set_deleting(&c.name, true);
-            if self.cluster_leases().is_some() {
-                // Other nodes' lookups no longer find it (none can wake it: this node holds its
-                // lease while the delete runs here).
-                if let Err(e) = self.store.set_deleting(&c.id, true).await {
-                    self.wakes.set_deleting(&c.name, false);
-                    return Err(e.into());
-                }
+            // Half applied, giving it up would keep (and restore) a mix of both: retry until the
+            // load can complete it.
+            if self.data.reset_started(&c.name).await? {
+                return Err(ControlError::Unavailable(format!("{} has a reset half applied that couldn't be completed; retry the delete: {e}", c.name)));
             }
-            self.apply_spec(&c.name).await;
+            tracing::warn!(cluster = c.name, error = %e, "a deleted cluster's pending reset couldn't be carried out; it is kept as it was");
+            self.data.cancel_reset(&c.name, "the cluster was deleted").await?;
         }
+        let lock = self.lock_out(&c, true).await?;
         let r = self.delete_inner(&c).await;
         let _g = self.specs.lock().await;
-        self.wakes.set_deleting(&c.name, false);
+        let hidden = lock.end();
         match &r {
             Ok(()) => self.wakes.forget(&c.name),
             // Still there: give it its credentials back.
             Err(_) => {
-                if self.cluster_leases().is_some()
-                    && let Err(e) = self.store.set_deleting(&c.id, false).await
+                if let Some(id) = hidden
+                    && let Err(e) = self.store.set_deleting(&id, false).await
                 {
                     tracing::warn!(cluster = c.name, error = %e, "un-hiding a search cluster after a failed delete failed");
                 }
@@ -2941,6 +3242,7 @@ mod tests {
             reindex_whitelist: vec!["es.example.com:443".into()],
             protected: false,
             project_id: None,
+            parent_now: false,
         };
         let s = spec_for(&c);
         assert!(s.ip_allowlist.contains("::ffff:203.0.113.9".parse().unwrap()) && !s.ip_allowlist.is_open());

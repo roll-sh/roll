@@ -26,6 +26,10 @@ pub struct Note {
     /// How that picture was taken, when as the reviewer saw it ("390x844, after 2 steps").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub crop_as: Option<String>,
+    /// The picture is the reviewer's own, of their tab, taken in their browser (Jam's, Marker.io's)
+    /// and sent with the note, rather than roll's crop.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub crop_own: bool,
     /// How the reviewer saw the page, from the note itself: what roll's browser takes it as.
     #[serde(skip)]
     pub seen: Seen,
@@ -172,6 +176,41 @@ pub struct GuestNote {
     pub errors: Vec<String>,
     #[serde(default)]
     pub requests: Vec<String>,
+    /// The picture of their tab they took (`POST /__roll/screen`'s token), kept as the note's.
+    #[serde(default)]
+    pub screen: String,
+}
+
+/// The largest picture a reviewer may send of their own tab.
+pub const SCREEN_MAX: usize = 1 << 20;
+/// Its widest and tallest side (the page downscales to it).
+pub const SCREEN_SIDE: u32 = 1600;
+
+/// A reviewer's picture of their own tab, checked: at most [`SCREEN_MAX`] bytes, a PNG, JPEG or
+/// WebP by its own bytes (whatever it was sent as), at most [`SCREEN_SIDE`] a side, and decoded
+/// whole. Its type.
+pub fn screen_ok(bytes: &[u8]) -> Result<&'static str, String> {
+    if bytes.len() > SCREEN_MAX {
+        return Err(format!("a picture is {} KiB at most", SCREEN_MAX >> 10));
+    }
+    let (format, mime) = match image::guess_format(bytes) {
+        Ok(image::ImageFormat::Png) => (image::ImageFormat::Png, "image/png"),
+        Ok(image::ImageFormat::Jpeg) => (image::ImageFormat::Jpeg, "image/jpeg"),
+        Ok(image::ImageFormat::WebP) => (image::ImageFormat::WebP, "image/webp"),
+        _ => return Err("a picture is a PNG, JPEG or WebP".into()),
+    };
+    let mut reader = image::ImageReader::with_format(std::io::Cursor::new(bytes), format);
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(SCREEN_SIDE);
+    limits.max_image_height = Some(SCREEN_SIDE);
+    limits.max_alloc = Some(64 << 20);
+    reader.limits(limits);
+    match reader.decode() {
+        Ok(img) if img.width() > 0 && img.height() > 0 => Ok(mime),
+        Ok(_) => Err("the picture is empty".into()),
+        Err(image::ImageError::Limits(_)) => Err(format!("a picture is {SCREEN_SIDE}x{SCREEN_SIDE} at most")),
+        Err(_) => Err("the picture doesn't decode".into()),
+    }
 }
 
 /// A guest's words made inert where a pull request shows them: no mention (`@` breaks), no
@@ -248,7 +287,7 @@ pub fn thread(comments: impl IntoIterator<Item = Comment>) -> Vec<Note> {
             let outside = c.outside || c.by.starts_with("guest:");
             // Its steps aren't taken from outside the team (a reader's could click anything).
             let seen = if outside { Seen { steps: Vec::new(), ..Seen::of(&c.body) } } else { Seen::of(&c.body) };
-            notes.push(Note { id: c.id, path, selector, note, by: c.by, at: c.at, replies: Vec::new(), crop: false, crop_as: None, seen, outside, work: None });
+            notes.push(Note { id: c.id, path, selector, note, by: c.by, at: c.at, replies: Vec::new(), crop: false, crop_as: None, crop_own: false, seen, outside, work: None });
         } else if let Some((to, note)) = parse_reply(&c.body) {
             let outside = c.outside || c.by.starts_with("guest:");
             replies.push((to, Reply { id: c.id, note, by: c.by, at: c.at, outside }));

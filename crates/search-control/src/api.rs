@@ -49,6 +49,11 @@ impl IntoResponse for ControlError {
             ControlError::Forbidden(_) => StatusCode::FORBIDDEN,
             ControlError::Busy(_) => StatusCode::TOO_MANY_REQUESTS,
             ControlError::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
+            ControlError::NotReset { pending, .. } => {
+                let status = if *pending { StatusCode::SERVICE_UNAVAILABLE } else { StatusCode::CONFLICT };
+                let reset = if *pending { "pending" } else { "dropped" };
+                return (status, Json(json!({ "error": self.to_string(), "reset": reset }))).into_response();
+            }
             ControlError::Internal(e) => {
                 tracing::warn!(error = %e, "search control error");
                 StatusCode::INTERNAL_SERVER_ERROR
@@ -67,6 +72,7 @@ pub fn router(control: Arc<Control>) -> Router {
         .route("/v1/search/clusters/{id}/password", post(rotate))
         .route("/v1/search/clusters/{id}/unload", post(unload))
         .route("/v1/search/clusters/{id}/restore", post(restore))
+        .route("/v1/search/clusters/{id}/reset", post(reset))
         .route("/v1/search/clusters/{id}/indices", get(indices))
         .route("/v1/search/clusters/{id}/request", post(request))
         .route("/v1/search/clusters/{id}/usage", get(usage))
@@ -508,10 +514,10 @@ async fn update(State(c): State<AppState>, caller: Caller, Path(id): Path<String
     Ok(Json(view(&c, &caller, d, false).await?))
 }
 
-async fn remove(State(c): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
+async fn remove(State(c): State<AppState>, Path(id): Path<String>) -> Result<Response, ControlError> {
     let d = c.get(&id).await?;
     c.delete(&d.id).await?;
-    Ok(Json(json!({ "deleted": d.id, "name": d.name })))
+    Ok(Json(json!({ "deleted": d.id, "name": d.name })).into_response())
 }
 
 #[derive(Deserialize)]
@@ -534,6 +540,32 @@ async fn branch(State(c): State<AppState>, caller: Caller, Path(id): Path<String
         c.branched(&parent, &d).await?;
     }
     Ok(Json(view(&c, &caller, d, true).await?).into_response())
+}
+
+/// `POST …/reset`'s body: the copy (or other branch) the branch is reset to, by id or name.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResetReq {
+    from: String,
+}
+
+/// Resets a branch in place to a copy of it ([`Control::reset`]).
+async fn reset(State(c): State<AppState>, caller: Caller, Path(id): Path<String>, body: bytes::Bytes) -> Result<Response, ControlError> {
+    let r: ResetReq = serde_json::from_slice(&body).map_err(|e| ControlError::Invalid(format!("invalid request: {e}")))?;
+    let b = c.get(&id).await?;
+    // The copy is one the caller may write, as branching it needs (the branch's check is the
+    // gate's); one it can't see is a 404.
+    let from = match c.get(&r.from).await {
+        Ok(f) if caller.may(&f, roll_auth::scope::Action::Write).await => f,
+        Ok(f) if caller.sees(&f).await => return Err(ControlError::Forbidden(format!("resetting from {} needs write on it", f.name))),
+        Ok(_) | Err(ControlError::NotFound(_)) => return Err(ControlError::NotFound(format!("no search cluster {}", r.from))),
+        Err(e) => return Err(e),
+    };
+    // On the branch's owner already: `per_cluster` sends every per-cluster route there.
+    let d = c.reset(&b, &from).await?;
+    let mut v = serde_json::to_value(view(&c, &caller, d, false).await?).map_err(|e| ControlError::Internal(e.into()))?;
+    v["reset"] = json!("applied");
+    Ok(Json(v).into_response())
 }
 
 async fn branches(State(c): State<AppState>, caller: Caller, Path(id): Path<String>) -> ApiResult<Vec<ClusterView>> {
