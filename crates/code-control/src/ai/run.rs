@@ -322,8 +322,7 @@ impl Code {
         }
         let changed: Vec<String> = files.iter().map(|f| f.path.clone()).collect();
         let learnings: Vec<Learning> = self
-            .db
-            .learnings(&r.id)?
+            .trusted_learnings(&r.id)?
             .into_iter()
             .filter(|l| l.path.as_deref().is_none_or(|p| changed.iter().any(|c| glob::matches(p, c))))
             .map(|l| Learning { id: l.id, path: l.path, text: l.text })
@@ -744,7 +743,7 @@ impl Code {
                 c.title, th.start_line, th.line, th.path
             ),
         };
-        let learnings: Vec<Learning> = self.db.learnings(&r.id)?.into_iter().map(|l| Learning { id: l.id, path: l.path, text: l.text }).collect();
+        let learnings: Vec<Learning> = self.trusted_learnings(&r.id)?.into_iter().map(|l| Learning { id: l.id, path: l.path, text: l.text }).collect();
         let system = prompt::system(&RepoPrompt { settings: &settings, prompt_file: None, guidelines: &[], learnings: &learnings });
         let engine = Engine::new(chosen.provider.clone(), chosen.secondary_model.clone());
         let (reply, suggestion, model, usage) = engine.reply(&system, &task, &settings).await.map_err(|e| match e {

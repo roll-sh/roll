@@ -566,6 +566,7 @@ pub const ROUTES: &[(&str, &str, &str)] = &[
     ("list_ai_reviews", "GET", "/v1/code/changes/{id}/ai-jobs"),
     ("get_reviewer", "GET", "/v1/code/repos/{owner}/{repo}/reviewer"),
     ("get_review_rules", "GET", "/v1/code/repos/{owner}/{repo}/review-settings"),
+    ("list_review_learnings", "GET", "/v1/code/repos/{owner}/{repo}/learnings"),
     ("get_repo_audit", "GET", "/v1/code/repos/{owner}/{repo}/audit"),
     ("start_preview", "POST", "/v1/code/changes/{id}/preview"),
     ("stop_preview", "DELETE", "/v1/code/changes/{id}/preview"),
@@ -944,6 +945,14 @@ fn every_tool() -> Vec<Value> {
             "get_review_rules",
             "Read a repo's review rules",
             "What a change needs to land: approvals, code owners, resolved threads, self-approval, auto-approval; as stored and as .roll/review.yaml tightens them.",
+            json!({ "repo": repo.clone() }),
+            &["repo"],
+            true,
+        ),
+        tool(
+            "list_review_learnings",
+            "List a repo's reviewer learnings",
+            "What roll's reviewer was taught for this repo and reads on every review: each learning's text, path glob (none: the whole repo), source (command: `@roll remember …`; resolved: a resolved thread's reason; dismissed: a dismissed review's; api), who and when. One marked outside may hold the words of someone who can't push (made before such replies stopped becoming learnings): the reviewer leaves it out, and lockdown withholds it.",
             json!({ "repo": repo.clone() }),
             &["repo"],
             true,
@@ -1608,11 +1617,12 @@ async fn run(c: &Call<'_>, name: &str, args: &Value) -> std::result::Result<Outc
             let id = c.change_id(args).await?;
             pass(c.get(&format!("/v1/code/changes/{}/ai-jobs", seg(&id))).await)
         }
-        "get_reviewer" | "get_review_rules" | "get_repo_audit" => {
+        "get_reviewer" | "get_review_rules" | "list_review_learnings" | "get_repo_audit" => {
             let base = c.repo(args)?;
             let tail = match name {
                 "get_reviewer" => "reviewer",
                 "get_review_rules" => "review-settings",
+                "list_review_learnings" => "learnings",
                 _ => "audit",
             };
             pass(c.get(&format!("{base}/{tail}")).await)

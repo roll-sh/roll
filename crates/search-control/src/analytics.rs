@@ -203,7 +203,7 @@ impl Control {
         let mut counts = self.store.experiments(&c.id).await?;
         counts.extend(pending.experiments.iter().cloned());
         let gone = |i: &str| pending.cleared.iter().any(|c| c == i) || pending.enabled.as_ref().is_some_and(|on| !on.iter().any(|o| o == i));
-        let mut total = Bucket::new(4 * LIST_ROWS, 2 * LIST_ROWS);
+        let mut total = Bucket::new(4 * LIST_ROWS, 2 * LIST_ROWS).with_shown(0);
         let mut indices: Vec<String> = Vec::new();
         // Per bucket of the range's resolution: searches, searches with no results, clicks,
         // conversions.

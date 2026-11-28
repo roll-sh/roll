@@ -408,6 +408,7 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
     let mut auth = auth::Auth::new(&args)?;
     let on = args.products()?;
     info!(products = %on, "starting");
+    cluster::cap_system_db(&args.code.cluster, on)?;
     let home = std::path::absolute(&args.home)?;
     // A sealed start: nothing runs until the deployment key's shares unseal this node (sealed.rs).
     let mut api_listener = None;

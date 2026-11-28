@@ -86,6 +86,13 @@ async fn as_person(mut req: axum::extract::Request, next: axum::middleware::Next
             req.extensions_mut().insert(roll_auth::Capable(vec![roll_auth::scope::Action::Reveal]));
         }
         req.extensions_mut().insert(roll_auth::Operator);
+        // The gate's decision in another index of the route's cluster.
+        let cluster = req.uri().path().strip_prefix("/v1/search/clusters/").and_then(|r| r.split('/').next()).map(str::to_string);
+        let r = rules.clone();
+        req.extensions_mut().insert(roll_auth::OtherIndex(Arc::new(move |index: &str, act: roll_auth::scope::Action| {
+            let res = roll_auth::scope::Resource { product: "search".into(), id: cluster.clone(), index: Some(index.into()), ..Default::default() };
+            r.outcome(&roll_auth::scope::Target::One(res), act) == roll_auth::scope::Outcome::Allow
+        })));
         req.extensions_mut().insert(roll_auth::Grant { id: "tok_t".into(), name: "t".into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(rules), user: None, ask_otherwise: false });
     }
     let who = req.headers().get("x-test-as").and_then(|v| v.to_str().ok()).map(str::to_string);
@@ -708,6 +715,132 @@ async fn requests_are_held_to_the_nodes_budgets() {
         .expect("a's reservation goes with its connection");
         assert_eq!(e.es(&ub, &pb, reqwest::Method::PUT, "/i/_doc/1", Some(doc)).await.0, 201);
     }
+}
+
+/// A reset or a delete whose request goes away (the client gives up while the reset waits for a
+/// wake to finish) runs to its end on its own: nothing stays locked out, so the branch answers
+/// with the copy's data, and once deleted, a cluster made under its name wakes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_reset_whose_request_goes_away_leaves_nothing_locked() {
+    use reqwest::Method;
+    let e = env().await;
+    let p = e.post("/v1/search/clusters", json!({"name": "rd"})).await;
+    let parent = format!("/v1/search/clusters/{}", p["id"].as_str().unwrap());
+    e.post(&format!("{parent}/request"), json!({"method": "PUT", "path": "/seed/_doc/0?refresh=true", "body": {"v": "seed"}})).await;
+    let b = e.post(&format!("{parent}/branches"), json!({"name": "pv-rd"})).await;
+    let branch = format!("/v1/search/clusters/{}", b["id"].as_str().unwrap());
+    let (u, pw) = creds(&b);
+    assert!(e.es(&u, &pw, Method::PUT, "/docs/_doc/1?refresh=true", Some(json!({"v": "A"}))).await.0 < 300);
+    let copy = e.post(&format!("{branch}/branches"), json!({"name": "pv-rd-copy"})).await;
+    assert!(e.es(&u, &pw, Method::PUT, "/docs/_doc/1?refresh=true", Some(json!({"v": "B"}))).await.0 < 300);
+    // A wake that takes a while, which the reset's unload waits for; its client gives up first.
+    asleep_with_slow_wake(&e, "pv-rd", Duration::from_millis(1500)).await;
+    let waking = spawn_get(&e, &u, &pw, "/docs/_doc/1");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let gone = e.http.post(format!("{}{branch}/reset", e.api)).json(&json!({"from": copy["id"]})).timeout(Duration::from_millis(300)).send().await;
+    assert!(gone.is_err(), "the client gave up: {gone:?}");
+    e.control.set_wake_delay(Duration::ZERO);
+    let _ = waking.await;
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let (s, v) = e.es(&u, &pw, Method::GET, "/docs/_doc/1", None).await;
+        if s == 200 && v["_source"]["v"] == "A" {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "the reset never completed: {s} {v}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    // The reset's own end (its outcome, its figures) may still be running: a 409 until then.
+    loop {
+        let (s, v) = e.call(Method::DELETE, &branch, None).await;
+        if s == 200 {
+            break;
+        }
+        assert!(s == 409 && std::time::Instant::now() < deadline, "{s} {v}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let again = e.post("/v1/search/clusters", json!({"name": "pv-rd"})).await;
+    let (u, pw) = creds(&again);
+    let (s, v) = e.es(&u, &pw, Method::PUT, "/fresh/_doc/1?refresh=true", Some(json!({"v": 1}))).await;
+    assert_eq!(s, 201, "a cluster made under the name wakes: {v}");
+}
+
+/// A branch reset to a copy of it (roll previews' restore points) holds what the copy held
+/// again, in place: the same id and password, its API key and browser key still work; an index
+/// made since is gone, one deleted since is back, and it writes on from there. A cluster outside
+/// the branch's line is refused, and a reset runs alone: a second one or a delete meanwhile is a
+/// 409.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_branch_resets_to_its_copy() {
+    use reqwest::Method;
+    let e = env().await;
+    let p = e.post("/v1/search/clusters", json!({"name": "rs"})).await;
+    let parent = format!("/v1/search/clusters/{}", p["id"].as_str().unwrap());
+    e.post(&format!("{parent}/request"), json!({"method": "PUT", "path": "/seed/_doc/0?refresh=true", "body": {"v": "seed"}})).await;
+    let b = e.post(&format!("{parent}/branches"), json!({"name": "pv-rs"})).await;
+    let id = b["id"].as_str().unwrap().to_string();
+    let branch = format!("/v1/search/clusters/{id}");
+    let (u, pw) = creds(&b);
+    let es = |m: Method, path: &str, body: Option<Value>| {
+        let (e, u, pw, path) = (&e, &u, &pw, path.to_string());
+        async move { e.es(u, pw, m, &path, body).await }
+    };
+    for (path, v) in [("/docs/_doc/1?refresh=true", "A"), ("/gone/_doc/1?refresh=true", "kept")] {
+        assert!(es(Method::PUT, path, Some(json!({"v": v}))).await.0 < 300, "{path}");
+    }
+    let (s, key) = es(Method::POST, "/_security/api_key", Some(json!({"name": "k"}))).await;
+    assert_eq!(s, 200, "{key}");
+    let (s, v) = e.call(Method::PATCH, &branch, Some(json!({"cors": {"allow_origin": ["https://pv.test"]}}))).await;
+    assert_eq!(s, 200, "{v}");
+    let site = e.post(&format!("{branch}/browser-keys"), json!({"name": "site", "indices": ["docs"]})).await;
+    let copy = e.post(&format!("{branch}/branches"), json!({"name": "pv-rs-copy"})).await;
+    // After the copy.
+    assert!(es(Method::PUT, "/docs/_doc/1?refresh=true", Some(json!({"v": "B"}))).await.0 < 300);
+    assert_eq!(es(Method::DELETE, "/gone", None).await.0, 200);
+    assert!(es(Method::PUT, "/later/_doc/1?refresh=true", Some(json!({"v": "B"}))).await.0 < 300);
+    // Only from a copy of the branch made without `at`.
+    let other = e.post("/v1/search/clusters", json!({"name": "rs-other"})).await;
+    for from in [json!("rs"), other["id"].clone(), json!(id)] {
+        let (s, v) = e.call(Method::POST, &format!("{branch}/reset"), Some(json!({"from": from}))).await;
+        assert_eq!(s, 400, "{from}: {v}");
+    }
+    let r = e.post(&format!("{branch}/reset"), json!({"from": copy["id"]})).await;
+    assert_eq!((&r["id"], &r["reset"]), (&json!(id), &json!("applied")), "{r}");
+    let (s, v) = es(Method::GET, "/docs/_doc/1", None).await;
+    assert_eq!((s, &v["_source"]["v"]), (200, &json!("A")), "{v}");
+    let (s, v) = es(Method::GET, "/gone/_doc/1", None).await;
+    assert_eq!((s, &v["_source"]["v"]), (200, &json!("kept")), "deleted after the copy, back: {v}");
+    assert_eq!(es(Method::GET, "/later", None).await.0, 404, "made after the copy");
+    let with_key = e.http.get(format!("{}/docs/_doc/1", e.es)).header("authorization", format!("ApiKey {}", key["encoded"].as_str().unwrap())).send().await.unwrap();
+    assert_eq!(with_key.status().as_u16(), 200, "the branch's API key");
+    let browser = e.http.post(format!("{}/docs/_search", e.es)).header("origin", "https://pv.test").header("authorization", format!("ApiKey {}", site["api_key"].as_str().unwrap())).json(&json!({})).send().await.unwrap();
+    assert_eq!(browser.status().as_u16(), 200, "the branch's browser key");
+    // It writes on from the copy; the copy and the parent are as they were.
+    assert!(es(Method::PUT, "/docs/_doc/2?refresh=true", Some(json!({"v": "C"}))).await.0 < 300);
+    assert_eq!(es(Method::GET, "/docs/_count", None).await.1["count"], 2);
+    let (cu, cp) = creds(&copy);
+    assert_eq!(e.es(&cu, &cp, Method::GET, "/docs/_count", None).await.1["count"], 1);
+    let (pu, ppw) = creds(&p);
+    assert_eq!(e.es(&pu, &ppw, Method::GET, "/_cat/indices?h=index&format=json", None).await.1, json!([{"index": "seed"}]));
+    // One operation at a time: while a reset runs (its load held up), a second reset and a
+    // delete answer 409; once it's done, the delete goes through.
+    e.control.set_wake_delay(Duration::from_millis(800));
+    let reset = format!("{branch}/reset");
+    let first = {
+        let req = e.http.post(format!("{}{reset}", e.api)).json(&json!({"from": copy["id"]}));
+        tokio::spawn(async move { req.send().await.unwrap().status().as_u16() })
+    };
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let (s, v) = e.call(Method::POST, &reset, Some(json!({"from": copy["id"]}))).await;
+    assert_eq!(s, 409, "a second reset: {v}");
+    let (s, v) = e.call(Method::DELETE, &branch, None).await;
+    assert_eq!(s, 409, "a delete: {v}");
+    assert_eq!(first.await.unwrap(), 200);
+    e.control.set_wake_delay(Duration::ZERO);
+    // The copy is a fixed point: the second reset puts back what the first did.
+    assert_eq!(es(Method::GET, "/docs/_count", None).await.1["count"], 1);
+    let (s, v) = e.call(Method::DELETE, &branch, None).await;
+    assert_eq!(s, 200, "{v}");
 }
 
 #[tokio::test]
@@ -7946,6 +8079,28 @@ async fn evaluate_scores_configurations_on_judged_queries() {
         assert_eq!(s, 400, "the cluster's own refusal: {v}");
         let (s, v) = e.call(Method::POST, &path, Some(json!({"judgments": judgments, "configurations": configs, "size": 3}))).await;
         assert!(s == 400 && v.to_string().contains("no field [size]"), "{s} {v}");
+        // Kept as a list (an index of the cluster), the same judgments score the same by name.
+        let list = format!("/v1/search/clusters/{id}/judgments/couches");
+        let (s, v) = e.call(Method::PUT, &list, Some(json!({"judgments": judgments}))).await;
+        assert_eq!((s, &v["index"], &v["ratings"]), (200, &json!("roll-judgments-couches"), &json!(3)), "{v}");
+        let (s, v) = e.call(Method::GET, &list, None).await;
+        assert_eq!((s, &v["judgments"][0]["query"], &v["meta"]["source"]), (200, &json!("couch"), &json!("manual")), "{v}");
+        let (s, by_name) = e.call(Method::POST, &path, Some(json!({"judgments_list": "couches", "configurations": configs}))).await;
+        assert_eq!((s, &by_name["comparison"]["better"], &by_name["judgments_list"]), (200, &json!(1), &json!("couches")), "{by_name}");
+        // A token limited to the evaluated index doesn't read the list's.
+        let goods_only = json!([{"product": "search", "resources": [{"id": id, "index": "goods"}], "actions": {"read": "allow"}}]).to_string();
+        let r = e.http.post(format!("{}{path}", e.api)).header("x-test-grant", &goods_only).json(&json!({"judgments_list": "couches", "configurations": configs})).send().await.unwrap();
+        assert_eq!(r.status().as_u16(), 403, "{}", r.text().await.unwrap_or_default());
+        let r = e.http.post(format!("{}{path}", e.api)).header("x-test-grant", &goods_only).json(&json!({"judgments": judgments, "configurations": configs})).send().await.unwrap();
+        assert_eq!(r.status().as_u16(), 200, "inline judgments need only the index: {}", r.text().await.unwrap_or_default());
+        // An index that merely has a list's name is never replaced or read as one.
+        assert_eq!(e.es(&u, &p, Method::PUT, "/roll-judgments-mine", Some(json!({}))).await.0, 200);
+        let (s, v) = e.call(Method::PUT, &format!("/v1/search/clusters/{id}/judgments/mine"), Some(json!({"judgments": judgments}))).await;
+        assert_eq!(s, 409, "{v}");
+        let (s, v) = e.call(Method::GET, &format!("/v1/search/clusters/{id}/judgments"), None).await;
+        assert_eq!((s, v["lists"].as_array().map(Vec::len)), (200, Some(1)), "{v}");
+        assert_eq!(e.call(Method::DELETE, &list, None).await.0, 200);
+        assert_eq!(e.call(Method::POST, &path, Some(json!({"judgments_list": "couches", "configurations": configs}))).await.0, 404);
     }
 
     // An application's configuration renders each judged query through the application's own
@@ -7978,6 +8133,94 @@ async fn evaluate_scores_configurations_on_judged_queries() {
         let (s, v) = e.call(Method::POST, &format!("/v1/search/clusters/{id}/indices/shop/evaluate"), Some(json!({"judgments": judgments, "configurations": [{"name": "x", "application": "shop", "variant": {"experiment": "e1", "variant": "nope"}}]}))).await;
         assert!(s == 400 && v.to_string().contains("no variant [nope]"), "{s} {v}");
     }
+}
+
+/// Judgments from clicks: searches with analytics on count what they showed at each position,
+/// `search_click` events what was clicked there, and `_from_clicks` rates each document as
+/// OpenSearch's implicit judgments do (COEC) on the same events, after the metering pass too.
+#[tokio::test]
+async fn judgments_are_built_from_clicks() {
+    use reqwest::Method;
+    let e = env().await;
+    let c = e.post("/v1/search/clusters", json!({"name": "clicked"})).await;
+    let (user, pw) = creds(&c);
+    let id = c["id"].as_str().unwrap().to_string();
+    let es = |m: Method, p: &str, b: Option<Value>| {
+        let (user, pw, p, e) = (user.clone(), pw.clone(), p.to_string(), &e);
+        async move {
+            let (s, v) = e.es(&user, &pw, m, &p, b).await;
+            assert!(s < 300, "{p}: {s} {v}");
+            v
+        }
+    };
+    for (doc, rank, m3) in [("1", 1, 2), ("2", 2, 3), ("3", 3, 1), ("4", 4, 4)] {
+        es(Method::PUT, &format!("/products/_doc/{doc}?refresh=true"), Some(json!({"rank": rank, "m3": m3}))).await;
+    }
+    let from_clicks = format!("/v1/search/clusters/{id}/judgments/clicked/_from_clicks");
+    let build = |body: Value| e.call(Method::POST, &from_clicks, Some(body));
+    let (s, v) = build(json!({"index": "products"})).await;
+    assert!(s == 400 && v.to_string().contains("index.roll.analytics.enabled"), "{s} {v}");
+    es(Method::PUT, "/products/_settings", Some(json!({"index.roll.analytics.enabled": true}))).await;
+    es(Method::PUT, "/_application/analytics/web", None).await;
+    // Each search shows its documents in a fixed order: "red shoe" 1 to 4, "model 3" 3 then 1.
+    let shown = async |text: &str, ids: &[&str], by: &str| {
+        let mut sort = serde_json::Map::new();
+        sort.insert(by.to_string(), json!("asc"));
+        let body = json!({"query": {"ids": {"values": ids}}, "sort": [sort]});
+        let r = e.http.post(format!("{}/products/_search", e.es)).basic_auth(&user, Some(&pw)).header("x-roll-search-query", text).json(&body).send().await.unwrap();
+        assert_eq!(r.status().as_u16(), 200);
+    };
+    let click = async |query: &str, doc: &str, shown: &[&str]| {
+        let items: Vec<Value> = shown.iter().map(|d| json!({"document": {"index": "products", "id": d}})).collect();
+        let ev = json!({"session": {"id": "s1"}, "user": {"id": "u1"}, "document": {"index": "products", "id": doc}, "search": {"query": query, "results": {"items": items}}});
+        es(Method::POST, "/_application/analytics/web/event/search_click", Some(ev)).await;
+    };
+    let red = ["1", "2", "3", "4"];
+    for _ in 0..5 {
+        shown("red shoe", &red, "rank").await;
+    }
+    for _ in 0..2 {
+        shown("model 3", &["3", "1"], "m3").await;
+        click("model 3", "3", &["3", "1"]).await;
+    }
+    for _ in 0..3 {
+        click("red shoe", "2", &red).await;
+    }
+    click("red shoe", "1", &red).await;
+    // A click on a document no search showed (a made-up id, at a position nothing filled)
+    // counts nowhere: the ratings and CTR below are OpenSearch's for the events above alone.
+    click("red shoe", "9", &["9"]).await;
+    click("red shoe", "4", &["4"]).await;
+    let (s, v) = build(json!({"index": "products", "min_searches": 2})).await;
+    assert!(s == 400 && v.to_string().contains("from 5"), "one person's searches never make a rating: {s} {v}");
+    // What the node counted, then what the catalog keeps after the metering pass. "model 3"
+    // (2 searches) isn't judged, yet its cells count toward CTR at each position.
+    for pass in [false, true] {
+        if pass {
+            e.control.sample().await.unwrap();
+        }
+        let (s, v) = build(json!({"index": "products", "min_searches": 5})).await;
+        assert_eq!((s, &v["source"], &v["ratings"]), (200, &json!("clicks"), &json!(4)), "{v}");
+        let mut rows: Vec<(String, String, f64, i64)> = Vec::new();
+        let hits = es(Method::POST, "/roll-judgments-clicked/_search", Some(json!({"size": 20}))).await;
+        for h in hits["hits"]["hits"].as_array().unwrap() {
+            let s = &h["_source"];
+            rows.push((s["query"].as_str().unwrap().into(), s["doc_id"].as_str().unwrap().into(), s["coec"].as_f64().unwrap(), s["rating"].as_i64().unwrap()));
+        }
+        rows.sort_by(|a, b| (&b.0, &a.1).cmp(&(&a.0, &b.1)));
+        let want: Vec<(String, String, f64, i64)> = [("red shoe", "1", 0.467, 1), ("red shoe", "2", 1.4, 2), ("red shoe", "3", 0.0, 0), ("red shoe", "4", 0.0, 0)]
+            .iter()
+            .map(|(q, d, v, r)| (q.to_string(), d.to_string(), *v, *r))
+            .collect();
+        assert_eq!(rows, want, "after the pass: {pass}");
+    }
+    let (s, v) = build(json!({"index": "products", "min_searches": 6})).await;
+    assert!(s == 400 && v.to_string().contains("searched 6 times"), "{s} {v}");
+    // Turning analytics off deletes the lists built from them in the next pass.
+    es(Method::PUT, "/products/_settings", Some(json!({"index.roll.analytics.enabled": false}))).await;
+    e.control.sample().await.unwrap();
+    let (s, _) = e.call(Method::GET, &format!("/v1/search/clusters/{id}/judgments/clicked"), None).await;
+    assert_eq!(s, 404);
 }
 
 /// The OTLP intake and an `otel` key, held to the cluster's shard limit like any create.

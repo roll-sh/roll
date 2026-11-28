@@ -35,8 +35,10 @@
 //! - `analytics`: search analytics ([`search_es::analytics::Bucket`]) of the indices that turned
 //!   them on, in two fixed rings per index, a row per slot: [`ANALYTICS_HOUR_SLOTS`] one-hour
 //!   buckets (7 days) and [`ANALYTICS_DAY_SLOTS`] one-day buckets (30 days), each a bounded
-//!   list of top queries and of queries with no results. A slot is replaced when its time comes
-//!   round again; an index whose analytics go off or that is deleted loses its rows.
+//!   list of top queries and of queries with no results, the daily ones also what their most
+//!   searched queries showed and had clicked at each position ([`ANALYTICS_DAY_CELL_QUERIES`]).
+//!   A slot is replaced when its time comes round again; an index whose analytics go off or that
+//!   is deleted loses its rows.
 //!
 //! - `crawler_sites`: one row per cluster and domain or origin verified (or being verified) for
 //!   its web crawlers: its kind (`domain`, by DNS, covering every origin on it; `origin`, by the
@@ -139,6 +141,10 @@ pub struct SearchCluster {
     /// Branches made before marking existed never have it, so their own jobs are left alone.
     #[serde(skip)]
     pub inherit_pending: bool,
+    /// A branch made from its parent as it was then, without `at` (a copy a reset may start
+    /// from: `Control::reset`). Branches made before it say `false`.
+    #[serde(skip)]
+    pub parent_now: bool,
     /// Its `reindex.remote.whitelist` (Elastic Cloud's user setting): the `host:port` patterns
     /// reindex from remote may read; empty: none. roll's migration adds the host it reads.
     /// Branches start with their parent's.
@@ -446,10 +452,10 @@ CREATE INDEX IF NOT EXISTS search_suggestions_due ON search_suggestions (due_at)
 "#;
 
 const COLS: &str = "id, name, region, flavor, password, idle_timeout_s, max_in_flight, max_body_mb, destructive_requires_name, \
-                    parent_id, parent_at, created_at, password_rotated_at, indices, docs, stored_bytes, owner, ip_allowlist, cors, browser_per_minute, inherit_pending, reindex_whitelist, made_by, protected, project_id";
+                    parent_id, parent_at, created_at, password_rotated_at, indices, docs, stored_bytes, owner, ip_allowlist, cors, browser_per_minute, inherit_pending, reindex_whitelist, made_by, protected, project_id, parent_now";
 /// What lookups read: [`COLS`] and where the cluster is loaded.
 const READ_COLS: &str = "id, name, region, flavor, password, idle_timeout_s, max_in_flight, max_body_mb, destructive_requires_name, \
-                         parent_id, parent_at, created_at, password_rotated_at, indices, docs, stored_bytes, owner, loaded_on, own_bytes, wake_at, restored_at, ip_allowlist, cors, browser_per_minute, inherit_pending, reindex_whitelist, made_by, protected, project_id";
+                         parent_id, parent_at, created_at, password_rotated_at, indices, docs, stored_bytes, owner, loaded_on, own_bytes, wake_at, restored_at, ip_allowlist, cors, browser_per_minute, inherit_pending, reindex_whitelist, made_by, protected, project_id, parent_now";
 /// What deleted clusters' reads add to [`READ_COLS`].
 const DELETED_COLS: &str = "deleted_name, deleted_at, purge_at, stored_as, name";
 
@@ -489,16 +495,17 @@ fn row(r: &Row) -> code_sql::Result<SearchCluster> {
         made_by: r.get(26)?,
         protected: r.get(27)?,
         project_id: r.get(28)?,
+        parent_now: r.get(29)?,
     })
 }
 
 fn deleted_row(r: &Row) -> code_sql::Result<DeletedCluster> {
     let mut c = row(r)?;
-    // [`DELETED_COLS`] follow [`READ_COLS`]' 29 (0-28).
-    c.name = r.get(29)?;
+    // [`DELETED_COLS`] follow [`READ_COLS`]' 30 (0-29).
+    c.name = r.get(30)?;
     c.loaded_on = None;
     c.wake_at = None;
-    Ok(DeletedCluster { cluster: c, deleted_at: r.get(30)?, purge_at: r.get(31)?, stored_as: r.get(32)?, reserved: r.get(33)? })
+    Ok(DeletedCluster { cluster: c, deleted_at: r.get(31)?, purge_at: r.get(32)?, stored_as: r.get(33)?, reserved: r.get(34)? })
 }
 
 /// What the catalog keeps of an index's query suggestions (`crate::suggestions`): its settings
@@ -569,6 +576,15 @@ pub fn analytics_caps(res: i64) -> (usize, usize) {
     if res >= 86_400 { ANALYTICS_DAY_TOP } else { ANALYTICS_HOUR_TOP }
 }
 
+/// Queries a day's bucket keeps (document, position) cells for, the most searched: judgments
+/// from clicks read the daily ring only, so the hourly ring keeps none.
+pub const ANALYTICS_DAY_CELL_QUERIES: usize = 100;
+
+/// The queries a ring of resolution `res` keeps cells for.
+pub fn analytics_cell_queries(res: i64) -> usize {
+    if res >= 86_400 { ANALYTICS_DAY_CELL_QUERIES } else { 0 }
+}
+
 fn allowlist_json(rules: &[IpRule]) -> String {
     serde_json::to_string(rules).expect("rules serialize")
 }
@@ -635,6 +651,8 @@ impl Store {
         db.add_column("search_clusters", "protected", "INTEGER NOT NULL DEFAULT 1")?;
         // The project a cluster was handed to (rolld's homes; [`SearchCluster::tenant`]).
         db.add_column("search_clusters", "project_id", "TEXT")?;
+        // Branches made before it aren't known to be copies made without `at` (`parent_now`).
+        db.add_column("search_clusters", "parent_now", "INTEGER NOT NULL DEFAULT 0")?;
         // Hand-overs to a workspace project decided (a home set) and not done yet
         // ([`Store::owe_handover`]).
         db.ensure_schema("CREATE TABLE IF NOT EXISTS search_handovers (cluster_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, at INTEGER NOT NULL)")?;
@@ -772,7 +790,7 @@ impl Store {
                 return Ok(Inserted::Over(over));
             }
             x.execute(
-                &format!("INSERT INTO search_clusters ({COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)"),
+                &format!("INSERT INTO search_clusters ({COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)"),
                 params![
                     c.id,
                     c.name,
@@ -798,7 +816,8 @@ impl Store {
                     whitelist_json(&c.reindex_whitelist),
                     c.made_by,
                     c.protected,
-                    c.project_id
+                    c.project_id,
+                    c.parent_now
                 ],
             )
             .map(|_| Inserted::Yes)
@@ -947,6 +966,12 @@ impl Store {
 
     pub async fn get(&self, id: &str) -> anyhow::Result<Option<SearchCluster>> {
         self.one("id", id).await
+    }
+
+    /// The name of cluster `id` while it isn't deleted, a delete in flight included (lookups by
+    /// [`Store::get`] don't see one).
+    pub async fn live_name(&self, id: &str) -> anyhow::Result<Option<String>> {
+        Ok(self.db.read(|x| x.query_row("SELECT name FROM search_clusters WHERE id = ?1 AND deleted_at IS NULL", params![id], |r| r.get(0)).optional())?)
     }
 
     /// The cluster named `name`, unless it is being deleted.
@@ -1486,7 +1511,8 @@ impl Store {
                         Some((a, data)) if a == at => search_es::analytics::Bucket::decode(&data, top, empty),
                         Some((a, _)) if a > at => continue,
                         _ => search_es::analytics::Bucket::new(top, empty),
-                    };
+                    }
+                    .with_shown(analytics_cell_queries(res));
                     merged.merge(bucket);
                     x.execute(
                         "INSERT INTO search_analytics (cluster_id, idx, res, slot, at, data) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
@@ -1935,6 +1961,7 @@ mod tests {
             reindex_whitelist: Vec::new(),
             protected: false,
             project_id: None,
+            parent_now: false,
         }
     }
 

@@ -942,7 +942,9 @@ service"), and a call the issuer gives no token for is `cron.failed` saying so. 
   2 MiB, handed to roll previews (`PreviewSnapshots`) and never to the app: 401 without the
   secret, 413 past the size, 400 for what isn't a PNG or a name roll previews refuses, 409 when
   the preview can't take one, a 404 where roll previews isn't on the node or no bypass is set.
-  roll previews is told the service too, and checks the preview runs on it. A `pv-<id>`
+  roll previews is told the service too, and checks the preview runs on it. `&head=` (the head
+  the test ran against; hex, at most 64, else a 400) is passed on and checked as on roll's own
+  runtime: a picture of a head the preview doesn't serve is a 409. A `pv-<id>`
   environment is roll previews' preview `pv_<id>` (its share links, notes and snapshots find it by
   that name), so only roll previews (the operator, in process) makes one: a person's or a token's
   PUT of a new one is a 403, a deploy into one that isn't there a 404.
@@ -982,8 +984,9 @@ service"), and a call the issuer gives no token for is `cron.failed` saying so. 
   there", `roll domains verify <host> --cloudflare-token roll://…`): the token is a roll secret
   the caller names by its `roll://` reference, scoped to Zone:DNS:Edit on that one zone, bound to
   them for this call only (roll secrets' `use_once`: refused unless they may reveal it, where an
-  approved `ask` is enough; never a `sensitive` key, which roll secrets keeps for runtimes:
-  the token is a plain key the person may reveal), audited as theirs (sent only to Cloudflare's API host) and never kept, so it stops
+  approved `ask` is enough; a `sensitive` key only once an admin of its folder opted it in for
+  this use, `apps.dns` (`roll secrets allow-use apps.dns CF_TOKEN`, the tag `use-apps-dns`),
+  else a plain key the person may reveal), audited as theirs (sent only to Cloudflare's API host) and never kept, so it stops
   working the moment they lose the project. The TXT
   challenge is written first where the domain needs one, then its CNAME, unproxied (flattened at
   an apex); a name still holding A or AAAA records (its old host) answers a 409 naming them, and
