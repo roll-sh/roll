@@ -89,12 +89,18 @@ CREATE TABLE IF NOT EXISTS public_cert_revocations (
     failed_at INTEGER,
     PRIMARY KEY (cert_id, serial)
 ) WITHOUT ROWID;
-CREATE TABLE IF NOT EXISTS public_cert_dns_claims (
-    name TEXT PRIMARY KEY,
-    holder TEXT NOT NULL,
-    until INTEGER NOT NULL
-) WITHOUT ROWID;
 ";
+
+/// The Route 53 record sets orders hold (zone and name), made after lib.rs drops the table they
+/// were by name alone in (claims last minutes: none worth keeping goes).
+pub(crate) const DNS_CLAIMS: &str = "
+CREATE TABLE IF NOT EXISTS public_cert_dns_claims (
+    zone TEXT NOT NULL,
+    name TEXT NOT NULL,
+    holder TEXT NOT NULL,
+    until INTEGER NOT NULL,
+    PRIMARY KEY (zone, name)
+) WITHOUT ROWID;";
 
 /// The columns a registration gained after it shipped (lib.rs adds them to an older table). The
 /// sweep's marks: `rolled_serial`, the serial every linked key was rolled to; `rolled_at`, when (or
@@ -108,6 +114,7 @@ pub(crate) const ADDED: &[(&str, &str)] = &[
     ("rolled_at", "INTEGER"),
     ("linked_at", "INTEGER"),
     ("aws_role", "TEXT"),
+    ("dns_held_since", "INTEGER"),
 ];
 
 pub(crate) const KIND: &str = "public_cert";
@@ -133,6 +140,9 @@ const MAX_NAMES: usize = 100;
 const CLAIM_MS: i64 = 15 * 60_000;
 /// How long a failed order waits before it's tried again (unless asked sooner).
 const RETRY_MS: i64 = 60 * 60_000;
+/// How long another order may hold a registration's Route 53 record sets before that's the
+/// registration's problem (`last_error`): an order holds them for minutes.
+const HELD_PROBLEM_MS: i64 = 60 * 60_000;
 /// How long a node holds rolling a registration's keys to its certificate.
 const ROLL_HOLD_MS: i64 = 2 * 60_000;
 /// How long after a key took a registration's certificate its keys are looked at again: a key
@@ -307,6 +317,9 @@ pub trait PublicCa: Send + Sync {
     fn allows(&self, directory: &str) -> bool;
     /// Check the DNS credential before it's kept, read only: it sees each name's zone.
     fn check(&self, dns: &DnsCredential, names: &[String]) -> std::result::Result<(), String>;
+    /// The hosted zone (its id) each of `records` (`_acme-challenge` names) is written in with
+    /// `dns`, in order: what an order's records are claimed by (read only).
+    fn zones(&self, dns: &DnsCredential, records: &[String]) -> std::result::Result<Vec<String>, String>;
     /// Order a certificate (blocks, minutes at most). Errors never hold a credential.
     fn order(&self, order: Order<'_>) -> std::result::Result<Ordered, String>;
     /// Revoke a certificate the account ordered (blocks; one already revoked counts as revoked),
@@ -1291,71 +1304,111 @@ impl Secrets {
     }
 
     /// Claim, order and keep one registration's certificate. `Ok(false)`: another node holds it,
-    /// or another order (of any project) holds one of its Route 53 record names.
+    /// or another order holds one of its Route 53 record sets.
     fn order_public_cert(&self, ca: &dyn PublicCa, r: &Row) -> Result<bool> {
         let now = self.db.now_ms()?;
-        // Route 53 keeps a name's values in one set, read and written whole: two of roll's orders
-        // writing it at once would drop one's value. So an order holds its record names, in the
-        // same write as the registration, for as long as it holds that (released after cleanup).
-        let records = match r.dns {
-            DnsProvider::Route53 => challenge_records(&r.domains),
-            DnsProvider::Cloudflare => vec![],
-        };
-        let holder = names::new_id("dnc", 12);
         let claimed = self.db.write(|c| {
-            for name in &records {
-                if c.query_row("SELECT 1 FROM public_cert_dns_claims WHERE name = ? AND until > ?", params![name, now], |_| Ok(())).optional()?.is_some() {
-                    return Ok::<_, Error>(false);
-                }
-            }
-            if c.execute(
-                "UPDATE public_certs SET claimed_until = ? WHERE id = ? AND (claimed_until IS NULL OR claimed_until <= ?) AND COALESCE(serial, '') = ? AND renew_requested = ?",
-                params![now + CLAIM_MS, r.id, now, r.serial.clone().unwrap_or_default(), r.renew_requested as i64],
-            )? != 1
-            {
-                return Ok(false);
-            }
-            for name in &records {
-                c.execute("INSERT INTO public_cert_dns_claims (name, holder, until) VALUES (?, ?, ?) ON CONFLICT (name) DO UPDATE SET holder = excluded.holder, until = excluded.until", params![name, holder, now + CLAIM_MS])?;
-            }
-            Ok(true)
+            Ok::<_, Error>(
+                c.execute(
+                    "UPDATE public_certs SET claimed_until = ? WHERE id = ? AND (claimed_until IS NULL OR claimed_until <= ?) AND COALESCE(serial, '') = ? AND renew_requested = ?",
+                    params![now + CLAIM_MS, r.id, now, r.serial.clone().unwrap_or_default(), r.renew_requested as i64],
+                )? == 1,
+            )
         })?;
         if !claimed {
             return Ok(false);
         }
-        let result = self.order_claimed(ca, r);
-        if !records.is_empty() {
+        let holder = names::new_id("dnc", 12);
+        let result = self.order_claimed(ca, r, &holder);
+        if r.dns == DnsProvider::Route53 {
             let _ = self.db.write(|c| c.execute("DELETE FROM public_cert_dns_claims WHERE holder = ?", [&holder]));
         }
         let now = self.db.now_ms()?;
-        let caller = Caller::consumer(JOB);
         match result {
-            Ok(()) => Ok(true),
+            Ok(true) => Ok(true),
+            Ok(false) => {
+                // Held: the next pass tries again. Held past an hour, it's the registration's
+                // problem, as a failed order is (with the hour's wait before the next try).
+                let since: Option<i64> = self.db.read(|c| c.query_row("SELECT dns_held_since FROM public_certs WHERE id = ?", [&r.id], |x| x.get(0)).optional())?.flatten();
+                if since.is_some_and(|t| now - t >= HELD_PROBLEM_MS) {
+                    let why = "another order has held its Route 53 challenge records for over an hour (a registration of the same names in the same hosted zone)";
+                    self.order_failed(r, why, false, now)?;
+                }
+                Ok(false)
+            }
             Err(e) => {
                 // Never the order's details beyond what the error says (it names no credential).
                 let why: String = e.to_string().chars().take(300).collect();
-                let _ = self.db.write(|c| {
-                    c.execute("UPDATE public_certs SET claimed_until = NULL, renew_requested = 0, last_error = ?, failed_at = ? WHERE id = ?", params![why, now, r.id])?;
-                    audit::record(c, self.keys()?, &r.project, &caller, "public_cert.failed", None, None, &[], &format!("ordering public certificate {} failed: {why}", r.name), now)
-                });
-                // Every key it renews says so: rotation.failed, and health's rotation_failing.
-                if r.has_cert {
-                    for (slug, path, key, _) in self.public_cert_keys(&r.project, &r.id)? {
-                        self.note_rotation(&r.project, &slug, &path, &key, Some(&format!("renewing public certificate {} failed: {why}", r.name)), false);
-                    }
-                }
+                self.order_failed(r, &why, true, now)?;
                 Err(e)
             }
         }
     }
 
-    fn order_claimed(&self, ca: &dyn PublicCa, r: &Row) -> Result<()> {
+    /// An order that failed (`ordered`: it was claimed and tried) or was held too long, as `why`:
+    /// on the registration (`last_error`, the hour's wait), in the audit log, and on every key it
+    /// renews (rotation.failed, and health's rotation_failing). A held one keeps a renewal asked
+    /// for, and has no claim to let go.
+    fn order_failed(&self, r: &Row, why: &str, ordered: bool, now: i64) -> Result<()> {
+        let caller = Caller::consumer(JOB);
+        let _ = self.db.write(|c| {
+            match ordered {
+                true => c.execute("UPDATE public_certs SET claimed_until = NULL, renew_requested = 0, last_error = ?, failed_at = ? WHERE id = ?", params![why, now, r.id])?,
+                false => c.execute("UPDATE public_certs SET last_error = ?, failed_at = ? WHERE id = ?", params![why, now, r.id])?,
+            };
+            audit::record(c, self.keys()?, &r.project, &caller, "public_cert.failed", None, None, &[], &format!("ordering public certificate {} failed: {why}", r.name), now)
+        });
+        if r.has_cert {
+            for (slug, path, key, _) in self.public_cert_keys(&r.project, &r.id)? {
+                self.note_rotation(&r.project, &slug, &path, &key, Some(&format!("renewing public certificate {} failed: {why}", r.name)), false);
+            }
+        }
+        Ok(())
+    }
+
+    /// Route 53 keeps a name's values in one set per hosted zone, read and written whole: two of
+    /// roll's orders writing it at once would drop one's value. So an order holds its record sets
+    /// (zone and name: a same-named zone in another account is another set) for as long as it
+    /// holds the registration (released after cleanup). `false`: another order holds one; the
+    /// registration is let go, and when it was first held kept.
+    fn claim_records(&self, r: &Row, holder: &str, records: &[(String, String)]) -> Result<bool> {
+        let now = self.db.now_ms()?;
+        self.db.write(|c| {
+            for (zone, name) in records {
+                if c.query_row("SELECT 1 FROM public_cert_dns_claims WHERE zone = ? AND name = ? AND until > ?", params![zone, name, now], |_| Ok(())).optional()?.is_some() {
+                    c.execute("UPDATE public_certs SET claimed_until = NULL, dns_held_since = COALESCE(dns_held_since, ?) WHERE id = ?", params![now, r.id])?;
+                    return Ok::<_, Error>(false);
+                }
+            }
+            for (zone, name) in records {
+                c.execute(
+                    "INSERT INTO public_cert_dns_claims (zone, name, holder, until) VALUES (?, ?, ?, ?) ON CONFLICT (zone, name) DO UPDATE SET holder = excluded.holder, until = excluded.until",
+                    params![zone, name, holder, now + CLAIM_MS],
+                )?;
+            }
+            c.execute("UPDATE public_certs SET dns_held_since = NULL WHERE id = ?", [&r.id])?;
+            Ok(true)
+        })
+    }
+
+    /// `false`: another order holds one of its Route 53 record sets ([`Secrets::claim_records`]).
+    fn order_claimed(&self, ca: &dyn PublicCa, r: &Row, holder: &str) -> Result<bool> {
         let dek = self.project(&r.project)?;
         // Ordering acts for whoever registered it, as they are now.
         if !self.registration_reaches(&r.created_by, &[(Action::Admin, Scope::whole(&r.project))])? {
             return Err(Error::Link(format!("public certificate {} was registered by {}, who may no longer manage this project: an admin registers it again", r.name, r.created_by)));
         }
         let dns = self.dns_credential(&dek, r, &format!("public-cert-{}", r.id))?;
+        if r.dns == DnsProvider::Route53 {
+            let records = challenge_records(&r.domains);
+            let zones = ca.zones(&dns, &records).map_err(Error::Link)?;
+            if zones.len() != records.len() {
+                return Err(Error::Link("the DNS provider didn't name a zone for every challenge record".into()));
+            }
+            if !self.claim_records(r, holder, &zones.into_iter().zip(records).collect::<Vec<_>>())? {
+                return Ok(false);
+            }
+        }
         let eab_key: Option<Vec<u8>> = self.db.read(|c| c.query_row("SELECT eab_key FROM public_certs WHERE id = ?", [&r.id], |x| x.get(0)))?;
         let eab_key = eab_key.map(|k| dek.open(&aad(&r.project, &r.id, &format!("eab:{}", r.directory)), &k)).transpose()?;
         let account: Option<Vec<u8>> = self.db.read(|c| c.query_row("SELECT credentials FROM public_cert_accounts WHERE project_id = ? AND directory = ?", [&r.project, &r.directory], |x| x.get(0)).optional())?;
@@ -1394,7 +1447,7 @@ impl Secrets {
             )?;
             audit::record(c, self.keys()?, &r.project, &caller, "public_cert.issued", None, None, &[], &format!("{} issued public certificate {} (serial {}, until {end})", r.directory, r.name, leaf.serial), now)
         })?;
-        Ok(())
+        Ok(true)
     }
 
     /// The keys linked to registration `id`.

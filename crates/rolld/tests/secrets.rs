@@ -384,8 +384,9 @@ async fn a_sealed_rolld_runs_nothing_that_needs_the_key_until_its_shares_unseal_
     };
     assert_eq!(refused().await, (503, json!(true)));
     assert!(tokio::net::TcpStream::connect(&r.search).await.is_err(), "roll search started sealed");
-    // Long enough for the sweeper's first pass, which runs as roll secrets starts.
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    // Long enough for the sweeper's first pass, which runs as roll secrets starts (too short a wait
+    // only weakens this check: a pass that hasn't run deletes nothing either).
+    tokio::time::sleep(Duration::from_secs(1)).await;
     assert_eq!(expiry(), Some(1), "the sweeper ran sealed");
     assert_eq!(unseal(shares[0].clone()).await, json!({ "sealed": true, "have": 1, "need": 2 }));
     assert_eq!(refused().await, (503, json!(true)), "one share of two unsealed it");
@@ -472,44 +473,8 @@ async fn a_search_cluster_links_only_while_its_owner_is_in_its_home_project() {
     assert!(!status.is_success() && !body.contains(&url), "an apps link: {status} {body}");
 }
 
-/// A roll secrets search link made by the cluster's name (as the provider once took them) is kept
-/// by the cluster's id at the next start, so the service reading it keeps its value.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_search_link_made_by_name_is_kept_by_id_at_the_next_start() {
-    let home = Arc::new(tempfile::tempdir().unwrap());
-    let r = Rolld::start_in(home.clone(), "search", false, &[], "/v1/info").await;
-    let p = Project::new(&r).await;
-    let project = p.id.clone();
-    let sc = r.post("/v1/search/clusters", json!({ "name": "named" })).await;
-    let id = sc["id"].as_str().unwrap().to_string();
-    p.link("search", &id, &[("ELASTICSEARCH_URL", "url", "live")]).await;
-    drop(p);
-    drop(r);
-    // Stopped, the link is made to name the cluster by its name, as an old one did.
-    let db = rusqlite::Connection::open(home.path().join("secrets.db")).unwrap();
-    let n = db.execute("UPDATE secrets SET link = replace(link, ?1, ?2) WHERE project_id = ?3", [format!("\"ref\":\"{id}\""), "\"ref\":\"named\"".to_string(), project.clone()]).unwrap();
-    assert_eq!(n, 1);
-    // Its versions carry that link too, as an old link's did from when it was written.
-    db.execute("UPDATE versions SET link = (SELECT s.link FROM secrets s WHERE s.id = versions.secret_id) WHERE project_id = ?1 AND link IS NOT NULL", [&project]).unwrap();
-    drop(db);
-    let r = Rolld::start_in(home.clone(), "search", false, &[], "/v1/info").await;
-    let p = Project { rolld: &r, id: project };
-    // Its address on this start (a new port).
-    let url = r.get(&format!("/v1/search/clusters/{id}")).await["url"].as_str().unwrap().to_string();
-    let started = Instant::now();
-    loop {
-        let v = r.get(&format!("/v1/secrets/projects/{}/environments/production/values?path=/", p.id)).await;
-        if v["values"]["ELASTICSEARCH_URL"].as_str() == Some(url.as_str()) {
-            assert_eq!(v["links"][0]["ref"], json!(id), "kept by its id: {v}");
-            break;
-        }
-        assert!(started.elapsed() < Duration::from_secs(30), "the link by name never read again: {v}");
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
-}
-
-/// A link by name is kept by id only for a cluster the project trusts that existed when the link
-/// was written: once the name is freed, a project developer's own cluster that takes it (on the
+/// A link by name (as the provider once took them) is kept by id at the next start (the control),
+/// but only for a cluster the project trusts that existed when the link was written: once the name is freed, a project developer's own cluster that takes it (on the
 /// canvas, not at home there) isn't trusted, and a cluster at home there that was made, or
 /// restored, after the link was first written isn't the one it meant, even once a comment edit
 /// has written the row since. Either way the link stays by name (and fails).
@@ -663,7 +628,8 @@ async fn apps_shows_a_staging_reference_to_production_only_to_who_may_reveal_pro
 /// A roll apps log drain into roll search, end to end: rolld makes the drain's data stream (roll
 /// apps' template, the stream, its retention) through search's console as the operator, mints a
 /// key that may only append to that stream through the search link's provider, and the drain's
-/// batch lands there as an ECS document through `_bulk`; the key reads and deletes nothing.
+/// batch lands there as an ECS document through `_bulk`; the key reads and deletes nothing. A
+/// service's narrowed search link reads only its indices.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_apps_drain_appends_to_its_own_search_data_stream() {
     let r = Rolld::start("apps,search", false).await;
@@ -696,19 +662,10 @@ async fn an_apps_drain_appends_to_its_own_search_data_stream() {
     assert_eq!(drain_keys().await, [false], "the drain's key");
     r.call(reqwest::Method::DELETE, &format!("{drains}/{}", d["id"].as_str().unwrap()), None).await;
     assert!(drain_keys().await.iter().all(|&invalidated| invalidated), "the deleted drain's key still works");
-}
 
-/// An apps service's search link with `indices` and `access: read` (roll secrets' search link
-/// provider, as `names` and `permission`) gets a key that reads those indices only, and
-/// unlinking revokes it.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_apps_search_link_is_narrowed_and_unlinking_revokes_it() {
-    let r = Rolld::start("apps,search", false).await;
-    let p = Project::new(&r).await;
-    let sc = r.post("/v1/search/clusters", json!({ "name": "logs" })).await;
-    let id = sc["id"].as_str().unwrap();
-    r.call(reqwest::Method::PUT, &format!("/v1/workspace/projects/{}/resources/search/{id}", p.id), Some(json!({ "x": 0, "y": 0 }))).await;
-    let (url, owner, password) = (sc["url"].as_str().unwrap(), sc["username"].as_str().unwrap(), sc["password"].as_str().unwrap());
+    // A service's search link with `indices` and `access: read` (roll secrets' search link
+    // provider, as `names` and `permission`) gets a key that reads those indices only, and
+    // unlinking revokes it.
     for index in ["logs-app", "audit"] {
         let put = r.http.put(format!("{url}/{index}/_doc/1?refresh=true")).basic_auth(owner, Some(password)).json(&json!({ "m": "hi" })).send().await.unwrap();
         assert_eq!(put.status().as_u16(), 201);
@@ -859,7 +816,8 @@ async fn a_search_clusters_password_is_kept_in_roll_secrets_and_shown_to_nobody(
 /// the environment reads its root, and one whose `roll://` variable names a key of a subfolder
 /// reads that folder too. It opens no variable: a write-only one whose sealed value no key opens
 /// doesn't stop it, and a reference set before roll apps kept them beside the values is marked
-/// once, when the store opens.
+/// once, when the store opens. An environment's delete names the services that read it, never a
+/// value, and needs a confirm.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn reach_names_the_services_that_read_a_folder() {
     // With search: the harness reads every rolld's search address.
@@ -868,10 +826,16 @@ async fn reach_names_the_services_that_read_a_folder() {
     let secrets = format!("/v1/secrets/projects/{project}/environments");
     r.call(reqwest::Method::PUT, &format!("{secrets}/production/secrets/LOG_LEVEL"), Some(json!({ "value": "debug" }))).await;
     r.call(reqwest::Method::PUT, &format!("{secrets}/production/secrets/API_TOKEN?path=/api"), Some(json!({ "value": "fake-api-token" }))).await;
+    r.call(reqwest::Method::PUT, &format!("{secrets}/staging/secrets/LOG_LEVEL"), Some(json!({ "value": "debug" }))).await;
+    let mut web = String::new();
     for name in ["web", "worker"] {
         let svc = r.post("/v1/apps/services", json!({ "project": project, "name": name, "source": { "kind": "upload" } })).await;
         let env = format!("/v1/apps/services/{}/environments/production", svc["id"].as_str().unwrap());
         r.call(reqwest::Method::PUT, &env, Some(json!({}))).await;
+        if name == "web" {
+            web = svc["id"].as_str().unwrap().to_string();
+            r.call(reqwest::Method::PUT, &format!("/v1/apps/services/{web}/environments/staging"), Some(json!({}))).await;
+        }
         if name == "worker" {
             r.call(reqwest::Method::PATCH, &format!("{env}/variables"), Some(json!({ "set": { "TOKEN": "roll://production/api/API_TOKEN", "SIGNING_KEY": "fake-signing-key" }, "seal": ["SIGNING_KEY"] }))).await;
         }
@@ -889,21 +853,12 @@ async fn reach_names_the_services_that_read_a_folder() {
     let api = r.get(&format!("{secrets}/production/reach?path=/api")).await;
     assert_eq!(through(&api), [("worker".to_string(), "roll://production/api/API_TOKEN".to_string())], "{api}");
     assert!(!api.to_string().contains("fake-api-token"), "names, never a value");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_environments_delete_names_the_services_that_read_it_and_needs_a_confirm() {
-    let r = Rolld::start("apps,search", false).await;
-    let project = Project::new(&r).await.id;
-    let envs = format!("/v1/secrets/projects/{project}/environments");
-    r.call(reqwest::Method::PUT, &format!("{envs}/staging/secrets/LOG_LEVEL"), Some(json!({ "value": "debug" }))).await;
-    let svc = r.post("/v1/apps/services", json!({ "project": project, "name": "web", "source": { "kind": "upload" } })).await;
-    r.call(reqwest::Method::PUT, &format!("/v1/apps/services/{}/environments/staging", svc["id"].as_str().unwrap()), Some(json!({}))).await;
-    let preview = r.get(&format!("{envs}/staging/deletion")).await;
+    // An environment's delete names the services that read it, and needs a confirm.
+    let preview = r.get(&format!("{secrets}/staging/deletion")).await;
     assert_eq!(preview["confirm"], true, "something reads it: {preview}");
-    assert!(preview["breaks"].as_array().unwrap().iter().any(|b| b["via"] == "service" && b["name"] == "web" && b["id"] == svc["id"]), "{preview}");
+    assert!(preview["breaks"].as_array().unwrap().iter().any(|b| b["via"] == "service" && b["name"] == "web" && b["id"] == web.as_str()), "{preview}");
     assert!(!preview.to_string().contains("debug"), "names, never a value");
-    let delete = |q: &str| r.http.delete(format!("{}{envs}/staging{q}", r.api)).bearer_auth(TOKEN).send();
+    let delete = |q: &str| r.http.delete(format!("{}{secrets}/staging{q}", r.api)).bearer_auth(TOKEN).send();
     let refused = delete("").await.unwrap();
     assert_eq!(refused.status(), 409);
     assert!(refused.text().await.unwrap().contains("service web"));

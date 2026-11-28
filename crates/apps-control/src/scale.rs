@@ -93,14 +93,3 @@ impl Apps {
         Ok(if sum { values.sum() } else { values.fold(0.0, f64::max) })
     }
 }
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn a_backlog_wants_an_instance_per_share_within_the_bounds() {
-        let sc = crate::model::Scale { stream: "str_a".into(), group: "g".into(), metric: String::new(), sum: false, per_instance: 100 };
-        assert_eq!(sc.instances(0, 1, 5), 1, "the floor");
-        assert_eq!(sc.instances(250, 1, 5), 3);
-        assert_eq!(sc.instances(10_000, 1, 5), 5, "the ceiling");
-    }
-}

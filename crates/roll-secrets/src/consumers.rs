@@ -370,15 +370,16 @@ impl Secrets {
         }
         // While its maker may still reveal what it reads, as they are now (a member removed or
         // demoted, or no longer an admin, stops it at once).
-        if !self.maker_reaches(by, &[(crate::access::Action::Reveal, crate::access::Scope::at(project, &r.env, &r.path))])? {
+        if !self.maker_reaches(by, &[(crate::access::Action::Reveal, crate::access::Scope::at(project, &r.env, &r.path).key(&r.key))])? {
             return Err(gone());
         }
         Ok(Caller::consumer(&format!("{} (runtime read for {by})", resource.consumer())))
     }
 
-    /// Whether `caller` may reveal `r`'s folder in `project`. Never says more than a reveal's 403.
+    /// Whether `caller` may reveal `r`'s key in `project` (its folder, or a rule naming that key).
+    /// Never says more than a reveal's 403.
     pub(crate) fn may_reveal_for(&self, project: &str, r: &Reference, caller: &Caller) -> Result<(), Refusal> {
-        if caller.allows(crate::access::Action::Reveal, &crate::access::Scope::at(project, &r.env, &r.path)) {
+        if caller.allows(crate::access::Action::Reveal, &crate::access::Scope::at(project, &r.env, &r.path).key(&r.key)) {
             return Ok(());
         }
         let who = caller.maker.as_deref().unwrap_or(&caller.principal);
@@ -402,7 +403,14 @@ impl Secrets {
     }
 
     fn digest_one(&self, project: &str, r: &Reference, caller: &Caller, resource: &ResourceRef) -> Result<String, Refusal> {
-        let (reader, _, _) = self.consumer_entry(project, &r.env, &r.path, &r.key, caller, resource.untrusted, resource.wants_placeholders())?;
+        let (reader, e, _) = self.consumer_entry(project, &r.env, &r.path, &r.key, caller, resource.untrusted, resource.wants_placeholders())?;
+        // A reader limited to some keys never reads the folder's digest: the key's own, which moves
+        // with each version it's written at.
+        if reader.grants.limits_keys() {
+            use sha2::Digest;
+            let d = sha2::Sha256::digest(format!("key\0{}\0{}\0{}\0{}", e.row.id, e.row.version, e.row.fp, e.row.updated_at).as_bytes());
+            return Ok(d.iter().take(16).map(|b| format!("{b:02x}")).collect());
+        }
         match self.digest(project, &r.env, &r.path, &reader) {
             Err(Error::NotFound(m)) => Err(Refusal::NoSuchKey(m)),
             d => Ok(d?),

@@ -106,7 +106,7 @@ class Rolld(BaseHTTPRequestHandler):
 class AWorkload(unittest.TestCase):
     def test_logs_in_reads_sealed_values_and_watches_for_changes(self):
         server = ThreadingHTTPServer(("127.0.0.1", 0), Rolld)
-        threading.Thread(target=server.serve_forever, daemon=True).start()
+        threading.Thread(target=server.serve_forever, args=(0.01,), daemon=True).start()
         self.addCleanup(server.shutdown)
         api = f"http://127.0.0.1:{server.server_address[1]}"
         with mock.patch.dict(os.environ, {"ROLL_API_URL": api, "ROLL_IDENTITY": "idn_ci", "ROLL_OIDC_TOKEN": "wrong"}, clear=False):
@@ -174,7 +174,7 @@ class AnAWSIdentity(unittest.TestCase):
 
     def test_logs_in_with_a_signed_get_caller_identity(self):
         server = ThreadingHTTPServer(("127.0.0.1", 0), Login)
-        threading.Thread(target=server.serve_forever, daemon=True).start()
+        threading.Thread(target=server.serve_forever, args=(0.01,), daemon=True).start()
         self.addCleanup(server.shutdown)
         api = f"http://127.0.0.1:{server.server_address[1]}"
         env = {"ROLL_API_URL": api, "ROLL_IDENTITY": "idn_web", "AWS_ACCESS_KEY_ID": "AKIAIOSFODNN7EXAMPLE", "AWS_SECRET_ACCESS_KEY": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", "AWS_SESSION_TOKEN": "EXAMPLETOKEN", "AWS_REGION": "eu-west-1"}
@@ -222,7 +222,7 @@ class Cached(BaseHTTPRequestHandler):
 class ACache(unittest.TestCase):
     def test_values_are_kept_revalidated_and_never_kept_with_dynamic_credentials(self):
         server = ThreadingHTTPServer(("127.0.0.1", 0), Cached)
-        threading.Thread(target=server.serve_forever, daemon=True).start()
+        threading.Thread(target=server.serve_forever, args=(0.01,), daemon=True).start()
         self.addCleanup(server.shutdown)
         clock = [0.0]
         c = roll_secrets.Client(f"http://127.0.0.1:{server.server_address[1]}", "rlt_x", project="prj_1", cache_ttl=20, clock=lambda: clock[0])
@@ -258,7 +258,7 @@ class Echo(BaseHTTPRequestHandler):
 class ATransitKey(unittest.TestCase):
     def test_sends_base64_and_decrypts_back_to_the_same_bytes(self):
         server = ThreadingHTTPServer(("127.0.0.1", 0), Echo)
-        threading.Thread(target=server.serve_forever, daemon=True).start()
+        threading.Thread(target=server.serve_forever, args=(0.01,), daemon=True).start()
         self.addCleanup(server.shutdown)
         cards = roll_secrets.Client(f"http://127.0.0.1:{server.server_address[1]}", "rlt_x", project="prj_1").transit("cards")
         ct = cards.encrypt("héllo ✓", "order:42")
@@ -318,7 +318,7 @@ class Writes(BaseHTTPRequestHandler):
 class OneKeyWrites(unittest.TestCase):
     def test_set_and_delete_write_one_key_and_drop_the_cache(self):
         server = ThreadingHTTPServer(("127.0.0.1", 0), Writes)
-        threading.Thread(target=server.serve_forever, daemon=True).start()
+        threading.Thread(target=server.serve_forever, args=(0.01,), daemon=True).start()
         self.addCleanup(server.shutdown)
         c = roll_secrets.Client(f"http://127.0.0.1:{server.server_address[1]}", "rlt_x", project="prj_1", cache_ttl=3600)
         s = Writes.state
@@ -387,7 +387,7 @@ class Reads(BaseHTTPRequestHandler):
 class OneKeyReads(unittest.TestCase):
     def test_a_keys_record_and_stored_value_after_a_login_from_a_token_source(self):
         server = ThreadingHTTPServer(("127.0.0.1", 0), Reads)
-        threading.Thread(target=server.serve_forever, daemon=True).start()
+        threading.Thread(target=server.serve_forever, args=(0.01,), daemon=True).start()
         self.addCleanup(server.shutdown)
         sourced = []
         c = roll_secrets.login_with_identity(f"http://127.0.0.1:{server.server_address[1]}", "idn_ci", lambda: sourced.append(1) or "fake-oidc", cache_ttl=3600)
@@ -451,7 +451,7 @@ class Delta(BaseHTTPRequestHandler):
 class AWatchDelta(unittest.TestCase):
     def test_a_change_reads_through_the_delta_and_an_older_rolld_reads_in_full(self):
         server = ThreadingHTTPServer(("127.0.0.1", 0), Delta)
-        threading.Thread(target=server.serve_forever, daemon=True).start()
+        threading.Thread(target=server.serve_forever, args=(0.01,), daemon=True).start()
         self.addCleanup(server.shutdown)
         c = roll_secrets.Client(f"http://127.0.0.1:{server.server_address[1]}", "rlt_x", project="prj_1")
         s, seen, stop = Delta.state, [], threading.Event()

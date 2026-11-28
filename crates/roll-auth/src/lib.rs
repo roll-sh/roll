@@ -527,17 +527,26 @@ pub struct Gate {
     /// Origins a write with a session cookie may come from (the dashboard's, and the API's own).
     origins: Origins,
     own_origin: Option<HeaderValue>,
+    /// Domains whose names hold others' pages on this listener (previews): never a loopback name
+    /// to an open gate, though they're under `localhost` (set once).
+    hosted: OnceLock<Vec<String>>,
 }
 
 impl Gate {
     pub fn new(token: Option<AdminToken>, rules: Vec<Rule>) -> Arc<Self> {
-        Arc::new(Self { token, rules, authorizer: OnceLock::new(), sessions: None, client_ip: OnceLock::new(), origins: Origins::List(Vec::new()), own_origin: None })
+        Arc::new(Self { token, rules, authorizer: OnceLock::new(), sessions: None, client_ip: OnceLock::new(), origins: Origins::List(Vec::new()), own_origin: None, hosted: OnceLock::new() })
     }
 
     /// Scoped tokens' evaluator, set once when it's ready (before serving).
     /// How to read a request's client address (set once).
     pub fn set_client_ip(&self, f: ClientIpFn) {
         let _ = self.client_ip.set(f);
+    }
+
+    /// Domains this listener serves others' pages under (`preview.localhost`): an open gate
+    /// answers no name at or under them, `*.localhost` or not (set once).
+    pub fn set_hosted(&self, domains: Vec<String>) {
+        let _ = self.hosted.set(domains.into_iter().map(|d| d.trim_matches('.').to_ascii_lowercase()).filter(|d| !d.is_empty()).collect());
     }
 
     pub fn set_authorizer(&self, a: Arc<dyn Authorizer>) {
@@ -548,7 +557,7 @@ impl Gate {
     /// (`ROLL_DASHBOARD_ORIGIN`); `own`: the API's public URL, whose origin may send writes too.
     pub fn with_sessions(token: Option<AdminToken>, rules: Vec<Rule>, sessions: Arc<dyn Sessions>, origins: Origins, own: &str) -> Arc<Self> {
         let own_origin = origin_of(own).and_then(|o| HeaderValue::from_str(&o).ok());
-        Arc::new(Self { token, rules, authorizer: OnceLock::new(), sessions: Some(sessions), client_ip: OnceLock::new(), origins, own_origin })
+        Arc::new(Self { token, rules, authorizer: OnceLock::new(), sessions: Some(sessions), client_ip: OnceLock::new(), origins, own_origin, hosted: OnceLock::new() })
     }
 
     /// The access of a route pattern (as the router has it): its longest matching rule's, else
@@ -576,7 +585,7 @@ pub async fn check(State(gate): State<Arc<Gate>>, mut req: Request, next: Next) 
     if gate.token.is_none() {
         let authority = req.uri().authority().map(|a| a.as_str().to_string());
         if !open_host_ok(&gate, req.headers(), authority.as_deref()) {
-            return error(StatusCode::MISDIRECTED_REQUEST, "this rolld runs without ROLL_ADMIN_TOKEN, so it answers only requests to localhost, 127.0.0.1 or [::1]", "misdirected");
+            return error(StatusCode::MISDIRECTED_REQUEST, OPEN_MISDIRECTED, "misdirected");
         }
         if !open_origin_ok(&gate, req.headers()) {
             return error(StatusCode::FORBIDDEN, "this rolld runs without ROLL_ADMIN_TOKEN, so it answers only local pages", "cross_origin");
@@ -759,6 +768,9 @@ fn origin_of(url: &str) -> Option<String> {
     (!host.is_empty()).then(|| format!("{}://{}", scheme.to_ascii_lowercase(), host.to_ascii_lowercase()))
 }
 
+/// An open gate's 421. Fixed text: the Host it refused isn't echoed.
+const OPEN_MISDIRECTED: &str = "this rolld runs without ROLL_ADMIN_TOKEN, so it answers only requests to localhost, 127.0.0.1, [::1] or a name under .localhost. To reach it by another name (a proxy, tailscale serve, ssh -R), set ROLL_DASHBOARD_ORIGIN to the URL you open it at, or set ROLL_ADMIN_TOKEN";
+
 fn error(status: StatusCode, msg: &str, code: &str) -> Response {
     (status, axum::Json(serde_json::json!({ "error": msg, "code": code }))).into_response()
 }
@@ -779,7 +791,8 @@ pub enum Origins {
 }
 
 impl Origins {
-    /// Comma-separated origins (`https://roll.sh,https://staging.roll.sh`).
+    /// Comma-separated origins (`https://roll.sh,https://staging.roll.sh`), written as a URL may
+    /// be (`https://roll.sh/`, `https://roll.sh:443`): kept as a browser sends them.
     pub fn parse(list: &str) -> Result<Self, String> {
         let mut out = Vec::new();
         for o in list.split(',').map(str::trim).filter(|o| !o.is_empty()) {
@@ -788,23 +801,47 @@ impl Origins {
             if !matches!(scheme, "http" | "https") || host.is_empty() || host.contains(['/', '?', '#', '@', '*']) {
                 return Err(format!("{o} isn't an origin (scheme://host[:port])"));
             }
+            let default = if scheme == "https" { ":443" } else { ":80" };
+            let o = format!("{scheme}://{}", host.strip_suffix(default).unwrap_or(host));
             out.push(HeaderValue::from_str(&o).map_err(|_| format!("{o} isn't an origin"))?);
         }
         Ok(Origins::List(out))
     }
 }
 
-/// Whether a request to an open gate names a host it answers: a loopback name, or the API's own
-/// or a dashboard origin's host. A browser always sends `Host`; a request with none (roll's own,
-/// in process) isn't a page's.
+/// Whether a request to an open gate names a host it answers: a loopback name (`*.localhost`
+/// too: browsers resolve those to loopback themselves, so a page can't rebind one), or the API's
+/// own or a dashboard origin's host. A browser always sends `Host`; a request with none (roll's
+/// own, in process) isn't a page's.
+///
+/// Not a name under a domain this listener serves others' pages on (previews): a page there
+/// whose preview is gone reaches the API with its own Host, and its same-origin reads send no
+/// `Origin` for [`open_origin_ok`] to refuse.
 fn open_host_ok(gate: &Gate, headers: &HeaderMap, authority: Option<&str>) -> bool {
     let host = headers.get(header::HOST).and_then(|h| h.to_str().ok()).or(authority);
     let Some(host) = host else { return true };
     let host = host.to_ascii_lowercase();
     let named = |o: &HeaderValue| o.to_str().ok().and_then(|o| o.split_once("://")).is_some_and(|(_, h)| h == host);
     HeaderValue::from_str(&format!("http://{host}")).is_ok_and(|o| is_local(&o))
+        || (localhost_name(&host) && !gate.hosted.get().is_some_and(|d| d.iter().any(|d| under(&host, d))))
         || gate.own_origin.as_ref().is_some_and(named)
         || matches!(&gate.origins, Origins::List(list) if list.iter().any(named))
+}
+
+/// `name.localhost[:port]` (RFC 6761: never in DNS): labels of letters, digits and `-`.
+fn localhost_name(host: &str) -> bool {
+    let name = match host.rsplit_once(':') {
+        Some((name, port)) if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => name,
+        Some(_) => return false,
+        None => host,
+    };
+    name.strip_suffix(".localhost").is_some_and(|labels| labels.split('.').all(|l| !l.is_empty() && l.len() <= 63 && l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')))
+}
+
+/// Whether `host[:port]` is `domain` or a name under it.
+fn under(host: &str, domain: &str) -> bool {
+    let name = host.rsplit_once(':').map_or(host, |(n, _)| n);
+    name == domain || name.strip_suffix(domain).is_some_and(|rest| rest.ends_with('.'))
 }
 
 /// Whether a request to an open gate may come from where its `Origin` says: a local page, the
@@ -854,7 +891,17 @@ mod tests {
     /// only from local pages.
     #[test]
     fn an_open_gate_answers_loopback_hosts_only() {
+        struct NoSessions;
+        impl Sessions for NoSessions {
+            fn cookie(&self) -> &str {
+                "roll_session"
+            }
+            fn resolve<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<Option<Session>, String>> {
+                Box::pin(async { Ok(None) })
+            }
+        }
         let gate = Gate::new(None, Vec::new());
+        gate.set_hosted(vec!["preview.localhost.".into()]);
         let host = |h: &'static str| {
             let mut m = HeaderMap::new();
             m.insert(header::HOST, HeaderValue::from_static(h));
@@ -868,9 +915,24 @@ mod tests {
             ("attacker.example:7070", false),
             ("localhost.attacker.example", false),
             ("127.0.0.1.nip.io:7070", false),
+            // Browsers resolve `*.localhost` to loopback themselves: no page can rebind one.
+            ("api.localhost:7070", true),
+            ("a.b.localhost", true),
+            ("localhost.attacker.example.localhost.evil", false),
+            ("evil.localhost:7070.attacker.example", false),
+            ("evil.localhost@attacker.example", false),
+            (".localhost", false),
+            // Others' pages (previews) are under the preview domain: never a loopback name.
+            ("chg-abc.preview.localhost:7070", false),
+            ("preview.localhost", false),
+            ("evil-preview.localhost", true),
         ] {
             assert_eq!(open_host_ok(&gate, &host(h), None), ok, "{h}");
         }
+        // A name the operator opens it at (a proxy, tailscale serve), listed as a URL may be.
+        let named = Gate::with_sessions(None, Vec::new(), Arc::new(NoSessions), Origins::parse("https://roll.example.test/, http://box.example.test:80").unwrap(), "http://127.0.0.1:7070");
+        assert!(open_host_ok(&named, &host("roll.example.test"), None) && open_host_ok(&named, &host("box.example.test"), None));
+        assert!(!open_host_ok(&named, &host("roll.example.test:8443"), None));
         assert!(open_host_ok(&gate, &HeaderMap::new(), None), "no Host: not a page's");
         assert!(!open_host_ok(&gate, &HeaderMap::new(), Some("attacker.example")), "HTTP/2's authority counts");
         // A page elsewhere is refused whatever it sends, a WebSocket upgrade (a GET) included.
@@ -880,6 +942,11 @@ mod tests {
         assert!(!open_origin_ok(&gate, &from));
         from.insert(header::ORIGIN, HeaderValue::from_static("http://localhost:3000"));
         assert!(open_origin_ok(&gate, &from));
+        // A `*.localhost` page is any local server's (a preview's too): never a local origin.
+        for o in ["http://chg-abc.preview.localhost:7070", "http://api.localhost:7070"] {
+            from.insert(header::ORIGIN, HeaderValue::from_str(o).unwrap());
+            assert!(!open_origin_ok(&gate, &from), "{o}");
+        }
         assert!(open_origin_ok(&gate, &host("127.0.0.1:7070")), "no Origin: a navigation, or not a browser");
     }
 

@@ -87,6 +87,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route("/v1/apps/projects/{project}/notifications/{nid}", axum::routing::delete(delete_target).patch(update_target))
         .route("/v1/apps/projects/{project}/notifications/{nid}/test", post(test_target))
         .route("/v1/apps/projects/{project}/notifications/{nid}/deliveries", get(deliveries))
+        .route("/v1/apps/projects/{project}/notifications/{nid}/deliveries/{did}/redeliver", post(redeliver))
         .route("/v1/apps/services/{id}/registry", put(put_registry).delete(delete_registry))
         .route("/v1/apps/services/{id}/deploys", get(service_deploys))
         .route("/v1/apps/services/{id}/git-login", put(put_git_login).delete(delete_git_login))
@@ -723,6 +724,10 @@ async fn test_target(State(apps): S, Path((project, nid)): Path<(String, String)
 
 async fn deliveries(State(apps): S, Path((project, nid)): Path<(String, String)>) -> R {
     ok(apps.deliveries(&project, &nid).await?)
+}
+
+async fn redeliver(State(apps): S, Path((project, nid, did)): Path<(String, String, String)>) -> R {
+    ok(apps.redeliver(&project, &nid, &did).await?)
 }
 
 #[derive(Deserialize)]

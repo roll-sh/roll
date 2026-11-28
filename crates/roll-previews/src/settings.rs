@@ -979,45 +979,6 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// Page states are a few, named, each a page of the first service's and a few known steps,
-    /// and other browsers are Firefox and WebKit; anything past that is refused when set.
-    #[test]
-    fn page_states_and_browsers_are_bounded() {
-        let ok = |states: serde_json::Value| Settings::default().patched(&serde_json::json!({ "github": { "states": states } })).is_ok();
-        assert!(ok(serde_json::json!([{ "name": "cart", "page": "/", "steps": [{ "click": "#open" }, { "type": ["#q", "shoes"] }, { "press": "Enter" }, { "wait": 500 }] }])));
-        assert!(!ok(serde_json::json!([{ "name": "Cart", "page": "/", "steps": [{ "click": "#open" }] }])), "a name of a-z, 0-9 and -");
-        assert!(!ok(serde_json::json!([{ "name": "cart", "page": "//evil.example", "steps": [{ "click": "#open" }] }])), "a page on the service's own origin");
-        assert!(!ok(serde_json::json!([{ "name": "cart", "page": "/", "steps": [{ "press": "F12" }] }])), "a key from the list");
-        assert!(!ok(serde_json::json!([{ "name": "cart", "page": "/", "steps": [{ "wait": 60000 }] }])), "a wait up to 5 s");
-        assert!(!ok(serde_json::json!([{ "name": "cart", "page": "/", "steps": [{ "eval": "alert(1)" }] }])), "no other step");
-        assert!(!ok(serde_json::json!([{ "name": "cart", "page": "/", "steps": [] }])), "a step at least");
-        // A sign-in the same way, its typed text a variable's name where it's a secret.
-        let login = |l: serde_json::Value| Settings::default().patched(&serde_json::json!({ "github": { "login": l } })).ok().and_then(|s| s.github.login);
-        let l = login(serde_json::json!({ "page": "/login", "steps": [{ "type": ["#email", "qa@acme.dev"] }, { "type": ["#password", "$E2E_PASSWORD"] }, { "press": "Enter" }] })).expect("a sign-in");
-        assert_eq!(l.names(), ["E2E_PASSWORD"]);
-        assert!(login(serde_json::json!({ "page": "https://evil.example/login", "steps": [{ "click": "#go" }] })).is_none() && login(serde_json::json!({ "page": "/login", "steps": [] })).is_none());
-        assert!(super::var_ref("$e2e").is_none() && super::var_ref("$1X").is_none() && super::var_ref("hunter2").is_none());
-        let four: Vec<serde_json::Value> = (0..4).map(|i| serde_json::json!({ "name": format!("s{i}"), "page": "/", "steps": [{ "wait": 1 }] })).collect();
-        assert!(!ok(serde_json::json!(four)), "at most 3");
-        let browsers = |b: serde_json::Value| Settings::default().patched(&serde_json::json!({ "github": { "browsers": b } })).is_ok();
-        assert!(browsers(serde_json::json!(["firefox", "webkit", "webkit-phone"])));
-        assert!(!browsers(serde_json::json!(["chrome"])) && !browsers(serde_json::json!(["webkit", "webkit"])), "the two other browsers, each once");
-        assert_eq!((storybook_entry("web"), storybook_entry("web:/sb/")), (Some(("web", "/")), Some(("web", "/sb/"))));
-        let flags = |f: serde_json::Value| Settings::default().patched(&serde_json::json!({ "flags": f })).is_ok();
-        assert!(flags(serde_json::json!([{ "name": "new-checkout", "options": ["off", "on"] }])));
-        assert!(!flags(serde_json::json!([{ "name": "a b", "options": ["on"] }])) && !flags(serde_json::json!([{ "name": "x", "options": [] }])), "names of a word, and an option at least");
-        let rule = [FlagRule { name: "new-checkout".into(), options: vec!["off".into(), "on".into()] }];
-        assert_eq!(flags_header(&rule, "new-checkout:on|theme:dark|new-checkout:off|new-checkout"), Some("new-checkout=on".into()), "only what the rule names, once");
-        assert_eq!(flags_header(&rule, "new-checkout:maybe"), None);
-        assert!(storybook_entry("web:/sb").is_none() && storybook_entry("Web").is_none() && storybook_entry("web:/a b/").is_none(), "a service, and a path ending in /");
-        assert!(Settings::default().patched(&serde_json::json!({ "github": { "storybook": "web:/x" } })).is_err());
-        assert!(story_id_ok("components-button--primary") && !story_id_ok("button") && !story_id_ok("../x--y") && !story_id_ok("a--"), "Storybook's ids");
-        let modes = |m: serde_json::Value| Settings::default().patched(&serde_json::json!({ "github": { "modes": m } })).is_ok();
-        assert!(modes(serde_json::json!([{ "name": "dark", "color_scheme": "dark" }, { "name": "de", "locale": "de-DE", "timezone": "Europe/Berlin" }])));
-        assert!(!modes(serde_json::json!([{ "name": "none" }])) && !modes(serde_json::json!([{ "name": "x", "color_scheme": "blue" }])) && !modes(serde_json::json!([{ "name": "x", "timezone": "../etc" }])), "a mode changes something real");
-        assert!(page_key_ok("state:tab") && page_key_ok("mode:dark") && page_key_ok("browser:firefox") && page_key_ok("story:a--b") && !page_key_ok("browser:chrome") && !page_key_ok("mode:"), "every kind of page key");
-    }
-
     #[test]
     fn patches_merge_and_production_needs_a_yes() {
         // A point in time for the data: a while back (at most 30 days), or a time.

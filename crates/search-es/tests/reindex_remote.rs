@@ -140,58 +140,115 @@ fn reindex(host: &str, extra: &str) -> String {
 /// Settings that let a test cluster read the mock remotes on 127.0.0.1.
 const LOCAL: &[(&str, &str)] = &[("roll.reindex.remote.allow_private_hosts", "true"), ("reindex.remote.whitelist", "127.0.0.1:*")];
 
+/// Reindex reads a remote only where the node lets it: only whitelisted hosts (none by default,
+/// as Elasticsearch; a node whitelist narrows further, in Elasticsearch's words); no private
+/// address without the node's flag, as a literal or behind a name that resolves to one (the
+/// resolver's check); no address the node denies (its own endpoints), in any literal form or by
+/// name; and no redirect's target. Nothing reaches a refused address.
 #[tokio::test]
-async fn only_whitelisted_hosts_are_read() {
-    // Elasticsearch's default: nothing is whitelisted, every remote is refused.
-    let c = cluster(&[("roll.reindex.remote.allow_private_hosts", "true")]).await;
-    let (s, v, _) = call(&c, "POST", "/_reindex", &reindex("https://es.example.com:443", "")).await;
-    assert_eq!((s, at(&v, "error.reason").as_str()), (400, Some("[es.example.com:443] not whitelisted in reindex.remote.whitelist")));
-}
-
-#[tokio::test]
-async fn a_private_address_needs_the_nodes_flag() {
-    let c = cluster(&[("reindex.remote.whitelist", "*:*")]).await;
-    for host in ["http://127.0.0.1:9200", "http://localhost:9200", "https://10.0.0.8:9243", "http://[::1]:9200", "http://169.254.169.254:80"] {
-        let (s, v, _) = call(&c, "POST", "/_reindex", &reindex(host, "")).await;
-        assert_eq!(s, 400, "{host}: {v:?}");
-        let reason = at(&v, "error.reason").as_str().unwrap_or_default();
-        assert!(reason.ends_with("is a private address, which reindex from remote may not connect to unless [roll.reindex.remote.allow_private_hosts] is set"), "{reason}");
+async fn a_remote_is_read_only_where_the_node_allows() {
+    {
+        // Elasticsearch's default: nothing is whitelisted, every remote is refused.
+        let c = cluster(&[("roll.reindex.remote.allow_private_hosts", "true")]).await;
+        let (s, v, _) = call(&c, "POST", "/_reindex", &reindex("https://es.example.com:443", "")).await;
+        assert_eq!((s, at(&v, "error.reason").as_str()), (400, Some("[es.example.com:443] not whitelisted in reindex.remote.whitelist")));
     }
-    // A node whitelist narrows further, in Elasticsearch's words.
-    let c = cluster(&[("reindex.remote.whitelist", "search.example.com:443")]).await;
-    let (_, v, _) = call(&c, "POST", "/_reindex", &reindex("https://other.example.com:443", "")).await;
-    assert_eq!(at(&v, "error.reason").as_str(), Some("[other.example.com:443] not whitelisted in reindex.remote.whitelist"));
+
+    {
+        let c = cluster(&[("reindex.remote.whitelist", "*:*")]).await;
+        for host in ["http://127.0.0.1:9200", "http://localhost:9200", "https://10.0.0.8:9243", "http://[::1]:9200", "http://169.254.169.254:80"] {
+            let (s, v, _) = call(&c, "POST", "/_reindex", &reindex(host, "")).await;
+            assert_eq!(s, 400, "{host}: {v:?}");
+            let reason = at(&v, "error.reason").as_str().unwrap_or_default();
+            assert!(reason.ends_with("is a private address, which reindex from remote may not connect to unless [roll.reindex.remote.allow_private_hosts] is set"), "{reason}");
+        }
+        // A node whitelist narrows further, in Elasticsearch's words.
+        let c = cluster(&[("reindex.remote.whitelist", "search.example.com:443")]).await;
+        let (_, v, _) = call(&c, "POST", "/_reindex", &reindex("https://other.example.com:443", "")).await;
+        assert_eq!(at(&v, "error.reason").as_str(), Some("[other.example.com:443] not whitelisted in reindex.remote.whitelist"));
+    }
+
+    {
+        let (remote, seen) = mock(|_, _, _| (200, vec![], root())).await;
+        let port = remote.rsplit(':').next().unwrap().to_string();
+        let c = cluster(&[("reindex.remote.whitelist", "*:*")]).await;
+        let (s, v, text) = call(&c, "POST", "/_reindex", &reindex(&format!("http://localhost.:{port}"), "")).await;
+        assert_eq!((s, at(&v, "error.type").as_str()), (500, Some("connect_exception")), "{text}");
+        assert!(text.contains("resolves to a private address"), "{text}");
+        assert!(seen.lock().unwrap().is_empty(), "a request reached the private address");
+    }
+
+    {
+        let (target, target_seen) = mock(|_, _, _| (200, vec![], root())).await;
+        let (remote, _) = mock(move |_, _, _| (302, vec![("location".into(), format!("{target}/"))], String::new())).await;
+        let c = cluster(LOCAL).await;
+        let (s, v, _) = call(&c, "POST", "/_reindex", &reindex(&remote, "")).await;
+        assert_eq!((s, at(&v, "error.type").as_str()), (302, Some("status_exception")), "{v:?}");
+        assert!(at(&v, "error.caused_by.reason").as_str().unwrap_or_default().contains("status line [HTTP/1.1 302 Found]"), "{v:?}");
+        assert!(target_seen.lock().unwrap().is_empty(), "the redirect's target was called");
+    }
+
+    {
+        let (remote, seen) = mock(|_, _, _| (200, vec![], root())).await;
+        let port = remote.rsplit(':').next().unwrap().to_string();
+        let c = cluster(&[LOCAL, &[("reindex.remote.whitelist", "*:*"), ("roll.reindex.remote.deny_addresses", "127.0.0.0/8,::1")]].concat()).await;
+        for host in [format!("http://127.0.0.1:{port}"), format!("http://127.000.000.001:{port}"), format!("http://[::ffff:127.0.0.1]:{port}")] {
+            let (s, v, text) = call(&c, "POST", "/_reindex", &reindex(&host, "")).await;
+            assert!(s >= 400, "{host}: {text}");
+            let _ = v;
+        }
+        let (s, v, text) = call(&c, "POST", "/_reindex", &reindex(&format!("http://localhost.:{port}"), "")).await;
+        assert_eq!((s, at(&v, "error.type").as_str()), (500, Some("connect_exception")), "{text}");
+        assert!(text.contains("an address roll may not reach"), "{text}");
+        assert!(seen.lock().unwrap().is_empty(), "a request reached a denied address");
+    }
 }
 
-/// A name the literal check can't see through (`localhost.` resolves to loopback): the
-/// resolver refuses its private addresses, and nothing reaches the mock behind them.
+/// A remote's page is bounded before roll builds anything from it: one over the buffer limit is
+/// refused before it's held, also when it comes chunked (no `Content-Length` to refuse up
+/// front); its cost is charged to the node's budget (two million zeros under a small budget fail
+/// as Elasticsearch's breaker does); one with more hits than roll asked for (`size`) is refused
+/// while it's read. Nothing is written or left held, and the point in time is released.
 #[tokio::test]
-async fn a_name_that_resolves_to_a_private_address_is_refused() {
-    let (remote, seen) = mock(|_, _, _| (200, vec![], root())).await;
-    let port = remote.rsplit(':').next().unwrap().to_string();
-    let c = cluster(&[("reindex.remote.whitelist", "*:*")]).await;
-    let (s, v, text) = call(&c, "POST", "/_reindex", &reindex(&format!("http://localhost.:{port}"), "")).await;
-    assert_eq!((s, at(&v, "error.type").as_str()), (500, Some("connect_exception")), "{text}");
-    assert!(text.contains("resolves to a private address"), "{text}");
-    assert!(seen.lock().unwrap().is_empty(), "a request reached the private address");
-}
+async fn a_remotes_page_is_bounded_before_it_is_built() {
+    {
+        oversized(false).await;
+        // No `Content-Length` to refuse up front: the cap holds while the body streams in.
+        oversized(true).await;
+    }
 
-#[tokio::test]
-async fn a_redirect_is_not_followed() {
-    let (target, target_seen) = mock(|_, _, _| (200, vec![], root())).await;
-    let (remote, _) = mock(move |_, _, _| (302, vec![("location".into(), format!("{target}/"))], String::new())).await;
-    let c = cluster(LOCAL).await;
-    let (s, v, _) = call(&c, "POST", "/_reindex", &reindex(&remote, "")).await;
-    assert_eq!((s, at(&v, "error.type").as_str()), (302, Some("status_exception")), "{v:?}");
-    assert!(at(&v, "error.caused_by.reason").as_str().unwrap_or_default().contains("status line [HTTP/1.1 302 Found]"), "{v:?}");
-    assert!(target_seen.lock().unwrap().is_empty(), "the redirect's target was called");
-}
+    {
+        let zeros = format!(r#"{{"pit_id":"p","hits":{{"total":{{"value":1,"relation":"eq"}},"hits":[{{"_index":"src","_id":"1","_source":{{"z":[{}0]}},"sort":[1]}}]}}}}"#, "0,".repeat(2_000_000));
+        let (remote, _) = mock(move |m, p, _| match (m, p) {
+            ("GET", "/") => (200, vec![], root()),
+            (_, p) if p.contains("_pit") => (200, vec![], r#"{"id":"p"}"#.into()),
+            _ => (200, vec![], zeros.clone()),
+        })
+        .await;
+        let c = cluster(&[LOCAL, &[("roll.reindex.remote.memory", "1mb")]].concat()).await;
+        let (s, v, text) = call(&c, "POST", "/_reindex", &reindex(&remote, "")).await;
+        assert_eq!((s, at(&v, "error.type").as_str()), (429, Some("circuit_breaking_exception")), "{text}");
+        assert_eq!(c.remote.budget.used(), 0);
+    }
 
-#[tokio::test]
-async fn an_oversized_page_is_refused() {
-    oversized(false).await;
-    // No `Content-Length` to refuse up front: the cap holds while the body streams in.
-    oversized(true).await;
+    {
+        let hit = |i: u32| format!(r#"{{"_index":"src","_id":"{i}","_source":{{"n":{i}}},"sort":[{i}]}}"#);
+        let page = format!(r#"{{"pit_id":"p","hits":{{"total":{{"value":3,"relation":"eq"}},"hits":[{},{},{}]}}}}"#, hit(1), hit(2), hit(3));
+        let (remote, _) = mock(move |m, p, _| match (m, p) {
+            ("GET", "/") => (200, vec![], root()),
+            (_, p) if p.contains("_pit") => (200, vec![], r#"{"id":"p"}"#.into()),
+            _ => (200, vec![], page.clone()),
+        })
+        .await;
+        let c = cluster(LOCAL).await;
+        let body = format!(r#"{{"source":{{"remote":{{"host":"{remote}"}},"index":"src","size":2}},"dest":{{"index":"dst"}}}}"#);
+        let (s, v, text) = call(&c, "POST", "/_reindex", &body).await;
+        assert_eq!(s, 500, "{text}");
+        assert!(text.contains("the remote answered with more hits than the [2] roll asked for"), "{text}");
+        let (_, n, _) = call(&c, "GET", "/dst/_count", "").await;
+        assert_eq!(at(&n, "count").as_i64().unwrap_or(0), 0, "nothing written: {v:?}");
+        assert_eq!(c.remote.budget.used(), 0);
+    }
 }
 
 async fn oversized(chunked: bool) {
@@ -283,64 +340,6 @@ async fn a_third_concurrent_task_is_refused() {
         call(&c, "GET", &format!("/_tasks/{t}?wait_for_completion=true&timeout=10s"), "").await;
     }
     assert_eq!(c.remote.tasks.held(&c.name), 0);
-}
-
-/// A page's cost is charged to the node's budget before anything is built from it: under a small
-/// budget, a page of two million zeros fails as Elasticsearch's breaker does, and nothing is held
-/// afterwards.
-#[tokio::test]
-async fn a_page_is_charged_to_the_nodes_budget() {
-    let zeros = format!(r#"{{"pit_id":"p","hits":{{"total":{{"value":1,"relation":"eq"}},"hits":[{{"_index":"src","_id":"1","_source":{{"z":[{}0]}},"sort":[1]}}]}}}}"#, "0,".repeat(2_000_000));
-    let (remote, _) = mock(move |m, p, _| match (m, p) {
-        ("GET", "/") => (200, vec![], root()),
-        (_, p) if p.contains("_pit") => (200, vec![], r#"{"id":"p"}"#.into()),
-        _ => (200, vec![], zeros.clone()),
-    })
-    .await;
-    let c = cluster(&[LOCAL, &[("roll.reindex.remote.memory", "1mb")]].concat()).await;
-    let (s, v, text) = call(&c, "POST", "/_reindex", &reindex(&remote, "")).await;
-    assert_eq!((s, at(&v, "error.type").as_str()), (429, Some("circuit_breaking_exception")), "{text}");
-    assert_eq!(c.remote.budget.used(), 0);
-}
-
-/// A page holds at most the hits roll asked for (`size`): one with more is refused while it's
-/// read, before more than that is built, and nothing is written.
-#[tokio::test]
-async fn a_page_with_more_hits_than_asked_for_is_refused() {
-    let hit = |i: u32| format!(r#"{{"_index":"src","_id":"{i}","_source":{{"n":{i}}},"sort":[{i}]}}"#);
-    let page = format!(r#"{{"pit_id":"p","hits":{{"total":{{"value":3,"relation":"eq"}},"hits":[{},{},{}]}}}}"#, hit(1), hit(2), hit(3));
-    let (remote, _) = mock(move |m, p, _| match (m, p) {
-        ("GET", "/") => (200, vec![], root()),
-        (_, p) if p.contains("_pit") => (200, vec![], r#"{"id":"p"}"#.into()),
-        _ => (200, vec![], page.clone()),
-    })
-    .await;
-    let c = cluster(LOCAL).await;
-    let body = format!(r#"{{"source":{{"remote":{{"host":"{remote}"}},"index":"src","size":2}},"dest":{{"index":"dst"}}}}"#);
-    let (s, v, text) = call(&c, "POST", "/_reindex", &body).await;
-    assert_eq!(s, 500, "{text}");
-    assert!(text.contains("the remote answered with more hits than the [2] roll asked for"), "{text}");
-    let (_, n, _) = call(&c, "GET", "/dst/_count", "").await;
-    assert_eq!(at(&n, "count").as_i64().unwrap_or(0), 0, "nothing written: {v:?}");
-    assert_eq!(c.remote.budget.used(), 0);
-}
-
-/// Addresses the node denies (its own endpoints) are refused whatever leads there: a literal in
-/// any form, or a name that resolves to one.
-#[tokio::test]
-async fn a_denied_address_is_refused_by_name_or_literal() {
-    let (remote, seen) = mock(|_, _, _| (200, vec![], root())).await;
-    let port = remote.rsplit(':').next().unwrap().to_string();
-    let c = cluster(&[LOCAL, &[("reindex.remote.whitelist", "*:*"), ("roll.reindex.remote.deny_addresses", "127.0.0.0/8,::1")]].concat()).await;
-    for host in [format!("http://127.0.0.1:{port}"), format!("http://127.000.000.001:{port}"), format!("http://[::ffff:127.0.0.1]:{port}")] {
-        let (s, v, text) = call(&c, "POST", "/_reindex", &reindex(&host, "")).await;
-        assert!(s >= 400, "{host}: {text}");
-        let _ = v;
-    }
-    let (s, v, text) = call(&c, "POST", "/_reindex", &reindex(&format!("http://localhost.:{port}"), "")).await;
-    assert_eq!((s, at(&v, "error.type").as_str()), (500, Some("connect_exception")), "{text}");
-    assert!(text.contains("an address roll may not reach"), "{text}");
-    assert!(seen.lock().unwrap().is_empty(), "a request reached a denied address");
 }
 
 // --- a real Elasticsearch 9.5.5 over HTTPS -----------------------------------------------------

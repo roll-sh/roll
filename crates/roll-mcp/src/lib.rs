@@ -745,7 +745,7 @@ impl Ctx {
         // What it lends or copies from another product is decided on that product too: any rule.
         let rules = || g.scope.0.iter().filter(|r| scope.others || r.product == "*" || r.product == product);
         let asks = rules().any(|r| actions.iter().any(|a| r.actions.get(a) == Some(&Effect::Ask)) || (scope.others && r.actions.values().any(|e| *e == Effect::Ask)));
-        let everywhere = |a: &Action| g.scope.0.iter().filter(|r| r.product == "*" || r.product == product).any(|r| r.actions.get(a) == Some(&Effect::Allow) && r.resources == Resources::All && r.environments.is_none() && r.paths.is_none() && !r.unprotected);
+        let everywhere = |a: &Action| g.scope.0.iter().filter(|r| r.product == "*" || r.product == product).any(|r| r.actions.get(a) == Some(&Effect::Allow) && r.resources == Resources::All && r.environments.is_none() && r.paths.is_none() && !r.unprotected && r.keys.is_none());
         let otherwise = g.ask_otherwise && (scope.others || !actions.iter().all(everywhere));
         let held = policy.is_some_and(|p| if scope.others { !p.agents_ask.is_empty() } else { actions.iter().any(|a| p.agent_asks(product, *a, None)) });
         asks || otherwise || held

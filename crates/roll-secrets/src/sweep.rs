@@ -385,7 +385,7 @@ impl Secrets {
     #[allow(clippy::too_many_arguments)]
     fn rotate_now(&self, project: &str, slug: &str, path: &str, key: &str, caller: &Caller, leak: bool, stored: bool) -> Result<Applied> {
         let path = names::path(path)?;
-        caller.need(Action::Write, &Scope::at(project, slug, &path))?;
+        caller.need(Action::Write, &Scope::at(project, slug, &path).key(key))?;
         let dek = self.project(project)?;
         let (env, link, state) = self.db.read(|c| {
             let env = envs::by_slug(c, project, slug)?;
@@ -451,23 +451,29 @@ impl Secrets {
                 if leak {
                     asked.options.insert("grace_minutes".into(), serde_json::json!(0));
                 }
-                let issued = provider.issue(&link.r#ref, &cred, &asked, &format!("roll secrets {slug} {key} (rotated)"), None)?;
+                let supersedes = provider.supersedes(&link);
                 let now = self.db.now_ms()?;
+                let issued = provider.issue(&link.r#ref, &cred, &asked, &format!("roll secrets {slug} {key} (rotated)"), None)?;
                 let handle = issued.handle.clone();
                 let parts = issued.parts.clone();
                 let new_state = seal_parts(&dek, project, issued, now);
                 let res = self.db.write(|c| {
                     let env = envs::by_slug(c, project, slug)?;
                     // The claim: the credential is still the one this rotation replaces. If another
-                    // rotation (a user, another node's sweeper) won, this one's credential is revoked.
+                    // rotation (a user, another node's sweeper) won, this one's credential is revoked,
+                    // unless each new credential ends the one before it (Paddle's): then this one is
+                    // the newest, as the vendor's claim was held through the other's write, and the
+                    // only one still working, so it replaces what the other stored.
                     let now_state: Option<String> =
                         c.query_row("SELECT link_state FROM secrets WHERE env_id = ? AND path = ? AND key = ? AND owner = ''", [&env.id, &path, key], |r| r.get(0)).optional()?.flatten();
                     let now_cred = now_state.and_then(|s| serde_json::from_str::<Json>(&s).ok()).and_then(|s| s.get("credential").and_then(Json::as_str).map(String::from));
-                    if now_cred != old {
-                        return Err(Error::Conflict("stale", format!("{key} was rotated meanwhile")));
-                    }
+                    let replacing = match now_cred {
+                        now_cred if now_cred == old => old.clone(),
+                        Some(now_cred) if supersedes => Some(now_cred),
+                        _ => return Err(Error::Conflict("stale", format!("{key} was rotated meanwhile"))),
+                    };
                     // Every secret of the environment that shares the credential.
-                    let sharing: Vec<(String, String, String, String)> = match &old {
+                    let sharing: Vec<(String, String, String, String)> = match &replacing {
                         Some(old) => c.query(
                             "SELECT path, key, link, link_state FROM secrets WHERE env_id = ? AND link_state LIKE ?",
                             [env.id.as_str(), &format!("%\"credential\":\"{old}\"%")],
@@ -525,6 +531,7 @@ impl Secrets {
                     };
                     Ok::<_, Error>((r, due))
                 });
+                provider.settled(&link.r#ref, &handle);
                 match res {
                     Ok(((change, items), due)) => {
                         for id in due {

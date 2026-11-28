@@ -35,7 +35,6 @@ const MAX_DRAINS: usize = 5;
 const BUFFER: usize = 10_000;
 /// The most lines a batch carries, and the longest a line waits for its batch.
 const BATCH: usize = 500;
-const LINGER: Duration = Duration::from_secs(1);
 /// An `s3` drain's: an object a batch, so fewer and bigger.
 const S3_BATCH: usize = 5_000;
 const S3_LINGER: Duration = Duration::from_secs(60);
@@ -508,7 +507,7 @@ impl Apps {
                         for o in list {
                             let d = &o.drain;
                             let Some(q) = queues.get_mut(&d.id) else { continue };
-                            let (most, linger) = if d.format == "s3" { (S3_BATCH, S3_LINGER) } else { (BATCH, LINGER) };
+                            let (most, linger) = if d.format == "s3" { (S3_BATCH, S3_LINGER) } else { (BATCH, self.cfg.drain_linger) };
                             if q.out || q.lines.is_empty() || (q.lines.len() < most && q.first.elapsed() < linger) {
                                 continue;
                             }
@@ -980,7 +979,7 @@ struct Queue {
     /// Its drain's project.
     project: String,
     lines: VecDeque<Value>,
-    /// When the oldest waiting line came (a batch goes after LINGER even if it's short).
+    /// When the oldest waiting line came (a batch goes after `drain_linger` even if it's short).
     first: Instant,
     /// A batch is on its way: the next waits for it, so batches arrive in order.
     out: bool,

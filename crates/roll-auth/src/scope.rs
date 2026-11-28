@@ -299,6 +299,11 @@ pub struct Rule {
     /// It only narrows.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unprotected: bool,
+    /// Secrets only: only these keys of the folders it reaches (`STRIPE_KEY`), never the folder as
+    /// a whole. A request about one key matches when it's one of these; one about no key (a list,
+    /// a folder's values) only where the product answers key by key ([`Resource::filters_keys`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keys: Option<Vec<String>>,
     pub actions: BTreeMap<Action, Effect>,
 }
 
@@ -345,6 +350,13 @@ pub struct Resource {
     /// [`crate::Grant::allows`] with each one's index): a rule limited to some indices matches it
     /// though the request names none. Secrets' encryption key list.
     pub filters_index: bool,
+    /// The one secret key the request is about (secrets' `…/secrets/{key}`; not an encryption key,
+    /// which is [`Resource::index`]).
+    pub key: Option<String>,
+    /// The product answers only the keys the caller's grant reaches (it asks [`crate::Grant::allows`]
+    /// with each one's key): a rule limited to some keys matches it though the request names none.
+    /// Environments and folders still match as they do. A folder's list and values.
+    pub filters_keys: bool,
 }
 
 impl Resource {
@@ -389,6 +401,17 @@ pub fn is_root(path: &str) -> bool {
     path.trim_end_matches('/').is_empty()
 }
 
+/// What every refusal of [`keys_only`] says: clients that follow a whole folder (`roll run
+/// --watch`, `roll secrets agent`) look for it to stop at their start.
+pub const KEYS_ONLY: &str = "reaches only some keys of";
+
+/// The refusal of a request about a whole secrets folder (a digest, a watch's delta, a diff, an
+/// import) to a grant whose rule would reach it but for its `keys`. `place` is the folder
+/// (`production`, `production:/api`); it never names a key.
+pub fn keys_only(place: &str, what: &str) -> String {
+    format!("this token {KEYS_ONLY} {place}; {what} reads the whole folder, so it needs a rule without keys")
+}
+
 /// A rule's folder in its one spelling: `/`, or `/a/b` with no empty, `.` or `..` folder and no
 /// trailing `/`, so each folder is named one way and the root is only `/`.
 fn canonical_path(p: &str) -> bool {
@@ -424,6 +447,16 @@ impl Rule {
         }
     }
 
+    /// A rule with keys reaches a request about one of them, or one the product answers key by key.
+    fn key_matches(&self, r: &Resource) -> bool {
+        match (&self.keys, &r.key) {
+            (None, _) => true,
+            (Some(list), Some(k)) => list.iter().any(|l| l == k),
+            // Not `filters_itself`: those routes answer per environment and folder, not per key.
+            (Some(_), None) => r.filters_keys,
+        }
+    }
+
     /// Whether this rule is about `target` at all (whatever its actions).
     pub fn matches(&self, target: &Target) -> bool {
         if !self.product_matches(target.product()) {
@@ -436,17 +469,21 @@ impl Rule {
                     Resources::Some(sel) => sel.iter().any(|s| s.matches(r)),
                 };
                 let unprotected = !self.unprotected || (r.protected == Some(false) && r.environment.as_deref() != Some(PRODUCTION));
-                resource && (r.filters_itself || (self.environment_matches(r.environment.as_deref()) && unprotected && self.path_matches(r.path.as_deref())))
+                resource
+                    && self.key_matches(r)
+                    && (r.filters_itself || (self.environment_matches(r.environment.as_deref()) && unprotected && self.path_matches(r.path.as_deref())))
             }
-            Target::List { .. } => true,
+            // A list's items are each checked as one resource, but a rule with keys names no
+            // resource of a list (none is a key): it never takes part.
+            Target::List { .. } => self.keys.is_none(),
             Target::Create { project, environment, .. } => {
                 let resource = match &self.resources {
                     Resources::All => true,
                     Resources::Some(sel) => project.as_ref().is_some_and(|p| sel.iter().any(|s| matches!(s, Selector::Project { project } if project == p))),
                 };
-                resource && self.environment_matches(environment.as_deref()) && self.paths.is_none() && !self.unprotected
+                resource && self.environment_matches(environment.as_deref()) && self.paths.is_none() && !self.unprotected && self.keys.is_none()
             }
-            Target::Product { .. } => self.resources == Resources::All && self.environments.is_none() && self.paths.is_none() && !self.unprotected,
+            Target::Product { .. } => self.resources == Resources::All && self.environments.is_none() && self.paths.is_none() && !self.unprotected && self.keys.is_none(),
         }
     }
 
@@ -470,8 +507,13 @@ impl Rule {
         };
         // `unprotected` narrows: a rule with it covers only rules with it.
         let unprotected = !self.unprotected || other.unprotected;
+        let keys = match (&self.keys, &other.keys) {
+            (None, _) => true,
+            (Some(_), None) => false,
+            (Some(mine), Some(theirs)) => theirs.iter().all(|t| mine.contains(t)),
+        };
         let actions = other.actions.iter().all(|(a, e)| self.actions.get(a).is_some_and(|mine| mine >= e));
-        product && resources && environments && paths && unprotected && actions
+        product && resources && environments && paths && unprotected && keys && actions
     }
 }
 
@@ -559,6 +601,15 @@ impl Scope {
             {
                 out.push(format!("{at}: paths are / or /folder/…, each folder named once (no empty, . or .. folder: /api or /api/x, not // or /a//b)"));
             }
+            if let Some(keys) = &r.keys {
+                if r.product != "secrets" {
+                    out.push(format!("{at}: only secrets rules name keys"));
+                } else if keys.is_empty() || keys.len() > 64 {
+                    out.push(format!("{at}: keys must list 1-64 keys (leave keys out for every key in the folders)"));
+                } else if let Some(bad) = keys.iter().find(|k| !roll_secrets_ref::is_key(k)) {
+                    out.push(format!("{at}: {:?} isn't a key name (a letter or _, then letters, digits and _, up to {} characters)", bad.chars().take(64).collect::<String>(), roll_secrets_ref::KEY_MAX));
+                }
+            }
         }
         out
     }
@@ -610,6 +661,57 @@ mod tests {
         assert!(r.covers(&one) && !one.covers(&r));
         assert!(!Scope(vec![rule(serde_json::json!({ "product": "secrets", "resources": [{ "id": "prj_1", "index": "logs-{now}" }], "actions": { "write": "allow" } }))]).problems().is_empty());
         assert!(super::rememberable_part("secrets", "payments") && !super::rememberable_part("secrets", "pay*") && !super::rememberable_part("secrets", "a,b"));
+    }
+
+    /// A secrets rule's keys: exact names only, on secrets only; a request about one key matches
+    /// when it's listed, one about no key only where the product answers key by key; lists,
+    /// creates and the product as a whole never; it covers only a subset of its keys. A node that
+    /// doesn't know `keys` reads such a grant as no rules: denied, never wider.
+    #[test]
+    fn keys_narrow_a_secrets_rule() {
+        let keyed = |keys: serde_json::Value| rule(serde_json::json!({ "product": "secrets", "resources": [{ "project": "prj_a" }], "environments": ["production"], "keys": keys, "actions": { "reveal": "allow" } }));
+        let r = keyed(serde_json::json!(["STRIPE_KEY"]));
+        assert!(Scope(vec![r.clone()]).problems().is_empty());
+        for bad in [serde_json::json!([]), serde_json::json!(["STRIPE_*"]), serde_json::json!(["*"]), serde_json::json!(["9LIVES"]), serde_json::json!(["A,B"])] {
+            assert!(!Scope(vec![keyed(bad.clone())]).problems().is_empty(), "{bad}");
+        }
+        assert!(!Scope(vec![rule(serde_json::json!({ "product": "postgres", "resources": "*", "keys": ["A"], "actions": { "read": "allow" } }))]).problems().is_empty(), "secrets only");
+        assert!(!Scope(vec![rule(serde_json::json!({ "product": "*", "resources": "*", "keys": ["A"], "actions": { "read": "allow" } }))]).problems().is_empty(), "not every product's");
+        let at = |key: Option<&str>, filters_keys: bool, filters_itself: bool| {
+            Target::One(Resource { project: Some("prj_a".into()), environment: Some("production".into()), path: Some("/".into()), key: key.map(Into::into), filters_keys, filters_itself, ..Resource::new("secrets", "prj_a") })
+        };
+        assert!(r.matches(&at(Some("STRIPE_KEY"), false, false)));
+        assert!(!r.matches(&at(Some("STRIPE"), false, false)) && !r.matches(&at(Some("OTHER"), false, false)), "exact names");
+        assert!(!r.matches(&at(None, false, false)), "the folder as a whole");
+        assert!(r.matches(&at(None, true, false)), "a folder answered key by key");
+        assert!(!r.matches(&at(None, false, true)), "a route that filters only by environment and folder");
+        assert!(!r.matches(&Target::List { product: "secrets".into() }));
+        assert!(!r.matches(&Target::Create { product: "secrets".into(), project: Some("prj_a".into()), environment: Some("production".into()) }));
+        assert!(!r.matches(&Target::Product { product: "secrets".into() }));
+        // Environments and folders still narrow a keyed rule's key-by-key match.
+        let staging = Target::One(Resource { environment: Some("staging".into()), key: Some("STRIPE_KEY".into()), ..Resource::new("secrets", "prj_a") });
+        assert!(!r.matches(&staging));
+        // Covering: a subset of keys, or no keys (every key); never a keyed rule over a keyless one.
+        let two = keyed(serde_json::json!(["STRIPE_KEY", "STRIPE_WEBHOOK"]));
+        let keyless = rule(serde_json::json!({ "product": "secrets", "resources": [{ "project": "prj_a" }], "environments": ["production"], "actions": { "reveal": "allow" } }));
+        assert!(two.covers(&r) && !r.covers(&two) && keyless.covers(&two) && !two.covers(&keyless));
+        // Serialized only when set.
+        assert!(serde_json::to_value(&keyless).unwrap().get("keys").is_none());
+        assert_eq!(serde_json::to_value(&r).unwrap()["keys"], serde_json::json!(["STRIPE_KEY"]));
+        // A node from before `keys` (it refuses fields it doesn't know) reads the grant's rules as
+        // none, as roll-access's store does (`unwrap_or_default`): everything denied.
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        #[allow(dead_code)]
+        struct Old {
+            product: String,
+            resources: Resources,
+            environments: Option<Vec<String>>,
+            actions: BTreeMap<Action, Effect>,
+        }
+        let stored = serde_json::to_string(&Scope(vec![r.clone()])).unwrap();
+        let old: Vec<Old> = serde_json::from_str(&stored).unwrap_or_default();
+        assert!(old.is_empty());
     }
 
     /// A selector's indices cover an index expression name by name and pattern by pattern, as

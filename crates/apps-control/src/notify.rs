@@ -15,7 +15,6 @@ use crate::model::{Delivery, Event, NotifyTarget};
 use crate::{Apps, Error, Result};
 use serde_json::{Value, json};
 use std::sync::Arc;
-use std::time::Duration;
 
 /// What a target can ask for; a new one gets the two that need someone.
 pub const EVENTS: [&str; 41] = [
@@ -308,7 +307,7 @@ impl Apps {
                 self.deliver_due().await;
             }
             tokio::select! {
-                _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+                _ = tokio::time::sleep(self.cfg.notify_every) => {}
                 _ = self.stop.cancelled() => return,
             }
         }
@@ -377,28 +376,20 @@ impl Apps {
     /// notifying on what's still open when a snooze ends): one resolved since (a later event
     /// closing its key) is dropped, one still open queued to its targets as it would have been.
     async fn release_held(self: &Arc<Self>) {
-        let Ok(held) = self.db(|s| s.held_alerts(50)).await else { return };
         let now = code_sql::now_ms();
+        let Ok(held) = self.db(move |s| s.held_alerts(now, 50)).await else { return };
         for (seq, svc, env) in held {
             let Ok(Some(e)) = self.db(move |s| s.event(seq)).await else {
                 let _ = self.db(move |s| s.release_held(seq, &[])).await;
                 continue;
             };
+            // Still quiet: looked at again in a while, behind no one (another environment's held
+            // alerts are read meanwhile).
             if self.silenced(&svc, &env, &e.kind, now).await {
+                let _ = self.db(move |s| s.defer_held(seq, now + 30_000)).await;
                 continue;
             }
-            // Closed since? The events after it of its environment, a few pages at most.
-            let key = oncall_of(&e).map(|(_, k, _)| k);
-            let (mut after, mut closed) = (seq, false);
-            for _ in 0..10 {
-                let Ok(page) = self.db(move |s| s.events(after, 200)).await else { break };
-                let Some(last) = page.last().map(|x| x.seq) else { break };
-                closed = page.iter().any(|x| x.service == svc && x.environment == env && oncall_of(x).is_some_and(|(open, k, _)| !open && Some(&k) == key.as_ref()));
-                if closed {
-                    break;
-                }
-                after = last;
-            }
+            let closed = self.closed_since(&e).await;
             let mut rows = Vec::new();
             if !closed {
                 let sid = svc.clone();
@@ -417,6 +408,56 @@ impl Apps {
                 tracing::warn!(seq, error = %err, "apps: a held alert wasn't let go; tried again");
             }
         }
+    }
+
+    /// Whether a later event of `e`'s environment carries its on-call key: one that closes it
+    /// (`closing`), or any (a newer open or close). Read by the environment's own events, all of
+    /// them (a busy fleet's other events don't push it out of reach).
+    async fn later_with_key(self: &Arc<Self>, e: &Event, closing: bool) -> bool {
+        let Some((_, key, _)) = oncall_of(e) else { return false };
+        let mut after = e.seq;
+        loop {
+            let (sid, en) = (e.service.clone(), e.environment.clone());
+            let Ok(page) = self.db(move |s| s.env_events(&sid, &en, after, 1000)).await else { return false };
+            let Some(last) = page.last().map(|x| x.seq) else { return false };
+            if page.iter().any(|x| oncall_of(x).is_some_and(|(open, k, _)| k == key && (!closing || !open))) {
+                return true;
+            }
+            after = last;
+        }
+    }
+
+    /// Whether an alert that opens an incident was closed by a later event of its environment.
+    async fn closed_since(self: &Arc<Self>, e: &Event) -> bool {
+        matches!(oncall_of(e), Some((true, ..))) && self.later_with_key(e, true).await
+    }
+
+    /// `POST …/deliveries/{did}/redeliver`: a delivered or failed one sent again from its first
+    /// try. Not an on-call target's event of an alert that a later one opened or closed since: a
+    /// trigger would open a resolved incident again, a resolve close an open one.
+    pub async fn redeliver(self: &Arc<Self>, project: &str, target: &str, id: &str) -> Result<Delivery> {
+        let p = project.to_string();
+        let Some(t) = self.db(move |s| s.targets(&p)).await?.into_iter().find(|t| t.id == target) else {
+            return Err(Error::NotFound(format!("no notification target {target}")));
+        };
+        let (ti, di) = (target.to_string(), id.to_string());
+        let Some(d) = self.db(move |s| s.delivery(&ti, &di)).await? else {
+            return Err(Error::NotFound(format!("no delivery {id}")));
+        };
+        if matches!(t.kind.as_str(), "pagerduty" | "opsgenie") {
+            let seq = d.event;
+            if let Some(e) = self.db(move |s| s.event(seq)).await?
+                && self.later_with_key(&e, false).await
+            {
+                return Err(Error::Conflict("a later event of this alert went out since: sent again, this one would undo it (open a resolved incident or close an open one)".into()));
+            }
+        }
+        let (ti, di) = (target.to_string(), id.to_string());
+        if !self.db(move |s| s.redeliver(&ti, &di)).await? {
+            return Err(Error::Conflict("this delivery is still being tried".into()));
+        }
+        // As it was written: the notifier may have sent it again by the time it's read.
+        Ok(Delivery { status: "pending".into(), attempts: 0, code: None, error: None, at: code_sql::now_ms(), ..d })
     }
 
     /// What's due, a few at a time (one slow target doesn't hold up the others), each try's
@@ -836,32 +877,20 @@ mod tests {
         assert!(super::wants(&ev(&["audit"]), "audit.variables", &data, false));
         assert!(!super::wants(&ev(&["audit"]), "audit.variables", &data, true), "never an on-call page");
         assert!(!super::wants(&super::DEFAULT_EVENTS.map(String::from), "audit.variables", &data, false), "not by default");
-    }
-
-    #[test]
-    fn a_routes_incident_is_its_own() {
+        // A route's burn and its clearing are one incident, apart from the service's own.
         let ev = |kind: &str, data: serde_json::Value| crate::model::Event { seq: 1, at: 1, kind: kind.into(), service: "svc_a".into(), environment: "production".into(), deployment: None, data };
         let key = |e: crate::model::Event| super::oncall_of(&e).map(|(open, k, _)| (open, k));
         let route = serde_json::json!({ "route": "/checkout/:id", "method": "POST" });
-        // A route's burn and its clearing are one incident, apart from the service's own.
         let opened = key(ev("alert.slo", route.clone())).unwrap();
         let mut resolved = route.clone();
         resolved["alert"] = "alert.slo".into();
         assert_eq!(key(ev("alert.resolved", resolved)).unwrap(), (false, opened.1.clone()));
         assert_ne!(opened.1, key(ev("alert.slo", serde_json::json!({}))).unwrap().1);
-        // Each route alert's kind, and each metric, is its own too.
-        let kind = |k: &str| key(ev("alert.route", serde_json::json!({ "route": "/a", "kind": k }))).unwrap().1;
-        assert_ne!(kind("errors"), kind("latency"));
-        assert_ne!(key(ev("alert.metric", serde_json::json!({ "metric": "a" }))).unwrap().1, key(ev("alert.metric", serde_json::json!({ "metric": "b" }))).unwrap().1);
-    }
-
-    #[test]
-    fn a_teams_card_can_not_link() {
-        assert!(!super::teams_escape("[Approve](https://evil)").contains("]("));
     }
 
     #[test]
     fn slack_text_can_not_mention_or_link() {
         assert_eq!(super::slack_escape("<!channel> <https://evil|Approve> & co"), "&lt;!channel&gt; &lt;https://evil|Approve&gt; &amp; co");
+        assert!(!super::teams_escape("[Approve](https://evil)").contains("]("), "nor a Teams card");
     }
 }

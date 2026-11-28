@@ -560,6 +560,7 @@ func (f *fakeRolld) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func TestEnvironmentsAndKeysAsCode(t *testing.T) {
+	t.Parallel()
 	f := &fakeRolld{envs: map[string]*environment{}, keys: map[string]map[string]any{}, identities: map[string]map[string]any{}, syncs: map[string]map[string]any{}, tokens: map[string]map[string]any{}}
 	srv := httptest.NewServer(f)
 	defer srv.Close()
@@ -595,6 +596,7 @@ resource "roll_secrets_token" "deploy" {
   name         = "deploy"
   environments = [roll_secrets_environment.production.slug]
   paths        = ["/api"]
+  keys         = ["STRIPE_KEY"]
   actions      = ["read", "reveal"]
   expires_at   = "2030-01-01T00:00:00Z"
 }
@@ -628,7 +630,7 @@ resource "roll_secrets_sync" "deploys" {
 						f.mu.Lock()
 						defer f.mu.Unlock()
 						rule := f.tokens["tok_1"]["rules"].([]any)[0].(map[string]any)
-						if fmt.Sprint(rule["resources"], rule["environments"], rule["paths"], rule["actions"]) != "[map[project:prj_a]] [production] [/api] map[read:allow reveal:allow]" || f.tokens["tok_1"]["expires_at"] != float64(1893456000000) {
+						if fmt.Sprint(rule["resources"], rule["environments"], rule["paths"], rule["keys"], rule["actions"]) != "[map[project:prj_a]] [production] [/api] [STRIPE_KEY] map[read:allow reveal:allow]" || f.tokens["tok_1"]["expires_at"] != float64(1893456000000) {
 							return fmt.Errorf("the token's rule: %v", f.tokens["tok_1"])
 						}
 						return nil
@@ -668,6 +670,7 @@ resource "roll_secrets_sync" "deploys" {
 // A value from an ephemeral read, written write-only: it reaches roll secrets and never Terraform's
 // state, and the run's dynamic credential is revoked when it closes.
 func TestValuesStayOutOfTheState(t *testing.T) {
+	t.Parallel()
 	f := &fakeRolld{envs: map[string]*environment{"production": {Slug: "production", Name: "production"}, "staging": {Slug: "staging", Name: "staging"}}, keys: map[string]map[string]any{"production:/DB_URL": {"value": "postgres://db/shop", "version": float64(1), "comment": ""}}, identities: map[string]map[string]any{}, syncs: map[string]map[string]any{}, tokens: map[string]map[string]any{}}
 	srv := httptest.NewServer(f)
 	defer srv.Close()
@@ -718,6 +721,7 @@ resource "roll_secret" "copy" {
 // A machine client for CI: made trusting GitHub Actions' identity, its rules changed in place on
 // its grant, its subject changed by a rotate (the client id stays), imported by its id, revoked.
 func TestMachineClientAsCode(t *testing.T) {
+	t.Parallel()
 	f := &fakeRolld{envs: map[string]*environment{}, keys: map[string]map[string]any{}, tokens: map[string]map[string]any{}, clients: map[string]map[string]any{}}
 	srv := httptest.NewServer(f)
 	defer srv.Close()
@@ -831,8 +835,10 @@ resource "roll_machine_client" "ci" {
 }
 
 // What a project registers itself, as code: a CA, an SSH CA, an encryption key and a database
-// outside roll, whose admin URL is write-only (sent once, never in the state).
+// outside roll, whose admin URL is write-only (sent once, never in the state). Values roll keeps
+// normalised (the CA's domains) plan as no change: the framework plans again after each apply.
 func TestRegistrationsAsCode(t *testing.T) {
+	t.Parallel()
 	f := &fakeRolld{envs: map[string]*environment{}, keys: map[string]map[string]any{}, identities: map[string]map[string]any{}, syncs: map[string]map[string]any{}, tokens: map[string]map[string]any{}}
 	srv := httptest.NewServer(f)
 	defer srv.Close()
@@ -897,10 +903,6 @@ resource "roll_secrets_outside_database" "rds" {
 					return nil
 				},
 			),
-		}, {
-			// Values roll keeps normalised, as configured: nothing to change.
-			Config:   config(protected),
-			PlanOnly: true,
 		}, {
 			// A protected key isn't destroyed (a rename, or taking it out of the configuration)…
 			Config:      config(""),

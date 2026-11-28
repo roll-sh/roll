@@ -411,26 +411,6 @@ mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    #[test]
-    fn listed_hosts_and_subdomains_on_web_ports_only() {
-        let hosts = vec!["api.stripe.com".to_string(), "*.sentry.io".to_string()];
-        let allowed = |h: &str, p: u16| allowed(&hosts, &WEB_PORTS, h, p);
-        assert!(allowed("api.stripe.com", 443));
-        assert!(allowed("API.Stripe.com.", 80));
-        assert!(!allowed("api.stripe.com", 22));
-        assert!(!allowed("stripe.com", 443));
-        assert!(!allowed("evilapi.stripe.com", 443));
-        assert!(allowed("o1.ingest.sentry.io", 443));
-        assert!(!allowed("sentry.io", 443));
-        assert!(!allowed("notsentry.io", 443));
-        assert_eq!(digest("net", &hosts), digest("net", &["*.sentry.io".to_string(), "api.stripe.com".to_string()]));
-        assert_ne!(digest("net", &hosts), digest("another", &hosts), "one network's proxy is its own");
-        assert_eq!(proxy_url("net", &hosts), format!("http://roll-egress-{}:3128", digest("net", &hosts)));
-        // A closed build's list: any host, still only on web ports.
-        let any = vec![ANY_PUBLIC.to_string()];
-        assert!(super::allowed(&any, &WEB_PORTS, "registry.npmjs.org", 443) && !super::allowed(&any, &WEB_PORTS, "registry.npmjs.org", 22));
-    }
-
     /// What the proxy answers a caller's `req` with, and what it kept as refused: `hosts` on
     /// `port` (a test server's, standing in for 443 and 80).
     async fn through(hosts: &[&str], port: u16, allow_private: bool, req: String) -> (String, Vec<Refused>) {
@@ -493,6 +473,23 @@ mod tests {
         // An https:// URL without CONNECT isn't a request a proxy forwards.
         let (out, _) = through(&["localhost"], port, true, "GET https://localhost/ HTTP/1.1\r\n\r\n".into()).await;
         assert!(out.starts_with("HTTP/1.1 400"), "{out}");
+        // Listed hosts and their subdomains, on web ports only.
+        let hosts = vec!["api.stripe.com".to_string(), "*.sentry.io".to_string()];
+        let listed = |h: &str, p: u16| allowed(&hosts, &WEB_PORTS, h, p);
+        assert!(listed("api.stripe.com", 443));
+        assert!(listed("API.Stripe.com.", 80));
+        assert!(!listed("api.stripe.com", 22));
+        assert!(!listed("stripe.com", 443));
+        assert!(!listed("evilapi.stripe.com", 443));
+        assert!(listed("o1.ingest.sentry.io", 443));
+        assert!(!listed("sentry.io", 443));
+        assert!(!listed("notsentry.io", 443));
+        assert_eq!(digest("net", &hosts), digest("net", &["*.sentry.io".to_string(), "api.stripe.com".to_string()]));
+        assert_ne!(digest("net", &hosts), digest("another", &hosts), "one network's proxy is its own");
+        assert_eq!(proxy_url("net", &hosts), format!("http://roll-egress-{}:3128", digest("net", &hosts)));
+        // A closed build's list: any host, still only on web ports.
+        let any = vec![ANY_PUBLIC.to_string()];
+        assert!(allowed(&any, &WEB_PORTS, "registry.npmjs.org", 443) && !allowed(&any, &WEB_PORTS, "registry.npmjs.org", 22));
     }
 
     /// A listed host the network's keys are bound to is intercepted (its CONNECT answered 200

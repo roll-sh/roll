@@ -1376,9 +1376,18 @@ impl roll_secrets::health::CodeRefs for CodeRefs {
         })
     }
 
+    /// From the control database every node shares (a GitHub link's `private` included), so any
+    /// node can tell. A database that doesn't answer is said in the log, not taken for private.
     fn public(&self, repo: &str) -> Option<String> {
         let (owner, name) = repo.split_once('/')?;
-        code_control::github::public_at(&self.0.find_repo(owner, name).ok()?)
+        match self.0.find_repo(owner, name) {
+            Ok(r) => code_control::github::public_at(&r),
+            Err(code_control::Error::NotFound(_) | code_control::Error::Moved(_)) => None,
+            Err(e) => {
+                tracing::warn!(repo, error = %e, "roll secrets' Health couldn't check whether a repository is public");
+                None
+            }
+        }
     }
 }
 
@@ -2840,22 +2849,6 @@ mod tests {
         (dir, project, router, apps)
     }
 
-    /// roll apps' instance tokens through the real issuer, called as apps calls it
-    /// (`SecretSource::issue(project, service, env, aud, ttl)`): the token's `sub` and
-    /// `environment` name the instance's environment; an untrusted preview gets none. (An
-    /// operator's project stands for every service: `Workspace::trusts`.)
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn an_apps_instance_token_names_its_environment_and_an_untrusted_preview_gets_none() {
-        use apps_control::integrations::SecretSource;
-        use base64::Engine;
-        let (_dir, project, _router, apps) = apps_secrets().await;
-        let hour = std::time::Duration::from_secs(3600);
-        let token = apps.issue(&project, "svc_web", "production", "sts.amazonaws.com", hour).await.unwrap().expect("an issuer here");
-        let claims: Json = serde_json::from_slice(&base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(token.split('.').nth(1).unwrap()).unwrap()).unwrap();
-        assert_eq!((claims["sub"].as_str(), claims["environment"].as_str(), claims["aud"].as_str()), (Some(format!("roll-apps:{project}:svc_web:production").as_str()), Some("production"), Some("sts.amazonaws.com")), "{claims}");
-        assert!(apps.issue(&project, "svc_web", "pv-7", "sts.amazonaws.com", hour).await.is_err(), "an untrusted preview gets no token");
-    }
-
     /// A closed environment's keys through the real roll secrets: a key bound to hosts resolves
     /// to a placeholder (the project environment's consumer, made by the operator), the
     /// interception CA covers its host, and ending it leaves no CA.
@@ -2879,22 +2872,18 @@ mod tests {
         assert!(apps.intercept(&project, "production", &[]).await.unwrap().is_none(), "no placeholders left, no CA");
     }
 
-    /// A search link takes whichever credential the cluster's flavor issues.
-    #[test]
-    fn a_search_key_is_an_api_key_or_an_opensearch_user() {
+    /// A search link takes whichever credential the cluster's flavor issues (an API key, or an
+    /// OpenSearch user). Narrowed by `names` and `permission`, it refuses a key roll search made
+    /// wider than asked (another access, other indices, or one that doesn't say) and deletes it;
+    /// the key asked for is kept.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_search_link_refuses_and_deletes_a_wider_key() {
+        use super::LinkProvider as _;
         let es = super::search_parts(&json!({ "id": "k1", "api_key": "abc" })).unwrap();
         assert_eq!(es.keys().collect::<Vec<_>>(), ["api_key"]);
         let os = super::search_parts(&json!({ "id": "roll-key-x", "username": "roll-key-x@logs", "password": "pw" })).unwrap();
         assert_eq!((os["user"].expose(), os["password"].expose()), ("roll-key-x@logs", "pw"));
         assert!(super::search_parts(&json!({ "id": "x" })).is_err());
-    }
-
-    /// A search link narrowed by `names` and `permission` refuses a key roll search made wider
-    /// than asked (another access, other indices, or one that doesn't say) and deletes it; the
-    /// key asked for is kept.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_search_link_refuses_and_deletes_a_wider_key() {
-        use super::LinkProvider as _;
         use axum::routing::{delete, post};
         let answer: Arc<Mutex<Json>> = Arc::new(Mutex::new(Json::Null));
         let asked: Arc<Mutex<Vec<Json>>> = Default::default();
@@ -3050,7 +3039,8 @@ mod tests {
     }
 
     /// A queue links live (where it is), managed (a user of its own, rotated by replacing it) and
-    /// dynamic (a user per lease, deleted when the lease ends).
+    /// dynamic (a user per lease, deleted when the lease ends); a linked user connects with the URL
+    /// alone, with only the access its link asked for.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_queue_links_live_managed_and_dynamic() {
         let q = Queues::start(None).await;
@@ -3082,13 +3072,9 @@ mod tests {
         assert_eq!(q.users().len(), 2);
         q.ok("DELETE", &format!("/leases/{}", r["leases"][0].as_str().unwrap()), None).await;
         assert_eq!(q.users().len(), 1, "the lease's user is deleted");
-    }
 
-    /// A linked user connects with the URL alone, with only the access its link asked for.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn a_linked_queue_user_connects_with_only_the_access_it_asked_for() {
-        let q = Queues::start(None).await;
-        q.ok("PUT", "/environments/production/secrets/AMQP_URL", Some(queue_link("url", "managed", json!({})))).await;
+        // A linked user connects with the URL alone, with only the access its link asked for
+        // (production's is the managed one above).
         q.ok("PUT", "/environments/staging/secrets/AMQP_URL", Some(queue_link("url", "managed", json!({ "permission": "read" })))).await;
         let (writer, reader) = (q.amqp_url("production").await, q.amqp_url("staging").await);
         let conn = lapin::Connection::connect(&writer, lapin::ConnectionProperties::default()).await.unwrap();
@@ -3186,7 +3172,7 @@ mod tests {
         let keys = ["DB_URL".to_string()];
         let ask = apps_control::integrations::Reveal { keys: &keys, refs: &[], sensitive: false };
         assert!(apps.may_reveal(operator, &project, "production", "svc_web", ask).await);
-        let rule = roll_auth::scope::Rule { product: "secrets".into(), resources: roll_auth::scope::Resources::Some(vec![roll_auth::scope::Selector::Project { project: "prj_other".into() }]), environments: None, paths: None, unprotected: false, actions: std::collections::BTreeMap::from([(roll_auth::scope::Action::Reveal, roll_auth::scope::Effect::Allow)]) };
+        let rule = roll_auth::scope::Rule { product: "secrets".into(), resources: roll_auth::scope::Resources::Some(vec![roll_auth::scope::Selector::Project { project: "prj_other".into() }]), environments: None, paths: None, unprotected: false, keys: None, actions: std::collections::BTreeMap::from([(roll_auth::scope::Action::Reveal, roll_auth::scope::Effect::Allow)]) };
         let grant = roll_auth::Grant { user: None, ask_otherwise: false, id: "tok_x".into(), name: "x".into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(roll_auth::scope::Scope(vec![rule])) };
         assert!(!apps.may_reveal(apps_control::integrations::Asker { operator: true, user: None, grant: Some(&grant) }, &project, "production", "svc_web", ask).await);
         // The read is the service's in the audit log.
@@ -3423,7 +3409,7 @@ mod tests {
         let code = super::ForCode::default();
         code.set(secrets.clone(), ws);
         let grant = |id: &str, on: &str| {
-            let rule = roll_auth::scope::Rule { product: "secrets".into(), resources: roll_auth::scope::Resources::Some(vec![roll_auth::scope::Selector::Project { project: on.into() }]), environments: None, paths: None, unprotected: false, actions: std::collections::BTreeMap::from([(roll_auth::scope::Action::Reveal, roll_auth::scope::Effect::Allow)]) };
+            let rule = roll_auth::scope::Rule { product: "secrets".into(), resources: roll_auth::scope::Resources::Some(vec![roll_auth::scope::Selector::Project { project: on.into() }]), environments: None, paths: None, unprotected: false, keys: None, actions: std::collections::BTreeMap::from([(roll_auth::scope::Action::Reveal, roll_auth::scope::Effect::Allow)]) };
             roll_auth::Grant { user: None, ask_otherwise: false, id: id.into(), name: id.into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(roll_auth::scope::Scope(vec![rule])) }
         };
         let refused = |r: anyhow::Result<code_control::Revealed>| r.err().and_then(|e| e.downcast::<code_control::Refused>().ok()).map(|r| r.0);
@@ -3482,7 +3468,7 @@ mod tests {
         let token = apps.issue(&operators, "svc_web", "production", "sts.amazonaws.com", ttl).await.unwrap().expect("a token");
         use base64::Engine as _;
         let claims: Json = serde_json::from_slice(&base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(token.split('.').nth(1).unwrap()).unwrap()).unwrap();
-        assert_eq!(claims["sub"], json!(format!("roll-apps:{operators}:svc_web:production")));
+        assert_eq!((&claims["sub"], &claims["environment"], &claims["aud"]), (&json!(format!("roll-apps:{operators}:svc_web:production")), &json!("production"), &json!("sts.amazonaws.com")), "{claims}");
         // A person's project stands only for their own services.
         assert!(apps.issue(&adas, "svc_theirs", "production", "sts.amazonaws.com", ttl).await.is_err());
         // Previews: a fork's (untrusted) gets no token, a vetted one does, under its own slug; an

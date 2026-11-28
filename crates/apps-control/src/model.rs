@@ -2114,6 +2114,9 @@ pub struct Environment {
     pub traces: bool,
     /// Its pages measure their Web Vitals for roll (`…/vitals`).
     pub vitals: bool,
+    /// Its Strict-Transport-Security when roll serves HTTPS ([`HSTS_DEFAULT`] unless it says;
+    /// None: none sent).
+    pub hsts: Option<Hsts>,
     /// Where its deploy status badge is (Netlify's), when it has one (`badge: true`): an SVG for a
     /// README, answered to anyone.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2748,7 +2751,14 @@ pub const MAX_CHECKS: usize = 5;
 pub struct Check {
     /// Unique in the environment: a-z, 0-9 and -, at most 32.
     pub name: String,
+    /// An HTTP check's (empty for a TCP check's).
+    #[serde(default)]
     pub path: String,
+    /// A TCP check (Fly's TCP checks, Better Stack's port monitors): a TCP service's port
+    /// (`run.tcp`) connected to through its own network, no HTTP; `contains` is looked for in
+    /// what it says first (a banner).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub tcp: bool,
     /// 30–3600 (default 60).
     #[serde(default = "Check::default_every")]
     pub every_s: u32,
@@ -2857,7 +2867,14 @@ impl Check {
         if self.name.is_empty() || self.name.len() > 32 || !self.name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') {
             return bad("a check's name is a-z, 0-9 and -, at most 32");
         }
-        if !self.path.starts_with('/') || self.path.starts_with("//") || self.path.len() > 2000 || !self.path.bytes().all(|b| b.is_ascii_graphic()) {
+        if self.tcp {
+            if !self.path.is_empty() {
+                return bad("a TCP check has no path: it connects to the service's port");
+            }
+            if self.browser.is_some() || self.status.is_some() || self.method.is_some() || self.headers.is_some() || self.body.is_some() || self.from.as_deref().is_some_and(|f| f != "roll") {
+                return bad("a TCP check connects (and reads its banner for contains) from roll: no browser, status, method, headers, body or from public");
+            }
+        } else if !self.path.starts_with('/') || self.path.starts_with("//") || self.path.len() > 2000 || !self.path.bytes().all(|b| b.is_ascii_graphic()) {
             return bad("a check's path is an absolute path, like /healthz");
         }
         match self.from.as_deref() {
@@ -2913,6 +2930,11 @@ impl Check {
         if (self.headers.is_some() || self.body.is_some() || self.method.is_some()) && self.browser.is_some() {
             return bad("method, headers and body are an HTTP check's (a browser check's script makes its own requests)");
         }
+        // A value's `${NAME}` is the environment's own variable: from roll only, never over the
+        // internet to wherever a domain's DNS points at the time.
+        if self.from.as_deref() == Some("public") && self.headers.as_ref().is_some_and(|h| h.values().any(|v| v.contains("${"))) {
+            return bad("a check from outside sends its headers as written: ${NAME} (the environment's own variable) is a check from roll's");
+        }
         if let Some(h) = &self.headers {
             let token = |n: &str| !n.is_empty() && n.len() <= 64 && n.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b));
             let reserved = |n: &str| { let l = n.to_ascii_lowercase(); matches!(l.as_str(), "host" | "content-length" | "transfer-encoding" | "connection" | "upgrade" | "te" | "trailer") || l.starts_with("x-roll-") };
@@ -2929,6 +2951,41 @@ impl Check {
             }
         }
         Ok(self)
+    }
+}
+
+/// An environment's Strict-Transport-Security (Vercel's, Netlify's `_headers`): on by default
+/// when roll serves HTTPS, added to its answers unless the app or its own headers send one.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Hsts {
+    /// Seconds, at most two years; 0 tells browsers to forget it.
+    pub max_age: u32,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub include_subdomains: bool,
+    /// For the browsers' preload list (hstspreload.org): with include_subdomains and a year at least.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub preload: bool,
+}
+
+/// What an environment answers with when it sets nothing: two years, its own name only.
+pub const HSTS_DEFAULT: Hsts = Hsts { max_age: 63_072_000, include_subdomains: false, preload: false };
+
+impl Hsts {
+    pub fn check(&self) -> Result<()> {
+        let bad = |m: &str| Err(Error::BadRequest(format!("hsts: {m}")));
+        if self.max_age > 63_072_000 {
+            return bad("max_age is at most 63072000 (two years)");
+        }
+        if self.preload && !(self.include_subdomains && self.max_age >= 31_536_000) {
+            return bad("preload needs include_subdomains and a max_age of a year (31536000) at least");
+        }
+        Ok(())
+    }
+
+    /// The header's value.
+    pub fn value(&self) -> String {
+        format!("max-age={}{}{}", self.max_age, if self.include_subdomains { "; includeSubDomains" } else { "" }, if self.preload { "; preload" } else { "" })
     }
 }
 
@@ -3774,50 +3831,6 @@ pub fn random(n: usize) -> String {
     b.iter().map(|x| ALPHABET[(x & 31) as usize] as char).collect()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn private_addresses_and_registries() {
-        for a in ["127.0.0.1", "10.1.2.3", "100.64.0.1", "0.1.2.3", "192.0.0.8", "198.18.0.1", "240.0.0.1", "224.0.0.1", "::1", "fd00::1", "fe80::1", "::ffff:10.0.0.1", "64:ff9b::a00:1", "::7f00:1", "2002:a00:1::", "ff02::1"] {
-            assert!(private_ip(a.parse().unwrap()), "{a}");
-        }
-        for a in ["1.1.1.1", "8.8.8.8", "2606:4700::1111", "64:ff9b::808:808"] {
-            assert!(!private_ip(a.parse().unwrap()), "{a}");
-        }
-        assert_eq!(registry_key("https://index.docker.io/v1/"), image_registry("nginx:1.27"));
-        assert_eq!(registry_key("GHCR.io"), image_registry("ghcr.io/acme/web:1"));
-        assert_ne!(registry_key("ghcr.io"), image_registry("evil.example/acme/web"));
-    }
-
-    #[test]
-    fn settings_are_checked_and_types_imply_their_rules() {
-        let run = Run::default().merged(Some(&serde_json::json!({"type": "worker"}))).unwrap();
-        assert_eq!(run.min_instances, 1, "a worker runs at least one");
-        let run = Run::default().merged(Some(&serde_json::json!({"volume": {"mount": "/data", "size_gb": 5}, "max_instances": 4}))).unwrap();
-        assert_eq!(run.max_instances, 1, "a volume allows one instance");
-        let size = |cpu: f64, memory_mb: u32| Run { cpu, memory_mb, ..Run::default() }.web_concurrency();
-        assert_eq!((size(0.25, 256), size(0.5, 512), size(1.0, 2048), size(4.0, 1024), size(16.0, 32768)), (1, 2, 3, 4, 16), "workers follow the instance");
-        let shared = Run::default().merged(Some(&serde_json::json!({"volume": {"mount": "/data", "size_gb": 5, "shared": true}, "max_instances": 4, "rollout": {"steps": [10]}}))).unwrap();
-        assert_eq!((shared.max_instances, shared.one_writer(), shared.rollout.steps.clone()), (4, false, vec![10]), "a shared volume: many instances, and deploys overlap");
-        assert!(Run::default().merged(Some(&serde_json::json!({"type": "cron"}))).is_err(), "cron needs a schedule");
-        assert!(Run::default().merged(Some(&serde_json::json!({"type": "cron", "schedule": "*/5 * * * *"}))).is_ok());
-        assert!(Run::default().merged(Some(&serde_json::json!({"cpu": 64}))).is_err());
-        assert!(Run::default().merged(Some(&serde_json::json!({"bogus": 1}))).is_err(), "unknown fields are refused");
-        assert!(check_hostname("www.example.com", &["roll.site"]).is_ok());
-        assert!(check_hostname("x.up.roll.site", &["roll.site"]).is_err());
-        assert!(check_hostname("localhost", &[]).is_err());
-        assert!(check_slug("shop-eu").is_ok());
-        for bad in ["ab", "Shop", "-shop", "shop-", "dep--shop", "www", "shop.eu"] {
-            assert!(check_slug(bad).is_err(), "{bad}");
-        }
-        assert!(check_hostname("1.2.3.4", &[]).is_err());
-        assert!(check_name("service", "My-App").is_err());
-        assert!(check_var_name("DATABASE_URL").is_ok() && check_var_name("1X").is_err());
-    }
-}
-
 /// What DNS answered for a custom domain that doesn't verify ([`domain_diagnosis`]).
 pub struct DnsSeen {
     pub cnames: Vec<String>,
@@ -3866,28 +3879,6 @@ pub fn domain_diagnosis(host: &str, target: &str, challenge: &str, token: &str, 
     }
 }
 
-#[cfg(test)]
-mod domain_diagnosis_tests {
-    use super::*;
-
-    fn seen(cnames: &[&str], txts: &[&str], host_txts: &[&str], addresses: &[&str]) -> DnsSeen {
-        let v = |x: &[&str]| x.iter().map(|s| s.to_string()).collect();
-        DnsSeen { cnames: v(cnames), txts: v(txts), host_txts: v(host_txts), addresses: v(addresses) }
-    }
-
-    #[test]
-    fn says_what_dns_answered_and_the_likely_mistake() {
-        let d = |s: &DnsSeen, shared| domain_diagnosis("www.shop.com", "edge.roll.site", "_roll-challenge.www.shop.com", "tok123", s, shared);
-        assert!(d(&seen(&["old.herokudns.com"], &[], &[], &[]), false).starts_with("www.shop.com points at old.herokudns.com instead of edge.roll.site"));
-        assert!(d(&seen(&[], &[], &[], &["104.21.4.1"]), false).contains("turn the proxy off"));
-        assert!(d(&seen(&[], &[], &["tok123"], &[]), true).starts_with("the TXT with the token is on www.shop.com; it goes on _roll-challenge.www.shop.com"));
-        assert!(d(&seen(&["edge.roll.site"], &["\"tok123\""], &[], &[]), true).contains("more around it (quotes?)"));
-        assert!(d(&seen(&["edge.roll.site"], &["other"], &[], &[]), true).contains("holds something else (other)"));
-        assert!(d(&seen(&[], &[], &[], &[]), false).contains("no CNAME to edge.roll.site yet"));
-    }
-}
-
-
 /// What to change for a failure roll knows (Heroku's error codes, Render's pointers): one line
 /// naming the setting and its command. None for anything else: the error and its detail say it.
 pub fn fix_for(error: &str, detail: Option<&str>) -> Option<String> {
@@ -3925,24 +3916,63 @@ pub fn fix_for(error: &str, detail: Option<&str>) -> Option<String> {
     Some(fix.to_string())
 }
 
-#[cfg(test)]
-mod fix_tests {
-    #[test]
-    fn known_failures_say_what_to_change() {
-        let f = |e: &str, d: Option<&str>| super::fix_for(e, d).unwrap_or_default();
-        assert!(f("docker pull ghcr.io/acme/app:1 failed", Some("error from registry: denied")).contains("registry login"));
-        assert!(f("it was killed (exit 137: out of memory, or a SIGKILL)", None).contains("--memory"));
-        assert!(f("the health check didn't pass within 60 s", None).contains("$PORT"));
-        assert!(f("the build failed (docker build exited with 1)", Some("npm ci can only install packages when your package.json and package-lock.json are in sync")).contains("package-lock.json"));
-        assert!(f("it crashed (exit 1)", Some("exec /app/server: exec format error")).contains("linux/amd64"));
-        assert!(f("it crashed (exit 127)", Some("/usr/bin/env: 'bash\r': No such file or directory")).contains("CRLF"));
-        assert!(f("it crashed (exit 1)", Some("Error: listen EADDRINUSE: address already in use :::8080")).contains("$PORT"));
-        assert!(f("it crashed (exit 126)", Some("/bin/sh: ./start.sh: Permission denied")).contains("chmod"));
-        assert!(f("it crashed (exit 1)", Some("Error: connect ECONNREFUSED 127.0.0.1:5432")).contains("DATABASE_URL"));
-        assert_eq!(super::fix_for("a reason nobody wrote down", None), None);
-    }
-}
-
 fn is_zero(n: &u32) -> bool {
     *n == 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn private_addresses_and_registries() {
+        for a in ["127.0.0.1", "10.1.2.3", "100.64.0.1", "0.1.2.3", "192.0.0.8", "198.18.0.1", "240.0.0.1", "224.0.0.1", "::1", "fd00::1", "fe80::1", "::ffff:10.0.0.1", "64:ff9b::a00:1", "::7f00:1", "2002:a00:1::", "ff02::1"] {
+            assert!(private_ip(a.parse().unwrap()), "{a}");
+        }
+        for a in ["1.1.1.1", "8.8.8.8", "2606:4700::1111", "64:ff9b::808:808"] {
+            assert!(!private_ip(a.parse().unwrap()), "{a}");
+        }
+        assert_eq!(registry_key("https://index.docker.io/v1/"), image_registry("nginx:1.27"));
+        assert_eq!(registry_key("GHCR.io"), image_registry("ghcr.io/acme/web:1"));
+        assert_ne!(registry_key("ghcr.io"), image_registry("evil.example/acme/web"));
+    }
+
+    #[test]
+    fn settings_are_checked_and_types_imply_their_rules() {
+        let run = Run::default().merged(Some(&serde_json::json!({"type": "worker"}))).unwrap();
+        assert_eq!(run.min_instances, 1, "a worker runs at least one");
+        let run = Run::default().merged(Some(&serde_json::json!({"volume": {"mount": "/data", "size_gb": 5}, "max_instances": 4}))).unwrap();
+        assert_eq!(run.max_instances, 1, "a volume allows one instance");
+        let size = |cpu: f64, memory_mb: u32| Run { cpu, memory_mb, ..Run::default() }.web_concurrency();
+        assert_eq!((size(0.25, 256), size(0.5, 512), size(1.0, 2048), size(4.0, 1024), size(16.0, 32768)), (1, 2, 3, 4, 16), "workers follow the instance");
+        let shared = Run::default().merged(Some(&serde_json::json!({"volume": {"mount": "/data", "size_gb": 5, "shared": true}, "max_instances": 4, "rollout": {"steps": [10]}}))).unwrap();
+        assert_eq!((shared.max_instances, shared.one_writer(), shared.rollout.steps.clone()), (4, false, vec![10]), "a shared volume: many instances, and deploys overlap");
+        assert!(Run::default().merged(Some(&serde_json::json!({"type": "cron"}))).is_err(), "cron needs a schedule");
+        assert!(Run::default().merged(Some(&serde_json::json!({"type": "cron", "schedule": "*/5 * * * *"}))).is_ok());
+        assert!(Run::default().merged(Some(&serde_json::json!({"cpu": 64}))).is_err());
+        assert!(Run::default().merged(Some(&serde_json::json!({"bogus": 1}))).is_err(), "unknown fields are refused");
+        assert!(check_hostname("www.example.com", &["roll.site"]).is_ok());
+        assert!(check_hostname("x.up.roll.site", &["roll.site"]).is_err());
+        assert!(check_hostname("localhost", &[]).is_err());
+        assert!(check_slug("shop-eu").is_ok());
+        for bad in ["ab", "Shop", "-shop", "shop-", "dep--shop", "www", "shop.eu"] {
+            assert!(check_slug(bad).is_err(), "{bad}");
+        }
+        assert!(check_hostname("1.2.3.4", &[]).is_err());
+        assert!(check_name("service", "My-App").is_err());
+        assert!(check_var_name("DATABASE_URL").is_ok() && check_var_name("1X").is_err());
+    }
+
+    #[test]
+    fn sso_admits_by_domain_and_group() {
+        // With Google, a domain's entry needs the account to be that Workspace domain's.
+        let g = Sso { provider: "google".into(), allow: vec!["@acme.com".into()] };
+        assert_eq!((g.admits("ann@acme.com", &[], None, &[]), g.admits("ann@acme.com", &[], Some("acme.com"), &[])), (None, Some("@acme.com")));
+        // An organisation's own provider: a group counts for that organisation's people only (group
+        // names aren't unique between organisations), and names its domain.
+        let o = Sso { provider: "sso".into(), allow: vec!["group:Eng Team@acme.com".into()] }.check().unwrap();
+        let eng = vec!["eng team".to_string()];
+        assert_eq!((o.admits("ann@acme.com", &[], None, &eng), o.admits("eve@evil.example", &[], None, &eng), o.admits("bob@acme.com", &[], None, &[])), (Some("group:eng team@acme.com"), None, None));
+        assert!(Sso { provider: "sso".into(), allow: vec!["group:eng".into()] }.check().is_err(), "a group names its organisation's domain");
+    }
 }

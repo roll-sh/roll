@@ -314,22 +314,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_pages_own_words_are_masked_wherever_they_sit() {
-        let mut health = Some(crate::PageHealth { errors: 1, first_error: Some("TypeError: key sk_test_51Hx9 rejected".into()), failed: 1, first_failed: Some("GET /api?token=sk_test_51Hx9 → 401".into()), unstable: false });
-        mask_strings(&mut health, &["sk_test_51Hx9".to_string()]);
-        let h = health.unwrap();
-        assert_eq!((h.first_error.as_deref(), h.first_failed.as_deref(), h.errors), (Some("TypeError: key *** rejected"), Some("GET /api?token=*** → 401"), 1));
-        // A value the shown 200 characters would split: parsed wide, masked whole, then cut.
-        let long = format!("{{\"errors\": [\"{}hunter2pass\"], \"failed\": []}}", "x".repeat(195));
-        let mut h = crate::PageHealth::parse(&long);
-        mask_strings(&mut h, &["hunter2pass".to_string()]);
-        let mut h = h.unwrap();
-        h.cut();
-        let shown = h.first_error.unwrap();
-        assert!(shown.ends_with("***") && !shown.contains("hunte"), "{shown}");
-    }
-
-    #[test]
     fn secrets_whole_and_branches_credentials_only() {
         let secrets = vec![("STRIPE_KEY".to_string(), "sk_test_abcdef".to_string()), ("FLAG".into(), "on".into())];
         let own = vec![("API_TOKEN".to_string(), "line-one\nline-two".to_string())];

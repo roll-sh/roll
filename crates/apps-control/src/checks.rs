@@ -3,7 +3,8 @@
 //! own proxy on the owner as a visitor's request would go (past its gates, as a path schedule's
 //! call is), every `every_s`. One that fails twice in a row is `check.down` (once, until it
 //! passes again); the next pass is `alert.resolved` for it. A check wakes a service that scales
-//! to zero, so a service with one doesn't sleep through it.
+//! to zero, so a service with one doesn't sleep through it. A TCP service's checks connect to
+//! its port instead (`tcp`, [`Apps::tcp_check`]).
 
 use crate::model::{Check, CheckState};
 use crate::{Apps, env_key};
@@ -83,6 +84,8 @@ impl Apps {
     async fn run_check(self: &Arc<Self>, service: &str, env: &str, host: &str, url: &str, c: &Check, key: String, started: i64) {
         let began = std::time::Instant::now();
         let (status, verdict) = match &c.browser {
+            // A TCP check: its port, through its own network ([`Apps::tcp_check`]).
+            _ if c.tcp => (None, self.tcp_check(service, env, c).await),
             // A browser check: its page in Chromium, then its script ([`crate::browser`]).
             Some(_) => {
                 let at = format!("{}{}", url.trim_end_matches('/'), c.path);
@@ -220,8 +223,9 @@ impl Apps {
             .iter()
             .map(|c| {
                 let r = runs.get(&format!("{}/{}", env_key(service, env), c.name)).cloned().unwrap_or_default();
-                // Known once a try has come back (an answer, or why there was none).
-                let tried = r.status.is_some() || r.error.is_some();
+                // Known once a try has come back (an answer, or why there was none; a TCP
+                // check's pass has neither).
+                let tried = r.status.is_some() || r.error.is_some() || r.last_at > 0;
                 let failure_at = self.check_failures.lock().get(&format!("{}/{}", env_key(service, env), c.name)).copied();
                 let metrics = self.check_metrics.lock().get(&format!("{}/{}", env_key(service, env), c.name)).cloned();
                 CheckState { name: c.name.clone(), up: tried.then_some(r.down_since.is_none()), failures: r.failures, last_at: tried.then_some(r.last_at), status: r.status, ms: tried.then_some(r.ms), error: r.error, down_since: r.down_since, failure_at, deployment: r.deployment, metrics, over_budget: r.over_budget }
@@ -238,7 +242,7 @@ mod tests {
     /// environment's own variables (the settings never hold the value).
     #[test]
     fn a_checks_request_takes_a_method_headers_and_a_body() {
-        let base = || Check { name: "api".into(), path: "/api/health".into(), every_s: 60, timeout_s: 10, status: None, contains: None, browser: None, budgets: None, from: None, host: None, method: None, headers: None, body: None };
+        let base = || Check { name: "api".into(), path: "/api/health".into(), tcp: false, every_s: 60, timeout_s: 10, status: None, contains: None, browser: None, budgets: None, from: None, host: None, method: None, headers: None, body: None };
         let with = |m: Option<&str>, h: &[(&str, &str)], b: Option<&str>| Check { method: m.map(String::from), headers: (!h.is_empty()).then(|| h.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()), body: b.map(String::from), ..base() };
         let c = with(Some("post"), &[("Authorization", "Bearer ${HEALTH_TOKEN}")], Some("{}")).check().unwrap();
         assert_eq!(c.method(), "POST");
@@ -248,11 +252,8 @@ mod tests {
         assert!(with(None, &[], Some("{}")).check().is_err(), "a GET has no body");
         assert!(with(None, &[("Host", "evil")], None).check().is_err() && with(None, &[("x-roll-check", "x")], None).check().is_err());
         assert!(with(None, &[("X-A", "a\r\nX-B: b")], None).check().is_err());
-    }
-
-    #[test]
-    fn an_answer_passes_by_its_status_and_text() {
-        let c = |status: Option<u16>, contains: Option<&str>| Check { name: "x".into(), path: "/".into(), every_s: 60, timeout_s: 10, status, contains: contains.map(String::from), browser: None, budgets: None, from: None, host: None, method: None, headers: None, body: None };
+        // An answer passes by its status and text.
+        let c = |status: Option<u16>, contains: Option<&str>| Check { name: "x".into(), path: "/".into(), tcp: false, every_s: 60, timeout_s: 10, status, contains: contains.map(String::from), browser: None, budgets: None, from: None, host: None, method: None, headers: None, body: None };
         assert!(passes(&c(None, None), 301, b"").is_ok(), "2xx or 3xx by default");
         assert_eq!(passes(&c(None, None), 503, b""), Err("answered 503".into()));
         assert!(passes(&c(Some(204), None), 204, b"").is_ok());
