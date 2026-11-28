@@ -95,6 +95,8 @@ textarea{min-height:72px;resize:vertical}
 .note p{margin:4px 0 0;white-space:pre-wrap;word-break:break-word}
 .reply{margin:6px 0 0 8px;padding-left:8px;border-left:1px solid rgba(255,255,255,.14)}
 .acts{display:flex;gap:6px;margin-top:6px}
+.shot{display:flex;align-items:center;gap:8px}
+.shot img{height:40px;max-width:96px;border-radius:4px;border:1px solid rgba(255,255,255,.14);object-fit:cover}
 .box{position:fixed;pointer-events:none;border:2px solid #4c8dff;border-radius:4px;background:rgba(76,141,255,.08);display:none}
 @media (prefers-reduced-motion:no-preference){.box{transition:all .12s ease-out}}
 </style>
@@ -106,6 +108,7 @@ textarea{min-height:72px;resize:vertical}
   <div class="muted">On <code class="where"></code></div>
   <input class="name" placeholder="Your name" aria-label="Your name" maxlength="40" hidden>
   <textarea placeholder="What should change here?" aria-label="Your feedback" required maxlength="4000"></textarea>
+  <div class="shot"><button type="button" class="resolve attach">Attach my screen</button><img alt="Your screen" hidden><span class="muted shotsaid"></span></div>
   <div class="muted said" hidden></div>
   <div class="row"><button type="button" class="cancel">Cancel</button><button type="submit" class="go">Post in roll</button></div>
 </form>`;
@@ -113,6 +116,64 @@ textarea{min-height:72px;resize:vertical}
   const btn = $(".btn"), form = $("form.card"), box = $(".box"), note = $("textarea"), where = $(".where"), count = $(".count:not(.flagbtn):not(.mainbtn)"), list = $("div.list");
   let picking = false, picked = null;
   const name = $("input.name"), said = $(".said");
+  // The reviewer's own picture of this tab (Jam's, Marker.io's), only when they click: the
+  // browser asks them, one frame is kept and the capture stops at once; refused, the note still
+  // goes. Sent to this preview's host straight away, which keeps it for the note (its token).
+  const attach = $(".attach"), bar = $(".bar"), thumb = $(".shot img"), shotSaid = $(".shotsaid");
+  let screen = null;
+  const SIDE = 1600, MAX = 1 << 20;
+  const frame = async (stream) => {
+    const video = document.createElement("video");
+    video.muted = true;
+    video.playsInline = true;
+    video.srcObject = stream;
+    await video.play();
+    // A frame drawn after roll's card was hidden (two, where the browser can say).
+    for (let i = 0; i < 2; i++) await new Promise((r) => (video.requestVideoFrameCallback ? video.requestVideoFrameCallback(() => r()) : requestAnimationFrame(() => r())));
+    const k = Math.min(1, SIDE / Math.max(video.videoWidth, video.videoHeight));
+    const c = document.createElement("canvas");
+    c.width = Math.max(1, Math.round(video.videoWidth * k));
+    c.height = Math.max(1, Math.round(video.videoHeight * k));
+    c.getContext("2d").drawImage(video, 0, 0, c.width, c.height);
+    const blob = (type, q) => new Promise((r) => c.toBlob(r, type, q));
+    let b = await blob("image/webp", 0.8);
+    if (!b || b.type !== "image/webp") b = await blob("image/jpeg", 0.8);
+    if (b && b.size > MAX) b = await blob("image/jpeg", 0.5);
+    return b;
+  };
+  attach.addEventListener("click", async () => {
+    if (!navigator.mediaDevices?.getDisplayMedia) { shotSaid.textContent = "This browser can't take one"; return; }
+    attach.disabled = true;
+    shotSaid.textContent = "";
+    let stream = null, b = null;
+    try {
+      stream = await navigator.mediaDevices.getDisplayMedia({ preferCurrentTab: true, video: true, audio: false });
+      // roll's own card and buttons aren't the page's (the picked element's outline stays).
+      form.style.visibility = bar.style.visibility = "hidden";
+      b = await frame(stream);
+    } catch {
+      b = null;
+    } finally {
+      if (stream) for (const t of stream.getTracks()) t.stop();
+      form.style.visibility = bar.style.visibility = "";
+      attach.disabled = false;
+    }
+    if (!b) { shotSaid.textContent = "Not attached"; return; }
+    const url = URL.createObjectURL(b);
+    thumb.src = url;
+    thumb.hidden = false;
+    attach.textContent = "Take it again";
+    shotSaid.textContent = "Sending…";
+    const sent = fetch("/__roll/screen", { method: "POST", credentials: "same-origin", headers: { "content-type": b.type }, body: b })
+      .then(async (r) => {
+        if (!r.ok) throw new Error((await r.text()).slice(0, 120) || `${r.status}`);
+        const j = await r.json();
+        shotSaid.textContent = "Attached";
+        return typeof j.screen === "string" ? j.screen : "";
+      })
+      .catch((err) => { shotSaid.textContent = `Not attached: ${err.message}`; thumb.hidden = true; return ""; });
+    screen = sent;
+  });
   if (GUEST) {
     name.hidden = false;
     name.required = true;
@@ -210,6 +271,11 @@ textarea{min-height:72px;resize:vertical}
   const reset = () => {
     stop();
     picked = null;
+    screen = null;
+    thumb.hidden = true;
+    thumb.removeAttribute("src");
+    attach.textContent = "Attach my screen";
+    shotSaid.textContent = "";
     said.hidden = true;
     form.hidden = true;
     btn.hidden = false;
@@ -239,9 +305,11 @@ textarea{min-height:72px;resize:vertical}
   });
   $(".cancel").addEventListener("click", reset);
   document.addEventListener("keydown", (e) => { if (e.key === "Escape" && (picking || !form.hidden)) reset(); });
-  form.addEventListener("submit", (e) => {
+  form.addEventListener("submit", async (e) => {
     e.preventDefault();
     if (!picked || !note.value.trim()) return;
+    // Its picture's token (sent when it was taken; waited for only if it's still on its way).
+    const shot = screen ? await screen : "";
     const ctx = {
       steps: steps.map(([t, what]) => `${Math.max(0, Math.round((Date.now() - t) / 1000))}s before · ${what}`),
       errors,
@@ -255,7 +323,7 @@ textarea{min-height:72px;resize:vertical}
         method: "POST",
         credentials: "same-origin",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ name: name.value.trim(), path: location.pathname, selector: picked.selector, viewport: `${innerWidth}x${innerHeight}`, note: note.value.trim(), ...ctx }),
+        body: JSON.stringify({ name: name.value.trim(), path: location.pathname, selector: picked.selector, viewport: `${innerWidth}x${innerHeight}`, note: note.value.trim(), screen: shot, ...ctx }),
       })
         .then(async (r) => {
           if (!r.ok) throw new Error((await r.text()).slice(0, 200) || `${r.status}`);
@@ -279,6 +347,7 @@ textarea{min-height:72px;resize:vertical}
       fb_requests: JSON.stringify([...failed.values()].slice(-5)),
       fb_ua: navigator.userAgent.slice(0, 300),
     });
+    if (shot) q.set("fb_screen", shot);
     // In a small window of roll's that posts it and closes (its form alone), the page's own list
     // read again when this one has the focus back; the whole dashboard where a popup can't open.
     // `noopener` either way: the page gets no handle on roll's window.
