@@ -3798,17 +3798,44 @@ capability, gone with the connection) connects to it on the instance's loopback,
 it's on, a closed one too. Admin, as the tunnel is; the port is in `tunnel.opened`
 (`api.rs::a_tunnel_reaches_a_private_services_port`, `docker.rs::a_tcp_service_and_a_tunnel_reach_a_sleeping_port`).
 
-`roll apps exec [-s service] [-e env] -- <command>` (Railway's `railway run`) runs a command on
-this machine with an environment's variables, read through `…/variables/values` (a reveal, in
-the audit trail). `PORT` and `ROLL_*` are the platform's, so they're left out, and so is a name
-that steers this machine's own programs (`PATH`, `LD_PRELOAD`, `DYLD_*`, `BASH_ENV`,
-`NODE_OPTIONS`, `PYTHONPATH` and the like: anyone who may write the environment's variables
-could otherwise run code on the laptop running `exec`); each is named. A sealed variable is never
-shown again, so it can't be set and is named instead. A linked service's private URL
-(`http://<name>.<env>.internal:<port>`) is pointed at a local tunnel to it, as the proxy above
-makes one, for as long as the command runs, so `roll apps exec -- npm run dev` reaches the API
-its web service links (Railway's `railway run`, Netlify's `netlify dev`); another `*.internal`
-value is said, as it only resolves inside roll. It exits with the command's exit code.
+## Local development
+
+`roll apps dev [service] [-e env] [--no-tunnels] -- <command>` (`railway run`, `vercel dev`,
+`heroku local`; `roll apps exec` is the same command) runs a command on this machine with an
+environment's variables, read through `…/variables/values` (a reveal, in the audit trail: the
+caller needs `reveal`, and values from roll secrets need secrets' leave too). Link variables and
+roll secrets' values come as that route gives them. They go only into the command's
+environment: never a file, its argv or a log. The command also gets `ROLL_DEV=1` and `PORT`, the
+service's port (the live deployment's), unless the shell running `roll apps dev` sets one.
+
+Left out, each named on stderr:
+
+- the platform's own `PORT` and `ROLL_*` (the instance's, wrong here);
+- sealed variables, which are never shown again (`…/variables/values` leaves them out for
+  everyone);
+- names that steer this machine's own programs (`PATH`, `LD_PRELOAD`, `DYLD_*`, `BASH_ENV`,
+  `NODE_OPTIONS`, `PYTHONPATH` and the like): anyone who may write the environment's variables
+  could otherwise run code on the laptop running `dev`.
+
+roll's own credentials in the shell (`ROLL_API_KEY`, `ROLL_TOKEN`, any `ROLL_*_TOKEN`, `_KEY`,
+`_PASSWORD`, `_SECRET`) aren't passed on, as `roll run` keeps them from its command: the app and
+its dependencies never act with the token that read its values. Before the command starts, stderr
+lists the names it gets, never a value.
+
+A linked service's private URL (`http://<name>.<env>.internal:<port>`) is pointed at a local
+tunnel to it (`127.0.0.1:<port>`, as `roll apps proxy` makes one) for as long as the command runs,
+so `roll apps dev -- npm run dev` reaches the API its web service links. Only the host and port
+change; the rest of the value stays as it was, byte for byte. Each tunnel opened is said on
+stderr. `--no-tunnels` leaves the values as they are. Another `*.internal` value is said, as it
+only resolves inside roll. roll's resources (Postgres, Redis, search) link public addresses, so
+their values need no tunnel.
+
+The tunnels close when the command exits, and roll exits with its exit code (or by the same
+signal). Ctrl-C from the terminal reaches the command itself; SIGINT, SIGTERM or SIGHUP sent to
+roll alone is passed on, and roll waits for the command. On Windows, Ctrl-C and Ctrl-Break reach
+every process on the console, the command included; closing the console, logging off or shutting
+down ends the command (Windows has no SIGTERM to pass on).
+`roll-cli/tests/apps.rs::dev_runs_a_command_here_with_the_environments_values`.
 
 `roll apps vars --pull [FILE]` (`vercel env pull`, `heroku config -s`) writes the same values to
 a `.env` file here instead (default `.env.local`), for a framework's own dev server: each line as
@@ -5031,113 +5058,109 @@ scanning"), then objectives ("SLOs"), then Prometheus scraping ("The app's Prome
 2. **CSP and Reporting API reports** (Report URI, Cloudflare Page Shield): `csp_reports: true` on an
    environment adds `Reporting-Endpoints` to roll's `/__roll/csp`; `GET …/csp-reports` groups them by
    directive and blocked URI, and a new directive is `alert.csp`.
-3. **Local development with an environment's values** (`railway run`, `vercel dev`, `heroku
-   local`): `roll apps dev [service] [--env staging] -- npm run dev` resolves the environment's
-   variables through the reveal route into the child's environment only (never a file), with
-   tunnels opened to the private services it links to.
-4. **Rotating a link's credential** (Heroku's `pg:credentials:rotate`, Render's): `POST
+3. **Rotating a link's credential** (Heroku's `pg:credentials:rotate`, Render's): `POST
    /v1/apps/services/{id}/links/{kind}/{ref}/rotate {environment?}` issues a new one, redeploys,
    and revokes the old one after the drain; admin, an MCP tool.
-5. **Moving a service to another owner** (Heroku's `apps:transfer`, Vercel's, Railway's): `POST
+4. **Moving a service to another owner** (Heroku's `apps:transfer`, Vercel's, Railway's): `POST
    …/services/{id}/transfer {owner, project}` makes a pending transfer the target's admin accepts
    (`POST /v1/apps/transfers/{tid}/accept`); links dropped and secrets named, as a move does.
-6. **Continuous profiling** (Cloud Profiler): `run.profiling: true` starts the language's agent
+5. **Continuous profiling** (Cloud Profiler): `run.profiling: true` starts the language's agent
    as traces' do; `GET …/{env}/profiles?type=cpu|heap&minutes=` a merged pprof and a flamegraph
    in the dashboard, by deployment.
-7. *Waiting on roll search's #1265.* **A search drain's metrics too**: OTLP metrics into
+6. *Waiting on roll search's #1265.* **A search drain's metrics too**: OTLP metrics into
    `metrics-*.otel-*` beside the ECS logs.
-8. **Checks from several locations with a quorum** (Better Stack, Checkly, Cloud Monitoring):
+7. **Checks from several locations with a quorum** (Better Stack, Checkly, Cloud Monitoring):
    `from: "public"` with `locations` and `fail_in`; per-location state. Needs probes off the owner
    node (roll cloud's edge).
-9. *Waiting on the fleet's second region (roll cloud).* **One environment in several regions**
+8. *Waiting on the fleet's second region (roll cloud).* **One environment in several regions**
    (Fly's regions, Railway's replicas, Cloud Run's multi-region): `run.regions: [{region,
    min_instances, max_instances}]`, the edge sending each request to the nearest healthy region.
-10. *Waiting on roll code (a tag event in its land log).* **A roll code repository's tags by
+9. *Waiting on roll code (a tag event in its land log).* **A roll code repository's tags by
    pattern**: `deploy_tags` for a repo service, through the same tag path once roll code says a
    tag was made (Git URL services' are done, by hook and by the watch).
-11. **DNS records at more providers** (Route 53, Cloud DNS, DigitalOcean): `provider` on
+10. **DNS records at more providers** (Route 53, Cloud DNS, DigitalOcean): `provider` on
    `…/configure` behind `DnsWriter`; Route 53 keyless (roll's issuer token for
    `AssumeRoleWithWebIdentity` on the customer's role, `ChangeResourceRecordSets` signed with
    s3-proto's SigV4), Cloud DNS through workload identity federation. Roll secrets' issuer.
-12. **Plain SSH, scp and rsync to an instance** (Render's SSH, Fly's sftp): an SSH listener in
+11. **Plain SSH, scp and rsync to an instance** (Render's SSH, Fly's sftp): an SSH listener in
    rolld mapping an account key to the shell grant; security-heavy, ranked last.
-13. *Design first, with roll-accounts' owner: mail to addresses that aren't accounts (an open relay's risk) and its abuse limits.* **Status page subscribers** (Statuspage's, Better Stack's, Instatus'): `POST /subscribe` on the
+12. *Design first, with roll-accounts' owner: mail to addresses that aren't accounts (an open relay's risk) and its abuse limits.* **Status page subscribers** (Statuspage's, Better Stack's, Instatus'): `POST /subscribe` on the
    page's host, double opt-in mail through roll-accounts' outbox, limits per address and client, an
    unsubscribe link in every mail, updates sent from a promised outbox written in the incident's
    own transaction; `GET …/status-page/subscribers` (counts for read, addresses for admin) and
    `DELETE …/subscribers/{id}`.
-14. *Waiting on the edge's owner (roll cloud): a country the edge vouches for.* **Country rules and
+13. *Waiting on the edge's owner (roll cloud): a country the edge vouches for.* **Country rules and
    location headers** (Vercel's, Cloud Armor's): `countries` on firewall rules and a normalised
    `x-roll-ip-country` for the app, from Cloudflare's header only when roll-edge vouches for it.
-15. **Approvals, waiting rollouts and rollbacks answered from Slack or Discord** (Heroku ChatOps,
+14. **Approvals, waiting rollouts and rollbacks answered from Slack or Discord** (Heroku ChatOps,
    Vercel's Slack app): buttons on `deploy.ready` and `rollout.waiting` messages, through roll
    code's chat ops (verified installs, the action queue, member checks), acting as the person.
    *A design with roll code's chat ops first:* apps' events would have to reach roll code's
    automations (an `apps` trigger), and a project's members map to an owner's install and its
    members; today chat ops know only roll code's owners.
-16. **A model gateway for apps** (Vercel AI Gateway): `ROLL_AI_*` variables and per-service keys
+15. **A model gateway for apps** (Vercel AI Gateway): `ROLL_AI_*` variables and per-service keys
    through `crates/model-gateway`, usage metered to the service. Today the gateway runs only in a
    machine's agent daemon, so hosting it for apps is a design decision first.
-17. **Keyless signatures and provenance pushed beside the image** (Fulcio certificates, Rekor's log; on the fleet, the attestation stored in ECR as an OCI referrer so `cosign verify-attestation` finds it).
-18. *Waiting on the fleet (an EC2 capacity provider: Fargate has none).* **GPUs** (Cloud Run's, Fly's), ranked down: `run.gpu`, Docker's device requests, the node's
+16. **Keyless signatures and provenance pushed beside the image** (Fulcio certificates, Rekor's log; on the fleet, the attestation stored in ECR as an OCI referrer so `cosign verify-attestation` finds it).
+17. *Waiting on the fleet (an EC2 capacity provider: Fargate has none).* **GPUs** (Cloud Run's, Fly's), ranked down: `run.gpu`, Docker's device requests, the node's
    capacity in placement, a price; Fargate refuses it.
-19. *Waiting on the user (who pays).* **"Why did it fail?" for any source and for crash loops**
+18. *Waiting on the user (who pays).* **"Why did it fail?" for any source and for crash loops**
    (Vercel's, Netlify's): a Git URL, GitHub App or upload service has no roll code owner to ask;
    the operator's provider under a per-project cap would do, and a crash loop after going live
    (`…/crashes/explain`). Also open: a service may name any repo that resolves, so its failures
    are explained on that repo owner's bill until projects and roll code owners are linked
    (#501's members).
-20. *Waiting on the user.* **Signed-in people, not just admins** (every competitor; roll search and
+19. *Waiting on the user.* **Signed-in people, not just admins** (every competitor; roll search and
    secrets do): `roll_auth::SignedIn` scoped through `Workspace::trusts`, others' services 404.
    Letting non-admins run code on a node's Docker is the user's call first.
-21. *Waiting on the fleet's first run.* **Cached answers across nodes and at the edge** (Vercel's, Netlify's): today the owner's
+20. *Waiting on the fleet's first run.* **Cached answers across nodes and at the edge** (Vercel's, Netlify's): today the owner's
    proxy alone keeps them; the storage CDN's purge outbox could carry the purges.
    Across nodes means a node that doesn't own the service answering from its own copy, which
    needs the owner's say that the environment has no gate (access, allow list, firewall, rate
    limit) on each answer, a generation per environment for purges, and hits metered and logged
    where the owner reads them: only worth it once the fleet serves traffic.
-22. **Egress on the fleet** (Fargate): a security group per closed environment's tasks with no
+21. **Egress on the fleet** (Fargate): a security group per closed environment's tasks with no
    outbound rule but the egress proxy's, and the proxy as a task or on the node; until then
    Fargate refuses `egress: roll` (409). *Waiting on the fleet's first run.*
-23. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
+22. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
    follow a stream group's lag now (a queue's project is what keeps another tenant's depth
    unread).
-24. **Region**: the region shown on the overview and each environment, defaulting to the project's
+23. **Region**: the region shown on the overview and each environment, defaulting to the project's
    databases', then a choice per environment once the fleet has a second region (Railway's,
    Fly's). *Waiting on the fleet.*
-25. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
+24. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
    Settings, without stopping services from sleeping (Railway's and Render's). A roll-hosted app
    linked to a search cluster with an IP allowlist (search #243) needs them on the list; until
    then such a cluster stays open (on one node, the link relay's loopback is what it sees). *Waiting on the
    user's first AWS run.*
-26. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
+25. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
    listener offering `h2` (ALPN `h2, http/1.1`; hyper's `http2::Builder` when `h2` is chosen,
    with the same graceful drain) and setting `Host` from `:authority` (HTTP/2 has no `Host`,
    and every product behind the edge routes on it), so Cloudflare's gRPC reaches h2c apps.
    Done here: `run.h2c` to the app, trailers through the proxy. Then TCP services.
-27. *Waiting on roll secrets (its `/services/<name>` layout).* **roll secrets as the env store**: the wiring is done (deploys resolve the project's secrets,
+26. *Waiting on roll secrets (its `/services/<name>` layout).* **roll secrets as the env store**: the wiring is done (deploys resolve the project's secrets,
    digests mark "needs deploy", roll secrets' reveal rules, linked and sensitive keys, dynamic
    credentials refused, new environments ensured); what's left is service variables kept in roll
    secrets at `/services/<name>` (one store for both), and links as per-environment secrets
    links.
-28. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
+27. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
    settings listed in "Not done yet", a first run against AWS with its cold starts measured (a
    warm window or `min_instances` 1 by default there until a wake is fast), and
    allocation-based metering for Fargate.
-29. *Waiting on the edge's owner (roll cloud).* **Wildcard certificates**: DNS-01 on a delegated
+28. *Waiting on the edge's owner (roll cloud).* **Wildcard certificates**: DNS-01 on a delegated
    `_acme-challenge.<base>` CNAME into a zone roll writes (`roll_edge::acme`'s DNS solver at
    another name), then `DomainTls::wildcards` true there; the routing and verification are done.
-30. *Waiting on the edge's owner (roll cloud).* **Bring your own certificate** (Vercel's,
+29. *Waiting on the edge's owner (roll cloud).* **Bring your own certificate** (Vercel's,
    Heroku's SNI, Fly's import): `PUT …/domains/{host}/certificate {cert_pem, key_pem}`, sealed,
    served by SNI at the edge (and Cloudflare's custom certificates), expiry through
    `domain.expiring`.
-31. *Waiting on a static build (no musl target on ai-server, and adding one is the shared toolchain's).* **A waker that takes every caller while the app starts**: busybox `nc -l` takes one, so a burst
+30. *Waiting on a static build (no musl target on ai-server, and adding one is the shared toolchain's).* **A waker that takes every caller while the app starts**: busybox `nc -l` takes one, so a burst
    of private calls to a stopped service loses all but the first (refused). A waker of roll's own
    (roll-fetch's `wake` mode, a static binary mounted read-only) that accepts each, holds them,
    and hands them over once the app listens; the cheap accept count already tells rolld.
-32. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
+31. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
     origin pulls for custom hostnames, then a first domain through Let's Encrypt and Cloudflare).
-33. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
+32. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
     restore (CRIU, which needs the host's Docker daemon with checkpoints on: the user's call), or
     Firecracker microVM hosts on the fleet.
-34. EFS volumes and Cloud Map private DNS on the fleet; TCP services on the fleet (the edge carrying TCP to a service's owner).
+33. EFS volumes and Cloud Map private DNS on the fleet; TCP services on the fleet (the edge carrying TCP to a service's owner).
