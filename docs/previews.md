@@ -1964,7 +1964,7 @@ land on the change.
     `against`: masked and cut as the sheet shows them);
   - main's picture, this push's, and where they differ.
 
-  The button reads `Review · 2.4%` once the page differs. `GET /__roll/review.json?path=` on the
+  The button reads `Review · 2.4% · 2 new` once the page differs or adds problems. `GET /__roll/review.json?path=` on the
   preview's own host answers it, and `GET /__roll/review.png?page=&pic=after|before|diff` serves
   the pictures behind the same gate. Main's screenshots open only for signed-in sessions, so these
   aren't the sheet's public signed links. Both are for a team visitor only, as Main is: someone in

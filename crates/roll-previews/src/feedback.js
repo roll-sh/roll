@@ -269,10 +269,9 @@ textarea{min-height:72px;resize:vertical}
     if (!r || !r.compared || !Array.isArray(r.pages) || !r.pages.length) return;
     const branch = typeof r.branch === "string" ? r.branch : "main";
     const most = Math.max(0, ...r.pages.map((p) => (typeof p.percent === "number" ? p.percent : 0)));
-    const bad = r.pages.some((p) => Object.values(p.added || {}).some((n) => n > 0));
-    reviewBtn.textContent = most > 0 ? `Review · ${Math.max(most, 0.1).toFixed(1)}%` : "Review";
-    if (bad) reviewBtn.append(" ", el("span", "bad", "●"));
-    reviewBtn.title = most > 0 || bad ? `This page differs from ${branch}'s preview` : `This page looks like ${branch}'s preview`;
+    const added = r.pages.reduce((n, p) => n + Object.values(p.added || {}).reduce((m, k) => m + (k > 0 ? k : 0), 0), 0);
+    reviewBtn.textContent = `Review${most > 0 ? ` · ${Math.max(most, 0.1).toFixed(1)}%` : ""}${added ? ` · ${added} new` : ""}`;
+    reviewBtn.title = most > 0 || added ? `This page differs from ${branch}'s preview${added ? `: ${added} new ${added === 1 ? "problem" : "problems"}` : ""}` : `This page looks like ${branch}'s preview`;
     reviewBtn.hidden = false;
     reviewList.replaceChildren(...r.pages.map((p) => reviewEntry(p, branch)));
   };
