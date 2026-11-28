@@ -35,9 +35,10 @@ jobs:
           # RESP and S3 auth and parsing.
           - name: protocols
             packages: -p redis-proto -p s3-proto
-          # Secrets: values bound to their row, references, .env, token scopes.
+          # Secrets: values bound to their row, references, .env, token scopes; no credential in a
+          # `Debug` (roll-secrets, rolld, roll-edge, apps-control).
           - name: secrets
-            packages: -p roll-secrets
+            packages: -p roll-secrets -p roll-debug-scan
           # roll search's segment format (doc values, points, postings, live docs); the rest of
           # search runs in `pnpm test:search` and the on-demand `search` workflow.
           - name: search

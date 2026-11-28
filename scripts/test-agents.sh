@@ -97,14 +97,21 @@ if [[ $e2e == 1 ]]; then
     strip -o "$work/pkg/roll" "$TARGET/debug/roll" 2>/dev/null || cp "$TARGET/debug/roll" "$work/pkg/roll"
     tar -C "$work/pkg" -czf "$work/rel/download/cli-v9.9.9/roll-$target.tar.gz" roll
     (cd "$work/rel/download/cli-v9.9.9" && shasum -a 256 "roll-$target.tar.gz" > SHA256SUMS)
-    ROLL_RELEASES="file://$work/rel" ROLL_VERSION=9.9.9 ROLL_INSTALL_DIR="$work/bin" sh apps/dashboard/public/install.sh
+    # With no ROLL_VERSION it takes the newest release that isn't a draft or a prerelease (only
+    # cli-v9.9.9 has downloads), and a named prerelease says what it is.
+    release() { printf '{ "tag_name": "%s", "author": { "login": "a" }, "draft": %s, "prerelease": %s, "assets": [] }' "$@"; }
+    echo "[$(release cli-v9.9.11 true false), $(release cli-v9.9.10 false true), $(release cli-v9.9.9 false false)]" > "$work/releases.json"
+    echo "[$(release cli-v9.9.9 false true)]" > "$work/prereleases.json"
+    ROLL_RELEASES="file://$work/rel" ROLL_RELEASES_API="file://$work/releases.json" ROLL_INSTALL_DIR="$work/bin" sh apps/dashboard/public/install.sh
     "$work/bin/roll" agent --help >/dev/null
     [[ ! -e $work/bin/rolld ]]
     # --with-rolld adds rolld, checked the same way; a rolld that doesn't match installs neither.
     mkdir -p "$work/pkgd" && printf '#!/bin/sh\necho rolld 9.9.9\n' > "$work/pkgd/rolld"
     tar -C "$work/pkgd" -czf "$work/rel/download/cli-v9.9.9/rolld-$target.tar.gz" rolld
     (cd "$work/rel/download/cli-v9.9.9" && shasum -a 256 "roll-$target.tar.gz" "rolld-$target.tar.gz" > SHA256SUMS)
-    ROLL_RELEASES="file://$work/rel" ROLL_VERSION=9.9.9 ROLL_INSTALL_DIR="$work/bin" sh apps/dashboard/public/install.sh --with-rolld
+    ROLL_RELEASES="file://$work/rel" ROLL_RELEASES_API="file://$work/prereleases.json" ROLL_VERSION=9.9.9 ROLL_INSTALL_DIR="$work/bin" \
+      sh apps/dashboard/public/install.sh --with-rolld 2>"$work/err"
+    grep -q "cli-v9.9.9 is a prerelease" "$work/err"
     [[ $("$work/bin/rolld") == "rolld 9.9.9" ]]
     rm "$work/bin/roll" "$work/bin/rolld"
     (cd "$work/rel/download/cli-v9.9.9" && shasum -a 256 "roll-$target.tar.gz" > SHA256SUMS &&

@@ -114,9 +114,10 @@ runs"](../secrets.md#where-it-runs).
 curl -fsSL https://roll.sh/install.sh | sh
 ```
 
-The script picks the build for your system, checks it against the release's `SHA256SUMS`, and puts
-`roll` in `~/.local/bin`. Set `ROLL_INSTALL_DIR` to put it somewhere else, or `ROLL_VERSION` to
-install one release. If `~/.local/bin` isn't on your `PATH`, the script tells you what to add.
+The script picks the build for your system from the newest release that isn't a prerelease, checks
+it against the release's `SHA256SUMS`, and puts `roll` in `~/.local/bin`. Set `ROLL_INSTALL_DIR` to
+put it somewhere else, or `ROLL_VERSION` to install one release (a prerelease too: the script says
+it is one). If `~/.local/bin` isn't on your `PATH`, the script tells you what to add.
 
 **Windows** (x86_64 and ARM64), in PowerShell:
 

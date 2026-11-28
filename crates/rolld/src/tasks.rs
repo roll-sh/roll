@@ -16,7 +16,7 @@ use std::path::Path;
 use std::sync::Arc;
 use tracing::{info, warn};
 
-#[derive(Args, Clone, Debug)]
+#[derive(Args, Clone)]
 pub struct TasksArgs {
     /// Token for the tasks API (`/v1/tasks`, `/_roll/tenants`); without one it's open, like the
     /// rest of the local API.

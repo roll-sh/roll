@@ -45,6 +45,7 @@ der.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+roll-debug-scan.workspace = true
 http-body-util.workspace = true
 # ACME's flow test drives a real client in process (tests/acme.rs).
 instant-acme.workspace = true
