@@ -162,6 +162,9 @@ struct PoolInner {
     state: Mutex<PoolState>,
     freed: Condvar,
     listeners: Mutex<HashMap<String, tokio::sync::watch::Sender<u64>>>,
+    /// The process's cap on connections to this server, shared with every other pool to it
+    /// ([`limit_connections`]).
+    cap: Option<Arc<Cap>>,
 }
 
 struct PoolState {
@@ -187,6 +190,7 @@ impl Pool {
         }
         // Which schema a connection serves shows in pg_stat_activity.
         config.application_name(format!("roll-code {schema}"));
+        let cap = cap_for(&config);
         let pool = Pool {
             inner: Arc::new(PoolInner {
                 config,
@@ -197,8 +201,12 @@ impl Pool {
                 state: Mutex::new(PoolState { idle: Vec::new(), open: 0, generation: 0 }),
                 freed: Condvar::new(),
                 listeners: Mutex::new(HashMap::new()),
+                cap,
             }),
         };
+        if let Some(cap) = &pool.inner.cap {
+            cap.pools.lock().push(Arc::downgrade(&pool.inner));
+        }
         // Connect now, so a bad URL fails at startup, and make sure the schema exists. Nodes
         // starting together may race to create it.
         let first = pool.inner.open_conn(false, 0)?;
@@ -493,15 +501,15 @@ impl Pool {
         }
         let (tx, rx) = tokio::sync::watch::channel(0u64);
         listeners.insert(channel.to_string(), tx.clone());
-        let (config, tls, url, channel) = (self.inner.config.clone(), self.inner.tls.clone(), self.inner.url.clone(), channel.to_string());
-        rt().spawn(listen_loop(config, tls, url, channel, tx));
+        let (config, tls, url, channel, cap) = (self.inner.config.clone(), self.inner.tls.clone(), self.inner.url.clone(), channel.to_string(), self.inner.cap.clone());
+        rt().spawn(listen_loop(config, tls, url, channel, tx, cap));
         rx
     }
 }
 
 /// Keep a connection listening on `channel`, bumping `tx` on every notification and after every
 /// reconnect, until nobody holds a receiver.
-async fn listen_loop(config: tokio_postgres::Config, tls: Option<MakeRustlsConnect>, url: String, channel: String, tx: tokio::sync::watch::Sender<u64>) {
+async fn listen_loop(config: tokio_postgres::Config, tls: Option<MakeRustlsConnect>, url: String, channel: String, tx: tokio::sync::watch::Sender<u64>, cap: Option<Arc<Cap>>) {
     use futures::StreamExt;
     let bump = |tx: &tokio::sync::watch::Sender<u64>| tx.send_modify(|n| *n = n.wrapping_add(1));
     loop {
@@ -509,6 +517,19 @@ async fn listen_loop(config: tokio_postgres::Config, tls: Option<MakeRustlsConne
             return;
         }
         let listen = format!("LISTEN {}", quote_ident(&channel));
+        // The listening connection counts against the cap for as long as it's open.
+        let _slot = match cap.clone() {
+            Some(cap) => match tokio::task::spawn_blocking(move || cap.slot(Duration::from_secs(30))).await {
+                Ok(Ok(slot)) => Some(slot),
+                Ok(Err(e)) => {
+                    tracing::warn!(db = %url, channel = %channel, error = %e, "no connection free to LISTEN on; retrying");
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
+                Err(_) => return,
+            },
+            None => None,
+        };
         let session = async {
             let (client, mut messages) = match &tls {
                 Some(t) => {
@@ -589,6 +610,10 @@ fn backoff(attempt: u32) {
 
 impl PoolInner {
     fn open_conn(&self, pooled: bool, generation: u64) -> Result<PgConn> {
+        let slot = match &self.cap {
+            Some(cap) => Some(cap.slot(self.opts.acquire_timeout)?),
+            None => None,
+        };
         let (config, tls) = (self.config.clone(), self.tls.clone());
         let timeout = self.opts.statement_timeout.as_millis();
         let setup = format!(
@@ -614,7 +639,106 @@ impl PoolInner {
             client.batch_execute(&setup).await?;
             Ok::<_, tokio_postgres::Error>(client)
         })?;
-        Ok(PgConn::new(client, generation, &self.schema))
+        let mut conn = PgConn::new(client, generation, &self.schema);
+        conn._slot = slot;
+        Ok(conn)
+    }
+
+    /// Close this pool's longest-idle connection, for another pool under the same cap. `false`
+    /// if it has none (or is busy: never wait on another pool's lock).
+    fn close_idle(&self) -> bool {
+        let Some(mut st) = self.state.try_lock() else { return false };
+        if st.idle.is_empty() {
+            return false;
+        }
+        let c = st.idle.remove(0);
+        st.open -= 1;
+        drop(st);
+        self.freed.notify_one();
+        drop(c);
+        true
+    }
+}
+
+/// A process's cap on the connections it opens to one Postgres server, shared by every pool and
+/// LISTEN connection to it, whichever product opened them: rolld's `ROLL_SYSTEM_DB_CONNECTIONS`.
+/// A connection that would go over it closes another pool's longest-idle connection first, or
+/// waits for one (up to the pool's `acquire_timeout`).
+struct Cap {
+    limit: usize,
+    open: Mutex<usize>,
+    freed: Condvar,
+    pools: Mutex<Vec<std::sync::Weak<PoolInner>>>,
+}
+
+/// One connection's place under a [`Cap`]; given back when the connection closes.
+struct Slot(Arc<Cap>);
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        *self.0.open.lock() -= 1;
+        self.0.freed.notify_all();
+    }
+}
+
+fn caps() -> &'static Mutex<HashMap<String, Arc<Cap>>> {
+    static CAPS: OnceLock<Mutex<HashMap<String, Arc<Cap>>>> = OnceLock::new();
+    CAPS.get_or_init(Default::default)
+}
+
+/// One server and login: pools whose URLs differ only in options share a cap.
+fn server_key(c: &tokio_postgres::Config) -> String {
+    format!("{:?}|{:?}|{:?}|{:?}", c.get_hosts(), c.get_ports(), c.get_dbname(), c.get_user())
+}
+
+fn cap_for(config: &tokio_postgres::Config) -> Option<Arc<Cap>> {
+    caps().lock().get(&server_key(config)).cloned()
+}
+
+/// Cap the connections this process opens to the server and database of `url` at `limit`,
+/// across every pool (and LISTEN) to it. Takes effect for pools connected after the call.
+pub fn limit_connections(url: &str, limit: usize) -> Result<()> {
+    let (config, _) = pg_config(url, None)?;
+    let cap = Arc::new(Cap { limit: limit.max(1), open: Mutex::new(0), freed: Condvar::new(), pools: Mutex::new(Vec::new()) });
+    caps().lock().insert(server_key(&config), cap);
+    Ok(())
+}
+
+impl Cap {
+    fn slot(self: &Arc<Self>, timeout: Duration) -> Result<Slot> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            {
+                let mut open = self.open.lock();
+                if *open < self.limit {
+                    *open += 1;
+                    return Ok(Slot(self.clone()));
+                }
+            }
+            // Full: close another pool's idle connection. No lock held: closing one gives its
+            // slot back, and a pool dropped here closes all of its own.
+            let pools: Vec<Arc<PoolInner>> = {
+                let mut pools = self.pools.lock();
+                pools.retain(|p| p.strong_count() > 0);
+                pools.iter().filter_map(std::sync::Weak::upgrade).collect()
+            };
+            let closed = pools.iter().any(|p| p.close_idle());
+            drop(pools);
+            if closed {
+                continue;
+            }
+            let mut open = self.open.lock();
+            if *open < self.limit {
+                continue;
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Err(Error::PoolTimeout(timeout));
+            }
+            // Woken when a slot frees or a connection goes idle; and look again now and then,
+            // in case one went idle while nothing was waiting.
+            self.freed.wait_until(&mut open, deadline.min(now + Duration::from_millis(100)));
+        }
     }
 }
 
@@ -660,6 +784,10 @@ impl Drop for Lease<'_> {
         }
         drop(st);
         self.pool.freed.notify_one();
+        // Another pool under the same cap may be waiting to close an idle connection.
+        if let Some(cap) = &self.pool.cap {
+            cap.freed.notify_all();
+        }
     }
 }
 
@@ -684,6 +812,8 @@ pub(crate) struct PgConn {
     claims: RefCell<Vec<i64>>,
     /// Session advisory locks this write holds (taken before its BEGIN).
     held: RefCell<Vec<i64>>,
+    /// Its place under the process's cap on connections to the server, if there is one.
+    _slot: Option<Slot>,
 }
 
 impl PgConn {
@@ -700,6 +830,7 @@ impl PgConn {
             read_committed: Cell::new(false),
             claims: RefCell::new(Vec::new()),
             held: RefCell::new(Vec::new()),
+            _slot: None,
         }
     }
 
