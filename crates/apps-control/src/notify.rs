@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 
 /// What a target can ask for; a new one gets the two that need someone.
-pub const EVENTS: [&str; 41] = [
+pub const EVENTS: [&str; 42] = [
     "deploy.started",
     "deploy.failed",
     "deploy.base_updated",
@@ -52,6 +52,9 @@ pub const EVENTS: [&str; 41] = [
     "deploy.vulnerable",
     "alert.slo",
     "alert.anomaly",
+    // A CSP directive blocking something for the first time (not by default: a page's own
+    // reports, which anyone can send).
+    "alert.csp",
     "attack.mode",
     "scale.out",
     "scale.in",
@@ -592,6 +595,10 @@ impl Apps {
                     if e.data["window"] == "1h" { "hour" } else { "six hours" }
                 ),
             ),
+            "alert.csp" => (
+                format!("{what}: its CSP blocked {} for the first time", e.data["directive"].as_str().unwrap_or("a directive")),
+                format!("A browser reported {} blocked by {} on {}. Its CSP reports show how often, and where.", e.data["blocked"].as_str().unwrap_or("something"), e.data["directive"].as_str().unwrap_or("a directive"), e.data["path"].as_str().unwrap_or("a page")),
+            ),
             "alert.errors" => (format!("{what}: errors"), format!("{}% of its {} requests in five minutes answered 5xx (the alert is at {}%).", e.data["value"], e.data["requests"], e.data["threshold"])),
             "alert.route" => {
                 let route = match e.data["method"].as_str() {
@@ -785,6 +792,7 @@ fn oncall_of(e: &Event) -> Option<(bool, String, &'static str)> {
             "alert.slo" if d["route"].is_string() => format!("alert.slo/{}", route()),
             "alert.route" => format!("alert.route/{}/{}", route(), d["kind"].as_str().unwrap_or("")),
             "alert.metric" => format!("alert.metric/{}", d["metric"].as_str().unwrap_or("")),
+            "alert.csp" => format!("alert.csp/{}", d["directive"].as_str().unwrap_or("")),
             a => a.to_string(),
         }
     };

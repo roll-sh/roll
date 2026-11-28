@@ -1441,6 +1441,53 @@ async fn an_environments_headers_are_on_its_answers() {
     assert_eq!(go("/elsewhere").await, (StatusCode::OK, None), "on to the app");
 }
 
+/// CSP reports (`csp_reports`): on, every answer names roll's endpoint and a policy that reports
+/// nowhere reports there (one with its own report-to is kept); both shapes of report are kept
+/// grouped, cut to origins and paths, at most 50 a body and 16 KiB; a directive's first report is
+/// `alert.csp`, once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn csp_reports_are_collected_and_grouped() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "web", json!({"port": 80, "min_instances": 1})).await;
+    let base = format!("/v1/apps/services/{}/environments/production", svc["id"].as_str().unwrap());
+    let hn = host(&svc["environments"][0]["url"]);
+    let send = |method: &str, path: &str, ctype: &str, body: String| {
+        let r = Request::builder().method(method).uri(path).header("host", hn.as_str()).header("content-type", ctype).body(Body::from(body)).unwrap();
+        w.public.clone().oneshot(r)
+    };
+    let h = |r: &axum::response::Response, k: &str| r.headers().get_all(k).iter().map(|v| v.to_str().unwrap().to_string()).collect::<Vec<_>>();
+    let rules = json!([{"set": {"Content-Security-Policy": "default-src 'self'"}}, {"path": "/own", "set": {"Content-Security-Policy": "img-src 'self'; report-to theirs"}, "replace": true}]);
+    assert_eq!(call(&w.api, "PUT", &base, Some(json!({"headers": rules}))).await.0, StatusCode::OK);
+    let r = send("GET", "/", "text/plain", String::new()).await.unwrap();
+    assert_eq!((h(&r, "reporting-endpoints"), h(&r, "content-security-policy")), (vec![], vec!["default-src 'self'".to_string()]), "off: untouched");
+    let legacy = json!({"csp-report": {"document-uri": "https://site.example/checkout?token=s3cret#x", "violated-directive": "script-src-elem", "blocked-uri": "https://evil.example/x.js?k=s3cret", "disposition": "enforce"}}).to_string();
+    assert_eq!(send("POST", "/__roll/csp", "application/csp-report", legacy.clone()).await.unwrap().status(), StatusCode::OK, "off: the app's own path");
+    let (st, env) = call(&w.api, "PUT", &base, Some(json!({"csp_reports": true}))).await;
+    assert_eq!((st, &env["csp_reports"]), (StatusCode::OK, &json!(true)), "{env}");
+    let r = send("GET", "/", "text/plain", String::new()).await.unwrap();
+    assert_eq!(h(&r, "reporting-endpoints"), [r#"roll="/__roll/csp""#]);
+    assert_eq!(h(&r, "content-security-policy"), ["default-src 'self'; report-uri /__roll/csp; report-to roll"]);
+    assert_eq!(h(&send("GET", "/own", "text/plain", String::new()).await.unwrap(), "content-security-policy"), ["img-src 'self'; report-to theirs"], "its own report-to kept");
+    // Both shapes: 60 in one Reporting API body (50 read), the legacy one, a report-only one.
+    let one = json!({"type": "csp-violation", "url": "https://site.example/checkout?token=s3cret", "body": {"documentURL": "https://site.example/checkout?token=s3cret", "blockedURL": "https://evil.example/y.js", "effectiveDirective": "script-src-elem", "disposition": "enforce"}});
+    let many = serde_json::to_string(&vec![one; 60]).unwrap();
+    assert!(many.len() < 16 * 1024);
+    let only = json!([{"type": "csp-violation", "body": {"documentURL": "https://site.example/users/42", "blockedURL": "data", "effectiveDirective": "img-src", "disposition": "report"}}]).to_string();
+    for (ctype, body) in [("application/reports+json", many), ("application/csp-report", legacy.clone()), ("application/reports+json", only)] {
+        assert_eq!(send("POST", "/__roll/csp", ctype, body).await.unwrap().status(), StatusCode::NO_CONTENT);
+    }
+    assert_eq!(send("POST", "/__roll/csp", "application/reports+json", "x".repeat(17 * 1024)).await.unwrap().status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(send("POST", "/__roll/csp", "application/csp-report", legacy).await.unwrap().status(), StatusCode::NO_CONTENT, "seen again");
+    let (st, v) = call(&w.api, "GET", &format!("{base}/csp-reports?minutes=60"), None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let groups: Vec<Value> = v["groups"].as_array().unwrap().iter().map(|g| json!([g["directive"], g["blocked"], g["path"], g["disposition"], g["count"]])).collect();
+    assert_eq!(groups, [json!(["script-src-elem", "https://evil.example", "/checkout", "enforce", 52]), json!(["img-src", "data:", "/users/:id", "report", 1])], "{v}");
+    assert!(!v.to_string().contains("s3cret"), "no query is kept: {v}");
+    let ev = call(&w.api, "GET", "/v1/apps/events?after=0", None).await.1;
+    let csp: Vec<Value> = ev["events"].as_array().unwrap().iter().filter(|e| e["kind"] == "alert.csp").map(|e| e["data"]["directive"].clone()).collect();
+    assert_eq!(csp, [json!("script-src-elem"), json!("img-src")], "once a directive: {ev}");
+}
+
 /// A GET that finds its instance gone (killed: nothing listens, and roll doesn't know yet) goes
 /// to a fresh instance instead of a 503; a request with a body isn't sent twice.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

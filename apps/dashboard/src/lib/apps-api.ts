@@ -713,6 +713,8 @@ export interface EnvironmentPut {
   traces?: boolean;
   /** Its pages measure their Web Vitals (a tag roll adds). */
   vitals?: boolean;
+  /** Its answers send their Content-Security-Policy reports to roll (`/__roll/csp`). */
+  csp_reports?: boolean;
   /** Strict-Transport-Security over HTTPS: its own, false (none) or null (the default, two years). */
   hsts?: Hsts | false | null;
   /** How long its logs are kept (null: 7 days). */
@@ -846,6 +848,8 @@ export interface Environment extends EnvironmentSummary {
   traces?: boolean;
   /** Its pages measure their Web Vitals for roll. */
   vitals?: boolean;
+  /** Its answers send their Content-Security-Policy reports to roll (`…/csp-reports`). */
+  csp_reports?: boolean;
   /** Its Strict-Transport-Security over HTTPS (null: none sent). */
   hsts?: Hsts | null;
   /** Days its logs are kept: 7 (default), 30 or 90; a preview's are 7. */
@@ -1403,6 +1407,25 @@ export interface Vitals {
   cut: boolean;
 }
 
+/** What browsers reported an environment's CSP blocked (`csp_reports: true`), grouped. */
+export interface CspReports {
+  minutes: number;
+  on: boolean;
+  groups: CspGroup[];
+}
+
+export interface CspGroup {
+  directive: string;
+  /** An origin, a scheme (`data:`), a keyword (`inline`, `eval`) or `other`. */
+  blocked: string;
+  /** The document's path, ids folded as `:id`. */
+  path: string;
+  disposition: "enforce" | "report";
+  count: number;
+  first_seen: number;
+  last_seen: number;
+}
+
 export interface Analytics {
   minutes: number;
   /** Minutes a point of `series` stands for. */
@@ -1525,6 +1548,7 @@ export type NotifyEvent =
   | "heartbeat.missed"
   | "deploy.vulnerable"
   | "alert.slo"
+  | "alert.csp"
   /** Every `audit.*` entry: who changed what (never paged). */
   | "audit";
 
@@ -1945,6 +1969,7 @@ export const appsApi = {
   routes: (id: string, e: string, minutes = 60) => call<RouteStats>("GET", `${env(id, e)}/routes${qs({ minutes })}`),
   analytics: (id: string, e: string, minutes = 1440) => call<Analytics>("GET", `${env(id, e)}/analytics${qs({ minutes })}`),
   vitals: (id: string, e: string, minutes = 1440) => call<Vitals>("GET", `${env(id, e)}/vitals${qs({ minutes })}`),
+  cspReports: (id: string, e: string, minutes = 1440) => call<CspReports>("GET", `${env(id, e)}/csp-reports${qs({ minutes })}`),
   setErrorState: (id: string, e: string, fingerprint: string, state: "open" | "resolved" | "muted") => call<{ fingerprint: string; state: string }>("PATCH", `${env(id, e)}/errors/${encodeURIComponent(fingerprint)}`, { state }),
   errors: (id: string, e: string, minutes = 1440) => call<{ minutes: number; groups: ErrorGroup[]; scanned: number; cut: boolean }>("GET", `${env(id, e)}/errors${qs({ minutes })}`),
   appMetrics: (id: string, e: string, minutes = 60) => call<AppMetrics>("GET", `${env(id, e)}/app-metrics${qs({ minutes })}`),
