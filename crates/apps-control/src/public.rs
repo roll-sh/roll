@@ -482,10 +482,10 @@ pub(crate) async fn call_scheduled(apps: Arc<Apps>, service: &str, env: &str, ho
 }
 
 /// GET `path` of an environment on its owner for an uptime check (`crate::checks`), as `host`
-/// asks and past its gates as a schedule's call is: the status and at most `max` bytes of the
-/// answer, or why it never answered.
+/// asks and past its gates as a schedule's call is: the status, the headers and at most `max`
+/// bytes of the answer, or why it never answered.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn call_check(apps: Arc<Apps>, service: &str, env: &str, host: &str, method: &str, path: &str, headers: &[(String, String)], body: Option<String>, timeout: std::time::Duration, max: usize) -> std::result::Result<(u16, Vec<u8>), String> {
+pub(crate) async fn call_check(apps: Arc<Apps>, service: &str, env: &str, host: &str, method: &str, path: &str, headers: &[(String, String)], body: Option<String>, timeout: std::time::Duration, max: usize) -> std::result::Result<(u16, axum::http::HeaderMap, Vec<u8>), String> {
     let method = axum::http::Method::from_bytes(method.as_bytes()).unwrap_or(axum::http::Method::GET);
     let mut b = Request::builder().method(method).uri(path).header(header::HOST, host).header(header::USER_AGENT, "roll-uptime/1.0");
     for (k, v) in headers {
@@ -495,7 +495,7 @@ pub(crate) async fn call_check(apps: Arc<Apps>, service: &str, env: &str, host: 
     req.extensions_mut().insert(Scheduled);
     tokio::time::timeout(timeout, async {
         let r = proxy(apps, service, env, None, req).await;
-        let status = r.status().as_u16();
+        let (status, headers) = (r.status().as_u16(), r.headers().clone());
         // At most `max` read; the rest dropped, so its instance's lease and meter end with it.
         let mut body = r.into_body().into_data_stream();
         let mut out = Vec::new();
@@ -507,7 +507,7 @@ pub(crate) async fn call_check(apps: Arc<Apps>, service: &str, env: &str, host: 
                 break;
             }
         }
-        (status, out)
+        (status, headers, out)
     })
     .await
     .map_err(|_| format!("it didn't answer within {} s", timeout.as_secs()))

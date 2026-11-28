@@ -619,203 +619,200 @@ mod tests {
         serde_json::from_value(json).unwrap()
     }
 
-    /// A rule's resources that don't parse say why: what's expected, or what's wrong in a selector.
+    /// A rule can name part of a resource: one encryption key of a secrets project, some of its
+    /// secret keys, some indices of a search cluster, or a folder; exclusions, `//` and unknown selector
+    /// fields are refused, never dropped (that would widen the rule).
     #[test]
-    fn bad_resources_say_why() {
-        let err = |resources: serde_json::Value| serde_json::from_value::<Rule>(serde_json::json!({ "product": "search", "resources": resources, "actions": { "read": "allow" } })).unwrap_err().to_string();
-        assert!(err(serde_json::json!({ "id": "srch_1" })).contains("expected resources as \"*\" or a list of selectors, like [{\"id\""), "{}", err(serde_json::json!({ "id": "srch_1" })));
-        assert!(err(serde_json::json!("all")).contains("resources must be \"*\" or a list, not \"all\""));
-        assert!(err(serde_json::json!([{ "id": "srch_1", "nope": 1 }])).contains("nope"), "{}", err(serde_json::json!([{ "id": "srch_1", "nope": 1 }])));
-        assert_eq!(rule(serde_json::json!({ "product": "search", "resources": [{ "id": "srch_1" }], "actions": { "read": "allow" } })).resources, Resources::Some(vec![Selector::Id { id: "srch_1".into(), index: None }]));
-        assert_eq!(rule(serde_json::json!({ "product": "search", "resources": "*", "actions": { "read": "allow" } })).resources, Resources::All);
+    fn a_rule_can_name_part_of_a_resource() {
+        {
+            // Secrets' encryption keys are literal names: a request names one key, and none of an index
+            // expression's meanings (`_all`, lists, exclusions) reach another key.
+            let r = rule(serde_json::json!({ "product": "secrets", "resources": [{ "id": "prj_1", "index": "payments,pay-*" }], "actions": { "write": "allow" } }));
+            let at = |key: &str| Target::One(Resource { index: Some(key.into()), ..Resource::new("secrets", "prj_1") });
+            for ok in ["payments", "pay-eu", "pay-"] {
+                assert!(r.matches(&at(ok)), "{ok}");
+            }
+            for no in ["pay", "pay-*", "payments,pay-eu", "payments,billing", "_all", "*", "-payments", "billing"] {
+                assert!(!r.matches(&at(no)), "{no}");
+            }
+            let all = rule(serde_json::json!({ "product": "secrets", "resources": [{ "id": "prj_1", "index": "_all" }], "actions": { "write": "allow" } }));
+            assert!(all.matches(&at("_all")) && !all.matches(&at("payments")), "a key named _all is only that key");
+            let one = rule(serde_json::json!({ "product": "secrets", "resources": [{ "id": "prj_1", "index": "pay-eu" }], "actions": { "write": "allow" } }));
+            assert!(r.covers(&one) && !one.covers(&r));
+            assert!(!Scope(vec![rule(serde_json::json!({ "product": "secrets", "resources": [{ "id": "prj_1", "index": "logs-{now}" }], "actions": { "write": "allow" } }))]).problems().is_empty());
+            assert!(super::rememberable_part("secrets", "payments") && !super::rememberable_part("secrets", "pay*") && !super::rememberable_part("secrets", "a,b"));
+        }
+        {
+            // A selector's indices cover an index expression name by name and pattern by pattern, as
+            // Elasticsearch authorizes one; the cluster as a whole is never theirs.
+            let r = rule(serde_json::json!({ "product": "search", "resources": [{ "id": "cl_1", "index": "logs-*,metrics" }], "actions": { "read": "allow" } }));
+            let at = |index: Option<&str>| Target::One(Resource { index: index.map(str::to_string), ..Resource::new("search", "cl_1") });
+            for ok in ["logs-2025", "logs-2025-*", "logs-*,-logs-old", "metrics", "logs-a,metrics"] {
+                assert!(r.matches(&at(Some(ok))), "{ok}");
+            }
+            for no in ["logs", "l*", "*", "_all", "logs-a,users", "remote:logs-a", "<logs-{now/d}>", "-logs-a", ""] {
+                assert!(!r.matches(&at(Some(no))), "{no}");
+            }
+            assert!(!r.matches(&at(None)), "the cluster itself");
+            assert!(!r.matches(&Target::One(Resource { index: Some("logs-a".into()), ..Resource::new("search", "cl_2") })));
+            let whole = rule(serde_json::json!({ "product": "search", "resources": [{ "id": "cl_1" }], "actions": { "read": "allow" } }));
+            let one = rule(serde_json::json!({ "product": "search", "resources": [{ "id": "cl_1", "index": "logs-a" }], "actions": { "read": "allow" } }));
+            assert!(whole.matches(&at(Some("anything"))) && whole.covers(&r) && r.covers(&one) && !one.covers(&r) && !r.covers(&whole));
+            assert!(!Scope(vec![rule(serde_json::json!({ "product": "search", "resources": [{ "id": "cl_1", "index": "-x" }], "actions": { "read": "allow" } }))]).problems().is_empty());
+            // An exclusion would be dropped, the rule reaching what it excluded: refused, and one
+            // stored before covers nothing.
+            let excluding = rule(serde_json::json!({ "product": "search", "resources": [{ "id": "cl_1", "index": "logs-*,-logs-secret" }], "actions": { "read": "allow" } }));
+            assert!(!Scope(vec![excluding.clone()]).problems().is_empty());
+            for no in ["logs-secret", "logs-a", "logs-*"] {
+                assert!(!excluding.matches(&at(Some(no))), "{no}");
+            }
+            assert!(!super::rememberable_part("search", "logs-*,-logs-secret") && super::rememberable_part("search", "logs-*"));
+            assert_eq!(super::rule_index("search", "logs-*, -logs-old,metrics"), "logs-*,metrics");
+            assert!(!Scope(vec![rule(serde_json::json!({ "product": "redis", "resources": [{ "id": "rdb_1", "index": "x" }], "actions": { "read": "allow" } }))]).problems().is_empty());
+            assert!(Scope(vec![rule(serde_json::json!({ "product": "secrets", "resources": [{ "id": "prj_1", "index": "payments" }], "actions": { "write": "allow" } }))]).problems().is_empty(), "an encryption key");
+            // A field a selector doesn't have is refused, never dropped (that would widen the rule).
+            for bad in [serde_json::json!({ "project": "p", "index": "logs-*" }), serde_json::json!({ "id": "a", "extra": 1 }), serde_json::json!({})] {
+                assert!(serde_json::from_value::<Selector>(bad.clone()).is_err(), "{bad}");
+            }
+        }
+        {
+            // A resource whose product filters per environment and path itself matches rules limited to
+            // some environments or paths, never ones about other resources.
+            let r = rule(serde_json::json!({ "product": "secrets", "resources": [{ "id": "prj_a" }], "environments": ["staging"], "paths": ["/api"], "actions": { "read": "allow" } }));
+            let at = |id: &str, filters_itself: bool| Target::One(Resource { filters_itself, ..Resource::new("secrets", id) });
+            assert!(!r.matches(&at("prj_a", false)) && r.matches(&at("prj_a", true)) && !r.matches(&at("prj_b", true)));
+            // A rule limited to one key matches a list that filters by key (it shows that key alone),
+            // never another key's request, nor a list that only filters by environment and folder.
+            let one_key = rule(serde_json::json!({ "product": "secrets", "resources": [{ "id": "prj_a", "index": "payments" }], "actions": { "read": "allow" } }));
+            let key = |name: &str| Target::One(Resource { index: Some(name.into()), ..Resource::new("secrets", "prj_a") });
+            let by_key = Target::One(Resource { filters_index: true, ..Resource::new("secrets", "prj_a") });
+            assert!(one_key.matches(&by_key) && !one_key.matches(&at("prj_a", true)) && !one_key.matches(&at("prj_a", false)) && one_key.matches(&key("payments")) && !one_key.matches(&key("billing")));
+            // A folder is spelled one way, and the root only `/`: `//` reads as every folder, so it is
+            // the root wherever "the whole environment" is decided, and no rule is made with it.
+            assert!(super::is_root("/") && super::is_root("//") && !super::is_root("/api"));
+            let paths = |p: &str| Scope(vec![rule(serde_json::json!({ "product": "secrets", "resources": "*", "paths": [p], "actions": { "read": "allow" } }))]).problems();
+            for no in ["//", "/a//b", "/./a", "/a/..", "api", "/api//"] {
+                assert!(!paths(no).is_empty(), "{no}");
+            }
+            assert!(paths("/").is_empty() && paths("/api/stripe").is_empty() && paths("/api/").is_empty(), "/api/ is /api");
+            // A rule stored with `//` (before it was refused) reaches no folder, not every one.
+            let old: Rule = serde_json::from_value(serde_json::json!({ "product": "secrets", "resources": "*", "paths": ["//"], "actions": { "read": "allow" } })).unwrap();
+            let folder = |p: &str| Target::One(Resource { path: Some(p.into()), ..Resource::new("secrets", "prj_a") });
+            assert!(!old.matches(&folder("/")) && !old.matches(&folder("/api")));
+            let api: Rule = serde_json::from_value(serde_json::json!({ "product": "secrets", "resources": "*", "paths": ["/api/"], "actions": { "read": "allow" } })).unwrap();
+            assert_eq!(api.paths, Some(vec!["/api".to_string()]));
+            assert!(api.matches(&folder("/api/x")) && !api.matches(&folder("/apix")));
+        }
+        {
+            // A secrets rule's keys: exact names only, on secrets only; a request about one key matches
+            // when it's listed, one about no key only where the product answers key by key; lists,
+            // creates and the product as a whole never; it covers only a subset of its keys. A node that
+            // doesn't know `keys` reads such a grant as no rules: denied, never wider.
+            let keyed = |keys: serde_json::Value| rule(serde_json::json!({ "product": "secrets", "resources": [{ "project": "prj_a" }], "environments": ["production"], "keys": keys, "actions": { "reveal": "allow" } }));
+            let r = keyed(serde_json::json!(["STRIPE_KEY"]));
+            assert!(Scope(vec![r.clone()]).problems().is_empty());
+            for bad in [serde_json::json!([]), serde_json::json!(["STRIPE_*"]), serde_json::json!(["*"]), serde_json::json!(["9LIVES"]), serde_json::json!(["A,B"])] {
+                assert!(!Scope(vec![keyed(bad.clone())]).problems().is_empty(), "{bad}");
+            }
+            assert!(!Scope(vec![rule(serde_json::json!({ "product": "postgres", "resources": "*", "keys": ["A"], "actions": { "read": "allow" } }))]).problems().is_empty(), "secrets only");
+            assert!(!Scope(vec![rule(serde_json::json!({ "product": "*", "resources": "*", "keys": ["A"], "actions": { "read": "allow" } }))]).problems().is_empty(), "not every product's");
+            let at = |key: Option<&str>, filters_keys: bool, filters_itself: bool| {
+                Target::One(Resource { project: Some("prj_a".into()), environment: Some("production".into()), path: Some("/".into()), key: key.map(Into::into), filters_keys, filters_itself, ..Resource::new("secrets", "prj_a") })
+            };
+            assert!(r.matches(&at(Some("STRIPE_KEY"), false, false)));
+            assert!(!r.matches(&at(Some("STRIPE"), false, false)) && !r.matches(&at(Some("OTHER"), false, false)), "exact names");
+            assert!(!r.matches(&at(None, false, false)), "the folder as a whole");
+            assert!(r.matches(&at(None, true, false)), "a folder answered key by key");
+            assert!(!r.matches(&at(None, false, true)), "a route that filters only by environment and folder");
+            assert!(!r.matches(&Target::List { product: "secrets".into() }));
+            assert!(!r.matches(&Target::Create { product: "secrets".into(), project: Some("prj_a".into()), environment: Some("production".into()) }));
+            assert!(!r.matches(&Target::Product { product: "secrets".into() }));
+            // Environments and folders still narrow a keyed rule's key-by-key match.
+            let staging = Target::One(Resource { environment: Some("staging".into()), key: Some("STRIPE_KEY".into()), ..Resource::new("secrets", "prj_a") });
+            assert!(!r.matches(&staging));
+            // Covering: a subset of keys, or no keys (every key); never a keyed rule over a keyless one.
+            let two = keyed(serde_json::json!(["STRIPE_KEY", "STRIPE_WEBHOOK"]));
+            let keyless = rule(serde_json::json!({ "product": "secrets", "resources": [{ "project": "prj_a" }], "environments": ["production"], "actions": { "reveal": "allow" } }));
+            assert!(two.covers(&r) && !r.covers(&two) && keyless.covers(&two) && !two.covers(&keyless));
+            // Serialized only when set.
+            assert!(serde_json::to_value(&keyless).unwrap().get("keys").is_none());
+            assert_eq!(serde_json::to_value(&r).unwrap()["keys"], serde_json::json!(["STRIPE_KEY"]));
+            // A node from before `keys` (it refuses fields it doesn't know) reads the grant's rules as
+            // none, as roll-access's store does (`unwrap_or_default`): everything denied.
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            #[allow(dead_code)]
+            struct Old {
+                product: String,
+                resources: Resources,
+                environments: Option<Vec<String>>,
+                actions: BTreeMap<Action, Effect>,
+            }
+            let stored = serde_json::to_string(&Scope(vec![r.clone()])).unwrap();
+            let old: Vec<Old> = serde_json::from_str(&stored).unwrap_or_default();
+            assert!(old.is_empty());
+        }
     }
 
-    #[test]
-    fn an_environment_ending_in_a_star_is_a_prefix() {
-        let r: Rule = serde_json::from_value(serde_json::json!({ "product": "apps", "resources": "*", "environments": ["preview", "pv-*"], "actions": { "write": "allow" } })).unwrap();
-        assert!(r.environment_matches(Some("pv-42")) && r.environment_matches(Some("preview")));
-        assert!(!r.environment_matches(Some("production")) && !r.environment_matches(None));
-        let narrower: Rule = serde_json::from_value(serde_json::json!({ "product": "apps", "resources": "*", "environments": ["pv-42"], "actions": { "write": "allow" } })).unwrap();
-        assert!(r.covers(&narrower) && !narrower.covers(&r));
-    }
-
-    /// Secrets' encryption keys are literal names: a request names one key, and none of an index
-    /// expression's meanings (`_all`, lists, exclusions) reach another key.
-    #[test]
-    fn keys_narrow_a_project() {
-        let r = rule(serde_json::json!({ "product": "secrets", "resources": [{ "id": "prj_1", "index": "payments,pay-*" }], "actions": { "write": "allow" } }));
-        let at = |key: &str| Target::One(Resource { index: Some(key.into()), ..Resource::new("secrets", "prj_1") });
-        for ok in ["payments", "pay-eu", "pay-"] {
-            assert!(r.matches(&at(ok)), "{ok}");
-        }
-        for no in ["pay", "pay-*", "payments,pay-eu", "payments,billing", "_all", "*", "-payments", "billing"] {
-            assert!(!r.matches(&at(no)), "{no}");
-        }
-        let all = rule(serde_json::json!({ "product": "secrets", "resources": [{ "id": "prj_1", "index": "_all" }], "actions": { "write": "allow" } }));
-        assert!(all.matches(&at("_all")) && !all.matches(&at("payments")), "a key named _all is only that key");
-        let one = rule(serde_json::json!({ "product": "secrets", "resources": [{ "id": "prj_1", "index": "pay-eu" }], "actions": { "write": "allow" } }));
-        assert!(r.covers(&one) && !one.covers(&r));
-        assert!(!Scope(vec![rule(serde_json::json!({ "product": "secrets", "resources": [{ "id": "prj_1", "index": "logs-{now}" }], "actions": { "write": "allow" } }))]).problems().is_empty());
-        assert!(super::rememberable_part("secrets", "payments") && !super::rememberable_part("secrets", "pay*") && !super::rememberable_part("secrets", "a,b"));
-    }
-
-    /// A secrets rule's keys: exact names only, on secrets only; a request about one key matches
-    /// when it's listed, one about no key only where the product answers key by key; lists,
-    /// creates and the product as a whole never; it covers only a subset of its keys. A node that
-    /// doesn't know `keys` reads such a grant as no rules: denied, never wider.
-    #[test]
-    fn keys_narrow_a_secrets_rule() {
-        let keyed = |keys: serde_json::Value| rule(serde_json::json!({ "product": "secrets", "resources": [{ "project": "prj_a" }], "environments": ["production"], "keys": keys, "actions": { "reveal": "allow" } }));
-        let r = keyed(serde_json::json!(["STRIPE_KEY"]));
-        assert!(Scope(vec![r.clone()]).problems().is_empty());
-        for bad in [serde_json::json!([]), serde_json::json!(["STRIPE_*"]), serde_json::json!(["*"]), serde_json::json!(["9LIVES"]), serde_json::json!(["A,B"])] {
-            assert!(!Scope(vec![keyed(bad.clone())]).problems().is_empty(), "{bad}");
-        }
-        assert!(!Scope(vec![rule(serde_json::json!({ "product": "postgres", "resources": "*", "keys": ["A"], "actions": { "read": "allow" } }))]).problems().is_empty(), "secrets only");
-        assert!(!Scope(vec![rule(serde_json::json!({ "product": "*", "resources": "*", "keys": ["A"], "actions": { "read": "allow" } }))]).problems().is_empty(), "not every product's");
-        let at = |key: Option<&str>, filters_keys: bool, filters_itself: bool| {
-            Target::One(Resource { project: Some("prj_a".into()), environment: Some("production".into()), path: Some("/".into()), key: key.map(Into::into), filters_keys, filters_itself, ..Resource::new("secrets", "prj_a") })
-        };
-        assert!(r.matches(&at(Some("STRIPE_KEY"), false, false)));
-        assert!(!r.matches(&at(Some("STRIPE"), false, false)) && !r.matches(&at(Some("OTHER"), false, false)), "exact names");
-        assert!(!r.matches(&at(None, false, false)), "the folder as a whole");
-        assert!(r.matches(&at(None, true, false)), "a folder answered key by key");
-        assert!(!r.matches(&at(None, false, true)), "a route that filters only by environment and folder");
-        assert!(!r.matches(&Target::List { product: "secrets".into() }));
-        assert!(!r.matches(&Target::Create { product: "secrets".into(), project: Some("prj_a".into()), environment: Some("production".into()) }));
-        assert!(!r.matches(&Target::Product { product: "secrets".into() }));
-        // Environments and folders still narrow a keyed rule's key-by-key match.
-        let staging = Target::One(Resource { environment: Some("staging".into()), key: Some("STRIPE_KEY".into()), ..Resource::new("secrets", "prj_a") });
-        assert!(!r.matches(&staging));
-        // Covering: a subset of keys, or no keys (every key); never a keyed rule over a keyless one.
-        let two = keyed(serde_json::json!(["STRIPE_KEY", "STRIPE_WEBHOOK"]));
-        let keyless = rule(serde_json::json!({ "product": "secrets", "resources": [{ "project": "prj_a" }], "environments": ["production"], "actions": { "reveal": "allow" } }));
-        assert!(two.covers(&r) && !r.covers(&two) && keyless.covers(&two) && !two.covers(&keyless));
-        // Serialized only when set.
-        assert!(serde_json::to_value(&keyless).unwrap().get("keys").is_none());
-        assert_eq!(serde_json::to_value(&r).unwrap()["keys"], serde_json::json!(["STRIPE_KEY"]));
-        // A node from before `keys` (it refuses fields it doesn't know) reads the grant's rules as
-        // none, as roll-access's store does (`unwrap_or_default`): everything denied.
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        #[allow(dead_code)]
-        struct Old {
-            product: String,
-            resources: Resources,
-            environments: Option<Vec<String>>,
-            actions: BTreeMap<Action, Effect>,
-        }
-        let stored = serde_json::to_string(&Scope(vec![r.clone()])).unwrap();
-        let old: Vec<Old> = serde_json::from_str(&stored).unwrap_or_default();
-        assert!(old.is_empty());
-    }
-
-    /// A selector's indices cover an index expression name by name and pattern by pattern, as
-    /// Elasticsearch authorizes one; the cluster as a whole is never theirs.
-    #[test]
-    fn indices_narrow_a_resource() {
-        let r = rule(serde_json::json!({ "product": "search", "resources": [{ "id": "cl_1", "index": "logs-*,metrics" }], "actions": { "read": "allow" } }));
-        let at = |index: Option<&str>| Target::One(Resource { index: index.map(str::to_string), ..Resource::new("search", "cl_1") });
-        for ok in ["logs-2025", "logs-2025-*", "logs-*,-logs-old", "metrics", "logs-a,metrics"] {
-            assert!(r.matches(&at(Some(ok))), "{ok}");
-        }
-        for no in ["logs", "l*", "*", "_all", "logs-a,users", "remote:logs-a", "<logs-{now/d}>", "-logs-a", ""] {
-            assert!(!r.matches(&at(Some(no))), "{no}");
-        }
-        assert!(!r.matches(&at(None)), "the cluster itself");
-        assert!(!r.matches(&Target::One(Resource { index: Some("logs-a".into()), ..Resource::new("search", "cl_2") })));
-        let whole = rule(serde_json::json!({ "product": "search", "resources": [{ "id": "cl_1" }], "actions": { "read": "allow" } }));
-        let one = rule(serde_json::json!({ "product": "search", "resources": [{ "id": "cl_1", "index": "logs-a" }], "actions": { "read": "allow" } }));
-        assert!(whole.matches(&at(Some("anything"))) && whole.covers(&r) && r.covers(&one) && !one.covers(&r) && !r.covers(&whole));
-        assert!(!Scope(vec![rule(serde_json::json!({ "product": "search", "resources": [{ "id": "cl_1", "index": "-x" }], "actions": { "read": "allow" } }))]).problems().is_empty());
-        // An exclusion would be dropped, the rule reaching what it excluded: refused, and one
-        // stored before covers nothing.
-        let excluding = rule(serde_json::json!({ "product": "search", "resources": [{ "id": "cl_1", "index": "logs-*,-logs-secret" }], "actions": { "read": "allow" } }));
-        assert!(!Scope(vec![excluding.clone()]).problems().is_empty());
-        for no in ["logs-secret", "logs-a", "logs-*"] {
-            assert!(!excluding.matches(&at(Some(no))), "{no}");
-        }
-        assert!(!super::rememberable_part("search", "logs-*,-logs-secret") && super::rememberable_part("search", "logs-*"));
-        assert_eq!(super::rule_index("search", "logs-*, -logs-old,metrics"), "logs-*,metrics");
-        assert!(!Scope(vec![rule(serde_json::json!({ "product": "redis", "resources": [{ "id": "rdb_1", "index": "x" }], "actions": { "read": "allow" } }))]).problems().is_empty());
-        assert!(Scope(vec![rule(serde_json::json!({ "product": "secrets", "resources": [{ "id": "prj_1", "index": "payments" }], "actions": { "write": "allow" } }))]).problems().is_empty(), "an encryption key");
-        // A field a selector doesn't have is refused, never dropped (that would widen the rule).
-        for bad in [serde_json::json!({ "project": "p", "index": "logs-*" }), serde_json::json!({ "id": "a", "extra": 1 }), serde_json::json!({})] {
-            assert!(serde_json::from_value::<Selector>(bad.clone()).is_err(), "{bad}");
-        }
-    }
-
-    /// A resource whose product filters per environment and path itself matches rules limited to
-    /// some environments or paths, never ones about other resources.
-    #[test]
-    fn a_resource_that_filters_itself() {
-        let r = rule(serde_json::json!({ "product": "secrets", "resources": [{ "id": "prj_a" }], "environments": ["staging"], "paths": ["/api"], "actions": { "read": "allow" } }));
-        let at = |id: &str, filters_itself: bool| Target::One(Resource { filters_itself, ..Resource::new("secrets", id) });
-        assert!(!r.matches(&at("prj_a", false)) && r.matches(&at("prj_a", true)) && !r.matches(&at("prj_b", true)));
-        // A rule limited to one key matches a list that filters by key (it shows that key alone),
-        // never another key's request, nor a list that only filters by environment and folder.
-        let one_key = rule(serde_json::json!({ "product": "secrets", "resources": [{ "id": "prj_a", "index": "payments" }], "actions": { "read": "allow" } }));
-        let key = |name: &str| Target::One(Resource { index: Some(name.into()), ..Resource::new("secrets", "prj_a") });
-        let by_key = Target::One(Resource { filters_index: true, ..Resource::new("secrets", "prj_a") });
-        assert!(one_key.matches(&by_key) && !one_key.matches(&at("prj_a", true)) && !one_key.matches(&at("prj_a", false)) && one_key.matches(&key("payments")) && !one_key.matches(&key("billing")));
-        // A folder is spelled one way, and the root only `/`: `//` reads as every folder, so it is
-        // the root wherever "the whole environment" is decided, and no rule is made with it.
-        assert!(super::is_root("/") && super::is_root("//") && !super::is_root("/api"));
-        let paths = |p: &str| Scope(vec![rule(serde_json::json!({ "product": "secrets", "resources": "*", "paths": [p], "actions": { "read": "allow" } }))]).problems();
-        for no in ["//", "/a//b", "/./a", "/a/..", "api", "/api//"] {
-            assert!(!paths(no).is_empty(), "{no}");
-        }
-        assert!(paths("/").is_empty() && paths("/api/stripe").is_empty() && paths("/api/").is_empty(), "/api/ is /api");
-        // A rule stored with `//` (before it was refused) reaches no folder, not every one.
-        let old: Rule = serde_json::from_value(serde_json::json!({ "product": "secrets", "resources": "*", "paths": ["//"], "actions": { "read": "allow" } })).unwrap();
-        let folder = |p: &str| Target::One(Resource { path: Some(p.into()), ..Resource::new("secrets", "prj_a") });
-        assert!(!old.matches(&folder("/")) && !old.matches(&folder("/api")));
-        let api: Rule = serde_json::from_value(serde_json::json!({ "product": "secrets", "resources": "*", "paths": ["/api/"], "actions": { "read": "allow" } })).unwrap();
-        assert_eq!(api.paths, Some(vec!["/api".to_string()]));
-        assert!(api.matches(&folder("/api/x")) && !api.matches(&folder("/apix")));
-    }
-
-    /// Resources, environments and paths narrow a rule; the most permissive matching rule wins;
-    /// a narrower scope is covered and a wider one isn't.
+    /// Resources, environments and paths narrow a rule; the most permissive matching rule wins; a
+    /// narrower scope is covered and a wider one isn't; a rule that doesn't parse says why.
     #[test]
     fn rules_narrow_and_cover() {
-        let scope = Scope(vec![
-            rule(serde_json::json!({ "product": "postgres", "resources": [{ "project": "prj_a" }], "actions": { "read": "allow", "delete": "ask" } })),
-            rule(serde_json::json!({ "product": "secrets", "resources": "*", "environments": ["development"], "paths": ["/api"], "actions": { "reveal": "allow" } })),
-            rule(serde_json::json!({ "product": "*", "resources": "*", "actions": { "read": "ask" } })),
-        ]);
-        let in_a = Target::One(Resource { project: Some("prj_a".into()), ..Resource::new("postgres", "db1") });
-        let elsewhere = Target::One(Resource::new("postgres", "db2"));
-        assert_eq!(scope.outcome(&in_a, Action::Read), Outcome::Allow);
-        assert_eq!(scope.outcome(&elsewhere, Action::Read), Outcome::Ask);
-        assert_eq!(scope.outcome(&in_a, Action::Delete), Outcome::Ask);
-        assert_eq!(scope.outcome(&elsewhere, Action::Delete), Outcome::Deny);
-        assert_eq!(scope.outcome(&in_a, Action::Write), Outcome::Deny);
-        let secret = |env: Option<&str>, path: &str| {
-            Target::One(Resource { environment: env.map(Into::into), path: Some(path.into()), ..Resource::new("secrets", "prj_a") })
-        };
-        assert_eq!(scope.outcome(&secret(Some("development"), "/api/db"), Action::Reveal), Outcome::Allow);
-        assert_eq!(scope.outcome(&secret(Some("development"), "/apix"), Action::Reveal), Outcome::Deny);
-        assert_eq!(scope.outcome(&secret(Some("production"), "/api"), Action::Reveal), Outcome::Deny);
-        assert_eq!(scope.outcome(&secret(None, "/api"), Action::Reveal), Outcome::Deny);
-        // Creating needs the project named; the product as a whole needs "*".
-        let create = |p: Option<&str>| Target::Create { product: "postgres".into(), project: p.map(Into::into), environment: None };
-        let one = Scope(vec![rule(serde_json::json!({ "product": "postgres", "resources": [{ "project": "prj_a" }], "actions": { "write": "allow" } }))]);
-        assert_eq!(one.outcome(&create(Some("prj_a")), Action::Write), Outcome::Allow);
-        assert_eq!(one.outcome(&create(None), Action::Write), Outcome::Deny);
-        assert_eq!(one.outcome(&Target::Product { product: "postgres".into() }, Action::Write), Outcome::Deny);
-        // Covering: never more than the maker.
-        assert!(!scope.covers(&one));
-        let wide = Scope(vec![rule(serde_json::json!({ "product": "*", "resources": "*", "actions": { "write": "allow", "read": "allow" } }))]);
-        // `unprotected`: only environments the product says aren't protected, never an unknown one.
-        let dev = rule(serde_json::json!({ "product": "secrets", "resources": [{ "project": "prj_a" }], "unprotected": true, "actions": { "reveal": "allow" } }));
-        let at = |protected: Option<bool>| Target::One(Resource { project: Some("prj_a".into()), environment: Some("x".into()), protected, ..Resource::new("secrets", "prj_a") });
-        assert!(dev.matches(&at(Some(false))) && !dev.matches(&at(Some(true))) && !dev.matches(&at(None)));
-        let everywhere = rule(serde_json::json!({ "product": "secrets", "resources": [{ "project": "prj_a" }], "actions": { "reveal": "allow" } }));
-        assert!(everywhere.covers(&dev) && !dev.covers(&everywhere));
-        assert!(wide.covers(&one) && !one.covers(&wide));
-        let asks = Scope(vec![rule(serde_json::json!({ "product": "postgres", "resources": "*", "actions": { "read": "ask" } }))]);
-        assert!(scope.covers(&asks) && !asks.covers(&Scope(vec![rule(serde_json::json!({ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }))])));
-        assert!(Scope(vec![]).problems().len() == 1 && serde_json::from_value::<Rule>(serde_json::json!({ "product": "x", "resources": "all", "actions": {} })).is_err());
+        {
+            let scope = Scope(vec![
+                rule(serde_json::json!({ "product": "postgres", "resources": [{ "project": "prj_a" }], "actions": { "read": "allow", "delete": "ask" } })),
+                rule(serde_json::json!({ "product": "secrets", "resources": "*", "environments": ["development"], "paths": ["/api"], "actions": { "reveal": "allow" } })),
+                rule(serde_json::json!({ "product": "*", "resources": "*", "actions": { "read": "ask" } })),
+            ]);
+            let in_a = Target::One(Resource { project: Some("prj_a".into()), ..Resource::new("postgres", "db1") });
+            let elsewhere = Target::One(Resource::new("postgres", "db2"));
+            assert_eq!(scope.outcome(&in_a, Action::Read), Outcome::Allow);
+            assert_eq!(scope.outcome(&elsewhere, Action::Read), Outcome::Ask);
+            assert_eq!(scope.outcome(&in_a, Action::Delete), Outcome::Ask);
+            assert_eq!(scope.outcome(&elsewhere, Action::Delete), Outcome::Deny);
+            assert_eq!(scope.outcome(&in_a, Action::Write), Outcome::Deny);
+            let secret = |env: Option<&str>, path: &str| {
+                Target::One(Resource { environment: env.map(Into::into), path: Some(path.into()), ..Resource::new("secrets", "prj_a") })
+            };
+            assert_eq!(scope.outcome(&secret(Some("development"), "/api/db"), Action::Reveal), Outcome::Allow);
+            assert_eq!(scope.outcome(&secret(Some("development"), "/apix"), Action::Reveal), Outcome::Deny);
+            assert_eq!(scope.outcome(&secret(Some("production"), "/api"), Action::Reveal), Outcome::Deny);
+            assert_eq!(scope.outcome(&secret(None, "/api"), Action::Reveal), Outcome::Deny);
+            // Creating needs the project named; the product as a whole needs "*".
+            let create = |p: Option<&str>| Target::Create { product: "postgres".into(), project: p.map(Into::into), environment: None };
+            let one = Scope(vec![rule(serde_json::json!({ "product": "postgres", "resources": [{ "project": "prj_a" }], "actions": { "write": "allow" } }))]);
+            assert_eq!(one.outcome(&create(Some("prj_a")), Action::Write), Outcome::Allow);
+            assert_eq!(one.outcome(&create(None), Action::Write), Outcome::Deny);
+            assert_eq!(one.outcome(&Target::Product { product: "postgres".into() }, Action::Write), Outcome::Deny);
+            // Covering: never more than the maker.
+            assert!(!scope.covers(&one));
+            let wide = Scope(vec![rule(serde_json::json!({ "product": "*", "resources": "*", "actions": { "write": "allow", "read": "allow" } }))]);
+            // `unprotected`: only environments the product says aren't protected, never an unknown one.
+            let dev = rule(serde_json::json!({ "product": "secrets", "resources": [{ "project": "prj_a" }], "unprotected": true, "actions": { "reveal": "allow" } }));
+            let at = |protected: Option<bool>| Target::One(Resource { project: Some("prj_a".into()), environment: Some("x".into()), protected, ..Resource::new("secrets", "prj_a") });
+            assert!(dev.matches(&at(Some(false))) && !dev.matches(&at(Some(true))) && !dev.matches(&at(None)));
+            let everywhere = rule(serde_json::json!({ "product": "secrets", "resources": [{ "project": "prj_a" }], "actions": { "reveal": "allow" } }));
+            assert!(everywhere.covers(&dev) && !dev.covers(&everywhere));
+            assert!(wide.covers(&one) && !one.covers(&wide));
+            let asks = Scope(vec![rule(serde_json::json!({ "product": "postgres", "resources": "*", "actions": { "read": "ask" } }))]);
+            assert!(scope.covers(&asks) && !asks.covers(&Scope(vec![rule(serde_json::json!({ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }))])));
+            assert!(Scope(vec![]).problems().len() == 1 && serde_json::from_value::<Rule>(serde_json::json!({ "product": "x", "resources": "all", "actions": {} })).is_err());
+        }
+        {
+            let r: Rule = serde_json::from_value(serde_json::json!({ "product": "apps", "resources": "*", "environments": ["preview", "pv-*"], "actions": { "write": "allow" } })).unwrap();
+            assert!(r.environment_matches(Some("pv-42")) && r.environment_matches(Some("preview")));
+            assert!(!r.environment_matches(Some("production")) && !r.environment_matches(None));
+            let narrower: Rule = serde_json::from_value(serde_json::json!({ "product": "apps", "resources": "*", "environments": ["pv-42"], "actions": { "write": "allow" } })).unwrap();
+            assert!(r.covers(&narrower) && !narrower.covers(&r));
+        }
+        {
+            // A rule's resources that don't parse say why: what's expected, or what's wrong in a selector.
+            let err = |resources: serde_json::Value| serde_json::from_value::<Rule>(serde_json::json!({ "product": "search", "resources": resources, "actions": { "read": "allow" } })).unwrap_err().to_string();
+            assert!(err(serde_json::json!({ "id": "srch_1" })).contains("expected resources as \"*\" or a list of selectors, like [{\"id\""), "{}", err(serde_json::json!({ "id": "srch_1" })));
+            assert!(err(serde_json::json!("all")).contains("resources must be \"*\" or a list, not \"all\""));
+            assert!(err(serde_json::json!([{ "id": "srch_1", "nope": 1 }])).contains("nope"), "{}", err(serde_json::json!([{ "id": "srch_1", "nope": 1 }])));
+            assert_eq!(rule(serde_json::json!({ "product": "search", "resources": [{ "id": "srch_1" }], "actions": { "read": "allow" } })).resources, Resources::Some(vec![Selector::Id { id: "srch_1".into(), index: None }]));
+            assert_eq!(rule(serde_json::json!({ "product": "search", "resources": "*", "actions": { "read": "allow" } })).resources, Resources::All);
+        }
     }
 }
