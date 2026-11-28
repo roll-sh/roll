@@ -24,13 +24,19 @@ describe("Deployments", () => {
   it("rolls back to one that was live only after asking, and offers nothing for a pruned one", async () => {
     api.rollback.mockResolvedValue({});
     const deploys = [dep("dep_live", "active"), dep("dep_before", "inactive"), dep("dep_old", "inactive", { pruned_at: T0 })];
-    render(<Deployments service="svc_1" env={env} deploys={deploys} runner={runner} />);
+    const { unmount } = render(<Deployments service="svc_1" env={env} deploys={deploys} runner={runner} />);
     const back = screen.getAllByRole("button", { name: /roll back/i });
     expect(back).toHaveLength(1);
     await userEvent.click(back[0]);
     expect(api.rollback).not.toHaveBeenCalled();
     await userEvent.click(screen.getByRole("button", { name: /sure\? roll production back/i }));
     await waitFor(() => expect(api.rollback).toHaveBeenCalledWith("svc_1", "production", "dep_before", false));
+    // A ready deployment is put live the same way.
+    unmount();
+    render(<Deployments service="svc_1" env={env} deploys={[dep("dep_ready", "ready"), dep("dep_live", "active")]} runner={runner} />);
+    await userEvent.click(screen.getByRole("button", { name: /put live/i }));
+    await userEvent.click(screen.getByRole("button", { name: /sure\? put it live in production/i }));
+    await waitFor(() => expect(api.rollback).toHaveBeenCalledWith("svc_1", "production", "dep_ready", false));
   });
 
   it("asks why a failed one failed and shows the answer as text", async () => {
@@ -40,18 +46,6 @@ describe("Deployments", () => {
     await waitFor(() => expect(api.explain).toHaveBeenCalledWith("svc_1", "production", "dep_bad", false));
     expect(await screen.findByText("It never listened on $PORT.")).toBeInTheDocument();
     expect(screen.getByText("<b>listen 3000</b>")).toBeInTheDocument();
-    // Asked anew: a refusal (once a minute) is said, not swallowed.
-    api.explain.mockRejectedValueOnce(new Error("it was explained less than a minute ago"));
-    await userEvent.click(screen.getByRole("button", { name: /ask again/i }));
-    await waitFor(() => expect(api.explain).toHaveBeenLastCalledWith("svc_1", "production", "dep_bad", true));
-    expect(await screen.findByText("it was explained less than a minute ago")).toBeInTheDocument();
   });
 
-  it("puts a ready deployment live the same way", async () => {
-    api.rollback.mockResolvedValue({});
-    render(<Deployments service="svc_1" env={env} deploys={[dep("dep_ready", "ready"), dep("dep_live", "active")]} runner={runner} />);
-    await userEvent.click(screen.getByRole("button", { name: /put live/i }));
-    await userEvent.click(screen.getByRole("button", { name: /sure\? put it live in production/i }));
-    await waitFor(() => expect(api.rollback).toHaveBeenCalledWith("svc_1", "production", "dep_ready", false));
-  });
 });

@@ -78,16 +78,31 @@ fn index() -> TestIndex {
     TestIndex::from_mapping(&mapping)
 }
 
-/// Runs `aggs` over `docs` dealt round-robin to `shards` shards of `segments` segments.
-fn run_layout(docs: &[Doc], shards: usize, segments: usize, aggs: &str) -> Json {
-    let index = index();
-    let mut per: Vec<Vec<(String, Json)>> = vec![Vec::new(); shards];
-    for (i, d) in docs.iter().enumerate() {
-        per[i % shards].push((i.to_string(), d.to_json()));
+/// `docs` dealt round-robin to `shards` shards of `segments` segments, built once and searched
+/// by every request of a test.
+struct Layout {
+    index: TestIndex,
+    searchers: Vec<search_index::Searcher>,
+}
+
+impl Layout {
+    fn new(docs: &[Doc], shards: usize, segments: usize) -> Layout {
+        let index = index();
+        let mut per: Vec<Vec<(String, Json)>> = vec![Vec::new(); shards];
+        for (i, d) in docs.iter().enumerate() {
+            per[i % shards].push((i.to_string(), d.to_json()));
+        }
+        let searchers = per.iter().map(|p| index.shard(p, segments).searcher()).collect();
+        Layout { index, searchers }
     }
-    let built: Vec<search_index::Shard> = per.iter().map(|p| index.shard(p, segments)).collect();
-    let searchers: Vec<search_index::Searcher> = built.iter().map(|s| s.searcher()).collect();
-    run(&index, &searchers, &format!(r#"{{"aggs":{aggs}}}"#), false).unwrap()
+
+    fn run(&self, aggs: &str) -> Json {
+        run(&self.index, &self.searchers, &format!(r#"{{"aggs":{aggs}}}"#), false).unwrap()
+    }
+}
+
+fn run_layout(docs: &[Doc], shards: usize, segments: usize, aggs: &str) -> Json {
+    Layout::new(docs, shards, segments).run(aggs)
 }
 
 const LAYOUTS: [(usize, usize); 4] = [(1, 1), (1, 4), (3, 1), (3, 3)];
@@ -238,12 +253,13 @@ fn composite_pages_cover_every_pair_once() {
             }
         }
         for (shards, segments) in LAYOUTS {
+            let layout = Layout::new(&docs, shards, segments);
             let mut got: BTreeMap<(String, i64), i64> = BTreeMap::new();
             let mut after = String::new();
             let mut pages = 0;
             loop {
                 let aggs = format!(r#"{{"c":{{"composite":{{"size":37,"sources":[{{"k":{{"terms":{{"field":"k"}}}}}},{{"n":{{"terms":{{"field":"n","order":"desc"}}}}}}]{after}}}}}}}"#);
-                let r = run_layout(&docs, shards, segments, &aggs);
+                let r = layout.run(&aggs);
                 let page = buckets(&r, "c");
                 if page.is_empty() {
                     break;
@@ -280,6 +296,7 @@ fn composite_keyword_pairs_page_exactly() {
             }
         }
         for (shards, segments) in LAYOUTS {
+            let layout = Layout::new(&docs, shards, segments);
             for size in [1usize, 7, 50] {
                 let mut got: BTreeMap<(String, String), i64> = BTreeMap::new();
                 let mut after = String::new();
@@ -287,7 +304,7 @@ fn composite_keyword_pairs_page_exactly() {
                     let aggs = format!(
                         r#"{{"c":{{"composite":{{"size":{size},"sources":[{{"a":{{"terms":{{"field":"k"}}}}}},{{"b":{{"terms":{{"field":"k","order":"desc"}}}}}}]{after}}}}}}}"#
                     );
-                    let r = run_layout(&docs, shards, segments, &aggs);
+                    let r = layout.run(&aggs);
                     let page = buckets(&r, "c");
                     if page.is_empty() {
                         break;
@@ -761,13 +778,14 @@ fn shapes_match_brute_force() {
 #[test]
 fn breadth_first_terms_match_depth_first() {
     let all = docs(77, 3000);
+    let layouts: Vec<Layout> = LAYOUTS.iter().map(|&(shards, segments)| Layout::new(&all, shards, segments)).collect();
     let sub = r#""aggs":{"h":{"date_histogram":{"field":"t","fixed_interval":"1d"},"aggs":{"s":{"sum":{"field":"d"}}}},"c":{"cardinality":{"field":"n"}},"m":{"max":{"field":"d"}}}"#;
     for (field, order) in [("k", r#"{"_count":"desc"}"#), ("n", r#"{"m":"desc"}"#), ("k", r#"[{"m":"asc"},{"_key":"desc"}]"#), ("n", r#"{"_key":"asc"}"#)] {
-        for &(shards, segments) in &LAYOUTS {
+        for (layout, (shards, segments)) in layouts.iter().zip(LAYOUTS) {
             let req = |mode: &str| format!(r#"{{"t":{{"terms":{{"field":"{field}","size":3,"order":{order}{mode}}},{sub}}}}}"#);
-            let depth = run_layout(&all, shards, segments, &req(r#","collect_mode":"depth_first""#));
-            let breadth = run_layout(&all, shards, segments, &req(r#","collect_mode":"breadth_first""#));
-            let default = run_layout(&all, shards, segments, &req(""));
+            let depth = layout.run(&req(r#","collect_mode":"depth_first""#));
+            let breadth = layout.run(&req(r#","collect_mode":"breadth_first""#));
+            let default = layout.run(&req(""));
             assert!(common::diff(&breadth, &depth, "").is_none(), "{field} {order} {shards}x{segments}: {:?}", common::diff(&breadth, &depth, ""));
             assert!(common::diff(&default, &depth, "").is_none(), "{field} {order} {shards}x{segments}");
         }
@@ -778,9 +796,9 @@ fn breadth_first_terms_match_depth_first() {
             r#"{{"t":{{"terms":{{"field":"n","size":4{mode}}},"aggs":{{"u":{{"terms":{{"field":"k","size":2,"min_doc_count":0{mode}}},"aggs":{{"a":{{"avg":{{"field":"d"}}}}}}}}}}}}}}"#
         )
     };
-    for &(shards, segments) in &LAYOUTS {
-        let depth = run_layout(&all, shards, segments, &nested(r#","collect_mode":"depth_first""#));
-        let breadth = run_layout(&all, shards, segments, &nested(r#","collect_mode":"breadth_first""#));
+    for (layout, (shards, segments)) in layouts.iter().zip(LAYOUTS) {
+        let depth = layout.run(&nested(r#","collect_mode":"depth_first""#));
+        let breadth = layout.run(&nested(r#","collect_mode":"breadth_first""#));
         assert!(common::diff(&breadth, &depth, "").is_none(), "nested {shards}x{segments}: {:?}", common::diff(&breadth, &depth, ""));
     }
 

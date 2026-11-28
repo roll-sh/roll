@@ -829,6 +829,9 @@ pub struct Store {
     /// Seals a preview's own variables (rolld: with `ROLL_SECRET_KEY`); unset, they're kept as
     /// written, and read either way.
     pub sealer: std::sync::OnceLock<std::sync::Arc<dyn crate::ports::Sealer>>,
+    /// Bumped after a write that may have recorded an event, on this node: wakes the followers
+    /// waiting on [`Store::wait_events`] at once (another node's events are read on a short timer).
+    events_tick: tokio::sync::watch::Sender<u64>,
 }
 
 const COLUMNS: &str = "id, project_id, slug, repo, change_id, branch, number, title, github_pr, head, trusted, desired, state, error, attempts, \
@@ -1075,7 +1078,7 @@ impl Store {
         if !db.has_column("shares", "last_at")? {
             db.add_column("shares", "last_at", "INTEGER")?;
         }
-        Ok(Store { db, rates: Rates::default(), signing: std::sync::OnceLock::new(), sealer: std::sync::OnceLock::new() })
+        Ok(Store { db, rates: Rates::default(), signing: std::sync::OnceLock::new(), sealer: std::sync::OnceLock::new(), events_tick: tokio::sync::watch::channel(0).0 })
     }
 
     pub fn now_ms(&self) -> Result<i64> {
@@ -1447,7 +1450,7 @@ impl Store {
         let now = self.now_ms()?;
         let base = crate::label_part(&format!("{}-{}", n.key, n.project_name), SLUG_MAX);
         let base = if base.is_empty() { crate::label_part(&id, SLUG_MAX) } else { base };
-        self.db.write(|c| {
+        let made = self.db.write(|c| {
             if let Some(change) = &n.change_id
                 && let Some(existing) = c.query_row(&format!("SELECT {COLUMNS} FROM previews WHERE change_id = ?"), [change], row).optional()?
             {
@@ -1488,7 +1491,9 @@ impl Store {
             emit(c, now, "created", &n.project_id, &id, n.change_id.as_deref(), &serde_json::json!({ "head": n.head }))?;
             let r = c.query_row(&format!("SELECT {COLUMNS} FROM previews WHERE id = ?"), [&id], row)?;
             Ok((r, true))
-        })
+        });
+        self.events_written();
+        made
     }
 
     pub fn row(&self, id: &str) -> Result<Row> {
@@ -1513,7 +1518,9 @@ impl Store {
     /// stored (with `updated_at`) unless it's unchanged. Returns the stored row.
     pub fn update(&self, id: &str, mut f: impl FnMut(&mut Row)) -> Result<Row> {
         let now = self.now_ms()?;
-        self.db.write(|c| {
+        let mut emitted = false;
+        let updated = self.db.write(|c| {
+            emitted = false;
             let old = c.query_row(&format!("SELECT {COLUMNS} FROM previews WHERE id = ?"), [id], row).optional()?;
             let Some(old) = old else { return Err(Error::NotFound(format!("no preview {id}"))) };
             let mut new = old.clone();
@@ -1558,9 +1565,14 @@ impl Store {
             };
             if let Some(kind) = kind {
                 emit(c, now, kind, &new.project_id, id, new.change_id.as_deref(), &serde_json::json!({ "head": new.head }))?;
+                emitted = true;
             }
             Ok(new)
-        })
+        });
+        if emitted {
+            self.events_written();
+        }
+        updated
     }
 
     /// Note that the preview was used (a request, a push) without a write per request: only
@@ -1576,7 +1588,7 @@ impl Store {
     /// Remove a preview's rows (after its branches and services are gone).
     pub fn remove(&self, id: &str) -> Result<()> {
         let now = self.now_ms()?;
-        self.db.write(|c| {
+        let removed = self.db.write(|c| {
             let gone = c.query_row("SELECT project_id, change_id, head FROM previews WHERE id = ?", [id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, String>(2)?))).optional()?;
             if let Some((project, change, head)) = gone {
                 emit(c, now, "deleted", &project, id, change.as_deref(), &serde_json::json!({ "head": head }))?;
@@ -1588,7 +1600,9 @@ impl Store {
             // Its own variables' references' setters.
             c.execute("DELETE FROM env_refs WHERE scope = ?", [format!("preview:{id}")])?;
             Ok::<_, Error>(())
-        })
+        });
+        self.events_written();
+        removed
     }
 
     /// The events after `after`, oldest first, at most `limit` (`GET /v1/previews/events`).
@@ -1617,7 +1631,32 @@ impl Store {
                 emit(c, now, kind, &project, id, change.as_deref(), &data)?;
             }
             Ok::<_, Error>(())
-        })
+        })?;
+        self.events_written();
+        Ok(())
+    }
+
+    /// Wake [`Store::wait_events`]' followers on this node (a hint: they read the events again).
+    fn events_written(&self) {
+        self.events_tick.send_modify(|n| *n = n.wrapping_add(1));
+    }
+
+    /// The events after `after`, as [`Store::events`], waiting up to `wait` for one when there's
+    /// none yet: woken at once by a write on this node, and reading again every
+    /// [`EVENTS_RECHECK`] for another node's (a fleet shares one database). Empty after `wait`.
+    pub async fn wait_events(self: &std::sync::Arc<Self>, after: i64, limit: usize, wait: std::time::Duration) -> Result<Vec<crate::Event>> {
+        let deadline = tokio::time::Instant::now() + wait;
+        let mut woken = self.events_tick.subscribe();
+        loop {
+            woken.borrow_and_update();
+            let me = self.clone();
+            let got = tokio::task::spawn_blocking(move || me.events(after, limit)).await.map_err(|e| Error::Internal(e.to_string()))??;
+            let now = tokio::time::Instant::now();
+            if !got.is_empty() || now >= deadline {
+                return Ok(got);
+            }
+            let _ = tokio::time::timeout((deadline - now).min(EVENTS_RECHECK), woken.changed()).await;
+        }
     }
 
     /// The newest event's seq (0 for none): where a follower that wants only what comes next
@@ -4352,6 +4391,11 @@ pub const GONE_KEPT: usize = 30;
 
 /// How long an event is kept for followers (`GET /v1/previews/events`).
 const EVENTS_KEEP_MS: i64 = 7 * 24 * 3_600_000;
+/// How often a waiting follower reads the events again for another node's (its own node's wake
+/// it at once).
+const EVENTS_RECHECK: std::time::Duration = std::time::Duration::from_secs(2);
+/// The longest a follower waits for an event (`wait`).
+pub const EVENTS_WAIT_MAX_S: u64 = 25;
 
 /// Record an event in the write that made it so. Its `seq` is taken inside that write (never a
 /// sequence, whose values are handed out outside it), so on Postgres two writers conflict and one

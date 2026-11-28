@@ -145,58 +145,69 @@ fn canonical(v: &Value) -> String {
     }
 }
 
-#[tokio::test]
+/// Every scenario replays on its own cluster, all of them at once.
+#[tokio::test(flavor = "multi_thread")]
 async fn responses_match_elasticsearch() {
-    let mut failures = Vec::new();
-    let mut checked = 0;
-    for (file, scenario) in scenarios() {
-        let mut cfg = ClusterConfig::new("docker-cluster");
-        cfg.unsealed_secrets = true;
-        cfg.node_name = "es-node".into();
-        // The reference node registers `/tmp` as `path.repo`; each scenario gets its own.
-        let repo = std::env::temp_dir().join(format!("roll-xpack-fixtures-{}-{file}", std::process::id()));
-        cfg.node_settings.push(("path.repo".into(), repo.to_string_lossy().into_owned()));
-        let cluster = Cluster::open(cfg, Arc::new(MemoryStore::new())).await.unwrap();
-        for (i, step) in scenario.get("steps").and_then(Value::as_array).unwrap().iter().enumerate() {
-            let req = step.get("req").and_then(Value::as_str).unwrap();
-            let label = format!("{file} #{i} {req}");
-            let (method, uri) = split_req(req);
-            let body = body_of(step);
-            let mut r = EsRequest::new(method, uri);
-            r.headers = headers_of(step, body.is_some());
-            if let Some(b) = &body {
-                r.body = b.clone().into();
-            }
-            let resp = search_es::handle(&cluster, r).await;
-            if step.get("skip").is_some() {
-                continue;
-            }
-            let Some(status) = step.get("status").and_then(Value::as_i64) else { continue };
-            checked += 1;
-            let got_text = if resp.head { String::new() } else { String::from_utf8_lossy(&resp.body).into_owned() };
-            if resp.status as i64 != status {
-                failures.push(format!("{label}: status {} != {status}\n  got:      {got_text}\n  expected: {}", resp.status, step.get("response").map(Value::to_json).unwrap_or_default()));
-                continue;
-            }
-            let keys = step_masks(step);
-            if let Some(expected) = step.get("response") {
-                let mut exp = expected.clone();
-                let mut got = if resp.head { Value::Str(String::new()) } else { parse(&resp.body).ok().flatten().unwrap_or(Value::Str(got_text.clone())) };
-                mask(&mut exp, &keys);
-                mask(&mut got, &keys);
-                let unordered = step.get("unordered").and_then(Value::as_bool) == Some(true);
-                let same = if unordered { canonical(&got) == canonical(&exp) } else { got.to_json() == exp.to_json() };
-                if !same {
-                    failures.push(format!("{label}:\n  got:      {}\n  expected: {}", got.to_json(), exp.to_json()));
-                }
-            }
-        }
+    let runs: Vec<_> = scenarios().into_iter().map(|(file, scenario)| tokio::spawn(replay(file, scenario))).collect();
+    let (mut failures, mut checked) = (Vec::new(), 0);
+    for run in runs {
+        let (f, n) = run.await.unwrap();
+        failures.extend(f);
+        checked += n;
     }
-    let _ = std::fs::remove_dir_all(std::env::temp_dir().join(format!("roll-xpack-fixtures-{}", std::process::id())));
     if !failures.is_empty() {
         panic!("{} of {checked} steps differ from Elasticsearch:\n\n{}", failures.len(), failures.join("\n\n"));
     }
     assert!(checked > 0);
+}
+
+/// Replays one scenario; its differences and the number of steps checked.
+async fn replay(file: String, scenario: Value) -> (Vec<String>, usize) {
+    let mut failures = Vec::new();
+    let mut checked = 0;
+    let mut cfg = ClusterConfig::new("docker-cluster");
+    cfg.unsealed_secrets = true;
+    cfg.node_name = "es-node".into();
+    // The reference node registers `/tmp` as `path.repo`; each scenario gets its own.
+    let repo = std::env::temp_dir().join(format!("roll-xpack-fixtures-{}-{file}", std::process::id()));
+    cfg.node_settings.push(("path.repo".into(), repo.to_string_lossy().into_owned()));
+    let cluster = Cluster::open(cfg, Arc::new(MemoryStore::new())).await.unwrap();
+    for (i, step) in scenario.get("steps").and_then(Value::as_array).unwrap().iter().enumerate() {
+        let req = step.get("req").and_then(Value::as_str).unwrap();
+        let label = format!("{file} #{i} {req}");
+        let (method, uri) = split_req(req);
+        let body = body_of(step);
+        let mut r = EsRequest::new(method, uri);
+        r.headers = headers_of(step, body.is_some());
+        if let Some(b) = &body {
+            r.body = b.clone().into();
+        }
+        let resp = search_es::handle(&cluster, r).await;
+        if step.get("skip").is_some() {
+            continue;
+        }
+        let Some(status) = step.get("status").and_then(Value::as_i64) else { continue };
+        checked += 1;
+        let got_text = if resp.head { String::new() } else { String::from_utf8_lossy(&resp.body).into_owned() };
+        if resp.status as i64 != status {
+            failures.push(format!("{label}: status {} != {status}\n  got:      {got_text}\n  expected: {}", resp.status, step.get("response").map(Value::to_json).unwrap_or_default()));
+            continue;
+        }
+        let keys = step_masks(step);
+        if let Some(expected) = step.get("response") {
+            let mut exp = expected.clone();
+            let mut got = if resp.head { Value::Str(String::new()) } else { parse(&resp.body).ok().flatten().unwrap_or(Value::Str(got_text.clone())) };
+            mask(&mut exp, &keys);
+            mask(&mut got, &keys);
+            let unordered = step.get("unordered").and_then(Value::as_bool) == Some(true);
+            let same = if unordered { canonical(&got) == canonical(&exp) } else { got.to_json() == exp.to_json() };
+            if !same {
+                failures.push(format!("{label}:\n  got:      {}\n  expected: {}", got.to_json(), exp.to_json()));
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(&repo);
+    (failures, checked)
 }
 
 /// Re-captures the fixtures from a real Elasticsearch (see the module docs).

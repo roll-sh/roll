@@ -119,90 +119,91 @@ pub fn find_secrets(text: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod policy_tests {
-    /// How long a request waits for its people: the shortest wait a covering rule says, else the
-    /// policy's, else ten minutes.
+    /// The operator's policy: how long a request waits for its people, when a grant is idle, and which
+    /// OAuth clients may connect.
     #[test]
-    fn approvals_wait_as_the_policy_says() {
-        let rule = |product: &str, wait: Option<u32>| super::ApprovalRule { product: product.into(), actions: Default::default(), environments: Some(vec!["production".into()]), approvals: 1, approvers: None, wait_minutes: wait };
-        let mut p = super::Policy::default();
-        assert_eq!(p.approval_wait_ms("postgres", "delete", None), 600_000);
-        p.approval_wait_minutes = Some(1_440);
-        p.approval_rules = vec![rule("postgres", Some(5)), rule("*", Some(30)), rule("apps", None)];
-        assert_eq!(p.approval_wait_ms("postgres", "delete", Some("production")), 300_000, "the shortest covering rule");
-        assert_eq!(p.approval_wait_ms("apps", "deploy", Some("production")), 1_800_000);
-        assert_eq!(p.approval_wait_ms("postgres", "delete", Some("dev")), 86_400_000, "no rule covers it: the policy's");
-    }
-
-    #[test]
-    fn a_grant_unused_too_long_is_idle() {
-        let p = super::Policy { max_idle_days: Some(30), ..Default::default() };
-        let day = 86_400_000;
-        let g = |created: i64, used: Option<i64>| crate::store::Grant {
-            read_only: false,
-            id: "tok_a".into(),
-            name: "a".into(),
-            kind: "token",
-            rules: Default::default(),
-            expires_at: None,
-            not_before: None,
-            pending: false,
-            approved_at: None,
-            decided_by: None,
-            hint: None,
-            decoy: false,
-            ip_allow: vec![],
-            created_by: "operator".into(),
-            created_at: created,
-            last_used_at: used,
-            last_used_ip: None,
-            revoked_at: None,
-            client: None,
-            rate_per_minute: None,
-            user: None,
-            revoked_why: None,
-            temporary: vec![],
-            ask_otherwise: false,
-            mcp_only: false,
-        };
-        let now = 100 * day;
-        assert!(p.idle(&g(0, None), now), "made 100 days ago, never used");
-        assert!(!p.idle(&g(0, Some(now - 2 * day)), now), "used two days ago");
-        assert!(!super::Policy::default().idle(&g(0, None), now), "no limit");
-    }
-
-    /// `oauth_clients`: a metadata document by its URL or host, a registered client by where all
-    /// its redirects go (its name proves nothing), a device client only by `device`.
-    #[test]
-    fn the_policy_names_the_clients_that_connect() {
-        let p = |list: &[&str]| super::Policy { oauth_clients: list.iter().map(|s| s.to_string()).collect(), ..Default::default() };
-        let c = |id: &str, redirects: &[&str]| crate::store::Client {
-            id: id.into(),
-            name: "Claude".into(),
-            uri: None,
-            redirect_uris: redirects.iter().map(|s| s.to_string()).collect(),
-            created_at: 0,
-            last_used_at: None,
-        };
-        let doc = c("https://claude.ai/oauth/mcp-client.json", &["https://claude.ai/api/mcp/auth_callback"]);
-        let local = c("rlc_x.sig", &["http://127.0.0.1:43111/callback"]);
-        let mixed = c("rlc_y.sig", &["https://claude.ai/cb", "https://evil.example/cb"]);
-        let app = c("rlc_z.sig", &["cursor://anysphere.cursor-mcp/oauth/callback"]);
-        let device = c("rlc_d.sig", &[]);
-        assert!(super::Policy::default().allows_client(&mixed), "no list: any client");
-        assert!(p(&["claude.ai"]).allows_client(&doc) && p(&["*.claude.ai"]).allows_client(&c("https://x.claude.ai/m.json", &["http://localhost:1/cb"])));
-        assert!(!p(&["*.claude.ai"]).allows_client(&doc), "a wildcard is subdomains only");
-        assert!(p(&["https://claude.ai/oauth/mcp-client.json"]).allows_client(&doc) && !p(&["https://claude.ai/other.json"]).allows_client(&c("rlc_q.sig", &["https://claude.ai/cb"])));
-        assert!(!p(&["claude.ai"]).allows_client(&mixed), "every redirect, not one of them");
-        assert!(p(&["claude.ai", "evil.example"]).allows_client(&mixed));
-        assert!(!p(&["claude.ai"]).allows_client(&local) && p(&["localhost"]).allows_client(&local));
-        assert!(p(&["Cursor:"]).allows_client(&app) && !p(&["localhost"]).allows_client(&app));
-        assert!(!p(&["localhost"]).allows_client(&device) && p(&["device"]).allows_client(&device));
-        assert!(p(&["claude.ai"]).allows_client(&c("mcl_ci", &[])), "a machine client is an admin's, not held to it");
-        for bad in ["", "claude", "http:", "javascript:", "https://", "a b.com", "*.", "-x.com"] {
-            assert!(p(&[bad]).problems().is_some(), "{bad:?} is refused");
+    fn the_policy_decides_waits_idleness_and_clients() {
+        {
+            // How long a request waits for its people: the shortest wait a covering rule says, else the
+            // policy's, else ten minutes.
+            let rule = |product: &str, wait: Option<u32>| super::ApprovalRule { product: product.into(), actions: Default::default(), environments: Some(vec!["production".into()]), approvals: 1, approvers: None, wait_minutes: wait };
+            let mut p = super::Policy::default();
+            assert_eq!(p.approval_wait_ms("postgres", "delete", None), 600_000);
+            p.approval_wait_minutes = Some(1_440);
+            p.approval_rules = vec![rule("postgres", Some(5)), rule("*", Some(30)), rule("apps", None)];
+            assert_eq!(p.approval_wait_ms("postgres", "delete", Some("production")), 300_000, "the shortest covering rule");
+            assert_eq!(p.approval_wait_ms("apps", "deploy", Some("production")), 1_800_000);
+            assert_eq!(p.approval_wait_ms("postgres", "delete", Some("dev")), 86_400_000, "no rule covers it: the policy's");
         }
-        assert!(p(&["claude.ai", "*.example.com", "localhost", "device", "cursor:", "vscode://", "https://chatgpt.com/cb"]).problems().is_none());
+        {
+            let p = super::Policy { max_idle_days: Some(30), ..Default::default() };
+            let day = 86_400_000;
+            let g = |created: i64, used: Option<i64>| crate::store::Grant {
+                read_only: false,
+                id: "tok_a".into(),
+                name: "a".into(),
+                kind: "token",
+                rules: Default::default(),
+                expires_at: None,
+                not_before: None,
+                pending: false,
+                approved_at: None,
+                decided_by: None,
+                hint: None,
+                decoy: false,
+                ip_allow: vec![],
+                created_by: "operator".into(),
+                created_at: created,
+                last_used_at: used,
+                last_used_ip: None,
+                revoked_at: None,
+                client: None,
+                rate_per_minute: None,
+                user: None,
+                revoked_why: None,
+                temporary: vec![],
+                ask_otherwise: false,
+                mcp_only: false,
+            };
+            let now = 100 * day;
+            assert!(p.idle(&g(0, None), now), "made 100 days ago, never used");
+            assert!(!p.idle(&g(0, Some(now - 2 * day)), now), "used two days ago");
+            assert!(!super::Policy::default().idle(&g(0, None), now), "no limit");
+        }
+        {
+            // `oauth_clients`: a metadata document by its URL or host, a registered client by where all
+            // its redirects go (its name proves nothing), a device client only by `device`.
+            let p = |list: &[&str]| super::Policy { oauth_clients: list.iter().map(|s| s.to_string()).collect(), ..Default::default() };
+            let c = |id: &str, redirects: &[&str]| crate::store::Client {
+                id: id.into(),
+                name: "Claude".into(),
+                uri: None,
+                redirect_uris: redirects.iter().map(|s| s.to_string()).collect(),
+                created_at: 0,
+                last_used_at: None,
+            };
+            let doc = c("https://claude.ai/oauth/mcp-client.json", &["https://claude.ai/api/mcp/auth_callback"]);
+            let local = c("rlc_x.sig", &["http://127.0.0.1:43111/callback"]);
+            let mixed = c("rlc_y.sig", &["https://claude.ai/cb", "https://evil.example/cb"]);
+            let app = c("rlc_z.sig", &["cursor://anysphere.cursor-mcp/oauth/callback"]);
+            let device = c("rlc_d.sig", &[]);
+            assert!(super::Policy::default().allows_client(&mixed), "no list: any client");
+            assert!(p(&["claude.ai"]).allows_client(&doc) && p(&["*.claude.ai"]).allows_client(&c("https://x.claude.ai/m.json", &["http://localhost:1/cb"])));
+            assert!(!p(&["*.claude.ai"]).allows_client(&doc), "a wildcard is subdomains only");
+            assert!(p(&["https://claude.ai/oauth/mcp-client.json"]).allows_client(&doc) && !p(&["https://claude.ai/other.json"]).allows_client(&c("rlc_q.sig", &["https://claude.ai/cb"])));
+            assert!(!p(&["claude.ai"]).allows_client(&mixed), "every redirect, not one of them");
+            assert!(p(&["claude.ai", "evil.example"]).allows_client(&mixed));
+            assert!(!p(&["claude.ai"]).allows_client(&local) && p(&["localhost"]).allows_client(&local));
+            assert!(p(&["Cursor:"]).allows_client(&app) && !p(&["localhost"]).allows_client(&app));
+            assert!(!p(&["localhost"]).allows_client(&device) && p(&["device"]).allows_client(&device));
+            assert!(p(&["claude.ai"]).allows_client(&c("mcl_ci", &[])), "a machine client is an admin's, not held to it");
+            for bad in ["", "claude", "http:", "javascript:", "https://", "a b.com", "*.", "-x.com"] {
+                assert!(p(&[bad]).problems().is_some(), "{bad:?} is refused");
+            }
+            assert!(p(&["claude.ai", "*.example.com", "localhost", "device", "cursor:", "vscode://", "https://chatgpt.com/cb"]).problems().is_none());
+        }
     }
+
 }
 
 #[cfg(test)]

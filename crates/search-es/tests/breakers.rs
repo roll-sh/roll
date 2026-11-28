@@ -173,23 +173,27 @@ async fn esql_trips_the_request_breaker_and_gives_its_memory_back() {
 }
 
 /// A `-1` request limit on a cluster of a node with `node`'s budget, held to 1gb (far above the
-/// node's budget: only the node can refuse), with 50,000 distinct keywords in `ids`.
+/// node's budget: only the node can refuse), with 15,000 distinct keywords in `ids` (their terms
+/// aggregation needs more than 512 KiB: 50,000 of them tripped 2 MiB).
 async fn ids_cluster(name: &str, node: &Arc<search_es::breaker::MemoryBudget>) -> Cluster {
     let mut cfg = ClusterConfig::new(name);
     cfg.request_memory = Some(node.clone());
     cfg.node_settings = vec![(search_es::breaker::REQUEST_MAX_LIMIT.to_string(), "1gb".to_string())];
     let c = Cluster::open(cfg, Arc::new(MemoryStore::new())).await.unwrap();
     call(&c, "PUT", "/ids", Some(br#"{"mappings":{"properties":{"id":{"type":"keyword"},"cat":{"type":"keyword"}}}}"#)).await;
-    let mut bulk = String::new();
-    for i in 0..50_000 {
-        bulk.push_str(&format!("{{\"index\":{{}}}}\n{{\"id\":\"id-{i:08}\",\"cat\":\"c{}\"}}\n", i % 10));
+    for chunk in 0..6 {
+        let mut bulk = String::new();
+        for i in chunk * 2500..(chunk + 1) * 2500 {
+            bulk.push_str(&format!("{{\"index\":{{}}}}\n{{\"id\":\"id-{i:08}\",\"cat\":\"c{}\"}}\n", i % 10));
+        }
+        assert_eq!(call(&c, "POST", "/ids/_bulk", Some(bulk.as_bytes())).await.0, 200);
     }
-    assert_eq!(call(&c, "POST", "/ids/_bulk?refresh=true", Some(bulk.as_bytes())).await.0, 200);
+    assert_eq!(call(&c, "POST", "/ids/_refresh", None).await.0, 200);
     assert_eq!(call(&c, "PUT", "/_cluster/settings", Some(br#"{"persistent":{"indices.breaker.request.limit":"-1"}}"#)).await.0, 200);
     c
 }
 
-const TERMS_IDS: &[u8] = br#"{"size":0,"aggs":{"ids":{"terms":{"field":"id","size":50000}}}}"#;
+const TERMS_IDS: &[u8] = br#"{"size":0,"aggs":{"ids":{"terms":{"field":"id","size":15000}}}}"#;
 
 /// The `[parent]` refusal a search gets when the node's budget refuses its aggregation (the
 /// reduce refuses it, so it's the search phase's cause).
@@ -202,7 +206,7 @@ fn parent_refusal(s: u16, v: &Value) -> &Value {
 
 #[tokio::test]
 async fn aggregations_are_held_to_the_node_budget_whatever_the_tenant_sets() {
-    let node = search_es::breaker::MemoryBudget::new(2 << 20);
+    let node = search_es::breaker::MemoryBudget::new(512 << 10);
     let c = ids_cluster("agg-node", &node).await;
     let (s, v) = call(&c, "POST", "/ids/_search", Some(TERMS_IDS)).await;
     let cause = parent_refusal(s, &v);

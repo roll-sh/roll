@@ -1522,6 +1522,10 @@ pub enum AppsCmd {
         /// to its HTML pages), or not.
         #[arg(long)]
         vitals: Option<bool>,
+        /// Its Strict-Transport-Security over HTTPS: `off`, `default` (two years), or a max-age in
+        /// seconds with `,subdomains` and `,preload` (`31536000,subdomains,preload`).
+        #[arg(long, value_name = "HSTS")]
+        hsts: Option<String>,
         /// What its code may reach, from its next deploy: `roll` (roll's products, the
         /// project's services and the `--egress-host`s, nothing else) or `open`.
         #[arg(long, value_parser = ["roll", "open"])]
@@ -1694,6 +1698,27 @@ fn write_link(dir: &Path, v: &Value) -> anyhow::Result<()> {
 /// needs admin (a deploy token can't).
 fn overriding(api: &Api, over: bool) -> Api {
     api.with_header(over.then_some(("x-roll-override", "1")))
+}
+
+/// `--hsts`: `off`, `default`, or `MAX_AGE[,subdomains][,preload]`.
+fn hsts_body(h: &str) -> anyhow::Result<Value> {
+    Ok(match h {
+        "off" => json!(false),
+        "default" => Value::Null,
+        _ => {
+            let mut parts = h.split(',').map(str::trim);
+            let max_age: u64 = parts.next().and_then(|n| n.parse().ok()).ok_or_else(|| anyhow::anyhow!("--hsts is off, default or MAX_AGE[,subdomains][,preload]"))?;
+            let mut v = json!({ "max_age": max_age });
+            for p in parts {
+                match p {
+                    "subdomains" => v["include_subdomains"] = json!(true),
+                    "preload" => v["preload"] = json!(true),
+                    _ => bail!("--hsts takes ,subdomains and ,preload after the max-age"),
+                }
+            }
+            v
+        }
+    })
 }
 
 async fn project_id(api: &Api, p: &str) -> anyhow::Result<String> {
@@ -5747,7 +5772,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Env { target, all_services, branch, no_branch, variables_from, data, wait_for_ci, run, follow_tag, deploy_tags, redeploy_on_secrets, vitals, egress, egress_host, private, open, signed_in, sso, maintenance, serve, pause, resume, resume_deploys, hold, allow_ip, allow_any, rate_limit, no_rate_limit, firewall, no_firewall, header, no_headers, route, no_routes, redirects, no_redirects, error_page, maintenance_page, roll_pages, freeze, unfreeze, rotate_config, set } => {
+        AppsCmd::Env { target, all_services, branch, no_branch, variables_from, data, wait_for_ci, run, follow_tag, deploy_tags, redeploy_on_secrets, vitals, hsts, egress, egress_host, private, open, signed_in, sso, maintenance, serve, pause, resume, resume_deploys, hold, allow_ip, allow_any, rate_limit, no_rate_limit, firewall, no_firewall, header, no_headers, route, no_routes, redirects, no_redirects, error_page, maintenance_page, roll_pages, freeze, unfreeze, rotate_config, set } => {
             let svc = service(api, &target).await?;
             if rotate_config {
                 let e = api.post(&format!("{}/config/rotate", env_path(&svc, &target.env)), json!({})).await?;
@@ -5789,6 +5814,9 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             if let Some(v) = vitals {
                 body.insert("vitals".into(), json!(v));
+            }
+            if let Some(h) = &hsts {
+                body.insert("hsts".into(), hsts_body(h)?);
             }
             if let Some(f) = follow_tag {
                 body.insert("follow_tag".into(), json!(f));

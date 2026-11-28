@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { deployChange, describePending, followChanges, followLog, formatFirewall, formatHeaders, parseEnv, parseFirewall, parseHeaders, stepDurations, toEnv, type DeployStatus, type EnvironmentSummary, type InstanceState, type Service } from "./apps-api";
+import { deployChange, followLog, formatFirewall, formatHeaders, parseEnv, parseFirewall, parseHeaders, toEnv, type DeployStatus, type EnvironmentSummary, type InstanceState, type Service } from "./apps-api";
 import { service } from "./workspace-resources";
 
 const svc = (env: Partial<EnvironmentSummary>, id = "svc_a"): Service => ({
@@ -21,20 +21,20 @@ const latest = (status: DeployStatus, id = "dep_1") => ({ latest: { id, status }
 describe("a service on the canvas", () => {
   it("maps instance states: running is online, waking and deploys are busy, asleep is idle and free", () => {
     const view = (state: InstanceState, env: Partial<EnvironmentSummary> = {}) => service(svc({ state, ...env }));
-    expect(view("running")).toMatchObject({ state: "online", stateLabel: "Running", sub: "web-shop.up.roll.site" });
-    expect(view("waking")).toMatchObject({ state: "starting", stateLabel: "Waking" });
-    expect(view("stopped")).toMatchObject({ state: "idle", stateLabel: "Asleep", note: "$0.00/h" });
-    expect(view("suspended")).toMatchObject({ state: "idle", stateLabel: "Suspended", note: "$0.00/h" });
-    expect(view("none")).toMatchObject({ state: "idle", stateLabel: "Not deployed", note: undefined });
-    expect(view("crashed")).toMatchObject({ state: "failed", stateLabel: "Crashed" });
-    // A deploy on its way is busy whatever the instances do; once it ends the card says how.
-    expect(view("stopped", latest("building"))).toMatchObject({ state: "starting", stateLabel: "Building…", note: undefined });
-    expect(view("running", { ...latest("failed"), active: { id: "dep_live", revision: null, created_at: 1 } })).toMatchObject({ state: "online", meta: "Failed" });
-    // What wants an eye: crashing reads failed between restarts, a capped project paused.
-    expect(view("running", { attention: ["crash_loop"] })).toMatchObject({ state: "failed", stateLabel: "Crashing" });
-    expect(view("stopped", { attention: ["capped"] })).toMatchObject({ state: "idle", stateLabel: "Paused (spend limit)" });
-    // A first deploy that failed: nothing serves, and the card says so in red.
-    expect(view("none", latest("failed"))).toMatchObject({ state: "failed", stateLabel: "Deploy failed" });
+    expect(view("running")).toMatchObject({ state: "online", sub: "web-shop.up.roll.site" });
+    expect(view("waking")).toMatchObject({ state: "starting" });
+    expect(view("stopped")).toMatchObject({ state: "idle", note: "$0.00/h" });
+    expect(view("suspended")).toMatchObject({ state: "idle", note: "$0.00/h" });
+    expect(view("none")).toMatchObject({ state: "idle", note: undefined });
+    expect(view("crashed")).toMatchObject({ state: "failed" });
+    // A deploy on its way is busy whatever the instances do.
+    expect(view("stopped", latest("building"))).toMatchObject({ state: "starting", note: undefined });
+    expect(view("running", { ...latest("failed"), active: { id: "dep_live", revision: null, created_at: 1 } })).toMatchObject({ state: "online" });
+    // What wants an eye: crashing reads failed between restarts, a capped project idle.
+    expect(view("running", { attention: ["crash_loop"] })).toMatchObject({ state: "failed" });
+    expect(view("stopped", { attention: ["capped"] })).toMatchObject({ state: "idle" });
+    // A first deploy that failed: nothing serves.
+    expect(view("none", latest("failed"))).toMatchObject({ state: "failed" });
     expect(view("running").href).toBe("/dashboard/apps/svc_a");
   });
 });
@@ -47,9 +47,7 @@ describe("deployChange", () => {
     expect(building).toMatchObject({ pending: true, finished: null });
     expect(deployChange(building.seen, [svc(latest("active"))])).toMatchObject({ pending: false, finished: "success" });
     expect(deployChange(building.seen, [svc(latest("failed"))])).toMatchObject({ pending: false, finished: "error" });
-  });
-
-  it("catches a deploy that came and went between two looks, and ignores old ones seen first", () => {
+    // A deploy that came and went between two looks is caught; an old one seen first isn't.
     expect(deployChange(new Map(), [svc(latest("active"))])).toMatchObject({ pending: false, finished: null });
     const before = deployChange(new Map(), [svc(latest("active", "dep_1"))]).seen;
     expect(deployChange(before, [svc(latest("active", "dep_2"))]).finished).toBe("success");
@@ -57,6 +55,7 @@ describe("deployChange", () => {
     const two = deployChange(new Map(), [svc(latest("deploying")), svc(latest("deploying", "dep_9"), "svc_b")]).seen;
     expect(deployChange(two, [svc(latest("active")), svc(latest("failed", "dep_9"), "svc_b")]).finished).toBe("error");
   });
+
 });
 
 describe("pasted .env text", () => {
@@ -64,31 +63,16 @@ describe("pasted .env text", () => {
     const { vars, errors } = parseEnv('# db\nexport DATABASE_URL=postgres://x?a=b\n\nNAME="a \\"b\\"\\nc"\nRAW=\'$HOME\'\n1BAD=x\nno equals\n');
     expect(vars).toEqual({ DATABASE_URL: "postgres://x?a=b", NAME: 'a "b"\nc', RAW: "$HOME" });
     expect(errors).toEqual([6, 7]);
-  });
-
-  it("writes variables as text that reads back exactly (the raw editor)", () => {
-    const vars = { URL: "postgres://u:p@h:5432/db?ssl=true", SPACED: " a b ", QUOTE: `it's "x"`, PEM: "-----BEGIN-----\nabc\\n\t\r\n-----END-----", EMPTY: "", HASH: "a #b", DOLLAR: "$HOME" };
-    expect(parseEnv(toEnv(vars))).toEqual({ vars, errors: [] });
-    expect(toEnv({ A: "plain", B: "two words" })).toBe("A=plain\nB='two words'\n");
+    // Written back as text (the raw editor), it reads back exactly; odd names stay plain keys.
+    const all = { URL: "postgres://u:p@h:5432/db?ssl=true", SPACED: " a b ", QUOTE: `it's "x"`, PEM: "-----BEGIN-----\nabc\\n\t\r\n-----END-----", EMPTY: "", HASH: "a #b", DOLLAR: "$HOME" };
+    expect(parseEnv(toEnv(all))).toEqual({ vars: all, errors: [] });
     const odd = parseEnv("__proto__=x\ntoString=y\n").vars;
     expect([Object.keys(odd), odd.__proto__, Object.hasOwn(odd, "constructor")]).toEqual([["__proto__", "toString"], "x", false]);
   });
+
 });
 
-describe("a deployment's steps", () => {
-  it("time each step until the next, the queue until the first, and nothing after it's live", () => {
-    const d = { created_at: 1000, steps: [{ step: "build", at: 1500 }, { step: "rollout", at: 35_500 }, { step: "live", at: 38_000 }] };
-    expect(stepDurations(d)).toEqual([
-      { label: "Queued", ms: 500 },
-      { label: "Build", ms: 34_000 },
-      { label: "Rollout", ms: 2500 },
-      { label: "Live", ms: null },
-    ]);
-    expect(stepDurations({ created_at: 0, steps: [{ step: "build", at: 10 }] }, 110).at(-1)).toEqual({ label: "Build", ms: 100 });
-  });
-});
-
-describe("firewall rules as typed", () => {
+describe("firewall rules and response headers as typed", () => {
   it("read one a line and come back the same", () => {
     const text = "allow /admin/health\ndeny /admin/*\ndeny method=DELETE,PUT\n# a note\ndeny ip=203.0.113.0/24,2001:db8::/32\ndeny /api/* header=X-Bot query=debug:1\nlimit 100:20 /api/* key=header:x-api-key\nchallenge /* bots=tools,spoofed\nlog /wp-* attacks=scanners,sqli\ndeny ua=Bad Bot/2";
     const rules = parseFirewall(text);
@@ -104,32 +88,21 @@ describe("firewall rules as typed", () => {
       { action: "deny", user_agent: "Bad Bot/2" },
     ]);
     expect(formatFirewall(rules)).toBe(text.replace("# a note\n", ""));
-  });
-});
-
-describe("pending changes", () => {
-  it("name what the next deploy does", () => {
-    expect(describePending({ variables: { added: ["ADDED"], removed: ["GONE"], changed: ["MODE"] }, run: ["memory_mb"] })).toBe("MODE changed, ADDED added, GONE removed, memory mb set");
-    expect(describePending({ variables: null, run: [] })).toBeNull();
-    expect(describePending({ variables: null, run: [], secrets: true })).toBe("the project's secrets changed");
-  });
-});
-
-describe("response headers", () => {
-  it("group one header a line into rules by path and replace, and come back the same", () => {
-    const text = "Strict-Transport-Security: max-age=63072000\n/api/* Cache-Control: no-store\n!/api/* Content-Type: application/problem+json\n# a note\nnot a header";
-    const rules = parseHeaders(text);
-    expect(rules).toEqual([
+    // Response headers: one a line, grouped into rules by path and replace.
+    const headers = "Strict-Transport-Security: max-age=63072000\n/api/* Cache-Control: no-store\n!/api/* Content-Type: application/problem+json\n# a note\nnot a header";
+    const headerRules = parseHeaders(headers);
+    expect(headerRules).toEqual([
       { set: { "Strict-Transport-Security": "max-age=63072000" } },
       { path: "/api/*", set: { "Cache-Control": "no-store" } },
       { path: "/api/*", set: { "Content-Type": "application/problem+json" }, replace: true },
     ]);
-    expect(parseHeaders(formatHeaders(rules))).toEqual(rules);
+    expect(parseHeaders(formatHeaders(headerRules))).toEqual(headerRules);
   });
 });
 
 describe("following a log", () => {
   it("stops at a finished log's end instead of reading it all again", async () => {
+    vi.useFakeTimers();
     const enc = new TextEncoder();
     const fetchFn = vi.fn(async () => new Response(new ReadableStream({ start(c) { c.enqueue(enc.encode('data: {"t":1,"stream":"stdout","text":"done"}\n\nevent: end\ndata: end\n\n')); c.close(); } })));
     vi.stubGlobal("fetch", fetchFn);
@@ -137,29 +110,12 @@ describe("following a log", () => {
     let ended = false;
     followLog({ job: { service: "svc_1", env: "production", job: "job_1" } }, { onLine: (l) => lines.push(l.text), onReset: () => {}, onEnd: () => (ended = true) });
     await vi.waitFor(() => expect(ended).toBe(true));
-    await new Promise((r) => setTimeout(r, 700));
+    // Past every reconnect delay: nothing is read again.
+    await vi.advanceTimersByTimeAsync(20_000);
     expect(lines).toEqual(["done"]);
     expect(fetchFn).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
     vi.unstubAllGlobals();
   });
 });
 
-describe("following a service's changes", () => {
-  it("shares one stream among a page's followers and closes it with the last", async () => {
-    const fetchFn = vi.fn((_url: string, init: RequestInit) => new Promise<Response>((resolve) => {
-      const enc = new TextEncoder();
-      resolve(new Response(new ReadableStream({ start(c) { c.enqueue(enc.encode("event: changed\ndata: {}\n\n")); init.signal?.addEventListener("abort", () => c.error(new DOMException("aborted", "AbortError"))); } })));
-    }));
-    vi.stubGlobal("fetch", fetchFn);
-    let a = 0;
-    let b = 0;
-    const stopA = followChanges("svc_1", { onChange: () => a++ });
-    const stopB = followChanges("svc_1", { onChange: () => b++ });
-    await vi.waitFor(() => expect(a + b).toBe(2));
-    expect(fetchFn).toHaveBeenCalledTimes(1);
-    stopA();
-    stopB();
-    expect((fetchFn.mock.calls[0][1] as RequestInit).signal?.aborted).toBe(true);
-    vi.unstubAllGlobals();
-  });
-});

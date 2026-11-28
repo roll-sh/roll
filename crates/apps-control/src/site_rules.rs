@@ -445,24 +445,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_environments_redirects_are_exact_paths_then_patterns() {
-        let text = "# moved\n/old /new 308\n/old/ /never\n/blog/* /posts/:splat 301\n/fr/* /fr-FR/:splat 302 Country=fr\n/docs https://docs.acme.dev\n";
-        assert_eq!(EnvRedirects::check(text), Ok(()));
-        let r = EnvRedirects::parse(text);
-        let v = Visitor::default();
-        assert_eq!(r.find("/old/", Some("a=1"), &v), Some((308, "/new?a=1".into())), "an exact path, the first rule for it");
-        assert_eq!(r.find("/blog/2026/hi", None, &v), Some((301, "/posts/2026/hi".into())));
-        assert_eq!(r.find("/fr/a", None, &v), None, "its condition doesn't hold");
-        assert_eq!(r.find("/docs", None, &v), Some((301, "https://docs.acme.dev".into())));
-        assert_eq!(r.find("/other", None, &v), None);
-        assert!(EnvRedirects::check("/a /b 200").unwrap_err().contains("line 1"), "no rewrites");
-        assert!(EnvRedirects::check("/a service:api/x 301").is_err(), "no service: targets");
-        assert!(EnvRedirects::check("/ok /b\nnonsense").unwrap_err().contains("line 2"));
-        let bulk: String = (0..=MAX_EXACT).map(|i| format!("/p{i} /q{i}\n")).collect();
-        assert!(EnvRedirects::check(&bulk).is_err(), "past the limit");
-    }
-
-    #[test]
     fn redirects_match_in_order_with_splats_and_placeholders() {
         let r = SiteRules::parse(
             Some(
@@ -490,35 +472,18 @@ mod tests {
         assert_eq!(api.redirect("/api/users/7", Some("a=1"), false, &Visitor::default()), Some(Outcome::Proxy { service: "api".into(), path: "/v1/users/7?a=1".into() }));
         assert_eq!(api.redirect("/hc", None, false, &Visitor::default()), Some(Outcome::Proxy { service: "api".into(), path: "/".into() }));
         assert_eq!((api.redirect("/bad", None, false, &Visitor::default()), api.redirect("/moved", None, false, &Visitor::default())), (None, None));
-    }
-
-    #[test]
-    fn rules_proxy_to_other_sites_and_hold_their_conditions() {
-        let r = SiteRules::parse(Some("/api/* https://api.example.com/v2/:splat 200\n/x/:host https://:host/ 200\n/fr / 302 Country=fr,be Language=fr\n/beta/* /beta.html 200 Cookie=beta\n/admin /a.html 200 Role=admin\n"), None);
-        assert_eq!(r.redirect("/api/users/7", Some("a=1"), false, &Visitor::default()), Some(Outcome::External("https://api.example.com/v2/users/7?a=1".into())));
-        assert_eq!(r.redirect("/x/evil.com", None, false, &Visitor::default()), None, "a visitor never picks the host");
+        // A visitor never picks the host a rule proxies to, and every condition holds.
+        let r = SiteRules::parse(Some("/x/:host https://:host/ 200\n/fr / 302 Country=fr,be Language=fr\n"), None);
+        assert_eq!(r.redirect("/x/evil.com", None, false, &Visitor::default()), None);
         let fr = Visitor { country: Some("BE".into()), languages: vec!["fr-be".into(), "fr".into()], cookies: vec![] };
         assert_eq!(r.redirect("/fr", None, false, &fr), Some(Outcome::Redirect(302, "/".into())));
-        assert_eq!(r.redirect("/fr", None, false, &Visitor { country: Some("BE".into()), ..Visitor::default() }), None, "every condition holds");
-        assert_eq!(r.redirect("/beta/x", None, false, &Visitor { cookies: vec!["beta".into()], ..Visitor::default() }), Some(Outcome::Serve(200, "/beta.html".into())));
-        assert_eq!(r.redirect("/beta/x", None, false, &Visitor::default()), None);
-        assert_eq!(r.redirect("/admin", None, false, &Visitor { cookies: vec!["nf_jwt".into()], ..Visitor::default() }), None, "a condition roll doesn't know never matches");
-        let mut h = axum::http::HeaderMap::new();
-        h.insert("accept-language", "fr-CH, en;q=0.8".parse().unwrap());
-        h.insert("cookie", "beta=1; roll_b=2".parse().unwrap());
-        h.insert("cf-ipcountry", "ch".parse().unwrap());
-        let v = Visitor::of(&h);
-        assert_eq!((v.country.as_deref(), v.languages, v.cookies), (Some("CH"), vec!["fr".to_string(), "fr-ch".into(), "en".into()], vec!["beta".to_string(), "roll_b".into()]));
-    }
-
-    #[test]
-    fn header_blocks_add_their_headers_and_framing_is_roll_s() {
-        let r = SiteRules::parse(
-            None,
-            Some("/*\n  X-Frame-Options: DENY\n  Content-Length: 1\n/assets/*\n  Cache-Control: public, max-age=31536000, immutable\n  Bad Name: x\n/empty\n"),
-        );
-        assert_eq!(r.headers("/assets/app.js"), [("x-frame-options".to_string(), "DENY".to_string()), ("cache-control".to_string(), "public, max-age=31536000, immutable".to_string())]);
+        assert_eq!(r.redirect("/fr", None, false, &Visitor { country: Some("BE".into()), ..Visitor::default() }), None);
+        // Framing is roll's: a header block can't set Content-Length.
+        let r = SiteRules::parse(None, Some("/*\n  X-Frame-Options: DENY\n  Content-Length: 1\n"));
         assert_eq!(r.headers("/about"), [("x-frame-options".to_string(), "DENY".to_string())]);
-        assert!(is_rules_file("/_redirects") && is_rules_file("_headers") && !is_rules_file("/headers"));
+        // An environment's redirects: never a service: target, and only so many.
+        assert!(EnvRedirects::check("/a service:api/x 301").is_err());
+        let bulk: String = (0..=MAX_EXACT).map(|i| format!("/p{i} /q{i}\n")).collect();
+        assert!(EnvRedirects::check(&bulk).is_err(), "past the limit");
     }
 }

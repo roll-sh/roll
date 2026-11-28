@@ -725,6 +725,7 @@ fn repo_of(event: &Event) -> Option<&str> {
         Event::Issues(e) => &e.repository.full_name,
         Event::CheckRun(e) => &e.repository.full_name,
         Event::Status(e) => &e.repository.full_name,
+        Event::Visibility(e) => &e.repository.full_name,
     })
 }
 
@@ -734,9 +735,13 @@ pub(crate) async fn handle_for_repo(code: &Arc<Code>, repo_id: &str, event_name:
     let event = Event::parse(event_name, body).map_err(|e| Error::Invalid(e.to_string()))?;
     let Some(full_name) = repo_of(&event) else { return Ok(()) };
     let Some((r, mut link)) = repos_for(code, full_name)?.into_iter().find(|(r, _)| r.id == repo_id) else { return Ok(()) };
-    // GitHub's word on its privacy, kept as the mirror last saw it (roll secrets' Health reads it);
-    // only where the payload says (`private` defaults to false when a slim one leaves it out).
-    let private = serde_json::from_slice::<serde_json::Value>(body).ok().and_then(|v| v["repository"]["private"].as_bool());
+    // GitHub's word on its privacy, kept as the mirror last saw it (roll secrets' Health reads it):
+    // a visibility event's, else only where the payload says (`private` defaults to false when a
+    // slim one leaves it out).
+    let private = match &event {
+        Event::Visibility(v) => Some(v.private),
+        _ => serde_json::from_slice::<serde_json::Value>(body).ok().and_then(|v| v["repository"]["private"].as_bool()),
+    };
     if let Some(p) = private.filter(|p| link.private != Some(*p)) {
         link = update_link(code, &r.id, |l| l.private = Some(p))?.unwrap_or(link);
     }
@@ -787,7 +792,7 @@ async fn handle_repo(code: &Arc<Code>, hub: &Hub, r: &RepoRow, link: &Link, even
             upsert_issue(code, r, &issue_draft(hub, &e.issue))
         }
         Event::CheckRun(e) if e.requested_action.is_some() => super::notify::visual_action(code, hub, r, link, e).await,
-        Event::CheckRun(_) | Event::Status(_) => Ok(()),
+        Event::CheckRun(_) | Event::Status(_) | Event::Visibility(_) => Ok(()),
         Event::Ping { .. } | Event::Ignored { .. } | Event::Installation { .. } | Event::InstallationRepositories { .. } => Ok(()),
     }
 }
