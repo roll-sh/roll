@@ -1785,8 +1785,10 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/secrets/projects/{project}/environments/{env}/secrets", "secrets", R, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path").filters_keys(),
     // A batch writes only keys the grant reaches: roll secrets refuses one naming others.
     row("POST", "/v1/secrets/projects/{project}/environments/{env}/changes", "secrets", W, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path").filters_keys(),
-    // A watcher's read of what changed since the values it holds: values, so reveal.
-    row("POST", "/v1/secrets/projects/{project}/environments/{env}/values/delta", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
+    // A watcher's read of what changed since the values it holds: values, so reveal. It and the
+    // folder's digest (what a watch polls) are worked out over the keys the grant reaches.
+    row("POST", "/v1/secrets/projects/{project}/environments/{env}/values/delta", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path").filters_keys(),
+    row("GET", "/v1/secrets/projects/{project}/environments/{env}/digest", "secrets", R, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path").filters_keys(),
     row("GET", "/v1/secrets/projects/{project}/environments/{env}/secrets/{key}/value", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path").secret_key(),
     // A TOTP key's current code is a credential: reveal, never the prefix's read.
     row("GET", "/v1/secrets/projects/{project}/environments/{env}/secrets/{key}/totp", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path").secret_key(),
