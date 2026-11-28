@@ -2114,6 +2114,8 @@ pub struct Environment {
     pub traces: bool,
     /// Its pages measure their Web Vitals for roll (`…/vitals`).
     pub vitals: bool,
+    /// Its answers name roll's CSP report endpoint (`…/csp-reports`).
+    pub csp_reports: bool,
     /// Its Strict-Transport-Security when roll serves HTTPS ([`HSTS_DEFAULT`] unless it says;
     /// None: none sent).
     pub hsts: Option<Hsts>,

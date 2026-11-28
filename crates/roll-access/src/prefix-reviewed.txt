@@ -190,6 +190,7 @@ POST /v1/previews/{id}/notes/{note}/resolve
 POST /v1/previews/{id}/notes/{note}/work
 POST /v1/previews/{id}/replay
 GET /v1/previews/{id}/notes/{note}/crop
+POST /v1/previews/{id}/notes/{note}/screen
 GET /v1/previews/{id}/logs
 POST /v1/previews/{id}/refresh
 GET /v1/previews/{id}/requests
@@ -258,7 +259,6 @@ POST /v1/secrets/projects/{project}/environments/{env}/rollback
 DELETE /v1/secrets/projects/{project}/environments/{env}/secrets/{key}
 GET /v1/secrets/projects/{project}/environments/{env}/secrets/{key}
 PUT /v1/secrets/projects/{project}/environments/{env}/secrets/{key}
-POST /v1/secrets/projects/{project}/environments/{env}/secrets/{key}/rotate
 GET /v1/secrets/projects/{project}/environments/{env}/secrets/{key}/versions
 GET /v1/secrets/projects/{project}/grid
 DELETE /v1/secrets/projects/{project}/identities/{id}

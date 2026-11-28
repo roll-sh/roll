@@ -100,7 +100,8 @@ bins=roll
 say "installing $tag ($bins) for $target into $DIR"
 fetch "$RELEASES/download/$tag/SHA256SUMS" "$tmp/SHA256SUMS" || die "couldn't download the checksums of $tag"
 
-# Checks a download's build provenance: made by release-cli.yml in roll-sh/roll. Only for
+# Checks a download's build provenance: made by release-cli.yml in roll-sh/roll, from this very
+# tag (so an older genuine build re-uploaded under a newer tag fails), on GitHub's runners. Only for
 # GitHub's own releases (a mirror in ROLL_RELEASES serves the same bytes; check them there).
 attested=0
 attest() {
@@ -109,8 +110,9 @@ attest() {
     return 0
   fi
   if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
-    gh attestation verify "$1" --repo "$REPO" --signer-workflow "$REPO/.github/workflows/release-cli.yml" >/dev/null 2>&1 \
-      || die "$(basename "$1") has no build provenance from $REPO's release workflow (gh attestation verify failed): not installing it"
+    gh attestation verify "$1" --repo "$REPO" --signer-workflow "$REPO/.github/workflows/release-cli.yml" \
+      --source-ref "refs/tags/$tag" --deny-self-hosted-runners >/dev/null 2>&1 \
+      || die "$(basename "$1") has no build provenance from $REPO's release workflow at $tag (gh attestation verify failed): not installing it"
     attested=1
   elif [ "$verify" = attestation ]; then
     die "ROLL_VERIFY=attestation needs gh, logged in (gh auth login), to check $(basename "$1")'s build provenance"
@@ -143,6 +145,8 @@ if [ "$attested" = 1 ]; then
   say "checked against SHA256SUMS and the build provenance of $REPO's release workflow"
 elif [ "$verify" = auto ] && [ "$RELEASES" = "https://github.com/$REPO/releases" ]; then
   say "checked against SHA256SUMS only: with gh logged in, this script also checks build provenance (or download the tarball and run gh attestation verify <file> --repo $REPO)"
+elif [ "$verify" != attestation ]; then
+  say "checked against SHA256SUMS only (build provenance not checked: ROLL_VERIFY=$verify, from $RELEASES)"
 fi
 
 mkdir -p "$DIR"
