@@ -76,8 +76,9 @@ impl Engine {
             pages.push(entry(
                 &c.path,
                 c.base_percent,
-                json!({ "a11y": a.and_then(|a| a.a11y_added), "links": a.and_then(|a| a.links_added), "seo": a.and_then(|a| a.seo_added), "errors": c.errors }),
-                json!({ "a11y": a11y_kinds(c.a11y.as_ref()), "links": broken(c.links.as_ref()) }),
+                json!({ "a11y": a.and_then(|a| a.a11y_added), "links": a.and_then(|a| a.links_added), "seo": a.and_then(|a| a.seo_added) }),
+                // Another page's errors aren't compared with main's: how many it had, as they are.
+                json!({ "a11y": a11y_kinds(c.a11y.as_ref()), "links": broken(c.links.as_ref()), "errors": c.errors }),
             ));
         }
         pages.truncate(ENTRIES_MAX);

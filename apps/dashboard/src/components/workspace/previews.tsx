@@ -30,6 +30,7 @@ export function ProjectPreviews({
   go,
   feedback,
   resolve,
+  reviewPage,
   onFeedbackPosted,
 }: {
   project: WorkspaceProject;
@@ -40,6 +41,8 @@ export function ProjectPreviews({
   feedback?: PreviewFeedback;
   /** A note a preview page's Resolve names (its review id), for the preview `open` names. */
   resolve?: string;
+  /** The page a preview page's Review opened roll for (its key), for the preview `open` names. */
+  reviewPage?: string;
   /** The note was posted: drop it from the address, so it isn't offered again. */
   onFeedbackPosted?: () => void;
 }) {
@@ -214,6 +217,7 @@ export function ProjectPreviews({
             onClose={() => setOpenId(null)}
             feedback={opened.id === initial ? feedback : undefined}
             resolve={opened.id === initial ? resolve : undefined}
+            reviewPage={opened.id === initial ? reviewPage : undefined}
             onFeedbackPosted={onFeedbackPosted}
           />
         )}
