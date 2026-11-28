@@ -878,19 +878,31 @@ pub enum AppsCmd {
         #[arg(long)]
         dockerfile: bool,
     },
-    /// Run a command here, on this machine, with an environment's variables (Railway's
-    /// `railway run`): `roll apps exec -- npm run dev`. `PORT` and `ROLL_*` are left out (they're
-    /// the platform's), sealed variables can't be (they're never shown again), and a linked
-    /// service's `*.internal` URL points at a local tunnel to it while the command runs.
-    /// Exits with the command's exit code.
-    Exec {
+    /// Run a command here, on this machine, with an environment's variables (`railway run`,
+    /// `vercel dev`, `heroku local`): `roll apps dev web -e staging -- npm run dev`. The values
+    /// (a reveal, audited) go only into the command's environment, with `ROLL_DEV=1` and `PORT`
+    /// (the service's, unless this shell sets one); stderr names what's set, never a value. The
+    /// platform's `ROLL_*`, sealed variables (never shown again) and names that steer this
+    /// machine's programs (`PATH`, `NODE_OPTIONS`, …) are left out and named, and so is roll's own
+    /// token (`ROLL_API_KEY` and the like). A linked service's `*.internal` URL points at a local
+    /// tunnel to it while the command runs (`--no-tunnels`: left as it is). Ctrl-C goes to the
+    /// command; roll exits with its exit code.
+    #[command(alias = "exec")]
+    Dev {
+        /// The service (or `--service`; default: the one this directory is linked to).
+        #[arg(value_name = "SERVICE", conflicts_with = "service")]
+        name: Option<String>,
         #[command(flatten)]
         target: Target,
+        /// Leave linked services' private URLs as they are: no tunnels.
+        #[arg(long)]
+        no_tunnels: bool,
         /// Pass roll's own credentials (ROLL_ADMIN_TOKEN, ROLL_TOKEN and the like) on to the
         /// command; by default it gets none unless the service sets that name itself.
         #[arg(long)]
         keep_roll_credentials: bool,
-        #[arg(trailing_var_arg = true, required = true, allow_hyphen_values = true)]
+        /// The command, after `--`.
+        #[arg(last = true, required = true)]
         command: Vec<String>,
     },
     /// Run the live image again with the current variables and settings (no build, same
@@ -3975,97 +3987,10 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             svc
         }
-        AppsCmd::Exec { target, keep_roll_credentials, command } => {
+        AppsCmd::Dev { name, mut target, no_tunnels, keep_roll_credentials, command } => {
+            target.service = name.or(target.service);
             let svc = service(api, &target).await?;
-            let base = env_path(&svc, &target.env);
-            let (values, listed) = (api.get(&format!("{base}/variables/values")).await?, api.get(&format!("{base}/variables")).await?);
-            // Names that steer this machine's own programs (a loader, a shell, a runtime's flags):
-            // an environment's variables are anyone-who-can-write-them's, so they're never set here.
-            let steering = |k: &str| {
-                ["PATH", "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "BASH_ENV", "ENV", "IFS", "SHELLOPTS", "BASHOPTS", "PS4", "PROMPT_COMMAND", "NODE_OPTIONS", "NODE_PATH", "PYTHONSTARTUP", "PYTHONPATH", "PYTHONHOME", "PERL5OPT", "PERL5LIB", "RUBYOPT", "RUBYLIB", "JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS", "JDK_JAVA_OPTIONS", "GIT_SSH_COMMAND", "GIT_EXEC_PATH", "HOME", "SHELL", "EDITOR"].contains(&k) || k.starts_with("DYLD_")
-            };
-            let mut left_out = Vec::new();
-            let vars: Vec<(String, String)> = values
-                .as_object()
-                .into_iter()
-                .flatten()
-                .filter(|(k, _)| k.as_str() != "PORT" && !k.starts_with("ROLL_"))
-                .filter(|(k, _)| {
-                    let keep = !steering(k);
-                    if !keep {
-                        left_out.push(k.to_string());
-                    }
-                    keep
-                })
-                .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
-                .collect();
-            if !left_out.is_empty() {
-                eprintln!("not set here (they'd steer this machine's programs): {}", left_out.join(", "));
-            }
-            let sealed: Vec<String> = listed["vars"].as_array().into_iter().flatten().filter(|v| v["sealed"] == true).map(|v| s(&v["name"])).collect();
-            if !sealed.is_empty() {
-                eprintln!("not set here (sealed, never shown again): {}", sealed.join(", "));
-            }
-            // A linked service's private URL (`http://<name>.<env>.internal:<port>`) pointed at a
-            // local tunnel to it, as `roll apps proxy` makes one, for as long as the command runs.
-            let mut vars = vars;
-            let mut tunneled = Vec::new();
-            // Only when something names one: the links (and each linked service) are read then, and
-            // one that can't be read is said, not fatal.
-            let links = if vars.iter().any(|(_, v)| v.contains(".internal")) {
-                api.get(&format!("/v1/apps/services/{}/links", enc(&s(&svc["id"])))).await.unwrap_or_else(|e| {
-                    eprintln!("its links couldn't be read ({e:#}): no tunnels");
-                    Value::Null
-                })
-            } else {
-                Value::Null
-            };
-            for l in links.as_array().into_iter().flatten().filter(|l| l["kind"] == "service") {
-                let other = match api.get(&format!("/v1/apps/services/{}", enc(&s(&l["ref"])))).await {
-                    Ok(o) => o,
-                    Err(e) => {
-                        eprintln!("the linked service {} couldn't be read ({e:#}): no tunnel to it", s(&l["ref"]));
-                        continue;
-                    }
-                };
-                let host = format!("{}.{}.internal", s(&other["name"]), target.env);
-                if !vars.iter().any(|(_, v)| internal_rewritten(v, &host, "").is_some()) {
-                    continue;
-                }
-                let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?;
-                let local = listener.local_addr()?.to_string();
-                for (_, v) in vars.iter_mut() {
-                    if let Some(new) = internal_rewritten(v, &host, &local) {
-                        *v = new;
-                    }
-                }
-                eprintln!("{local} → {} ({}), for {}'s link", s(&other["name"]), target.env, s(&svc["name"]));
-                let (url, headers) = tunnel_to(api, &env_path(&other, &target.env));
-                tunneled.push(tokio::spawn(async move {
-                    if let Err(e) = tunnels(url, headers, listener).await {
-                        eprintln!("a tunnel ended: {e:#}");
-                    }
-                }));
-            }
-            let internal: Vec<&str> = vars.iter().filter(|(_, v)| v.contains(".internal")).map(|(k, _)| k.as_str()).collect();
-            if !internal.is_empty() {
-                eprintln!("{} name a private address (*.internal) that only resolves inside roll: `roll apps proxy` reaches one from here", internal.join(", "));
-            }
-            let mut cmd = tokio::process::Command::new(&command[0]);
-            if !keep_roll_credentials {
-                for k in crate::sys::roll_credentials(&|n| vars.iter().any(|(k, _)| k == n)) {
-                    cmd.env_remove(k);
-                }
-            }
-            let status = cmd.args(&command[1..]).envs(vars).status().await.with_context(|| format!("couldn't run {}", command[0]))?;
-            for t in tunneled {
-                t.abort();
-            }
-            match status.code() {
-                Some(0) => return Ok(()),
-                Some(code) => std::process::exit(code),
-                None => bail!("{} was killed by a signal", command[0]),
-            }
+            return dev(api, &svc, &target.env, no_tunnels, keep_roll_credentials, &command).await;
         }
         AppsCmd::Export { project, output, force } => {
             let project = match project {
@@ -6151,6 +6076,118 @@ fn secret_from_stdin(what: &str) -> anyhow::Result<String> {
     let v = v.trim_end_matches(['\r', '\n']).to_string();
     anyhow::ensure!(!v.is_empty(), "{what} goes on stdin (never argv)");
     Ok(v)
+}
+
+/// `roll apps dev`: `command` run here with environment `env`'s values (the reveal route's) in
+/// its environment only, never a file, argv or a log; a tunnel to each linked service a value
+/// names, unless `no_tunnels`; Ctrl-C passed on, and its exit roll's.
+async fn dev(api: &Api, svc: &Value, env: &str, no_tunnels: bool, keep_roll_credentials: bool, command: &[String]) -> anyhow::Result<()> {
+    let base = env_path(svc, env);
+    let (values, listed) = (api.get(&format!("{base}/variables/values")).await?, api.get(&format!("{base}/variables")).await?);
+    // Names that steer this machine's own programs (a loader, a shell, a runtime's flags): an
+    // environment's variables are anyone-who-can-write-them's, so they're never set here.
+    let steering = |k: &str| {
+        ["PATH", "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "BASH_ENV", "ENV", "IFS", "SHELLOPTS", "BASHOPTS", "PS4", "PROMPT_COMMAND", "NODE_OPTIONS", "NODE_PATH", "PYTHONSTARTUP", "PYTHONPATH", "PYTHONHOME", "PERL5OPT", "PERL5LIB", "RUBYOPT", "RUBYLIB", "JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS", "JDK_JAVA_OPTIONS", "GIT_SSH_COMMAND", "GIT_EXEC_PATH", "HOME", "SHELL", "EDITOR", "COMSPEC", "PATHEXT"].contains(&k) || k.starts_with("DYLD_")
+    };
+    // `PORT`, `ROLL_*` and roll's own (`WEB_CONCURRENCY`, `OTEL_*`, an agent's
+    // `JAVA_TOOL_OPTIONS`) are the instance's, wrong on this machine.
+    let roll_made: Vec<String> = listed["vars"].as_array().into_iter().flatten().filter(|v| v["source"] == "roll").map(|v| s(&v["name"])).collect();
+    let (mut vars, mut left_out) = (Vec::new(), Vec::new());
+    for (k, v) in values.as_object().into_iter().flatten() {
+        let Some(v) = v.as_str() else { continue };
+        if k == "PORT" || k.starts_with("ROLL_") || roll_made.contains(k) {
+            continue;
+        }
+        if steering(k) {
+            left_out.push(k.clone());
+            continue;
+        }
+        vars.push((k.clone(), v.to_string()));
+    }
+    if !left_out.is_empty() {
+        eprintln!("not set here (they'd steer this machine's programs): {}", left_out.join(", "));
+    }
+    let sealed: Vec<String> = listed["vars"].as_array().into_iter().flatten().filter(|v| v["sealed"] == true).map(|v| s(&v["name"])).collect();
+    if !sealed.is_empty() {
+        eprintln!("not set here (sealed, never shown again): {}", sealed.join(", "));
+    }
+    // A linked service's private URL (`http://<name>.<env>.internal:<port>`) pointed at a local
+    // tunnel to it, as `roll apps proxy` makes one, for as long as the command runs. Only when
+    // something names one: the links (and each linked service) are read then, and one that can't
+    // be read is said, not fatal. roll's resources (Postgres, Redis, search) link public
+    // addresses, so their values stay as they are.
+    let mut tunneled = Vec::new();
+    let links = if !no_tunnels && vars.iter().any(|(_, v)| v.contains(".internal")) {
+        api.get(&format!("/v1/apps/services/{}/links", enc(&s(&svc["id"])))).await.unwrap_or_else(|e| {
+            eprintln!("its links couldn't be read ({e:#}): no tunnels");
+            Value::Null
+        })
+    } else {
+        Value::Null
+    };
+    for l in links.as_array().into_iter().flatten().filter(|l| l["kind"] == "service") {
+        let other = match api.get(&format!("/v1/apps/services/{}", enc(&s(&l["ref"])))).await {
+            Ok(o) => o,
+            Err(e) => {
+                eprintln!("the linked service {} couldn't be read ({e:#}): no tunnel to it", s(&l["ref"]));
+                continue;
+            }
+        };
+        let host = format!("{}.{env}.internal", s(&other["name"]));
+        if !vars.iter().any(|(_, v)| internal_rewritten(v, &host, "").is_some()) {
+            continue;
+        }
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?;
+        let local = listener.local_addr()?.to_string();
+        for (_, v) in vars.iter_mut() {
+            if let Some(new) = internal_rewritten(v, &host, &local) {
+                *v = new;
+            }
+        }
+        eprintln!("tunnel: {local} → {} ({env}), for {}'s link", s(&other["name"]), s(&svc["name"]));
+        let (url, headers) = tunnel_to(api, &env_path(&other, env));
+        tunneled.push(tokio::spawn(async move {
+            if let Err(e) = tunnels(url, headers, listener).await {
+                eprintln!("a tunnel ended: {e:#}");
+            }
+        }));
+    }
+    let internal: Vec<&str> = vars.iter().filter(|(_, v)| v.contains(".internal")).map(|(k, _)| k.as_str()).collect();
+    if !internal.is_empty() {
+        eprintln!("{} name a private address (*.internal) that only resolves inside roll: `roll apps proxy` reaches one from here", internal.join(", "));
+    }
+    // The service's port, unless this shell already sets one (`PORT=3000 roll apps dev …`).
+    if std::env::var_os("PORT").is_none() {
+        let port = values["PORT"].as_str().map(str::to_string).or_else(|| svc["run"]["port"].as_u64().map(|p| p.to_string()));
+        vars.extend(port.map(|p| ("PORT".to_string(), p)));
+    }
+    vars.push(("ROLL_DEV".into(), "1".into()));
+    let mut names: Vec<&str> = vars.iter().map(|(k, _)| k.as_str()).collect();
+    names.sort_unstable();
+    eprintln!("set from {} ({env}): {}", s(&svc["name"]), names.join(", "));
+    // roll's own credentials (the token that read these values among them) aren't the app's,
+    // as `roll run` keeps them from its command.
+    let mut cmd = tokio::process::Command::new(crate::sys::program(&command[0]));
+    if !keep_roll_credentials {
+        for k in crate::sys::roll_credentials(&|n| vars.iter().any(|(k, _)| k == n)) {
+            cmd.env_remove(k);
+        }
+    }
+    cmd.args(&command[1..]).envs(vars);
+    // Ctrl-C from the terminal reaches the command itself; one sent to roll alone (and SIGTERM,
+    // SIGHUP; on Windows, the console closing) is passed on. roll stays up until it exits.
+    let mut signals = crate::mask::Signals::new()?;
+    let mut child = cmd.spawn().with_context(|| format!("couldn't run {}", command[0]))?;
+    let status = loop {
+        tokio::select! {
+            status = child.wait() => break status?,
+            sig = signals.next() => crate::mask::Signals::pass(&mut child, sig),
+        }
+    };
+    for t in tunneled {
+        t.abort();
+    }
+    crate::mask::exit_as(status)
 }
 
 /// `v` with every URL whose host is exactly `host` (after `//` or `@`, before a port, a path,
