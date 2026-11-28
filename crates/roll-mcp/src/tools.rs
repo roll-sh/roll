@@ -2568,10 +2568,15 @@ mod tests {
         // to a grant that may only write is the gap (search's alerts in review, previews' env).
         let unprotected: Vec<&str> = include_str!("no-tool.txt")
             .lines()
-            .filter(|l| !l.starts_with('#') && l.contains("credential") && !l.contains("sets a credential (") && !l.contains("sets a credential:") && !l.contains("answers no credential"))
+            .filter(|l| !l.starts_with('#') && l.contains("credential"))
             .filter(|l| {
                 let mut w = l.split_whitespace();
                 let (Some(m), Some(r)) = (w.next(), w.next()) else { return false };
+                // What the line says it is, after the route: only setting one, or answering none.
+                let why = w.collect::<Vec<_>>().join(" ");
+                if why.starts_with("sets a credential") || why.starts_with("answers no credential") {
+                    return false;
+                }
                 let sample = r.split('/').map(|s| if s.starts_with('{') { "x" } else { s }).collect::<Vec<_>>().join("/");
                 catalog::by_path(if m == "*" { "GET" } else { m }, &sample).is_some_and(|f| {
                     let decided = matches!(f.row.act, catalog::Act::Is(roll_auth::scope::Action::Reveal | roll_auth::scope::Action::Admin) | catalog::Act::Body(_));
