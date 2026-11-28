@@ -4439,7 +4439,7 @@ pub fn run(ctx: &Ctx, mut req: SearchRequest) -> EsResult<SearchOutcome> {
     drop(st);
     let total = targets.len();
     let per_cluster: Vec<(Option<String>, usize)> = match &ccs {
-        Some(plan) => {
+        Some(_) => {
             let mut v: Vec<(Option<String>, usize)> = Vec::new();
             for t in &targets {
                 let c = t.cluster.as_deref().map(str::to_string);
