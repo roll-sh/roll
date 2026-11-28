@@ -815,9 +815,11 @@ async fn run_with(mut args: Args) -> anyhow::Result<()> {
         let ws = workspace.clone();
         access.on_leaked("rlv_", move |secret, _why| ws.revoke_leaked_invite(secret));
     }
-    // …and previews' (`rlb_`).
+    // …and previews' deploy hooks (`rlb_`) and bypass secrets (`rpb_`).
     if let Some(e) = previews_engine.clone() {
-        access.on_leaked("rlb_", move |secret, _why| e.revoke_leaked_hook(secret));
+        let hooks = e.clone();
+        access.on_leaked("rlb_", move |secret, _why| hooks.revoke_leaked_hook(secret));
+        access.on_leaked("rpb_", move |secret, _why| e.revoke_leaked_bypass(secret));
     }
     // The audit log streamed to SIEMs (it needs ROLL_SECRET_KEY to keep each sink's secret).
     access::sinks(&access, args.secret_key().as_deref().map(String::as_str));

@@ -3233,9 +3233,10 @@ impl Store {
     }
 
     /// A new bypass secret for `project`'s private previews (replacing any): returned once,
-    /// kept only as its SHA-256.
+    /// kept only as its SHA-256 (`rpb_…`, a roll secret leak scanning finds; one made before
+    /// checksums still works until rotated).
     pub fn rotate_bypass(&self, project: &str) -> Result<(String, i64)> {
-        let secret = format!("rpb_{}", new_token());
+        let secret = roll_auth::credentials::new_secret("rpb_");
         let (hash, now) = (bypass_hash(&secret), self.now_ms()?);
         self.db.write(|c| {
             c.execute(
@@ -3245,6 +3246,16 @@ impl Store {
             Ok::<_, Error>(())
         })?;
         Ok((secret, now))
+    }
+
+    /// Deletes the bypass secret this is, if it's a live one: the project whose it was.
+    pub fn delete_bypass_by_secret(&self, secret: &str) -> Result<Option<String>> {
+        let hash = bypass_hash(secret);
+        self.db.write(|c| {
+            let Some(project) = c.query_row("SELECT project_id FROM bypass WHERE hash = ?", [hash.as_str()], |r| r.get::<_, String>(0)).optional()? else { return Ok(None) };
+            c.execute("DELETE FROM bypass WHERE project_id = ? AND hash = ?", [project.as_str(), hash.as_str()])?;
+            Ok::<_, Error>(Some(project))
+        })
     }
 
     pub fn delete_bypass(&self, project: &str) -> Result<()> {

@@ -485,6 +485,15 @@ impl Engine {
         Some(format!("previews' deploy hook {:?} of project {}", hook.name, hook.project))
     }
 
+    /// A project's bypass secret found where it shouldn't be (roll-access's leak scanning): it
+    /// stops opening the project's previews at once. Says whose it was, or `None` when it's no
+    /// live one.
+    pub fn revoke_leaked_bypass(&self, secret: &str) -> Option<String> {
+        let project = self.store.delete_bypass_by_secret(secret).ok()??;
+        tracing::warn!(project = %project, "previews: a leaked bypass secret was revoked");
+        Some(format!("previews' bypass secret of project {project}"))
+    }
+
     /// A link to the preview for someone outside the team, open for `hours` (1–720), on its own
     /// token: the answer is the only time the link is shown. Only where the preview isn't public
     /// (`access: link` or `team`); a public one needs none.
