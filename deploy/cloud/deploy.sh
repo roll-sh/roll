@@ -10,7 +10,8 @@
 #   deploy.sh rollback [td]   put back the revision the last deploy replaced (or the task
 #                             definition ARN given), canary to 0
 #   deploy.sh current         the image tag the fleet runs (pass it as ImageTag to stack updates)
-#   deploy.sh status          services, deployments and alarms
+#   deploy.sh status          what's live (commit, since when, what the API says), services,
+#                             deployments, alarms and an open deploy-failure issue
 #   deploy.sh diagnose [hours]  read only: each deploy alarm's state and reason, the minutes its
 #                             metric breached in the last hours (default 24, at most 360), the
 #                             services' recent events and the stopped nodes' reasons
@@ -76,9 +77,13 @@ cmd_push() {
   [ -z "${CARGO_BUILD_JOBS:-}" ] || jobs=(--build-arg "CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS")
   local root
   root=$(cd "$(dirname "$0")/../.." && pwd)
+  # What's deployed, for GET /v1/info (and the footer): the commit and when it was made.
+  local made
+  made=$(git -C "$root" show -s --format=%cI "$tag" 2>/dev/null || true)
   log "building $REPO:$tag (linux/arm64)"
   docker buildx build "${builder[@]}" "${jobs[@]}" --platform linux/arm64 \
     -f "$root/deploy/cloud/Dockerfile" \
+    --build-arg "ROLL_COMMIT=$tag" --build-arg "ROLL_COMMITTED_AT=$made" \
     --cache-from "type=registry,ref=$CACHE:main" \
     --cache-to "type=registry,ref=$CACHE:main,mode=max,image-manifest=true,oci-mediatypes=true" \
     --label "org.opencontainers.image.revision=$tag" \
@@ -266,7 +271,16 @@ cmd_current() {
 
 cmd_status() {
   outputs
-  local name names
+  local name names td tag
+  td=$(task_def_of "$SERVICE")
+  tag=$(image_of "$td")
+  tag=${tag##*:}
+  log "live: $tag ($(git log -1 --format='%s, %cI' "$tag" 2>/dev/null || echo "not in this checkout"))"
+  log "since: $(aws ecs describe-task-definition --task-definition "$td" --query 'taskDefinition.registeredAt' --output text) (${td##*/} registered)"
+  log "api: $(curl -fsS --max-time 10 "https://api.${ROLL_DOMAIN:-roll.sh}/v1/info" 2>/dev/null || echo unreachable)"
+  if command -v gh >/dev/null; then
+    log "deploy-failure issue: $(gh issue list --label deploy-failure --state open --json number,url --jq '.[0].url // "none open"' 2>/dev/null || echo "gh can't say")"
+  fi
   for name in "$SERVICE" "$CANARY"; do
     service "$name" | jq -r '"\(.serviceName): \(.runningCount)/\(.desiredCount) running", (.deployments[] | "  \(.status) \(.rolloutState) \(.taskDefinition | split("/")[-1]) \(.runningCount)/\(.desiredCount)")'
   done
