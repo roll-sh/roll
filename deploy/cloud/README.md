@@ -1,5 +1,16 @@
 # roll cloud on AWS and Cloudflare
 
+## Deploy status
+
+- **Live:** `task-definition/roll-cloud:6`, commit 5fa7976e4d (2026-11-13 11:52 UTC), the last
+  green deploy. Every deploy since (116 runs to 2026-11-28) passed its canary's bake and then
+  failed when the first replacement node of the roll started: ECS's alarm rollback (about 3 in
+  4) or its circuit breaker (about 1 in 4), each rolled back to revision 6.
+- **Broken:** which alarm trips is not yet known; `deploy.sh diagnose` (the `deploy` workflow
+  run by hand with `diagnose`) reads it from the alarms' own metrics, and a failed deploy now
+  prints the alarms, the services' events and the stopped nodes' reasons before rolling back.
+- **Next:** find the cause from that, fix it, deploy current main.
+
 How to stand up, deploy, scale and tear down roll cloud: every product on one fleet of `rolld`
 nodes in us-east-1, behind Cloudflare. The design is [docs/cloud/README.md](../../docs/cloud/README.md).
 
@@ -210,7 +221,14 @@ deploy/cloud/deploy.sh deploy <sha>     # canary, bake, roll
 deploy/cloud/deploy.sh rollback         # put back the revision the last deploy replaced
 deploy/cloud/deploy.sh current          # the tag the fleet runs
 deploy/cloud/deploy.sh status
+deploy/cloud/deploy.sh diagnose 72     # read only: why deploys of the last 72 hours failed
 ```
+
+`diagnose` prints each deploy alarm's state and reason, the minutes in which its metric breached
+its threshold, 5xx answers by product, the services' last events and the stopped nodes' reasons.
+It needs only the deploy role's rights, so it also runs from GitHub: Actions → deploy → Run
+workflow on `main` with `diagnose` checked. A failed deploy prints the same, from its own start,
+before it rolls back.
 
 `BAKE_SECONDS` changes the bake. To go back to an older build through the same canary, run the
 workflow by hand with that commit's tag.

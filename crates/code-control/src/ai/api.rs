@@ -56,7 +56,20 @@ async fn patch_reviewer(State(code): S, caller: Caller, Path((owner, repo)): Pat
 
 async fn learnings(State(code): S, caller: Caller, Path((owner, repo)): Path<(String, String)>) -> Result<Json<Value>> {
     let r = code.readable(&caller, &owner, &repo)?;
-    Ok(Json(serde_json::to_value(code.db.learnings(&r.id)?).unwrap_or_default()))
+    // One that may hold an outsider's words says so (`outside`: MCP's lockdown withholds its text).
+    let marked = code.learnings_marked(&r.id)?;
+    Ok(Json(Value::Array(
+        marked
+            .into_iter()
+            .map(|(l, outside)| {
+                let mut v = serde_json::to_value(l).unwrap_or_default();
+                if outside {
+                    v["outside"] = json!(true);
+                }
+                v
+            })
+            .collect(),
+    )))
 }
 
 async fn add_learning(State(code): S, caller: Caller, Path((owner, repo)): Path<(String, String)>, B(b): B) -> Result<(StatusCode, Json<Value>)> {
