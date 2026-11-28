@@ -107,21 +107,23 @@ impl StatusCache {
     }
 }
 
-/// One thing shown, as the page has it: who it is, whether it's up now, and its days.
+/// One thing shown, as the page has it: who it is, whether it's up now (and degraded: a slow
+/// check), and its days.
 pub(crate) struct Row {
     label: String,
     up: Option<bool>,
+    degraded: bool,
     /// (day, checks or pings that passed, that failed or were missed).
     days: Vec<(i64, i64, i64)>,
 }
 
 impl Apps {
     /// A check's run, or a heartbeat's ping (true) or miss (false), counted on today, with what
-    /// it is now (`up`): whether it was down before, when it's up now and that changed (a check
+    /// it is now (`up`, `degraded`: a slow check, or `down`): whether it was down before, when it's up now and that changed (a check
     /// back after a restart, which its memory doesn't know).
-    pub(crate) async fn status_count(self: &Arc<Self>, key: String, ok: bool, up: bool) -> bool {
+    pub(crate) async fn status_count(self: &Arc<Self>, key: String, ok: bool, now: &'static str) -> bool {
         let day = today();
-        match self.db(move |s| s.status_day_add(&key, day, ok, up)).await {
+        match self.db(move |s| s.status_day_add(&key, day, ok, now)).await {
             Ok(None) => false,
             Ok(Some(was)) => {
                 self.status_cache.forget();
@@ -557,7 +559,7 @@ impl Apps {
                 let mut rows = Vec::new();
                 for (key, label, _) in shown(&pg, &services, &envs, false) {
                     let last = s.get_state(&format!("status-last:{key}"))?;
-                    rows.push(Row { label, up: last.map(|l| l == "up"), days: s.status_days(&key, since)? });
+                    rows.push(Row { label, up: last.as_ref().map(|l| l != "down"), degraded: last.as_deref() == Some("degraded"), days: s.status_days(&key, since)? });
                 }
                 Ok((rows, s.incidents(&pg.project, code_sql::now_ms() - DAYS * 86_400_000)?))
             })
@@ -637,7 +639,7 @@ pub(crate) async fn serve(apps: Arc<Apps>, page: Page, path: &str) -> Response {
         (all > 0).then(|| (ok as f64 * 1000.0 / all as f64).round() / 10.0)
     };
     if path == "/status.json" {
-        let items: Vec<Value> = rows.iter().map(|r| json!({ "name": r.label, "up": r.up, "uptime": uptime(&r.days), "days": (since..=today()).map(|d| r.day(d)).collect::<Vec<_>>() })).collect();
+        let items: Vec<Value> = rows.iter().map(|r| json!({ "name": r.label, "up": r.up, "degraded": r.degraded, "uptime": uptime(&r.days), "days": (since..=today()).map(|d| r.day(d)).collect::<Vec<_>>() })).collect();
         return (StatusCode::OK, [(header::CACHE_CONTROL, "public, max-age=30")], axum::Json(json!({ "title": page.title, "up": rows.iter().all(|r| r.up != Some(false)), "items": items, "incidents": incidents }))).into_response();
     }
     let all_up = rows.iter().all(|r| r.up != Some(false));
@@ -667,6 +669,7 @@ pub(crate) async fn serve(apps: Arc<Apps>, page: Page, path: &str) -> Response {
     let mut list = String::new();
     for r in rows {
         let state = match r.up {
+            Some(true) if r.degraded => "<span class=slow>degraded</span>",
             Some(true) => "<span class=up>up</span>",
             Some(false) => "<span class=down>down</span>",
             None => "<span class=none>no data</span>",
@@ -688,7 +691,7 @@ pub(crate) async fn serve(apps: Arc<Apps>, page: Page, path: &str) -> Response {
          body{{margin:0;background:var(--bg);color:var(--fg);font:14px system-ui,sans-serif}}main{{max-width:720px;margin:0 auto;padding:40px 16px}}\
          h1{{font-size:22px;font-weight:600;letter-spacing:-.04em;margin:0 0 6px}}.all{{color:var(--muted);margin:0 0 28px}}ul{{list-style:none;margin:0;padding:0}}\
          li{{border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin:0 0 12px}}.row{{display:flex;justify-content:space-between;gap:12px;margin:0 0 10px}}\
-         .up{{color:var(--accent)}}.down{{color:var(--danger)}}.none{{color:var(--muted)}}.bars{{display:flex;gap:2px}}.bars i{{flex:1;height:28px;border-radius:2px;background:var(--none)}}\
+         .up{{color:var(--accent)}}.down{{color:var(--danger)}}.slow{{color:var(--fg)}}.none{{color:var(--muted)}}.bars{{display:flex;gap:2px}}.bars i{{flex:1;height:28px;border-radius:2px;background:var(--none)}}\
          .bars i.g{{background:var(--accent)}}.bars i.b{{background:var(--danger)}}.foot{{display:flex;justify-content:space-between;color:var(--muted);font-size:12px;margin-top:6px}}\
          .inc{{border:1px solid var(--line);border-radius:10px;padding:12px 16px;margin:0 0 12px}}.inc.open{{border-color:var(--danger)}}.inc.maint{{border-color:var(--accent)}}.inc .when{{color:var(--fg);margin:0 0 6px}}.inc h2{{font-size:14px;margin:0 0 6px}}.inc p{{color:var(--muted);margin:6px 0 0}}\
          h3{{font-size:13px;font-weight:600;margin:28px 0 10px}}footer{{color:var(--muted);font-size:12px;margin-top:24px}}</style><link rel=alternate type=application/atom+xml href=/feed.xml><main><h1>{t}</h1><p class=all>{all}</p>{plan}<ul>{list}</ul>{hist}<footer>Kept by roll · <a href=/feed.xml style=color:inherit>feed</a></footer></main>",
@@ -699,6 +702,8 @@ pub(crate) async fn serve(apps: Arc<Apps>, page: Page, path: &str) -> Response {
             "Nothing to show yet."
         } else if !all_up {
             "Something is down."
+        } else if rows.iter().any(|r| r.degraded) {
+            "Something is slow."
         } else if incidents.iter().any(|i| i["state"] == "maintenance" && i["resolved_at"].is_null()) {
             "Under scheduled maintenance."
         } else {
