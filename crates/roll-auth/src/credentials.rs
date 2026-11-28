@@ -573,67 +573,128 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// The guard and the scanners find each known credential format, and roll's own secrets, where
+    /// people and agents read it, at its place in the text; padding and look-alikes find nothing.
     #[test]
-    fn known_formats_are_found_where_others_read_and_nothing_else() {
-        let gh = format!("ghp_{}", "a1B2".repeat(9));
-        let at = |product: &str, args: Value| check(product, true, &args).map(|f| (f.kind, f.at));
-        assert_eq!(at("code", json!({ "body": format!("use {gh} to push") })), Some(("a GitHub token".to_string(), "arguments.body".to_string())));
-        assert_eq!(at("code", json!({ "files": [{ "content": "AKIAIOSFODNN7XQ2LMNP" }] })), Some(("an AWS access key".to_string(), "arguments.files[0].content".to_string())));
-        let body = "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW";
-        assert_eq!(at("code", json!({ "text": format!("-----BEGIN OPENSSH PRIVATE KEY-----\n{body}\n-----END OPENSSH PRIVATE KEY-----") })).map(|f| f.0), Some("a private key".to_string()));
-        // A database URL with its password, and a secret's share link with its key.
-        assert_eq!(at("code", json!({ "body": "DATABASE_URL=postgres://app:Xq7vR2mK9pLw4tZs@db.prod.example.net:5432/main" })).map(|f| f.0), Some(DB_URL.to_string()));
-        assert_eq!(at("workspace", json!({ "description": "cache: rediss://default:aB3dE5fG7hJ9kL1m@cache.internal:6379" })).map(|f| f.0), Some(DB_URL.to_string()));
-        let share = format!("https://roll.example/share/shr_{}#{}", "a2b3".repeat(6), "Zx9_".repeat(10) + "Q1-");
-        assert_eq!(at("code", json!({ "body": format!("open {share}") })).map(|f| f.0), Some(SHARE_LINK.to_string()));
-        // Where credentials belong, or a read: nothing.
-        assert_eq!(at("postgres", json!({ "sql": format!("-- {gh}") })), None);
-        assert_eq!(check("code", false, &json!({ "q": gh })), None);
-        // Things that look a little like one: a commit id, a UUID, a short prefix, prose.
-        for fine in ["9fceb02d0ae598e95dc970b74767f19372d61af8", "123e4567-e89b-12d3-a456-426614174000", "ghp_short", "sk_live_", "AKIA lowercase akiaiosfodnn7example", "rlt_notachecksummedtoken0000000000000000", "AKIAIOSFODNN7EXAMPLE", "if line == \"-----BEGIN RSA PRIVATE KEY-----\" { … } // \"-----END \"",
-            // Database URLs people write in docs and dev setups, and a share's id alone.
-            "postgres://postgres:postgres@localhost:5432/app", "postgres://app:Xq7vR2mK9pLw4tZs@127.0.0.1/main", "postgres://user:password@host/db", "mysql://root:${MYSQL_PASSWORD}@db/app",
-            "redis://:<your-password>@cache:6379", "postgres://app@db.prod.example.net/main", "https://user:Xq7vR2mK9pLw4tZs@example.com/", "shr_a2b3a2b3a2b3a2b3a2b3a2b3 was opened"] {
-            assert_eq!(at("code", json!({ "body": fine })), None, "{fine}");
+    fn credentials_are_found_where_others_read_and_nothing_else() {
+        {
+            let gh = format!("ghp_{}", "a1B2".repeat(9));
+            let at = |product: &str, args: Value| check(product, true, &args).map(|f| (f.kind, f.at));
+            assert_eq!(at("code", json!({ "body": format!("use {gh} to push") })), Some(("a GitHub token".to_string(), "arguments.body".to_string())));
+            assert_eq!(at("code", json!({ "files": [{ "content": "AKIAIOSFODNN7XQ2LMNP" }] })), Some(("an AWS access key".to_string(), "arguments.files[0].content".to_string())));
+            let body = "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW";
+            assert_eq!(at("code", json!({ "text": format!("-----BEGIN OPENSSH PRIVATE KEY-----\n{body}\n-----END OPENSSH PRIVATE KEY-----") })).map(|f| f.0), Some("a private key".to_string()));
+            // A database URL with its password, and a secret's share link with its key.
+            assert_eq!(at("code", json!({ "body": "DATABASE_URL=postgres://app:Xq7vR2mK9pLw4tZs@db.prod.example.net:5432/main" })).map(|f| f.0), Some(DB_URL.to_string()));
+            assert_eq!(at("workspace", json!({ "description": "cache: rediss://default:aB3dE5fG7hJ9kL1m@cache.internal:6379" })).map(|f| f.0), Some(DB_URL.to_string()));
+            let share = format!("https://roll.example/share/shr_{}#{}", "a2b3".repeat(6), "Zx9_".repeat(10) + "Q1-");
+            assert_eq!(at("code", json!({ "body": format!("open {share}") })).map(|f| f.0), Some(SHARE_LINK.to_string()));
+            // Where credentials belong, or a read: nothing.
+            assert_eq!(at("postgres", json!({ "sql": format!("-- {gh}") })), None);
+            assert_eq!(check("code", false, &json!({ "q": gh })), None);
+            // Things that look a little like one: a commit id, a UUID, a short prefix, prose.
+            for fine in ["9fceb02d0ae598e95dc970b74767f19372d61af8", "123e4567-e89b-12d3-a456-426614174000", "ghp_short", "sk_live_", "AKIA lowercase akiaiosfodnn7example", "rlt_notachecksummedtoken0000000000000000", "AKIAIOSFODNN7EXAMPLE", "if line == \"-----BEGIN RSA PRIVATE KEY-----\" { … } // \"-----END \"",
+                // Database URLs people write in docs and dev setups, and a share's id alone.
+                "postgres://postgres:postgres@localhost:5432/app", "postgres://app:Xq7vR2mK9pLw4tZs@127.0.0.1/main", "postgres://user:password@host/db", "mysql://root:${MYSQL_PASSWORD}@db/app",
+                "redis://:<your-password>@cache:6379", "postgres://app@db.prod.example.net/main", "https://user:Xq7vR2mK9pLw4tZs@example.com/", "shr_a2b3a2b3a2b3a2b3a2b3a2b3 was opened"] {
+                assert_eq!(at("code", json!({ "body": fine })), None, "{fine}");
+            }
+        }
+        {
+            let words = |s: &str| candidates(&json!({ "body": s })).unwrap().into_iter().map(|(w, _)| w).collect::<Vec<_>>();
+            assert_eq!(words("NODE_ENV=production region us-east-1 user postgres pw=Tr0ub4dor-Horse-77"), vec!["Tr0ub4dor-Horse-77"]);
+            let padding: String = (0..MAX_CANDIDATES + 1).map(|i| format!("Zq{i:06}Hy8Lw3Rt ")).collect();
+            assert!(candidates(&json!({ "body": padding })).is_none());
+        }
+        {
+            let gh = format!("ghp_{}", "a".repeat(36));
+            let key = format!("-----BEGIN PRIVATE KEY-----\n{}\n-----END PRIVATE KEY-----", "QUJD".repeat(20));
+            let text = format!("token = {gh}\naws AKIAIOSFODNN7EXAMPLE is the docs' one, AKIAZ2345678901234AB isn't\n{key}\nsk-ant-{}\n", "x".repeat(40));
+            let found = find_all(&text);
+            let kinds: Vec<&str> = found.iter().map(|m| m.kind).collect();
+            assert_eq!(kinds, ["a GitHub token", "an AWS access key", "a private key", "an Anthropic API key"]);
+            assert_eq!(&text[found[0].start..found[0].end], gh);
+            assert_eq!(&text[found[2].start..found[2].end], key, "a key's block, header to footer");
+            assert_eq!(kind_in(&text), Some("a private key"));
+            assert!(find_all("a plain sentence, production, us-east-1").is_empty());
+            // A database URL is found as the URL, so a warning points at it.
+            let url = "mongodb+srv://svc:Xq7vR2mK9pLw4tZs@cluster0.mongodb.net";
+            let text = format!("uri: \"{url}/app?retryWrites=true\"\n");
+            let found = find_all(&text);
+            assert_eq!((found.len(), &text[found[0].start..found[0].end]), (1, url));
+            // Bounded however much a text holds.
+            let many = format!("{gh} ").repeat(MAX_MATCHES + 50);
+            assert_eq!(find_all(&many).len(), MAX_MATCHES);
+        }
+        {
+            // Every prefix roll makes is one the guard and scanners know, checksummed.
+            for p in super::SECRET_PREFIXES {
+                let s = super::new_secret(p);
+                assert!(super::checksum_ok(&s), "{p}");
+                assert_eq!(super::kind_in(&format!("token: {s}")), Some(super::ROLL), "{p}");
+            }
         }
     }
 
-    #[test]
-    fn only_credential_like_words_are_scanned_and_padding_is_refused() {
-        let words = |s: &str| candidates(&json!({ "body": s })).unwrap().into_iter().map(|(w, _)| w).collect::<Vec<_>>();
-        assert_eq!(words("NODE_ENV=production region us-east-1 user postgres pw=Tr0ub4dor-Horse-77"), vec!["Tr0ub4dor-Horse-77"]);
-        let padding: String = (0..MAX_CANDIDATES + 1).map(|i| format!("Zq{i:06}Hy8Lw3Rt ")).collect();
-        assert!(candidates(&json!({ "body": padding })).is_none());
-    }
-}
-
-#[cfg(test)]
-mod prefix_tests {
-    /// Every prefix roll makes is one the guard and scanners know, checksummed.
-    #[test]
-    fn every_roll_secret_is_a_credential() {
-        for p in super::SECRET_PREFIXES {
-            let s = super::new_secret(p);
-            assert!(super::checksum_ok(&s), "{p}");
-            assert_eq!(super::kind_in(&format!("token: {s}")), Some(super::ROLL), "{p}");
-        }
-    }
 }
 
 #[cfg(test)]
 mod unstored_tests {
     use super::*;
 
+    /// What a pushed credential's notice says: a placeholder isn't one, an AWS key's account and
+    /// secret are read from it and what's near it, an allow list holds globs and fingerprints, and the
+    /// key it suggests is named from its variable or its kind.
     #[test]
-    fn placeholders_are_told_from_credentials() {
-        // Built from pieces: push protection scans the repo.
-        let live = ["sk_", "live_"].concat();
-        for fake in [format!("{live}{}", "x".repeat(24)), format!("{live}FAKE{}", "9aZ".repeat(7)), format!("ghp_{}test", "Ab1".repeat(10) + "Ab"), ["AKIA", "0000", "0000", "1234", "5678"].concat()] {
-            assert!(find_all(&fake).len() == 1 && placeholder(&fake), "{fake}");
+    fn a_pushed_credential_is_named_and_told_from_a_placeholder() {
+        {
+            // Built from pieces: push protection scans the repo.
+            let live = ["sk_", "live_"].concat();
+            for fake in [format!("{live}{}", "x".repeat(24)), format!("{live}FAKE{}", "9aZ".repeat(7)), format!("ghp_{}test", "Ab1".repeat(10) + "Ab"), ["AKIA", "0000", "0000", "1234", "5678"].concat()] {
+                assert!(find_all(&fake).len() == 1 && placeholder(&fake), "{fake}");
+            }
+            let real_looking = ["AKIA", "ROLLFIXTURE", "23456"].concat();
+            assert!(find_all(&real_looking).len() == 1 && !placeholder(&real_looking));
+            assert!(!placeholder(&format!("{live}51Hx9Q2aB7cD3eF5gH8jK")));
         }
-        let real_looking = ["AKIA", "ROLLFIXTURE", "23456"].concat();
-        assert!(find_all(&real_looking).len() == 1 && !placeholder(&real_looking));
-        assert!(!placeholder(&format!("{live}51Hx9Q2aB7cD3eF5gH8jK")));
+        {
+            let id = fake_aws_key_id(123_456_789_012);
+            assert_eq!(find_all(&id).first().map(|m| m.kind), Some("an AWS access key"));
+            assert_eq!(aws_account(&id).as_deref(), Some("123456789012"));
+            assert_eq!(aws_account(&fake_aws_key_id(52_310_077_262)).as_deref(), Some("052310077262"), "zero-padded to 12 digits");
+            // Old ids (AKIAI…, AKIAJ…) don't carry it; nor does anything else.
+            assert_eq!(aws_account("AKIAIOSFODNN7EXAMPLE"), None);
+            assert_eq!(aws_account("AKIA0123"), None);
+        }
+        {
+            // Built from pieces: push protection scans the repo.
+            let id = ["AKIA", "ROLLFIXTURE", "23456"].concat();
+            let secret = ["rollFixture", "SecretKey", "0123456789", "abcdefghij"].concat();
+            let text = format!("[default]\naws_access_key_id = {id}\nregion = us-east-1\naws_secret_access_key = {secret}\n");
+            let m = find_all(&text).into_iter().find(|m| m.kind == "an AWS access key").unwrap();
+            assert_eq!(aws_secret_near(&text, &m), Some(secret.as_str()));
+            // AWS's documented secret, or nothing near enough: no pair.
+            let docs = format!("{id}\nwJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\n");
+            assert_eq!(aws_secret_near(&docs, &find_all(&docs)[0]), None);
+            let far = format!("{id}{}{secret}\n", "\n".repeat(8));
+            assert_eq!(aws_secret_near(&far, &find_all(&far)[0]), None);
+        }
+        {
+            let fp = fingerprint("anything");
+            assert!(fp.starts_with("sha256:") && fp.len() == 31);
+            let a = Allow::parse(&format!("# fixtures\ntests/fixtures/**\n*.pem  # keys for tests\n{}\nsha256:nothex\n", fp.to_uppercase().replace("SHA256", "sha256")));
+            assert_eq!(a.paths, ["tests/fixtures/**", "*.pem"]);
+            assert!(a.fingerprints.contains(&fp));
+            assert_eq!(a.fingerprints.len(), 1);
+        }
+        {
+            assert_eq!(suggested_key("a Stripe live key", "const stripeKey = \""), "STRIPE_KEY");
+            assert_eq!(suggested_key("a GitHub token", "  \"token\": \""), "GITHUB_TOKEN");
+            assert_eq!(suggested_key("an AWS access key", "aws_access_key_id = "), "AWS_ACCESS_KEY_ID");
+            assert_eq!(suggested_key("an AWS access key", "curl -u "), "AWS_ACCESS_KEY_ID");
+            assert_eq!(env_read("src/pay.ts", "STRIPE_KEY"), "process.env.STRIPE_KEY");
+            assert_eq!(env_read("config.yml", "STRIPE_KEY"), "${STRIPE_KEY}");
+        }
     }
 
     /// An AWS key id carrying `account` (the encoding [`aws_account`] reads), built here: no real
@@ -645,76 +706,5 @@ mod unstored_tests {
         format!("AKIA{head}ROLLFX")
     }
 
-    #[test]
-    fn an_aws_key_ids_account_is_read_from_the_id() {
-        let id = fake_aws_key_id(123_456_789_012);
-        assert_eq!(find_all(&id).first().map(|m| m.kind), Some("an AWS access key"));
-        assert_eq!(aws_account(&id).as_deref(), Some("123456789012"));
-        assert_eq!(aws_account(&fake_aws_key_id(52_310_077_262)).as_deref(), Some("052310077262"), "zero-padded to 12 digits");
-        // Old ids (AKIAI…, AKIAJ…) don't carry it; nor does anything else.
-        assert_eq!(aws_account("AKIAIOSFODNN7EXAMPLE"), None);
-        assert_eq!(aws_account("AKIA0123"), None);
-    }
-
-    #[test]
-    fn an_aws_key_id_is_paired_with_the_secret_near_it() {
-        // Built from pieces: push protection scans the repo.
-        let id = ["AKIA", "ROLLFIXTURE", "23456"].concat();
-        let secret = ["rollFixture", "SecretKey", "0123456789", "abcdefghij"].concat();
-        let text = format!("[default]\naws_access_key_id = {id}\nregion = us-east-1\naws_secret_access_key = {secret}\n");
-        let m = find_all(&text).into_iter().find(|m| m.kind == "an AWS access key").unwrap();
-        assert_eq!(aws_secret_near(&text, &m), Some(secret.as_str()));
-        // AWS's documented secret, or nothing near enough: no pair.
-        let docs = format!("{id}\nwJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\n");
-        assert_eq!(aws_secret_near(&docs, &find_all(&docs)[0]), None);
-        let far = format!("{id}{}{secret}\n", "\n".repeat(8));
-        assert_eq!(aws_secret_near(&far, &find_all(&far)[0]), None);
-    }
-
-    #[test]
-    fn an_allow_list_holds_globs_and_fingerprints() {
-        let fp = fingerprint("anything");
-        assert!(fp.starts_with("sha256:") && fp.len() == 31);
-        let a = Allow::parse(&format!("# fixtures\ntests/fixtures/**\n*.pem  # keys for tests\n{}\nsha256:nothex\n", fp.to_uppercase().replace("SHA256", "sha256")));
-        assert_eq!(a.paths, ["tests/fixtures/**", "*.pem"]);
-        assert!(a.fingerprints.contains(&fp));
-        assert_eq!(a.fingerprints.len(), 1);
-    }
-
-    #[test]
-    fn a_key_is_named_from_its_variable_or_its_kind() {
-        assert_eq!(suggested_key("a Stripe live key", "const stripeKey = \""), "STRIPE_KEY");
-        assert_eq!(suggested_key("a GitHub token", "  \"token\": \""), "GITHUB_TOKEN");
-        assert_eq!(suggested_key("an AWS access key", "aws_access_key_id = "), "AWS_ACCESS_KEY_ID");
-        assert_eq!(suggested_key("an AWS access key", "curl -u "), "AWS_ACCESS_KEY_ID");
-        assert_eq!(env_read("src/pay.ts", "STRIPE_KEY"), "process.env.STRIPE_KEY");
-        assert_eq!(env_read("config.yml", "STRIPE_KEY"), "${STRIPE_KEY}");
-    }
 }
 
-#[cfg(test)]
-mod find_all_tests {
-    use super::*;
-
-    #[test]
-    fn finds_each_credential_with_its_place() {
-        let gh = format!("ghp_{}", "a".repeat(36));
-        let key = format!("-----BEGIN PRIVATE KEY-----\n{}\n-----END PRIVATE KEY-----", "QUJD".repeat(20));
-        let text = format!("token = {gh}\naws AKIAIOSFODNN7EXAMPLE is the docs' one, AKIAZ2345678901234AB isn't\n{key}\nsk-ant-{}\n", "x".repeat(40));
-        let found = find_all(&text);
-        let kinds: Vec<&str> = found.iter().map(|m| m.kind).collect();
-        assert_eq!(kinds, ["a GitHub token", "an AWS access key", "a private key", "an Anthropic API key"]);
-        assert_eq!(&text[found[0].start..found[0].end], gh);
-        assert_eq!(&text[found[2].start..found[2].end], key, "a key's block, header to footer");
-        assert_eq!(kind_in(&text), Some("a private key"));
-        assert!(find_all("a plain sentence, production, us-east-1").is_empty());
-        // A database URL is found as the URL, so a warning points at it.
-        let url = "mongodb+srv://svc:Xq7vR2mK9pLw4tZs@cluster0.mongodb.net";
-        let text = format!("uri: \"{url}/app?retryWrites=true\"\n");
-        let found = find_all(&text);
-        assert_eq!((found.len(), &text[found[0].start..found[0].end]), (1, url));
-        // Bounded however much a text holds.
-        let many = format!("{gh} ").repeat(MAX_MATCHES + 50);
-        assert_eq!(find_all(&many).len(), MAX_MATCHES);
-    }
-}

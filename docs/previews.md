@@ -574,6 +574,9 @@ behind the `Apps` trait:
     `PreviewRouter`, #278), which serves a roll-runtime service, and only for the project that
     holds the domain. Previews answers the 404 for a name it doesn't hold. rolld's API port
     serves the same names too (a node without apps' ingress).
+  - **Team access:** a ticket (`POST /v1/previews/{id}/visit`) to a name under the domain lands
+    on that name, at the domain's scheme; the preview's name under another project's domain gets
+    none.
   - **Changes:** the domain is read from roll apps at most once a minute. When it's verified,
     changed or removed, the project's runtime services' URLs move and every preview reports
     again, so the pull request's links follow.
@@ -2024,6 +2027,29 @@ land on the change.
   a note asked; the label names the engine ("WebKit, 390x844, after 1 step"). Chromium's run
   takes the rest. `a_note_says_how_its_reviewer_saw_the_page`; live, a Safari-on-iOS note after
   a click, cropped in WebKit.
+- What the reviewer saw, from their own browser (Jam's and Marker.io's screenshots): the note
+  form's "Attach my screen" asks the browser for this tab (`getDisplayMedia`,
+  `preferCurrentTab`), only on that click, never on its own. One frame is drawn to a canvas
+  with roll's card and buttons hidden (the picked element's outline stays), the capture stops
+  at once, and the frame is scaled to at most 1600 px a side and sent as WebP (JPEG where the
+  browser can't) to `POST /__roll/screen` on the preview's own host (from its own origin, the
+  visitor's cookie the credential, as `/__roll/notes`). A browser that refuses, or a reviewer
+  who says no, leaves the note as it was: it still posts. roll reads the picture by its own
+  bytes, never by its type: a PNG, JPEG or WebP of at most 1 MiB and 1600 by 1600, decoded whole,
+  or a 400 (413 past 1 MiB). It waits half an hour for its note (20 at most per preview for the
+  team, 20 per share link; a guest's only while their link's 10 notes an hour aren't spent, 429
+  after) under a one-use token: a guest's note carries it (`screen`) and keeps it as theirs;
+  for the team the page hands it to roll's window (`fb_screen`), which posts the note and then
+  attaches it (`POST …/notes/{note}/screen`, the note's own author only). It's kept as the
+  note's picture, in the crop's place (`GET …/notes/{note}/crop` with its own type and
+  `X-Roll-Crop-Own: true`; `crop_own` in the notes list), so the next screenshot run doesn't
+  crop that note, and a crop it was already taking never replaces it. The sheet's note, its
+  thread and the change's review show it as "Their own screen", and a public preview's pull
+  request comment links it as the crop's, except a guest's (or another outside reader's): the
+  pull request shows no image of theirs, as their words have none, and their picture is marked
+  outside (`X-Roll-Outside`) like the rest of their note. The page's code can draw what it
+  likes on its own tab, so this is the reviewer's view, not roll's proof of the page.
+  `a_reviewers_own_screen_is_kept_with_their_note`.
 - The open notes reach the pull request (Vercel's comments): the preview's own comment, updated
   in place, lists them (newest first, at most 10), each with its page, who and what as plain
   words (one line, markdown escaped: a note can't link, embed an image, mention or close
@@ -2148,10 +2174,11 @@ previews in it), the operator and admins see every project.
 | `DELETE /v1/previews/{id}/webhooks/{webhook}` | | 204: it lets nothing in from the next request |
 | `GET`/`PUT /v1/previews/{id}/env` | `{vars: {NAME: value \| null}}` (`null` removes; at most 100, 32 KiB each; a value may be `roll://ENV[/folder]/KEY`) | `{vars}`: the preview's own variables; its services redeploy with them. 403 for a reference to an environment other than the base without the caller's reveal on its folder; 400 for a malformed one or a look-alike |
 | `POST /v1/previews/{id}/approve` | `{head}` (the head looked at) | `Preview`: that head of a fork's pull request on a Git URL service runs (`pull.approved_head`); the next push waits again. 409 when the preview moved on to another head or isn't a fork's pull request. Admin in the permissions catalogue, and no MCP tool: letting outside code run with the project's data is a person's call |
-| `POST /v1/previews/{id}/visit` | `{to}` (a URL at one of the preview's service hosts) | `{url}`: a one-use way into a team-access preview (`access: "team"`) at `to`, good for a minute, for a person signed in to roll (a session; a token is a 403). 400 when the project's previews aren't `team` or `to` isn't the preview's; 403 for a person who may not open the project. Operator-only in the permissions catalogue: no grant ever gives one |
+| `POST /v1/previews/{id}/visit` | `{to}` (a URL at one of the preview's service hosts, under roll's preview domain or its project's own) | `{url}`: a one-use way into a team-access preview (`access: "team"`) at `to`'s host, good for a minute, for a person signed in to roll (a session; a token is a 403). 400 when the project's previews aren't `team` or `to` isn't the preview's; 403 for a person who may not open the project. Operator-only in the permissions catalogue: no grant ever gives one |
 | `POST /v1/previews/{id}/keep` | `{hours}` (0–720; 0 releases) | `Preview`: kept past its TTL until then (`kept_until`); a landed or closed change still ends it |
-| `GET /v1/previews/{id}/notes` | | `{notes: [{id, path, selector, note, by, at, replies: [{id, note, by, at}], crop, work?: {number, url}}]}`: the notes left on its pages that nobody has resolved, every page's (the latest 500); `crop`: a picture of its element is kept |
-| `GET /v1/previews/{id}/notes/{note}/crop` | | `image/png`: the note's element as a screenshot run cropped it from its page (`X-Roll-Crop-As`: how, when as its reviewer saw it); 404 until one has |
+| `GET /v1/previews/{id}/notes` | | `{notes: [{id, path, selector, note, by, at, replies: [{id, note, by, at}], crop, crop_as?, crop_own?, work?: {number, url}}]}`: the notes left on its pages that nobody has resolved, every page's (the latest 500); `crop`: a picture of it is kept, `crop_own` when its reviewer took it of their own tab |
+| `GET /v1/previews/{id}/notes/{note}/crop` | | `image/png`: the note's element as a screenshot run cropped it from its page (`X-Roll-Crop-As`: how, when as its reviewer saw it), or the picture its reviewer took of their own tab (`X-Roll-Crop-Own: true`; `image/png`, `image/jpeg` or `image/webp`; a guest's marked outside); 404 until there's one |
+| `POST /v1/previews/{id}/notes/{note}/screen` | `{screen}` (the `rsc_…` token `POST /__roll/screen` answered the page) | `{note, crop_own: true}`: the picture the note's reviewer took of their own tab kept as its picture. 403 for anyone but the note's author (the operator excepted); 404 for a note that isn't the change's or a token that's used, gone (half an hour) or a guest's. No MCP tool: a person's own step from roll's window |
 | `POST /v1/previews/{id}/notes/{note}/resolve` | | `{resolved}`: a note on the preview's page (its review's id) resolved, so the page stops listing it; 404 for a note that isn't the change's |
 | `POST /v1/previews/{id}/notes/{note}/work` | | `{number, url}`: the note made a work item on its change's repo by roll (a GitHub issue on a repo mirrored there, a guest's note excepted; labelled `preview-feedback`, a guest's words marked as outside the team's), said on the change; once a note (asked again, the same one; two callers at once make one, the second a 409 while it's made); 403 when the caller's grant (or a person's token's session) doesn't write the change's repo's code; 404 for a note that isn't the change's |
 | `GET /v1/previews/{id}/mail` | | `{mail: [{id, at, from, to, subject, size}]}`: what its services sent, caught (newest first, the last 50) |

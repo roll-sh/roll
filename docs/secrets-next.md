@@ -31,6 +31,26 @@ Left:
 - the forty-fifth review, after the test cut;
 - the `discord.post` step's DM path can still DM anyone who shares a server with roll's bot (roll code's).
 
+**Ranked, 2026-11-28 11:30** (after the forty-fourth review and the test cut; from a review of main cd16808b1 against Vault/OpenBao, Infisical, Doppler, AWS Secrets Manager, Akeyless and 1Password; the forty-fifth review runs alongside and adds its own):
+
+1. **The `discord.post` step DMs anyone who shares a server with roll's bot** (security, S; fixing in `fix/discord-dm-in-guild`).
+   - #1256 tied channels to the install's server, but a step's `user` still opens a DM with any Discord user id.
+   - Fix: the user must be a member of the install's server (`guild_member`) before the DM is opened.
+2. **A sensitive key a product may use once, by its owner's opt-in** (completeness and integration, M).
+   - #1238 refuses every sensitive key in `use_once`, so roll apps' Cloudflare DNS needs a plain key.
+   - AWS's resource policies and Vault's per-path policies let a key's owner name the one consumer.
+   - Fix: a tag the key's admin sets (`use:apps.dns`), checked with the caller's `reveal`, audited, never for an untrusted caller.
+3. **Per-key watching for key-scoped tokens** (completeness, M).
+   - #1257 says why a key-scoped token can't watch. A digest over just the token's keys (server, CLI, the SDKs' `watch`) would let it watch.
+4. **The `Debug` canary beyond roll-secrets** (hardening, S).
+   - rolld's clap `Args`, roll-edge and apps-control derive `Debug` over credential fields that nothing prints today. Run the same source scan over them, with a reviewed list.
+5. **`install.sh` and `install.ps1` pick the newest `cli-v*` release, prereleases included** (S).
+   - Filter `"prerelease": true`, and say so when `ROLL_VERSION` names one.
+6. **rolld's `auth` test is now the slowest part of `pnpm test:secrets`** (37–49 s; tests, S–M).
+   - It starts rolld for each case. One started rolld per binary, with the cases as requests, keeps the invariant at a fraction of the time.
+7. **People: time-boxed elevation and access requests for people** (completeness, L; the user's call, D13/D14/D16). Infisical's and Akeyless's access requests, Vault's control groups.
+8. **The root of trust beyond AWS KMS, and FIPS** (L; the user's call).
+
 **State, 2026-11-27 15:45.** The forty-third review is done. It found two live bugs, both fixed. Landed since 05:00, each with main's CI green and after a check of the merged tree wherever main had moved under it:
 - The forty-third product review's live bugs:
   - medium: a rolld with no `ROLL_ADMIN_TOKEN` (the guide's step 0 for an evaluation) answered any `Host`, so a web page could act as the operator through DNS rebinding, or open a shell over a WebSocket. Fixed by #1193 (fedf38742), where an open gate answers only loopback hosts and step 0 gets a token, and #1202 (0d628850d), where an open gate refuses a foreign `Origin` whatever the method, after roll MCP's review;
