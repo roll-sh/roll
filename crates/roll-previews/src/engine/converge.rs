@@ -2146,7 +2146,9 @@ impl Engine {
                 notes.reverse();
                 notes.truncate(10);
                 p.notes = notes.into_iter().map(|n| {
-                    let link = if n.crop { self.store.note_crop_link(&p.id, &n.id).ok().flatten() } else { None };
+                    // Not a picture someone outside the team sent of their own (a pull request shows no
+                    // image of theirs, as their words have none).
+                    let link = if n.crop && !(n.crop_own && n.outside) { self.store.note_crop_link(&p.id, &n.id).ok().flatten() } else { None };
                     (n, link)
                 }).collect();
             }

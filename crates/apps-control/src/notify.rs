@@ -11,13 +11,13 @@
 //! the tenant's choice: they're sealed, fetched through `net::client` (public addresses, no
 //! redirects, a timeout), HTTPS only, and what an answer says is read bounded.
 
-use crate::model::{Delivery, Event, NotifyTarget};
+use crate::model::{Alert, Delivery, Escalation, Event, NotifyTarget};
 use crate::{Apps, Error, Result};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
 /// What a target can ask for; a new one gets the two that need someone.
-pub const EVENTS: [&str; 43] = [
+pub const EVENTS: [&str; 44] = [
     "deploy.started",
     "deploy.failed",
     "deploy.base_updated",
@@ -60,6 +60,8 @@ pub const EVENTS: [&str; 43] = [
     "scale.out",
     "scale.in",
     "instance.crashed",
+    // Someone acknowledged an open alert (not by default; never an on-call page).
+    "alert.acked",
     // Who signed in to a gated environment, and who was turned away (for a SIEM; not by default).
     "visit.admitted",
     "visit.denied",
@@ -74,10 +76,18 @@ fn wants(events: &[String], kind: &str, data: &Value, oncall: bool) -> bool {
         "alert.resolved" => data["alert"].as_str().is_some_and(|a| events.iter().any(|e| e == a)),
         // An on-call target that pages on failed deploys hears the next good one: it closes them.
         "deploy.active" if oncall => events.iter().any(|e| e == "deploy.failed" || e == "deploy.active"),
+        "alert.acked" if oncall => false,
         k if k.starts_with("audit.") => !oncall && events.iter().any(|e| e == "audit"),
         k => events.iter().any(|e| e == k),
     }
 }
+
+/// The alerts that stay open until an event closes their key (an `alert.resolved`, or a deploy
+/// that goes live for a failed one): what's listed, acknowledged and escalated.
+pub const ALERT_KINDS: [&str; 13] = ["check.down", "heartbeat.missed", "deploy.failed", "alert.memory", "alert.cpu", "alert.metric", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "alert.route", "alert.slo", "alert.anomaly"];
+
+/// Open alerts listed at most.
+const MAX_ALERTS: usize = 100;
 
 /// Targets per project.
 const MAX_TARGETS: usize = 20;
@@ -89,7 +99,7 @@ impl Apps {
     /// answer this once.
     pub async fn add_target(self: &Arc<Self>, project: &str, body: Value) -> Result<Value> {
         let o = body.as_object().cloned().unwrap_or_default();
-        if let Some(k) = o.keys().find(|k| !["kind", "url", "events", "environments", "services", "previews", "routing_key", "api_key", "region"].contains(&k.as_str())) {
+        if let Some(k) = o.keys().find(|k| !["kind", "url", "events", "environments", "services", "previews", "routing_key", "api_key", "region", "escalate"].contains(&k.as_str())) {
             return Err(Error::BadRequest(format!("unknown field {k}")));
         }
         let kind = o.get("kind").and_then(Value::as_str).unwrap_or("webhook").to_string();
@@ -223,14 +233,24 @@ impl Apps {
             Some(Value::Bool(b)) => *b,
             Some(_) => return Err(Error::BadRequest("previews is true or false".into())),
         };
-        Ok((events, crate::store::TargetFilters { environments, services, previews }))
+        let escalate = match o.get("escalate") {
+            None => current.and_then(|c| c.escalate.clone()),
+            Some(Value::Null) => None,
+            Some(v) => {
+                let e: Escalation = serde_json::from_value(v.clone()).map_err(|_| Error::BadRequest("escalate is {after_min, to}: minutes (5–1440) and another target's id".into()))?;
+                let all = self.targets(project).await?;
+                check_escalation(&all, current.map(|c| c.id.as_str()), &e)?;
+                Some(e)
+            }
+        };
+        Ok((events, crate::store::TargetFilters { environments, services, previews, escalate }))
     }
 
-    /// `PATCH …/notifications/{nid}`: its events, environments, services and previews (what's
-    /// absent stays). Its URL and secret don't change: a new URL is a new target.
+    /// `PATCH …/notifications/{nid}`: its events, environments, services, previews and escalation
+    /// (what's absent stays). Its URL and secret don't change: a new URL is a new target.
     pub async fn update_target(self: &Arc<Self>, project: &str, id: &str, body: Value) -> Result<NotifyTarget> {
         let o = body.as_object().cloned().unwrap_or_default();
-        if let Some(k) = o.keys().find(|k| !["events", "environments", "services", "previews"].contains(&k.as_str())) {
+        if let Some(k) = o.keys().find(|k| !["events", "environments", "services", "previews", "escalate"].contains(&k.as_str())) {
             return Err(Error::BadRequest(format!("{k} can't be changed (a new URL is a new target)")));
         }
         let current = self.targets(project).await?.into_iter().find(|t| t.id == id).ok_or_else(|| Error::NotFound(format!("no notification target {id}")))?;
@@ -298,7 +318,7 @@ impl Apps {
         };
         let e = Event { seq: 0, at: code_sql::now_ms(), kind: "test".into(), service: String::new(), environment: String::new(), deployment: None, data: json!({}) };
         let delivery = format!("test_{}", crate::model::random(12));
-        let (code, error) = self.send(&t, &url, secret.as_deref(), &delivery, &e, "test", "this is a test from roll apps").await;
+        let (code, error) = self.send(&t, &url, secret.as_deref(), &delivery, &e, "test", "this is a test from roll apps", false).await;
         Ok(json!({ "ok": error.is_none(), "code": code, "error": error }))
     }
 
@@ -308,6 +328,7 @@ impl Apps {
             if self.deps.cluster.singleton("apps:notify") {
                 self.queue_page().await;
                 self.release_held().await;
+                self.escalate_due(code_sql::now_ms()).await;
                 self.deliver_due().await;
             }
             tokio::select! {
@@ -330,7 +351,7 @@ impl Apps {
         };
         let Ok(events) = self.db(move |s| s.events(cursor, 200)).await else { return };
         let Some(last) = events.last().map(|e| e.seq) else { return };
-        let (mut queued, mut held) = (Vec::new(), Vec::new());
+        let (mut queued, mut held, mut alerts) = (Vec::new(), Vec::new(), Vec::new());
         // Whether an environment is a preview's, looked up once per pass.
         let mut ephemeral: std::collections::HashMap<(String, String), bool> = std::collections::HashMap::new();
         for e in &events {
@@ -357,6 +378,16 @@ impl Apps {
                     b
                 }
             };
+            // Alerts open and close whatever's quiet (a silenced one is still open); a preview's
+            // aren't the team's to acknowledge.
+            if !preview && let Some((open, key, _)) = oncall_of(e) {
+                if open && ALERT_KINDS.contains(&e.kind.as_str()) {
+                    let about = self.describe(e).await.0;
+                    alerts.push(crate::store::AlertChange::Open { project: p.clone(), key, seq: e.seq, kind: e.kind.clone(), service: e.service.clone(), env: e.environment.clone(), about, at: e.at });
+                } else if !open {
+                    alerts.push(crate::store::AlertChange::Close { key, seq: e.seq, kind: e.kind.clone(), at: e.at });
+                }
+            }
             // A silence open when it happened: held back, never sent while it's quiet (a resolve
             // always is); one still open when the silence ends goes out then ([`Self::release_held`]).
             if self.silenced(&e.service, &e.environment, &e.kind, e.at).await {
@@ -369,7 +400,7 @@ impl Apps {
                 }
             }
         }
-        match self.db(move |s| s.queue_deliveries(&queued, &held, cursor, last)).await {
+        match self.db(move |s| s.queue_deliveries(&queued, &held, &alerts, cursor, last)).await {
             Ok(true) => {}
             Ok(false) => tracing::info!("apps: another node moved the notifications cursor; reading from there"),
             Err(e) => tracing::warn!(error = %e, "apps: queueing notifications failed; tried again"),
@@ -436,6 +467,57 @@ impl Apps {
         matches!(oncall_of(e), Some((true, ..))) && self.later_with_key(e, true).await
     }
 
+    /// Escalations due at `now` (Better Stack's escalation policies): each alert a target that
+    /// escalates was sent, still open and unacknowledged, goes to its `to` once, claimed in one
+    /// write with its delivery (a restart or another node never sends it twice). One whose
+    /// environment is silenced for its kind waits, looked at again in a minute.
+    pub async fn escalate_due(self: &Arc<Self>, now: i64) {
+        let Ok(due) = self.db(move |s| s.due_escalations(now, 50)).await else { return };
+        for (a, target) in due {
+            let (id, t) = (a.id.clone(), target.clone());
+            if self.silenced(&a.service, &a.environment, &a.kind, now).await {
+                let _ = self.db(move |s| s.defer_escalation(&id, &t, now + 60_000)).await;
+                continue;
+            }
+            if let Err(err) = self.db(move |s| s.claim_escalation(&id, &t)).await {
+                tracing::warn!(alert = %a.id, error = %err, "apps: an escalation wasn't claimed; tried again");
+            }
+        }
+    }
+
+    /// `GET …/projects/{project}/alerts`: its open alerts, newest first.
+    pub async fn alerts(self: &Arc<Self>, project: &str) -> Result<Vec<Alert>> {
+        let p = project.to_string();
+        self.db(move |s| s.open_alerts(&p, MAX_ALERTS)).await
+    }
+
+    /// `POST …/projects/{project}/alerts/{id}/ack`: idempotent (who acknowledged first stays);
+    /// a closed one is a conflict. Its escalations stop; `alert.acked` and the audit entry say so.
+    pub async fn ack_alert(self: &Arc<Self>, project: &str, id: &str, actor: Option<String>) -> Result<Alert> {
+        let (p, i, by) = (project.to_string(), id.to_string(), actor.clone().unwrap_or_else(|| "someone".into()));
+        let (a, acked) = self.db(move |s| s.ack_alert(&p, &i, &by)).await?;
+        if acked {
+            self.audit("alert.acked", &a.service, &a.environment, actor, json!({ "alert": a.id, "kind": a.kind })).await;
+        }
+        Ok(a)
+    }
+
+    /// The dashboard's page to acknowledge `e`'s alert, while it's open: signing in is what lets
+    /// someone act on it (a link carries no token).
+    async fn ack_link(self: &Arc<Self>, project: &str, e: &Event) -> Option<(String, String)> {
+        let web = self.cfg.web_url.clone()?;
+        let (true, key, _) = oncall_of(e)? else { return None };
+        if !ALERT_KINDS.contains(&e.kind.as_str()) {
+            return None;
+        }
+        let a = self.db(move |s| s.open_alert(&key)).await.ok()??;
+        if a.project != project {
+            return None;
+        }
+        let q: String = url::form_urlencoded::Serializer::new(String::new()).append_pair("project", project).append_pair("alert", &a.id).finish();
+        Some((a.id, format!("{web}/dashboard/apps/alerts?{q}")))
+    }
+
     /// `POST …/deliveries/{did}/redeliver`: a delivered or failed one sent again from its first
     /// try. Not an on-call target's event of an alert that a later one opened or closed since: a
     /// trigger would open a resolved incident again, a resolve close an open one.
@@ -470,7 +552,7 @@ impl Apps {
         use futures::StreamExt;
         // Claimed for longer than a try takes (10 s, eight at a time over at most 50).
         let Ok(due) = self.db(|s| s.due_deliveries(50, 120_000)).await else { return };
-        futures::stream::iter(due).for_each_concurrent(8, |(id, target, seq, attempts)| async move {
+        futures::stream::iter(due).for_each_concurrent(8, |(id, target, seq, attempts, escalated)| async move {
             let retry = |error: Option<&str>| error.and_then(|_| RETRY_S.get(attempts as usize)).map(|s| code_sql::now_ms() + s * 1000);
             let t = target.clone();
             let (t, url, secret) = match self.db(move |s| s.target_secrets(&t)).await {
@@ -490,8 +572,12 @@ impl Apps {
                 let _ = self.db(move |s| s.finish_delivery(&id, None, Some("the event is gone"), None)).await;
                 return;
             };
-            let (title, text) = self.describe(&e).await;
-            let (code, error) = self.send(&t, &url, secret.as_deref(), &id, &e, &title, &text).await;
+            let (mut title, mut text) = self.describe(&e).await;
+            if escalated {
+                title = format!("Escalated: {title}");
+                text = format!("{text} No one acknowledged it in time.");
+            }
+            let (code, error) = self.send(&t, &url, secret.as_deref(), &id, &e, &title, &text, escalated).await;
             let next = retry(error.as_deref());
             let _ = self.db(move |s| s.finish_delivery(&id, code, error.as_deref(), next)).await;
         })
@@ -659,6 +745,7 @@ impl Apps {
                     e.data["until"].as_i64().and_then(chrono::DateTime::from_timestamp_millis).map(|d| d.format("%H:%M UTC").to_string()).unwrap_or_default()
                 ),
             ),
+            "alert.acked" => (format!("Acknowledged: {}", e.data["about"].as_str().unwrap_or("an alert")), format!("{} acknowledged it; it stays open until it clears.", e.data["by"].as_str().unwrap_or("someone"))),
             "volume.backup_failed" => (format!("{what}: volume backup failed"), format!("The daily backup of its volume failed: {}. The last one that worked is still there.", e.data["error"].as_str().unwrap_or("no reason given"))),
             "alert.resolved" => {
                 let which = match e.data["alert"].as_str() {
@@ -728,14 +815,20 @@ impl Apps {
     /// A webhook is signed as roll code's are (`code_control::review::apps::signature`): the
     /// send time in seconds, so a retry passes a receiver's replay window, and the delivery's id.
     #[allow(clippy::too_many_arguments)]
-    async fn send(&self, t: &NotifyTarget, url: &str, secret: Option<&str>, delivery: &str, e: &Event, title: &str, text: &str) -> (Option<u16>, Option<String>) {
+    async fn send(self: &Arc<Self>, t: &NotifyTarget, url: &str, secret: Option<&str>, delivery: &str, e: &Event, title: &str, text: &str, escalated: bool) -> (Option<u16>, Option<String>) {
         let link = self.cfg.web_url.as_ref().filter(|_| !e.service.is_empty()).map(|w| format!("{w}/dashboard/apps/{}?env={}", e.service, e.environment));
+        // An open alert's acknowledge page (signing in required), for people's channels.
+        let (alert, ack) = match self.ack_link(&t.project, e).await {
+            Some((a, l)) => (Some(a), Some(l)),
+            None => (None, None),
+        };
         if t.kind == "email" {
             // The owner as they are now (a project handed over mails its new owner).
             let Some(mail) = self.mailbox() else { return (None, Some("email isn't set up on this node".into())) };
             let Some(owner) = self.project_owner(&t.project).await else { return (None, Some("the project has no owner with an account".into())) };
             let open = link.map(|l| format!("\n\nOpen it in roll: {l}")).unwrap_or_default();
-            let text = format!("{text}{open}\n\nYou get this because you own the project. Its notification settings in roll say what's sent, or remove this email.");
+            let ack = ack.map(|l| format!("\nAcknowledge it (stops its escalation): {l}")).unwrap_or_default();
+            let text = format!("{text}{open}{ack}\n\nYou get this because you own the project. Its notification settings in roll say what's sent, or remove this email.");
             return match mail.send(&owner, &format!("[roll] {title}"), &text).await {
                 Ok(()) => (None, None),
                 Err(err) => (None, Some(err.to_string())),
@@ -747,21 +840,24 @@ impl Apps {
         let body = match t.kind.as_str() {
             // Slack reads `<…>` as links and mentions (`<!channel>`) and `&` as an entity start:
             // a commit author or an error can't ping a channel or hide a link.
-            "slack" => json!({ "text": format!("*{}*\n{}{}", slack_escape(title), slack_escape(text), link.as_ref().map(|l| format!("\n<{l}|Open in roll>")).unwrap_or_default()) }),
-            "discord" => json!({ "content": format!("**{title}**\n{text}{}", link.as_ref().map(|l| format!("\n{l}")).unwrap_or_default()), "allowed_mentions": { "parse": [] } }),
+            "slack" => json!({ "text": format!("*{}*\n{}{}{}", slack_escape(title), slack_escape(text), link.as_ref().map(|l| format!("\n<{l}|Open in roll>")).unwrap_or_default(), ack.as_ref().map(|l| format!(" · <{l}|Acknowledge>")).unwrap_or_default()) }),
+            "discord" => json!({ "content": format!("**{title}**\n{text}{}{}", link.as_ref().map(|l| format!("\n{l}")).unwrap_or_default(), ack.as_ref().map(|l| format!("\nAcknowledge: {l}")).unwrap_or_default()), "allowed_mentions": { "parse": [] } }),
             // An Adaptive Card (what Teams' Workflows take): its text is never a mention.
             "teams" => {
                 let body = [json!({ "type": "TextBlock", "text": teams_escape(title), "weight": "Bolder", "wrap": true }), json!({ "type": "TextBlock", "text": teams_escape(text), "wrap": true })];
-                let actions = link.as_ref().map(|l| vec![json!({ "type": "Action.OpenUrl", "title": "Open in roll", "url": l })]).unwrap_or_default();
+                let mut actions = link.as_ref().map(|l| vec![json!({ "type": "Action.OpenUrl", "title": "Open in roll", "url": l })]).unwrap_or_default();
+                if let Some(l) = &ack {
+                    actions.push(json!({ "type": "Action.OpenUrl", "title": "Acknowledge", "url": l }));
+                }
                 json!({ "type": "message", "attachments": [{ "contentType": "application/vnd.microsoft.card.adaptive", "content": { "$schema": "http://adaptivecards.io/schemas/adaptive-card.json", "type": "AdaptiveCard", "version": "1.4", "body": body, "actions": actions } }] })
             }
             // Google Chat reads `<users/all>` as a mention and `<url|text>` as a link: neither
             // comes from what an event says.
             "googlechat" => {
                 let clean = |s: &str| s.replace(['<', '>'], "");
-                json!({ "text": format!("*{}*\n{}{}", clean(title), clean(text), link.as_ref().map(|l| format!("\n<{l}|Open in roll>")).unwrap_or_default()) })
+                json!({ "text": format!("*{}*\n{}{}{}", clean(title), clean(text), link.as_ref().map(|l| format!("\n<{l}|Open in roll>")).unwrap_or_default(), ack.as_ref().map(|l| format!("\n<{l}|Acknowledge>")).unwrap_or_default()) })
             }
-            _ => json!({ "type": e.kind, "at": e.at, "seq": e.seq, "service": e.service, "environment": e.environment, "deployment": e.deployment, "data": e.data, "title": title, "text": text, "url": link }),
+            _ => json!({ "type": e.kind, "at": e.at, "seq": e.seq, "service": e.service, "environment": e.environment, "deployment": e.deployment, "data": e.data, "title": title, "text": text, "url": link, "alert": alert, "ack_url": ack, "escalated": escalated }),
         };
         let bytes = serde_json::to_vec(&body).expect("JSON");
         let mut req = self.notify_client.post(url).header("content-type", "application/json");
@@ -816,7 +912,7 @@ fn oncall_of(e: &Event) -> Option<(bool, String, &'static str)> {
         "heartbeat.missed" => (true, key(&format!("heartbeat.missed/{}", e.data["heartbeat"].as_str()?)), "error"),
         // A deploy that worked closes the failed one's.
         "deploy.active" => (false, key("deploy.failed"), "info"),
-        "domain.active" => return None,
+        "domain.active" | "alert.acked" => return None,
         "crash_loop" | "spend.limit" => (true, key(&e.kind), "critical"),
         "deploy.failed" | "alert.errors" | "alert.slo" | "cron.failed" | "job.failed" | "volume.backup_failed" | "domain.tls_failed" | "domain.expired" => (true, key(&which(&e.kind, &e.data)), "error"),
         "form.submitted" => (true, format!("{}/{}", key(&e.kind), e.data["submission"].as_str().unwrap_or("")), "info"),
@@ -875,6 +971,30 @@ impl Apps {
     }
 }
 
+/// A target's escalation against the project's `targets`: 5–1440 minutes, to another of them
+/// (`me`: the one being changed, none for a new one), and no loop back to it through theirs.
+fn check_escalation(targets: &[NotifyTarget], me: Option<&str>, e: &Escalation) -> Result<()> {
+    if !(5..=1440).contains(&e.after_min) {
+        return Err(Error::BadRequest("escalate.after_min is 5–1440 minutes".into()));
+    }
+    if me == Some(e.to.as_str()) {
+        return Err(Error::BadRequest("escalate.to is another target, not this one".into()));
+    }
+    if !targets.iter().any(|t| t.id == e.to) {
+        return Err(Error::BadRequest(format!("escalate.to: the project has no notification target {}", e.to)));
+    }
+    // Following who escalates to whom from `to`: never back to `me` (at most every target once).
+    let mut at = Some(e.to.as_str());
+    for _ in 0..targets.len() {
+        let Some(id) = at else { break };
+        if Some(id) == me {
+            return Err(Error::BadRequest(format!("escalate.to: {} escalates back to this target (a loop)", e.to)));
+        }
+        at = targets.iter().find(|t| t.id == id).and_then(|t| t.escalate.as_ref()).map(|x| x.to.as_str());
+    }
+    Ok(())
+}
+
 /// Text for Slack's `mrkdwn`: `&`, `<` and `>` as entities, so nothing in it is a link or a
 /// mention.
 fn slack_escape(s: &str) -> String {
@@ -905,6 +1025,20 @@ mod tests {
         resolved["alert"] = "alert.slo".into();
         assert_eq!(key(ev("alert.resolved", resolved)).unwrap(), (false, opened.1.clone()));
         assert_ne!(opened.1, key(ev("alert.slo", serde_json::json!({}))).unwrap().1);
+    }
+
+    /// An escalation goes to another of the project's targets, in 5–1440 minutes, never round.
+    #[test]
+    fn an_escalation_names_another_target_and_never_loops() {
+        let t = |id: &str, to: Option<&str>| crate::model::NotifyTarget { id: id.into(), project: "prj_a".into(), kind: "slack".into(), host: String::new(), events: Vec::new(), environments: Vec::new(), services: Vec::new(), previews: false, escalate: to.map(|to| super::Escalation { after_min: 10, to: to.into() }), created_at: 0 };
+        let e = |to: &str, after_min| super::Escalation { after_min, to: to.into() };
+        let all = [t("ntf_a", None), t("ntf_b", Some("ntf_c")), t("ntf_c", Some("ntf_a"))];
+        assert!(super::check_escalation(&all, None, &e("ntf_b", 10)).is_ok(), "a new target can't be in a loop yet");
+        assert!(super::check_escalation(&all, Some("ntf_a"), &e("ntf_a", 10)).is_err(), "not itself");
+        assert!(super::check_escalation(&all, Some("ntf_a"), &e("ntf_x", 10)).is_err(), "not an unknown one");
+        assert!(super::check_escalation(&all, Some("ntf_a"), &e("ntf_b", 10)).is_err(), "a → b → c → a is a loop");
+        assert!(super::check_escalation(&all, Some("ntf_b"), &e("ntf_a", 4)).is_err(), "at least 5 minutes");
+        assert!(super::check_escalation(&all, Some("ntf_b"), &e("ntf_a", 1440)).is_ok());
     }
 
     #[test]
