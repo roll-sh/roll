@@ -176,7 +176,7 @@ async fn an_answer_cites_the_documents_it_retrieved() {
     doc(&c, "docs", "pw", r#"{"title":"Resetting your password","url":"https://acme.test/pw","body":"Open Settings, then Security, then Reset password.","tenant":"a"}"#).await;
     doc(&c, "docs", "bill", r#"{"title":"Invoices","url":"https://acme.test/bill","body":"Invoices are under Billing.","tenant":"a"}"#).await;
 
-    let (s, v, text) = call(&c, "POST", "/_roll/chat/help/_answer", r#"{"question":"How do I reset my password?","messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"Hello&#33; See&#32;docs.⁠example &#91;1&#93;"}]}"#).await;
+    let (s, v, text) = call(&c, "POST", "/_roll/chat/help/_answer", r#"{"question":"How do I reset my password?","messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"Hello&#33; See&#32;docs.\u2060example &#91;1&#93;"}]}"#).await;
     assert_eq!(s, 200, "{v:?}");
     // As sent: the model's text made literal (`[1]` as entities); citations read what it wrote.
     let sent_answer = search_es::xpack::chat::answer::sanitize(&ANSWER.concat(), None);
