@@ -3113,7 +3113,7 @@ calls name) is a 403, so no service can sign a call to another. Trust the exact 
 never `…:*`, which takes trusted previews' tokens too. Not yet: a per-request header for web
 services (Vercel's `x-vercel-oidc-token`): the URL is one local `GET`.
 `api.rs::an_instance_reads_its_oidc_token_for_an_allowed_audience`, and through the real issuer
-rolld's `secrets::tests::an_apps_instance_token_names_its_environment_and_an_untrusted_preview_gets_none`.
+rolld's `secrets::tests::a_service_gets_an_issuer_token_only_from_a_project_that_stands_for_it`.
 
 ## Runtime config
 
@@ -3808,7 +3808,8 @@ shown again, so it can't be set and is named instead. A linked service's private
 (`http://<name>.<env>.internal:<port>`) is pointed at a local tunnel to it, as the proxy above
 makes one, for as long as the command runs, so `roll apps exec -- npm run dev` reaches the API
 its web service links (Railway's `railway run`, Netlify's `netlify dev`); another `*.internal`
-value is said, as it only resolves inside roll. It exits with the command's exit code.
+value is said, as it only resolves inside roll. It exits with the command's exit code. Like `roll run`, it never hands the command roll's own credentials (inherited `ROLL_*` tokens,
+keys, passwords, secrets and URLs with a password in them); `--keep-roll-credentials` passes them on.
 
 `roll apps vars --pull [FILE]` (`vercel env pull`, `heroku config -s`) writes the same values to
 a `.env` file here instead (default `.env.local`), for a framework's own dev server: each line as

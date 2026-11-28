@@ -56,6 +56,8 @@ impl T {
             .current_dir(self.work.path())
             .env("ROLL_API_URL", &self.api)
             .env_remove("ROLL_API_KEY")
+            // A credential of roll's in the caller's shell, which `exec`'s command never gets.
+            .env("ROLL_FAKE_TOKEN", "fake-inherited-token")
             .stdin(Stdio::null())
             .output()
             .await
@@ -171,8 +173,8 @@ async fn settings_through_the_cli() {
     // A command here with the environment's variables, the platform's own left out, its exit code kept.
     // A variable that would steer this machine's programs (anyone who may write variables could set one) isn't set either.
     t.ok(&["vars", "-s", "site", "-p", "acme", "NODE_OPTIONS=--require=/tmp/evil.js"]).await;
-    let (code, out, err) = t.run(&["exec", "-s", "site", "-p", "acme", "--", "sh", "-c", "echo \"$MODE ${PORT:-no-port} ${KEY:-no-key} ${NODE_OPTIONS:-no-node-options}\"; exit 3"]).await;
-    assert_eq!((code, out.trim()), (Some(3), "prod no-port no-key no-node-options"), "{err}");
+    let (code, out, err) = t.run(&["exec", "-s", "site", "-p", "acme", "--", "sh", "-c", "echo \"$MODE ${PORT:-no-port} ${KEY:-no-key} ${NODE_OPTIONS:-no-node-options} ${ROLL_FAKE_TOKEN:-no-roll-token}\"; exit 3"]).await;
+    assert_eq!((code, out.trim()), (Some(3), "prod no-port no-key no-node-options no-roll-token"), "{err}");
     assert!(err.contains("not set here (sealed") && err.contains("KEY") && err.contains("steer") && err.contains("NODE_OPTIONS"), "{err}");
     // What a size costs before it's made, and what its week says (nothing yet).
     let q = t.json(&["quote", "--memory", "1024", "--min", "1"]).await;
