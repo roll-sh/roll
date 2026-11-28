@@ -60,6 +60,8 @@ pub fn router(engine: Arc<Engine>) -> Router {
             Router::new()
                 .route("/v1/previews/{id}/sleep", post(sleep))
                 .route("/v1/previews/{id}/wake", post(wake))
+                // Starting an earlier push again stops the oldest kept one's container.
+                .route("/v1/previews/{id}/pushes/{revision}/start", post(start_push))
                 .route("/v1/previews/{id}/logs", get(logs))
                 .route("/v1/previews/{id}/requests", get(requests))
                 // Its request log is kept on its holder too, and the replay asks through it.
@@ -889,6 +891,21 @@ async fn sleep(AxState(e): S, Path(id): Path<String>) -> crate::Result<Json<Prev
 async fn wake(AxState(e): S, Path(id): Path<String>) -> crate::Result<Json<Preview>> {
     check_id(&id)?;
     e.wake(&id).await.map(Json)
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+struct StartPushBody {
+    /// Which service's push at the revision, when several went at it.
+    service: Option<String>,
+}
+
+/// `POST …/pushes/{revision}/start`: an earlier push it no longer keeps, kept again (its link
+/// starts it on the next request), as its own 410 page's "Start this push again" does.
+async fn start_push(AxState(e): S, Path((id, revision)): Path<(String, String)>, who: Option<axum::Extension<roll_auth::SignedIn>>, grant: Option<axum::Extension<roll_auth::Grant>>, b: Bytes) -> crate::Result<Json<Preview>> {
+    check_id(&id)?;
+    let b: StartPushBody = body(&b)?;
+    e.start_push(&id, &revision, b.service.as_deref(), &asker(who, grant)).await.map(Json)
 }
 
 #[derive(Deserialize, Default)]

@@ -175,7 +175,10 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
   cookie or a person's session (not a share link, not the CI bypass), and at most once a minute
   a preview, keeps it again in place of the oldest kept push of that service (whose container goes),
   at the same link, and the next request starts it, on the preview's data (its own copy went
-  when it was dropped). A fork's earlier heads never start again
+  when it was dropped). The sheet ("Start again"), `roll preview start-push <preview> <revision>`
+  and roll MCP's `previews_start_push` do the same through `POST …/pushes/{revision}/start`, by
+  the preview's `gone` list, with the same limits (the caller's grant is the gate there, so a
+  public preview's too). A fork's earlier heads never start again
   (`engine.rs::earlier_pushes_stay_reachable_at_their_own_urls`,
   `runtime.rs::service_hosts_reach_their_containers`).
 - **A page loaded before a push keeps working** (Vercel's skew protection; roll apps'
@@ -2164,6 +2167,7 @@ previews in it), the operator and admins see every project.
 | `POST /v1/previews/{id}/sleep` | | `Preview`: stop its services now |
 | `POST /v1/previews/{id}/wake` | | `Preview`: start its services now |
 | `POST /v1/previews/{id}/reset` | `{resources?: ["postgres:prj_…"]}` | `Preview`: re-branch from the parents |
+| `POST /v1/previews/{id}/pushes/{revision}/start` | `{service?}` (which service's push, when several went at `revision`) | `Preview`: an earlier push it no longer keeps (`gone`) kept again in place of the oldest kept push of its service (whose container goes), at its own link, which starts it on the next request, on the preview's data; said in its activity ("ada started web's earlier push 8a again from roll"). The same rules as its 410 page's: at most once a minute a preview (409), a trusted preview's only (409 for a fork's), a service it still runs on roll's runtime (409 for a roll apps service's build: roll apps' own), 409 for one it still keeps, 404 for a revision that isn't one of its gone pushes (another preview's too), 400 when several services' went at it and `service` doesn't say which. Write, so a public preview's too (its page's button is a private one's only). Runs on the preview's holder. `roll preview start-push`, roll MCP's `previews_start_push`, the sheet's "Start again" |
 | `POST /v1/previews/{id}/rehearse` | | 202 `Preview`: its next converge rehearses the change's release on fresh, masked branches of its Postgres parents as they are now (`rehearsal`); 400 for a default branch's preview, 409 without a `release` or a Postgres branch |
 | `GET /v1/previews/{id}/restore-points` | | `{points: [{id, label, by, at, data}], max}`: oldest first, `data` the resources it holds (`postgres:prj_…`) |
 | `POST /v1/previews/{id}/restore-points` | `{label?}` (one line, 60 characters at most) | 201 `{id, label, by, at, data}`: its Postgres, NoSQL, Redis and stream data saved now; 409 while it isn't ready, past `max`, or with nothing to save |
@@ -2241,6 +2245,7 @@ type Preview = {
   outside?: true;                    // a fork's preview: its title and its code's words are outside text, which roll MCP's lockdown withholds (its error groups, its logs' answer, its traces, spans and routes carry it too)
   runs: string | null;                // the earlier head its services run (later pushes touched only ignored paths)
   earlier: {service: string; revision: string; url: string; share_url: string | null; at: number; own_data: string[]}[]; // earlier pushes, still reachable; own_data: the products it has its own copy of (as its head left them)
+  gone: {service: string; revision: string; at: number; startable: boolean}[]; // earlier pushes it no longer keeps (the latest 30, newest first; at: when it went): their links answer 410; startable (a trusted preview's, a service it still runs on roll's runtime): POST …/pushes/{revision}/start
   copies: {count: number; bytes: number; usd_month: number}; // the earlier pushes' own copies of its data, said apart (counted in cost)
   browser_checks: {service: string; name: string; state: "pending" | "passed" | "failed"; error: string | null; files: {service_id: string; environment: string} | null}[]; // production's browser checks on this head (roll apps); files: where a failure's screenshot and trace are kept
   browser_checks_rule: "check" | "required" | null; // the project's rule for them, when it's more than showing them
@@ -2911,7 +2916,7 @@ type Settings = {
   last seen, the service and its title, opening to its newest sample; the last hour, 6 or 24),
   plus a "Previews" overlay on the canvas that draws each
   preview's branches next to their parents.
-- **CLI**: `roll preview ls|show|open|create|rm|sleep|wake|refresh|reset|keep|accept|screenshot|share|env|connect|mail|notes|points|logs [-f]|activity|requests|visitors|settings|usage|bypass|wait|up|down|masks|errors|metrics|traces|hooks|shell|cp|forward|fetch|try|swap`.
+- **CLI**: `roll preview ls|show|open|create|rm|sleep|wake|refresh|reset|keep|start-push|accept|screenshot|share|env|connect|mail|notes|points|logs [-f]|activity|requests|visitors|settings|usage|bypass|wait|up|down|masks|errors|metrics|traces|hooks|shell|cp|forward|fetch|try|swap`.
   - `roll preview up [--project P] [--repo owner/name] [--name N] [--no-wait] [--timeout S] [--force]`
     previews a checkout's working tree as it is, as `netlify deploy` and `vercel deploy` do from a
     directory: uncommitted and untracked files included, what `.gitignore` leaves out left out.
@@ -3274,7 +3279,8 @@ In progress, each in a pull request of its own:
   GitHub issue closing resolves it; Jira and Asana through an automation trigger after);
 - the page's own review in the toolbar (Vercel's toolbar, Chromatic's UI Review: whether this
   page changed against main and what it adds, Accept opening roll);
-- an earlier push started again from the sheet, the CLI and MCP.
+- an earlier push started again from the sheet, the CLI and MCP (#1312: `POST
+  …/pushes/{revision}/start`, the preview's `gone`, `roll preview start-push`, `previews_start_push`).
 
 Landed from it: team access on a project's own preview domain (#1258, roll apps' side #1277), a
 live Previews list following the event feed (#1269), what a note's reviewer saw from their own

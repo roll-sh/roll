@@ -584,7 +584,7 @@ impl Engine {
     /// again, the oldest kept push of that service going in its place, and its link starts it
     /// on the next request (on the preview's data: its own copy went when it was dropped). A
     /// trusted preview's only: a fork's earlier heads don't run.
-    pub async fn restart_push(&self, gone: &crate::store::GonePush, by: &str) -> Result<String> {
+    pub async fn restart_push(&self, gone: &crate::store::GonePush, by: &str, from: &str) -> Result<String> {
         let r = self.store.row(&gone.preview)?;
         if r.desired == Desired::Deleted {
             return Err(Error::Conflict("the preview is being deleted".into()));
@@ -612,8 +612,27 @@ impl Engine {
         }
         let url = self.store.pinned(&r.id)?.into_iter().find(|p| p.service == gone.service && p.revision == gone.revision).map(|p| p.url).unwrap_or_default();
         let short: String = gone.revision.strip_prefix("cs_").unwrap_or(&gone.revision).chars().take(10).collect();
-        self.store.log(&r.id, &format!("{by} started {}'s earlier push {short} again from its link", gone.service))?;
+        self.store.log(&r.id, &format!("{by} started {}'s earlier push {short} again {from}", gone.service))?;
         Ok(url)
+    }
+
+    /// `POST …/pushes/{revision}/start`: [`Self::restart_push`] from roll (the sheet, `roll
+    /// preview start-push`, MCP) for one of this preview's gone pushes ([`crate::Preview::gone`])
+    /// at `revision` (of `service`, needed when several services' pushes at it went). The same
+    /// rules as its link's page, but the caller's grant is the gate, so a public preview's too.
+    pub async fn start_push(&self, id: &str, revision: &str, service: Option<&str>, by: &str) -> Result<crate::Preview> {
+        let gone: Vec<_> = self.store.gone_pushes(id)?.into_iter().filter(|(_, s, rev, _)| rev == revision && service.is_none_or(|w| w == s)).collect();
+        let (host, service) = match gone.as_slice() {
+            [] if self.store.pinned(id)?.iter().any(|p| p.revision == revision && service.is_none_or(|w| w == p.service)) => return Err(Error::Conflict(format!("the preview still keeps {revision}: open its link"))),
+            [] => return Err(Error::NotFound(format!("no earlier push {revision} the preview no longer keeps"))),
+            [(host, s, _, _)] => (host.clone(), s.clone()),
+            many => return Err(Error::BadRequest(format!("pushes of {} went at {revision}: name the service", many.iter().map(|g| g.1.as_str()).collect::<Vec<_>>().join(", ")))),
+        };
+        if host.starts_with("apps:") {
+            return Err(Error::Conflict(format!("{service} is a roll apps service: its earlier builds are roll apps' own")));
+        }
+        self.restart_push(&crate::store::GonePush { preview: id.to_string(), service, revision: revision.to_string(), current_url: None }, by, "from roll").await?;
+        self.store.preview(id)
     }
 
     /// A note a guest left through share link `share` (its `notes` on): posted on the change as

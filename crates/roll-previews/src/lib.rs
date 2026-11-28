@@ -484,6 +484,9 @@ pub struct Preview {
     /// Earlier pushes of the change's services, still reachable (newest first; the last
     /// [`store::PINNED_KEEP`] per service).
     pub earlier: Vec<Pinned>,
+    /// Earlier pushes it no longer keeps (the latest [`store::GONE_KEPT`], newest first): their
+    /// links answer 410, and a `startable` one starts again (`POST …/pushes/{revision}/start`).
+    pub gone: Vec<Gone>,
     /// Production's browser checks on this head (roll apps runs them on a preview's deployment as
     /// it goes live): each one's state, read until each has run.
     pub browser_checks: Vec<BrowserCheck>,
@@ -1676,6 +1679,18 @@ pub struct Pinned {
     /// The data products it has its own copy of (as its head left them); the rest it shares with
     /// the preview.
     pub own_data: Vec<Kind>,
+}
+
+/// An earlier push its preview no longer keeps ([`Preview::gone`]).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Gone {
+    pub service: String,
+    pub revision: String,
+    /// When it stopped being kept.
+    pub at: i64,
+    /// It can start again ([`engine::Engine::start_push`]): a trusted preview's, of a service it
+    /// still runs on roll's runtime (a roll apps build is roll apps' own).
+    pub startable: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]

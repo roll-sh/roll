@@ -97,6 +97,17 @@ pub enum Preview {
     Wake { preview: String },
     /// Redeploy whatever isn't at the revision it should run.
     Refresh { preview: String },
+    /// Start an earlier push it no longer keeps again (`show`'s "gone" ones): kept in place of the
+    /// oldest kept push of its service, its link starting it on the next request. At most once a
+    /// minute a preview.
+    StartPush {
+        preview: String,
+        /// The push's revision (`cs_…`, as `show` lists it).
+        revision: String,
+        /// Which service's push, when several went at that revision.
+        #[arg(long)]
+        service: Option<String>,
+    },
     /// Keep it past its TTL for a while (7 days unless --hours; at most 720); --release lets its
     /// rules decide again. A landed or closed change still ends it.
     Keep {
@@ -825,6 +836,11 @@ fn print_preview(p: &Value) {
         let own = if own.is_empty() { String::new() } else { format!("  (own data: {})", own.join(", ")) };
         println!("earlier  {} at {}  {}{own}", s(&x["service"]), rev.trim_start_matches("cs_").chars().take(10).collect::<String>(), s(&x["share_url"]));
     }
+    for x in p["gone"].as_array().into_iter().flatten() {
+        let rev = s(&x["revision"]);
+        let how = if x["startable"].as_bool() == Some(true) { format!("  (roll preview start-push {} {rev})", s(&p["id"])) } else { String::new() };
+        println!("gone     {} at {}{how}", s(&x["service"]), rev.trim_start_matches("cs_").chars().take(10).collect::<String>());
+    }
     for svc in p["services"].as_array().into_iter().flatten() {
         // The link with the access token when the preview is private: the one that opens it.
         let url = svc["share_url"].as_str().or(svc["url"].as_str()).unwrap_or("-");
@@ -1154,6 +1170,7 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
             body["reason"] = json!(reason);
             api.post(&format!("/v1/previews/{preview}/visual/refuse"), body).await?
         }
+        Preview::StartPush { preview, revision, service } => api.post(&format!("/v1/previews/{preview}/pushes/{}/start", urlencoding::encode(&revision)), json!({ "service": service })).await?,
         Preview::Keep { preview, hours, release } => api.post(&format!("/v1/previews/{preview}/keep"), json!({ "hours": if release { 0 } else { hours } })).await?,
         Preview::Share { preview, hours, label, notes, list, revoke } => {
             let path = format!("/v1/previews/{preview}/shares");
