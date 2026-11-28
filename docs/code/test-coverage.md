@@ -476,6 +476,7 @@ envelope `{event, delivery, webhook, repo{id, full_name, default_branch, visibil
 | `retry_agent_automation_run` | a cancelled run goes on | `mcp.rs::automation_tools_map_onto_their_routes` |
 | `enable_agent_automation` | on again by id | `mcp.rs::automation_tools_map_onto_their_routes` |
 | `disable_agent_automation` | off by name, as `GET` of it then shows | `mcp.rs::automation_tools_map_onto_their_routes` |
+| `delete_agent_automation` | deleted by name, its route then 404 | `mcp.rs::automation_tools_map_onto_their_routes` |
 | `get_agent_automation_catalog` | same JSON as `GET …/automations/catalog` | `mcp.rs::automation_tools_map_onto_their_routes` |
 | `test_agent_automation` | same JSON as `POST …/automations/test` for the spec and event | `mcp.rs::automation_tools_map_onto_their_routes` |
 | `list_agent_sandboxes` | same JSON as `GET …/sandboxes` | `mcp.rs::automation_tools_map_onto_their_routes` |
