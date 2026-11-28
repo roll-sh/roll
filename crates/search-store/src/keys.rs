@@ -291,6 +291,40 @@ pub fn state_key(cluster: &str, v: Version) -> String {
     format!("{CLUSTER_PREFIX}{cluster}/state/{v}.json.zst")
 }
 
+/// A reset in progress (`Store::begin_reset`): under the state prefix, which loading lists
+/// anyway, so a load notices it at no extra cost. Neither name parses as a state version.
+pub fn reset_key(cluster: &str) -> String {
+    format!("{CLUSTER_PREFIX}{cluster}/state/reset.json")
+}
+
+
+/// What became of the cluster's last reset (`Store::reset_outcome`).
+pub fn reset_outcome_key(cluster: &str) -> String {
+    format!("{CLUSTER_PREFIX}{cluster}/state/reset-outcome.json")
+}
+
+/// The commit points a reset in progress applies, copied under the cluster it resets.
+pub fn reset_copies_prefix(cluster: &str) -> String {
+    format!("{CLUSTER_PREFIX}{cluster}/reset/")
+}
+
+/// Everything the reset recorded at `at_ms` wrote besides its intent: its copies and its state.
+pub fn reset_dir(cluster: &str, at_ms: u64) -> String {
+    format!("{CLUSTER_PREFIX}{cluster}/reset/{at_ms}/")
+}
+
+/// The state the reset recorded at `at_ms` writes last.
+pub fn reset_state_key(cluster: &str, at_ms: u64) -> String {
+    format!("{CLUSTER_PREFIX}{cluster}/reset/{at_ms}/state.zst")
+}
+
+/// One shard's commit point the reset recorded at `at_ms` applies (garbage collection keeps what
+/// it names, WAL ranges included, as for a shard's latest commit point). Each reset's keys are its
+/// own, so removing an earlier one's leftovers never removes a later one's copy.
+pub fn reset_copy_key(cluster: &str, at_ms: u64, shard: &ShardId) -> String {
+    format!("{CLUSTER_PREFIX}{cluster}/reset/{at_ms}/{}/{}.json", shard.index_uuid, shard.shard)
+}
+
 pub fn shards_prefix(cluster: &str) -> String {
     format!("{CLUSTER_PREFIX}{cluster}/i/")
 }
@@ -350,7 +384,7 @@ pub const TOMBSTONE_SUFFIX: &str = ".deleted.json";
 
 /// A generation in a shard's history: a commit point, or the tombstone that ends it. Orders by
 /// version alone.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ShardVersion {
     pub version: Version,
     pub deleted: bool,
@@ -432,6 +466,12 @@ pub enum ClusterObject<'a> {
     Manifest { cluster: &'a str, index_uuid: &'a str, shard: u32, version: Version, deleted: bool },
     /// A pinned commit point (`crate::Store::write_pin`).
     Pin { cluster: &'a str, name: &'a str, shard: u32 },
+    /// A commit point a reset in progress applies (`crate::Store::begin_reset`).
+    ResetCopy { cluster: &'a str, index_uuid: &'a str, shard: u32 },
+    /// A reset in progress (its copies are kept while it is).
+    ResetIntent { cluster: &'a str },
+    /// The state a reset recorded (`reset/<at>/state.zst`), removed with its copies.
+    ResetState { cluster: &'a str },
 }
 
 pub fn parse_cluster_key(key: &str) -> Option<ClusterObject<'_>> {
@@ -440,6 +480,9 @@ pub fn parse_cluster_key(key: &str) -> Option<ClusterObject<'_>> {
     if let Some(file) = rest.strip_prefix("state/") {
         if file.contains('/') {
             return None;
+        }
+        if file == "reset.json" {
+            return Some(ClusterObject::ResetIntent { cluster });
         }
         return Some(ClusterObject::State { cluster, version: parse_version(file, ".json.zst")? });
     }
@@ -450,6 +493,21 @@ pub fn parse_cluster_key(key: &str) -> Option<ClusterObject<'_>> {
             return None;
         }
         return Some(ClusterObject::Pin { cluster, name, shard: shard.parse().ok()? });
+    }
+    if let Some(rest) = rest.strip_prefix("reset/") {
+        let (at, rest) = rest.split_once('/')?;
+        if at.is_empty() || !at.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        if rest == "state.zst" {
+            return Some(ClusterObject::ResetState { cluster });
+        }
+        let (index_uuid, file) = rest.split_once('/')?;
+        let shard = file.strip_suffix(".json")?;
+        if index_uuid.is_empty() || shard.is_empty() || !shard.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        return Some(ClusterObject::ResetCopy { cluster, index_uuid, shard: shard.parse().ok()? });
     }
     let rest = rest.strip_prefix("i/")?;
     let mut parts = rest.split('/');

@@ -23,7 +23,7 @@ pub enum BackendKind {
     Dynamodb,
 }
 
-#[derive(Args, Clone, Debug)]
+#[derive(Args, Clone)]
 pub struct ClusterArgs {
     /// Where membership and leases live (default: postgres with a cluster secret, else memory).
     #[arg(id = "roll_cluster_backend", long = "cluster-backend", env = "ROLL_CLUSTER_BACKEND", value_enum)]
@@ -57,15 +57,30 @@ pub struct ClusterArgs {
     /// product. roll code keeps its data there unless `--code-database` names another.
     #[arg(id = "roll_system_database", long = "system-database", env = "ROLL_SYSTEM_DATABASE", hide_env_values = true)]
     pub system_database: Option<String>,
-    /// Connections this node may open to the system database, across every product on it:
-    /// rolld splits them between the products' pools ([`DbBudget`]). Unset: each product's own
-    /// default (about 59 with every product on). Size it so nodes × budget, with a deploy's extra
-    /// nodes, stays under the database's `max_connections`.
+    /// Connections this node may open to the system database, across every product on it: a
+    /// hard cap ([`cap_system_db`]), and rolld splits it between the products' pools
+    /// ([`DbBudget`]). Unset: each product's own default (about 59 with every product on). Size
+    /// it so nodes × budget, with a deploy's extra nodes, stays under the database's
+    /// `max_connections`.
     #[arg(long = "system-db-connections", env = "ROLL_SYSTEM_DB_CONNECTIONS")]
     pub system_db_connections: Option<usize>,
 }
 
-/// How many system-database connections each product's pool may open on this node.
+/// Cap the connections this node opens to the system database at `ROLL_SYSTEM_DB_CONNECTIONS`,
+/// across every pool and LISTEN connection of every product (`code_sql::limit_connections`):
+/// one with every pool at its [`DbBudget`] share would go over it, since each pool keeps at least
+/// one. roll queues' metadata client isn't a code-sql pool, so its connection comes off the top.
+/// Before any product connects.
+pub fn cap_system_db(args: &ClusterArgs, on: crate::products::Products) -> anyhow::Result<()> {
+    let (Some(total), Some(url)) = (args.system_db_connections, args.system_database.as_deref().filter(|u| !u.is_empty())) else { return Ok(()) };
+    let queues = usize::from(on.on(crate::products::Product::Queues));
+    code_sql::limit_connections(url, total.saturating_sub(queues).max(1))?;
+    Ok(())
+}
+
+/// How many system-database connections each product's pool may open on this node: each pool's
+/// own ceiling. Together they may add up to more than the budget; [`cap_system_db`] holds the
+/// node to it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DbBudget {
     /// Each of roll code's two pools (its store and its control plane).

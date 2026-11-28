@@ -193,6 +193,7 @@ roll-intercept = { path = "crates/roll-intercept" }
 roll-secrets = { path = "crates/roll-secrets" }
 roll-secrets-chain = { path = "crates/roll-secrets-chain" }
 roll-secrets-ref = { path = "crates/roll-secrets-ref" }
+roll-debug-scan = { path = "crates/roll-debug-scan" }
 roll-keyshares = { path = "crates/roll-keyshares" }
 code-store = { path = "crates/code-store" }
 code-git = { path = "crates/code-git" }

@@ -24,7 +24,7 @@ use std::time::Duration;
 use tokio::net::TcpListener;
 use tracing::info;
 
-#[derive(Args, Clone, Debug)]
+#[derive(Args, Clone)]
 pub struct QueuesArgs {
     /// Disable the queues broker.
     #[arg(long = "no-queues", env = "ROLL_QUEUES_DISABLED", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]

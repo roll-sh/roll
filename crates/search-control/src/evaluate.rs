@@ -9,7 +9,7 @@
 //! Each becomes one `_rank_eval` call on the index, its requests the judged queries rendered
 //! through it, so the cluster checks and runs them as it runs any search of that index.
 //!
-//! Nothing here stores anything: judgments come in the request.
+//! Judgments come in the request, or from a stored list (`judgments_list`, [`crate::judgments`]).
 
 use serde_json::{Map, Value, json};
 
@@ -60,6 +60,9 @@ pub const APPLICATION_QUERY_PARAM: &str = "query_string";
 #[derive(Clone, Debug, PartialEq)]
 pub struct Spec {
     pub judgments: Vec<Judgment>,
+    /// The stored list the judgments come from (`judgments_list`): `judgments` is empty until the
+    /// route reads it.
+    pub list: Option<String>,
     pub configurations: Vec<Configuration>,
     /// `_rank_eval`'s `metric`.
     pub metric: Value,
@@ -76,7 +79,7 @@ fn only(m: &Map<String, Value>, what: &str, keys: &[&str]) -> Result<(), String>
     }
 }
 
-fn parse_judgment(v: &Value, i: usize) -> Result<Judgment, String> {
+pub(crate) fn parse_judgment(v: &Value, i: usize) -> Result<Judgment, String> {
     let Some(m) = v.as_object() else { return Err(bad(format!("[judgments][{i}] is an object {{query, ratings}}"))) };
     only(m, &format!("[judgments][{i}]"), &["query", "ratings"])?;
     let query = m.get("query").and_then(Value::as_str).filter(|q| !q.is_empty() && q.len() <= 1024).ok_or_else(|| bad(format!("[judgments][{i}][query] is text of 1 to 1,024 bytes")))?;
@@ -155,20 +158,34 @@ fn parse_configuration(v: &Value, i: usize) -> Result<Configuration, String> {
     Ok(Configuration { name: name.to_string(), template, params, query_param, application: None })
 }
 
-/// Parses an `evaluate` body: `{judgments: [{query, ratings: [{_id, rating, _index?}]}],
-/// configurations: [{name, request | template, query_param?}] (one or two), metric?}`, the
-/// metric `_rank_eval`'s (by default nDCG at 10).
-pub fn parse(body: &[u8]) -> Result<Spec, String> {
-    let v: Value = serde_json::from_slice(body).map_err(|e| bad(format!("the body isn't JSON: {e}")))?;
-    let Some(m) = v.as_object() else { return Err(bad("the body is an object {judgments, configurations, metric?}")) };
-    only(m, "the body", &["judgments", "configurations", "metric"])?;
-    let Some(js) = m.get("judgments").and_then(Value::as_array).filter(|j| !j.is_empty()) else {
+/// The judged queries of a `judgments` list (`[{query, ratings: [{_id, rating, _index?}]}]`, at
+/// most [`MAX_QUERIES`] of [`MAX_RATINGS`]).
+pub(crate) fn parse_judgments(v: Option<&Value>) -> Result<Vec<Judgment>, String> {
+    let Some(js) = v.and_then(Value::as_array).filter(|j| !j.is_empty()) else {
         return Err(bad("[judgments] is a list of {query, ratings}"));
     };
     if js.len() > MAX_QUERIES {
         return Err(bad(format!("[judgments] holds {} queries: at most {MAX_QUERIES}", js.len())));
     }
-    let judgments = js.iter().enumerate().map(|(i, j)| parse_judgment(j, i)).collect::<Result<Vec<_>, _>>()?;
+    js.iter().enumerate().map(|(i, j)| parse_judgment(j, i)).collect()
+}
+
+/// Parses an `evaluate` body: `{judgments: [{query, ratings: [{_id, rating, _index?}]}] |
+/// judgments_list, configurations: [{name, request | template, query_param?}] (one or two),
+/// metric?}`, the metric `_rank_eval`'s (by default nDCG at 10).
+pub fn parse(body: &[u8]) -> Result<Spec, String> {
+    let v: Value = serde_json::from_slice(body).map_err(|e| bad(format!("the body isn't JSON: {e}")))?;
+    let Some(m) = v.as_object() else { return Err(bad("the body is an object {judgments, configurations, metric?}")) };
+    only(m, "the body", &["judgments", "judgments_list", "configurations", "metric"])?;
+    let (judgments, list) = match (m.get("judgments"), m.get("judgments_list")) {
+        (j, None) => (parse_judgments(j)?, None),
+        (None, Some(Value::String(name))) => {
+            crate::judgments::index_name(name).map_err(bad)?;
+            (Vec::new(), Some(name.clone()))
+        }
+        (None, Some(_)) => return Err(bad("[judgments_list] is a stored judgment list's name")),
+        (Some(_), Some(_)) => return Err(bad("the judgments come in [judgments] or from a stored [judgments_list], one of them")),
+    };
     let Some(cs) = m.get("configurations").and_then(Value::as_array).filter(|c| (1..=2).contains(&c.len())) else {
         return Err(bad("[configurations] is a list of one or two {name, request | template}"));
     };
@@ -181,7 +198,7 @@ pub fn parse(body: &[u8]) -> Result<Spec, String> {
         Some(Value::Object(o)) if o.len() == 1 => Value::Object(o.clone()),
         Some(_) => return Err(bad("[metric] names one of _rank_eval's metrics: {\"dcg\": {\"k\": 10, \"normalize\": true}}, precision, recall, mean_reciprocal_rank or expected_reciprocal_rank")),
     };
-    Ok(Spec { judgments, configurations, metric })
+    Ok(Spec { judgments, list, configurations, metric })
 }
 
 /// Whether `index` names one index, alias or data stream (no pattern, list or exclusion): a
@@ -306,6 +323,9 @@ pub fn answer(spec: &Spec, answers: &[Value]) -> Value {
         per_query.push(s);
     }
     let mut out = json!({ "metric": spec.metric, "queries": spec.judgments.len(), "configurations": configurations });
+    if let Some(l) = &spec.list {
+        out["judgments_list"] = json!(l);
+    }
     if let [a, b] = per_query.as_slice() {
         let mut changed: Vec<(usize, f64, f64)> = Vec::new();
         let mut unchanged = 0usize;

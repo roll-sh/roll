@@ -2749,6 +2749,34 @@ async fn one_pusher_spends_its_share_and_made_up_pushers_only_the_tokens_budget(
     }
 }
 
+/// The candidates a scanner may try (what stops a scan token brute-forcing stored values through
+/// `POST …/scan`): a pusher's half of its token's minute, the token's across every pusher it names.
+/// The caps are lowered for the test; the constants are the defaults.
+#[tokio::test]
+async fn a_scanners_candidates_are_capped_per_pusher_and_per_token() {
+    let api = Api::new().await;
+    api.secrets.set_scan_candidates(100, 300);
+    let scan = |pusher: &str, n: usize| json!({ "candidates": (0..n).map(|i| format!("fake-candidate-{i:08}")).collect::<Vec<_>>(), "pusher": pusher, "refs": ["refs/heads/main"] });
+    let minute = || api.db.now_ms().unwrap() / 60_000;
+    for attempt in 0.. {
+        let started = minute();
+        let token = api.token(json!({ "name": format!("hook-{attempt}"), "actions": ["scan"] }));
+        let alice = api.req(Method::POST, "/scan", Some(scan("alice", 50)), Some(&token)).await.0;
+        let alice_more = api.req(Method::POST, "/scan", Some(scan("alice", 1)), Some(&token)).await;
+        let bob = api.req(Method::POST, "/scan", Some(scan("bob", 50)), Some(&token)).await.0;
+        let carol = api.req(Method::POST, "/scan", Some(scan("carol", 1)), Some(&token)).await;
+        if minute() != started && attempt < 3 {
+            continue;
+        }
+        assert_eq!((alice, bob), (StatusCode::OK, StatusCode::OK));
+        let said = alice_more.1["error"].as_str().unwrap_or_default();
+        assert!(alice_more.0 == StatusCode::TOO_MANY_REQUESTS && said.contains("candidates tried a minute") && said.contains("for pusher alice"), "{alice_more:?}");
+        let said = carol.1["error"].as_str().unwrap_or_default();
+        assert!(carol.0 == StatusCode::TOO_MANY_REQUESTS && said.contains("across every pusher its hook names"), "{carol:?}");
+        break;
+    }
+}
+
 /// A login on the break-glass list is a pusher as one hook's token names it: `alice` is refused
 /// until a hook has named alice, then bound to that hook's token (a scan-only one), not to a
 /// reveal+scan token that named alice too, so that token can't break glass; the answer names the
@@ -7261,7 +7289,7 @@ async fn a_frozen_folder_answers_423_to_readers_and_lets_its_admins_through() {
 /// A reference named for one request and kept by nothing (roll apps' Cloudflare token): read
 /// once as the caller, audited as their use of it naming the resource, under `bind_ref`'s checks
 /// (reveal there, no untrusted caller), with no maker recorded, audited with the fixed host it
-/// goes to; never a sensitive key, even for that host.
+/// goes to; a sensitive key only for that host, by its folder admin's opt-in for that one use.
 #[tokio::test]
 async fn a_reference_read_once_reads_as_the_caller_and_is_audited_as_theirs() {
     use roll_secrets::{Refusal, ResourceRef};
@@ -7277,20 +7305,37 @@ async fn a_reference_read_once_reads_as_the_caller_and_is_audited_as_theirs() {
         (s.caller_of(false, None, Some(&grant)).unwrap(), id)
     };
     let (prod, id) = token("production");
-    let once = s.use_once(&web, "roll://production/CF_TOKEN", &prod, "writing a domain's records", None).unwrap();
+    let once = s.use_once(&web, "roll://production/CF_TOKEN", &prod, "apps.dns", "writing a domain's records", None).unwrap();
     assert_eq!(once.value.expose(), "fake-cf");
     let audit = api.ok(Method::GET, "/audit?action=secrets.use", None).await;
     assert_eq!(audit[0]["actor"].as_str(), Some(format!("token:{id}").as_str()), "{audit}");
     assert!(audit[0]["summary"].as_str().unwrap().contains("apps:service:web"), "{audit}");
-    let untrusted = s.untrusted(&api.project, &prod).unwrap();
     let cf = Some("https://api.cloudflare.com/client/v4");
-    for (caller, reference, to) in [(&token("staging").0, "roll://production/CF_TOKEN", cf), (&prod, "roll://production/CF_SENSITIVE", None), (&prod, "roll://production/CF_SENSITIVE", cf), (&untrusted, "roll://production/CF_TOKEN", None), (&untrusted, "roll://production/CF_SENSITIVE", cf)] {
-        let refused = s.use_once(&web, reference, caller, "writing a domain's records", to).unwrap_err();
+    let summary = || async { api.ok(Method::GET, "/audit?action=secrets.use", None).await[0]["summary"].as_str().unwrap().to_string() };
+    s.use_once(&web, "roll://production/CF_TOKEN", &prod, "apps.dns", "writing a domain's records", cf).unwrap();
+    assert!(summary().await.ends_with(", sent only to https://api.cloudflare.com/client/v4"));
+
+    // A sensitive key: only once its folder's admin opts it in for the one use (a writer can't),
+    // audited as both.
+    let refused = s.use_once(&web, "roll://production/CF_SENSITIVE", &prod, "apps.dns", "writing a domain's records", cf).unwrap_err();
+    assert!(matches!(refused, Refusal::Unusable(_)), "{refused}");
+    let opt_in = json!({ "ops": [{ "op": "set", "key": "CF_SENSITIVE", "tags": ["sensitive", "use-apps-dns"] }] });
+    let writer = api.token(json!({ "name": "writer", "actions": ["read", "reveal", "write"] }));
+    let (status, body) = api.req(Method::POST, "/environments/production/changes", Some(opt_in.clone()), Some(&writer)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    api.ok(Method::POST, "/environments/production/changes", Some(opt_in)).await;
+    let wrote = api.ok(Method::GET, "/audit?action=secrets.write", None).await;
+    assert!(wrote[0]["summary"].as_str().unwrap().ends_with("; CF_SENSITIVE opted in for use-apps-dns"), "{wrote}");
+    let once = s.use_once(&web, "roll://production/CF_SENSITIVE", &prod, "apps.dns", "writing a domain's records", cf).unwrap();
+    assert_eq!(once.value.expose(), "fake-cf-kept");
+    assert!(summary().await.ends_with(", a sensitive key, opted in for apps.dns, sent only to https://api.cloudflare.com/client/v4"));
+
+    // Still never: another use, no fixed host, another environment's token, an untrusted caller.
+    let untrusted = s.untrusted(&api.project, &prod).unwrap();
+    for (caller, reference, use_id, to) in [(&prod, "roll://production/CF_SENSITIVE", "apps.mail", cf), (&prod, "roll://production/CF_SENSITIVE", "apps.dns", None), (&token("staging").0, "roll://production/CF_TOKEN", "apps.dns", cf), (&untrusted, "roll://production/CF_TOKEN", "apps.dns", None), (&untrusted, "roll://production/CF_SENSITIVE", "apps.dns", cf)] {
+        let refused = s.use_once(&web, reference, caller, use_id, "writing a domain's records", to).unwrap_err();
         assert!(matches!(refused, Refusal::NotAllowed(_) | Refusal::Unusable(_)) && !refused.to_string().contains("fake-"), "{refused}");
     }
-    s.use_once(&web, "roll://production/CF_TOKEN", &prod, "writing a domain's records", cf).unwrap();
-    let audit = api.ok(Method::GET, "/audit?action=secrets.use", None).await;
-    assert!(audit[0]["summary"].as_str().unwrap().ends_with("sent only to https://api.cloudflare.com/client/v4"), "{audit}");
 }
 
 #[tokio::test]
@@ -9351,7 +9396,7 @@ async fn public_certificates_are_ordered_in_the_background_renewed_and_a_failed_
     assert_eq!(*ca.orders.lock().unwrap().last().unwrap(), (vec!["www.roll-fake.test".to_string(), "*.roll-fake.test".to_string()], true));
     let events = api.ok(Method::GET, &format!("/events?after={start}&kinds=rotation.succeeded"), None).await;
     assert_eq!(events["events"].as_array().unwrap().len(), 1, "one credential, four keys: {events}");
-    assert_eq!(events["events"][0]["data"]["sharing"].as_array().unwrap().len(), 4, "{events}");
+    assert_eq!(events["events"][0]["data"]["sharing"].as_object().unwrap().values().map(|k| k.as_array().unwrap().len()).sum::<usize>(), 4, "{events}");
     assert_eq!(api.secrets.sweep_due_syncs().unwrap(), (1, 0));
     let pushed = api.certs.pushes.lock().unwrap().clone();
     assert_eq!((pushed.len(), pushed[1].0.as_str(), pushed[1].3.as_deref()), (2, v["TLS_CERT"].as_str().unwrap(), Some("arn:fake:1")), "the renewed certificate, to the same target");

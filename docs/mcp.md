@@ -72,8 +72,8 @@ tokens instead of ~56k. A product too big for some clients on its own splits int
 toolsets: apps is `apps.observe` (logs, metrics, errors, traces, vitals, CSP reports, SLOs, usage, push,
 events: 21 tools, ~3.2k tokens), `apps.deploy` (deploys, promotions, rollbacks, jobs, cron runs,
 restarts: 39, ~5.9k), `apps.configure` (services, environments, variables, domains, volumes,
-forms, links, runtime config: 30, ~5.5k) and `apps.project` (drains, notifications, limits, the
-status page, the preview domain: 29, ~3.9k); secrets is `secrets.values` (keys, folders,
+forms, links, runtime config: 30, ~5.5k) and `apps.project` (drains, notifications, open alerts,
+limits, the status page, the preview domain: 31, ~4.1k); secrets is `secrets.values` (keys, folders,
 environments, changes, change and value requests, promotion, imports: 49, ~8.5k),
 `secrets.security` (audit, findings, leaks, reach, insights, shares, rotations, the backup
 schedule: 15, ~2.2k) and `secrets.integrations` (transit, leases, CAs, clouds, syncs and the other
@@ -1307,7 +1307,12 @@ previews are listed once those products are on.
 | `search_delete_site_verification` | Drop a site's verification. | `DELETE /v1/search/clusters/{cluster}/site-verifications/{site}` |
 | `search_refresh` | Make what was just indexed searchable now. | `POST /v1/search/clusters/{cluster}/indices/{index}/refresh` |
 | `search_analyze` | The tokens an index's analyzer makes of some text, or a chain tried inline (`tokenizer`, `filter`, `char_filter`, `explain`) (read). | `POST /v1/search/clusters/{cluster}/indices/{index}/analyze` |
-| `search_evaluate` | One or two search configurations (a body with `{{query}}`, or a template) scored against judged queries by `_rank_eval` (nDCG@10 by default), and compared query by query: the difference and the queries that got better or worse (read). | `POST /v1/search/clusters/{cluster}/indices/{index}/evaluate` |
+| `search_evaluate` | One or two search configurations (a body with `{{query}}`, or a template) scored against judged queries, inline or a stored list by name (`judgments_list`), by `_rank_eval` (nDCG@10 by default), and compared query by query: the difference and the queries that got better or worse (read). | `POST /v1/search/clusters/{cluster}/indices/{index}/evaluate` |
+| `search_list_judgments` | The cluster's stored judgment lists: source, queries, ratings, when built. | `GET /v1/search/clusters/{cluster}/judgments` |
+| `search_get_judgments` | A stored judgment list's judged queries, in `search_evaluate`'s shape. | `GET /v1/search/clusters/{cluster}/judgments/{name}` |
+| `search_put_judgments` | Make or replace a stored judgment list (an index, `roll-judgments-<name>`). | `PUT /v1/search/clusters/{cluster}/judgments/{name}` |
+| `search_judgments_from_clicks` | Make or replace a stored judgment list from an index's click analytics (COEC, for queries with at least `min_searches` searches; counts only). | `POST /v1/search/clusters/{cluster}/judgments/{name}/_from_clicks` |
+| `search_delete_judgments` | Delete a stored judgment list and its index. | `DELETE /v1/search/clusters/{cluster}/judgments/{name}` |
 | `search_add_document` | Index a document under a new id. | `POST /v1/search/clusters/{cluster}/indices/{index}/docs` |
 | `search_bulk` | Index, update or delete many documents (NDJSON); deleting is delete. | `POST /v1/search/clusters/{cluster}/indices/{index}/bulk` |
 | `search_delete_by_query` | Delete every document that matches a query, at most `max_docs`, stopping or going on past conflicts. | `POST /v1/search/clusters/{cluster}/indices/{index}/delete_by_query` |
@@ -1482,6 +1487,7 @@ previews are listed once those products are on.
 | `apps_delete_environment` | Delete an environment with its deploys and domains. | `DELETE /v1/apps/services/{id}/environments/{env}` |
 | `apps_link` | Give a service a roll resource's connection variables (reveal on the resource). | `PUT /v1/apps/services/{id}/links/{kind}/{ref}` |
 | `apps_unlink` | Stop giving a service a linked resource's variables. | `DELETE /v1/apps/services/{id}/links/{kind}/{ref}` |
+| `apps_rotate_link` | A new credential for a link: its environments redeployed with it, the old one revoked once nothing runs with it. | `POST /v1/apps/services/{service}/links/{kind}/{ref}/rotate` |
 | `apps_list_silences` | An environment's alert silences open now. | `GET /v1/apps/services/{id}/environments/{env}/silences` |
 | `apps_silence_alerts` | Quiet an environment's alerts until a time (events kept, resolves still sent). | `POST /v1/apps/services/{id}/environments/{env}/silences` |
 | `apps_end_silence` | End an alert silence early. | `DELETE /v1/apps/services/{id}/environments/{env}/silences/{sid}` |
@@ -1511,11 +1517,13 @@ previews are listed once those products are on.
 | `apps_list_project_services` | The services in one workspace project. | `GET /v1/apps/projects/{project}/services` |
 | `apps_list_notifications` | Where a project's deploy, crash and preview events are sent (webhook, Slack, Discord, email; the URL's host only). | `GET /v1/apps/projects/{project}/notifications` |
 | `apps_add_notification` | Notify a webhook, Slack, Discord, the project's owner by email, PagerDuty (`routing_key`) or Opsgenie (`api_key`) of a project's events; URLs and keys are stored sealed and never shown again (and redacted from the audit log, #586). | `POST /v1/apps/projects/{project}/notifications` |
-| `apps_update_notification` | Change which events, environments and services a notification gets: given ones replace. | `PATCH /v1/apps/projects/{project}/notifications/{nid}` |
+| `apps_update_notification` | Change which events, environments and services a notification gets, and where its unacknowledged alerts escalate: given ones replace. | `PATCH /v1/apps/projects/{project}/notifications/{nid}` |
 | `apps_delete_notification` | Stop sending a project's events there. | `DELETE /v1/apps/projects/{project}/notifications/{nid}` |
 | `apps_test_notification` | Send a test event now (not retried): whether it arrived. | `POST /v1/apps/projects/{project}/notifications/{nid}/test` |
 | `apps_notification_deliveries` | A notification's last 50 deliveries, newest first: what was sent and whether it arrived. | `GET /v1/apps/projects/{project}/notifications/{nid}/deliveries` |
 | `apps_redeliver_notification` | Send a delivered or failed delivery's event again, from its first try (its delivery id kept). Not an on-call event a later one undid. | `POST /v1/apps/projects/{project}/notifications/{nid}/deliveries/{did}/redeliver` |
+| `apps_list_alerts` | A project's open alerts, newest first: what each is about, who acknowledged it, whether it escalated. | `GET /v1/apps/projects/{project}/alerts` |
+| `apps_ack_alert` | Acknowledge an open alert so it isn't escalated (idempotent; a closed one is a conflict). | `POST /v1/apps/projects/{project}/alerts/{aid}/ack` |
 | `apps_list_drains` | Where a project's logs are sent (the URL's host only). | `GET /v1/apps/projects/{project}/drains` |
 | `apps_add_drain` | Send every matching service's logs out of roll: an HTTPS endpoint (signed; its signing secret comes back once), an OTLP collector, syslog over TLS, or an S3 bucket (apps #580; the AWS keys go as headers, which the audit log redacts), or the project's own roll storage bucket with nothing to paste (`bucket`, apps #590), or a data stream of the project's own roll search cluster as ECS documents with an append-only key (`search`). | `POST /v1/apps/projects/{project}/drains` |
 | `apps_update_drain` | Change what a drain sends or its headers: given ones replace (a new URL is a new drain). | `PATCH /v1/apps/projects/{project}/drains/{did}` |
@@ -1626,15 +1634,13 @@ From a 2026-11-24 gap review (every tool run as an agent would against a fresh r
 
 From a 2026-11-26 comparison (the spec's anniversary post, Claude's connector docs, Atlassian's, Stripe's and GitHub's changelogs; no core SEP went final since 2026-11-15):
 
-1. **The access/MCP tests made fast (this PR).** After #1266's cut, every roll-mcp test process
-   still spent about 5 s in a debug build matching each tool against the catalogue (`PREPARED`):
-   `catalog::by_path` allocated for every row it tried, and each tool looked its route up six times.
-   Rows are now scored without allocating (the same row wins, checked on two million row and path
-   pairs) and each tool is looked up once: `PREPARED` 0.3 s, roll-mcp's unit tests 6.0 s → 2.0 s,
-   `tests/mcp.rs` 8.2 s → 4.5 s. The gate's lookups under catch-all routes (storage, tasks) do the
-   same less work. Fixed waits on the audit writer became waits for its rows. roll code's
-   `create_repo` said a repository is private by default; the route makes it public (#1263's open
-   item), and both repo-creating tools now say so.
+1. **roll code's reviewer learnings, an outsider's left out (this PR).** Until #639 a resolved
+   thread's learning took its latest reply, whoever wrote it, and every learning goes into the
+   reviewer's prompt: an outsider's words stored then still steered every later review. One whose
+   thread shows it came from an outside comment (or whose thread is gone) is now left out of
+   reviews and marked `outside` on `GET …/learnings`, and `list_review_learnings` maps onto it
+   (lockdown withholds the marked ones). That closes roll code's last `no tool yet` line;
+   `delete_agent_automation` closed the other (#1304).
    - **The operator's call:** a signed-in person's cookie on `/v1/code/mcp` runs tools anonymously
      (public reads only), in every revision, because tool calls forward no cookie. Forwarding it
      would widen what a session's tools reach, so it waits for a decision.
@@ -1729,7 +1735,7 @@ From a 2026-11-26 comparison (the spec's anniversary post, Claude's connector do
    stateless and search mode (`?tools=search`) covers clients that can't take the list; "remember this browser"; a preset that reveals development's values without asking
    (#354); a connection-level `?project=` (only a token's rules bound a project; a default that
    some tools can't honour would look like a boundary).
-16. **Landed 2026-11-26 to 28:** roll code's `/v1/code/mcp` speaks 2026-07-28 itself, its rules shared with roll-mcp in `roll_auth::mcp`, 131 conformance checks passing (#1263); the access/MCP tests one per flow, 166 to 95 with every security invariant kept (#1266); every tool-less credential route is one the gate protects, which found `PUT /v1/previews/{id}/env` answering every value to a grant that may only write (#1267); a `previews.event` stream hears events as they're recorded (#1275); lends naming their key hand and remember that key (#1246, with a review's fixes in #1251); `previews_replay` (#1233); the official MCP conformance suite as `pnpm test:mcp-conformance` and the 2026-07-28 gaps it found (#1231); structured authorization denials (SEP-2643) on every refusal by the gate and on tasks held while a person decides (#1218, #1221); `previews_note_to_work` (#1217); a forward's signed decision says when it passed on an approval (#1210); a body the gate decides from is the JSON object (imports: array) the route reads, closing write decided for admin or delete SQL and CQL sent as an array, and a replacing `.env` import needs delete and write (#1208); a secret lent at an environment's root approved once, its key on the card, and previews' webhook list and revoke tools (#1201); fixes from a review of #1182 and #1186 (a rule stored with `//` reaches nothing, `/api/` is `/api`, the check endpoint and import sources take folders as the gate does) and resolve, diff and `.env` import decided by their body's folder, with one folder parser for roll secrets and the gate (#1195); a missing document names itself and its index, `review_preview` reads `main_on_change` (#1191); a rule's index never holds an exclusion, which reached what it
+16. **Landed 2026-11-26 to 28:** `delete_agent_automation` on roll code's MCP (#1304); `rolld --test auth` 35-37 s → 18-23 s, the edge probed over shared connections eight at a time (#1295); catalogue lookups without per-row allocation and each tool's route looked up once (`PREPARED` 5 s → 0.3 s in a debug build), fixed waits on the audit writer, and roll code's repo tools saying a repository is public unless asked (#1285); roll code's `/v1/code/mcp` speaks 2026-07-28 itself, its rules shared with roll-mcp in `roll_auth::mcp`, 131 conformance checks passing (#1263); the access/MCP tests one per flow, 166 to 95 with every security invariant kept (#1266); every tool-less credential route is one the gate protects, which found `PUT /v1/previews/{id}/env` answering every value to a grant that may only write (#1267); a `previews.event` stream hears events as they're recorded (#1275); lends naming their key hand and remember that key (#1246, with a review's fixes in #1251); `previews_replay` (#1233); the official MCP conformance suite as `pnpm test:mcp-conformance` and the 2026-07-28 gaps it found (#1231); structured authorization denials (SEP-2643) on every refusal by the gate and on tasks held while a person decides (#1218, #1221); `previews_note_to_work` (#1217); a forward's signed decision says when it passed on an approval (#1210); a body the gate decides from is the JSON object (imports: array) the route reads, closing write decided for admin or delete SQL and CQL sent as an array, and a replacing `.env` import needs delete and write (#1208); a secret lent at an environment's root approved once, its key on the card, and previews' webhook list and revoke tools (#1201); fixes from a review of #1182 and #1186 (a rule stored with `//` reaches nothing, `/api/` is `/api`, the check endpoint and import sources take folders as the gate does) and resolve, diff and `.env` import decided by their body's folder, with one folder parser for roll secrets and the gate (#1195); a missing document names itself and its index, `review_preview` reads `main_on_change` (#1191); a rule's index never holds an exclusion, which reached what it
    excluded at the gate and in search's scoped principal (#1182, from the re-check of search #1111);
    the root folder spelled `//` is the root, so the 8-hour caps hold and a secrets folder has one
    spelling, refused at the gate where secrets would refuse it (#1186, from roll secrets' 43rd

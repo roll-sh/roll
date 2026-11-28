@@ -12,6 +12,10 @@
 //! - **Clicks** come from Elasticsearch's own `search_click` analytics events
 //!   (`POST _application/analytics/<collection>/event/search_click`): the clicked document's
 //!   index, the search's query and, when the event lists the results, the document's position.
+//! - **Shown and clicked at each position** ([`Shown`]): for judgments from clicks (COEC), each
+//!   search counts an impression for its first [`MAX_RANK`] hits by position, in each hit's own
+//!   index, and a click on a document counts in its cell. Counts only, for queries the bucket's
+//!   top list holds, at most [`MAX_CELLS`] a query.
 //! - **Aggregated in place, bounded.** Each index has one [`Bucket`] per hour: exact totals
 //!   and two bounded heavy-hitter lists ([`TopQueries`], Space-Saving), one of every query and
 //!   one of queries that found nothing. A query searched more than `searches / capacity` times in
@@ -49,6 +53,16 @@ pub const MAX_PENDING_HOURS: usize = 48;
 pub const MAX_PENDING_BYTES: usize = 4 << 20;
 /// Variants a cluster keeps counts of between two passes.
 pub const MAX_PENDING_VARIANTS: usize = 1_024;
+/// Positions (1-based) whose impressions a search counts: OpenSearch's implicit judgments'
+/// default `maxRank`.
+pub const MAX_RANK: u32 = 20;
+/// (document, position) cells a query keeps in a bucket.
+pub const MAX_CELLS: usize = 32;
+/// Bytes of a document id a cell takes (a longer id isn't counted).
+pub const MAX_DOC_ID: usize = 512;
+/// What a cell costs beyond its document id, against [`MAX_PENDING_BYTES`] (its position,
+/// counts and the map's own share).
+const CELL_BYTES: usize = 48;
 
 /// What one query saw in a bucket.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -105,11 +119,13 @@ impl QueryStats {
 pub struct TopQueries {
     cap: usize,
     map: HashMap<Box<str>, QueryStats>,
+    /// The query the last [`TopQueries::slot`] evicted, for the bucket to forget its cells.
+    evicted: Option<Box<str>>,
 }
 
 impl TopQueries {
     pub fn new(cap: usize) -> TopQueries {
-        TopQueries { cap, map: HashMap::new() }
+        TopQueries { cap, map: HashMap::new(), evicted: None }
     }
 
     pub fn len(&self) -> usize {
@@ -142,6 +158,7 @@ impl TopQueries {
                     self.map.remove(&k);
                     *bytes = bytes.saturating_sub(k.len());
                     fresh.searches = searches;
+                    self.evicted = Some(k);
                 }
             }
             *bytes += q.len();
@@ -188,6 +205,176 @@ impl TopQueries {
     }
 }
 
+/// How often a query's search showed a document at one position, and how often it was clicked
+/// there.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Cell {
+    pub impressions: u64,
+    pub clicks: u64,
+}
+
+/// A query's cells, by (document id, 1-based position).
+pub type Cells = HashMap<(Box<str>, u32), Cell>;
+
+/// Per query, its (document id, position) cells: what judgments from clicks are built from.
+/// Bounded: queries the bucket's top list holds, at most `cap` of them (the most searched; 0
+/// keeps none), [`MAX_CELLS`] each (those shown most).
+#[derive(Clone, Debug, Default)]
+pub struct Shown {
+    pub cap: usize,
+    pub map: HashMap<Box<str>, Cells>,
+}
+
+impl Shown {
+    fn new(cap: usize) -> Shown {
+        Shown { cap, map: HashMap::new() }
+    }
+
+    /// Query `q`'s cell for `doc` at `position`, made if there's room.
+    fn cell(&mut self, q: &str, doc: &str, position: u32, bytes: &mut usize) -> Option<&mut Cell> {
+        if self.cap == 0 || doc.is_empty() || doc.len() > MAX_DOC_ID || !(1..=MAX_RANK).contains(&position) {
+            return None;
+        }
+        if !self.map.contains_key(q) {
+            if self.map.len() >= self.cap || *bytes >= MAX_PENDING_BYTES {
+                return None;
+            }
+            *bytes += q.len();
+            self.map.insert(q.into(), HashMap::new());
+        }
+        let cells = self.map.get_mut(q)?;
+        let k = (Box::<str>::from(doc), position);
+        if !cells.contains_key(&k) {
+            if cells.len() >= MAX_CELLS || *bytes >= MAX_PENDING_BYTES {
+                return None;
+            }
+            *bytes += doc.len() + CELL_BYTES;
+            cells.insert(k.clone(), Cell::default());
+        }
+        cells.get_mut(&k)
+    }
+
+    /// Keeps the cells of the `cap` queries of `top` searched most, [`MAX_CELLS`] each.
+    fn trim(&mut self, top: &TopQueries) {
+        self.map.retain(|q, _| top.map.contains_key(q));
+        if self.map.len() > self.cap {
+            let mut qs: Vec<_> = self.map.keys().map(|q| (q.clone(), top.map.get(q).map_or(0, |s| s.searches))).collect();
+            qs.sort_unstable_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            for (q, _) in qs.into_iter().skip(self.cap) {
+                self.map.remove(&q);
+            }
+        }
+        for cells in self.map.values_mut() {
+            if cells.len() > MAX_CELLS {
+                let mut v: Vec<_> = cells.drain().collect();
+                v.sort_unstable_by(|a, b| (b.1.impressions, b.1.clicks).cmp(&(a.1.impressions, a.1.clicks)).then_with(|| a.0.cmp(&b.0)));
+                v.truncate(MAX_CELLS);
+                *cells = v.into_iter().collect();
+            }
+        }
+    }
+
+    fn merge(&mut self, other: &Shown) {
+        for (q, cells) in &other.map {
+            let mine = self.map.entry(q.clone()).or_default();
+            for (k, c) in cells {
+                let m = mine.entry(k.clone()).or_default();
+                m.impressions += c.impressions;
+                m.clicks += c.clicks;
+            }
+        }
+    }
+
+    fn text_bytes(&self) -> usize {
+        self.map.iter().map(|(q, cells)| q.len() + cells.keys().map(|(d, _)| d.len() + CELL_BYTES).sum::<usize>()).sum()
+    }
+
+    /// Forgets query `q`'s cells (its top entry was evicted), giving their bytes back.
+    fn forget(&mut self, q: &str, bytes: &mut usize) {
+        if let Some(cells) = self.map.remove(q) {
+            let freed = q.len() + cells.keys().map(|(d, _)| d.len() + CELL_BYTES).sum::<usize>();
+            *bytes = bytes.saturating_sub(freed);
+        }
+    }
+
+    /// A click on `doc` for `q`: counted only on a cell a search showed it in (at `position`, or
+    /// where it was shown most), and never past that cell's impressions, so a click alone makes
+    /// no cell and can't raise a rating past what was shown. Whether it counted.
+    fn click(&mut self, q: &str, doc: &str, position: Option<u32>) -> bool {
+        let Some(cells) = self.map.get_mut(q) else { return false };
+        let key = match position {
+            Some(p) => cells.keys().find(|(d, x)| &**d == doc && *x == p).cloned(),
+            None => cells.iter().filter(|((d, _), c)| &**d == doc && c.impressions > 0).max_by_key(|((_, p), c)| (c.impressions, std::cmp::Reverse(*p))).map(|(k, _)| k.clone()),
+        };
+        match key.and_then(|k| cells.get_mut(&k)) {
+            Some(c) if c.clicks < c.impressions => {
+                c.clicks += 1;
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
+/// One document's rating from clicks for one query ([`coec`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Judged {
+    pub query: String,
+    pub doc: String,
+    pub impressions: u64,
+    pub clicks: u64,
+    /// Σ impressions × CTR(position).
+    pub expected: f64,
+    /// Clicks over expected clicks, to three decimals (0 when nothing was expected).
+    pub coec: f64,
+}
+
+/// Clicks over expected clicks (COEC), as OpenSearch's implicit judgments rate documents
+/// (`UBI_JUDGMENT`, `clickModel: coec`): CTR at each position is its clicks over its impressions
+/// over every cell, and a document shown for a query `judged` keeps is rated its clicks over
+/// Σ impressions × CTR(position). Cells are `(query, document, position, impressions, clicks)`;
+/// positions past `max_rank` don't count. Unordered.
+pub fn coec<'a>(cells: impl IntoIterator<Item = (&'a str, &'a str, u32, u64, u64)>, max_rank: u32, judged: impl Fn(&str) -> bool) -> Vec<Judged> {
+    let mut summed = HashMap::new();
+    for (q, d, p, i, c) in cells {
+        if (1..=max_rank).contains(&p) {
+            let e: &mut (u64, u64) = summed.entry((q, d, p)).or_default();
+            e.0 += i;
+            e.1 += c;
+        }
+    }
+    // A cell's clicks never count past what it showed.
+    for (i, c) in summed.values_mut() {
+        *c = (*c).min(*i);
+    }
+    let mut at = vec![(0u64, 0u64); max_rank as usize + 1];
+    for ((_, _, p), (i, c)) in &summed {
+        at[*p as usize].0 += i;
+        at[*p as usize].1 += c;
+    }
+    let ctr: Vec<f64> = at.iter().map(|(i, c)| if *i == 0 { 0.0 } else { *c as f64 / *i as f64 }).collect();
+    let mut docs = HashMap::new();
+    for ((q, d, p), (i, c)) in &summed {
+        if judged(q) {
+            let e: &mut (u64, u64, f64) = docs.entry((*q, *d)).or_default();
+            e.0 += i;
+            e.1 += c;
+            e.2 += *i as f64 * ctr[*p as usize];
+        }
+    }
+    docs.into_iter()
+        .filter(|(_, (i, _, _))| *i > 0)
+        .map(|((q, d), (impressions, clicks, expected))| Judged {
+            query: q.to_string(),
+            doc: d.to_string(),
+            impressions,
+            clicks,
+            expected,
+            coec: if expected > 0.0 { (clicks as f64 / expected * 1000.0).round() / 1000.0 } else { 0.0 },
+        })
+        .collect()
+}
+
 /// An index's searches over one stretch of time (an hour here; an hour or a day in the
 /// catalog).
 #[derive(Clone, Debug)]
@@ -202,11 +389,29 @@ pub struct Bucket {
     pub top: TopQueries,
     /// Queries that found nothing (only `searches` is counted).
     pub empty: TopQueries,
+    /// What its searches showed, and what was clicked, at each position.
+    pub shown: Shown,
 }
 
 impl Bucket {
     pub fn new(top: usize, empty: usize) -> Bucket {
-        Bucket { searches: 0, no_hits: 0, clicks: 0, conversions: 0, value_milli: 0, top: TopQueries::new(top), empty: TopQueries::new(empty) }
+        Bucket { searches: 0, no_hits: 0, clicks: 0, conversions: 0, value_milli: 0, top: TopQueries::new(top), empty: TopQueries::new(empty), shown: Shown::new(top) }
+    }
+
+    /// The bucket keeping cells for at most `cap` queries (0: none, the catalog's hourly ring).
+    pub fn with_shown(mut self, cap: usize) -> Bucket {
+        self.shown.cap = cap;
+        self.shown.trim(&self.top);
+        self
+    }
+
+    /// An impression of `doc` at `position` (1-based) in a search for `q`.
+    fn impression(&mut self, q: &str, doc: &str, position: u32, bytes: &mut usize) {
+        if self.top.map.contains_key(q)
+            && let Some(c) = self.shown.cell(q, doc, position, bytes)
+        {
+            c.impressions += 1;
+        }
     }
 
     fn pending() -> Bucket {
@@ -230,6 +435,7 @@ impl Bucket {
                 s.no_hits += 1;
             }
         }
+        self.forget_evicted(bytes);
         if hits == 0
             && let Some(s) = self.empty.slot(q, bytes)
         {
@@ -237,14 +443,29 @@ impl Bucket {
         }
     }
 
-    fn click(&mut self, q: &str, position: Option<u32>, bytes: &mut usize) {
+    /// A click on a result of a search for `q`: in the totals and the query's row, and on its
+    /// document's cell when this hour showed it there ([`Shown::click`]). Whether the cell counted it.
+    fn click(&mut self, q: &str, doc: Option<&str>, position: Option<u32>, bytes: &mut usize) -> bool {
         self.clicks += 1;
-        if let Some(s) = self.top.slot(q, bytes) {
-            s.clicks += 1;
-            if let Some(p) = position {
-                s.position_sum += u64::from(p);
-                s.positioned += 1;
+        let listed = match self.top.slot(q, bytes) {
+            Some(s) => {
+                s.clicks += 1;
+                if let Some(p) = position {
+                    s.position_sum += u64::from(p);
+                    s.positioned += 1;
+                }
+                true
             }
+            None => false,
+        };
+        self.forget_evicted(bytes);
+        listed && doc.is_some_and(|d| self.shown.click(q, d, position))
+    }
+
+    /// Drops the cells of the query the top list just evicted.
+    fn forget_evicted(&mut self, bytes: &mut usize) {
+        if let Some(q) = self.top.evicted.take() {
+            self.shown.forget(&q, bytes);
         }
     }
 
@@ -256,6 +477,7 @@ impl Bucket {
             s.conversions += 1;
             s.value_milli = s.value_milli.saturating_add(value_milli);
         }
+        self.forget_evicted(bytes);
     }
 
     /// Adds `other` (each list then keeps its own capacity).
@@ -267,6 +489,10 @@ impl Bucket {
         self.value_milli = self.value_milli.saturating_add(other.value_milli);
         self.top.merge(&other.top);
         self.empty.merge(&other.empty);
+        if self.shown.cap > 0 {
+            self.shown.merge(&other.shown);
+            self.shown.trim(&self.top);
+        }
     }
 
     /// The bucket with lists of other capacities (what the catalog keeps).
@@ -275,6 +501,7 @@ impl Bucket {
         self.empty.cap = empty;
         self.top.trim();
         self.empty.trim();
+        self.shown.trim(&self.top);
         self
     }
 
@@ -288,6 +515,13 @@ impl Bucket {
             "m": self.value_milli,
             "q": self.top.map.iter().map(|(q, s)| s.to_json(q)).collect::<Vec<_>>(),
             "n": self.empty.map.iter().map(|(q, s)| serde_json::json!([&**q, s.searches])).collect::<Vec<_>>(),
+            "p": self
+                .shown
+                .map
+                .iter()
+                .filter(|(q, _)| self.top.map.contains_key(*q))
+                .map(|(q, cells)| serde_json::json!([&**q, cells.iter().map(|((d, p), c)| serde_json::json!([&**d, p, c.impressions, c.clicks])).collect::<Vec<_>>()]))
+                .collect::<Vec<_>>(),
         })
         .to_string()
     }
@@ -315,11 +549,24 @@ impl Bucket {
         }
         b.top.trim();
         b.empty.trim();
+        for e in v.get("p").and_then(serde_json::Value::as_array).into_iter().flatten() {
+            let (Some(q), Some(cells)) = (e[0].as_str(), e[1].as_array()) else { continue };
+            if !b.top.map.contains_key(q) {
+                continue;
+            }
+            for cell in cells {
+                let (Some(d), Some(p), Some(i), Some(c)) = (cell[0].as_str(), cell[1].as_u64(), cell[2].as_u64(), cell[3].as_u64()) else { continue };
+                if (1..=u64::from(MAX_RANK)).contains(&p) && !d.is_empty() && d.len() <= MAX_DOC_ID {
+                    b.shown.map.entry(q.into()).or_default().insert((d.into(), p as u32), Cell { impressions: i, clicks: c.min(i) });
+                }
+            }
+        }
+        b.shown.trim(&b.top);
         b
     }
 
     fn text_bytes(&self) -> usize {
-        self.top.text_bytes() + self.empty.text_bytes()
+        self.top.text_bytes() + self.empty.text_bytes() + self.shown.text_bytes()
     }
 }
 
@@ -589,13 +836,39 @@ impl Analytics {
         }
     }
 
+    /// Records what a search for `query` (normalized) showed: `hits` as (index, id) in order,
+    /// the first at 1-based position `from + 1`, each counted in its own index's bucket when that
+    /// index has analytics on (`on`), up to [`MAX_RANK`].
+    pub fn record_impressions<'a>(&self, on: &[String], query: &str, from: u32, hits: impl Iterator<Item = (&'a str, &'a str)>) {
+        if on.is_empty() || from >= MAX_RANK {
+            return;
+        }
+        let hour = unix_hour();
+        let mut p = self.pending.lock();
+        for (i, (index, id)) in hits.take((MAX_RANK - from) as usize).enumerate() {
+            if on.iter().any(|o| o == index) {
+                let (b, bytes) = p.hour(index, hour);
+                b.impression(query, id, from + i as u32 + 1, bytes);
+            }
+        }
+    }
+
     /// Records a click on a result of a search of index `index` (with analytics on) for `query`
-    /// (normalized), at 1-based `position` when known.
-    pub fn record_click(&self, index: &str, query: &str, position: Option<u32>) {
+    /// (normalized): document `doc` when the event names it, at 1-based `position` when known.
+    ///
+    /// The document's cell is the one of this hour that showed it, else of the hour before while
+    /// that one still waits here (a click just after the hour turned).
+    pub fn record_click(&self, index: &str, query: &str, doc: Option<&str>, position: Option<u32>) {
         let hour = unix_hour();
         let mut p = self.pending.lock();
         let (b, bytes) = p.hour(index, hour);
-        b.click(query, position, bytes);
+        if b.click(query, doc, position, bytes) {
+            return;
+        }
+        let Some(doc) = doc else { return };
+        if let Some((_, prev)) = p.hours.get_mut(index).and_then(|hs| hs.iter_mut().rev().find(|(h, _)| *h + 1 == hour)) {
+            prev.shown.click(query, doc, position);
+        }
     }
 
     /// Records a search of experiment variant `v` by trial `key` (a hash of the experiment, the
@@ -937,11 +1210,11 @@ mod tests {
         let n = &mut 0;
         let mut a = Bucket::new(4, 4);
         a.search("shoes", 10, 1000, n);
-        a.click("shoes", Some(2), n);
-        a.click("shoes", None, n);
+        a.click("shoes", None, Some(2), n);
+        a.click("shoes", None, None, n);
         let mut b = Bucket::new(4, 4);
         b.search("shoes", 8, 3000, n);
-        b.click("shoes", Some(4), n);
+        b.click("shoes", None, Some(4), n);
         a.merge(&b);
         let s = a.top.get("shoes").unwrap();
         assert_eq!((s.searches, s.hits, s.latency_us, s.clicks, s.position_sum, s.positioned), (2, 18, 4000, 3, 6, 2));

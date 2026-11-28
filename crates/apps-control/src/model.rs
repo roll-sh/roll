@@ -240,7 +240,48 @@ pub struct NotifyTarget {
     pub services: Vec<String>,
     /// Whether preview (ephemeral) environments' events come too.
     pub previews: bool,
+    /// Where an alert it was sent goes when no one acknowledges it in time (one hop).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub escalate: Option<Escalation>,
     pub created_at: i64,
+}
+
+/// A target's escalation (Better Stack's escalation policies): an alert it was sent that's still
+/// open and unacknowledged `after_min` minutes on goes to the project's target `to`, once.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Escalation {
+    pub after_min: u32,
+    pub to: String,
+}
+
+/// An open alert (docs/apps/README.md, "Acknowledging and escalating"): from its opening event
+/// until an event closing its key ([`crate::notify`]'s `oncall_of`).
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct Alert {
+    /// Stable for the incident: its key and its opening event's seq, hashed.
+    pub id: String,
+    pub kind: String,
+    pub service: String,
+    pub environment: String,
+    /// What it's about: the opening message's title.
+    pub about: String,
+    pub opened_at: i64,
+    pub acked: Option<AlertAck>,
+    /// When it was escalated (no one acknowledged it in time).
+    pub escalated_at: Option<i64>,
+    #[serde(skip)]
+    pub project: String,
+    /// Its opening event.
+    #[serde(skip)]
+    pub seq: i64,
+    #[serde(skip)]
+    pub closed_at: Option<i64>,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct AlertAck {
+    pub by: String,
+    pub at: i64,
 }
 
 impl NotifyTarget {
@@ -273,7 +314,7 @@ pub struct Delivery {
 /// A private environment's gate: the visitors' token, people signed in to roll who may open the
 /// project (`signed_in`), or both, and an automation bypass (CI). Secrets as SHA-256 hex
 /// digests; none is kept.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct Access {
     pub token_hash: Option<String>,
     pub bypass_hash: Option<String>,
@@ -292,6 +333,23 @@ pub struct Access {
     /// A preview's webhook URLs (roll previews': a provider that can't send a header, Stripe's,
     /// GitHub's): one exact path each, in with `?roll_hook=<token>`, the token's SHA-256 only.
     pub webhooks: Vec<HookUrl>,
+}
+
+/// Whether each secret's digest is set, never the digest: the password's is guessable offline.
+impl std::fmt::Debug for Access {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let set = |o: &Option<String>| o.as_ref().map(|_| "<redacted>");
+        f.debug_struct("Access")
+            .field("token_hash", &set(&self.token_hash))
+            .field("bypass_hash", &set(&self.bypass_hash))
+            .field("signed_in", &self.signed_in)
+            .field("password_hash", &set(&self.password_hash))
+            .field("sso", &self.sso)
+            .field("preflight", &self.preflight)
+            .field("callers", &self.callers)
+            .field("webhooks", &self.webhooks)
+            .finish()
+    }
 }
 
 /// One webhook URL of a preview's ([`Access::webhooks`]).
@@ -3782,6 +3840,9 @@ pub struct Link {
     pub indices: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub access: Option<String>,
+    /// It has a credential of its own, which `POST …/rotate` replaces.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub rotates: bool,
 }
 
 impl Link {

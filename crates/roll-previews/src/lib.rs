@@ -1370,7 +1370,8 @@ pub enum VisualState {
     Refused,
 }
 
-/// A change's preview's recent GETs replayed against main's preview (`POST …/replay`), at a head.
+/// A change's preview's recent GETs (and kept writes) replayed against main's preview (`POST
+/// …/replay`), at a head.
 #[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
 pub struct Replay {
     pub head: String,
@@ -1384,6 +1385,11 @@ pub struct Replay {
     /// Why it couldn't (one line, masked): no preview of main, nothing served lately.
     #[serde(default)]
     pub error: Option<String>,
+    /// Why it couldn't run on copies of both previews' data (one line, masked: a service on roll
+    /// apps, a branch its product can't copy), so its GETs were asked of the previews as they
+    /// serve and kept writes weren't replayed. `None` when it ran on copies.
+    #[serde(default)]
+    pub copies_error: Option<String>,
 }
 
 /// One request asked of both previews: its status on each (0: no answer), and a JSON answer's
@@ -1391,6 +1397,9 @@ pub struct Replay {
 #[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
 pub struct ReplayedRequest {
     pub service: String,
+    /// `GET`, or a write replayed on copies of both previews' data.
+    #[serde(default = "get_method")]
+    pub method: String,
     pub path: String,
     pub status: u16,
     pub main_status: u16,
@@ -1398,6 +1407,10 @@ pub struct ReplayedRequest {
     pub removed: Vec<String>,
     #[serde(default)]
     pub added: Vec<String>,
+}
+
+fn get_method() -> String {
+    "GET".into()
 }
 
 impl ReplayedRequest {
@@ -1852,6 +1865,12 @@ pub struct Visitor {
 pub struct Activity {
     pub at: i64,
     pub message: String,
+}
+
+/// Whether `web@<tag>` runs on a copy of its preview's data (`main`: main's code on a change's
+/// migrated data; `replay-<change's preview>`: replayed writes), not an earlier push.
+pub fn on_a_copy(tag: &str) -> bool {
+    tag == "main" || tag.starts_with("replay-")
 }
 
 /// The name every branch of a preview has (on its parent): the idempotency key of branching.

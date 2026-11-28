@@ -1350,7 +1350,12 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
                 println!("{} of {} answered differently from main's preview", differ.len(), all.len());
                 for q in differ {
                     let lost: Vec<String> = q["removed"].as_array().into_iter().flatten().map(s).collect();
-                    println!("  {}  {} (main {}){}", s(&q["path"]), q["status"], q["main_status"], if lost.is_empty() { String::new() } else { format!("  lost {}", lost.join(", ")) });
+                    let method = s(&q["method"]);
+                    let method = if method.is_empty() || method == "GET" { String::new() } else { format!("{method} ") };
+                    println!("  {method}{}  {} (main {}){}", s(&q["path"]), q["status"], q["main_status"], if lost.is_empty() { String::new() } else { format!("  lost {}", lost.join(", ")) });
+                }
+                if let Some(e) = v["copies_error"].as_str() {
+                    println!("not on copies of the data (GETs asked as they serve, writes not replayed): {e}");
                 }
                 return Ok(());
             }

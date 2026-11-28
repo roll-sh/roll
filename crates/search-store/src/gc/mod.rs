@@ -9,7 +9,10 @@
 //! branch being made — as long as `grace` exceeds the longest such window (an hour is plenty).
 //!
 //! Every retained manifest keeps its segments and live docs (a reader may still hold it), and so
-//! does every pin (`Store::write_pin`, snapshot contents). WAL ranges are needed by the latest
+//! does every pin (`Store::write_pin`, snapshot contents). A reset in progress keeps what its copies name, WAL
+//! ranges included, as a latest commit point does (`Store::begin_reset`), while its cluster has
+//! the reset's intent; copies without one (a reset that failed before recording it) are removed
+//! once they stayed so for the grace period. WAL ranges are needed by the latest
 //! manifest of each shard (crash recovery) and by older ones only for point-in-time branches
 //! inside `manifest_retain_ms`: an older manifest's range counts while its successor is younger
 //! than the window, and only up to the WAL file the successor was written at (anything later is
@@ -70,8 +73,11 @@ pub struct GcStats {
     pub manifests_deleted: usize,
     /// WAL run markers no open range needed any more.
     pub run_markers_deleted: usize,
-    /// Pins (snapshot contents) whose objects were kept.
+    /// Pins (snapshot contents) and pending resets' copies whose objects were kept.
     pub pins: usize,
+    /// Copies a reset left without its intent (it failed before recording it), removed once
+    /// they stayed so for the grace period.
+    pub reset_copies_deleted: usize,
 }
 
 /// The collector's memory between passes (one per [`Store`]).
@@ -163,12 +169,26 @@ impl Store {
             None => HashMap::new(),
         };
 
-        let manifest_keys: Vec<String> = objects
-            .list(keys::CLUSTER_PREFIX)
-            .await?
+        let cluster_keys = objects.list(keys::CLUSTER_PREFIX).await?;
+        // Clusters with a reset pending: their reset copies are kept, others' are leftovers.
+        let resetting: HashSet<String> = cluster_keys
+            .iter()
+            .filter_map(|(k, _)| match keys::parse_cluster_key(k) {
+                Some(ClusterObject::ResetIntent { cluster }) => Some(cluster.to_string()),
+                _ => None,
+            })
+            .collect();
+        // A reset's state without its intent (a reset that failed before recording it, or whose
+        // leftovers' delete failed) goes with its copies.
+        let mut orphan_copies: Vec<String> = cluster_keys
+            .iter()
+            .filter(|(k, _)| matches!(keys::parse_cluster_key(k), Some(ClusterObject::ResetState { cluster }) if !resetting.contains(cluster)))
+            .map(|(k, _)| k.clone())
+            .collect();
+        let manifest_keys: Vec<String> = cluster_keys
             .into_iter()
             .map(|(k, _)| k)
-            .filter(|k| matches!(keys::parse_cluster_key(k), Some(ClusterObject::Manifest { .. } | ClusterObject::Pin { .. })))
+            .filter(|k| matches!(keys::parse_cluster_key(k), Some(ClusterObject::Manifest { .. } | ClusterObject::Pin { .. } | ClusterObject::ResetCopy { .. })))
             .collect();
         self.load_marks_snapshot().await;
         let missing: Vec<String> = {
@@ -218,6 +238,30 @@ impl Store {
                 match keys::parse_cluster_key(key) {
                     Some(ClusterObject::Manifest { cluster, index_uuid, shard, version, deleted }) => {
                         shards.entry((cluster, index_uuid, shard)).or_default().push(Gen { version, deleted, key, marks: m });
+                    }
+                    // A reset's copy is a latest commit point the reset will write: its segments,
+                    // live docs and WAL ranges (the copy's unflushed operations) stay.
+                    Some(ClusterObject::ResetCopy { cluster, .. }) if !resetting.contains(cluster) => orphan_copies.push(key.clone()),
+                    Some(ClusterObject::ResetCopy { .. }) => {
+                        st.pins += 1;
+                        for &(id, live) in m.segments.iter() {
+                            keep_segments.insert(id);
+                            if let Some(g) = live {
+                                keep_live.insert((id, g));
+                            }
+                        }
+                        for s in m.wal.iter() {
+                            let to = match s.to {
+                                Some(to) => to,
+                                None => {
+                                    open_from.entry(s.node.clone()).or_default().push(s.from);
+                                    runs.get(&s.node).and_then(|r| crate::wal::run_end(r, s.from)).unwrap_or(u64::MAX)
+                                }
+                            };
+                            if to >= s.from {
+                                ranges.entry(s.node.clone()).or_default().push((s.from, to));
+                            }
+                        }
                     }
                     // A pin keeps its segments and live docs, never WAL.
                     Some(ClusterObject::Pin { .. }) => {
@@ -294,6 +338,23 @@ impl Store {
         let cutoff = now.saturating_sub(grace.as_millis() as u64);
         let mut next = HashMap::new();
         let mut doomed = Vec::new();
+        // A reset's copies its intent never named (it failed before recording it) go once they
+        // stayed so for the grace period: a reset writes its intent moments after its copies.
+        let mut doomed_copies = Vec::new();
+        for key in orphan_copies {
+            let since = pending.remove(&key).unwrap_or(now);
+            if since <= cutoff {
+                doomed_copies.push(key);
+            } else {
+                next.insert(key, since);
+            }
+        }
+        for key in doomed_copies {
+            match objects.delete(&key).await {
+                Ok(()) => st.reset_copies_deleted += 1,
+                Err(e) => tracing::warn!(error = %e, key, "deleting a reset's leftover copy failed"),
+            }
+        }
         for (key, size) in candidates {
             if live(&key) {
                 continue;

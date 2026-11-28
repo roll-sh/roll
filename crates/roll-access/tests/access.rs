@@ -154,6 +154,8 @@ fn postgres() -> Router {
         .route("/v1/apps/services/{id}/environments/{env}/redeploy", post(|| async { axum::Json(json!({ "ok": true })) }))
         .route("/v1/apps/services/{id}/environments/{env}/domains/{host}/configure", post(|| async { axum::Json(json!({ "status": "active" })) }))
         .route("/v1/search/clusters/{id}/indices/{index}/search", post(|| async { axum::Json(json!({ "hits": [] })) }))
+        // Search's evaluate reads a judgment list's index beside the one it evaluates.
+        .route("/v1/search/clusters/{id}/indices/{index}/evaluate", post(|ext: axum::http::Extensions| async move { axum::Json(json!({ "list": roll_auth::OtherIndex::reaches(&ext, "roll-judgments-q", roll_auth::scope::Action::Read) })) }))
         .route(
             "/v1/search/clusters",
             post(|| async { axum::Json(json!({ "id": "cl_new", "password": "fresh" })) })
@@ -1321,8 +1323,9 @@ async fn a_rule_can_grant_part_of_a_resource() {
     }
     {
         // A rule limited to some secret keys: a request about one key is decided by it, a folder's
-        // list and values (answered key by key) let it through, and what's answered only per
-        // environment and folder (health), a list or a create don't. Keys are secrets' only.
+        // list, values and digest (answered key by key) let it through, and what's answered only
+        // per environment and folder (a diff, health), a list or a create don't. Keys are secrets'
+        // only.
         let d = Daemon::new(50);
         let (stripe, _) = d.token(json!([{ "product": "secrets", "resources": [{ "id": "prj_a" }], "environments": ["production"], "keys": ["STRIPE_KEY"], "actions": { "read": "allow", "reveal": "allow", "write": "allow" } }]), json!({})).await;
         let at = |rest: &str| format!("/v1/secrets/projects/prj_a/environments/production{rest}");
@@ -1333,11 +1336,13 @@ async fn a_rule_can_grant_part_of_a_resource() {
         assert_eq!(d.call(&stripe, Method::GET, &at("/values"), None).await.0, StatusCode::OK);
         assert_eq!(d.call(&stripe, Method::GET, &at("/secrets"), None).await.0, StatusCode::OK);
         assert_eq!(d.call(&stripe, Method::GET, "/v1/secrets/projects/prj_a/health", None).await.0, StatusCode::FORBIDDEN);
-    // A whole folder's digest (a watch's) says why: the folder, never a key.
-    let (s, why) = d.call(&stripe, Method::GET, &at("/digest?path=/api"), None).await;
-    let why = why["error"].as_str().unwrap_or_default().to_string();
-    assert_eq!(s, StatusCode::FORBIDDEN);
-    assert!(why.contains("only some keys of production:/api; a watch (the folder's digest) reads the whole folder") && !why.contains("STRIPE"), "{why}");
+        // A watch's digest is worked out over its keys; a diff of the whole folder says why not:
+        // the folder, never a key.
+        assert_eq!(d.call(&stripe, Method::GET, &at("/digest?path=/api"), None).await.0, StatusCode::OK);
+        let (s, why) = d.call(&stripe, Method::POST, &at("/diff"), Some(json!({ "path": "/api", "text": "" }))).await;
+        let why = why["error"].as_str().unwrap_or_default().to_string();
+        assert_eq!(s, StatusCode::FORBIDDEN);
+        assert!(why.contains("only some keys of production:/api; a diff reads the whole folder") && !why.contains("STRIPE"), "{why}");
         assert_eq!(d.call(&stripe, Method::GET, "/v1/secrets/projects/prj_a/environments/staging/secrets/STRIPE_KEY/value", None).await.0, StatusCode::FORBIDDEN);
         let (s, _) = d.call(OPERATOR, Method::POST, "/v1/access/tokens", Some(json!({ "name": "x", "rules": [{ "product": "postgres", "resources": "*", "keys": ["A"], "actions": { "read": "allow" } }] }))).await;
         assert_eq!(s, StatusCode::BAD_REQUEST);
@@ -3837,3 +3842,45 @@ async fn claude_signs_a_member_in_with_its_own_assertion() {
     }
 }
 
+/// A second index inside one request (a judgment list beside the evaluated index) is decided as the
+/// route's own resource is, the index changed: only where the token's rules allow it outright, and
+/// a person's token is held within their session as well.
+#[tokio::test]
+async fn a_second_index_is_reached_only_where_the_rules_allow_it() {
+    let d = Daemon::new(50);
+    let list = |rules: Value| {
+        let d = &d;
+        async move {
+            let (t, _) = d.token(rules, json!({})).await;
+            let (s, v) = d.call(&t, Method::POST, "/v1/search/clusters/cl_1/indices/logs-1/evaluate", Some(json!({}))).await;
+            assert_eq!(s, StatusCode::OK, "{v}");
+            v["list"].as_bool().unwrap()
+        }
+    };
+    let rule = |index: &str| json!([{ "product": "search", "resources": [{ "id": "cl_1", "index": index }], "actions": { "read": "allow" } }]);
+    assert!(!list(rule("logs-*")).await, "the evaluated index's rule doesn't reach the list's");
+    assert!(list(rule("logs-*,roll-judgments-*")).await);
+    let asks = json!([
+        { "product": "search", "resources": [{ "id": "cl_1", "index": "logs-*" }], "actions": { "read": "allow" } },
+        { "product": "search", "resources": [{ "id": "cl_1", "index": "roll-judgments-*" }], "actions": { "read": "ask" } },
+    ]);
+    assert!(!list(asks).await, "an ask asks nobody inside a request");
+    // bob owns `cl_bobs`: his token's rule decides where it's narrower, his session where the
+    // token's is wider.
+    d.people.add("usr_bob", "bob");
+    let bobs = |rules: Value| {
+        let d = &d;
+        async move {
+            let (s, made) = d.as_user("usr_bob", Method::POST, "/v1/access/tokens", Some(json!({ "name": "eval", "rules": rules }))).await;
+            assert_eq!(s, StatusCode::CREATED, "{made}");
+            let t = made["token"].as_str().unwrap().to_string();
+            let (s, v) = d.call(&t, Method::POST, "/v1/search/clusters/cl_bobs/indices/logs-1/evaluate", Some(json!({}))).await;
+            assert_eq!(s, StatusCode::OK, "{v}");
+            v["list"].as_bool().unwrap()
+        }
+    };
+    let on_bobs = |index: &str| json!([{ "product": "search", "resources": [{ "id": "cl_bobs", "index": index }], "actions": { "read": "allow" } }]);
+    assert!(!bobs(on_bobs("logs-*")).await);
+    assert!(bobs(on_bobs("logs-*,roll-judgments-*")).await);
+    assert!(bobs(json!([{ "product": "search", "resources": "*", "actions": { "read": "allow" } }])).await);
+}

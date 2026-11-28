@@ -492,6 +492,10 @@ async fn evaluate_gates_a_relevance_change() {
     let (j, t, d) = (at(&judgments), at(&title), at(&desc));
     let out = e.roll(&["search", "index", "evaluate", "judged", "goods", "--judgments", &j, "--config", &t, "--config", &d, "--fail-on-worse"]).await;
     assert!(out.contains("desc against title: +") && out.contains("1 better"), "{out}");
-    let out = e.roll_with(&["search", "index", "evaluate", "judged", "goods", "--judgments", &j, "--config", &d, "--config", &t, "--fail-on-worse"], None).await;
+    // The same judgments kept in the cluster as a list, evaluated by name.
+    e.roll(&["search", "judgments", "put", "judged", "couch", &j]).await;
+    let lists = e.roll(&["search", "judgments", "list", "judged"]).await;
+    assert!(lists.contains("\"roll-judgments-couch\"") && lists.contains("\"ratings\": 2"), "{lists}");
+    let out = e.roll_with(&["search", "index", "evaluate", "judged", "goods", "--judgments-list", "couch", "--config", &d, "--config", &t, "--fail-on-worse"], None).await;
     assert!(!out.status.success(), "a worse candidate fails the run: {out:?}");
 }

@@ -654,14 +654,14 @@ pub fn by_path(method: &str, path: &str) -> Option<Found> {
 /// catch-all whose real routes have rows), `operator only` (on purpose), or `None`: no row, so no
 /// grant can call it. rolld logs it for every route at startup; `rolld/tests/auth.rs` reads it.
 pub fn classified(route: &str) -> Option<&'static str> {
-    if OPERATOR_ONLY.iter().any(|(r, _)| shape(r) == shape(route)) {
+    let shape = shape(route);
+    if INDEX.operator_only.contains(&shape) {
         return Some("operator only");
     }
-    let shape = shape(route);
-    if let Some(r) = ROWS.iter().find(|r| self::shape(r.route) == shape) {
+    if let Some(r) = own_rows(&shape).next() {
         return Some(r.product);
     }
-    if let Some(r) = ROWS.iter().filter(|r| r.route.ends_with('/') && shape.starts_with(&self::shape(r.route))).max_by_key(|r| r.route.len()) {
+    if let Some((_, r)) = INDEX.prefixes.iter().filter(|(s, _)| shape.starts_with(s.as_str())).max_by_key(|(_, r)| r.route.len()) {
         return Some(r.product);
     }
     if FORWARDS.iter().any(|(r, _, _)| *r == route) {
@@ -681,8 +681,15 @@ pub fn classified(route: &str) -> Option<&'static str> {
 /// covers it.
 pub fn method_by_prefix(method: &str, route: &str) -> bool {
     let shape = shape(route);
-    let own = ROWS.iter().any(|r| self::shape(r.route) == shape && (r.method == "*" || r.method == method));
-    !own && !OPERATOR_ONLY.iter().any(|(r, _)| self::shape(r) == shape) && ROWS.iter().any(|r| r.route.ends_with('/') && shape.starts_with(&self::shape(r.route)))
+    let own = own_rows(&shape).any(|r| r.method == "*" || r.method == method);
+    !own && !INDEX.operator_only.contains(&shape) && INDEX.prefixes.iter().any(|(s, _)| shape.starts_with(s.as_str()))
+}
+
+/// The rows whose own route has this shape, in the catalogue's order: an exact route's, or a
+/// prefix row's when the route is that prefix itself (`/v1/storage/`).
+fn own_rows(shape: &str) -> impl Iterator<Item = &'static Row> {
+    let exact = INDEX.exact.get(shape).into_iter().flatten().copied();
+    exact.chain(INDEX.prefixes.iter().filter(move |(s, _)| s == shape).map(|(_, r)| *r))
 }
 
 /// Whether `method route`, decided by a prefix row, was looked at (`prefix-reviewed.txt`, one
@@ -1056,6 +1063,16 @@ fn secrets_import_action(b: &Value) -> Action {
 }
 
 /// A replacing import writes the file's keys too.
+/// Rotating a link redeploys the environment it names, or every one that uses the link
+/// (production among them) when it names none: `deploy` too unless it names one other than
+/// production, as a deploy there is.
+fn apps_rotate_also(b: &Value) -> Vec<Action> {
+    match b.get("environment").and_then(Value::as_str) {
+        Some(e) if e != "production" => Vec::new(),
+        _ => vec![Action::Deploy],
+    }
+}
+
 fn secrets_import_also(b: &Value) -> Vec<Action> {
     if b["replace"] == true { vec![Action::Write] } else { Vec::new() }
 }
@@ -1497,6 +1514,10 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/search/clusters/{id}/password", "search", ADMIN, one(PG, "cluster")).capable(&[Action::Reveal]).lends(Lend::Each(search_secret_write)),
     // A deleted cluster back (its id still resolves while it is kept): a write, like a create.
     row("POST", "/v1/search/clusters/{id}/restore", "search", W, one(PG, "cluster")),
+    // A branch's indices back to a copy of it (roll previews' restore points): it discards what
+    // was written since, so a delete, as every reset is; the copy named in the body is one the
+    // caller may write (search checks it).
+    row("POST", "/v1/search/clusters/{id}/reset", "search", D, one(PG, "cluster")),
     // Any request as the cluster's owner. One that answers or sets a credential (decided by
     // search on the API the cluster routes it to) needs reveal too: the gate says whether the
     // grant has it (`capable`), without reading the body.
@@ -1588,6 +1609,14 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/search/clusters/{id}/synonyms/{set}/{rule}", "search", R, one(PG, "cluster")),
     row("PUT", "/v1/search/clusters/{id}/synonyms/{set}/{rule}", "search", W, one(PG, "cluster")),
     row("DELETE", "/v1/search/clusters/{id}/synonyms/{set}/{rule}", "search", W, one(PG, "cluster")),
+    // Judgment lists are indices of the cluster (`roll-judgments-<name>`); their routes name no
+    // index, so they're for a grant on the whole cluster.
+    row("GET", "/v1/search/clusters/{id}/judgments", "search", R, one(PG, "cluster")),
+    row("GET", "/v1/search/clusters/{id}/judgments/{name}", "search", R, one(PG, "cluster")),
+    row("PUT", "/v1/search/clusters/{id}/judgments/{name}", "search", W, one(PG, "cluster")),
+    row("DELETE", "/v1/search/clusters/{id}/judgments/{name}", "search", D, one(PG, "cluster")),
+    // Reads the index's click analytics and writes the list.
+    row("POST", "/v1/search/clusters/{id}/judgments/{name}/_from_clicks", "search", W, one(PG, "cluster")),
     row("GET", "/v1/search/clusters/{id}/query_rules", "search", R, one(PG, "cluster")),
     row("GET", "/v1/search/clusters/{id}/query_rules/{ruleset}", "search", R, one(PG, "cluster")),
     row("PUT", "/v1/search/clusters/{id}/query_rules/{ruleset}", "search", W, one(PG, "cluster")),
@@ -1785,8 +1814,10 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/secrets/projects/{project}/environments/{env}/secrets", "secrets", R, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path").filters_keys(),
     // A batch writes only keys the grant reaches: roll secrets refuses one naming others.
     row("POST", "/v1/secrets/projects/{project}/environments/{env}/changes", "secrets", W, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path").filters_keys(),
-    // A watcher's read of what changed since the values it holds: values, so reveal.
-    row("POST", "/v1/secrets/projects/{project}/environments/{env}/values/delta", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
+    // A watcher's read of what changed since the values it holds: values, so reveal. It and the
+    // folder's digest (what a watch polls) are worked out over the keys the grant reaches.
+    row("POST", "/v1/secrets/projects/{project}/environments/{env}/values/delta", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path").filters_keys(),
+    row("GET", "/v1/secrets/projects/{project}/environments/{env}/digest", "secrets", R, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path").filters_keys(),
     row("GET", "/v1/secrets/projects/{project}/environments/{env}/secrets/{key}/value", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path").secret_key(),
     // A TOTP key's current code is a credential: reveal, never the prefix's read.
     row("GET", "/v1/secrets/projects/{project}/environments/{env}/secrets/{key}/totp", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path").secret_key(),
@@ -1881,6 +1912,9 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/apps/projects/{project}/notifications/{nid}/test", "apps", W, one(&["project"], "project")),
     row("GET", "/v1/apps/projects/{project}/notifications/{nid}/deliveries", "apps", R, one(&["project"], "project")),
     row("POST", "/v1/apps/projects/{project}/notifications/{nid}/deliveries/{did}/redeliver", "apps", W, one(&["project"], "project")),
+    // A project's open alerts, and acknowledging one (it stops its escalation): read and write.
+    row("GET", "/v1/apps/projects/{project}/alerts", "apps", R, one(&["project"], "project")),
+    row("POST", "/v1/apps/projects/{project}/alerts/{aid}/ack", "apps", W, one(&["project"], "project")),
     // A project's log drains: every service's output POSTed out of roll, signed. Adding one sends
     // runtime output elsewhere and its signing secret comes back once: reveal. The URL is never
     // answered (only its host).
@@ -1921,6 +1955,9 @@ static ROWS: &[Row] = &[
     // its code reads them: reveal on that resource too.
     row("PUT", "/v1/apps/services/{id}/links/{kind}/{ref}", "apps", W, one(PG, "service")).lends(Lend::Path("kind", "ref")),
     row("DELETE", "/v1/apps/services/{id}/links/{kind}/{ref}", "apps", W, one(PG, "service")),
+    // A new credential for a link, the service redeployed with it and the old one revoked:
+    // admin on the service (its credentials), and reveal on the resource, as linking it.
+    row("POST", "/v1/apps/services/{id}/links/{kind}/{ref}/rotate", "apps", ADMIN, one(PG, "service")).lends(Lend::Path("kind", "ref")).needs_too(apps_rotate_also),
     row("*", "/v1/apps/services/{id}", "apps", M, one(PG, "service")),
     // A worker scaled on a stream group's lag has apps read that stream for it, and a web service's
     // pushes consume one (and dead-letter into it): read there too, write with a dead letter.
@@ -2079,6 +2116,10 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/previews/{id}/rehearse", "previews", D, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
     // An earlier push it no longer keeps, started again (its 410 page's button, from roll).
     row("POST", "/v1/previews/{id}/pushes/{revision}/start", "previews", W, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    // Its recent GETs, and with `replay_writes` its kept writes, asked of it and main's preview
+    // again: the writes only on fresh copies of both previews' data, deleted after, so nothing
+    // the previews serve from changes: write, as a visit's own write is.
+    row("POST", "/v1/previews/{id}/replay", "previews", W, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
     // A share link lets someone outside the team in, its token only in the answer: reveal, as the
     // bypass secret is. Listing (no tokens) is read and revoking one is delete, by the prefix.
     row("POST", "/v1/previews/{id}/shares", "previews", REVEAL, one(PG, "preview")).env(EnvFrom::Fixed("preview")),

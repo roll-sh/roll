@@ -40,6 +40,8 @@ export interface EvalChange {
 export interface Evaluation {
   metric: Record<string, unknown>;
   queries: number;
+  /** The stored list the judgments came from, when they did. */
+  judgments_list?: string;
   configurations: { name: string; score: number | null; failed: number; queries: EvalQuery[] }[];
   comparison?: {
     baseline: string;
@@ -51,6 +53,24 @@ export interface Evaluation {
     better_queries: EvalChange[];
     worse_queries: EvalChange[];
   };
+}
+
+/** A judgment list stored in the cluster (`GET …/judgments`): its index is `roll-judgments-<name>`. */
+export interface JudgmentList {
+  name: string;
+  index: string;
+  source?: "manual" | "import" | "clicks";
+  queries?: number;
+  ratings?: number;
+  built_at?: number;
+}
+
+/** What a judgment list's index starts with (`search_control::judgments::PREFIX`). */
+export const LIST_PREFIX = "roll-judgments-";
+
+/** Whether `name` can name a list: 1 to 64 of a-z, 0-9, _ and -, starting with a letter or digit. */
+export function validListName(name: string): boolean {
+  return /^[a-z0-9][a-z0-9_-]{0,63}$/.test(name);
 }
 
 /** The route's limits (`search_control::evaluate`). */
