@@ -2082,6 +2082,10 @@ static ROWS: &[Row] = &[
     // Putting a restore point back replaces the data the preview has now, as a reset does.
     row("POST", "/v1/previews/{id}/restore-points/{point}/restore", "previews", D, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
     row("POST", "/v1/previews/{id}/rehearse", "previews", D, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    // Its recent GETs, and with `replay_writes` its kept writes, asked of it and main's preview
+    // again: the writes only on fresh copies of both previews' data, deleted after, so nothing
+    // the previews serve from changes: write, as a visit's own write is.
+    row("POST", "/v1/previews/{id}/replay", "previews", W, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
     // A share link lets someone outside the team in, its token only in the answer: reveal, as the
     // bypass secret is. Listing (no tokens) is read and revoking one is delete, by the prefix.
     row("POST", "/v1/previews/{id}/shares", "previews", REVEAL, one(PG, "preview")).env(EnvFrom::Fixed("preview")),

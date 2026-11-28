@@ -28,13 +28,18 @@ impl EnvSource for Engine {
             None => (service, None),
         };
         let svc = services.iter().find(|x| x.name == name).ok_or_else(|| anyhow::anyhow!("no service {name}"))?;
+        // Main's code on a copy of the preview's data (`web@main`), or the preview's own on a copy
+        // for a change's replayed writes (`web@replay-<change's preview>`): what it runs and the
+        // copy's variables, only while they run.
+        let replay = earlier.is_some_and(|t| t.starts_with("replay-"));
         let main_run = match earlier {
-            Some("main") => Some(self.main_runs.lock().get(&(preview.to_string(), name.to_string())).cloned().ok_or_else(|| anyhow::anyhow!("main's code isn't running on this preview's data now"))?),
+            Some(tag) if crate::on_a_copy(tag) => Some(self.main_runs.lock().get(&(preview.to_string(), service.to_string())).cloned().ok_or_else(|| anyhow::anyhow!("nothing runs on a copy of this preview's data now"))?),
             _ => None,
         };
         let (rev, host, url) = match earlier {
-            // Main's revision on a copy of the preview's data (main_on_change.rs), trusted only.
-            Some("main") if r.trusted => {
+            // Main's revision, or the preview's own, on a copy of its data (main_on_change.rs,
+            // replay.rs), trusted only.
+            Some(tag) if crate::on_a_copy(tag) && r.trusted => {
                 let host = self.store.service_host(preview, service)?.ok_or_else(|| anyhow::anyhow!("no service {name}"))?;
                 (main_run.as_ref().map(|(rev, _)| rev.clone()).unwrap_or_default(), host, svc.url.clone())
             }
@@ -94,10 +99,11 @@ impl EnvSource for Engine {
         for (k, v) in secrets.into_iter().chain(own).chain(branches) {
             set(&mut env, &k, v);
         }
-        if s.mail == crate::settings::MailRule::Catch {
+        if s.mail == crate::settings::MailRule::Catch || replay {
             self.catch_mail(&r.id, &mut env)?;
         }
         if s.traces
+            && !replay
             && let Some(vars) = self.otlp_vars(&r.id, service)?
         {
             // Its token is a credential (its traces' only lock): out of what the preview shows.
@@ -115,7 +121,8 @@ impl EnvSource for Engine {
         }
         set(&mut env, "ROLL_PREVIEW", r.id.clone());
         set(&mut env, "ROLL_PREVIEW_URL", url);
-        for other in &services {
+        // A replayed write never reaches a service on the real branches through roll's URLs.
+        for other in services.iter().filter(|_| !replay) {
             set(&mut env, &format!("ROLL_PREVIEW_URL_{}", env_suffix(&other.name)), other.url.clone());
         }
         set(&mut env, "PORT", spec.port.to_string());
@@ -148,9 +155,11 @@ impl EnvSource for Engine {
             webhooks: Vec::new(),
             // The runtime's proxy adds the button per request (`runtime::Tagger`).
             feedback: false,
-            egress: s.egress_for(r.trusted),
-            egress_hosts: s.egress_hosts.clone(),
-            crons: s.crons,
+            // A replayed write sends nothing outside roll twice (a payment, a webhook), and runs no
+            // schedule.
+            egress: if replay { crate::settings::EgressRule::Roll } else { s.egress_for(r.trusted) },
+            egress_hosts: if replay { Vec::new() } else { s.egress_hosts.clone() },
+            crons: s.crons && !replay,
             maker: None,
             rebuild: None,
             traces: s.traces,
