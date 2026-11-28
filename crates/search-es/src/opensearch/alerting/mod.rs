@@ -540,7 +540,8 @@ async fn put(ctx: &Ctx<'_>, update: Option<String>) -> EsResult<Reply> {
         })
         .await?;
     let n = |k: &str| r.get(k).cloned().unwrap_or(Value::from(0));
-    Reply::ok(obj! { "_id" => id, "_version" => n("_version"), "_seq_no" => n("_seq_no"), "_primary_term" => n("_primary_term"), "monitor" => shown(&monitor) })
+    let status = if update.is_some() { 200 } else { 201 };
+    Ok(Reply::Body(status, obj! { "_id" => id, "_version" => n("_version"), "_seq_no" => n("_seq_no"), "_primary_term" => n("_primary_term"), "monitor" => shown(&monitor) }))
 }
 
 async fn get(ctx: &Ctx<'_>) -> EsResult<Reply> {

@@ -20,6 +20,15 @@
             }
           }
         }
+      },
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "index": "esm-logs"
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
       }
     },
     {
@@ -31,7 +40,85 @@
       "mask": [
         "took",
         "_seq_no"
-      ]
+      ],
+      "status": 200,
+      "response": {
+        "took": 34,
+        "errors": false,
+        "items": [
+          {
+            "index": {
+              "_index": "esm-logs",
+              "_id": "d0",
+              "_version": 1,
+              "result": "created",
+              "forced_refresh": true,
+              "_shards": {
+                "total": 2,
+                "successful": 1,
+                "failed": 0
+              },
+              "_seq_no": 0,
+              "_primary_term": 1,
+              "status": 201
+            }
+          },
+          {
+            "index": {
+              "_index": "esm-logs",
+              "_id": "d1",
+              "_version": 1,
+              "result": "created",
+              "forced_refresh": true,
+              "_shards": {
+                "total": 2,
+                "successful": 1,
+                "failed": 0
+              },
+              "_seq_no": 1,
+              "_primary_term": 1,
+              "status": 201
+            }
+          },
+          {
+            "index": {
+              "_index": "esm-logs",
+              "_id": "d2",
+              "_version": 1,
+              "result": "created",
+              "forced_refresh": true,
+              "_shards": {
+                "total": 2,
+                "successful": 1,
+                "failed": 0
+              },
+              "_seq_no": 2,
+              "_primary_term": 1,
+              "status": 201
+            }
+          },
+          {
+            "index": {
+              "_index": "esm-logs",
+              "_id": "d3",
+              "_version": 1,
+              "result": "created",
+              "forced_refresh": true,
+              "_shards": {
+                "total": 2,
+                "successful": 1,
+                "failed": 0
+              },
+              "_seq_no": 3,
+              "_primary_term": 1,
+              "status": 201
+            }
+          }
+        ]
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
     },
     {
       "req": "POST /_plugins/_alerting/monitors",
@@ -94,10 +181,87 @@
         "executionTime",
         "_seq_no",
         "created_time_ms",
-        "last_updated_time_ms"
+        "last_updated_time_ms",
+        "_primary_term"
       ],
       "keep": {
         "m1": "_id"
+      },
+      "status": 201,
+      "response": {
+        "_id": "MuBOIqIBudumUcvfQrld",
+        "_version": 1,
+        "_seq_no": 70,
+        "_primary_term": 2,
+        "monitor": {
+          "type": "monitor",
+          "schema_version": 0,
+          "name": "esm-q1",
+          "monitor_type": "query_level_monitor",
+          "enabled": false,
+          "enabled_time": null,
+          "schedule": {
+            "period": {
+              "interval": 1,
+              "unit": "MINUTES"
+            }
+          },
+          "inputs": [
+            {
+              "search": {
+                "indices": [
+                  "esm-logs"
+                ],
+                "query": {
+                  "size": 0,
+                  "query": {
+                    "term": {
+                      "level": {
+                        "value": "error",
+                        "boost": 1.0
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          ],
+          "triggers": [
+            {
+              "query_level_trigger": {
+                "id": "esm-t1",
+                "name": "t1",
+                "severity": "1",
+                "condition": {
+                  "script": {
+                    "source": "ctx.results[0].hits.total.value > 0",
+                    "lang": "painless"
+                  }
+                },
+                "actions": []
+              }
+            }
+          ],
+          "last_update_time": 1795871883859,
+          "data_sources": {
+            "query_index": ".opensearch-alerting-queries",
+            "findings_index": ".opensearch-alerting-finding-history-write",
+            "findings_index_pattern": "<.opensearch-alerting-finding-history-{now/d}-1>",
+            "alerts_index": ".opendistro-alerting-alerts",
+            "alerts_history_index": ".opendistro-alerting-alert-history-write",
+            "alerts_history_index_pattern": "<.opendistro-alerting-alert-history-{now/d}-1>",
+            "comments_index": ".opensearch-alerting-comments-history-write",
+            "comments_index_pattern": "<.opensearch-alerting-comments-history-{now/d}-1>",
+            "query_index_mappings_by_type": {},
+            "findings_enabled": false
+          },
+          "delete_query_index_in_every_run": false,
+          "should_create_single_alert_for_findings": false,
+          "owner": "alerting"
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
       }
     },
     {
@@ -116,8 +280,86 @@
         "executionTime",
         "_seq_no",
         "created_time_ms",
-        "last_updated_time_ms"
-      ]
+        "last_updated_time_ms",
+        "_primary_term"
+      ],
+      "status": 200,
+      "response": {
+        "_id": "MuBOIqIBudumUcvfQrld",
+        "_version": 1,
+        "_seq_no": 70,
+        "_primary_term": 2,
+        "monitor": {
+          "type": "monitor",
+          "schema_version": 0,
+          "name": "esm-q1",
+          "monitor_type": "query_level_monitor",
+          "enabled": false,
+          "enabled_time": null,
+          "schedule": {
+            "period": {
+              "interval": 1,
+              "unit": "MINUTES"
+            }
+          },
+          "inputs": [
+            {
+              "search": {
+                "indices": [
+                  "esm-logs"
+                ],
+                "query": {
+                  "size": 0,
+                  "query": {
+                    "term": {
+                      "level": {
+                        "value": "error",
+                        "boost": 1.0
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          ],
+          "triggers": [
+            {
+              "query_level_trigger": {
+                "id": "esm-t1",
+                "name": "t1",
+                "severity": "1",
+                "condition": {
+                  "script": {
+                    "source": "ctx.results[0].hits.total.value > 0",
+                    "lang": "painless"
+                  }
+                },
+                "actions": []
+              }
+            }
+          ],
+          "last_update_time": 1795871883859,
+          "data_sources": {
+            "query_index": ".opensearch-alerting-queries",
+            "findings_index": ".opensearch-alerting-finding-history-write",
+            "findings_index_pattern": "<.opensearch-alerting-finding-history-{now/d}-1>",
+            "alerts_index": ".opendistro-alerting-alerts",
+            "alerts_history_index": ".opendistro-alerting-alert-history-write",
+            "alerts_history_index_pattern": "<.opendistro-alerting-alert-history-{now/d}-1>",
+            "comments_index": ".opensearch-alerting-comments-history-write",
+            "comments_index_pattern": "<.opensearch-alerting-comments-history-{now/d}-1>",
+            "query_index_mappings_by_type": {},
+            "findings_enabled": false
+          },
+          "delete_query_index_in_every_run": false,
+          "should_create_single_alert_for_findings": false,
+          "owner": "alerting"
+        },
+        "associated_workflows": []
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
     },
     {
       "req": "POST /_plugins/_alerting/monitors/${m1}/_execute?dryrun=true",
@@ -136,7 +378,51 @@
         "_seq_no",
         "created_time_ms",
         "last_updated_time_ms"
-      ]
+      ],
+      "status": 200,
+      "response": {
+        "monitor_name": "esm-q1",
+        "period_start": 1795871824009,
+        "period_end": 1795871884009,
+        "error": null,
+        "input_results": {
+          "results": [
+            {
+              "_shards": {
+                "total": 1,
+                "failed": 0,
+                "successful": 1,
+                "skipped": 0
+              },
+              "hits": {
+                "hits": [],
+                "total": {
+                  "value": 1,
+                  "relation": "eq"
+                },
+                "max_score": null
+              },
+              "took": 6,
+              "timed_out": false
+            }
+          ],
+          "ppl_query_results": [],
+          "ppl_num_results": null,
+          "error": null
+        },
+        "trigger_results": {
+          "esm-t1": {
+            "name": "t1",
+            "triggered": true,
+            "action_results": {},
+            "ppl_query_results": [],
+            "error": null
+          }
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
     },
     {
       "req": "GET /_plugins/_alerting/monitors/alerts?monitorId=${m1}",
@@ -156,7 +442,15 @@
         "created_time_ms",
         "last_updated_time_ms",
         "id"
-      ]
+      ],
+      "status": 200,
+      "response": {
+        "alerts": [],
+        "totalAlerts": 0
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
     },
     {
       "req": "POST /_plugins/_alerting/monitors/${m1}/_execute",
@@ -175,7 +469,51 @@
         "_seq_no",
         "created_time_ms",
         "last_updated_time_ms"
-      ]
+      ],
+      "status": 200,
+      "response": {
+        "monitor_name": "esm-q1",
+        "period_start": 1795871825091,
+        "period_end": 1795871885091,
+        "error": null,
+        "input_results": {
+          "results": [
+            {
+              "_shards": {
+                "total": 1,
+                "failed": 0,
+                "successful": 1,
+                "skipped": 0
+              },
+              "hits": {
+                "hits": [],
+                "total": {
+                  "value": 1,
+                  "relation": "eq"
+                },
+                "max_score": null
+              },
+              "took": 7,
+              "timed_out": false
+            }
+          ],
+          "ppl_query_results": [],
+          "ppl_num_results": null,
+          "error": null
+        },
+        "trigger_results": {
+          "esm-t1": {
+            "name": "t1",
+            "triggered": true,
+            "action_results": {},
+            "ppl_query_results": [],
+            "error": null
+          }
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
     },
     {
       "req": "GET /_plugins/_alerting/monitors/alerts?monitorId=${m1}",
@@ -197,6 +535,40 @@
       ],
       "keep": {
         "a1": "alerts.0.id"
+      },
+      "status": 200,
+      "response": {
+        "alerts": [
+          {
+            "id": "OOBOIqIBudumUcvfR7k3",
+            "version": 1,
+            "monitor_id": "MuBOIqIBudumUcvfQrld",
+            "workflow_id": "",
+            "workflow_name": "",
+            "associated_alert_ids": [],
+            "schema_version": 6,
+            "monitor_version": 1,
+            "monitor_name": "esm-q1",
+            "execution_id": "MuBOIqIBudumUcvfQrld_2026-11-28T13:18:05.093516254_dc0717b9-e7d8-4ae3-9d44-a5dc18c361bc",
+            "trigger_id": "esm-t1",
+            "trigger_name": "t1",
+            "finding_ids": [],
+            "related_doc_ids": [],
+            "state": "ACTIVE",
+            "error_message": null,
+            "alert_history": [],
+            "severity": "1",
+            "action_execution_results": [],
+            "start_time": 1795871885110,
+            "last_notification_time": 1795871885110,
+            "end_time": null,
+            "acknowledged_time": null
+          }
+        ],
+        "totalAlerts": 1
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
       }
     },
     {
@@ -206,6 +578,22 @@
           "${a1}",
           "esm-bogus"
         ]
+      },
+      "status": 200,
+      "response": {
+        "success": [
+          "OOBOIqIBudumUcvfR7k3"
+        ],
+        "failed": [
+          {
+            "esm-bogus": {
+              "failed_reason": "Alert: esm-bogus does not exist (it may have already completed)."
+            }
+          }
+        ]
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
       }
     },
     {
@@ -214,6 +602,20 @@
         "alerts": [
           "${a1}"
         ]
+      },
+      "status": 200,
+      "response": {
+        "success": [],
+        "failed": [
+          {
+            "OOBOIqIBudumUcvfR7k3": {
+              "failed_reason": "Alert has already been acknowledged."
+            }
+          }
+        ]
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
       }
     },
     {
@@ -233,7 +635,41 @@
         "_seq_no",
         "created_time_ms",
         "last_updated_time_ms"
-      ]
+      ],
+      "status": 200,
+      "response": {
+        "alerts": [
+          {
+            "id": "OOBOIqIBudumUcvfR7k3",
+            "version": 2,
+            "monitor_id": "MuBOIqIBudumUcvfQrld",
+            "workflow_id": "",
+            "workflow_name": "",
+            "associated_alert_ids": [],
+            "schema_version": 6,
+            "monitor_version": 1,
+            "monitor_name": "esm-q1",
+            "execution_id": "MuBOIqIBudumUcvfQrld_2026-11-28T13:18:05.093516254_dc0717b9-e7d8-4ae3-9d44-a5dc18c361bc",
+            "trigger_id": "esm-t1",
+            "trigger_name": "t1",
+            "finding_ids": [],
+            "related_doc_ids": [],
+            "state": "ACKNOWLEDGED",
+            "error_message": null,
+            "alert_history": [],
+            "severity": "1",
+            "action_execution_results": [],
+            "start_time": 1795871885110,
+            "last_notification_time": 1795871885110,
+            "end_time": null,
+            "acknowledged_time": 1795871885226
+          }
+        ],
+        "totalAlerts": 1
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
     },
     {
       "req": "POST /_plugins/_alerting/monitors/${m1}/_execute",
@@ -252,7 +688,51 @@
         "_seq_no",
         "created_time_ms",
         "last_updated_time_ms"
-      ]
+      ],
+      "status": 200,
+      "response": {
+        "monitor_name": "esm-q1",
+        "period_start": 1795871825327,
+        "period_end": 1795871885327,
+        "error": null,
+        "input_results": {
+          "results": [
+            {
+              "_shards": {
+                "total": 1,
+                "failed": 0,
+                "successful": 1,
+                "skipped": 0
+              },
+              "hits": {
+                "hits": [],
+                "total": {
+                  "value": 1,
+                  "relation": "eq"
+                },
+                "max_score": null
+              },
+              "took": 3,
+              "timed_out": false
+            }
+          ],
+          "ppl_query_results": [],
+          "ppl_num_results": null,
+          "error": null
+        },
+        "trigger_results": {
+          "esm-t1": {
+            "name": "t1",
+            "triggered": true,
+            "action_results": {},
+            "ppl_query_results": [],
+            "error": null
+          }
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
     },
     {
       "req": "PUT /_plugins/_alerting/monitors/${m1}",
@@ -315,8 +795,85 @@
         "executionTime",
         "_seq_no",
         "created_time_ms",
-        "last_updated_time_ms"
-      ]
+        "last_updated_time_ms",
+        "_primary_term"
+      ],
+      "status": 200,
+      "response": {
+        "_id": "MuBOIqIBudumUcvfQrld",
+        "_version": 2,
+        "_seq_no": 73,
+        "_primary_term": 2,
+        "monitor": {
+          "type": "monitor",
+          "schema_version": 9,
+          "name": "esm-q1",
+          "monitor_type": "query_level_monitor",
+          "enabled": false,
+          "enabled_time": null,
+          "schedule": {
+            "period": {
+              "interval": 1,
+              "unit": "MINUTES"
+            }
+          },
+          "inputs": [
+            {
+              "search": {
+                "indices": [
+                  "esm-logs"
+                ],
+                "query": {
+                  "size": 0,
+                  "query": {
+                    "term": {
+                      "level": {
+                        "value": "error",
+                        "boost": 1.0
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          ],
+          "triggers": [
+            {
+              "query_level_trigger": {
+                "id": "esm-t1",
+                "name": "t1",
+                "severity": "1",
+                "condition": {
+                  "script": {
+                    "source": "return false",
+                    "lang": "painless"
+                  }
+                },
+                "actions": []
+              }
+            }
+          ],
+          "last_update_time": 1795871885361,
+          "data_sources": {
+            "query_index": ".opensearch-alerting-queries",
+            "findings_index": ".opensearch-alerting-finding-history-write",
+            "findings_index_pattern": "<.opensearch-alerting-finding-history-{now/d}-1>",
+            "alerts_index": ".opendistro-alerting-alerts",
+            "alerts_history_index": ".opendistro-alerting-alert-history-write",
+            "alerts_history_index_pattern": "<.opendistro-alerting-alert-history-{now/d}-1>",
+            "comments_index": ".opensearch-alerting-comments-history-write",
+            "comments_index_pattern": "<.opensearch-alerting-comments-history-{now/d}-1>",
+            "query_index_mappings_by_type": {},
+            "findings_enabled": false
+          },
+          "delete_query_index_in_every_run": false,
+          "should_create_single_alert_for_findings": false,
+          "owner": "alerting"
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
     },
     {
       "req": "POST /_plugins/_alerting/monitors/${m1}/_execute",
@@ -335,7 +892,51 @@
         "_seq_no",
         "created_time_ms",
         "last_updated_time_ms"
-      ]
+      ],
+      "status": 200,
+      "response": {
+        "monitor_name": "esm-q1",
+        "period_start": 1795871825428,
+        "period_end": 1795871885428,
+        "error": null,
+        "input_results": {
+          "results": [
+            {
+              "_shards": {
+                "total": 1,
+                "failed": 0,
+                "successful": 1,
+                "skipped": 0
+              },
+              "hits": {
+                "hits": [],
+                "total": {
+                  "value": 1,
+                  "relation": "eq"
+                },
+                "max_score": null
+              },
+              "took": 4,
+              "timed_out": false
+            }
+          ],
+          "ppl_query_results": [],
+          "ppl_num_results": null,
+          "error": null
+        },
+        "trigger_results": {
+          "esm-t1": {
+            "name": "t1",
+            "triggered": false,
+            "action_results": {},
+            "ppl_query_results": [],
+            "error": null
+          }
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
     },
     {
       "req": "GET /_plugins/_alerting/monitors/alerts?monitorId=${m1}",
@@ -355,7 +956,41 @@
         "created_time_ms",
         "last_updated_time_ms"
       ],
-      "capture_sleep_ms": 1500
+      "capture_sleep_ms": 1500,
+      "status": 200,
+      "response": {
+        "alerts": [
+          {
+            "id": "OOBOIqIBudumUcvfR7k3",
+            "version": 1,
+            "monitor_id": "MuBOIqIBudumUcvfQrld",
+            "workflow_id": "",
+            "workflow_name": "",
+            "associated_alert_ids": [],
+            "schema_version": 6,
+            "monitor_version": 1,
+            "monitor_name": "esm-q1",
+            "execution_id": "MuBOIqIBudumUcvfQrld_2026-11-28T13:18:05.093516254_dc0717b9-e7d8-4ae3-9d44-a5dc18c361bc",
+            "trigger_id": "esm-t1",
+            "trigger_name": "t1",
+            "finding_ids": [],
+            "related_doc_ids": [],
+            "state": "COMPLETED",
+            "error_message": null,
+            "alert_history": [],
+            "severity": "1",
+            "action_execution_results": [],
+            "start_time": 1795871885110,
+            "last_notification_time": 1795871885110,
+            "end_time": 1795871885445,
+            "acknowledged_time": 1795871885226
+          }
+        ],
+        "totalAlerts": 1
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
     },
     {
       "req": "GET /_plugins/_alerting/monitors/alerts?monitorId=${m1}&alertState=ACTIVE",
@@ -374,7 +1009,15 @@
         "_seq_no",
         "created_time_ms",
         "last_updated_time_ms"
-      ]
+      ],
+      "status": 200,
+      "response": {
+        "alerts": [],
+        "totalAlerts": 0
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
     },
     {
       "req": "POST /_plugins/_alerting/monitors/_execute?dryrun=true",
@@ -436,7 +1079,51 @@
         "_seq_no",
         "created_time_ms",
         "last_updated_time_ms"
-      ]
+      ],
+      "status": 200,
+      "response": {
+        "monitor_name": "esm-inline",
+        "period_start": 1795871827156,
+        "period_end": 1795871887156,
+        "error": null,
+        "input_results": {
+          "results": [
+            {
+              "_shards": {
+                "total": 1,
+                "failed": 0,
+                "successful": 1,
+                "skipped": 0
+              },
+              "hits": {
+                "hits": [],
+                "total": {
+                  "value": 4,
+                  "relation": "eq"
+                },
+                "max_score": null
+              },
+              "took": 3,
+              "timed_out": false
+            }
+          ],
+          "ppl_query_results": [],
+          "ppl_num_results": null,
+          "error": null
+        },
+        "trigger_results": {
+          "esm-ti": {
+            "name": "t1",
+            "triggered": true,
+            "action_results": {},
+            "ppl_query_results": [],
+            "error": null
+          }
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
     },
     {
       "req": "POST /_plugins/_alerting/monitors",
@@ -516,10 +1203,106 @@
         "executionTime",
         "_seq_no",
         "created_time_ms",
-        "last_updated_time_ms"
+        "last_updated_time_ms",
+        "_primary_term"
       ],
       "keep": {
         "m2": "_id"
+      },
+      "status": 201,
+      "response": {
+        "_id": "R-BOIqIBudumUcvfT7lP",
+        "_version": 1,
+        "_seq_no": 74,
+        "_primary_term": 2,
+        "monitor": {
+          "type": "monitor",
+          "schema_version": 0,
+          "name": "esm-q2",
+          "monitor_type": "query_level_monitor",
+          "enabled": false,
+          "enabled_time": null,
+          "schedule": {
+            "period": {
+              "interval": 1,
+              "unit": "MINUTES"
+            }
+          },
+          "inputs": [
+            {
+              "search": {
+                "indices": [
+                  "esm-logs"
+                ],
+                "query": {
+                  "size": 0,
+                  "query": {
+                    "term": {
+                      "level": {
+                        "value": "error",
+                        "boost": 1.0
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          ],
+          "triggers": [
+            {
+              "query_level_trigger": {
+                "id": "esm-t2",
+                "name": "t1",
+                "severity": "1",
+                "condition": {
+                  "script": {
+                    "source": "ctx.results[0].hits.total.value > 0",
+                    "lang": "painless"
+                  }
+                },
+                "actions": [
+                  {
+                    "id": "esm-a1",
+                    "name": "a1",
+                    "destination_id": "esm-hook",
+                    "message_template": {
+                      "source": "{{ctx.monitor.name}}: {{ctx.trigger.name}} {{ctx.results.0.hits.total.value}} hits",
+                      "lang": "mustache"
+                    },
+                    "throttle_enabled": true,
+                    "subject_template": {
+                      "source": "S {{ctx.trigger.severity}}",
+                      "lang": "mustache"
+                    },
+                    "throttle": {
+                      "value": 5,
+                      "unit": "MINUTES"
+                    }
+                  }
+                ]
+              }
+            }
+          ],
+          "last_update_time": 1795871887174,
+          "data_sources": {
+            "query_index": ".opensearch-alerting-queries",
+            "findings_index": ".opensearch-alerting-finding-history-write",
+            "findings_index_pattern": "<.opensearch-alerting-finding-history-{now/d}-1>",
+            "alerts_index": ".opendistro-alerting-alerts",
+            "alerts_history_index": ".opendistro-alerting-alert-history-write",
+            "alerts_history_index_pattern": "<.opendistro-alerting-alert-history-{now/d}-1>",
+            "comments_index": ".opensearch-alerting-comments-history-write",
+            "comments_index_pattern": "<.opensearch-alerting-comments-history-{now/d}-1>",
+            "query_index_mappings_by_type": {},
+            "findings_enabled": false
+          },
+          "delete_query_index_in_every_run": false,
+          "should_create_single_alert_for_findings": false,
+          "owner": "alerting"
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
       }
     },
     {
@@ -539,7 +1322,63 @@
         "_seq_no",
         "created_time_ms",
         "last_updated_time_ms"
-      ]
+      ],
+      "status": 200,
+      "response": {
+        "monitor_name": "esm-q2",
+        "period_start": 1795871827348,
+        "period_end": 1795871887348,
+        "error": null,
+        "input_results": {
+          "results": [
+            {
+              "_shards": {
+                "total": 1,
+                "failed": 0,
+                "successful": 1,
+                "skipped": 0
+              },
+              "hits": {
+                "hits": [],
+                "total": {
+                  "value": 1,
+                  "relation": "eq"
+                },
+                "max_score": null
+              },
+              "took": 4,
+              "timed_out": false
+            }
+          ],
+          "ppl_query_results": [],
+          "ppl_num_results": null,
+          "error": null
+        },
+        "trigger_results": {
+          "esm-t2": {
+            "name": "t1",
+            "triggered": true,
+            "action_results": {
+              "esm-a1": {
+                "id": "esm-a1",
+                "name": "a1",
+                "output": {
+                  "subject": "S 1",
+                  "message": "esm-q2: t1 1 hits"
+                },
+                "throttled": false,
+                "executionTime": 1795871887227,
+                "error": null
+              }
+            },
+            "ppl_query_results": [],
+            "error": null
+          }
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
     },
     {
       "req": "POST /_plugins/_alerting/monitors",
@@ -586,6 +1425,27 @@
             }
           }
         ]
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "alerting_exception",
+              "reason": "Monitor name is null"
+            }
+          ],
+          "type": "alerting_exception",
+          "reason": "Monitor name is null",
+          "caused_by": {
+            "type": "exception",
+            "reason": "java.lang.IllegalArgumentException: Monitor name is null"
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
       }
     },
     {
@@ -628,6 +1488,27 @@
             }
           }
         ]
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "alerting_exception",
+              "reason": "Monitor schedule is null"
+            }
+          ],
+          "type": "alerting_exception",
+          "reason": "Monitor schedule is null",
+          "caused_by": {
+            "type": "exception",
+            "reason": "java.lang.IllegalArgumentException: Monitor schedule is null"
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
       }
     },
     {
@@ -676,10 +1557,52 @@
             }
           }
         ]
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "alerting_exception",
+              "reason": "No enum constant java.time.temporal.ChronoUnit.HOURZ"
+            }
+          ],
+          "type": "alerting_exception",
+          "reason": "No enum constant java.time.temporal.ChronoUnit.HOURZ",
+          "caused_by": {
+            "type": "exception",
+            "reason": "java.lang.IllegalArgumentException: No enum constant java.time.temporal.ChronoUnit.HOURZ"
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
       }
     },
     {
-      "req": "GET /_plugins/_alerting/monitors/esm-nope"
+      "req": "GET /_plugins/_alerting/monitors/esm-nope",
+      "status": 404,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "alerting_exception",
+              "reason": "Monitor not found."
+            }
+          ],
+          "type": "alerting_exception",
+          "reason": "Monitor not found.",
+          "caused_by": {
+            "type": "exception",
+            "reason": "org.opensearch.OpenSearchStatusException: Monitor not found."
+          }
+        },
+        "status": 404
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
     },
     {
       "req": "PUT /_plugins/_alerting/monitors/esm-nope",
@@ -727,10 +1650,52 @@
             }
           }
         ]
+      },
+      "status": 404,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "alerting_exception",
+              "reason": "Monitor with esm-nope is not found"
+            }
+          ],
+          "type": "alerting_exception",
+          "reason": "Monitor with esm-nope is not found",
+          "caused_by": {
+            "type": "exception",
+            "reason": "org.opensearch.OpenSearchStatusException: Monitor with esm-nope is not found"
+          }
+        },
+        "status": 404
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
       }
     },
     {
-      "req": "POST /_plugins/_alerting/monitors/esm-nope/_execute"
+      "req": "POST /_plugins/_alerting/monitors/esm-nope/_execute",
+      "status": 404,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "alerting_exception",
+              "reason": "Can't find monitor with id: esm-nope"
+            }
+          ],
+          "type": "alerting_exception",
+          "reason": "Can't find monitor with id: esm-nope",
+          "caused_by": {
+            "type": "exception",
+            "reason": "org.opensearch.OpenSearchStatusException: Can't find monitor with id: esm-nope"
+          }
+        },
+        "status": 404
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
     },
     {
       "req": "POST /_plugins/_alerting/monitors/esm-nope/_acknowledge/alerts",
@@ -738,14 +1703,69 @@
         "alerts": [
           "x"
         ]
+      },
+      "status": 500,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "alerting_exception",
+              "reason": "No monitor found with id [esm-nope]"
+            }
+          ],
+          "type": "alerting_exception",
+          "reason": "No monitor found with id [esm-nope]",
+          "caused_by": {
+            "type": "exception",
+            "reason": "org.opensearch.ResourceNotFoundException: No monitor found with id [esm-nope]"
+          }
+        },
+        "status": 500
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
       }
     },
     {
       "req": "POST /_plugins/_alerting/monitors/${m1}/_acknowledge/alerts",
-      "body": {}
+      "body": {},
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "You must provide at least one alert id."
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "You must provide at least one alert id."
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
     },
     {
-      "req": "GET /_plugins/_alerting/monitors/alerts?bogus=1"
+      "req": "GET /_plugins/_alerting/monitors/alerts?bogus=1",
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "request [/_plugins/_alerting/monitors/alerts] contains unrecognized parameter: [bogus]"
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "request [/_plugins/_alerting/monitors/alerts] contains unrecognized parameter: [bogus]"
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
     },
     {
       "req": "POST /_plugins/_alerting/monitors",
@@ -833,10 +1853,115 @@
         "executionTime",
         "_seq_no",
         "created_time_ms",
-        "last_updated_time_ms"
+        "last_updated_time_ms",
+        "_primary_term"
       ],
       "keep": {
         "b1": "_id"
+      },
+      "status": 201,
+      "response": {
+        "_id": "UOBOIqIBudumUcvfULld",
+        "_version": 1,
+        "_seq_no": 77,
+        "_primary_term": 2,
+        "monitor": {
+          "type": "monitor",
+          "schema_version": 0,
+          "name": "esm-b1",
+          "monitor_type": "bucket_level_monitor",
+          "enabled": false,
+          "enabled_time": null,
+          "schedule": {
+            "period": {
+              "interval": 5,
+              "unit": "MINUTES"
+            }
+          },
+          "inputs": [
+            {
+              "search": {
+                "indices": [
+                  "esm-logs"
+                ],
+                "query": {
+                  "size": 0,
+                  "query": {
+                    "match_all": {
+                      "boost": 1.0
+                    }
+                  },
+                  "aggregations": {
+                    "composite_agg": {
+                      "composite": {
+                        "size": 10,
+                        "sources": [
+                          {
+                            "level": {
+                              "terms": {
+                                "field": "level",
+                                "missing_bucket": false,
+                                "order": "asc"
+                              }
+                            }
+                          }
+                        ]
+                      },
+                      "aggregations": {
+                        "total": {
+                          "sum": {
+                            "field": "n"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          ],
+          "triggers": [
+            {
+              "bucket_level_trigger": {
+                "id": "esm-bt",
+                "name": "bt",
+                "severity": "1",
+                "condition": {
+                  "buckets_path": {
+                    "total": "total",
+                    "_count": "_count"
+                  },
+                  "parent_bucket_path": "composite_agg",
+                  "script": {
+                    "source": "params._count > 1 || params.total > 2",
+                    "lang": "painless"
+                  },
+                  "gap_policy": "skip"
+                },
+                "actions": []
+              }
+            }
+          ],
+          "last_update_time": 1795871887440,
+          "data_sources": {
+            "query_index": ".opensearch-alerting-queries",
+            "findings_index": ".opensearch-alerting-finding-history-write",
+            "findings_index_pattern": "<.opensearch-alerting-finding-history-{now/d}-1>",
+            "alerts_index": ".opendistro-alerting-alerts",
+            "alerts_history_index": ".opendistro-alerting-alert-history-write",
+            "alerts_history_index_pattern": "<.opendistro-alerting-alert-history-{now/d}-1>",
+            "comments_index": ".opensearch-alerting-comments-history-write",
+            "comments_index_pattern": "<.opensearch-alerting-comments-history-{now/d}-1>",
+            "query_index_mappings_by_type": {},
+            "findings_enabled": false
+          },
+          "delete_query_index_in_every_run": false,
+          "should_create_single_alert_for_findings": false,
+          "owner": "alerting"
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
       }
     },
     {
@@ -856,7 +1981,129 @@
         "_seq_no",
         "created_time_ms",
         "last_updated_time_ms"
-      ]
+      ],
+      "status": 200,
+      "response": {
+        "monitor_name": "esm-b1",
+        "period_start": 1795871587705,
+        "period_end": 1795871887705,
+        "error": null,
+        "input_results": {
+          "results": [
+            {
+              "_shards": {
+                "total": 1,
+                "failed": 0,
+                "successful": 1,
+                "skipped": 0
+              },
+              "hits": {
+                "hits": [],
+                "total": {
+                  "value": 4,
+                  "relation": "eq"
+                },
+                "max_score": null
+              },
+              "took": 13,
+              "terminated_early": true,
+              "timed_out": false,
+              "aggregations": {
+                "esm-bt": {
+                  "parent_bucket_path": "composite_agg",
+                  "bucket_indices": [
+                    0,
+                    2
+                  ]
+                },
+                "composite_agg": {
+                  "buckets": [
+                    {
+                      "doc_count": 1,
+                      "total": {
+                        "value": 3.0
+                      },
+                      "key": {
+                        "level": "error"
+                      }
+                    },
+                    {
+                      "doc_count": 1,
+                      "total": {
+                        "value": 2.0
+                      },
+                      "key": {
+                        "level": "info"
+                      }
+                    },
+                    {
+                      "doc_count": 2,
+                      "total": {
+                        "value": 6.0
+                      },
+                      "key": {
+                        "level": "warn"
+                      }
+                    }
+                  ],
+                  "after_key": {
+                    "level": "warn"
+                  }
+                }
+              }
+            }
+          ],
+          "ppl_query_results": [],
+          "ppl_num_results": null,
+          "error": null
+        },
+        "trigger_results": {
+          "esm-bt": {
+            "name": "bt",
+            "agg_result_buckets": {
+              "error": {
+                "agg_alert_content": {
+                  "parent_bucket_path": "composite_agg",
+                  "bucket_keys": [
+                    "error"
+                  ],
+                  "bucket": {
+                    "doc_count": 1,
+                    "total": {
+                      "value": 3.0
+                    },
+                    "key": {
+                      "level": "error"
+                    }
+                  }
+                }
+              },
+              "warn": {
+                "agg_alert_content": {
+                  "parent_bucket_path": "composite_agg",
+                  "bucket_keys": [
+                    "warn"
+                  ],
+                  "bucket": {
+                    "doc_count": 2,
+                    "total": {
+                      "value": 6.0
+                    },
+                    "key": {
+                      "level": "warn"
+                    }
+                  }
+                }
+              }
+            },
+            "action_results": {},
+            "error": null
+          }
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
     },
     {
       "req": "GET /_plugins/_alerting/monitors/alerts?monitorId=${b1}",
@@ -876,7 +2123,96 @@
         "created_time_ms",
         "last_updated_time_ms",
         "id"
-      ]
+      ],
+      "status": 200,
+      "response": {
+        "alerts": [
+          {
+            "id": "U-BOIqIBudumUcvfUblz",
+            "version": 1,
+            "monitor_id": "UOBOIqIBudumUcvfULld",
+            "workflow_id": "",
+            "workflow_name": "",
+            "associated_alert_ids": [],
+            "schema_version": 6,
+            "monitor_version": 1,
+            "monitor_name": "esm-b1",
+            "execution_id": "UOBOIqIBudumUcvfULld_2026-11-28T13:18:07.707665289_9e81d6e8-3a28-414b-b286-f5c30bc24cfc",
+            "trigger_id": "esm-bt",
+            "trigger_name": "bt",
+            "finding_ids": [],
+            "related_doc_ids": [],
+            "state": "ACTIVE",
+            "error_message": null,
+            "alert_history": [],
+            "severity": "1",
+            "action_execution_results": [],
+            "start_time": 1795871887729,
+            "last_notification_time": 1795871887729,
+            "end_time": null,
+            "acknowledged_time": null,
+            "agg_alert_content": {
+              "parent_bucket_path": "composite_agg",
+              "bucket_keys": [
+                "error"
+              ],
+              "bucket": {
+                "doc_count": 1,
+                "total": {
+                  "value": 3.0
+                },
+                "key": {
+                  "level": "error"
+                }
+              }
+            }
+          },
+          {
+            "id": "VOBOIqIBudumUcvfUblz",
+            "version": 1,
+            "monitor_id": "UOBOIqIBudumUcvfULld",
+            "workflow_id": "",
+            "workflow_name": "",
+            "associated_alert_ids": [],
+            "schema_version": 6,
+            "monitor_version": 1,
+            "monitor_name": "esm-b1",
+            "execution_id": "UOBOIqIBudumUcvfULld_2026-11-28T13:18:07.707665289_9e81d6e8-3a28-414b-b286-f5c30bc24cfc",
+            "trigger_id": "esm-bt",
+            "trigger_name": "bt",
+            "finding_ids": [],
+            "related_doc_ids": [],
+            "state": "ACTIVE",
+            "error_message": null,
+            "alert_history": [],
+            "severity": "1",
+            "action_execution_results": [],
+            "start_time": 1795871887729,
+            "last_notification_time": 1795871887729,
+            "end_time": null,
+            "acknowledged_time": null,
+            "agg_alert_content": {
+              "parent_bucket_path": "composite_agg",
+              "bucket_keys": [
+                "warn"
+              ],
+              "bucket": {
+                "doc_count": 2,
+                "total": {
+                  "value": 6.0
+                },
+                "key": {
+                  "level": "warn"
+                }
+              }
+            }
+          }
+        ],
+        "totalAlerts": 2
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
     },
     {
       "req": "POST /_plugins/_alerting/monitors",
@@ -948,10 +2284,98 @@
         "executionTime",
         "_seq_no",
         "created_time_ms",
-        "last_updated_time_ms"
+        "last_updated_time_ms",
+        "_primary_term"
       ],
       "keep": {
         "d1": "_id"
+      },
+      "status": 201,
+      "response": {
+        "_id": "V-BOIqIBudumUcvfUbn-",
+        "_version": 1,
+        "_seq_no": 80,
+        "_primary_term": 2,
+        "monitor": {
+          "type": "monitor",
+          "schema_version": 0,
+          "name": "esm-d1",
+          "monitor_type": "doc_level_monitor",
+          "enabled": false,
+          "enabled_time": null,
+          "schedule": {
+            "period": {
+              "interval": 1,
+              "unit": "MINUTES"
+            }
+          },
+          "inputs": [
+            {
+              "doc_level_input": {
+                "description": "d",
+                "indices": [
+                  "esm-logs"
+                ],
+                "queries": [
+                  {
+                    "id": "q1",
+                    "name": "errors",
+                    "fields": [],
+                    "query": "level:\"error\"",
+                    "tags": [
+                      "sev1"
+                    ],
+                    "query_field_names": []
+                  },
+                  {
+                    "id": "q2",
+                    "name": "big",
+                    "fields": [],
+                    "query": "n:5",
+                    "tags": [],
+                    "query_field_names": []
+                  }
+                ],
+                "fan_out_enabled": true
+              }
+            }
+          ],
+          "triggers": [
+            {
+              "document_level_trigger": {
+                "id": "esm-dt",
+                "name": "dt",
+                "severity": "1",
+                "condition": {
+                  "script": {
+                    "source": "query[tag=sev1] || query[name=big]",
+                    "lang": "painless"
+                  }
+                },
+                "actions": []
+              }
+            }
+          ],
+          "last_update_time": 1795871887857,
+          "data_sources": {
+            "query_index": ".opensearch-alerting-queries",
+            "findings_index": ".opensearch-alerting-finding-history-write",
+            "findings_index_pattern": "<.opensearch-alerting-finding-history-{now/d}-1>",
+            "alerts_index": ".opendistro-alerting-alerts",
+            "alerts_history_index": ".opendistro-alerting-alert-history-write",
+            "alerts_history_index_pattern": "<.opendistro-alerting-alert-history-{now/d}-1>",
+            "comments_index": ".opensearch-alerting-comments-history-write",
+            "comments_index_pattern": "<.opensearch-alerting-comments-history-{now/d}-1>",
+            "query_index_mappings_by_type": {},
+            "findings_enabled": false
+          },
+          "delete_query_index_in_every_run": false,
+          "should_create_single_alert_for_findings": false,
+          "owner": "alerting"
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
       }
     },
     {
@@ -971,7 +2395,33 @@
         "_seq_no",
         "created_time_ms",
         "last_updated_time_ms"
-      ]
+      ],
+      "status": 200,
+      "response": {
+        "monitor_name": "esm-d1",
+        "period_start": 1795871828307,
+        "period_end": 1795871888307,
+        "error": null,
+        "input_results": {
+          "results": [
+            {}
+          ],
+          "ppl_query_results": [],
+          "ppl_num_results": null,
+          "error": null
+        },
+        "trigger_results": {
+          "esm-dt": {
+            "name": "dt",
+            "triggeredDocs": [],
+            "action_results": {},
+            "error": null
+          }
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
     },
     {
       "req": "PUT /esm-logs/_doc/n1?refresh=true",
@@ -981,7 +2431,25 @@
       },
       "mask": [
         "_seq_no"
-      ]
+      ],
+      "status": 201,
+      "response": {
+        "_index": "esm-logs",
+        "_id": "n1",
+        "_version": 1,
+        "result": "created",
+        "forced_refresh": true,
+        "_shards": {
+          "total": 2,
+          "successful": 1,
+          "failed": 0
+        },
+        "_seq_no": 4,
+        "_primary_term": 1
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
     },
     {
       "req": "PUT /esm-logs/_doc/n2?refresh=true",
@@ -991,7 +2459,25 @@
       },
       "mask": [
         "_seq_no"
-      ]
+      ],
+      "status": 201,
+      "response": {
+        "_index": "esm-logs",
+        "_id": "n2",
+        "_version": 1,
+        "result": "created",
+        "forced_refresh": true,
+        "_shards": {
+          "total": 2,
+          "successful": 1,
+          "failed": 0
+        },
+        "_seq_no": 5,
+        "_primary_term": 1
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
     },
     {
       "req": "POST /_plugins/_alerting/monitors/${d1}/_execute",
@@ -1010,7 +2496,39 @@
         "_seq_no",
         "created_time_ms",
         "last_updated_time_ms"
-      ]
+      ],
+      "status": 200,
+      "response": {
+        "monitor_name": "esm-d1",
+        "period_start": 1795871828496,
+        "period_end": 1795871888496,
+        "error": null,
+        "input_results": {
+          "results": [
+            {
+              "q1": [
+                "n1|esm-logs"
+              ]
+            }
+          ],
+          "ppl_query_results": [],
+          "ppl_num_results": null,
+          "error": null
+        },
+        "trigger_results": {
+          "esm-dt": {
+            "name": "dt",
+            "triggeredDocs": [
+              "n1|esm-logs"
+            ],
+            "action_results": {},
+            "error": null
+          }
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
     },
     {
       "req": "POST /_plugins/_alerting/monitors/${d1}/_execute",
@@ -1029,7 +2547,33 @@
         "_seq_no",
         "created_time_ms",
         "last_updated_time_ms"
-      ]
+      ],
+      "status": 200,
+      "response": {
+        "monitor_name": "esm-d1",
+        "period_start": 1795871828831,
+        "period_end": 1795871888831,
+        "error": null,
+        "input_results": {
+          "results": [
+            {}
+          ],
+          "ppl_query_results": [],
+          "ppl_num_results": null,
+          "error": null
+        },
+        "trigger_results": {
+          "esm-dt": {
+            "name": "dt",
+            "triggeredDocs": [],
+            "action_results": {},
+            "error": null
+          }
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
     },
     {
       "req": "GET /_plugins/_alerting/monitors/alerts?monitorId=${d1}",
@@ -1050,7 +2594,45 @@
         "last_updated_time_ms",
         "id",
         "finding_ids"
-      ]
+      ],
+      "status": 200,
+      "response": {
+        "alerts": [
+          {
+            "id": "1e883ce5-a119-4bd7-b915-eb18a2b2f0bf",
+            "version": 1,
+            "monitor_id": "V-BOIqIBudumUcvfUbn-",
+            "workflow_id": "",
+            "workflow_name": "",
+            "associated_alert_ids": [],
+            "schema_version": 6,
+            "monitor_version": 1,
+            "monitor_name": "esm-d1",
+            "execution_id": "V-BOIqIBudumUcvfUbn-_2026-11-28T13:18:08.500886281_7706a060-85b5-45c2-ad1e-04b15dde453b",
+            "trigger_id": "esm-dt",
+            "trigger_name": "dt",
+            "finding_ids": [
+              "e47290ab-2959-42ea-be0f-75fe96b06fc2"
+            ],
+            "related_doc_ids": [
+              "n1|esm-logs"
+            ],
+            "state": "ACTIVE",
+            "error_message": null,
+            "alert_history": [],
+            "severity": "1",
+            "action_execution_results": [],
+            "start_time": 1795871888665,
+            "last_notification_time": 1795871888665,
+            "end_time": null,
+            "acknowledged_time": null
+          }
+        ],
+        "totalAlerts": 1
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
     },
     {
       "req": "POST /_plugins/_alerting/monitors/_search",
@@ -1077,8 +2659,106 @@
         "created_time_ms",
         "last_updated_time_ms",
         "_score",
-        "max_score"
-      ]
+        "max_score",
+        "_primary_term"
+      ],
+      "status": 200,
+      "response": {
+        "took": 6,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 1,
+            "relation": "eq"
+          },
+          "max_score": 2.0,
+          "hits": [
+            {
+              "_index": ".opendistro-alerting-config",
+              "_id": "MuBOIqIBudumUcvfQrld",
+              "_version": 2,
+              "_seq_no": 73,
+              "_primary_term": 2,
+              "_score": 2.0,
+              "_source": {
+                "type": "monitor",
+                "schema_version": 9,
+                "name": "esm-q1",
+                "monitor_type": "query_level_monitor",
+                "enabled": false,
+                "enabled_time": null,
+                "schedule": {
+                  "period": {
+                    "interval": 1,
+                    "unit": "MINUTES"
+                  }
+                },
+                "inputs": [
+                  {
+                    "search": {
+                      "indices": [
+                        "esm-logs"
+                      ],
+                      "query": {
+                        "size": 0,
+                        "query": {
+                          "term": {
+                            "level": {
+                              "value": "error",
+                              "boost": 1.0
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                ],
+                "triggers": [
+                  {
+                    "query_level_trigger": {
+                      "id": "esm-t1",
+                      "name": "t1",
+                      "severity": "1",
+                      "condition": {
+                        "script": {
+                          "source": "return false",
+                          "lang": "painless"
+                        }
+                      },
+                      "actions": []
+                    }
+                  }
+                ],
+                "last_update_time": 1795871885361,
+                "data_sources": {
+                  "query_index": ".opensearch-alerting-queries",
+                  "findings_index": ".opensearch-alerting-finding-history-write",
+                  "findings_index_pattern": "<.opensearch-alerting-finding-history-{now/d}-1>",
+                  "alerts_index": ".opendistro-alerting-alerts",
+                  "alerts_history_index": ".opendistro-alerting-alert-history-write",
+                  "alerts_history_index_pattern": "<.opendistro-alerting-alert-history-{now/d}-1>",
+                  "comments_index": ".opensearch-alerting-comments-history-write",
+                  "comments_index_pattern": "<.opensearch-alerting-comments-history-{now/d}-1>",
+                  "query_index_mappings_by_type": {},
+                  "findings_enabled": false
+                },
+                "delete_query_index_in_every_run": false,
+                "should_create_single_alert_for_findings": false,
+                "owner": "alerting"
+              }
+            }
+          ]
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
     },
     {
       "req": "DELETE /_plugins/_alerting/monitors/${m2}",
@@ -1097,13 +2777,59 @@
         "_seq_no",
         "created_time_ms",
         "last_updated_time_ms"
-      ]
+      ],
+      "status": 200,
+      "response": {
+        "_id": "R-BOIqIBudumUcvfT7lP",
+        "_version": 2
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
     },
     {
-      "req": "DELETE /_plugins/_alerting/monitors/${m2}"
+      "req": "DELETE /_plugins/_alerting/monitors/${m2}",
+      "status": 404,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "status_exception",
+              "reason": "Monitor with R-BOIqIBudumUcvfT7lP is not found"
+            }
+          ],
+          "type": "status_exception",
+          "reason": "Monitor with R-BOIqIBudumUcvfT7lP is not found"
+        },
+        "status": 404
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
     },
     {
-      "req": "GET /_plugins/_alerting/monitors/${m2}"
+      "req": "GET /_plugins/_alerting/monitors/${m2}",
+      "status": 404,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "alerting_exception",
+              "reason": "Monitor not found."
+            }
+          ],
+          "type": "alerting_exception",
+          "reason": "Monitor not found.",
+          "caused_by": {
+            "type": "exception",
+            "reason": "org.opensearch.OpenSearchStatusException: Monitor not found."
+          }
+        },
+        "status": 404
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
     },
     {
       "req": "POST /_plugins/_notifications/configs",
@@ -1122,6 +2848,13 @@
             "method": "POST"
           }
         }
+      },
+      "status": 200,
+      "response": {
+        "config_id": "esm-hook"
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
       }
     },
     {
@@ -1135,6 +2868,13 @@
             "url": "https://hooks.slack.com/services/T0/B0/esm"
           }
         }
+      },
+      "status": 200,
+      "response": {
+        "config_id": "esm-slack"
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
       }
     },
     {
@@ -1142,14 +2882,68 @@
       "mask": [
         "created_time_ms",
         "last_updated_time_ms"
-      ]
+      ],
+      "status": 200,
+      "response": {
+        "start_index": 0,
+        "total_hits": 1,
+        "total_hit_relation": "eq",
+        "config_list": [
+          {
+            "config_id": "esm-hook",
+            "last_updated_time_ms": 1795871889172,
+            "created_time_ms": 1795871889172,
+            "config": {
+              "name": "esm hook",
+              "description": "d",
+              "config_type": "webhook",
+              "is_enabled": true,
+              "webhook": {
+                "url": "https://hooks.example.com/esm",
+                "header_params": {
+                  "Content-Type": "application/json"
+                },
+                "method": "POST"
+              }
+            }
+          }
+        ]
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
     },
     {
       "req": "GET /_plugins/_notifications/configs?config_type=slack",
       "mask": [
         "created_time_ms",
         "last_updated_time_ms"
-      ]
+      ],
+      "status": 200,
+      "response": {
+        "start_index": 0,
+        "total_hits": 1,
+        "total_hit_relation": "eq",
+        "config_list": [
+          {
+            "config_id": "esm-slack",
+            "last_updated_time_ms": 1795871889242,
+            "created_time_ms": 1795871889242,
+            "config": {
+              "name": "esm slack",
+              "description": "",
+              "config_type": "slack",
+              "is_enabled": true,
+              "slack": {
+                "url": "https://hooks.slack.com/services/T0/B0/esm"
+              }
+            }
+          }
+        ]
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
     },
     {
       "req": "PUT /_plugins/_notifications/configs/esm-slack",
@@ -1162,6 +2956,13 @@
             "url": "https://hooks.slack.com/services/T0/B0/esm2"
           }
         }
+      },
+      "status": 200,
+      "response": {
+        "config_id": "esm-slack"
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
       }
     },
     {
@@ -1169,10 +2970,55 @@
       "mask": [
         "created_time_ms",
         "last_updated_time_ms"
-      ]
+      ],
+      "status": 200,
+      "response": {
+        "start_index": 0,
+        "total_hits": 1,
+        "total_hit_relation": "eq",
+        "config_list": [
+          {
+            "config_id": "esm-slack",
+            "last_updated_time_ms": 1795871889317,
+            "created_time_ms": 1795871889242,
+            "config": {
+              "name": "esm slack 2",
+              "description": "",
+              "config_type": "slack",
+              "is_enabled": false,
+              "slack": {
+                "url": "https://hooks.slack.com/services/T0/B0/esm2"
+              }
+            }
+          }
+        ]
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
     },
     {
-      "req": "GET /_plugins/_notifications/features"
+      "req": "GET /_plugins/_notifications/features",
+      "status": 200,
+      "response": {
+        "allowed_config_type_list": [
+          "slack",
+          "chime",
+          "microsoft_teams",
+          "webhook",
+          "email",
+          "sns",
+          "ses_account",
+          "smtp_account",
+          "email_group"
+        ],
+        "plugin_features": {
+          "tooltip_support": "true"
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
     },
     {
       "req": "POST /_plugins/_notifications/configs",
@@ -1184,6 +3030,23 @@
             "url": "https://hooks.chime.aws/x"
           }
         }
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "status_exception",
+              "reason": "Wrong Chime url. Should contain \"hooks.chime.aws/incomingwebhooks/\" and \"?token=\""
+            }
+          ],
+          "type": "status_exception",
+          "reason": "Wrong Chime url. Should contain \"hooks.chime.aws/incomingwebhooks/\" and \"?token=\""
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
       }
     },
     {
@@ -1196,6 +3059,23 @@
             "url": "https://example.com/x"
           }
         }
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "status_exception",
+              "reason": "Wrong Slack url. Should contain \"hooks.slack.com/services/\" or \"hooks.gov-slack.com/services/\""
+            }
+          ],
+          "type": "status_exception",
+          "reason": "Wrong Slack url. Should contain \"hooks.slack.com/services/\" or \"hooks.gov-slack.com/services/\""
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
       }
     },
     {
@@ -1208,6 +3088,23 @@
             "url": "https://hooks.slack.com/services/x"
           }
         }
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "name is null or empty"
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "name is null or empty"
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
       }
     },
     {
@@ -1220,6 +3117,23 @@
             "url": "ftp://x"
           }
         }
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "Invalid URL or unsupported"
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "Invalid URL or unsupported"
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
       }
     },
     {
@@ -1229,6 +3143,23 @@
           "name": "esm w",
           "config_type": "webhook"
         }
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "ConfigType: webhook and data doesn't match"
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "ConfigType: webhook and data doesn't match"
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
       }
     },
     {
@@ -1238,6 +3169,23 @@
           "name": "esm b",
           "config_type": "bogus"
         }
+      },
+      "status": 406,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "status_exception",
+              "reason": "NotificationConfig with type NONE is not acceptable"
+            }
+          ],
+          "type": "status_exception",
+          "reason": "NotificationConfig with type NONE is not acceptable"
+        },
+        "status": 406
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
       }
     },
     {
@@ -1251,25 +3199,136 @@
             "url": "https://hooks.slack.com/services/T0/B0/x"
           }
         }
+      },
+      "status": 409,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "status_exception",
+              "reason": "Document version conflict putting esm-slack in index .opensearch-notifications-config"
+            }
+          ],
+          "type": "status_exception",
+          "reason": "Document version conflict putting esm-slack in index .opensearch-notifications-config"
+        },
+        "status": 409
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
       }
     },
     {
-      "req": "GET /_plugins/_notifications/configs/esm-nope"
+      "req": "GET /_plugins/_notifications/configs/esm-nope",
+      "status": 404,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "status_exception",
+              "reason": "NotificationConfig esm-nope not found"
+            }
+          ],
+          "type": "status_exception",
+          "reason": "NotificationConfig esm-nope not found"
+        },
+        "status": 404
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
     },
     {
-      "req": "GET /_plugins/_notifications/configs?bogus=1"
+      "req": "GET /_plugins/_notifications/configs?bogus=1",
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "request [/_plugins/_notifications/configs] contains unrecognized parameter: [bogus]"
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "request [/_plugins/_notifications/configs] contains unrecognized parameter: [bogus]"
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
     },
     {
-      "req": "POST /_plugins/_notifications/feature/test/esm-nope"
+      "req": "POST /_plugins/_notifications/feature/test/esm-nope",
+      "status": 404,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "status_exception",
+              "reason": "{\"event_status_list\": [{\"config_id\":\"esm-nope\",\"config_type\":\"none\",\"config_name\":\"invalid-config\",\"email_recipient_status\":[],\"delivery_status\":{\"status_code\":\"404\",\"status_text\":\"Channel esm-nope not found\"}}]}"
+            }
+          ],
+          "type": "status_exception",
+          "reason": "{\"event_status_list\": [{\"config_id\":\"esm-nope\",\"config_type\":\"none\",\"config_name\":\"invalid-config\",\"email_recipient_status\":[],\"delivery_status\":{\"status_code\":\"404\",\"status_text\":\"Channel esm-nope not found\"}}]}"
+        },
+        "status": 404
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
     },
     {
-      "req": "DELETE /_plugins/_notifications/configs?config_id_list=esm-slack,esm-nope"
+      "req": "DELETE /_plugins/_notifications/configs?config_id_list=esm-slack,esm-nope",
+      "status": 404,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "status_exception",
+              "reason": "NotificationConfig [esm-nope] not found"
+            }
+          ],
+          "type": "status_exception",
+          "reason": "NotificationConfig [esm-nope] not found"
+        },
+        "status": 404
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
     },
     {
-      "req": "DELETE /_plugins/_notifications/configs?config_id_list=esm-slack"
+      "req": "DELETE /_plugins/_notifications/configs?config_id_list=esm-slack",
+      "status": 200,
+      "response": {
+        "delete_response_list": {
+          "esm-slack": "OK"
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
     },
     {
-      "req": "DELETE /_plugins/_notifications/configs/esm-slack"
+      "req": "DELETE /_plugins/_notifications/configs/esm-slack",
+      "status": 404,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "status_exception",
+              "reason": "NotificationConfig esm-slack not found"
+            }
+          ],
+          "type": "status_exception",
+          "reason": "NotificationConfig esm-slack not found"
+        },
+        "status": 404
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
     }
   ]
 }

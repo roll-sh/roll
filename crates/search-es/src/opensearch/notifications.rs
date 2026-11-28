@@ -188,7 +188,7 @@ async fn put(ctx: &Ctx<'_>, update: Option<String>) -> EsResult<Reply> {
             let old = st.metadata.xpack.get(CONFIGS, &id).cloned();
             let created = match (&update, &old) {
                 (Some(_), None) => return Err(not_found(&id)),
-                (None, Some(_)) => return Err(status(409, format!("NotificationConfig {id} already exists"))),
+                (None, Some(_)) => return Err(status(409, format!("Document version conflict putting {id} in index .opensearch-notifications-config"))),
                 (_, Some(o)) => o.get("created_time_ms").and_then(Value::as_i64).unwrap_or(now),
                 (None, None) => now,
             };

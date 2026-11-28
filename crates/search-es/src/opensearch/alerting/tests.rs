@@ -136,6 +136,8 @@ async fn doc_level_monitor_alerts_on_new_documents_only() {
     let id = ok(&c, "POST", "/_plugins/_alerting/monitors", monitor).await.get("_id").map(Value::to_es_string).unwrap();
     ok(&c, "PUT", "/logs/_doc/new?refresh=true", r#"{"level":"error"}"#).await;
     ok(&c, "PUT", "/logs/_doc/quiet?refresh=true", r#"{"level":"info"}"#).await;
+    let dry = ok(&c, "POST", &format!("/_plugins/_alerting/monitors/{id}/_execute?dryrun=true"), "").await;
+    assert_eq!(dry.pointer(&["trigger_results", "dt", "triggeredDocs"]).map(Value::to_json).as_deref(), Some(r#"["new|logs"]"#), "{} {:?}", dry.to_json(), c.state().metadata.xpack.get(JOBS, &id));
     assert_eq!(run_due(&c, next_run_of(&c, &id)).await, 1);
     let a = alerts_of(&c, &id).await;
     assert_eq!(a.iter().map(|a| a.get("related_doc_ids").map(Value::to_json).unwrap_or_default()).collect::<Vec<_>>(), [r#"["new|logs"]"#]);

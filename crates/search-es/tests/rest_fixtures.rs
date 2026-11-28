@@ -546,7 +546,11 @@ async fn cleanup(client: &reqwest::Client, base: &str) {
         }
     }
     // Alerting monitors named `esm-*` and notification channels with `esm-*` ids.
-    if let Some(v) = get(format!("{base}/_plugins/_alerting/monitors/_search?size=1000")).await {
+    let monitors = async {
+        let r = client.post(format!("{base}/_plugins/_alerting/monitors/_search")).header("content-type", "application/json").body(r#"{"size":1000,"query":{"match_all":{}}}"#).send().await.ok()?;
+        parse(&r.bytes().await.ok()?).ok().flatten()
+    };
+    if let Some(v) = monitors.await {
         for h in v.pointer(&["hits", "hits"]).and_then(Value::as_array).cloned().unwrap_or_default() {
             let named = h.pointer(&["_source", "name"]).and_then(Value::as_str).is_some_and(|n| n.starts_with("esm"));
             if let (true, Some(id)) = (named, h.get("_id").and_then(Value::as_str)) {

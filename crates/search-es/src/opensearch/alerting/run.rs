@@ -89,7 +89,7 @@ impl Run<'_> {
         super::user_doc(self.owner.as_ref())
     }
 
-    fn new_alert(&self, trigger: &Map, state: &str, error: Option<String>) -> New<'_> {
+    fn new_alert<'s>(&'s self, trigger: &'s Map, state: &'s str, error: Option<String>) -> New<'s> {
         static NULL: Value = Value::Null;
         New {
             monitor_id: self.id.as_deref().unwrap_or_default(),
