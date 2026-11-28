@@ -266,6 +266,9 @@ pub struct Replay {
 
 /// Replays a recorded scenario.
 pub async fn replay(fixture: &str, signed: bool) -> Replay {
+    // The recorded endpoints keep their captured limits (as low as 3 a minute); replayed at
+    // full speed, the requests are the same and nothing waits. `rate`'s own test checks the waits.
+    search_es::xpack::inference::rate::speed_up_for_tests(10_000);
     let steps = parse(std::fs::read(format!("{}/tests/fixtures/inference/{fixture}.json", env!("CARGO_MANIFEST_DIR"))).unwrap().as_slice()).unwrap().unwrap();
     let m = mock().await;
     let c = cluster(&m).await;

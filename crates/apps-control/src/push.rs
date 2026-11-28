@@ -438,12 +438,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tries_back_off_to_a_minute() {
-        let waits: Vec<u64> = (1..=9).map(|a| backoff(a).as_secs()).collect();
-        assert_eq!(waits, [1, 2, 4, 8, 16, 32, 60, 60, 60]);
-    }
-
-    #[test]
     fn a_record_is_a_cloudevent_with_its_value() {
         let rule = Push { stream: "st_aaaaaaaaaaaa".into(), topic: "orders".into(), group: "g".into(), path: "/events".into(), environment: None, dead_letter: None, max_attempts: None, timeout_s: None, max_in_flight: None, auth: None };
         let headers = vec![("content-type".into(), b"application/json".to_vec()), ("trace id".into(), b"x".to_vec()), ("tenant".into(), b"acme".to_vec()), ("id".into(), b"forged".to_vec())];

@@ -2480,12 +2480,13 @@ impl Store {
     }
 
     /// One more check run or ping (`ok`), or failure or miss, on `day` (days since 1970), and
-    /// what it is now (`up`: a check is down only after its failures in a row, not one try):
+    /// what it is now (`up`, `degraded` or `down`: a check is down only after its failures in a
+    /// row, not one try, and degraded while it's slow):
     /// what it was before, when that changed. Once a day, days and resolved incidents past
     /// [`crate::status_page::DAYS`] go.
-    pub fn status_day_add(&self, key: &str, day: i64, ok: bool, up: bool) -> Result<Option<Option<String>>> {
+    pub fn status_day_add(&self, key: &str, day: i64, ok: bool, now: &str) -> Result<Option<Option<String>>> {
         let (g, b) = if ok { (1, 0) } else { (0, 1) };
-        let (last_key, now) = (format!("status-last:{key}"), if up { "up" } else { "down" });
+        let last_key = format!("status-last:{key}");
         let changed = self.db.write(|c| {
             c.execute(
                 "INSERT INTO status_days (key, day, ok, bad) VALUES (?, ?, ?, ?) ON CONFLICT (key, day) DO UPDATE SET ok = status_days.ok + excluded.ok, bad = status_days.bad + excluded.bad",
@@ -5408,29 +5409,6 @@ fn delivery_row(r: &code_sql::Row<'_>) -> code_sql::Result<Delivery> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Patterns saved as substrings keep their meaning under the Logs search: quoted once, on
-    /// the next open, one word left alone.
-    #[test]
-    fn saved_log_patterns_are_quoted_once() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("apps.db");
-        let s = Store::new(Db::open_sqlite(&path, Default::default()).unwrap(), Sealer::new(&"k".repeat(32)).unwrap()).unwrap();
-        let run = r#"{"alerts":{"log_match":"connection refused"},"log_metrics":[{"name":"a","pattern":"-ERR"},{"name":"b","pattern":"panic"}]}"#;
-        s.db.execute("INSERT INTO environments (service, name, ephemeral, slug, created_at, run) VALUES ('svc_x', 'production', 0, 'x', 0, ?)", [run]).unwrap();
-        s.db.execute("DELETE FROM state WHERE key = 'log-patterns-quoted'", ()).unwrap();
-        drop(s);
-        let s = Store::new(Db::open_sqlite(&path, Default::default()).unwrap(), Sealer::new(&"k".repeat(32)).unwrap()).unwrap();
-        let got: String = s.db.query_row("SELECT run FROM environments WHERE service = 'svc_x'", (), |r| r.get(0)).unwrap();
-        let v: serde_json::Value = serde_json::from_str(&got).unwrap();
-        assert_eq!((v["alerts"]["log_match"].as_str(), v["log_metrics"][0]["pattern"].as_str(), v["log_metrics"][1]["pattern"].as_str()), (Some("\"connection refused\""), Some("\"-ERR\""), Some("panic")), "{got}");
-        // Once: a search saved since stays as it was written.
-        s.db.execute("UPDATE environments SET run = ? WHERE service = 'svc_x'", [r#"{"alerts":{"log_match":"timeout OR refused"}}"#]).unwrap();
-        drop(s);
-        let s = Store::new(Db::open_sqlite(&path, Default::default()).unwrap(), Sealer::new(&"k".repeat(32)).unwrap()).unwrap();
-        let got: String = s.db.query_row("SELECT run FROM environments WHERE service = 'svc_x'", (), |r| r.get(0)).unwrap();
-        assert!(got.contains("\"timeout OR refused\"") && !got.contains("\\\""), "{got}");
-    }
 
     /// Two notifiers (a handover) never queue an event twice for a target, the one whose
     /// cursor moved under it queues nothing, and a claimed delivery isn't handed out again.

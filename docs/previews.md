@@ -574,6 +574,9 @@ behind the `Apps` trait:
     `PreviewRouter`, #278), which serves a roll-runtime service, and only for the project that
     holds the domain. Previews answers the 404 for a name it doesn't hold. rolld's API port
     serves the same names too (a node without apps' ingress).
+  - **Team access:** a ticket (`POST /v1/previews/{id}/visit`) to a name under the domain lands
+    on that name, at the domain's scheme; the preview's name under another project's domain gets
+    none.
   - **Changes:** the domain is read from roll apps at most once a minute. When it's verified,
     changed or removed, the project's runtime services' URLs move and every preview reports
     again, so the pull request's links follow.
@@ -2128,7 +2131,7 @@ previews in it), the operator and admins see every project.
 | --- | --- | --- |
 | `GET /v1/previews?project=&state=` | | `Preview[]`, newest first, light (`Preview::light`): every count and state a row reads, without each page's accessibility issues, links and comparison, the first page's issues' markup and axe-core's words, or the words against main (by the bounds, about 130 KB a preview whose pages have the most violations, down to a few KB); `GET …/{id}` has all of it |
 | `POST /v1/previews` | `{project, repo, branch? , change?}` | 201 `Preview` (or 200 with the project's existing one). 404 unless the repo is on the project's canvas and the project stands for it (`Workspace::trusts`, as for the previews it makes itself: a preview builds and runs the repo). 409 when the change's preview is another project's (a change has one; it's never handed to another project); 400 when `X-Roll-Project` (the project roll-access decided the create on) names another project than the body |
-| `GET /v1/previews/events?after=&limit=&latest=` | | `{events: Event[], next}`: what happened to previews after the seq `after` (0 by default), oldest first, at most `limit` (1–500, 100 by default); `next` is where to ask from again (past events the caller doesn't see too: a signed-in person sees their projects'). `latest=1`: `{events: [], next}` with the newest seq, to follow from now on (400 with `after`). `type Event = {seq, at, kind: "created" \| "ready" \| "failed" \| "visual_change" \| "browser_checks_passed" \| "browser_checks_failed" \| "deleted", project, preview, change: string \| null, data: {head}}`: `ready` is up after a push or the first deploy (asleep once up counts), never a sleeping preview waking; `visual_change` is a visual change waiting for review, once a head; `browser_checks_passed` and `browser_checks_failed` say production's browser checks have all run on the head, once a head. Each event's `seq` is taken in the write that made it so, so commit order is seq order and a follower past one never misses an earlier one; kept 7 days. roll MCP's event feeds follow it |
+| `GET /v1/previews/events?after=&limit=&latest=&wait=` | | `{events: Event[], next}`: what happened to previews after the seq `after` (0 by default), oldest first, at most `limit` (1–500, 100 by default); `wait` (1–25 seconds, not with `latest`): with none yet, the answer waits that long for one (a long poll: woken at once by an event this node records, another node's read within 2 s), then answers empty; `next` is where to ask from again (past events the caller doesn't see too: a signed-in person sees their projects'). `latest=1`: `{events: [], next}` with the newest seq, to follow from now on (400 with `after`). `type Event = {seq, at, kind: "created" \| "ready" \| "failed" \| "visual_change" \| "browser_checks_passed" \| "browser_checks_failed" \| "deleted", project, preview, change: string \| null, data: {head}}`: `ready` is up after a push or the first deploy (asleep once up counts), never a sleeping preview waking; `visual_change` is a visual change waiting for review, once a head; `browser_checks_passed` and `browser_checks_failed` say production's browser checks have all run on the head, once a head. Each event's `seq` is taken in the write that made it so, so commit order is seq order and a follower past one never misses an earlier one; kept 7 days. roll MCP's event feeds follow it |
 | `GET /v1/previews/{id}` | | `Preview` |
 | `DELETE /v1/previews/{id}` | | 202 `Preview` (`desired: "deleted"`) |
 | `POST /v1/previews/{id}/refresh` | | `Preview`: redeploy now |
@@ -2148,7 +2151,7 @@ previews in it), the operator and admins see every project.
 | `DELETE /v1/previews/{id}/webhooks/{webhook}` | | 204: it lets nothing in from the next request |
 | `GET`/`PUT /v1/previews/{id}/env` | `{vars: {NAME: value \| null}}` (`null` removes; at most 100, 32 KiB each; a value may be `roll://ENV[/folder]/KEY`) | `{vars}`: the preview's own variables; its services redeploy with them. 403 for a reference to an environment other than the base without the caller's reveal on its folder; 400 for a malformed one or a look-alike |
 | `POST /v1/previews/{id}/approve` | `{head}` (the head looked at) | `Preview`: that head of a fork's pull request on a Git URL service runs (`pull.approved_head`); the next push waits again. 409 when the preview moved on to another head or isn't a fork's pull request. Admin in the permissions catalogue, and no MCP tool: letting outside code run with the project's data is a person's call |
-| `POST /v1/previews/{id}/visit` | `{to}` (a URL at one of the preview's service hosts) | `{url}`: a one-use way into a team-access preview (`access: "team"`) at `to`, good for a minute, for a person signed in to roll (a session; a token is a 403). 400 when the project's previews aren't `team` or `to` isn't the preview's; 403 for a person who may not open the project. Operator-only in the permissions catalogue: no grant ever gives one |
+| `POST /v1/previews/{id}/visit` | `{to}` (a URL at one of the preview's service hosts, under roll's preview domain or its project's own) | `{url}`: a one-use way into a team-access preview (`access: "team"`) at `to`'s host, good for a minute, for a person signed in to roll (a session; a token is a 403). 400 when the project's previews aren't `team` or `to` isn't the preview's; 403 for a person who may not open the project. Operator-only in the permissions catalogue: no grant ever gives one |
 | `POST /v1/previews/{id}/keep` | `{hours}` (0–720; 0 releases) | `Preview`: kept past its TTL until then (`kept_until`); a landed or closed change still ends it |
 | `GET /v1/previews/{id}/notes` | | `{notes: [{id, path, selector, note, by, at, replies: [{id, note, by, at}], crop, work?: {number, url}}]}`: the notes left on its pages that nobody has resolved, every page's (the latest 500); `crop`: a picture of its element is kept |
 | `GET /v1/previews/{id}/notes/{note}/crop` | | `image/png`: the note's element as a screenshot run cropped it from its page (`X-Roll-Crop-As`: how, when as its reviewer saw it); 404 until one has |
@@ -3206,8 +3209,10 @@ In progress, each in a pull request of its own:
 2. **The page's own review in the toolbar** (Vercel's toolbar, Chromatic's UI Review): a team
    visitor sees whether this page changed against main and what it adds, with Accept opening
    roll (never clickable by the page's own script).
-3. **A live dashboard**: the list and the sheet follow the preview event feed instead of polling
-   every 15 to 20 s, one slow poll kept as a fallback.
+3. **A live dashboard, in review**: the Previews list follows the event feed (a long poll, `wait`)
+   instead of reading the list every 20 s; a calm list is read once a minute in case the feed
+   missed something, a busy one every 3 s as before. A screenshot that arrives after a preview is
+   up without a visual change still shows at the next read.
 4. **roll's reviewer reads the visual and API results** (Percy's Visual Review Agent): which of a
    change's visual changes its diff explains, as the verdict's first line; model output never
    accepts anything.

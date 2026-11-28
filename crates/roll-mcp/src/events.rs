@@ -40,6 +40,9 @@ struct Feed {
     filters: &'static [(&'static str, &'static str, &'static str)],
     /// What an event's `data` holds.
     payload: fn() -> Value,
+    /// Its route takes `wait` (seconds) after a cursor: a stream's next read waits there for an
+    /// event, so one arrives as it's recorded rather than at the stream's next read.
+    waits: bool,
 }
 
 const FEEDS: &[Feed] = &[
@@ -67,6 +70,7 @@ const FEEDS: &[Feed] = &[
                 "data": { "description": "The kind's details" },
             } })
         },
+        waits: false,
     },
     Feed {
         name: "previews.event",
@@ -88,6 +92,7 @@ const FEEDS: &[Feed] = &[
                 "data": { "type": "object", "description": "head: the commit it was built from" },
             } })
         },
+        waits: true,
     },
     Feed {
         name: "access.approval",
@@ -113,6 +118,7 @@ const FEEDS: &[Feed] = &[
                 "reason": { "type": ["string", "null"] },
             } })
         },
+        waits: false,
     },
     Feed {
         name: "access.alert",
@@ -144,6 +150,7 @@ const FEEDS: &[Feed] = &[
                 "fix": { "type": "string", "description": "tighten, expire, revoke, limit_addresses, rotate_client or approve" },
             } })
         },
+        waits: false,
     },
     Feed {
         name: "workspace.event",
@@ -162,6 +169,7 @@ const FEEDS: &[Feed] = &[
                 "data": { "type": "object", "description": "Person and group ids, handles, roles and environments, reasons, and the actor; never a secret" },
             } })
         },
+        waits: false,
     },
     Feed {
         name: "secrets.event",
@@ -182,6 +190,7 @@ const FEEDS: &[Feed] = &[
                 "data": { "type": "object", "description": "Names, ids, counts and reasons, with the actor; never a value" },
             } })
         },
+        waits: false,
     },
     Feed {
         name: "code.landed",
@@ -201,6 +210,7 @@ const FEEDS: &[Feed] = &[
                 "ref": { "type": "string" },
             } })
         },
+        waits: false,
     },
 ];
 
@@ -760,9 +770,11 @@ struct Read {
 
 /// Read a feed after `after` as the caller (unattended: nothing asks a person) and turn what the
 /// filter keeps into event notifications, each with its cursor.
-async fn read_feed(ctx: &Arc<Ctx>, f: &'static Feed, route: &str, filter: &Filter, after: i64, floor: Option<i64>, meta: &Value) -> Result<Read, Refused> {
+#[allow(clippy::too_many_arguments)]
+async fn read_feed(ctx: &Arc<Ctx>, f: &'static Feed, route: &str, filter: &Filter, after: i64, floor: Option<i64>, meta: &Value, wait: Option<u64>) -> Result<Read, Refused> {
     let audit = json!({ "name": f.name });
-    let page = crate::read_route_as(ctx, &format!("{route}{after}"), &format!("events/stream:{}", f.name), audit, true).await.map_err(|e| refused(f, e))?;
+    let wait = wait.map(|w| format!("&wait={w}")).unwrap_or_default();
+    let page = crate::read_route_as(ctx, &format!("{route}{after}{wait}"), &format!("events/stream:{}", f.name), audit, true).await.map_err(|e| refused(f, e))?;
     let events = page["events"].as_array().cloned().unwrap_or_default();
     let more = events.len() >= PAGE;
     let outside = tool(f).map_or(&[][..], |t| t.outside);
@@ -847,7 +859,7 @@ pub(crate) async fn stream(ctx: Arc<Ctx>, msg: &Value) -> axum::response::Respon
         _ => (None, false, None),
     };
     let (cursor, first) = match start {
-        Some(after) => match read_feed(&ctx, f, &route, &filter, after, floor, &meta).await {
+        Some(after) => match read_feed(&ctx, f, &route, &filter, after, floor, &meta, None).await {
             Ok(r) => (r.cursor, Some(r)),
             Err(e) => return fail(e),
         },
@@ -890,11 +902,13 @@ pub(crate) async fn stream(ctx: Arc<Ctx>, msg: &Value) -> axum::response::Respon
                     s.queue.push_back(json!({ "jsonrpc": "2.0", "id": id, "result": { "resultType": "complete", "_meta": meta } }));
                     continue;
                 }
-                // A full page reads on at once; otherwise the next read waits its turn.
-                if !s.more {
+                // A full page reads on at once; otherwise the next read waits its turn, at the feed
+                // when it can (an event then arrives as it's recorded), else here.
+                let wait = (f.waits && !s.more).then_some(STREAM_READ_EVERY.as_secs() - 1);
+                if !s.more && wait.is_none() {
                     tokio::time::sleep(STREAM_READ_EVERY).await;
                 }
-                match read_feed(&s.ctx, f, &s.route, &s.filter, s.cursor, None, &meta).await {
+                match read_feed(&s.ctx, f, &s.route, &s.filter, s.cursor, None, &meta, wait).await {
                     Ok(r) => {
                         (s.cursor, s.more) = (r.cursor, r.more);
                         s.queue.extend(r.out);
@@ -941,11 +955,3 @@ fn iso8601(ms: i64) -> String {
     format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}.{milli:03}Z", rem / 3600, rem % 3600 / 60, rem % 60)
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn times_are_iso8601() {
-        assert_eq!(super::iso8601(0), "1970-01-01T00:00:00.000Z");
-        assert_eq!(super::iso8601(1_795_334_400_123), "2026-11-22T08:00:00.123Z");
-    }
-}

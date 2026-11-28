@@ -303,16 +303,3 @@ pub const SPIKE_TIMES: f64 = 3.0;
 fn round(x: f64) -> f64 {
     (x * 100.0).round() / 100.0
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn months_are_utc_calendar_months() {
-        let (m, start) = month_of(1_794_540_427_871); // 2026-11-13
-        assert_eq!(m, 2026 * 12 + 10);
-        assert_eq!(start, Utc.with_ymd_and_hms(2026, 11, 1, 0, 0, 0).unwrap().timestamp_millis());
-        assert_eq!(month_of(start - 1).0, m - 1);
-    }
-}

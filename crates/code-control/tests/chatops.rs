@@ -65,6 +65,10 @@ async fn mock_api(State(m): State<Arc<Mock>>, uri: Uri, headers: axum::http::Hea
         Some(code) if listing => return axum::Json(json!({ "ok": false, "error": code })).into_response(),
         _ => {}
     }
+    // 77 shares no server of the install's with roll's bot.
+    if p == "discord/guilds/G1/members/77" {
+        return (StatusCode::NOT_FOUND, axum::Json(json!({ "message": "Unknown Member", "code": 10007 }))).into_response();
+    }
     if let Some(v) = lists(p, &query) {
         return axum::Json(v).into_response();
     }
@@ -721,6 +725,11 @@ async fn discord_interactions_are_verified_and_reach_the_inbox() {
     let id = install["id"].as_str().unwrap();
     w.a.req("PATCH", &format!("/v1/code/agents/acme/integrations/discord/{id}"), Some(json!({ "members": ["42"] })), Some(&w.owner)).await;
     w.automation("discord").await;
+    // A step's DM goes only to a member of the install's server.
+    let dm = json!({ "name": "dm a stranger", "trigger": { "type": "integration", "source": "discord" },
+        "steps": [{ "id": "dm", "kind": "discord.post", "config": { "user": "77", "text": "hello" } }] });
+    let (s, v) = w.a.req("POST", "/v1/code/agents/acme/automations", Some(dm), Some(&w.owner)).await;
+    assert_eq!(s, StatusCode::CREATED, "{v}");
     let (_, v) = send(&w.a, req(&command("i2", "42"), &ts, None)).await;
     assert_eq!(v["data"]["content"], "Sent to roll.");
     send(&w.a, req(&command("i2", "42"), &ts, None)).await;
@@ -728,6 +737,24 @@ async fn discord_interactions_are_verified_and_reach_the_inbox() {
     let ev = w.events();
     assert_eq!(ev.len(), 1);
     assert_eq!((ev[0].1.as_str(), ev[0].2["prompt"].as_str(), ev[0].2["guild"].as_str()), ("command", Some("fix the build"), Some(guild.as_str())));
+    let failed = || {
+        let (a, owner) = (&w.a, &w.owner);
+        async move {
+            let runs = a.ok_as("GET", "/v1/code/agents/acme/automations/runs", owner).await;
+            runs.as_array().unwrap().iter().find(|r| r["name"] == "dm a stranger" && r["status"] == "failed").cloned()
+        }
+    };
+    let mut run = None;
+    for _ in 0..400 {
+        run = failed().await;
+        if run.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let run = run.expect("the stranger's DM fails");
+    assert!(run.to_string().contains("isn't a member of this install's server"), "{run}");
+    assert!(!w.mock.calls.lock().iter().any(|c| c.0.contains("users/@me/channels")), "no DM opened");
 
     // A status card's Reply button opens a modal at once.
     let click = json!({ "type": 3, "id": "i3", "application_id": "app1", "token": "tok", "guild_id": guild, "channel_id": "C9", "message": { "id": "m1" },

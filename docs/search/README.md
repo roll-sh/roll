@@ -2051,8 +2051,9 @@ deterministic (#396).
    SIGKILL) is the shared lease TTL (`ClusterConfig::lease_ttl`, 10 s: redis 10.4, nosql 10.6 in
    the same run) plus ~1 s to load the cluster from S3 and replay its WAL. Search's part is the
    load; the TTL is roll cloud's fleet-wide choice.
-28. **CI**: the merge gate runs `search-codec`'s lib tests (`rust (search)`, 54 s on PR #29 with
-   main's cache: under the minute, no room for another crate). Test gaps a read-only analysis found on 2026-11-22
+28. **CI**: the merge gate runs `search-codec`'s lib tests (`rust (search)`, 31-39 s on main
+   since the test cut of 2026-11-28, its test step 11-16 s; about 20 s of the job is checkout,
+   toolchain and cache, shared by every job). Test gaps a read-only analysis found on 2026-11-22
    (main at d9aecc990), ranked; each test goes in `test:search`, not the merge gate (all landed, each
    failing against its guarded line: (1) with the egress fix in #771, 0d6daf6cc; (2), (3), (4), (7)
    and (8) in #768, 1c2b5e62c; (5), (6), (9), (10), (11) and the unused e2e file's removal in
@@ -2077,8 +2078,8 @@ deterministic (#396).
    `previews/data.rs`'s `a_masked_search_branch_shows_no_original_value` (a text field and its
    `.keyword`, an address in an array of objects, a dotted key, an index `logs.2024`: none in
    `_source`, `_terms_enum` or a terms aggregation on the branch), `tests/secrets.rs`'s
-   `an_apps_search_link_is_narrowed_and_unlinking_revokes_it` (and the drain's key revoked with the
-   drain) and `a_repository_key_follows_rotation_and_a_branch_gets_no_protected_key`, and
+   `an_apps_drain_appends_to_its_own_search_data_stream` (a service's narrowed link, and the
+   drain's key revoked with the drain) and `a_repository_key_follows_rotation_and_a_branch_gets_no_protected_key`, and
    `tests/auth.rs`'s `mcp_search_with_a_project_token`. (`search-store`'s mass-recovery
    WAL test flaked on a loaded host: a replay counted itself in the shared replay cache only
    after listing, so one could finish and empty it while the others listed; it now counts first.
@@ -2274,3 +2275,10 @@ deterministic (#396).
 
    Left for later: `roll search` commands for saved searches, and Discover on several clusters at
    once.
+34. **Cross-cluster replication** (Elastic's follower indices, `_ccr`; OpenSearch's
+   `_plugins/_replication`; compatibility.md lists it as none): disaster recovery in another
+   region, and read-only copies near readers. roll can make a follower cheap: segments are already
+   in object storage and branches share them by key, so a follower in the same object store reads
+   the leader's segments and replays only its WAL tail, with no copy of the data. Design first: the
+   follower's lag and fencing on the fleet, a follower in another region's object store (copies
+   segments once), auto-follow patterns, pause and resume, and promotion when the leader is lost.
