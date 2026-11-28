@@ -512,6 +512,7 @@ mod tests {
         let engine = Engine::new(crate::engine::Config { domain: "preview.test".into(), ..Default::default() }, store.clone(), ws, Arc::new(NoCode), Vec::new(), rt.clone(), Arc::new(NoSecrets), Box::new(|| false));
         rt.attach(&engine);
         let app = crate::api::router(engine.clone()).layer(axum::middleware::from_fn_with_state(rt.clone(), crate::runtime::route));
+        // As someone in through `preview`'s link (its cookie), or nobody.
         let get = |host: &str, path: String, preview: Option<&str>| {
             let mut b = Request::get(path).header(header::HOST, host);
             if let Some(p) = preview {
@@ -526,16 +527,14 @@ mod tests {
             }
         };
         let (host, elsewhere) = ("web-pr1-shop.preview.test", "web-pr2-shop.preview.test");
-        let review = |host: &'static str, path: &str, who: Option<&'static str>| {
-            let get = get.clone();
-            let path = format!("/__roll/review.json?path={}", super::encode(path));
+        let review = |host: &str, path: &str, who: Option<&str>| {
+            let asked = get(host, format!("/__roll/review.json?path={}", super::encode(path)), who);
             async move {
-                let (status, body) = get(host, path, who).await;
+                let (status, body) = asked.await;
                 (status, serde_json::from_slice::<serde_json::Value>(&body).unwrap_or_default())
             }
         };
-        let id_s: &'static str = Box::leak(id.clone().into_boxed_str());
-        let other_s: &'static str = Box::leak(other.clone().into_boxed_str());
+        let (id_s, other_s) = (id.as_str(), other.as_str());
         // In through roll: /pricing changed whole, with the two problems main's page doesn't have.
         let (status, r) = review(host, "/pricing", Some(id_s)).await;
         assert_eq!(status, 200, "{r}");
