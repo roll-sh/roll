@@ -2097,6 +2097,11 @@ impl Engine {
             let id = r.id.clone();
             tokio::task::spawn_blocking(move || i.end(&id)).await?.map_err(|e| anyhow::anyhow!("ending its interception: {e:#}"))?;
         }
+        // Copies a replay of its writes left (a crash before they went), by their names.
+        if r.change_id.is_some() {
+            let main = self.main_preview(r).await?;
+            self.clear_replay_copies(r, main.as_ref()).await?;
+        }
         let name = branch_name(&r.id);
         for res in self.store.resources(&r.id)? {
             self.delete_branch(&r.id, &res, &name).await?;
@@ -2146,7 +2151,9 @@ impl Engine {
                 notes.reverse();
                 notes.truncate(10);
                 p.notes = notes.into_iter().map(|n| {
-                    let link = if n.crop { self.store.note_crop_link(&p.id, &n.id).ok().flatten() } else { None };
+                    // Not a picture someone outside the team sent of their own (a pull request shows no
+                    // image of theirs, as their words have none).
+                    let link = if n.crop && !(n.crop_own && n.outside) { self.store.note_crop_link(&p.id, &n.id).ok().flatten() } else { None };
                     (n, link)
                 }).collect();
             }

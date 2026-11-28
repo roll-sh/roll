@@ -35,7 +35,7 @@ impl Engine {
         let ran = self.main_on_copies(r, s, &mut made, &mut ran_here).await;
         // What ran on roll's runtime stops (its variables go with it), then the copies go.
         for name in ran_here {
-            self.main_runs.lock().remove(&(r.id.clone(), name.clone()));
+            self.main_runs.lock().remove(&(r.id.clone(), format!("{name}@main")));
             if let Err(e) = self.apps.remove(&r.id, &format!("{name}@main")).await {
                 warn!(preview = %r.id, error = %e, "previews: stopping main's code on the copy");
             }
@@ -123,7 +123,7 @@ impl Engine {
                     (main.id.as_str(), svc.name.clone(), url, main_access.as_deref())
                 }
                 Run::Here(rev) => {
-                    self.main_runs.lock().insert((r.id.clone(), svc.name.clone()), (rev.clone(), changes.clone()));
+                    self.main_runs.lock().insert((r.id.clone(), format!("{}@main", svc.name)), (rev.clone(), changes.clone()));
                     ran_here.push(svc.name.clone());
                     (r.id.as_str(), format!("{}@main", svc.name), String::new(), own_access.as_deref())
                 }
@@ -144,15 +144,16 @@ impl Engine {
     }
 }
 
-/// A copy of one of the change's branches main's code ran on, to delete after.
-struct Copy {
-    b: Arc<dyn Brancher>,
-    parent: String,
+/// A copy of one of a preview's branches code ran on (main's on a change's, or the preview's own
+/// for replayed writes), to delete after.
+pub(super) struct Copy {
+    pub(super) b: Arc<dyn Brancher>,
+    pub(super) parent: String,
     /// The preview's branch it was copied from.
-    from: String,
-    r#ref: String,
-    kept: Option<String>,
-    name: String,
+    pub(super) from: String,
+    pub(super) r#ref: String,
+    pub(super) kept: Option<String>,
+    pub(super) name: String,
 }
 
 /// Where main's code runs on the copy: its roll apps deployment again (by id), or its revision on
@@ -163,7 +164,7 @@ enum Run {
 }
 
 /// `env`'s values that are `old`'s swapped for `new`'s under the same name.
-fn swap(env: &mut [(String, String)], old: &[(String, String)], new: &[(String, String)]) {
+pub(super) fn swap(env: &mut [(String, String)], old: &[(String, String)], new: &[(String, String)]) {
     for (k, v) in old {
         if let Some((_, nv)) = new.iter().find(|(nk, _)| nk == k) {
             for kv in env.iter_mut().filter(|(_, vv)| vv == v) {

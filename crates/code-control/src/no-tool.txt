@@ -9,7 +9,6 @@ POST /v1/code/agents/login                                                      
 POST /v1/code/agents/login/poll                                                 device login: `roll agent up` asks, a person approves in their browser
 GET /v1/code/agents/shares/{id}                                                 a share link's own page, read with the link (a credential)
 GET /v1/code/agents/{owner}/automations/notices                                 the dashboard's banners about automations
-DELETE /v1/code/agents/{owner}/automations/{id}                                 no tool yet: delete an automation
 GET /v1/code/agents/{owner}/automations/{id}                                    list_agent_automations answers each automation in full
 GET /v1/code/agents/{owner}/automations/{id}/runs                               list_agent_automation_runs takes the automation
 DELETE /v1/code/agents/{owner}/automations/{id}/secrets/{name}                  a credential: an automation's secrets

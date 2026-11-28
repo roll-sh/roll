@@ -283,7 +283,8 @@ async fn world_full(setup: impl FnOnce(&mut AppsConfig), objects: bool, deps_set
     cfg.live.drain = Duration::from_millis(50);
     cfg.supersede_every = Duration::from_millis(50);
     cfg.notify_every = Duration::from_millis(20);
-    cfg.host_ttl = Duration::from_millis(20);
+    // Long: a change that forgets to drop a host's cached answer fails here, not by luck.
+    cfg.host_ttl = Duration::from_secs(30);
     cfg.drain_linger = Duration::from_millis(50);
     cfg.otlp_base = Some("http://127.0.0.1:7070".into());
     cfg.allow_private = true;
@@ -801,6 +802,36 @@ async fn a_signed_in_person_gets_into_a_gated_environment() {
     };
     assert_eq!(ask(None, to.clone()).await.0, StatusCode::FORBIDDEN);
     assert_eq!(ask(Some("usr_ada"), "https://evil.example/".into()).await.0, StatusCode::BAD_REQUEST);
+    // Under the project's active preview domain: its own label only (roll previews' team access).
+    let pd = format!("/v1/apps/projects/{}/preview-domain", w.project);
+    let (_, d) = call(&w.api, "POST", &pd, Some(json!({"hostname": "*.preview.acme.dev"}))).await;
+    w.dns.add("_roll-challenge.preview.acme.dev", "TXT", d["token"].as_str().unwrap());
+    assert_eq!(call(&w.api, "POST", &format!("{pd}/verify"), None).await.1["status"], "active");
+    assert_eq!(call(&w.api, "PUT", &env, Some(json!({"preview_host": "admin-pr1"}))).await.0, StatusCode::OK);
+    let (st, t) = ask(Some("usr_ada"), "https://admin-pr1.preview.acme.dev/dash".into()).await;
+    let landing = url::Url::parse(t["url"].as_str().unwrap_or("")).unwrap();
+    assert_eq!((st, landing.host_str(), landing.path()), (StatusCode::OK, Some("admin-pr1.preview.acme.dev"), "/__roll/visit"), "{t}");
+    assert_eq!(ask(Some("usr_ada"), "https://someone-else.preview.acme.dev/dash".into()).await.0, StatusCode::BAD_REQUEST, "a label it doesn't hold");
+    // Opened there: a session on the preview host, and the app's page answered.
+    let at_preview = |path: String, cookie: String| {
+        let r = Request::builder().uri(path).header("host", "admin-pr1.preview.acme.dev").header("accept", "text/html").header("cookie", cookie).body(Body::empty()).unwrap();
+        let public = w.public.clone();
+        async move {
+            let resp = public.oneshot(r).await.unwrap();
+            (resp.status(), resp.headers().clone())
+        }
+    };
+    let (st, hd) = at_preview(landing[url::Position::BeforePath..].to_string(), state.clone()).await;
+    assert_eq!(st, StatusCode::FOUND, "{hd:?}");
+    let preview_session = hd["set-cookie"].to_str().unwrap().split(';').next().unwrap().to_string();
+    assert_eq!(at_preview("/dash".into(), preview_session).await.0, StatusCode::OK);
+    // Its label under another project's active preview domain names nothing of it.
+    let p2 = w.apps.deps.workspace.as_ref().unwrap().create("", "other", "", None).unwrap().id;
+    let pd2 = format!("/v1/apps/projects/{p2}/preview-domain");
+    let (_, d2) = call(&w.api, "POST", &pd2, Some(json!({"hostname": "*.other.dev"}))).await;
+    w.dns.add("_roll-challenge.other.dev", "TXT", d2["token"].as_str().unwrap());
+    assert_eq!(call(&w.api, "POST", &format!("{pd2}/verify"), None).await.1["status"], "active");
+    assert_eq!(ask(Some("usr_ada"), "https://admin-pr1.other.dev/dash".into()).await.0, StatusCode::BAD_REQUEST, "another project's domain");
     // The ticket goes to the environment's own scheme and port, whatever `to` names: never over
     // another scheme, nor to whatever listens on another port of the address.
     let origin = svc["environments"][0]["url"].as_str().unwrap().trim_end_matches('/').to_string();
@@ -1134,6 +1165,13 @@ async fn an_image_service_scales_to_zero_and_wakes_on_the_first_request() {
     assert!(crowd.iter().all(|(st, _)| *st == StatusCode::OK), "{crowd:?}");
     assert!(Fake::count(&w.fake.counts.creates) - created <= 1, "one instance woke for all of them");
     assert_eq!(w.fake.instances(id).iter().filter(|(_, _, st)| *st == FakeState::Running).count(), 1);
+    // Put to sleep by hand (to stop paying now), then woken by hand.
+    let running = || w.fake.instances(id).iter().filter(|(_, _, st)| *st == FakeState::Running).count();
+    let (st, e) = call(&w.api, "POST", &format!("/v1/apps/services/{id}/environments/production/sleep"), None).await;
+    assert_eq!((st, running()), (StatusCode::OK, 0), "{e}");
+    assert_ne!(e["state"], "running", "{e}");
+    let (st, e) = call(&w.api, "POST", &format!("/v1/apps/services/{id}/environments/production/wake"), None).await;
+    assert_eq!((st, e["state"].as_str(), running()), (StatusCode::OK, Some("running"), 1), "{e}");
     // An unknown host is a 404 page, not an error.
     assert_eq!(visit(&w, "nope.apps.localhost", "/").await.0, StatusCode::NOT_FOUND);
 }
@@ -1429,6 +1467,53 @@ async fn an_environments_headers_are_on_its_answers() {
     assert_eq!(go("/old?a=1").await, (StatusCode::PERMANENT_REDIRECT, Some("/new?a=1".into())));
     assert_eq!(go("/blog/2026/hi").await, (StatusCode::MOVED_PERMANENTLY, Some("/posts/2026/hi".into())));
     assert_eq!(go("/elsewhere").await, (StatusCode::OK, None), "on to the app");
+}
+
+/// CSP reports (`csp_reports`): on, every answer names roll's endpoint and a policy that reports
+/// nowhere reports there (one with its own report-to is kept); both shapes of report are kept
+/// grouped, cut to origins and paths, at most 50 a body and 16 KiB; a directive's first report is
+/// `alert.csp`, once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn csp_reports_are_collected_and_grouped() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "web", json!({"port": 80, "min_instances": 1})).await;
+    let base = format!("/v1/apps/services/{}/environments/production", svc["id"].as_str().unwrap());
+    let hn = host(&svc["environments"][0]["url"]);
+    let send = |method: &str, path: &str, ctype: &str, body: String| {
+        let r = Request::builder().method(method).uri(path).header("host", hn.as_str()).header("content-type", ctype).body(Body::from(body)).unwrap();
+        w.public.clone().oneshot(r)
+    };
+    let h = |r: &axum::response::Response, k: &str| r.headers().get_all(k).iter().map(|v| v.to_str().unwrap().to_string()).collect::<Vec<_>>();
+    let rules = json!([{"set": {"Content-Security-Policy": "default-src 'self'"}}, {"path": "/own", "set": {"Content-Security-Policy": "img-src 'self'; report-to theirs"}, "replace": true}]);
+    assert_eq!(call(&w.api, "PUT", &base, Some(json!({"headers": rules}))).await.0, StatusCode::OK);
+    let r = send("GET", "/", "text/plain", String::new()).await.unwrap();
+    assert_eq!((h(&r, "reporting-endpoints"), h(&r, "content-security-policy")), (vec![], vec!["default-src 'self'".to_string()]), "off: untouched");
+    let legacy = json!({"csp-report": {"document-uri": "https://site.example/checkout?token=s3cret#x", "violated-directive": "script-src-elem", "blocked-uri": "https://evil.example/x.js?k=s3cret", "disposition": "enforce"}}).to_string();
+    assert_eq!(send("POST", "/__roll/csp", "application/csp-report", legacy.clone()).await.unwrap().status(), StatusCode::OK, "off: the app's own path");
+    let (st, env) = call(&w.api, "PUT", &base, Some(json!({"csp_reports": true}))).await;
+    assert_eq!((st, &env["csp_reports"]), (StatusCode::OK, &json!(true)), "{env}");
+    let r = send("GET", "/", "text/plain", String::new()).await.unwrap();
+    assert_eq!(h(&r, "reporting-endpoints"), [r#"roll="/__roll/csp""#]);
+    assert_eq!(h(&r, "content-security-policy"), ["default-src 'self'; report-uri /__roll/csp; report-to roll"]);
+    assert_eq!(h(&send("GET", "/own", "text/plain", String::new()).await.unwrap(), "content-security-policy"), ["img-src 'self'; report-to theirs"], "its own report-to kept");
+    // Both shapes: 60 in one Reporting API body (50 read), the legacy one, a report-only one.
+    let one = json!({"type": "csp-violation", "url": "https://site.example/checkout?token=s3cret", "body": {"documentURL": "https://site.example/checkout?token=s3cret", "blockedURL": "https://evil.example/y.js", "effectiveDirective": "script-src-elem", "disposition": "enforce"}});
+    let many = serde_json::to_string(&vec![one; 60]).unwrap();
+    assert!(many.len() < 16 * 1024);
+    let only = json!([{"type": "csp-violation", "body": {"documentURL": "https://site.example/users/42", "blockedURL": "data", "effectiveDirective": "img-src", "disposition": "report"}}]).to_string();
+    for (ctype, body) in [("application/reports+json", many), ("application/csp-report", legacy.clone()), ("application/reports+json", only)] {
+        assert_eq!(send("POST", "/__roll/csp", ctype, body).await.unwrap().status(), StatusCode::NO_CONTENT);
+    }
+    assert_eq!(send("POST", "/__roll/csp", "application/reports+json", "x".repeat(17 * 1024)).await.unwrap().status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(send("POST", "/__roll/csp", "application/csp-report", legacy).await.unwrap().status(), StatusCode::NO_CONTENT, "seen again");
+    let (st, v) = call(&w.api, "GET", &format!("{base}/csp-reports?minutes=60"), None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let groups: Vec<Value> = v["groups"].as_array().unwrap().iter().map(|g| json!([g["directive"], g["blocked"], g["path"], g["disposition"], g["count"]])).collect();
+    assert_eq!(groups, [json!(["script-src-elem", "https://evil.example", "/checkout", "enforce", 52]), json!(["img-src", "data:", "/users/:id", "report", 1])], "{v}");
+    assert!(!v.to_string().contains("s3cret"), "no query is kept: {v}");
+    let ev = call(&w.api, "GET", "/v1/apps/events?after=0", None).await.1;
+    let csp: Vec<Value> = ev["events"].as_array().unwrap().iter().filter(|e| e["kind"] == "alert.csp").map(|e| e["data"]["directive"].clone()).collect();
+    assert_eq!(csp, [json!("script-src-elem"), json!("img-src")], "once a directive: {ev}");
 }
 
 /// A GET that finds its instance gone (killed: nothing listens, and roll doesn't know yet) goes
@@ -1979,6 +2064,71 @@ async fn a_link_puts_its_variables_in_the_instances() {
     assert_eq!(MINTED.lock().len(), before + 2, "the same options make nothing");
     let listed = call(&w.api, "GET", &format!("/v1/apps/services/{rid}/links"), None).await.1;
     assert!(listed.as_array().unwrap().iter().any(|l| l["kind"] == "search" && l["access"] == "read" && l["indices"] == json!(["tenant-*"])), "{listed}");
+    // Rotated (Heroku's pg:credentials:rotate): a new key, the environments redeployed with it,
+    // the old one revoked only once nothing runs with it. A redeploy that fails keeps the old one.
+    let key_of = |line: &str| line.rsplit(' ').next().unwrap().to_string();
+    let old = key_of(MINTED.lock().iter().rev().find(|l| l.starts_with(&format!("link {rid} "))).unwrap());
+    let revoked = |k: &str| MINTED.lock().contains(&format!("unlink {k}"));
+    let rbase = format!("/v1/apps/services/{rid}/environments");
+    call(&w.api, "PUT", &format!("{rbase}/staging"), Some(json!({}))).await;
+    let (_, sd) = call(&w.api, "POST", &format!("{rbase}/staging/deploys"), Some(json!({}))).await;
+    let staged = settled(&w, &rid, "staging", sd["id"].as_str().unwrap()).await;
+    assert_eq!(staged["status"], "active", "{staged}");
+    call(&w.api, "PATCH", &format!("/v1/apps/services/{rid}"), Some(json!({"run": {"health_path": "/healthz", "health_timeout_s": 1}}))).await;
+    call(&w.api, "PATCH", &format!("{rbase}/production/variables"), Some(json!({"set": {"FAKE_ECHO": "ELASTICSEARCH_API_KEY", "FAKE_UNHEALTHY": "1"}}))).await;
+    let before = MINTED.lock().len();
+    let (st, e) = call(&w.api, "POST", &format!("{path}/rotate"), Some(json!({"environment": "production"}))).await;
+    assert_eq!(st, StatusCode::CONFLICT, "{e}");
+    assert!(e.to_string().contains("keeps its old credential"), "{e}");
+    let tried = key_of(&MINTED.lock()[before]);
+    let (_, v) = call(&w.api, "GET", &format!("{rbase}/production/variables/values"), None).await;
+    assert_eq!(v["ELASTICSEARCH_API_KEY"], format!("{old}-secret"), "the old one is back: {v}");
+    // The one that never went live is revoked; the old one, still in use, isn't.
+    for _ in 0..400 {
+        if revoked(&tried) {
+            break;
+        }
+        w.apps.revoke_pass().await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(revoked(&tried) && !revoked(&old), "{:?}", MINTED.lock());
+    call(&w.api, "PATCH", &format!("{rbase}/production/variables"), Some(json!({"unset": ["FAKE_UNHEALTHY"]}))).await;
+    let was = call(&w.api, "GET", &format!("{rbase}/production"), None).await.1["active"]["id"].as_str().unwrap().to_string();
+    let (st, r) = call(&w.api, "POST", &format!("{path}/rotate"), Some(json!({"environment": "production"}))).await;
+    assert_eq!((st, &r["live"], &r["waiting"]), (StatusCode::OK, &json!(true), &json!(["staging"])), "{r}");
+    let new = key_of(MINTED.lock().iter().rev().find(|l| l.starts_with(&format!("link {rid} "))).unwrap());
+    let dep = r["deployments"][0]["id"].as_str().unwrap();
+    let (_, body) = visit_deployment(&w, &host(&racer["environments"][0]["url"]), dep).await;
+    assert_eq!(body["vars"]["ELASTICSEARCH_API_KEY"], format!("{new}-secret"), "{body}");
+    // Production's old instances drained, staging still runs with the old key: kept.
+    for _ in 0..400 {
+        if !w.fake.instances(&rid).iter().any(|(_, d, _)| *d == was) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    w.apps.revoke_pass().await;
+    assert!(!revoked(&old), "staging still runs with it");
+    // Staging deployed again: nothing runs with it, and it goes, after the new one was made.
+    let (_, sd) = call(&w.api, "POST", &format!("{rbase}/staging/redeploy"), Some(json!({}))).await;
+    settled(&w, &rid, "staging", sd["id"].as_str().unwrap()).await;
+    for _ in 0..400 {
+        if revoked(&old) {
+            break;
+        }
+        w.apps.revoke_pass().await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let log = MINTED.lock().clone();
+    let at = |l: String| log.iter().position(|x| *x == l);
+    assert!(at(format!("unlink {old}")) > at(format!("link {rid} {new}")), "{log:?}");
+    assert!(!revoked(&new));
+    let (_, act) = call(&w.api, "GET", &format!("/v1/apps/services/{rid}/activity"), None).await;
+    assert!(act.to_string().contains("link.rotated") && !act.to_string().contains("-secret"), "audited, never a value: {act}");
+    // A link with no credential of its own has nothing to rotate.
+    call(&w.api, "PUT", &format!("/v1/apps/services/{rid}/links/postgres/main"), Some(json!({}))).await;
+    assert_eq!(call(&w.api, "POST", &format!("/v1/apps/services/{rid}/links/postgres/main/rotate"), None).await.0, StatusCode::BAD_REQUEST);
+    call(&w.api, "DELETE", &format!("/v1/apps/services/{rid}/links/postgres/main"), None).await;
     // A service link gives another web service's URLs, named for it: private on the project
     // network, public when it's public. Only another web service of the project links, and its
     // links go with it.
@@ -1989,6 +2139,7 @@ async fn a_link_puts_its_variables_in_the_instances() {
     let (st, l) = call(&w.api, "PUT", &format!("{links}/service/{pid}"), Some(json!({}))).await;
     assert_eq!((st, &l["vars"]), (StatusCode::OK, &json!(["PAY_URL", "PAY_PUBLIC_URL"])), "{l}");
     assert_eq!(call(&w.api, "PUT", &format!("{links}/service/{rid}"), Some(json!({}))).await.0, StatusCode::BAD_REQUEST, "not itself");
+    assert_eq!(call(&w.api, "POST", &format!("{links}/service/{pid}/rotate"), None).await.0, StatusCode::BAD_REQUEST, "nothing of its own to rotate");
     assert_eq!(call(&w.api, "PUT", &format!("{links}/service/{}", worker["id"].as_str().unwrap()), Some(json!({}))).await.0, StatusCode::BAD_REQUEST, "a worker has no URL");
     let base = format!("/v1/apps/services/{rid}/environments/production");
     call(&w.api, "PATCH", &format!("{base}/variables"), Some(json!({"set": {"FAKE_ECHO": "PAY_URL,PAY_PUBLIC_URL"}}))).await;
@@ -4338,8 +4489,9 @@ async fn a_log_drain_speaks_syslog_or_otlp() {
 }
 
 /// Uptime checks (Cloud Monitoring's): a path GET'd through the environment's own proxy on its
-/// schedule, or its real URL from outside; two failures in a row are `check.down` once, the next
-/// pass resolves it.
+/// schedule, or its real URL from outside; `fail_after` failures in a row are `check.down` once,
+/// `recover_after` passes resolve it, a failing assertion fails a try, and two slow passes are
+/// `check.slow` until a pass that isn't.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_uptime_check_goes_down_and_comes_back() {
     // The apps listener served for real, at its `*.localhost` name, for a check from outside.
@@ -4375,34 +4527,54 @@ async fn an_uptime_check_goes_down_and_comes_back() {
     };
     let up = pass(0).await;
     assert_eq!((up["up"].as_bool(), up["status"].as_u64()), (Some(true), Some(200)), "{up}");
-    // It now expects what the app never answers (whichever instance answers): it fails.
-    call(&w.api, "PUT", &base, Some(json!({"checks": [{"name": "home", "path": "/", "every_s": 60, "status": 299}]}))).await;
-    let once = pass(1).await;
-    assert_eq!((once["up"].as_bool(), once["failures"].as_u64()), (Some(true), Some(1)), "one failure isn't down: {once}");
-    let down = pass(2).await;
+    // It now expects what the app never answers (whichever instance answers): down after its
+    // three failures in a row, and up again after two passes.
+    let set = |check: Value| call(&w.api, "PUT", &base, Some(json!({"checks": [check]})));
+    set(json!({"name": "home", "path": "/", "every_s": 60, "status": 299, "fail_after": 3})).await;
+    for n in 1..=2 {
+        let st = pass(n).await;
+        assert_eq!((st["up"].as_bool(), st["failures"].as_u64()), (Some(true), Some(n as u64)), "under fail_after isn't down: {st}");
+    }
+    let down = pass(3).await;
     assert_eq!((down["up"].as_bool(), down["error"].as_str()), (Some(false), Some("answered 200")), "{down}");
-    pass(3).await;
-    call(&w.api, "PUT", &base, Some(json!({"checks": [{"name": "home", "path": "/", "every_s": 60}]}))).await;
-    assert_eq!(pass(4).await["up"].as_bool(), Some(true));
+    set(json!({"name": "home", "path": "/", "every_s": 60, "recover_after": 2})).await;
+    assert_eq!(pass(4).await["up"].as_bool(), Some(false), "one pass of two");
+    assert_eq!(pass(5).await["up"].as_bool(), Some(true));
+    // An assertion that doesn't hold fails the try, saying which; one that does passes.
+    let asserting = |path: &str| json!({"name": "home", "path": "/", "every_s": 60, "fail_after": 1, "assert": [{"header": "content-type", "matches": "json"}, {"json": "$.path", "equals": path}, {"not_contains": "\"error\""}]});
+    set(asserting("/nope")).await;
+    let failed = pass(6).await;
+    assert_eq!((failed["up"].as_bool(), failed["error"].as_str()), (Some(false), Some(r#"assert $.path: "/" isn't "/nope""#)), "{failed}");
+    set(asserting("/")).await;
+    assert_eq!(pass(7).await["up"].as_bool(), Some(true));
+    // Two passes in a row slower than slow_ms are slow (one isn't); the next that isn't clears it.
+    set(json!({"name": "home", "path": "/sleep/300", "every_s": 60, "slow_ms": 250})).await;
+    let slow: Vec<Value> = [pass(8).await["slow"].clone(), pass(9).await["slow"].clone()].into();
+    assert_eq!(slow, [json!(false), json!(true)]);
+    set(json!({"name": "home", "path": "/", "every_s": 60, "slow_ms": 250})).await;
+    let fast = pass(10).await;
+    assert_eq!((fast["up"].as_bool(), fast["slow"].as_bool()), (Some(true), Some(false)), "{fast}");
     // Each event is written a moment after its state.
     let mut ev = Value::Null;
+    let of_home = |ev: &Value| ev["events"].as_array().unwrap().iter().filter(|e| e["data"]["check"] == "home").cloned().collect::<Vec<_>>();
     for _ in 0..200 {
         ev = call(&w.api, "GET", "/v1/apps/events?after=0", None).await.1;
-        if ev.to_string().contains("alert.resolved") {
+        if of_home(&ev).iter().filter(|e| e["kind"] == "alert.resolved").count() == 3 {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    let kinds: Vec<&str> = ev["events"].as_array().unwrap().iter().filter(|e| e["data"]["check"] == "home").map(|e| e["kind"].as_str().unwrap()).collect();
-    assert_eq!(kinds, ["check.down", "alert.resolved"], "down once, then resolved: {ev}");
+    let kinds: Vec<(String, String)> = of_home(&ev).iter().map(|e| (e["kind"].as_str().unwrap().to_string(), e["data"]["alert"].as_str().unwrap_or("").to_string())).collect();
+    let want = [("check.down", ""), ("alert.resolved", "check.down"), ("check.down", ""), ("alert.resolved", "check.down"), ("check.slow", ""), ("alert.resolved", "check.slow")];
+    assert_eq!(kinds, want.map(|(k, a)| (k.to_string(), a.to_string())), "each once, then resolved: {ev}");
     // From outside (Cloud Monitoring's, Checkly's): `from: public` fetches the environment's real
     // URL over the network as a visitor's request goes; a host that isn't one of its domains is
     // refused.
     call(&w.api, "PUT", &base, Some(json!({"checks": [{"name": "home", "path": "/", "from": "public"}]}))).await;
-    let up = pass(5).await;
+    let up = pass(11).await;
     assert_eq!((up["up"].as_bool(), up["status"].as_u64()), (Some(true), Some(200)), "over the network: {up}");
     call(&w.api, "PUT", &base, Some(json!({"checks": [{"name": "home", "path": "/", "from": "public", "host": "not-ours.example"}]}))).await;
-    let refused = pass(6).await;
+    let refused = pass(12).await;
     assert!(refused["error"].as_str().is_some_and(|e| e.contains("isn't one of this environment's active domains")), "{refused}");
 }
 
@@ -4638,6 +4810,7 @@ async fn on_call_targets_open_and_close_incidents() {
     let w = world_full(
         |c| {
             c.oncall_apis = apps_control::OncallApis { pagerduty_us: format!("http://{at}/pd"), pagerduty_eu: format!("http://{at}/pd-eu"), opsgenie_us: format!("http://{at}/og"), opsgenie_eu: format!("http://{at}/og-eu") };
+            c.web_url = Some("https://roll.example".into());
         },
         false,
         |_| {},
@@ -4730,6 +4903,94 @@ async fn on_call_targets_open_and_close_incidents() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     assert!(paged, "the held alert went out when the silence ended");
+    // Open alerts (Better Stack's): the failed deploy and the memory alert, newest first, until
+    // something closes their keys.
+    let alerts = format!("/v1/apps/projects/{}/alerts", w.project);
+    let kinds = |v: &Value| v.as_array().unwrap().iter().map(|a| a["kind"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+    let (st, list) = call(&w.api, "GET", &alerts, None).await;
+    assert_eq!((st, kinds(&list)), (StatusCode::OK, vec!["deploy.failed".to_string(), "alert.memory".into()]), "{list}");
+    assert_eq!(list[1]["acked"], Value::Null, "{list}");
+    // Acknowledged once: again changes nothing, an unknown one is a 404.
+    let failed = list[0]["id"].as_str().unwrap().to_string();
+    let (st, a) = call(&w.api, "POST", &format!("{alerts}/{failed}/ack"), None).await;
+    assert_eq!((st, a["acked"]["by"].is_string()), (StatusCode::OK, true), "{a}");
+    assert_eq!(call(&w.api, "POST", &format!("{alerts}/{failed}/ack"), None).await.1["acked"], a["acked"], "who acknowledged first stays");
+    assert_eq!(call(&w.api, "POST", &format!("{alerts}/alr_nope/ack"), None).await.0, StatusCode::NOT_FOUND);
+    let ev = call(&w.api, "GET", "/v1/apps/events?after=0", None).await.1;
+    let n = |k: &str| ev["events"].as_array().unwrap().iter().filter(|e| e["kind"] == k).count();
+    assert_eq!((n("alert.acked"), n("audit.alert.acked")), (1, 1), "an event targets can ask for, and the audit trail's");
+    // Escalation (Better Stack's policies): to another target, never itself nor round.
+    let (st, esc) = call(&w.api, "POST", &base, Some(json!({"kind": "webhook", "url": format!("http://{at}/esc"), "events": ["check.down"]}))).await;
+    assert_eq!(st, StatusCode::CREATED, "{esc}");
+    let esc_id = esc["id"].as_str().unwrap().to_string();
+    let target = format!("{base}/{pd_id}");
+    assert_eq!(call(&w.api, "PATCH", &target, Some(json!({"escalate": {"after_min": 15, "to": pd_id}}))).await.0, StatusCode::BAD_REQUEST, "not itself");
+    assert_eq!(call(&w.api, "PATCH", &target, Some(json!({"escalate": {"after_min": 2, "to": esc_id}}))).await.0, StatusCode::BAD_REQUEST, "5–1440 minutes");
+    let (st, t) = call(&w.api, "PATCH", &target, Some(json!({"escalate": {"after_min": 15, "to": esc_id}}))).await;
+    assert_eq!((st, t["escalate"]["to"].as_str()), (StatusCode::OK, Some(esc_id.as_str())), "{t}");
+    assert_eq!(call(&w.api, "PATCH", &format!("{base}/{esc_id}"), Some(json!({"escalate": {"after_min": 15, "to": pd_id}}))).await.0, StatusCode::BAD_REQUEST, "a loop");
+    // A resolve closes the memory alert (acknowledging it now is a conflict); it opens again.
+    let memory = list[1]["id"].as_str().unwrap().to_string();
+    let event = |kind: &'static str, data: Value| {
+        let (apps, sid) = (w.apps.clone(), id.clone());
+        async move { apps.db(move |s| s.add_event(kind, &sid, "production", None, &data)).await.unwrap() }
+    };
+    event("alert.resolved", json!({"alert": "alert.memory"})).await;
+    let mut list = Value::Null;
+    for _ in 0..400 {
+        list = call(&w.api, "GET", &alerts, None).await.1;
+        if kinds(&list) == ["deploy.failed"] {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(kinds(&list), ["deploy.failed"], "{list}");
+    assert_eq!(call(&w.api, "POST", &format!("{alerts}/{memory}/ack"), None).await.0, StatusCode::CONFLICT, "closed");
+    event("alert.memory", json!({"value": 99, "limit_mb": 512, "threshold": 90})).await;
+    for _ in 0..400 {
+        list = call(&w.api, "GET", &alerts, None).await.1;
+        if kinds(&list).len() == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let again = list[0]["id"].as_str().unwrap().to_string();
+    assert_eq!((list[0]["kind"].as_str(), again != memory), (Some("alert.memory"), true), "a new incident: {list}");
+    // Unacknowledged past its 15 minutes, but silenced: nothing escalates until it's over, then
+    // once, whatever passes run.
+    let escalated = || async { call(&w.api, "GET", &format!("{base}/{esc_id}/deliveries"), None).await.1.as_array().unwrap().iter().map(|d| d["kind"].as_str().unwrap().to_string()).collect::<Vec<_>>() };
+    let (_, quiet) = call(&w.api, "POST", &silences, Some(json!({"until": until, "reason": "load test", "alerts": ["alert.memory"]}))).await;
+    let later = code_sql::now_ms() + 16 * 60_000;
+    w.apps.escalate_due(later).await;
+    assert!(escalated().await.is_empty(), "silenced");
+    assert_eq!(call(&w.api, "DELETE", &format!("{silences}/{}", quiet["id"].as_str().unwrap()), None).await.0, StatusCode::NO_CONTENT);
+    w.apps.escalate_due(later + 2 * 60_000).await;
+    w.apps.escalate_due(later + 5 * 60_000).await;
+    assert_eq!(escalated().await, ["alert.memory"], "sent to its target once");
+    let mut sent = None;
+    for _ in 0..400 {
+        sent = got.lock().iter().find(|(u, ..)| u == "/esc").map(|(.., b)| b.clone());
+        if sent.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let sent = sent.expect("the escalation was delivered");
+    assert_eq!((sent["escalated"].as_bool(), sent["alert"].as_str()), (Some(true), Some(again.as_str())), "{sent}");
+    assert!(sent["title"].as_str().unwrap().starts_with("Escalated: "), "{sent}");
+    assert!(sent["ack_url"].as_str().unwrap().starts_with(&format!("https://roll.example/dashboard/apps/alerts?project={}&alert={again}", w.project)), "{sent}");
+    assert!(call(&w.api, "GET", &alerts, None).await.1[0]["escalated_at"].is_i64());
+    // Whoever it was escalated to hears it close.
+    event("alert.resolved", json!({"alert": "alert.memory"})).await;
+    let mut heard = Vec::new();
+    for _ in 0..400 {
+        heard = escalated().await;
+        if heard.len() == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(heard.contains(&"alert.resolved".to_string()), "{heard:?}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -4865,7 +5126,10 @@ async fn a_failed_deploy_is_sent_to_the_projects_targets_signed_and_retried() {
     let again = |t: &Value, d: &str| format!("{base}/{}/deliveries/{d}/redeliver", t["id"].as_str().unwrap());
     let (st, d) = call(&w.api, "POST", &again(&hook, &did), None).await;
     assert_eq!((st, d["status"].as_str(), d["attempts"].as_u64()), (StatusCode::OK, Some("pending"), Some(0)), "{d}");
-    assert_eq!(call(&w.api, "POST", &again(&hook, &did), None).await.0, StatusCode::CONFLICT, "still being tried");
+    // The failing target's is still being tried (between its retries): not sent again.
+    let down_log = call(&w.api, "GET", &got_of(&down), None).await.1;
+    let pending = down_log.as_array().unwrap().iter().find(|d| d["status"] == "pending").unwrap()["id"].as_str().unwrap().to_string();
+    assert_eq!(call(&w.api, "POST", &again(&down, &pending), None).await.0, StatusCode::CONFLICT, "still being tried: {down_log}");
     assert_eq!(call(&w.api, "POST", &again(&staging, &did), None).await.0, StatusCode::NOT_FOUND, "another target's");
     let mut twice = 0;
     for _ in 0..1000 {
@@ -5686,6 +5950,13 @@ async fn a_closed_environments_build_gets_no_secret_values() {
     assert!(live.template().unwrap().spec.vars.iter().any(|(k, _)| k == "SESSION_KEY"), "its instances still get it");
     let nets = w.fake.build_networks.lock().clone();
     assert_eq!((nets.first(), nets.last()), (Some(&None), Some(&Some(format!("roll-apps-build-{}", w.project.strip_prefix("prj_").unwrap_or(&w.project))))), "{nets:?}");
+    // Open again and no longer runtime-only: the next build has it.
+    assert_eq!(call(&w.api, "PUT", &env, Some(json!({"egress": null}))).await.0, StatusCode::OK);
+    assert_eq!(call(&w.api, "PATCH", &format!("{env}/variables"), Some(json!({"runtime_only": {"SESSION_KEY": false}}))).await.0, StatusCode::OK);
+    let (_, d) = call(&w.api, "POST", &format!("{env}/deploys"), Some(json!({"no_cache": true}))).await;
+    settled(&w, &id, "production", d["id"].as_str().unwrap()).await;
+    let vars = w.fake.build_vars.lock().last().cloned().unwrap();
+    assert!(vars.contains(&"SESSION_KEY".to_string()), "{vars:?}");
 }
 
 /// A remote build cache for Turborepo and Nx (Vercel's Remote Cache): a build gets its

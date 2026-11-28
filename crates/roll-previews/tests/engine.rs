@@ -291,6 +291,61 @@ async fn recent_requests_are_replayed_against_mains_preview() {
 }
 
 #[tokio::test]
+async fn writes_are_replayed_on_copies_of_both_previews_data() {
+    use base64::Engine as _;
+    let e = env(json!({ "enabled": true, "github": { "screenshot": true }, "replay_writes": true }));
+    e.code.open(change("chg_rw", 1));
+    e.engine.pass().await.unwrap();
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_rw").unwrap().unwrap();
+    let main = e.engine.store.rows(Some(&e.project)).unwrap().into_iter().find(|r| r.change_id.is_none()).unwrap();
+    // Both services on roll's runtime, started with what the engine gives them.
+    e.apps.runtime.store(true, Ordering::SeqCst);
+    let source: Arc<dyn roll_previews::ports::EnvSource> = e.engine.clone();
+    *e.apps.env_source.lock() = Some(Arc::downgrade(&source));
+    let kept = |method: &str, path: &str, body: &str| roll_previews::store::KeptWrite { at: 0, service: "web".into(), method: method.into(), path: path.into(), content_type: Some("application/json".into()), body: base64::engine::general_purpose::STANDARD.encode(body) };
+    e.engine.store.keep_write(&p.id, &kept("POST", "/api/orders", r#"{"qty":1}"#)).unwrap();
+    e.engine.store.keep_write(&main.id, &kept("DELETE", "/api/orders/1", "")).unwrap();
+    e.apps.sent_status.lock().insert(format!("{} POST /api/orders", p.id), 500);
+    e.apps.request_log.lock().insert(p.id.clone(), vec![roll_previews::RequestLine { at: 1, service: "web".into(), method: "GET".into(), path: "/api/orders".into(), status: 200, ms: 3 }]);
+    let serving = |id: &str| e.engine.store.resources(id).unwrap().into_iter().filter_map(|r| r.r#ref).collect::<Vec<_>>();
+    let before: Vec<String> = serving(&p.id).into_iter().chain(serving(&main.id)).collect();
+    e.engine.replay(&p.id, "ada").await.unwrap();
+    let mut done = None;
+    for _ in 0..500 {
+        done = e.engine.store.preview(&p.id).unwrap().replay.filter(|x| x.ok.is_some());
+        if done.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let done = done.expect("replayed");
+    assert_eq!(done.copies_error, None, "{:?}", done.error);
+    let got: Vec<(&str, &str, u16, u16)> = done.requests.iter().map(|q| (q.method.as_str(), q.path.as_str(), q.status, q.main_status)).collect();
+    assert_eq!(got, vec![("GET", "/api/orders", 200, 200), ("POST", "/api/orders", 500, 200), ("DELETE", "/api/orders/1", 200, 200)], "its GETs, then both previews' writes, oldest first, compared");
+    assert!(!e.apps.started.lock().iter().any(|(_, s, _, _)| s == "web"), "nothing asked of the services as they serve");
+    // Each preview's own code took them, on a copy of its own data: never a branch it serves from.
+    let run = format!("web@replay-{}", p.id.trim_start_matches("pv_"));
+    let sent = e.apps.sent.lock().clone();
+    assert!(sent.contains(&(p.id.clone(), run.clone(), "POST".into())) && sent.contains(&(main.id.clone(), run.clone(), "POST".into())), "{sent:?}");
+    for (pv, svc, _, vars) in e.apps.started.lock().iter().filter(|(_, s, _, _)| *s == run) {
+        let db = vars.iter().find(|(k, _)| k == "DATABASE_URL").map(|(_, v)| v.clone()).unwrap_or_default();
+        let copy = if *pv == p.id { "-w" } else { "-wm" };
+        assert!(db.ends_with(&format!("{}{copy}", roll_previews::branch_name(&p.id))), "{pv} {svc} ran on {db}");
+        assert!(!before.iter().any(|b| db.ends_with(b.as_str())), "never on a serving branch: {db}");
+    }
+    // Afterwards the runs stopped and the copies are gone; the serving branches are as they were.
+    let removed = e.apps.removed.lock().clone();
+    assert!(removed.contains(&(p.id.clone(), run.clone())) && removed.contains(&(main.id.clone(), run.clone())), "{removed:?}");
+    let live: Vec<String> = e.pg.branches.lock().iter().chain(e.redis.branches.lock().iter()).cloned().collect();
+    assert!(before.iter().all(|b| live.contains(b)), "{live:?}");
+    assert!(!live.iter().any(|b| b.contains("-w")), "the copies are gone: {live:?}");
+    // A fork's preview is refused: its code never takes a write.
+    e.engine.store.update(&p.id, |r| r.trusted = false).unwrap();
+    assert!(matches!(e.engine.replay(&p.id, "ada").await, Err(roll_previews::Error::Conflict(_))));
+}
+
+#[tokio::test]
 async fn a_visual_change_waits_for_someone_to_accept_it_at_each_head() {
     let e = env(json!({ "enabled": true, "visual_review": "check", "github": { "screenshot": true } }));
     let png = |v: u8| {
@@ -1282,7 +1337,7 @@ async fn a_signed_in_person_sees_only_their_own_projects_previews() {
     assert_eq!(roll_previews::api::router(e.engine.clone()).oneshot(req).await.unwrap().status().as_u16(), 400);
     // A member (a viewer here) passes previews' own check once roll-access decided the request by
     // their role (their session's grant beside it; roll-access/tests/access.rs::
-    // a_members_role_decides_what_they_do_to_a_preview: a viewer reads it, never its credentials).
+    // a_members_role_decides_what_they_do: a viewer reads it, never its credentials).
     // Without a decision (past the gate), only an owner does.
     struct Addresses;
     impl roll_workspace::People for Addresses {
@@ -1725,12 +1780,64 @@ async fn a_share_links_guest_leaves_notes_as_a_guest() {
     }
     assert!(matches!(e.engine.guest_note(&p.id, &open, &note).await, Err(roll_previews::Error::Conflict(_))), "ten an hour per link");
     // What a guest sees: their link's notes only.
-    let theirs = roll_previews::notes::Note { id: "rv_c1".into(), path: "/pricing".into(), selector: "button.buy".into(), note: "Too small".into(), by: "guest:Ada".into(), at: 1, replies: Vec::new(), crop: false, crop_as: None, seen: Default::default(), outside: false, work: None };
+    let theirs = roll_previews::notes::Note { id: "rv_c1".into(), path: "/pricing".into(), selector: "button.buy".into(), note: "Too small".into(), by: "guest:Ada".into(), at: 1, replies: Vec::new(), crop: false, crop_as: None, crop_own: false, seen: Default::default(), outside: false, work: None };
     let team = roll_previews::notes::Note { id: "rv_team".into(), by: "bob".into(), ..theirs.clone() };
     e.code.feedback.lock().insert("chg_g".into(), vec![theirs, team]);
     let seen: Vec<String> = e.engine.guest_notes_of(&p.id, &open.id, "/pricing").await.unwrap().into_iter().map(|n| n.id).collect();
     assert_eq!(seen, ["rv_c1"]);
     assert!(e.engine.guest_notes_of(&p.id, &closed.id, "/pricing").await.unwrap().is_empty());
+}
+
+/// A reviewer's own picture of their tab (Jam's, Marker.io's), sent from the page: checked by its
+/// bytes (a non-image, one too big or too wide refused), kept for its note's author only, once,
+/// served as the note's picture through its signed link, never replaced by roll's crop; a
+/// guest's kept with their note, marked as theirs.
+#[tokio::test]
+async fn a_reviewers_own_screen_is_kept_with_their_note() {
+    let e = env(json!({ "enabled": true, "access": "public" }));
+    e.code.open(change("chg_os", 1));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_os").unwrap().unwrap();
+    let encode = |w: u32, h: u32, f: image::ImageFormat| {
+        let mut out = Vec::new();
+        image::DynamicImage::new_rgb8(w, h).write_to(&mut std::io::Cursor::new(&mut out), f).unwrap();
+        out
+    };
+    let jpeg = encode(8, 8, image::ImageFormat::Jpeg);
+    assert!(jpeg.len() < 1024, "a few hundred bytes");
+    let refused = [b"<svg onload=alert(1)>".to_vec(), encode(1601, 1, image::ImageFormat::Png), [&jpeg[..jpeg.len() / 2], &[0; 16]].concat(), [&jpeg[..], &vec![0; roll_previews::notes::SCREEN_MAX][..]].concat()];
+    for bad in refused {
+        assert!(matches!(e.engine.keep_screen(&p.id, None, bad).await, Err(roll_previews::Error::BadRequest(_))), "not an image, too wide, cut short, too big (a whole picture with a megabyte after it)");
+    }
+    let token = e.engine.keep_screen(&p.id, None, jpeg.clone()).await.unwrap();
+    let note = roll_previews::notes::Note { id: "rv_own".into(), path: "/cart".into(), selector: "button.pay".into(), note: "Cut off".into(), by: "ada".into(), at: 1, replies: Vec::new(), crop: false, crop_as: None, crop_own: false, seen: Default::default(), outside: false, work: None };
+    e.code.feedback.lock().insert("chg_os".into(), vec![note]);
+    let ada = ["ada".to_string()];
+    assert!(matches!(e.engine.attach_screen(&p.id, "rv_own", &token, Some(&["bob".to_string()])).await, Err(roll_previews::Error::Forbidden(_))), "someone else's note");
+    e.engine.attach_screen(&p.id, "rv_own", &token, Some(&ada)).await.unwrap();
+    assert!(matches!(e.engine.attach_screen(&p.id, "rv_own", &token, Some(&ada)).await, Err(roll_previews::Error::NotFound(_))), "a token is taken once");
+    let listed = e.engine.open_notes(&p.id).await.unwrap();
+    assert!(listed[0].crop && listed[0].crop_own, "{listed:?}");
+    // roll's crop of the element, taken meanwhile, doesn't replace theirs.
+    e.engine.store.set_note_crop(&p.id, "rv_own", &encode(4, 4, image::ImageFormat::Png), None).unwrap();
+    // Through its signed link, as the pull request's comment links it.
+    e.engine.store.set_screenshot(&p.id, &p.head, &encode(4, 4, image::ImageFormat::Png), None, None).unwrap();
+    let (exp, sig) = e.engine.store.note_crop_link(&p.id, "rv_own").unwrap().unwrap();
+    use tower::ServiceExt;
+    let req = axum::http::Request::get(format!("/v1/previews/{}/screenshot.png?note=rv_own&exp={exp}&sig={sig}", p.id)).body(axum::body::Body::empty()).unwrap();
+    let resp = roll_previews::api::router(e.engine.clone()).oneshot(req).await.unwrap();
+    assert_eq!((resp.status().as_u16(), resp.headers()["content-type"].to_str().unwrap()), (200, "image/jpeg"));
+    assert_eq!(axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap(), jpeg, "their picture, as they sent it");
+    // A guest's goes with their note, as theirs (a share link is a link-access preview's).
+    let mut settings = e.engine.store.settings(&e.project).unwrap();
+    settings.access = roll_previews::settings::Access::Link;
+    e.engine.store.put_settings(&e.project, &settings).unwrap();
+    let (_, url) = e.engine.share(&p.id, 2, "ada", None, "", true).unwrap();
+    let share = e.engine.store.share_live(&p.id, url.split("roll_share=").nth(1).unwrap()).unwrap().unwrap();
+    let screen = e.engine.keep_screen(&p.id, Some(&share), jpeg.clone()).await.unwrap();
+    let guest = roll_previews::notes::GuestNote { name: "Ada".into(), path: "/cart".into(), note: "Here".into(), screen, ..Default::default() };
+    let review = e.engine.guest_note(&p.id, &share, &guest).await.unwrap();
+    assert_eq!(e.engine.store.note_crop(&p.id, &review).unwrap().and_then(|c| c.own).as_deref(), Some("guest"));
 }
 
 /// A note made a work item on its change's repo (Marker.io's notes to a tracker; roll code's
@@ -1742,7 +1849,7 @@ async fn a_note_becomes_a_work_item_once() {
     e.code.open(change("chg_nw", 1));
     e.engine.pass().await.unwrap();
     let p = e.engine.store.row_by_change("chg_nw").unwrap().unwrap();
-    let note = roll_previews::notes::Note { id: "rv_n1".into(), path: "/cart".into(), selector: "button.pay".into(), note: "The Pay button is cut off\non a phone".into(), by: "guest:Ada".into(), at: 1, replies: Vec::new(), crop: false, crop_as: None, seen: Default::default(), outside: true, work: None };
+    let note = roll_previews::notes::Note { id: "rv_n1".into(), path: "/cart".into(), selector: "button.pay".into(), note: "The Pay button is cut off\non a phone".into(), by: "guest:Ada".into(), at: 1, replies: Vec::new(), crop: false, crop_as: None, crop_own: false, seen: Default::default(), outside: true, work: None };
     e.code.feedback.lock().insert("chg_nw".into(), vec![note]);
     assert!(matches!(e.engine.note_to_work(&p.id, "rv_none", "bob").await, Err(roll_previews::Error::NotFound(_))));
     // Two at once (two clicks, the sheet and the CLI): one item.
@@ -1984,4 +2091,20 @@ async fn a_projects_own_preview_domain_serves_only_its_previews() {
     e.engine.store.set_project_domain("prj_other", Some(("preview.other.dev", false)), &none, &none).unwrap();
     assert_eq!(e.engine.store.service_for_domain_host(&web.host, "preview.other.dev").unwrap(), None, "only the domain's own project's previews");
     assert_eq!(e.engine.store.service_for_domain_host(&web.host, "preview.unknown.dev").unwrap(), None);
+    // Team access there: a signed-in person's ticket lands on the domain's host they asked for;
+    // the preview's name under another project's domain, or a name of nothing, gets none.
+    struct Anyone;
+    impl roll_previews::ports::Visitors for Anyone {
+        fn may_open(&self, _: &str, _: &str, _: &str) -> bool {
+            true
+        }
+    }
+    let _ = e.engine.visitors.set(Arc::new(Anyone));
+    let s = e.engine.store.settings(&e.project).unwrap().patched(&json!({ "access": "team" })).unwrap();
+    e.engine.store.put_settings(&e.project, &s).unwrap();
+    let ticket = |to: String| e.engine.visit_ticket(&p.id, "usr_ada", "ada", "ses_1", &to);
+    let url = ticket(format!("https://{}.preview.acme.dev/cart?x=1", web.host)).unwrap();
+    assert!(url.starts_with(&format!("http://{}.preview.acme.dev/__roll/visit?ticket=rlv_", web.host)) && url.ends_with("&to=%2Fcart%3Fx%3D1"), "{url}");
+    assert!(matches!(ticket(format!("http://{}.preview.other.dev/", web.host)), Err(roll_previews::Error::BadRequest(_))), "another project's domain");
+    assert!(matches!(ticket("http://nothing.preview.acme.dev/".into()), Err(roll_previews::Error::BadRequest(_))));
 }

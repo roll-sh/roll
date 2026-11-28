@@ -1173,6 +1173,15 @@ impl roll_previews::ports::Apps for Services {
         Ok(self.apps.find(preview, service).await?.is_none())
     }
 
+    /// A replayed write: roll's runtime's services only (roll apps' proxy takes none from roll).
+    async fn send(&self, preview: &str, service: &str, method: &str, path: &str, content_type: Option<&str>, body: Vec<u8>) -> anyhow::Result<Option<roll_previews::ports::Fetched>> {
+        let name = service.split_once('@').map_or(service, |(n, _)| n);
+        if self.apps.find(preview, name).await?.is_some() {
+            return Ok(None);
+        }
+        self.runtime.send(preview, service, method, path, content_type, body).await
+    }
+
     fn swap(&self, preview: &str, service: &str, to: Option<roll_previews::ports::Laptop>) {
         self.runtime.swap(preview, service, to);
     }

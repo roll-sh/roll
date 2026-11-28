@@ -240,7 +240,48 @@ pub struct NotifyTarget {
     pub services: Vec<String>,
     /// Whether preview (ephemeral) environments' events come too.
     pub previews: bool,
+    /// Where an alert it was sent goes when no one acknowledges it in time (one hop).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub escalate: Option<Escalation>,
     pub created_at: i64,
+}
+
+/// A target's escalation (Better Stack's escalation policies): an alert it was sent that's still
+/// open and unacknowledged `after_min` minutes on goes to the project's target `to`, once.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Escalation {
+    pub after_min: u32,
+    pub to: String,
+}
+
+/// An open alert (docs/apps/README.md, "Acknowledging and escalating"): from its opening event
+/// until an event closing its key ([`crate::notify`]'s `oncall_of`).
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct Alert {
+    /// Stable for the incident: its key and its opening event's seq, hashed.
+    pub id: String,
+    pub kind: String,
+    pub service: String,
+    pub environment: String,
+    /// What it's about: the opening message's title.
+    pub about: String,
+    pub opened_at: i64,
+    pub acked: Option<AlertAck>,
+    /// When it was escalated (no one acknowledged it in time).
+    pub escalated_at: Option<i64>,
+    #[serde(skip)]
+    pub project: String,
+    /// Its opening event.
+    #[serde(skip)]
+    pub seq: i64,
+    #[serde(skip)]
+    pub closed_at: Option<i64>,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct AlertAck {
+    pub by: String,
+    pub at: i64,
 }
 
 impl NotifyTarget {
@@ -2114,6 +2155,8 @@ pub struct Environment {
     pub traces: bool,
     /// Its pages measure their Web Vitals for roll (`…/vitals`).
     pub vitals: bool,
+    /// Its answers name roll's CSP report endpoint (`…/csp-reports`).
+    pub csp_reports: bool,
     /// Its Strict-Transport-Security when roll serves HTTPS ([`HSTS_DEFAULT`] unless it says;
     /// None: none sent).
     pub hsts: Option<Hsts>,
@@ -2798,6 +2841,95 @@ pub struct Check {
     /// Its request's body (at most 4 KiB), with a method that takes one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
+    /// A pass slower than this (ms, 50–60000) is slow (Better Stack's degraded state): two in a
+    /// row are `check.slow`, the next pass that isn't resolves it. A TCP check's is its connect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slow_ms: Option<u32>,
+    /// What an HTTP check's answer must also hold (Checkly's assertions), at most 5, all of them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assert: Option<Vec<Assertion>>,
+    /// Failures in a row before it's down (1–5, default 2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fail_after: Option<u32>,
+    /// Passes in a row before it's up again (1–5, default 1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recover_after: Option<u32>,
+}
+
+/// One of a check's `assert`: a JSON value at a dotted path, text the answer must not hold, or a
+/// header holding text (a plain substring, never a pattern).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Assertion {
+    Json(JsonAssertion),
+    NotContains(NotContains),
+    Header(HeaderAssertion),
+}
+
+/// `{json: "$.status", equals: "ok"}`: the answer is JSON, and the value at the path is `equals`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JsonAssertion {
+    pub json: String,
+    pub equals: serde_json::Value,
+}
+
+/// `{not_contains: "error"}`: the answer's first 64 KiB doesn't hold the text.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NotContains {
+    pub not_contains: String,
+}
+
+/// `{header: "content-type", matches: "json"}`: the header was sent and holds the text.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HeaderAssertion {
+    pub header: String,
+    pub matches: String,
+}
+
+/// A check's assertions, at most.
+pub const MAX_ASSERTIONS: usize = 5;
+
+impl Assertion {
+    /// A `json` path's segments (`$.items.0.id`: `items`, `0`, `id`): at most 10, no wildcards.
+    pub fn segments(path: &str) -> Option<Vec<&str>> {
+        let rest = path.strip_prefix("$.")?;
+        let parts: Vec<&str> = rest.split('.').collect();
+        let ok = parts.len() <= 10 && parts.iter().all(|p| !p.is_empty() && p.len() <= 100 && !p.contains(['*', '[', ']', ' ']));
+        ok.then_some(parts)
+    }
+
+    /// Whether an answer holds it: why not, naming it.
+    pub fn holds(&self, headers: &axum::http::HeaderMap, body: &[u8]) -> std::result::Result<(), String> {
+        match self {
+            Assertion::Json(JsonAssertion { json, equals }) => {
+                let doc: serde_json::Value = serde_json::from_slice(body).map_err(|_| format!("assert {json}: its answer isn't JSON (or is over 64 KiB)"))?;
+                let mut at = &doc;
+                for seg in Assertion::segments(json).unwrap_or_default() {
+                    let next = match at {
+                        serde_json::Value::Array(a) => seg.parse::<usize>().ok().and_then(|i| a.get(i)),
+                        serde_json::Value::Object(o) => o.get(seg),
+                        _ => None,
+                    };
+                    at = next.ok_or_else(|| format!("assert {json}: its answer has nothing there"))?;
+                }
+                if at != equals {
+                    let got: String = at.to_string().chars().take(100).collect();
+                    return Err(format!("assert {json}: {got} isn't {equals}"));
+                }
+                Ok(())
+            }
+            Assertion::NotContains(NotContains { not_contains }) if String::from_utf8_lossy(body).contains(not_contains.as_str()) => Err(format!("assert not_contains: its answer contains {not_contains:?}")),
+            Assertion::NotContains(_) => Ok(()),
+            Assertion::Header(HeaderAssertion { header, matches }) => match headers.get(header.as_str()).map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned()) {
+                None => Err(format!("assert header {header}: it wasn't sent")),
+                Some(v) if !v.contains(matches.as_str()) => Err(format!("assert header {header}: it doesn't contain {matches:?}")),
+                Some(_) => Ok(()),
+            },
+        }
+    }
 }
 
 /// The methods a check may send ([`Check::method`]).
@@ -2807,6 +2939,11 @@ impl Check {
     /// Its method, GET unless it says.
     pub fn method(&self) -> &str {
         self.method.as_deref().unwrap_or("GET")
+    }
+
+    /// Failures in a row before it's down, and passes in a row before it's up again.
+    pub fn thresholds(&self) -> (u32, u32) {
+        (self.fail_after.unwrap_or(2), self.recover_after.unwrap_or(1))
     }
 
     /// Its headers with each `${NAME}` the variable's value in `vars`; the name of one it names that
@@ -2950,6 +3087,33 @@ impl Check {
                 return bad("a body goes with method POST, PUT, PATCH or DELETE");
             }
         }
+        if self.slow_ms.is_some_and(|v| !(50..=60_000).contains(&v)) || self.fail_after.is_some_and(|v| !(1..=5).contains(&v)) || self.recover_after.is_some_and(|v| !(1..=5).contains(&v)) {
+            return bad("slow_ms is 50–60000, fail_after and recover_after 1–5");
+        }
+        if self.slow_ms.is_some() && self.browser.is_some() {
+            return bad("slow_ms is an HTTP or TCP check's (a browser check has budgets)");
+        }
+        if let Some(all) = &mut self.assert {
+            if self.tcp || self.browser.is_some() {
+                return bad("assert is an HTTP check's");
+            }
+            if all.is_empty() || all.len() > MAX_ASSERTIONS {
+                return bad("assert holds 1–5 assertions");
+            }
+            for a in all {
+                let ok = match a {
+                    Assertion::Json(j) => Assertion::segments(&j.json).is_some(),
+                    Assertion::NotContains(n) => !n.not_contains.is_empty() && n.not_contains.len() <= 200,
+                    Assertion::Header(h) => {
+                        h.header.make_ascii_lowercase();
+                        !h.header.is_empty() && h.header.len() <= 64 && h.header.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b)) && !h.matches.is_empty() && h.matches.len() <= 200
+                    }
+                };
+                if !ok {
+                    return bad("an assertion is {json: \"$.a.b\" (dotted, an array's index as $.items.0, at most 10 segments, no wildcards), equals}, {not_contains: 1–200 characters} or {header, matches: 1–200 characters}");
+                }
+            }
+        }
         Ok(self)
     }
 }
@@ -3044,7 +3208,8 @@ pub struct HeartbeatState {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct CheckState {
     pub name: String,
-    /// None: not tried yet. False once it has failed twice in a row.
+    /// None: not tried yet. False once it has failed `fail_after` times in a row (2), until
+    /// `recover_after` passes in a row (1).
     pub up: Option<bool>,
     /// Failures in a row.
     pub failures: u32,
@@ -3053,6 +3218,8 @@ pub struct CheckState {
     pub ms: Option<u64>,
     pub error: Option<String>,
     pub down_since: Option<i64>,
+    /// Two passes in a row over its `slow_ms`, until one isn't (degraded on a status page).
+    pub slow: bool,
     /// When a browser check's last failure was kept: its screenshot and Playwright trace
     /// (`…/checks/{name}/screenshot`, `…/trace`), as this node knows.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3620,7 +3787,7 @@ impl LinkKind {
     /// Whether an environment with data of its own (`data: "branch"`) gets a branch of it (the
     /// kinds roll previews branches). Another (search) is left out of such an environment.
     pub fn branches(self) -> bool {
-        matches!(self, LinkKind::Postgres | LinkKind::Redis | LinkKind::Nosql | LinkKind::Bucket | LinkKind::Stream | LinkKind::Queue)
+        matches!(self, LinkKind::Postgres | LinkKind::Redis | LinkKind::Nosql | LinkKind::Bucket | LinkKind::Stream | LinkKind::Queue | LinkKind::Search)
     }
 
     pub const ALL: [LinkKind; 9] = [LinkKind::Postgres, LinkKind::Redis, LinkKind::Bucket, LinkKind::Stream, LinkKind::Queue, LinkKind::Nosql, LinkKind::Search, LinkKind::Service, LinkKind::Tasks];
@@ -3656,6 +3823,9 @@ pub struct Link {
     pub indices: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub access: Option<String>,
+    /// It has a credential of its own, which `POST …/rotate` replaces.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub rotates: bool,
 }
 
 impl Link {

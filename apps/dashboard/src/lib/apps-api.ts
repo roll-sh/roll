@@ -713,6 +713,8 @@ export interface EnvironmentPut {
   traces?: boolean;
   /** Its pages measure their Web Vitals (a tag roll adds). */
   vitals?: boolean;
+  /** Its answers send their Content-Security-Policy reports to roll (`/__roll/csp`). */
+  csp_reports?: boolean;
   /** Strict-Transport-Security over HTTPS: its own, false (none) or null (the default, two years). */
   hsts?: Hsts | false | null;
   /** How long its logs are kept (null: 7 days). */
@@ -846,6 +848,8 @@ export interface Environment extends EnvironmentSummary {
   traces?: boolean;
   /** Its pages measure their Web Vitals for roll. */
   vitals?: boolean;
+  /** Its answers send their Content-Security-Policy reports to roll (`…/csp-reports`). */
+  csp_reports?: boolean;
   /** Its Strict-Transport-Security over HTTPS (null: none sent). */
   hsts?: Hsts | null;
   /** Days its logs are kept: 7 (default), 30 or 90; a preview's are 7. */
@@ -1163,6 +1167,17 @@ export interface Link {
   indices?: string[];
   /** A search link's key: read, or append (create documents on exact names); none: read and write. */
   access?: "read" | "append";
+  /** A credential of its own, which {@link appsApi.rotateLink} replaces. */
+  rotates?: true;
+}
+
+/** A link's rotation: the redeploys it made, and the environments that keep the old credential until their next deploy. */
+export interface Rotation {
+  kind: LinkKind;
+  ref: string;
+  deployments: { environment: string; id: string; status: DeployStatus }[];
+  waiting: string[];
+  live: boolean;
 }
 
 /** `reference`: one of its own with `${{ … }}` in it, filled in at the deploy. */
@@ -1327,11 +1342,18 @@ export interface UptimeCheck {
   method?: "GET" | "HEAD" | "POST" | "PUT" | "PATCH" | "DELETE" | "OPTIONS";
   headers?: Record<string, string>;
   body?: string;
+  /** 50–60000 ms: two passes in a row slower than this are `check.slow` (degraded), until one isn't. Not a browser check's; a TCP check's is its connect. */
+  slow_ms?: number;
+  /** An HTTP check's, at most 5, all must hold: a JSON value at a dotted path (`$.items.0.id`), text its answer mustn't hold, or a header holding text (never a pattern). */
+  assert?: ({ json: string; equals: unknown } | { not_contains: string } | { header: string; matches: string })[];
+  /** 1–5: failures in a row before down (default 2), and passes in a row before up again (default 1). */
+  fail_after?: number;
+  recover_after?: number;
 }
 
 export interface UptimeCheckState {
   name: string;
-  /** null: not tried yet; false once it failed twice in a row. */
+  /** null: not tried yet; false once it failed `fail_after` times in a row, until `recover_after` passes. */
   up: boolean | null;
   failures: number;
   last_at: number | null;
@@ -1339,6 +1361,8 @@ export interface UptimeCheckState {
   ms: number | null;
   error: string | null;
   down_since: number | null;
+  /** Two passes in a row over its `slow_ms`, until one isn't. */
+  slow: boolean;
   /** A browser check's last failure kept (its screenshot and Playwright trace), as the owner knows. */
   failure_at?: number;
   /** A preview's: the deployment this result is of (production's browser checks, run on each of its heads). */
@@ -1401,6 +1425,25 @@ export interface Vitals {
   metrics: Partial<Record<VitalName, Vital>>;
   routes: { route: string; samples: number; metrics: Partial<Record<VitalName, Vital>> }[];
   cut: boolean;
+}
+
+/** What browsers reported an environment's CSP blocked (`csp_reports: true`), grouped. */
+export interface CspReports {
+  minutes: number;
+  on: boolean;
+  groups: CspGroup[];
+}
+
+export interface CspGroup {
+  directive: string;
+  /** An origin, a scheme (`data:`), a keyword (`inline`, `eval`) or `other`. */
+  blocked: string;
+  /** The document's path, ids folded as `:id`. */
+  path: string;
+  disposition: "enforce" | "report";
+  count: number;
+  first_seen: number;
+  last_seen: number;
 }
 
 export interface Analytics {
@@ -1480,12 +1523,36 @@ export interface NotifyTarget {
   services: string[];
   /** Preview (ephemeral) environments' events too. */
   previews: boolean;
+  /** An alert it was sent, still open and unacknowledged `after_min` on, goes to target `to` once. */
+  escalate?: NotifyEscalation;
   created_at: number;
   /** Only in the answer to its creation, for a webhook: what its requests are signed with. */
   secret?: string;
 }
 
+export interface NotifyEscalation {
+  /** 5–1440 minutes. */
+  after_min: number;
+  /** Another of the project's targets. */
+  to: string;
+}
+
+/** An open alert: from its opening event until one closing it (its resolve, a deploy that works). */
+export interface OpenAlert {
+  /** `alr_…`, the same for the whole incident. */
+  id: string;
+  kind: string;
+  service: string;
+  environment: string;
+  /** The opening message's title. */
+  about: string;
+  opened_at: number;
+  acked: { by: string; at: number } | null;
+  escalated_at: number | null;
+}
+
 export type NotifyEvent =
+  | "alert.acked"
   | "alert.anomaly"
   | "attack.mode"
   | "deploy.started"
@@ -1522,9 +1589,11 @@ export type NotifyEvent =
   | "volume.backup_failed"
   | "volume.full"
   | "check.down"
+  | "check.slow"
   | "heartbeat.missed"
   | "deploy.vulnerable"
   | "alert.slo"
+  | "alert.csp"
   /** Every `audit.*` entry: who changed what (never paged). */
   | "audit";
 
@@ -1760,6 +1829,9 @@ export const appsApi = {
   link: (id: string, kind: LinkKind, ref: string, prefix?: string) =>
     call<Link>("PUT", `${svc(id)}/links/${kind}/${enc(ref)}`, prefix ? { prefix } : {}),
   unlink: (id: string, kind: LinkKind, ref: string) => call<null>("DELETE", `${svc(id)}/links/${kind}/${enc(ref)}`),
+  /** A new credential for the link, its environments redeployed with it; the old one is revoked once nothing runs with it. */
+  rotateLink: (id: string, kind: LinkKind, ref: string, environment?: string) =>
+    call<Rotation>("POST", `${svc(id)}/links/${kind}/${enc(ref)}/rotate`, environment ? { environment } : {}),
 
   environments: (id: string) => call<Environment[]>("GET", `${svc(id)}/environments`),
   environment: (id: string, e: string) => call<Environment>("GET", env(id, e)),
@@ -1786,10 +1858,12 @@ export const appsApi = {
   projectUsage: (project: string, month?: string) => call<ProjectUsage>("GET", `/v1/apps/projects/${enc(project)}/usage${qs({ month })}`),
   setLimits: (project: string, body: { alert_usd: number | null; hard_usd: number | null }) => call<SpendLimits>("PUT", `/v1/apps/projects/${enc(project)}/limits`, body),
   /** PagerDuty takes its integration's `routing_key`, Opsgenie its `api_key` (sealed, never returned), each with a `region`. */
-  addNotifyTarget: (project: string, body: { kind: NotifyTarget["kind"]; url?: string; routing_key?: string; api_key?: string; region?: "us" | "eu"; events?: NotifyEvent[]; environments?: string[]; services?: string[]; previews?: boolean }) => call<NotifyTarget>("POST", `/v1/apps/projects/${enc(project)}/notifications`, body),
+  addNotifyTarget: (project: string, body: { kind: NotifyTarget["kind"]; url?: string; routing_key?: string; api_key?: string; region?: "us" | "eu"; events?: NotifyEvent[]; environments?: string[]; services?: string[]; previews?: boolean; escalate?: NotifyEscalation }) => call<NotifyTarget>("POST", `/v1/apps/projects/${enc(project)}/notifications`, body),
   /** Its events and filters (given ones replace); its URL and secret stay. */
-  updateNotifyTarget: (project: string, id: string, body: { events?: NotifyEvent[]; environments?: string[]; services?: string[]; previews?: boolean }) =>
+  updateNotifyTarget: (project: string, id: string, body: { events?: NotifyEvent[]; environments?: string[]; services?: string[]; previews?: boolean; escalate?: NotifyEscalation | null }) =>
     call<NotifyTarget>("PATCH", `/v1/apps/projects/${enc(project)}/notifications/${enc(id)}`, body),
+  alerts: (project: string) => call<OpenAlert[]>("GET", `/v1/apps/projects/${enc(project)}/alerts`),
+  ackAlert: (project: string, id: string) => call<OpenAlert>("POST", `/v1/apps/projects/${enc(project)}/alerts/${enc(id)}/ack`),
   removeNotifyTarget: (project: string, id: string) => call<null>("DELETE", `/v1/apps/projects/${enc(project)}/notifications/${enc(id)}`),
   testNotifyTarget: (project: string, id: string) => call<{ ok: boolean; code: number | null; error: string | null }>("POST", `/v1/apps/projects/${enc(project)}/notifications/${enc(id)}/test`),
   notifyDeliveries: (project: string, id: string) => call<NotifyDelivery[]>("GET", `/v1/apps/projects/${enc(project)}/notifications/${enc(id)}/deliveries`),
@@ -1945,6 +2019,7 @@ export const appsApi = {
   routes: (id: string, e: string, minutes = 60) => call<RouteStats>("GET", `${env(id, e)}/routes${qs({ minutes })}`),
   analytics: (id: string, e: string, minutes = 1440) => call<Analytics>("GET", `${env(id, e)}/analytics${qs({ minutes })}`),
   vitals: (id: string, e: string, minutes = 1440) => call<Vitals>("GET", `${env(id, e)}/vitals${qs({ minutes })}`),
+  cspReports: (id: string, e: string, minutes = 1440) => call<CspReports>("GET", `${env(id, e)}/csp-reports${qs({ minutes })}`),
   setErrorState: (id: string, e: string, fingerprint: string, state: "open" | "resolved" | "muted") => call<{ fingerprint: string; state: string }>("PATCH", `${env(id, e)}/errors/${encodeURIComponent(fingerprint)}`, { state }),
   errors: (id: string, e: string, minutes = 1440) => call<{ minutes: number; groups: ErrorGroup[]; scanned: number; cut: boolean }>("GET", `${env(id, e)}/errors${qs({ minutes })}`),
   appMetrics: (id: string, e: string, minutes = 60) => call<AppMetrics>("GET", `${env(id, e)}/app-metrics${qs({ minutes })}`),

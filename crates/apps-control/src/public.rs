@@ -482,10 +482,10 @@ pub(crate) async fn call_scheduled(apps: Arc<Apps>, service: &str, env: &str, ho
 }
 
 /// GET `path` of an environment on its owner for an uptime check (`crate::checks`), as `host`
-/// asks and past its gates as a schedule's call is: the status and at most `max` bytes of the
-/// answer, or why it never answered.
+/// asks and past its gates as a schedule's call is: the status, the headers and at most `max`
+/// bytes of the answer, or why it never answered.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn call_check(apps: Arc<Apps>, service: &str, env: &str, host: &str, method: &str, path: &str, headers: &[(String, String)], body: Option<String>, timeout: std::time::Duration, max: usize) -> std::result::Result<(u16, Vec<u8>), String> {
+pub(crate) async fn call_check(apps: Arc<Apps>, service: &str, env: &str, host: &str, method: &str, path: &str, headers: &[(String, String)], body: Option<String>, timeout: std::time::Duration, max: usize) -> std::result::Result<(u16, axum::http::HeaderMap, Vec<u8>), String> {
     let method = axum::http::Method::from_bytes(method.as_bytes()).unwrap_or(axum::http::Method::GET);
     let mut b = Request::builder().method(method).uri(path).header(header::HOST, host).header(header::USER_AGENT, "roll-uptime/1.0");
     for (k, v) in headers {
@@ -495,7 +495,7 @@ pub(crate) async fn call_check(apps: Arc<Apps>, service: &str, env: &str, host: 
     req.extensions_mut().insert(Scheduled);
     tokio::time::timeout(timeout, async {
         let r = proxy(apps, service, env, None, req).await;
-        let status = r.status().as_u16();
+        let (status, headers) = (r.status().as_u16(), r.headers().clone());
         // At most `max` read; the rest dropped, so its instance's lease and meter end with it.
         let mut body = r.into_body().into_data_stream();
         let mut out = Vec::new();
@@ -507,7 +507,7 @@ pub(crate) async fn call_check(apps: Arc<Apps>, service: &str, env: &str, host: 
                 break;
             }
         }
-        (status, out)
+        (status, headers, out)
     })
     .await
     .map_err(|_| format!("it didn't answer within {} s", timeout.as_secs()))
@@ -1794,6 +1794,20 @@ pub(crate) async fn proxy(apps: Arc<Apps>, service: &str, env: &str, deployment:
         {
             r.headers_mut().insert(header::STRICT_TRANSPORT_SECURITY, v.clone());
         }
+        // CSP reports (`crate::csp`): roll's endpoint named, and each policy that reports nowhere
+        // sent there (the app's own report-to or report-uri kept).
+        if g.csp_reports {
+            r.headers_mut().append(axum::http::HeaderName::from_static("reporting-endpoints"), HeaderValue::from_static(crate::csp::ENDPOINTS));
+            for name in [header::CONTENT_SECURITY_POLICY, header::CONTENT_SECURITY_POLICY_REPORT_ONLY] {
+                let policies: Vec<HeaderValue> = r.headers().get_all(&name).iter().map(crate::csp::with_reporting).collect();
+                if !policies.is_empty() {
+                    r.headers_mut().remove(&name);
+                    for v in policies {
+                        r.headers_mut().append(name.clone(), v);
+                    }
+                }
+            }
+        }
     }
     if deployment.is_some() || gate.as_ref().is_some_and(|g| g.preview) {
         r.headers_mut().insert("x-robots-tag", HeaderValue::from_static("noindex"));
@@ -2022,6 +2036,14 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
         let country = req.headers().get("cf-ipcountry").and_then(|v| v.to_str().ok()).filter(|c| c.len() == 2 && c.bytes().all(|b| b.is_ascii_alphabetic())).map(|c| c.to_ascii_uppercase());
         let Ok(body) = axum::body::to_bytes(req.into_body(), crate::vitals::MAX_BODY).await else { return StatusCode::PAYLOAD_TOO_LARGE.into_response() };
         return apps.vitals_beacon(service, env, &body, country).into_response();
+    }
+    // CSP reports: browsers' reports on the environment's own host, both shapes, bounded.
+    if gate.csp_reports && req.uri().path() == crate::csp::BEACON && req.method() == axum::http::Method::POST {
+        if !crate::csp::report_type(req.headers().get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok())) {
+            return StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response();
+        }
+        let Ok(body) = axum::body::to_bytes(req.into_body(), crate::csp::MAX_BODY).await else { return StatusCode::PAYLOAD_TOO_LARGE.into_response() };
+        return apps.csp_beacon(service, env, &body).await.into_response();
     }
     // Custom events: on every environment's own host, as its access log's page views are.
     if req.uri().path() == crate::track::SCRIPT_PATH && req.method() == axum::http::Method::GET {

@@ -2749,6 +2749,34 @@ async fn one_pusher_spends_its_share_and_made_up_pushers_only_the_tokens_budget(
     }
 }
 
+/// The candidates a scanner may try (what stops a scan token brute-forcing stored values through
+/// `POST …/scan`): a pusher's half of its token's minute, the token's across every pusher it names.
+/// The caps are lowered for the test; the constants are the defaults.
+#[tokio::test]
+async fn a_scanners_candidates_are_capped_per_pusher_and_per_token() {
+    let api = Api::new().await;
+    api.secrets.set_scan_candidates(100, 300);
+    let scan = |pusher: &str, n: usize| json!({ "candidates": (0..n).map(|i| format!("fake-candidate-{i:08}")).collect::<Vec<_>>(), "pusher": pusher, "refs": ["refs/heads/main"] });
+    let minute = || api.db.now_ms().unwrap() / 60_000;
+    for attempt in 0.. {
+        let started = minute();
+        let token = api.token(json!({ "name": format!("hook-{attempt}"), "actions": ["scan"] }));
+        let alice = api.req(Method::POST, "/scan", Some(scan("alice", 50)), Some(&token)).await.0;
+        let alice_more = api.req(Method::POST, "/scan", Some(scan("alice", 1)), Some(&token)).await;
+        let bob = api.req(Method::POST, "/scan", Some(scan("bob", 50)), Some(&token)).await.0;
+        let carol = api.req(Method::POST, "/scan", Some(scan("carol", 1)), Some(&token)).await;
+        if minute() != started && attempt < 3 {
+            continue;
+        }
+        assert_eq!((alice, bob), (StatusCode::OK, StatusCode::OK));
+        let said = alice_more.1["error"].as_str().unwrap_or_default();
+        assert!(alice_more.0 == StatusCode::TOO_MANY_REQUESTS && said.contains("candidates tried a minute") && said.contains("for pusher alice"), "{alice_more:?}");
+        let said = carol.1["error"].as_str().unwrap_or_default();
+        assert!(carol.0 == StatusCode::TOO_MANY_REQUESTS && said.contains("across every pusher its hook names"), "{carol:?}");
+        break;
+    }
+}
+
 /// A login on the break-glass list is a pusher as one hook's token names it: `alice` is refused
 /// until a hook has named alice, then bound to that hook's token (a scan-only one), not to a
 /// reveal+scan token that named alice too, so that token can't break glass; the answer names the
@@ -4464,6 +4492,20 @@ async fn paddle_rotations_at_once_leave_the_key_on_the_secret_paddle_keeps() {
     assert_eq!(graces, [3600, 3600, 0], "linked, scheduled, then the leak's");
     assert_eq!((current, old), (paddle_secret(3), Some((paddle_secret(2), 0))));
     assert_eq!(api.values("production", "/").await["values"]["PADDLE_API_KEY"], paddle_secret(3), "the key Paddle keeps");
+
+    // A loser replaces only the credential it raced with: a value set by hand after the winner's
+    // write stays, and the loser is stale.
+    let (held, go) = Pause::arm(&api.gate.pause, &maker);
+    let rotate = || api.call(Method::POST, "/environments/production/secrets/PADDLE_API_KEY/rotate", None);
+    let meanwhile = async {
+        Pause::reached(held).await;
+        assert!(rotate().await.0.is_success(), "the winner");
+        api.ok(Method::PUT, "/environments/production/secrets/PADDLE_API_KEY", Some(json!({ "value": "set-by-hand" }))).await;
+        go.send(()).unwrap();
+    };
+    let ((s, e), ()) = tokio::join!(rotate(), meanwhile);
+    assert_eq!(s, StatusCode::CONFLICT, "{e}");
+    assert_eq!(api.values("production", "/").await["values"]["PADDLE_API_KEY"], "set-by-hand");
 }
 
 #[tokio::test]
@@ -4487,8 +4529,21 @@ async fn a_database_outside_roll_hands_out_logins_in_turn_and_per_lease() {
     assert_eq!((blue.0.as_str(), password("app_blue")), ("app_blue", Some(blue.1.clone())));
 
     // Each rotation hands out the other role; the one in use keeps working through the grace.
+    // It rewrites DB_USER too, so a token that may write DB_PASSWORD alone may not rotate it (told
+    // how many keys share the login, not which). One that may write both, but read neither, hears
+    // only of the key it rotated.
+    let writer = |keys: &[&str]| {
+        let mut rule = roll_secrets::access::rule(&api.project, None, None, &[roll_secrets::Action::Write]);
+        rule.keys = Some(keys.iter().map(|k| k.to_string()).collect());
+        api.gate.grant("writer", rule, None).0
+    };
     let rotate = || api.call(Method::POST, "/environments/production/secrets/DB_PASSWORD/rotate", None);
-    assert!(rotate().await.0.is_success());
+    let (s, e) = api.req(Method::POST, "/environments/production/secrets/DB_PASSWORD/rotate", None, Some(&writer(&["DB_PASSWORD"]))).await;
+    assert!(s == StatusCode::FORBIDDEN && e.to_string().contains("1 other key") && !e.to_string().contains("DB_USER"), "{s} {e}");
+    assert_eq!(login().await, blue, "refused before anything was issued");
+    let (s, r) = api.req(Method::POST, "/environments/production/secrets/DB_PASSWORD/rotate", None, Some(&writer(&["DB_PASSWORD", "DB_USER"]))).await;
+    assert!(s.is_success(), "{r}");
+    assert_eq!(r["items"].as_array().unwrap().iter().map(|i| i["key"].as_str().unwrap()).collect::<Vec<_>>(), ["DB_PASSWORD"], "{r}");
     let green = login().await;
     assert_eq!((green.0.as_str(), password("app_green"), password("app_blue")), ("app_green", Some(green.1.clone()), Some(blue.1.clone())));
     // Both roles are taken (green in use, blue in its grace): another rotation waits, resetting
