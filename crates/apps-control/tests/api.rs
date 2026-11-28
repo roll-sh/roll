@@ -4088,7 +4088,8 @@ async fn a_previews_runtime_lines_reach_only_drains_that_take_previews() {
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
     assert!(others(), "{:?}", got.lock());
-    let got: Vec<(String, Value)> = got.lock().iter().filter(|(_, l)| l["text"] != after).cloned().collect();
+    // The preview's own lines (production's go to the drains that take every environment).
+    let got: Vec<(String, Value)> = got.lock().iter().filter(|(_, l)| l["environment"] == "pv-abc").cloned().collect();
     let mut to: Vec<(&str, &str)> = got.iter().map(|(to, l)| (to.as_str(), l["source"].as_str().unwrap_or(""))).collect();
     to.sort();
     assert_eq!(to, [("builds", "build"), ("previews", "runtime"), ("previews", "runtime")], "{got:?}");

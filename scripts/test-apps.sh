@@ -40,7 +40,8 @@ env -u ROLL_APPS_DOCKER cargo test -p roll-cli --test apps
 # Cloudflare for SaaS against a fake Cloudflare.
 env -u ROLL_APPS_DOCKER cargo test -p roll-edge --lib --test custom_domains
 # rolld's own apps tests (src/apps.rs) aren't run here: a rolld test build is about 15 GB.
-cargo build -p rolld -p roll-cli
+# rolld and roll-cli still compile with the change (checked, not built: no test runs them).
+cargo check -p rolld -p roll-cli
 if [[ $docker == 1 ]]; then
   # Three at a time: each test makes its own project's networks, and a host whose other projects
   # hold most of Docker's address pools refuses the rest ("all predefined address pools have been
