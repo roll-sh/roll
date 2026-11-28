@@ -2,7 +2,8 @@ import { HorizonMark, type MarkState } from "@roll/brand";
 import { Check, Copy, X } from "lucide-react";
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { prettyBody, prettyJson, type MsgState, type RunStatus } from "@/lib/tasks-api";
-import { useMarkState } from "../mark-state";
+import { SkeletonLines } from "../loading";
+import { useMarkBusy, useMarkState } from "../mark-state";
 
 // Same control styles as databases.tsx.
 export const btn =
@@ -233,11 +234,16 @@ export function Empty({ title, children }: { title: string; children?: ReactNode
   );
 }
 
+/** A panel's rows while they load (components/loading.tsx); `label` is what a screen reader hears. */
 export function Loading({ label = "Loading…" }: { label?: string }) {
+  useMarkBusy(true);
   return (
-    <p className="px-5 py-6 text-[13px] text-subtle">
-      <span className="shimmer">{label}</span>
-    </p>
+    <div aria-busy="true" className="skeleton-in px-5 py-4">
+      <span className="sr-only" role="status">
+        {label}
+      </span>
+      <SkeletonLines />
+    </div>
   );
 }
 

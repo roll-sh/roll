@@ -25,6 +25,8 @@ import { ProjectDrift } from "../apps/project-drift";
 import { TemplateList } from "../apps/deploy-repo";
 import { NewServiceSheet } from "../apps/new-service";
 import { AppShell } from "../app-shell";
+import { SkeletonCrumb } from "../loading";
+import { useMarkBusy } from "../mark-state";
 import { Board, type Card } from "./board";
 import { Inspector, ResourceSheet, StagedSheet } from "./inspector";
 import { ProjectAgents, threadsOf, useAgents } from "./agents";
@@ -47,6 +49,7 @@ export type ProjectTab = "canvas" | "previews" | "logs" | "metrics" | "members";
 export function ProjectPage({ id, tab = "canvas", children }: { id: string; tab?: ProjectTab; children?: ReactNode }) {
   const ws = useWorkspace();
   const project = ws.projects.find((p) => p.id === id);
+  if (!project && ws.status === "loading") return <ProjectLoading />;
   if (!project) return <MissingProject crumb="Project" to={(id) => `/dashboard/projects/${id}`} />;
   return (
     <Project key={project.id} ws={ws} project={project} tab={tab}>
@@ -332,6 +335,25 @@ function Project({ ws, project, tab, children }: { ws: WorkspaceState; project: 
       </footer>
       <DeployChanges ws={ws} project={project} open={reviewing} onClose={() => setReviewing(false)} />
       <ProjectSettings project={project} open={settings} initialTab={asked === "services" ? "apps" : "general"} onClose={() => setSettings(false)} />
+    </AppShell>
+  );
+}
+
+/** The project's frame while the workspace loads: its name's place in the header, the dot grid, the
+ *  footer strip, so the page doesn't move when it arrives. */
+function ProjectLoading() {
+  useMarkBusy(true);
+  return (
+    <AppShell
+      bleed
+      crumb={<SkeletonCrumb />}
+    >
+      <div aria-busy="true" className="absolute inset-x-0 top-0 bottom-7 bg-[radial-gradient(var(--line-3)_1px,transparent_1.3px)] [background-size:20px_20px]">
+        <span className="sr-only" role="status">
+          Loading the project
+        </span>
+      </div>
+      <footer className="absolute inset-x-0 bottom-0 h-7 border-t border-line bg-canvas" />
     </AppShell>
   );
 }

@@ -131,10 +131,10 @@ export function NosqlDatabases() {
           </EmptyPanel>
         )
       ) : (
-        <>
+        <div className="arrive">
           <Overview info={info} dbs={dbs} />
           <DatabaseList dbs={dbs} info={info} busy={busy} onUnload={(d) => run(`unload-${d.id}`, () => nosqlApi.unload(d.id))} />
-        </>
+        </div>
       )}
     </AppShell>
   );

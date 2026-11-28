@@ -2,6 +2,8 @@ import { DotField, HorizonMark } from "@roll/brand";
 import { Check, Copy, Eye, EyeOff } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { ROLL_API } from "@/lib/roll-api";
+import { SkeletonList } from "./loading";
+import { useMarkBusy } from "./mark-state";
 
 /** Shared building blocks of the dashboard pages (Postgres, Redis). */
 
@@ -114,18 +116,24 @@ export function ErrorNote({ error }: { error: string | null }) {
   );
 }
 
-export function Connecting() {
+/** A page's list while its first answer is on the way: the shared skeleton (components/loading.tsx),
+ *  faded in only if the wait passes 150 ms, with the marks thinking. */
+export function Connecting({ rows = 3 }: { rows?: number }) {
+  useMarkBusy(true);
   return (
-    <p className="mt-10 text-[13px] text-subtle">
-      <span className="shimmer">Connecting to rolld…</span>
-    </p>
+    <div aria-busy="true" className="skeleton-in mt-6">
+      <span className="sr-only" role="status">
+        Loading
+      </span>
+      <SkeletonList rows={rows} />
+    </div>
   );
 }
 
 /** A quiet hero panel over the dot field, for empty and offline states. */
 export function EmptyPanel({ children }: { children: ReactNode }) {
   return (
-    <section className="relative isolate mt-6 overflow-hidden rounded-xl border border-line bg-panel">
+    <section className="arrive relative isolate mt-6 overflow-hidden rounded-xl border border-line bg-panel">
       <DotField spacing={18} radius={90} className="-z-10 text-fg" />
       <div className="flex flex-col items-start gap-3 p-8">{children}</div>
     </section>

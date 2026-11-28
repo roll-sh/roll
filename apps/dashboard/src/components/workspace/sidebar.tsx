@@ -8,6 +8,7 @@ import { cachedHealth } from "@/lib/secrets-health-cache";
 import { hideAgents } from "@/lib/agents-surface";
 import { monthOf, projectMonth, usd } from "@/lib/workspace-resources";
 import { spendOf, useWorkspace } from "@/lib/workspace-store";
+import { Skeleton } from "../loading";
 import { useMarkState } from "../mark-state";
 import { AccountMenu } from "./account";
 import { SidebarAgents, threadsOf, useAgents } from "./agents";
@@ -71,13 +72,22 @@ export function Sidebar({ onSearch }: { onSearch: () => void }) {
           </span>
         </div>
         <div className="mt-1 flex items-baseline gap-1.5 font-mono text-[17px] font-semibold tracking-[-0.04em]">
-          {ws.status === "ready" ? usd(total.usd) : "—"}
+          {ws.status === "ready" ? (
+            usd(total.usd)
+          ) : ws.status === "loading" ? (
+            // The number's line height, so the card doesn't change size when it arrives.
+            <span className="flex h-[25.5px] items-center">
+              <Skeleton className="h-3.5 w-12" />
+            </span>
+          ) : (
+            "—"
+          )}
           <span className="text-[11px] font-normal tracking-normal text-subtle">so far</span>
         </div>
         <MonthMeter elapsed={month.elapsed} days={month.days} />
         <div className="mt-1.5 flex justify-between text-[11px] text-subtle">
           <span>
-            On track for <b className="font-mono font-medium text-fg">≈ {usd(projectMonth(total.usd, month))}</b>
+            On track for <b className="font-mono font-medium text-fg">≈ {ws.status === "ready" ? usd(projectMonth(total.usd, month)) : "—"}</b>
           </span>
           <span>by {month.end}</span>
         </div>
@@ -142,6 +152,7 @@ function Projects({ pathname }: { pathname: string }) {
             <p className="px-2 py-1.5 text-[12px] text-subtle">Projects didn't load: {ws.error}</p>
           )
         ) : null}
+        {ws.status === "loading" && <ProjectRowsSkeleton />}
         {ws.projects.map((p) => {
           const base = `/dashboard/projects/${p.id}`;
           const inside = pathname === base || pathname.startsWith(`${base}/`);
@@ -206,6 +217,23 @@ function Projects({ pathname }: { pathname: string }) {
         )}
       </div>
     </>
+  );
+}
+
+/** The project rows' places while the workspace loads: a row's height, icon and two lines. */
+function ProjectRowsSkeleton() {
+  return (
+    <div aria-hidden className="skeleton-in flex flex-col gap-px">
+      {[52, 36].map((w) => (
+        <div key={w} className={`${row} border-transparent`}>
+          <Skeleton className="size-6 shrink-0 rounded-md" />
+          <span className="flex h-[28.75px] flex-1 flex-col justify-center gap-1">
+            <Skeleton className="h-2.5" style={{ width: `${w}%` }} />
+            <Skeleton className="h-2 w-1/4 opacity-70" />
+          </span>
+        </div>
+      ))}
+    </div>
   );
 }
 

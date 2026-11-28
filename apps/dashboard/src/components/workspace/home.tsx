@@ -5,6 +5,7 @@ import { allFindings, deletedProjects, recoverEnvironment, recoverProject, type 
 import { KIND_LABEL, monthOf, projectMonth, resourceKey, usd } from "@/lib/workspace-resources";
 import { loadWorkspace, spendOf, useWorkspace } from "@/lib/workspace-store";
 import { AppShell } from "../app-shell";
+import { Loaded, Skeleton, SkeletonCards } from "../loading";
 import { KindTile } from "./kind";
 import { openNewProject } from "./new-project";
 import { ProjectIcon } from "./project-icon";
@@ -16,82 +17,82 @@ export function Home() {
   const total = spendOf(ws, ws.projects.flatMap((p) => p.resources));
   const placed = new Set(ws.projects.flatMap((p) => p.resources.map(resourceKey)));
   const loose = [...ws.inventory.values()].filter((v) => !placed.has(resourceKey(v)));
+  const ready = ws.status !== "loading";
 
   return (
     <AppShell crumb="Home">
-      <section className="rise">
+      <section>
         <h1 className="text-[20px] font-semibold tracking-[-0.045em]">Projects</h1>
         <p className="mt-0.5 text-[12.5px] text-muted">Each project groups its services, databases, caches, streams and buckets on one canvas.</p>
-        <div className="mt-4 grid gap-2.5 sm:grid-cols-2 lg:grid-cols-3">
-          {ws.projects.map((p) => {
-            const s = spendOf(ws, p.resources);
-            // What's failing in it (a crash loop, a failed deploy, a database down): seen before opening it.
-            const failing = p.resources.filter((r) => ws.inventory.get(resourceKey(r))?.state === "failed").length;
-            // Services with changes waiting for a redeploy (Railway's staged changes).
-            const changes = p.resources.reduce((n, r) => n + (ws.inventory.get(resourceKey(r))?.toDeploy?.length ?? 0), 0);
-            return (
-              <Link
-                key={p.id}
-                href={`/dashboard/projects/${p.id}`}
-                className="group rounded-xl border border-line-2 bg-sheet p-3 shadow-card inset-shadow-highlight transition-[border-color,box-shadow] duration-150 hover:border-line-3 hover:shadow-card-hover"
-              >
-                <div className="flex items-center gap-2.5">
-                  <ProjectIcon project={p} className="size-8" />
-                  <div className="min-w-0 flex-1 leading-tight">
-                    <div className="truncate text-[13px] font-semibold tracking-[-0.015em]">{p.name}</div>
-                    <div className={`truncate text-subtle ${p.description ? "text-[11px]" : "font-mono text-[10.5px]"}`}>
-                      {p.description || `${p.resources.length} ${p.resources.length === 1 ? "resource" : "resources"}`}
+        <Loaded ready={ready} skeleton={<SkeletonCards count={3} />} className="mt-4">
+          <div className="grid gap-2.5 sm:grid-cols-2 lg:grid-cols-3">
+            {ws.projects.map((p) => {
+              const s = spendOf(ws, p.resources);
+              // What's failing in it (a crash loop, a failed deploy, a database down): seen before opening it.
+              const failing = p.resources.filter((r) => ws.inventory.get(resourceKey(r))?.state === "failed").length;
+              // Services with changes waiting for a redeploy (Railway's staged changes).
+              const changes = p.resources.reduce((n, r) => n + (ws.inventory.get(resourceKey(r))?.toDeploy?.length ?? 0), 0);
+              return (
+                <Link
+                  key={p.id}
+                  href={`/dashboard/projects/${p.id}`}
+                  className="group rounded-xl border border-line-2 bg-sheet p-3 shadow-card inset-shadow-highlight transition-[border-color,box-shadow] duration-150 hover:border-line-3 hover:shadow-card-hover"
+                >
+                  <div className="flex items-center gap-2.5">
+                    <ProjectIcon project={p} className="size-8" />
+                    <div className="min-w-0 flex-1 leading-tight">
+                      <div className="truncate text-[13px] font-semibold tracking-[-0.015em]">{p.name}</div>
+                      <div className={`truncate text-subtle ${p.description ? "text-[11px]" : "font-mono text-[10.5px]"}`}>
+                        {p.description || `${p.resources.length} ${p.resources.length === 1 ? "resource" : "resources"}`}
+                      </div>
                     </div>
+                    <ArrowUpRight className="size-3.5 text-subtle transition-colors group-hover:text-fg" />
                   </div>
-                  <ArrowUpRight className="size-3.5 text-subtle transition-colors group-hover:text-fg" />
-                </div>
-                <div className="mt-3 flex flex-wrap gap-1">
-                  {p.resources.slice(0, 6).map((r) => (
-                    <span key={resourceKey(r)} className="flex items-center gap-1 rounded-md border border-line px-1.5 py-0.5 text-[10.5px] text-muted">
-                      {KIND_LABEL[r.kind]}
-                    </span>
-                  ))}
-                </div>
-                {failing > 0 && (
-                  <div className="mt-2 flex items-center gap-1.5 text-[11.5px] text-danger">
-                    <i className="size-1.5 rounded-full bg-danger" />
-                    {failing} {failing === 1 ? "needs" : "need"} attention
+                  <div className="mt-3 flex flex-wrap gap-1">
+                    {p.resources.slice(0, 6).map((r) => (
+                      <span key={resourceKey(r)} className="flex items-center gap-1 rounded-md border border-line px-1.5 py-0.5 text-[10.5px] text-muted">
+                        {KIND_LABEL[r.kind]}
+                      </span>
+                    ))}
                   </div>
-                )}
-                {changes > 0 && (
-                  <div className="mt-2 flex items-center gap-1.5 text-[11.5px] text-accent">
-                    <i className="size-1.5 rounded-full bg-accent" />
-                    {changes} {changes === 1 ? "change" : "changes"} to deploy
+                  {failing > 0 && (
+                    <div className="mt-2 flex items-center gap-1.5 text-[11.5px] text-danger">
+                      <i className="size-1.5 rounded-full bg-danger" />
+                      {failing} {failing === 1 ? "needs" : "need"} attention
+                    </div>
+                  )}
+                  {changes > 0 && (
+                    <div className="mt-2 flex items-center gap-1.5 text-[11.5px] text-accent">
+                      <i className="size-1.5 rounded-full bg-accent" />
+                      {changes} {changes === 1 ? "change" : "changes"} to deploy
+                    </div>
+                  )}
+                  <div className="mt-3 flex justify-between border-t border-line pt-2 font-mono text-[11px] text-subtle">
+                    <span>{usd(s.usd)} so far</span>
+                    <span>≈ {usd(projectMonth(s.usd, month))}</span>
                   </div>
-                )}
-                <div className="mt-3 flex justify-between border-t border-line pt-2 font-mono text-[11px] text-subtle">
-                  <span>{usd(s.usd)} so far</span>
-                  <span>≈ {usd(projectMonth(s.usd, month))}</span>
-                </div>
-              </Link>
-            );
-          })}
-          {ws.status === "ready" && !ws.projects.length && (
-            <button
-              onClick={openNewProject}
-              className="rounded-xl border border-dashed border-line-2 p-4 text-left text-[12.5px] text-muted transition-colors hover:border-line-3 hover:text-fg"
-            >
-              <b className="block font-medium text-fg">Make your first project</b>
-              Pick a name and an icon, and what it starts with.
-            </button>
-          )}
-        </div>
+                </Link>
+              );
+            })}
+            {ws.status === "ready" && !ws.projects.length && (
+              <button
+                onClick={openNewProject}
+                className="rounded-xl border border-dashed border-line-2 p-4 text-left text-[12.5px] text-muted transition-colors hover:border-line-3 hover:text-fg"
+              >
+                <b className="block font-medium text-fg">Make your first project</b>
+                Pick a name and an icon, and what it starts with.
+              </button>
+            )}
+          </div>
+        </Loaded>
       </section>
 
-      <SecretsToFix />
-      <RecentlyDeleted />
-
-      <section id="usage" className="rise mt-10 scroll-mt-16">
+      <section id="usage" className="mt-10 scroll-mt-16">
         <h2 className="text-[15px] font-semibold tracking-[-0.03em]">{month.label}</h2>
         <div className="mt-3 grid grid-cols-3 gap-2.5">
-          <Stat label="So far" value={usd(total.usd)} note={`day ${month.elapsed} of ${month.days}`} />
-          <Stat label="Projected" value={`≈ ${usd(projectMonth(total.usd, month))}`} note={`by ${month.end}, at this rate`} />
-          <Stat label="Projects" value={String(ws.projects.length)} note={`${placed.size} resources`} />
+          <Stat label="So far" value={ready && usd(total.usd)} note={`day ${month.elapsed} of ${month.days}`} />
+          <Stat label="Projected" value={ready && `≈ ${usd(projectMonth(total.usd, month))}`} note={`by ${month.end}, at this rate`} />
+          <Stat label="Projects" value={ready && String(ws.projects.length)} note={ready ? `${placed.size} resources` : "\u00a0"} />
         </div>
         {ws.projects.length > 0 && (
           <div className="mt-3 rounded-xl border border-line-2 bg-sheet inset-shadow-highlight">
@@ -115,7 +116,7 @@ export function Home() {
       </section>
 
       {loose.length > 0 && (
-        <section className="rise mt-10">
+        <section className="mt-10">
           <h2 className="text-[15px] font-semibold tracking-[-0.03em]">Not in a project</h2>
           <p className="mt-0.5 text-[12.5px] text-muted">Add these to a project from its canvas (Add, then pick one).</p>
           <div className="mt-3 rounded-xl border border-line-2 bg-sheet inset-shadow-highlight">
@@ -132,15 +133,20 @@ export function Home() {
           </div>
         </section>
       )}
+
+      {/* Found after the page shows (nothing when none), so below everything that's already there. */}
+      <SecretsToFix />
+      <RecentlyDeleted />
     </AppShell>
   );
 }
 
-function Stat({ label, value, note }: { label: string; value: string; note: string }) {
+/** `value` false while the workspace loads: a placeholder of the number's height. */
+function Stat({ label, value, note }: { label: string; value: string | false; note: string }) {
   return (
     <div className="rounded-xl border border-line-2 bg-sheet px-3 py-2.5 inset-shadow-highlight">
       <div className="text-[11px] text-subtle">{label}</div>
-      <div className="mt-0.5 font-mono text-[18px] font-semibold tracking-[-0.04em]">{value}</div>
+      <div className="mt-0.5 flex h-[27px] items-center font-mono text-[18px] font-semibold tracking-[-0.04em]">{value === false ? <Skeleton className="h-4 w-16" /> : value}</div>
       <div className="font-mono text-[10.5px] text-subtle">{note}</div>
     </div>
   );
@@ -163,7 +169,7 @@ function SecretsToFix() {
   }, []);
   if (!projects.length) return null;
   return (
-    <section className="rise mt-10">
+    <section className="arrive mt-10">
       <h2 className="text-[15px] font-semibold tracking-[-0.03em]">Secrets to fix</h2>
       <div className="mt-3 divide-y divide-line rounded-xl border border-line-2 bg-panel">
         {projects.map((p) =>
@@ -222,7 +228,7 @@ function RecentlyDeleted() {
     }
   };
   return (
-    <section className="rise mt-10">
+    <section className="arrive mt-10">
       <h2 className="text-[15px] font-semibold tracking-[-0.03em]">Recently deleted</h2>
       <p className="mt-0.5 text-[12.5px] text-muted">Their secrets are kept until the date shown; restoring a project brings its canvas back, and restoring an environment makes its secrets and references work again.</p>
       {error && <p className="mt-2 rounded-lg border border-danger/40 bg-danger/10 px-3 py-2 text-[12px] text-danger">{error}</p>}

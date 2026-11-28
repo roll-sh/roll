@@ -5,6 +5,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { WaitingApprovals } from "./access/waiting";
 import { AgentsControl } from "./agents/agents-control";
 import { AskPanel } from "./ask";
+import { NavProgress } from "./loading";
 import { useMarkState } from "./mark-state";
 import { ReauthDialog } from "./reauth-dialog";
 import { Link } from "@/components/link";
@@ -71,6 +72,7 @@ export function AppShell({ crumb, actions, bleed = false, children }: { crumb: R
               </span>
               <WaitingApprovals />
               <AgentsControl pill={false} />
+              <NavProgress />
             </header>
             <SecondFactorNotice />
 

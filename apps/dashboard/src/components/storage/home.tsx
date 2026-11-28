@@ -109,7 +109,7 @@ export function StorageHome() {
       ) : !info || !buckets ? (
         <Connecting />
       ) : (
-        <>
+        <div className="arrive">
           <TabNav
             tabs={tabs}
             tab={tab}
@@ -170,7 +170,7 @@ export function StorageHome() {
             {tab === "roles" && <RolesTab buckets={buckets} />}
             {tab === "usage" && <UsageTab info={info} />}
           </div>
-        </>
+        </div>
       )}
     </AppShell>
   );

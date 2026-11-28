@@ -145,7 +145,7 @@ export function CodeRepos() {
           </EmptyPanel>
         )
       ) : (
-        <>
+        <div className="arrive">
           <div className={scope ? "mt-4" : "mt-6"}>
             <Stats
               items={[
@@ -161,7 +161,7 @@ export function CodeRepos() {
             />
           </div>
           <RepoList repos={repos} />
-        </>
+        </div>
       )}
     </CodeShell>
   );

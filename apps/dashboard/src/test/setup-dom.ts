@@ -31,6 +31,10 @@ vi.mock("@tanstack/react-router", async (original) => ({
     createElement("a", { href: href ?? `${to && to !== "." ? to : ""}${search ? stringifySearch(search) || "?" : ""}`, ...rest }, children),
   useNavigate: () => vi.fn(),
   useRouter: () => ({ invalidate: vi.fn() }),
+  useRouterState: <T,>(opts?: { select?: (s: { status: "idle"; isLoading: false }) => T }) => {
+    const s = { status: "idle", isLoading: false } as const;
+    return opts?.select ? opts.select(s) : s;
+  },
   useLocation: <T,>(opts?: { select?: (l: { pathname: string; search: object; hash: string }) => T }) => {
     const l = { pathname: "/dashboard", search: {}, hash: "" };
     return opts?.select ? opts.select(l) : l;
