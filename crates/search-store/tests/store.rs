@@ -35,59 +35,78 @@ fn seg_ref(id: SegmentId, bytes: usize) -> SegmentRef {
     SegmentRef { id, bytes: bytes as u64, max_doc: 10, del_count: 0, live: None }
 }
 
+/// Segments go up once, open from the cache, and are fetched once per node; a file named in
+/// upper case is cached under the canonical name.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn segments_upload_open_and_fetch_once() {
-    let objects = test_objects("seg-fetch");
-    let mut cfg = fast_config("n1");
-    cfg.single_put_bytes = 64 << 10;
-    let a = open(&objects, &temp_dir("seg-a"), cfg.clone()).await;
-    let (small, small_data) = make_segment(&a, 10_000).await;
-    // Over two download parts, ending mid-part: fetched as parallel ranged reads.
-    const BIG: usize = (2 * search_store::cache::FETCH_PART as usize) + 12_345;
-    let (big, big_data) = make_segment(&a, BIG).await;
-    assert!(a.is_cached(&small) && a.is_cached(&big));
-    assert_eq!(&*a.open_segment(&small).await.unwrap(), &small_data[..]);
-    let st = a.stats();
-    assert_eq!(st.cache.hits, 1);
-    assert_eq!(st.segments_uploaded, 2);
-    assert_eq!(st.segment_bytes_uploaded, (10_000 + BIG) as u64);
-    assert_eq!(objects.get(&big.key()).await.unwrap().unwrap().len(), BIG);
 
-    // Another node: concurrent opens of a missing segment share one download.
-    let b = open(&objects, &temp_dir("seg-b"), cfg.clone()).await;
-    let mut tasks = Vec::new();
-    for _ in 0..16 {
-        let b = b.clone();
-        tasks.push(tokio::spawn(async move { b.open_segment(&big).await.unwrap() }));
+    {
+        let objects = test_objects("seg-fetch");
+        let mut cfg = fast_config("n1");
+        cfg.single_put_bytes = 64 << 10;
+        let a = open(&objects, &temp_dir("seg-a"), cfg.clone()).await;
+        let (small, small_data) = make_segment(&a, 10_000).await;
+        // Over two download parts, ending mid-part: fetched as parallel ranged reads.
+        const BIG: usize = (2 * search_store::cache::FETCH_PART as usize) + 12_345;
+        let (big, big_data) = make_segment(&a, BIG).await;
+        assert!(a.is_cached(&small) && a.is_cached(&big));
+        assert_eq!(&*a.open_segment(&small).await.unwrap(), &small_data[..]);
+        let st = a.stats();
+        assert_eq!(st.cache.hits, 1);
+        assert_eq!(st.segments_uploaded, 2);
+        assert_eq!(st.segment_bytes_uploaded, (10_000 + BIG) as u64);
+        assert_eq!(objects.get(&big.key()).await.unwrap().unwrap().len(), BIG);
+
+        // Another node: concurrent opens of a missing segment share one download.
+        let b = open(&objects, &temp_dir("seg-b"), cfg.clone()).await;
+        let mut tasks = Vec::new();
+        for _ in 0..16 {
+            let b = b.clone();
+            tasks.push(tokio::spawn(async move { b.open_segment(&big).await.unwrap() }));
+        }
+        let mut maps = Vec::new();
+        for t in tasks {
+            let d = t.await.unwrap();
+            assert_eq!(&*d, &big_data[..]);
+            maps.push(d);
+        }
+        let st = b.stats().cache;
+        assert_eq!(st.misses, 1, "one download for 16 concurrent opens");
+        assert_eq!(st.fetched_bytes, BIG as u64);
+        assert_eq!(st.mapped_files, 1);
+        let bytes = maps[0].to_bytes();
+        drop(maps);
+        assert_eq!(b.stats().cache.mapped_files, 1, "a Bytes view keeps the map alive");
+        assert_eq!(bytes.len(), BIG);
+        drop(bytes);
+        assert_eq!(b.stats().cache.mapped_files, 0);
+        let all = b.open_segments(&[small, big]).await.unwrap();
+        assert_eq!(&*all[0], &small_data[..]);
+        // A missing object is an error, not a hang, and isn't cached.
+        let missing = SegmentId::random();
+        assert!(b.open_segment(&missing).await.is_err());
+        assert!(!b.is_cached(&missing));
+        // Bad file names are refused.
+        let bad = b.segment_path(&missing).with_file_name("nope.seg");
+        std::fs::write(&bad, b"x").unwrap();
+        assert!(b.upload_segment(&bad).await.is_err());
+        drop(all);
+        b.close().await.unwrap();
     }
-    let mut maps = Vec::new();
-    for t in tasks {
-        let d = t.await.unwrap();
-        assert_eq!(&*d, &big_data[..]);
-        maps.push(d);
+
+    {
+        let objects = test_objects("seg-case");
+        let store = open(&objects, &temp_dir("seg-case"), fast_config("n1")).await;
+        let id = SegmentId::random();
+        let data = segment_bytes(&id, 4096);
+        let path = store.segment_path(&id).with_file_name(format!("{}.seg", id.to_hex().to_uppercase()));
+        std::fs::write(&path, &data).unwrap();
+        assert_eq!(store.upload_segment(&path).await.unwrap(), id);
+        assert!(store.is_cached(&id));
+        assert_eq!(&*store.open_segment(&id).await.unwrap(), &data[..]);
+        let st = store.stats().cache;
+        assert_eq!((st.hits, st.misses, st.files, st.used), (1, 0, 1, 4096), "{st:?}");
     }
-    let st = b.stats().cache;
-    assert_eq!(st.misses, 1, "one download for 16 concurrent opens");
-    assert_eq!(st.fetched_bytes, BIG as u64);
-    assert_eq!(st.mapped_files, 1);
-    let bytes = maps[0].to_bytes();
-    drop(maps);
-    assert_eq!(b.stats().cache.mapped_files, 1, "a Bytes view keeps the map alive");
-    assert_eq!(bytes.len(), BIG);
-    drop(bytes);
-    assert_eq!(b.stats().cache.mapped_files, 0);
-    let all = b.open_segments(&[small, big]).await.unwrap();
-    assert_eq!(&*all[0], &small_data[..]);
-    // A missing object is an error, not a hang, and isn't cached.
-    let missing = SegmentId::random();
-    assert!(b.open_segment(&missing).await.is_err());
-    assert!(!b.is_cached(&missing));
-    // Bad file names are refused.
-    let bad = b.segment_path(&missing).with_file_name("nope.seg");
-    std::fs::write(&bad, b"x").unwrap();
-    assert!(b.upload_segment(&bad).await.is_err());
-    drop(all);
-    b.close().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -288,40 +307,88 @@ async fn cache_evicts_lru_under_budget_but_never_mapped_files() {
     assert_eq!(&*reader.open_segment(&segs[5].0).await.unwrap(), &segs[5].1[..]);
 }
 
+/// Cluster states and shard manifests are written as numbered generations: retained, read back
+/// newest first, never silently an older one, and fenced by epoch (of any size).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn manifests_are_generational_with_retention_and_fallback() {
-    let objects = test_objects("manifests");
-    let mut cfg = fast_config("n1");
-    cfg.manifest_retain = 3;
-    let store = open(&objects, &temp_dir("manifests"), cfg).await;
-    let s = shard("idxM", 1);
-    assert!(store.read_manifest("c1", &s).await.unwrap().is_none());
-    for i in 0..10i64 {
-        let m = ShardManifest { max_seq_no: i, local_checkpoint: i, mapping_version: i as u64, ..Default::default() };
-        let w = store.write_manifest("c1", &s, &m).await.unwrap();
-        assert_eq!(w.generation, i as u64 + 1);
+async fn cluster_states_and_manifests_are_generational() {
+
+    {
+        let objects = test_objects("manifests");
+        let mut cfg = fast_config("n1");
+        cfg.manifest_retain = 3;
+        let store = open(&objects, &temp_dir("manifests"), cfg).await;
+        let s = shard("idxM", 1);
+        assert!(store.read_manifest("c1", &s).await.unwrap().is_none());
+        for i in 0..10i64 {
+            let m = ShardManifest { max_seq_no: i, local_checkpoint: i, mapping_version: i as u64, ..Default::default() };
+            let w = store.write_manifest("c1", &s, &m).await.unwrap();
+            assert_eq!(w.generation, i as u64 + 1);
+        }
+        let latest = store.read_manifest("c1", &s).await.unwrap().unwrap();
+        assert_eq!((latest.generation, latest.max_seq_no), (10, 9));
+        let all = store.read_manifests("c1", &s).await.unwrap();
+        assert_eq!(all.iter().map(|m| m.generation).collect::<Vec<_>>(), vec![8, 9, 10]);
+        assert_eq!(store.stats().manifests_deleted, 7);
+        // A damaged newer generation is an error, never silently the previous one.
+        let damaged = search_store::keys::manifest_key("c1", &s, search_store::Version::new(0, 11, 0));
+        objects.put(&damaged, Bytes::from_static(b"{garbage")).await.unwrap();
+        for err in [store.read_manifest("c1", &s).await.unwrap_err(), store.recover_shard("c1", &s).await.unwrap_err(), store.read_manifests("c1", &s).await.unwrap_err()] {
+            assert!(format!("{err:#}").contains(&format!("shard manifest {damaged} is damaged")), "{err:#}");
+        }
+        assert!(store.write_manifest("c1", &s, &ShardManifest { max_seq_no: 1, local_checkpoint: 2, ..Default::default() }).await.is_err());
+        // A fresh store (another node) continues the numbering.
+        let other = open(&objects, &temp_dir("manifests-b"), fast_config("n2")).await;
+        let w = other.write_manifest("c1", &s, &ShardManifest::default()).await.unwrap();
+        assert_eq!(w.generation, 12);
+        assert_eq!(other.list_shards("c1").await.unwrap(), vec![s.clone()]);
+        objects.delete(&damaged).await.unwrap();
+        assert_eq!(store.read_manifest("c1", &s).await.unwrap().unwrap().generation, 12);
+        other.delete_shard("c1", &s).await.unwrap();
+        assert!(other.read_manifest("c1", &s).await.unwrap().is_none());
     }
-    let latest = store.read_manifest("c1", &s).await.unwrap().unwrap();
-    assert_eq!((latest.generation, latest.max_seq_no), (10, 9));
-    let all = store.read_manifests("c1", &s).await.unwrap();
-    assert_eq!(all.iter().map(|m| m.generation).collect::<Vec<_>>(), vec![8, 9, 10]);
-    assert_eq!(store.stats().manifests_deleted, 7);
-    // A damaged newer generation is an error, never silently the previous one.
-    let damaged = search_store::keys::manifest_key("c1", &s, search_store::Version::new(0, 11, 0));
-    objects.put(&damaged, Bytes::from_static(b"{garbage")).await.unwrap();
-    for err in [store.read_manifest("c1", &s).await.unwrap_err(), store.recover_shard("c1", &s).await.unwrap_err(), store.read_manifests("c1", &s).await.unwrap_err()] {
-        assert!(format!("{err:#}").contains(&format!("shard manifest {damaged} is damaged")), "{err:#}");
+
+    {
+        let objects = test_objects("state");
+        let mut cfg = fast_config("n1");
+        cfg.state_retain = 2;
+        let store = open(&objects, &temp_dir("state"), cfg).await;
+        assert!(store.read_cluster("c1").await.unwrap().is_none());
+        assert!(!store.cluster_exists("c1").await.unwrap());
+        for i in 0..5 {
+            let g = store.write_cluster("c1", &ClusterState::from_value(&serde_json::json!({"v": i})).unwrap()).await.unwrap();
+            assert_eq!(g, i + 1);
+        }
+        let s = store.read_cluster("c1").await.unwrap().unwrap();
+        assert_eq!(s.generation, 5);
+        assert_eq!(s.parse::<serde_json::Value>().unwrap()["v"], 4);
+        assert!(s.written_ms > 0);
+        assert_eq!(store.read_cluster_history("c1").await.unwrap().len(), 2);
+        assert!(store.write_cluster("c1", &ClusterState::new("nope")).await.is_err());
+        assert!(store.write_cluster("bad/name", &ClusterState::new("{}")).await.is_err());
+        store.delete_cluster("c1").await.unwrap();
+        assert!(store.read_cluster("c1").await.unwrap().is_none());
+        assert!(objects.list("search/c/c1/").await.unwrap().is_empty());
     }
-    assert!(store.write_manifest("c1", &s, &ShardManifest { max_seq_no: 1, local_checkpoint: 2, ..Default::default() }).await.is_err());
-    // A fresh store (another node) continues the numbering.
-    let other = open(&objects, &temp_dir("manifests-b"), fast_config("n2")).await;
-    let w = other.write_manifest("c1", &s, &ShardManifest::default()).await.unwrap();
-    assert_eq!(w.generation, 12);
-    assert_eq!(other.list_shards("c1").await.unwrap(), vec![s.clone()]);
-    objects.delete(&damaged).await.unwrap();
-    assert_eq!(store.read_manifest("c1", &s).await.unwrap().unwrap().generation, 12);
-    other.delete_shard("c1", &s).await.unwrap();
-    assert!(other.read_manifest("c1", &s).await.unwrap().is_none());
+
+    {
+        let objects = test_objects("big-epoch");
+        let store = open(&objects, &temp_dir("big-epoch"), fast_config("n1")).await;
+        let s = shard("idxBIG", 0);
+        for epoch in [7, 10_000_000_000_000_000, u64::MAX] {
+            store.set_epoch("big", epoch);
+            let g = store.write_cluster("big", &ClusterState::new(format!("{{\"e\":\"{epoch}\"}}"))).await.unwrap();
+            let st = store.read_cluster("big").await.unwrap().unwrap();
+            assert_eq!((st.epoch, st.generation, st.json.clone()), (epoch, g, Bytes::from(format!("{{\"e\":\"{epoch}\"}}"))));
+            let m = store.write_manifest("big", &s, &ShardManifest::default()).await.unwrap();
+            let back = store.read_manifest("big", &s).await.unwrap().unwrap();
+            assert_eq!((back.epoch, back.generation), (epoch, m.generation));
+        }
+        assert!(store.cluster_exists("big").await.unwrap());
+        assert_eq!(store.read_cluster_history("big").await.unwrap().len(), 3);
+        // An older epoch is fenced by the largest.
+        store.set_epoch("big", 10_000_000_000_000_000);
+        assert!(store.write_cluster("big", &ClusterState::new("{}")).await.unwrap_err().downcast_ref::<search_store::Fenced>().is_some());
+    }
 }
 
 /// Makes an object unreadable (local object storage): an I/O error, not a missing object.
@@ -496,70 +563,22 @@ async fn a_flush_after_delete_does_not_bring_the_shard_back() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn epochs_of_any_size_are_readable() {
-    let objects = test_objects("big-epoch");
-    let store = open(&objects, &temp_dir("big-epoch"), fast_config("n1")).await;
-    let s = shard("idxBIG", 0);
-    for epoch in [7, 10_000_000_000_000_000, u64::MAX] {
-        store.set_epoch("big", epoch);
-        let g = store.write_cluster("big", &ClusterState::new(format!("{{\"e\":\"{epoch}\"}}"))).await.unwrap();
-        let st = store.read_cluster("big").await.unwrap().unwrap();
-        assert_eq!((st.epoch, st.generation, st.json.clone()), (epoch, g, Bytes::from(format!("{{\"e\":\"{epoch}\"}}"))));
-        let m = store.write_manifest("big", &s, &ShardManifest::default()).await.unwrap();
-        let back = store.read_manifest("big", &s).await.unwrap().unwrap();
-        assert_eq!((back.epoch, back.generation), (epoch, m.generation));
-    }
-    assert!(store.cluster_exists("big").await.unwrap());
-    assert_eq!(store.read_cluster_history("big").await.unwrap().len(), 3);
-    // An older epoch is fenced by the largest.
-    store.set_epoch("big", 10_000_000_000_000_000);
-    assert!(store.write_cluster("big", &ClusterState::new("{}")).await.unwrap_err().downcast_ref::<search_store::Fenced>().is_some());
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn uppercase_segment_file_names_are_cached_under_the_canonical_name() {
-    let objects = test_objects("seg-case");
-    let store = open(&objects, &temp_dir("seg-case"), fast_config("n1")).await;
-    let id = SegmentId::random();
-    let data = segment_bytes(&id, 4096);
-    let path = store.segment_path(&id).with_file_name(format!("{}.seg", id.to_hex().to_uppercase()));
-    std::fs::write(&path, &data).unwrap();
-    assert_eq!(store.upload_segment(&path).await.unwrap(), id);
-    assert!(store.is_cached(&id));
-    assert_eq!(&*store.open_segment(&id).await.unwrap(), &data[..]);
-    let st = store.stats().cache;
-    assert_eq!((st.hits, st.misses, st.files, st.used), (1, 0, 1, 4096), "{st:?}");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn point_in_time_window_retains_young_manifests() {
-    let objects = test_objects("manifest-window");
-    let mut cfg = fast_config("n1");
-    cfg.manifest_retain = 1;
-    cfg.manifest_retain_ms = 60_000;
-    let store = open(&objects, &temp_dir("manifest-window"), cfg).await;
-    let s = shard("idxW", 0);
-    for _ in 0..5 {
-        store.write_manifest("c1", &s, &ShardManifest::default()).await.unwrap();
-    }
-    assert_eq!(store.read_manifests("c1", &s).await.unwrap().len(), 5);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn window_retention_keeps_the_commit_point_current_at_the_window_start() {
     let objects = test_objects("window-edge");
     let mut cfg = fast_config("n1");
     cfg.manifest_retain = 1;
     cfg.state_retain = 1;
     // Wide enough that the branch below still falls inside it on a slow (loaded, S3) run.
-    cfg.manifest_retain_ms = 3000;
+    cfg.manifest_retain_ms = 1500;
     let store = open(&objects, &temp_dir("window-edge"), cfg).await;
     let s = shard("idxE", 0);
     for g in 1..=3 {
         store.write_manifest("c1", &s, &ShardManifest { mapping_version: g, ..Default::default() }).await.unwrap();
         store.write_cluster("c1", &ClusterState::new(format!("{{\"g\":{g}}}"))).await.unwrap();
     }
-    tokio::time::sleep(Duration::from_millis(3500)).await;
+    // Young generations are all kept, whatever `manifest_retain` says.
+    assert_eq!(store.read_manifests("c1", &s).await.unwrap().len(), 3);
+    tokio::time::sleep(Duration::from_millis(1600)).await;
     let m4 = store.write_manifest("c1", &s, &ShardManifest { mapping_version: 4, ..Default::default() }).await.unwrap();
     store.write_cluster("c1", &ClusterState::new("{\"g\":4}")).await.unwrap();
     // Generations 1 and 2 were superseded before the window started; 3 was current at its start.
@@ -572,30 +591,6 @@ async fn window_retention_keeps_the_commit_point_current_at_the_window_start() {
     let child = store.read_manifest("c1-pit", &s).await.unwrap().unwrap();
     assert_eq!(child.mapping_version, 3);
     assert_eq!(&store.read_cluster("c1-pit").await.unwrap().unwrap().json[..], b"{\"g\":3}");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn cluster_state_generations() {
-    let objects = test_objects("state");
-    let mut cfg = fast_config("n1");
-    cfg.state_retain = 2;
-    let store = open(&objects, &temp_dir("state"), cfg).await;
-    assert!(store.read_cluster("c1").await.unwrap().is_none());
-    assert!(!store.cluster_exists("c1").await.unwrap());
-    for i in 0..5 {
-        let g = store.write_cluster("c1", &ClusterState::from_value(&serde_json::json!({"v": i})).unwrap()).await.unwrap();
-        assert_eq!(g, i + 1);
-    }
-    let s = store.read_cluster("c1").await.unwrap().unwrap();
-    assert_eq!(s.generation, 5);
-    assert_eq!(s.parse::<serde_json::Value>().unwrap()["v"], 4);
-    assert!(s.written_ms > 0);
-    assert_eq!(store.read_cluster_history("c1").await.unwrap().len(), 2);
-    assert!(store.write_cluster("c1", &ClusterState::new("nope")).await.is_err());
-    assert!(store.write_cluster("bad/name", &ClusterState::new("{}")).await.is_err());
-    store.delete_cluster("c1").await.unwrap();
-    assert!(store.read_cluster("c1").await.unwrap().is_none());
-    assert!(objects.list("search/c/c1/").await.unwrap().is_empty());
 }
 
 /// A cluster with one shard: segments `segs`, live docs on the first one.

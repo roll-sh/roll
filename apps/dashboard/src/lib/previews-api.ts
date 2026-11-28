@@ -706,7 +706,10 @@ export const previewsApi = {
   requests: (id: string) => call<{ requests: RequestLine[] }>("GET", `${one(id)}/requests`),
   /** What its running services use right now (cores of CPU, resident memory, the memory each runs with). */
   metrics: (id: string) => call<{ services: ServiceMetrics[] }>("GET", `${one(id)}/metrics`),
-  events: (after = 0, limit = 100) => call<{ events: PreviewEvent[]; next: number }>("GET", `/v1/previews/events?after=${after}&limit=${limit}`),
+  /** What happened to previews after `after`; with `wait` (1–25 s), the answer waits that long for one when there's none yet. */
+  events: (after = 0, limit = 100, wait?: number) => call<{ events: PreviewEvent[]; next: number }>("GET", `/v1/previews/events${query({ after, limit, wait })}`),
+  /** Where to follow the events from: the newest seq, so only what happens next is read. */
+  latestEvent: () => call<{ events: PreviewEvent[]; next: number }>("GET", "/v1/previews/events?latest=1"),
   /** Its services' errors in the last `minutes` (5–1440, 60 by default, rounded up to 15-minute steps), grouped, newest first; masked as its logs are. */
   errors: (id: string, minutes?: number) => call<{ minutes: number; groups: ErrorGroup[] }>("GET", `${one(id)}/errors${query({ minutes })}`),
   /** How many errors its services wrote in that span (a list's rows: nothing to mask, so no values are read). */

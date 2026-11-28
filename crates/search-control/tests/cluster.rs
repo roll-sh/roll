@@ -431,7 +431,7 @@ async fn eventually<T: std::fmt::Debug>(secs: u64, mut check: impl AsyncFnMut() 
 /// runs on the next owner with no request waking the cluster, and no scheduled run runs twice.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn due_jobs_run_once_on_the_next_owner() {
-    let (a, b) = two_nodes("fleet-jobs", |_| {}).await;
+    let (a, b) = two_nodes("fleet-jobs", |c| c.job_wake_interval = Some(Duration::from_millis(200))).await;
     let http = reqwest::Client::new();
     let (s, c) = call(&http, reqwest::Method::POST, format!("{}/v1/search/clusters", a.api), None, Some(json!({"name": "jobs"}))).await;
     assert_eq!(s, 200, "{c}");

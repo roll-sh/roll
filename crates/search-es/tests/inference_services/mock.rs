@@ -180,10 +180,17 @@ pub async fn call(c: &Cluster, method: &str, uri: &str, body: Option<&str>) -> (
     (resp.status, String::from_utf8_lossy(&resp.body).into_owned())
 }
 
-/// A service account JSON (a JSON string, ready for a request body) with a fresh key.
+/// The primes of the test service account's 2048-bit key (generating one takes seconds in a
+/// debug build). A throwaway key made for these tests; it signs nothing anywhere else.
+const KEY_P: &str = "c2a7125bb189aa4f9d8c1be331c21ce60a107d577c40e9398277584d2783e8b93cf1cffb6d6258f7f9490e2bf920fe3d81de2e25dddba0da72c521629c5dac6740a63e2424b78b4ede2cd9e115dc63dba3111b17e50bfd70131953cc9cc0493d4d51c503790a28fc5037cd3bdf979953d50f8c7f840a7e2f0881dec2ef8d5727";
+const KEY_Q: &str = "c272013a3198ac4fa2c2a633e88a769cc40dbd8aa26681d7ab961c98bc289170dad21d5d466a33749de9406b6f0115c8b62e7ca2149fb3909986e61f0d6af410fd496d35957e26d761bf26f8a6bbe8c356a16e99661675b1416030cb245c104bc4e7523aa7042e1d2a828bfe0c25e0fbce2894a3d9f52384a9a3d840cee3d917";
+
+/// A service account JSON (a JSON string, ready for a request body) with the test key.
 pub fn service_account() -> String {
     use rsa::pkcs1::EncodeRsaPrivateKey;
-    let key = rsa::RsaPrivateKey::new(&mut rand::thread_rng(), 2048).unwrap().to_pkcs1_pem(rsa::pkcs8::LineEnding::LF).unwrap().to_string();
+    let prime = |h: &str| rsa::BigUint::parse_bytes(h.as_bytes(), 16).unwrap();
+    let key = rsa::RsaPrivateKey::from_p_q(prime(KEY_P), prime(KEY_Q), rsa::BigUint::from(65_537u32)).unwrap();
+    let key = key.to_pkcs1_pem(rsa::pkcs8::LineEnding::LF).unwrap().to_string();
     let sa = format!(
         r#"{{"type":"service_account","project_id":"rinf-proj","private_key_id":"abc123","private_key":{},"client_email":"rinf@rinf-proj.iam.gserviceaccount.com","token_uri":"https://oauth2.googleapis.com/token"}}"#,
         Value::from(key.as_str()).to_json()
@@ -259,6 +266,9 @@ pub struct Replay {
 
 /// Replays a recorded scenario.
 pub async fn replay(fixture: &str, signed: bool) -> Replay {
+    // The recorded endpoints keep their captured limits (as low as 3 a minute); replayed at
+    // full speed, the requests are the same and nothing waits. `rate`'s own test checks the waits.
+    search_es::xpack::inference::rate::speed_up_for_tests(10_000);
     let steps = parse(std::fs::read(format!("{}/tests/fixtures/inference/{fixture}.json", env!("CARGO_MANIFEST_DIR"))).unwrap().as_slice()).unwrap().unwrap();
     let m = mock().await;
     let c = cluster(&m).await;
