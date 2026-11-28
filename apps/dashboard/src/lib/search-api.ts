@@ -372,6 +372,8 @@ export interface SavedSpec {
   time_field: string | null;
   mode: "kql" | "esql" | "dql" | "ppl";
   query: string;
+  /** Filter pills (`DiscoverFilter`); at most 50. */
+  filters: { field: string; value: string | number | boolean; negate: boolean }[];
   range: { last: string | null } | { gte: number; lt: number };
   columns: string[];
   sort: { column: string; field: string; order: "asc" | "desc" } | null;
@@ -448,8 +450,9 @@ export const searchApi = {
   /** One URL through the web crawler's path, writing nothing (with a connector's configuration, or none). */
   crawlTest: (id: string, url: string, connector?: string) => call<CrawlTest>("POST", `${cl(id)}/crawl-test`, { url, connector }),
   siteVerifications: (id: string) => call<{ verifications: SiteVerification[] }>("GET", `${cl(id)}/site-verifications`),
-  /** Discover's saved searches (docs/search/README.md, "Saved searches"): the cluster's, by name. */
+  /** Discover's saved searches (docs/search/README.md, the roll API's `saved-searches` rows): the cluster's, by name. */
   savedSearches: (id: string) => call<{ saved_searches: SavedSearch[] }>("GET", `${cl(id)}/saved-searches`),
+  savedSearch: (id: string, saved: string) => call<SavedSearch>("GET", `${cl(id)}/saved-searches/${encodeURIComponent(saved)}`),
   saveSearch: (id: string, name: string, search: SavedSpec) => call<SavedSearch>("POST", `${cl(id)}/saved-searches`, { name, search }),
   updateSavedSearch: (id: string, saved: string, change: { name?: string; search?: SavedSpec }) =>
     call<SavedSearch>("PUT", `${cl(id)}/saved-searches/${encodeURIComponent(saved)}`, change),

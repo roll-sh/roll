@@ -7,21 +7,23 @@
 //! parent's (a branch is a copy of the data, not of the people's views of it).
 //!
 //! The spec is the dashboard's view (`apps/dashboard/src/lib/search-discover.ts`): `view`,
-//! `time_field`, `mode`, `query`, `range`, `columns`, `sort`, checked here for shape and size only
-//! (the cluster decides whether the view and query mean anything when the search is opened).
+//! `time_field`, `mode`, `query`, `filters`, `range`, `columns`, `sort`, checked here for shape and
+//! size only (the cluster decides whether the view and query mean anything when it's opened).
 
 use crate::control::{Control, ControlError, Result};
 use crate::store::{SavedRefused, SavedRow, SearchCluster};
 use serde_json::{Map, Value, json};
 
 /// Saved searches a cluster keeps at most.
-pub const MAX_SAVED: i64 = 500;
+pub const MAX_SAVED: i64 = 200;
 const MAX_NAME: usize = 128;
 const MAX_VIEW: usize = 1024;
 const MAX_FIELD: usize = 512;
 const MAX_QUERY: usize = 16 << 10;
 const MAX_COLUMNS: usize = 100;
-const KEYS: &[&str] = &["view", "time_field", "mode", "query", "range", "columns", "sort"];
+const MAX_FILTERS: usize = 50;
+const MAX_VALUE: usize = 4 << 10;
+const KEYS: &[&str] = &["view", "time_field", "mode", "query", "filters", "range", "columns", "sort"];
 
 fn bad(why: impl Into<String>) -> ControlError {
     ControlError::Invalid(why.into())
@@ -39,7 +41,7 @@ pub fn check_name(name: &str) -> Result<String> {
 /// A saved search's spec, checked: what the dashboard's view holds, no more, each part within
 /// its size, the mode one of the cluster's flavor's languages. Unknown keys are refused.
 pub fn check_spec(spec: &Value, flavor: &str) -> Result<Value> {
-    let Value::Object(m) = spec else { return Err(bad("[search] is an object: view, time_field, mode, query, range, columns, sort")) };
+    let Value::Object(m) = spec else { return Err(bad(format!("[search] is an object: {}", KEYS.join(", ")))) };
     if let Some(k) = m.keys().find(|k| !KEYS.contains(&k.as_str())) {
         return Err(bad(format!("[search] has no field [{k}] (it takes {})", KEYS.join(", "))));
     }
@@ -60,6 +62,27 @@ pub fn check_spec(spec: &Value, flavor: &str) -> Result<Value> {
     }
     out.insert("mode".into(), mode.into());
     out.insert("query".into(), text("query", MAX_QUERY, false)?.unwrap_or_default().into());
+    // Filter pills (Kibana's phrase filters): a field, a value, and whether it's left out.
+    let filters = match m.get("filters") {
+        None => Vec::new(),
+        Some(Value::Array(a)) if a.len() <= MAX_FILTERS => a
+            .iter()
+            .map(|f| match f {
+                Value::Object(f) if f.len() == 3 => {
+                    let field = f.get("field").and_then(Value::as_str).filter(|v| !v.is_empty() && v.len() <= MAX_FIELD);
+                    let value = f.get("value").filter(|v| v.is_number() || v.is_boolean() || v.as_str().is_some_and(|s| s.len() <= MAX_VALUE));
+                    match (field, value, f.get("negate").and_then(Value::as_bool)) {
+                        (Some(field), Some(value), Some(negate)) => Ok(json!({ "field": field, "value": value, "negate": negate })),
+                        _ => Err(()),
+                    }
+                }
+                _ => Err(()),
+            })
+            .collect::<std::result::Result<_, ()>>()
+            .map_err(|()| bad(format!("[search.filters] are {{field, value, negate}}: a field name, a string of at most {MAX_VALUE} bytes, a number or a boolean, and true or false")))?,
+        _ => return Err(bad(format!("[search.filters] is at most {MAX_FILTERS} filters"))),
+    };
+    out.insert("filters".into(), Value::Array(filters));
     let range = match m.get("range") {
         None => json!({ "last": null }),
         Some(Value::Object(r)) if r.len() == 1 && r.contains_key("last") => match &r["last"] {
@@ -159,10 +182,10 @@ mod tests {
 
     #[test]
     fn specs_are_the_dashboards_view_within_their_sizes() {
-        let spec = json!({"view": "logs-*", "time_field": "@timestamp", "mode": "kql", "query": "status >= 500", "range": {"last": "24h"}, "columns": ["host"], "sort": {"column": "host", "field": "host", "order": "asc"}});
+        let spec = json!({"view": "logs-*", "time_field": "@timestamp", "mode": "kql", "query": "status >= 500", "filters": [{"field": "host", "value": "web-1", "negate": true}], "range": {"last": "24h"}, "columns": ["host"], "sort": {"column": "host", "field": "host", "order": "asc"}});
         assert_eq!(check_spec(&spec, "elasticsearch").unwrap(), spec);
         let minimal = check_spec(&json!({"view": "logs", "mode": "ppl"}), "opensearch").unwrap();
-        assert_eq!(minimal, json!({"view": "logs", "time_field": null, "mode": "ppl", "query": "", "range": {"last": null}, "columns": [], "sort": null}));
+        assert_eq!(minimal, json!({"view": "logs", "time_field": null, "mode": "ppl", "query": "", "filters": [], "range": {"last": null}, "columns": [], "sort": null}));
         for (bad, why) in [
             (json!({"view": "x", "mode": "ppl"}), "kql, esql"),
             (json!({"view": "x", "mode": "kql", "extra": 1}), "no field [extra]"),
@@ -170,6 +193,7 @@ mod tests {
             (json!({"view": "x", "mode": "kql", "range": {"gte": 5, "lt": 1}}), "gte below lt"),
             (json!({"view": "x", "mode": "kql", "range": {"last": "-1h"}}), "a number and a unit"),
             (json!({"view": "x", "mode": "kql", "sort": {"column": "a", "field": "a", "order": "up"}}), "asc|desc"),
+            (json!({"view": "x", "mode": "kql", "filters": [{"field": "a", "value": {}, "negate": false}]}), "{field, value, negate}"),
         ] {
             assert!(check_spec(&bad, "elasticsearch").unwrap_err().to_string().contains(why), "{bad}");
         }

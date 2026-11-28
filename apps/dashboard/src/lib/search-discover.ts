@@ -25,6 +25,18 @@ export const MODES: Record<"elasticsearch" | "opensearch", { value: DiscoverMode
 /** Whether a mode's query is the search's filter (KQL, DQL), or a whole piped query (ES|QL, PPL). */
 export const piped = (mode: DiscoverMode) => mode === "esql" || mode === "ppl";
 
+/** A filter pill (Kibana's phrase filter): documents whose `field` is `value`, or with `negate`
+ * the ones whose field isn't. Filters apply to KQL and DQL views; surrounding documents keep them
+ * and drop the query, as Kibana's do. */
+export interface DiscoverFilter {
+  field: string;
+  value: string | number | boolean;
+  negate: boolean;
+}
+
+/** The filters a view keeps at most (the control plane's cap on a saved search's). */
+export const MAX_FILTERS = 50;
+
 /** A Discover view, as the URL holds it. */
 export interface DiscoverState {
   view: string;
@@ -32,6 +44,8 @@ export interface DiscoverState {
   timeField: string | null | undefined;
   mode: DiscoverMode;
   query: string;
+  /** Only KQL and DQL views apply them (a piped query has its own `WHERE`). */
+  filters: DiscoverFilter[];
   range: TimeRange;
   columns: string[];
   sort: TableSort | null;
@@ -45,7 +59,7 @@ export const SAMPLE_SIZE = 500;
 export const PIPED_LIMIT = 100;
 
 export function initialState(flavor: "elasticsearch" | "opensearch"): DiscoverState {
-  return { view: "", timeField: undefined, mode: MODES[flavor][0].value, query: "", range: { last: "24h" }, columns: [], sort: null };
+  return { view: "", timeField: undefined, mode: MODES[flavor][0].value, query: "", filters: [], range: { last: "24h" }, columns: [], sort: null };
 }
 
 /** The filter KQL and DQL texts become: roll serves the `kql` query on both flavors (DQL is KQL's
@@ -54,15 +68,34 @@ function textQuery(query: string): Record<string, unknown> {
   return query.trim() ? { kql: { query: query.trim() } } : { match_all: {} };
 }
 
-/** The query of a KQL or DQL view: its text and the time range, both filters (no scoring). */
-export function viewQuery(s: Pick<DiscoverState, "query" | "range" | "timeField">): Record<string, unknown> {
+/** A filter pill's clause: `match_phrase`, as Kibana's phrase filters are. */
+const phrase = (f: DiscoverFilter) => ({ match_phrase: { [f.field]: f.value } });
+
+/** The filter pills as `bool` clauses: kept ones in `filter`, negated ones in `must_not`. */
+function pills(filters: DiscoverFilter[], filter: Record<string, unknown>[]): Record<string, unknown> {
+  const out = filters.filter((f) => !f.negate).map(phrase);
+  const not = filters.filter((f) => f.negate).map(phrase);
+  return { bool: { filter: [...filter, ...out], ...(not.length ? { must_not: not } : {}) } };
+}
+
+/** The query of a KQL or DQL view: its text, its filter pills and the time range, all filters
+ * (no scoring). */
+export function viewQuery(s: Pick<DiscoverState, "query" | "filters" | "range" | "timeField">): Record<string, unknown> {
   const range = s.timeField ? timeFilter(s.timeField, s.range) : null;
-  return { bool: { filter: [textQuery(s.query), ...(range ? [range] : [])] } };
+  return pills(s.filters, [textQuery(s.query), ...(range ? [range] : [])]);
+}
+
+/** The view's filters with one more: a pill on the same field and value is replaced (its
+ * `negate` flips, as Kibana's + and − do), past [`MAX_FILTERS`] none is added. */
+export function addFilter(filters: DiscoverFilter[], f: DiscoverFilter): DiscoverFilter[] {
+  const same = (x: DiscoverFilter) => x.field === f.field && x.value === f.value;
+  if (filters.some(same)) return filters.map((x) => (same(x) ? f : x));
+  return filters.length >= MAX_FILTERS ? filters : [...filters, f];
 }
 
 /** `POST /<view>/_search` of a KQL or DQL view: a page newest first (or by a column), and on the
- * first page the documents over time (`auto_date_histogram`). */
-export function searchBody(s: DiscoverState, from = 0, size = DISCOVER_PAGE): Record<string, unknown> {
+ * first page the documents over time (`auto_date_histogram`, its buckets in `zone`). */
+export function searchBody(s: DiscoverState, from = 0, size = DISCOVER_PAGE, zone = "UTC"): Record<string, unknown> {
   const sort = sortClause(s.sort) ?? (s.timeField ? [{ [s.timeField]: { order: "desc", unmapped_type: "date" } }] : undefined);
   return {
     query: viewQuery(s),
@@ -71,13 +104,13 @@ export function searchBody(s: DiscoverState, from = 0, size = DISCOVER_PAGE): Re
     track_total_hits: true,
     ...(sort ? { sort } : {}),
     ...(s.timeField ? { fields: timeValue(s.timeField) } : {}),
-    ...(s.timeField && from === 0 ? { aggs: { over_time: { auto_date_histogram: { field: s.timeField, buckets: 60 } } } } : {}),
+    ...(s.timeField && from === 0 ? { aggs: { over_time: { auto_date_histogram: { field: s.timeField, buckets: 60, time_zone: zone } } } } : {}),
   };
 }
 
 /** The top values of one field over a sample of the view's matching documents (about
  * [`SAMPLE_SIZE`] a shard: `sampler` keeps each shard's best, which are all equal under filters). */
-export function sampleBody(s: Pick<DiscoverState, "query" | "range" | "timeField">, field: string, size = 5): Record<string, unknown> {
+export function sampleBody(s: Pick<DiscoverState, "query" | "filters" | "range" | "timeField">, field: string, size = 5): Record<string, unknown> {
   return { size: 0, query: viewQuery(s), aggs: { sample: { sampler: { shard_size: SAMPLE_SIZE }, aggs: { top: { terms: { field, size } } } } } };
 }
 
@@ -144,12 +177,30 @@ export function pipedTable(resp: unknown): { columns: string[]; rows: unknown[][
   return { columns: cols.map((c) => c.name), rows: r.values ?? r.datarows ?? [] };
 }
 
-/** The request a view sends, as the console takes it: method, path and body. */
-export function viewRequest(s: DiscoverState, now: number, from = 0): { method: "POST"; path: string; body: unknown } {
+/** A request Discover sends, as the console takes it. */
+export interface EsRequest {
+  method: "POST";
+  path: string;
+  body: Record<string, unknown>;
+}
+
+/** A request as the console takes it: `METHOD path`, then its body. */
+export const requestText = (r: EsRequest) => `${r.method} ${r.path}\n${JSON.stringify(r.body, null, 2)}`;
+
+/** `POST /<view>/_search` with `body`. */
+export const viewSearch = (view: string, body: Record<string, unknown>): EsRequest => ({ method: "POST", path: `/${encodeURIComponent(view)}/_search`, body });
+
+/** The request a view sends. */
+export function viewRequest(s: DiscoverState, now: number, from = 0, zone = "UTC"): EsRequest {
   if (s.mode === "esql") return { method: "POST", path: "/_query", body: { query: esqlText(s, now) } };
   if (s.mode === "ppl") return { method: "POST", path: "/_plugins/_ppl", body: { query: pplText(s, now) } };
-  return { method: "POST", path: `/${encodeURIComponent(s.view)}/_search`, body: searchBody(s, from) };
+  return viewSearch(s.view, searchBody(s, from, DISCOVER_PAGE, zone));
 }
+
+/** What the sidebar's sample and a field's chart count over: in KQL and DQL the view's query and
+ * filters, in ES|QL and PPL the range alone (their query isn't a filter). */
+export const countedOver = (s: DiscoverState): Pick<DiscoverState, "query" | "filters" | "range" | "timeField"> =>
+  piped(s.mode) ? { query: "", filters: [], range: s.range, timeField: s.timeField } : s;
 
 /** A KQL (and DQL) field name, its special characters escaped. */
 function kqlField(name: string): string {
@@ -162,9 +213,10 @@ function kqlValue(v: string | number | boolean): string {
 }
 
 /**
- * The field sidebar's + and −: the query with documents whose `field` is `value` kept (or left
- * out, `exclude`). KQL and DQL get `and field: "value"` (`not` before it to leave out), the
- * query so far in parentheses; ES|QL and PPL get a `WHERE`/`where` line.
+ * The field sidebar's + and − on a piped query (KQL and DQL get a filter pill, [`addFilter`]):
+ * the query with documents whose `field` is `value` kept (or left out, `exclude`), as a
+ * `WHERE`/`where` line. Given KQL or DQL, `and field: "value"` (`not` before it to leave out),
+ * the query so far in parentheses.
  */
 export function withFilter(mode: DiscoverMode, query: string, field: string, value: string | number | boolean, exclude: boolean): string {
   const q = query.trim();
@@ -210,13 +262,17 @@ export function valuesField(fields: ViewField[], name: string): string | null {
 /** The time fields a view may be browsed by: its date fields. */
 export const dateFields = (fields: ViewField[]) => fields.filter((f) => f.type === "date" || f.type === "date_nanos").map((f) => f.name);
 
-/** The view as the URL's hash keeps it: `#discover?view=…&tf=…&mode=…&q=…&range=…&col=…&sort=…`. */
-export function stateToHash(s: DiscoverState): string {
+/** The view as the URL's hash keeps it:
+ * `#discover?saved=…&view=…&tf=…&mode=…&q=…&f=…&range=…&col=…&sort=…`, `saved` the saved search
+ * it was opened from and each `f` a filter pill as JSON (`[field, value, negate]`). */
+export function stateToHash(s: DiscoverState, saved?: string | null): string {
   const p = new URLSearchParams();
+  if (saved) p.set("saved", saved);
   if (s.view) p.set("view", s.view);
   if (s.timeField !== undefined) p.set("tf", s.timeField ?? "-");
   p.set("mode", s.mode);
   if (s.query) p.set("q", s.query);
+  for (const f of s.filters) p.append("f", JSON.stringify([f.field, f.value, f.negate]));
   p.set("range", "gte" in s.range ? `${s.range.gte}-${s.range.lt}` : (s.range.last ?? "all"));
   for (const c of s.columns) p.append("col", c);
   if (s.sort) p.set("sort", `${s.sort.column}:${s.sort.field}:${s.sort.order}`);
@@ -237,22 +293,42 @@ export function hashToState(hash: string, base: DiscoverState, modes: DiscoverMo
   else if (r === "all") range = { last: null };
   else if (r && /^\d+[smhd]$/.test(r)) range = { last: r };
   const sort = p.get("sort")?.split(":");
+  const filters = p.getAll("f").flatMap((t): DiscoverFilter[] => {
+    try {
+      const [field, value, negate] = JSON.parse(t) as unknown[];
+      const ok = typeof field === "string" && field !== "" && ["string", "number", "boolean"].includes(typeof value) && typeof negate === "boolean";
+      return ok ? [{ field, value: value as DiscoverFilter["value"], negate }] : [];
+    } catch {
+      return [];
+    }
+  });
   return {
     view: p.get("view") ?? base.view,
     timeField: tf === null ? base.timeField : tf === "-" ? null : tf,
     mode: mode && modes.includes(mode) ? mode : base.mode,
     query: p.get("q") ?? base.query,
+    filters: p.has("f") ? filters.slice(0, MAX_FILTERS) : base.filters,
     range,
     columns: p.getAll("col").length ? p.getAll("col") : base.columns,
     sort: sort && sort.length === 3 && (sort[2] === "asc" || sort[2] === "desc") ? { column: sort[0], field: sort[1], order: sort[2] } : base.sort,
   };
 }
 
+/** The URL's saved search (`#discover?saved=<id>`), and whether the URL holds a view of its own
+ * (an opened search's edits): with none, the saved search's own view opens. */
+export function hashSaved(hash: string): { id: string; ownView: boolean } | null {
+  const at = hash.indexOf("?");
+  if (!hash.startsWith("#discover") || at < 0) return null;
+  const p = new URLSearchParams(hash.slice(at + 1));
+  const id = p.get("saved");
+  return id ? { id, ownView: p.has("view") } : null;
+}
+
 // ---- Saved searches (kept by roll's control plane: `crates/search-control/src/saved.rs`).
 
 /** A view as a saved search keeps it (an undecided time field is none). */
 export function toSpec(s: DiscoverState): SavedSpec {
-  return { view: s.view, time_field: s.timeField ?? null, mode: s.mode, query: s.query, range: s.range, columns: s.columns, sort: s.sort };
+  return { view: s.view, time_field: s.timeField ?? null, mode: s.mode, query: s.query, filters: s.filters, range: s.range, columns: s.columns, sort: s.sort };
 }
 
 /** A saved search opened as a view; a mode this cluster's flavor hasn't falls back on its first. */
@@ -262,6 +338,7 @@ export function fromSpec(spec: SavedSpec, modes: DiscoverMode[]): DiscoverState 
     timeField: spec.time_field,
     mode: modes.includes(spec.mode) ? spec.mode : modes[0],
     query: spec.query,
+    filters: spec.filters ?? [],
     range: spec.range,
     columns: spec.columns,
     sort: spec.sort,
@@ -300,11 +377,11 @@ export function anchorBody(tf: string, id: string): Record<string, unknown> {
 
 /**
  * `POST /<view>/_search` for the documents around an anchor: `newer` (ascending after its sort
- * values; shown reversed above it) and `older` (descending after them). The range doesn't apply;
- * the view's query does when `keepQuery`.
+ * values; shown reversed above it) and `older` (descending after them). As in Kibana, the query
+ * and the range don't apply and the filter pills do.
  */
-export function surroundingBodies(s: Pick<DiscoverState, "query">, tf: string, anchorSort: unknown[], counts: { newer: number; older: number }, keepQuery: boolean): { newer: Record<string, unknown>; older: Record<string, unknown> } {
-  const query = { bool: { filter: [textQuery(keepQuery ? s.query : "")] } };
+export function surroundingBodies(s: Pick<DiscoverState, "filters">, tf: string, anchorSort: unknown[], counts: { newer: number; older: number }): { newer: Record<string, unknown>; older: Record<string, unknown> } {
+  const query = pills(s.filters, []);
   const one = (order: "asc" | "desc", size: number) => ({ size, query, sort: contextSort(tf, order), search_after: anchorSort, fields: timeValue(tf), track_total_hits: false });
   return { newer: one("asc", counts.newer), older: one("desc", counts.older) };
 }
@@ -335,17 +412,18 @@ export const CHART_BARS = { terms: 10, number: 30, date: 40 } as const;
 /**
  * One request for a field's chart over the view's whole query and range (not the sidebar's
  * sample): the bars (`terms`, `variable_width_histogram` for numbers, `auto_date_histogram` for
- * dates), with the distinct values (`cardinality`, approximate past 3,000), the documents
- * without a value (`missing`) and, for numbers and dates, `min` and `max`.
+ * dates, in `zone`), with the distinct values (`cardinality`, approximate past 3,000), the
+ * documents without a value (`missing`), for numbers and dates `min` and `max`, and for numbers
+ * `avg`. All cheap: one pass over doc values, no scripts.
  */
-export function chartBody(s: Pick<DiscoverState, "query" | "range" | "timeField">, kind: FieldChart, field: string): Record<string, unknown> {
+export function chartBody(s: Pick<DiscoverState, "query" | "filters" | "range" | "timeField">, kind: FieldChart, field: string, zone = "UTC"): Record<string, unknown> {
   const bars =
     kind === "terms"
       ? { terms: { field, size: CHART_BARS.terms } }
       : kind === "number"
         ? { variable_width_histogram: { field, buckets: CHART_BARS.number } }
-        : { auto_date_histogram: { field, buckets: CHART_BARS.date } };
-  const extent = kind === "terms" ? {} : { low: { min: { field } }, high: { max: { field } } };
+        : { auto_date_histogram: { field, buckets: CHART_BARS.date, time_zone: zone } };
+  const extent = kind === "terms" ? {} : { low: { min: { field } }, high: { max: { field } }, ...(kind === "number" ? { mean: { avg: { field } } } : {}) };
   return { size: 0, track_total_hits: true, query: viewQuery(s), aggs: { bars, distinct: { cardinality: { field } }, missing: { missing: { field } }, ...extent } };
 }
 
@@ -369,6 +447,8 @@ export interface ChartData {
   missing: number | null;
   min: number | null;
   max: number | null;
+  /** Numbers only. */
+  avg: number | null;
 }
 
 export function chartData(kind: FieldChart, resp: unknown): ChartData {
@@ -392,6 +472,7 @@ export function chartData(kind: FieldChart, resp: unknown): ChartData {
     missing: a.missing?.doc_count ?? null,
     min: a.low?.value ?? null,
     max: a.high?.value ?? null,
+    avg: a.mean?.value ?? null,
   };
 }
 
@@ -400,6 +481,29 @@ export function chartData(kind: FieldChart, resp: unknown): ChartData {
 /** The viewer's time zone, shown next to the times (`Europe/Budapest`). */
 export function viewerZone(): string {
   return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+}
+
+/** Where the viewer's choice of zone is kept (this browser only): `utc`, or the viewer's own. */
+const ZONE_KEY = "roll.search.discover.zone";
+
+/** The zone times are shown in: UTC when the viewer chose it, else theirs. */
+export function shownZone(): string {
+  try {
+    if (localStorage.getItem(ZONE_KEY) === "utc") return "UTC";
+  } catch {
+    // Storage blocked: the viewer's zone.
+  }
+  return viewerZone();
+}
+
+/** Keeps the viewer's choice: UTC, or their own zone. */
+export function keepZone(utc: boolean) {
+  try {
+    if (utc) localStorage.setItem(ZONE_KEY, "utc");
+    else localStorage.removeItem(ZONE_KEY);
+  } catch {
+    // Storage blocked: the choice lasts until the page is left.
+  }
 }
 
 /** A time (epoch milliseconds, or ISO text: without an offset it's UTC, as Elasticsearch reads it)

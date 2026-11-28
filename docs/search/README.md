@@ -250,6 +250,9 @@ are then paused too (put them again to resume them).
   stay, since a branch usually serves the same pages, but none of its browser keys work there (a
   key works only on its own cluster, below): a page pointed at a branch, roll previews' included,
   needs a browser key of the branch's own.
+- Discover's saved searches don't come along: they are roll's catalogue's, not the cluster's
+  data, and a branch (a roll preview's too) starts with none. A view the branch needs is saved
+  there again (its URL opens the same view on either cluster).
 
 `a_branch_acts_as_none_of_its_parents` in the same file covers it.
 
@@ -944,6 +947,8 @@ origins (browser search), once they're on main.
 | POST | `/v1/search/clusters/{id}/unload` | sleep now (`{"unloaded": false}` while requests run) |
 | GET | `/v1/search/clusters/{id}/indices` | `_cat/indices` as JSON numbers: health, status, shards, docs, sizes; docs and sizes of open indices come from the engine (as `_stats` reports them: Lucene documents, nested ones included, unflushed writes included). Wakes the cluster |
 | POST | `/v1/search/clusters/{id}/request` | console: `{method, path, body?}` (a JSON body, sent byte for byte so `_source` keeps its key order, or a string such as NDJSON, sent as is) → `{status, headers, body, took_ms, truncated}`; an answer the cluster streams (`_inference/…/_stream`) is passed through as it comes instead, with its status and `Content-Type: text/event-stream`. Accepts bodies up to the cluster's `max_body_mb` (the request may be up to twice that plus 1 MiB, for JSON escapes) |
+| GET, POST | `/v1/search/clusters/{id}/saved-searches` | Discover's saved searches, by name: `{saved_searches: [{id, name, search, made_by, created_at, updated_at}]}`; save `{name, search}` → 201 with the saved search. `search` is the view: `{view, time_field?, mode, query?, filters?, range?, columns?, sort?}`, `mode` `kql`/`esql` on Elasticsearch-flavor clusters and `dql`/`ppl` on OpenSearch ones, `filters` at most 50 `{field, value, negate}` (a string of at most 4 KiB, a number or a boolean), `range` `{last: "15m"\|null}` or `{gte, lt}` (epoch ms), `sort` `{column, field, order}` or null; a name is 1 to 128 characters, a query at most 16 KiB. Unknown keys are 400, a name the cluster has already (trimmed) 409, at most 200 a cluster (409 past it). Read for listing, write for saving; MCP: `search_list_saved_searches`, `search_save_search` |
+| GET, PUT, DELETE | `/v1/search/clusters/{id}/saved-searches/{search}` | one; `PUT {name?, search?}` renames it, replaces its view, or both; `DELETE` → 204. MCP: `search_get_saved_search`, `search_update_saved_search`, `search_delete_saved_search` |
 | GET | `/v1/search/clusters/{id}/usage?days=30` | loaded seconds, GiB-hours, requests, stored GiB-months, provider tokens (`input_tokens`, `output_tokens`; not priced), cost, and the same workload on Elastic Cloud Hosted, an Amazon OpenSearch Service domain and OpenSearch Serverless |
 | GET | `/v1/search/clusters/{id}/metrics?range=1h\|24h\|14d` | request metrics (architecture.md, "Observability"): `{range, step_s, from, to, points, totals}`; each point (`at`, the start of its step: a minute for `1h`, 15 minutes for `24h`, 2 hours for `14d`; only steps with requests) and `totals` hold `all`, `search`, `index` and `other`, each `{requests, rate, 2xx, 4xx, 5xx, rejected, p50_ms, p95_ms, p99_ms}` (`rate` per second; `rejected`: 429s; percentiles `null` when nothing ran). Includes what the cluster's node recorded since the last metering pass |
 | GET | `/v1/search/clusters/{id}/slowlog` | the search and indexing slow logs, newest first, at most 500: `{entries, max_entries}`, each entry Elasticsearch's JSON slow log line (`@timestamp`, `log.level`, `log.logger`, `elasticsearch.index.name`, `elasticsearch.shard.id`, `elasticsearch.slowlog.{message,took,took_millis,source,total_hits,stats,search_type,total_shards,id,routing}`) |
@@ -2235,8 +2240,37 @@ deterministic (#396).
    table. The table shows the chosen columns (or the document) newest first, or by a column; a row
    opens the document's JSON. The view, time field, mode, query, range, columns and sort are the
    URL's hash (`#discover?view=…`), to bookmark or share; every request it sends can be shown and
-   opened in the console. Slice 2 in progress (`feature/search-discover-2`): saved searches (roll's
-   control plane per cluster is the first choice, so they outlive an index and agents see them), a document's surrounding
-   documents (`search_after` both ways on the time field), a field's chart (top values, or a
-   histogram over the query and range) with whole-range statistics where they're cheap, and
-   timestamps in the viewer's zone.
+   opened in the console.
+
+   Slice 2 in review (`feature/search-discover-2`):
+   - Saved searches (Kibana's saved searches, OpenSearch Dashboards' saved queries): the view,
+     time field, mode, query, filters, range, columns and sort under a name. They're opened, saved
+     as new or over the one opened (a dot on the button while it differs), renamed and deleted
+     from the bar's Saved panel (`components/search/discover-saved.tsx`), and `#discover?saved=<id>`
+     opens one (the hash keeps `saved` beside the view, so an edited one reloads edited). They
+     live in roll's catalogue per cluster (`search_saved_searches`,
+     `crates/search-control/src/saved.rs`; at most 200 a cluster, every part bounded), not in
+     the cluster. So they outlive the indices they read, don't show in the tenant's own indices,
+     and agents reach them through roll MCP (`search_*_saved_search*`). A branch or preview starts
+     with none.
+   - Filter pills (Kibana's): + and − in KQL and DQL add a `match_phrase` filter (`must_not` when
+     left out) instead of editing the query; a pill inverts or goes. ES|QL and PPL keep the
+     `WHERE` line.
+   - Surrounding documents (Kibana's context view): from an opened row, the anchor (highlighted)
+     among the 5 newer and 5 older documents, five more a click on either side. They're found by
+     `search_after` from the anchor's own sort values (the time field, then `_doc`) both ways, over
+     every time, and as in Kibana the query is dropped and the filter pills kept.
+   - A field's chart from the sidebar's Visualize, over the whole query and range in one request
+     (`components/search/discover-chart.tsx`): a keyword's top 10 values (+ and −), a number's
+     spread (`variable_width_histogram`) or a date over time (a bar narrows the range). Beside it,
+     the range's documents, the share with a value (`missing`), distinct values (`cardinality`,
+     an estimate past 3,000), `min`/`max`, and numbers' `avg`.
+   - Times in the table, the histogram, the sidebar and the chart are in the viewer's zone, to the
+     millisecond, with the zone shown and a switch to UTC (kept in the browser). Date histograms
+     get `time_zone`, so days start at the zone's midnight. The table reads the time field as
+     epoch milliseconds from `fields`, so a custom date format in `_source` shows right.
+   - The chart's and the surrounding documents' requests are shown and open in the console, one
+     at a time, like the view's.
+
+   Left for later: `roll search` commands for saved searches, and Discover on several clusters at
+   once.

@@ -1,20 +1,26 @@
-import { ArrowLeft, Bookmark, ChartColumn, ChevronLeft, ChevronRight, Code2, Columns3, FoldVertical, Minus, Plus, Search, SquareTerminal, X } from "lucide-react";
-import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
+import { ArrowLeft, ArrowLeftRight, Bookmark, ChartColumn, ChevronLeft, ChevronRight, Code2, Columns3, FoldVertical, Globe, Minus, Plus, Search, SquareTerminal, X } from "lucide-react";
+import { Fragment, type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
 import {
+  addFilter,
   anchorBody,
   chartOf,
+  countedOver,
   CONTEXT_STEP,
   dateFields,
   DISCOVER_PAGE,
   edited,
   fromSpec,
+  hashSaved,
   hashToState,
   initialState,
+  keepZone,
   localTime,
   MODES,
   piped,
   pipedTable,
+  requestText,
   sampleBody,
+  shownZone,
   stateToHash,
   surroundingBodies,
   topValues,
@@ -22,16 +28,19 @@ import {
   viewFields,
   viewerZone,
   viewRequest,
+  viewSearch,
   withFilter,
+  type DiscoverFilter,
   type DiscoverState,
   type FieldChart as ChartKind,
   type ViewField,
 } from "@/lib/search-discover";
-import { esJson, esRaw, formatCount, type SavedSearch, type SearchCluster } from "@/lib/search-api";
+import { esJson, esRaw, formatCount, type SavedSearch, type SearchCluster, searchApi } from "@/lib/search-api";
 import { cellText, hitSources, nextSort, sortField, sourceCells, TIME_PRESETS, timeBuckets, timeFieldOf, type TimeBucket } from "@/lib/search-docs";
 import { Segmented } from "../redis/shared";
 import { btn, input } from "../ui";
 import { FieldChart } from "./discover-chart";
+import { RequestList, RequestsButton } from "./discover-requests";
 import { SavedSearches } from "./discover-saved";
 import { JsonDoc, TimeHistogram } from "./index-browser";
 
@@ -64,17 +73,16 @@ async function viewNames(cluster: string): Promise<string[]> {
   return [...new Set(names)].filter((n) => !n.startsWith(".")).sort();
 }
 
-const requestText = (r: { method: string; path: string; body: unknown }) => `${r.method} ${r.path}\n${JSON.stringify(r.body, null, 2)}`;
-
 /**
  * Discover (Kibana's and OpenSearch Dashboards' first screen for logs): a view of an index
  * pattern, alias or data stream over a time range, its documents over time, its fields with their
  * top values, and a table of the chosen columns. The query is KQL (or ES|QL) on Elasticsearch-flavor
  * clusters, DQL (or PPL) on OpenSearch ones. The whole view lives in the URL's hash, so it can be
  * bookmarked and shared, and every request it sends can be opened in the console. A view can be
- * saved under a name (`SavedSearches`), a document shown among the ones around it in time
- * (`Surrounding`), and a field drawn over the whole range (`FieldChart`). Times are the viewer's
- * zone's, and say so.
+ * saved under a name (`SavedSearches`; `#discover?saved=<id>` opens one), a document shown among
+ * the ones around it in time (`Surrounding`), and a field drawn over the whole range
+ * (`FieldChart`). The sidebar's + and − add filter pills (Kibana's), which surrounding documents
+ * keep. Times are the viewer's zone's, or UTC, and say which.
  */
 export function DiscoverTab({ cluster, onOpenConsole }: { cluster: SearchCluster; onOpenConsole: (text: string) => void }) {
   const modes = MODES[cluster.flavor === "opensearch" ? "opensearch" : "elasticsearch"];
@@ -99,14 +107,37 @@ export function DiscoverTab({ cluster, onOpenConsole }: { cluster: SearchCluster
   // The server renders in its own zone: the viewer's is read once mounted.
   const [zone, setZone] = useState("UTC");
 
-  // The view in the URL is read once mounted (the server render has no hash).
+  // The view in the URL is read once mounted (the server render has no hash). A saved search it
+  // names is read first: its own view opens unless the URL holds one (its edits).
   useEffect(() => {
-    const s = hashToState(window.location.hash, state, modes.map((m) => m.value));
-    setStateRaw(s);
-    setDraft(s.query);
-    setViewDraft(s.view);
-    setZone(viewerZone());
-    setReady(true);
+    let live = true;
+    const hash = window.location.hash;
+    const s = hashToState(hash, state, modes.map((m) => m.value));
+    const saved = hashSaved(hash);
+    const start = (v: DiscoverState) => {
+      setStateRaw(v);
+      setDraft(v.query);
+      setViewDraft(v.view);
+      setReady(true);
+    };
+    setZone(shownZone());
+    if (!saved) start(s);
+    else
+      searchApi.savedSearch(cluster.id, saved.id).then(
+        (found) => {
+          if (!live) return;
+          setOpened(found);
+          start(saved.ownView ? s : fromSpec(found.search, modes.map((m) => m.value)));
+        },
+        (e) => {
+          if (!live) return;
+          setErr(`The saved search ${saved.id} didn't open: ${e instanceof Error ? e.message : String(e)}`);
+          start(s);
+        },
+      );
+    return () => {
+      live = false;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   const setState = useCallback((f: (s: DiscoverState) => DiscoverState) => {
@@ -134,8 +165,8 @@ export function DiscoverTab({ cluster, onOpenConsole }: { cluster: SearchCluster
   // The view goes in the URL once it's rendered (an updater runs during a render, where the
   // router mustn't hear of a new URL).
   useEffect(() => {
-    if (ready) window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}${stateToHash(state)}`);
-  }, [ready, state]);
+    if (ready) window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}${stateToHash(state, opened?.id)}`);
+  }, [ready, state, opened]);
 
   useEffect(() => {
     let live = true;
@@ -173,7 +204,7 @@ export function DiscoverTab({ cluster, onOpenConsole }: { cluster: SearchCluster
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cluster.id, ready, state.view]);
 
-  const request = useMemo(() => (state.view && state.timeField !== undefined ? viewRequest(state, now, from) : null), [state, now, from]);
+  const request = useMemo(() => (state.view && state.timeField !== undefined ? viewRequest(state, now, from, zone) : null), [state, now, from, zone]);
 
   const load = useCallback(async () => {
     if (!request) return;
@@ -207,13 +238,22 @@ export function DiscoverTab({ cluster, onOpenConsole }: { cluster: SearchCluster
   }, [load]);
 
   const consoleText = request ? requestText(request) : "";
+  const utc = zone === "UTC";
+  const toggleZone = () => {
+    keepZone(!utc);
+    setZone(utc ? viewerZone() : "UTC");
+  };
   const dates = fields ? dateFields(fields) : [];
   const toggleColumn = (name: string) => setState((s) => ({ ...s, columns: s.columns.includes(name) ? s.columns.filter((c) => c !== name) : [...s.columns, name] }));
+  // + and −: a filter pill in KQL and DQL (Kibana's), a `WHERE` line in a piped query.
   const filter = (field: string, value: string | number | boolean, exclude: boolean) => {
+    if (!piped(state.mode)) return setState((s) => ({ ...s, filters: addFilter(s.filters, { field, value, negate: exclude }) }));
     const q = withFilter(state.mode, state.query, field, value, exclude);
     setDraft(q);
     setState((s) => ({ ...s, query: q }));
   };
+  const setFilters = (filters: DiscoverFilter[]) => setState((s) => ({ ...s, filters }));
+  const zoneToggle = <ZoneToggle zone={zone} onToggle={toggleZone} />;
 
   return (
     <div className="space-y-4">
@@ -260,7 +300,14 @@ export function DiscoverTab({ cluster, onOpenConsole }: { cluster: SearchCluster
           </select>
         )}
         <div className="w-36">
-          <Segmented value={state.mode} options={modes} onChange={(mode) => setState((s) => ({ ...s, mode, query: "" }))} />
+          <Segmented
+            value={state.mode}
+            options={modes}
+            onChange={(mode) => {
+              setDraft("");
+              setState((s) => ({ ...s, mode, query: "", filters: [] }));
+            }}
+          />
         </div>
         {/* A row of its own on a phone. */}
         <div className="relative min-w-0 flex-1 basis-full sm:basis-0">
@@ -296,6 +343,8 @@ export function DiscoverTab({ cluster, onOpenConsole }: { cluster: SearchCluster
         </button>
       </form>
 
+      {!piped(state.mode) && state.filters.length > 0 && <FilterPills filters={state.filters} onChange={setFilters} />}
+
       {showSaved && <SavedSearches cluster={cluster.id} state={state} opened={opened} onOpen={openSaved} onSaved={setOpened} />}
 
       {showRequest && request && (
@@ -327,11 +376,11 @@ export function DiscoverTab({ cluster, onOpenConsole }: { cluster: SearchCluster
           ) : (
             <div className="min-w-0 overflow-hidden rounded-lg border border-line bg-panel">
               {state.timeField && !piped(state.mode) && result?.kind === "hits" && (
-                <TimeHistogram field={state.timeField} range={state.range} buckets={result.buckets} total={result.total} onRange={(range) => setState((s) => ({ ...s, range }))} />
+                <TimeHistogram field={state.timeField} range={state.range} buckets={result.buckets} total={result.total} zone={zone} extra={zoneToggle} onRange={(range) => setState((s) => ({ ...s, range }))} />
               )}
               {state.timeField && (piped(state.mode) || !result) && (
                 <div className="border-b border-line px-5 py-3">
-                  <RangeOnly state={state} zone={zone} onRange={(range) => setState((s) => ({ ...s, range }))} />
+                  <RangeOnly state={state} zone={zone} extra={zoneToggle} onRange={(range) => setState((s) => ({ ...s, range }))} />
                 </div>
               )}
               {chart && (
@@ -345,6 +394,7 @@ export function DiscoverTab({ cluster, onOpenConsole }: { cluster: SearchCluster
                   onFilter={filter}
                   onRange={(range) => setState((s) => ({ ...s, range }))}
                   onClose={() => setChart(null)}
+                  onOpenConsole={onOpenConsole}
                 />
               )}
               {err ? (
@@ -405,8 +455,8 @@ export function DiscoverTab({ cluster, onOpenConsole }: { cluster: SearchCluster
 /**
  * The documents around one in time (Kibana's "View surrounding documents"): the anchor, the
  * newer ones above it and the older ones below, found with `search_after` from the anchor's own
- * sort values (the time field, then `_doc`) both ways. The range doesn't apply; the view's query
- * does when asked to. More load five at a time on either side.
+ * sort values (the time field, then `_doc`) both ways. As in Kibana, the query and the range don't
+ * apply and the filter pills do. More load five at a time on either side.
  */
 function Surrounding({
   cluster,
@@ -428,18 +478,26 @@ function Surrounding({
   onOpenConsole: (text: string) => void;
 }) {
   const [counts, setCounts] = useState({ newer: CONTEXT_STEP, older: CONTEXT_STEP });
-  const [keepQuery, setKeepQuery] = useState(false);
+  const [showRequests, setShowRequests] = useState(false);
   const [found, setFound] = useState<Hit | null>(null);
   const [around, setAround] = useState<{ newer: Hit[]; older: Hit[] } | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [open, setOpen] = useState<string | null>(null);
-  const canKeep = !piped(state.mode) && state.query.trim() !== "";
+  const filters = piped(state.mode) ? [] : state.filters;
+  const anchorRequest = useMemo(() => viewSearch(anchor._index, anchorBody(timeField, anchor._id)), [anchor._index, anchor._id, timeField]);
+  const sides = useMemo(() => {
+    if (!found?.sort) return null;
+    const bodies = surroundingBodies({ filters }, timeField, found.sort, counts);
+    return { newer: viewSearch(state.view, bodies.newer), older: viewSearch(state.view, bodies.older) };
+    // `filters` is compared by what it holds.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [found, state.view, JSON.stringify(filters), timeField, counts]);
 
   // The anchor again, by id on its own index, for its sort values.
   useEffect(() => {
     let live = true;
-    searchHits(cluster.id, `/${encodeURIComponent(anchor._index)}/_search`, anchorBody(timeField, anchor._id)).then(
+    searchHits(cluster.id, anchorRequest.path, anchorRequest.body).then(
       (r) => {
         if (!live) return;
         if (r.hits[0]?.sort) setFound(r.hits[0]);
@@ -450,15 +508,13 @@ function Surrounding({
     return () => {
       live = false;
     };
-  }, [cluster.id, anchor._index, anchor._id, timeField]);
+  }, [cluster.id, anchorRequest]);
 
   useEffect(() => {
-    if (!found?.sort) return;
+    if (!sides) return;
     let live = true;
     setLoading(true);
-    const bodies = surroundingBodies(state, timeField, found.sort, counts, keepQuery && canKeep);
-    const path = `/${encodeURIComponent(state.view)}/_search`;
-    Promise.all([searchHits(cluster.id, path, bodies.newer), searchHits(cluster.id, path, bodies.older)]).then(
+    Promise.all([searchHits(cluster.id, sides.newer.path, sides.newer.body), searchHits(cluster.id, sides.older.path, sides.older.body)]).then(
       ([newer, older]) => {
         if (!live) return;
         setAround({ newer: newer.hits, older: older.hits });
@@ -474,10 +530,9 @@ function Surrounding({
     return () => {
       live = false;
     };
-    // `state` is read for its view and query only.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cluster.id, found, state.view, state.query, timeField, counts, keepQuery, canKeep]);
+  }, [cluster.id, sides]);
 
+  const requests = [anchorRequest, ...(sides ? [sides.newer, sides.older] : [])];
   const key = `${anchor._index}/${anchor._id}`;
   const hits = found && around ? [...[...around.newer].reverse(), found, ...around.older] : [];
   const more = (side: "newer" | "older") => setCounts((c) => ({ ...c, [side]: c[side] + CONTEXT_STEP }));
@@ -487,14 +542,17 @@ function Surrounding({
         <button type="button" onClick={onBack} className={btn}>
           <ArrowLeft className="size-3.5" strokeWidth={1.5} /> Documents
         </button>
-        <span className="min-w-0 truncate text-[12px] text-muted">
+        <span className="min-w-0 flex-1 truncate text-[12px] text-muted">
           Around <span className="font-mono text-fg">{anchor._id}</span> by <span className="font-mono">{timeField}</span>, in every time
+          {filters.length ? `, with the ${filters.length === 1 ? "filter" : `${filters.length} filters`} (not the query)` : ", without the query"}
         </span>
-        <label className={`ml-auto flex items-center gap-1.5 text-[12px] ${canKeep ? "text-muted" : "text-subtle opacity-60"}`} title={canKeep ? "Only documents the view's query matches" : "The view has no query to keep"}>
-          <input type="checkbox" checked={keepQuery && canKeep} disabled={!canKeep} onChange={(e) => setKeepQuery(e.target.checked)} className="accent-[var(--color-accent)]" />
-          Keep the query
-        </label>
+        <RequestsButton count={requests.length} shown={showRequests} onToggle={() => setShowRequests((v) => !v)} />
       </div>
+      {showRequests && (
+        <div className="border-b border-line px-5 py-3">
+          <RequestList requests={requests} onOpenConsole={onOpenConsole} />
+        </div>
+      )}
       {err ? (
         <p role="alert" className="px-5 py-4 font-mono text-[12px] text-danger">
           {err}
@@ -530,8 +588,49 @@ function ContextMore({ side, shown, asked, loading, onMore }: { side: "newer" | 
   );
 }
 
+/** The zone times are shown in, and a switch between the viewer's and UTC. */
+function ZoneToggle({ zone, onToggle }: { zone: string; onToggle: () => void }) {
+  const own = viewerZone();
+  if (own === "UTC") return <span className="font-mono text-[11px] text-subtle">UTC</span>;
+  return (
+    <button type="button" onClick={onToggle} className={`${btn} py-0.5 font-mono text-[11px]`} aria-label={`Times in ${zone}: show them in ${zone === "UTC" ? own : "UTC"}`} title={`Show times in ${zone === "UTC" ? `your zone (${own})` : "UTC"}`}>
+      <Globe className="size-3" strokeWidth={1.5} /> {zone}
+    </button>
+  );
+}
+
+/** The filter pills (Kibana's): each keeps or leaves out a field's value; a click inverts one,
+ * × removes it. */
+function FilterPills({ filters, onChange }: { filters: DiscoverFilter[]; onChange: (f: DiscoverFilter[]) => void }) {
+  const text = (f: DiscoverFilter) => `${f.negate ? "NOT " : ""}${f.field}: ${String(f.value)}`;
+  return (
+    <ul className="flex flex-wrap items-center gap-1.5" aria-label="Filters">
+      {filters.map((f, i) => (
+        <li key={`${f.field}\u0000${String(f.value)}`} className={`rise flex max-w-full items-center rounded-md border font-mono text-[11px] ${f.negate ? "border-danger/40 text-danger" : "border-line-2 text-fg"} bg-panel`}>
+          <span className="truncate py-0.5 pr-1 pl-2" title={text(f)}>
+            {text(f)}
+          </span>
+          <button type="button" onClick={() => onChange(filters.map((x, j) => (j === i ? { ...x, negate: !x.negate } : x)))} className="rounded p-1 text-subtle transition hover:text-fg" aria-label={`Invert ${text(f)}`} title={f.negate ? "Keep these instead" : "Leave these out instead"}>
+            <ArrowLeftRight className="size-3" strokeWidth={1.5} />
+          </button>
+          <button type="button" onClick={() => onChange(filters.filter((_, j) => j !== i))} className="rounded p-1 text-subtle transition hover:text-fg" aria-label={`Remove ${text(f)}`}>
+            <X className="size-3" strokeWidth={1.5} />
+          </button>
+        </li>
+      ))}
+      {filters.length > 1 && (
+        <li>
+          <button type="button" onClick={() => onChange([])} className="px-1 text-[11px] text-subtle transition hover:text-fg">
+            Clear filters
+          </button>
+        </li>
+      )}
+    </ul>
+  );
+}
+
 /** The range presets alone, where no histogram is drawn (a piped query, or before the first answer). */
-function RangeOnly({ state, zone, onRange }: { state: DiscoverState; zone: string; onRange: (r: DiscoverState["range"]) => void }) {
+function RangeOnly({ state, zone, extra, onRange }: { state: DiscoverState; zone: string; extra: ReactNode; onRange: (r: DiscoverState["range"]) => void }) {
   const r = state.range;
   return (
     <div className="flex flex-wrap items-center gap-3">
@@ -543,9 +642,8 @@ function RangeOnly({ state, zone, onRange }: { state: DiscoverState; zone: strin
           {localTime(r.gte, zone).slice(0, 19)} – {localTime(r.lt, zone).slice(0, 19)} <X className="size-3" strokeWidth={1.5} />
         </button>
       )}
-      <span className="ml-auto font-mono text-[11px] text-subtle">
-        by {state.timeField} · {zone}
-      </span>
+      <span className="ml-auto font-mono text-[11px] text-subtle">by {state.timeField}</span>
+      {extra}
     </div>
   );
 }
@@ -622,8 +720,8 @@ function FieldList({
   );
 }
 
-/** One field's top 5 values over a sample of the view's matching documents. In ES|QL and PPL
- * modes the sample is of the range alone (their query isn't a filter). */
+/** One field's top 5 values over a sample of the view's matching documents (its query and
+ * filters; in ES|QL and PPL modes the range alone, their query isn't a filter). */
 function TopValues({
   cluster,
   state,
@@ -648,18 +746,18 @@ function TopValues({
   const isDate = fields.some((f) => f.name === field && (f.type === "date" || f.type === "date_nanos"));
   const [values, setValues] = useState<ReturnType<typeof topValues> | null>(null);
   const [err, setErr] = useState<string | null>(null);
-  const query = piped(state.mode) ? "" : state.query;
+  const body = on ? JSON.stringify(sampleBody(countedOver(state), on)) : null;
   useEffect(() => {
-    if (!on) return;
+    if (!body) return;
     let live = true;
-    esJson(cluster.id, "POST", `/${encodeURIComponent(state.view)}/_search`, sampleBody({ query, range: state.range, timeField: state.timeField }, on)).then(
+    esJson(cluster.id, "POST", `/${encodeURIComponent(state.view)}/_search`, JSON.parse(body)).then(
       (r) => live && setValues(topValues(r)),
       (e) => live && setErr(e instanceof Error ? e.message : String(e)),
     );
     return () => {
       live = false;
     };
-  }, [cluster.id, state.view, state.range, state.timeField, query, on]);
+  }, [cluster.id, state.view, body]);
   if (!on) return <p className="px-4 pb-2 text-[11px] text-subtle">Not aggregatable: no top values.</p>;
   if (err) return <p className="px-4 pb-2 text-[11px] text-danger">{err}</p>;
   if (!values)

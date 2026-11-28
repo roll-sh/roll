@@ -1,8 +1,9 @@
 import { Minus, Plus, X } from "lucide-react";
-import { useEffect, useState } from "react";
-import { chartBody, chartData, type ChartData, type FieldChart as Kind, localTime, piped, type DiscoverState } from "@/lib/search-discover";
+import { useEffect, useMemo, useState } from "react";
+import { chartBody, chartData, type ChartData, countedOver, type DiscoverState, type FieldChart as Kind, localTime, viewSearch } from "@/lib/search-discover";
 import { esJson, formatCount } from "@/lib/search-api";
 import type { TimeRange } from "@/lib/search-docs";
+import { RequestList, RequestsButton } from "./discover-requests";
 
 /** A share of the documents: one decimal below 1%. */
 function pct(n: number, of: number): string {
@@ -16,7 +17,9 @@ const num = (n: number) => (Number.isInteger(n) ? formatCount(n) : n.toLocaleStr
  * A field drawn over the view's whole query and range, in one request: a keyword's top 10 values
  * as bars (+ and − keep or leave a value out), a number's spread (`variable_width_histogram`, each
  * bar as wide as the values it holds) or a date's documents over time (a bar narrows the range).
- * Its statistics are the whole range's, not the sidebar's sample.
+ * Its statistics are the whole range's, not the sidebar's sample: the documents, the share with
+ * a value, an estimate of the distinct values, and for numbers and dates the extent (numbers'
+ * mean too).
  */
 export function FieldChart({
   cluster,
@@ -28,6 +31,7 @@ export function FieldChart({
   onFilter,
   onRange,
   onClose,
+  onOpenConsole,
 }: {
   cluster: string;
   state: DiscoverState;
@@ -40,23 +44,26 @@ export function FieldChart({
   onFilter: (field: string, value: string | number | boolean, exclude: boolean) => void;
   onRange: (r: TimeRange) => void;
   onClose: () => void;
+  onOpenConsole: (text: string) => void;
 }) {
   const [data, setData] = useState<ChartData | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [showRequest, setShowRequest] = useState(false);
   // In ES|QL and PPL modes the query isn't a filter: the chart is of the range.
-  const query = piped(state.mode) ? "" : state.query;
+  const body = JSON.stringify(chartBody(countedOver(state), kind, field, zone));
+  const request = useMemo(() => viewSearch(state.view, JSON.parse(body)), [state.view, body]);
   useEffect(() => {
     let live = true;
     setData(null);
     setErr(null);
-    esJson(cluster, "POST", `/${encodeURIComponent(state.view)}/_search`, chartBody({ query, range: state.range, timeField: state.timeField }, kind, field)).then(
+    esJson(cluster, request.method, request.path, request.body).then(
       (r) => live && setData(chartData(kind, r)),
       (e) => live && setErr(e instanceof Error ? e.message : String(e)),
     );
     return () => {
       live = false;
     };
-  }, [cluster, state.view, state.range, state.timeField, query, kind, field]);
+  }, [cluster, request, kind]);
 
   const value = (v: number) => (kind === "date" ? localTime(v, zone).slice(0, 19) : num(v));
   return (
@@ -67,15 +74,24 @@ export function FieldChart({
         {data && (
           <span className="font-mono text-[11px] text-subtle tabular-nums">
             {formatCount(data.total)} documents
+            {data.missing != null && data.total > 0 && ` · present in ${pct(data.total - data.missing, data.total)}`}
             {data.distinct != null && ` · ${data.distinct > 3000 ? "≈" : ""}${formatCount(data.distinct)} distinct`}
-            {data.missing ? ` · ${formatCount(data.missing)} without a value` : ""}
             {data.min != null && data.max != null && ` · ${value(data.min)} to ${value(data.max)}`}
+            {data.avg != null && ` · mean ${num(data.avg)}`}
           </span>
         )}
-        <button type="button" onClick={onClose} className="ml-auto rounded p-1 text-subtle transition hover:text-fg" aria-label="Close the chart">
-          <X className="size-3.5" strokeWidth={1.5} />
-        </button>
+        <span className="ml-auto flex items-center gap-1">
+          <RequestsButton count={1} shown={showRequest} onToggle={() => setShowRequest((v) => !v)} />
+          <button type="button" onClick={onClose} className="rounded p-1 text-subtle transition hover:text-fg" aria-label="Close the chart">
+            <X className="size-3.5" strokeWidth={1.5} />
+          </button>
+        </span>
       </div>
+      {showRequest && (
+        <div className="pt-2">
+          <RequestList requests={[request]} onOpenConsole={onOpenConsole} />
+        </div>
+      )}
       {err ? (
         <p role="alert" className="pt-2 font-mono text-[12px] text-danger">
           {err}

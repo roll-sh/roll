@@ -1726,7 +1726,7 @@ contexts of x-pack's version allowlist), `EsObj::Version`, `contexts::version_al
 | GET    | `/v1/search/clusters/{id}/indices`               | indices with docs, size, health |
 | POST   | `/v1/search/clusters/{id}/request`               | run one REST request (dashboard console) |
 | GET    | `/v1/search/clusters/{id}/saved-searches`        | Discover's saved searches, by name |
-| POST   | `/v1/search/clusters/{id}/saved-searches`        | save the view `{name, search}` (201; 409 on a name taken) |
+| POST   | `/v1/search/clusters/{id}/saved-searches`        | save the view `{name, search}` (201; 409 on a name taken or past 200) |
 | GET    | `/v1/search/clusters/{id}/saved-searches/{search}` | one saved search |
 | PUT    | `/v1/search/clusters/{id}/saved-searches/{search}` | rename or replace its view `{name?, search?}` |
 | DELETE | `/v1/search/clusters/{id}/saved-searches/{search}` | (204) |
