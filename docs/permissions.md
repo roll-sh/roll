@@ -226,7 +226,7 @@ endpoint for an hour's access token, rather than holding a long-lived token in a
   mint another kind of credential.
 - **Tests:** `roll-access/tests/access.rs::a_machine_client_trades_its_credential_for_a_token_its_rules_bound`
   (secret and key, rules bounding the token, a replayed assertion, a leaked secret, a revoked
-  client); `a_persons_machine_client_acts_as_them`; `a_ci_job_signs_in_with_its_own_oidc_token`
+  client); `a_persons_token_acts_as_them`; `a_ci_job_signs_in_with_its_own_oidc_token`
   (the right repository and branch sign in, within the rules; another repository, branch, audience,
   key or an expired token is `invalid_grant`; a shared issuer's wildcard tenant is refused); `roll-cli/tests/token.rs::a_machine_client_from_the_cli_trades_its_secret_for_a_token_held_to_its_rules`.
 
@@ -359,6 +359,7 @@ type Rule = {
   resources: "*" | Selector[];      // "*": every resource, including ones made later
   environments?: string[];          // only resources in these environments
   paths?: string[];                 // only resources under these paths (secrets' folders)
+  keys?: string[];                  // secrets only: only these keys of those folders (exact names)
   actions: Partial<Record<Action, "allow" | "ask">>;
 };
 
@@ -473,7 +474,7 @@ first, so they can't hide what runs, and anything that makes or changes credenti
 - A roll secret another product writes or reads once as the caller is lent the same way:
   - **The routes:** search's admin password rotated into one (`POST …/password` with `secret: {environment, path?, project?}`, `write`; the project left out is the one the cluster is on), and roll apps' Cloudflare token for writing a domain's records (`POST …/domains/{host}/configure` with `cloudflare_token: "roll://[PROJECT@]ENV[/folder]/KEY"`, `reveal` on its folder, read once with `Secrets::use_once`; the project left out is the service's).
   - **What's checked:** `write` (or `reveal`) on that folder as roll secrets decides it, protected environments included. The environment and path are checked as roll secrets names them, so a pattern like `prod*` is refused rather than remembered as a wildcard.
-  - **An approval** names that folder, even when the route's own action asks too. Remembering it allows that folder and its subfolders in that environment (a folder's rule reaches every folder under it). `/`, the default, is the whole environment, so a secrets approval at the root (or naming no folder) is remembered for 8 hours at most, and the approval screen offers only that. A secret lent to another product's route at the root (apps' DNS token as `roll://production/CF_TOKEN`, search's rotated password written to `/`) is approved once only: remembered, every later call would reach every key there. Keep such a token in a folder of its own (`roll://production/dns/CF_TOKEN`) to remember it. The card names the lent key. A folder has one spelling, roll secrets' (`/api/` is `/api`, `roll_secrets_ref::folder` for both): one secrets would refuse (`//`, `/a//b`, `.` or `..`) is refused at the gate before anyone is asked, a rule's `paths` read `/api/` as `/api` and refuse the rest, and anything deciding the whole environment counts `/` spelled with more slashes as the root. A rule stored with `//` before that reaches no folder. The folder is the one the request reads: `?path=` for most routes (a batch's items may each name their own, which roll secrets checks again one by one), the body's `path` for resolving, comparing and importing a `.env` (absent is `/`), and an import source's own `path`. An import with `replace` (deleting the folder's keys the file lacks) needs `delete` and `write`. A body the gate decides from must be the JSON object (or, for imports, the array) the route reads: a product parsing into a typed struct would take an array field by field, where the gate reading by name sees nothing.
+  - **An approval** names that folder, even when the route's own action asks too. Remembering it allows that folder and its subfolders in that environment (a folder's rule reaches every folder under it). `/`, the default, is the whole environment, so a secrets approval at the root (or naming no folder) is remembered for 8 hours at most, and the approval screen offers only that. A secret lent to another product's route names its key (apps' DNS token as `roll://production/CF_TOKEN`, search's rotated password's `key`): the rule handed to the product and the one remembering its approval reach that key name only (`keys`), in that folder and the folders under it (a folder's rule reaches them), so a lend at the root is remembered for that key name across the environment, 8 hours at most there, and another key asks again. One naming no key at the root is approved once only (remembered, every later call would reach every key there). Reading the folder to find the secret stays the folder's. The card names the lent key. A folder has one spelling, roll secrets' (`/api/` is `/api`, `roll_secrets_ref::folder` for both): one secrets would refuse (`//`, `/a//b`, `.` or `..`) is refused at the gate before anyone is asked, a rule's `paths` read `/api/` as `/api` and refuse the rest, and anything deciding the whole environment counts `/` spelled with more slashes as the root. A rule stored with `//` before that reaches no folder. The folder is the one the request reads: `?path=` for most routes (a batch's items may each name their own, which roll secrets checks again one by one), the body's `path` for resolving, comparing and importing a `.env` (absent is `/`), and an import source's own `path`. An import with `replace` (deleting the folder's keys the file lacks) needs `delete` and `write`. A body the gate decides from must be the JSON object (or, for imports, the array) the route reads: a product parsing into a typed struct would take an array field by field, where the gate reading by name sees nothing.
   - **The grant the product gets** carries one exact rule (that folder: `write` or `reveal`) for this request, plus `read` on that folder whenever the action passes, allowed outright or approved, since the product reads the version back. roll secrets checks the caller again inside, and nothing else in the project opens.
   - **A remembered approval** keeps to what it named. When the route's own action asked too (admin on the cluster), the card names both ("write secrets prj_… in production:/ai, and admin search cl_…"), and remembering keeps both. What the approval covers is recorded when the gate asks (the approval's `also`), never worked out again from the token at approval time, so a later approval never remembers more than it asked. That route's own rule is skipped when the token's rules, temporary ones included, allow it already, and remembering is refused when roll's policy asks again for it. A route whose action its body decides records none.
   - **A secret a product keeps following needs `reveal` allowed outright.** That covers an inference endpoint keyed by a secret (its sync) and a bound `roll://` reference: either is checked again as its maker at every use, so an approval can't stand in for it.
@@ -625,7 +626,7 @@ A rule can grant some indices of a search cluster: `{id: "cl_1", index: "logs-*,
 - Search checks the rest at query time as the caller: a query's reads of other indices (terms
   lookups, `more_like_this`, lookup runtime fields, `indexed_shape`, templates after rendering, and
   the bodies of reindex, ES|QL, SQL and the other query-bearing APIs) and a body's `_index` values
-  stay within `{index}` (search's `control.rs`, `per_index_routes`; feature/roll-search 5db7c2602
+  stay within `{index}` (search's `control.rs`, `documents`; feature/roll-search 5db7c2602
   and fae055c31), and a document an ingest pipeline moves (`_index`, `reroute`) is checked again
   as a write at the index it lands in (ea6be2f0f). ES|QL and SQL read as the caller too (0158b6d9c):
   `FROM`, wildcards, `LOOKUP JOIN` and SQL reach only the indices it may read.
@@ -651,6 +652,39 @@ key-limited token gets a 403 there), and roll secrets asks the grant about each 
 (`Grants::reaches_key`); with none reachable it's a 403. Creating a key stays the project's
 (`roll_auth::scope::sub_resources` lists the products that have such names; secrets' rows name
 `{name}` with `.index("name")`).
+
+### Secrets' keys
+
+A secrets rule can reach only some keys of the folders it names: `keys: ["STRIPE_KEY"]`, 1–64
+exact key names (no patterns: `STRIPE_*` is refused), on product `secrets` only. 1Password and
+Doppler grant one item or secret the same way; before, the smallest grant was a folder.
+
+- **Matching** (`Rule::matches`): a request about one key (`…/secrets/{key}` and everything under
+  it: its value, versions, TOTP code, rotation, hosts, purge; the row's `.key("key")`) matches when
+  the key is one of `keys`, and environments and folders still narrow it. A request about no key
+  matches only where the row answers or writes key by key (`filters_keys`: the folder's list, its
+  values, a resolve, a batch of changes), and roll secrets asks the grant again per key, so it
+  answers those keys alone and refuses a batch naming another (it names them). Anything else
+  about the folder (a digest, a watch's delta, a `.env` import or diff, a promote, health and
+  leaks, which filter only by environment and folder) is a 403. Its message says the token
+  reaches only some keys of that folder and what it asked needs a rule without keys (the folder,
+  never a key), which is how `roll run --watch` and `roll secrets agent` know to stop at their
+  start. A list, a create or the product as a whole never matches a rule with keys.
+- **Covering**: a rule with keys covers another only if the other's keys are a subset of its own;
+  one without keys covers a keyed one, never the reverse. Remembering, tighten and step-ups go by
+  this, so a keyed approval can't be remembered as a rule over the folder.
+- **Inside roll secrets**: `Scope::key` names the key a check is about, and `Scope::by_key` a
+  folder answered key by key; what imports and bases show through needs the key in both folders.
+  A person's reference to one key (`bind_ref`, `resolve_as`, `use_once`) is checked at that key,
+  so a maker limited to it can bind it; its digest is then the key's own.
+- **Clients**: `roll secrets tokens create … --key STRIPE_KEY` (repeatable), `roll token create
+  --product secrets --key …`, the builder's Keys field on the secrets row, the Secrets page's
+  token form, and Terraform's `roll_secrets_token` `keys`.
+- **Older nodes** refuse a rule field they don't know, so during a rolling restart a node from
+  before `keys` reads such a grant as no rules (`Store::get` parses rules with
+  `unwrap_or_default`): every request is denied there, or asks when `ask_otherwise` is set; never
+  wider. A remember written by such a node would drop the grant's rules; restart every node before
+  making keyed tokens.
 
 ### Presets
 

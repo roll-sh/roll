@@ -100,7 +100,10 @@ async fn issues(State(m): S) -> Json<Value> {
 async fn create_issue(State(m): S, Path((o, r)): Path<(String, String)>, Json(b): Json<Value>) -> Json<Value> {
     record(&m, "POST", format!("/repos/{o}/{r}/issues"), b.clone());
     let n = 100 + m.next_id.fetch_add(1, Ordering::SeqCst);
-    let made = issue_json(n, b["title"].as_str().unwrap_or(""), "open", &[]);
+    // Made by roll's App: its bot, whose association GitHub says is NONE.
+    let mut made = issue_json(n, b["title"].as_str().unwrap_or(""), "open", &[]);
+    made["user"] = json!({ "login": "roll-test[bot]", "id": 99, "type": "Bot" });
+    made["author_association"] = json!("NONE");
     m.issues.lock().push(made.clone());
     Json(made)
 }
@@ -634,7 +637,11 @@ async fn connect_import_webhooks_and_mirror() {
     // A preview note's issue (roll previews' note to work): opened on the mirror by roll's App.
     let row = a.code.find_repo("acme", "app").unwrap();
     let (n, url) = a.code.open_github_issue(&row, "Preview feedback: cut off", "the note", &["preview-feedback".to_string()]).await.unwrap().expect("a connected repo");
-    assert_eq!(url, format!("https://github.com/acme/app/issues/{n}"));
+    // The repo's work item at once, by roll's own number, the team's words (roll's App opened it).
+    let item = a.ok("GET", "/v1/code/repos/acme/app/work", None).await.as_array().unwrap().iter().find(|w| w["title"] == "Preview feedback: cut off").cloned().expect("made a work item");
+    assert_eq!(item["number"].as_u64(), Some(n), "{item}");
+    assert_ne!(item["outside"], true, "{item}");
+    assert!(url.starts_with("https://github.com/acme/app/issues/"), "{url}");
     assert!(g.mock.calls.lock().iter().any(|(m, p, b)| m == "POST" && p == "/repos/acme/app/issues" && b["labels"] == json!(["preview-feedback"]) && b["body"] == "the note"));
     assert_eq!(work[0]["source"], "github#1");
     assert_eq!(work[0]["priority"], 1);
@@ -1716,7 +1723,8 @@ async fn a_push_to_github_that_adds_a_value_fails_its_check_and_reports_the_leak
 /// close or a draft dequeues a queued change, reopen, merged on GitHub (landed, dequeued, not
 /// echoed), PRs into other branches ignored, draft PRs; issues unlabeled, issue events about
 /// PRs ignored, closed without a reason; installations suspended, unsuspended, repos removed and
-/// added, events for other installations and repos; deliveries that fail aren't recorded.
+/// added, events for other installations and repos; a repo made private or public with no push;
+/// deliveries that fail aren't recorded.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pull_request_issue_and_installation_actions() {
     let g = github_mock().await;
@@ -1902,6 +1910,17 @@ async fn pull_request_issue_and_installation_actions() {
     assert!(!a.ok("GET", "/v1/code/repos/acme/app/work", None).await.as_array().unwrap().iter().any(|w| w["source"] == "github#10"));
     assert_eq!(hook(a, "installation_repositories", "x-8", &repos("added", "acme/app"), SECRET).await, StatusCode::OK);
     assert_eq!(gh().await["connected"], true);
+    // Made private or public on GitHub with no push: the link says so at once (roll secrets'
+    // Health reads it).
+    assert_eq!(gh().await["private"], false);
+    let mut private_repo = repo.clone();
+    private_repo["private"] = json!(true);
+    let visibility = |action: Option<&str>, r: &Value| json!({ "action": action, "repository": r, "sender": { "login": "human", "id": 5 }, "installation": inst });
+    assert_eq!(hook(a, "repository", "v-1", &visibility(Some("privatized"), &private_repo), SECRET).await, StatusCode::OK);
+    assert_eq!(gh().await["private"], true);
+    // `public` has no action, and its payload's `private` isn't what decides.
+    assert_eq!(hook(a, "public", "v-2", &visibility(None, &private_repo), SECRET).await, StatusCode::OK);
+    assert_eq!(gh().await["private"], false);
 
     // Deliveries: unsigned 401, unparseable 400, and a failed one isn't recorded, so GitHub's
     // redelivery is processed again.

@@ -14,6 +14,11 @@
 #   ROLL_INSTALL_DIR    where to put roll.exe (default: as above)
 #   ROLL_INSTALL_SCOPE  `user` (default) or `machine` (as -System)
 #   ROLL_RELEASES       where releases are downloaded from (default: https://github.com/roll-sh/roll/releases)
+#   ROLL_VERIFY         auto (default): also check the download's build provenance with
+#                       `gh attestation verify` when gh is installed and logged in; attestation:
+#                       refuse to install without that check; checksum: SHA256SUMS only
+# SHA256SUMS comes from the same release, so it catches a broken download, not a replaced release:
+# the attestation, signed by the release workflow and kept by GitHub outside the release, does.
 param([switch]$System)
 
 $ErrorActionPreference = 'Stop'
@@ -26,6 +31,10 @@ $Releases = if ($env:ROLL_RELEASES) { $env:ROLL_RELEASES.TrimEnd('/') } else { "
 
 function Say($msg) { [Console]::Error.WriteLine("roll: $msg") }
 function Die($msg) { Say $msg; exit 1 }
+
+$verify = if ($env:ROLL_VERIFY) { $env:ROLL_VERIFY } else { 'auto' }
+if ($verify -notin @('auto', 'attestation', 'checksum')) { Die "ROLL_VERIFY is auto, attestation or checksum, not $verify" }
+$github = $Releases -eq "https://github.com/$Repo/releases"
 
 $machine = $System -or ($env:ROLL_INSTALL_SCOPE -eq 'machine')
 if ($machine) {
@@ -69,6 +78,25 @@ try {
     if (-not $want) { Die "SHA256SUMS of $tag doesn't list $asset" }
     $have = (Get-FileHash -Algorithm SHA256 (Join-Path $tmp $asset)).Hash.ToLowerInvariant()
     if ($have -ne $want) { Die "$asset doesn't match its checksum (got $have, want $want): not installing it" }
+    # Build provenance: made by release-cli.yml in roll-sh/roll. A mirror serves the same bytes:
+    # under auto it's checked by checksum only.
+    if ($verify -eq 'attestation' -or ($verify -eq 'auto' -and $github)) {
+        $gh = Get-Command gh -ErrorAction SilentlyContinue
+        $loggedIn = $false
+        if ($gh) { & gh auth status *> $null; $loggedIn = $LASTEXITCODE -eq 0 }
+        if ($loggedIn) {
+            # From this very tag (an older genuine build under a newer tag fails), on GitHub's runners.
+            & gh attestation verify (Join-Path $tmp $asset) --repo $Repo --signer-workflow "$Repo/.github/workflows/release-cli.yml" --source-ref "refs/tags/$tag" --deny-self-hosted-runners *> $null
+            if ($LASTEXITCODE -ne 0) { Die "$asset has no build provenance from $Repo's release workflow at $tag (gh attestation verify failed): not installing it" }
+            Say "checked against SHA256SUMS and the build provenance of $Repo's release workflow"
+        } elseif ($verify -eq 'attestation') {
+            Die "ROLL_VERIFY=attestation needs gh, logged in (gh auth login), to check $asset's build provenance"
+        } else {
+            Say "checked against SHA256SUMS only: with gh logged in, this script also checks build provenance (or run gh attestation verify <file> --repo $Repo on the zip)"
+        }
+    } elseif ($verify -ne 'attestation') {
+        Say "checked against SHA256SUMS only (build provenance not checked: ROLL_VERIFY=$verify, from $Releases)"
+    }
 
     Expand-Archive -Path (Join-Path $tmp $asset) -DestinationPath (Join-Path $tmp 'out')
     $new = Join-Path $tmp 'out\roll.exe'

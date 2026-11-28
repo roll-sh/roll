@@ -64,5 +64,5 @@ c, err = secrets.LoginWithIdentity(ctx, api, "idn_…", func(ctx context.Context
 })
 ```
 
-Tests: `go test -race ./...` here (CI's `sdk` job), or without Go installed:
+Tests: `go test -race ./...` here (CI's `sdk-go` job), or without Go installed:
 `docker run --rm -v "$PWD":/src -w /src golang:1.24-bookworm go test -race ./...`.

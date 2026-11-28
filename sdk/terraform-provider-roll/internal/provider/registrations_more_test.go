@@ -42,6 +42,7 @@ func (n noneOf) CheckPlan(_ context.Context, req plancheck.CheckPlanRequest, res
 // and no credential sent in (the App's private key, the SIEM's token, the token in the rotator's
 // URL) in the plan or the state.
 func TestMoreRegistrationsAsCode(t *testing.T) {
+	t.Parallel()
 	f := &fakeRolld{envs: map[string]*environment{}, keys: map[string]map[string]any{}, identities: map[string]map[string]any{}, syncs: map[string]map[string]any{}, tokens: map[string]map[string]any{}}
 	srv := httptest.NewServer(f)
 	defer srv.Close()
@@ -215,16 +216,11 @@ resource "roll_secrets_project" "settings" {
 					sentButNotKept,
 				),
 			},
-			// What roll shows once, or never, isn't imported.
+			// What roll shows once, or never, isn't imported. One import per shape: the
+			// registrations share one import (`importProject` with an id), the project's settings
+			// another, the project a third.
 			imported("roll_secrets_rotator.vendor", "url_wo_version", "secret", "rotate_secret"),
-			imported("roll_secrets_audit_sink.splunk", "token_wo_version", "secret"),
-			imported("roll_secrets_github_app.deploy", "private_key_wo_version"),
-			imported("roll_secrets_aws_role.deploy"),
-			imported("roll_secrets_aws_user.legacy"),
-			imported("roll_secrets_cloud_account.gcp"),
-			imported("roll_secrets_cloud_account.azure"),
 			imported("roll_secrets_required_keys.all"),
-			imported("roll_secrets_kms_key.cmk"),
 			imported("roll_secrets_project.settings"),
 		},
 		CheckDestroy: func(*terraform.State) error {

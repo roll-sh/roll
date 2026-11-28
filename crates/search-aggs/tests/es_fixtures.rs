@@ -4,7 +4,7 @@
 //! errors must have the same type and reason.
 //!
 //! Each suite also runs with every shard split into several segments (results must not depend
-//! on the segment layout). `FIXTURE_CASE=<name>` runs one case; `FIXTURE_SHOW=1` prints the
+//! on the segment layout); the random suites run in several segments only. `FIXTURE_CASE=<name>` runs one case; `FIXTURE_SHOW=1` prints the
 //! responses that differ.
 
 mod common;
@@ -159,124 +159,70 @@ fn run_suite(name: &str, segments: usize, rel: f64) {
     }
 }
 
+/// Runs a suite as captured, then with every shard split into `segments` segments.
+fn run_layouts(name: &str, segments: usize) {
+    run_suite(name, 1, 0.0);
+    run_suite(name, segments, 0.0);
+}
+
 #[test]
 fn main_single_shard() {
-    run_suite("main1", 1, 0.0);
+    run_layouts("main1", 4);
 }
 
 #[test]
 fn main_three_shards() {
-    run_suite("main3", 1, 0.0);
-}
-
-#[test]
-fn main_single_shard_four_segments() {
-    run_suite("main1", 4, 0.0);
-}
-
-#[test]
-fn main_three_shards_three_segments() {
-    run_suite("main3", 3, 0.0);
+    run_layouts("main3", 3);
 }
 
 #[test]
 fn join_two_shards() {
-    run_suite("join2", 1, 0.0);
-}
-
-#[test]
-fn join_two_shards_three_segments() {
-    run_suite("join2", 3, 0.0);
+    run_layouts("join2", 3);
 }
 
 #[test]
 fn bulk_three_shards() {
-    run_suite("bulk3", 1, 0.0);
-}
-
-#[test]
-fn bulk_three_shards_three_segments() {
-    run_suite("bulk3", 3, 0.0);
+    run_layouts("bulk3", 3);
 }
 
 #[test]
 fn range_fields_two_shards() {
-    run_suite("range2", 1, 0.0);
-}
-
-#[test]
-fn range_fields_two_shards_three_segments() {
-    run_suite("range2", 3, 0.0);
+    run_layouts("range2", 3);
 }
 
 #[test]
 fn time_series_two_shards() {
-    run_suite("ts2", 1, 0.0);
-}
-
-#[test]
-fn time_series_two_shards_three_segments() {
-    run_suite("ts2", 3, 0.0);
+    run_layouts("ts2", 3);
 }
 
 #[test]
 fn pre_aggregated_two_shards() {
-    run_suite("pre2", 1, 0.0);
-}
-
-#[test]
-fn pre_aggregated_two_shards_three_segments() {
-    run_suite("pre2", 3, 0.0);
+    run_layouts("pre2", 3);
 }
 
 #[test]
 fn exponential_histograms_two_shards() {
-    run_suite("exp2", 1, 0.0);
-}
-
-#[test]
-fn exponential_histograms_two_shards_three_segments() {
-    run_suite("exp2", 3, 0.0);
+    run_layouts("exp2", 3);
 }
 
 #[test]
 fn shapes_two_shards() {
-    run_suite("shape2", 1, 0.0);
-}
-
-#[test]
-fn shapes_two_shards_three_segments() {
-    run_suite("shape2", 3, 0.0);
+    run_layouts("shape2", 3);
 }
 
 #[test]
 fn licensed_two_shards() {
-    run_suite("lic2", 1, 0.0);
-}
-
-#[test]
-fn licensed_two_shards_three_segments() {
-    run_suite("lic2", 3, 0.0);
+    run_layouts("lic2", 3);
 }
 
 #[test]
 fn time_series_geo_two_shards() {
-    run_suite("tsg2", 1, 0.0);
-}
-
-#[test]
-fn time_series_geo_two_shards_three_segments() {
-    run_suite("tsg2", 3, 0.0);
+    run_layouts("tsg2", 3);
 }
 
 #[test]
 fn frequent_item_sets_two_shards() {
-    run_suite("fis2", 1, 0.0);
-}
-
-#[test]
-fn frequent_item_sets_two_shards_three_segments() {
-    run_suite("fis2", 3, 0.0);
+    run_layouts("fis2", 3);
 }
 
 /// Installs the part-of-speech entries of the `cat2` corpus words (an excerpt of
@@ -290,83 +236,45 @@ fn install_cat_dictionary() {
 #[test]
 fn categorize_text_two_shards() {
     install_cat_dictionary();
-    run_suite("cat2", 1, 0.0);
+    run_layouts("cat2", 3);
 }
 
 #[test]
-fn categorize_text_two_shards_three_segments() {
-    install_cat_dictionary();
-    run_suite("cat2", 3, 0.0);
+fn core_errors_and_edges_three_shards() {
+    run_layouts("err3", 2);
 }
+
+#[test]
+fn review_fixes_three_shards() {
+    run_layouts("fix3", 2);
+}
+
+// The random suites are wide nets over request shapes the suites above already run as
+// captured: they run in several segments only, which also holds them to Elasticsearch's
+// answers.
 
 #[test]
 fn categorize_text_random_rounds() {
-    install_cat_dictionary();
-    run_suite("catr1", 1, 0.0);
-}
-
-#[test]
-fn categorize_text_random_rounds_three_segments() {
     install_cat_dictionary();
     run_suite("catr1", 3, 0.0);
 }
 
 #[test]
-fn core_errors_and_edges_three_shards() {
-    run_suite("err3", 1, 0.0);
-}
-
-#[test]
-fn core_errors_and_edges_three_shards_two_segments() {
-    run_suite("err3", 2, 0.0);
-}
-
-#[test]
 fn random_trees_three_shards() {
-    run_suite("rnd3", 1, 0.0);
-}
-
-#[test]
-fn random_trees_three_shards_three_segments() {
     run_suite("rnd3", 3, 0.0);
 }
 
 #[test]
 fn random_wide_trees_three_shards() {
-    run_suite("rndw3", 1, 0.0);
-}
-
-#[test]
-fn random_wide_trees_three_shards_two_segments() {
     run_suite("rndw3", 2, 0.0);
 }
 
 #[test]
 fn random_wide_trees_other_docs_two_shards() {
-    run_suite("rndx2", 1, 0.0);
-}
-
-#[test]
-fn random_wide_trees_other_docs_two_shards_three_segments() {
     run_suite("rndx2", 3, 0.0);
 }
 
 #[test]
 fn random_dates_two_shards() {
-    run_suite("rnddate2", 1, 0.0);
-}
-
-#[test]
-fn random_dates_two_shards_three_segments() {
     run_suite("rnddate2", 3, 0.0);
-}
-
-#[test]
-fn review_fixes_three_shards() {
-    run_suite("fix3", 1, 0.0);
-}
-
-#[test]
-fn review_fixes_three_shards_two_segments() {
-    run_suite("fix3", 2, 0.0);
 }

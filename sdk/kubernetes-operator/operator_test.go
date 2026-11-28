@@ -153,9 +153,10 @@ func (f *fakeRolld) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.URL.Path {
 	case "/v1/secrets/projects/prj_a/environments/production/digest":
-		// A long poll answers once the digest moves (held here at most 3 s, not 25).
+		// A long poll answers once the digest moves (held here at most 3 s, not 25), or ends when
+		// the operator hangs up (so closing the server doesn't wait out a held poll).
 		if since := r.URL.Query().Get("since"); since != "" && r.URL.Query().Get("wait") != "" {
-			for until := time.Now().Add(3 * time.Second); f.digest == since && time.Now().Before(until); {
+			for until := time.Now().Add(3 * time.Second); f.digest == since && time.Now().Before(until) && r.Context().Err() == nil; {
 				f.mu.Unlock()
 				time.Sleep(20 * time.Millisecond)
 				f.mu.Lock()

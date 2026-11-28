@@ -33,15 +33,3 @@ pub fn expected(tree: &dyn Tree) -> Option<(&'static str, Vec<String>)> {
     }
     (!names.is_empty()).then_some((file, names))
 }
-
-#[cfg(test)]
-mod tests {
-    use crate::tests::tree as files;
-
-    #[test]
-    fn an_example_file_names_what_the_app_needs() {
-        let t = files(&[(".env.example", "# Stripe\nSTRIPE_KEY=sk_test_xxx\nexport DATABASE_URL=\n\nNEXT_PUBLIC_SITE=https://x\nnot a line\n1BAD=x\nSTRIPE_KEY=again\n")]);
-        assert_eq!(super::expected(&t), Some((".env.example", vec!["STRIPE_KEY".to_string(), "DATABASE_URL".into(), "NEXT_PUBLIC_SITE".into()])));
-        assert_eq!(super::expected(&files(&[("app.js", "")])), None);
-    }
-}

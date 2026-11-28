@@ -433,6 +433,8 @@ export interface Silence {
   alerts: string[];
   reason: string;
   created_at: number;
+  /** A repeating one: quiet only inside these weekly windows. */
+  every?: { windows: { from: string; to: string }[]; timezone?: string };
 }
 
 /** What a project's board charts (`board.rs`): one service's metric in one environment. */
@@ -673,6 +675,12 @@ export interface EnvironmentDiff {
   settings: { field: string; from: unknown; to: unknown; put: EnvironmentPut }[];
 }
 
+export interface Hsts {
+  max_age: number;
+  include_subdomains?: boolean;
+  preload?: boolean;
+}
+
 export interface EnvironmentPut {
   /** Attack mode by itself: once a minute's requests reach per_minute, a challenge for every visitor without a pass for minutes; null: never by itself. */
   attack_mode?: { per_minute: number; minutes?: number } | null;
@@ -705,6 +713,8 @@ export interface EnvironmentPut {
   traces?: boolean;
   /** Its pages measure their Web Vitals (a tag roll adds). */
   vitals?: boolean;
+  /** Strict-Transport-Security over HTTPS: its own, false (none) or null (the default, two years). */
+  hsts?: Hsts | false | null;
   /** How long its logs are kept (null: 7 days). */
   log_retention_days?: 7 | 30 | 90 | null;
   /** Days its built deployments stay to roll back to past the newest ten (1–90); null: only those. */
@@ -836,6 +846,8 @@ export interface Environment extends EnvironmentSummary {
   traces?: boolean;
   /** Its pages measure their Web Vitals for roll. */
   vitals?: boolean;
+  /** Its Strict-Transport-Security over HTTPS (null: none sent). */
+  hsts?: Hsts | null;
   /** Days its logs are kept: 7 (default), 30 or 90; a preview's are 7. */
   log_retention_days?: number;
   /** Days its built deployments stay to roll back to past the newest ten. */
@@ -1295,7 +1307,10 @@ export type VitalName = "lcp" | "inp" | "cls" | "fcp" | "ttfb";
 /** An uptime check: GET `path` every `every_s` (30–3600, default 60) through the environment's own proxy; passes on `status` (any 2xx/3xx when none) and, with `contains`, an answer holding it. */
 export interface UptimeCheck {
   name: string;
-  path: string;
+  /** An HTTP check's; none for a TCP check. */
+  path?: string;
+  /** A TCP service's check: its port connected to through its own network, `contains` read in its banner. */
+  tcp?: boolean;
   every_s?: number;
   timeout_s?: number;
   status?: number;
@@ -1312,11 +1327,18 @@ export interface UptimeCheck {
   method?: "GET" | "HEAD" | "POST" | "PUT" | "PATCH" | "DELETE" | "OPTIONS";
   headers?: Record<string, string>;
   body?: string;
+  /** 50–60000 ms: two passes in a row slower than this are `check.slow` (degraded), until one isn't. Not a browser check's; a TCP check's is its connect. */
+  slow_ms?: number;
+  /** An HTTP check's, at most 5, all must hold: a JSON value at a dotted path (`$.items.0.id`), text its answer mustn't hold, or a header holding text (never a pattern). */
+  assert?: ({ json: string; equals: unknown } | { not_contains: string } | { header: string; matches: string })[];
+  /** 1–5: failures in a row before down (default 2), and passes in a row before up again (default 1). */
+  fail_after?: number;
+  recover_after?: number;
 }
 
 export interface UptimeCheckState {
   name: string;
-  /** null: not tried yet; false once it failed twice in a row. */
+  /** null: not tried yet; false once it failed `fail_after` times in a row, until `recover_after` passes. */
   up: boolean | null;
   failures: number;
   last_at: number | null;
@@ -1324,6 +1346,8 @@ export interface UptimeCheckState {
   ms: number | null;
   error: string | null;
   down_since: number | null;
+  /** Two passes in a row over its `slow_ms`, until one isn't. */
+  slow: boolean;
   /** A browser check's last failure kept (its screenshot and Playwright trace), as the owner knows. */
   failure_at?: number;
   /** A preview's: the deployment this result is of (production's browser checks, run on each of its heads). */
@@ -1507,6 +1531,7 @@ export type NotifyEvent =
   | "volume.backup_failed"
   | "volume.full"
   | "check.down"
+  | "check.slow"
   | "heartbeat.missed"
   | "deploy.vulnerable"
   | "alert.slo"
@@ -1711,7 +1736,7 @@ export const appsApi = {
   updateIncident: (project: string, incident: string, body: { state: IncidentState; text: string }) => call<null>("POST", `/v1/apps/projects/${enc(project)}/status-page/incidents/${enc(incident)}/updates`, body),
   deleteStatusPage: (project: string) => call<void>("DELETE", `/v1/apps/projects/${enc(project)}/status-page`),
   silences: (id: string, e: string) => call<Silence[]>("GET", `${env(id, e)}/silences`),
-  addSilence: (id: string, e: string, body: { until: number; reason: string; alerts?: string[] }) => call<Silence>("POST", `${env(id, e)}/silences`, body),
+  addSilence: (id: string, e: string, body: { until?: number; reason: string; alerts?: string[]; every?: Silence["every"] }) => call<Silence>("POST", `${env(id, e)}/silences`, body),
   endSilence: (id: string, e: string, sid: string) => call<null>("DELETE", `${env(id, e)}/silences/${enc(sid)}`),
   board: (project: string) => call<{ panels: BoardPanel[] }>("GET", `/v1/apps/projects/${enc(project)}/board`),
   putBoard: (project: string, panels: BoardPanel[]) => call<{ panels: BoardPanel[] }>("PUT", `/v1/apps/projects/${enc(project)}/board`, { panels }),
@@ -1778,6 +1803,9 @@ export const appsApi = {
   removeNotifyTarget: (project: string, id: string) => call<null>("DELETE", `/v1/apps/projects/${enc(project)}/notifications/${enc(id)}`),
   testNotifyTarget: (project: string, id: string) => call<{ ok: boolean; code: number | null; error: string | null }>("POST", `/v1/apps/projects/${enc(project)}/notifications/${enc(id)}/test`),
   notifyDeliveries: (project: string, id: string) => call<NotifyDelivery[]>("GET", `/v1/apps/projects/${enc(project)}/notifications/${enc(id)}/deliveries`),
+  /** A delivered or failed one sent again from its first try (409 for a page resolved since). */
+  redeliver: (project: string, id: string, delivery: string) =>
+    call<NotifyDelivery>("POST", `/v1/apps/projects/${enc(project)}/notifications/${enc(id)}/deliveries/${enc(delivery)}/redeliver`),
   putRegistry: (id: string, body: { username: string; password: string; server?: string }) => call<Service>("PUT", `${svc(id)}/registry`, body),
   deleteRegistry: (id: string) => call<Service>("DELETE", `${svc(id)}/registry`),
   putGitLogin: (id: string, body: { username: string; password: string } | { username: string; secret: string }) => call<Service>("PUT", `${svc(id)}/git-login`, body),

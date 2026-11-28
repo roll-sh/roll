@@ -42,6 +42,7 @@ const EVENTS: { value: NotifyEvent; label: string }[] = [
   { value: "volume.backup_failed", label: "Backup failed" },
   { value: "volume.full", label: "Volume 90% full" },
   { value: "check.down", label: "Uptime check down" },
+  { value: "check.slow", label: "Uptime check slow" },
   { value: "heartbeat.missed", label: "Heartbeat missed" },
   { value: "deploy.vulnerable", label: "New known vulnerabilities" },
   { value: "audit", label: "Every change people make (audit log)" },
@@ -66,7 +67,7 @@ export function NotificationsPanel({ project, projectName, runner }: { project: 
   const [url, setUrl] = useState("");
   const [region, setRegion] = useState<"us" | "eu">("us");
   const oncall = kind === "pagerduty" || kind === "opsgenie";
-  const [events, setEvents] = useState<NotifyEvent[]>(["check.down", "heartbeat.missed", "alert.slo", "alert.anomaly", "deploy.failed", "rollout.waiting", "deploy.ready", "error.new", "error.regressed", "crash_loop", "spend.alert", "spend.spike", "spend.limit", "alert.memory", "alert.cpu", "alert.metric", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "alert.route", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"]);
+  const [events, setEvents] = useState<NotifyEvent[]>(["check.down", "check.slow", "heartbeat.missed", "alert.slo", "alert.anomaly", "deploy.failed", "rollout.waiting", "deploy.ready", "error.new", "error.regressed", "crash_loop", "spend.alert", "spend.spike", "spend.limit", "alert.memory", "alert.cpu", "alert.metric", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "alert.route", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"]);
   const [envs, setEnvs] = useState("");
   const [previews, setPreviews] = useState(false);
   // Only some of the project's services (none chosen: every one).
@@ -235,23 +236,39 @@ export function NotificationsPanel({ project, projectName, runner }: { project: 
 
 function Deliveries({ project, target }: { project: string; target: string }) {
   const [list, setList] = useState<NotifyDelivery[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
   useEffect(() => {
     appsApi.notifyDeliveries(project, target).then(setList, () => setList([]));
   }, [project, target]);
   if (!list) return null;
   if (!list.length) return <p className="mt-2 text-[12px] text-subtle">Nothing sent yet.</p>;
+  const redeliver = (id: string) => {
+    setError(null);
+    appsApi.redeliver(project, target, id).then(
+      (d) => setList((l) => l && l.map((x) => (x.id === d.id ? d : x))),
+      (e: unknown) => setError(e instanceof Error ? e.message : String(e)),
+    );
+  };
   return (
-    <ul className="mt-2 space-y-1 font-mono text-[11.5px]">
-      {list.slice(0, 10).map((d) => (
-        <li key={d.id} className="flex gap-3">
-          <span className={d.status === "failed" ? "text-danger" : d.status === "pending" ? "text-accent" : "text-muted"}>{d.status}</span>
-          <span className="text-fg">{d.kind}</span>
-          <span className="text-subtle">{d.code ?? "—"}</span>
-          <span className="min-w-0 flex-1 truncate text-subtle">{d.error ?? ""}</span>
-          <span className="text-subtle">{since(d.at)}</span>
-        </li>
-      ))}
-    </ul>
+    <>
+      <ul className="mt-2 space-y-1 font-mono text-[11.5px]">
+        {list.slice(0, 10).map((d) => (
+          <li key={d.id} className="flex items-center gap-3">
+            <span className={d.status === "failed" ? "text-danger" : d.status === "pending" ? "text-accent" : "text-muted"}>{d.status}</span>
+            <span className="text-fg">{d.kind}</span>
+            <span className="text-subtle">{d.code ?? "—"}</span>
+            <span className="min-w-0 flex-1 truncate text-subtle">{d.error ?? ""}</span>
+            <span className="text-subtle">{since(d.at)}</span>
+            {d.status !== "pending" && (
+              <button type="button" className="font-sans text-[11.5px] text-muted hover:text-fg" onClick={() => redeliver(d.id)}>
+                Redeliver
+              </button>
+            )}
+          </li>
+        ))}
+      </ul>
+      {error && <p className="mt-1 text-[12px] text-danger">{error}</p>}
+    </>
   );
 }
 

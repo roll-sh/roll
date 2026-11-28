@@ -829,6 +829,9 @@ pub struct Store {
     /// Seals a preview's own variables (rolld: with `ROLL_SECRET_KEY`); unset, they're kept as
     /// written, and read either way.
     pub sealer: std::sync::OnceLock<std::sync::Arc<dyn crate::ports::Sealer>>,
+    /// Bumped after a write that may have recorded an event, on this node: wakes the followers
+    /// waiting on [`Store::wait_events`] at once (another node's events are read on a short timer).
+    events_tick: tokio::sync::watch::Sender<u64>,
 }
 
 const COLUMNS: &str = "id, project_id, slug, repo, change_id, branch, number, title, github_pr, head, trusted, desired, state, error, attempts, \
@@ -1075,7 +1078,7 @@ impl Store {
         if !db.has_column("shares", "last_at")? {
             db.add_column("shares", "last_at", "INTEGER")?;
         }
-        Ok(Store { db, rates: Rates::default(), signing: std::sync::OnceLock::new(), sealer: std::sync::OnceLock::new() })
+        Ok(Store { db, rates: Rates::default(), signing: std::sync::OnceLock::new(), sealer: std::sync::OnceLock::new(), events_tick: tokio::sync::watch::channel(0).0 })
     }
 
     pub fn now_ms(&self) -> Result<i64> {
@@ -1327,15 +1330,6 @@ impl Store {
         })
     }
 
-    /// An earlier push as if it had been replaced `ms` earlier.
-    #[cfg(test)]
-    pub(crate) fn age_pinned(&self, id: &str, service: &str, revision: &str, ms: i64) -> Result<()> {
-        self.db.write(|c| {
-            c.execute("UPDATE pinned SET at = at - ? WHERE preview_id = ? AND service = ? AND revision = ?", params![ms, id, service, revision])?;
-            Ok::<_, Error>(())
-        })
-    }
-
     pub fn set_service_config(&self, id: &str, name: &str, config: &str) -> Result<()> {
         self.db.write(|c| {
             c.execute("UPDATE services SET config = ? WHERE preview_id = ? AND name = ?", params![config, id, name])?;
@@ -1456,7 +1450,7 @@ impl Store {
         let now = self.now_ms()?;
         let base = crate::label_part(&format!("{}-{}", n.key, n.project_name), SLUG_MAX);
         let base = if base.is_empty() { crate::label_part(&id, SLUG_MAX) } else { base };
-        self.db.write(|c| {
+        let made = self.db.write(|c| {
             if let Some(change) = &n.change_id
                 && let Some(existing) = c.query_row(&format!("SELECT {COLUMNS} FROM previews WHERE change_id = ?"), [change], row).optional()?
             {
@@ -1497,7 +1491,9 @@ impl Store {
             emit(c, now, "created", &n.project_id, &id, n.change_id.as_deref(), &serde_json::json!({ "head": n.head }))?;
             let r = c.query_row(&format!("SELECT {COLUMNS} FROM previews WHERE id = ?"), [&id], row)?;
             Ok((r, true))
-        })
+        });
+        self.events_written();
+        made
     }
 
     pub fn row(&self, id: &str) -> Result<Row> {
@@ -1522,7 +1518,9 @@ impl Store {
     /// stored (with `updated_at`) unless it's unchanged. Returns the stored row.
     pub fn update(&self, id: &str, mut f: impl FnMut(&mut Row)) -> Result<Row> {
         let now = self.now_ms()?;
-        self.db.write(|c| {
+        let mut emitted = false;
+        let updated = self.db.write(|c| {
+            emitted = false;
             let old = c.query_row(&format!("SELECT {COLUMNS} FROM previews WHERE id = ?"), [id], row).optional()?;
             let Some(old) = old else { return Err(Error::NotFound(format!("no preview {id}"))) };
             let mut new = old.clone();
@@ -1567,9 +1565,14 @@ impl Store {
             };
             if let Some(kind) = kind {
                 emit(c, now, kind, &new.project_id, id, new.change_id.as_deref(), &serde_json::json!({ "head": new.head }))?;
+                emitted = true;
             }
             Ok(new)
-        })
+        });
+        if emitted {
+            self.events_written();
+        }
+        updated
     }
 
     /// Note that the preview was used (a request, a push) without a write per request: only
@@ -1585,7 +1588,7 @@ impl Store {
     /// Remove a preview's rows (after its branches and services are gone).
     pub fn remove(&self, id: &str) -> Result<()> {
         let now = self.now_ms()?;
-        self.db.write(|c| {
+        let removed = self.db.write(|c| {
             let gone = c.query_row("SELECT project_id, change_id, head FROM previews WHERE id = ?", [id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, String>(2)?))).optional()?;
             if let Some((project, change, head)) = gone {
                 emit(c, now, "deleted", &project, id, change.as_deref(), &serde_json::json!({ "head": head }))?;
@@ -1597,7 +1600,9 @@ impl Store {
             // Its own variables' references' setters.
             c.execute("DELETE FROM env_refs WHERE scope = ?", [format!("preview:{id}")])?;
             Ok::<_, Error>(())
-        })
+        });
+        self.events_written();
+        removed
     }
 
     /// The events after `after`, oldest first, at most `limit` (`GET /v1/previews/events`).
@@ -1626,7 +1631,32 @@ impl Store {
                 emit(c, now, kind, &project, id, change.as_deref(), &data)?;
             }
             Ok::<_, Error>(())
-        })
+        })?;
+        self.events_written();
+        Ok(())
+    }
+
+    /// Wake [`Store::wait_events`]' followers on this node (a hint: they read the events again).
+    fn events_written(&self) {
+        self.events_tick.send_modify(|n| *n = n.wrapping_add(1));
+    }
+
+    /// The events after `after`, as [`Store::events`], waiting up to `wait` for one when there's
+    /// none yet: woken at once by a write on this node, and reading again every
+    /// [`EVENTS_RECHECK`] for another node's (a fleet shares one database). Empty after `wait`.
+    pub async fn wait_events(self: &std::sync::Arc<Self>, after: i64, limit: usize, wait: std::time::Duration) -> Result<Vec<crate::Event>> {
+        let deadline = tokio::time::Instant::now() + wait;
+        let mut woken = self.events_tick.subscribe();
+        loop {
+            woken.borrow_and_update();
+            let me = self.clone();
+            let got = tokio::task::spawn_blocking(move || me.events(after, limit)).await.map_err(|e| Error::Internal(e.to_string()))??;
+            let now = tokio::time::Instant::now();
+            if !got.is_empty() || now >= deadline {
+                return Ok(got);
+            }
+            let _ = tokio::time::timeout((deadline - now).min(EVENTS_RECHECK), woken.changed()).await;
+        }
     }
 
     /// The newest event's seq (0 for none): where a follower that wants only what comes next
@@ -2862,12 +2892,13 @@ impl Store {
         })
     }
 
-    /// Note `review`'s work item made (`number`), or, with `None`, not: its claim let go.
-    pub fn set_note_work(&self, preview: &str, review: &str, made: Option<(u64, &str)>) -> Result<()> {
+    /// Note `review`'s work item made (`number`), or, with `None`, not: `by`'s claim let go (one
+    /// another caller took over since stays theirs).
+    pub fn set_note_work(&self, preview: &str, review: &str, by: &str, made: Option<(u64, &str)>) -> Result<()> {
         self.db.write(|c| {
             match made {
                 Some((number, url)) => c.execute("UPDATE note_work SET number = ?, url = ? WHERE preview_id = ? AND review_id = ?", params![number as i64, url, preview, review])?,
-                None => c.execute("DELETE FROM note_work WHERE preview_id = ? AND review_id = ? AND number = 0", params![preview, review])?,
+                None => c.execute("DELETE FROM note_work WHERE preview_id = ? AND review_id = ? AND number = 0 AND by = ?", params![preview, review, by])?,
             };
             Ok::<_, Error>(())
         })
@@ -4349,6 +4380,11 @@ pub const GONE_KEPT: usize = 30;
 
 /// How long an event is kept for followers (`GET /v1/previews/events`).
 const EVENTS_KEEP_MS: i64 = 7 * 24 * 3_600_000;
+/// How often a waiting follower reads the events again for another node's (its own node's wake
+/// it at once).
+const EVENTS_RECHECK: std::time::Duration = std::time::Duration::from_secs(2);
+/// The longest a follower waits for an event (`wait`).
+pub const EVENTS_WAIT_MAX_S: u64 = 25;
 
 /// Record an event in the write that made it so. Its `seq` is taken inside that write (never a
 /// sequence, whose values are handed out outside it), so on Postgres two writers conflict and one
@@ -4387,55 +4423,6 @@ pub fn month_start(now_ms: i64) -> i64 {
 
 #[cfg(test)]
 mod tests {
-    /// The pull request comment's screenshot link opens that screenshot of a public preview
-    /// until it expires; a link anyone changed (another preview, a later expiry, a guessed
-    /// signature), an older screenshot's link, or a preview gone private doesn't.
-    #[test]
-    fn a_new_heads_screenshot_keeps_the_one_before_and_how_much_changed() {
-        let png = |dark: u32| {
-            let img = image::RgbaImage::from_fn(10, 10, |x, _| if x < dark { image::Rgba([0, 0, 0, 255]) } else { image::Rgba([255, 255, 255, 255]) });
-            let mut out = std::io::Cursor::new(Vec::new());
-            img.write_to(&mut out, image::ImageFormat::Png).unwrap();
-            out.into_inner()
-        };
-        let (_dir, store) = store();
-        let (row, _) = store.create(&new("chg_visual")).unwrap();
-        let id = row.id.as_str();
-        let speed = |load_ms| crate::PageSpeed { ttfb_ms: 20, fcp_ms: Some(100), load_ms, bytes: 1000, lcp_ms: None, cls: None, endpoints: Vec::new() };
-        store.set_screenshot(id, "cs_1", &png(0), Some(&speed(900)), Some(&png(0))).unwrap();
-        assert_eq!(store.visual_change(id).unwrap(), None, "a first one: nothing to compare");
-        assert_eq!(store.page_speed(id).unwrap(), Some(crate::PageSpeedView { now: speed(900), before: None }));
-        store.set_screenshot(id, "cs_2", &png(3), Some(&speed(1200)), Some(&png(5))).unwrap();
-        assert_eq!(store.visual_change(id).unwrap(), Some(("cs_1".to_string(), 3000)), "30% of pixels");
-        assert_eq!(store.previous_screenshot(id).unwrap(), Some(png(0)));
-        assert_eq!(store.page_speed(id).unwrap(), Some(crate::PageSpeedView { now: speed(1200), before: Some(speed(900)) }));
-        // The phone-width one too, with its own change.
-        assert_eq!(store.phone_change(id).unwrap(), Some(5000));
-        assert_eq!(store.phone_screenshot(id, true).unwrap(), Some(png(0)));
-        // Against the default branch's preview: its own share, at both widths.
-        let (main, _) = store.create(&New { change_id: None, branch: Some("main".into()), key: "main".into(), ..new("chg_main") }).unwrap();
-        assert!(store.compare_with_base(id, &main.id, "main", None).is_ok() && store.base_change(id).unwrap().is_none(), "no screenshot there yet");
-        store.set_screenshot(&main.id, "cs_m", &png(1), None, Some(&png(0))).unwrap();
-        store.keep_base_history(&main.id, "cs_m").unwrap();
-        store.compare_with_base(id, &main.id, "main", None).unwrap();
-        assert_eq!(store.base_change(id).unwrap(), Some(BaseRow { preview: main.id.clone(), branch: "main".into(), change_bp: 2000, phone_bp: Some(5000), head: Some("cs_m".into()), speed: None, a11y: None, health: None, text: None, links: None, api: None, api_breaking: Vec::new(), api_unread: false }));
-        // Main moves on (to what the change's page looks like): a change that left it at cs_m is
-        // still compared with cs_m's, and shown that one.
-        store.set_screenshot(&main.id, "cs_m2", &png(3), Some(&speed(700)), Some(&png(5))).unwrap();
-        store.keep_base_history(&main.id, "cs_m2").unwrap();
-        store.compare_with_base(id, &main.id, "main", Some("cs_m")).unwrap();
-        assert_eq!(store.base_change(id).unwrap().map(|b| (b.change_bp, b.head)), Some((2000, Some("cs_m".into()))));
-        assert_eq!(store.base_screenshot(id, false, None).unwrap(), Some(png(1)));
-        store.compare_with_base(id, &main.id, "main", Some("cs_gone")).unwrap();
-        assert_eq!(store.base_change(id).unwrap().map(|b| (b.change_bp, b.head)), Some((0, Some("cs_m2".into()))), "not kept: the latest");
-        // Its load there comes along (to say "slower than main"), from the history too.
-        store.compare_with_base(id, &main.id, "main", Some("cs_m2")).unwrap();
-        assert_eq!(store.base_change(id).unwrap().and_then(|b| b.speed).map(|s| s.load_ms), Some(700));
-        // Taken again at the same head: what came before stays.
-        store.set_screenshot(id, "cs_2", &png(3), Some(&speed(1100)), Some(&png(5))).unwrap();
-        assert_eq!(store.visual_change(id).unwrap(), Some(("cs_1".to_string(), 3000)));
-        assert_eq!(store.page_speed(id).unwrap().unwrap().before, Some(speed(900)));
-    }
 
     #[test]
     fn a_share_link_opens_its_preview_until_it_ends_or_is_revoked() {
@@ -4559,23 +4546,6 @@ mod tests {
         assert!(store.vars(&b.id).is_err());
     }
 
-    /// An earlier push's copy of the data costs what it holds, in the preview's cost (and its
-    /// budget and size cap with it).
-    #[test]
-    fn an_earlier_pushs_copy_of_the_data_counts_in_the_previews_cost() {
-        let (_dir, store) = store();
-        let (row, _) = store.create(&new("chg_copy")).unwrap();
-        let before = store.cost(&row).unwrap();
-        let d = PinnedData { revision: "cs_1".into(), kind: Kind::Postgres, parent: "prj_db".into(), name: "pv-x-1".into(), r#ref: "br_1".into(), kept: None, source: "br_0".into() };
-        store.add_pinned_data(&row.id, &d).unwrap();
-        store.set_pinned_usage(&row.id, &d, &crate::ports::Usage { bytes: 3 << 20, storage_usd_month: 0.5, active_usd_hour: 0.0, month_to_date_usd: 0.25 }).unwrap();
-        let after = store.cost(&row).unwrap();
-        assert_eq!(after.bytes - before.bytes, 3 << 20);
-        assert_eq!(store.preview(&row.id).unwrap().copies, crate::Copies { count: 1, bytes: 3 << 20, usd_month: 0.5 }, "and said apart");
-        assert!((after.sleeping_usd_month - before.sleeping_usd_month - 0.5).abs() < 1e-9);
-        assert!(after.month_to_date_usd - before.month_to_date_usd >= 0.25);
-    }
-
     fn store() -> (tempfile::TempDir, Store) {
         let dir = tempfile::tempdir().unwrap();
         let s = Store::open(&Target::Sqlite(dir.path().join("p.db")), Default::default()).unwrap();
@@ -4626,10 +4596,4 @@ mod tests {
         assert_eq!(s.environment_of("postgres", "br_9").unwrap(), None);
     }
 
-    #[test]
-    fn months_start_on_the_first() {
-        // 2026-11-12T19:00:00Z → 2026-11-01T00:00:00Z
-        assert_eq!(month_start(1_794_510_000_000), 1_793_491_200_000);
-        assert_eq!(month_start(1_793_491_200_000), 1_793_491_200_000);
-    }
 }

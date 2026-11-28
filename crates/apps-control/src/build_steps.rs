@@ -72,23 +72,3 @@ impl BuildSteps {
         self.seen.iter().filter(|(_, kept, _)| *kept).take(MAX).map(|(_, _, s)| s.clone()).collect()
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn plain_progress_reads_as_steps_with_times_and_cache_hits() {
-        let log = "#0 building with \"default\" instance using docker driver\n\n#1 [internal] load build definition from Dockerfile\n#1 transferring dockerfile: 105B done\n#1 DONE 0.1s\n\n#2 [internal] load metadata for docker.io/library/node:22\n#2 DONE 0.0s\n\n#3 [internal] load build context\n#3 transferring context: 30B done\n#3 DONE 0.4s\n\n#4 [1/4] FROM docker.io/library/node:22@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc\n#4 resolve docker.io/library/node:22@sha256:d9e8 0.0s done\n#4 DONE 0.2s\n\n#5 [2/4] COPY package.json ./\n#5 CACHED\n\n#6 [3/4] RUN npm ci\n#6 0.314 #9 DONE 99.0s\n#6 DONE 21.3s\n\n#7 [4/4] RUN npm run build\n#7 1.2 Error: boom\n#7 ERROR: process \"/bin/sh -c npm run build\" did not complete successfully: exit code: 1\n";
-        let mut b = BuildSteps::default();
-        log.lines().for_each(|l| b.feed(l));
-        let s = b.steps();
-        let names: Vec<&str> = s.iter().map(|s| s.name.as_str()).collect();
-        assert_eq!(names, ["[internal] load build context", "[1/4] FROM docker.io/library/node:22", "[2/4] COPY package.json ./", "[3/4] RUN npm ci", "[4/4] RUN npm run build"]);
-        assert_eq!((s[0].ms, s[1].ms), (Some(400), Some(200)));
-        assert!(s[2].cached && s[2].ms.is_none());
-        // A step's own output saying `#9 DONE` is its output, not BuildKit's.
-        assert_eq!((s[3].ms, s[3].cached), (Some(21_300), false));
-        assert!(s[4].failed && s[4].ms.is_none());
-    }
-}

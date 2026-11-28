@@ -15,6 +15,14 @@
 #   ROLL_INSTALL_DIR    where to put `roll` (and `rolld`) (default: ~/.local/bin)
 #   ROLL_INSTALL_ROLLD  1: install `rolld` too, as `--with-rolld` does
 #   ROLL_RELEASES       where releases are downloaded from (default: https://github.com/roll-sh/roll/releases)
+#   ROLL_VERIFY         auto (default): also check each download's build provenance with
+#                       `gh attestation verify` when gh is installed and logged in, and say how
+#                       to check it when it isn't; attestation: refuse to install without that
+#                       check; checksum: SHA256SUMS only
+#
+# SHA256SUMS comes from the same release as the downloads, so it catches a broken download, not a
+# replaced release. The attestation does: the release workflow signs one for every asset with its
+# own GitHub identity, and GitHub keeps it outside the release.
 set -eu
 
 REPO=roll-sh/roll
@@ -29,6 +37,11 @@ case "$rolld" in
   0 | "") rolld=0 ;;
   1) ;;
   *) die "ROLL_INSTALL_ROLLD is 1 (install rolld too) or 0, not $rolld" ;;
+esac
+verify=${ROLL_VERIFY:-auto}
+case "$verify" in
+  auto | attestation | checksum) ;;
+  *) die "ROLL_VERIFY is auto, attestation or checksum, not $verify" ;;
 esac
 for a in "$@"; do
   case "$a" in
@@ -87,6 +100,25 @@ bins=roll
 say "installing $tag ($bins) for $target into $DIR"
 fetch "$RELEASES/download/$tag/SHA256SUMS" "$tmp/SHA256SUMS" || die "couldn't download the checksums of $tag"
 
+# Checks a download's build provenance: made by release-cli.yml in roll-sh/roll, from this very
+# tag (so an older genuine build re-uploaded under a newer tag fails), on GitHub's runners. Only for
+# GitHub's own releases (a mirror in ROLL_RELEASES serves the same bytes; check them there).
+attested=0
+attest() {
+  [ "$verify" != checksum ] || return 0
+  if [ "$RELEASES" != "https://github.com/$REPO/releases" ] && [ "$verify" = auto ]; then
+    return 0
+  fi
+  if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+    gh attestation verify "$1" --repo "$REPO" --signer-workflow "$REPO/.github/workflows/release-cli.yml" \
+      --source-ref "refs/tags/$tag" --deny-self-hosted-runners >/dev/null 2>&1 \
+      || die "$(basename "$1") has no build provenance from $REPO's release workflow at $tag (gh attestation verify failed): not installing it"
+    attested=1
+  elif [ "$verify" = attestation ]; then
+    die "ROLL_VERIFY=attestation needs gh, logged in (gh auth login), to check $(basename "$1")'s build provenance"
+  fi
+}
+
 # Downloads `<bin>-<target>.tar.gz`, checks it against SHA256SUMS and unpacks its one binary into
 # $tmp/<bin>/. Every download is checked before anything is installed.
 unpack() {
@@ -102,12 +134,20 @@ unpack() {
     die "needs sha256sum or shasum to check the download"
   fi
   [ "$have" = "$want" ] || die "$asset doesn't match its checksum (got $have, want $want): not installing it"
+  attest "$tmp/$asset"
   mkdir "$tmp/$1"
   tar -xzf "$tmp/$asset" -C "$tmp/$1"
   [ -f "$tmp/$1/$1" ] || die "$asset has no $1 binary"
   chmod 755 "$tmp/$1/$1"
 }
 for b in $bins; do unpack "$b"; done
+if [ "$attested" = 1 ]; then
+  say "checked against SHA256SUMS and the build provenance of $REPO's release workflow"
+elif [ "$verify" = auto ] && [ "$RELEASES" = "https://github.com/$REPO/releases" ]; then
+  say "checked against SHA256SUMS only: with gh logged in, this script also checks build provenance (or download the tarball and run gh attestation verify <file> --repo $REPO)"
+elif [ "$verify" != attestation ]; then
+  say "checked against SHA256SUMS only (build provenance not checked: ROLL_VERIFY=$verify, from $RELEASES)"
+fi
 
 mkdir -p "$DIR"
 for b in $bins; do

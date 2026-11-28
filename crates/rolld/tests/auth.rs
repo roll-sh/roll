@@ -3,8 +3,8 @@
 //! carry control-plane routes too): each route rolld lists at startup (from its routers, with the
 //! access `src/auth.rs` gives it) answers 401 without the token and something else with it,
 //! except the public ones; a signed-in user who isn't an admin (docs/accounts.md) gets 403 on
-//! every route that isn't theirs; CORS answers only the dashboard's origin; and rolld refuses to
-//! listen off loopback without a token.
+//! every route that isn't theirs; CORS answers only the dashboard's origin; rolld refuses to
+//! listen off loopback without a token, and without one answers only loopback names.
 
 mod common;
 
@@ -542,6 +542,18 @@ async fn every_control_plane_route_needs_the_operator_token() {
         .map(|(_, r, _)| r.clone())
         .collect();
     assert!(unscoped.is_empty(), "routes no scoped token can be classified for (add catalogue rows in roll-access): {unscoped:#?}");
+    // roll-access reads a secret key (what `keys: [...]` rules reach) only from a path under
+    // `…/secrets/{key}`: every secrets route naming a `{key}` is under it, or it says why its
+    // `{key}` isn't a secret key here.
+    const SECRET_KEY: &str = "/v1/secrets/projects/{project}/environments/{env}/secrets/{key}";
+    const NOT_A_SECRET_KEY: &[(&str, &str)] = &[];
+    let keyed: Vec<_> = routes
+        .iter()
+        .filter(|(h, r, _)| h == "api" && r.starts_with("/v1/secrets/") && r.split('/').any(|s| s == "{key}") && !r.starts_with(SECRET_KEY) && !NOT_A_SECRET_KEY.iter().any(|(p, _)| *p == r.as_str()))
+        .map(|(_, r, _)| r.clone())
+        .collect();
+    assert!(routes.iter().any(|(h, r, _)| h == "api" && r.starts_with(SECRET_KEY)), "rolld lists no {SECRET_KEY} route");
+    assert!(keyed.is_empty(), "secrets routes with a {{key}} that isn't a secret key's (name it otherwise, or list it in NOT_A_SECRET_KEY): {keyed:#?}");
     // A method a prefix row decides (no row of the route's own names it) takes the prefix's action,
     // whatever it answers: each was looked at, and a new one is (a GET that answers values is
     // reveal; the env of a preview was read until it was). Public routes aren't a grant's.
@@ -1003,6 +1015,44 @@ async fn a_developer_writes_a_search_cluster_only_while_it_isnt_protected() {
     assert_eq!(does(ada, reqwest::Method::GET, "/v1/search/clusters/stray".into(), None, None).await.0, 404, "nothing was made");
     let (s, v) = does(ada, reqwest::Method::POST, "/v1/search/clusters".into(), Some(serde_json::json!({ "name": "kept", "parent": parent })), Some(&project)).await;
     assert_eq!(s, 200, "a branch named into its parent's project: {v}");
+}
+
+/// Open (no token, loopback): only a loopback name is answered, so a page can't reach the API by
+/// pointing a name of its own at 127.0.0.1; the refusal names the ways forward, never the Host.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_open_rolld_answers_loopback_hosts_only() {
+    let home = tempfile::tempdir().unwrap();
+    let mut cmd = rolld(home.path(), &[], &[("ROLL_PRODUCTS", "tasks".to_string())]);
+    let started = common::on_any_port(&mut cmd, common::LISTENERS, home.path());
+    let mut child = cmd.stdout(Stdio::null()).spawn().expect("rolld starts");
+    let addrs = started.addrs(&mut child).await;
+    let _d = Rolld(child);
+    let (api, port) = (addrs.url("api"), addrs.port("api"));
+    let http = reqwest::Client::builder().timeout(Duration::from_secs(30)).build().unwrap();
+    let ask = |host: String, origin: Option<&'static str>| {
+        let mut req = http.get(format!("{api}/v1/workspace/projects")).header("host", host);
+        if let Some(o) = origin {
+            req = req.header("origin", o);
+        }
+        async move {
+            let r = req.send().await.unwrap();
+            (r.status().as_u16(), r.text().await.unwrap_or_default())
+        }
+    };
+    let since = std::time::Instant::now();
+    while ask(format!("127.0.0.1:{port}"), None).await.0 != 200 {
+        assert!(since.elapsed() < Duration::from_secs(60), "rolld didn't answer:\n{}", started.tail());
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let (status, body) = ask("attacker.example".into(), None).await;
+    assert_eq!(status, 421, "{body}");
+    assert!(body.contains("ROLL_DASHBOARD_ORIGIN") && body.contains("ROLL_ADMIN_TOKEN") && !body.contains("attacker"), "{body}");
+    for host in [format!("localhost:{port}"), format!("[::1]:{port}"), format!("api.localhost:{port}")] {
+        assert_eq!(ask(host.clone(), None).await.0, 200, "{host}");
+    }
+    // Previews' pages are others' (`chg-….preview.localhost`), and their own Origin is refused.
+    assert_eq!(ask(format!("chg-abc.preview.localhost:{port}"), None).await.0, 421);
+    assert_eq!(ask(format!("127.0.0.1:{port}"), Some("http://chg-abc.preview.localhost:7070")).await.0, 403);
 }
 
 #[test]

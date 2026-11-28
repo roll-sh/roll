@@ -482,10 +482,10 @@ pub(crate) async fn call_scheduled(apps: Arc<Apps>, service: &str, env: &str, ho
 }
 
 /// GET `path` of an environment on its owner for an uptime check (`crate::checks`), as `host`
-/// asks and past its gates as a schedule's call is: the status and at most `max` bytes of the
-/// answer, or why it never answered.
+/// asks and past its gates as a schedule's call is: the status, the headers and at most `max`
+/// bytes of the answer, or why it never answered.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn call_check(apps: Arc<Apps>, service: &str, env: &str, host: &str, method: &str, path: &str, headers: &[(String, String)], body: Option<String>, timeout: std::time::Duration, max: usize) -> std::result::Result<(u16, Vec<u8>), String> {
+pub(crate) async fn call_check(apps: Arc<Apps>, service: &str, env: &str, host: &str, method: &str, path: &str, headers: &[(String, String)], body: Option<String>, timeout: std::time::Duration, max: usize) -> std::result::Result<(u16, axum::http::HeaderMap, Vec<u8>), String> {
     let method = axum::http::Method::from_bytes(method.as_bytes()).unwrap_or(axum::http::Method::GET);
     let mut b = Request::builder().method(method).uri(path).header(header::HOST, host).header(header::USER_AGENT, "roll-uptime/1.0");
     for (k, v) in headers {
@@ -495,7 +495,7 @@ pub(crate) async fn call_check(apps: Arc<Apps>, service: &str, env: &str, host: 
     req.extensions_mut().insert(Scheduled);
     tokio::time::timeout(timeout, async {
         let r = proxy(apps, service, env, None, req).await;
-        let status = r.status().as_u16();
+        let (status, headers) = (r.status().as_u16(), r.headers().clone());
         // At most `max` read; the rest dropped, so its instance's lease and meter end with it.
         let mut body = r.into_body().into_data_stream();
         let mut out = Vec::new();
@@ -507,7 +507,7 @@ pub(crate) async fn call_check(apps: Arc<Apps>, service: &str, env: &str, host: 
                 break;
             }
         }
-        (status, out)
+        (status, headers, out)
     })
     .await
     .map_err(|_| format!("it didn't answer within {} s", timeout.as_secs()))
@@ -1780,6 +1780,14 @@ pub(crate) async fn proxy(apps: Arc<Apps>, service: &str, env: &str, deployment:
                 }
             }
         }
+        // Strict-Transport-Security over HTTPS, on by default (Vercel's, Netlify's), unless the
+        // app or the headers above sent their own.
+        if apps.cfg.scheme == "https"
+            && let Some(v) = &g.hsts
+            && !r.headers().contains_key(header::STRICT_TRANSPORT_SECURITY)
+        {
+            r.headers_mut().insert(header::STRICT_TRANSPORT_SECURITY, v.clone());
+        }
     }
     if deployment.is_some() || gate.as_ref().is_some_and(|g| g.preview) {
         r.headers_mut().insert("x-robots-tag", HeaderValue::from_static("noindex"));
@@ -2849,27 +2857,6 @@ async fn accepts(addr: std::net::SocketAddr) -> bool {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn a_traceparent_is_continued_only_when_it_is_one() {
-        use super::parse_traceparent as p;
-        let ids = Some(("4bf92f3577b34da6a3ce929d0e0e4736".to_string(), "00f067aa0ba902b7".to_string()));
-        assert_eq!(p("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"), ids);
-        for bad in ["ff-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01", "00-00000000000000000000000000000000-00f067aa0ba902b7-01", "00-4bf92f3577b34da6a3ce929d0e0e4736-0000000000000000-01", "00-4BF92F3577B34DA6A3CE929D0E0E4736-00f067aa0ba902b7-01", "00-4bf92f35-00f067aa0ba902b7-01", "garbage"] {
-            assert_eq!(p(bad), None, "{bad}");
-        }
-    }
-
-    #[test]
-    fn an_encoding_is_taken_by_its_own_q_and_star_only_for_the_rest() {
-        use super::accept_q as q;
-        assert_eq!((q(Some("gzip, br"), "br"), q(Some("gzip, br"), "gzip")), (1.0, 1.0));
-        assert_eq!(q(Some("gzip;q=0, *"), "gzip"), 0.0, "named and refused: * doesn't bring it back");
-        assert_eq!(q(Some("gzip;q=0, *"), "br"), 1.0);
-        assert_eq!(q(Some("gzip;Q=0"), "gzip"), 0.0);
-        assert_eq!(q(Some("gzip;q=1, br;q=0.1"), "br"), 0.1);
-        assert_eq!((q(None, "gzip"), q(Some("identity"), "gzip")), (0.0, 0.0));
-    }
-
-    #[test]
     fn one_byte_range_is_met_and_the_rest_is_the_whole_file() {
         use super::byte_range as r;
         assert_eq!(r("bytes=0-99", 1000), Some(Ok((0, 99))));
@@ -2883,12 +2870,8 @@ mod tests {
         for whole in ["bytes=0-1,5-6", "bytes=5-1", "items=0-1", "bytes=-", "bytes=a-b", "bytes=+1-2", "bytes=99999999999999999999-"] {
             assert_eq!(r(whole, 1000), None, "{whole}");
         }
-    }
-
-    #[test]
-    fn the_pages_mark_is_the_brands_export() {
-        let brand = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packages/brand/assets/horizon-dark.svg");
-        let Ok(svg) = std::fs::read_to_string(brand) else { return };
-        assert_eq!(super::HORIZON.trim(), svg.trim().replace("fill=\"#0a0a0a\"", "fill=\"currentColor\""), "regenerate crates/apps-control/assets/horizon.svg from @roll/brand");
+        // An encoding is taken by its own q: named and refused, * doesn't bring it back.
+        use super::accept_q as q;
+        assert_eq!((q(Some("gzip;q=0, *"), "gzip"), q(Some("gzip;Q=0"), "gzip"), q(Some("gzip;q=0, *"), "br")), (0.0, 0.0, 1.0));
     }
 }

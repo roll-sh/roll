@@ -727,6 +727,51 @@
         "x-roll-action": "read"
       }
     },
+    "/v1/apps/projects/{project}/notifications/{nid}/deliveries/{did}/redeliver": {
+      "post": {
+        "description": "Answers `Delivery` (pending again from its first try, its id kept: a receiver that dedupes on `X-Roll-Delivery` sees one event); 409 while it's still pending, or for an on-call target's event of an alert a later event opened or closed since (it would undo it).",
+        "operationId": "postProjectsProjectNotificationsNidDeliveriesDidRedeliver",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "nid",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "did",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`Delivery` (pending again from its first try, its id kept: a receiver that dedupes on `X-Roll-Delivery` sees one event); 409 while it's still pending, or for an on-call target's event of an alert a later event opened or closed since (it would undo it)"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Redeliver delivery",
+        "tags": [
+          "projects"
+        ],
+        "x-roll-action": "write"
+      }
+    },
     "/v1/apps/projects/{project}/notifications/{nid}/test": {
       "post": {
         "description": "Answers `{ ok, code, error }` (sent now, not retried).",
@@ -5256,7 +5301,7 @@
     },
     "/v1/apps/services/{id}/environments/{env}/silences": {
       "get": {
-        "description": "Answers `Silence[]` open now: `{ id, until /* ms */, alerts: string[] /* none: all */, reason, created_at }`.",
+        "description": "Answers `Silence[]` open now: `{ id, until /* ms */, alerts: string[] /* none: all */, reason, created_at, every?: { windows: { from: string; to: string }[]; timezone?: string } /* a repeating one: quiet only inside these */ }`.",
         "operationId": "getServicesIdEnvironmentsEnvSilences",
         "parameters": [
           {
@@ -5278,7 +5323,7 @@
         ],
         "responses": {
           "200": {
-            "description": "`Silence[]` open now: `{ id, until /* ms */, alerts: string[] /* none: all */, reason, created_at }`"
+            "description": "`Silence[]` open now: `{ id, until /* ms */, alerts: string[] /* none: all */, reason, created_at, every?: { windows: { from: string; to: string }[]; timezone?: string } /* a repeating one: quiet only inside these */ }`"
           },
           "4XX": {
             "$ref": "#/components/responses/Error"
@@ -5319,7 +5364,7 @@
               }
             }
           },
-          "description": "`{ until: number /* ms, in the next 30 days */, reason: string /* 1–200 */, alerts?: (\"check.down\" | \"heartbeat.missed\" | \"crash_loop\" | \"alert.memory\" | \"alert.cpu\" | \"alert.metric\" | \"alert.errors\" | \"alert.latency\" | \"alert.capacity\" | \"alert.log\" | \"alert.route\" | \"alert.slo\" | \"alert.anomaly\" | \"cron.failed\" | \"deploy.failed\")[] /* none: all */ }`"
+          "description": "`{ until?: number /* ms, in the next 30 days; a repeating one's in the next year, a year by default */, every?: { windows: { from: string /* \"sat 02:00\" */; to: string }[] /* 1–14, weekly */; timezone?: string /* IANA; default UTC */ } /* a repeating silence: quiet only inside its windows (a nightly backup's, a weekly maintenance's) */, reason: string /* 1–200 */, alerts?: (\"check.down\" | \"check.slow\" | \"heartbeat.missed\" | \"crash_loop\" | \"alert.memory\" | \"alert.cpu\" | \"alert.metric\" | \"alert.errors\" | \"alert.latency\" | \"alert.capacity\" | \"alert.log\" | \"alert.route\" | \"alert.slo\" | \"alert.anomaly\" | \"cron.failed\" | \"deploy.failed\")[] /* none: all */ }`"
         },
         "responses": {
           "201": {

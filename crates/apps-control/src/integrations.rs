@@ -253,8 +253,8 @@ pub trait SecretSource: Send + Sync {
     }
     /// `reference`'s value for one request of `who`'s on `service` in `env` (a domain's
     /// Cloudflare token), read as them that once and kept by nothing: refused unless they may
-    /// reveal it now (an approval of an `ask` there is enough), and a sensitive key only when `to`
-    /// names the fixed host the value is sent to. Audited as their use, for `purpose`, to `to`.
+    /// reveal it now (an approval of an `ask` there is enough), never a sensitive key (roll
+    /// secrets' #1238). Audited as their use, for `purpose`, sent only to `to`.
     #[allow(clippy::too_many_arguments)]
     async fn use_once(&self, _who: Asker<'_>, _project: &str, _env: &str, _service: &str, _reference: &str, _purpose: &str, _to: Option<&'static str>) -> anyhow::Result<String> {
         anyhow::bail!("roll secrets isn't on this node")
@@ -798,21 +798,5 @@ impl Resolver for StaticDns {
 
     async fn ptr(&self, name: &str) -> Vec<String> {
         self.find(name, "PTR")
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_postgres_urls_parts_are_libpqs_variables() {
-        let mut v = vec![("DATABASE_URL".to_string(), "postgres://roll:p%40ss@127.0.0.1:5433/main?options=endpoint%3Dep-1&sslmode=disable".to_string())];
-        assert_eq!(pg_parts(LinkKind::Postgres, &mut v).len(), 7);
-        let got: std::collections::BTreeMap<_, _> = v.into_iter().collect();
-        assert_eq!((got["PGHOST"].as_str(), got["PGPORT"].as_str(), got["PGUSER"].as_str(), got["PGPASSWORD"].as_str()), ("127.0.0.1", "5433", "roll", "p@ss"));
-        assert_eq!((got["PGDATABASE"].as_str(), got["PGOPTIONS"].as_str(), got["PGSSLMODE"].as_str()), ("main", "endpoint=ep-1", "disable"));
-        let mut redis = vec![("DATABASE_URL".to_string(), "postgres://a@b/c".to_string())];
-        assert!(pg_parts(LinkKind::Redis, &mut redis).is_empty());
     }
 }

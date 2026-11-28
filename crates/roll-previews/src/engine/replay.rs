@@ -9,6 +9,11 @@ use super::*;
 const REPLAY_MAX: usize = 40;
 /// How many are asked at a time (each of both previews).
 const REPLAY_AT_ONCE: usize = 8;
+/// The longest a replay runs (an answer that streams never ends one); one asked longer ago that
+/// never said how it went was lost (a restart) and may be asked again.
+const REPLAY_FOR: std::time::Duration = std::time::Duration::from_secs(180);
+/// Paths a GET acts on (signing out, unsubscribing, a token's one use): never replayed.
+const ACTS: [&str; 6] = ["logout", "log-out", "signout", "sign-out", "unsubscribe", "confirm"];
 
 impl Engine {
     /// `POST …/{id}/replay`: asked for now (202), replayed in the background; `replay` on the
@@ -22,7 +27,8 @@ impl Engine {
         if !r.trusted {
             return Err(Error::Conflict("a preview of a pull request from a fork isn't replayed against main's: its paths are its code's".into()));
         }
-        if self.store.runtime_fact::<crate::Replay>(id, "replay")?.is_some_and(|x| x.ok.is_none() && x.head == r.build()) {
+        let now = self.store.now_ms()?;
+        if self.store.runtime_fact::<crate::Replay>(id, "replay")?.is_some_and(|x| x.ok.is_none() && x.head == r.build() && now - x.at < REPLAY_FOR.as_millis() as i64 + 60_000) {
             return Err(Error::Conflict("it's being replayed".into()));
         }
         let asked = crate::Replay { head: r.build().to_string(), by: by.to_string(), at: self.store.now_ms()?, ok: None, requests: Vec::new(), error: None };
@@ -31,7 +37,8 @@ impl Engine {
         let (me, pid, base) = (self.clone(), id.to_string(), asked.clone());
         tokio::spawn(async move {
             let asked = base;
-            let done = match me.replayed(&pid).await {
+            let ran = tokio::time::timeout(REPLAY_FOR, me.replayed(&pid)).await.unwrap_or_else(|_| Err(anyhow::anyhow!("it didn't finish within {} s", REPLAY_FOR.as_secs())));
+            let done = match ran {
                 Ok(requests) => crate::Replay { ok: Some(!requests.iter().any(|q| q.differs())), requests, ..asked.clone() },
                 Err(e) => crate::Replay { ok: Some(false), error: Some(me.mask_text(&pid, &format!("{e:#}").lines().next().unwrap_or("").chars().take(300).collect::<String>()).await.unwrap_or_default()), ..asked.clone() },
             };
@@ -51,7 +58,8 @@ impl Engine {
         let mut asked: Vec<(String, String)> = Vec::new();
         for l in self.apps.requests(id).into_iter().chain(self.apps.requests(&main.id)) {
             let key = (l.service.clone(), l.path.clone());
-            if l.method != "GET" || l.path.starts_with("/__roll") || !crate::settings::page_path_ok(&l.path) || asked.contains(&key) {
+            let acts = ACTS.iter().any(|w| l.path.to_ascii_lowercase().contains(w));
+            if l.method != "GET" || l.path.starts_with("/__roll") || acts || !crate::settings::page_path_ok(&l.path) || asked.contains(&key) {
                 continue;
             }
             if ours.iter().any(|s| s.name == l.service) && theirs.iter().any(|s| s.name == l.service) {

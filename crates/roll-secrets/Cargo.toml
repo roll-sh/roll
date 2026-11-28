@@ -51,6 +51,8 @@ instant-acme.workspace = true
 tempfile.workspace = true
 tokio-rustls.workspace = true
 tower.workspace = true
+# Each test's database starts as a copy of one made once (`VACUUM INTO`, tests/api.rs).
+rusqlite.workspace = true
 # The interception CA's name constraints, as a TLS client checks them (intercept.rs).
 rustls-pki-types.workspace = true
 rustls-webpki.workspace = true
