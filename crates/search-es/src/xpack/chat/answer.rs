@@ -291,7 +291,9 @@ mod tests {
                 NodeValue::HtmlInline(h) => panic!("inline HTML {h:?} in {out:?}"),
                 NodeValue::HtmlBlock(h) => panic!("an HTML block {:?} in {out:?}", h.literal),
                 NodeValue::FootnoteReference(_) | NodeValue::FootnoteDefinition(_) => panic!("a footnote in {out:?}"),
-                NodeValue::Table(_) => panic!("a table in {out:?}"),
+                // A one-column table (`text` over `-:`) holds only text: with no raw `|` nothing
+                // can split a cell.
+                NodeValue::Table(_) => assert!(!out.contains('|'), "a table with a raw | in {out:?}"),
                 NodeValue::Text(t) if n.parent().is_none_or(|p| !matches!(p.data().value, NodeValue::Link(_))) => assert!(!linkable.is_match(t), "linkable text {t:?} in {out:?}"),
                 _ => {}
             }

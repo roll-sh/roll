@@ -60,8 +60,8 @@ what the best of the four products does:
     `!`, `*`, `_` and `#` the model writes becomes its numeric entity (`&#60;`): every renderer
     shows the character and none reads it as syntax, so no tag, image, link, reference
     definition, footnote, table cell boundary, code span, strikethrough, emphasis or heading
-    can start (marked and remark-gfm still make a one-column table of `text` over `-:`, which
-    holds nothing but text: with no `|` there's nothing to split), and an
+    can start (comrak, marked and remark-gfm still make a one-column table of `text` over `-:`,
+    which holds nothing but text: with no `|` there's nothing to split), and an
     entity or escape the model wrote (`https:&#47;&#47;`, `\/`) shows as written, never decoded
     into what it spells. `\r` and `\r\n` become `\n`.
   - **Link-shaped tokens broken.** U+2060 WORD JOINER goes inside every `//`, after a `:` that
@@ -101,7 +101,8 @@ what the best of the four products does:
   - **Tests:** every payload of the four reviews (`crates/search-es/tests/fixtures/chat-markup.json`)
     whole, a character at a time and split at every point, and 4,000 random compositions of the
     reviewers' fragments, read as GitHub-flavored markdown (comrak): any link but a kept one,
-    image, HTML, table, footnote or linkable text (a URL, an address, a domain) fails; and every
+    image, HTML, footnote, table with a raw `|` or linkable text (a URL, an address, a domain)
+    fails; and every
     payload reads back as written. A manual check outside the repo (it needs node packages the
     repo doesn't have: `~/.cache/rr1068r4/jscheck` on the dev server) renders the corpus and
     70,000 random compositions, each in random pieces, through this code with marked,
