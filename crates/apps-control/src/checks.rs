@@ -1,19 +1,20 @@
 //! Uptime checks (Cloud Monitoring's uptime checks, Render's and Fly's HTTP checks; docs/apps/
 //! README.md, "Uptime checks"): an environment's `checks` are GETs of its own paths, through its
 //! own proxy on the owner as a visitor's request would go (past its gates, as a path schedule's
-//! call is), every `every_s`. One that fails twice in a row is `check.down` (once, until it
-//! passes again); the next pass is `alert.resolved` for it. A check wakes a service that scales
-//! to zero, so a service with one doesn't sleep through it. A TCP service's checks connect to
-//! its port instead (`tcp`, [`Apps::tcp_check`]).
+//! call is), every `every_s`. One that fails `fail_after` times in a row (2) is `check.down`
+//! (once, until it passes again); `recover_after` passes in a row (1) are `alert.resolved` for it.
+//! Two passes in a row slower than `slow_ms` are `check.slow`, and the next that isn't resolves
+//! it. A check wakes a service that scales to zero, so a service with one doesn't sleep through
+//! it. A TCP service's checks connect to its port instead (`tcp`, [`Apps::tcp_check`]).
 
-use crate::model::{Check, CheckState};
+use crate::model::{Assertion, Check, CheckState};
 use crate::{Apps, env_key};
 use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Failures in a row before a check is down.
-const DOWN_AFTER: u32 = 2;
+/// Slow passes in a row before a check is `check.slow`.
+const SLOW_AFTER: u32 = 2;
 /// The most of an answer read to look for `contains`.
 const MAX_BODY: usize = 64 << 10;
 
@@ -28,6 +29,11 @@ pub struct Run {
     pub ms: u64,
     pub error: Option<String>,
     pub failures: u32,
+    /// Passes in a row (what `recover_after` counts), and slow ones.
+    pub passes: u32,
+    pub slow_passes: u32,
+    /// Slow: two passes in a row over `slow_ms`, until one isn't.
+    pub slow: bool,
     pub down_since: Option<i64>,
     pub running: bool,
     /// A preview's run: the deployment it's of ([`crate::browser`]'s preview checks).
@@ -36,8 +42,9 @@ pub struct Run {
     pub over_budget: Option<String>,
 }
 
-/// Whether an answer passes: the status it expects (2xx or 3xx unless it says), and its text.
-pub fn passes(c: &Check, status: u16, body: &[u8]) -> Result<(), String> {
+/// Whether an answer passes: the status it expects (2xx or 3xx unless it says), its text, and
+/// each of its assertions.
+pub fn passes(c: &Check, status: u16, headers: &axum::http::HeaderMap, body: &[u8]) -> Result<(), String> {
     let status_ok = match c.status {
         Some(s) => status == s,
         None => (200..400).contains(&status),
@@ -50,7 +57,7 @@ pub fn passes(c: &Check, status: u16, body: &[u8]) -> Result<(), String> {
     {
         return Err(format!("its answer doesn't contain {t:?}"));
     }
-    Ok(())
+    c.assert.iter().flatten().try_for_each(|a: &Assertion| a.holds(headers, body))
 }
 
 impl Apps {
@@ -103,18 +110,19 @@ impl Apps {
             None => match self.live(service, env).template().map(|t| c.headers_with(&t.spec.vars)).unwrap_or_else(|| c.headers_with(&[])) {
                 Err(e) => (None, Err(e)),
                 Ok(headers) if c.from.as_deref() == Some("public") => match self.check_from_public(service, env, url, c, &headers).await {
-                    Ok((s, body)) => (Some(s), passes(c, s, &body)),
+                    Ok((s, h, body)) => (Some(s), passes(c, s, &h, &body)),
                     Err(e) => (None, Err(e)),
                 },
                 Ok(headers) => match crate::public::call_check(self.clone(), service, env, host, c.method(), &c.path, &headers, c.body.clone(), Duration::from_secs(c.timeout_s as u64), MAX_BODY).await {
-                    Ok((s, body)) => (Some(s), passes(c, s, &body)),
+                    Ok((s, h, body)) => (Some(s), passes(c, s, &h, &body)),
                     Err(e) => (None, Err(e)),
                 },
             },
         };
         let ms = began.elapsed().as_millis() as u64;
         let now = code_sql::now_ms();
-        let (went_down, came_up, up) = {
+        let (fail_after, recover_after) = c.thresholds();
+        let (went_down, came_up, up, went_slow, sped_up, slow) = {
             let mut runs = self.check_states.lock();
             let r = runs.entry(key).or_default();
             r.running = false;
@@ -122,27 +130,49 @@ impl Apps {
             r.last_at = started;
             r.status = status;
             r.ms = ms;
-            match &verdict {
+            let (mut went_slow, mut sped_up) = (false, false);
+            let (went_down, came_up) = match &verdict {
                 Ok(()) => {
                     r.error = None;
                     r.failures = 0;
-                    (false, r.down_since.take().is_some(), true)
+                    r.passes += 1;
+                    let came_up = r.down_since.is_some() && r.passes >= recover_after;
+                    if came_up {
+                        r.down_since = None;
+                    }
+                    // Slow is a pass's: never a failure's, and never while it's down.
+                    let is_slow = c.slow_ms.is_some_and(|s| ms > s as u64);
+                    r.slow_passes = if is_slow { r.slow_passes + 1 } else { 0 };
+                    if is_slow && !r.slow && r.slow_passes >= SLOW_AFTER && r.down_since.is_none() {
+                        (r.slow, went_slow) = (true, true);
+                    } else if !is_slow && r.slow {
+                        (r.slow, sped_up) = (false, true);
+                    }
+                    (false, came_up)
                 }
                 Err(e) => {
                     r.error = Some(e.clone());
                     r.failures += 1;
-                    let down = r.failures >= DOWN_AFTER && r.down_since.is_none();
+                    (r.passes, r.slow_passes) = (0, 0);
+                    let down = r.failures >= fail_after && r.down_since.is_none();
                     if down {
                         r.down_since = Some(now);
                     }
-                    (down, false, r.down_since.is_none())
+                    (down, false)
                 }
-            }
+            };
+            (went_down, came_up, r.down_since.is_none(), went_slow, sped_up, r.slow)
         };
         let log = self.logs.sink(format!("env:{service}/{env}"), crate::logs::Stream::System);
         // Its day on a status page: a pass or a failure.
         // Back up is what the store last said too: a restart or a takeover forgets `down_since`.
-        let was_down = self.status_count(crate::status_page::check_key(service, env, &c.name), verdict.is_ok(), up).await;
+        // Degraded while it's slow, as a status page shows it.
+        let shown = match (up, slow) {
+            (false, _) => "down",
+            (true, true) => "degraded",
+            (true, false) => "up",
+        };
+        let was_down = self.status_count(crate::status_page::check_key(service, env, &c.name), verdict.is_ok(), shown).await;
         let came_up = came_up || (up && was_down);
         let (sid, e) = (service.to_string(), env.to_string());
         if went_down || came_up {
@@ -151,7 +181,7 @@ impl Apps {
         if went_down {
             let why = verdict.as_ref().err().cloned().unwrap_or_default();
             log.line(format!("uptime check {}: {} {} is down: {why}", c.name, c.method(), c.path));
-            let data = json!({ "check": c.name, "path": c.path, "http_status": status, "error": why });
+            let data = json!({ "check": c.name, "path": c.path, "http_status": status, "error": why, "failures": fail_after });
             if let Err(err) = self.db(move |s| s.add_event("check.down", &sid, &e, None, &data)).await {
                 tracing::warn!(service, env, error = %err, "apps: an uptime check's check.down wasn't recorded");
             }
@@ -162,12 +192,27 @@ impl Apps {
                 tracing::warn!(service, env, error = %err, "apps: an uptime check's alert.resolved wasn't recorded");
             }
         }
+        let (sid, e) = (service.to_string(), env.to_string());
+        if went_slow {
+            let slow_ms = c.slow_ms.unwrap_or_default();
+            log.line(format!("uptime check {}: {} {} is slow: {ms} ms (over {slow_ms} ms)", c.name, c.method(), c.path));
+            let data = json!({ "check": c.name, "path": c.path, "ms": ms, "slow_ms": slow_ms });
+            if let Err(err) = self.db(move |s| s.add_event("check.slow", &sid, &e, None, &data)).await {
+                tracing::warn!(service, env, error = %err, "apps: an uptime check's check.slow wasn't recorded");
+            }
+        } else if sped_up {
+            log.line(format!("uptime check {}: {} {} is fast again: {ms} ms", c.name, c.method(), c.path));
+            let data = json!({ "alert": "check.slow", "check": c.name });
+            if let Err(err) = self.db(move |s| s.add_event("alert.resolved", &sid, &e, None, &data)).await {
+                tracing::warn!(service, env, error = %err, "apps: an uptime check's alert.resolved wasn't recorded");
+            }
+        }
     }
 
     /// A public check's request (`from: public`): to the environment's own URL, or one of its
     /// active custom domains over HTTPS, through the client for URLs a tenant chose (public
     /// addresses only, no redirects, a bounded read).
-    async fn check_from_public(self: &Arc<Self>, service: &str, env: &str, url: &str, c: &Check, headers: &[(String, String)]) -> Result<(u16, Vec<u8>), String> {
+    async fn check_from_public(self: &Arc<Self>, service: &str, env: &str, url: &str, c: &Check, headers: &[(String, String)]) -> Result<(u16, axum::http::HeaderMap, Vec<u8>), String> {
         let at = match &c.host {
             None => format!("{}{}", url.trim_end_matches('/'), c.path),
             Some(h) => {
@@ -212,8 +257,8 @@ impl Apps {
             }
             why.chars().take(300).collect::<String>()
         })?;
-        let status = res.status().as_u16();
-        Ok((status, crate::net::read_bounded(res, MAX_BODY).await))
+        let (status, headers) = (res.status().as_u16(), res.headers().clone());
+        Ok((status, headers, crate::net::read_bounded(res, MAX_BODY).await))
     }
 
     /// An environment's checks as they stand, on this node (its owner runs them).
@@ -228,7 +273,7 @@ impl Apps {
                 let tried = r.status.is_some() || r.error.is_some() || r.last_at > 0;
                 let failure_at = self.check_failures.lock().get(&format!("{}/{}", env_key(service, env), c.name)).copied();
                 let metrics = self.check_metrics.lock().get(&format!("{}/{}", env_key(service, env), c.name)).cloned();
-                CheckState { name: c.name.clone(), up: tried.then_some(r.down_since.is_none()), failures: r.failures, last_at: tried.then_some(r.last_at), status: r.status, ms: tried.then_some(r.ms), error: r.error, down_since: r.down_since, failure_at, deployment: r.deployment, metrics, over_budget: r.over_budget }
+                CheckState { name: c.name.clone(), up: tried.then_some(r.down_since.is_none()), failures: r.failures, last_at: tried.then_some(r.last_at), status: r.status, ms: tried.then_some(r.ms), error: r.error, down_since: r.down_since, slow: r.slow, failure_at, deployment: r.deployment, metrics, over_budget: r.over_budget }
             })
             .collect()
     }
@@ -237,12 +282,14 @@ impl Apps {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     /// A check's request beyond a GET: its method and body checked, its headers' `${NAME}`s the
-    /// environment's own variables (the settings never hold the value).
+    /// environment's own variables (the settings never hold the value); its answer passes by its
+    /// status, text and assertions, and its thresholds are checked.
     #[test]
     fn a_checks_request_takes_a_method_headers_and_a_body() {
-        let base = || Check { name: "api".into(), path: "/api/health".into(), tcp: false, every_s: 60, timeout_s: 10, status: None, contains: None, browser: None, budgets: None, from: None, host: None, method: None, headers: None, body: None };
+        let base = || Check { name: "api".into(), path: "/api/health".into(), tcp: false, every_s: 60, timeout_s: 10, status: None, contains: None, browser: None, budgets: None, from: None, host: None, method: None, headers: None, body: None, slow_ms: None, assert: None, fail_after: None, recover_after: None };
         let with = |m: Option<&str>, h: &[(&str, &str)], b: Option<&str>| Check { method: m.map(String::from), headers: (!h.is_empty()).then(|| h.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()), body: b.map(String::from), ..base() };
         let c = with(Some("post"), &[("Authorization", "Bearer ${HEALTH_TOKEN}")], Some("{}")).check().unwrap();
         assert_eq!(c.method(), "POST");
@@ -252,13 +299,38 @@ mod tests {
         assert!(with(None, &[], Some("{}")).check().is_err(), "a GET has no body");
         assert!(with(None, &[("Host", "evil")], None).check().is_err() && with(None, &[("x-roll-check", "x")], None).check().is_err());
         assert!(with(None, &[("X-A", "a\r\nX-B: b")], None).check().is_err());
-        // An answer passes by its status and text.
-        let c = |status: Option<u16>, contains: Option<&str>| Check { name: "x".into(), path: "/".into(), tcp: false, every_s: 60, timeout_s: 10, status, contains: contains.map(String::from), browser: None, budgets: None, from: None, host: None, method: None, headers: None, body: None };
-        assert!(passes(&c(None, None), 301, b"").is_ok(), "2xx or 3xx by default");
-        assert_eq!(passes(&c(None, None), 503, b""), Err("answered 503".into()));
-        assert!(passes(&c(Some(204), None), 204, b"").is_ok());
-        assert!(passes(&c(Some(204), None), 200, b"").is_err(), "the status it says");
-        assert!(passes(&c(None, Some("ok")), 200, b"{\"status\":\"ok\"}").is_ok());
-        assert!(passes(&c(None, Some("ok")), 200, b"degraded").is_err());
+        // Thresholds and assertions: in range, and assertions only on an HTTP check.
+        let parse = |mut v: serde_json::Value| {
+            v["name"] = json!("a");
+            if v.get("path").is_none() {
+                v["path"] = json!("/");
+            }
+            serde_json::from_value::<Check>(v).map_err(|e| e.to_string()).and_then(|c| c.check().map_err(|e| e.to_string()))
+        };
+        let c = parse(json!({"slow_ms": 500, "fail_after": 3, "recover_after": 2, "assert": [{"json": "$.items.0.id", "equals": 7}, {"not_contains": "error"}, {"header": "Content-Type", "matches": "json"}]})).unwrap();
+        assert_eq!(c.thresholds(), (3, 2));
+        assert_eq!(parse(json!({})).unwrap().thresholds(), (2, 1), "today's: down after two, up after one");
+        let six = vec![json!({"not_contains": "a"}); 6];
+        for bad in [json!({"slow_ms": 10}), json!({"fail_after": 0}), json!({"recover_after": 6}), json!({"assert": []}), json!({"assert": [{"json": "$.a.*", "equals": 1}]}), json!({"assert": [{"json": "a.b", "equals": 1}]}), json!({"assert": [{"json": "$.a"}]}), json!({"assert": [{"json": "$.1.2.3.4.5.6.7.8.9.10.11", "equals": 1}]}), json!({"assert": [{"not_contains": ""}]}), json!({"assert": [{"header": "x"}]}), json!({"assert": [{"header": "x", "matches": "a", "equals": 1}]}), json!({"assert": six}), json!({"tcp": true, "path": "", "assert": [{"not_contains": "a"}]}), json!({"every_s": 300, "browser": "1", "slow_ms": 500})] {
+            assert!(parse(bad.clone()).is_err(), "{bad}");
+        }
+        assert!(parse(json!({"tcp": true, "path": "", "slow_ms": 200})).is_ok(), "a TCP check's slow is its connect");
+        // An answer passes by its status, its text and each assertion, a failing one named.
+        let mut h = axum::http::HeaderMap::new();
+        h.insert("content-type", "application/json".parse().unwrap());
+        assert!(passes(&c, 200, &h, br#"{"items": [{"id": 7}]}"#).is_ok());
+        assert_eq!(passes(&c, 200, &h, br#"{"items": [{"id": 8}]}"#), Err("assert $.items.0.id: 8 isn't 7".into()));
+        assert!(passes(&c, 200, &h, br#"{"items": []}"#).unwrap_err().contains("has nothing there"));
+        assert!(passes(&c, 200, &h, b"<html>").unwrap_err().contains("isn't JSON"));
+        assert!(passes(&c, 200, &h, br#"{"items": [{"id": 7}], "error": 1}"#).unwrap_err().contains("not_contains"));
+        assert_eq!(passes(&c, 200, &axum::http::HeaderMap::new(), br#"{"items": [{"id": 7}]}"#), Err("assert header content-type: it wasn't sent".into()));
+        let c = |status: Option<u16>, contains: Option<&str>| Check { status, contains: contains.map(String::from), ..base() };
+        let none = axum::http::HeaderMap::new();
+        assert!(passes(&c(None, None), 301, &none, b"").is_ok(), "2xx or 3xx by default");
+        assert_eq!(passes(&c(None, None), 503, &none, b""), Err("answered 503".into()));
+        assert!(passes(&c(Some(204), None), 204, &none, b"").is_ok());
+        assert!(passes(&c(Some(204), None), 200, &none, b"").is_err(), "the status it says");
+        assert!(passes(&c(None, Some("ok")), 200, &none, b"{\"status\":\"ok\"}").is_ok());
+        assert!(passes(&c(None, Some("ok")), 200, &none, b"degraded").is_err());
     }
 }

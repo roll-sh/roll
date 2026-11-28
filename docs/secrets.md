@@ -7704,8 +7704,8 @@ That's 205–219 ms of CPU per identity down to 7–18 ms, across all runs. The 
 change, which now also works out the stamps, cost the same as before: 0.3 s on SQLite and 0.6–0.8
 + 0.9–1.0 s on Postgres, for all 1,000.
 
-`a_watchers_delta_returns_what_changed_and_is_audited` and
-`a_permission_change_since_the_answer_held_gets_the_full_set` (`tests/api.rs`) and
+`a_watchers_delta_returns_what_changed_and_is_audited` (`tests/api.rs`, a permission change since
+the answer held too) and
 `roll_run_watch_restarts_on_a_write_waits_out_failures_and_passes_sigterm_on`
 (`roll-cli/tests/secrets.rs`) cover it, and each runtime client has a watch test against its own
 fake rolld that reads a one-key change through the route and falls back to a full read on a 404

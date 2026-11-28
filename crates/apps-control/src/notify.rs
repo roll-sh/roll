@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 
 /// What a target can ask for; a new one gets the two that need someone.
-pub const EVENTS: [&str; 41] = [
+pub const EVENTS: [&str; 42] = [
     "deploy.started",
     "deploy.failed",
     "deploy.base_updated",
@@ -48,6 +48,7 @@ pub const EVENTS: [&str; 41] = [
     "volume.full",
     "form.submitted",
     "check.down",
+    "check.slow",
     "heartbeat.missed",
     "deploy.vulnerable",
     "alert.slo",
@@ -62,7 +63,7 @@ pub const EVENTS: [&str; 41] = [
     // Every `audit.*` entry (who changed what), for a SIEM's webhook; never an on-call page.
     "audit",
 ];
-const DEFAULT_EVENTS: [&str; 27] = ["check.down", "heartbeat.missed", "alert.slo", "alert.anomaly", "deploy.failed", "rollout.waiting", "deploy.ready", "error.new", "error.regressed", "crash_loop", "spend.alert", "spend.spike", "spend.limit", "alert.memory", "alert.cpu", "alert.metric", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "alert.route", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"];
+const DEFAULT_EVENTS: [&str; 28] = ["check.down", "check.slow", "heartbeat.missed", "alert.slo", "alert.anomaly", "deploy.failed", "rollout.waiting", "deploy.ready", "error.new", "error.regressed", "crash_loop", "spend.alert", "spend.spike", "spend.limit", "alert.memory", "alert.cpu", "alert.metric", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "alert.route", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"];
 /// Whether a target with `events` hears an event: its own kind, or for a resolution, the alert's
 /// (whoever heard an alert hears it clear; there's nothing else to ask for).
 fn wants(events: &[String], kind: &str, data: &Value, oncall: bool) -> bool {
@@ -612,7 +613,11 @@ impl Apps {
             ),
             "check.down" => (
                 format!("{what}: {} is down", e.data["path"].as_str().unwrap_or("a page")),
-                format!("Its uptime check {} failed twice in a row: {}.", e.data["check"].as_str().unwrap_or(""), e.data["error"].as_str().unwrap_or("no answer")),
+                format!("Its uptime check {} failed {} times in a row: {}.", e.data["check"].as_str().unwrap_or(""), e.data["failures"].as_u64().unwrap_or(2), e.data["error"].as_str().unwrap_or("no answer")),
+            ),
+            "check.slow" => (
+                format!("{what}: {} is slow", e.data["path"].as_str().filter(|p| !p.is_empty()).unwrap_or("a check")),
+                format!("Its uptime check {} passed slower than {} ms twice in a row (the last took {} ms).", e.data["check"].as_str().unwrap_or(""), e.data["slow_ms"], e.data["ms"]),
             ),
             "form.submitted" => (
                 format!("{what}: a submission to {}", e.data["form"].as_str().unwrap_or("a form")),
@@ -670,6 +675,9 @@ impl Apps {
                 } else if e.data["alert"] == "check.down" {
                     let name = e.data["check"].as_str().unwrap_or("");
                     (format!("{what}: uptime check {name} is up"), format!("Its uptime check {name} passes again."))
+                } else if e.data["alert"] == "check.slow" {
+                    let name = e.data["check"].as_str().unwrap_or("");
+                    (format!("{what}: uptime check {name} is fast again"), format!("Its uptime check {name} passed within its time."))
                 } else {
                     (format!("{what}: {which} alert resolved"), format!("The {which} alert cleared: the last five minutes are under its threshold."))
                 }
@@ -791,9 +799,12 @@ fn oncall_of(e: &Event) -> Option<(bool, String, &'static str)> {
     Some(match e.kind.as_str() {
         // A check's or heartbeat's own incident, by its name: two checks are two pages.
         "alert.resolved" if e.data["alert"] == "check.down" => (false, key(&format!("check.down/{}", e.data["check"].as_str()?)), "info"),
+        "alert.resolved" if e.data["alert"] == "check.slow" => (false, key(&format!("check.slow/{}", e.data["check"].as_str()?)), "info"),
         "alert.resolved" if e.data["alert"] == "heartbeat.missed" => (false, key(&format!("heartbeat.missed/{}", e.data["heartbeat"].as_str()?)), "info"),
         "alert.resolved" => (false, key(&which(e.data["alert"].as_str()?, &e.data)), "info"),
         "check.down" => (true, key(&format!("check.down/{}", e.data["check"].as_str()?)), "error"),
+        // Slow is lower than down: a warning, its own incident per check.
+        "check.slow" => (true, key(&format!("check.slow/{}", e.data["check"].as_str()?)), "warning"),
         "heartbeat.missed" => (true, key(&format!("heartbeat.missed/{}", e.data["heartbeat"].as_str()?)), "error"),
         // A deploy that worked closes the failed one's.
         "deploy.active" => (false, key("deploy.failed"), "info"),
