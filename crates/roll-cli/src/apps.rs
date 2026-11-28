@@ -878,15 +878,31 @@ pub enum AppsCmd {
         #[arg(long)]
         dockerfile: bool,
     },
-    /// Run a command here, on this machine, with an environment's variables (Railway's
-    /// `railway run`): `roll apps exec -- npm run dev`. `PORT` and `ROLL_*` are left out (they're
-    /// the platform's), sealed variables can't be (they're never shown again), and a linked
-    /// service's `*.internal` URL points at a local tunnel to it while the command runs.
-    /// Exits with the command's exit code.
-    Exec {
+    /// Run a command here, on this machine, with an environment's variables (`railway run`,
+    /// `vercel dev`, `heroku local`): `roll apps dev web -e staging -- npm run dev`. The values
+    /// (a reveal, audited) go only into the command's environment, with `ROLL_DEV=1` and `PORT`
+    /// (the service's, unless this shell sets one); stderr names what's set, never a value. The
+    /// platform's `ROLL_*`, sealed variables (never shown again) and names that steer this
+    /// machine's programs (`PATH`, `NODE_OPTIONS`, …) are left out and named, and so is roll's own
+    /// token (`ROLL_API_KEY` and the like). A linked service's `*.internal` URL points at a local
+    /// tunnel to it while the command runs (`--no-tunnels`: left as it is). Ctrl-C goes to the
+    /// command; roll exits with its exit code.
+    #[command(alias = "exec")]
+    Dev {
+        /// The service (or `--service`; default: the one this directory is linked to).
+        #[arg(value_name = "SERVICE", conflicts_with = "service")]
+        name: Option<String>,
         #[command(flatten)]
         target: Target,
-        #[arg(trailing_var_arg = true, required = true, allow_hyphen_values = true)]
+        /// Leave linked services' private URLs as they are: no tunnels.
+        #[arg(long)]
+        no_tunnels: bool,
+        /// Pass roll's own credentials (ROLL_ADMIN_TOKEN, ROLL_TOKEN and the like) on to the
+        /// command; by default it gets none unless the service sets that name itself.
+        #[arg(long)]
+        keep_roll_credentials: bool,
+        /// The command, after `--`.
+        #[arg(last = true, required = true)]
         command: Vec<String>,
     },
     /// Run the live image again with the current variables and settings (no build, same
@@ -1118,6 +1134,15 @@ pub enum AppsCmd {
         #[arg(long, default_value_t = 1440)]
         minutes: i64,
     },
+    /// What browsers reported its pages' Content-Security-Policy blocked (its environment's CSP
+    /// reports on, `roll apps env --csp-reports true`), grouped, the most frequent first.
+    CspReports {
+        #[command(flatten)]
+        target: Target,
+        /// How far back, in minutes (60–10080; default a day).
+        #[arg(long, default_value_t = 1440)]
+        minutes: i64,
+    },
     /// Recent traces the app's OpenTelemetry SDK sent once its environment's Traces switch is on
     /// (newest first; `--min-ms` keeps the slow ones); `--trace ID` prints one's spans.
     Traces {
@@ -1342,6 +1367,24 @@ pub enum AppsCmd {
         /// adds this once, so it's for one removed before).
         #[arg(long, conflicts_with_all = ["add", "remove", "edit", "test", "deliveries"])]
         email: bool,
+        /// With `--add`, `--email` or `--edit`: an alert it was sent that's still open and not
+        /// acknowledged this many minutes on (5–1440) goes to `--escalate-to`, once.
+        #[arg(long, value_name = "MIN", requires = "escalate_to")]
+        escalate_after: Option<u32>,
+        /// With `--escalate-after`: the project's target it escalates to (its id).
+        #[arg(long, value_name = "ID", requires = "escalate_after")]
+        escalate_to: Option<String>,
+        /// With `--edit`: escalate nowhere any more.
+        #[arg(long, requires = "edit", conflicts_with = "escalate_after")]
+        no_escalate: bool,
+    },
+    /// The project's open alerts, newest first (who acknowledged each); `--ack ID` acknowledges
+    /// one, so it isn't escalated (it stays open until it clears).
+    Alerts {
+        #[command(flatten)]
+        target: Target,
+        #[arg(long, value_name = "ID")]
+        ack: Option<String>,
     },
     /// The project's status page: shown (its address and incidents); made or changed (`--title`,
     /// `--item SERVICE/ENV/check:NAME` or `…/heartbeat:NAME`: every check and heartbeat without
@@ -1522,6 +1565,10 @@ pub enum AppsCmd {
         /// to its HTML pages), or not.
         #[arg(long)]
         vitals: Option<bool>,
+        /// Collect its pages' Content-Security-Policy reports (`true`: its answers name roll's
+        /// `/__roll/csp`, and a policy that reports nowhere reports there), or not.
+        #[arg(long)]
+        csp_reports: Option<bool>,
         /// Its Strict-Transport-Security over HTTPS: `off`, `default` (two years), or a max-age in
         /// seconds with `,subdomains` and `,preload` (`31536000,subdomains,preload`).
         #[arg(long, value_name = "HSTS")]
@@ -3958,96 +4005,10 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             svc
         }
-        AppsCmd::Exec { target, command } => {
+        AppsCmd::Dev { name, mut target, no_tunnels, keep_roll_credentials, command } => {
+            target.service = name.or(target.service);
             let svc = service(api, &target).await?;
-            let base = env_path(&svc, &target.env);
-            let (values, listed) = (api.get(&format!("{base}/variables/values")).await?, api.get(&format!("{base}/variables")).await?);
-            // Names that steer this machine's own programs (a loader, a shell, a runtime's flags):
-            // an environment's variables are anyone-who-can-write-them's, so they're never set here.
-            let steering = |k: &str| {
-                ["PATH", "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "BASH_ENV", "ENV", "IFS", "SHELLOPTS", "BASHOPTS", "PS4", "PROMPT_COMMAND", "NODE_OPTIONS", "NODE_PATH", "PYTHONSTARTUP", "PYTHONPATH", "PYTHONHOME", "PERL5OPT", "PERL5LIB", "RUBYOPT", "RUBYLIB", "JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS", "JDK_JAVA_OPTIONS", "GIT_SSH_COMMAND", "GIT_EXEC_PATH", "HOME", "SHELL", "EDITOR"].contains(&k) || k.starts_with("DYLD_")
-            };
-            let mut left_out = Vec::new();
-            let vars: Vec<(String, String)> = values
-                .as_object()
-                .into_iter()
-                .flatten()
-                .filter(|(k, _)| k.as_str() != "PORT" && !k.starts_with("ROLL_"))
-                .filter(|(k, _)| {
-                    let keep = !steering(k);
-                    if !keep {
-                        left_out.push(k.to_string());
-                    }
-                    keep
-                })
-                .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
-                .collect();
-            if !left_out.is_empty() {
-                eprintln!("not set here (they'd steer this machine's programs): {}", left_out.join(", "));
-            }
-            let sealed: Vec<String> = listed["vars"].as_array().into_iter().flatten().filter(|v| v["sealed"] == true).map(|v| s(&v["name"])).collect();
-            if !sealed.is_empty() {
-                eprintln!("not set here (sealed, never shown again): {}", sealed.join(", "));
-            }
-            // A linked service's private URL (`http://<name>.<env>.internal:<port>`) pointed at a
-            // local tunnel to it, as `roll apps proxy` makes one, for as long as the command runs.
-            let mut vars = vars;
-            let mut tunneled = Vec::new();
-            // Only when something names one: the links (and each linked service) are read then, and
-            // one that can't be read is said, not fatal.
-            let links = if vars.iter().any(|(_, v)| v.contains(".internal")) {
-                api.get(&format!("/v1/apps/services/{}/links", enc(&s(&svc["id"])))).await.unwrap_or_else(|e| {
-                    eprintln!("its links couldn't be read ({e:#}): no tunnels");
-                    Value::Null
-                })
-            } else {
-                Value::Null
-            };
-            for l in links.as_array().into_iter().flatten().filter(|l| l["kind"] == "service") {
-                let other = match api.get(&format!("/v1/apps/services/{}", enc(&s(&l["ref"])))).await {
-                    Ok(o) => o,
-                    Err(e) => {
-                        eprintln!("the linked service {} couldn't be read ({e:#}): no tunnel to it", s(&l["ref"]));
-                        continue;
-                    }
-                };
-                let host = format!("{}.{}.internal", s(&other["name"]), target.env);
-                if !vars.iter().any(|(_, v)| internal_rewritten(v, &host, "").is_some()) {
-                    continue;
-                }
-                let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?;
-                let local = listener.local_addr()?.to_string();
-                for (_, v) in vars.iter_mut() {
-                    if let Some(new) = internal_rewritten(v, &host, &local) {
-                        *v = new;
-                    }
-                }
-                eprintln!("{local} → {} ({}), for {}'s link", s(&other["name"]), target.env, s(&svc["name"]));
-                let (url, headers) = tunnel_to(api, &env_path(&other, &target.env));
-                tunneled.push(tokio::spawn(async move {
-                    if let Err(e) = tunnels(url, headers, listener).await {
-                        eprintln!("a tunnel ended: {e:#}");
-                    }
-                }));
-            }
-            let internal: Vec<&str> = vars.iter().filter(|(_, v)| v.contains(".internal")).map(|(k, _)| k.as_str()).collect();
-            if !internal.is_empty() {
-                eprintln!("{} name a private address (*.internal) that only resolves inside roll: `roll apps proxy` reaches one from here", internal.join(", "));
-            }
-            let status = tokio::process::Command::new(&command[0])
-                .args(&command[1..])
-                .envs(vars)
-                .status()
-                .await
-                .with_context(|| format!("couldn't run {}", command[0]))?;
-            for t in tunneled {
-                t.abort();
-            }
-            match status.code() {
-                Some(0) => return Ok(()),
-                Some(code) => std::process::exit(code),
-                None => bail!("{} was killed by a signal", command[0]),
-            }
+            return dev(api, &svc, &target.env, no_tunnels, keep_roll_credentials, &command).await;
         }
         AppsCmd::Export { project, output, force } => {
             let project = match project {
@@ -4983,6 +4944,24 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
+        AppsCmd::CspReports { target, minutes } => {
+            let svc = service(api, &target).await?;
+            let v = api.get(&format!("{}/csp-reports?minutes={minutes}", env_path(&svc, &target.env))).await?;
+            if !json_out {
+                let groups = v["groups"].as_array().cloned().unwrap_or_default();
+                if v["on"] != true {
+                    println!("CSP reports are off (roll apps env --csp-reports true)");
+                }
+                if groups.is_empty() {
+                    println!("no reports in the last {} minutes", v["minutes"]);
+                }
+                for g in &groups {
+                    println!("{:>7}  {:<18} {:<36} {:<30} {}", g["count"], s(&g["directive"]), s(&g["blocked"]), s(&g["path"]), if g["disposition"] == "report" { "report-only" } else { "" });
+                }
+                return Ok(());
+            }
+            v
+        }
         AppsCmd::Traces { target, minutes, min_ms, trace } => {
             let svc = service(api, &target).await?;
             let base = env_path(&svc, &target.env);
@@ -5365,10 +5344,11 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 v
             }
         }
-        AppsCmd::Notifications { target, add, kind, region, events, only_env, only_service, previews, every_env, every_service, remove, test, edit, deliveries, redeliver, email } => {
-            if add.is_none() && edit.is_none() && !email && (events.is_some() || !only_env.is_empty() || !only_service.is_empty() || previews.is_some()) {
-                bail!("--events, --only-env, --only-service and --previews go with --add, --email or --edit");
+        AppsCmd::Notifications { target, add, kind, region, events, only_env, only_service, previews, every_env, every_service, remove, test, edit, deliveries, redeliver, email, escalate_after, escalate_to, no_escalate } => {
+            if add.is_none() && edit.is_none() && !email && (events.is_some() || !only_env.is_empty() || !only_service.is_empty() || previews.is_some() || escalate_after.is_some()) {
+                bail!("--events, --only-env, --only-service, --previews and --escalate-after go with --add, --email or --edit");
             }
+            let escalate = escalate_after.zip(escalate_to).map(|(after_min, to)| json!({ "after_min": after_min, "to": to }));
             let (add, kind) = if email { (Some(String::new()), "email".to_string()) } else { (add, kind) };
             let svc = service(api, &target).await?;
             let path = format!("/v1/apps/projects/{}/notifications", enc(&s(&svc["project"])));
@@ -5393,8 +5373,14 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 if every_service {
                     body.insert("services".into(), json!([]));
                 }
+                if let Some(e) = &escalate {
+                    body.insert("escalate".into(), e.clone());
+                }
+                if no_escalate {
+                    body.insert("escalate".into(), Value::Null);
+                }
                 if body.is_empty() {
-                    bail!("nothing to change: --events, --only-env, --only-service or --previews");
+                    bail!("nothing to change: --events, --only-env, --only-service, --previews or --escalate-after");
                 }
                 let t = api.call(reqwest::Method::PATCH, &format!("{path}/{}", enc(&id)), Some(Value::Object(body))).await?;
                 if !json_out {
@@ -5423,6 +5409,9 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 }
                 if let Some(e) = events {
                     body["events"] = json!(e);
+                }
+                if let Some(e) = escalate {
+                    body["escalate"] = e;
                 }
                 let t = api.post(&path, body).await?;
                 if !json_out {
@@ -5617,6 +5606,33 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             eprintln!("{} MiB of {deployment}'s image", n >> 20);
             return Ok(());
         }
+        AppsCmd::Alerts { target, ack } => {
+            let svc = service(api, &target).await?;
+            let path = format!("/v1/apps/projects/{}/alerts", enc(&s(&svc["project"])));
+            let when = |v: &Value| v.as_i64().and_then(chrono::DateTime::from_timestamp_millis).map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string()).unwrap_or_default();
+            if let Some(id) = ack {
+                let a = api.post(&format!("{path}/{}/ack", enc(&id)), json!({})).await?;
+                if !json_out {
+                    println!("{}  acknowledged by {} at {}", s(&a["id"]), s(&a["acked"]["by"]), when(&a["acked"]["at"]));
+                    return Ok(());
+                }
+                a
+            } else {
+                let v = api.get(&path).await?;
+                if !json_out {
+                    for a in v.as_array().into_iter().flatten() {
+                        let state = match a["acked"]["by"].as_str() {
+                            Some(by) => format!("acked by {by}"),
+                            None if a["escalated_at"].is_i64() => "escalated".into(),
+                            None => "open".into(),
+                        };
+                        println!("{}  {}  {:<16} {}  {}", s(&a["id"]), when(&a["opened_at"]), state, s(&a["kind"]), s(&a["about"]));
+                    }
+                    return Ok(());
+                }
+                v
+            }
+        }
         AppsCmd::Silence { target, duration, reason, alerts, every, timezone, end } => {
             let svc = service(api, &target).await?;
             let path = format!("{}/silences", env_path(&svc, &target.env));
@@ -5772,7 +5788,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Env { target, all_services, branch, no_branch, variables_from, data, wait_for_ci, run, follow_tag, deploy_tags, redeploy_on_secrets, vitals, hsts, egress, egress_host, private, open, signed_in, sso, maintenance, serve, pause, resume, resume_deploys, hold, allow_ip, allow_any, rate_limit, no_rate_limit, firewall, no_firewall, header, no_headers, route, no_routes, redirects, no_redirects, error_page, maintenance_page, roll_pages, freeze, unfreeze, rotate_config, set } => {
+        AppsCmd::Env { target, all_services, branch, no_branch, variables_from, data, wait_for_ci, run, follow_tag, deploy_tags, redeploy_on_secrets, vitals, csp_reports, hsts, egress, egress_host, private, open, signed_in, sso, maintenance, serve, pause, resume, resume_deploys, hold, allow_ip, allow_any, rate_limit, no_rate_limit, firewall, no_firewall, header, no_headers, route, no_routes, redirects, no_redirects, error_page, maintenance_page, roll_pages, freeze, unfreeze, rotate_config, set } => {
             let svc = service(api, &target).await?;
             if rotate_config {
                 let e = api.post(&format!("{}/config/rotate", env_path(&svc, &target.env)), json!({})).await?;
@@ -5814,6 +5830,9 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             if let Some(v) = vitals {
                 body.insert("vitals".into(), json!(v));
+            }
+            if let Some(v) = csp_reports {
+                body.insert("csp_reports".into(), json!(v));
             }
             if let Some(h) = &hsts {
                 body.insert("hsts".into(), hsts_body(h)?);
@@ -6112,6 +6131,118 @@ fn secret_from_stdin(what: &str) -> anyhow::Result<String> {
     let v = v.trim_end_matches(['\r', '\n']).to_string();
     anyhow::ensure!(!v.is_empty(), "{what} goes on stdin (never argv)");
     Ok(v)
+}
+
+/// `roll apps dev`: `command` run here with environment `env`'s values (the reveal route's) in
+/// its environment only, never a file, argv or a log; a tunnel to each linked service a value
+/// names, unless `no_tunnels`; Ctrl-C passed on, and its exit roll's.
+async fn dev(api: &Api, svc: &Value, env: &str, no_tunnels: bool, keep_roll_credentials: bool, command: &[String]) -> anyhow::Result<()> {
+    let base = env_path(svc, env);
+    let (values, listed) = (api.get(&format!("{base}/variables/values")).await?, api.get(&format!("{base}/variables")).await?);
+    // Names that steer this machine's own programs (a loader, a shell, a runtime's flags): an
+    // environment's variables are anyone-who-can-write-them's, so they're never set here.
+    let steering = |k: &str| {
+        ["PATH", "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "BASH_ENV", "ENV", "IFS", "SHELLOPTS", "BASHOPTS", "PS4", "PROMPT_COMMAND", "NODE_OPTIONS", "NODE_PATH", "PYTHONSTARTUP", "PYTHONPATH", "PYTHONHOME", "PERL5OPT", "PERL5LIB", "RUBYOPT", "RUBYLIB", "JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS", "JDK_JAVA_OPTIONS", "GIT_SSH_COMMAND", "GIT_EXEC_PATH", "HOME", "SHELL", "EDITOR", "COMSPEC", "PATHEXT"].contains(&k) || k.starts_with("DYLD_")
+    };
+    // `PORT`, `ROLL_*` and roll's own (`WEB_CONCURRENCY`, `OTEL_*`, an agent's
+    // `JAVA_TOOL_OPTIONS`) are the instance's, wrong on this machine.
+    let roll_made: Vec<String> = listed["vars"].as_array().into_iter().flatten().filter(|v| v["source"] == "roll").map(|v| s(&v["name"])).collect();
+    let (mut vars, mut left_out) = (Vec::new(), Vec::new());
+    for (k, v) in values.as_object().into_iter().flatten() {
+        let Some(v) = v.as_str() else { continue };
+        if k == "PORT" || k.starts_with("ROLL_") || roll_made.contains(k) {
+            continue;
+        }
+        if steering(k) {
+            left_out.push(k.clone());
+            continue;
+        }
+        vars.push((k.clone(), v.to_string()));
+    }
+    if !left_out.is_empty() {
+        eprintln!("not set here (they'd steer this machine's programs): {}", left_out.join(", "));
+    }
+    let sealed: Vec<String> = listed["vars"].as_array().into_iter().flatten().filter(|v| v["sealed"] == true).map(|v| s(&v["name"])).collect();
+    if !sealed.is_empty() {
+        eprintln!("not set here (sealed, never shown again): {}", sealed.join(", "));
+    }
+    // A linked service's private URL (`http://<name>.<env>.internal:<port>`) pointed at a local
+    // tunnel to it, as `roll apps proxy` makes one, for as long as the command runs. Only when
+    // something names one: the links (and each linked service) are read then, and one that can't
+    // be read is said, not fatal. roll's resources (Postgres, Redis, search) link public
+    // addresses, so their values stay as they are.
+    let mut tunneled = Vec::new();
+    let links = if !no_tunnels && vars.iter().any(|(_, v)| v.contains(".internal")) {
+        api.get(&format!("/v1/apps/services/{}/links", enc(&s(&svc["id"])))).await.unwrap_or_else(|e| {
+            eprintln!("its links couldn't be read ({e:#}): no tunnels");
+            Value::Null
+        })
+    } else {
+        Value::Null
+    };
+    for l in links.as_array().into_iter().flatten().filter(|l| l["kind"] == "service") {
+        let other = match api.get(&format!("/v1/apps/services/{}", enc(&s(&l["ref"])))).await {
+            Ok(o) => o,
+            Err(e) => {
+                eprintln!("the linked service {} couldn't be read ({e:#}): no tunnel to it", s(&l["ref"]));
+                continue;
+            }
+        };
+        let host = format!("{}.{env}.internal", s(&other["name"]));
+        if !vars.iter().any(|(_, v)| internal_rewritten(v, &host, "").is_some()) {
+            continue;
+        }
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?;
+        let local = listener.local_addr()?.to_string();
+        for (_, v) in vars.iter_mut() {
+            if let Some(new) = internal_rewritten(v, &host, &local) {
+                *v = new;
+            }
+        }
+        eprintln!("tunnel: {local} → {} ({env}), for {}'s link", s(&other["name"]), s(&svc["name"]));
+        let (url, headers) = tunnel_to(api, &env_path(&other, env));
+        tunneled.push(tokio::spawn(async move {
+            if let Err(e) = tunnels(url, headers, listener).await {
+                eprintln!("a tunnel ended: {e:#}");
+            }
+        }));
+    }
+    let internal: Vec<&str> = vars.iter().filter(|(_, v)| v.contains(".internal")).map(|(k, _)| k.as_str()).collect();
+    if !internal.is_empty() {
+        eprintln!("{} name a private address (*.internal) that only resolves inside roll: `roll apps proxy` reaches one from here", internal.join(", "));
+    }
+    // The service's port, unless this shell already sets one (`PORT=3000 roll apps dev …`).
+    if std::env::var_os("PORT").is_none() {
+        let port = values["PORT"].as_str().map(str::to_string).or_else(|| svc["run"]["port"].as_u64().map(|p| p.to_string()));
+        vars.extend(port.map(|p| ("PORT".to_string(), p)));
+    }
+    vars.push(("ROLL_DEV".into(), "1".into()));
+    let mut names: Vec<&str> = vars.iter().map(|(k, _)| k.as_str()).collect();
+    names.sort_unstable();
+    eprintln!("set from {} ({env}): {}", s(&svc["name"]), names.join(", "));
+    // roll's own credentials (the token that read these values among them) aren't the app's,
+    // as `roll run` keeps them from its command.
+    let mut cmd = tokio::process::Command::new(crate::sys::program(&command[0]));
+    if !keep_roll_credentials {
+        for k in crate::sys::roll_credentials(&|n| vars.iter().any(|(k, _)| k == n)) {
+            cmd.env_remove(k);
+        }
+    }
+    cmd.args(&command[1..]).envs(vars);
+    // Ctrl-C from the terminal reaches the command itself; one sent to roll alone (and SIGTERM,
+    // SIGHUP; on Windows, the console closing) is passed on. roll stays up until it exits.
+    let mut signals = crate::mask::Signals::new()?;
+    let mut child = cmd.spawn().with_context(|| format!("couldn't run {}", command[0]))?;
+    let status = loop {
+        tokio::select! {
+            status = child.wait() => break status?,
+            sig = signals.next() => crate::mask::Signals::pass(&mut child, sig),
+        }
+    };
+    for t in tunneled {
+        t.abort();
+    }
+    crate::mask::exit_as(status)
 }
 
 /// `v` with every URL whose host is exactly `host` (after `//` or `@`, before a port, a path,

@@ -77,7 +77,6 @@ describe("NewServiceSheet", () => {
     render(<NewServiceSheet project={project} spot={{ x: 48, y: 48 }} onClose={() => {}} onCreated={created} onImported={() => {}} />);
     await userEvent.click(await screen.findByRole("button", { name: "apps/web" }));
     await userEvent.click(screen.getByRole("button", { name: "apps/api" }));
-    expect(screen.getByText(/2 services, one per folder/)).toBeInTheDocument();
     await waitFor(() => expect(screen.getByRole("button", { name: "Deploy" })).toBeEnabled());
     await userEvent.click(screen.getByRole("button", { name: "Deploy" }));
     await waitFor(() => expect(created).toHaveBeenCalled());

@@ -1118,6 +1118,12 @@ pub trait Apps: Send + Sync {
     async fn fetch(&self, _preview: &str, _service: &str, _url: &str, _access: Option<&str>, _path: &str, _head: bool) -> anyhow::Result<Option<Fetched>> {
         Ok(None)
     }
+    /// `method` `path` with `body` sent to the service as [`Self::fetch`] reads it (a write replayed
+    /// on a copy of the preview's data): its answer, read as `fetch` reads one. `None` where this
+    /// backend can't (roll apps' services: roll apps' proxy).
+    async fn send(&self, _preview: &str, _service: &str, _method: &str, _path: &str, _content_type: Option<&str>, _body: Vec<u8>) -> anyhow::Result<Option<Fetched>> {
+        Ok(None)
+    }
     /// Whether `service` can be swapped for a laptop's process here (`roll preview swap`): roll's
     /// runtime serves its requests itself; roll apps' services are roll apps'.
     async fn can_swap(&self, _preview: &str, _service: &str) -> anyhow::Result<bool> {

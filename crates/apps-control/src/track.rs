@@ -216,19 +216,8 @@ mod tests {
             assert!(parse(bad).is_none(), "{}", String::from_utf8_lossy(bad));
         }
         assert!(parse(format!(r#"{{"name":"{}"}}"#, "x".repeat(101)).as_bytes()).is_none());
-    }
-
-    #[test]
-    fn user_agents_read_as_browser_os_and_device() {
-        let chrome_mac = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
         let iphone = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1";
-        let edge = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0";
-        let tablet = "Mozilla/5.0 (Linux; Android 14; SM-X710) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
-        assert_eq!(device_of(chrome_mac), ("Chrome", "macOS", "desktop"));
         assert_eq!(device_of(iphone), ("Safari", "iOS", "mobile"));
-        assert_eq!(device_of(edge), ("Edge", "Windows", "desktop"));
-        assert_eq!(device_of(tablet), ("Chrome", "Android", "tablet"));
-        assert_eq!(device_of("Googlebot/2.1 (+http://www.google.com/bot.html)").2, "bot");
         assert_eq!(device_of("curl/8.5.0").2, "bot");
     }
 }

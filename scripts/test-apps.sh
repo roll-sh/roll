@@ -32,13 +32,18 @@ if [[ $force == 0 && $docker == 0 && -f $STAMP && "$(cat "$STAMP")" == "$hash" ]
 fi
 
 cargo clippy -p apps-build -p apps-control -p roll-edge --all-targets -- -D warnings
-cargo test -p apps-build -p apps-control -p roll-workspace "${args[@]}"
+# Without --docker nothing runs on Docker, even with ROLL_APPS_DOCKER set in the shell.
+env -u ROLL_APPS_DOCKER cargo test -p apps-build -p apps-control -p roll-workspace "${args[@]}"
 # `roll apps …` end to end: the real binary against roll apps in process.
-cargo test -p roll-cli --test apps
+env -u ROLL_APPS_DOCKER cargo test -p roll-cli --test apps
+# roll-mcp's tool tests read apps-control's source (link kinds, rollout actions, lifecycle).
+cargo test -p roll-mcp --lib
 # Custom domains' certificates at the edge: the HTTP-01 manager, the plain-HTTP listener, and
 # Cloudflare for SaaS against a fake Cloudflare.
-cargo test -p roll-edge --lib --test custom_domains
-cargo build -p rolld -p roll-cli
+env -u ROLL_APPS_DOCKER cargo test -p roll-edge --lib --test custom_domains
+# rolld's own apps tests (src/apps.rs) aren't run here: a rolld test build is about 15 GB.
+# rolld and roll-cli still compile with the change (checked, not built: no test runs them).
+cargo check -p rolld -p roll-cli
 if [[ $docker == 1 ]]; then
   # Three at a time: each test makes its own project's networks, and a host whose other projects
   # hold most of Docker's address pools refuses the rest ("all predefined address pools have been

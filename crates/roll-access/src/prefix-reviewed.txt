@@ -181,7 +181,6 @@ GET /v1/previews/projects/{project}/mask-suggestions
 GET /v1/previews/projects/{project}/hooks
 GET /v1/previews/{id}/activity
 GET /v1/previews/{id}/visitors
-PUT /v1/previews/{id}/env
 POST /v1/previews/{id}/keep
 GET /v1/previews/{id}/restore-points
 POST /v1/previews/{id}/restore-points
@@ -189,8 +188,8 @@ DELETE /v1/previews/{id}/restore-points/{point}
 GET /v1/previews/{id}/notes
 POST /v1/previews/{id}/notes/{note}/resolve
 POST /v1/previews/{id}/notes/{note}/work
-POST /v1/previews/{id}/replay
 GET /v1/previews/{id}/notes/{note}/crop
+POST /v1/previews/{id}/notes/{note}/screen
 GET /v1/previews/{id}/logs
 POST /v1/previews/{id}/refresh
 GET /v1/previews/{id}/requests
@@ -243,7 +242,6 @@ PUT /v1/secrets/projects/{project}/environments/{env}
 GET /v1/secrets/projects/{project}/environments/{env}/changes
 GET /v1/secrets/projects/{project}/environments/{env}/changes/{seq}
 GET /v1/secrets/projects/{project}/environments/{env}/deletion
-GET /v1/secrets/projects/{project}/environments/{env}/digest
 GET /v1/secrets/projects/{project}/environments/{env}/exports
 DELETE /v1/secrets/projects/{project}/environments/{env}/folders
 GET /v1/secrets/projects/{project}/environments/{env}/folders
@@ -259,7 +257,6 @@ POST /v1/secrets/projects/{project}/environments/{env}/rollback
 DELETE /v1/secrets/projects/{project}/environments/{env}/secrets/{key}
 GET /v1/secrets/projects/{project}/environments/{env}/secrets/{key}
 PUT /v1/secrets/projects/{project}/environments/{env}/secrets/{key}
-POST /v1/secrets/projects/{project}/environments/{env}/secrets/{key}/rotate
 GET /v1/secrets/projects/{project}/environments/{env}/secrets/{key}/versions
 GET /v1/secrets/projects/{project}/grid
 DELETE /v1/secrets/projects/{project}/identities/{id}

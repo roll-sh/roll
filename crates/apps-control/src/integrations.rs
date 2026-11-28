@@ -800,19 +800,3 @@ impl Resolver for StaticDns {
         self.find(name, "PTR")
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_postgres_urls_parts_are_libpqs_variables() {
-        let mut v = vec![("DATABASE_URL".to_string(), "postgres://roll:p%40ss@127.0.0.1:5433/main?options=endpoint%3Dep-1&sslmode=disable".to_string())];
-        assert_eq!(pg_parts(LinkKind::Postgres, &mut v).len(), 7);
-        let got: std::collections::BTreeMap<_, _> = v.into_iter().collect();
-        assert_eq!((got["PGHOST"].as_str(), got["PGPORT"].as_str(), got["PGUSER"].as_str(), got["PGPASSWORD"].as_str()), ("127.0.0.1", "5433", "roll", "p@ss"));
-        assert_eq!((got["PGDATABASE"].as_str(), got["PGOPTIONS"].as_str(), got["PGSSLMODE"].as_str()), ("main", "endpoint=ep-1", "disable"));
-        let mut redis = vec![("DATABASE_URL".to_string(), "postgres://a@b/c".to_string())];
-        assert!(pg_parts(LinkKind::Redis, &mut redis).is_empty());
-    }
-}

@@ -42,6 +42,7 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route("/v1/previews/{id}/notes/{note}/resolve", post(resolve_note))
         .route("/v1/previews/{id}/notes/{note}/work", post(note_work))
         .route("/v1/previews/{id}/notes/{note}/crop", get(note_crop))
+        .route("/v1/previews/{id}/notes/{note}/screen", post(attach_screen))
         .route("/v1/previews/{id}/mail", get(mails))
         .route("/v1/previews/{id}/mail/{mail}", get(mail_raw))
         .route("/v1/previews/{id}/screenshot.png", get(screenshot_link))
@@ -274,23 +275,39 @@ struct EventsQuery {
     after: Option<i64>,
     limit: Option<usize>,
     latest: Option<String>,
+    /// Seconds to wait for an event when there's none after `after` yet (a long poll).
+    wait: Option<u64>,
 }
 
 /// What happened to previews after `after`, oldest first (`{events, next}`; `next` is where to
 /// ask from again, past the events the caller doesn't see too). `latest=1`: none, and the newest
-/// seq, to follow from now on.
+/// seq, to follow from now on. `wait`: with none yet, the answer waits up to that many seconds
+/// for one (at most [`crate::store::EVENTS_WAIT_MAX_S`]).
 async fn events(AxState(e): S, axum::Extension(visible): axum::Extension<Visible>, Query(q): Query<EventsQuery>) -> crate::Result<Json<Value>> {
     let latest = matches!(q.latest.as_deref(), Some("1" | "true"));
     if latest && q.after.is_some() {
         return Err(Error::BadRequest("latest or after, not both".into()));
     }
     let limit = q.limit.unwrap_or(100).clamp(1, 500);
+    let wait = match q.wait {
+        Some(w) if latest || w == 0 || w > crate::store::EVENTS_WAIT_MAX_S => {
+            return Err(Error::BadRequest(format!("wait is 1 to {} seconds, and not with latest", crate::store::EVENTS_WAIT_MAX_S)));
+        }
+        w => w.map(std::time::Duration::from_secs),
+    };
+    let after = q.after.unwrap_or(0);
+    let waited = match wait {
+        Some(w) => Some(e.store.wait_events(after, limit, w).await?),
+        None => None,
+    };
     blocking(e, move |e| {
         if latest {
             return Ok(json!({ "events": [], "next": e.store.latest_event()? }));
         }
-        let after = q.after.unwrap_or(0);
-        let got = e.store.events(after, limit)?;
+        let got = match waited {
+            Some(got) => got,
+            None => e.store.events(after, limit)?,
+        };
         let next = got.last().map_or(after, |x| x.seq);
         let seen: Vec<crate::Event> = got.into_iter().filter(|x| visible.sees(&x.project)).collect();
         Ok(json!({ "events": seen, "next": next }))
@@ -611,17 +628,47 @@ async fn notes(AxState(e): S, Path(id): Path<String>) -> crate::Result<Json<serd
     Ok(Json(v))
 }
 
-/// A picture of a note's element, as a screenshot run cropped it from the page (404 until one has).
+/// A note's picture: its element as a screenshot run cropped it from the page, or the one its
+/// reviewer took of their own tab (`x-roll-crop-own`; a guest's marked outside). 404 until one.
 async fn note_crop(AxState(e): S, Path((id, note)): Path<(String, String)>) -> crate::Result<Response> {
     check_id(&id)?;
     e.store.row(&id)?;
-    let (png, seen) = e.store.note_crop(&id, &note)?.ok_or_else(|| Error::NotFound("no picture of that note's element yet".into()))?;
-    let mut resp = picture(&e, &id, png, "private, max-age=3600");
+    let crop = e.store.note_crop(&id, &note)?.ok_or_else(|| Error::NotFound("no picture of that note's element yet".into()))?;
+    let mut resp = outside_if_untrusted(&e, &id, ([(axum::http::header::CONTENT_TYPE, crop.mime.as_str()), (axum::http::header::CACHE_CONTROL, "private, max-age=3600"), (axum::http::header::X_CONTENT_TYPE_OPTIONS, "nosniff")], crop.image).into_response());
     // Taken as its reviewer saw it: how (`390x844, after 2 steps`).
-    if let Some(v) = seen.and_then(|s| axum::http::HeaderValue::from_str(&s).ok()) {
+    if let Some(v) = crop.seen.and_then(|s| axum::http::HeaderValue::from_str(&s).ok()) {
         resp.headers_mut().insert(axum::http::HeaderName::from_static("x-roll-crop-as"), v);
     }
+    if let Some(own) = crop.own {
+        resp.headers_mut().insert(axum::http::HeaderName::from_static("x-roll-crop-own"), axum::http::HeaderValue::from_static("true"));
+        if own == "guest" {
+            resp.headers_mut().insert(roll_auth::lockdown::OUTSIDE_HEADER, axum::http::HeaderValue::from_static("true"));
+        }
+    }
     Ok(resp)
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AttachScreen {
+    screen: String,
+}
+
+/// The picture a note's reviewer took of their own tab on the page (its `screen` token, which
+/// the page's button gave roll's window), kept as the note's: its author's only, once.
+async fn attach_screen(AxState(e): S, Path((id, note)): Path<(String, String)>, who: Option<axum::Extension<roll_auth::SignedIn>>, grant: Option<axum::Extension<roll_auth::Grant>>, Json(body): Json<AttachScreen>) -> crate::Result<Json<serde_json::Value>> {
+    check_id(&id)?;
+    if !crate::store::note_id_ok(&note) || !body.screen.starts_with("rsc_") || body.screen.len() > 64 {
+        return Err(Error::BadRequest("expected a note id and {screen: \"rsc_…\"}".into()));
+    }
+    // Whoever may say they wrote it: a person by any name they go by, a token by its own.
+    let by = match (who, grant) {
+        (Some(axum::Extension(u)), None) => Some(aliases_of(&e, Some(&u)).await?),
+        (_, Some(axum::Extension(g))) => Some(vec![format!("token:{}", g.name)]),
+        (None, None) => None,
+    };
+    e.attach_screen(&id, &note, &body.screen, by.as_deref()).await?;
+    Ok(Json(serde_json::json!({ "note": note, "crop_own": true })))
 }
 
 /// Resolve a note left on the preview's page (its review's id): the page stops listing it.
@@ -818,17 +865,18 @@ async fn screenshot_link(AxState(e): S, Path(id): Path<String>, Query(q): Query<
             return Ok(None);
         }
         if let Some(n) = &note {
-            return Ok(e.store.note_crop(&id, n)?.map(|(png, _)| png));
+            return Ok(e.store.note_crop(&id, n)?.map(|c| (c.image, c.mime)));
         }
+        let png = |b: Option<Vec<u8>>| b.map(|b| (b, "image/png".to_string()));
         if variant.is_none() {
-            return Ok(e.store.screenshot(&id)?.map(|(_, png)| png));
+            return Ok(png(e.store.screenshot(&id)?.map(|(_, png)| png)));
         }
         let (Some(before), Some((_, after))) = (e.store.base_screenshot(&id, false, None)?, e.store.screenshot(&id)?) else { return Ok(None) };
-        Ok(crate::visual::diff(&before, &after))
+        Ok(png(crate::visual::diff(&before, &after)))
     })
     .await?;
-    match shot.filter(|png| !png.is_empty()) {
-        Some(png) => Ok(([(axum::http::header::CONTENT_TYPE, "image/png"), (axum::http::header::CACHE_CONTROL, "public, max-age=86400, immutable")], png).into_response()),
+    match shot.filter(|(b, _)| !b.is_empty()) {
+        Some((b, mime)) => Ok(([(axum::http::header::CONTENT_TYPE, mime), (axum::http::header::CACHE_CONTROL, "public, max-age=86400, immutable".to_string()), (axum::http::header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string())], b).into_response()),
         None => Ok((StatusCode::FORBIDDEN, "not a valid link").into_response()),
     }
 }

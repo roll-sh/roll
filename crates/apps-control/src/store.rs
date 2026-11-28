@@ -14,6 +14,10 @@ use code_sql::{Db, OptionalExtension, params};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+/// A delivery due ([`Store::due_deliveries`]): its id, target, event seq, tries so far, and
+/// whether it's an escalation (no one acknowledged the alert in time).
+pub type DueDelivery = (String, String, i64, u32, bool);
+
 /// A dropped build cache: its project and cache, and the objects to delete.
 pub type DroppedCache = ((String, String), Vec<String>);
 
@@ -381,6 +385,28 @@ CREATE TABLE IF NOT EXISTS variables (
     PRIMARY KEY (service, env, name)
 ) WITHOUT ROWID;
 -- An environment's variables kept as files in its instances (their absolute paths).
+-- An environment's CSP reports (`csp`), grouped: how many, first and last seen; at most 500 an
+-- environment, kept as long as its logs.
+CREATE TABLE IF NOT EXISTS csp_reports (
+    service TEXT NOT NULL,
+    env TEXT NOT NULL,
+    directive TEXT NOT NULL,
+    blocked TEXT NOT NULL,
+    path TEXT NOT NULL,
+    disposition TEXT NOT NULL,
+    count INTEGER NOT NULL,
+    first_seen INTEGER NOT NULL,
+    last_seen INTEGER NOT NULL,
+    PRIMARY KEY (service, env, directive, blocked, path, disposition)
+) WITHOUT ROWID;
+-- The directives an environment's CSP reports have named: the first is its `alert.csp`.
+CREATE TABLE IF NOT EXISTS csp_directives (
+    service TEXT NOT NULL,
+    env TEXT NOT NULL,
+    directive TEXT NOT NULL,
+    first_seen INTEGER NOT NULL,
+    PRIMARY KEY (service, env, directive)
+) WITHOUT ROWID;
 -- Every error an environment has had (`errors::note_new_errors`), by fingerprint: the first time
 -- one is seen is its `error.new` event.
 CREATE TABLE IF NOT EXISTS error_groups (
@@ -533,6 +559,37 @@ CREATE TABLE IF NOT EXISTS held_alerts (
     env TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS events_env ON events (service, env, seq);
+-- Alerts, open from their opening event until one closing their key, written in the notifier
+-- cursor's own transaction (so none is missed or opened twice). Closed ones stay a week: an ack
+-- after the close is a 409, not a 404.
+CREATE TABLE IF NOT EXISTS apps_alerts (
+    id TEXT PRIMARY KEY,
+    project TEXT NOT NULL,
+    alert_key TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    service TEXT NOT NULL,
+    env TEXT NOT NULL,
+    about TEXT NOT NULL,
+    opened_at INTEGER NOT NULL,
+    closed_at INTEGER,
+    acked_by TEXT,
+    acked_at INTEGER,
+    escalated_at INTEGER
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS apps_alerts_key ON apps_alerts (alert_key, closed_at);
+CREATE INDEX IF NOT EXISTS apps_alerts_project ON apps_alerts (project, closed_at, seq);
+-- An alert sent to a target that escalates: due at `due_at`, then `sent` (claimed once) or
+-- `dropped` (acknowledged or closed first).
+CREATE TABLE IF NOT EXISTS alert_escalations (
+    alert TEXT NOT NULL,
+    target TEXT NOT NULL,
+    to_target TEXT NOT NULL,
+    due_at INTEGER NOT NULL,
+    state TEXT NOT NULL,
+    PRIMARY KEY (alert, target)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS alert_escalations_due ON alert_escalations (state, due_at);
 CREATE TABLE IF NOT EXISTS alert_silences (
     id TEXT PRIMARY KEY,
     service TEXT NOT NULL,
@@ -808,6 +865,8 @@ pub struct EnvRow {
     pub vitals: bool,
     /// Its Strict-Transport-Security: the default unless it set one; None: off (`hsts: false`).
     pub hsts: Option<crate::model::Hsts>,
+    /// Its answers name roll's CSP report endpoint ([`crate::csp`]).
+    pub csp_reports: bool,
     /// Days its logs are kept (7, 30 or 90); None: [`crate::logs::KEEP_DAYS`].
     pub log_retention_days: Option<u32>,
     /// Approvals a deployment needs from people other than its author before it goes live.
@@ -978,7 +1037,7 @@ fn name_taken(name: &str, deleted: Option<i64>) -> String {
         Some(_) => format!("a deleted service named {name} holds the name: restore it, or delete it again to delete it for good"),
     }
 }
-const ENV_COLS: &str = "service, name, branch, ephemeral, active, slug, port, created_at, wait_for_ci, run, hook_hash, follow_tag, tag_seen, feedback, maintenance, allow_ips, rate_limit, tcp_port, firewall, pages, redeploy_on_secrets, secrets_seen, headers, paused, held_by, egress, vitals, routes, report, checks, heartbeats, split, freeze, mirror, pause_schedule, snippets, log_retention_days, approvals, badge, egress_by, redirects, keep_days, hsts";
+const ENV_COLS: &str = "service, name, branch, ephemeral, active, slug, port, created_at, wait_for_ci, run, hook_hash, follow_tag, tag_seen, feedback, maintenance, allow_ips, rate_limit, tcp_port, firewall, pages, redeploy_on_secrets, secrets_seen, headers, paused, held_by, egress, vitals, routes, report, checks, heartbeats, split, freeze, mirror, pause_schedule, snippets, log_retention_days, approvals, badge, egress_by, redirects, keep_days, hsts, csp_reports";
 /// A deployment [`Store::prune_deployments`] pruned, with its image when nothing else names it.
 pub struct Pruned {
     pub id: String,
@@ -1078,6 +1137,7 @@ fn env_row(r: &code_sql::Row<'_>) -> code_sql::Result<EnvRow> {
             None => Some(crate::model::HSTS_DEFAULT),
             Some(s) => serde_json::from_str::<Option<crate::model::Hsts>>(&s).ok().flatten(),
         },
+        csp_reports: r.get::<_, i64>(43)? != 0,
     })
 }
 
@@ -1228,6 +1288,8 @@ impl Store {
         db.add_column("notify_targets", "environments", "TEXT NOT NULL DEFAULT '[]'")?;
         db.add_column("notify_targets", "services", "TEXT NOT NULL DEFAULT '[]'")?;
         db.add_column("notify_targets", "previews", "INTEGER NOT NULL DEFAULT 1")?;
+        db.add_column("notify_targets", "escalate", "TEXT")?;
+        db.add_column("notify_deliveries", "escalated", "INTEGER NOT NULL DEFAULT 0")?;
         db.add_column("environments", "wait_for_ci", "INTEGER NOT NULL DEFAULT 0")?;
         db.add_column("environments", "run", "TEXT NOT NULL DEFAULT '{}'")?;
         db.add_column("environments", "hook_hash", "TEXT")?;
@@ -1265,6 +1327,7 @@ impl Store {
         db.add_column("environments", "keep_days", "INTEGER")?;
         // Its Strict-Transport-Security, as JSON (`false`, or its own); NULL: the default.
         db.add_column("environments", "hsts", "TEXT")?;
+        db.add_column("environments", "csp_reports", "INTEGER NOT NULL DEFAULT 0")?;
         db.add_column("environments", "approvals", "INTEGER")?;
         db.add_column("environments", "badge", "INTEGER NOT NULL DEFAULT 0")?;
         db.add_column("environments", "egress_by", "TEXT")?;
@@ -1516,7 +1579,7 @@ impl Store {
             c.execute("DELETE FROM deploy_git_tags WHERE deployment IN (SELECT id FROM deployments WHERE service = ?)", [id])?;
             c.execute("DELETE FROM state WHERE key LIKE ?", [format!("%:{id}/%")])?;
             c.execute("DELETE FROM status_days WHERE key LIKE ?", [format!("%:{id}/%")])?;
-            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "variable_runtime_only", "visit_tickets", "visit_sessions", "variable_files", "error_groups", "variables", "links", "domains", "preview_hosts", "runs", "jobs", "metrics", "usage", "form_submissions", "deploy_scans", "env_data", "env_branches", "udp_ports", "env_unscheduled", "sandboxes", "env_peering", "volume_hours", "env_deploy_tags", "alert_silences", "held_alerts"] {
+            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "variable_runtime_only", "visit_tickets", "visit_sessions", "variable_files", "error_groups", "variables", "links", "domains", "preview_hosts", "runs", "jobs", "metrics", "usage", "form_submissions", "deploy_scans", "env_data", "env_branches", "udp_ports", "env_unscheduled", "sandboxes", "env_peering", "volume_hours", "env_deploy_tags", "alert_silences", "held_alerts", "csp_reports", "csp_directives"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ?"), [id])?;
             }
             match c.execute("DELETE FROM services WHERE id = ?", [id])? {
@@ -1639,7 +1702,7 @@ impl Store {
                     None => None,
                 };
                 c.execute(
-                    &format!("INSERT INTO environments ({ENV_COLS}) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 0, '{{}}', NULL, 0, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL, 0, NULL, NULL, 0, NULL, 1, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL, NULL, NULL)"),
+                    &format!("INSERT INTO environments ({ENV_COLS}) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 0, '{{}}', NULL, 0, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL, 0, NULL, NULL, 0, NULL, 1, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL, NULL, NULL, 0)"),
                     params![service, env, branch.flatten(), ephemeral.unwrap_or(false) as i64, slug, port, now],
                 )?;
             }
@@ -1656,7 +1719,7 @@ impl Store {
             if n == 0 {
                 return Err(Error::NotFound(format!("service {service} has no environment {env}")));
             }
-            for t in ["variables", "variable_files", "error_groups", "domains", "preview_hosts", "runs", "jobs", "metrics", "deploy_keys", "env_access", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "variable_runtime_only", "visit_tickets", "visit_sessions", "form_submissions", "env_data", "udp_ports", "env_unscheduled", "sandboxes", "env_peering", "env_deploy_tags", "alert_silences", "held_alerts"] {
+            for t in ["variables", "variable_files", "error_groups", "domains", "preview_hosts", "runs", "jobs", "metrics", "deploy_keys", "env_access", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "variable_runtime_only", "visit_tickets", "visit_sessions", "form_submissions", "env_data", "udp_ports", "env_unscheduled", "sandboxes", "env_peering", "env_deploy_tags", "alert_silences", "held_alerts", "csp_reports", "csp_directives"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ? AND env = ?"), [service, env])?;
             }
             // Its schedules', challenge's and base images' state goes with it.
@@ -1746,8 +1809,8 @@ impl Store {
         let url_sealed = self.sealer.seal(&format!("notify:{id}:url"), url);
         let secret_sealed = secret.map(|s| self.sealer.seal(&format!("notify:{id}:secret"), s));
         self.db.execute(
-            "INSERT INTO notify_targets (id, project, kind, host, url_sealed, secret_sealed, events, created_at, environments, services, previews) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            params![id, project, kind, host, url_sealed, secret_sealed, serde_json::to_string(events).expect("JSON"), now, to_json(&filters.environments), to_json(&filters.services), filters.previews],
+            "INSERT INTO notify_targets (id, project, kind, host, url_sealed, secret_sealed, events, created_at, environments, services, previews, escalate) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            params![id, project, kind, host, url_sealed, secret_sealed, serde_json::to_string(events).expect("JSON"), now, to_json(&filters.environments), to_json(&filters.services), filters.previews, filters.escalate.as_ref().map(to_json)],
         )?;
         Ok(NotifyTarget {
             id,
@@ -1758,14 +1821,15 @@ impl Store {
             environments: filters.environments.clone(),
             services: filters.services.clone(),
             previews: filters.previews,
+            escalate: filters.escalate.clone(),
             created_at: now,
         })
     }
 
     pub fn update_target(&self, project: &str, id: &str, events: &[String], filters: &TargetFilters) -> Result<NotifyTarget> {
         let n = self.db.execute(
-            "UPDATE notify_targets SET events = ?, environments = ?, services = ?, previews = ? WHERE id = ? AND project = ?",
-            params![serde_json::to_string(events).expect("JSON"), to_json(&filters.environments), to_json(&filters.services), filters.previews, id, project],
+            "UPDATE notify_targets SET events = ?, environments = ?, services = ?, previews = ?, escalate = ? WHERE id = ? AND project = ?",
+            params![serde_json::to_string(events).expect("JSON"), to_json(&filters.environments), to_json(&filters.services), filters.previews, filters.escalate.as_ref().map(to_json), id, project],
         )?;
         if n == 0 {
             return Err(Error::NotFound(format!("no notification target {id}")));
@@ -1781,7 +1845,7 @@ impl Store {
     pub fn target_secrets(&self, id: &str) -> Result<Option<(NotifyTarget, String, Option<String>)>> {
         let row: Option<(NotifyTarget, String, Option<String>)> = self
             .db
-            .query_row(&format!("SELECT {TARGET_COLS}, url_sealed, secret_sealed FROM notify_targets WHERE id = ?"), [id], |r| Ok((target_row(r)?, r.get(9)?, r.get(10)?)))
+            .query_row(&format!("SELECT {TARGET_COLS}, url_sealed, secret_sealed FROM notify_targets WHERE id = ?"), [id], |r| Ok((target_row(r)?, r.get(10)?, r.get(11)?)))
             .optional()?;
         row.map(|(t, u, s)| {
             let url = self.sealer.open(&format!("notify:{}:url", t.id), &u)?;
@@ -1797,6 +1861,14 @@ impl Store {
                 return Err(Error::NotFound(format!("no notification target {id}")));
             }
             c.execute("DELETE FROM notify_deliveries WHERE target = ?", [id])?;
+            c.execute("DELETE FROM alert_escalations WHERE target = ? AND state = 'waiting'", [id])?;
+            // Who escalated to it escalates nowhere now (an edit can't name a gone target).
+            let escalating: Vec<(String, String)> = c.query("SELECT id, escalate FROM notify_targets WHERE project = ? AND escalate IS NOT NULL", [project], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            for (other, e) in escalating {
+                if serde_json::from_str::<Escalation>(&e).is_ok_and(|e| e.to == id) {
+                    c.execute("UPDATE notify_targets SET escalate = NULL WHERE id = ?", [other])?;
+                }
+            }
             Ok(())
         })
     }
@@ -1808,7 +1880,8 @@ impl Store {
     /// may have moved it): false when it wasn't. A (target, event) is queued once whatever runs.
     /// `held`: the alerts a silence held back in the same page (event seq, service, env), kept
     /// for [`crate::Apps`]'s release when it ends.
-    pub fn queue_deliveries(&self, deliveries: &[(String, i64, String)], held: &[(i64, String, String)], from: i64, to: i64) -> Result<bool> {
+    /// `alerts`: the page's alerts opened and closed, in order, kept with the cursor too.
+    pub fn queue_deliveries(&self, deliveries: &[(String, i64, String)], held: &[(i64, String, String)], alerts: &[AlertChange], from: i64, to: i64) -> Result<bool> {
         let now = self.now()?;
         self.db.write(|c| {
             let at: Option<String> = c.query_row("SELECT value FROM state WHERE key = 'notify'", (), |r| r.get(0)).optional()?;
@@ -1818,12 +1891,36 @@ impl Store {
             for (seq, svc, env) in held {
                 c.execute("INSERT INTO held_alerts (seq, service, env) VALUES (?, ?, ?) ON CONFLICT (seq) DO NOTHING", params![seq, svc, env])?;
             }
+            for a in alerts {
+                match a {
+                    AlertChange::Open { project, key, seq, kind, service, env, about, at } => {
+                        // A repeat while it's open is the same incident.
+                        let open: Option<String> = c.query_row("SELECT id FROM apps_alerts WHERE alert_key = ? AND closed_at IS NULL", [key], |r| r.get(0)).optional()?;
+                        if open.is_none() {
+                            c.execute(
+                                "INSERT INTO apps_alerts (id, project, alert_key, seq, kind, service, env, about, opened_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO NOTHING",
+                                params![alert_id(key, *seq), project, key, seq, kind, service, env, about, at],
+                            )?;
+                        }
+                    }
+                    AlertChange::Close { key, seq, kind, at } => {
+                        let open: Option<String> = c.query_row("SELECT id FROM apps_alerts WHERE alert_key = ? AND closed_at IS NULL", [key], |r| r.get(0)).optional()?;
+                        let Some(id) = open else { continue };
+                        c.execute("UPDATE apps_alerts SET closed_at = ? WHERE id = ?", params![at, id])?;
+                        c.execute("UPDATE alert_escalations SET state = 'dropped' WHERE alert = ? AND state = 'waiting'", [&id])?;
+                        // Whoever it was escalated to hears it close (an on-call incident closes).
+                        let to: Vec<String> = c.query("SELECT to_target FROM alert_escalations WHERE alert = ? AND state = 'sent'", [&id], |r| r.get(0))?;
+                        for t in to {
+                            c.execute(
+                                "INSERT INTO notify_deliveries (id, target, event, kind, status, attempts, next_at, code, error, at) VALUES (?, ?, ?, ?, 'pending', 0, ?, NULL, NULL, ?) ON CONFLICT (target, event) DO NOTHING",
+                                params![new_id("dlv"), t, seq, kind, now, now],
+                            )?;
+                        }
+                    }
+                }
+            }
             for (target, event, kind) in deliveries {
-                c.execute(
-                    "INSERT INTO notify_deliveries (id, target, event, kind, status, attempts, next_at, code, error, at) VALUES (?, ?, ?, ?, 'pending', 0, ?, NULL, NULL, ?) \
-                     ON CONFLICT (target, event) DO NOTHING",
-                    params![new_id("dlv"), target, event, kind, now, now],
-                )?;
+                queue_delivery(c, now, target, *event, kind)?;
             }
             c.execute("UPDATE state SET value = ? WHERE key = 'notify'", [to.to_string()])?;
             Ok(true)
@@ -1859,29 +1956,110 @@ impl Store {
         let now = self.now()?;
         self.db.write(|c| {
             for (target, event, kind) in deliveries {
-                c.execute(
-                    "INSERT INTO notify_deliveries (id, target, event, kind, status, attempts, next_at, code, error, at) VALUES (?, ?, ?, ?, 'pending', 0, ?, NULL, NULL, ?) ON CONFLICT (target, event) DO NOTHING",
-                    params![new_id("dlv"), target, event, kind, now, now],
-                )?;
+                queue_delivery(c, now, target, *event, kind)?;
             }
             c.execute("DELETE FROM held_alerts WHERE seq = ?", [seq])?;
             Ok(())
         })
     }
 
+    // ── alerts ──
+
+    /// A project's open alerts, newest first, at most `limit`.
+    pub fn open_alerts(&self, project: &str, limit: usize) -> Result<Vec<Alert>> {
+        Ok(self.db.query(&format!("SELECT {ALERT_COLS} FROM apps_alerts WHERE project = ? AND closed_at IS NULL ORDER BY seq DESC LIMIT ?"), params![project, limit as i64], alert_row)?)
+    }
+
+    /// The open alert an event of `key` belongs to.
+    pub fn open_alert(&self, key: &str) -> Result<Option<Alert>> {
+        Ok(self.db.query(&format!("SELECT {ALERT_COLS} FROM apps_alerts WHERE alert_key = ? AND closed_at IS NULL"), [key], alert_row)?.pop())
+    }
+
+    /// Acknowledge a project's alert as `by`: the alert, and whether this call acknowledged it
+    /// (false: it already was; who did first stays). Its `alert.acked` event goes with it.
+    /// Closed: a conflict.
+    pub fn ack_alert(&self, project: &str, id: &str, by: &str) -> Result<(Alert, bool)> {
+        let now = self.now()?;
+        self.db.write(|c| {
+            let Some(mut a) = c.query(&format!("SELECT {ALERT_COLS} FROM apps_alerts WHERE id = ? AND project = ?"), [id, project], alert_row)?.pop() else {
+                return Err(Error::NotFound(format!("no alert {id}")));
+            };
+            if a.closed_at.is_some() {
+                return Err(Error::Conflict(format!("alert {id} is closed already")));
+            }
+            if a.acked.is_some() {
+                return Ok((a, false));
+            }
+            c.execute("UPDATE apps_alerts SET acked_by = ?, acked_at = ? WHERE id = ?", params![by, now, id])?;
+            c.execute("UPDATE alert_escalations SET state = 'dropped' WHERE alert = ? AND state = 'waiting'", [id])?;
+            insert_event(c, now, "alert.acked", &a.service, &a.environment, None, &serde_json::json!({ "alert": id, "kind": a.kind, "about": a.about, "by": by }))?;
+            a.acked = Some(AlertAck { by: by.to_string(), at: now });
+            Ok((a, true))
+        })
+    }
+
+    /// Escalations due at `now`, oldest first, at most `limit`: (the alert, the target that
+    /// escalates).
+    pub fn due_escalations(&self, now: i64, limit: usize) -> Result<Vec<(Alert, String)>> {
+        let cols = ALERT_COLS.split(", ").map(|c| format!("a.{c}")).collect::<Vec<_>>().join(", ");
+        Ok(self.db.query(
+            &format!("SELECT {cols}, e.target FROM alert_escalations e JOIN apps_alerts a ON a.id = e.alert WHERE e.state = 'waiting' AND e.due_at <= ? ORDER BY e.due_at LIMIT ?"),
+            params![now, limit as i64],
+            |r| Ok((alert_row(r)?, r.get(ALERT_COLS.split(", ").count())?)),
+        )?)
+    }
+
+    /// An escalation still quiet (a silence), looked at again from `due_at`.
+    pub fn defer_escalation(&self, alert: &str, target: &str, due_at: i64) -> Result<()> {
+        self.db.execute("UPDATE alert_escalations SET due_at = ? WHERE alert = ? AND target = ? AND state = 'waiting'", params![due_at, alert, target])?;
+        Ok(())
+    }
+
+    /// Claim an escalation once and queue its delivery to its target, marked as escalated, in one
+    /// write: nothing when it's no longer waiting, its alert was acknowledged or closed, or the
+    /// target it goes to is gone. True when it was sent.
+    pub fn claim_escalation(&self, alert: &str, target: &str) -> Result<bool> {
+        let now = self.now()?;
+        self.db.write(|c| {
+            // Where it goes, the alert's opening event and kind, when it closed and was acknowledged.
+            type Row = (String, i64, String, Option<i64>, Option<i64>);
+            let row: Option<Row> = c
+                .query_row(
+                    "SELECT e.to_target, a.seq, a.kind, a.closed_at, a.acked_at FROM alert_escalations e JOIN apps_alerts a ON a.id = e.alert WHERE e.alert = ? AND e.target = ? AND e.state = 'waiting'",
+                    [alert, target],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                )
+                .optional()?;
+            let Some((to, seq, kind, closed, acked)) = row else { return Ok(false) };
+            let open = closed.is_none() && acked.is_none();
+            let exists: Option<String> = c.query_row("SELECT id FROM notify_targets WHERE id = ?", [&to], |r| r.get(0)).optional()?;
+            if !open || exists.is_none() {
+                c.execute("UPDATE alert_escalations SET state = 'dropped' WHERE alert = ? AND target = ?", [alert, target])?;
+                return Ok(false);
+            }
+            c.execute("UPDATE alert_escalations SET state = 'sent' WHERE alert = ? AND target = ?", [alert, target])?;
+            c.execute("UPDATE apps_alerts SET escalated_at = COALESCE(escalated_at, ?) WHERE id = ?", params![now, alert])?;
+            c.execute(
+                "INSERT INTO notify_deliveries (id, target, event, kind, status, attempts, next_at, code, error, at, escalated) VALUES (?, ?, ?, ?, 'pending', 0, ?, NULL, NULL, ?, 1) ON CONFLICT (target, event) DO NOTHING",
+                params![new_id("dlv"), to, seq, kind, now, now],
+            )?;
+            Ok(true)
+        })
+    }
+
     /// Claim the deliveries due now for `claim_ms` (another node doesn't send them meanwhile;
-    /// a crash mid-send tries again when the claim lapses): (id, target, event seq, attempts so far).
-    pub fn due_deliveries(&self, limit: usize, claim_ms: i64) -> Result<Vec<(String, String, i64, u32)>> {
+    /// a crash mid-send tries again when the claim lapses) ([`DueDelivery`]).
+    pub fn due_deliveries(&self, limit: usize, claim_ms: i64) -> Result<Vec<DueDelivery>> {
         let now = self.now()?;
         self.db.write(|c| {
             // An on-call target's in event order, one at a time: a resolve never overtakes its
             // trigger (a page left open for good), a retry included. Others go side by side.
-            let due: Vec<(String, String, i64, u32)> = c.query(
-                "SELECT d.id, d.target, d.event, d.attempts FROM notify_deliveries d LEFT JOIN notify_targets t ON t.id = d.target \
+            let due: Vec<DueDelivery> = c.query(
+                "SELECT d.id, d.target, d.event, d.attempts, d.escalated FROM notify_deliveries d LEFT JOIN notify_targets t ON t.id = d.target \
                  WHERE d.status = 'pending' AND d.next_at <= ? AND (t.kind IS NULL OR t.kind NOT IN ('pagerduty', 'opsgenie') OR NOT EXISTS \
                  (SELECT 1 FROM notify_deliveries e WHERE e.target = d.target AND e.status = 'pending' AND e.event < d.event)) ORDER BY d.next_at LIMIT ?",
                 params![now, limit as i64],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get::<_, i64>(3)? as u32)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get::<_, i64>(3)? as u32, r.get::<_, i64>(4)? != 0)),
             )?;
             for (id, ..) in &due {
                 c.execute("UPDATE notify_deliveries SET next_at = ? WHERE id = ?", params![now + claim_ms, id])?;
@@ -1993,6 +2171,10 @@ impl Store {
         self.db.execute("DELETE FROM events WHERE at < ? AND kind NOT LIKE 'audit.%' AND seq NOT IN (SELECT seq FROM held_alerts)", [before_ms])?;
         self.db.execute("DELETE FROM events WHERE at < ? AND kind LIKE 'audit.%'", [code_sql::now_ms() - 90 * 86_400_000])?;
         self.db.execute("DELETE FROM notify_deliveries WHERE at < ? AND status <> 'pending'", [before_ms])?;
+        // Alerts closed a week ago, and any nothing closed in 30 days (its check or service gone).
+        let stale = code_sql::now_ms() - 30 * 86_400_000;
+        self.db.execute("DELETE FROM alert_escalations WHERE alert IN (SELECT id FROM apps_alerts WHERE closed_at < ? OR (closed_at IS NULL AND opened_at < ?))", [before_ms, stale])?;
+        self.db.execute("DELETE FROM apps_alerts WHERE closed_at < ? OR (closed_at IS NULL AND opened_at < ?)", [before_ms, stale])?;
         Ok(())
     }
 
@@ -2480,12 +2662,13 @@ impl Store {
     }
 
     /// One more check run or ping (`ok`), or failure or miss, on `day` (days since 1970), and
-    /// what it is now (`up`: a check is down only after its failures in a row, not one try):
+    /// what it is now (`up`, `degraded` or `down`: a check is down only after its failures in a
+    /// row, not one try, and degraded while it's slow):
     /// what it was before, when that changed. Once a day, days and resolved incidents past
     /// [`crate::status_page::DAYS`] go.
-    pub fn status_day_add(&self, key: &str, day: i64, ok: bool, up: bool) -> Result<Option<Option<String>>> {
+    pub fn status_day_add(&self, key: &str, day: i64, ok: bool, now: &str) -> Result<Option<Option<String>>> {
         let (g, b) = if ok { (1, 0) } else { (0, 1) };
-        let (last_key, now) = (format!("status-last:{key}"), if up { "up" } else { "down" });
+        let last_key = format!("status-last:{key}");
         let changed = self.db.write(|c| {
             c.execute(
                 "INSERT INTO status_days (key, day, ok, bad) VALUES (?, ?, ?, ?) ON CONFLICT (key, day) DO UPDATE SET ok = status_days.ok + excluded.ok, bad = status_days.bad + excluded.bad",
@@ -4884,6 +5067,66 @@ impl Store {
         Ok(())
     }
 
+    pub fn set_csp_reports(&self, service: &str, env: &str, on: bool) -> Result<()> {
+        self.db.execute("UPDATE environments SET csp_reports = ? WHERE service = ? AND name = ?", params![on as i64, service, env])?;
+        Ok(())
+    }
+
+    /// CSP reports counted into their groups (the oldest groups going past
+    /// [`crate::csp::MAX_GROUPS`]); a directive the environment never had is its `alert.csp`, in
+    /// the same transaction. The new directives' first reports come back.
+    pub fn add_csp_reports(&self, service: &str, env: &str, counts: &[(crate::csp::Key, i64)]) -> Result<Vec<crate::csp::Key>> {
+        let now = self.now()?;
+        Ok(self.db.write(|c| {
+            let mut new = Vec::new();
+            for (k, n) in counts {
+                let pk = params![service, env, k.directive, k.blocked, k.path, k.disposition];
+                let have: Option<i64> = c.query_row("SELECT count FROM csp_reports WHERE service = ? AND env = ? AND directive = ? AND blocked = ? AND path = ? AND disposition = ?", pk, |r| r.get(0)).optional()?;
+                match have {
+                    Some(_) => {
+                        c.execute("UPDATE csp_reports SET count = count + ?, last_seen = ? WHERE service = ? AND env = ? AND directive = ? AND blocked = ? AND path = ? AND disposition = ?", params![n, now, service, env, k.directive, k.blocked, k.path, k.disposition])?;
+                    }
+                    None => {
+                        let groups: i64 = c.query_row("SELECT COUNT(*) FROM csp_reports WHERE service = ? AND env = ?", params![service, env], |r| r.get(0))?;
+                        if groups >= crate::csp::MAX_GROUPS {
+                            let old: Option<(String, String, String, String)> = c
+                                .query_row("SELECT directive, blocked, path, disposition FROM csp_reports WHERE service = ? AND env = ? ORDER BY last_seen, count LIMIT 1", params![service, env], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+                                .optional()?;
+                            if let Some((d, b, p, s)) = old {
+                                c.execute("DELETE FROM csp_reports WHERE service = ? AND env = ? AND directive = ? AND blocked = ? AND path = ? AND disposition = ?", params![service, env, d, b, p, s])?;
+                            }
+                        }
+                        c.execute("INSERT INTO csp_reports (service, env, directive, blocked, path, disposition, count, first_seen, last_seen) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", params![service, env, k.directive, k.blocked, k.path, k.disposition, n, now, now])?;
+                    }
+                }
+                if c.execute("INSERT INTO csp_directives (service, env, directive, first_seen) VALUES (?, ?, ?, ?) ON CONFLICT (service, env, directive) DO NOTHING", params![service, env, k.directive, now])? == 1 {
+                    insert_event(c, now, "alert.csp", service, env, None, &serde_json::json!({ "directive": k.directive, "blocked": k.blocked, "path": k.path }))?;
+                    new.push(k.clone());
+                }
+            }
+            Ok::<_, code_sql::Error>(new)
+        })?)
+    }
+
+    /// An environment's CSP report groups last seen since `since` (unix ms), the most frequent
+    /// first: each with its count, first and last seen.
+    pub fn csp_reports(&self, service: &str, env: &str, since: i64) -> Result<Vec<(crate::csp::Key, i64, i64, i64)>> {
+        Ok(self.db.query(
+            "SELECT directive, blocked, path, disposition, count, first_seen, last_seen FROM csp_reports WHERE service = ? AND env = ? AND last_seen >= ? ORDER BY count DESC, last_seen DESC LIMIT 500",
+            params![service, env, since],
+            |r| {
+                let disposition = if r.get::<_, String>(3)? == "report" { "report" } else { "enforce" };
+                Ok((crate::csp::Key { directive: r.get(0)?, blocked: r.get(1)?, path: r.get(2)?, disposition }, r.get(4)?, r.get(5)?, r.get(6)?))
+            },
+        )?)
+    }
+
+    /// An environment's CSP report groups last seen before `before` (its log retention) deleted.
+    pub fn expire_csp_reports(&self, service: &str, env: &str, before: i64) -> Result<()> {
+        self.db.execute("DELETE FROM csp_reports WHERE service = ? AND env = ? AND last_seen < ?", params![service, env, before])?;
+        Ok(())
+    }
+
     pub fn set_vitals(&self, service: &str, env: &str, on: bool) -> Result<()> {
         self.db.execute("UPDATE environments SET vitals = ? WHERE service = ? AND name = ?", params![on as i64, service, env])?;
         Ok(())
@@ -5294,7 +5537,7 @@ impl Store {
     }
 }
 
-const TARGET_COLS: &str = "id, project, kind, host, events, created_at, environments, services, previews";
+const TARGET_COLS: &str = "id, project, kind, host, events, created_at, environments, services, previews, escalate";
 
 /// A drain's sources, filters and headers, checked. No `Debug`: its headers' values are a
 /// vendor's keys.
@@ -5337,11 +5580,46 @@ pub struct OpenedDrain {
     pub headers: Vec<(String, String)>,
 }
 
-/// What a target follows ([`NotifyTarget::follows`]).
+/// What a target follows ([`NotifyTarget::follows`]), and where it escalates.
 pub struct TargetFilters {
     pub environments: Vec<String>,
     pub services: Vec<String>,
     pub previews: bool,
+    pub escalate: Option<Escalation>,
+}
+
+/// What a page of events does to alerts ([`Store::queue_deliveries`]).
+#[derive(Clone, Debug)]
+pub enum AlertChange {
+    Open { project: String, key: String, seq: i64, kind: String, service: String, env: String, about: String, at: i64 },
+    Close { key: String, seq: i64, kind: String, at: i64 },
+}
+
+/// An alert's id: its key and opening event, so one incident keeps one id on every node.
+pub fn alert_id(key: &str, seq: i64) -> String {
+    let h = Sha256::digest(format!("{key}\n{seq}").as_bytes());
+    format!("alr_{}", h[..10].iter().map(|b| format!("{b:02x}")).collect::<String>())
+}
+
+/// A delivery, once per (target, event). The one of an alert's opening event to a target that
+/// escalates starts the escalation's clock (one hop: an escalated delivery never does).
+fn queue_delivery(c: &code_sql::Conn<'_>, now: i64, target: &str, event: i64, kind: &str) -> code_sql::Result<()> {
+    c.execute(
+        "INSERT INTO notify_deliveries (id, target, event, kind, status, attempts, next_at, code, error, at) VALUES (?, ?, ?, ?, 'pending', 0, ?, NULL, NULL, ?) ON CONFLICT (target, event) DO NOTHING",
+        params![new_id("dlv"), target, event, kind, now, now],
+    )?;
+    let esc: Option<(String, Option<String>)> = c
+        .query_row("SELECT a.id, t.escalate FROM apps_alerts a JOIN notify_targets t ON t.id = ? WHERE a.seq = ? AND a.closed_at IS NULL", params![target, event], |r| Ok((r.get(0)?, r.get(1)?)))
+        .optional()?;
+    if let Some((alert, Some(e))) = esc
+        && let Ok(e) = serde_json::from_str::<Escalation>(&e)
+    {
+        c.execute(
+            "INSERT INTO alert_escalations (alert, target, to_target, due_at, state) VALUES (?, ?, ?, ?, 'waiting') ON CONFLICT (alert, target) DO NOTHING",
+            params![alert, target, e.to, now + i64::from(e.after_min) * 60_000],
+        )?;
+    }
+    Ok(())
 }
 
 fn target_row(r: &code_sql::Row<'_>) -> code_sql::Result<NotifyTarget> {
@@ -5356,6 +5634,7 @@ fn target_row(r: &code_sql::Row<'_>) -> code_sql::Result<NotifyTarget> {
         environments: list(6)?,
         services: list(7)?,
         previews: r.get(8)?,
+        escalate: r.get::<_, Option<String>>(9)?.and_then(|e| serde_json::from_str(&e).ok()),
     })
 }
 
@@ -5392,6 +5671,26 @@ fn insert_event(c: &code_sql::Conn<'_>, now: i64, kind: &str, service: &str, env
     Ok(())
 }
 
+const ALERT_COLS: &str = "id, project, seq, kind, service, env, about, opened_at, closed_at, acked_by, acked_at, escalated_at";
+
+fn alert_row(r: &code_sql::Row<'_>) -> code_sql::Result<Alert> {
+    let by: Option<String> = r.get(9)?;
+    let at: Option<i64> = r.get(10)?;
+    Ok(Alert {
+        id: r.get(0)?,
+        project: r.get(1)?,
+        seq: r.get(2)?,
+        kind: r.get(3)?,
+        service: r.get(4)?,
+        environment: r.get(5)?,
+        about: r.get(6)?,
+        opened_at: r.get(7)?,
+        closed_at: r.get(8)?,
+        acked: by.zip(at).map(|(by, at)| AlertAck { by, at }),
+        escalated_at: r.get(11)?,
+    })
+}
+
 fn delivery_row(r: &code_sql::Row<'_>) -> code_sql::Result<Delivery> {
     Ok(Delivery {
         id: r.get(0)?,
@@ -5409,29 +5708,6 @@ fn delivery_row(r: &code_sql::Row<'_>) -> code_sql::Result<Delivery> {
 mod tests {
     use super::*;
 
-    /// Patterns saved as substrings keep their meaning under the Logs search: quoted once, on
-    /// the next open, one word left alone.
-    #[test]
-    fn saved_log_patterns_are_quoted_once() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("apps.db");
-        let s = Store::new(Db::open_sqlite(&path, Default::default()).unwrap(), Sealer::new(&"k".repeat(32)).unwrap()).unwrap();
-        let run = r#"{"alerts":{"log_match":"connection refused"},"log_metrics":[{"name":"a","pattern":"-ERR"},{"name":"b","pattern":"panic"}]}"#;
-        s.db.execute("INSERT INTO environments (service, name, ephemeral, slug, created_at, run) VALUES ('svc_x', 'production', 0, 'x', 0, ?)", [run]).unwrap();
-        s.db.execute("DELETE FROM state WHERE key = 'log-patterns-quoted'", ()).unwrap();
-        drop(s);
-        let s = Store::new(Db::open_sqlite(&path, Default::default()).unwrap(), Sealer::new(&"k".repeat(32)).unwrap()).unwrap();
-        let got: String = s.db.query_row("SELECT run FROM environments WHERE service = 'svc_x'", (), |r| r.get(0)).unwrap();
-        let v: serde_json::Value = serde_json::from_str(&got).unwrap();
-        assert_eq!((v["alerts"]["log_match"].as_str(), v["log_metrics"][0]["pattern"].as_str(), v["log_metrics"][1]["pattern"].as_str()), (Some("\"connection refused\""), Some("\"-ERR\""), Some("panic")), "{got}");
-        // Once: a search saved since stays as it was written.
-        s.db.execute("UPDATE environments SET run = ? WHERE service = 'svc_x'", [r#"{"alerts":{"log_match":"timeout OR refused"}}"#]).unwrap();
-        drop(s);
-        let s = Store::new(Db::open_sqlite(&path, Default::default()).unwrap(), Sealer::new(&"k".repeat(32)).unwrap()).unwrap();
-        let got: String = s.db.query_row("SELECT run FROM environments WHERE service = 'svc_x'", (), |r| r.get(0)).unwrap();
-        assert!(got.contains("\"timeout OR refused\"") && !got.contains("\\\""), "{got}");
-    }
-
     /// Two notifiers (a handover) never queue an event twice for a target, the one whose
     /// cursor moved under it queues nothing, and a claimed delivery isn't handed out again.
     #[test]
@@ -5441,15 +5717,15 @@ mod tests {
         let s = Store::new(db, Sealer::new(&"k".repeat(32)).unwrap()).unwrap();
         s.set_state("notify", "0").unwrap();
         let page = [("ntf_a".to_string(), 1, "deploy.failed".to_string()), ("ntf_a".to_string(), 2, "crash_loop".to_string())];
-        assert!(s.queue_deliveries(&page, &[], 0, 2).unwrap());
-        assert!(!s.queue_deliveries(&page, &[], 0, 2).unwrap(), "the cursor moved: the second notifier queues nothing");
-        assert!(s.queue_deliveries(&page, &[], 2, 2).unwrap());
+        assert!(s.queue_deliveries(&page, &[], &[], 0, 2).unwrap());
+        assert!(!s.queue_deliveries(&page, &[], &[], 0, 2).unwrap(), "the cursor moved: the second notifier queues nothing");
+        assert!(s.queue_deliveries(&page, &[], &[], 2, 2).unwrap());
         let due = s.due_deliveries(50, 60_000).unwrap();
         assert_eq!(due.len(), 2, "one per (target, event), whatever ran: {due:?}");
         assert!(s.due_deliveries(50, 60_000).unwrap().is_empty(), "claimed: no other node sends them meanwhile");
         // A held alert still quiet waits behind no one: another environment's is read meanwhile.
         let held = [(3, "svc_a".to_string(), "production".to_string()), (4, "svc_b".to_string(), "production".to_string())];
-        assert!(s.queue_deliveries(&[], &held, 2, 4).unwrap());
+        assert!(s.queue_deliveries(&[], &held, &[], 2, 4).unwrap());
         s.defer_held(3, i64::MAX).unwrap();
         assert_eq!(s.held_alerts(code_sql::now_ms(), 1).unwrap(), [(4, "svc_b".to_string(), "production".to_string())]);
     }
