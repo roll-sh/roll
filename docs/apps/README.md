@@ -2311,8 +2311,11 @@ the domain is active, after any exact or wildcard custom domain. Any other label
 in process and with its Host as it came, to roll previews' router (`Apps::set_preview_router`,
 which rolld fills: previews on roll's own runtime, from roll.toml's `[preview]`), so the wildcard
 points at one place, roll apps' ingress; without the router it's a 404. Plain HTTP for now: a wildcard's
-certificate needs DNS-01, which isn't issued here yet. The flow is
-`a_preview_environment_answers_under_its_projects_preview_domain`.
+certificate needs DNS-01, which isn't issued here yet. Team access works there too: a signed-in
+person's visit ticket may land on the environment's own label under the active preview domain
+(never another label, nor another project's domain). The flow is
+`a_preview_environment_answers_under_its_projects_preview_domain`, and the ticket's
+`a_signed_in_person_gets_into_a_gated_environment`.
 
 ## A custom domain on another port
 
