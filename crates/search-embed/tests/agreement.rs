@@ -67,6 +67,26 @@ fn agreement(m: &E5, cases: &[serde_json::Value], key: &str) -> (f64, f64, Strin
     (sum / cases.len() as f64, low, low_case, same)
 }
 
+/// The fixture's cases this test runs, `(name, input_type)`: one per path through the model
+/// (each prefix, scripts the tokenizer splits differently, the shortest input, the 512-token and
+/// 96 KiB cuts, runs of characters the normalizer drops) and the 8-bit build's worst case.
+const CASES: [(&str, &str); 14] = [
+    ("en", "none"),
+    ("en", "ingest"),
+    ("en", "search"),
+    ("ja", "none"),
+    ("ar", "search"),
+    ("emoji", "ingest"),
+    ("caps", "none"),
+    ("one", "none"),
+    ("en-long", "ingest"),
+    ("edge-513-passage", "ingest"),
+    ("edge-514-passage", "ingest"),
+    ("far-over-512-plain", "none"),
+    ("past-96k-words", "ingest"),
+    ("zero-width-run-then-article", "ingest"),
+];
+
 #[test]
 fn embeddings_agree_with_elasticsearch() {
     let Some(dir) = std::env::var_os("ROLL_E5_WEIGHTS") else {
@@ -75,7 +95,14 @@ fn embeddings_agree_with_elasticsearch() {
     };
     let dir = std::path::Path::new(&dir);
     let fixture: serde_json::Value = serde_json::from_str(include_str!("fixtures/e5-es-9.5.5.json")).unwrap();
-    let cases = fixture["cases"].as_array().unwrap();
+    let cases: Vec<serde_json::Value> = CASES
+        .iter()
+        .map(|&(name, input)| {
+            let found = fixture["cases"].as_array().unwrap().iter().find(|c| c["name"] == name && c["input_type"].as_str().unwrap_or("none") == input);
+            found.unwrap_or_else(|| panic!("no case {name} ({input}) in the fixture")).clone()
+        })
+        .collect();
+    let cases = &cases[..];
     let builds: Vec<f64> = cases.iter().map(|c| {
         let (a, b) = (floats(&c["embedding"]), floats(&c["embedding_f32"]));
         cosine(&a.iter().map(|x| *x as f32).collect::<Vec<_>>(), &b)

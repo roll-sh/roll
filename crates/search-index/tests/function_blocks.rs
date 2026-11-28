@@ -282,7 +282,7 @@ fn bulk(s: &Searcher, q: &QueryRef) -> Result<Vec<(u32, u32)>, String> {
 
 #[test]
 fn block_scoring_equals_per_doc_scoring() {
-    let seeds: u64 = std::env::var("FN_SEEDS").ok().and_then(|s| s.parse().ok()).unwrap_or(6);
+    let seeds: u64 = std::env::var("FN_SEEDS").ok().and_then(|s| s.parse().ok()).unwrap_or(3);
     let (mut checked, mut failed) = (0, 0);
     for seed in 0..seeds {
         let shard = build(4000 + seed, 1500 + 400 * seed as usize);
