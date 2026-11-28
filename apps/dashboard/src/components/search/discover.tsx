@@ -102,6 +102,7 @@ export function DiscoverTab({ cluster, onOpenConsole }: { cluster: SearchCluster
   const [now, setNow] = useState(() => Date.now());
   const [opened, setOpened] = useState<SavedSearch | null>(null);
   const [showSaved, setShowSaved] = useState(false);
+  const [savedErr, setSavedErr] = useState<string | null>(null);
   const [chart, setChart] = useState<{ name: string; kind: ChartKind; field: string } | null>(null);
   const [context, setContext] = useState<Hit | null>(null);
   // The server renders in its own zone: the viewer's is read once mounted.
@@ -131,7 +132,7 @@ export function DiscoverTab({ cluster, onOpenConsole }: { cluster: SearchCluster
         },
         (e) => {
           if (!live) return;
-          setErr(`The saved search ${saved.id} didn't open: ${e instanceof Error ? e.message : String(e)}`);
+          setSavedErr(`The saved search ${saved.id} didn't open: ${e instanceof Error ? e.message : String(e)}`);
           start(s);
         },
       );
@@ -342,6 +343,12 @@ export function DiscoverTab({ cluster, onOpenConsole }: { cluster: SearchCluster
           {opened && edited(state, opened.search) && <span className="size-1.5 rounded-full bg-accent" title="Changed since it was saved" />}
         </button>
       </form>
+
+      {savedErr && (
+        <p role="alert" className="font-mono text-[12px] text-danger">
+          {savedErr}
+        </p>
+      )}
 
       {!piped(state.mode) && state.filters.length > 0 && <FilterPills filters={state.filters} onChange={setFilters} />}
 
