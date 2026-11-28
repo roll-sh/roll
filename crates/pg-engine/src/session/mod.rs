@@ -4214,6 +4214,12 @@ impl Drop for Session {
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
             self.state.definer.borrow_mut().pop();
+            // Still there: the next session in this proc slot (its pg_temp_N) drops them before
+            // it uses the schema, as InitTempTableNamespace's RemoveTempRelations does, and
+            // doesn't find them as its own (`Engine::connect`).
+            if own_temp(self) {
+                self.state.db.temp_leftovers.store(true, Ordering::Relaxed);
+            }
         }
         // Leftovers of sessions that couldn't clean up go with the database's last session.
         let has_temp = |me: &Self| {

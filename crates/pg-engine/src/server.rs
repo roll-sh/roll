@@ -1405,12 +1405,16 @@ fn handle(
         );
         s.log_message(&line, None);
     }
-    // Nothing more goes out: the client sees the end (FIN) right after the last message, as
-    // when a backend exits, not after the session's teardown below (rollback, locks, the
-    // backend's entry). In that window a client that had read a FATAL could send its next
-    // query, still unread when the socket closed: a reset ("error communicating with the
-    // server") instead of the end of the connection. (The socket closes only once the client
-    // has the FIN: `Closing`.)
+    // The session's teardown (its transaction rolled back, its locks, temporary objects, proc
+    // slot and backend entry gone), then the end (FIN): a backend's exit callbacks
+    // (RemoveTempRelationsCallback, ProcKill, pgstat_beshutdown_hook) run before its exit
+    // closes the socket, so a client that has read the end and connects again finds none of
+    // them. (The FIN went first, from 2026-10-30, so that a query a client sent after the
+    // FATAL, unread when the socket closed, was no reset; `Closing` reads and drops such input
+    // now, until the client closes its end.)
+    drop(s);
+    drop(proc);
+    drop(_guard);
     let _ = c.wr.shutdown(std::net::Shutdown::Write);
     r
 }

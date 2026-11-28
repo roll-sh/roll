@@ -363,6 +363,9 @@ impl Conn {
     /// A session of protocol `proto`: its BackendKeyData's process id and key.
     pub fn keyed(addr: &str, proto: i32) -> (Conn, i32, Vec<u8>) {
         let mut c = Conn::open(addr, &startup_packet(proto, &[], b"\0"));
+        // (Its replies come: QUIET, a wait for none, gave up on a loaded machine's checked
+        // build before the BackendKeyData, and `cancel` sent its request with an empty key.)
+        c.quiet = ANSWER;
         let (mut pid, mut key) = (0, Vec::new());
         loop {
             match c.next() {

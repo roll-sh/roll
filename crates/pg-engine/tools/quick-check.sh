@@ -85,7 +85,14 @@ if [ "${QC_REF_CHAIN:-}" = 1 ]; then
     skip $suite && continue
     case $suite in regress) port=$1 ;; iso) port=$2 ;; dump) port=$3 ;; esac
     if ref_suite $suite "$port" "$4"; then echo "$suite ok $REF_SECS $REF_DETAIL"
-    else echo "$suite FAIL $REF_SECS exit $REF_RC, $REF_DETAIL$([ $suite = regress ] && echo " (report: $D/pgr/report/REPORT.md)")"; fi >>"$D/ref.status"
+    elif [ $suite = regress ]; then
+      # (The report and the engine's log, with the differing units' errors, kept past the
+      # next run, which reuses $D/pgr: a once-only difference was otherwise gone by the time
+      # anyone looked, agent 311's temp:21 among them.)
+      K=$D/kept/regress-$(date +%Y%m%d-%H%M%S)
+      mkdir -p "$K" && cp -rp "$D/pgr/report" "$K/" 2>/dev/null; cp -p "$D/pgr/out/engine.log" "$K/" 2>/dev/null
+      echo "$suite FAIL $REF_SECS exit $REF_RC, $REF_DETAIL (report: $K/report/REPORT.md, engine log: $K/engine.log)"
+    else echo "$suite FAIL $REF_SECS exit $REF_RC, $REF_DETAIL"; fi >>"$D/ref.status"
   done
   echo done >>"$D/ref.status"
   exit 0
