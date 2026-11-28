@@ -72,7 +72,7 @@ fn work(dir: &Path, filler: &Path) {
         let e = errors(&r);
         if e.is_empty() {
             println!("acked {i}");
-            if freed && i > 0 && (i as usize) % 7 == 0 {
+            if freed && i > 0 && i.is_multiple_of(7) {
                 break;
             }
         } else {
