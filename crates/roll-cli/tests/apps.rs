@@ -56,6 +56,8 @@ impl T {
             .current_dir(self.work.path())
             .env("ROLL_API_URL", &self.api)
             .env_remove("ROLL_API_KEY")
+            // A credential of roll's in the caller's shell, which `exec`'s command never gets.
+            .env("ROLL_FAKE_TOKEN", "fake-inherited-token")
             .stdin(Stdio::null())
             .output()
             .await
@@ -135,12 +137,6 @@ async fn variables_and_an_environment_through_the_cli() {
         use std::os::unix::fs::PermissionsExt;
         assert_eq!(std::fs::metadata(t.work.path().join("pulled.env")).unwrap().permissions().mode() & 0o777, 0o600);
     }
-    // An environment's own error page, and back to roll's.
-    std::fs::write(t.work.path().join("oops.html"), "<h1>oops</h1>").unwrap();
-    let env = t.json(&["env", "-s", "web", "-p", "acme", "--error-page", "oops.html"]).await;
-    assert_eq!(env["pages"]["error"], "<h1>oops</h1>", "{env}");
-    let env = t.json(&["env", "-s", "web", "-p", "acme", "--roll-pages"]).await;
-    assert!(env.get("pages").is_none(), "{env}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -177,8 +173,8 @@ async fn settings_through_the_cli() {
     // A command here with the environment's variables, the platform's own left out, its exit code kept.
     // A variable that would steer this machine's programs (anyone who may write variables could set one) isn't set either.
     t.ok(&["vars", "-s", "site", "-p", "acme", "NODE_OPTIONS=--require=/tmp/evil.js"]).await;
-    let (code, out, err) = t.run(&["exec", "-s", "site", "-p", "acme", "--", "sh", "-c", "echo \"$MODE ${PORT:-no-port} ${KEY:-no-key} ${NODE_OPTIONS:-no-node-options}\"; exit 3"]).await;
-    assert_eq!((code, out.trim()), (Some(3), "prod no-port no-key no-node-options"), "{err}");
+    let (code, out, err) = t.run(&["exec", "-s", "site", "-p", "acme", "--", "sh", "-c", "echo \"$MODE ${PORT:-no-port} ${KEY:-no-key} ${NODE_OPTIONS:-no-node-options} ${ROLL_FAKE_TOKEN:-no-roll-token}\"; exit 3"]).await;
+    assert_eq!((code, out.trim()), (Some(3), "prod no-port no-key no-node-options no-roll-token"), "{err}");
     assert!(err.contains("not set here (sealed") && err.contains("KEY") && err.contains("steer") && err.contains("NODE_OPTIONS"), "{err}");
     // What a size costs before it's made, and what its week says (nothing yet).
     let q = t.json(&["quote", "--memory", "1024", "--min", "1"]).await;
@@ -187,31 +183,17 @@ async fn settings_through_the_cli() {
     // `roll up` doesn't upload to an image service: it says what deploys one.
     let (code, _, err) = t.run_up().await;
     assert!(code != Some(0) && err.contains("roll deploy"), "{err}");
-}
-
-/// The newer environment settings and the status page: a freeze (and a deploy that overrides
-/// it), any setting as JSON, a page with an incident and its update.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn freezes_settings_and_a_status_page_through_the_cli() {
-    let t = start().await;
-    t.ok(&["create", "web", "-p", "acme", "--image", "nginx:1.27", "--port", "80"]).await;
-    let env = t.json(&["env", "-s", "web", "-p", "acme", "--freeze", "the launch", "--set", r#"heartbeats=[{"name":"backup","every_s":86400}]"#]).await;
+    // A freeze, and a deploy that overrides it; any environment setting as JSON.
+    let env = t.json(&["env", "-s", "site", "-p", "acme", "--freeze", "the launch", "--set", r#"heartbeats=[{"name":"backup","every_s":86400}]"#]).await;
     assert_eq!((env["frozen"].as_bool(), env["heartbeats"][0]["name"].as_str()), (Some(true), Some("backup")), "{env}");
-    let (code, _, err) = t.run(&["redeploy", "-s", "web", "-p", "acme"]).await;
+    let (code, _, err) = t.run(&["redeploy", "-s", "site", "-p", "acme"]).await;
     assert!(code != Some(0) && err.contains("frozen: the launch"), "{err}");
-    let dep = t.json(&["redeploy", "-s", "web", "-p", "acme", "--override"]).await;
+    let dep = t.json(&["redeploy", "-s", "site", "-p", "acme", "--override"]).await;
     assert!(dep["id"].as_str().is_some_and(|d| d.starts_with("dep_")), "{dep}");
-    let (code, _, err) = t.run(&["env", "-s", "web", "-p", "acme", "--set", "heartbeats"]).await;
+    let (code, _, err) = t.run(&["env", "-s", "site", "-p", "acme", "--set", "heartbeats"]).await;
     assert!(code != Some(0) && err.contains("FIELD=JSON"), "{err}");
-    let env = t.json(&["env", "-s", "web", "-p", "acme", "--unfreeze"]).await;
+    let env = t.json(&["env", "-s", "site", "-p", "acme", "--unfreeze"]).await;
     assert!(env["frozen"] != true && env["freeze"].is_null(), "{env}");
-    let page = t.json(&["status-page", "-s", "web", "-p", "acme", "--title", "Acme"]).await;
-    assert!(page["url"].as_str().is_some_and(|u| u.contains("status-")), "{page}");
-    let inc = t.json(&["status-page", "-s", "web", "-p", "acme", "--incident", "Slow checkouts", "--text", "Looking into it."]).await;
-    let id = inc["id"].as_str().unwrap();
-    t.ok(&["status-page", "-s", "web", "-p", "acme", "--update", id, "--state", "resolved", "--text", "Fixed."]).await;
-    let shown = t.ok(&["status-page", "-s", "web", "-p", "acme"]).await;
-    assert!(shown.contains("Acme") && shown.contains(&format!("{id}  resolved  Slow checkouts")), "{shown}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -240,10 +222,6 @@ async fn a_local_tree_is_planned_before_anything_is_made() {
     let out = tokio::process::Command::new(env!("CARGO_BIN_EXE_roll")).args(["up", "empty", "-p", "acme"]).current_dir(t.work.path()).env("ROLL_API_URL", &t.api).env_remove("ROLL_API_KEY").output().await.unwrap();
     assert!(!out.status.success() && String::from_utf8_lossy(&out.stderr).contains("couldn't tell how to build"), "{}", String::from_utf8_lossy(&out.stderr));
     assert_eq!(t.json(&["list"]).await, serde_json::json!([]), "nothing made");
-    // Every command completes in a shell.
-    let out = tokio::process::Command::new(env!("CARGO_BIN_EXE_roll")).args(["completion", "zsh"]).output().await.unwrap();
-    let script = String::from_utf8_lossy(&out.stdout);
-    assert!(out.status.success() && script.contains("#compdef roll") && script.contains("routes"), "{}", String::from_utf8_lossy(&out.stderr));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

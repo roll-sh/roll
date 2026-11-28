@@ -865,14 +865,20 @@ mod tests {
         let refused = link.open("127.0.0.1", 9).await.err().unwrap();
         assert!(refused.contains("allow-list"), "{refused}");
 
-        // A slow reader: roll holds at most a window, and the server is held back by TCP.
+        // A slow reader: roll holds at most a window, and the server is held back by TCP (it stops
+        // gaining; buffered without bound, it would gain until the wait runs out).
         let mut slow = link.open("127.0.0.1", flood).await.unwrap();
-        tokio::time::sleep(Duration::from_millis(1500)).await;
-        let held = written.load(Ordering::Relaxed);
+        let mut held = 0;
+        for _ in 0..100 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let now = written.load(Ordering::Relaxed);
+            if now > 0 && now == held {
+                break;
+            }
+            held = now;
+        }
         assert!(link.mux.buffered() <= proto::WINDOW, "roll buffers at most a window ({})", link.mux.buffered());
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        let later = written.load(Ordering::Relaxed);
-        assert!(later < 32 << 20 && later - held < 4 << 20, "the server is held back, not buffered without bound ({held} then {later} bytes)");
+        assert!(held < 32 << 20, "the server is held back, not buffered without bound ({held} bytes)");
         // Reading lets it go on.
         let mut buf = vec![0u8; 1 << 20];
         slow.read_exact(&mut buf).await.unwrap();
@@ -881,8 +887,14 @@ mod tests {
         // Status as reported, and audit rows naming targets, never bytes.
         let list: Json = r.http.get(format!("{}/v1/secrets/projects/{}/gateways", r.url, r.project)).send().await.unwrap().json().await.unwrap();
         assert_eq!((list[0]["status"]["online"].as_bool(), list[0]["status"]["allow"].as_array().map(Vec::len)), (Some(true), Some(2)));
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        let audit = r.http.get(format!("{}/v1/secrets/projects/{}/audit?action=gateway", r.url, r.project)).send().await.unwrap().text().await.unwrap();
+        let mut audit = String::new();
+        for _ in 0..100 {
+            audit = r.http.get(format!("{}/v1/secrets/projects/{}/audit?action=gateway", r.url, r.project)).send().await.unwrap().text().await.unwrap();
+            if audit.contains(&format!("127.0.0.1:{echo}")) && audit.contains("127.0.0.1:9") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
         assert!(audit.contains(&format!("127.0.0.1:{echo}")) && audit.contains("127.0.0.1:9") && !audit.contains("hello through"), "{audit}");
         assert!(lines.lock().unwrap().iter().any(|l| l.contains("refused 127.0.0.1:9")), "the gateway logs its refusal");
 

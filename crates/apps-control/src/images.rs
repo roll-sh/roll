@@ -227,13 +227,14 @@ mod tests {
     #[test]
     fn the_cache_keeps_the_newest_within_its_bytes() {
         let c = ImageCache::default();
-        let k = |n: usize| Kept { bytes: Bytes::from(vec![0u8; n]), content_type: "image/webp", cache_control: None, vary: false };
+        let k = |b: &Bytes| Kept { bytes: b.clone(), content_type: "image/webp", cache_control: None, vary: false };
+        let five = Bytes::from(vec![0u8; 5 << 20]);
         for i in 0..20 {
-            c.put(format!("k{i}"), k(5 << 20));
+            c.put(format!("k{i}"), k(&five));
         }
         assert!(c.get("k0").is_none() && c.get("k19").is_some());
         assert!(c.kept.lock().2 <= CACHE_BYTES);
-        c.put("big".into(), k(KEEP_AT_MOST + 1));
+        c.put("big".into(), k(&Bytes::from(vec![0u8; KEEP_AT_MOST + 1])));
         assert!(c.get("big").is_none(), "one too big isn't kept");
     }
 }

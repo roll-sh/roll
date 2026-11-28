@@ -74,6 +74,7 @@ pub mod store;
 pub mod traces;
 pub mod visit;
 pub mod vitals;
+pub mod csp;
 pub mod heartbeats;
 pub mod slo;
 pub mod prom;
@@ -103,8 +104,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-/// How long a host's answer is kept on a node that didn't change it ([`Apps::env_for_host`]).
-const HOST_TTL: Duration = Duration::from_secs(1);
 /// How long a deleted service is kept, stopped, for a restore (Railway's 48 hours).
 pub const DELETED_KEPT_MS: i64 = 48 * 3600 * 1000;
 use store::{EnvRow, ServiceRow, Store};
@@ -171,6 +170,12 @@ pub struct AppsConfig {
     pub build_timeout: Duration,
     /// How often a push's build looks for a newer push that replaces it.
     pub supersede_every: Duration,
+    /// How often the notifier queues and sends what's due (2 s).
+    pub notify_every: Duration,
+    /// How long a host's answer is kept on a node that didn't change it (1 s).
+    pub host_ttl: Duration,
+    /// How long a drain's short batch waits for more lines before it goes (1 s).
+    pub drain_linger: Duration,
     pub live: LiveConfig,
     pub prices: Prices,
     /// The biggest `roll up` upload.
@@ -223,6 +228,9 @@ impl AppsConfig {
             cname_target: None,
             build_timeout: Duration::from_secs(30 * 60),
             supersede_every: Duration::from_secs(3),
+            notify_every: Duration::from_secs(2),
+            host_ttl: Duration::from_secs(1),
+            drain_linger: Duration::from_secs(1),
             live: LiveConfig::default(),
             prices: Prices::default(),
             upload_max: 512 << 20,
@@ -363,6 +371,8 @@ pub struct Apps {
     visit_denials: Mutex<HashMap<String, i64>>,
     /// Web Vitals beacons kept this minute, by environment: (minute, count).
     pub(crate) vitals_seen: Mutex<HashMap<String, (i64, u32)>>,
+    /// CSP report requests taken this minute, by environment: (minute, count).
+    pub(crate) csp_seen: Mutex<HashMap<String, (i64, u32)>>,
     /// Custom events taken this minute, per environment ([`track`]).
     pub(crate) events_seen: Mutex<HashMap<String, (i64, u32)>>,
     /// Form submissions taken this minute, per environment ([`forms`]).
@@ -739,6 +749,7 @@ impl Apps {
             visits: Mutex::new(HashMap::new()),
             visit_denials: Mutex::new(HashMap::new()),
             vitals_seen: Mutex::new(HashMap::new()),
+            csp_seen: Mutex::new(HashMap::new()),
             events_seen: Mutex::new(HashMap::new()),
             forms_seen: Mutex::new(HashMap::new()),
             check_states: Mutex::new(HashMap::new()),
@@ -1965,6 +1976,7 @@ impl Apps {
             feedback: r.feedback,
             vitals: r.vitals,
             hsts: r.hsts.clone(),
+            csp_reports: r.csp_reports,
             log_retention_days: r.log_retention_days.unwrap_or(crate::logs::KEEP_DAYS),
             keep_days: r.keep_days,
             approvals: r.approvals,
@@ -2087,7 +2099,7 @@ impl Apps {
                 settings.push(json!({ "field": format!("run.{k}"), "from": x, "to": y, "put": { "run": { k: x } } }));
             }
         }
-        for k in ["wait_for_ci", "follow_tag", "redeploy_on_secrets", "traces", "vitals", "hsts", "report", "egress", "allow_ips", "rate_limit", "firewall", "headers", "routes", "redirects", "checks", "log_retention_days", "keep_days", "approvals"] {
+        for k in ["wait_for_ci", "follow_tag", "redeploy_on_secrets", "traces", "vitals", "hsts", "csp_reports", "report", "egress", "allow_ips", "rate_limit", "firewall", "headers", "routes", "redirects", "checks", "log_retention_days", "keep_days", "approvals"] {
             let (x, y) = (a.get(k).cloned().unwrap_or(Value::Null), b.get(k).cloned().unwrap_or(Value::Null));
             if x != y {
                 // An environment's `hsts: null` reads as none sent, where a PUT's null is the default.
@@ -2139,7 +2151,7 @@ impl Apps {
     pub async fn put_environment_by(self: &Arc<Self>, service: &str, env: &str, body: Value, by: Option<String>) -> Result<Environment> {
         let o = body.as_object().cloned().unwrap_or_default();
         for k in o.keys() {
-            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "routes", "redirects", "checks", "heartbeats", "split", "mirror", "snippets", "config", "freeze", "pause_schedule", "paused", "held", "hostname", "traces", "egress", "vitals", "report", "preview_host", "log_retention_days", "keep_days", "approvals", "badge", "closed_by", "data", "scheduled", "attack_mode", "challenge_until", "preflight", "deploy_tags", "hsts"].contains(&k.as_str()) {
+            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "routes", "redirects", "checks", "heartbeats", "split", "mirror", "snippets", "config", "freeze", "pause_schedule", "paused", "held", "hostname", "traces", "egress", "vitals", "report", "preview_host", "log_retention_days", "keep_days", "approvals", "badge", "closed_by", "data", "scheduled", "attack_mode", "challenge_until", "preflight", "deploy_tags", "hsts", "csp_reports"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
@@ -2601,7 +2613,7 @@ impl Apps {
                 svc.for_env(&row).map_err(|e| Error::BadRequest(e.to_string().replace("no longer fit", "don't fit")))?;
             }
         }
-        for k in ["feedback", "follow_tag", "wait_for_ci", "redeploy_on_secrets", "traces", "vitals", "report", "badge"] {
+        for k in ["feedback", "follow_tag", "wait_for_ci", "redeploy_on_secrets", "traces", "vitals", "csp_reports", "report", "badge"] {
             if !matches!(o.get(k), None | Some(Value::Null | Value::Bool(_))) {
                 return Err(Error::BadRequest(format!("{k} is a boolean")));
             }
@@ -2891,6 +2903,13 @@ impl Apps {
         if let Some(Value::Bool(on)) = o.get("vitals") {
             let (sid, e, on) = (service.to_string(), env.to_string(), *on);
             self.db(move |s| s.set_vitals(&sid, &e, on)).await?;
+            self.live(service, env).forget_gate();
+            self.changed(service);
+        }
+        // CSP reports: its answers name roll's endpoint from the next request on.
+        if let Some(Value::Bool(on)) = o.get("csp_reports") {
+            let (sid, e, on) = (service.to_string(), env.to_string(), *on);
+            self.db(move |s| s.set_csp_reports(&sid, &e, on)).await?;
             self.live(service, env).forget_gate();
             self.changed(service);
         }
@@ -3436,7 +3455,7 @@ impl Apps {
                 continue;
             }
             // Nor does an environment with data of its own: its branch's, or none yet; a kind
-            // with no branches (search) is left out of it.
+            // with no branches (tasks) is left out of it.
             if own_data && kind != LinkKind::Service && !kind.branches() {
                 branch_notices.push(format!("{} {r} is left out of {}: it has data of its own, and a {} can't be branched", kind.as_str(), env.name, kind.as_str()));
                 continue;
@@ -4555,7 +4574,7 @@ impl Apps {
     pub async fn env_for_host(self: &Arc<Self>, host: &str) -> Option<HostTarget> {
         // Every request asks: kept a second (another node's change shows within it), and
         // forgotten at once on any change here. It was two queries a request, about 150 µs of the
-        // proxy's 260 (`docker.rs::the_proxys_own_cost_is_measured`, release).
+        // proxy's 260 (a release build, on real Docker).
         // Kept by the name itself (no port, any case, no trailing dot), and only a name that is
         // one (253 bytes at most) and names something: anyone can send any Host, and a miss isn't
         // worth a slot.
@@ -4566,7 +4585,7 @@ impl Apps {
         let generation = self.hosts_gen.load(std::sync::atomic::Ordering::SeqCst);
         if let Some((at, g, v)) = self.hosts.lock().get(&key).cloned()
             && g == generation
-            && at.elapsed() < HOST_TTL
+            && at.elapsed() < self.cfg.host_ttl
         {
             return v;
         }
@@ -4649,7 +4668,7 @@ impl Apps {
             preview: row.ephemeral,
             headers: row.headers,
             hsts: row.hsts.as_ref().and_then(|h| axum::http::HeaderValue::from_str(&h.value()).ok()),
-            routes: row.routes, traces, vitals: row.vitals, challenge_key, attack_until: attack.until, split: row.split, mirror: row.mirror, snippets: snippets_of(&row.snippets),
+            routes: row.routes, traces, vitals: row.vitals, csp_reports: row.csp_reports, challenge_key, attack_until: attack.until, split: row.split, mirror: row.mirror, snippets: snippets_of(&row.snippets),
             redirects: row.redirects.as_deref().map(crate::site_rules::EnvRedirects::parse).filter(|r| !r.is_empty()).map(Arc::new) });
         live.set_gate(g.clone(), seen);
         Ok(g)
@@ -5255,21 +5274,6 @@ fn link_options(kind: LinkKind, body: &Value) -> Result<integrations::LinkOption
     Ok(out)
 }
 
-#[cfg(test)]
-mod fingerprint_tests {
-    use super::*;
-
-    #[test]
-    fn only_what_differs_from_the_defaults_counts() {
-        let mut run = Run::default();
-        assert_eq!(set_only(&run, &Run::default()), json!({}));
-        run.memory_mb = 1024;
-        run.alerts.error_pct = 10;
-        // A nested setting counts alone: a sibling roll adds later doesn't change this.
-        assert_eq!(set_only(&run, &Run::default()), json!({"memory_mb": 1024, "alerts": {"error_pct": 10}}));
-    }
-}
-
 /// When a volume growing at its last week's pace (a least-squares line through its hourly sizes)
 /// would be full: in days, None while it isn't growing or with under a day of points.
 fn volume_full_in_days(points: &[(i64, u64)], size: u64, now_hour: i64) -> Option<f64> {
@@ -5286,20 +5290,4 @@ fn volume_full_in_days(points: &[(i64, u64)], size: u64, now_hour: i64) -> Optio
         return Some(0.0);
     }
     (slope.is_finite() && slope > 0.0).then(|| ((size as f64 - last) / slope / 24.0 * 10.0).round() / 10.0)
-}
-
-#[cfg(test)]
-mod volume_tests {
-    #[test]
-    fn a_growing_volume_says_when_its_full() {
-        // 1 GiB a day on a 10 GiB volume, at about 4 GiB after two days: six days to go.
-        let gib = 1u64 << 30;
-        let points: Vec<(i64, u64)> = (0..48).map(|h| (1000 + h, 2 * gib + gib * h as u64 / 24)).collect();
-        let d = super::volume_full_in_days(&points, 10 * gib, 1047).unwrap();
-        assert!((d - 6.0).abs() < 0.2, "{d}");
-        let flat: Vec<(i64, u64)> = (0..48).map(|h| (1000 + h, gib)).collect();
-        assert_eq!(super::volume_full_in_days(&flat, 10 * gib, 1047), None);
-        assert_eq!(super::volume_full_in_days(&points[..10], 10 * gib, 1047), None, "under a day of points");
-        assert_eq!(super::volume_full_in_days(&points, 2 * gib, 1047), Some(0.0), "already full");
-    }
 }

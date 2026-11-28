@@ -624,28 +624,30 @@ pub const NESTS: &[&str] = &["/v1/storage"];
 /// The row for a request by its path alone (what a catch-all hides, or a tool's route).
 pub fn by_path(method: &str, path: &str) -> Option<Found> {
     let path = path.split('?').next().unwrap_or(path);
-    if OPERATOR_ONLY.iter().any(|(r, _)| match_pattern(r, path).is_some()) {
+    if OPERATOR_ONLY.iter().any(|(r, _)| score(r, path).is_some()) {
         return None;
     }
+    // Every row is tried (a request under a catch-all, each tool's route), so rows are scored
+    // without allocating; only the one that wins has its parameters read.
     let exact = ROWS
         .iter()
         .filter(|r| !r.route.ends_with('/'))
         .filter_map(|r| {
-            let (score, params) = match_pattern(r.route, path)?;
-            Some(((score, method_rank(r, method)?), r, params))
+            let rank = method_rank(r, method)?;
+            Some(((score(r.route, path)?, rank), r))
         })
-        .max_by_key(|(k, ..)| *k);
-    if let Some((_, row, params)) = exact {
-        return Some(Found { row, params: Some(params) });
+        .max_by_key(|(k, _)| *k);
+    if let Some((_, row)) = exact {
+        return Some(Found { row, params: match_pattern(row.route, path).map(|(_, p)| p) });
     }
     ROWS.iter()
         .filter(|r| r.route.ends_with('/'))
         .filter_map(|r| {
-            let params = match_prefix(r.route, path)?;
-            Some(((r.route.len(), method_rank(r, method)?), r, params))
+            let rank = method_rank(r, method)?;
+            prefix_fits(r.route, path).then_some(((r.route.len(), rank), r))
         })
-        .max_by_key(|(k, ..)| *k)
-        .map(|(_, row, params)| Found { row, params: Some(params) })
+        .max_by_key(|(k, _)| *k)
+        .map(|(_, row)| Found { row, params: match_prefix(row.route, path) })
 }
 
 /// How a route pattern is classified for grants, whatever the method: its product, `by path` (a
@@ -726,6 +728,37 @@ fn match_pattern(pattern: &str, path: &str) -> Option<(usize, Vec<(String, Strin
         }
     }
     (pat.len() == segs.len()).then_some((statics, params))
+}
+
+/// Whether `pattern` matches `path`, and how many of its segments are static: [`match_pattern`]'s
+/// score, allocating nothing.
+fn score(pattern: &str, path: &str) -> Option<usize> {
+    score_segments(pattern.trim_start_matches('/').split('/'), path.trim_start_matches('/').split('/'))
+}
+
+fn score_segments<'p, 's>(mut pat: impl Iterator<Item = &'p str>, mut segs: impl Iterator<Item = &'s str>) -> Option<usize> {
+    let mut statics = 0;
+    loop {
+        match (pat.next(), segs.next()) {
+            (None, None) => return Some(statics),
+            (Some(p), s) if p.strip_prefix("{*").is_some_and(|rest| rest.ends_with('}')) => return s.map(|_| statics),
+            (Some(p), Some(s)) => match p.strip_prefix('{').and_then(|p| p.strip_suffix('}')) {
+                Some(_) if !s.is_empty() => {}
+                Some(_) => return None,
+                None if p == s => statics += 1,
+                None => return None,
+            },
+            _ => return None,
+        }
+    }
+}
+
+/// [`match_prefix`] without its parameters.
+fn prefix_fits(prefix: &str, path: &str) -> bool {
+    let base = prefix.trim_end_matches('/').trim_start_matches('/');
+    let n = base.split('/').count();
+    let segs = path.trim_start_matches('/').split('/');
+    segs.clone().count() > n && score_segments(base.split('/'), segs.take(n)).is_some()
 }
 
 /// A prefix row (`/a/{x}/`) against a path with something after it.
@@ -1808,6 +1841,8 @@ static ROWS: &[Row] = &[
     row("PUT", "/v1/secrets/projects/{project}/environments/{env}/secrets/{key}/hosts", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path").secret_key(),
     row("DELETE", "/v1/secrets/projects/{project}/environments/{env}/secrets/{key}/hosts", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path").secret_key(),
     // Purging a secret's history can't be undone.
+    // A rotation rewrites every key sharing the credential: roll-secrets asks write on each.
+    row("POST", "/v1/secrets/projects/{project}/environments/{env}/secrets/{key}/rotate", "secrets", W, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path").secret_key(),
     row("POST", "/v1/secrets/projects/{project}/environments/{env}/secrets/{key}/purge", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path").secret_key(),
     // A change request's current and proposed values, for its approvers.
     row("GET", "/v1/secrets/projects/{project}/environments/{env}/requests/{id}/values", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
@@ -1933,6 +1968,8 @@ static ROWS: &[Row] = &[
     // Who's signed in to a gated environment (emails of a provider's visitors), and ending one's
     // session: it only takes access away.
     row("GET", "/v1/apps/services/{id}/environments/{env}/visitors", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
+    // What browsers reported an environment's CSP blocked (`csp_reports`): read on the service.
+    row("GET", "/v1/apps/services/{id}/environments/{env}/csp-reports", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
     row("DELETE", "/v1/apps/services/{id}/environments/{env}/visitors/{visitor}", "apps", W, one(PG, "service")).env(EnvFrom::Param("env")),
     // A volume's backups: making one changes nothing the app sees (write, production too);
     // restoring one replaces the volume's files (delete, as restoring over a branch is).
@@ -2047,6 +2084,9 @@ static ROWS: &[Row] = &[
     // A preview's own variables come back with their values: reveal (setting them is write, by
     // the prefix).
     row("GET", "/v1/previews/{id}/env", "previews", REVEAL, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    // Setting a preview's variables answers all of them, values too: hidden from a grant that
+    // can't reveal them (as reading them is).
+    row("PUT", "/v1/previews/{id}/env", "previews", W, one(PG, "preview")).env(EnvFrom::Fixed("preview")).reveals(&["vars"]),
     // The share link with its access token, as a QR code for a phone (previews-next): the token in
     // another encoding, so reveal as the link itself is.
     row("GET", "/v1/previews/{id}/qr.png", "previews", REVEAL, one(PG, "preview")).env(EnvFrom::Fixed("preview")),

@@ -22,6 +22,7 @@ const EVENTS: { value: NotifyEvent; label: string }[] = [
   { value: "alert.capacity", label: "At capacity" },
   { value: "alert.route", label: "Route alert (one route's errors or latency)" },
   { value: "alert.anomaly", label: "Unusual for the hour" },
+  { value: "alert.csp", label: "A CSP directive blocked something for the first time" },
   { value: "attack.mode", label: "Attack mode on" },
   { value: "deploy.started", label: "A deploy began building" },
   { value: "scale.out", label: "Scaled out" },
@@ -42,6 +43,7 @@ const EVENTS: { value: NotifyEvent; label: string }[] = [
   { value: "volume.backup_failed", label: "Backup failed" },
   { value: "volume.full", label: "Volume 90% full" },
   { value: "check.down", label: "Uptime check down" },
+  { value: "check.slow", label: "Uptime check slow" },
   { value: "heartbeat.missed", label: "Heartbeat missed" },
   { value: "deploy.vulnerable", label: "New known vulnerabilities" },
   { value: "audit", label: "Every change people make (audit log)" },
@@ -66,7 +68,7 @@ export function NotificationsPanel({ project, projectName, runner }: { project: 
   const [url, setUrl] = useState("");
   const [region, setRegion] = useState<"us" | "eu">("us");
   const oncall = kind === "pagerduty" || kind === "opsgenie";
-  const [events, setEvents] = useState<NotifyEvent[]>(["check.down", "heartbeat.missed", "alert.slo", "alert.anomaly", "deploy.failed", "rollout.waiting", "deploy.ready", "error.new", "error.regressed", "crash_loop", "spend.alert", "spend.spike", "spend.limit", "alert.memory", "alert.cpu", "alert.metric", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "alert.route", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"]);
+  const [events, setEvents] = useState<NotifyEvent[]>(["check.down", "check.slow", "heartbeat.missed", "alert.slo", "alert.anomaly", "deploy.failed", "rollout.waiting", "deploy.ready", "error.new", "error.regressed", "crash_loop", "spend.alert", "spend.spike", "spend.limit", "alert.memory", "alert.cpu", "alert.metric", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "alert.route", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"]);
   const [envs, setEnvs] = useState("");
   const [previews, setPreviews] = useState(false);
   // Only some of the project's services (none chosen: every one).

@@ -4283,14 +4283,16 @@ async fn a_branch_acts_as_none_of_its_parents() {
         assert_eq!(v["status"]["state"]["active"], false, "{v}");
         let (s, v) = e.es(&u, &p, Method::PUT, "/_watcher/watch/ping/_deactivate", None).await;
         assert_eq!(s, 200, "{v}");
-        // Once the last execution recorded itself: as many calls as the parent's executions.
+        // Once the last execution recorded itself: as many calls as the parent's executions (the
+        // branch's inactive copy adds none). How many ran before the deactivation depends on load,
+        // so one is enough.
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
         loop {
             e.es(&u, &p, Method::POST, "/.watcher-history-*/_refresh?expand_wildcards=all", None).await;
             let (_, v) = e.es(&u, &p, Method::GET, "/.watcher-history-*/_count?expand_wildcards=all", None).await;
             let executions = v["count"].as_u64().unwrap() as usize;
             let calls = hooks.load(std::sync::atomic::Ordering::SeqCst);
-            if executions >= 2 && calls == executions {
+            if executions >= 1 && calls == executions {
                 break;
             }
             assert!(std::time::Instant::now() < deadline, "{calls} calls for {executions} executions: {v}");

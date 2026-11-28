@@ -174,8 +174,13 @@ impl Fleet {
     }
 }
 
+/// A visitor, an API call or a tunnel (`roll apps proxy`: a WebSocket carrying one TCP
+/// connection, its upgrade forwarded) at a node that doesn't own the service reaches the owner;
+/// a static site's `service:` rewrite reaches the project's service where it lives.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_visitor_at_a_node_that_doesnt_own_the_service_gets_the_owners_answer() {
+    use futures::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
     let f = fleet(2).await;
     let (id, h) = f.image_service(&f.nodes[0], "web").await;
     let (owner, other) = f.owner_and_other(&id);
@@ -194,13 +199,23 @@ async fn a_visitor_at_a_node_that_doesnt_own_the_service_gets_the_owners_answer(
         let (st, env) = call(&n.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None).await;
         assert_eq!((st, env["active"].is_object()), (StatusCode::OK, true), "{env}");
     }
-}
-
-/// A static site's `service:` rewrite reaches the project's service where it lives: the site on
-/// one node, the API on the other.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_sites_rewrite_reaches_a_service_another_node_owns() {
-    let f = fleet(2).await;
+    // A tunnel through the node that doesn't own it.
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{}/v1/apps/services/{id}/environments/production/tunnel", other.addr)).await.unwrap();
+    ws.send(Message::Binary(b"GET /through HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n".to_vec().into())).await.unwrap();
+    let mut got = Vec::new();
+    while let Some(Ok(m)) = ws.next().await {
+        match m {
+            Message::Binary(b) if b.is_empty() => break,
+            Message::Binary(b) => got.extend_from_slice(&b),
+            Message::Close(_) => break,
+            _ => {}
+        }
+    }
+    let text = String::from_utf8_lossy(&got);
+    assert!(text.starts_with("HTTP/1.1 200") && text.contains(r#""path":"/through""#), "{text}");
+    assert!(owner.fake.instances(&id).iter().any(|(n, ..)| text.contains(n.as_str())), "the owner's instance answered: {text}");
+    // The site on one node, the api on the other: an upload the fake builds into a static site
+    // whose `_redirects` sends `/api/*` to `service:api/v1/:splat`.
     let via = &f.nodes[0];
     // The site: an upload the fake builds into a static site whose `_redirects` sends
     // `/api/*` to `service:api/v1/:splat`.
@@ -235,17 +250,33 @@ async fn a_sites_rewrite_reaches_a_service_another_node_owns() {
 }
 
 /// A killed owner (its port closed, its membership gone without a goodbye): once its lease
-/// expires the other node takes the service, wakes it there for the next visitor, and deploys it.
+/// expires the other node takes the service, wakes it there for the next visitor, and deploys it;
+/// a static site it owned is served there from its files' tar in object storage, nothing built
+/// or run there.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_killed_owners_service_moves_to_the_node_left() {
     let mut f = fleet(2).await;
     let (id, h) = f.image_service(&f.nodes[0], "web").await;
     let key = apps_control::lease_key(&id);
     let owner = f.nodes.iter().position(|n| n.apps.deps.cluster.owns(&key)).unwrap();
+    // A static site on the same owner (made again until it is).
+    let mut site = None;
+    for _ in 0..20 {
+        let (s, sh) = f.static_site(&f.nodes[0]).await;
+        if f.nodes[owner].apps.deps.cluster.owns(&apps_control::lease_key(&s)) {
+            site = Some((s, sh));
+            break;
+        }
+        for _ in 0..2 {
+            assert_eq!(call(&f.nodes[0].api, "DELETE", &format!("/v1/apps/services/{s}"), None).await.0, StatusCode::NO_CONTENT);
+        }
+    }
+    let (site, site_host) = site.expect("a site on the same owner");
     let dead = f.nodes.remove(owner);
     dead.server.abort();
     dead.apps.deps.cluster.fault_kill();
     let left = &f.nodes[0];
+    let builds = Fake::count(&left.fake.counts.builds);
     let mut owned = false;
     for _ in 0..300 {
         if left.apps.deps.cluster.owns(&key) {
@@ -269,6 +300,20 @@ async fn a_killed_owners_service_moves_to_the_node_left() {
     }
     let body = ok.expect("a visitor gets the app on the node left");
     assert!(left.fake.instances(&id).iter().any(|(n, ..)| body["instance"] == *n), "woken there: {body}");
+    let mut page = None;
+    for _ in 0..300 {
+        let req = Request::builder().uri("/").header("host", site_host.as_str()).body(Body::empty()).unwrap();
+        let resp = left.public.clone().oneshot(req).await.unwrap();
+        if resp.status() == StatusCode::OK {
+            page = Some(String::from_utf8(resp.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap());
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(page.as_deref(), Some("<!doctype html><title>fake site</title>"));
+    assert!(left.apps.deps.cluster.owns(&apps_control::lease_key(&site)));
+    assert_eq!(Fake::count(&left.fake.counts.builds), builds, "nothing built again");
+    assert!(left.fake.instances(&site).is_empty(), "nothing runs: its files answer");
     // And it deploys there.
     let (st, d) = call(&left.api, "POST", &format!("/v1/apps/services/{id}/environments/production/redeploy"), Some(json!({}))).await;
     assert_eq!(st, StatusCode::ACCEPTED, "{d}");
@@ -340,7 +385,7 @@ async fn a_joining_node_takes_services_with_no_request_failing() {
     }
     f.join("n1").await;
     let mut failed = Vec::new();
-    let mut moved = false;
+    let (mut moved, mut moved_at) = (false, None);
     for round in 0..600 {
         for (id, h) in &svcs {
             let req = Request::builder().uri("/").header("host", h.as_str()).body(Body::empty()).unwrap();
@@ -353,68 +398,13 @@ async fn a_joining_node_takes_services_with_no_request_failing() {
             }
         }
         moved = svcs.iter().any(|(id, _)| f.nodes[1].apps.deps.cluster.owns(&apps_control::lease_key(id)));
-        if moved && round > 40 {
+        if moved && round >= *moved_at.get_or_insert(round) + 5 {
             break;
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
     assert!(moved, "the new node took at least one service");
     assert!(failed.is_empty(), "requests failed during the handoff: {failed:?}");
-}
-
-/// A static site whose owner dies is served by the node that takes it over: its files' tar
-/// from object storage, nothing built or run there.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_static_sites_files_answer_on_the_node_that_takes_it_over() {
-    let mut f = fleet(2).await;
-    let (site, h) = f.static_site(&f.nodes[0]).await;
-    let key = apps_control::lease_key(&site);
-    let owner = f.nodes.iter().position(|n| n.apps.deps.cluster.owns(&key)).unwrap();
-    let dead = f.nodes.remove(owner);
-    dead.server.abort();
-    dead.apps.deps.cluster.fault_kill();
-    let left = &f.nodes[0];
-    let builds = apps_control::runtime::fake::Fake::count(&left.fake.counts.builds);
-    let mut page = None;
-    for _ in 0..300 {
-        let req = Request::builder().uri("/").header("host", h.as_str()).body(Body::empty()).unwrap();
-        let resp = left.public.clone().oneshot(req).await.unwrap();
-        if resp.status() == StatusCode::OK {
-            page = Some(String::from_utf8(resp.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap());
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    assert_eq!(page.as_deref(), Some("<!doctype html><title>fake site</title>"));
-    assert!(left.apps.deps.cluster.owns(&key));
-    assert_eq!(apps_control::runtime::fake::Fake::count(&left.fake.counts.builds), builds, "nothing built again");
-    assert!(left.fake.instances(&site).is_empty(), "nothing runs: its files answer");
-    drop(dead);
-}
-
-/// A tunnel (`roll apps proxy`: a WebSocket carrying one TCP connection) opened at a node that
-/// doesn't own the service reaches the owner's instance: the upgrade is forwarded.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_tunnel_through_a_node_that_doesnt_own_the_service_reaches_its_port() {
-    use futures::{SinkExt, StreamExt};
-    use tokio_tungstenite::tungstenite::Message;
-    let f = fleet(2).await;
-    let (id, _) = f.image_service(&f.nodes[0], "web").await;
-    let (owner, other) = f.owner_and_other(&id);
-    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{}/v1/apps/services/{id}/environments/production/tunnel", other.addr)).await.unwrap();
-    ws.send(Message::Binary(b"GET /through HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n".to_vec().into())).await.unwrap();
-    let mut got = Vec::new();
-    while let Some(Ok(m)) = ws.next().await {
-        match m {
-            Message::Binary(b) if b.is_empty() => break,
-            Message::Binary(b) => got.extend_from_slice(&b),
-            Message::Close(_) => break,
-            _ => {}
-        }
-    }
-    let text = String::from_utf8_lossy(&got);
-    assert!(text.starts_with("HTTP/1.1 200") && text.contains(r#""path":"/through""#), "{text}");
-    assert!(owner.fake.instances(&id).iter().any(|(n, ..)| text.contains(n.as_str())), "the owner's instance answered: {text}");
 }
 
 /// A cron service whose owner dies keeps its schedule on the node that takes it over, and its
@@ -571,7 +561,7 @@ async fn a_handoff_on_a_shared_runtime_keeps_the_instances() {
     let made = Fake::count(&shared.counts.creates);
     f.join("n1").await;
     let mut failed = Vec::new();
-    let mut moved = Vec::new();
+    let (mut moved, mut moved_at) = (Vec::new(), None);
     for round in 0..600 {
         for (id, h) in &svcs {
             let req = Request::builder().uri("/").header("host", h.as_str()).body(Body::empty()).unwrap();
@@ -581,7 +571,7 @@ async fn a_handoff_on_a_shared_runtime_keeps_the_instances() {
             }
         }
         moved = svcs.iter().filter(|(id, _)| f.nodes[1].apps.deps.cluster.owns(&apps_control::lease_key(id))).map(|(id, _)| id.clone()).collect();
-        if !moved.is_empty() && round > 40 {
+        if !moved.is_empty() && round >= *moved_at.get_or_insert(round) + 5 {
             break;
         }
         tokio::time::sleep(Duration::from_millis(25)).await;

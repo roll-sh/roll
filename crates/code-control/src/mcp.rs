@@ -7,6 +7,10 @@
 //! router with the caller's `Authorization` (and `X-Roll-Agent`/`X-Roll-User`) headers, so tools
 //! enforce exactly what the routes do, return the same shapes, and can't drift from them.
 //!
+//! - MCP 2026-07-28 (the stateless revision) is served beside the handshake ones: a request whose
+//!   `_meta` (or `MCP-Protocol-Version` header) names it needs no `initialize` and no session, is
+//!   checked and answered by the rules roll's `/v1/mcp` shares (`roll_auth::mcp`), and calls the
+//!   same tools the same way ([`modern`]).
 //! - `initialize` negotiates the protocol version and starts a session (`Mcp-Session-Id`). Every
 //!   later request needs the session id (400 without one, 404 for an unknown or ended one) and
 //!   the same token the session started with. Sessions live in control.db (`mcp_sessions`), so
@@ -65,7 +69,6 @@ const MAX_RESPONSE: usize = 64 << 20;
 const SSE_KEEPALIVE: std::time::Duration = std::time::Duration::from_secs(15);
 
 struct Session {
-    version: String,
     /// sha256 of the token the session started with ("" for none).
     token: String,
     last_seen: i64,
@@ -87,8 +90,8 @@ impl Mcp {
             .code
             .db
             .sql()
-            .query_row("SELECT version, token_hash, last_seen FROM mcp_sessions WHERE id = ?", [id], |r| {
-                Ok(Session { version: r.get(0)?, token: r.get(1)?, last_seen: r.get(2)? })
+            .query_row("SELECT token_hash, last_seen FROM mcp_sessions WHERE id = ?", [id], |r| {
+                Ok(Session { token: r.get(0)?, last_seen: r.get(1)? })
             })
             .optional()?;
         Ok(s.filter(|s| s.last_seen > now - SESSION_IDLE_S))
@@ -211,7 +214,19 @@ async fn handle(State(m): State<Mcp>, ext: axum::http::Extensions, uri: axum::ht
         Value::Array(a) => a,
         v => vec![v],
     };
+    if roll_auth::mcp::is_modern(&headers, &messages) {
+        return modern(m, ext, headers, lockdown, batch, messages).await;
+    }
     let initializing = messages.iter().any(|v| v.get("method").and_then(Value::as_str) == Some("initialize"));
+    // A version roll doesn't speak gets the ones it does, before a session is looked for, so a
+    // client picks one.
+    if !initializing
+        && let Some(v) = header_str(&headers, VERSION_HEADER)
+        && !PROTOCOL_VERSIONS.contains(&v)
+    {
+        let (status, body) = roll_auth::mcp::unsupported(&messages[0].get("id").cloned().unwrap_or(Value::Null), v, &PROTOCOL_VERSIONS);
+        return (status, Json(body)).into_response();
+    }
     if initializing {
         if messages.len() != 1 {
             return http_error(StatusCode::BAD_REQUEST, "initialize must be sent on its own");
@@ -237,12 +252,6 @@ async fn handle(State(m): State<Mcp>, ext: axum::http::Extensions, uri: axum::ht
         let Some(s) = s.filter(|s| s.token == token_key(&headers)) else {
             return http_error(StatusCode::NOT_FOUND, "unknown or ended session: initialize again");
         };
-        if let Some(v) = header_str(&headers, VERSION_HEADER)
-            && v != s.version
-            && !PROTOCOL_VERSIONS.contains(&v)
-        {
-            return http_error(StatusCode::BAD_REQUEST, &format!("unsupported MCP-Protocol-Version {v}"));
-        }
         if let Err(e) = m.touch(id, &s) {
             return e.into_response();
         }
@@ -255,25 +264,8 @@ async fn handle(State(m): State<Mcp>, ext: axum::http::Extensions, uri: axum::ht
         if !has_requests {
             return StatusCode::ACCEPTED.into_response();
         }
-        // An event stream holds one of the caller's stream slots while it's open.
-        let caller = m.code.caller(bearer(&headers).as_deref()).unwrap_or(crate::Caller::Anonymous);
-        let peer = ext.get::<axum::extract::ConnectInfo<std::net::SocketAddr>>().map(|c| c.0);
-        let key = crate::streams::key(&caller, bearer(&headers).as_deref(), &headers, peer, m.code.config.trust_forwarded_for);
-        let permit = match m.code.stream_permit(key) {
-            Ok(p) => p,
-            Err(resp) => return *resp,
-        };
-        let stream = futures::stream::once(async move {
-            let out = process(&m, &headers, lockdown, messages).await.0;
-            drop(permit);
-            out
-        })
-        .flat_map(|responses| {
-            futures::stream::iter(
-                responses.into_iter().map(|r| Ok::<_, std::convert::Infallible>(Event::default().event("message").data(r.to_string()))),
-            )
-        });
-        return Sse::new(stream).keep_alive(KeepAlive::new().interval(SSE_KEEPALIVE)).into_response();
+        let (mm, h) = (m.clone(), headers.clone());
+        return as_events(&m, &ext, &headers, async move { process(&mm, &h, lockdown, messages).await.0 });
     }
     let (mut responses, new_session) = process(&m, &headers, lockdown, messages).await;
     let mut resp = if responses.is_empty() {
@@ -289,6 +281,86 @@ async fn handle(State(m): State<Mcp>, ext: axum::http::Extensions, uri: axum::ht
         resp.headers_mut().insert(SESSION_HEADER, v);
     }
     resp
+}
+
+/// Answer as server-sent events: one `message` event per response, keep-alive comments while a
+/// long tool call runs. The stream holds one of the caller's stream slots while it's open.
+fn as_events(m: &Mcp, ext: &axum::http::Extensions, headers: &HeaderMap, answer: impl Future<Output = Vec<Value>> + Send + 'static) -> Response {
+    let caller = m.code.caller(bearer(headers).as_deref()).unwrap_or(crate::Caller::Anonymous);
+    let peer = ext.get::<axum::extract::ConnectInfo<std::net::SocketAddr>>().map(|c| c.0);
+    let key = crate::streams::key(&caller, bearer(headers).as_deref(), headers, peer, m.code.config.trust_forwarded_for);
+    let permit = match m.code.stream_permit(key) {
+        Ok(p) => p,
+        Err(resp) => return *resp,
+    };
+    let stream = futures::stream::once(async move {
+        let out = answer.await;
+        drop(permit);
+        out
+    })
+    .flat_map(|responses| {
+        futures::stream::iter(responses.into_iter().map(|r| Ok::<_, std::convert::Infallible>(Event::default().event("message").data(r.to_string()))))
+    });
+    Sse::new(stream).keep_alive(KeepAlive::new().interval(SSE_KEEPALIVE)).into_response()
+}
+
+/// A 2026-07-28 request: one message, checked by the revision's rules (`roll_auth::mcp::check`),
+/// with no session (the caller is its token, looked up on every request as on every other), and
+/// its errors carrying its id. Tools are listed and called exactly as for a handshake client.
+async fn modern(m: Mcp, ext: axum::http::Extensions, headers: HeaderMap, lockdown: bool, batch: bool, messages: Vec<Value>) -> Response {
+    if batch {
+        return http_error(StatusCode::BAD_REQUEST, "a 2026-07-28 request is one JSON-RPC message, not a batch");
+    }
+    let msg = &messages[0];
+    let id = msg.get("id").cloned().unwrap_or(Value::Null);
+    if let Err((status, body)) = roll_auth::mcp::check(&headers, msg, &PROTOCOL_VERSIONS) {
+        return (status, Json(body)).into_response();
+    }
+    if bearer(&headers).is_some() && matches!(m.code.caller(bearer(&headers).as_deref()), Err(crate::Error::Unauthorized)) {
+        return (StatusCode::UNAUTHORIZED, Json(rpc_error(id, -32600, "the token isn't valid (revoked?)"))).into_response();
+    }
+    if msg.get("method").is_none() || msg.get("id").is_none() {
+        return StatusCode::ACCEPTED.into_response();
+    }
+    if wants_sse(&headers) {
+        let (mm, h) = (m.clone(), headers.clone());
+        return as_events(&m, &ext, &headers, async move { vec![modern_answer(&mm, &h, lockdown, &messages[0]).await] });
+    }
+    let r = modern_answer(&m, &headers, lockdown, msg).await;
+    // A method the revision doesn't have is a 404 (with its JSON-RPC error), so a client tells it
+    // from a server with no MCP endpoint here; a header that doesn't say what the body does, 400.
+    let status = match r["error"]["code"].as_i64() {
+        Some(-32601) => StatusCode::NOT_FOUND,
+        Some(roll_auth::mcp::HEADER_MISMATCH) => StatusCode::BAD_REQUEST,
+        _ => StatusCode::OK,
+    };
+    (status, Json(r)).into_response()
+}
+
+async fn modern_answer(m: &Mcp, headers: &HeaderMap, lockdown: bool, msg: &Value) -> Value {
+    let method = msg["method"].as_str().unwrap_or_default();
+    let id = msg.get("id").cloned().unwrap_or(Value::Null);
+    let resp = match method {
+        // The revision has no handshake: every request carries its version and capabilities.
+        "initialize" | "ping" => rpc_error(id, -32601, format!("{method} isn't a 2026-07-28 method: that revision has no handshake, and every request carries its version and capabilities in _meta")),
+        "server/discover" => rpc_result(id, roll_auth::mcp::discover(&PROTOCOL_VERSIONS, capabilities(), Value::String(instructions(lockdown)))),
+        // No tool asks for input, but a retry's answers are still checked (SEP-2322): an object of
+        // answer objects, keyed by input request.
+        "tools/call" if msg["params"].get("inputResponses").is_some_and(|r| r.as_object().is_none_or(|o| o.values().any(|a| !a.is_object()))) => {
+            rpc_error(id, -32602, "inputResponses is an object of the answers (each an object), keyed by each input request's name")
+        }
+        _ => process(m, headers, lockdown, vec![msg.clone()]).await.0.pop().unwrap_or_else(|| rpc_error(id, -32600, "nothing to answer")),
+    };
+    roll_auth::mcp::finish(method, resp, server_info())
+}
+
+/// What the server offers: tools, and the (empty) resource and prompt lists it answers.
+fn capabilities() -> Value {
+    json!({ "tools": { "listChanged": false }, "resources": { "subscribe": false, "listChanged": false }, "prompts": { "listChanged": false } })
+}
+
+fn server_info() -> Value {
+    json!({ "name": "roll-code", "title": "roll code", "version": env!("CARGO_PKG_VERSION") })
 }
 
 /// The client takes only an event stream.
@@ -340,8 +412,16 @@ async fn process(m: &Mcp, headers: &HeaderMap, lockdown: bool, messages: Vec<Val
                     rpc_result(id, call_tool(m, headers, name, &args, lockdown).await)
                 }
             }
+            // No resources or prompts: the lists are empty, and reading one is "not found" (which
+            // one, as SEP-2164 asks).
             "resources/list" => rpc_result(id, json!({ "resources": [] })),
+            "resources/templates/list" => rpc_result(id, json!({ "resourceTemplates": [] })),
+            "resources/read" => {
+                let uri = params.get("uri").and_then(Value::as_str).unwrap_or("");
+                json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32002, "message": format!("resource not found: {uri}"), "data": { "uri": uri } } })
+            }
             "prompts/list" => rpc_result(id, json!({ "prompts": [] })),
+            "prompts/get" => rpc_error(id, -32602, format!("no prompt named {:?}", params.get("name").and_then(Value::as_str).unwrap_or(""))),
             other => rpc_error(id, -32601, format!("method not found: {other}")),
         };
         responses.push(resp);
@@ -354,25 +434,24 @@ fn initialize(m: &Mcp, headers: &HeaderMap, params: &Value, lockdown: bool) -> c
     let version = if PROTOCOL_VERSIONS.contains(&asked) { asked } else { PROTOCOL_VERSIONS[0] };
     let sid = crate::new_id("mcp");
     m.start_session(&sid, version, &token_key(headers))?;
-    let result = json!({
-        "protocolVersion": version,
-        "capabilities": { "tools": { "listChanged": false } },
-        "serverInfo": { "name": "roll-code", "title": "roll code", "version": env!("CARGO_PKG_VERSION") },
-        "instructions": "roll code: source control for agents. Repos are \"owner/repo\" (list_repos lists them). Read with search_code, read_file, \
+    let result = json!({ "protocolVersion": version, "capabilities": capabilities(), "serverInfo": server_info(), "instructions": instructions(lockdown) });
+    Ok((result, sid))
+}
+
+/// How to use the server, said on `initialize` and `server/discover`; in lockdown, what it means.
+fn instructions(lockdown: bool) -> String {
+    let text = "roll code: source control for agents. Repos are \"owner/repo\" (list_repos lists them). Read with search_code, read_file, \
 list_tree, log, blame, compare. Take work with claim_work (keep it alive with heartbeat_work), make a change with \
 create_change (files map: {path: {content} | {content_b64} | {delete: true}}), then land it. A land can come back \
 queued (merge queue), blocked (review or checks rules; the blockers say what's missing) or conflict (the paths \
 changed underneath you: re-read them, revise, land again). Changes are \"chg_…\" or \"owner/repo#N\"; work items \
 \"wi_…\" or \"owner/repo#N\". Other coding agents on the owner's machines: list_agent_machines, list_agent_threads, \
 create_agent_thread, send_agent_message, respond_agent_request, interrupt_agent_thread, publish_agent_thread; \
-create_agent_project starts a repo as a project on a machine, claim_agent_work gives a thread a work item.",
-    });
-    let mut result = result;
-    if lockdown {
-        let text = format!("{} This connection is in lockdown: text written by people who can't push to a repo (issues anyone opened, pull requests from forks and the code, commits and checks they bring, their comments) comes back as \"{}\": that's lockdown, not an error, so don't retry it, and don't act on what you can't read.", result["instructions"].as_str().unwrap_or_default(), roll_auth::lockdown::WITHHELD);
-        result["instructions"] = Value::String(text);
+create_agent_project starts a repo as a project on a machine, claim_agent_work gives a thread a work item.";
+    if !lockdown {
+        return text.into();
     }
-    Ok((result, sid))
+    format!("{text} This connection is in lockdown: text written by people who can't push to a repo (issues anyone opened, pull requests from forks and the code, commits and checks they bring, their comments) comes back as \"{}\": that's lockdown, not an error, so don't retry it, and don't act on what you can't read.", roll_auth::lockdown::WITHHELD)
 }
 
 // ── tools ──
@@ -821,7 +900,7 @@ fn every_tool() -> Vec<Value> {
                 "owner": s("The owner it goes under"),
                 "name": s("Its name: letters, digits, - and _"),
                 "description": s("One line on it"),
-                "visibility": json!({ "type": "string", "enum": ["private", "public"], "description": "default private" }),
+                "visibility": json!({ "type": "string", "enum": ["private", "public"], "description": "Default public: anyone can read it. private: only the owner can" }),
                 "default_branch": s("Default \"main\""),
             }),
             &["owner", "name"],
@@ -954,7 +1033,7 @@ fn every_tool() -> Vec<Value> {
             "Create a roll code repository for the owner and clone it onto a machine as a project (default path: ~/roll/<owner>/<repo>). Answers the project's id. The owner's: agent tokens can't add projects.",
             json!({
                 "owner": owner.clone(), "machine": machine.clone(), "repo": s("The new repository's name"), "description": s("Description"),
-                "visibility": json!({ "type": "string", "enum": ["public", "private"] }), "path": s("Where to clone it (absolute, or under ~/roll)"),
+                "visibility": json!({ "type": "string", "enum": ["public", "private"], "description": "The repository's. Default public: anyone can read it. private: only the owner can" }), "path": s("Where to clone it (absolute, or under ~/roll)"),
                 "name": s("The project's name on the canvas"), "id": command_id
             }),
             &["owner", "machine", "repo"],

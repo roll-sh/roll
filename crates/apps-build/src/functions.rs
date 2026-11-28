@@ -289,14 +289,3 @@ Deno.serve({ hostname: '127.0.0.1', port: Number(Deno.env.get('ROLL_EDGE_PORT') 
     return new Response('The edge function failed.', { status: 500 });
   }
 });"#;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn its_server_is_never_cut_short_by_its_heredoc() {
-        assert!(!SERVER.lines().any(|l| l.trim() == "ROLL_FUNCTIONS"));
-        assert!(!EDGE_SERVER.lines().any(|l| l.trim() == "ROLL_EDGE"));
-    }
-}

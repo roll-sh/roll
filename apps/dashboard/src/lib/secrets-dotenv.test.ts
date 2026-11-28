@@ -21,7 +21,7 @@ const secret = (key: string, source: Secret["source"] = { kind: "own" }): Secret
 });
 
 describe("the .env bulk paste", () => {
-  it("reads a .env the way the server does", () => {
+  it("reads a .env the way the server does, and previews new, replaced and skipped keys against the folder", () => {
     const text = [
       "﻿# the database",
       "export DATABASE_URL = postgres://a:b@h/db  # trailing comment",
@@ -45,16 +45,14 @@ describe("the .env bulk paste", () => {
     expect(parseDotenv("OK=1\n1BAD=2").error).toMatch(/^line 2: a key/);
     expect(parseDotenv('A="open').error).toBe("line 1: the double quote isn't closed");
     expect(parseDotenv("A=1\nnot a pair").error).toBe("line 2: expected KEY=value");
-  });
 
-  it("previews new, replaced and skipped keys against the folder", () => {
     const current = [secret("A"), secret("SHARED", { kind: "import", environment: "staging", path: "/common" })];
-    const { entries } = parseDotenv("A=1\nB=2\nSHARED=3");
-    expect(previewImport(entries, current, false).map((r) => [r.key, r.action, r.over])).toEqual([
+    const pasted = parseDotenv("A=1\nB=2\nSHARED=3").entries;
+    expect(previewImport(pasted, current, false).map((r) => [r.key, r.action, r.over])).toEqual([
       ["A", "skip", undefined],
       ["B", "new", undefined],
       ["SHARED", "new", "imported from staging/common"],
     ]);
-    expect(previewImport(entries, current, true)[0].action).toBe("replace");
+    expect(previewImport(pasted, current, true)[0].action).toBe("replace");
   });
 });

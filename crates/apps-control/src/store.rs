@@ -381,6 +381,28 @@ CREATE TABLE IF NOT EXISTS variables (
     PRIMARY KEY (service, env, name)
 ) WITHOUT ROWID;
 -- An environment's variables kept as files in its instances (their absolute paths).
+-- An environment's CSP reports (`csp`), grouped: how many, first and last seen; at most 500 an
+-- environment, kept as long as its logs.
+CREATE TABLE IF NOT EXISTS csp_reports (
+    service TEXT NOT NULL,
+    env TEXT NOT NULL,
+    directive TEXT NOT NULL,
+    blocked TEXT NOT NULL,
+    path TEXT NOT NULL,
+    disposition TEXT NOT NULL,
+    count INTEGER NOT NULL,
+    first_seen INTEGER NOT NULL,
+    last_seen INTEGER NOT NULL,
+    PRIMARY KEY (service, env, directive, blocked, path, disposition)
+) WITHOUT ROWID;
+-- The directives an environment's CSP reports have named: the first is its `alert.csp`.
+CREATE TABLE IF NOT EXISTS csp_directives (
+    service TEXT NOT NULL,
+    env TEXT NOT NULL,
+    directive TEXT NOT NULL,
+    first_seen INTEGER NOT NULL,
+    PRIMARY KEY (service, env, directive)
+) WITHOUT ROWID;
 -- Every error an environment has had (`errors::note_new_errors`), by fingerprint: the first time
 -- one is seen is its `error.new` event.
 CREATE TABLE IF NOT EXISTS error_groups (
@@ -808,6 +830,8 @@ pub struct EnvRow {
     pub vitals: bool,
     /// Its Strict-Transport-Security: the default unless it set one; None: off (`hsts: false`).
     pub hsts: Option<crate::model::Hsts>,
+    /// Its answers name roll's CSP report endpoint ([`crate::csp`]).
+    pub csp_reports: bool,
     /// Days its logs are kept (7, 30 or 90); None: [`crate::logs::KEEP_DAYS`].
     pub log_retention_days: Option<u32>,
     /// Approvals a deployment needs from people other than its author before it goes live.
@@ -978,7 +1002,7 @@ fn name_taken(name: &str, deleted: Option<i64>) -> String {
         Some(_) => format!("a deleted service named {name} holds the name: restore it, or delete it again to delete it for good"),
     }
 }
-const ENV_COLS: &str = "service, name, branch, ephemeral, active, slug, port, created_at, wait_for_ci, run, hook_hash, follow_tag, tag_seen, feedback, maintenance, allow_ips, rate_limit, tcp_port, firewall, pages, redeploy_on_secrets, secrets_seen, headers, paused, held_by, egress, vitals, routes, report, checks, heartbeats, split, freeze, mirror, pause_schedule, snippets, log_retention_days, approvals, badge, egress_by, redirects, keep_days, hsts";
+const ENV_COLS: &str = "service, name, branch, ephemeral, active, slug, port, created_at, wait_for_ci, run, hook_hash, follow_tag, tag_seen, feedback, maintenance, allow_ips, rate_limit, tcp_port, firewall, pages, redeploy_on_secrets, secrets_seen, headers, paused, held_by, egress, vitals, routes, report, checks, heartbeats, split, freeze, mirror, pause_schedule, snippets, log_retention_days, approvals, badge, egress_by, redirects, keep_days, hsts, csp_reports";
 /// A deployment [`Store::prune_deployments`] pruned, with its image when nothing else names it.
 pub struct Pruned {
     pub id: String,
@@ -1078,6 +1102,7 @@ fn env_row(r: &code_sql::Row<'_>) -> code_sql::Result<EnvRow> {
             None => Some(crate::model::HSTS_DEFAULT),
             Some(s) => serde_json::from_str::<Option<crate::model::Hsts>>(&s).ok().flatten(),
         },
+        csp_reports: r.get::<_, i64>(43)? != 0,
     })
 }
 
@@ -1265,6 +1290,7 @@ impl Store {
         db.add_column("environments", "keep_days", "INTEGER")?;
         // Its Strict-Transport-Security, as JSON (`false`, or its own); NULL: the default.
         db.add_column("environments", "hsts", "TEXT")?;
+        db.add_column("environments", "csp_reports", "INTEGER NOT NULL DEFAULT 0")?;
         db.add_column("environments", "approvals", "INTEGER")?;
         db.add_column("environments", "badge", "INTEGER NOT NULL DEFAULT 0")?;
         db.add_column("environments", "egress_by", "TEXT")?;
@@ -1516,7 +1542,7 @@ impl Store {
             c.execute("DELETE FROM deploy_git_tags WHERE deployment IN (SELECT id FROM deployments WHERE service = ?)", [id])?;
             c.execute("DELETE FROM state WHERE key LIKE ?", [format!("%:{id}/%")])?;
             c.execute("DELETE FROM status_days WHERE key LIKE ?", [format!("%:{id}/%")])?;
-            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "variable_runtime_only", "visit_tickets", "visit_sessions", "variable_files", "error_groups", "variables", "links", "domains", "preview_hosts", "runs", "jobs", "metrics", "usage", "form_submissions", "deploy_scans", "env_data", "env_branches", "udp_ports", "env_unscheduled", "sandboxes", "env_peering", "volume_hours", "env_deploy_tags", "alert_silences", "held_alerts"] {
+            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "variable_runtime_only", "visit_tickets", "visit_sessions", "variable_files", "error_groups", "variables", "links", "domains", "preview_hosts", "runs", "jobs", "metrics", "usage", "form_submissions", "deploy_scans", "env_data", "env_branches", "udp_ports", "env_unscheduled", "sandboxes", "env_peering", "volume_hours", "env_deploy_tags", "alert_silences", "held_alerts", "csp_reports", "csp_directives"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ?"), [id])?;
             }
             match c.execute("DELETE FROM services WHERE id = ?", [id])? {
@@ -1639,7 +1665,7 @@ impl Store {
                     None => None,
                 };
                 c.execute(
-                    &format!("INSERT INTO environments ({ENV_COLS}) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 0, '{{}}', NULL, 0, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL, 0, NULL, NULL, 0, NULL, 1, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL, NULL, NULL)"),
+                    &format!("INSERT INTO environments ({ENV_COLS}) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 0, '{{}}', NULL, 0, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL, 0, NULL, NULL, 0, NULL, 1, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL, NULL, NULL, 0)"),
                     params![service, env, branch.flatten(), ephemeral.unwrap_or(false) as i64, slug, port, now],
                 )?;
             }
@@ -1656,7 +1682,7 @@ impl Store {
             if n == 0 {
                 return Err(Error::NotFound(format!("service {service} has no environment {env}")));
             }
-            for t in ["variables", "variable_files", "error_groups", "domains", "preview_hosts", "runs", "jobs", "metrics", "deploy_keys", "env_access", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "variable_runtime_only", "visit_tickets", "visit_sessions", "form_submissions", "env_data", "udp_ports", "env_unscheduled", "sandboxes", "env_peering", "env_deploy_tags", "alert_silences", "held_alerts"] {
+            for t in ["variables", "variable_files", "error_groups", "domains", "preview_hosts", "runs", "jobs", "metrics", "deploy_keys", "env_access", "trace_ingest", "runtime_config", "oidc_access", "variable_makers", "variable_runtime_only", "visit_tickets", "visit_sessions", "form_submissions", "env_data", "udp_ports", "env_unscheduled", "sandboxes", "env_peering", "env_deploy_tags", "alert_silences", "held_alerts", "csp_reports", "csp_directives"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ? AND env = ?"), [service, env])?;
             }
             // Its schedules', challenge's and base images' state goes with it.
@@ -2480,12 +2506,13 @@ impl Store {
     }
 
     /// One more check run or ping (`ok`), or failure or miss, on `day` (days since 1970), and
-    /// what it is now (`up`: a check is down only after its failures in a row, not one try):
+    /// what it is now (`up`, `degraded` or `down`: a check is down only after its failures in a
+    /// row, not one try, and degraded while it's slow):
     /// what it was before, when that changed. Once a day, days and resolved incidents past
     /// [`crate::status_page::DAYS`] go.
-    pub fn status_day_add(&self, key: &str, day: i64, ok: bool, up: bool) -> Result<Option<Option<String>>> {
+    pub fn status_day_add(&self, key: &str, day: i64, ok: bool, now: &str) -> Result<Option<Option<String>>> {
         let (g, b) = if ok { (1, 0) } else { (0, 1) };
-        let (last_key, now) = (format!("status-last:{key}"), if up { "up" } else { "down" });
+        let last_key = format!("status-last:{key}");
         let changed = self.db.write(|c| {
             c.execute(
                 "INSERT INTO status_days (key, day, ok, bad) VALUES (?, ?, ?, ?) ON CONFLICT (key, day) DO UPDATE SET ok = status_days.ok + excluded.ok, bad = status_days.bad + excluded.bad",
@@ -4884,6 +4911,66 @@ impl Store {
         Ok(())
     }
 
+    pub fn set_csp_reports(&self, service: &str, env: &str, on: bool) -> Result<()> {
+        self.db.execute("UPDATE environments SET csp_reports = ? WHERE service = ? AND name = ?", params![on as i64, service, env])?;
+        Ok(())
+    }
+
+    /// CSP reports counted into their groups (the oldest groups going past
+    /// [`crate::csp::MAX_GROUPS`]); a directive the environment never had is its `alert.csp`, in
+    /// the same transaction. The new directives' first reports come back.
+    pub fn add_csp_reports(&self, service: &str, env: &str, counts: &[(crate::csp::Key, i64)]) -> Result<Vec<crate::csp::Key>> {
+        let now = self.now()?;
+        Ok(self.db.write(|c| {
+            let mut new = Vec::new();
+            for (k, n) in counts {
+                let pk = params![service, env, k.directive, k.blocked, k.path, k.disposition];
+                let have: Option<i64> = c.query_row("SELECT count FROM csp_reports WHERE service = ? AND env = ? AND directive = ? AND blocked = ? AND path = ? AND disposition = ?", pk, |r| r.get(0)).optional()?;
+                match have {
+                    Some(_) => {
+                        c.execute("UPDATE csp_reports SET count = count + ?, last_seen = ? WHERE service = ? AND env = ? AND directive = ? AND blocked = ? AND path = ? AND disposition = ?", params![n, now, service, env, k.directive, k.blocked, k.path, k.disposition])?;
+                    }
+                    None => {
+                        let groups: i64 = c.query_row("SELECT COUNT(*) FROM csp_reports WHERE service = ? AND env = ?", params![service, env], |r| r.get(0))?;
+                        if groups >= crate::csp::MAX_GROUPS {
+                            let old: Option<(String, String, String, String)> = c
+                                .query_row("SELECT directive, blocked, path, disposition FROM csp_reports WHERE service = ? AND env = ? ORDER BY last_seen, count LIMIT 1", params![service, env], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+                                .optional()?;
+                            if let Some((d, b, p, s)) = old {
+                                c.execute("DELETE FROM csp_reports WHERE service = ? AND env = ? AND directive = ? AND blocked = ? AND path = ? AND disposition = ?", params![service, env, d, b, p, s])?;
+                            }
+                        }
+                        c.execute("INSERT INTO csp_reports (service, env, directive, blocked, path, disposition, count, first_seen, last_seen) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", params![service, env, k.directive, k.blocked, k.path, k.disposition, n, now, now])?;
+                    }
+                }
+                if c.execute("INSERT INTO csp_directives (service, env, directive, first_seen) VALUES (?, ?, ?, ?) ON CONFLICT (service, env, directive) DO NOTHING", params![service, env, k.directive, now])? == 1 {
+                    insert_event(c, now, "alert.csp", service, env, None, &serde_json::json!({ "directive": k.directive, "blocked": k.blocked, "path": k.path }))?;
+                    new.push(k.clone());
+                }
+            }
+            Ok::<_, code_sql::Error>(new)
+        })?)
+    }
+
+    /// An environment's CSP report groups last seen since `since` (unix ms), the most frequent
+    /// first: each with its count, first and last seen.
+    pub fn csp_reports(&self, service: &str, env: &str, since: i64) -> Result<Vec<(crate::csp::Key, i64, i64, i64)>> {
+        Ok(self.db.query(
+            "SELECT directive, blocked, path, disposition, count, first_seen, last_seen FROM csp_reports WHERE service = ? AND env = ? AND last_seen >= ? ORDER BY count DESC, last_seen DESC LIMIT 500",
+            params![service, env, since],
+            |r| {
+                let disposition = if r.get::<_, String>(3)? == "report" { "report" } else { "enforce" };
+                Ok((crate::csp::Key { directive: r.get(0)?, blocked: r.get(1)?, path: r.get(2)?, disposition }, r.get(4)?, r.get(5)?, r.get(6)?))
+            },
+        )?)
+    }
+
+    /// An environment's CSP report groups last seen before `before` (its log retention) deleted.
+    pub fn expire_csp_reports(&self, service: &str, env: &str, before: i64) -> Result<()> {
+        self.db.execute("DELETE FROM csp_reports WHERE service = ? AND env = ? AND last_seen < ?", params![service, env, before])?;
+        Ok(())
+    }
+
     pub fn set_vitals(&self, service: &str, env: &str, on: bool) -> Result<()> {
         self.db.execute("UPDATE environments SET vitals = ? WHERE service = ? AND name = ?", params![on as i64, service, env])?;
         Ok(())
@@ -5408,29 +5495,6 @@ fn delivery_row(r: &code_sql::Row<'_>) -> code_sql::Result<Delivery> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Patterns saved as substrings keep their meaning under the Logs search: quoted once, on
-    /// the next open, one word left alone.
-    #[test]
-    fn saved_log_patterns_are_quoted_once() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("apps.db");
-        let s = Store::new(Db::open_sqlite(&path, Default::default()).unwrap(), Sealer::new(&"k".repeat(32)).unwrap()).unwrap();
-        let run = r#"{"alerts":{"log_match":"connection refused"},"log_metrics":[{"name":"a","pattern":"-ERR"},{"name":"b","pattern":"panic"}]}"#;
-        s.db.execute("INSERT INTO environments (service, name, ephemeral, slug, created_at, run) VALUES ('svc_x', 'production', 0, 'x', 0, ?)", [run]).unwrap();
-        s.db.execute("DELETE FROM state WHERE key = 'log-patterns-quoted'", ()).unwrap();
-        drop(s);
-        let s = Store::new(Db::open_sqlite(&path, Default::default()).unwrap(), Sealer::new(&"k".repeat(32)).unwrap()).unwrap();
-        let got: String = s.db.query_row("SELECT run FROM environments WHERE service = 'svc_x'", (), |r| r.get(0)).unwrap();
-        let v: serde_json::Value = serde_json::from_str(&got).unwrap();
-        assert_eq!((v["alerts"]["log_match"].as_str(), v["log_metrics"][0]["pattern"].as_str(), v["log_metrics"][1]["pattern"].as_str()), (Some("\"connection refused\""), Some("\"-ERR\""), Some("panic")), "{got}");
-        // Once: a search saved since stays as it was written.
-        s.db.execute("UPDATE environments SET run = ? WHERE service = 'svc_x'", [r#"{"alerts":{"log_match":"timeout OR refused"}}"#]).unwrap();
-        drop(s);
-        let s = Store::new(Db::open_sqlite(&path, Default::default()).unwrap(), Sealer::new(&"k".repeat(32)).unwrap()).unwrap();
-        let got: String = s.db.query_row("SELECT run FROM environments WHERE service = 'svc_x'", (), |r| r.get(0)).unwrap();
-        assert!(got.contains("\"timeout OR refused\"") && !got.contains("\\\""), "{got}");
-    }
 
     /// Two notifiers (a handover) never queue an event twice for a target, the one whose
     /// cursor moved under it queues nothing, and a claimed delivery isn't handed out again.

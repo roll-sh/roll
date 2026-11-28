@@ -649,8 +649,7 @@ The Go and Python clients log in with OIDC tokens and AWS only, not yet with `gc
 machine credential.
 
 Tests: `crates/roll-cli/tests/secrets.rs` (`the_local_agent_answers_only_requests_that_carry_its_token`,
-`a_change_reaches_the_local_agents_cache_through_the_digest`,
-`a_revoked_logins_local_agent_answers_a_refusal_within_one_poll`,
+with a change through the digest, `a_revoked_logins_local_agent_answers_a_refusal_within_one_poll`,
 `the_local_agent_on_a_gce_vm_logs_in_with_the_metadata_servers_identity_token`,
 `a_bootstrap_token_becomes_a_machine_credential_kept_on_disk_and_replaced_at_half_life`); the
 identity login's renewal is `relogin_tests` in `crates/roll-cli/src/secrets.rs`, which the agent
@@ -1437,6 +1436,12 @@ A link is `{kind, ref, field, mode, options}`:
   midnight on the next day), a due rotation waits for the window to open and runs inside it, so a
   credential changes only when you expect it to; `next_due` says when that is. A window goes with
   `rotate_days`, on a managed link.
+  Keys of one environment that share a credential (a login's username and password, in any
+  folder) rotate together: rotating one rewrites them all, so a
+  person or token needs write on each of them, as for any other write of them. Without it the
+  rotation is refused before anything is issued (403 saying how many other keys share it, never
+  which), and the answer lists only the keys the caller may read. roll's own rotations (scheduled,
+  for a leak, a recovered project's) rewrite every key that shares the credential.
 - **`dynamic`** (short-lived credentials): each resolve that asks for it (`roll run`, an app's
   start) issues a fresh credential with a TTL (`ttl_minutes`, default 60, at least 15 minutes, at most 7 days), recorded
   as a **lease**. Leases are revoked when they expire, or at once with `DELETE …/leases/{id}`, and
@@ -1819,7 +1824,8 @@ instead of at the first rotation:
   the secret that one stored), finds the key moved on when it comes to store its own; for most
   vendors that's a lost race and its credential is revoked, but Paddle ends the secret it rotated
   from, so its new secret, the newest and the only one that keeps working, is stored over the
-  other's. The key's id never changes (`id` is `api_key_id`). With `expires_days`, each new
+  other's. It replaces only that: if the key's link or value changed since for another reason (a
+  person re-linked it, or set a value by hand), the rotation is stale (409) and leaves it alone. The key's id never changes (`id` is `api_key_id`). With `expires_days`, each new
   secret gets `new_key_expires_at` that many days ahead, and a link's `rotate_days` is at most
   `expires_days` less 14; without it, each keeps the key's own expiry, which the registration's
   `credential_expires_at` can give health. One environment per registration: the registration is one
@@ -3618,6 +3624,8 @@ roll completions bash|zsh|fish|powershell
   `ROLL_TOKEN`, `ROLL_FALLBACK_KEY`…) is dropped from its environment unless the project sets
   that name itself, so an app and its dependencies never act as roll's operator or with the token
   that read its values. `--keep-roll-credentials` passes them on (a script that calls `roll`).
+  A `_URI` or `_URL` name whose value carries a password counts too. `roll apps exec` and
+  `roll secrets render --exec` drop the same names.
 - `roll run --watch [--interval 5]` keeps the command as a child and restarts it (SIGTERM, then
   SIGKILL after 10 s) when the environment changes. It polls `…/digest`, a hash of the folder's
   effective keys, versions, fingerprints and links, and of what their references reach (in this
@@ -5969,7 +5977,15 @@ that follow from it:
   rotate, hosts, purge) at that key, and a folder's list, values (`roll run`, an export, `?seq=`),
   resolve and batch of changes key by key: those keys alone, and a batch naming another is
   refused with its name. A digest, a watch's delta, a `.env` import or diff, a promote, health
-  and leaks stay the folder's (403). `Scope::key` and `Scope::by_key` carry it to `Grants::allows`;
+  and leaks stay the folder's (403). That 403 says why when a keyed rule would reach the folder
+  key by key: "this token reaches only some keys of production:/api; a watch (the folder's
+  digest) reads the whole folder, so it needs a rule without keys" (the folder, never a key;
+  `roll_auth::scope::keys_only`, from the gate and from `Caller::need`). So a keyed token can't
+  watch: `roll run --watch`, `roll secrets render --watch` and `roll secrets agent` (for its
+  `-e` folder and `--prefetch` ones) stop at their start with that message and exit non-zero
+  instead of failing every poll. Plain `roll run` reads the token's keys, and the agent with
+  `--ttl 0` keeps nothing and reads them on every request. There's no per-key watch yet.
+  `Scope::key` and `Scope::by_key` carry it to `Grants::allows`;
   `access::reaches` asks it per key, and `Grants::limits_keys` skips that for every other caller.
   `roll secrets tokens create … --key STRIPE_KEY` makes one. (Encryption keys are another
   thing: `{id, index}`, below.)
@@ -7697,11 +7713,12 @@ That's 205–219 ms of CPU per identity down to 7–18 ms, across all runs. The 
 change, which now also works out the stamps, cost the same as before: 0.3 s on SQLite and 0.6–0.8
 + 0.9–1.0 s on Postgres, for all 1,000.
 
-`a_watchers_delta_returns_what_changed_and_is_audited` and
-`a_permission_change_since_the_answer_held_gets_the_full_set` (`tests/api.rs`) and
-`roll_run_watch_reads_a_change_through_a_delta` (`roll-cli/tests/secrets.rs`) cover it, and each
-runtime client has a watch test against its own fake rolld that reads a one-key change through the
-route and falls back to a full read on a 404 (an older rolld).
+`a_watchers_delta_returns_what_changed_and_is_audited` (`tests/api.rs`, a permission change since
+the answer held too) and
+`roll_run_watch_restarts_on_a_write_waits_out_failures_and_passes_sigterm_on`
+(`roll-cli/tests/secrets.rs`) cover it, and each runtime client has a watch test against its own
+fake rolld that reads a one-key change through the route and falls back to a full read on a 404
+(an older rolld).
 
 ### Large changes
 

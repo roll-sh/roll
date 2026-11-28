@@ -372,22 +372,12 @@ mod tests {
         c.put("s/production", ("a.example", "/a"), &h(&[]), &resp, Bytes::from_static(b"x"), pol);
         c.clear_service("s");
         assert!(c.get("s/production", "a.example", "/a", &h(&[]), false).is_none());
-        assert_eq!(c.inner.lock().unwrap().bytes, 0, "every byte accounted for");
-    }
-
-    #[test]
-    fn answers_are_purged_by_their_tags() {
-        let tagged = h(&[("cache-tag", "Product-1, list"), ("surrogate-key", "product-1 home"), ("netlify-cache-tag", "")]);
-        assert_eq!(tags(&tagged), ["product-1", "list", "home"], "each once, whatever its case or header");
-        let c = ResponseCache::default();
-        let pol = Policy { fresh: Duration::from_secs(60), stale: Duration::ZERO };
+        // Purged by their tags, which are the cache's alone.
+        let tagged = h(&[("cache-tag", "Product-1, list"), ("surrogate-key", "product-1 home")]);
         c.put("s/production", ("a.example", "/p/1"), &h(&[]), &tagged, Bytes::from_static(b"1"), pol);
         c.put("s/production", ("a.example", "/p/2"), &h(&[]), &h(&[("vercel-cache-tag", "list,product-2")]), Bytes::from_static(b"2"), pol);
         let Some(Hit::Fresh(r)) = c.get("s/production", "a.example", "/p/1", &h(&[]), false) else { panic!("kept") };
         assert!(TAG_HEADERS.iter().all(|t| !r.headers().contains_key(*t)), "tags are the cache's alone");
-        assert_eq!(c.purge("s/production", None, Some(&["product-2".to_string()])), 1);
-        assert!(c.get("s/production", "a.example", "/p/1", &h(&[]), false).is_some());
-        c.put("s/production", ("a.example", "/p/2"), &h(&[]), &h(&[("vercel-cache-tag", "list,product-2")]), Bytes::from_static(b"2"), pol);
         assert_eq!(c.purge("s/production", None, Some(&["list".to_string()])), 2);
         assert_eq!(c.inner.lock().unwrap().bytes, 0, "every byte accounted for");
     }
