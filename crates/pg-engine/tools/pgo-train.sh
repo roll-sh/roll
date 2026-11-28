@@ -66,7 +66,7 @@ EPID=
 PROFDIR=$RAW
 start() {
   LLVM_PROFILE_FILE="$PROFDIR/engine-%p-%m.profraw" TMPDIR="$WORK" $(ts) "$ENGINE" --data "$DATA" \
-    --listen 127.0.0.1:"$PORT" --password pw --max-prepared-transactions 5 --allow-server-files "$WORK" \
+    --listen 127.0.0.1:"$PORT" --password pw --max-prepared-transactions 5 --allow-server-files "$WORK" -c autovacuum=off \
     >>"$WORK/engine.log" 2>&1 &
   EPID=$!
   i=0; until ss -ltn | grep -q ":$PORT "; do
@@ -95,6 +95,12 @@ trap cleanup EXIT INT TERM
 b() { $(tc) "$BENCH" --target wire --port "$PORT" --password pw --label train "$@" >>"$WORK/out/bench.log" 2>&1 \
   || { echo "pgo-train: bench $* failed" >&2; tail -20 "$WORK/out/bench.log" >&2; exit 1; }; }
 psql() { timeout 300 docker exec -e PGPASSWORD=pw "$CLI" psql -X -q -h 127.0.0.1 -p "$PORT" -U postgres "$@"; }
+# Autovacuum is off (-c autovacuum=off, above): its workers wake on a clock (autovacuum_naptime), so
+# what they VACUUMed and ANALYZEd, and so the heap model's pruning and the plans after them,
+# differed from one training to the next (VACUUM 0.36-0.43 G counts of the TPC-H class, the short
+# class's heap pruning 2.3x: HANDOFF "Reproducible PGO training"). The parts that write are
+# followed by a VACUUM ANALYZE of their database instead, as its worker would have run.
+vac() { psql -d "$1" -c "VACUUM ANALYZE" >/dev/null; }
 pgbench() { docker exec -e PGPASSWORD=pw -w /w "$CLI" pgbench -h 127.0.0.1 -p "$PORT" -U postgres "$@" >>"$WORK/out/pgbench.log" 2>&1 \
   || { echo "pgo-train: pgbench $* failed" >&2; tail -20 "$WORK/out/pgbench.log" >&2; exit 1; }; }
 
@@ -123,6 +129,7 @@ if want startup; then
   stop; start; b startup-catalog
 fi
 b oltp-load --rows 100000
+vac bench
 
 class point
 # Point reads: extended protocol with binary results (the bench client), simple protocol
@@ -172,21 +179,27 @@ class short
 # BENCH "Short write transactions") and its single-row UPDATE alone.
 if want short; then
   b oltp-load --rows 100000
+  vac bench
   b oltp --rows 100000 --clients 8 --txns 10500 --only short_txn
   b oltp --rows 100000 --clients 32 --txns 3000 --only short_txn
   b oltp --rows 100000 --clients 1 --txns 9000 --only short_txn
   b oltp --rows 100000 --clients 8 --txns 9300 --only insert
   b oltp --rows 100000 --clients 8 --txns 9200 --only update_indexed
   b oltp --rows 100000 --clients 8 --txns 8900 --only upsert
+  vac bench
   pgbench -n -f /w/delete.sql -c 8 -j 4 -t 4400 bench
+  vac bench
   [ -n "$(psql -d bench -Atc "SELECT 1 FROM pg_class WHERE relname = 'pgbench_accounts'")" ] || pgbench -i -I dtGvp -s 1 bench
   pgbench -n -M prepared -c 8 -j 4 -t 1800 bench
   pgbench -n -M simple -c 8 -j 4 -t 540 bench
+  vac bench
   psql -d bench -c CHECKPOINT
   [ -n "$(psql -d tpcb -Atc "SELECT 1 FROM pg_class WHERE relname = 'pgbench_accounts'" 2>/dev/null)" ] \
     || { psql -d postgres -c "CREATE DATABASE tpcb" >/dev/null; pgbench -i -I dtGvp -s 32 tpcb; }
   pgbench -n -M prepared -c 8 -j 4 -t 2000 tpcb
+  vac tpcb
   pgbench -n -M prepared -f /w/update.sql -D scale=32 -c 8 -j 4 -t 5000 tpcb
+  vac tpcb
 fi
 psql -d postgres -c "DROP DATABASE IF EXISTS tpcb" >/dev/null
 class tpch
