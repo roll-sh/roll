@@ -613,7 +613,7 @@ pub(crate) fn open_pit_for(ctx: &Ctx, mut req: SearchRequest, ka: Duration, inde
         for t in targets {
             let searcher = t.searcher()?;
             let table = t.table();
-            let qctx = super::query::QueryCtx::new(ctx.cluster, &st, &t.idx, &table, &searcher, ctx.now_ms, t.reader().in_remote(t.cluster.clone());
+            let qctx = super::query::QueryCtx::new(ctx.cluster, &st, &t.idx, &table, &searcher, ctx.now_ms, t.reader()).in_remote(t.cluster.clone());
             let q = qctx.to_filter(f).map_err(|e| super::query::shard_exception(&t.idx, e))?;
             if searcher.count(&q).map_err(crate::engine::convert::index_error)? > 0 {
                 kept.push(t);

@@ -253,7 +253,7 @@ fn scan_shard(
     // [`scan`] ran `before_search`.
     let searcher = t.shard.searcher();
     let table = t.table();
-    let qctx = QueryCtx::new(cluster, st, &t.idx, &table, &searcher, ctx.now_ms, t.reader().in_remote(t.cluster.clone());
+    let qctx = QueryCtx::new(cluster, st, &t.idx, &table, &searcher, ctx.now_ms, t.reader()).in_remote(t.cluster.clone());
     use crate::search::query::arc;
     let mut q = match query {
         Some(q) => qctx.to_filter(q).map_err(|e| crate::search::query::shard_exception(&t.idx, e))?,
