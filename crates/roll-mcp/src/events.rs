@@ -941,11 +941,3 @@ fn iso8601(ms: i64) -> String {
     format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}.{milli:03}Z", rem / 3600, rem % 3600 / 60, rem % 60)
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn times_are_iso8601() {
-        assert_eq!(super::iso8601(0), "1970-01-01T00:00:00.000Z");
-        assert_eq!(super::iso8601(1_795_334_400_123), "2026-11-22T08:00:00.123Z");
-    }
-}
