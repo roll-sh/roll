@@ -2027,9 +2027,16 @@ impl Store {
                 rotate = None;
             } else {
                 c.wal.append_now(ts, &writes)?;
-                if self.opts.sync {
-                    // (Also makes every group commit appended before this one durable.)
-                    c.wal.sync()?;
+                // (Also makes every group commit appended before this one durable.) The record
+                // is in the file by now (`append_now`): a failed fsync can't take it back, and
+                // a crash would replay the commit this reports failed, so the store stops, as
+                // `wait_durable`'s failed fsync does (Postgres PANICs).
+                if self.opts.sync
+                    && let Err(e) = c.wal.sync()
+                {
+                    self.closed.store(true, Ordering::Release);
+                    self.wake_durable();
+                    return Err(e);
                 }
                 self.assigned.store(ts, Ordering::Release);
                 ranged = self.note_rdels(writes.iter().map(|(k, v)| (k.as_slice(), v.as_deref())), ts);

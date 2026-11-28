@@ -26573,6 +26573,7 @@ whole and nothing else. Found and fixed:
 
 **Left.** The `Engine::open` mutex held through a database's whole open (recovery included)
 delays connections to every other database. The connect-time `shared_lock` wait (patch above).
-Item 2's error text, if it recurs. A WAL fsync failing after `append_now` wrote the record in
-`commit_with` leaves the record in the file with the commit reported failed: PostgreSQL PANICs
-there, and the store doesn't close in that one path.
+Item 2's error text, if it recurs.
+- Also fixed: a WAL fsync failing in `commit_with` (after `append_now` had written the record)
+  returned the error with the store open, the record in the file: a crash then replayed a commit
+  reported failed. The store stops there now, as at `wait_durable`'s failed fsync.
