@@ -381,6 +381,17 @@ CREATE TABLE IF NOT EXISTS note_crops (
     at INTEGER NOT NULL,
     PRIMARY KEY (preview_id, note_id)
 );
+-- Pictures reviewers took of their own tab, from the page (`POST /__roll/screen`), until their
+-- note claims one (`owner`: `team`, or `share:<id>` for a share link's guest).
+CREATE TABLE IF NOT EXISTS own_screens (
+    preview_id TEXT NOT NULL,
+    token TEXT NOT NULL,
+    owner TEXT NOT NULL,
+    image TEXT NOT NULL,
+    mime TEXT NOT NULL,
+    at INTEGER NOT NULL,
+    PRIMARY KEY (preview_id, token)
+);
 CREATE TABLE IF NOT EXISTS leases (
     preview_id TEXT NOT NULL,
     service TEXT NOT NULL,
@@ -494,6 +505,27 @@ pub const CROP_MAX: usize = 512 << 10;
 pub const CROPS_KEPT: usize = 50;
 /// The most notes cropped in one screenshot run.
 pub const CROPS_PER_RUN: usize = 10;
+/// How long a reviewer's own picture waits for its note (`POST /__roll/screen`).
+pub const SCREEN_WAITS_MS: i64 = 30 * 60_000;
+/// The most pictures waiting for their notes, per preview and owner (the team, or one share
+/// link's guests): the oldest go.
+pub const SCREENS_WAITING: usize = 20;
+
+/// How a note's picture was taken, as the notes list says it: roll's crop's viewport and steps
+/// when as its reviewer saw it, and whose it is when its reviewer took it (`team`, `guest`).
+pub type Cropped = (Option<String>, Option<String>);
+
+/// A note's picture: roll's crop of its element, or one its reviewer took of their own tab.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Crop {
+    pub image: Vec<u8>,
+    /// `image/png`, `image/jpeg` or `image/webp`.
+    pub mime: String,
+    /// How roll's crop was taken, when as its reviewer saw it.
+    pub seen: Option<String>,
+    /// Taken by its reviewer: `team`, or `guest` (a share link's, outside the team).
+    pub own: Option<String>,
+}
 
 /// The newest activity lines kept per preview.
 pub const ACTIVITY_KEEP: i64 = 200;
@@ -981,6 +1013,14 @@ impl Store {
         // How a note's crop was taken, when as its reviewer saw it.
         if !db.has_column("note_crops", "seen")? {
             db.add_column("note_crops", "seen", "TEXT")?;
+        }
+        // A note's picture its reviewer took themselves (`team`, `guest`), and its type when it
+        // isn't a PNG.
+        if !db.has_column("note_crops", "own")? {
+            db.add_column("note_crops", "own", "TEXT")?;
+        }
+        if !db.has_column("note_crops", "mime")? {
+            db.add_column("note_crops", "mime", "TEXT")?;
         }
         if !db.has_column("page_shots", "base_sig")? {
             db.add_column("page_shots", "base_sig", "TEXT")?;
@@ -1581,7 +1621,7 @@ impl Store {
             if let Some((project, change, head)) = gone {
                 emit(c, now, "deleted", &project, id, change.as_deref(), &serde_json::json!({ "head": head }))?;
             }
-            for t in ["resources", "services", "pinned", "pinned_data", "restore_points", "shares", "guest_notes", "note_tells", "visit_tickets", "visit_sessions", "visits", "activity", "screenshots", "page_shots", "visual_page_accepts", "visual_page_refusals", "mail", "resolved_notes", "note_work", "base_history", "leases", "note_crops", "git_pulls", "git_reports", "runtime_facts", "gone_pushes", "run_usage", "service_spend", "previews"] {
+            for t in ["resources", "services", "pinned", "pinned_data", "restore_points", "shares", "guest_notes", "note_tells", "visit_tickets", "visit_sessions", "visits", "activity", "screenshots", "page_shots", "visual_page_accepts", "visual_page_refusals", "mail", "resolved_notes", "note_work", "base_history", "leases", "note_crops", "own_screens", "git_pulls", "git_reports", "runtime_facts", "gone_pushes", "run_usage", "service_spend", "previews"] {
                 let col = if t == "previews" { "id" } else { "preview_id" };
                 c.execute(&format!("DELETE FROM {t} WHERE {col} = ?"), [id])?;
             }
@@ -3453,18 +3493,28 @@ impl Store {
     // ── note crops: a picture of each note's element, cropped by a screenshot run ──
 
     /// Keep a note's crop (a PNG of at most [`CROP_MAX`] bytes; a bigger one is dropped), at
-    /// most [`CROPS_KEPT`] a preview (the oldest go).
+    /// most [`CROPS_KEPT`] a preview (the oldest go). Never over the reviewer's own picture.
     pub fn set_note_crop(&self, id: &str, note: &str, png: &[u8], seen: Option<&str>) -> Result<()> {
         if png.len() > CROP_MAX || !png.starts_with(b"\x89PNG") {
             return Ok(());
         }
+        self.put_note_picture(id, note, png, None, seen, None)
+    }
+
+    /// Keep the picture a note's reviewer took of their own tab ([`crate::notes::screen_ok`]
+    /// checked it) as the note's, over roll's crop: `own` is `team` or `guest`.
+    pub fn set_own_crop(&self, id: &str, note: &str, image: &[u8], mime: &str, own: &str) -> Result<()> {
+        self.put_note_picture(id, note, image, Some(mime), None, Some(own))
+    }
+
+    fn put_note_picture(&self, id: &str, note: &str, image: &[u8], mime: Option<&str>, seen: Option<&str>, own: Option<&str>) -> Result<()> {
         use base64::Engine as _;
         let now = self.now_ms()?;
-        let b64 = base64::engine::general_purpose::STANDARD.encode(png);
+        let b64 = base64::engine::general_purpose::STANDARD.encode(image);
         self.db.write(|c| {
             c.execute(
-                "INSERT INTO note_crops (preview_id, note_id, png, at, seen) VALUES (?, ?, ?, ?, ?) ON CONFLICT (preview_id, note_id) DO UPDATE SET png = excluded.png, at = excluded.at, seen = excluded.seen",
-                params![id, note, b64, now, seen],
+                "INSERT INTO note_crops (preview_id, note_id, png, at, seen, mime, own) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (preview_id, note_id) DO UPDATE SET png = excluded.png, at = excluded.at, seen = excluded.seen, mime = excluded.mime, own = excluded.own WHERE note_crops.own IS NULL OR excluded.own IS NOT NULL",
+                params![id, note, b64, now, seen, mime, own],
             )?;
             c.execute(
                 "DELETE FROM note_crops WHERE preview_id = ? AND note_id NOT IN (SELECT note_id FROM note_crops WHERE preview_id = ? ORDER BY at DESC, note_id LIMIT ?)",
@@ -3474,16 +3524,51 @@ impl Store {
         })
     }
 
-    /// The notes of `id` that have a crop, with how each was taken when as its reviewer saw it.
-    pub fn cropped_notes(&self, id: &str) -> Result<std::collections::HashMap<String, Option<String>>> {
-        Ok(self.db.read(|c| c.query("SELECT note_id, seen FROM note_crops WHERE preview_id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?))))?.into_iter().collect())
+    /// The notes of `id` that have a picture: how roll's crop was taken when as its reviewer saw
+    /// it, and whose it is when its reviewer took it.
+    pub fn cropped_notes(&self, id: &str) -> Result<std::collections::HashMap<String, Cropped>> {
+        Ok(self.db.read(|c| c.query("SELECT note_id, seen, own FROM note_crops WHERE preview_id = ?", [id], |r| Ok((r.get(0)?, (r.get(1)?, r.get(2)?)))))?.into_iter().collect())
     }
 
-    /// A note's crop, and how it was taken when as its reviewer saw it.
-    pub fn note_crop(&self, id: &str, note: &str) -> Result<Option<(Vec<u8>, Option<String>)>> {
+    /// A note's picture.
+    pub fn note_crop(&self, id: &str, note: &str) -> Result<Option<Crop>> {
         use base64::Engine as _;
-        let row: Option<(String, Option<String>)> = self.db.read(|c| c.query_row("SELECT png, seen FROM note_crops WHERE preview_id = ? AND note_id = ?", [id, note], |r| Ok((r.get(0)?, r.get(1)?))).optional())?;
-        Ok(row.and_then(|(b64, seen)| base64::engine::general_purpose::STANDARD.decode(b64).ok().map(|png| (png, seen))))
+        type Row = (String, Option<String>, Option<String>, Option<String>);
+        let row: Option<Row> = self.db.read(|c| c.query_row("SELECT png, seen, mime, own FROM note_crops WHERE preview_id = ? AND note_id = ?", [id, note], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).optional())?;
+        Ok(row.and_then(|(b64, seen, mime, own)| base64::engine::general_purpose::STANDARD.decode(b64).ok().map(|image| Crop { image, mime: mime.unwrap_or_else(|| "image/png".into()), seen, own })))
+    }
+
+    // ── own_screens: a reviewer's picture of their own tab, waiting for its note ──
+
+    /// Keep a picture a reviewer took (checked: [`crate::notes::screen_ok`]) until their note
+    /// claims it, at most [`SCREEN_WAITS_MS`], at most [`SCREENS_WAITING`] per owner. Its token.
+    pub fn keep_screen(&self, id: &str, owner: &str, image: &[u8], mime: &str) -> Result<String> {
+        use base64::Engine as _;
+        let now = self.now_ms()?;
+        let token = format!("rsc_{}", new_token());
+        let b64 = base64::engine::general_purpose::STANDARD.encode(image);
+        self.db.write(|c| {
+            c.execute("DELETE FROM own_screens WHERE at <= ?", [now - SCREEN_WAITS_MS])?;
+            c.execute("INSERT INTO own_screens (preview_id, token, owner, image, mime, at) VALUES (?, ?, ?, ?, ?, ?)", params![id, token, owner, b64, mime, now])?;
+            c.execute(
+                "DELETE FROM own_screens WHERE preview_id = ? AND owner = ? AND token NOT IN (SELECT token FROM own_screens WHERE preview_id = ? AND owner = ? ORDER BY at DESC, token LIMIT ?)",
+                params![id, owner, id, owner, SCREENS_WAITING as i64],
+            )?;
+            Ok::<_, Error>(())
+        })?;
+        Ok(token)
+    }
+
+    /// A waiting picture of `owner`'s, taken (once) for its note: `(image, mime)`.
+    pub fn take_screen(&self, id: &str, token: &str, owner: &str) -> Result<Option<(Vec<u8>, String)>> {
+        use base64::Engine as _;
+        let now = self.now_ms()?;
+        let row: Option<(String, String)> = self.db.write(|c| {
+            let row = c.query_row("SELECT image, mime FROM own_screens WHERE preview_id = ? AND token = ? AND owner = ? AND at > ?", params![id, token, owner, now - SCREEN_WAITS_MS], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+            c.execute("DELETE FROM own_screens WHERE preview_id = ? AND token = ? AND owner = ?", params![id, token, owner])?;
+            Ok::<_, Error>(row)
+        })?;
+        Ok(row.and_then(|(b64, mime)| base64::engine::general_purpose::STANDARD.decode(b64).ok().map(|image| (image, mime))))
     }
 
     // ── git_pulls: the pull request a Git URL service's preview is of (roll apps' `GitPull`) ──

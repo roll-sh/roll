@@ -191,6 +191,7 @@ POST /v1/previews/{id}/notes/{note}/resolve
 POST /v1/previews/{id}/notes/{note}/work
 POST /v1/previews/{id}/replay
 GET /v1/previews/{id}/notes/{note}/crop
+POST /v1/previews/{id}/notes/{note}/screen
 GET /v1/previews/{id}/logs
 POST /v1/previews/{id}/refresh
 GET /v1/previews/{id}/requests
