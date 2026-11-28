@@ -1581,6 +1581,114 @@ client, (I30 s - I10 s) / (ops30 - ops10) of the server's cgroup): 54,633 -> 54,
 <- 56,440 (n3 first), 55,969 -> 53,588: +0.4%, +1.1%, -4.3%, foreign load 2.2-3.6 cores; b0 alone
 ranges 54.6-56.0 k. Noise: no aggregate runs in a point select.
 
+## Bulk writes, round 30: TRUNCATE's range check, the unique build's tuple sizes; the count after the DELETE, the 1,000-row read's syscalls (2026-11-28, agent 348)
+
+HANDOFF "Bulk writes, round 30" has what it means. Lane C, agent 321's bulk script as 344 ran it
+(`~/.cache/a348/bench/bulk.sh`, joined windows: a step's window runs on until the server is quiet),
+with two additions: `count_fresh` (`count(*), sum(c)` of `bulk2`, 1M rows never updated, before the
+TRUNCATE) and each step's statement window apart (`stmt`: a second perf stat ending when psql
+returns). Plain dist builds (`tools/dist.sh`), on origin's `9cfd1322f`: **b0** the base (sha256
+`c33eec85...`); **n1f** cand/a348's code before its last fix (`10ef55e0...`); **n2** n1f with
+cand/a348-2's change (`aab64680...`); **n2b** both candidates' code as handed in (`2ae83c78...`). G user
+instructions of the server's cgroup, every counter 100% of its window; foreign load 0.8-3.9 cores
+on the server CPUs (lane.sh: 4.6-7.7 on the lane's 8) in every hold, so instruction counts only
+(a build's repeat within 0.005 G but CREATE UNIQUE INDEX, 2.674-2.679 over b0's seven runs).
+Every row count, sum and ctid hash equal on every build. No PGO build compared.
+
+### The whole script, one tools/lane.sh hold a pair
+
+| step | b0 / n1f | n1f / b0 (other order) | n1f / n2 | n2 / n1f (other order) |
+|---|---:|---:|---:|---:|
+| copy_in | 6.420 / 6.421 | 6.420 / 6.420 | 6.420 / 6.420 | 6.421 / 6.421 |
+| create_index | 3.020 / 3.022 | 3.024 / 3.023 | 3.023 / 2.913 (-3.64%) | 3.021 / 2.911 (-3.64%) |
+| create_unique_index | 2.675 / 2.679 | 2.676 / 2.674 | 2.678 / 2.566 (-4.18%) | 2.675 / 2.568 (-4.00%) |
+| copy_out | 2.358 / 2.358 | 2.358 / 2.358 | 2.358 / 2.358 | 2.358 / 2.358 |
+| insert_select | 4.434 / 4.434 | 4.434 / 4.434 | 4.434 / 4.434 | 4.434 / 4.434 |
+| update_half | 12.389 / 12.389 | 12.389 / 12.389 | 12.389 / 12.389 | 12.389 / 12.389 |
+| delete_quarter | 6.729 / 6.728 | 6.728 / 6.728 | 6.728 / 6.728 | 6.728 / 6.728 |
+| vacuum | 1.722 / 1.723 | 1.722 / 1.723 | 1.723 / 1.723 | 1.723 / 1.723 |
+| analyze | 0.467 / 0.467 | 0.467 / 0.467 | 0.467 / 0.467 | 0.467 / 0.467 |
+| count_after | 0.352 / 0.352 | 0.352 / 0.352 | 0.352 / 0.352 | 0.352 / 0.352 |
+| count_fresh | 0.468 / 0.468 | 0.468 / 0.468 | 0.468 / 0.468 | 0.468 / 0.468 |
+| truncate | 0.069 / 0.004 (-94%) | 0.069 / 0.004 (-94%) | 0.004 / 0.004 | 0.004 / 0.004 |
+| drop_table | 0.005 / 0.005 | 0.005 / 0.002 | 0.003 / 0.005 | 0.005 / 0.005 |
+| copy_pk | 18.206 / 18.202 | 18.206 / 18.204 | 18.208 / 18.204 | 18.204 / 18.204 |
+| copy_sx | 12.893 / 12.894 | 12.893 / 12.899 | 12.893 / 12.894 | 12.894 / 12.894 |
+| all steps | 72.208 / 72.147 (-0.08%) | 72.212 / 72.146 (-0.09%) | 72.149 / 71.926 (-0.31%) | 72.144 / 71.927 (-0.30%) |
+
+TRUNCATE against PostgreSQL 18.6's 0.032 G and pgrust's 0.063 (314's runs, the standing): 0.004,
+0.13x the better. CREATE UNIQUE INDEX 2.57 against pgrust's 1.91 (1.34x PostgreSQL's 2.25: 1.14x);
+CREATE INDEX 2.91 against PostgreSQL's 2.89 (1.01x): plain dist against their standing builds.
+
+Where TRUNCATE's 0.069 went on b0: the statement's window (until psql returns) 0.0685 of it, its
+samples 85% on `roll-flush` (`Store::collect_ranges` -> `holds_covered` -> `Cursor::fill` ->
+`SstReader::raw_block_in`: zstd's Huffman decoding and crc32 of one 6.13 MB block, file 41's block 2
+of 4: 66 entries and the bulk table's 7.73 MB `estkeep` record), 15% the connection. The
+compaction log: `collected deleted ranges dropped=3 rewritten=0` (the three files of `bulk2`).
+
+The variants before cand/a348's (each one pair against b0; G):
+
+| build | the writer's split | create_index | create_unique_index | copy_in | truncate |
+|---|---|---:|---:|---:|---:|
+| n1 | a check of each entry in `add_from`, before it | 3.019 -> 3.051 (+1.06%) | +1.05% | +0.39% | -94% |
+| n1b | the same behind one compare, out of line | +0.33% | +0.34% | +0.11% | -94% |
+| n1c | at the block's end in `add_from` (`put2`, `body2` outlined) | +1.03% | +0.41% | +0.39% | -94% |
+| n1d | n1c, both `#[inline(always)]` (`key`, `value` kept live) | +0.20% | +0.22% | +0.06% | -97% |
+| n1e | n1d on the block's size alone | +0.07% | +0.30% | +0.05% | -94% |
+| n1f | in `finish_block` (`add_from` 5,042 bytes, the base's) | +0.07 / -0.03% | +0.15 / -0.07% | +0.02 / 0.00% | -94% |
+
+### The count after the DELETE, profiled (b0, 20 counts in one window, `instructions:upp`)
+
+`Pre::decode` 39.1%, `Block::run_rows_to` 29.9%, `Partials::batch_run` 10.4%, `partial_chunk` 5.1%,
+`FloatAgg::merge` (the connection, the serial float sum) 3.7%, libc copies 4%. 469 instructions a row
+after the DELETE (0.352 G / 750,000), 468 a row fresh (0.468 G / 1M).
+
+### The index builds, profiled (b0, one build each, inclusive shares)
+
+| | CREATE INDEX (a) | CREATE UNIQUE INDEX (id) |
+|---|---:|---:|
+| reading and making entries (`Plan::run`) | 59.8% | 49.8% |
+| of it: the heap's sizing (`stored_tuple_len`) | 10.5% | (kept) |
+| of it: index tuple sizes (`IndexTupleSize::push`, `datum_bytes`) | 4.5% | 5.5% |
+| the sort (`flag_sort`) | 8.2% | (sorted) |
+| writing (`put_runs`: spill run, `SstWriter::add_from`, zstd) | 27.3% | 43.4% |
+| of it: zstd (no dictionary, 4 kB index blocks) | 9.5% | 16.3% |
+| the measure (`FusedMeasure`: `BtreeMeasure::group`, `EstBuilder::push`) | 1.1% | 6.3% |
+| the duplicate check (`Dups::push`, in `put_runs`) | | 3.1% |
+
+### The 1,000-row range read's syscalls (lane B, `rk.sh`: 8 clients, 8 s from +1 s; a reading)
+
+| per read | roll b0 | pgrust |
+|---|---:|---:|
+| sendto | 2.17 | 1.12 |
+| recvfrom | 1.24 | 2.23 |
+| epoll_wait | 0 | 1.10 |
+| pread64 | 2.31 | 0.02 |
+| all syscalls | 5.78 | 4.58 |
+| kernel instructions (with the tracepoints on) | 136,945 | 70,032 |
+| of them under `sendto` | 74.9% | 60.2% |
+| of them in the packet filter (`nft_do_chain`) | 44.0% | 30.1% |
+
+Foreign load 3.2 / 1.9 cores. In a later pair (rk.sh, b0 / n2b, 0.84 / 1.07 foreign cores) the
+pread64s were 0.01 / 0.03 a read: the first run's 2.31 were block cache misses of its warm-up.
+
+### Point selects and the 1,000-row range read (lanes A and B, oltp.sh: G user instructions a read; readings)
+
+Neither candidate changes a read path's code: function sizes of b0 and n2b differ in the writer,
+`holds_covered`, `SstReader::open` and slivers of `raw_block_in` (the miss path), `get_raw_found` and
+`toast::read_value`. (n2, before `Block::load` and `BlockIndex::find` were inlined again, had both
+outlined: a call each seek.) Lanes at 2.6-7.3 foreign cores (lane.sh), so readings, one hold a pair:
+
+| cell | b0 | n2b |
+|---|---|---|
+| select-only, 8 clients | 36,813 | 41,390 / 36,335 (the first in a loaded window) |
+| 1,000-row range, 8 clients | 2,132,519 / 2,150,117 | 2,167,681 / 2,232,533 |
+| the same, rk.sh / ru.sh (0.2-1.1 foreign cores) | 2,198,306 / 2,234,425 | 2,287,224 / 2,259,961 |
+
+b0 alone read 2.08-2.29 M over seven range runs (each on a fresh `pgbench -i`); a profile of each
+(ru.sh, `instructions:u` by symbol) has the same functions in the same shares. Level within that
+spread; a quiet lane would be needed to settle 0.1%.
+
 ## Bulk writes, round 29: the bulk DELETE's compaction by thread and function, zstd's settings offline, a deletion run's entries (dropped) (2026-11-27, agent 344)
 
 HANDOFF "Bulk writes, round 29" has what it means. Lane C, agent 321's bulk script with joined windows

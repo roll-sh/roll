@@ -10627,6 +10627,78 @@ and confirm on PGO:
 Agent 218's short-transaction stack (ten steps, `wip/a218`) was gated this way and landed: BENCH
 "Profile-guided build", part 2.
 
+## Bulk writes, round 30: TRUNCATE's background work, the unique build's tuple sizes; the count after the DELETE and the 1,000-row read's kernel time explained (agent 348)
+
+BENCH "Bulk writes, round 30" has the measurements (lane C, agent 321's bulk script with joined
+windows as 344 ran it, copied to `~/.cache/a348/bench`; lane B for the range read's syscalls).
+Plain dist builds (`tools/dist.sh`) on origin's `9cfd1322f` (rebased since on `8f691b51f`, which
+changed none of these files), no PGO build compared (agent 347's training was not yet reproducible):
+**b0** the base; **n1f** cand/a348's code before its last fix (`Block::load`, `BlockIndex::find`
+inlined again); **n2b** both candidates' code as handed in.
+
+**TRUNCATE (cand/a348, `storage/sst.rs`, `storage/rdel.rs`).** Its 0.068 G (2.12x PostgreSQL's 0.032)
+was not the statement's: 85% of it ran on the flush thread right after it, in
+`Store::collect_ranges` -> `holds_covered`, decompressing one block. TRUNCATE deletes two ranges, the
+table's keys and its xmax records (`multixact::XMAX_PREFIX` 0x27 + oid). The xmax range falls inside
+the database's system file (keys 0x01 .. 0x29: size estimates, kept models, `estkeep` records), and
+`holds_covered` seeks there, reading the block the seek comes to. In the bulk script that block was
+6.13 MB stored, 7.73 MB raw: 66 small entries and, last, the bulk table's full `estkeep` record (the
+estimate of a table past the model, agent 341's records), the writer having ended the block only
+after it. Any read of a key between those 66 entries and the record decompressed all of it. Since
+314's round (0.003 G) the estimate records are kept, which is why this step grew.
+- The writer: a block its last entry took past twice its target ends as two, the entries before it
+  and that entry alone (`SstWriter::end_apart`, decided in `finish_block`, once a block). Only values
+  of more than a block's target do this (row and index entries are far smaller); the format is
+  unchanged, readers of any build read the files.
+- The reader: format 2's index already records each block's entry count, which `open` skipped; it
+  is kept (in the padding of the index's (offset, length) pairs: no memory). `may_hold_range` says
+  from the index alone that a file holds nothing in [start, end) when the block a seek to `start`
+  comes to is one entry at or past `end`; `holds_covered` skips such a range. Files of older builds
+  read as before (their blocks are not one entry).
+- Test: `sst::tests::a_big_value_is_a_block_of_its_own` (the blocks' entry counts, the check, the
+  value read back).
+- Measured (b0 / n1f, two pairs, both orders): TRUNCATE 0.069 -> 0.004 G both (PostgreSQL 18.6's
+  0.032, pgrust's 0.063 in the standing), every other step within 0.07%, the whole script -0.08 /
+  -0.09%; b0 / n2b once the same. The step's window is now the statement's.
+- What it cost first, and how it went: a check of each entry in `add_from` (n1: +1.0% on index
+  builds; behind one compare, out of line, n1b: +0.33%); the split decided at the block's end in
+  `add_from` (n1c: +1.0%: `put2` and `body2`, now with a second caller, were outlined: `#[inline(always)]`
+  on both since; n1d / n1e +0.2-0.3% on the index builds: the branch kept `key` / `value` live through
+  `add_from`, its registers changed). In `finish_block` `add_from` is the base's code.
+
+**What CREATE UNIQUE INDEX does beyond CREATE INDEX** (the brief's question; b0's profiles): no second
+sort and no other writer. The unique build is cheaper than CREATE INDEX here (2.67 against 3.02 G):
+it sizes no heap rows (the first build's measure is kept) and its keys come sorted. What it does
+more: the duplicate check in its write pass (`put_runs::<Dups>`, `Dups::push`, ~8%) and the btree
+measure with one group a key (`FusedMeasure` -> `BtreeMeasure::group`, `EstBuilder::push`: 6.3%
+against 1.1% for CREATE INDEX's 100,000 keys). Its write (the spill run, `SstWriter::add_from`, zstd
+without a dictionary on 4 kB index blocks: 43% together) and its read of the table (`Plan::run`,
+the row decode, 50%) are where pgrust's 1.91 G is lost; neither had a small cut.
+
+**count(*) after the DELETE is not dearer than another count.** 0.352 G for 750,000 rows is 469
+instructions a row; the same `count(*), sum(c)` of the script's other table, 1M rows of INSERT ...
+SELECT never updated or deleted (a `count_fresh` step), 0.468 G, 468 a row. The DELETE's compaction
+left one L1 file of the live rows; the scan steps over no tombstones and merges nothing. Where the
+469 go (20 counts profiled): `Pre::decode` 39% (format 4's column decode), `run_rows_to` 30%,
+`Partials::batch_run` 10%, `partial_chunk` 5%, the serial float merge 3.7%: agent 311's format 5
+work, not cut here.
+
+**Kernel instructions per 1,000-row read** (1.63x pgrust; `rk.sh`: perf stat of the syscalls and a
+kernel profile over 8 s): roll 5.8 syscalls a read: 2.17 sendto, 1.24 recvfrom, 2.31 pread64; pgrust
+4.6: 1.12 sendto, 2.23 recvfrom, 1.10 epoll_wait. Sending is 75% of roll's kernel instructions
+(`tcp_sendmsg`: the loopback segment and the host's netfilter rules, `nft_do_chain` alone 44%), so
+the count follows the sends. Roll sends a result in 8 kB pieces as PostgreSQL does
+(PQ_SEND_BUFFER_SIZE; `WireSink`): the 12 kB of 1,000 DataRows go out at 8 kB and at the Sync,
+where pgrust writes once. Sending at 64 kB (`~/.cache/a348/patches/send-at-64k-dropped.patch`) is
+visible: a statement that stalls after its first rows sends them only at its end
+(`wire::rows_stream_as_the_executor_makes_them` holds PostgreSQL's behaviour), so dropped, not
+measured. The pread64s are block cache misses of the harness's 10 s after `pgbench -i` (compaction's
+writes don't fill the cache): they shrink in a longer run and were not in the kernel profile's top.
+
+**Left.** The unique build's write side (zstd on 4 kB blocks without a dictionary, the spill run) and
+its read; format 5 for the count; a send that waits for more rows without changing what a
+stalled statement's client sees (the kernel can't do it on loopback).
+
 ## Bulk writes, round 29: what the bulk DELETE's forced compaction costs; a deletion run's entries written without making their keys, dropped (agent 344)
 
 BENCH "Bulk writes, round 29" has the measurements (lane C, agent 321's bulk script with joined
