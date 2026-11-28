@@ -65,7 +65,9 @@ what the best of the four products does:
     entity or escape the model wrote (`https:&#47;&#47;`, `\/`) shows as written, never decoded
     into what it spells. `\r` and `\r\n` become `\n`.
   - **Link-shaped tokens broken.** U+2060 WORD JOINER goes inside every `//`, after a `:` that
-    follows a letter (`https:`, `mailto:`, `xmpp:`), after every `.`, and before every `@`. The
+    follows a letter (`https:`, `mailto:`, `xmpp:`), after every `.` (and between `www` and its
+    `.`, as comrak's `www.` autolink takes a joiner after the dot as part of the domain), and
+    before every `@`. The
     dot's is for markdown-it's linkify, which links a bare `evil.com/p?d=…` and counts the
     joiner as a letter: after the dot it breaks the TLD match (IDNs' too). None of GFM's
     (comrak's), marked's, markdown-it's (linkify too) or remark-gfm's autolinks spans it, and

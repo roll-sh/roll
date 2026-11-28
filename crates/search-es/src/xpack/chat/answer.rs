@@ -12,7 +12,8 @@
 //!   table cell boundary, code span, emphasis or heading can start, and an entity or escape the
 //!   model wrote (`&#47;`, `\/`) shows as written, never decoded into what it spells.
 //! - **Link-shaped tokens broken.** U+2060 WORD JOINER goes inside every `//`, after a `:` that
-//!   follows a letter (`https:`, `mailto:`), after every `.` (a domain's labels: markdown-it's
+//!   follows a letter (`https:`, `mailto:`), between `www` and its `.` (comrak's `www.` autolink
+//!   would take a joiner after the dot as part of the domain), after every `.` (a domain's labels: markdown-it's
 //!   linkify links a bare `evil.com/p?d=…`, and counts the joiner as a letter, so it goes after the
 //!   dot, which breaks the TLD match, IDNs too), and before every `@`: no GFM, marked, markdown-it
 //!   (linkify too) or remark autolink spans it, and it's invisible.
@@ -169,13 +170,18 @@ impl Sanitizer {
         if bidi(c) {
             return;
         }
-        let [p2, p1] = [self.prev[1], self.prev[2]];
+        let [p3, p2, p1] = self.prev;
         if LITERAL.contains(&c) {
             let _ = write!(out, "&#{};", c as u32);
         } else if c == '/' && p1 == '/' {
             out.push(WORD_JOINER);
             out.push('/');
         } else if c == '.' {
+            // comrak's `www.` autolink takes a joiner after the dot as part of the domain: one
+            // goes before it too.
+            if [p3, p2, p1].iter().all(|c| c.eq_ignore_ascii_case(&'w')) {
+                out.push(WORD_JOINER);
+            }
             out.push('.');
             out.push(WORD_JOINER);
         } else if c == ':' && p1.is_ascii_alphabetic() {
@@ -343,7 +349,7 @@ mod tests {
         assert_eq!(sanitize("![x](https://e/p) <img> a|b ~c~ *d* `e` #f &amp; \\[", None), "&#33;&#91;x&#93;(https:\u{2060}/\u{2060}/e/p) &#60;img&#62; a&#124;b &#126;c&#126; &#42;d&#42; &#96;e&#96; &#35;f &#38;amp; &#92;&#91;");
         assert_eq!(
             sanitize("www.e.com see evil.com/p?d=S сайт.рф help@e.com mailto:x ftp://e 10:30 3.14 \u{202E}x\u{202C}", None),
-            "www.\u{2060}e.\u{2060}com see evil.\u{2060}com/p?d=S сайт.\u{2060}рф help\u{2060}@e.\u{2060}com mailto:\u{2060}x ftp:\u{2060}/\u{2060}/e 10:30 3.\u{2060}14 x"
+            "www\u{2060}.\u{2060}e.\u{2060}com see evil.\u{2060}com/p?d=S сайт.\u{2060}рф help\u{2060}@e.\u{2060}com mailto:\u{2060}x ftp:\u{2060}/\u{2060}/e 10:30 3.\u{2060}14 x"
         );
         let ok = Some(vec!["https://help.acme.test/pw".to_string(), "https://help.acme.test/(x)".to_string()]);
         assert_eq!(
