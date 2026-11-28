@@ -493,10 +493,7 @@ mod tests {
         assert!(wireguard_config("[Interface]\nPrivateKey = a\nAddress = 10.9.0.2\n").is_err(), "no peer");
         assert!(wireguard_config(&conf.replace("AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=", "short")).unwrap_err().contains("isn't a WireGuard key"));
         assert!(wireguard_config(&conf.replace("10.9.0.2/32", "10.9.0.2/32; rm -rf /")).is_err(), "an address is an address");
-    }
-
-    #[test]
-    fn routes_are_names_with_their_own_ports() {
+        // Routes are names, each with its own port.
         let ok = parse(&json!({"kind": "wireguard", "secret": "roll://production/WG", "routes": [{"name": "DB.acme.corp", "target": "10.0.3.4:5432"}, {"name": "v6.acme.corp", "target": "[fd00::1]:6379"}]})).unwrap();
         assert_eq!((ok.routes[0].name.as_str(), ok.routes[0].port()), ("db.acme.corp", 5432));
         assert_eq!((ok.routes[1].target.as_str(), ok.routes[1].port()), ("[fd00::1]:6379", 6379), "IPv6 keeps its brackets");

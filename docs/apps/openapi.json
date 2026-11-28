@@ -186,6 +186,72 @@
         "x-roll-action": "read"
       }
     },
+    "/v1/apps/projects/{project}/alerts": {
+      "get": {
+        "description": "Answers `Alert[]`: its open alerts (from the opening event until one closing its key: an `alert.resolved`, or a live deploy for a failed one), newest first, at most 100.",
+        "operationId": "getProjectsProjectAlerts",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`Alert[]`: its open alerts (from the opening event until one closing its key: an `alert.resolved`, or a live deploy for a failed one), newest first, at most 100"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "List alerts",
+        "tags": [
+          "projects"
+        ],
+        "x-roll-action": "read"
+      }
+    },
+    "/v1/apps/projects/{project}/alerts/{aid}/ack": {
+      "post": {
+        "description": "Answers `Alert` acknowledged: its escalations stop (it stays open until it clears); again: as it is (who acknowledged first stays); 409 once it's closed, 404 for another project's; `alert.acked` and `audit.alert.acked`.",
+        "operationId": "postProjectsProjectAlertsAidAck",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "aid",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`Alert` acknowledged: its escalations stop (it stays open until it clears); again: as it is (who acknowledged first stays); 409 once it's closed, 404 for another project's; `alert.acked` and `audit.alert.acked`"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Ack alert",
+        "tags": [
+          "projects"
+        ],
+        "x-roll-action": "write"
+      }
+    },
     "/v1/apps/projects/{project}/board": {
       "get": {
         "description": "Answers `{ panels: { title?, service, environment, metric }[] }`: the project's board, in order (none when nobody made one).",
@@ -591,7 +657,7 @@
               }
             }
           },
-          "description": "`{ kind?: \"webhook\" | \"slack\" | \"discord\" | \"email\" | \"pagerduty\" | \"opsgenie\", url, routing_key?, api_key?, region?, events?, environments?, services?, previews? }` (environments: names; services: names or ids, kept as ids; previews: default false; `email` takes no `url`: it's the project's owner, 400 with one, for a project without an owner, or where mail isn't set up; `pagerduty` takes its integration's `routing_key`, `opsgenie` its `api_key`, each sealed and never returned, and `region` `us` or `eu`, no `url`: the service's own API)"
+          "description": "`{ kind?: \"webhook\" | \"slack\" | \"discord\" | \"email\" | \"pagerduty\" | \"opsgenie\", url, routing_key?, api_key?, region?, events?, environments?, services?, previews?, escalate?: { after_min: number /* 5–1440 */; to: string /* another of the project's targets */ } }` (environments: names; services: names or ids, kept as ids; previews: default false; `email` takes no `url`: it's the project's owner, 400 with one, for a project without an owner, or where mail isn't set up; `pagerduty` takes its integration's `routing_key`, `opsgenie` its `api_key`, each sealed and never returned, and `region` `us` or `eu`, no `url`: the service's own API)"
         },
         "responses": {
           "201": {
@@ -673,7 +739,7 @@
               }
             }
           },
-          "description": "`{ events?, environments?, services?, previews? }` (given ones replace, the rest stay; null is a new target's default: the default events, every environment and service, no previews; any other field 400: a new URL is a new target)"
+          "description": "`{ events?, environments?, services?, previews?, escalate? }` (given ones replace, the rest stay; null is a new target's default: the default events, every environment and service, no previews, no escalation; any other field 400: a new URL is a new target; `escalate.to` must be another of the project's targets with no loop back through theirs, 400 otherwise)"
         },
         "responses": {
           "200": {
@@ -2131,6 +2197,43 @@
           "services"
         ],
         "x-roll-action": "write"
+      }
+    },
+    "/v1/apps/services/{id}/environments/{env}/csp-reports": {
+      "get": {
+        "description": "Answers `{ minutes, on, groups: { directive, blocked /* an origin, a scheme (`data:`), a keyword (`inline`, `eval`) or `other` */, path /* the document's, ids folded as `:id` */, disposition: \"enforce\" | \"report\", count, first_seen, last_seen }[] }`: what browsers reported to `/__roll/csp` with `csp_reports: true`, grouped, for the groups seen in the last 60–10,080 minutes (default 1,440), the most frequent first (each count since its first report); at most 500 groups an environment, kept as long as its logs.",
+        "operationId": "getServicesIdEnvironmentsEnvCspReports",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`{ minutes, on, groups: { directive, blocked /* an origin, a scheme (`data:`), a keyword (`inline`, `eval`) or `other` */, path /* the document's, ids folded as `:id` */, disposition: \"enforce\" | \"report\", count, first_seen, last_seen }[] }`: what browsers reported to `/__roll/csp` with `csp_reports: true`, grouped, for the groups seen in the last 60–10,080 minutes (default 1,440), the most frequent first (each count since its first report); at most 500 groups an environment, kept as long as its logs"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "List csp reports",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "read"
       }
     },
     "/v1/apps/services/{id}/environments/{env}/deploys": {
@@ -5364,7 +5467,7 @@
               }
             }
           },
-          "description": "`{ until?: number /* ms, in the next 30 days; a repeating one's in the next year, a year by default */, every?: { windows: { from: string /* \"sat 02:00\" */; to: string }[] /* 1–14, weekly */; timezone?: string /* IANA; default UTC */ } /* a repeating silence: quiet only inside its windows (a nightly backup's, a weekly maintenance's) */, reason: string /* 1–200 */, alerts?: (\"check.down\" | \"heartbeat.missed\" | \"crash_loop\" | \"alert.memory\" | \"alert.cpu\" | \"alert.metric\" | \"alert.errors\" | \"alert.latency\" | \"alert.capacity\" | \"alert.log\" | \"alert.route\" | \"alert.slo\" | \"alert.anomaly\" | \"cron.failed\" | \"deploy.failed\")[] /* none: all */ }`"
+          "description": "`{ until?: number /* ms, in the next 30 days; a repeating one's in the next year, a year by default */, every?: { windows: { from: string /* \"sat 02:00\" */; to: string }[] /* 1–14, weekly */; timezone?: string /* IANA; default UTC */ } /* a repeating silence: quiet only inside its windows (a nightly backup's, a weekly maintenance's) */, reason: string /* 1–200 */, alerts?: (\"check.down\" | \"check.slow\" | \"heartbeat.missed\" | \"crash_loop\" | \"alert.memory\" | \"alert.cpu\" | \"alert.metric\" | \"alert.errors\" | \"alert.latency\" | \"alert.capacity\" | \"alert.log\" | \"alert.route\" | \"alert.slo\" | \"alert.anomaly\" | \"alert.csp\" | \"cron.failed\" | \"deploy.failed\")[] /* none: all */ }`"
         },
         "responses": {
           "201": {
@@ -6362,6 +6465,61 @@
           "services"
         ],
         "x-roll-action": "write"
+      }
+    },
+    "/v1/apps/services/{id}/links/{kind}/{ref}/rotate": {
+      "post": {
+        "description": "Answers `{ kind, ref, deployments: { environment, id, status }[], waiting: string[], live }`: a new credential made as linking makes one, stored in place of the old (sealed), the environments redeployed with it and followed until they're live. The old one is revoked once no deployment made before the rotation runs, is live or is still to go live in an environment that uses the link (its instances drained; `waiting`: the ones not redeployed, which keep it until their next deploy), by a pass every 10 s that survives a restart. 202 when a redeploy is still going or waits for an approval. 409 when a redeploy failed or couldn't start: the old credential is put back and still works, the new one is revoked once nothing runs with it; 409 when the link changed meanwhile. 400 for a link with no credential of its own (`postgres`, `redis`, `nosql`, `service`) or an environment that doesn't use it; 404 for no such link. Audited as `audit.link.rotated` (the environments, never a value).",
+        "operationId": "postServicesIdLinksKindRefRotate",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "kind",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "ref",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "description": "`{ environment? }` (only that one redeployed; default: every environment that uses the link, not previews or one with data of its own)"
+        },
+        "responses": {
+          "200": {
+            "description": "`{ kind, ref, deployments: { environment, id, status }[], waiting: string[], live }`: a new credential made as linking makes one, stored in place of the old (sealed), the environments redeployed with it and followed until they're live. The old one is revoked once no deployment made before the rotation runs, is live or is still to go live in an environment that uses the link (its instances drained; `waiting`: the ones not redeployed, which keep it until their next deploy), by a pass every 10 s that survives a restart. 202 when a redeploy is still going or waits for an approval. 409 when a redeploy failed or couldn't start: the old credential is put back and still works, the new one is revoked once nothing runs with it; 409 when the link changed meanwhile. 400 for a link with no credential of its own (`postgres`, `redis`, `nosql`, `service`) or an environment that doesn't use it; 404 for no such link. Audited as `audit.link.rotated` (the environments, never a value)"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Rotate link",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "admin (its credentials; reveal on the resource, as linking it), and deploy unless `environment` names one other than production (none: every environment that uses it, production among them)"
       }
     },
     "/v1/apps/services/{id}/move": {

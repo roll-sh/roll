@@ -1553,8 +1553,9 @@ function NoteThread({ previewId, change, review, where, onDone }: { previewId: s
   const [reply, setReply] = useState("");
   const [state, setState] = useState<"idle" | "busy" | "done">("idle");
   const [error, setError] = useState<string | null>(null);
-  // What the note is about, as the next screenshot run cropped it from the page.
-  const [crop, setCrop] = useState<{ url: string; as: string | null } | null>(null);
+  // What the note is about: the picture its reviewer took of their own tab, or as the next
+  // screenshot run cropped it from the page.
+  const [crop, setCrop] = useState<{ url: string; as: string | null; own: boolean } | null>(null);
   useEffect(() => {
     let url: string | null = null;
     let live = true;
@@ -1603,8 +1604,12 @@ function NoteThread({ previewId, change, review, where, onDone }: { previewId: s
       {note && <p className="mt-1 break-words text-fg">{note}</p>}
       {crop && (
         <figure className="mt-1.5">
-          <img src={crop.url} alt="The part of the page the note is about" className="max-h-48 max-w-full rounded-md border border-line-2" />
-          {crop.as && <figcaption className="mt-0.5 font-mono text-[10.5px] text-subtle">As they saw it: {crop.as}</figcaption>}
+          <img src={crop.url} alt={crop.own ? "Their screen when they left the note" : "The part of the page the note is about"} className="max-h-48 max-w-full rounded-md border border-line-2" />
+          {crop.own ? (
+            <figcaption className="mt-0.5 text-[10.5px] text-subtle">Their own screen, from their browser</figcaption>
+          ) : (
+            crop.as && <figcaption className="mt-0.5 font-mono text-[10.5px] text-subtle">As they saw it: {crop.as}</figcaption>
+          )}
         </figure>
       )}
       {replies.map((r) => (
@@ -1829,7 +1834,7 @@ function metricsText(m: ServiceMetrics): string {
 }
 
 /** Its latest requests through roll (Vercel's request log): newest first, errors at a glance. */
-/** Its recent GETs replayed against main's preview (Signadot's SmartTests): what answered differently. */
+/** Its recent GETs (and kept writes, on copies of both previews' data) replayed against main's preview (Signadot's SmartTests): what answered differently. */
 function Replay({ preview: p }: { preview: Preview }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -1862,10 +1867,11 @@ function Replay({ preview: p }: { preview: Preview }) {
         </button>
       </div>
       {differs.slice(0, 8).map((q) => (
-        <p key={`${q.service}${q.path}`} className="min-w-0 break-words font-mono text-[10.5px] text-danger">
-          {q.path} {said(q.status)} (main {said(q.main_status)}){q.removed.length ? ` · lost ${q.removed.slice(0, 4).join(", ")}` : ""}
+        <p key={`${q.service}${q.method}${q.path}`} className="min-w-0 break-words font-mono text-[10.5px] text-danger">
+          {q.method && q.method !== "GET" ? `${q.method} ` : ""}{q.path} {said(q.status)} (main {said(q.main_status)}){q.removed.length ? ` · lost ${q.removed.slice(0, 4).join(", ")}` : ""}
         </p>
       ))}
+      {r?.copies_error && <p className="text-muted">Not on copies of the data (GETs asked as they serve, writes not replayed): {r.copies_error}</p>}
       {error && <p className="text-danger">{error}</p>}
     </div>
   );

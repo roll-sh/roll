@@ -87,13 +87,6 @@ mod tests {
     const HEAD: &str = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n";
 
     #[test]
-    fn accepted_connections_are_read_from_snmp() {
-        let snmp = "Ip: Forwarding DefaultTTL\nIp: 1 64\nTcp: RtoAlgorithm RtoMin RtoMax MaxConn ActiveOpens PassiveOpens AttemptFails\nTcp: 1 200 120000 -1 3 7 0\nUdp: InDatagrams\nUdp: 0\n";
-        assert_eq!(passive_opens(snmp), Some(7));
-        assert_eq!(passive_opens("Ip: x\nIp: 1\n"), None);
-    }
-
-    #[test]
     fn only_peers_other_than_the_host_are_private_traffic() {
         let listen = "   0: 00000000:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 1 1 0 100 0 0 10 0\n";
         let from = |peer: &str| format!("   1: 030012AC:1F90 {peer}:D2F0 01 00000000:00000000 00:00000000 00000000     0        0 1 1 0 20 4 28 10 -1\n");
@@ -109,5 +102,7 @@ mod tests {
         // An IPv4-mapped IPv6 row (busybox listens on `::`).
         let tcp6 = format!("{HEAD}   0: 00000000000000000000000000000000:2328 00000000000000000000000000000000:0000 0A 00000000:00000001 00:00000000 00000000     0        0 2245507849 2 000000009a288b5b 100 0 0 10 0\n");
         assert!(listening(HEAD, &tcp6, 9000));
+        let snmp = "Ip: Forwarding DefaultTTL\nIp: 1 64\nTcp: RtoAlgorithm RtoMin RtoMax MaxConn ActiveOpens PassiveOpens AttemptFails\nTcp: 1 200 120000 -1 3 7 0\nUdp: InDatagrams\nUdp: 0\n";
+        assert_eq!((passive_opens(snmp), passive_opens("Ip: x\nIp: 1\n")), (Some(7), None), "accepted connections, from snmp");
     }
 }

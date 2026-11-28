@@ -115,6 +115,7 @@ Repos are `"owner/repo"`. Changes are `"chg_…"` or `"owner/repo#N"`, and work 
 | `cancel_agent_automation_run` | cancel a run going on (the owner's) | `POST …/automations/runs/{run}/cancel` |
 | `retry_agent_automation_run` | a failed or cancelled run goes on from where it stopped (the owner's; `openWorldHint`, as `run_agent_automation`) | `POST …/automations/runs/{run}/retry` |
 | `enable_agent_automation`, `disable_agent_automation` | turn an automation on or off (by id or name; runs going on go on) | `POST …/automations/{id}/enable`, `/disable` |
+| `delete_agent_automation` | delete one for good (by id or name; its secrets and webhook dropped, its runs going on cancelled; destructive) | `DELETE …/automations/{id}` |
 | `get_agent_automation_catalog` | every trigger and step kind, with each config's JSON Schema | `GET …/automations/catalog` |
 | `test_agent_automation` | what a spec would do with an event, saving and running nothing | `POST …/automations/test` |
 | `list_agent_sandboxes`, `stop_agent_sandbox`, `get_agent_sandbox_usage` | the owner's sandboxes; stop one (its billing stops); a month's running hours and price | `GET /agents/{owner}/sandboxes`, `POST …/{id}/stop`, `GET …/usage` |
@@ -155,10 +156,26 @@ Agent tokens may use them to orchestrate agents, within what an agent's commands
 
 ## Protocol
 
-- **Versions:** the server speaks `2025-11-25`, `2025-06-18`, `2025-03-26` and `2024-11-05`. It answers
-  `initialize` with the version the client asked for when it supports it, and with the newest
-  otherwise.
-- **Sessions:** `initialize` returns `Mcp-Session-Id`. Every later request has to send it:
+- **Versions:** the server speaks `2026-07-28` (the stateless revision) and the handshake revisions
+  `2025-11-25`, `2025-06-18`, `2025-03-26` and `2024-11-05`. It answers `initialize` with the
+  version the client asked for when it supports it, and with the newest handshake one otherwise. A
+  request whose `MCP-Protocol-Version` names a version it doesn't speak gets `-32022` with the
+  list it does (`data.supported`).
+- **2026-07-28:** a request whose `params._meta["io.modelcontextprotocol/protocolVersion"]` (or
+  `MCP-Protocol-Version` header) is `2026-07-28` is served on its own, with no `initialize` and no
+  session: the caller is its token, looked up on every request as on every other. It lists and
+  calls the same tools, by the same names and with the same rights as a session; lockdown and the
+  `Accept: text/event-stream` answers work the same.
+  - `server/discover` says the versions, the capabilities and the instructions `initialize` gives.
+  - The request is checked as the revision asks, by the rules roll's `/v1/mcp` uses too
+    (`roll_auth::mcp`): its `_meta` names its version and its `clientCapabilities`
+    (`-32602` otherwise), and its `MCP-Protocol-Version`, `Mcp-Method` and, for a call, `Mcp-Name`
+    headers say what the body says (`-32020`, 400 otherwise). A batch is refused.
+  - Every result carries `resultType: "complete"` and `_meta["io.modelcontextprotocol/serverInfo"]`;
+    lists carry `ttlMs` and `cacheScope: "private"` (tools follow the caller's rights).
+  - `initialize`, `ping` and any other method the revision doesn't have answer 404 with `-32601`.
+    Every error carries the request's id.
+- **Sessions** (the handshake revisions): `initialize` returns `Mcp-Session-Id`. Every later request has to send it:
   - without a session id: 400
   - with an unknown or ended session: 404
   - from a different token than the one that started the session: 404
@@ -184,4 +201,6 @@ Agent tokens may use them to orchestrate agents, within what an agent's commands
   or the API's own origin, otherwise it gets 403. This stops a web page from driving a local daemon
   through DNS rebinding.
 
-Tests are in `crates/code-control/tests/mcp.rs`.
+Tests are in `crates/code-control/tests/mcp.rs`. `pnpm test:mcp-conformance` runs the official
+MCP conformance suite against this server too, with its own baseline
+(`tests/mcp-conformance/code-expected.yml`; docs/mcp.md, "Conformance").

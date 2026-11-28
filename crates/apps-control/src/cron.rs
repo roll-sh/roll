@@ -51,13 +51,8 @@ mod tests {
         let summer = Utc.with_ymd_and_hms(2026, 3, 30, 0, 0, 0).unwrap().timestamp_millis();
         assert_eq!(s.next_after(summer), Some(Utc.with_ymd_and_hms(2026, 3, 30, 7, 0, 0).unwrap().timestamp_millis()));
         assert!(Schedule::parse("0 9 * * *", Some("Mars/Olympus")).is_err());
-    }
-
-    #[test]
-    fn five_fields_in_utc() {
-        use chrono::Utc;
+        // Five fields, in UTC unless a zone is given.
         let s = Schedule::parse("*/15 * * * *", None).unwrap();
-        // 2026-01-01T00:07:00Z → 00:15.
         let t = Utc.with_ymd_and_hms(2026, 1, 1, 0, 7, 0).unwrap().timestamp_millis();
         assert_eq!(s.next_after(t), Some(t + 8 * 60_000));
         assert!(Schedule::parse("0 0 * * * *", None).is_err(), "no seconds field");

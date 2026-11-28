@@ -1,6 +1,6 @@
-import { BellRing, Send, Trash2 } from "lucide-react";
+import { BellRing, Check, Send, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
-import { appsApi, type NotifyDelivery, type NotifyEvent, type NotifyTarget } from "@/lib/apps-api";
+import { appsApi, type NotifyDelivery, type NotifyEscalation, type NotifyEvent, type NotifyTarget, type OpenAlert } from "@/lib/apps-api";
 import { btn, CopyButton, input, Panel, primary, useCopy } from "../ui";
 import { since, SureButton, type Runner } from "./shared";
 
@@ -22,6 +22,7 @@ const EVENTS: { value: NotifyEvent; label: string }[] = [
   { value: "alert.capacity", label: "At capacity" },
   { value: "alert.route", label: "Route alert (one route's errors or latency)" },
   { value: "alert.anomaly", label: "Unusual for the hour" },
+  { value: "alert.csp", label: "A CSP directive blocked something for the first time" },
   { value: "attack.mode", label: "Attack mode on" },
   { value: "deploy.started", label: "A deploy began building" },
   { value: "scale.out", label: "Scaled out" },
@@ -42,8 +43,10 @@ const EVENTS: { value: NotifyEvent; label: string }[] = [
   { value: "volume.backup_failed", label: "Backup failed" },
   { value: "volume.full", label: "Volume 90% full" },
   { value: "check.down", label: "Uptime check down" },
+  { value: "check.slow", label: "Uptime check slow" },
   { value: "heartbeat.missed", label: "Heartbeat missed" },
   { value: "deploy.vulnerable", label: "New known vulnerabilities" },
+  { value: "alert.acked", label: "Someone acknowledged an alert" },
   { value: "audit", label: "Every change people make (audit log)" },
 ];
 
@@ -66,7 +69,7 @@ export function NotificationsPanel({ project, projectName, runner }: { project: 
   const [url, setUrl] = useState("");
   const [region, setRegion] = useState<"us" | "eu">("us");
   const oncall = kind === "pagerduty" || kind === "opsgenie";
-  const [events, setEvents] = useState<NotifyEvent[]>(["check.down", "heartbeat.missed", "alert.slo", "alert.anomaly", "deploy.failed", "rollout.waiting", "deploy.ready", "error.new", "error.regressed", "crash_loop", "spend.alert", "spend.spike", "spend.limit", "alert.memory", "alert.cpu", "alert.metric", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "alert.route", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"]);
+  const [events, setEvents] = useState<NotifyEvent[]>(["check.down", "check.slow", "heartbeat.missed", "alert.slo", "alert.anomaly", "deploy.failed", "rollout.waiting", "deploy.ready", "error.new", "error.regressed", "crash_loop", "spend.alert", "spend.spike", "spend.limit", "alert.memory", "alert.cpu", "alert.metric", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "alert.route", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"]);
   const [envs, setEnvs] = useState("");
   const [previews, setPreviews] = useState(false);
   // Only some of the project's services (none chosen: every one).
@@ -79,6 +82,8 @@ export function NotificationsPanel({ project, projectName, runner }: { project: 
   const [open, setOpen] = useState<string | null>(null);
   // The target whose events are being changed (in place: its URL and secret stay).
   const [editing, setEditing] = useState<string | null>(null);
+  // The target whose escalation is being changed.
+  const [escalating, setEscalating] = useState<string | null>(null);
   const { copied, copy } = useCopy();
   // A read that failed says so (an empty list would read as "nothing set").
   const [failed, setFailed] = useState<string | null>(null);
@@ -113,6 +118,7 @@ export function NotificationsPanel({ project, projectName, runner }: { project: 
   return (
     <Panel title={`Notifications for ${projectName}`} aside={<span className="text-[12px] text-muted">the project's services</span>}>
       {failed && <p className="border-b border-line px-5 py-3 text-[12.5px] text-danger">Its targets couldn't be read: {failed}</p>}
+      <OpenAlerts project={project} runner={runner} />
       {targets && targets.length > 0 && (
         <ul className="divide-y divide-line border-b border-line">
           {targets.map((t) => (
@@ -126,6 +132,7 @@ export function NotificationsPanel({ project, projectName, runner }: { project: 
                   · {t.services.length ? t.services.map((id) => all.find((s) => s.id === id)?.name ?? id).join(", ") : "every service"}
                   {" "}· {t.environments.length ? t.environments.join(", ") : "every environment"}
                   {t.previews ? ", previews too" : ""}
+                  {t.escalate ? ` · escalates to ${targetName(targets, t.escalate.to)} after ${t.escalate.after_min} min` : ""}
                 </span>
                 <span className="ml-auto flex gap-1.5">
                   <button type="button" className={btn} disabled={runner.busy !== null} onClick={() => void runner.run("test", () => appsApi.testNotifyTarget(project, t.id)).then((r) => r && !r.ok && runner.setError(`The test didn't arrive: ${r.error ?? "no answer"}`))}>
@@ -133,6 +140,9 @@ export function NotificationsPanel({ project, projectName, runner }: { project: 
                   </button>
                   <button type="button" className={btn} aria-expanded={editing === t.id} onClick={() => setEditing(editing === t.id ? null : t.id)}>
                     Events
+                  </button>
+                  <button type="button" className={btn} aria-expanded={escalating === t.id} disabled={targets.length < 2} title={targets.length < 2 ? "Add another target to escalate to" : undefined} onClick={() => setEscalating(escalating === t.id ? null : t.id)}>
+                    Escalate
                   </button>
                   <button type="button" className={btn} onClick={() => setOpen(open === t.id ? null : t.id)}>
                     Deliveries
@@ -149,6 +159,19 @@ export function NotificationsPanel({ project, projectName, runner }: { project: 
                   onSave={async (events) => {
                     if (await runner.run("events", () => appsApi.updateNotifyTarget(project, t.id, { events }))) {
                       setEditing(null);
+                      void load();
+                    }
+                  }}
+                />
+              )}
+              {escalating === t.id && (
+                <EditEscalation
+                  target={t}
+                  others={targets.filter((x) => x.id !== t.id)}
+                  busy={runner.busy !== null}
+                  onSave={async (escalate) => {
+                    if (await runner.run("escalation", () => appsApi.updateNotifyTarget(project, t.id, { escalate }))) {
+                      setEscalating(null);
                       void load();
                     }
                   }}
@@ -286,5 +309,81 @@ function EditEvents({ current, busy, onSave }: { current: NotifyEvent[]; busy: b
         Save
       </button>
     </div>
+  );
+}
+
+function targetName(targets: NotifyTarget[], id: string) {
+  const t = targets.find((x) => x.id === id);
+  return t ? `${KINDS.find((k) => k.value === t.kind)?.label ?? t.kind} ${t.host}` : id;
+}
+
+/** Where a target's unacknowledged alerts go, and after how long (Better Stack's escalation). */
+function EditEscalation({ target, others, busy, onSave }: { target: NotifyTarget; others: NotifyTarget[]; busy: boolean; onSave: (e: NotifyEscalation | null) => void }) {
+  const [after, setAfter] = useState(String(target.escalate?.after_min ?? 15));
+  const [to, setTo] = useState(target.escalate?.to ?? others[0]?.id ?? "");
+  const minutes = Number(after);
+  const valid = Number.isInteger(minutes) && minutes >= 5 && minutes <= 1440 && to !== "";
+  return (
+    <div className="rise mt-3 flex flex-wrap items-center gap-2 text-[12px] text-muted">
+      <span>An alert no one acknowledges in</span>
+      <input value={after} onChange={(e) => setAfter(e.target.value)} inputMode="numeric" aria-label="Minutes (5–1440)" className={`${input} w-16 font-mono text-[12px]`} />
+      <span>minutes goes to</span>
+      <select value={to} onChange={(e) => setTo(e.target.value)} aria-label="Escalate to" className={`${input} w-56 text-[12px]`}>
+        {others.map((o) => (
+          <option key={o.id} value={o.id}>
+            {targetName(others, o.id)}
+          </option>
+        ))}
+      </select>
+      <button type="button" className={btn} disabled={busy || !valid} onClick={() => onSave({ after_min: minutes, to })}>
+        Save
+      </button>
+      {target.escalate && (
+        <button type="button" className={btn} disabled={busy} onClick={() => onSave(null)}>
+          Stop escalating
+        </button>
+      )}
+    </div>
+  );
+}
+
+/** The project's open alerts, newest first, each acknowledged here (it stops escalating). */
+function OpenAlerts({ project, runner }: { project: string; runner: Runner }) {
+  const [alerts, setAlerts] = useState<OpenAlert[] | null>(null);
+  const load = useCallback(() => appsApi.alerts(project).then(setAlerts, () => setAlerts(null)), [project]);
+  useEffect(() => {
+    void load();
+  }, [load]);
+  if (!alerts?.length) return null;
+  return (
+    <div className="border-b border-line px-5 py-3">
+      <p className="mb-2 text-[12px] font-medium text-muted">Open alerts</p>
+      <ul className="space-y-1.5">
+        {alerts.map((a) => (
+          <AlertRow key={a.id} alert={a} busy={runner.busy !== null} onAck={() => void runner.run("ack", () => appsApi.ackAlert(project, a.id)).then((r) => r && load())} />
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+/** One open alert: what it's about, since when, and who acknowledged it (or an Ack button). */
+export function AlertRow({ alert: a, busy, onAck }: { alert: OpenAlert; busy: boolean; onAck: () => void }) {
+  return (
+    <li className="flex flex-wrap items-center gap-2 text-[13px]">
+      <span className={`size-1.5 rounded-full ${a.acked ? "bg-subtle" : "bg-danger"}`} aria-hidden />
+      <span className="min-w-0 flex-1 truncate">{a.about}</span>
+      <span className="text-[12px] text-subtle">{since(a.opened_at)}</span>
+      {a.escalated_at !== null && !a.acked && <span className="text-[12px] text-danger">escalated</span>}
+      {a.acked ? (
+        <span className="inline-flex items-center gap-1 text-[12px] text-muted">
+          <Check className="size-3.5" /> {a.acked.by}
+        </span>
+      ) : (
+        <button type="button" className={btn} disabled={busy} onClick={onAck}>
+          Ack
+        </button>
+      )}
+    </li>
   );
 }

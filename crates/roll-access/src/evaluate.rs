@@ -1419,8 +1419,6 @@ fn keys_only(scope: &Scope, target: &Target, needs: &[Action], own: Outcome, oth
         _ => r.project.clone().or_else(|| r.id.clone()).unwrap_or_default(),
     };
     let what = match route.rsplit('/').next().unwrap_or_default() {
-        "digest" => "a watch (the folder's digest)",
-        "delta" => "a watch (the folder's delta)",
         "diff" => "a diff",
         "import" | "imports" => "an import",
         "promote" => "a promote",

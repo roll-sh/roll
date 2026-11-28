@@ -739,7 +739,7 @@ async fn roll_run_watch_restarts_on_a_write_waits_out_failures_and_passes_sigter
         }
     };
     // Each start writes its value; SIGTERM writes `term` and exits 7.
-    let script = r#"trap 'echo term >> "$SEEN"; exit 7' TERM; echo "$GREETING" >> "$SEEN"; while :; do sleep 0.05; done"#;
+    let script = r#"trap 'echo term >> "$SEEN"; exit 7' TERM; echo "$GREETING $KEPT" >> "$SEEN"; while :; do sleep 0.05; done"#;
     // Every poll fails from the start: the first read (values, not the digest) still starts it.
     s.polls.failing.store(true, Ordering::SeqCst);
     let mut roll = tokio::process::Command::new(env!("CARGO_BIN_EXE_roll"))
@@ -756,16 +756,16 @@ async fn roll_run_watch_restarts_on_a_write_waits_out_failures_and_passes_sigter
         .kill_on_drop(true)
         .spawn()
         .unwrap();
-    wait_for("one\n").await;
+    wait_for("one same\n").await;
     let before = s.polls.asked.load(Ordering::SeqCst);
     tokio::time::sleep(Duration::from_millis(1500)).await;
     let polls = s.polls.asked.load(Ordering::SeqCst) - before;
     assert!((1..=4).contains(&polls), "{polls} failing polls in 1.5 s at a 1 s interval");
-    assert_eq!(seen(), "one\n", "a failing poll keeps the running command");
+    assert_eq!(seen(), "one same\n", "a failing poll keeps the running command");
 
     s.polls.failing.store(false, Ordering::SeqCst);
     ok(&s.api, &[], &[&at[..], &["set", "GREETING=two"]].concat(), None).await;
-    wait_for("one\nterm\ntwo\n").await;
+    wait_for("one same\nterm\ntwo same\n").await;
     let project = s.projects.list(roll_workspace::Scope::All).unwrap().into_iter().find(|p| p.name == "shop").unwrap().id;
     let filter = roll_secrets::AuditFilter { action: Some("secrets.export".into()), ..Default::default() };
     let reads = s.secrets.audit(&project, filter, &roll_secrets::Caller::operator()).unwrap();
@@ -775,7 +775,7 @@ async fn roll_run_watch_restarts_on_a_write_waits_out_failures_and_passes_sigter
     unsafe { libc::kill(roll.id().unwrap() as libc::pid_t, libc::SIGTERM) };
     let status = tokio::time::timeout(Duration::from_secs(10), roll.wait()).await.expect("roll exits with its command").unwrap();
     assert_eq!(status.code(), Some(7));
-    assert_eq!(seen(), "one\nterm\ntwo\nterm\n");
+    assert_eq!(seen(), "one same\nterm\ntwo same\nterm\n");
 }
 
 /// A token reaches what it's told to, for 90 days: no environment named is refused (or the
@@ -1154,34 +1154,56 @@ async fn a_revoked_logins_local_agent_answers_a_refusal_within_one_poll() {
     assert!(body.contains("refused the agent's login") && !body.contains("fake-"), "{body}");
 }
 
-/// A token whose rule reaches only some keys reads those with `roll run`, but can't follow the
-/// whole folder: `roll run --watch` and `roll secrets agent` say why at their start (the folder,
-/// never a key) and exit non-zero, rather than failing every poll.
+/// A token whose rule reaches only some keys watches those alone: `roll run --watch` restarts
+/// when its key changes, and another key's write doesn't move the token's digest, so nothing
+/// restarts for it.
+#[cfg(unix)]
 #[tokio::test]
-async fn a_key_scoped_token_says_at_the_start_that_it_cant_watch() {
+async fn a_key_scoped_tokens_watch_follows_only_its_keys() {
+    use std::time::Duration;
     let s = start().await;
-    ok(&s.api, &[], &["secrets", "-p", "shop", "-e", "production", "set", "STRIPE_KEY=fake-stripe", "DB_PASSWORD=fake-pw"], None).await;
+    let at = ["secrets", "-p", "shop", "-e", "production"];
+    ok(&s.api, &[], &[&at[..], &["set", "STRIPE_KEY=fake-one", "DB_PASSWORD=fake-pw"]].concat(), None).await;
     let token = ok(&s.api, &[], &["secrets", "-p", "shop", "tokens", "create", "stripe", "--for-env", "production", "--key", "STRIPE_KEY"], None).await.trim().to_string();
-    let t = [("ROLL_TOKEN", token.as_str())];
-    let plain = ok(&s.api, &t, &["run", "-e", "production", "--no-mask", "--", "sh", "-c", "echo ${STRIPE_KEY:-none} ${DB_PASSWORD:-none}"], None).await;
-    assert_eq!(plain.trim(), "fake-stripe none");
-    let why = |o: &Out| o.code != Some(0) && o.stderr.contains("only some keys of production") && o.stderr.contains("a rule without keys") && !o.stderr.contains("STRIPE_KEY") && !o.stderr.contains("DB_PASSWORD");
-    let watched = roll(&s.api, &t, &["run", "-e", "production", "--watch", "--no-mask", "--", "true"], None).await;
-    assert!(why(&watched) && watched.stderr.contains("--watch"), "{}", watched.stderr);
-    let token_file = s._dir.path().join("agent-token");
-    let agent = tokio::process::Command::new(env!("CARGO_BIN_EXE_roll"))
-        .args(["secrets", "-e", "production", "agent", "--port", "0", "--token-file", token_file.to_str().unwrap()])
+    let project = s.projects.list(roll_workspace::Scope::All).unwrap().into_iter().find(|p| p.name == "shop").unwrap().id;
+    let url = format!("{}/v1/secrets/projects/{project}/environments/production/digest", s.api);
+    let digest = || async {
+        let r = reqwest::Client::new().get(&url).bearer_auth(&token).send().await.unwrap();
+        assert_eq!(r.status(), reqwest::StatusCode::OK);
+        r.json::<serde_json::Value>().await.unwrap()["digest"].as_str().unwrap().to_string()
+    };
+    let seen_at = s._dir.path().join("seen");
+    let seen = || std::fs::read_to_string(&seen_at).unwrap_or_default();
+    let wait_for = |want: &'static str| {
+        let seen = &seen;
+        async move {
+            let started = std::time::Instant::now();
+            while seen() != want {
+                assert!(started.elapsed() < Duration::from_secs(20), "waited for {want:?}, the command wrote {:?}", seen());
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+    };
+    let _roll = tokio::process::Command::new(env!("CARGO_BIN_EXE_roll"))
+        .args(["run", "-e", "production", "--watch", "--interval", "1", "--no-mask", "--", "sh", "-c", r#"echo "$STRIPE_KEY ${DB_PASSWORD:-none}" >> "$SEEN"; exec sleep 600"#])
         .env("ROLL_API_URL", &s.api)
         .env("ROLL_TOKEN", &token)
+        .env("SEEN", &seen_at)
         .env_remove("ROLL_PROJECT")
         .env_remove("ROLL_ENV")
         .env_remove("ROLL_ADMIN_TOKEN")
         .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .kill_on_drop(true)
-        .output();
-    let out = tokio::time::timeout(std::time::Duration::from_secs(20), agent).await.expect("the agent exits at its start").unwrap();
-    let agent = Out { code: out.status.code(), stdout: String::new(), stderr: String::from_utf8_lossy(&out.stderr).into() };
-    assert!(why(&agent) && agent.stderr.contains("--ttl 0"), "{}", agent.stderr);
+        .spawn()
+        .unwrap();
+    wait_for("fake-one none\n").await;
+    let before = digest().await;
+    ok(&s.api, &[], &[&at[..], &["set", "DB_PASSWORD=fake-pw-2"]].concat(), None).await;
+    assert_eq!(digest().await, before, "another key's write moved a key-scoped token's digest");
+    ok(&s.api, &[], &[&at[..], &["set", "STRIPE_KEY=fake-two"]].concat(), None).await;
+    wait_for("fake-one none\nfake-two none\n").await;
 }
 
 /// A Compute Engine metadata server: the instance's identity token for the audience asked, signed

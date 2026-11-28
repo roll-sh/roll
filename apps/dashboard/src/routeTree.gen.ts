@@ -10,6 +10,7 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as BrandRouteImport } from './routes/brand'
 import { Route as SigninRouteImport } from './routes/signin'
 import { Route as OwnerIndexRouteImport } from './routes/$owner/index'
 import { Route as OwnerRepoRouteRouteImport } from './routes/$owner/$repo/route'
@@ -22,6 +23,8 @@ import { Route as DashboardStreamsRouteImport } from './routes/dashboard/streams
 import { Route as DashboardTasksRouteImport } from './routes/dashboard/tasks'
 import { Route as OauthAuthorizeRouteImport } from './routes/oauth/authorize'
 import { Route as OauthDeviceRouteImport } from './routes/oauth/device'
+import { Route as ProductsIndexRouteImport } from './routes/products/index'
+import { Route as ProductsProductRouteImport } from './routes/products/$product'
 import { Route as RequestTokenRouteImport } from './routes/request/$token'
 import { Route as ShareIdRouteImport } from './routes/share/$id'
 import { Route as OwnerRepoIndexRouteImport } from './routes/$owner/$repo/index'
@@ -37,6 +40,7 @@ import { Route as DashboardAgentsIndexRouteImport } from './routes/dashboard/age
 import { Route as DashboardAgentsConnectRouteImport } from './routes/dashboard/agents/connect'
 import { Route as DashboardAgentsSharesRouteImport } from './routes/dashboard/agents/shares'
 import { Route as DashboardAppsIdRouteImport } from './routes/dashboard/apps/$id'
+import { Route as DashboardAppsAlertsRouteImport } from './routes/dashboard/apps/alerts'
 import { Route as DashboardAppsVisitRouteImport } from './routes/dashboard/apps/visit'
 import { Route as DashboardCodeIndexRouteImport } from './routes/dashboard/code/index'
 import { Route as DashboardNosqlIndexRouteImport } from './routes/dashboard/nosql/index'
@@ -87,6 +91,11 @@ import { Route as DashboardCodeOwnerRepoChangesNumberRouteImport } from './route
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const BrandRoute = BrandRouteImport.update({
+  id: '/brand',
+  path: '/brand',
   getParentRoute: () => rootRouteImport,
 } as any)
 const SigninRoute = SigninRouteImport.update({
@@ -147,6 +156,16 @@ const OauthAuthorizeRoute = OauthAuthorizeRouteImport.update({
 const OauthDeviceRoute = OauthDeviceRouteImport.update({
   id: '/oauth/device',
   path: '/oauth/device',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ProductsIndexRoute = ProductsIndexRouteImport.update({
+  id: '/products/',
+  path: '/products/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ProductsProductRoute = ProductsProductRouteImport.update({
+  id: '/products/$product',
+  path: '/products/$product',
   getParentRoute: () => rootRouteImport,
 } as any)
 const RequestTokenRoute = RequestTokenRouteImport.update({
@@ -223,6 +242,11 @@ const DashboardAgentsSharesRoute = DashboardAgentsSharesRouteImport.update({
 const DashboardAppsIdRoute = DashboardAppsIdRouteImport.update({
   id: '/dashboard/apps/$id',
   path: '/dashboard/apps/$id',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const DashboardAppsAlertsRoute = DashboardAppsAlertsRouteImport.update({
+  id: '/dashboard/apps/alerts',
+  path: '/dashboard/apps/alerts',
   getParentRoute: () => rootRouteImport,
 } as any)
 const DashboardAppsVisitRoute = DashboardAppsVisitRouteImport.update({
@@ -473,6 +497,7 @@ const DashboardCodeOwnerRepoChangesNumberRoute =
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/brand': typeof BrandRoute
   '/signin': typeof SigninRoute
   '/$owner/$repo': typeof OwnerRepoRouteRouteWithChildren
   '/dashboard/account': typeof DashboardAccountRoute
@@ -483,10 +508,12 @@ export interface FileRoutesByFullPath {
   '/dashboard/tasks': typeof DashboardTasksRoute
   '/oauth/authorize': typeof OauthAuthorizeRoute
   '/oauth/device': typeof OauthDeviceRoute
+  '/products/$product': typeof ProductsProductRoute
   '/request/$token': typeof RequestTokenRoute
   '/share/$id': typeof ShareIdRoute
   '/$owner/': typeof OwnerIndexRoute
   '/dashboard/': typeof DashboardIndexRoute
+  '/products/': typeof ProductsIndexRoute
   '/$owner/$repo/git-receive-pack': typeof OwnerRepoGitReceivePackRoute
   '/$owner/$repo/git-upload-pack': typeof OwnerRepoGitUploadPackRoute
   '/$owner/$repo/search': typeof OwnerRepoSearchRoute
@@ -497,6 +524,7 @@ export interface FileRoutesByFullPath {
   '/dashboard/agents/connect': typeof DashboardAgentsConnectRoute
   '/dashboard/agents/shares': typeof DashboardAgentsSharesRoute
   '/dashboard/apps/$id': typeof DashboardAppsIdRoute
+  '/dashboard/apps/alerts': typeof DashboardAppsAlertsRoute
   '/dashboard/apps/visit': typeof DashboardAppsVisitRoute
   '/dashboard/nosql/$id': typeof DashboardNosqlIdRoute
   '/dashboard/previews/note': typeof DashboardPreviewsNoteRoute
@@ -549,6 +577,7 @@ export interface FileRoutesByFullPath {
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/brand': typeof BrandRoute
   '/signin': typeof SigninRoute
   '/dashboard/account': typeof DashboardAccountRoute
   '/dashboard/databases': typeof DashboardDatabasesRoute
@@ -558,10 +587,12 @@ export interface FileRoutesByTo {
   '/dashboard/tasks': typeof DashboardTasksRoute
   '/oauth/authorize': typeof OauthAuthorizeRoute
   '/oauth/device': typeof OauthDeviceRoute
+  '/products/$product': typeof ProductsProductRoute
   '/request/$token': typeof RequestTokenRoute
   '/share/$id': typeof ShareIdRoute
   '/$owner': typeof OwnerIndexRoute
   '/dashboard': typeof DashboardIndexRoute
+  '/products': typeof ProductsIndexRoute
   '/$owner/$repo/git-receive-pack': typeof OwnerRepoGitReceivePackRoute
   '/$owner/$repo/git-upload-pack': typeof OwnerRepoGitUploadPackRoute
   '/$owner/$repo/search': typeof OwnerRepoSearchRoute
@@ -572,6 +603,7 @@ export interface FileRoutesByTo {
   '/dashboard/agents/connect': typeof DashboardAgentsConnectRoute
   '/dashboard/agents/shares': typeof DashboardAgentsSharesRoute
   '/dashboard/apps/$id': typeof DashboardAppsIdRoute
+  '/dashboard/apps/alerts': typeof DashboardAppsAlertsRoute
   '/dashboard/apps/visit': typeof DashboardAppsVisitRoute
   '/dashboard/nosql/$id': typeof DashboardNosqlIdRoute
   '/dashboard/previews/note': typeof DashboardPreviewsNoteRoute
@@ -625,6 +657,7 @@ export interface FileRoutesByTo {
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/brand': typeof BrandRoute
   '/signin': typeof SigninRoute
   '/$owner/$repo': typeof OwnerRepoRouteRouteWithChildren
   '/dashboard/account': typeof DashboardAccountRoute
@@ -635,10 +668,12 @@ export interface FileRoutesById {
   '/dashboard/tasks': typeof DashboardTasksRoute
   '/oauth/authorize': typeof OauthAuthorizeRoute
   '/oauth/device': typeof OauthDeviceRoute
+  '/products/$product': typeof ProductsProductRoute
   '/request/$token': typeof RequestTokenRoute
   '/share/$id': typeof ShareIdRoute
   '/$owner/': typeof OwnerIndexRoute
   '/dashboard/': typeof DashboardIndexRoute
+  '/products/': typeof ProductsIndexRoute
   '/$owner/$repo/git-receive-pack': typeof OwnerRepoGitReceivePackRoute
   '/$owner/$repo/git-upload-pack': typeof OwnerRepoGitUploadPackRoute
   '/$owner/$repo/search': typeof OwnerRepoSearchRoute
@@ -649,6 +684,7 @@ export interface FileRoutesById {
   '/dashboard/agents/connect': typeof DashboardAgentsConnectRoute
   '/dashboard/agents/shares': typeof DashboardAgentsSharesRoute
   '/dashboard/apps/$id': typeof DashboardAppsIdRoute
+  '/dashboard/apps/alerts': typeof DashboardAppsAlertsRoute
   '/dashboard/apps/visit': typeof DashboardAppsVisitRoute
   '/dashboard/nosql/$id': typeof DashboardNosqlIdRoute
   '/dashboard/previews/note': typeof DashboardPreviewsNoteRoute
@@ -703,6 +739,7 @@ export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
+    | '/brand'
     | '/signin'
     | '/$owner/$repo'
     | '/dashboard/account'
@@ -713,10 +750,12 @@ export interface FileRouteTypes {
     | '/dashboard/tasks'
     | '/oauth/authorize'
     | '/oauth/device'
+    | '/products/$product'
     | '/request/$token'
     | '/share/$id'
     | '/$owner/'
     | '/dashboard/'
+    | '/products/'
     | '/$owner/$repo/git-receive-pack'
     | '/$owner/$repo/git-upload-pack'
     | '/$owner/$repo/search'
@@ -727,6 +766,7 @@ export interface FileRouteTypes {
     | '/dashboard/agents/connect'
     | '/dashboard/agents/shares'
     | '/dashboard/apps/$id'
+    | '/dashboard/apps/alerts'
     | '/dashboard/apps/visit'
     | '/dashboard/nosql/$id'
     | '/dashboard/previews/note'
@@ -779,6 +819,7 @@ export interface FileRouteTypes {
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
+    | '/brand'
     | '/signin'
     | '/dashboard/account'
     | '/dashboard/databases'
@@ -788,10 +829,12 @@ export interface FileRouteTypes {
     | '/dashboard/tasks'
     | '/oauth/authorize'
     | '/oauth/device'
+    | '/products/$product'
     | '/request/$token'
     | '/share/$id'
     | '/$owner'
     | '/dashboard'
+    | '/products'
     | '/$owner/$repo/git-receive-pack'
     | '/$owner/$repo/git-upload-pack'
     | '/$owner/$repo/search'
@@ -802,6 +845,7 @@ export interface FileRouteTypes {
     | '/dashboard/agents/connect'
     | '/dashboard/agents/shares'
     | '/dashboard/apps/$id'
+    | '/dashboard/apps/alerts'
     | '/dashboard/apps/visit'
     | '/dashboard/nosql/$id'
     | '/dashboard/previews/note'
@@ -854,6 +898,7 @@ export interface FileRouteTypes {
   id:
     | '__root__'
     | '/'
+    | '/brand'
     | '/signin'
     | '/$owner/$repo'
     | '/dashboard/account'
@@ -864,10 +909,12 @@ export interface FileRouteTypes {
     | '/dashboard/tasks'
     | '/oauth/authorize'
     | '/oauth/device'
+    | '/products/$product'
     | '/request/$token'
     | '/share/$id'
     | '/$owner/'
     | '/dashboard/'
+    | '/products/'
     | '/$owner/$repo/git-receive-pack'
     | '/$owner/$repo/git-upload-pack'
     | '/$owner/$repo/search'
@@ -878,6 +925,7 @@ export interface FileRouteTypes {
     | '/dashboard/agents/connect'
     | '/dashboard/agents/shares'
     | '/dashboard/apps/$id'
+    | '/dashboard/apps/alerts'
     | '/dashboard/apps/visit'
     | '/dashboard/nosql/$id'
     | '/dashboard/previews/note'
@@ -931,6 +979,7 @@ export interface FileRouteTypes {
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  BrandRoute: typeof BrandRoute
   SigninRoute: typeof SigninRoute
   OwnerRepoRouteRoute: typeof OwnerRepoRouteRouteWithChildren
   DashboardAccountRoute: typeof DashboardAccountRoute
@@ -941,16 +990,19 @@ export interface RootRouteChildren {
   DashboardTasksRoute: typeof DashboardTasksRoute
   OauthAuthorizeRoute: typeof OauthAuthorizeRoute
   OauthDeviceRoute: typeof OauthDeviceRoute
+  ProductsProductRoute: typeof ProductsProductRoute
   RequestTokenRoute: typeof RequestTokenRoute
   ShareIdRoute: typeof ShareIdRoute
   OwnerIndexRoute: typeof OwnerIndexRoute
   DashboardIndexRoute: typeof DashboardIndexRoute
+  ProductsIndexRoute: typeof ProductsIndexRoute
   DashboardAccessApprovalsRoute: typeof DashboardAccessApprovalsRoute
   DashboardAccessAuditRoute: typeof DashboardAccessAuditRoute
   DashboardAccessNewRoute: typeof DashboardAccessNewRoute
   DashboardAgentsConnectRoute: typeof DashboardAgentsConnectRoute
   DashboardAgentsSharesRoute: typeof DashboardAgentsSharesRoute
   DashboardAppsIdRoute: typeof DashboardAppsIdRoute
+  DashboardAppsAlertsRoute: typeof DashboardAppsAlertsRoute
   DashboardAppsVisitRoute: typeof DashboardAppsVisitRoute
   DashboardNosqlIdRoute: typeof DashboardNosqlIdRoute
   DashboardPreviewsNoteRoute: typeof DashboardPreviewsNoteRoute
@@ -997,6 +1049,13 @@ declare module '@tanstack/react-router' {
       path: '/'
       fullPath: '/'
       preLoaderRoute: typeof IndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/brand': {
+      id: '/brand'
+      path: '/brand'
+      fullPath: '/brand'
+      preLoaderRoute: typeof BrandRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/signin': {
@@ -1081,6 +1140,20 @@ declare module '@tanstack/react-router' {
       path: '/oauth/device'
       fullPath: '/oauth/device'
       preLoaderRoute: typeof OauthDeviceRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/products/': {
+      id: '/products/'
+      path: '/products'
+      fullPath: '/products/'
+      preLoaderRoute: typeof ProductsIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/products/$product': {
+      id: '/products/$product'
+      path: '/products/$product'
+      fullPath: '/products/$product'
+      preLoaderRoute: typeof ProductsProductRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/request/$token': {
@@ -1186,6 +1259,13 @@ declare module '@tanstack/react-router' {
       path: '/dashboard/apps/$id'
       fullPath: '/dashboard/apps/$id'
       preLoaderRoute: typeof DashboardAppsIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/dashboard/apps/alerts': {
+      id: '/dashboard/apps/alerts'
+      path: '/dashboard/apps/alerts'
+      fullPath: '/dashboard/apps/alerts'
+      preLoaderRoute: typeof DashboardAppsAlertsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/dashboard/apps/visit': {
@@ -1566,6 +1646,7 @@ const DashboardProjectsIdRouteWithChildren =
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  BrandRoute: BrandRoute,
   SigninRoute: SigninRoute,
   OwnerRepoRouteRoute: OwnerRepoRouteRouteWithChildren,
   DashboardAccountRoute: DashboardAccountRoute,
@@ -1576,16 +1657,19 @@ const rootRouteChildren: RootRouteChildren = {
   DashboardTasksRoute: DashboardTasksRoute,
   OauthAuthorizeRoute: OauthAuthorizeRoute,
   OauthDeviceRoute: OauthDeviceRoute,
+  ProductsProductRoute: ProductsProductRoute,
   RequestTokenRoute: RequestTokenRoute,
   ShareIdRoute: ShareIdRoute,
   OwnerIndexRoute: OwnerIndexRoute,
   DashboardIndexRoute: DashboardIndexRoute,
+  ProductsIndexRoute: ProductsIndexRoute,
   DashboardAccessApprovalsRoute: DashboardAccessApprovalsRoute,
   DashboardAccessAuditRoute: DashboardAccessAuditRoute,
   DashboardAccessNewRoute: DashboardAccessNewRoute,
   DashboardAgentsConnectRoute: DashboardAgentsConnectRoute,
   DashboardAgentsSharesRoute: DashboardAgentsSharesRoute,
   DashboardAppsIdRoute: DashboardAppsIdRoute,
+  DashboardAppsAlertsRoute: DashboardAppsAlertsRoute,
   DashboardAppsVisitRoute: DashboardAppsVisitRoute,
   DashboardNosqlIdRoute: DashboardNosqlIdRoute,
   DashboardPreviewsNoteRoute: DashboardPreviewsNoteRoute,

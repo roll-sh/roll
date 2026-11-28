@@ -378,9 +378,7 @@ async fn tools_follow_the_tokens_rules() {
     assert_eq!(log[0]["client"], "cursor 1.2", "{log}");
 
     // Every call is audited with its tool and redacted arguments.
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     d.tool(&reader, "postgres_query", json!({ "endpoint": "ep_x", "sql": "select 'password'", "approval": "apr_secret" })).await;
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     d.tool(OPERATOR, "postgres_list_projects", json!({})).await;
     let log = d.audit_until(|l| l.as_array().is_some_and(|a| a.iter().any(|e| e["grant_id"].is_null() && e["tool"] == "postgres_list_projects"))).await;
     assert!(log.as_array().unwrap().iter().any(|e| e["grant_id"].is_null() && e["tool"] == "postgres_list_projects"), "the operator's calls too: {log}");
@@ -390,121 +388,163 @@ async fn tools_follow_the_tokens_rules() {
     assert!(deletes.contains(&"deny") && deletes.contains(&"ask"), "{log}");
 }
 
-/// Search mode (`?tools=search`): three tools instead of every one, and a run is the tool it names
-/// to every check after it (the token's tools, read-only, the gate, the audit log).
+/// What a connection's URL asks for decides what it lists, never what it may do: search mode finds
+/// and runs tools through the same checks, metadata only lists no data, and an area lists its own
+/// tools and the lookups.
 #[tokio::test]
-async fn search_mode_finds_and_runs_through_the_same_checks() {
-    let d = Daemon::new();
-    let reader = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }])).await;
-    let at = |q: &str| format!("/v1/mcp?tools=search{q}");
-    let rpc = |path: String, method: &'static str, params: Value| {
-        let d = &d;
-        let reader = reader.clone();
-        async move { d.http(&reader, Method::POST, &path, Some(json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params }))).await.2["result"].clone() }
-    };
-    let listed = names(&rpc(at(""), "tools/list", json!({})).await);
-    assert!(listed.contains(&"roll_find_tools".into()) && listed.contains(&"roll_run_read".into()) && !listed.iter().any(|n| n.starts_with("postgres_")), "{listed:?}");
-    assert!(!listed.contains(&"roll_run".into()), "a reader has nothing to run that changes things: {listed:?}");
-    assert!(listed.contains(&"roll_find".into()), "finding a resource by name works in search mode too: {listed:?}");
-    let found = rpc(at(""), "tools/call", json!({ "name": "roll_find_tools", "arguments": { "query": "list postgres projects" } })).await;
-    assert_eq!(found["structuredContent"]["tools"][0]["name"], "postgres_list_projects", "{found}");
-    assert!(found["structuredContent"]["tools"][0]["inputSchema"].is_object());
-    let ran = rpc(at(""), "tools/call", json!({ "name": "roll_run_read", "arguments": { "tool": "postgres_list_projects", "arguments": {} } })).await;
-    assert_eq!((ran["isError"].as_bool(), &ran["structuredContent"]["items"][0]["id"]), (Some(false), &json!("pa")), "{ran}");
-    // A tool the token doesn't offer isn't there to run, whatever the run tool.
-    let refused = rpc(at(""), "tools/call", json!({ "name": "roll_run_read", "arguments": { "tool": "postgres_delete_project", "arguments": { "project": "pa" } } })).await;
-    assert_eq!(refused["isError"], true, "{refused}");
-    // The operator's run of a write: roll_run_read refuses it, and a read-only connection lists no roll_run.
-    let (_, _, op) = d.http(OPERATOR, Method::POST, &at(""), Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "roll_run_read", "arguments": { "tool": "postgres_delete_project", "arguments": { "project": "pa" } } } }))).await;
-    assert!(op["result"]["content"][0]["text"].as_str().unwrap().contains("roll_run"), "{op}");
-    let (_, _, ro) = d.http(OPERATOR, Method::POST, &at("&readonly=1"), Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))).await;
-    assert!(!names(&ro["result"]).contains(&"roll_run".into()), "{ro}");
-    let (s, _, _) = d.http(OPERATOR, Method::POST, "/v1/mcp?tools=some", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))).await;
-    assert_eq!(s, StatusCode::BAD_REQUEST, "a name no tool has: refused, not silently empty");
-    // Single tools picked (GitHub's X-MCP-Tools list) or dropped (exclusion wins): what's shown and
-    // may be called, never what's allowed.
-    let list = |path: &'static str, h: &'static [(&'static str, &'static str)]| {
-        let d = &d;
-        async move { names(&d.http_with(OPERATOR, Method::POST, path, Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" })), h).await.2["result"]) }
-    };
-    assert_eq!(list("/v1/mcp", &[("x-mcp-tools", "postgres_list_projects,postgres_delete_project")]).await, ["postgres_list_projects", "postgres_delete_project"]);
-    assert_eq!(list("/v1/mcp?tools=postgres_list_projects,postgres_delete_project&exclude_tools=postgres_delete_project", &[]).await, ["postgres_list_projects"]);
-    let (_, _, dropped) = d.http(OPERATOR, Method::POST, "/v1/mcp?exclude_tools=postgres_delete_project", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "postgres_delete_project", "arguments": { "project": "pa" } } }))).await;
-    assert_eq!(dropped["result"]["isError"], true, "{dropped}");
-    // The audit log names the tool that ran, not the run tool.
-    let log = d.audit_until(|l| l.as_array().is_some_and(|a| a.iter().any(|e| e["tool"] == "postgres_list_projects" && !e["grant_id"].is_null()))).await;
-    assert!(!log.as_array().unwrap().iter().any(|e| e["tool"].as_str().is_some_and(|t| t.starts_with("roll_"))), "{log}");
-    // A tool this token ran lately is listed beside search mode's own, and runs directly; one it
-    // may not use isn't, whatever it ran.
-    let listed = names(&rpc(at(""), "tools/list", json!({})).await);
-    assert!(listed.contains(&"postgres_list_projects".into()) && !listed.contains(&"postgres_delete_project".into()), "{listed:?}");
-    let direct = rpc(at(""), "tools/call", json!({ "name": "postgres_list_projects", "arguments": {} })).await;
-    assert_eq!(direct["isError"].as_bool(), Some(false), "{direct}");
+async fn a_connections_url_picks_its_tools() {
+    {
+        // Search mode (`?tools=search`): three tools instead of every one, and a run is the tool it names
+        // to every check after it (the token's tools, read-only, the gate, the audit log).
+        let d = Daemon::new();
+        let reader = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }])).await;
+        let at = |q: &str| format!("/v1/mcp?tools=search{q}");
+        let rpc = |path: String, method: &'static str, params: Value| {
+            let d = &d;
+            let reader = reader.clone();
+            async move { d.http(&reader, Method::POST, &path, Some(json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params }))).await.2["result"].clone() }
+        };
+        let listed = names(&rpc(at(""), "tools/list", json!({})).await);
+        assert!(listed.contains(&"roll_find_tools".into()) && listed.contains(&"roll_run_read".into()) && !listed.iter().any(|n| n.starts_with("postgres_")), "{listed:?}");
+        assert!(!listed.contains(&"roll_run".into()), "a reader has nothing to run that changes things: {listed:?}");
+        assert!(listed.contains(&"roll_find".into()), "finding a resource by name works in search mode too: {listed:?}");
+        let found = rpc(at(""), "tools/call", json!({ "name": "roll_find_tools", "arguments": { "query": "list postgres projects" } })).await;
+        assert_eq!(found["structuredContent"]["tools"][0]["name"], "postgres_list_projects", "{found}");
+        assert!(found["structuredContent"]["tools"][0]["inputSchema"].is_object());
+        let ran = rpc(at(""), "tools/call", json!({ "name": "roll_run_read", "arguments": { "tool": "postgres_list_projects", "arguments": {} } })).await;
+        assert_eq!((ran["isError"].as_bool(), &ran["structuredContent"]["items"][0]["id"]), (Some(false), &json!("pa")), "{ran}");
+        // A tool the token doesn't offer isn't there to run, whatever the run tool.
+        let refused = rpc(at(""), "tools/call", json!({ "name": "roll_run_read", "arguments": { "tool": "postgres_delete_project", "arguments": { "project": "pa" } } })).await;
+        assert_eq!(refused["isError"], true, "{refused}");
+        // The operator's run of a write: roll_run_read refuses it, and a read-only connection lists no roll_run.
+        let (_, _, op) = d.http(OPERATOR, Method::POST, &at(""), Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "roll_run_read", "arguments": { "tool": "postgres_delete_project", "arguments": { "project": "pa" } } } }))).await;
+        assert!(op["result"]["content"][0]["text"].as_str().unwrap().contains("roll_run"), "{op}");
+        let (_, _, ro) = d.http(OPERATOR, Method::POST, &at("&readonly=1"), Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))).await;
+        assert!(!names(&ro["result"]).contains(&"roll_run".into()), "{ro}");
+        let (s, _, _) = d.http(OPERATOR, Method::POST, "/v1/mcp?tools=some", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "a name no tool has: refused, not silently empty");
+        // Single tools picked (GitHub's X-MCP-Tools list) or dropped (exclusion wins): what's shown and
+        // may be called, never what's allowed.
+        let list = |path: &'static str, h: &'static [(&'static str, &'static str)]| {
+            let d = &d;
+            async move { names(&d.http_with(OPERATOR, Method::POST, path, Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" })), h).await.2["result"]) }
+        };
+        assert_eq!(list("/v1/mcp", &[("x-mcp-tools", "postgres_list_projects,postgres_delete_project")]).await, ["postgres_list_projects", "postgres_delete_project"]);
+        assert_eq!(list("/v1/mcp?tools=postgres_list_projects,postgres_delete_project&exclude_tools=postgres_delete_project", &[]).await, ["postgres_list_projects"]);
+        let (_, _, dropped) = d.http(OPERATOR, Method::POST, "/v1/mcp?exclude_tools=postgres_delete_project", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "postgres_delete_project", "arguments": { "project": "pa" } } }))).await;
+        assert_eq!(dropped["result"]["isError"], true, "{dropped}");
+        // The audit log names the tool that ran, not the run tool.
+        let log = d.audit_until(|l| l.as_array().is_some_and(|a| a.iter().any(|e| e["tool"] == "postgres_list_projects" && !e["grant_id"].is_null()))).await;
+        assert!(!log.as_array().unwrap().iter().any(|e| e["tool"].as_str().is_some_and(|t| t.starts_with("roll_"))), "{log}");
+        // A tool this token ran lately is listed beside search mode's own, and runs directly; one it
+        // may not use isn't, whatever it ran.
+        let listed = names(&rpc(at(""), "tools/list", json!({})).await);
+        assert!(listed.contains(&"postgres_list_projects".into()) && !listed.contains(&"postgres_delete_project".into()), "{listed:?}");
+        let direct = rpc(at(""), "tools/call", json!({ "name": "postgres_list_projects", "arguments": {} })).await;
+        assert_eq!(direct["isError"].as_bool(), Some(false), "{direct}");
+    }
+    {
+        // Metadata only (`?metadata=1`): plans, schemas and usage listed, no tool that answers stored
+        // data or changes anything; such a call is refused saying why, and the instructions say so.
+        let d = Daemon::new();
+        let (_, _, listed) = d.http(OPERATOR, Method::POST, "/v1/mcp?metadata=1", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))).await;
+        let names = names(&listed["result"]);
+        assert!(names.contains(&"postgres_list_projects".into()) && names.contains(&"postgres_explain".into()), "{names:?}");
+        assert!(!names.contains(&"postgres_query".into()) && !names.contains(&"postgres_execute".into()), "{names:?}");
+        let (_, _, refused) = d.http(OPERATOR, Method::POST, "/v1/mcp?metadata=1", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "postgres_query", "arguments": { "endpoint": "ep_1", "sql": "select 1" } } }))).await;
+        assert!(refused["result"]["isError"] == true && refused["result"]["content"][0]["text"].as_str().unwrap_or_default().contains("metadata only"), "{refused}");
+        let (_, _, init) = d.http(OPERATOR, Method::POST, "/v1/mcp?metadata=1", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": "2025-06-18" } }))).await;
+        assert!(init["result"]["instructions"].as_str().unwrap_or_default().contains("metadata only"), "{init}");
+    }
+    {
+        // An area (`?toolsets=secrets.security`) lists its own tools and the lookups every area needs,
+        // and nothing of its product's other areas; the access tools stay.
+        let d = Daemon::with_products(vec!["secrets".into(), "workspace".into()]);
+        let (s, _, out) = d.http(OPERATOR, Method::POST, "/v1/mcp?toolsets=secrets.security", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))).await;
+        assert_eq!(s, StatusCode::OK, "{out}");
+        let listed = names(&out["result"]);
+        for has in ["secrets_audit", "secrets_findings", "secrets_list_environments", "access_wait_approval"] {
+            assert!(listed.contains(&has.to_string()), "secrets.security lists {has}: {listed:?}");
+        }
+        for not in ["secrets_set", "secrets_transit_encrypt", "workspace_list_projects"] {
+            assert!(!listed.contains(&not.to_string()), "secrets.security doesn't list {not}");
+        }
+    }
 }
 
-/// Metadata only (`?metadata=1`): plans, schemas and usage listed, no tool that answers stored
-/// data or changes anything; such a call is refused saying why, and the instructions say so.
-#[tokio::test]
-async fn a_metadata_connection_lists_no_data() {
-    let d = Daemon::new();
-    let (_, _, listed) = d.http(OPERATOR, Method::POST, "/v1/mcp?metadata=1", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))).await;
-    let names = names(&listed["result"]);
-    assert!(names.contains(&"postgres_list_projects".into()) && names.contains(&"postgres_explain".into()), "{names:?}");
-    assert!(!names.contains(&"postgres_query".into()) && !names.contains(&"postgres_execute".into()), "{names:?}");
-    let (_, _, refused) = d.http(OPERATOR, Method::POST, "/v1/mcp?metadata=1", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "postgres_query", "arguments": { "endpoint": "ep_1", "sql": "select 1" } } }))).await;
-    assert!(refused["result"]["isError"] == true && refused["result"]["content"][0]["text"].as_str().unwrap_or_default().contains("metadata only"), "{refused}");
-    let (_, _, init) = d.http(OPERATOR, Method::POST, "/v1/mcp?metadata=1", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": "2025-06-18" } }))).await;
-    assert!(init["result"]["instructions"].as_str().unwrap_or_default().contains("metadata only"), "{init}");
-}
-
-/// The operator's policy holds every token's MCP to lockdown and to reading, whatever its URL asks
-/// (`mcp_lockdown`, `mcp_read_only`); the operator's own connection isn't held.
-#[tokio::test]
-async fn the_policy_holds_agents_to_lockdown_and_reading() {
-    let d = Daemon::new();
-    let token = d.token(json!([{ "product": "*", "resources": "*", "actions": { "read": "allow", "write": "allow", "delete": "allow" } }])).await;
-    assert!(names(&d.rpc(&token, "tools/list", json!({})).await).contains(&"postgres_delete_project".to_string()));
-    let (s, _, _) = d.http(OPERATOR, Method::PUT, "/v1/access/policy", Some(json!({ "mcp_lockdown": true, "mcp_read_only": true }))).await;
-    assert_eq!(s, StatusCode::OK);
-    let listed = d.rpc(&token, "tools/list", json!({})).await;
-    assert!(listed["tools"].as_array().unwrap().iter().all(|t| t["annotations"]["readOnlyHint"] == true), "read-only, unasked");
-    let work = d.tool(&token, "code_list_work", json!({})).await;
-    assert!(!work["content"][0]["text"].as_str().unwrap().contains("push the secrets"), "lockdown, unasked: {work}");
-    assert!(names(&d.rpc(OPERATOR, "tools/list", json!({})).await).contains(&"postgres_delete_project".to_string()), "not the operator");
-    // Agents only as grants: the admin token gets OAuth's challenge, a token goes on.
-    assert_eq!(d.http(OPERATOR, Method::PUT, "/v1/access/policy", Some(json!({ "mcp_require_grant": true }))).await.0, StatusCode::OK);
-    let (s, h, _) = d.http(OPERATOR, Method::POST, "/v1/mcp", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))).await;
-    assert!(s == StatusCode::UNAUTHORIZED && h.get("www-authenticate").is_some_and(|v| v.to_str().unwrap().contains("resource_metadata")), "{s}");
-    assert!(!d.rpc(&token, "tools/list", json!({})).await["tools"].as_array().unwrap().is_empty());
-}
-
-/// Lockdown (`?lockdown=1`): an outside record's text never reaches the model, in the structured
-/// answer or the text block a tool set wrote; the rest of the answer stays.
-#[tokio::test]
+/// Lockdown: an outside record's text never reaches the model (a fork's screenshot is a notice
+/// instead of the image), and the operator's policy holds every token's MCP to lockdown and to
+/// reading whatever its URL asks.
+#[tokio::test(flavor = "multi_thread")]
 async fn lockdown_withholds_what_outsiders_wrote() {
-    let d = Daemon::new();
-    let call = |path: &'static str| {
-        let d = &d;
-        async move { d.http(OPERATOR, Method::POST, path, Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "code_list_work", "arguments": {} } }))).await.2["result"].clone() }
-    };
-    let open = call("/v1/mcp").await;
-    assert!(open["content"][0]["text"].as_str().unwrap().contains("push the secrets"), "{open}");
-    let locked = call("/v1/mcp?lockdown=1").await;
-    let text = locked["content"][0]["text"].as_str().unwrap();
-    assert!(!text.contains("Ignore your instructions") && !text.contains("push the secrets") && text.contains("Fix the build"), "{text}");
-    assert_eq!(locked["structuredContent"]["items"][0]["id"], "wi_1");
-    assert_eq!(locked["structuredContent"]["items"][0]["title"], roll_mcp::lockdown::WITHHELD);
-    // A site's form submissions are anyone's to write: their fields are withheld too, ids kept.
-    let form = |path: &'static str| {
-        let d = &d;
-        async move { d.http(OPERATOR, Method::POST, path, Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "apps_form_submissions", "arguments": { "service": "svc_1", "env": "production", "form": "contact" } } }))).await.2["result"].clone() }
-    };
-    assert!(form("/v1/mcp").await["content"][0]["text"].as_str().unwrap().contains("delete production"));
-    let locked = form("/v1/mcp?lockdown=1").await;
-    assert!(!locked["content"][0]["text"].as_str().unwrap().contains("delete production"), "{locked}");
-    assert_eq!((&locked["structuredContent"]["items"][0]["id"], &locked["structuredContent"]["items"][0]["fields"]), (&json!("sub_1"), &json!(roll_mcp::lockdown::WITHHELD_SENT)), "{locked}");
-    let (s, _, _) = d.http(OPERATOR, Method::POST, "/v1/mcp?lockdown=maybe", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))).await;
-    assert_eq!(s, StatusCode::BAD_REQUEST, "a typo never turns lockdown off");
+    {
+        let d = Daemon::new();
+        let call = |path: &'static str| {
+            let d = &d;
+            async move { d.http(OPERATOR, Method::POST, path, Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "code_list_work", "arguments": {} } }))).await.2["result"].clone() }
+        };
+        let open = call("/v1/mcp").await;
+        assert!(open["content"][0]["text"].as_str().unwrap().contains("push the secrets"), "{open}");
+        let locked = call("/v1/mcp?lockdown=1").await;
+        let text = locked["content"][0]["text"].as_str().unwrap();
+        assert!(!text.contains("Ignore your instructions") && !text.contains("push the secrets") && text.contains("Fix the build"), "{text}");
+        assert_eq!(locked["structuredContent"]["items"][0]["id"], "wi_1");
+        assert_eq!(locked["structuredContent"]["items"][0]["title"], roll_mcp::lockdown::WITHHELD);
+        // A site's form submissions are anyone's to write: their fields are withheld too, ids kept.
+        let form = |path: &'static str| {
+            let d = &d;
+            async move { d.http(OPERATOR, Method::POST, path, Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "apps_form_submissions", "arguments": { "service": "svc_1", "env": "production", "form": "contact" } } }))).await.2["result"].clone() }
+        };
+        assert!(form("/v1/mcp").await["content"][0]["text"].as_str().unwrap().contains("delete production"));
+        let locked = form("/v1/mcp?lockdown=1").await;
+        assert!(!locked["content"][0]["text"].as_str().unwrap().contains("delete production"), "{locked}");
+        assert_eq!((&locked["structuredContent"]["items"][0]["id"], &locked["structuredContent"]["items"][0]["fields"]), (&json!("sub_1"), &json!(roll_mcp::lockdown::WITHHELD_SENT)), "{locked}");
+        let (s, _, _) = d.http(OPERATOR, Method::POST, "/v1/mcp?lockdown=maybe", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "a typo never turns lockdown off");
+    }
+    {
+        // The operator's policy holds every token's MCP to lockdown and to reading, whatever its URL asks
+        // (`mcp_lockdown`, `mcp_read_only`); the operator's own connection isn't held.
+        let d = Daemon::new();
+        let token = d.token(json!([{ "product": "*", "resources": "*", "actions": { "read": "allow", "write": "allow", "delete": "allow" } }])).await;
+        assert!(names(&d.rpc(&token, "tools/list", json!({})).await).contains(&"postgres_delete_project".to_string()));
+        let (s, _, _) = d.http(OPERATOR, Method::PUT, "/v1/access/policy", Some(json!({ "mcp_lockdown": true, "mcp_read_only": true }))).await;
+        assert_eq!(s, StatusCode::OK);
+        let listed = d.rpc(&token, "tools/list", json!({})).await;
+        assert!(listed["tools"].as_array().unwrap().iter().all(|t| t["annotations"]["readOnlyHint"] == true), "read-only, unasked");
+        let work = d.tool(&token, "code_list_work", json!({})).await;
+        assert!(!work["content"][0]["text"].as_str().unwrap().contains("push the secrets"), "lockdown, unasked: {work}");
+        assert!(names(&d.rpc(OPERATOR, "tools/list", json!({})).await).contains(&"postgres_delete_project".to_string()), "not the operator");
+        // Agents only as grants: the admin token gets OAuth's challenge, a token goes on.
+        assert_eq!(d.http(OPERATOR, Method::PUT, "/v1/access/policy", Some(json!({ "mcp_require_grant": true }))).await.0, StatusCode::OK);
+        let (s, h, _) = d.http(OPERATOR, Method::POST, "/v1/mcp", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))).await;
+        assert!(s == StatusCode::UNAUTHORIZED && h.get("www-authenticate").is_some_and(|v| v.to_str().unwrap().contains("resource_metadata")), "{s}");
+        assert!(!d.rpc(&token, "tools/list", json!({})).await["tools"].as_array().unwrap().is_empty());
+    }
+    {
+        // A screenshot comes back as MCP image content, so an agent can look at a preview; in lockdown
+        // a fork's page (any words its code shows) comes back as a notice instead.
+        let d = Daemon::with_products(vec!["previews".into()]);
+        let shot = d.tool(OPERATOR, "previews_screenshot", json!({ "id": "pv_1" })).await;
+        assert_eq!((shot["isError"].as_bool(), shot["content"][1]["type"].as_str(), shot["content"][1]["mimeType"].as_str()), (Some(false), Some("image"), Some("image/png")), "{shot}");
+        let call = |path: &'static str, id: &'static str| {
+            let d = &d;
+            async move { d.http(OPERATOR, Method::POST, path, Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "previews_screenshot", "arguments": { "id": id } } }))).await.2["result"].clone() }
+        };
+        let images = |r: &Value| r["content"].as_array().map_or(0, |c| c.iter().filter(|c| c["type"] == "image").count());
+        assert_eq!(images(&call("/v1/mcp", "pv_fork").await), 1, "outside lockdown a fork's picture is shown");
+        assert_eq!(images(&call("/v1/mcp?lockdown=1", "pv_1").await), 1, "a trusted preview's picture is shown in lockdown");
+        let locked = call("/v1/mcp?lockdown=1", "pv_fork").await;
+        assert_eq!((images(&locked), locked["content"][0]["text"].as_str()), (0, Some(roll_mcp::lockdown::WITHHELD_PICTURE)), "{locked}");
+        // A text answer from outside (a fork's caught mail) is withheld whole too.
+        let mail = |path: &'static str, mail: &'static str| {
+            let d = &d;
+            async move { d.http(OPERATOR, Method::POST, path, Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "previews_read_mail", "arguments": { "id": "pv_1", "mail": mail } } }))).await.2["result"].clone() }
+        };
+        assert!(mail("/v1/mcp?lockdown=1", "m_team").await["content"][0]["text"].as_str().unwrap_or("").contains("Subject:"));
+        let locked = mail("/v1/mcp?lockdown=1", "m_fork").await;
+        assert_eq!(locked["content"][0]["text"].as_str(), Some(roll_mcp::lockdown::WITHHELD), "{locked}");
+    }
 }
 
 /// Seals as rolld's does in shape: bound to the task, opened only with the same binding.
@@ -831,43 +871,94 @@ async fn tools_list_cost() {
     }
 }
 
-/// A prompt's arguments complete from what the connection may list (MCP `completion/complete`,
-/// read through the gate): the operator gets matching projects; a token without the prompt's
-/// tools gets nothing.
-/// A call missing an id it needs, from a 2026 client that fills in forms, asks the person to pick
-/// one (the choices what the connection may read), and the retry with the choice runs; a client
-/// that doesn't fill in forms gets the call's own answer, as before.
+/// A prompt's arguments complete from what the connection may list (MCP `completion/complete`, read
+/// through the gate), and a call missing an id it needs, from a 2026 client that fills in forms,
+/// asks the person to pick one; the retry with the choice runs.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_missing_id_is_asked_for() {
-    let d = Daemon::new();
-    let call = |caps: Value, extra: Value| {
-        let mut params = json!({ "name": "postgres_delete_project", "arguments": {} });
-        params["_meta"] = json!({ "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientInfo": { "name": "modern", "version": "2" }, "io.modelcontextprotocol/clientCapabilities": caps });
-        if let Some(o) = extra.as_object() {
-            for (k, v) in o {
-                params[k] = v.clone();
+    {
+        let d = Daemon::new();
+        let call = |caps: Value, extra: Value| {
+            let mut params = json!({ "name": "postgres_delete_project", "arguments": {} });
+            params["_meta"] = json!({ "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientInfo": { "name": "modern", "version": "2" }, "io.modelcontextprotocol/clientCapabilities": caps });
+            if let Some(o) = extra.as_object() {
+                for (k, v) in o {
+                    params[k] = v.clone();
+                }
             }
-        }
-        let d = &d;
-        async move {
-            let body = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": params });
-            let h = [("mcp-protocol-version", "2026-07-28"), ("mcp-method", "tools/call"), ("mcp-name", "postgres_delete_project")];
-            d.http_with(OPERATOR, Method::POST, "/v1/mcp", Some(body), &h).await.2
-        }
-    };
-    let forms = json!({ "elicitation": { "form": {} } });
-    let asked = call(forms.clone(), json!({})).await;
-    let form = &asked["result"]["inputRequests"]["missing:project"];
-    assert_eq!((asked["result"]["resultType"].as_str(), form["params"]["mode"].as_str()), (Some("input_required"), Some("form")), "{asked}");
-    assert_eq!(form["params"]["requestedSchema"]["properties"]["value"]["enum"], json!(["pa"]), "{asked}");
+            let d = &d;
+            async move {
+                let body = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": params });
+                let h = [("mcp-protocol-version", "2026-07-28"), ("mcp-method", "tools/call"), ("mcp-name", "postgres_delete_project")];
+                d.http_with(OPERATOR, Method::POST, "/v1/mcp", Some(body), &h).await.2
+            }
+        };
+        let forms = json!({ "elicitation": { "form": {} } });
+        let asked = call(forms.clone(), json!({})).await;
+        let form = &asked["result"]["inputRequests"]["missing:project"];
+        assert_eq!((asked["result"]["resultType"].as_str(), form["params"]["mode"].as_str()), (Some("input_required"), Some("form")), "{asked}");
+        assert_eq!(form["params"]["requestedSchema"]["properties"]["value"]["enum"], json!(["pa"]), "{asked}");
 
-    let ran = call(forms.clone(), json!({ "inputResponses": { "missing:project": { "action": "accept", "content": { "value": "pa" } } } })).await;
-    assert_eq!((ran["result"]["resultType"].as_str(), ran["result"]["isError"].as_bool()), (Some("complete"), Some(false)), "{ran}");
-    let declined = call(forms, json!({ "inputResponses": { "missing:project": { "action": "decline" } } })).await;
-    assert_eq!(declined["result"]["isError"], true, "{declined}");
-    // A client without forms: no form, the call answers as it would.
-    let plain = call(json!({}), json!({})).await;
-    assert_ne!(plain["result"]["resultType"], "input_required", "{plain}");
+        let ran = call(forms.clone(), json!({ "inputResponses": { "missing:project": { "action": "accept", "content": { "value": "pa" } } } })).await;
+        assert_eq!((ran["result"]["resultType"].as_str(), ran["result"]["isError"].as_bool()), (Some("complete"), Some(false)), "{ran}");
+        let declined = call(forms, json!({ "inputResponses": { "missing:project": { "action": "decline" } } })).await;
+        assert_eq!(declined["result"]["isError"], true, "{declined}");
+        // A client without forms: no form, the call answers as it would.
+        let plain = call(json!({}), json!({})).await;
+        assert_ne!(plain["result"]["resultType"], "input_required", "{plain}");
+    }
+    {
+        let d = Daemon::with_products(vec!["postgres".into(), "secrets".into(), "workspace".into()]);
+        let mut made_ids = Vec::new();
+        for name in ["billing", "blog", "api"] {
+            let (s, _, made) = d.http(OPERATOR, Method::POST, "/v1/workspace/projects", Some(json!({ "name": name }))).await;
+            assert_eq!(s, StatusCode::CREATED);
+            made_ids.push(made["id"].as_str().unwrap().to_string());
+        }
+        let ask = |typed: &str| json!({ "ref": { "type": "ref/prompt", "name": "fix_secrets_health" }, "argument": { "name": "project", "value": typed } });
+        // Ids only (what the tools take), never names.
+        let got = d.rpc(OPERATOR, "completion/complete", ask("")).await;
+        let mut values: Vec<String> = got["completion"]["values"].as_array().unwrap().iter().filter_map(Value::as_str).map(str::to_string).collect();
+        values.sort();
+        made_ids.sort();
+        assert_eq!(values, made_ids, "{got}");
+        // A Postgres project completes from Postgres's own list, not the workspace's.
+        let pg = d.rpc(OPERATOR, "completion/complete", json!({ "ref": { "type": "ref/prompt", "name": "try_migration_on_branch" }, "argument": { "name": "project", "value": "" } })).await;
+        assert_eq!(pg["completion"]["values"], json!(["pa"]), "{pg}");
+        // A project's page (a resource template): listed, read through the gate, its id completed.
+        let templates = d.rpc(OPERATOR, "resources/templates/list", json!({})).await;
+        assert_eq!(templates["resourceTemplates"][0]["uriTemplate"], "roll://projects/{project}", "{templates}");
+        let uri = format!("roll://projects/{}", made_ids[0]);
+        let page = d.rpc(OPERATOR, "resources/read", json!({ "uri": uri })).await;
+        assert!(page["contents"][0]["text"].as_str().unwrap().contains("Workspace project \""), "{page}");
+        let sneaky = d.http(OPERATOR, Method::POST, "/v1/mcp", Some(json!({ "jsonrpc": "2.0", "id": 9, "method": "resources/read", "params": { "uri": "roll://projects/../../v1/access/tokens" } }))).await.2;
+        assert_eq!(sneaky["error"]["code"], -32002, "an id that isn't one reaches no route: {sneaky}");
+        let ids = d.rpc(OPERATOR, "completion/complete", json!({ "ref": { "type": "ref/resource", "uri": "roll://projects/{project}" }, "argument": { "name": "project", "value": "" } })).await;
+        assert_eq!(ids["completion"]["values"].as_array().unwrap().len(), 3, "{ids}");
+        // A roll code file (GitHub's repository contents): listed with code_read_file, read through it,
+        // its owner completed; a path that climbs or hides a slash names nothing.
+        assert_eq!(templates["resourceTemplates"][1]["uriTemplate"], "roll://code/{owner}/{repo}/{+path}", "{templates}");
+        let file = d.rpc(OPERATOR, "resources/read", json!({ "uri": "roll://code/acme/api/src/main.rs" })).await;
+        assert_eq!(file["contents"][0]["text"], "fn main() {}\n", "{file}");
+        for bad in ["roll://code/acme/api/src/../../x", "roll://code/acme/api/a%2Fb", "roll://code/acme/api/missing.rs", "roll://code/../../x"] {
+            let out = d.http(OPERATOR, Method::POST, "/v1/mcp", Some(json!({ "jsonrpc": "2.0", "id": 9, "method": "resources/read", "params": { "uri": bad } }))).await.2;
+            assert_eq!(out["error"]["code"], -32002, "{bad}: {out}");
+        }
+        let owners = d.rpc(OPERATOR, "completion/complete", json!({ "ref": { "type": "ref/resource", "uri": "roll://code/{owner}/{repo}/{+path}" }, "argument": { "name": "owner", "value": "" } })).await;
+        assert_eq!(owners["completion"]["values"], json!(["acme"]), "{owners}");
+        // A prompt this connection isn't offered: -32602.
+        let reader = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }])).await;
+        let none = d.http(&reader, Method::POST, "/v1/mcp", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "completion/complete", "params": ask("") }))).await.2;
+        assert_eq!(none["error"]["code"], -32602, "{none}");
+        // Typing never asks a person: a list that would ask is refused at once, and nothing waits.
+        let asker = d.token(json!([{ "product": "secrets", "resources": "*", "actions": { "read": "allow" } }, { "product": "workspace", "resources": "*", "actions": { "read": "ask" } }])).await;
+        let started = std::time::Instant::now();
+        let quiet = d.rpc(&asker, "completion/complete", ask("")).await;
+        assert_eq!(quiet["completion"]["values"], json!([]), "{quiet}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "it didn't wait on an approval");
+        let pending = d.http(OPERATOR, Method::GET, "/v1/access/approvals?state=pending", None).await.2;
+        assert_eq!(pending.as_array().map_or(0, Vec::len) + pending["approvals"].as_array().map_or(0, Vec::len), 0, "no approval opened: {pending}");
+    }
 }
 
 /// Skills over MCP (SEP-2640): `server/discover` declares the extension, `skills/list` has the
@@ -907,102 +998,6 @@ async fn skills_are_the_workflows_a_connection_has() {
         assert_eq!(front[0], format!("name: {}", skill["frontmatter"]["name"].as_str().unwrap()));
         assert_eq!(front[1], format!("description: {}", skill["frontmatter"]["description"]));
     }
-}
-
-/// An area (`?toolsets=secrets.security`) lists its own tools and the lookups every area needs,
-/// and nothing of its product's other areas; the access tools stay.
-#[tokio::test]
-async fn an_area_lists_its_tools_and_the_lookups() {
-    let d = Daemon::with_products(vec!["secrets".into(), "workspace".into()]);
-    let (s, _, out) = d.http(OPERATOR, Method::POST, "/v1/mcp?toolsets=secrets.security", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))).await;
-    assert_eq!(s, StatusCode::OK, "{out}");
-    let listed = names(&out["result"]);
-    for has in ["secrets_audit", "secrets_findings", "secrets_list_environments", "access_wait_approval"] {
-        assert!(listed.contains(&has.to_string()), "secrets.security lists {has}: {listed:?}");
-    }
-    for not in ["secrets_set", "secrets_transit_encrypt", "workspace_list_projects"] {
-        assert!(!listed.contains(&not.to_string()), "secrets.security doesn't list {not}");
-    }
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn prompt_arguments_complete_from_what_it_may_read() {
-    let d = Daemon::with_products(vec!["postgres".into(), "secrets".into(), "workspace".into()]);
-    let mut made_ids = Vec::new();
-    for name in ["billing", "blog", "api"] {
-        let (s, _, made) = d.http(OPERATOR, Method::POST, "/v1/workspace/projects", Some(json!({ "name": name }))).await;
-        assert_eq!(s, StatusCode::CREATED);
-        made_ids.push(made["id"].as_str().unwrap().to_string());
-    }
-    let ask = |typed: &str| json!({ "ref": { "type": "ref/prompt", "name": "fix_secrets_health" }, "argument": { "name": "project", "value": typed } });
-    // Ids only (what the tools take), never names.
-    let got = d.rpc(OPERATOR, "completion/complete", ask("")).await;
-    let mut values: Vec<String> = got["completion"]["values"].as_array().unwrap().iter().filter_map(Value::as_str).map(str::to_string).collect();
-    values.sort();
-    made_ids.sort();
-    assert_eq!(values, made_ids, "{got}");
-    // A Postgres project completes from Postgres's own list, not the workspace's.
-    let pg = d.rpc(OPERATOR, "completion/complete", json!({ "ref": { "type": "ref/prompt", "name": "try_migration_on_branch" }, "argument": { "name": "project", "value": "" } })).await;
-    assert_eq!(pg["completion"]["values"], json!(["pa"]), "{pg}");
-    // A project's page (a resource template): listed, read through the gate, its id completed.
-    let templates = d.rpc(OPERATOR, "resources/templates/list", json!({})).await;
-    assert_eq!(templates["resourceTemplates"][0]["uriTemplate"], "roll://projects/{project}", "{templates}");
-    let uri = format!("roll://projects/{}", made_ids[0]);
-    let page = d.rpc(OPERATOR, "resources/read", json!({ "uri": uri })).await;
-    assert!(page["contents"][0]["text"].as_str().unwrap().contains("Workspace project \""), "{page}");
-    let sneaky = d.http(OPERATOR, Method::POST, "/v1/mcp", Some(json!({ "jsonrpc": "2.0", "id": 9, "method": "resources/read", "params": { "uri": "roll://projects/../../v1/access/tokens" } }))).await.2;
-    assert_eq!(sneaky["error"]["code"], -32002, "an id that isn't one reaches no route: {sneaky}");
-    let ids = d.rpc(OPERATOR, "completion/complete", json!({ "ref": { "type": "ref/resource", "uri": "roll://projects/{project}" }, "argument": { "name": "project", "value": "" } })).await;
-    assert_eq!(ids["completion"]["values"].as_array().unwrap().len(), 3, "{ids}");
-    // A roll code file (GitHub's repository contents): listed with code_read_file, read through it,
-    // its owner completed; a path that climbs or hides a slash names nothing.
-    assert_eq!(templates["resourceTemplates"][1]["uriTemplate"], "roll://code/{owner}/{repo}/{+path}", "{templates}");
-    let file = d.rpc(OPERATOR, "resources/read", json!({ "uri": "roll://code/acme/api/src/main.rs" })).await;
-    assert_eq!(file["contents"][0]["text"], "fn main() {}\n", "{file}");
-    for bad in ["roll://code/acme/api/src/../../x", "roll://code/acme/api/a%2Fb", "roll://code/acme/api/missing.rs", "roll://code/../../x"] {
-        let out = d.http(OPERATOR, Method::POST, "/v1/mcp", Some(json!({ "jsonrpc": "2.0", "id": 9, "method": "resources/read", "params": { "uri": bad } }))).await.2;
-        assert_eq!(out["error"]["code"], -32002, "{bad}: {out}");
-    }
-    let owners = d.rpc(OPERATOR, "completion/complete", json!({ "ref": { "type": "ref/resource", "uri": "roll://code/{owner}/{repo}/{+path}" }, "argument": { "name": "owner", "value": "" } })).await;
-    assert_eq!(owners["completion"]["values"], json!(["acme"]), "{owners}");
-    // A prompt this connection isn't offered: -32602.
-    let reader = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }])).await;
-    let none = d.http(&reader, Method::POST, "/v1/mcp", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "completion/complete", "params": ask("") }))).await.2;
-    assert_eq!(none["error"]["code"], -32602, "{none}");
-    // Typing never asks a person: a list that would ask is refused at once, and nothing waits.
-    let asker = d.token(json!([{ "product": "secrets", "resources": "*", "actions": { "read": "allow" } }, { "product": "workspace", "resources": "*", "actions": { "read": "ask" } }])).await;
-    let started = std::time::Instant::now();
-    let quiet = d.rpc(&asker, "completion/complete", ask("")).await;
-    assert_eq!(quiet["completion"]["values"], json!([]), "{quiet}");
-    assert!(started.elapsed() < std::time::Duration::from_secs(5), "it didn't wait on an approval");
-    let pending = d.http(OPERATOR, Method::GET, "/v1/access/approvals?state=pending", None).await.2;
-    assert_eq!(pending.as_array().map_or(0, Vec::len) + pending["approvals"].as_array().map_or(0, Vec::len), 0, "no approval opened: {pending}");
-}
-
-/// A screenshot comes back as MCP image content, so an agent can look at a preview; in lockdown
-/// a fork's page (any words its code shows) comes back as a notice instead.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_screenshot_is_an_image_the_agent_sees() {
-    let d = Daemon::with_products(vec!["previews".into()]);
-    let shot = d.tool(OPERATOR, "previews_screenshot", json!({ "id": "pv_1" })).await;
-    assert_eq!((shot["isError"].as_bool(), shot["content"][1]["type"].as_str(), shot["content"][1]["mimeType"].as_str()), (Some(false), Some("image"), Some("image/png")), "{shot}");
-    let call = |path: &'static str, id: &'static str| {
-        let d = &d;
-        async move { d.http(OPERATOR, Method::POST, path, Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "previews_screenshot", "arguments": { "id": id } } }))).await.2["result"].clone() }
-    };
-    let images = |r: &Value| r["content"].as_array().map_or(0, |c| c.iter().filter(|c| c["type"] == "image").count());
-    assert_eq!(images(&call("/v1/mcp", "pv_fork").await), 1, "outside lockdown a fork's picture is shown");
-    assert_eq!(images(&call("/v1/mcp?lockdown=1", "pv_1").await), 1, "a trusted preview's picture is shown in lockdown");
-    let locked = call("/v1/mcp?lockdown=1", "pv_fork").await;
-    assert_eq!((images(&locked), locked["content"][0]["text"].as_str()), (0, Some(roll_mcp::lockdown::WITHHELD_PICTURE)), "{locked}");
-    // A text answer from outside (a fork's caught mail) is withheld whole too.
-    let mail = |path: &'static str, mail: &'static str| {
-        let d = &d;
-        async move { d.http(OPERATOR, Method::POST, path, Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "previews_read_mail", "arguments": { "id": "pv_1", "mail": mail } } }))).await.2["result"].clone() }
-    };
-    assert!(mail("/v1/mcp?lockdown=1", "m_team").await["content"][0]["text"].as_str().unwrap_or("").contains("Subject:"));
-    let locked = mail("/v1/mcp?lockdown=1", "m_fork").await;
-    assert_eq!(locked["content"][0]["text"].as_str(), Some(roll_mcp::lockdown::WITHHELD), "{locked}");
 }
 
 /// `roll_find`: a resource by part of its name, from each list the connection has, naming the read
@@ -1047,65 +1042,66 @@ async fn a_resource_is_found_by_name_or_link() {
     assert_eq!((s, names(&listed["result"])), (StatusCode::OK, vec!["roll_find".to_string()]), "{listed}");
 }
 
-/// A token's page shows what an agent connected with it is offered: its tools (as `tools/list`
-/// would list them) and what they cost an agent's context, read as the caller.
+/// What a token is offered is what it reaches: its page shows the tools `tools/list` would list and
+/// what they cost an agent's context; a person's token only their account's reach; a member's
+/// client what their role allows.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_tokens_page_shows_what_an_agent_sees() {
-    let d = Daemon::new();
-    let (_, _, made) = d
-        .http(OPERATOR, Method::POST, "/v1/access/tokens", Some(json!({ "name": "reader", "rules": [{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }] })))
-        .await;
-    let (id, token) = (made["grant"]["id"].as_str().unwrap().to_string(), made["token"].as_str().unwrap().to_string());
-    let (s, _, seen) = d.http(OPERATOR, Method::GET, &format!("/v1/access/tokens/{id}/tools"), None).await;
-    assert_eq!(s, StatusCode::OK, "{seen}");
-    let tools: Vec<&str> = seen["tools"].as_array().unwrap().iter().filter_map(|t| t["name"].as_str()).collect();
-    assert!(tools.contains(&"postgres_query") && !tools.contains(&"postgres_execute"), "{tools:?}");
-    assert!(seen["context_tokens"].as_u64().unwrap() > 0);
-    // Asked as the caller: a token that may not read tokens learns nothing.
-    assert_eq!(d.http(&token, Method::GET, &format!("/v1/access/tokens/{id}/tools"), None).await.0, StatusCode::FORBIDDEN);
-    assert_eq!(d.http(OPERATOR, Method::GET, "/v1/access/tokens/tok_nope/tools", None).await.0, StatusCode::NOT_FOUND);
-}
-
-/// A person's own token's page shows only what their account reaches (as `tools/list` would for
-/// them): rules for everything, but Postgres is the operator's, so none of its tools; previews are a
-/// member product (their role decides), so its tools are there.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_persons_token_page_shows_only_their_reach() {
-    let d = Daemon::with_products(vec!["postgres".into(), "previews".into()]);
-    let new = serde_json::from_value::<roll_access::store::NewGrant>(json!({ "name": "alices", "rules": [{ "product": "*", "resources": "*", "actions": { "read": "allow" } }] })).unwrap();
-    let (g, _) = d.access.store.create(&new, roll_auth::GrantKind::Token, "usr_alice", None, Some("usr_alice")).unwrap();
-    let (s, _, seen) = d.http(OPERATOR, Method::GET, &format!("/v1/access/tokens/{}/tools", g.id), None).await;
-    assert_eq!(s, StatusCode::OK, "{seen}");
-    let tools: Vec<&str> = seen["tools"].as_array().unwrap().iter().filter_map(|t| t["name"].as_str()).collect();
-    assert!(tools.contains(&"workspace_list_projects"), "{tools:?}");
-    assert!(!tools.iter().any(|t| t.starts_with("postgres_")), "a person's token never reaches Postgres: {tools:?}");
-    assert!(tools.contains(&"previews_list"), "a member's role reaches previews: {tools:?}");
-}
-
-/// A member's own token lists a member product's tools as their role allows, as the gate decides
-/// its calls (`within` their session): a viewer's client is shown secrets' reads, not its reveals or
-/// writes, even with a token that names every action; made an admin, they're there.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_members_client_lists_what_their_role_allows() {
-    let d = Daemon::with_products(vec!["secrets".into()]);
-    let project = d.workspace.create("usr_bob", "pay", "", None).unwrap();
-    let (_, url) = d.workspace.invite(&roll_workspace::Actor::operator(), &project.id, "alice@example.com", "viewer", None).unwrap();
-    d.workspace.accept("usr_alice", url.split("token=").nth(1).unwrap(), None).unwrap();
-    let all = json!([{ "product": "*", "resources": "*", "actions": { "read": "allow", "write": "allow", "reveal": "allow", "admin": "allow" } }]);
-    let new = serde_json::from_value::<roll_access::store::NewGrant>(json!({ "name": "alices", "rules": all })).unwrap();
-    let (g, _) = d.access.store.create(&new, roll_auth::GrantKind::Token, "usr_alice", None, Some("usr_alice")).unwrap();
-    let listed = || async {
+async fn a_token_is_offered_what_it_reaches() {
+    {
+        // A token's page shows what an agent connected with it is offered: its tools (as `tools/list`
+        // would list them) and what they cost an agent's context, read as the caller.
+        let d = Daemon::new();
+        let (_, _, made) = d
+            .http(OPERATOR, Method::POST, "/v1/access/tokens", Some(json!({ "name": "reader", "rules": [{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }] })))
+            .await;
+        let (id, token) = (made["grant"]["id"].as_str().unwrap().to_string(), made["token"].as_str().unwrap().to_string());
+        let (s, _, seen) = d.http(OPERATOR, Method::GET, &format!("/v1/access/tokens/{id}/tools"), None).await;
+        assert_eq!(s, StatusCode::OK, "{seen}");
+        let tools: Vec<&str> = seen["tools"].as_array().unwrap().iter().filter_map(|t| t["name"].as_str()).collect();
+        assert!(tools.contains(&"postgres_query") && !tools.contains(&"postgres_execute"), "{tools:?}");
+        assert!(seen["context_tokens"].as_u64().unwrap() > 0);
+        // Asked as the caller: a token that may not read tokens learns nothing.
+        assert_eq!(d.http(&token, Method::GET, &format!("/v1/access/tokens/{id}/tools"), None).await.0, StatusCode::FORBIDDEN);
+        assert_eq!(d.http(OPERATOR, Method::GET, "/v1/access/tokens/tok_nope/tools", None).await.0, StatusCode::NOT_FOUND);
+    }
+    {
+        // A person's own token's page shows only what their account reaches (as `tools/list` would for
+        // them): rules for everything, but Postgres is the operator's, so none of its tools; previews are a
+        // member product (their role decides), so its tools are there.
+        let d = Daemon::with_products(vec!["postgres".into(), "previews".into()]);
+        let new = serde_json::from_value::<roll_access::store::NewGrant>(json!({ "name": "alices", "rules": [{ "product": "*", "resources": "*", "actions": { "read": "allow" } }] })).unwrap();
+        let (g, _) = d.access.store.create(&new, roll_auth::GrantKind::Token, "usr_alice", None, Some("usr_alice")).unwrap();
         let (s, _, seen) = d.http(OPERATOR, Method::GET, &format!("/v1/access/tokens/{}/tools", g.id), None).await;
         assert_eq!(s, StatusCode::OK, "{seen}");
-        seen["tools"].as_array().unwrap().iter().filter_map(|t| t["name"].as_str().map(String::from)).collect::<Vec<String>>()
-    };
-    let tools = listed().await;
-    assert!(tools.iter().any(|t| t == "secrets_list"), "a viewer reads: {tools:?}");
-    // secrets_set_imports' action comes from its body (write or admin): read never counts for it.
-    assert!(!tools.iter().any(|t| t == "secrets_set" || t == "secrets_get_values" || t == "secrets_set_imports"), "a viewer neither writes nor reveals: {tools:?}");
-    d.workspace.set_role(&roll_workspace::Actor::operator(), &project.id, "usr_alice", "admin", None).unwrap();
-    let tools = listed().await;
-    assert!(tools.iter().any(|t| t == "secrets_set") && tools.iter().any(|t| t == "secrets_get_values"), "an admin does: {tools:?}");
+        let tools: Vec<&str> = seen["tools"].as_array().unwrap().iter().filter_map(|t| t["name"].as_str()).collect();
+        assert!(tools.contains(&"workspace_list_projects"), "{tools:?}");
+        assert!(!tools.iter().any(|t| t.starts_with("postgres_")), "a person's token never reaches Postgres: {tools:?}");
+        assert!(tools.contains(&"previews_list"), "a member's role reaches previews: {tools:?}");
+    }
+    {
+        // A member's own token lists a member product's tools as their role allows, as the gate decides
+        // its calls (`within` their session): a viewer's client is shown secrets' reads, not its reveals or
+        // writes, even with a token that names every action; made an admin, they're there.
+        let d = Daemon::with_products(vec!["secrets".into()]);
+        let project = d.workspace.create("usr_bob", "pay", "", None).unwrap();
+        let (_, url) = d.workspace.invite(&roll_workspace::Actor::operator(), &project.id, "alice@example.com", "viewer", None).unwrap();
+        d.workspace.accept("usr_alice", url.split("token=").nth(1).unwrap(), None).unwrap();
+        let all = json!([{ "product": "*", "resources": "*", "actions": { "read": "allow", "write": "allow", "reveal": "allow", "admin": "allow" } }]);
+        let new = serde_json::from_value::<roll_access::store::NewGrant>(json!({ "name": "alices", "rules": all })).unwrap();
+        let (g, _) = d.access.store.create(&new, roll_auth::GrantKind::Token, "usr_alice", None, Some("usr_alice")).unwrap();
+        let listed = || async {
+            let (s, _, seen) = d.http(OPERATOR, Method::GET, &format!("/v1/access/tokens/{}/tools", g.id), None).await;
+            assert_eq!(s, StatusCode::OK, "{seen}");
+            seen["tools"].as_array().unwrap().iter().filter_map(|t| t["name"].as_str().map(String::from)).collect::<Vec<String>>()
+        };
+        let tools = listed().await;
+        assert!(tools.iter().any(|t| t == "secrets_list"), "a viewer reads: {tools:?}");
+        // secrets_set_imports' action comes from its body (write or admin): read never counts for it.
+        assert!(!tools.iter().any(|t| t == "secrets_set" || t == "secrets_get_values" || t == "secrets_set_imports"), "a viewer neither writes nor reveals: {tools:?}");
+        d.workspace.set_role(&roll_workspace::Actor::operator(), &project.id, "usr_alice", "admin", None).unwrap();
+        let tools = listed().await;
+        assert!(tools.iter().any(|t| t == "secrets_set") && tools.iter().any(|t| t == "secrets_get_values"), "an admin does: {tools:?}");
+    }
 }
 
 /// Step-up (SEP-835): an OAuth connection's refused call carries a challenge naming the step-up roll
@@ -1143,61 +1139,6 @@ async fn a_refused_oauth_call_challenges_for_the_rule() {
     assert!(plain["_meta"].get("mcp/www_authenticate").is_none(), "a scoped token has no consent to step up: {plain}");
 }
 
-/// 2026-07-28's `subscriptions/listen` (SEP-2575): the stream starts with the acknowledgement of
-/// what roll will send, then says when the connection's tools change (an access request approved),
-/// and the event types it may poll with them (SEP-3415), tagged with the subscription's id.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_subscription_hears_the_tools_change() {
-    let d = Daemon::with_products(vec!["postgres".into(), "previews".into()]);
-    let asker = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "delete": "ask" } }])).await;
-    let meta = json!({ "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientInfo": { "name": "t", "version": "1" }, "io.modelcontextprotocol/clientCapabilities": {} });
-    let listen = json!({ "jsonrpc": "2.0", "id": "listen:1", "method": "subscriptions/listen", "params": { "_meta": meta, "notifications": { "toolsListChanged": true, "resourcesListChanged": true, "eventsListChanged": true } } });
-    let req = Request::builder()
-        .method(Method::POST)
-        .uri("/v1/mcp")
-        .header("content-type", "application/json")
-        .header("accept", "application/json, text/event-stream")
-        .header("mcp-protocol-version", "2026-07-28")
-        .header("mcp-method", "subscriptions/listen")
-        .header("authorization", format!("Bearer {asker}"))
-        .body(Body::from(listen.to_string()))
-        .unwrap();
-    // Asking only for what roll doesn't send is refused rather than held open.
-    let nothing = json!({ "jsonrpc": "2.0", "id": "listen:0", "method": "subscriptions/listen", "params": { "_meta": meta, "notifications": { "resourcesListChanged": true } } });
-    let (_, _, refused) = d.http_with(&asker, Method::POST, "/v1/mcp", Some(nothing), &[("mcp-protocol-version", "2026-07-28"), ("mcp-method", "subscriptions/listen")]).await;
-    assert_eq!(refused["error"]["code"], -32602, "{refused}");
-    let mut body = d.router.clone().oneshot(req).await.unwrap().into_body();
-    let mut buf = String::new();
-    // The next JSON-RPC message on the stream (keep-alive comments skipped), within 15 s.
-    let mut next = async move || -> Value {
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
-        loop {
-            if let Some(i) = buf.find("\n\n") {
-                let event: String = buf.drain(..i + 2).collect();
-                if let Some(data) = event.lines().find_map(|l| l.strip_prefix("data: ").or_else(|| l.strip_prefix("data:"))) {
-                    return serde_json::from_str(data).unwrap();
-                }
-                continue;
-            }
-            let frame = tokio::time::timeout_at(deadline, body.frame()).await.expect("a message within 15 s").unwrap_or_else(|| panic!("the stream ended: {buf}")).unwrap();
-            if let Ok(data) = frame.into_data() {
-                buf.push_str(&String::from_utf8_lossy(&data));
-            }
-        }
-    };
-    let ack = next().await;
-    assert_eq!((ack["method"].as_str(), &ack["params"]["notifications"]), (Some("notifications/subscriptions/acknowledged"), &json!({ "toolsListChanged": true, "eventsListChanged": true })), "only what roll sends");
-    assert_eq!(ack["params"]["_meta"]["io.modelcontextprotocol/subscriptionId"], "listen:1", "a client matches the ack by it");
-    let asked = d.tool(&asker, "access_request_access", json!({ "product": "previews", "action": "read", "for": "15m", "reason": "follow the previews" })).await;
-    let apr = asked["structuredContent"]["id"].as_str().unwrap_or_else(|| panic!("{asked}")).to_string();
-    assert_eq!(d.http(OPERATOR, Method::POST, &format!("/v1/access/approvals/{apr}/approve"), None).await.0, StatusCode::OK);
-    let changed = next().await;
-    assert_eq!((changed["method"].as_str(), &changed["params"]["_meta"]["io.modelcontextprotocol/subscriptionId"]), (Some("notifications/tools/list_changed"), &json!("listen:1")), "{changed}");
-    // Reading previews offers previews.event too: the event types changed with the tools.
-    let types = next().await;
-    assert_eq!((types["method"].as_str(), &types["params"]["_meta"]["io.modelcontextprotocol/subscriptionId"]), (Some("notifications/events/list_changed"), &json!("listen:1")), "{types}");
-}
-
 /// A credential headed where people and agents read it is refused before it's sent (guard.rs):
 /// a well-known format in a project's description, a roll token anywhere but roll secrets. The
 /// refusal names where and what kind, never the value, and the audit log keeps it.
@@ -1231,45 +1172,152 @@ async fn credentials_are_kept_out_of_what_agents_write() {
     assert_eq!(d.tool(&agent, "workspace_create_project", json!({ "name": "db", "description": "password: Tr0ub4dor-Horse-77" })).await["isError"], false, "it can't have read one");
 }
 
-/// MCP Events (SEP-3415, poll mode): a 2026-07-28 client finds `apps.event` where it may use
-/// apps' event log, starts from now, reads what happened after its cursor with its filter, gets a
-/// fresh cursor (and a possible gap) for one roll can't read, and is refused without apps.
-#[tokio::test]
-async fn an_agent_polls_what_happened() {
-    let d = Daemon::with_products(vec!["postgres".into(), "apps".into()]);
-    let send = |token: &str, method: &str, mut params: Value| {
-        params["_meta"] = json!({ "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientInfo": { "name": "events", "version": "1" }, "io.modelcontextprotocol/clientCapabilities": { "extensions": { "io.modelcontextprotocol/events": {} } } });
-        let mut h = vec![("mcp-protocol-version", "2026-07-28".to_string()), ("mcp-method", method.to_string())];
-        if let Some(n) = params["name"].as_str() {
-            h.push(("mcp-name", n.to_string()));
-        }
-        let (token, body, d) = (token.to_string(), json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params }), &d);
-        async move {
-            let h: Vec<(&str, &str)> = h.iter().map(|(k, v)| (*k, v.as_str())).collect();
-            d.http_with(&token, Method::POST, "/v1/mcp", Some(body), &h).await.2
-        }
-    };
-    let found = send(OPERATOR, "server/discover", json!({})).await;
-    assert_eq!(found["result"]["capabilities"]["extensions"]["io.modelcontextprotocol/events"]["listChanged"], true, "{found}");
-    let list = send(OPERATOR, "events/list", json!({})).await;
-    assert_eq!((list["result"]["events"][0]["name"].as_str(), &list["result"]["events"][0]["delivery"]), (Some("apps.event"), &json!(["poll", "push"])), "{list}");
+/// MCP Events and subscriptions (2026-07-28): an agent polls what happened, streams it, and hears
+/// when its connection's tools change.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_hears_what_happens() {
+    {
+        // MCP Events (SEP-3415, poll mode): a 2026-07-28 client finds `apps.event` where it may use
+        // apps' event log, starts from now, reads what happened after its cursor with its filter, gets a
+        // fresh cursor (and a possible gap) for one roll can't read, and is refused without apps.
+        let d = Daemon::with_products(vec!["postgres".into(), "apps".into()]);
+        let send = |token: &str, method: &str, mut params: Value| {
+            params["_meta"] = json!({ "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientInfo": { "name": "events", "version": "1" }, "io.modelcontextprotocol/clientCapabilities": { "extensions": { "io.modelcontextprotocol/events": {} } } });
+            let mut h = vec![("mcp-protocol-version", "2026-07-28".to_string()), ("mcp-method", method.to_string())];
+            if let Some(n) = params["name"].as_str() {
+                h.push(("mcp-name", n.to_string()));
+            }
+            let (token, body, d) = (token.to_string(), json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params }), &d);
+            async move {
+                let h: Vec<(&str, &str)> = h.iter().map(|(k, v)| (*k, v.as_str())).collect();
+                d.http_with(&token, Method::POST, "/v1/mcp", Some(body), &h).await.2
+            }
+        };
+        let found = send(OPERATOR, "server/discover", json!({})).await;
+        assert_eq!(found["result"]["capabilities"]["extensions"]["io.modelcontextprotocol/events"]["listChanged"], true, "{found}");
+        let list = send(OPERATOR, "events/list", json!({})).await;
+        assert_eq!((list["result"]["events"][0]["name"].as_str(), &list["result"]["events"][0]["delivery"]), (Some("apps.event"), &json!(["poll", "push"])), "{list}");
 
-    let poll = |token: &str, cursor: Value, args: Value| send(token, "events/poll", json!({ "name": "apps.event", "cursor": cursor, "arguments": args }));
-    let now = poll(OPERATOR, Value::Null, json!({})).await["result"].clone();
-    assert_eq!((now["events"].as_array().map(Vec::len), now["cursor"].as_str()), (Some(0), Some("a1:3")), "from now: {now}");
-    let r = poll(OPERATOR, json!("a1:0"), json!({ "kinds": ["deploy.*"] })).await["result"].clone();
-    let kinds: Vec<&str> = r["events"].as_array().unwrap().iter().map(|e| e["data"]["kind"].as_str().unwrap()).collect();
-    assert_eq!((kinds, r["cursor"].as_str(), r["hasMore"].as_bool()), (vec!["deploy.active", "deploy.failed"], Some("a1:3"), Some(false)), "{r}");
-    assert_eq!((r["events"][0]["eventId"].as_str(), r["events"][0]["timestamp"].as_str()), (Some("apps.event:1"), Some("2026-11-22T08:00:00.001Z")), "{r}");
-    let stale = poll(OPERATOR, json!("whatever"), json!({})).await["result"].clone();
-    assert_eq!((stale["truncated"].as_bool(), stale["cursor"].as_str()), (Some(true), Some("a1:3")), "{stale}");
-    assert_eq!(poll(OPERATOR, json!("a1:0"), json!({ "nope": 1 })).await["error"]["code"], -32602);
+        let poll = |token: &str, cursor: Value, args: Value| send(token, "events/poll", json!({ "name": "apps.event", "cursor": cursor, "arguments": args }));
+        let now = poll(OPERATOR, Value::Null, json!({})).await["result"].clone();
+        assert_eq!((now["events"].as_array().map(Vec::len), now["cursor"].as_str()), (Some(0), Some("a1:3")), "from now: {now}");
+        let r = poll(OPERATOR, json!("a1:0"), json!({ "kinds": ["deploy.*"] })).await["result"].clone();
+        let kinds: Vec<&str> = r["events"].as_array().unwrap().iter().map(|e| e["data"]["kind"].as_str().unwrap()).collect();
+        assert_eq!((kinds, r["cursor"].as_str(), r["hasMore"].as_bool()), (vec!["deploy.active", "deploy.failed"], Some("a1:3"), Some(false)), "{r}");
+        assert_eq!((r["events"][0]["eventId"].as_str(), r["events"][0]["timestamp"].as_str()), (Some("apps.event:1"), Some("2026-11-22T08:00:00.001Z")), "{r}");
+        let stale = poll(OPERATOR, json!("whatever"), json!({})).await["result"].clone();
+        assert_eq!((stale["truncated"].as_bool(), stale["cursor"].as_str()), (Some(true), Some("a1:3")), "{stale}");
+        assert_eq!(poll(OPERATOR, json!("a1:0"), json!({ "nope": 1 })).await["error"]["code"], -32602);
 
-    let reader = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }])).await;
-    let types = send(&reader, "events/list", json!({})).await["result"]["events"].clone();
-    let names: Vec<&str> = types.as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
-    assert_eq!(names, ["access.approval"], "its own approvals' decisions, not apps' events");
-    assert_eq!(poll(&reader, Value::Null, json!({})).await["error"]["code"], -32024);
+        let reader = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }])).await;
+        let types = send(&reader, "events/list", json!({})).await["result"]["events"].clone();
+        let names: Vec<&str> = types.as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert_eq!(names, ["access.approval"], "its own approvals' decisions, not apps' events");
+        assert_eq!(poll(&reader, Value::Null, json!({})).await["error"]["code"], -32024);
+    }
+    {
+        // MCP Events' push mode: `events/stream` answers a bad subscription with an error and no stream;
+        // a good one opens with `active` (its cursor and heartbeat), then what the filter keeps, each event
+        // with its cursor, every frame tagged with the request's id.
+        let d = Daemon::with_products(vec!["postgres".into(), "apps".into()]);
+        let meta = json!({ "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientInfo": { "name": "t", "version": "1" }, "io.modelcontextprotocol/clientCapabilities": { "extensions": { "io.modelcontextprotocol/events": {} } } });
+        let call = |name: &str, params: Value| {
+            let mut params = params;
+            params["_meta"] = meta.clone();
+            params["name"] = json!(name);
+            let body = json!({ "jsonrpc": "2.0", "id": "s1", "method": "events/stream", "params": params });
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v1/mcp")
+                .header("content-type", "application/json")
+                .header("accept", "application/json, text/event-stream")
+                .header("mcp-protocol-version", "2026-07-28")
+                .header("mcp-method", "events/stream")
+                .header("mcp-name", name)
+                .header("authorization", format!("Bearer {OPERATOR}"))
+                .body(Body::from(body.to_string()))
+                .unwrap()
+        };
+        let refused = d.router.clone().oneshot(call("nope.event", json!({}))).await.unwrap().into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(serde_json::from_slice::<Value>(&refused).unwrap()["error"]["code"], -32023, "no stream for an event roll doesn't have");
+        let mut body = d.router.clone().oneshot(call("apps.event", json!({ "cursor": "a1:0", "arguments": { "kinds": ["deploy.*"] }, "heartbeatMs": 20000 }))).await.unwrap().into_body();
+        let mut buf = String::new();
+        let mut next = async move || -> Value {
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+            loop {
+                if let Some(i) = buf.find("\n\n") {
+                    let event: String = buf.drain(..i + 2).collect();
+                    if let Some(data) = event.lines().find_map(|l| l.strip_prefix("data: ").or_else(|| l.strip_prefix("data:"))) {
+                        return serde_json::from_str(data).unwrap();
+                    }
+                    continue;
+                }
+                let frame = tokio::time::timeout_at(deadline, body.frame()).await.expect("a message within 15 s").unwrap_or_else(|| panic!("the stream ended: {buf}")).unwrap();
+                if let Ok(data) = frame.into_data() {
+                    buf.push_str(&String::from_utf8_lossy(&data));
+                }
+            }
+        };
+        let active = next().await;
+        assert_eq!((active["method"].as_str(), active["params"]["heartbeatMs"].as_u64(), &active["params"]["_meta"]["io.modelcontextprotocol/subscriptionId"]), (Some("notifications/events/active"), Some(20000), &json!("s1")), "{active}");
+        let (one, two) = (next().await, next().await);
+        let seen: Vec<(&str, &str)> = [&one, &two].iter().map(|e| (e["params"]["data"]["kind"].as_str().unwrap(), e["params"]["cursor"].as_str().unwrap())).collect();
+        assert_eq!(seen, [("deploy.active", "a1:1"), ("deploy.failed", "a1:2")], "{one} {two}");
+        assert_eq!(two["params"]["_meta"]["io.modelcontextprotocol/subscriptionId"], "s1");
+    }
+    {
+        // 2026-07-28's `subscriptions/listen` (SEP-2575): the stream starts with the acknowledgement of
+        // what roll will send, then says when the connection's tools change (an access request approved),
+        // and the event types it may poll with them (SEP-3415), tagged with the subscription's id.
+        let d = Daemon::with_products(vec!["postgres".into(), "previews".into()]);
+        let asker = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "delete": "ask" } }])).await;
+        let meta = json!({ "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientInfo": { "name": "t", "version": "1" }, "io.modelcontextprotocol/clientCapabilities": {} });
+        let listen = json!({ "jsonrpc": "2.0", "id": "listen:1", "method": "subscriptions/listen", "params": { "_meta": meta, "notifications": { "toolsListChanged": true, "resourcesListChanged": true, "eventsListChanged": true } } });
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/mcp")
+            .header("content-type", "application/json")
+            .header("accept", "application/json, text/event-stream")
+            .header("mcp-protocol-version", "2026-07-28")
+            .header("mcp-method", "subscriptions/listen")
+            .header("authorization", format!("Bearer {asker}"))
+            .body(Body::from(listen.to_string()))
+            .unwrap();
+        // Asking only for what roll doesn't send is refused rather than held open.
+        let nothing = json!({ "jsonrpc": "2.0", "id": "listen:0", "method": "subscriptions/listen", "params": { "_meta": meta, "notifications": { "resourcesListChanged": true } } });
+        let (_, _, refused) = d.http_with(&asker, Method::POST, "/v1/mcp", Some(nothing), &[("mcp-protocol-version", "2026-07-28"), ("mcp-method", "subscriptions/listen")]).await;
+        assert_eq!(refused["error"]["code"], -32602, "{refused}");
+        let mut body = d.router.clone().oneshot(req).await.unwrap().into_body();
+        let mut buf = String::new();
+        // The next JSON-RPC message on the stream (keep-alive comments skipped), within 15 s.
+        let mut next = async move || -> Value {
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+            loop {
+                if let Some(i) = buf.find("\n\n") {
+                    let event: String = buf.drain(..i + 2).collect();
+                    if let Some(data) = event.lines().find_map(|l| l.strip_prefix("data: ").or_else(|| l.strip_prefix("data:"))) {
+                        return serde_json::from_str(data).unwrap();
+                    }
+                    continue;
+                }
+                let frame = tokio::time::timeout_at(deadline, body.frame()).await.expect("a message within 15 s").unwrap_or_else(|| panic!("the stream ended: {buf}")).unwrap();
+                if let Ok(data) = frame.into_data() {
+                    buf.push_str(&String::from_utf8_lossy(&data));
+                }
+            }
+        };
+        let ack = next().await;
+        assert_eq!((ack["method"].as_str(), &ack["params"]["notifications"]), (Some("notifications/subscriptions/acknowledged"), &json!({ "toolsListChanged": true, "eventsListChanged": true })), "only what roll sends");
+        assert_eq!(ack["params"]["_meta"]["io.modelcontextprotocol/subscriptionId"], "listen:1", "a client matches the ack by it");
+        let asked = d.tool(&asker, "access_request_access", json!({ "product": "previews", "action": "read", "for": "15m", "reason": "follow the previews" })).await;
+        let apr = asked["structuredContent"]["id"].as_str().unwrap_or_else(|| panic!("{asked}")).to_string();
+        assert_eq!(d.http(OPERATOR, Method::POST, &format!("/v1/access/approvals/{apr}/approve"), None).await.0, StatusCode::OK);
+        let changed = next().await;
+        assert_eq!((changed["method"].as_str(), &changed["params"]["_meta"]["io.modelcontextprotocol/subscriptionId"]), (Some("notifications/tools/list_changed"), &json!("listen:1")), "{changed}");
+        // Reading previews offers previews.event too: the event types changed with the tools.
+        let types = next().await;
+        assert_eq!((types["method"].as_str(), &types["params"]["_meta"]["io.modelcontextprotocol/subscriptionId"]), (Some("notifications/events/list_changed"), &json!("listen:1")), "{types}");
+    }
 }
 
 /// A callback that echoes MCP Events' challenge (`/good`) or doesn't (`/bad`), keeping each POST.
@@ -1412,58 +1460,6 @@ async fn an_agent_subscribes_a_webhook() {
     // the feed once as the agent, and that asks, so nothing is kept.
     assert_eq!(d.http(OPERATOR, Method::PUT, "/v1/access/policy", Some(json!({ "agents_ask": [{ "product": "apps" }] }))).await.0, StatusCode::OK);
     assert_eq!(sub(&token, "https://hooks.example.com/good", secret).await["error"]["code"], -32024);
-}
-
-/// MCP Events' push mode: `events/stream` answers a bad subscription with an error and no stream;
-/// a good one opens with `active` (its cursor and heartbeat), then what the filter keeps, each event
-/// with its cursor, every frame tagged with the request's id.
-#[tokio::test(flavor = "multi_thread")]
-async fn an_agent_streams_what_happens() {
-    let d = Daemon::with_products(vec!["postgres".into(), "apps".into()]);
-    let meta = json!({ "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientInfo": { "name": "t", "version": "1" }, "io.modelcontextprotocol/clientCapabilities": { "extensions": { "io.modelcontextprotocol/events": {} } } });
-    let call = |name: &str, params: Value| {
-        let mut params = params;
-        params["_meta"] = meta.clone();
-        params["name"] = json!(name);
-        let body = json!({ "jsonrpc": "2.0", "id": "s1", "method": "events/stream", "params": params });
-        Request::builder()
-            .method(Method::POST)
-            .uri("/v1/mcp")
-            .header("content-type", "application/json")
-            .header("accept", "application/json, text/event-stream")
-            .header("mcp-protocol-version", "2026-07-28")
-            .header("mcp-method", "events/stream")
-            .header("mcp-name", name)
-            .header("authorization", format!("Bearer {OPERATOR}"))
-            .body(Body::from(body.to_string()))
-            .unwrap()
-    };
-    let refused = d.router.clone().oneshot(call("nope.event", json!({}))).await.unwrap().into_body().collect().await.unwrap().to_bytes();
-    assert_eq!(serde_json::from_slice::<Value>(&refused).unwrap()["error"]["code"], -32023, "no stream for an event roll doesn't have");
-    let mut body = d.router.clone().oneshot(call("apps.event", json!({ "cursor": "a1:0", "arguments": { "kinds": ["deploy.*"] }, "heartbeatMs": 20000 }))).await.unwrap().into_body();
-    let mut buf = String::new();
-    let mut next = async move || -> Value {
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
-        loop {
-            if let Some(i) = buf.find("\n\n") {
-                let event: String = buf.drain(..i + 2).collect();
-                if let Some(data) = event.lines().find_map(|l| l.strip_prefix("data: ").or_else(|| l.strip_prefix("data:"))) {
-                    return serde_json::from_str(data).unwrap();
-                }
-                continue;
-            }
-            let frame = tokio::time::timeout_at(deadline, body.frame()).await.expect("a message within 15 s").unwrap_or_else(|| panic!("the stream ended: {buf}")).unwrap();
-            if let Ok(data) = frame.into_data() {
-                buf.push_str(&String::from_utf8_lossy(&data));
-            }
-        }
-    };
-    let active = next().await;
-    assert_eq!((active["method"].as_str(), active["params"]["heartbeatMs"].as_u64(), &active["params"]["_meta"]["io.modelcontextprotocol/subscriptionId"]), (Some("notifications/events/active"), Some(20000), &json!("s1")), "{active}");
-    let (one, two) = (next().await, next().await);
-    let seen: Vec<(&str, &str)> = [&one, &two].iter().map(|e| (e["params"]["data"]["kind"].as_str().unwrap(), e["params"]["cursor"].as_str().unwrap())).collect();
-    assert_eq!(seen, [("deploy.active", "a1:1"), ("deploy.failed", "a1:2")], "{one} {two}");
-    assert_eq!(two["params"]["_meta"]["io.modelcontextprotocol/subscriptionId"], "s1");
 }
 
 /// An inspector that blocks deleting projects and notes a result telling the model what to do.

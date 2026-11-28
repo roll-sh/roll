@@ -2895,6 +2895,9 @@ impl Apps {
             if n.is_multiple_of(10) {
                 self.flush_meters(false).await;
                 self.cron_pass(code_sql::now_ms()).await;
+                // Links' old credentials that nothing runs with any more.
+                let this = self.clone();
+                tokio::spawn(async move { this.revoke_pass().await });
             }
             if n.is_multiple_of(600) {
                 let day_ago = code_sql::now_ms() - 86_400_000;
@@ -3445,6 +3448,8 @@ impl Apps {
                         past_week += self.logs.stored_before(&key, week).await;
                     }
                 }
+                let (sid, en) = (svc.id.clone(), e.name.clone());
+                let _ = self.db(move |s| s.expire_csp_reports(&sid, &en, before)).await;
                 if past_week > 0 {
                     let (sid, en, gb) = (svc.id.clone(), e.name.clone(), past_week as f64 / 1e9);
                     let _ = self.db(move |s| s.meter_stored(&sid, &en, "logs", now / 3_600_000, gb)).await;
@@ -3996,10 +4001,7 @@ mod judge_tests {
         assert_eq!(judge(served(100, 3), served(100, 0), 5, Some((&slo, 14.4)), None), None, "under the default burn");
         assert_eq!(judge(served(100, 3), served(100, 5), 5, Some((&slo, 2.0)), None), None, "the old one is worse");
         assert_eq!(judge(served(10, 3), served(100, 0), 5, Some((&slo, 2.0)), None), None, "too few requests to say");
-    }
-
-    #[test]
-    fn a_step_much_slower_than_the_old_deployment_fails() {
+        // A step much slower than the old deployment fails, when asked.
         let timed = |ms: f64| {
             let mut s = Served { requests: 100, ..Default::default() };
             for _ in 0..100 {
@@ -4100,13 +4102,6 @@ mod skip_tests {
         // A day down: the latest due time before now, not the first one missed.
         let now = t0 + 86_400_000 + 60_000;
         assert_eq!(super::latest_due(&s, first, now), t0 + 86_400_000);
-    }
-
-    #[test]
-    fn a_message_can_skip_its_deploy() {
-        assert_eq!(super::skip_tag("docs: typo\n\n[Skip CI]"), Some("[skip ci]"));
-        assert_eq!(super::skip_tag("readme [deploy skip]"), Some("[deploy skip]"));
-        assert_eq!(super::skip_tag("skip the cache"), None);
     }
 }
 

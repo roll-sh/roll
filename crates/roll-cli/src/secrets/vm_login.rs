@@ -155,7 +155,25 @@ fn make_dir(path: &Path) -> anyhow::Result<()> {
     b.recursive(true);
     #[cfg(unix)]
     std::os::unix::fs::DirBuilderExt::mode(&mut b, 0o700);
-    b.create(dir).with_context(|| format!("making {}", dir.display()))
+    b.create(dir).with_context(|| format!("making {}", dir.display()))?;
+    #[cfg(unix)]
+    shared_dir(dir, &std::fs::metadata(dir).with_context(|| format!("reading {}", dir.display()))?)?;
+    Ok(())
+}
+
+/// Refuses a directory another local user can change: one they could delete or rename the
+/// credential in, so the next login presents the spent bootstrap token again and the machine's
+/// chain is revoked. It must be this user's or root's, and writable by no one else unless sticky
+/// (`/tmp`, where only a file's owner may remove it). OpenSSH's StrictModes asks the same.
+#[cfg(unix)]
+fn shared_dir(dir: &Path, meta: &std::fs::Metadata) -> anyhow::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    // SAFETY: geteuid has no preconditions and can't fail.
+    let me = unsafe { libc::geteuid() };
+    let d = dir.display();
+    anyhow::ensure!(meta.uid() == me || meta.uid() == 0, "{d} belongs to uid {}, not this user (uid {me}) or root, so roll won't keep a machine credential there: pick a directory of this user's (ROLL_MACHINE_CREDENTIAL_FILE)", meta.uid());
+    anyhow::ensure!(meta.mode() & 0o022 == 0 || meta.mode() & 0o1000 != 0, "{d} can be written by its group or others (mode {:o}), so another user could remove the machine credential: `chmod 700 {d}`, or pick a directory of this user's (ROLL_MACHINE_CREDENTIAL_FILE)", meta.mode() & 0o7777);
+    Ok(())
 }
 
 /// Refuses a file another local user could have put at `path` or can change: on Unix it must be

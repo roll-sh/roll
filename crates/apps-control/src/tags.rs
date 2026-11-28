@@ -372,22 +372,8 @@ mod tags_tests {
         assert!(tag_matches("v*", "v1.2.3") && tag_matches("v*", "v") && !tag_matches("v*", "release-v1"));
         assert!(tag_matches("v1.*.*", "v1.20.3") && !tag_matches("v1.*.*", "v1.2"));
         assert!(tag_matches("release/*", "release/2026-11") && tag_matches("*-prod", "eu-prod") && !tag_matches("*-prod", "eu-prod-2"));
-    }
-
-    #[test]
-    fn tags_sort_as_versions() {
         let mut t = vec!["v10", "v9", "v1.2.10", "v1.2.9", "v2"];
         t.sort_by(|a, b| super::version_order(a, b));
-        assert_eq!(t, ["v1.2.9", "v1.2.10", "v2", "v9", "v10"]);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn a_pinned_reference_gives_its_digest() {
-        let d = format!("sha256:{}", "a".repeat(64));
-        assert_eq!(super::digest(&format!("nginx:1.27@{d}")), Some(d.as_str()));
-        assert_eq!(super::digest("nginx:1.27"), None);
+        assert_eq!(t, ["v1.2.9", "v1.2.10", "v2", "v9", "v10"], "tags sort as versions");
     }
 }

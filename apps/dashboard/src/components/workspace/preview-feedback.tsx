@@ -21,6 +21,9 @@ export interface PreviewFeedback {
   steps?: string[];
   /** The browser it was left in (`Chrome 131 on macOS`). */
   browser?: string;
+  /** The picture the reviewer took of their own tab, waiting on the preview for this note (its
+   * token, `rsc_…`). */
+  screen?: string;
 }
 
 /** The page's own words, kept to one inert line each. */
@@ -79,6 +82,7 @@ export function feedbackFrom(query: string): PreviewFeedback | undefined {
     steps: contextList(params.get("fb_steps"), 20),
     requests: contextList(params.get("fb_requests")),
     browser: browserOf(s("fb_ua").slice(0, 300)),
+    screen: /^rsc_[a-z2-7]{24}$/.test(s("fb_screen")) ? s("fb_screen") : undefined,
   };
 }
 
@@ -132,13 +136,16 @@ export function FeedbackForm({ preview: p, feedback: f, onPosted }: { preview: P
   const [error, setError] = useState<string | null>(null);
   const [posted, setPosted] = useState(false);
   const [withContext, setWithContext] = useState(true);
+  const [withScreen, setWithScreen] = useState(true);
+  // Posted, but its picture didn't stay with it (gone past its half hour): said, the note stands.
+  const [screenLost, setScreenLost] = useState<string | null>(null);
   const summary = contextSummary(f);
   const change = p.number && p.repo ? `/dashboard/code/${p.repo}/changes/${p.number}` : null;
   if (!p.change) return <p className="text-[12px] text-muted">Feedback goes on a change; this preview is a branch's.</p>;
   if (posted)
     return (
       <p className="rounded-lg border border-line bg-panel px-3 py-2 text-[12px] text-soft">
-        Posted on the change{change && (
+        Posted on the change{screenLost && ` without your screen's picture (${screenLost})`}{change && (
           <>
             {" · "}
             <a href={change} className="text-accent hover:underline">
@@ -157,9 +164,12 @@ export function FeedbackForm({ preview: p, feedback: f, onPosted }: { preview: P
         if (!note.trim() || busy || !p.change) return;
         setBusy(true);
         try {
-          await codeApi.submitReview(p.change, { verdict: "comment", body: feedbackBody(p, f, note, withContext) });
+          const review = await codeApi.submitReview(p.change, { verdict: "comment", body: feedbackBody(p, f, note, withContext) });
+          let lost: string | null = null;
+          if (f.screen && withScreen) await previewsApi.attachScreen(p.id, review.id, f.screen).catch((err: unknown) => (lost = errorText(err)));
+          setScreenLost(lost);
           setPosted(true);
-          onPosted?.();
+          if (!lost) onPosted?.();
         } catch (err) {
           setError(errorText(err));
         } finally {
@@ -193,6 +203,12 @@ export function FeedbackForm({ preview: p, feedback: f, onPosted }: { preview: P
             ))}
           </ul>
         </div>
+      )}
+      {f.screen && (
+        <label className="flex items-center gap-2 text-[11.5px] text-soft">
+          <input type="checkbox" checked={withScreen} onChange={(e) => setWithScreen(e.target.checked)} className="accent-accent" />
+          Attach the picture you took of your screen
+        </label>
       )}
       <div className="flex items-center justify-end gap-2">
         {error && <span className="mr-auto text-[11.5px] text-danger">{error}</span>}

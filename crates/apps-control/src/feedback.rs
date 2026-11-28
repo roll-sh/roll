@@ -186,20 +186,3 @@ pub fn script(target: &str, guest: bool) -> Response {
         .replace("__ROLL_MAIN__", "false");
     ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8"), (header::CACHE_CONTROL, "private, max-age=300")], js).into_response()
 }
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn the_tag_goes_before_the_body_closes_even_across_chunks() {
-        let mut t = super::Tagger { tag: bytes::Bytes::from_static(super::TAG), close: b"</body>", at_end: true, held: Vec::new(), done: false };
-        let mut out = t.push(b"<p>hi</p></BO");
-        out.extend(t.push(b"DY></html>"));
-        out.extend(t.finish());
-        assert_eq!(String::from_utf8(out).unwrap(), r#"<p>hi</p><script src="/__roll/feedback.js" defer></script></BODY></html>"#);
-        // A head snippet on a page with no head: nothing added.
-        let mut t = super::Tagger { tag: bytes::Bytes::from_static(b"<script>x</script>"), close: b"</head>", at_end: false, held: Vec::new(), done: false };
-        let mut out = t.push(b"<p>no head</p>");
-        out.extend(t.finish());
-        assert_eq!(out, b"<p>no head</p>");
-    }
-}

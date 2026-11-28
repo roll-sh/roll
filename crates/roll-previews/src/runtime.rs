@@ -912,6 +912,23 @@ impl Runtime {
         }
     }
 
+    /// A reviewer's picture of their own tab (`POST /__roll/screen`): from this page (its own
+    /// origin), at most [`crate::notes::SCREEN_MAX`], checked, kept for their note.
+    async fn own_screen(&self, preview: &str, guest: Option<&crate::store::LiveShare>, req: Request) -> Response {
+        let host = req.headers().get(header::HOST).and_then(|h| h.to_str().ok()).unwrap_or("").to_string();
+        let origin = req.headers().get(header::ORIGIN).and_then(|h| h.to_str().ok()).unwrap_or("");
+        if origin.split_once("://").map(|(_, h)| h) != Some(host.as_str()) {
+            return (StatusCode::FORBIDDEN, "pictures come from the preview's own pages").into_response();
+        }
+        let Ok(image) = axum::body::to_bytes(req.into_body(), crate::notes::SCREEN_MAX).await else { return (StatusCode::PAYLOAD_TOO_LARGE, "a picture is 1 MiB at most").into_response() };
+        let Ok(engine) = self.engine() else { return StatusCode::SERVICE_UNAVAILABLE.into_response() };
+        match engine.keep_screen(preview, guest, image.to_vec()).await {
+            Ok(token) => (StatusCode::CREATED, [(header::CACHE_CONTROL, "no-store")], axum::Json(serde_json::json!({ "screen": token }))).into_response(),
+            Err(crate::Error::Conflict(m)) => (StatusCode::TOO_MANY_REQUESTS, m).into_response(),
+            Err(e) => e.into_response(),
+        }
+    }
+
     /// `POST /__roll/snapshot?name=` with the project's bypass secret and a PNG (at most
     /// [`SCREENSHOT_MAX`]): the team's tests' picture, kept as page `snap:<name>`. 401 without
     /// the secret (a fork's preview never has one), 400 for anything but a PNG.
@@ -1137,14 +1154,24 @@ impl Runtime {
         true
     }
 
-    /// [`Runtime::proxy_to`], kept in the preview's request log.
-    async fn proxy(self: &Arc<Self>, preview: &str, service: &str, req: Request, feedback: bool) -> Response {
+    /// [`Runtime::proxy_to`], kept in the preview's request log (a write with its body too, where
+    /// the project replays writes).
+    async fn proxy(self: &Arc<Self>, preview: &str, service: &str, mut req: Request, feedback: bool) -> Response {
         let started = std::time::Instant::now();
         let (method, path) = (req.method().to_string(), req.uri().path().chars().take(300).collect::<String>());
+        let write = match self.write_to_keep(preview, service, &mut req).await {
+            Ok(w) => w,
+            Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
+        };
         let resp = self.proxy_to(preview, service, req, feedback).await;
         // Not after its services went (removed, or moved to another node meanwhile).
         if !self.live.lock().keys().any(|(p, _)| p == preview) {
             return resp;
+        }
+        if let Some(w) = write
+            && let Err(e) = self.store.keep_write(preview, &w)
+        {
+            warn!(preview, error = %e, "previews: keeping a write to replay");
         }
         let line = crate::RequestLine { at: self.store.now_ms().unwrap_or(0), service: service.into(), method, path, status: resp.status().as_u16(), ms: started.elapsed().as_millis() as u64 };
         let mut all = self.requests.lock();
@@ -1154,6 +1181,78 @@ impl Runtime {
             kept.pop_front();
         }
         resp
+    }
+
+    /// A write to keep for replays on copies of the data (`replay_writes`): to a trusted preview's
+    /// own service (not an earlier push's or a replay's `web@…`), with a `Content-Length` of at
+    /// most [`crate::store::WRITE_BODY_MAX`]. Its body is read and put back; its method, path
+    /// (never the query) and content type are kept, never its other headers (a visitor's cookies
+    /// are their credentials).
+    async fn write_to_keep(&self, preview: &str, service: &str, req: &mut Request) -> Result<Option<crate::store::KeptWrite>, &'static str> {
+        use base64::Engine as _;
+        let m = req.method();
+        if !matches!(*m, axum::http::Method::POST | axum::http::Method::PUT | axum::http::Method::PATCH | axum::http::Method::DELETE) || service.contains('@') || is_upgrade(req.headers()) {
+            return Ok(None);
+        }
+        let len = match req.headers().get(header::CONTENT_LENGTH).map(|v| v.to_str().ok().and_then(|v| v.parse::<usize>().ok())) {
+            Some(Some(n)) => n,
+            None if !req.headers().contains_key(header::TRANSFER_ENCODING) => 0,
+            _ => return Ok(None),
+        };
+        if len > crate::store::WRITE_BODY_MAX || self.store.sealer.get().is_none() {
+            return Ok(None);
+        }
+        let Ok(r) = self.store.row(preview) else { return Ok(None) };
+        if !r.trusted || !self.store.settings(&r.project_id).is_ok_and(|s| s.replay_writes) {
+            return Ok(None);
+        }
+        let body = std::mem::take(req.body_mut());
+        let Ok(bytes) = axum::body::to_bytes(body, crate::store::WRITE_BODY_MAX).await else {
+            return Err("the request's body didn't arrive whole");
+        };
+        let w = crate::store::KeptWrite {
+            at: 0,
+            service: service.to_string(),
+            method: req.method().to_string(),
+            path: req.uri().path().chars().take(300).collect(),
+            content_type: req.headers().get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).map(|v| v.chars().take(200).collect()),
+            body: base64::engine::general_purpose::STANDARD.encode(&bytes),
+        };
+        *req.body_mut() = Body::from(bytes);
+        Ok(Some(w))
+    }
+
+    /// `method` `path` (with `body`) to the service through its proxy, as roll reads a page: its
+    /// status, the headers worth seeing, and its body up to [`crate::ports::FETCH_MAX`].
+    async fn ask(self: &Arc<Self>, preview: &str, service: &str, method: axum::http::Method, path: &str, content_type: Option<&str>, body: Vec<u8>) -> anyhow::Result<crate::ports::Fetched> {
+        let host = self.store.service_host(preview, service)?.ok_or_else(|| anyhow::anyhow!("no service {service}"))?;
+        let mut req = Request::builder()
+            .method(method)
+            .uri(path)
+            .header(header::HOST, format!("{host}.{}", self.cfg.domain))
+            .header(header::ACCEPT, "text/html,application/json,text/plain;q=0.9,*/*;q=0.5")
+            .header(header::ACCEPT_ENCODING, "identity");
+        if let Some(t) = content_type {
+            req = req.header(header::CONTENT_TYPE, t);
+        }
+        let resp = self.proxy(preview, service, req.body(Body::from(body))?, false).await;
+        let status = resp.status().as_u16();
+        const SHOWN: [&str; 4] = ["content-type", "location", "cache-control", "content-length"];
+        let headers = SHOWN.iter().filter_map(|h| resp.headers().get(*h).and_then(|v| v.to_str().ok()).map(|v| (h.to_string(), v.chars().take(500).collect()))).collect();
+        let mut body = Vec::new();
+        let mut truncated = false;
+        let mut stream = resp.into_body().into_data_stream();
+        while let Some(chunk) = stream.next().await {
+            let Ok(chunk) = chunk else { break };
+            let room = crate::ports::FETCH_MAX - body.len();
+            if chunk.len() > room {
+                body.extend_from_slice(&chunk[..room]);
+                truncated = true;
+                break;
+            }
+            body.extend_from_slice(&chunk);
+        }
+        Ok(crate::ports::Fetched { status, headers, body, truncated })
     }
 
     async fn proxy_to(self: &Arc<Self>, preview: &str, service: &str, mut req: Request, feedback: bool) -> Response {
@@ -1318,6 +1417,9 @@ pub const FEEDBACK_PATH: &str = "/__roll/feedback.js";
 pub const FEEDBACK_NOTES_PATH: &str = "/__roll/feedback.json";
 /// Where a share link's guest posts a note from the button.
 pub const GUEST_NOTE_PATH: &str = "/__roll/notes";
+/// Where the button sends the picture a reviewer took of their own tab (`POST`, the image): kept
+/// for their note, its token answered.
+pub const SCREEN_PATH: &str = "/__roll/screen";
 /// The toolbar's Main: the page on main's preview (`?path=`), as `{url}` (a team visitor's only).
 pub const MAIN_PAGE_PATH: &str = "/__roll/main";
 /// On an earlier push's link its preview no longer keeps: start it again ([`Engine::restart_push`]).
@@ -1988,34 +2090,14 @@ impl Apps for Runtime {
     }
 
     async fn fetch(&self, preview: &str, service: &str, _url: &str, _access: Option<&str>, path: &str, head: bool) -> anyhow::Result<Option<crate::ports::Fetched>> {
-        use futures::StreamExt;
         let me = self.me.upgrade().ok_or_else(|| anyhow::anyhow!("the preview runtime is stopping"))?;
-        let host = self.store.service_host(preview, service)?.ok_or_else(|| anyhow::anyhow!("no service {service}"))?;
-        let req = Request::builder()
-            .method(if head { axum::http::Method::HEAD } else { axum::http::Method::GET })
-            .uri(path)
-            .header(header::HOST, format!("{host}.{}", self.cfg.domain))
-            .header(header::ACCEPT, "text/html,application/json,text/plain;q=0.9,*/*;q=0.5")
-            .header(header::ACCEPT_ENCODING, "identity")
-            .body(Body::empty())?;
-        let resp = me.proxy(preview, service, req, false).await;
-        let status = resp.status().as_u16();
-        const SHOWN: [&str; 4] = ["content-type", "location", "cache-control", "content-length"];
-        let headers = SHOWN.iter().filter_map(|h| resp.headers().get(*h).and_then(|v| v.to_str().ok()).map(|v| (h.to_string(), v.chars().take(500).collect()))).collect();
-        let mut body = Vec::new();
-        let mut truncated = false;
-        let mut stream = resp.into_body().into_data_stream();
-        while let Some(chunk) = stream.next().await {
-            let Ok(chunk) = chunk else { break };
-            let room = crate::ports::FETCH_MAX - body.len();
-            if chunk.len() > room {
-                body.extend_from_slice(&chunk[..room]);
-                truncated = true;
-                break;
-            }
-            body.extend_from_slice(&chunk);
-        }
-        Ok(Some(crate::ports::Fetched { status, headers, body, truncated }))
+        Ok(Some(me.ask(preview, service, if head { axum::http::Method::HEAD } else { axum::http::Method::GET }, path, None, Vec::new()).await?))
+    }
+
+    async fn send(&self, preview: &str, service: &str, method: &str, path: &str, content_type: Option<&str>, body: Vec<u8>) -> anyhow::Result<Option<crate::ports::Fetched>> {
+        let me = self.me.upgrade().ok_or_else(|| anyhow::anyhow!("the preview runtime is stopping"))?;
+        let method = axum::http::Method::from_bytes(method.as_bytes())?;
+        Ok(Some(me.ask(preview, service, method, path, content_type, body).await?))
     }
 
     fn swap(&self, preview: &str, service: &str, to: Option<crate::ports::Laptop>) {
@@ -3064,6 +3146,16 @@ async fn serve(rt: Arc<Runtime>, preview: String, service: String, mut req: Requ
     {
         let path = req.uri().query().unwrap_or("").split('&').filter_map(|kv| kv.split_once('=')).find(|(k, _)| *k == "path").map(|(_, v)| percent_decode(v)).unwrap_or_default();
         return rt.main_page(&preview, &service, &path).await;
+    }
+    if req.uri().path() == SCREEN_PATH
+        && req.method() == axum::http::Method::POST
+        && let Some(t) = &target
+    {
+        let guest = match t {
+            Feedback::Guest(share) => Some(share.clone()),
+            Feedback::Team(_) => None,
+        };
+        return rt.own_screen(&preview, guest.as_ref(), req).await;
     }
     if req.uri().path() == GUEST_NOTE_PATH
         && req.method() == axum::http::Method::POST

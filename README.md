@@ -6,7 +6,7 @@ Serverless infrastructure for everything.
 
 ```
 apps/
-  dashboard/        TanStack Start app — brand playground (/), dashboard (/dashboard, /dashboard/code, /dashboard/databases, /dashboard/streams, /dashboard/tasks, /dashboard/storage, /dashboard/nosql), public repo pages (/<owner>/<repo>)
+  dashboard/        TanStack Start app — marketing site (/, /products, /products/<product>, /brand), dashboard (/dashboard, /dashboard/code, /dashboard/databases, /dashboard/streams, /dashboard/tasks, /dashboard/storage, /dashboard/nosql), public repo pages (/<owner>/<repo>)
 packages/
   brand/            @roll/brand — logo geometry, animation engine, React components, SVG assets
   tasks/            @roll/tasks — TypeScript SDK: client, pull consumer, signature verification, workflows
