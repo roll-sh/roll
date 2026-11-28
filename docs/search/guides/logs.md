@@ -161,8 +161,8 @@ cluster accepts bodies up to `max_body_mb` (100 MB by default; `--max-body-mb` o
 
 ## Send OpenTelemetry logs over OTLP
 
-A cluster takes OTLP/HTTP logs at `/_otlp/v1/logs` and traces at `/_otlp/v1/traces`, in protobuf
-or JSON, gzip allowed, as Elastic's managed OTLP endpoint does. Make a key that can only write OpenTelemetry's data streams:
+A cluster takes OTLP/HTTP logs at `/_otlp/v1/logs`, traces at `/_otlp/v1/traces` and metrics at
+`/_otlp/v1/metrics`, in protobuf or JSON, gzip allowed, as Elastic's managed OTLP endpoint does. Make a key that can only write OpenTelemetry's data streams:
 
 ```sh
 roll search keys create logs collector --access otel
@@ -184,6 +184,9 @@ service:
     traces:
       receivers: [otlp]
       exporters: [otlphttp/roll]
+    metrics:
+      receivers: [otlp]
+      exporters: [otlphttp/roll]
 ```
 
 An SDK's OTLP/HTTP log exporter works the same way, with `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` set
@@ -200,12 +203,35 @@ Spans land in `traces-<dataset>.otel-<namespace>` (`name`, `kind`, `duration` in
 exception it recorded) as log lines with the span's `trace_id` and `span_id`, so a trace's errors
 are found in the logs.
 
+Metrics land in `metrics-<dataset>.otel-<namespace>`, a time series data stream (the built-in
+`metrics-otel@template`), written as Elastic's Collector exporter writes them in its `otel`
+mode against Elasticsearch 9.5:
+- One document holds every data point that shares a resource, scope, attributes, timestamp and
+  unit, each under `metrics.<name>`, with `@timestamp`, `start_timestamp`, `unit`, `attributes.*`,
+  `resource.attributes.*` and `scope.*` beside them.
+- Gauges map as `double` or `long`, and monotonic cumulative sums as counters. Other sums map as
+  gauges.
+- An exponential histogram becomes an `exponential_histogram` field with its own buckets. A
+  histogram with explicit buckets becomes one too, with each bucket at its midpoint. Delta and
+  cumulative histograms are both kept, and their `temporality` field tells them apart. A summary
+  becomes `{sum, value_count}`, without quantiles.
+- A data point without its own `data_stream.dataset` goes where the exporter sends it: a
+  Collector receiver's scope to its receiver's name (`metrics-hostmetricsreceiver.otel-default`),
+  else `generic`.
+- Timestamps must be near now. A time series data stream takes 2 hours back and 30 minutes
+  ahead by default, and refuses points outside that in `partial_success`.
+- A point an SDK marks as holding no recorded value (a staleness marker) is skipped, and not
+  counted as rejected.
+
 Limits:
 - a record keeps 128 attributes, and the rest count in its `dropped_attributes_count`;
 - a value over 1 MiB is cut there, and the answer's `partial_success` says how many were;
 - a record nested more than 8 deep or holding more than 10,000 values is rejected, and
-  `partial_success` counts it;
-- one request writes at most 64 data streams;
+  `partial_success` counts it (for metrics, a data point, buckets included);
+- one request writes at most 64 data streams (a metrics data stream's past backing indices,
+  when `data_stream.past_tsdb_index_creation_enabled` is on, aren't counted; the shard limit
+  below still bounds them);
+- a metric's name or unit over 1 KiB is cut there, and counted with the cut values;
 - an OTLP/JSON body is at most 4 MiB, while protobuf, which Collectors send, goes to the cluster's
   `max_body_mb`;
 - a key that may not write a record's data stream gets a 403, and a busy cluster a 429 with

@@ -132,6 +132,12 @@ impl Budget {
         self.charge(bytes as u64)
     }
 
+    /// One data point of a group still being built was read: the next starts its own
+    /// [`MAX_VALUES`], while what both hold stays charged until [`Budget::record_done`].
+    pub(super) fn point_done(&mut self) {
+        self.record_values = 0;
+    }
+
     /// The record was written out (or rejected): its values are given back.
     pub(super) fn record_done(&mut self) {
         let n = std::mem::take(&mut self.record_bytes);
@@ -166,6 +172,9 @@ pub struct Batch {
     pub truncated: u64,
     /// The first rejection's reason.
     pub reason: Option<String>,
+    /// How many records each document holds, in order (metrics' documents group data points);
+    /// empty when each holds one.
+    pub weights: Vec<u64>,
     pub(super) targets: HashSet<String>,
 }
 
@@ -438,13 +447,64 @@ pub(super) struct Rendered {
 /// A context's tree as rendered: its JSON charged, then its tree's charge given back. Its
 /// routing attributes are kept made valid, so a record never copies them again.
 pub(super) fn render(c: Context, scope: bool, budget: &mut Budget) -> Result<Rendered, Fail> {
+    render_as(c, scope, false, budget)
+}
+
+/// [`render`]; for `metrics`, the attributes as the exporter writes time series dimensions:
+/// without the routing ones and the mapping hints, a key-value list as its JSON text.
+pub(super) fn render_as(mut c: Context, scope: bool, metrics: bool, budget: &mut Budget) -> Result<Rendered, Fail> {
     let pick = |k: &str| c.attributes.get(k).and_then(Value::as_str).filter(|s| !s.is_empty());
     let dataset = pick("data_stream.dataset").map(dataset_base).filter(|d| !d.is_empty());
     let namespace = pick("data_stream.namespace").map(|n| sanitize(n, 100)).filter(|n| !n.is_empty());
+    if metrics {
+        dimensions(&mut c.attributes);
+    }
     let json = context_json(c, scope).to_json();
     budget.ndjson(json.len())?;
     budget.record_done();
     Ok(Rendered { dataset, namespace, json })
+}
+
+/// Attributes as metrics' documents hold them (time series dimensions), as the exporter writes
+/// them: the routing and exporter-control ones left out, and a key-value list (in an array too)
+/// written as its JSON text the way Go's `json.Marshal` prints it (keys sorted; `<`, `>`, `&`,
+/// U+2028 and U+2029 escaped), so one list sent in two orders is one series.
+pub(super) fn dimensions(m: &mut Map) {
+    m.retain(|k, _| {
+        !matches!(
+            k.as_str(),
+            "data_stream.type"
+                | "data_stream.dataset"
+                | "data_stream.namespace"
+                | "elasticsearch.mapping.hints"
+                | "elasticsearch.index"
+                | "elasticsearch.document_id"
+                | "elasticsearch.ingest_pipeline"
+                | "elastic.mapping.mode"
+        )
+    });
+    fn sorted(v: &Value) -> Value {
+        match v {
+            Value::Obj(o) => {
+                let mut keys: Vec<&String> = o.keys().collect();
+                keys.sort();
+                Value::Obj(keys.into_iter().map(|k| (k.clone(), sorted(&o[k.as_str()]))).collect())
+            }
+            Value::Arr(a) => Value::Arr(a.iter().map(sorted).collect()),
+            other => other.clone(),
+        }
+    }
+    fn stringify(v: &mut Value) {
+        match v {
+            Value::Obj(_) => {
+                let text = sorted(v).to_json().replace('<', "\\u003c").replace('>', "\\u003e").replace('&', "\\u0026").replace('\u{2028}', "\\u2028").replace('\u{2029}', "\\u2029");
+                *v = Value::from(text);
+            }
+            Value::Arr(a) => a.iter_mut().for_each(stringify),
+            _ => {}
+        }
+    }
+    m.values_mut().for_each(stringify);
 }
 
 /// A rendered context's charge given back (another replaces it).
@@ -596,7 +656,11 @@ pub(super) fn admit(out: &mut Batch, kind: &str, dataset: &str, namespace: &str)
 /// Appends a document's `create` line and its text, the resource and scope spliced in as
 /// rendered, charged before it's written.
 pub(super) fn push_doc(out: &mut Batch, budget: &mut Budget, index: &str, doc: Value, scope: &Rendered, resource: &Rendered) -> Result<(), Fail> {
-    let action = obj! { "create" => obj! { "_index" => index } }.to_json();
+    push_line(out, budget, obj! { "create" => obj! { "_index" => index } }.to_json(), doc, scope, resource)
+}
+
+/// [`push_doc`] with its `create` line as given (metrics' carry their dynamic templates).
+pub(super) fn push_line(out: &mut Batch, budget: &mut Budget, action: String, doc: Value, scope: &Rendered, resource: &Rendered) -> Result<(), Fail> {
     // The record's own fields, without the closing brace; the resource and scope go in as
     // rendered once ([`Rendered`]), charged before anything is written.
     let mut head = doc.to_json();
