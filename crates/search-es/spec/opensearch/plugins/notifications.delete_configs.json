@@ -1,0 +1,29 @@
+{
+  "notifications.delete_configs": {
+    "documentation": {
+      "url": "https://docs.opensearch.org/latest/observing-your-data/notifications/api/",
+      "description": "Deletes channel configurations."
+    },
+    "stability": "stable",
+    "url": {
+      "paths": [
+        {
+          "path": "/_plugins/_notifications/configs",
+          "methods": [
+            "DELETE"
+          ]
+        }
+      ]
+    },
+    "params": {
+      "config_id": {
+        "type": "string",
+        "description": "A config"
+      },
+      "config_id_list": {
+        "type": "string",
+        "description": "Configs"
+      }
+    }
+  }
+}

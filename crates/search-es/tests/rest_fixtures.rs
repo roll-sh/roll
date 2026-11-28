@@ -16,6 +16,11 @@
 //! admin's credentials from `ROLL_ES_CAPTURE_AUTH=admin:<password>`: they go with every step
 //! that sends no `Authorization` of its own, as roll runs a step without one as the owner.
 //! Capturing only creates and deletes objects named `esm-*` and never changes cluster settings.
+//!
+//! Ids a server makes up (an alerting monitor's, an alert's) carry over with `keep`:
+//! `{"keep": {"m1": "_id"}}` takes the step's response value at that dotted path, later steps'
+//! `req` and `body` say `${m1}`, and every response shows `<m1>` where the value was (each side
+//! its own: roll's when replaying, the reference's in the fixture).
 
 use search_es::json::{Map, Value, parse};
 use search_es::{Cluster, ClusterConfig, EsRequest, MemoryStore};
@@ -202,6 +207,62 @@ fn headers_of(step: &Value, has_body: bool) -> Vec<(String, String)> {
     h
 }
 
+/// The value at a dotted path (`alerts.0.id`).
+fn at_path<'a>(v: &'a Value, path: &str) -> Option<&'a Value> {
+    let mut cur = v;
+    for seg in path.split('.') {
+        cur = match cur {
+            Value::Obj(m) => m.get(seg)?,
+            Value::Arr(a) => a.get(seg.parse::<usize>().ok()?)?,
+            _ => return None,
+        };
+    }
+    Some(cur)
+}
+
+/// Records a step's `keep` values from `response` into `vars`.
+fn keep_vars(step: &Value, response: Option<&Value>, vars: &mut Vec<(String, String)>) {
+    let (Some(Value::Obj(k)), Some(r)) = (step.get("keep"), response) else { return };
+    for (name, path) in k {
+        if let Some(v) = path.as_str().and_then(|p| at_path(r, p)) {
+            vars.retain(|(n, _)| n != name);
+            vars.push((name.clone(), v.to_es_string()));
+        }
+    }
+}
+
+/// `${name}` replaced by the kept values.
+fn with_vars(s: &str, vars: &[(String, String)]) -> String {
+    let mut out = s.to_string();
+    for (n, v) in vars {
+        out = out.replace(&format!("${{{n}}}"), v);
+    }
+    out
+}
+
+/// Every kept value inside strings and keys replaced by `<name>`.
+fn hide_vars(v: &mut Value, vars: &[(String, String)]) {
+    let hide = |s: &str| {
+        let mut out = s.to_string();
+        for (n, x) in vars.iter().filter(|(_, x)| !x.is_empty()) {
+            out = out.replace(x.as_str(), &format!("<{n}>"));
+        }
+        out
+    };
+    match v {
+        Value::Obj(m) => {
+            let old = std::mem::take(m);
+            for (k, mut x) in old {
+                hide_vars(&mut x, vars);
+                m.insert(hide(&k), x);
+            }
+        }
+        Value::Arr(a) => a.iter_mut().for_each(|x| hide_vars(x, vars)),
+        Value::Str(s) => *s = hide(s),
+        _ => {}
+    }
+}
+
 /// Every scenario replays on its own cluster, all of them at once.
 #[tokio::test(flavor = "multi_thread")]
 async fn responses_match_elasticsearch() {
@@ -240,11 +301,13 @@ async fn replay(file: String, scenario: Value) -> (Vec<String>, usize) {
     }
     let cluster = Cluster::open(cfg, Arc::new(MemoryStore::new())).await.unwrap();
     let mut ism_clock = 0i64;
+    let mut ours: Vec<(String, String)> = Vec::new();
+    let mut theirs: Vec<(String, String)> = Vec::new();
     for (i, step) in scenario.get("steps").and_then(Value::as_array).unwrap().iter().enumerate() {
-        let req = step.get("req").and_then(Value::as_str).unwrap();
+        let req = with_vars(step.get("req").and_then(Value::as_str).unwrap(), &ours);
         let label = format!("{file} #{i} {req}");
-        let (method, uri) = split_req(req);
-        let body = body_of(step);
+        let (method, uri) = split_req(&req);
+        let body = body_of(step).map(|b| with_vars(&b, &ours));
         let mut r = EsRequest::new(method, uri);
         r.headers = headers_of(step, body.is_some());
         if let Some(b) = &body {
@@ -261,6 +324,8 @@ async fn replay(file: String, scenario: Value) -> (Vec<String>, usize) {
             search_es::opensearch::ism_run::run_at(&cluster, &names, now + ism_clock).await;
         }
         let resp = search_es::handle(&cluster, r).await;
+        keep_vars(step, parse(&resp.body).ok().flatten().as_ref(), &mut ours);
+        keep_vars(step, step.get("response"), &mut theirs);
         // An ISM template applies only to indices created strictly after its
         // `last_updated_time` (milliseconds); a real cluster never answers the policy PUT
         // and the next index creation within the same millisecond, this in-process one can.
@@ -282,6 +347,8 @@ async fn replay(file: String, scenario: Value) -> (Vec<String>, usize) {
         if let Some(expected) = step.get("response") {
             let mut exp = expected.clone();
             let mut got = if resp.head { Value::Str(String::new()) } else { parse(&resp.body).ok().flatten().unwrap_or(Value::Str(got_text.clone())) };
+            hide_vars(&mut exp, &theirs);
+            hide_vars(&mut got, &ours);
             mask(&mut exp, &keys);
             mask(&mut got, &keys);
             if got != exp {
@@ -346,6 +413,7 @@ async fn capture() {
         }
         cleanup(&client, &base).await;
         let mut steps_out = Vec::new();
+        let mut vars: Vec<(String, String)> = Vec::new();
         for step in scenario.get("steps").and_then(Value::as_array).unwrap() {
             // A reference cluster that applies some changes asynchronously (OpenSearch's ISM
             // registers managed indices in the background) gets a pause first; roll needs none.
@@ -367,9 +435,9 @@ async fn capture() {
                 }
                 tokio::time::sleep(std::time::Duration::from_secs(8)).await;
             }
-            let req = step.get("req").and_then(Value::as_str).unwrap();
-            let (method, uri) = split_req(req);
-            let body = body_of(step);
+            let req = with_vars(step.get("req").and_then(Value::as_str).unwrap(), &vars);
+            let (method, uri) = split_req(&req);
+            let body = body_of(step).map(|b| with_vars(&b, &vars));
             let mut rb = client.request(reqwest::Method::from_bytes(method.as_bytes()).unwrap(), format!("{base}{uri}"));
             for (k, v) in headers_of(step, body.is_some()) {
                 rb = rb.header(k, v);
@@ -404,6 +472,7 @@ async fn capture() {
             let is_json = ct.as_deref().is_some_and(|c| c.contains("json"));
             match (is_json, parse(&bytes)) {
                 (true, Ok(Some(v))) => {
+                    keep_vars(step, Some(&v), &mut vars);
                     out.insert("response".into(), v);
                 }
                 _ => {
@@ -474,6 +543,26 @@ async fn cleanup(client: &reqwest::Client, base: &str) {
         for r in v.get("results").and_then(Value::as_array).cloned().unwrap_or_default() {
             if let Some(n) = r.get("synonyms_set").and_then(Value::as_str).filter(|n| n.starts_with("esm")) {
                 del(format!("{base}/_synonyms/{n}")).await;
+            }
+        }
+    }
+    // Alerting monitors named `esm-*` and notification channels with `esm-*` ids.
+    let monitors = async {
+        let r = client.post(format!("{base}/_plugins/_alerting/monitors/_search")).header("content-type", "application/json").body(r#"{"size":1000,"query":{"match_all":{}}}"#).send().await.ok()?;
+        parse(&r.bytes().await.ok()?).ok().flatten()
+    };
+    if let Some(v) = monitors.await {
+        for h in v.pointer(&["hits", "hits"]).and_then(Value::as_array).cloned().unwrap_or_default() {
+            let named = h.pointer(&["_source", "name"]).and_then(Value::as_str).is_some_and(|n| n.starts_with("esm"));
+            if let (true, Some(id)) = (named, h.get("_id").and_then(Value::as_str)) {
+                del(format!("{base}/_plugins/_alerting/monitors/{id}")).await;
+            }
+        }
+    }
+    if let Some(v) = get(format!("{base}/_plugins/_notifications/configs?max_items=1000")).await {
+        for c in v.get("config_list").and_then(Value::as_array).cloned().unwrap_or_default() {
+            if let Some(id) = c.get("config_id").and_then(Value::as_str).filter(|id| id.starts_with("esm")) {
+                del(format!("{base}/_plugins/_notifications/configs/{id}")).await;
             }
         }
     }

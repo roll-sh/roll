@@ -4,7 +4,8 @@
 //! workload management statistics table (`_list/wlm_stats`), and the k-NN plugin's node APIs
 //! (`_plugins/_knn/stats`, `warmup`, `clear_cache`; see `spec/opensearch/plugins`), the SQL
 //! plugin's PPL engine ([`ppl`]: `_plugins/_ppl`, its explain and grammar APIs, and
-//! `_plugins/_query/settings`); plus the
+//! `_plugins/_query/settings`), the Alerting plugin ([`alerting`]: `_plugins/_alerting` monitors and
+//! alerts) and the Notifications plugin's channels ([`notifications`]); plus the
 //! dialect's field-type and query differences that need more than a branch where they occur
 //! (`flat_object` sub-fields, `knn_vector`).
 //!
@@ -14,6 +15,7 @@
 //! order), checked against a real OpenSearch in Docker; the elasticsearch dialect never
 //! reaches it because its route table has none of these APIs.
 
+pub mod alerting;
 pub mod approximate;
 pub mod bitmap;
 pub mod can_match;
@@ -26,6 +28,7 @@ pub mod ism_run;
 pub mod jobs;
 pub mod knn;
 pub mod knn_api;
+pub mod notifications;
 pub mod pit;
 pub mod ppl;
 pub mod profile;
@@ -60,6 +63,8 @@ pub fn implemented(api: Api) -> bool {
             | Api::PplGrammar
             | Api::QuerySettings
     ) || ism::implemented(api)
+        || alerting::implemented(api)
+        || notifications::implemented(api)
         || sm::implemented(api)
         || crate::xpack::security::opensearch::api::implemented(api)
 }
@@ -91,6 +96,8 @@ async fn dispatch_api(ctx: &Ctx<'_>) -> EsResult<Reply> {
         Api::QuerySettings => ppl::settings(ctx).await,
         api if ism::implemented(api) => ism::dispatch(ctx).await,
         api if sm::implemented(api) => sm::dispatch(ctx).await,
+        api if alerting::implemented(api) => alerting::dispatch(ctx).await,
+        api if notifications::implemented(api) => notifications::dispatch(ctx).await,
         api if crate::xpack::security::opensearch::api::implemented(api) => crate::xpack::security::opensearch::api::dispatch(ctx).await,
         other => Err(crate::error::EsError::not_implemented(other.name())),
     }
@@ -181,7 +188,7 @@ pub fn add_search_extras(out: &crate::search::SearchOutcome, req: &crate::search
 }
 
 /// `UUID.randomUUID().toString()`.
-fn random_uuid() -> String {
+pub(crate) fn random_uuid() -> String {
     let mut b: [u8; 16] = rand::random();
     b[6] = (b[6] & 0x0f) | 0x40;
     b[8] = (b[8] & 0x3f) | 0x80;

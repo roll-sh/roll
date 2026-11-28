@@ -1,0 +1,45 @@
+{
+  "alerting.get_monitor": {
+    "documentation": {
+      "url": "https://docs.opensearch.org/latest/observing-your-data/alerting/api/",
+      "description": "Gets a monitor."
+    },
+    "stability": "stable",
+    "url": {
+      "paths": [
+        {
+          "path": "/_plugins/_alerting/monitors/{monitor_id}",
+          "methods": [
+            "GET",
+            "HEAD"
+          ],
+          "parts": {
+            "monitor_id": {
+              "type": "string",
+              "description": "The monitor's id."
+            }
+          }
+        },
+        {
+          "path": "/_opendistro/_alerting/monitors/{monitor_id}",
+          "methods": [
+            "GET",
+            "HEAD"
+          ],
+          "parts": {
+            "monitor_id": {
+              "type": "string",
+              "description": "The monitor's id."
+            }
+          }
+        }
+      ]
+    },
+    "params": {
+      "version": {
+        "type": "number",
+        "description": "The version"
+      }
+    }
+  }
+}

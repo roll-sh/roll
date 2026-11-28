@@ -1,0 +1,23 @@
+{
+  "notifications.create_config": {
+    "documentation": {
+      "url": "https://docs.opensearch.org/latest/observing-your-data/notifications/api/",
+      "description": "Creates a channel configuration."
+    },
+    "stability": "stable",
+    "url": {
+      "paths": [
+        {
+          "path": "/_plugins/_notifications/configs",
+          "methods": [
+            "POST"
+          ]
+        }
+      ]
+    },
+    "body": {
+      "description": "The configuration",
+      "required": false
+    }
+  }
+}

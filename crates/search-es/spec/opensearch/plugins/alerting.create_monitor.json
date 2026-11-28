@@ -1,0 +1,40 @@
+{
+  "alerting.create_monitor": {
+    "documentation": {
+      "url": "https://docs.opensearch.org/latest/observing-your-data/alerting/api/",
+      "description": "Creates a monitor."
+    },
+    "stability": "stable",
+    "url": {
+      "paths": [
+        {
+          "path": "/_plugins/_alerting/monitors",
+          "methods": [
+            "POST"
+          ]
+        },
+        {
+          "path": "/_opendistro/_alerting/monitors",
+          "methods": [
+            "POST"
+          ]
+        }
+      ]
+    },
+    "params": {
+      "refresh": {
+        "type": "enum",
+        "options": [
+          "true",
+          "false",
+          "wait_for"
+        ],
+        "description": "Refresh the config index after the write."
+      }
+    },
+    "body": {
+      "description": "The monitor",
+      "required": false
+    }
+  }
+}

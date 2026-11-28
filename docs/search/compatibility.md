@@ -160,6 +160,32 @@ Reproduce the YAML numbers with `scripts/search-yaml-suites.sh roll` (set `ROLL_
   deleted as the user who stored the policy. Not run: `time_limit` (stored and returned) and
   notifications (none are sent). OpenSearch's YAML suites have no snapshot management tests
   (the index-management plugin tests it in Kotlin).
+- Alerting (`_plugins/_alerting`, with the `_opendistro/_alerting` aliases): monitors
+  (create, update with `if_seq_no`/`if_primary_term`, get, delete, `_search` over the monitors
+  only, `_execute` by id or inline, with `dryrun`), stored as the plugin stores them (the
+  `{"monitor": …}` document of the hidden `.opendistro-alerting-config`, its query printed in
+  OpenSearch's form, composite defaults, trigger and action ids kept or made, `schema_version`
+  0 on create and 9 on update), and their validation messages. Query-level monitors (painless
+  conditions over `ctx.results`), bucket-level monitors (`buckets_path` values as `params` per
+  bucket of `parent_bucket_path`, the trigger's `bucket_indices` in the response, one alert per
+  bucket) and document-level monitors (query strings over the documents written since the last
+  run, by `_seq_no` per shard; `query[id|name|tag=…]` expressions with `&&`, `||`, `!`; one alert
+  per document). Alerts are `.opendistro-alerting-alerts` documents routed by monitor: `ACTIVE`,
+  `ACKNOWLEDGED` (`_acknowledge/alerts`, with the plugin's per-id failures), `ERROR`, and
+  `COMPLETED` or `DELETED` moved to `.opendistro-alerting-alert-history-<date>-1` behind its
+  write alias; `GET …/monitors/alerts` reads both with `monitorId`, `alertState`,
+  `severityLevel`, `searchString`, sorting and paging. Actions render their mustache subject and
+  message, send through a notification channel, and are throttled per alert
+  (`action_execution_results`). Monitors run on the cluster's job scheduler (owner only,
+  surviving unloads), as the user who stored them at that user's rights now. Notifications
+  (`_plugins/_notifications`: configs CRUD and listing, `channels`, `features`,
+  `feature/test`): webhook, Slack, Chime and Teams channels send, through the egress check
+  (public addresses only unless `roll.notifications.allow_private_hosts`); their URLs and headers
+  are sealed at rest. Pinned by `os_alerting.json` (62 steps from OpenSearch 3.9.0; the
+  reference's `_primary_term` is masked, its container having restarted). Not yet: workflows,
+  cluster-metrics and PPL monitors, findings and comments, email/SNS/SES channels, the legacy
+  destinations API, bucket-level `action_execution_policy` scopes other than per alert, and the
+  aggregation printer beyond composite defaults (other aggregations are stored as given).
 - OpenSearch search request extras (`os_search_ext.json`, 21 steps): `phase_took`,
   `cancel_after_time_interval`, the bundled plugins' `ext` sections (`rerank`, `ml_inference`,
   `ubi` with its response `query_id`; other names fail as OpenSearch fails them), the `template`

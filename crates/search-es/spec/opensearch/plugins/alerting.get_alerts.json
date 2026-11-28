@@ -1,0 +1,75 @@
+{
+  "alerting.get_alerts": {
+    "documentation": {
+      "url": "https://docs.opensearch.org/latest/observing-your-data/alerting/api/",
+      "description": "Lists alerts."
+    },
+    "stability": "stable",
+    "url": {
+      "paths": [
+        {
+          "path": "/_plugins/_alerting/monitors/alerts",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/_opendistro/_alerting/monitors/alerts",
+          "methods": [
+            "GET"
+          ]
+        }
+      ]
+    },
+    "params": {
+      "sortString": {
+        "type": "string",
+        "description": "The field to sort by"
+      },
+      "sortOrder": {
+        "type": "string",
+        "description": "asc or desc"
+      },
+      "missing": {
+        "type": "string",
+        "description": "The value of missing sort values"
+      },
+      "size": {
+        "type": "number",
+        "description": "How many alerts"
+      },
+      "startIndex": {
+        "type": "number",
+        "description": "The first alert"
+      },
+      "searchString": {
+        "type": "string",
+        "description": "Text to match"
+      },
+      "severityLevel": {
+        "type": "string",
+        "description": "The severity, or ALL"
+      },
+      "alertState": {
+        "type": "string",
+        "description": "The state, or ALL"
+      },
+      "monitorId": {
+        "type": "string",
+        "description": "The monitor"
+      },
+      "workflowIds": {
+        "type": "string",
+        "description": "Workflows"
+      },
+      "alertIndex": {
+        "type": "string",
+        "description": "The alert index"
+      },
+      "monitorIds": {
+        "type": "string",
+        "description": "Monitors"
+      }
+    }
+  }
+}

@@ -1,0 +1,63 @@
+{
+  "alerting.execute_monitor": {
+    "documentation": {
+      "url": "https://docs.opensearch.org/latest/observing-your-data/alerting/api/",
+      "description": "Runs a monitor."
+    },
+    "stability": "stable",
+    "url": {
+      "paths": [
+        {
+          "path": "/_plugins/_alerting/monitors/{monitor_id}/_execute",
+          "methods": [
+            "POST"
+          ],
+          "parts": {
+            "monitor_id": {
+              "type": "string",
+              "description": "The monitor's id."
+            }
+          }
+        },
+        {
+          "path": "/_opendistro/_alerting/monitors/{monitor_id}/_execute",
+          "methods": [
+            "POST"
+          ],
+          "parts": {
+            "monitor_id": {
+              "type": "string",
+              "description": "The monitor's id."
+            }
+          }
+        },
+        {
+          "path": "/_plugins/_alerting/monitors/_execute",
+          "methods": [
+            "POST"
+          ]
+        },
+        {
+          "path": "/_opendistro/_alerting/monitors/_execute",
+          "methods": [
+            "POST"
+          ]
+        }
+      ]
+    },
+    "params": {
+      "dryrun": {
+        "type": "boolean",
+        "description": "Run without sending notifications or saving alerts"
+      },
+      "period_end": {
+        "type": "number",
+        "description": "The end of the period"
+      }
+    },
+    "body": {
+      "description": "A monitor to run",
+      "required": false
+    }
+  }
+}

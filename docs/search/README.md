@@ -1825,7 +1825,13 @@ deterministic (#396).
      downsample targets, so an `otel` key can't add data streams past it.
    - OTLP over gRPC. Traces landed in #1236 (spans into `traces-*.otel-*`, their events as log
      lines); metrics are in review (#1265: data points into `metrics-*.otel-*`).
-   - `_plugins/_alerting` on OpenSearch-flavor clusters.
+   - **`_plugins/_alerting` on OpenSearch-flavor clusters** (in review,
+     `feature/search-os-alerting`; compatibility.md): query, bucket and document-level monitors
+     on the cluster's job scheduler, alerts and their states in the plugin's indices, throttles,
+     acknowledgements, and notification channels (`_plugins/_notifications`, webhook, Slack,
+     Chime, Teams) through the egress check. Left: workflows (composite monitors),
+     cluster-metrics and PPL monitors, findings and comments, email/SNS channels, and the legacy
+     destinations API.
    - Visualizations.
 19. **Vector search's footprint** (docs/benchmarks/search.md, "Vector search": 1M × 384 against
    Elasticsearch 9.5.5 and OpenSearch 3.9). Roll leads on indexing (4,735 docs/s against 3,585

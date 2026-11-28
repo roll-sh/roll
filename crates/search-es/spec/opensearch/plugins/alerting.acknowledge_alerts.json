@@ -1,0 +1,41 @@
+{
+  "alerting.acknowledge_alerts": {
+    "documentation": {
+      "url": "https://docs.opensearch.org/latest/observing-your-data/alerting/api/",
+      "description": "Acknowledges alerts of a monitor."
+    },
+    "stability": "stable",
+    "url": {
+      "paths": [
+        {
+          "path": "/_plugins/_alerting/monitors/{monitor_id}/_acknowledge/alerts",
+          "methods": [
+            "POST"
+          ],
+          "parts": {
+            "monitor_id": {
+              "type": "string",
+              "description": "The monitor's id."
+            }
+          }
+        },
+        {
+          "path": "/_opendistro/_alerting/monitors/{monitor_id}/_acknowledge/alerts",
+          "methods": [
+            "POST"
+          ],
+          "parts": {
+            "monitor_id": {
+              "type": "string",
+              "description": "The monitor's id."
+            }
+          }
+        }
+      ]
+    },
+    "body": {
+      "description": "The alert ids",
+      "required": false
+    }
+  }
+}

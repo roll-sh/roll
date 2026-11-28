@@ -1,0 +1,31 @@
+{
+  "alerting.search_monitors": {
+    "documentation": {
+      "url": "https://docs.opensearch.org/latest/observing-your-data/alerting/api/",
+      "description": "Searches monitors."
+    },
+    "stability": "stable",
+    "url": {
+      "paths": [
+        {
+          "path": "/_plugins/_alerting/monitors/_search",
+          "methods": [
+            "GET",
+            "POST"
+          ]
+        },
+        {
+          "path": "/_opendistro/_alerting/monitors/_search",
+          "methods": [
+            "GET",
+            "POST"
+          ]
+        }
+      ]
+    },
+    "body": {
+      "description": "The search request",
+      "required": false
+    }
+  }
+}

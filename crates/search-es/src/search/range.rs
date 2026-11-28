@@ -437,6 +437,23 @@ pub(crate) fn ip_step(b: [u8; 16], up: bool) -> Option<[u8; 16]> {
 pub fn range_query(ctx: &QueryCtx, r: &Range) -> EsResult<QueryRef> {
     if r.field == "_seq_no" {
         ctx.check_seq_no_queryable()?;
+        // `SeqNoFieldMapper.rangeQuery`: a long point range over the sequence numbers (no
+        // mapped field carries them; a document-level monitor reads new documents this way).
+        let bound = |v: Option<&Value>, inclusive: bool, step: i64, open: i64| -> EsResult<i64> {
+            match v.filter(|v| !v.is_null()) {
+                None => Ok(open),
+                Some(v) => {
+                    let n = parse_long_value(v)?;
+                    Ok(if inclusive { n } else { n.saturating_add(step) })
+                }
+            }
+        };
+        let lo = bound(r.from.as_ref(), r.include_lower, 1, i64::MIN)?;
+        let hi = bound(r.to.as_ref(), r.include_upper, -1, i64::MAX)?;
+        if lo > hi {
+            return Ok(match_none("empty range"));
+        }
+        return Ok(arc(search_index::query::ConstantScoreQuery::new(arc(PointRangeQuery::long(search_index::schema::SEQ_NO_FIELD, lo, hi)))));
     }
     let Some(f) = ctx.field(&r.field) else {
         // `RangeQueryBuilder.doRewrite`: `DISJOINT` on a shard without the field.
