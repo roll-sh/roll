@@ -72,13 +72,22 @@ export function Sidebar({ onSearch }: { onSearch: () => void }) {
           </span>
         </div>
         <div className="mt-1 flex items-baseline gap-1.5 font-mono text-[17px] font-semibold tracking-[-0.04em]">
-          {ws.status === "ready" ? usd(total.usd) : ws.status === "loading" ? <Skeleton className="h-3.5 w-12 self-center" /> : "—"}
+          {ws.status === "ready" ? (
+            usd(total.usd)
+          ) : ws.status === "loading" ? (
+            // The number's line height, so the card doesn't change size when it arrives.
+            <span className="flex h-[25.5px] items-center">
+              <Skeleton className="h-3.5 w-12" />
+            </span>
+          ) : (
+            "—"
+          )}
           <span className="text-[11px] font-normal tracking-normal text-subtle">so far</span>
         </div>
         <MonthMeter elapsed={month.elapsed} days={month.days} />
         <div className="mt-1.5 flex justify-between text-[11px] text-subtle">
           <span>
-            On track for <b className="font-mono font-medium text-fg">≈ {usd(projectMonth(total.usd, month))}</b>
+            On track for <b className="font-mono font-medium text-fg">≈ {ws.status === "ready" ? usd(projectMonth(total.usd, month)) : "—"}</b>
           </span>
           <span>by {month.end}</span>
         </div>
@@ -218,7 +227,7 @@ function ProjectRowsSkeleton() {
       {[52, 36].map((w) => (
         <div key={w} className={`${row} border-transparent`}>
           <Skeleton className="size-6 shrink-0 rounded-md" />
-          <span className="flex flex-1 flex-col gap-1 py-[3px]">
+          <span className="flex h-[28.75px] flex-1 flex-col justify-center gap-1">
             <Skeleton className="h-2.5" style={{ width: `${w}%` }} />
             <Skeleton className="h-2 w-1/4 opacity-70" />
           </span>

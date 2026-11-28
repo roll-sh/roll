@@ -93,11 +93,11 @@ export function SkeletonCards({ count = 3, className = "" }: { count?: number; c
               <Skeleton className="h-2 w-1/4 opacity-70" />
             </span>
           </div>
-          <div className="mt-3 flex h-[19px] gap-1">
+          <div className="mt-3 flex h-[21.75px] gap-1">
             <Skeleton className="h-full w-12" />
             <Skeleton className="h-full w-10" />
           </div>
-          <div className="mt-3 flex h-[25px] items-end justify-between border-t border-line pb-1">
+          <div className="mt-3 flex h-[25.5px] items-end justify-between border-t border-line pb-1">
             <Skeleton className="h-2 w-14" />
             <Skeleton className="h-2 w-10" />
           </div>
