@@ -4,6 +4,33 @@ The ranked work list and the log of roll secrets' review rounds. It's internal: 
 
 ## Next
 
+**State, 2026-11-28 07:20.** The forty-fourth review is done. It found two live bugs, both fixed. The user then asked for lighter tests and a merge gate under a minute, which comes first. Landed since 15:45, each with main's CI green and after a check of the merged tree wherever main had moved under it:
+- The forty-fourth review's live bugs, fixed in #1238 (19e9b7fd1):
+  - `Secrets::use_once` read a `sensitive` key for a product's fixed host (#1225), so someone who could reveal the folder but not read the key could have roll write DNS records with it in every zone it can edit. A one-off read now never returns a sensitive key. `to` is still audited;
+  - `roll run` handed the command roll's own credentials (`ROLL_ADMIN_TOKEN`, `ROLL_TOKEN`…). It now drops inherited `ROLL_*` names ending `_TOKEN`, `_TOKEN_FILE`, `_KEY`, `_PASSWORD`, `_SECRET` or `_CREDENTIAL_FILE`, unless the project sets that name itself; `--keep-roll-credentials` passes them on.
+- #1239 (4a33eb72b): item 5. Every release asset gets build provenance (`actions/attest-build-provenance`). The release job checks it the way `install.sh` and `install.ps1` do (`gh attestation verify`, `ROLL_VERIFY=auto|attestation|checksum`), and step 0 shows the manual check and the from-source prerequisites.
+- #1244 (0f1da4f13): items 3 and 4.
+  - A Paddle rotation holds its claim until its write, so the secret ends on the key Paddle keeps.
+  - Route 53 claims are keyed by hosted zone, and a claim held over an hour is a problem on the registration.
+- #1241 (14f6055f0): items 6 and 7.
+  - The machine credential file is refused if another user owns it or can write it. Its directory is made 0700, and it's tied to the server that made it.
+  - A bare break-glass login counts only while the pushing token is scan-only now (asked of roll-access, never the column).
+- #1247 (68600ac85): item 8. `Grants::limits_keys` has no default, so no wrapper can silently widen a key-scoped grant.
+- #1249 (af1754e64): items 9 and 10.
+  - The open gate's 421 names `ROLL_DASHBOARD_ORIGIN` and `ROLL_ADMIN_TOKEN`, and `*.localhost` Hosts are answered (never as an Origin, never the preview domain), with an end-to-end test in `rolld/tests/auth.rs`.
+  - GitHub's `public` and `repository` events flip a link's `private`.
+- #1226 (42e5a8c43): key-scoped secrets rules (`keys: [..]`), reviewed by roll MCP.
+- #1256 (5475474ba): from roll search's review of #1211. roll's one Discord bot posted wherever a tenant named a channel, which roll secrets' notifications allowed. Every Discord post or edit through an install now checks that the channel is in the install's server.
+- #1242 (08fd495bb): the merge gate's only job over a minute was `sdk` (72 s). It's now `sdk-go` (one `go` command over a `go.work`, cached: 19 s warm, 52 s cold) and `sdk` (32 s). The Terraform provider's tests run in parallel (27 s → 5 s), and the operator's long-poll test no longer waits out a held poll (3.1 s → 0.16 s).
+
+In flight:
+- lighter tests: the roll-secrets crate (api.rs's 164 tests, nodes, units), and rolld, the CLI, the dashboard and the SDKs (measured: `pnpm test:secrets` 139.5 s → 106.2 s warm, 330 → 322 Rust tests, 32 → 25 dashboard tests, before the crate's cut);
+- #1257: a key-scoped token's watch says at the start why it can't watch (item 8's UX half). Per-key watching is left.
+
+Left:
+- the forty-fifth review, after the test cut;
+- the `discord.post` step's DM path can still DM anyone who shares a server with roll's bot (roll code's).
+
 **State, 2026-11-27 15:45.** The forty-third review is done. It found two live bugs, both fixed. Landed since 05:00, each with main's CI green and after a check of the merged tree wherever main had moved under it:
 - The forty-third product review's live bugs:
   - medium: a rolld with no `ROLL_ADMIN_TOKEN` (the guide's step 0 for an evaluation) answered any `Host`, so a web page could act as the operator through DNS rebinding, or open a shell over a WebSocket. Fixed by #1193 (fedf38742), where an open gate answers only loopback hosts and step 0 gets a token, and #1202 (0d628850d), where an open gate refuses a foreign `Origin` whatever the method, after roll MCP's review;
