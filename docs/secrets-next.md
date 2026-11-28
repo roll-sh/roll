@@ -4,6 +4,34 @@ The ranked work list and the log of roll secrets' review rounds. It's internal: 
 
 ## Next
 
+**State, 2026-11-28 19:10.** The forty-fifth review is done, and so are items 1–6 of the 11:30 ranking below. The forty-sixth review (cold, read only) is running. Landed since 07:20, each with main's CI green and after a check of the merged tree wherever main had moved under it:
+- The forty-fifth review:
+  - #1286 (421929374): items 1 and 6.
+    - Rotating a key needs write on every key that shares its credential. The refusal says only how many share it, and the answer names only keys the caller may read.
+    - A losing Paddle rotation replaces only the credential it raced with, never a person's change.
+  - #1298 (a5e76bc56): item 1's follow-up. The `rotation.succeeded` event's `sharing` is by folder, and the feed shows each reader only the folders they may read.
+  - #1284 (b2dc374b6): items 2 and 3.
+    - `roll apps exec` and `roll secrets render --exec` drop roll's own inherited credentials, as `roll run` does (`crate::sys::roll_credentials`, now URLs carrying a password too).
+    - The install scripts' provenance check is pinned to the release's own tag (`--source-ref refs/tags/<tag>`, `--deny-self-hosted-runners`).
+  - #1290 (a3a9afc58): items 4 and 7.
+    - The machine credential's directory must be this user's or root's, and not writable by others unless it's sticky.
+    - The scan oracle's candidate budgets are settable per `Secrets` and tested again.
+    - A watch's kept key is asserted.
+  - #1282 (974e0f0ea): item 5. A `discord.post` DM goes only to a member of the install's server.
+- The 11:30 ranking:
+  - #1297 (535998862): item 2. `use-<id>` tags, set only by an admin of the key's folder, let `use_once` read a sensitive key for that one product use (roll apps' `apps.dns`); `roll secrets allow-use`.
+  - #1289 (41b835f55): item 3. A key-scoped token's digest and delta cover only its keys, so it can watch.
+  - #1313 (acd277bd5): items 4–6.
+    - One `Debug` scanner (`roll-debug-scan`) over roll-secrets, rolld, roll-edge and apps-control.
+    - The install scripts skip prereleases.
+    - rolld's `auth` test: 44.7 s → about 12 s.
+
+In flight:
+- the forty-sixth review.
+
+Left:
+- items 7 and 8 of the ranking below (the user's call).
+
 **State, 2026-11-28 07:20.** The forty-fourth review is done. It found two live bugs, both fixed. The user then asked for lighter tests and a merge gate under a minute, which comes first. Landed since 15:45, each with main's CI green and after a check of the merged tree wherever main had moved under it:
 - The forty-fourth review's live bugs, fixed in #1238 (19e9b7fd1):
   - `Secrets::use_once` read a `sensitive` key for a product's fixed host (#1225), so someone who could reveal the folder but not read the key could have roll write DNS records with it in every zone it can edit. A one-off read now never returns a sensitive key. `to` is still audited;
