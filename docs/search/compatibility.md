@@ -160,6 +160,41 @@ Reproduce the YAML numbers with `scripts/search-yaml-suites.sh roll` (set `ROLL_
   deleted as the user who stored the policy. Not run: `time_limit` (stored and returned) and
   notifications (none are sent). OpenSearch's YAML suites have no snapshot management tests
   (the index-management plugin tests it in Kotlin).
+- OpenSearch's Search Relevance Workbench (`_plugins/_search_relevance/*`, `os_srw.json`, 43
+  steps from a fresh OpenSearch 3.9.0):
+  - **Stores.** Its six plain stores, each made on first use with the plugin's mapping (one shard,
+    `auto_expand_replicas: 0-1`); a delete makes its store too, as the plugin's does.
+  - **Answers.** A collection's `GET` is the store's own search response, newest first (with a
+    special empty answer before the store exists), and `GET …/{id}` its one hit. Also: 404
+    `resource_not_found_exception`, the 500 for an id before its store exists, `…/_search`, and
+    the plain-text 403 under `plugins.search_relevance.workbench_enabled: false`.
+  - **Query sets.** `PUT` manual sets (other samplings refused); `POST` `topn`, `random` and
+    `pptss` from `ubi_queries` (409 without it, checked before the sampler), read as the caller.
+    Past `plugins.search_relevance.query_set.maximum` (queries, or `querySetSize`), the plugin's
+    plain-text 403 "Query Set Limit Exceeded.".
+  - **Search configurations** with `%SearchText%`, on an index that exists (400 otherwise, as the
+    plugin answers), their `searchPipeline` applied to each search.
+  - **Judgments.** `IMPORT_JUDGMENT`, and `UBI_JUDGMENT` with `clickModel: coec` from UBI's events
+    read as the caller through a scroll (the same COEC as roll's judgments from clicks:
+    OpenSearch's ratings to the digit). An unknown click model is stored `ERROR`.
+  - **Experiments.** `POINTWISE_EVALUATION` (exactly one configuration) and `PAIRWISE_COMPARISON`
+    (exactly two), run as the user who made them, with the plugin's metrics:
+    - pointwise: relevant means the query's highest judged rating; precision over the hits
+      returned; nDCG's ideal from every judged rating;
+    - pairwise: Jaccard, RBO at 0.5 and 0.9 normalized by its depth, and the shared share.
+    Each experiment's variant and result documents are stored too, in one bulk once it's done.
+    A run is a cancellable task (the node keeps the cluster loaded for it); its maker's access is
+    checked before each search; deleting the experiment cancels it and nothing more is stored. At
+    most 4 run at once per cluster (429 past that).
+  - **Store searches** (`…/_search`) read only the store: a body with a terms lookup, an indexed
+    shape, a stored percolated document, `more_like_this` documents or a `wrapper` is refused
+    (400), since the plugin's store search runs with the plugin's own authority.
+  - **Not copied.** The plugin's run order: it stores results and pairwise snapshots in the order
+    its runs finish, which the fixture masks. Its null-pointer 500s for missing fields: roll
+    answers 400 naming the field.
+  - **Not run.** `LLM_JUDGMENT` (an ML Commons model, sending documents to a model provider),
+    `HYBRID_OPTIMIZER` (neural-search hybrid pipelines) and scheduled experiments: each answers
+    400. `stats`: no route yet.
 - OpenSearch search request extras (`os_search_ext.json`, 21 steps): `phase_took`,
   `cancel_after_time_interval`, the bundled plugins' `ext` sections (`rerank`, `ml_inference`,
   `ubi` with its response `query_id`; other names fail as OpenSearch fails them), the `template`

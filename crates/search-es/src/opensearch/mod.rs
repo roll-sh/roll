@@ -31,6 +31,7 @@ pub mod ppl;
 pub mod profile;
 pub mod search_pipeline;
 pub mod sm;
+pub mod srw;
 pub mod upgrade;
 pub mod wlm;
 
@@ -61,6 +62,7 @@ pub fn implemented(api: Api) -> bool {
             | Api::QuerySettings
     ) || ism::implemented(api)
         || sm::implemented(api)
+        || srw::implemented(api)
         || crate::xpack::security::opensearch::api::implemented(api)
 }
 
@@ -91,6 +93,7 @@ async fn dispatch_api(ctx: &Ctx<'_>) -> EsResult<Reply> {
         Api::QuerySettings => ppl::settings(ctx).await,
         api if ism::implemented(api) => ism::dispatch(ctx).await,
         api if sm::implemented(api) => sm::dispatch(ctx).await,
+        api if srw::implemented(api) => srw::dispatch(ctx).await,
         api if crate::xpack::security::opensearch::api::implemented(api) => crate::xpack::security::opensearch::api::dispatch(ctx).await,
         other => Err(crate::error::EsError::not_implemented(other.name())),
     }

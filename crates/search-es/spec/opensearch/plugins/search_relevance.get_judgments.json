@@ -1,0 +1,31 @@
+{
+  "search_relevance.get_judgments": {
+    "documentation": {
+      "url": "https://docs.opensearch.org/latest/search-plugins/search-relevance/",
+      "description": "Lists the judgment lists, or gets one."
+    },
+    "stability": "experimental",
+    "url": {
+      "paths": [
+        {
+          "path": "/_plugins/_search_relevance/judgments",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/_plugins/_search_relevance/judgments/{judgment_id}",
+          "methods": [
+            "GET"
+          ],
+          "parts": {
+            "judgment_id": {
+              "type": "string",
+              "description": "The judgment list's id."
+            }
+          }
+        }
+      ]
+    }
+  }
+}

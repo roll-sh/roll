@@ -1,0 +1,2125 @@
+{
+  "description": "OpenSearch's Search Relevance Workbench: query sets, search configurations, imported and click (COEC) judgments, pointwise and pairwise experiments, their stores and errors, and the switch that turns it off",
+  "dialect": "opensearch",
+  "steps": [
+    {
+      "req": "GET /_plugins/_search_relevance/query_sets",
+      "status": 200,
+      "response": {
+        "took": 0,
+        "timed_out": false,
+        "_shards": {
+          "total": 0,
+          "successful": 0,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 0,
+            "relation": "eq"
+          },
+          "max_score": 0.0,
+          "hits": []
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_plugins/_search_relevance/query_sets/nope",
+      "status": 500,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "index_not_found_exception",
+              "reason": "no such index [search-relevance-queryset]",
+              "index": "search-relevance-queryset",
+              "resource.id": "search-relevance-queryset",
+              "resource.type": "index_or_alias",
+              "index_uuid": "_na_"
+            }
+          ],
+          "type": "search_relevance_exception",
+          "reason": "Failed to get document",
+          "caused_by": {
+            "type": "index_not_found_exception",
+            "reason": "no such index [search-relevance-queryset]",
+            "index": "search-relevance-queryset",
+            "resource.id": "search-relevance-queryset",
+            "resource.type": "index_or_alias",
+            "index_uuid": "_na_"
+          }
+        },
+        "status": 500
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "PUT /esm-products",
+      "body": {
+        "settings": {
+          "number_of_replicas": 0
+        },
+        "mappings": {
+          "properties": {
+            "title": {
+              "type": "text"
+            },
+            "up": {
+              "type": "integer"
+            },
+            "down": {
+              "type": "integer"
+            }
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "index": "esm-products"
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "PUT /esm-products/_doc/1?refresh=true",
+      "body": {
+        "title": "red shoe model 1",
+        "up": 1,
+        "down": 6
+      },
+      "status": 201,
+      "response": {
+        "_index": "esm-products",
+        "_id": "1",
+        "_version": 1,
+        "result": "created",
+        "forced_refresh": true,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "failed": 0
+        },
+        "_seq_no": 0,
+        "_primary_term": 1
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "PUT /esm-products/_doc/2?refresh=true",
+      "body": {
+        "title": "red shoe model 2",
+        "up": 2,
+        "down": 5
+      },
+      "status": 201,
+      "response": {
+        "_index": "esm-products",
+        "_id": "2",
+        "_version": 1,
+        "result": "created",
+        "forced_refresh": true,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "failed": 0
+        },
+        "_seq_no": 1,
+        "_primary_term": 1
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "PUT /esm-products/_doc/3?refresh=true",
+      "body": {
+        "title": "red shoe model 3",
+        "up": 3,
+        "down": 4
+      },
+      "status": 201,
+      "response": {
+        "_index": "esm-products",
+        "_id": "3",
+        "_version": 1,
+        "result": "created",
+        "forced_refresh": true,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "failed": 0
+        },
+        "_seq_no": 2,
+        "_primary_term": 1
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "PUT /esm-products/_doc/4?refresh=true",
+      "body": {
+        "title": "red shoe model 4",
+        "up": 4,
+        "down": 3
+      },
+      "status": 201,
+      "response": {
+        "_index": "esm-products",
+        "_id": "4",
+        "_version": 1,
+        "result": "created",
+        "forced_refresh": true,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "failed": 0
+        },
+        "_seq_no": 3,
+        "_primary_term": 1
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "PUT /esm-products/_doc/5?refresh=true",
+      "body": {
+        "title": "red shoe model 5",
+        "up": 5,
+        "down": 2
+      },
+      "status": 201,
+      "response": {
+        "_index": "esm-products",
+        "_id": "5",
+        "_version": 1,
+        "result": "created",
+        "forced_refresh": true,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "failed": 0
+        },
+        "_seq_no": 4,
+        "_primary_term": 1
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "PUT /esm-products/_doc/6?refresh=true",
+      "body": {
+        "title": "red shoe model 6",
+        "up": 6,
+        "down": 1
+      },
+      "status": 201,
+      "response": {
+        "_index": "esm-products",
+        "_id": "6",
+        "_version": 1,
+        "result": "created",
+        "forced_refresh": true,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "failed": 0
+        },
+        "_seq_no": 5,
+        "_primary_term": 1
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "PUT /_plugins/_search_relevance/query_sets",
+      "body": {
+        "name": "esm-qs",
+        "description": "manual set",
+        "sampling": "manual",
+        "querySetQueries": [
+          {
+            "queryText": "red shoe"
+          },
+          {
+            "queryText": "model 3"
+          }
+        ]
+      },
+      "stash": {
+        "qs": "query_set_id"
+      },
+      "status": 200,
+      "response": {
+        "query_set_id": "ca530ee7-994f-4056-b500-414c3947fab2",
+        "query_set_result": "CREATED"
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /_plugins/_search_relevance/query_sets",
+      "body": {
+        "name": "esm-bad",
+        "description": "d",
+        "sampling": "manual",
+        "querySetQueries": [
+          {
+            "queryText": "x"
+          }
+        ]
+      },
+      "status": 409,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "search_relevance_exception",
+              "reason": "UBI queries index does not exist"
+            }
+          ],
+          "type": "search_relevance_exception",
+          "reason": "UBI queries index does not exist"
+        },
+        "status": 409
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /_plugins/_search_relevance/query_sets",
+      "body": {
+        "name": "esm-top",
+        "description": "d",
+        "sampling": "topn",
+        "querySetSize": 5
+      },
+      "status": 409,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "search_relevance_exception",
+              "reason": "UBI queries index does not exist"
+            }
+          ],
+          "type": "search_relevance_exception",
+          "reason": "UBI queries index does not exist"
+        },
+        "status": 409
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_plugins/_search_relevance/query_sets",
+      "mask": [
+        "took",
+        "sort"
+      ],
+      "status": 200,
+      "response": {
+        "took": 91,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 1,
+            "relation": "eq"
+          },
+          "max_score": null,
+          "hits": [
+            {
+              "_index": "search-relevance-queryset",
+              "_id": "ca530ee7-994f-4056-b500-414c3947fab2",
+              "_score": null,
+              "_source": {
+                "id": "ca530ee7-994f-4056-b500-414c3947fab2",
+                "name": "esm-qs",
+                "description": "manual set",
+                "sampling": "manual",
+                "timestamp": "2026-11-27T07:25:06.957Z",
+                "querySetQueries": [
+                  {
+                    "queryText": "red shoe",
+                    "customFields": {}
+                  },
+                  {
+                    "queryText": "model 3",
+                    "customFields": {}
+                  }
+                ]
+              },
+              "sort": [
+                1795764306957
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_plugins/_search_relevance/query_sets/${qs}",
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "took": 59,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 1,
+            "relation": "eq"
+          },
+          "max_score": 1.0,
+          "hits": [
+            {
+              "_index": "search-relevance-queryset",
+              "_id": "ca530ee7-994f-4056-b500-414c3947fab2",
+              "_score": 1.0,
+              "_source": {
+                "id": "ca530ee7-994f-4056-b500-414c3947fab2",
+                "name": "esm-qs",
+                "description": "manual set",
+                "sampling": "manual",
+                "timestamp": "2026-11-27T07:25:06.957Z",
+                "querySetQueries": [
+                  {
+                    "queryText": "red shoe",
+                    "customFields": {}
+                  },
+                  {
+                    "queryText": "model 3",
+                    "customFields": {}
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_plugins/_search_relevance/query_sets/nope",
+      "status": 404,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "resource_not_found_exception",
+              "reason": "Document not found: nope"
+            }
+          ],
+          "type": "resource_not_found_exception",
+          "reason": "Document not found: nope"
+        },
+        "status": 404
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "DELETE /_plugins/_search_relevance/query_sets/nope",
+      "mask": [
+        "_seq_no",
+        "_primary_term"
+      ],
+      "status": 404,
+      "response": {
+        "_index": "search-relevance-queryset",
+        "_id": "nope",
+        "_version": 1,
+        "result": "not_found",
+        "forced_refresh": true,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "failed": 0
+        },
+        "_seq_no": 1,
+        "_primary_term": 1
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "PUT /_plugins/_search_relevance/search_configurations",
+      "body": {
+        "name": "esm-up",
+        "index": "esm-products",
+        "query": "{\"query\": {\"match\": {\"title\": \"%SearchText%\"}}, \"sort\": [{\"up\": \"asc\"}]}"
+      },
+      "stash": {
+        "up": "search_configuration_id"
+      },
+      "status": 200,
+      "response": {
+        "search_configuration_id": "81145b4a-45b3-4f92-9ca9-51b6b62ffd06",
+        "search_configuration_result": "CREATED"
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "PUT /_plugins/_search_relevance/search_configurations",
+      "body": {
+        "name": "esm-down",
+        "index": "esm-products",
+        "query": "{\"query\": {\"match\": {\"title\": \"%SearchText%\"}}, \"sort\": [{\"down\": \"asc\"}]}"
+      },
+      "stash": {
+        "down": "search_configuration_id"
+      },
+      "status": 200,
+      "response": {
+        "search_configuration_id": "439924ea-883a-4888-92f6-017eb8ab587b",
+        "search_configuration_result": "CREATED"
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_plugins/_search_relevance/search_configurations/${up}",
+      "mask": [
+        "took"
+      ],
+      "status": 200,
+      "response": {
+        "took": 12,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 1,
+            "relation": "eq"
+          },
+          "max_score": 1.0,
+          "hits": [
+            {
+              "_index": "search-relevance-search-config",
+              "_id": "81145b4a-45b3-4f92-9ca9-51b6b62ffd06",
+              "_score": 1.0,
+              "_source": {
+                "id": "81145b4a-45b3-4f92-9ca9-51b6b62ffd06",
+                "name": "esm-up",
+                "timestamp": "2026-11-27T07:25:07.658Z",
+                "index": "esm-products",
+                "query": "{\"query\": {\"match\": {\"title\": \"%SearchText%\"}}, \"sort\": [{\"up\": \"asc\"}]}",
+                "searchPipeline": "",
+                "description": ""
+              }
+            }
+          ]
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "PUT /_plugins/_search_relevance/judgments",
+      "body": {
+        "name": "esm-j",
+        "description": "imported",
+        "type": "IMPORT_JUDGMENT",
+        "judgmentRatings": [
+          {
+            "query": "red shoe",
+            "ratings": [
+              {
+                "docId": "1",
+                "rating": "3"
+              },
+              {
+                "docId": "2",
+                "rating": "1"
+              },
+              {
+                "docId": "6",
+                "rating": "2"
+              }
+            ]
+          },
+          {
+            "query": "model 3",
+            "ratings": [
+              {
+                "docId": "3",
+                "rating": "3"
+              }
+            ]
+          }
+        ]
+      },
+      "stash": {
+        "j": "judgment_id"
+      },
+      "status": 200,
+      "response": {
+        "judgment_id": "c0fe7746-55d7-4a60-a8fa-8eecf93a9bcb"
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "PUT /_plugins/_search_relevance/judgments",
+      "body": {
+        "name": "esm-bad",
+        "type": "NOPE"
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "Invalid or missing judgment type"
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "Invalid or missing judgment type",
+          "caused_by": {
+            "type": "illegal_argument_exception",
+            "reason": "No enum constant org.opensearch.searchrelevance.model.JudgmentType.NOPE"
+          }
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_plugins/_search_relevance/judgments/${j}",
+      "mask": [
+        "took"
+      ],
+      "capture_sleep_ms": 3000,
+      "status": 200,
+      "response": {
+        "took": 7,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 1,
+            "relation": "eq"
+          },
+          "max_score": 1.0,
+          "hits": [
+            {
+              "_index": "search-relevance-judgment",
+              "_id": "c0fe7746-55d7-4a60-a8fa-8eecf93a9bcb",
+              "_score": 1.0,
+              "_source": {
+                "id": "c0fe7746-55d7-4a60-a8fa-8eecf93a9bcb",
+                "timestamp": "2026-11-27T07:25:08.769Z",
+                "name": "esm-j",
+                "status": "COMPLETED",
+                "type": "IMPORT_JUDGMENT",
+                "metadata": {},
+                "judgmentRatings": [
+                  {
+                    "query": "red shoe",
+                    "ratings": [
+                      {
+                        "docId": "1",
+                        "rating": "3"
+                      },
+                      {
+                        "docId": "2",
+                        "rating": "1"
+                      },
+                      {
+                        "docId": "6",
+                        "rating": "2"
+                      }
+                    ]
+                  },
+                  {
+                    "query": "model 3",
+                    "ratings": [
+                      {
+                        "docId": "3",
+                        "rating": "3"
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "PUT /_plugins/_search_relevance/judgments",
+      "body": {
+        "name": "esm-clicks",
+        "type": "UBI_JUDGMENT",
+        "clickModel": "coec",
+        "maxRank": 20
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "search_relevance_exception",
+              "reason": "No 'ubiEventsIndex' parameter was provided and the default UBI events index [ubi_events] does not exist or is missing required UBI event fields (query_id, action_name, event_attributes.object.object_id). Ingest UBI events data into [ubi_events], or set the 'ubiEventsIndex' parameter to an existing UBI events index."
+            }
+          ],
+          "type": "search_relevance_exception",
+          "reason": "No 'ubiEventsIndex' parameter was provided and the default UBI events index [ubi_events] does not exist or is missing required UBI event fields (query_id, action_name, event_attributes.object.object_id). Ingest UBI events data into [ubi_events], or set the 'ubiEventsIndex' parameter to an existing UBI events index."
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "PUT /_plugins/_search_relevance/experiments",
+      "body": {
+        "querySetId": "${qs}",
+        "searchConfigurationList": [
+          "${up}",
+          "${down}"
+        ],
+        "judgmentList": [
+          "${j}"
+        ],
+        "size": 4,
+        "type": "POINTWISE_EVALUATION"
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "search_relevance_exception",
+              "reason": "POINTWISE_EVALUATION requires exactly 1 search configuration"
+            }
+          ],
+          "type": "search_relevance_exception",
+          "reason": "POINTWISE_EVALUATION requires exactly 1 search configuration"
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "PUT /_plugins/_search_relevance/experiments",
+      "body": {
+        "querySetId": "${qs}",
+        "searchConfigurationList": [
+          "${up}"
+        ],
+        "size": 4,
+        "type": "PAIRWISE_COMPARISON"
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "search_relevance_exception",
+              "reason": "PAIRWISE_COMPARISON requires exactly 2 search configurations"
+            }
+          ],
+          "type": "search_relevance_exception",
+          "reason": "PAIRWISE_COMPARISON requires exactly 2 search configurations"
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "PUT /_plugins/_search_relevance/experiments",
+      "body": {
+        "querySetId": "${qs}",
+        "searchConfigurationList": [
+          "${down}"
+        ],
+        "judgmentList": [
+          "${j}"
+        ],
+        "size": 4,
+        "type": "POINTWISE_EVALUATION"
+      },
+      "stash": {
+        "e1": "experiment_id"
+      },
+      "status": 200,
+      "response": {
+        "experiment_id": "fdf7c1bc-e371-409b-aca4-458073e0df0f",
+        "experiment_result": "CREATED"
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_plugins/_search_relevance/experiments/${e1}",
+      "mask": [
+        "took",
+        "inputSignature",
+        "name",
+        "results"
+      ],
+      "capture_sleep_ms": 4000,
+      "status": 200,
+      "response": {
+        "took": 8,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 1,
+            "relation": "eq"
+          },
+          "max_score": 1.0,
+          "hits": [
+            {
+              "_index": ".plugins-search-relevance-experiment",
+              "_id": "fdf7c1bc-e371-409b-aca4-458073e0df0f",
+              "_score": 1.0,
+              "_source": {
+                "id": "fdf7c1bc-e371-409b-aca4-458073e0df0f",
+                "timestamp": "2026-11-27T07:25:13.387Z",
+                "name": "POINTWISE_EVALUATION-fdf7c1bc",
+                "type": "POINTWISE_EVALUATION",
+                "status": "COMPLETED",
+                "querySetId": "ca530ee7-994f-4056-b500-414c3947fab2",
+                "searchConfigurationList": [
+                  "439924ea-883a-4888-92f6-017eb8ab587b"
+                ],
+                "judgmentList": [
+                  "c0fe7746-55d7-4a60-a8fa-8eecf93a9bcb"
+                ],
+                "size": 4,
+                "isScheduled": false,
+                "scheduledExperimentJobId": null,
+                "results": [
+                  {
+                    "evaluationId": "44779f14-eb7d-402d-b397-3517f524584c",
+                    "queryText": "red shoe",
+                    "searchConfigurationId": "439924ea-883a-4888-92f6-017eb8ab587b"
+                  },
+                  {
+                    "evaluationId": "71c610fa-d788-4a87-96c9-c054e73f9795",
+                    "queryText": "model 3",
+                    "searchConfigurationId": "439924ea-883a-4888-92f6-017eb8ab587b"
+                  }
+                ],
+                "inputSignature": {
+                  "query_set": "4edeb23ea94474910444a73214a77c5c5f7a82d752107c540bda891656927b1c",
+                  "judgment_list": "7e40b92eb76ea890616278a25ea0972367edfabb84796f3a7266bf7666112c86",
+                  "search_configurations": "9c787b59fc0ffec5e4df1348dfabd9938f7276ab8c526d8a79e0bcfa45df9896"
+                }
+              }
+            }
+          ]
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /search-relevance-evaluation-result/_search",
+      "body": {
+        "query": {
+          "term": {
+            "experimentId": "${e1}"
+          }
+        },
+        "sort": [
+          {
+            "searchText": "asc"
+          }
+        ],
+        "_source": {
+          "excludes": [
+            "id",
+            "experimentVariantId",
+            "searchConfigurationId"
+          ]
+        }
+      },
+      "mask": [
+        "took",
+        "sort",
+        "_id"
+      ],
+      "capture_sleep_ms": 3000,
+      "status": 200,
+      "response": {
+        "took": 40,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 2,
+            "relation": "eq"
+          },
+          "max_score": null,
+          "hits": [
+            {
+              "_index": "search-relevance-evaluation-result",
+              "_id": "71c610fa-d788-4a87-96c9-c054e73f9795",
+              "_score": null,
+              "_source": {
+                "searchText": "model 3",
+                "judgmentIds": [
+                  "c0fe7746-55d7-4a60-a8fa-8eecf93a9bcb"
+                ],
+                "experimentId": "fdf7c1bc-e371-409b-aca4-458073e0df0f",
+                "metrics": [
+                  {
+                    "metric": "Coverage@4",
+                    "value": 0.25
+                  },
+                  {
+                    "metric": "Precision@4",
+                    "value": 0.25
+                  },
+                  {
+                    "metric": "Recall@4",
+                    "value": 1.0
+                  },
+                  {
+                    "metric": "MAP@4",
+                    "value": 0.25
+                  },
+                  {
+                    "metric": "MRR",
+                    "value": 0.25
+                  },
+                  {
+                    "metric": "DCG@4",
+                    "value": 3.01
+                  },
+                  {
+                    "metric": "NDCG@4",
+                    "value": 0.43
+                  }
+                ],
+                "timestamp": "2026-11-27T07:25:12.178Z",
+                "documentIds": [
+                  "6",
+                  "5",
+                  "4",
+                  "3"
+                ]
+              },
+              "sort": [
+                "model 3"
+              ]
+            },
+            {
+              "_index": "search-relevance-evaluation-result",
+              "_id": "44779f14-eb7d-402d-b397-3517f524584c",
+              "_score": null,
+              "_source": {
+                "searchText": "red shoe",
+                "judgmentIds": [
+                  "c0fe7746-55d7-4a60-a8fa-8eecf93a9bcb"
+                ],
+                "experimentId": "fdf7c1bc-e371-409b-aca4-458073e0df0f",
+                "metrics": [
+                  {
+                    "metric": "Coverage@4",
+                    "value": 0.25
+                  },
+                  {
+                    "metric": "Precision@4",
+                    "value": 0.0
+                  },
+                  {
+                    "metric": "Recall@4",
+                    "value": 0.0
+                  },
+                  {
+                    "metric": "MAP@4",
+                    "value": 0.0
+                  },
+                  {
+                    "metric": "MRR",
+                    "value": 0.0
+                  },
+                  {
+                    "metric": "DCG@4",
+                    "value": 3.0
+                  },
+                  {
+                    "metric": "NDCG@4",
+                    "value": 0.32
+                  }
+                ],
+                "timestamp": "2026-11-27T07:25:12.182Z",
+                "documentIds": [
+                  "6",
+                  "5",
+                  "4",
+                  "3"
+                ]
+              },
+              "sort": [
+                "red shoe"
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      },
+      "unordered": true
+    },
+    {
+      "req": "PUT /_plugins/_search_relevance/experiments",
+      "body": {
+        "querySetId": "${qs}",
+        "searchConfigurationList": [
+          "${up}",
+          "${down}"
+        ],
+        "size": 4,
+        "type": "PAIRWISE_COMPARISON"
+      },
+      "stash": {
+        "e2": "experiment_id"
+      },
+      "status": 200,
+      "response": {
+        "experiment_id": "a9331acf-23f2-4a8d-9e08-7da2ee285be0",
+        "experiment_result": "CREATED"
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_plugins/_search_relevance/experiments/${e2}",
+      "mask": [
+        "took",
+        "inputSignature",
+        "name",
+        "snapshots",
+        "query_text"
+      ],
+      "capture_sleep_ms": 4000,
+      "status": 200,
+      "response": {
+        "took": 4,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 1,
+            "relation": "eq"
+          },
+          "max_score": 1.0,
+          "hits": [
+            {
+              "_index": ".plugins-search-relevance-experiment",
+              "_id": "a9331acf-23f2-4a8d-9e08-7da2ee285be0",
+              "_score": 1.0,
+              "_source": {
+                "id": "a9331acf-23f2-4a8d-9e08-7da2ee285be0",
+                "timestamp": "2026-11-27T07:25:19.219Z",
+                "name": "PAIRWISE_COMPARISON-a9331acf",
+                "type": "PAIRWISE_COMPARISON",
+                "status": "COMPLETED",
+                "querySetId": "ca530ee7-994f-4056-b500-414c3947fab2",
+                "searchConfigurationList": [
+                  "81145b4a-45b3-4f92-9ca9-51b6b62ffd06",
+                  "439924ea-883a-4888-92f6-017eb8ab587b"
+                ],
+                "judgmentList": [],
+                "size": 4,
+                "isScheduled": false,
+                "scheduledExperimentJobId": null,
+                "results": [
+                  {
+                    "snapshots": [
+                      {
+                        "searchConfigurationId": "81145b4a-45b3-4f92-9ca9-51b6b62ffd06",
+                        "docIds": [
+                          "1",
+                          "2",
+                          "3",
+                          "4"
+                        ]
+                      },
+                      {
+                        "searchConfigurationId": "439924ea-883a-4888-92f6-017eb8ab587b",
+                        "docIds": [
+                          "6",
+                          "5",
+                          "4",
+                          "3"
+                        ]
+                      }
+                    ],
+                    "metrics": [
+                      {
+                        "metric": "jaccard",
+                        "value": 0.33
+                      },
+                      {
+                        "metric": "rbo50",
+                        "value": 0.03
+                      },
+                      {
+                        "metric": "rbo90",
+                        "value": 0.11
+                      },
+                      {
+                        "metric": "frequencyWeighted",
+                        "value": 0.5
+                      }
+                    ],
+                    "query_text": "red shoe"
+                  },
+                  {
+                    "snapshots": [
+                      {
+                        "searchConfigurationId": "81145b4a-45b3-4f92-9ca9-51b6b62ffd06",
+                        "docIds": [
+                          "1",
+                          "2",
+                          "3",
+                          "4"
+                        ]
+                      },
+                      {
+                        "searchConfigurationId": "439924ea-883a-4888-92f6-017eb8ab587b",
+                        "docIds": [
+                          "6",
+                          "5",
+                          "4",
+                          "3"
+                        ]
+                      }
+                    ],
+                    "metrics": [
+                      {
+                        "metric": "jaccard",
+                        "value": 0.33
+                      },
+                      {
+                        "metric": "rbo50",
+                        "value": 0.03
+                      },
+                      {
+                        "metric": "rbo90",
+                        "value": 0.11
+                      },
+                      {
+                        "metric": "frequencyWeighted",
+                        "value": 0.5
+                      }
+                    ],
+                    "query_text": "model 3"
+                  }
+                ],
+                "inputSignature": {
+                  "query_set": "4edeb23ea94474910444a73214a77c5c5f7a82d752107c540bda891656927b1c",
+                  "judgment_list": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                  "search_configurations": "2e7b869d0413ac6c99747323f8769d9d8962ad78b9fcc26bd238b851351290bd"
+                }
+              }
+            }
+          ]
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "PUT /_plugins/_search_relevance/experiments",
+      "body": {
+        "querySetId": "nope",
+        "searchConfigurationList": [
+          "${up}"
+        ],
+        "judgmentList": [
+          "${j}"
+        ],
+        "size": 4,
+        "type": "POINTWISE_EVALUATION"
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "search_relevance_exception",
+              "reason": "QuerySet [nope] does not exist"
+            }
+          ],
+          "type": "search_relevance_exception",
+          "reason": "QuerySet [nope] does not exist"
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "PUT /_plugins/_search_relevance/experiments",
+      "body": {
+        "querySetId": "${qs}",
+        "searchConfigurationList": [
+          "${up}"
+        ],
+        "size": 4,
+        "type": "NOPE"
+      },
+      "status": 400,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "Invalid or missing experiment type"
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "Invalid or missing experiment type"
+        },
+        "status": 400
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "DELETE /_plugins/_search_relevance/experiments/${e2}",
+      "mask": [
+        "_seq_no",
+        "_primary_term",
+        "_version"
+      ],
+      "status": 200,
+      "response": {
+        "_index": ".plugins-search-relevance-experiment",
+        "_id": "a9331acf-23f2-4a8d-9e08-7da2ee285be0",
+        "_version": 3,
+        "result": "deleted",
+        "forced_refresh": true,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "failed": 0
+        },
+        "_seq_no": 4,
+        "_primary_term": 1
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_plugins/_search_relevance/experiments/${e2}",
+      "mask": [
+        "took"
+      ],
+      "status": 404,
+      "response": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "resource_not_found_exception",
+              "reason": "Document not found: a9331acf-23f2-4a8d-9e08-7da2ee285be0"
+            }
+          ],
+          "type": "resource_not_found_exception",
+          "reason": "Document not found: a9331acf-23f2-4a8d-9e08-7da2ee285be0"
+        },
+        "status": 404
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "PUT /ubi_events",
+      "body": {
+        "mappings": {
+          "properties": {
+            "action_name": {
+              "type": "keyword"
+            },
+            "query_id": {
+              "type": "keyword"
+            },
+            "user_query": {
+              "type": "keyword"
+            },
+            "timestamp": {
+              "type": "date"
+            },
+            "event_attributes": {
+              "properties": {
+                "object": {
+                  "properties": {
+                    "object_id": {
+                      "type": "keyword"
+                    }
+                  }
+                },
+                "position": {
+                  "properties": {
+                    "ordinal": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "shards_acknowledged": true,
+        "index": "ubi_events"
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "POST /ubi_events/_bulk?refresh=true",
+      "raw": "{\"index\": {}}\n{\"query_id\": \"r0\", \"user_query\": \"red shoe\", \"action_name\": \"impression\", \"timestamp\": \"2026-11-26T10:00:00.000Z\", \"event_attributes\": {\"object\": {\"object_id\": \"1\"}, \"position\": {\"ordinal\": 1}}}\n{\"index\": {}}\n{\"query_id\": \"r0\", \"user_query\": \"red shoe\", \"action_name\": \"impression\", \"timestamp\": \"2026-11-26T10:00:00.000Z\", \"event_attributes\": {\"object\": {\"object_id\": \"2\"}, \"position\": {\"ordinal\": 2}}}\n{\"index\": {}}\n{\"query_id\": \"r0\", \"user_query\": \"red shoe\", \"action_name\": \"impression\", \"timestamp\": \"2026-11-26T10:00:00.000Z\", \"event_attributes\": {\"object\": {\"object_id\": \"3\"}, \"position\": {\"ordinal\": 3}}}\n{\"index\": {}}\n{\"query_id\": \"r0\", \"user_query\": \"red shoe\", \"action_name\": \"impression\", \"timestamp\": \"2026-11-26T10:00:00.000Z\", \"event_attributes\": {\"object\": {\"object_id\": \"4\"}, \"position\": {\"ordinal\": 4}}}\n{\"index\": {}}\n{\"query_id\": \"r0\", \"user_query\": \"red shoe\", \"action_name\": \"click\", \"timestamp\": \"2026-11-26T10:00:00.000Z\", \"event_attributes\": {\"object\": {\"object_id\": \"2\"}, \"position\": {\"ordinal\": 2}}}\n{\"index\": {}}\n{\"query_id\": \"r1\", \"user_query\": \"red shoe\", \"action_name\": \"impression\", \"timestamp\": \"2026-11-26T10:00:00.000Z\", \"event_attributes\": {\"object\": {\"object_id\": \"1\"}, \"position\": {\"ordinal\": 1}}}\n{\"index\": {}}\n{\"query_id\": \"r1\", \"user_query\": \"red shoe\", \"action_name\": \"impression\", \"timestamp\": \"2026-11-26T10:00:00.000Z\", \"event_attributes\": {\"object\": {\"object_id\": \"2\"}, \"position\": {\"ordinal\": 2}}}\n{\"index\": {}}\n{\"query_id\": \"r1\", \"user_query\": \"red shoe\", \"action_name\": \"impression\", \"timestamp\": \"2026-11-26T10:00:00.000Z\", \"event_attributes\": {\"object\": {\"object_id\": \"3\"}, \"position\": {\"ordinal\": 3}}}\n{\"index\": {}}\n{\"query_id\": \"r1\", \"user_query\": \"red shoe\", \"action_name\": \"impression\", \"timestamp\": \"2026-11-26T10:00:00.000Z\", \"event_attributes\": {\"object\": {\"object_id\": \"4\"}, \"position\": {\"ordinal\": 4}}}\n{\"index\": {}}\n{\"query_id\": \"r1\", \"user_query\": \"red shoe\", \"action_name\": \"click\", \"timestamp\": \"2026-11-26T10:00:00.000Z\", \"event_attributes\": {\"object\": {\"object_id\": \"2\"}, \"position\": {\"ordinal\": 2}}}\n{\"index\": {}}\n{\"query_id\": \"r2\", \"user_query\": \"red shoe\", \"action_name\": \"impression\", \"timestamp\": \"2026-11-26T10:00:00.000Z\", \"event_attributes\": {\"object\": {\"object_id\": \"1\"}, \"position\": {\"ordinal\": 1}}}\n{\"index\": {}}\n{\"query_id\": \"r2\", \"user_query\": \"red shoe\", \"action_name\": \"impression\", \"timestamp\": \"2026-11-26T10:00:00.000Z\", \"event_attributes\": {\"object\": {\"object_id\": \"2\"}, \"position\": {\"ordinal\": 2}}}\n{\"index\": {}}\n{\"query_id\": \"r2\", \"user_query\": \"red shoe\", \"action_name\": \"impression\", \"timestamp\": \"2026-11-26T10:00:00.000Z\", \"event_attributes\": {\"object\": {\"object_id\": \"3\"}, \"position\": {\"ordinal\": 3}}}\n{\"index\": {}}\n{\"query_id\": \"r2\", \"user_query\": \"red shoe\", \"action_name\": \"impression\", \"timestamp\": \"2026-11-26T10:00:00.000Z\", \"event_attributes\": {\"object\": {\"object_id\": \"4\"}, \"position\": {\"ordinal\": 4}}}\n{\"index\": {}}\n{\"query_id\": \"r2\", \"user_query\": \"red shoe\", \"action_name\": \"click\", \"timestamp\": \"2026-11-26T10:00:00.000Z\", \"event_attributes\": {\"object\": {\"object_id\": \"2\"}, \"position\": {\"ordinal\": 2}}}\n{\"index\": {}}\n{\"query_id\": \"r3\", \"user_query\": \"red shoe\", \"action_name\": \"impression\", \"timestamp\": \"2026-11-26T10:00:00.000Z\", \"event_attributes\": {\"object\": {\"object_id\": \"1\"}, \"position\": {\"ordinal\": 1}}}\n{\"index\": {}}\n{\"query_id\": \"r3\", \"user_query\": \"red shoe\", \"action_name\": \"impression\", \"timestamp\": \"2026-11-26T10:00:00.000Z\", \"event_attributes\": {\"object\": {\"object_id\": \"2\"}, \"position\": {\"ordinal\": 2}}}\n{\"index\": {}}\n{\"query_id\": \"r3\", \"user_query\": \"red shoe\", \"action_name\": \"impression\", \"timestamp\": \"2026-11-26T10:00:00.000Z\", \"event_attributes\": {\"object\": {\"object_id\": \"3\"}, \"position\": {\"ordinal\": 3}}}\n{\"index\": {}}\n{\"query_id\": \"r3\", \"user_query\": \"red shoe\", \"action_name\": \"impression\", \"timestamp\": \"2026-11-26T10:00:00.000Z\", \"event_attributes\": {\"object\": {\"object_id\": \"4\"}, \"position\": {\"ordinal\": 4}}}\n{\"index\": {}}\n{\"query_id\": \"r3\", \"user_query\": \"red shoe\", \"action_name\": \"click\", \"timestamp\": \"2026-11-26T10:00:00.000Z\", \"event_attributes\": {\"object\": {\"object_id\": \"1\"}, \"position\": {\"ordinal\": 1}}}\n{\"index\": {}}\n{\"query_id\": \"r4\", \"user_query\": \"red shoe\", \"action_name\": \"impression\", \"timestamp\": \"2026-11-26T10:00:00.000Z\", \"event_attributes\": {\"object\": {\"object_id\": \"1\"}, \"position\": {\"ordinal\": 1}}}\n{\"index\": {}}\n{\"query_id\": \"r4\", \"user_query\": \"red shoe\", \"action_name\": \"impression\", \"timestamp\": \"2026-11-26T10:00:00.000Z\", \"event_attributes\": {\"object\": {\"object_id\": \"2\"}, \"position\": {\"ordinal\": 2}}}\n{\"index\": {}}\n{\"query_id\": \"r4\", \"user_query\": \"red shoe\", \"action_name\": \"impression\", \"timestamp\": \"2026-11-26T10:00:00.000Z\", \"event_attributes\": {\"object\": {\"object_id\": \"3\"}, \"position\": {\"ordinal\": 3}}}\n{\"index\": {}}\n{\"query_id\": \"r4\", \"user_query\": \"red shoe\", \"action_name\": \"impression\", \"timestamp\": \"2026-11-26T10:00:00.000Z\", \"event_attributes\": {\"object\": {\"object_id\": \"4\"}, \"position\": {\"ordinal\": 4}}}\n{\"index\": {}}\n{\"query_id\": \"m0\", \"user_query\": \"model 3\", \"action_name\": \"impression\", \"timestamp\": \"2026-11-26T10:00:00.000Z\", \"event_attributes\": {\"object\": {\"object_id\": \"3\"}, \"position\": {\"ordinal\": 1}}}\n{\"index\": {}}\n{\"query_id\": \"m0\", \"user_query\": \"model 3\", \"action_name\": \"impression\", \"timestamp\": \"2026-11-26T10:00:00.000Z\", \"event_attributes\": {\"object\": {\"object_id\": \"1\"}, \"position\": {\"ordinal\": 2}}}\n{\"index\": {}}\n{\"query_id\": \"m0\", \"user_query\": \"model 3\", \"action_name\": \"click\", \"timestamp\": \"2026-11-26T10:00:00.000Z\", \"event_attributes\": {\"object\": {\"object_id\": \"3\"}, \"position\": {\"ordinal\": 1}}}\n{\"index\": {}}\n{\"query_id\": \"m1\", \"user_query\": \"model 3\", \"action_name\": \"impression\", \"timestamp\": \"2026-11-26T10:00:00.000Z\", \"event_attributes\": {\"object\": {\"object_id\": \"3\"}, \"position\": {\"ordinal\": 1}}}\n{\"index\": {}}\n{\"query_id\": \"m1\", \"user_query\": \"model 3\", \"action_name\": \"impression\", \"timestamp\": \"2026-11-26T10:00:00.000Z\", \"event_attributes\": {\"object\": {\"object_id\": \"1\"}, \"position\": {\"ordinal\": 2}}}\n{\"index\": {}}\n{\"query_id\": \"m1\", \"user_query\": \"model 3\", \"action_name\": \"click\", \"timestamp\": \"2026-11-26T10:00:00.000Z\", \"event_attributes\": {\"object\": {\"object_id\": \"3\"}, \"position\": {\"ordinal\": 1}}}\n",
+      "headers": {
+        "Content-Type": "application/x-ndjson"
+      },
+      "mask": [
+        "took",
+        "_id",
+        "_seq_no",
+        "_primary_term"
+      ],
+      "skip": "the bulk only loads the events",
+      "status": 200,
+      "response": {
+        "took": 42,
+        "errors": false,
+        "items": [
+          {
+            "index": {
+              "_index": "ubi_events",
+              "_id": "G7LlG6IBJXAUsaAZBZY3",
+              "_version": 1,
+              "result": "created",
+              "forced_refresh": true,
+              "_shards": {
+                "total": 2,
+                "successful": 1,
+                "failed": 0
+              },
+              "_seq_no": 0,
+              "_primary_term": 1,
+              "status": 201
+            }
+          },
+          {
+            "index": {
+              "_index": "ubi_events",
+              "_id": "HLLlG6IBJXAUsaAZBZY3",
+              "_version": 1,
+              "result": "created",
+              "forced_refresh": true,
+              "_shards": {
+                "total": 2,
+                "successful": 1,
+                "failed": 0
+              },
+              "_seq_no": 1,
+              "_primary_term": 1,
+              "status": 201
+            }
+          },
+          {
+            "index": {
+              "_index": "ubi_events",
+              "_id": "HbLlG6IBJXAUsaAZBZY3",
+              "_version": 1,
+              "result": "created",
+              "forced_refresh": true,
+              "_shards": {
+                "total": 2,
+                "successful": 1,
+                "failed": 0
+              },
+              "_seq_no": 2,
+              "_primary_term": 1,
+              "status": 201
+            }
+          },
+          {
+            "index": {
+              "_index": "ubi_events",
+              "_id": "HrLlG6IBJXAUsaAZBZY3",
+              "_version": 1,
+              "result": "created",
+              "forced_refresh": true,
+              "_shards": {
+                "total": 2,
+                "successful": 1,
+                "failed": 0
+              },
+              "_seq_no": 3,
+              "_primary_term": 1,
+              "status": 201
+            }
+          },
+          {
+            "index": {
+              "_index": "ubi_events",
+              "_id": "H7LlG6IBJXAUsaAZBZY3",
+              "_version": 1,
+              "result": "created",
+              "forced_refresh": true,
+              "_shards": {
+                "total": 2,
+                "successful": 1,
+                "failed": 0
+              },
+              "_seq_no": 4,
+              "_primary_term": 1,
+              "status": 201
+            }
+          },
+          {
+            "index": {
+              "_index": "ubi_events",
+              "_id": "ILLlG6IBJXAUsaAZBZY3",
+              "_version": 1,
+              "result": "created",
+              "forced_refresh": true,
+              "_shards": {
+                "total": 2,
+                "successful": 1,
+                "failed": 0
+              },
+              "_seq_no": 5,
+              "_primary_term": 1,
+              "status": 201
+            }
+          },
+          {
+            "index": {
+              "_index": "ubi_events",
+              "_id": "IbLlG6IBJXAUsaAZBZY3",
+              "_version": 1,
+              "result": "created",
+              "forced_refresh": true,
+              "_shards": {
+                "total": 2,
+                "successful": 1,
+                "failed": 0
+              },
+              "_seq_no": 6,
+              "_primary_term": 1,
+              "status": 201
+            }
+          },
+          {
+            "index": {
+              "_index": "ubi_events",
+              "_id": "IrLlG6IBJXAUsaAZBZY3",
+              "_version": 1,
+              "result": "created",
+              "forced_refresh": true,
+              "_shards": {
+                "total": 2,
+                "successful": 1,
+                "failed": 0
+              },
+              "_seq_no": 7,
+              "_primary_term": 1,
+              "status": 201
+            }
+          },
+          {
+            "index": {
+              "_index": "ubi_events",
+              "_id": "I7LlG6IBJXAUsaAZBZY3",
+              "_version": 1,
+              "result": "created",
+              "forced_refresh": true,
+              "_shards": {
+                "total": 2,
+                "successful": 1,
+                "failed": 0
+              },
+              "_seq_no": 8,
+              "_primary_term": 1,
+              "status": 201
+            }
+          },
+          {
+            "index": {
+              "_index": "ubi_events",
+              "_id": "JLLlG6IBJXAUsaAZBZY3",
+              "_version": 1,
+              "result": "created",
+              "forced_refresh": true,
+              "_shards": {
+                "total": 2,
+                "successful": 1,
+                "failed": 0
+              },
+              "_seq_no": 9,
+              "_primary_term": 1,
+              "status": 201
+            }
+          },
+          {
+            "index": {
+              "_index": "ubi_events",
+              "_id": "JbLlG6IBJXAUsaAZBZY3",
+              "_version": 1,
+              "result": "created",
+              "forced_refresh": true,
+              "_shards": {
+                "total": 2,
+                "successful": 1,
+                "failed": 0
+              },
+              "_seq_no": 10,
+              "_primary_term": 1,
+              "status": 201
+            }
+          },
+          {
+            "index": {
+              "_index": "ubi_events",
+              "_id": "JrLlG6IBJXAUsaAZBZY3",
+              "_version": 1,
+              "result": "created",
+              "forced_refresh": true,
+              "_shards": {
+                "total": 2,
+                "successful": 1,
+                "failed": 0
+              },
+              "_seq_no": 11,
+              "_primary_term": 1,
+              "status": 201
+            }
+          },
+          {
+            "index": {
+              "_index": "ubi_events",
+              "_id": "J7LlG6IBJXAUsaAZBZY3",
+              "_version": 1,
+              "result": "created",
+              "forced_refresh": true,
+              "_shards": {
+                "total": 2,
+                "successful": 1,
+                "failed": 0
+              },
+              "_seq_no": 12,
+              "_primary_term": 1,
+              "status": 201
+            }
+          },
+          {
+            "index": {
+              "_index": "ubi_events",
+              "_id": "KLLlG6IBJXAUsaAZBZY3",
+              "_version": 1,
+              "result": "created",
+              "forced_refresh": true,
+              "_shards": {
+                "total": 2,
+                "successful": 1,
+                "failed": 0
+              },
+              "_seq_no": 13,
+              "_primary_term": 1,
+              "status": 201
+            }
+          },
+          {
+            "index": {
+              "_index": "ubi_events",
+              "_id": "KbLlG6IBJXAUsaAZBZY3",
+              "_version": 1,
+              "result": "created",
+              "forced_refresh": true,
+              "_shards": {
+                "total": 2,
+                "successful": 1,
+                "failed": 0
+              },
+              "_seq_no": 14,
+              "_primary_term": 1,
+              "status": 201
+            }
+          },
+          {
+            "index": {
+              "_index": "ubi_events",
+              "_id": "KrLlG6IBJXAUsaAZBZY3",
+              "_version": 1,
+              "result": "created",
+              "forced_refresh": true,
+              "_shards": {
+                "total": 2,
+                "successful": 1,
+                "failed": 0
+              },
+              "_seq_no": 15,
+              "_primary_term": 1,
+              "status": 201
+            }
+          },
+          {
+            "index": {
+              "_index": "ubi_events",
+              "_id": "K7LlG6IBJXAUsaAZBZY3",
+              "_version": 1,
+              "result": "created",
+              "forced_refresh": true,
+              "_shards": {
+                "total": 2,
+                "successful": 1,
+                "failed": 0
+              },
+              "_seq_no": 16,
+              "_primary_term": 1,
+              "status": 201
+            }
+          },
+          {
+            "index": {
+              "_index": "ubi_events",
+              "_id": "LLLlG6IBJXAUsaAZBZY3",
+              "_version": 1,
+              "result": "created",
+              "forced_refresh": true,
+              "_shards": {
+                "total": 2,
+                "successful": 1,
+                "failed": 0
+              },
+              "_seq_no": 17,
+              "_primary_term": 1,
+              "status": 201
+            }
+          },
+          {
+            "index": {
+              "_index": "ubi_events",
+              "_id": "LbLlG6IBJXAUsaAZBZY3",
+              "_version": 1,
+              "result": "created",
+              "forced_refresh": true,
+              "_shards": {
+                "total": 2,
+                "successful": 1,
+                "failed": 0
+              },
+              "_seq_no": 18,
+              "_primary_term": 1,
+              "status": 201
+            }
+          },
+          {
+            "index": {
+              "_index": "ubi_events",
+              "_id": "LrLlG6IBJXAUsaAZBZY3",
+              "_version": 1,
+              "result": "created",
+              "forced_refresh": true,
+              "_shards": {
+                "total": 2,
+                "successful": 1,
+                "failed": 0
+              },
+              "_seq_no": 19,
+              "_primary_term": 1,
+              "status": 201
+            }
+          },
+          {
+            "index": {
+              "_index": "ubi_events",
+              "_id": "L7LlG6IBJXAUsaAZBZY3",
+              "_version": 1,
+              "result": "created",
+              "forced_refresh": true,
+              "_shards": {
+                "total": 2,
+                "successful": 1,
+                "failed": 0
+              },
+              "_seq_no": 20,
+              "_primary_term": 1,
+              "status": 201
+            }
+          },
+          {
+            "index": {
+              "_index": "ubi_events",
+              "_id": "MLLlG6IBJXAUsaAZBZY3",
+              "_version": 1,
+              "result": "created",
+              "forced_refresh": true,
+              "_shards": {
+                "total": 2,
+                "successful": 1,
+                "failed": 0
+              },
+              "_seq_no": 21,
+              "_primary_term": 1,
+              "status": 201
+            }
+          },
+          {
+            "index": {
+              "_index": "ubi_events",
+              "_id": "MbLlG6IBJXAUsaAZBZY3",
+              "_version": 1,
+              "result": "created",
+              "forced_refresh": true,
+              "_shards": {
+                "total": 2,
+                "successful": 1,
+                "failed": 0
+              },
+              "_seq_no": 22,
+              "_primary_term": 1,
+              "status": 201
+            }
+          },
+          {
+            "index": {
+              "_index": "ubi_events",
+              "_id": "MrLlG6IBJXAUsaAZBZY3",
+              "_version": 1,
+              "result": "created",
+              "forced_refresh": true,
+              "_shards": {
+                "total": 2,
+                "successful": 1,
+                "failed": 0
+              },
+              "_seq_no": 23,
+              "_primary_term": 1,
+              "status": 201
+            }
+          },
+          {
+            "index": {
+              "_index": "ubi_events",
+              "_id": "M7LlG6IBJXAUsaAZBZY3",
+              "_version": 1,
+              "result": "created",
+              "forced_refresh": true,
+              "_shards": {
+                "total": 2,
+                "successful": 1,
+                "failed": 0
+              },
+              "_seq_no": 24,
+              "_primary_term": 1,
+              "status": 201
+            }
+          },
+          {
+            "index": {
+              "_index": "ubi_events",
+              "_id": "NLLlG6IBJXAUsaAZBZY3",
+              "_version": 1,
+              "result": "created",
+              "forced_refresh": true,
+              "_shards": {
+                "total": 2,
+                "successful": 1,
+                "failed": 0
+              },
+              "_seq_no": 25,
+              "_primary_term": 1,
+              "status": 201
+            }
+          },
+          {
+            "index": {
+              "_index": "ubi_events",
+              "_id": "NbLlG6IBJXAUsaAZBZY3",
+              "_version": 1,
+              "result": "created",
+              "forced_refresh": true,
+              "_shards": {
+                "total": 2,
+                "successful": 1,
+                "failed": 0
+              },
+              "_seq_no": 26,
+              "_primary_term": 1,
+              "status": 201
+            }
+          },
+          {
+            "index": {
+              "_index": "ubi_events",
+              "_id": "NrLlG6IBJXAUsaAZBZY3",
+              "_version": 1,
+              "result": "created",
+              "forced_refresh": true,
+              "_shards": {
+                "total": 2,
+                "successful": 1,
+                "failed": 0
+              },
+              "_seq_no": 27,
+              "_primary_term": 1,
+              "status": 201
+            }
+          },
+          {
+            "index": {
+              "_index": "ubi_events",
+              "_id": "N7LlG6IBJXAUsaAZBZY3",
+              "_version": 1,
+              "result": "created",
+              "forced_refresh": true,
+              "_shards": {
+                "total": 2,
+                "successful": 1,
+                "failed": 0
+              },
+              "_seq_no": 28,
+              "_primary_term": 1,
+              "status": 201
+            }
+          },
+          {
+            "index": {
+              "_index": "ubi_events",
+              "_id": "OLLlG6IBJXAUsaAZBZY3",
+              "_version": 1,
+              "result": "created",
+              "forced_refresh": true,
+              "_shards": {
+                "total": 2,
+                "successful": 1,
+                "failed": 0
+              },
+              "_seq_no": 29,
+              "_primary_term": 1,
+              "status": 201
+            }
+          }
+        ]
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "PUT /_plugins/_search_relevance/judgments",
+      "body": {
+        "name": "esm-coec",
+        "type": "UBI_JUDGMENT",
+        "clickModel": "coec",
+        "maxRank": 20
+      },
+      "stash": {
+        "uj": "judgment_id"
+      },
+      "status": 200,
+      "response": {
+        "judgment_id": "5fbadbcf-43c6-4acb-9990-033d35047e15"
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_plugins/_search_relevance/judgments/${uj}",
+      "mask": [
+        "took"
+      ],
+      "capture_sleep_ms": 4000,
+      "status": 200,
+      "response": {
+        "took": 24,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 1,
+            "relation": "eq"
+          },
+          "max_score": 1.0,
+          "hits": [
+            {
+              "_index": "search-relevance-judgment",
+              "_id": "5fbadbcf-43c6-4acb-9990-033d35047e15",
+              "_score": 1.0,
+              "_source": {
+                "id": "5fbadbcf-43c6-4acb-9990-033d35047e15",
+                "timestamp": "2026-11-27T07:25:24.134Z",
+                "name": "esm-coec",
+                "status": "COMPLETED",
+                "type": "UBI_JUDGMENT",
+                "metadata": {
+                  "clickModel": "coec",
+                  "endDate": "",
+                  "ubiEventsIndex": "ubi_events",
+                  "startDate": "",
+                  "maxRank": 20
+                },
+                "judgmentRatings": [
+                  {
+                    "query": "red shoe",
+                    "ratings": [
+                      {
+                        "docId": "1",
+                        "rating": "0.467"
+                      },
+                      {
+                        "docId": "2",
+                        "rating": "1.400"
+                      },
+                      {
+                        "docId": "3",
+                        "rating": "0.000"
+                      },
+                      {
+                        "docId": "4",
+                        "rating": "0.000"
+                      }
+                    ]
+                  },
+                  {
+                    "query": "model 3",
+                    "ratings": [
+                      {
+                        "docId": "1",
+                        "rating": "0.000"
+                      },
+                      {
+                        "docId": "3",
+                        "rating": "2.333"
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "PUT /_plugins/_search_relevance/judgments",
+      "body": {
+        "name": "esm-nope",
+        "type": "UBI_JUDGMENT",
+        "clickModel": "nope",
+        "maxRank": 20
+      },
+      "stash": {
+        "nj": "judgment_id"
+      },
+      "status": 200,
+      "response": {
+        "judgment_id": "ec86fa1f-3da1-4f79-8463-b593c68b8e0c"
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_plugins/_search_relevance/judgments/${nj}",
+      "mask": [
+        "took"
+      ],
+      "capture_sleep_ms": 2000,
+      "status": 200,
+      "response": {
+        "took": 8,
+        "timed_out": false,
+        "_shards": {
+          "total": 1,
+          "successful": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        "hits": {
+          "total": {
+            "value": 1,
+            "relation": "eq"
+          },
+          "max_score": 1.0,
+          "hits": [
+            {
+              "_index": "search-relevance-judgment",
+              "_id": "ec86fa1f-3da1-4f79-8463-b593c68b8e0c",
+              "_score": 1.0,
+              "_source": {
+                "id": "ec86fa1f-3da1-4f79-8463-b593c68b8e0c",
+                "timestamp": "2026-11-27T07:25:27.851Z",
+                "name": "esm-nope",
+                "status": "ERROR",
+                "type": "UBI_JUDGMENT",
+                "metadata": {
+                  "error": "Unsupported click model: nope"
+                },
+                "judgmentRatings": []
+              }
+            }
+          ]
+        }
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "PUT /_cluster/settings",
+      "body": {
+        "persistent": {
+          "plugins.search_relevance.workbench_enabled": false
+        }
+      },
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "persistent": {
+          "plugins": {
+            "search_relevance": {
+              "workbench_enabled": "false"
+            }
+          }
+        },
+        "transient": {}
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    },
+    {
+      "req": "GET /_plugins/_search_relevance/query_sets",
+      "status": 403,
+      "text": "Search Relevance Workbench is disabled",
+      "response_headers": {
+        "content-type": "text/plain; charset=UTF-8"
+      }
+    },
+    {
+      "req": "PUT /_cluster/settings",
+      "body": {
+        "persistent": {
+          "plugins.search_relevance.workbench_enabled": null
+        }
+      },
+      "status": 200,
+      "response": {
+        "acknowledged": true,
+        "persistent": {},
+        "transient": {}
+      },
+      "response_headers": {
+        "content-type": "application/json; charset=UTF-8"
+      }
+    }
+  ],
+  "node_settings": {
+    "path.repo": "/repo"
+  }
+}

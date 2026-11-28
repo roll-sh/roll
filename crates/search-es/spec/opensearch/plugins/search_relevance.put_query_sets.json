@@ -1,0 +1,19 @@
+{
+  "search_relevance.put_query_sets": {
+    "documentation": {
+      "url": "https://docs.opensearch.org/latest/search-plugins/search-relevance/",
+      "description": "Creates a query set."
+    },
+    "stability": "experimental",
+    "url": {
+      "paths": [
+        {
+          "path": "/_plugins/_search_relevance/query_sets",
+          "methods": [
+            "PUT"
+          ]
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "search_relevance.delete_query_sets": {
+    "documentation": {
+      "url": "https://docs.opensearch.org/latest/search-plugins/search-relevance/",
+      "description": "Deletes a query set."
+    },
+    "stability": "experimental",
+    "url": {
+      "paths": [
+        {
+          "path": "/_plugins/_search_relevance/query_sets/{query_set_id}",
+          "methods": [
+            "DELETE"
+          ],
+          "parts": {
+            "query_set_id": {
+              "type": "string",
+              "description": "The query set's id."
+            }
+          }
+        }
+      ]
+    }
+  }
+}

@@ -246,3 +246,51 @@ async fn a_links_users_have_their_own_scrolls() {
     let (s, v) = link_call(&c, "POST", "/_search/scroll", &page, &auth, "a").await;
     assert_eq!((s, hits(&v)), (200, 1), "{}", v.to_json());
 }
+
+/// OpenSearch's Search Relevance Workbench reads what its caller may read, as the plugin does:
+/// a user with the Workbench's actions and read on `a` only can't make a click judgment from
+/// `b`'s events, sample `ubi_queries`, reach `b` through a store search's terms lookup, or run an
+/// experiment on `b` (it ends `ERROR`).
+#[tokio::test]
+async fn the_workbench_reads_as_its_caller() {
+    let cfg = search_es::ClusterConfig { dialect: search_es::Dialect::OpenSearch, unsealed_secrets: true, ..search_es::ClusterConfig::new("srw") };
+    let c = Cluster::open(cfg, std::sync::Arc::new(search_es::MemoryStore::new())).await.unwrap();
+    let events = r#"{"mappings":{"properties":{"action_name":{"type":"keyword"},"query_id":{"type":"keyword"},"user_query":{"type":"keyword"},"event_attributes":{"properties":{"object":{"properties":{"object_id":{"type":"keyword"}}},"position":{"properties":{"ordinal":{"type":"integer"}}}}}}}}"#;
+    let setup = [
+        ("PUT", "/a/_doc/1?refresh=true", r#"{"t":"red shoe"}"#),
+        ("PUT", "/b/_doc/1?refresh=true", r#"{"t":"red shoe"}"#),
+        ("PUT", "/b-events", events),
+        ("PUT", "/b-events/_doc/1?refresh=true", r#"{"query_id":"q","user_query":"red shoe","action_name":"impression","event_attributes":{"object":{"object_id":"1"},"position":{"ordinal":1}}}"#),
+        ("PUT", "/ubi_queries/_doc/1?refresh=true", r#"{"query_id":"q","user_query":"red shoe"}"#),
+        ("PUT", "/_plugins/_security/api/roles/srw", r#"{"cluster_permissions":["cluster:admin/opensearch/search_relevance/*"],"index_permissions":[{"index_patterns":["a"],"allowed_actions":["read"]}]}"#),
+        ("PUT", "/_plugins/_security/api/internalusers/u", r#"{"password":"Srw-pass-1234!"}"#),
+        ("PUT", "/_plugins/_security/api/rolesmapping/srw", r#"{"users":["u"]}"#),
+    ];
+    for (m, u, b) in setup {
+        let (s, v) = call(&c, m, u, b, None).await;
+        assert!(s < 300, "{m} {u}: {s} {v}");
+    }
+    let auth = Some(format!("Basic {}", base64::engine::general_purpose::STANDARD.encode("u:Srw-pass-1234!")));
+    let as_u = |m: &'static str, u: &'static str, b: String| {
+        let (c, auth) = (&c, auth.clone());
+        async move { call_as(c, m, u, &b, auth).await }
+    };
+    const B: &str = "/_plugins/_search_relevance";
+    let (s, v) = as_u("PUT", "/_plugins/_search_relevance/judgments", r#"{"name":"j","type":"UBI_JUDGMENT","clickModel":"coec","ubiEventsIndex":"b-events"}"#.into()).await;
+    assert_eq!(s, 403, "b's events: {v}");
+    let (s, v) = as_u("POST", "/_plugins/_search_relevance/query_sets", r#"{"name":"q","description":"d","sampling":"topn","querySetSize":5}"#.into()).await;
+    assert_eq!(s, 403, "ubi_queries: {v}");
+    let (s, v) = as_u("POST", "/_plugins/_search_relevance/query_sets/_search", r#"{"query":{"terms":{"t":{"index":"b","id":"1","path":"t"}}}}"#.into()).await;
+    assert_eq!(s, 400, "a lookup into b through the store: {v}");
+    // An experiment on b: made, then its searches (as u) are refused, and it ends ERROR.
+    let id = |v: &Value, k: &str| v.get(k).and_then(Value::as_str).unwrap_or_else(|| panic!("{v}")).to_string();
+    let qs = id(&as_u("PUT", "/_plugins/_search_relevance/query_sets", r#"{"name":"q","description":"d","sampling":"manual","querySetQueries":[{"queryText":"red shoe"}]}"#.into()).await.1, "query_set_id");
+    let conf = id(&as_u("PUT", "/_plugins/_search_relevance/search_configurations", r#"{"name":"c","index":"b","query":"{\"query\":{\"match\":{\"t\":\"%SearchText%\"}}}"}"#.into()).await.1, "search_configuration_id");
+    let j = id(&as_u("PUT", "/_plugins/_search_relevance/judgments", r#"{"name":"j","type":"IMPORT_JUDGMENT","judgmentRatings":[{"query":"red shoe","ratings":[{"docId":"1","rating":"3"}]}]}"#.into()).await.1, "judgment_id");
+    let body = format!(r#"{{"querySetId":"{qs}","searchConfigurationList":["{conf}"],"judgmentList":["{j}"],"size":5,"type":"POINTWISE_EVALUATION"}}"#);
+    let (s, v) = as_u("PUT", "/_plugins/_search_relevance/experiments", body).await;
+    assert_eq!(s, 200, "{v}");
+    let e = id(&v, "experiment_id");
+    let (_, v) = call(&c, "GET", &format!("{B}/experiments/{e}"), "", None).await;
+    assert_eq!(v.pointer(&["hits", "hits"]).and_then(Value::as_array).and_then(|h| h.first()).and_then(|h| h.pointer(&["_source", "status"])).and_then(Value::as_str), Some("ERROR"), "{v}");
+}

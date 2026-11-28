@@ -1,0 +1,19 @@
+{
+  "search_relevance.put_search_configurations": {
+    "documentation": {
+      "url": "https://docs.opensearch.org/latest/search-plugins/search-relevance/",
+      "description": "Creates a search configuration."
+    },
+    "stability": "experimental",
+    "url": {
+      "paths": [
+        {
+          "path": "/_plugins/_search_relevance/search_configurations",
+          "methods": [
+            "PUT"
+          ]
+        }
+      ]
+    }
+  }
+}

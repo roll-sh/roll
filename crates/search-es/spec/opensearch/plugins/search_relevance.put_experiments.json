@@ -1,0 +1,19 @@
+{
+  "search_relevance.put_experiments": {
+    "documentation": {
+      "url": "https://docs.opensearch.org/latest/search-plugins/search-relevance/",
+      "description": "Creates a experiment."
+    },
+    "stability": "experimental",
+    "url": {
+      "paths": [
+        {
+          "path": "/_plugins/_search_relevance/experiments",
+          "methods": [
+            "PUT"
+          ]
+        }
+      ]
+    }
+  }
+}

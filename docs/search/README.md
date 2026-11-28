@@ -1817,11 +1817,12 @@ deterministic (#396).
    (#1145). Offline evaluation landed in #1159 (`…/indices/{index}/evaluate`,
    `roll search index evaluate` for CI, `search_evaluate`, the Relevance tab's Evaluate); a
    search application's template and its experiment's variants scored the same way landed in
-   #1163. Next: judgment lists kept as indices, built from clicks, and OpenSearch's Search
-   Relevance Workbench (in progress). Then: classify the judgment-list routes by the list's
-   index (`roll-judgments-<name>`) instead of the whole cluster, so a grant limited to some
-   indices can manage its lists; `_from_clicks` then needs read on its body's `index` too,
-   through `OtherIndex`. Left: the `roll_` rule types and
+   #1163. Phase 1 of judgments is in review: lists kept as indices and evaluated by name
+   (#1189), lists built from clicks with COEC (#1194), and OpenSearch's Search Relevance
+   Workbench on OpenSearch-flavor clusters (`feature/search-relevance-workbench`). Then: classify
+   the judgment-list routes by the list's index (`roll-judgments-<name>`) instead of the whole
+   cluster, so a grant limited to some indices can manage its lists; `_from_clicks` then needs read
+   on its body's `index` too, through `OtherIndex`. Left: the `roll_` rule types and
    dynamic re-ranking.
 16. **Cold start at size**: the 19.8 ms cold start is a 50k-document index from local cache.
    Measured at 1M documents (docs/benchmarks/search.md, "Cold start at size"): a wake from the

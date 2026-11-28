@@ -1,0 +1,31 @@
+{
+  "search_relevance.get_experiments": {
+    "documentation": {
+      "url": "https://docs.opensearch.org/latest/search-plugins/search-relevance/",
+      "description": "Lists the experiments, or gets one."
+    },
+    "stability": "experimental",
+    "url": {
+      "paths": [
+        {
+          "path": "/_plugins/_search_relevance/experiments",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/_plugins/_search_relevance/experiments/{experiment_id}",
+          "methods": [
+            "GET"
+          ],
+          "parts": {
+            "experiment_id": {
+              "type": "string",
+              "description": "The experiment's id."
+            }
+          }
+        }
+      ]
+    }
+  }
+}

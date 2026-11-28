@@ -1,0 +1,19 @@
+{
+  "search_relevance.put_judgments": {
+    "documentation": {
+      "url": "https://docs.opensearch.org/latest/search-plugins/search-relevance/",
+      "description": "Creates a judgment list."
+    },
+    "stability": "experimental",
+    "url": {
+      "paths": [
+        {
+          "path": "/_plugins/_search_relevance/judgments",
+          "methods": [
+            "PUT"
+          ]
+        }
+      ]
+    }
+  }
+}

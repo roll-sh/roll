@@ -1,0 +1,19 @@
+{
+  "search_relevance.post_query_sets": {
+    "documentation": {
+      "url": "https://docs.opensearch.org/latest/search-plugins/search-relevance/",
+      "description": "Creates a query set sampled from user behavior data."
+    },
+    "stability": "experimental",
+    "url": {
+      "paths": [
+        {
+          "path": "/_plugins/_search_relevance/query_sets",
+          "methods": [
+            "POST"
+          ]
+        }
+      ]
+    }
+  }
+}

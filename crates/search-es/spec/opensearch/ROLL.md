@@ -16,7 +16,9 @@ Management's `_plugins/_ism/*` with its `_opendistro/_ism/*` aliases, the SQL pl
 `_plugins/_ppl`, `_plugins/_ppl/_explain`, `_plugins/_ppl/_grammar` and
 `_plugins/_query/settings`, the Security plugin's `_plugins/_security/api/{internalusers,roles,
 rolesmapping,actiongroups,account,tenants,permissionsinfo,securityconfig,audit,ssl,cache}`,
-`authinfo`, `whoami` and `health` with their `_opendistro/_security` aliases), written in the
+`authinfo`, `whoami` and `health` with their `_opendistro/_security` aliases, the Search
+Relevance Workbench's `_plugins/_search_relevance/{query_sets,search_configurations,judgments,
+experiments}`), written in the
 same format from the plugins' route definitions (`RestKNNStatsHandler`, `RestKNNWarmupHandler`,
 ...). An entry may name `"params_from": "<api>"` to take another API's parameters, and one with
 `"overlay": true` adds parameters to a core API whose spec file lacks them (`search`'s
