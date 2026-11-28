@@ -18,7 +18,8 @@
 //!   highlight and rescore queries, inner hits, collapse, a search application's rendered
 //!   template) runs with `search.allow_expensive_queries: false` unless the key allows them
 //!   (`regexp`, `wildcard`, `prefix`, `fuzzy`, joining queries, `percolate`, ranges on text and
-//!   keyword, runtime-field queries), and refuses `query_string` (`?q=` builds one), `span_multi`
+//!   keyword, runtime-field queries; a `semantic_text` field's own chunks, which its `semantic`
+//!   queries search, aren't a join), and refuses `query_string` (`?q=` builds one), `span_multi`
 //!   and intervals' `wildcard`, `prefix`, `regexp` and `fuzzy` rules. The owner's own filters (an
 //!   alias filter, the key's `filter`) are built without the policy
 //!   ([`crate::search::query::QueryCtx::owner_filter`]).
@@ -44,6 +45,11 @@
 //! - **Items**: an `_msearch`'s searches and an `_mget`'s documents, as the engine parsed them,
 //!   are charged to the key's rate limits before they run ([`charge_items`]); more than
 //!   `max_items` is a 429.
+//! - **Chat** (`/_roll/chat/{name}/_answer` and the OpenAI-compatible route): its own entry,
+//!   `limits.chat`, naming the profiles the key may run, with per-minute turns and tokens,
+//!   concurrency and history caps (`crate::xpack::chat::limits`); none, no chat. Every answer
+//!   also charges `limits.chat.cost` items here ([`charge_work`]). The inference APIs stay
+//!   closed: a browser key never names an endpoint, only a profile its owner set up.
 
 use crate::error::{EsError, EsResult};
 use crate::json::Value;
@@ -75,6 +81,9 @@ pub const RERANK_DOCS_PER_ITEM: i64 = 10;
 const APIS: &[&str] = &[
     "search", "msearch", "count", "get", "get_source", "exists", "exists_source", "mget", "terms_enum",
     "search_application.search", "info", "ping", "security.authenticate",
+    // Chat, under its own policy entry (`limits.chat`, `crate::xpack::chat::limits`): refused
+    // by the handler to a key whose entry doesn't name the profile.
+    "roll.chat.answer", "roll.chat.completions", "roll.chat.models",
     // A page's clicks and conversions, with `limits.events` (refused by the handler otherwise).
     "search_application.post_behavioral_analytics_event",
 ];
@@ -132,6 +141,8 @@ pub struct Policy {
     pub inference_endpoints: Vec<String>,
     pub allow_scripts: bool,
     pub allow_expensive_queries: bool,
+    /// What it may chat with (`limits.chat`; `None`: no chat at all).
+    pub chat: Option<crate::xpack::chat::limits::ChatPolicy>,
     /// It may post `search_click` and `roll_conversion` events about what it reaches
     /// (`limits.events`): counted, never stored.
     pub events: bool,
@@ -151,6 +162,7 @@ impl Default for Policy {
             inference_endpoints: Vec::new(),
             allow_scripts: false,
             allow_expensive_queries: false,
+            chat: None,
             events: false,
         }
     }
@@ -190,6 +202,7 @@ impl Policy {
             inference_endpoints: l.and_then(|l| l.get("inference_endpoints")).and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).map(str::to_owned).collect()).unwrap_or_default(),
             allow_scripts: b("allow_scripts"),
             allow_expensive_queries: b("allow_expensive_queries"),
+            chat: crate::xpack::chat::limits::ChatPolicy::of(l),
             events: b("events"),
         }
     }

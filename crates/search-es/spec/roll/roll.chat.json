@@ -1,0 +1,81 @@
+{
+  "roll.chat.put_profile": {
+    "documentation": {
+      "url": "https://roll.sh/docs/search/rag",
+      "description": "Create or replace a chat profile: what it retrieves from (an index or a search application), the completion endpoint, instructions and budgets"
+    },
+    "stability": "experimental",
+    "visibility": "public",
+    "headers": { "accept": ["application/json"], "content_type": ["application/json"] },
+    "url": {
+      "paths": [
+        { "path": "/_roll/chat/{name}", "methods": ["PUT"], "parts": { "name": { "type": "string", "description": "The profile's name" } } }
+      ]
+    },
+    "body": { "description": "The profile", "required": true },
+    "params": {}
+  },
+  "roll.chat.get_profile": {
+    "documentation": { "url": "https://roll.sh/docs/search/rag", "description": "Chat profiles, or one by name" },
+    "stability": "experimental",
+    "visibility": "public",
+    "headers": { "accept": ["application/json"] },
+    "url": {
+      "paths": [
+        { "path": "/_roll/chat", "methods": ["GET"] },
+        { "path": "/_roll/chat/{name}", "methods": ["GET"], "parts": { "name": { "type": "string", "description": "The profile's name" } } }
+      ]
+    },
+    "params": {}
+  },
+  "roll.chat.delete_profile": {
+    "documentation": { "url": "https://roll.sh/docs/search/rag", "description": "Delete a chat profile" },
+    "stability": "experimental",
+    "visibility": "public",
+    "headers": { "accept": ["application/json"] },
+    "url": {
+      "paths": [
+        { "path": "/_roll/chat/{name}", "methods": ["DELETE"], "parts": { "name": { "type": "string", "description": "The profile's name" } } }
+      ]
+    },
+    "params": {}
+  },
+  "roll.chat.answer": {
+    "documentation": { "url": "https://roll.sh/docs/search/rag", "description": "Answer a question from what a chat profile retrieves, with citations: JSON, or server-sent events with stream: true. The answer's markdown characters arrive as numeric entities" },
+    "stability": "experimental",
+    "visibility": "public",
+    "headers": { "accept": ["application/json", "text/event-stream"], "content_type": ["application/json"] },
+    "url": {
+      "paths": [
+        { "path": "/_roll/chat/{name}/_answer", "methods": ["POST"], "parts": { "name": { "type": "string", "description": "The profile's name" } } }
+      ]
+    },
+    "body": { "description": "question, params, messages, stream", "required": true },
+    "params": {}
+  },
+  "roll.chat.completions": {
+    "documentation": { "url": "https://roll.sh/docs/search/rag", "description": "OpenAI's chat completions over chat profiles: model names the profile" },
+    "stability": "experimental",
+    "visibility": "public",
+    "headers": { "accept": ["application/json", "text/event-stream"], "content_type": ["application/json"] },
+    "url": {
+      "paths": [
+        { "path": "/_roll/openai/v1/chat/completions", "methods": ["POST"] }
+      ]
+    },
+    "body": { "description": "An OpenAI chat completions request", "required": true },
+    "params": {}
+  },
+  "roll.chat.models": {
+    "documentation": { "url": "https://roll.sh/docs/search/rag", "description": "OpenAI's model list: the chat profiles the caller may run" },
+    "stability": "experimental",
+    "visibility": "public",
+    "headers": { "accept": ["application/json"] },
+    "url": {
+      "paths": [
+        { "path": "/_roll/openai/v1/models", "methods": ["GET"] }
+      ]
+    },
+    "params": {}
+  }
+}

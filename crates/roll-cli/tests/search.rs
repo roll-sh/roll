@@ -385,6 +385,29 @@ async fn inference_endpoints() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("nope"), "{out:?}");
 }
 
+/// `roll search chat`: a profile made over an index, then a question streamed through the
+/// control route with its sources listed (the cited one marked), and the answer object with
+/// `--json`. The test plugin's streaming service answers with its messages in capitals, roll's
+/// rules included, so `[1]` is cited.
+#[tokio::test]
+async fn chat_answers_with_sources() {
+    let e = env().await;
+    e.roll(&["search", "clusters", "create", "kb"]).await;
+    let endpoint = r#"{"service":"streaming_completion_test_service","service_settings":{"model":"m","api_key":"fake-key"}}"#;
+    e.roll(&["search", "request", "kb", "PUT", "/_inference/chat_completion/cc", endpoint]).await;
+    e.roll(&["search", "request", "kb", "PUT", "/articles", r#"{"mappings":{"properties":{"title":{"type":"text"},"body":{"type":"text"}}}}"#]).await;
+    e.roll(&["search", "request", "kb", "PUT", "/articles/_doc/pw?refresh=true", r#"{"title":"Resetting a password","body":"Open Settings and choose Reset password."}"#]).await;
+    let out = e.roll(&["search", "chat", "profiles", "create", "kb", "help", "--index", "articles", "--inference-id", "cc", "--field", "title"]).await;
+    assert!(out.contains("chat profile help on kb"), "{out}");
+    assert!(e.roll(&["search", "chat", "profiles", "list", "kb"]).await.contains("index articles"));
+    let out = e.roll(&["search", "chat", "kb", "help", "how do I reset my password?"]).await;
+    // Markdown's characters arrive as entities and print as themselves.
+    assert!(out.contains("YOU ANSWER THE USER'S QUESTION") && out.contains("LIKE [1] OR [2][3]") && !out.contains("&#91;") && out.contains("*[1] articles/pw  Resetting a password"), "{out}");
+    let v = e.roll_json(&["search", "chat", "kb", "help", "how do I reset my password?"]).await;
+    assert_eq!((v["cited"].clone(), v["sources"][0]["_id"].clone(), v["finish_reason"].clone()), (serde_json::json!([1]), serde_json::json!("pw"), serde_json::json!("stop")), "{v}");
+    e.roll(&["search", "chat", "profiles", "delete", "kb", "help"]).await;
+}
+
 /// `roll search crawler import`: an Open Crawler YAML file becomes a `roll_web_crawler` connector
 /// (the domain's `auth` in the sealed fields, the rest in the active snippet), and every key it
 /// drops is named, never its value; two credentialed domains are refused.

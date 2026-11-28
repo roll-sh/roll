@@ -186,11 +186,13 @@ pub fn host_label(host: &str, domain: Option<&str>) -> Option<String> {
 /// The cluster a request names, read as [`crate::Node::enter`] reads it (the `Host` label under
 /// `domain`, then the credentials' user, key id or token prefix) without checking anything: a
 /// fleet node's front runs the request on that cluster's owner, which authenticates it.
-pub fn cluster_named(headers: &hyper::HeaderMap, domain: Option<&str>) -> Option<String> {
+pub fn cluster_named(headers: &hyper::HeaderMap, path: &str, domain: Option<&str>) -> Option<String> {
     let host = headers.get(hyper::header::HOST).and_then(|h| h.to_str().ok());
     let host_cluster = host.and_then(|h| host_label(h, domain));
     let auth = headers.get(hyper::header::AUTHORIZATION).and_then(|h| h.to_str().ok());
-    let presented = parse_authorization(auth).ok()?;
+    // As the node reads it (`http::head_of`): an API key as Bearer on chat's OpenAI routes.
+    let auth = auth.map(|a| search_es::xpack::chat::openai::authorization_for(path, a).unwrap_or_else(|| a.to_string()));
+    let presented = parse_authorization(auth.as_deref()).ok()?;
     claim(&presented, host_cluster.as_deref()).map(|c| c.cluster)
 }
 

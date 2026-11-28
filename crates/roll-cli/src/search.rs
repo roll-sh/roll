@@ -49,6 +49,10 @@ pub enum Search {
     /// Inference endpoints: the models `semantic_text` fields embed with, rerankers, completions.
     #[command(subcommand)]
     Inference(Inference),
+    /// Answers with citations from a chat profile: `roll search chat <cluster> <profile>
+    /// "question"`, or `roll search chat profiles list|create|delete`.
+    #[command(args_conflicts_with_subcommands = true)]
+    Chat(crate::search_chat::Chat),
     /// Web crawlers: `roll_web_crawler` connectors that crawl a site into an index.
     #[command(subcommand)]
     Crawler(Crawler),
@@ -1035,6 +1039,7 @@ pub async fn run(api: &Api, as_json: bool, cmd: Search) -> anyhow::Result<()> {
                 Docs::Delete { cluster, index, id, refresh: r } => index_call(api, as_json, Method::DELETE, &cluster, &index, &doc(&id), (refresh(r), None)).await,
             };
         }
+        Search::Chat(chat) => return crate::search_chat::run(api, as_json, chat).await,
         Search::Crawler(Crawler::Import { cluster, file, connector, preset }) => return crate::search_crawler::import(api, as_json, &cluster, &file, connector.as_deref(), preset.as_deref()).await,
         Search::Crawler(Crawler::Create { cluster, url, connector, preset }) => return crate::search_crawler::create(api, as_json, &cluster, &url, connector.as_deref(), preset.as_deref()).await,
         Search::Crawler(Crawler::Test { cluster, url, connector }) => return crate::search_crawler::test(api, as_json, &cluster, &url, connector.as_deref()).await,

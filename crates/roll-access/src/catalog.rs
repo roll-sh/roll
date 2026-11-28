@@ -1559,6 +1559,10 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/search/clusters/{id}/audit", "search", R, one(PG, "cluster")),
     // Search analytics: the indices' query text, aggregated; a read of the cluster's data.
     row("GET", "/v1/search/clusters/{id}/analytics", "search", R, one(PG, "cluster")),
+    // A chat profile's answer (docs/search/rag.md): a read of what the profile retrieves, run as
+    // the cluster's owner, answered by the owner's model under the profile's daily token cap.
+    // The profile names its index or search application, so it stays the cluster's.
+    row("POST", "/v1/search/clusters/{id}/chat/{profile}", "search", R, one(PG, "cluster")),
     row("*", "/v1/search/clusters/{id}/", "search", M, one(PG, "cluster")),
     // An index's routes are about those indices (`{index}`: a name, or on reads an expression),
     // so a rule can grant some of a cluster's indices. The console (`request`) and the index list

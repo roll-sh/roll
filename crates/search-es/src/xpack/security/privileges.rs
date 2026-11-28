@@ -289,6 +289,10 @@ pub fn action_of(api: &str) -> (Scope, String) {
         "eql.search" => Some((Index, "indices:data/read/eql")),
         "graph.explore" => Some((Index, "indices:data/read/xpack/graph/explore")),
         "esql.query" | "esql.async_query" => Some((Any, "indices:data/read/esql")),
+        // roll's chat (`crate::xpack::chat`): an answer reads through its search, run as the
+        // caller; managing profiles checks its cluster privileges in the handler.
+        "roll.chat.answer" | "roll.chat.completions" | "roll.chat.models" => Some((Any, "indices:data/read/roll/chat")),
+        "roll.chat.put_profile" | "roll.chat.get_profile" | "roll.chat.delete_profile" => Some((Any, "cluster:admin/roll/chat/profile")),
         // roll's A/B tests (`crate::xpack::entsearch::experiments`): promoting a variant writes
         // the search application, as its `PUT` does.
         "roll.search_application.promote_experiment" => Some((Cluster, "cluster:admin/xpack/application/search_application/put")),

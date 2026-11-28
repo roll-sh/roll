@@ -821,9 +821,12 @@ tokio::task_local! {
 /// `Workflow`s: the workflow a REST API starts (`WorkflowResolver`).
 fn workflow_of(api: &str) -> Option<&'static str> {
     match api {
-        // A page's analytics events about its application's searches (roll's: a browser key with
-        // `limits.events`, `browser::Policy::events`) belong to the same flow.
-        "search_application.search" | "search_application.post_behavioral_analytics_event" => Some("search_application_query"),
+        // roll's chat answers run a search application's search too (docs/search/rag.md): a
+        // key restricted to the workflow runs the profiles over its application
+        // (`crate::xpack::chat::run` refuses it a profile over an index). A page's analytics
+        // events about its application's searches (roll's: a browser key with `limits.events`,
+        // `browser::Policy::events`) belong to the same flow.
+        "search_application.search" | "search_application.post_behavioral_analytics_event" | "roll.chat.answer" | "roll.chat.completions" | "roll.chat.models" => Some("search_application_query"),
         _ => None,
     }
 }
@@ -833,6 +836,14 @@ fn workflow_of(api: &str) -> Option<&'static str> {
 pub fn in_workflow<F: std::future::Future>(ctx: &Ctx<'_>, f: F) -> impl std::future::Future<Output = F::Output> {
     let w = WORKFLOW.try_with(|w| *w).unwrap_or_else(|_| workflow_of(ctx.api.name()));
     WORKFLOW.scope(w, f)
+}
+
+/// Whether the request's principal is an API key restricted to workflows
+/// (`restriction.workflows`), by its own role descriptors or a derived key's narrowing.
+pub fn workflow_restricted(ctx: &Ctx) -> bool {
+    let Some(AuthKind::ApiKey(a)) = ctx.principal.get().map(|p| &p.kind) else { return false };
+    let restricted = |v: &Value| v.as_object().is_some_and(|m| m.values().any(|d| d.pointer(&["restriction", "workflows"]).is_some()));
+    restricted(&a.role_descriptors) || a.derived.as_ref().is_some_and(|d| restricted(&d.narrowing))
 }
 
 /// An API key whose role descriptors restrict it to workflows (`restriction.workflows`) may

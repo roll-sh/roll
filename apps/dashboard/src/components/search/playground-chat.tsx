@@ -10,6 +10,11 @@ import {
   citations,
   MAX_SOURCES,
   newBoundary,
+  PROFILE_CODES,
+  profileBody,
+  profileCode,
+  profileName,
+  type ProfileCode,
   sourcesOf,
   sseReader,
   type ChatHit,
@@ -28,7 +33,9 @@ import { btn, input, Panel, primary, useCopy } from "../ui";
  * `chat_completion` endpoint, cited as `[n]`. The conversation lives in this page only.
  * Answers are untrusted text: rendered as text nodes, links only from the sources' own fields.
  * The thinking pattern is `components/ask.tsx`'s: the mark thinks, steps shimmer, the answer
- * streams with a caret, the mark plays success.
+ * streams with a caret, the mark plays success. "Save as profile" (phase 2) puts a chat profile
+ * over the index with this tab's endpoint and instructions, and "view code" then also shows its
+ * `_answer` route and the OpenAI SDK against the cluster.
  */
 
 type Phase = "searching" | "writing" | "done" | "error" | "stopped";
@@ -75,7 +82,9 @@ export function Chat({
   const [instructions, setInstructions] = useState("");
   const [question, setQuestion] = useState("");
   const [turns, setTurns] = useState<ChatTurn[]>([]);
-  const [code, setCode] = useState<Language | null>(null);
+  const [code, setCode] = useState<Language | ProfileCode | null>(null);
+  /** The chat profile saved from this tab (phase 2), with what saving it answered. */
+  const [saved, setSaved] = useState<{ name: string; error: string | null } | null>(null);
   const abort = useRef<AbortController | null>(null);
 
   useEffect(() => {
@@ -86,6 +95,17 @@ export function Chat({
   const busy = turns.some((t) => t.phase === "searching" || t.phase === "writing");
   const patch = (i: number, p: Partial<ChatTurn> | ((t: ChatTurn) => Partial<ChatTurn>)) =>
     setTurns((ts) => ts.map((t, j) => (j === i ? { ...t, ...(typeof p === "function" ? p(t) : p) } : t)));
+
+  const saveProfile = async () => {
+    const name = profileName(index);
+    try {
+      await esJson(cluster.id, "PUT", `/_roll/chat/${encodeURIComponent(name)}`, profileBody(index, model, instructions, fields));
+      setSaved({ name, error: null });
+      setCode("answer");
+    } catch (e) {
+      setSaved({ name, error: e instanceof Error ? e.message : String(e) });
+    }
+  };
 
   const ask = async () => {
     const q = question.trim();
@@ -210,6 +230,21 @@ export function Chat({
                 {lang === "javascript" ? "js" : lang}
               </button>
             ))}
+            {saved && !saved.error &&
+              PROFILE_CODES.map((kind) => (
+                <button
+                  key={kind}
+                  type="button"
+                  aria-pressed={code === kind}
+                  onClick={() => setCode((c) => (c === kind ? null : kind))}
+                  className={`font-mono transition hover:text-fg ${code === kind ? "text-fg" : ""}`}
+                >
+                  {kind === "answer" ? "_answer" : "openai"}
+                </button>
+              ))}
+            <button type="button" disabled={!model} onClick={saveProfile} className="ml-1 transition hover:text-fg disabled:opacity-40" title="PUT /_roll/chat/{name}: an answer route with citations">
+              {saved && !saved.error ? `Saved as ${saved.name}` : "Save as profile"}
+            </button>
             {turns.length > 0 && !busy && (
               <button type="button" onClick={() => setTurns([])} className="ml-1 transition hover:text-fg">
                 Clear
@@ -218,7 +253,11 @@ export function Chat({
           </span>
         }
       >
-        {code && searchFor.ok && model && (
+        {saved?.error && <p className="border-b border-line px-5 py-2 text-[12px] text-danger">{saved.error}</p>}
+        {(code === "answer" || code === "openai") && saved && !saved.error && (
+          <CodeView lang={code} note={`Profile ${saved.name} on the cluster: ${code === "answer" ? "its _answer route (events: sources, delta, done)" : "the OpenAI SDK, the cluster as base_url"}.`} text={profileCode(code, saved.name, last?.question ?? question, { url: cluster.url, flavor: cluster.flavor })} />
+        )}
+        {code && code !== "answer" && code !== "openai" && searchFor.ok && model && (
           <CodeView
             lang={code}
             text={chatCode(
@@ -275,12 +314,12 @@ export function Chat({
   );
 }
 
-function CodeView({ lang, text }: { lang: Language; text: string }) {
+function CodeView({ lang, text, note }: { lang: string; text: string; note?: string }) {
   const { copied, copy } = useCopy();
   return (
     <div className="rise border-b border-line">
       <div className="flex items-center justify-between px-5 pt-3 text-[11px] text-subtle">
-        <span>The composed calls ({lang}): search, then the chat completion. They run on Elasticsearch 9.5.5 too.</span>
+        <span>{note ?? `The composed calls (${lang}): search, then the chat completion. They run on Elasticsearch 9.5.5 too.`}</span>
         <button type="button" onClick={() => copy(lang, text)} className="font-mono transition hover:text-fg">
           {copied === lang ? "copied" : "copy"}
         </button>

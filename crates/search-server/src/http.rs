@@ -292,9 +292,18 @@ fn head_of<B>(req: &Request<B>) -> EsRequest {
         Some(_) => req.uri().to_string(),
         None => req.uri().path_and_query().map(|p| p.as_str().to_string()).unwrap_or_else(|| "/".into()),
     };
+    let path = req.uri().path();
     let mut headers = Vec::with_capacity(req.headers().len());
     for (k, v) in req.headers() {
-        headers.push((k.as_str().to_string(), String::from_utf8_lossy(v.as_bytes()).into_owned()));
+        let mut value = String::from_utf8_lossy(v.as_bytes()).into_owned();
+        // OpenAI SDKs send an API key as Bearer: on chat's OpenAI-compatible routes it is read
+        // as the `ApiKey` it is, here, so admission (a browser key's rate limits) sees it too.
+        if k.as_str() == "authorization"
+            && let Some(a) = search_es::xpack::chat::openai::authorization_for(path, &value)
+        {
+            value = a;
+        }
+        headers.push((k.as_str().to_string(), value));
     }
     EsRequest { verified: None, own_address: false, method: req.method().as_str().to_string(), uri, headers, body: Bytes::new() }
 }

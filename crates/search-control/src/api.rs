@@ -113,6 +113,7 @@ pub fn router(control: Arc<Control>) -> Router {
         .route("/v1/search/clusters/{id}/site-verifications/{site}", axum::routing::delete(delete_site_verification))
         .route("/v1/search/clusters/{id}/site-verifications/{site}/check", post(check_site_verification))
         .route("/v1/search/clusters/{id}/crawl-test", post(crawl_test))
+        .route("/v1/search/clusters/{id}/chat/{profile}", post(chat_answer))
         // Calls about one cluster: the caller's own, then on its owner.
         .layer(axum::middleware::from_fn_with_state(control.clone(), per_cluster))
         // The dashboard calls it from the browser, like the other control planes.
@@ -625,6 +626,43 @@ async fn request(State(c): State<AppState>, Path(id): Path<String>, method: Meth
             if let Some(v) = headers.iter().find(|(k, _)| k.eq_ignore_ascii_case("content-type")).and_then(|(_, v)| axum::http::HeaderValue::from_str(v).ok()) {
                 resp.headers_mut().insert(axum::http::header::CONTENT_TYPE, v);
             }
+            resp.headers_mut().insert(axum::http::header::CACHE_CONTROL, axum::http::HeaderValue::from_static("no-store"));
+            Ok(resp)
+        }
+    }
+}
+
+/// The most a chat question's body may hold (the cluster bounds the question and its history).
+const CHAT_MAX_BODY: usize = 1 << 20;
+
+/// `POST /v1/search/clusters/{id}/chat/{profile}`: the cluster's `/_roll/chat/{profile}/_answer`
+/// (docs/search/rag.md) as its owner, its JSON answer or, with `"stream": true`, its server-sent
+/// events as they come. `roll search chat` and the `search_chat` MCP tool call it.
+async fn chat_answer(State(c): State<AppState>, Path((id, profile)): Path<(String, String)>, method: Method, headers: HeaderMap, body: Body) -> Result<Response, ControlError> {
+    if profile.is_empty() || profile.len() > 128 || !profile.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'-' | b'_' | b'.')) {
+        return Err(ControlError::Invalid(format!("invalid chat profile name [{profile}]")));
+    }
+    let cluster = c.get(&id).await?;
+    let mut held = Reservation::none();
+    let bytes = read_limited(body, CHAT_MAX_BODY, declared(&headers), c.node.body_budget(), &mut held).await.map_err(|e| read_error(&cluster, e))?;
+    if serde_json::from_slice::<serde::de::IgnoredAny>(&bytes).is_err() {
+        return Err(ControlError::Invalid("the body isn't JSON: {\"question\": …}".into()));
+    }
+    if let Some(resp) = forward(&c, &cluster.name, method, &format!("/v1/search/clusters/{id}/chat/{profile}"), &headers, bytes.clone()).await {
+        return Ok(resp);
+    }
+    drop(held);
+    match c.request(&cluster.id, "POST", &format!("/_roll/chat/{profile}/_answer"), Vec::new(), bytes).await? {
+        ConsoleAnswer::Whole(out) => {
+            let status = StatusCode::from_u16(out.status).unwrap_or(StatusCode::BAD_GATEWAY);
+            Ok((status, [(axum::http::header::CONTENT_TYPE, "application/json")], out.body).into_response())
+        }
+        ConsoleAnswer::Stream { status, body, .. } => {
+            use futures::StreamExt;
+            let body = body.take().map_or_else(Body::empty, |s| Body::from_stream(s.map(Ok::<_, std::convert::Infallible>)));
+            let mut resp = Response::new(body);
+            *resp.status_mut() = StatusCode::from_u16(status).unwrap_or(StatusCode::OK);
+            resp.headers_mut().insert(axum::http::header::CONTENT_TYPE, axum::http::HeaderValue::from_static("text/event-stream"));
             resp.headers_mut().insert(axum::http::header::CACHE_CONTROL, axum::http::HeaderValue::from_static("no-store"));
             Ok(resp)
         }

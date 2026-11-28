@@ -17,6 +17,7 @@
 pub mod async_results;
 pub mod async_search;
 pub mod autoscaling;
+pub mod chat;
 pub mod downsample;
 pub mod enrich;
 pub mod entsearch;
@@ -80,6 +81,8 @@ pub struct Runtime {
     pub connector_syncs: entsearch::sync::Syncs,
     /// What the audit log records, as of a state version ([`security::audit::snapshot`]).
     pub audit: parking_lot::Mutex<Option<(u64, std::sync::Arc<security::audit::Snapshot>)>>,
+    /// Chat answers' limits ([`chat::limits`]).
+    pub chat: std::sync::Arc<chat::limits::Limiter>,
     /// Provider tokens of completions not metered yet ([`inference::tokens`]).
     pub tokens: std::sync::Arc<inference::tokens::Tokens>,
 }
@@ -292,6 +295,12 @@ handlers! { ctx;
     InferenceInference | InferenceTextEmbedding | InferenceSparseEmbedding | InferenceRerank | InferenceCompletion | InferenceEmbedding => inference::infer(ctx).await,
     InferenceStreamCompletion | InferenceChatCompletionUnified => inference::stream_route(ctx).await,
     InferencePutRegionPolicy => inference::region::put(ctx).await,
+    RollChatPutProfile => chat::put(ctx).await,
+    RollChatGetProfile => chat::get(ctx),
+    RollChatDeleteProfile => chat::delete(ctx).await,
+    RollChatAnswer => chat::answer(ctx).await,
+    RollChatCompletions => chat::openai::completions(ctx).await,
+    RollChatModels => chat::openai::models(ctx),
     RollSearchApplicationPromoteExperiment => entsearch::experiments::promote(ctx).await,
     RollOtlpLogs => crate::otlp::logs(ctx).await,
     RollOtlpTraces => crate::otlp::traces(ctx).await,

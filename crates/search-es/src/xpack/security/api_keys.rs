@@ -203,6 +203,10 @@ struct NewKey {
     cross_cluster: Option<Value>,
 }
 
+/// A key doc's field (roll's own) holding the realm of the person a key made by an API key acts
+/// for (its `realm` is `_es_api_key`).
+pub const PAYER_REALM: &str = "roll_payer_realm";
+
 async fn store_key(ctx: &Ctx<'_>, owner: &Principal, k: NewKey) -> EsResult<Reply> {
     let id = crate::meta::names::time_based_id();
     let secret = super::random_b64url(16);
@@ -224,6 +228,15 @@ async fn store_key(ctx: &Ctx<'_>, owner: &Principal, k: NewKey) -> EsResult<Repl
     doc.insert("username".into(), owner.username.clone().into());
     doc.insert("realm".into(), realm.into());
     doc.insert("realm_type".into(), realm_type.into());
+    // A key an API key made records `_es_api_key` as its realm, as Elasticsearch does; the realm
+    // of the person it acts for is kept beside it (never printed: `key_view` lists its fields),
+    // so what is counted per person (chat's budgets) counts it as theirs.
+    if let AuthKind::ApiKey(by) = &owner.kind
+        && let Some(maker) = st.metadata.xpack.get(KEYS, &by.id)
+        && let Some(r) = maker.get(PAYER_REALM).or_else(|| maker.get("realm")).and_then(Value::as_str)
+    {
+        doc.insert(PAYER_REALM.into(), r.into());
+    }
     // A new key's `derive` is checked as an update from nothing: its first generation only.
     let mut metadata = k.metadata;
     super::derived::on_update(&mut metadata, &Value::Null)?;

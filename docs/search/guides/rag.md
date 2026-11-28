@@ -16,9 +16,10 @@ plain text. About fifteen minutes.
   `.multilingual-e5-small-elasticsearch` endpoint. Until it lands, that endpoint (and
   `.elser-2-elasticsearch`, the default `inference_id` of a `semantic_text` field) answers as a
   cluster without ML nodes does, so name your own endpoint in every `semantic_text` field.
-- **roll has no chat API yet.** The last step below calls a completion endpoint from your own
-  script. Chat over hits with citations, and an API for it, are `## Next` item 11 in
-  [../README.md](../README.md).
+- **Chat with citations in one call** is roll's own API, `/_roll/chat` (it's not
+  Elasticsearch's): a profile retrieves and the cluster answers, with the sources it used
+  ([Ask a profile](#ask-a-profile) below, [../rag.md](../rag.md)). The script further down does
+  the same with plain Elasticsearch calls, which run on Elasticsearch too.
 
 ## Before you start
 
@@ -199,6 +200,37 @@ request, `<`, `>` and the boundary escaped in their text, and a system message t
 to follow them. Its "View code" gives the same flow in curl, Python or JavaScript, and that code
 runs on Elasticsearch too. Render the answer as text: a link or image the model writes could
 send another document's text to someone else's server.
+
+## Ask a profile
+
+A chat profile does the last section in one call: it retrieves from an index (BM25 and
+`semantic` over its fields, fused with `rrf`) or a search application, quotes the hits to the
+model as data, and answers with citations that name each document.
+
+```sh
+roll search chat profiles create kb help --index kb --inference-id llm \
+  --instructions "You are the help desk of Acme." --field title --field url
+roll search chat kb help "how do I reset my password?"
+```
+
+The answer streams in, then its sources (`*` marks the cited ones). Over HTTP it's
+`POST /_roll/chat/help/_answer` with `{"question": …, "messages": [earlier turns], "stream": true}`
+(server-sent events: `sources`, `delta`, `done`), or OpenAI's chat completions with the cluster as
+the base URL:
+
+```python
+import html
+from openai import OpenAI
+client = OpenAI(base_url=os.environ["ELASTICSEARCH_URL"] + "/_roll/openai/v1", api_key=os.environ["ELASTICSEARCH_API_KEY"])
+r = client.chat.completions.create(model="help", messages=[{"role": "user", "content": "how do I reset my password?"}])
+# The answer is made literal for markdown renderers: its markdown characters arrive as numeric
+# entities, so render it as markdown, or decode them to print it.
+print(html.unescape(r.choices[0].message.content), r.model_extra["roll"]["sources"])
+```
+
+A web page can ask too, with a browser key whose `limits.chat` names the profile (its turns and
+tokens per minute are limited; [site-search.md](site-search.md) has browser keys). The search runs
+as the key, so its filter decides what the model sees.
 
 ## Good to know
 

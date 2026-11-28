@@ -333,7 +333,18 @@ pub async fn handle(cluster: &Cluster, req: EsRequest) -> EsResponse {
 /// Handles one request whose thread pool slot the caller already took (or was refused,
 /// [`crate::thread_pool::pool_for`]): the server queues for the pool before it takes a
 /// node-wide running slot, so a queued request holds none. `None`: the slot is taken here.
-pub async fn handle_admitted(cluster: &Cluster, req: EsRequest, admitted: Option<Admitted>) -> EsResponse {
+pub async fn handle_admitted(cluster: &Cluster, mut req: EsRequest, admitted: Option<Admitted>) -> EsResponse {
+    // An API key sent as Bearer on chat's OpenAI routes is the `ApiKey` it is from here on, so
+    // the internal calls its handler makes as the client carry it too (the node rewrites it
+    // before admission already: `search-server/src/http.rs`).
+    let path = req.uri.split('?').next().unwrap_or_default().to_string();
+    for (k, v) in req.headers.iter_mut() {
+        if k.eq_ignore_ascii_case("authorization")
+            && let Some(a) = crate::xpack::chat::openai::authorization_for(&path, v)
+        {
+            *v = a;
+        }
+    }
     let handled = async {
         match cluster.dialect {
             Dialect::Elasticsearch => handle_inner(cluster, &req, admitted).await,

