@@ -134,46 +134,45 @@ fn crc32(data: &[u8]) -> u32 {
 mod tests {
     use super::*;
 
+    /// Codes are RFC 6238's (its vectors), seeds base32, a code is accepted within its drift and two
+    /// codes must be consecutive, and the enrolment QR code is a PNG.
     #[test]
-    fn rfc6238_vectors() {
-        // RFC 6238 appendix B, SHA-1 (8 digits there; the last 6 are ours).
-        let seed = b"12345678901234567890";
-        for (t, want) in [(59, 94_287_082u32), (1_111_111_109, 7_081_804), (1_111_111_111, 14_050_471), (1_234_567_890, 89_005_924), (2_000_000_000, 69_279_037), (20_000_000_000, 65_353_130)] {
-            assert_eq!(totp(seed, t / STEP_S), want % 1_000_000, "t = {t}");
+    fn codes_follow_rfc6238() {
+        {
+            // RFC 6238 appendix B, SHA-1 (8 digits there; the last 6 are ours).
+            let seed = b"12345678901234567890";
+            for (t, want) in [(59, 94_287_082u32), (1_111_111_109, 7_081_804), (1_111_111_111, 14_050_471), (1_234_567_890, 89_005_924), (2_000_000_000, 69_279_037), (20_000_000_000, 65_353_130)] {
+                assert_eq!(totp(seed, t / STEP_S), want % 1_000_000, "t = {t}");
+            }
+        }
+        {
+            assert_eq!(base32_encode(b"foobar"), "MZXW6YTBOI");
+            assert_eq!(base32_decode("MZXW6YTBOI").unwrap(), b"foobar");
+            assert_eq!(base32_decode("mzxw6ytboi======").unwrap(), b"foobar");
+            assert!(base32_decode("not base32!").is_none());
+            let s = new_seed();
+            assert_eq!(s.len(), 32);
+            assert_eq!(base32_decode(&s).unwrap().len(), 20);
+        }
+        {
+            let seed = b"12345678901234567890";
+            let now = 1_700_000_000;
+            let step = now / STEP_S;
+            assert_eq!(step_of(seed, totp(seed, step), now), Some(step));
+            assert_eq!(step_of(seed, totp(seed, step - 1), now), Some(step - 1));
+            assert_eq!(step_of(seed, totp(seed, step - 3), now), None, "too old");
+            assert_eq!(consecutive(seed, totp(seed, step - 2), totp(seed, step - 1), now), Some(step - 1));
+            assert_eq!(consecutive(seed, totp(seed, step - 2), totp(seed, step), now), None, "not consecutive");
+            assert_eq!(parse_code("012345"), Some(12345));
+            assert_eq!(parse_code("12345"), None);
+            assert_eq!(parse_code("12345a"), None);
+        }
+        {
+            let png = qr_png(&otpauth_uri("roll", "roll:alice", &new_seed())).unwrap();
+            assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
+            assert!(png.ends_with(&[0xAE, 0x42, 0x60, 0x82]), "IEND's CRC");
+            assert_eq!(crc32(b"IEND"), 0xAE42_6082);
         }
     }
 
-    #[test]
-    fn base32_round_trips() {
-        assert_eq!(base32_encode(b"foobar"), "MZXW6YTBOI");
-        assert_eq!(base32_decode("MZXW6YTBOI").unwrap(), b"foobar");
-        assert_eq!(base32_decode("mzxw6ytboi======").unwrap(), b"foobar");
-        assert!(base32_decode("not base32!").is_none());
-        let s = new_seed();
-        assert_eq!(s.len(), 32);
-        assert_eq!(base32_decode(&s).unwrap().len(), 20);
-    }
-
-    #[test]
-    fn steps_and_drift() {
-        let seed = b"12345678901234567890";
-        let now = 1_700_000_000;
-        let step = now / STEP_S;
-        assert_eq!(step_of(seed, totp(seed, step), now), Some(step));
-        assert_eq!(step_of(seed, totp(seed, step - 1), now), Some(step - 1));
-        assert_eq!(step_of(seed, totp(seed, step - 3), now), None, "too old");
-        assert_eq!(consecutive(seed, totp(seed, step - 2), totp(seed, step - 1), now), Some(step - 1));
-        assert_eq!(consecutive(seed, totp(seed, step - 2), totp(seed, step), now), None, "not consecutive");
-        assert_eq!(parse_code("012345"), Some(12345));
-        assert_eq!(parse_code("12345"), None);
-        assert_eq!(parse_code("12345a"), None);
-    }
-
-    #[test]
-    fn qr_codes_are_pngs() {
-        let png = qr_png(&otpauth_uri("roll", "roll:alice", &new_seed())).unwrap();
-        assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
-        assert!(png.ends_with(&[0xAE, 0x42, 0x60, 0x82]), "IEND's CRC");
-        assert_eq!(crc32(b"IEND"), 0xAE42_6082);
-    }
 }

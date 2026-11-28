@@ -305,32 +305,35 @@ mod tests {
         ]
     }
 
+    /// Search mode finds tools by words, best first, and its run tools run only what the connection
+    /// lists (a read-only run no write, never a run of a run).
     #[test]
-    fn finds_by_words_best_first() {
-        let found = find(&sample(), &json!({ "query": "create a postgres branch" }));
-        let names: Vec<&str> = found["structuredContent"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
-        assert_eq!(names[0], "postgres_create_branch");
-        assert!(!names.contains(&"access_check"), "the access tools are listed on their own");
-        assert_eq!(found["structuredContent"]["tools"][0]["run_with"], RUN);
-        let by_name = find(&sample(), &json!({ "query": "redis_keys" }));
-        assert_eq!(by_name["structuredContent"]["tools"].as_array().unwrap().len(), 1);
-        let none = find(&sample(), &json!({ "query": "kafka" }));
-        assert!(none["content"][0]["text"].as_str().unwrap().starts_with("No tool matches"));
+    fn finds_by_words_and_runs_only_what_the_connection_has() {
+        {
+            let found = find(&sample(), &json!({ "query": "create a postgres branch" }));
+            let names: Vec<&str> = found["structuredContent"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+            assert_eq!(names[0], "postgres_create_branch");
+            assert!(!names.contains(&"access_check"), "the access tools are listed on their own");
+            assert_eq!(found["structuredContent"]["tools"][0]["run_with"], RUN);
+            let by_name = find(&sample(), &json!({ "query": "redis_keys" }));
+            assert_eq!(by_name["structuredContent"]["tools"].as_array().unwrap().len(), 1);
+            let none = find(&sample(), &json!({ "query": "kafka" }));
+            assert!(none["content"][0]["text"].as_str().unwrap().starts_with("No tool matches"));
+        }
+        {
+            let all = sample();
+            assert_eq!(unwrap(&all, RUN_READ, &json!({ "tool": "postgres_query", "arguments": { "sql": "select 1" } })).unwrap().0, "postgres_query");
+            assert!(unwrap(&all, RUN_READ, &json!({ "tool": "postgres_create_branch" })).is_err(), "read-only run refuses a write");
+            assert!(unwrap(&all, RUN, &json!({ "tool": "postgres_delete_project" })).is_err(), "not offered");
+            assert!(unwrap(&all, RUN, &json!({ "tool": RUN, "arguments": {} })).is_err(), "no run of a run");
+            assert_eq!(unwrap(&all, RUN, &json!({ "tool": "access_check" })).unwrap().0, "access_check");
+            let shown = listed(&all);
+            let names: Vec<&str> = shown.iter().map(|t| t["name"].as_str().unwrap()).collect();
+            assert_eq!(names, ["access_check", FIND, RUN_READ, RUN]);
+            assert_eq!(listed(&all[..1]).len(), 1, "nothing to find, nothing listed but access");
+        }
     }
 
-    #[test]
-    fn runs_only_what_the_connection_has() {
-        let all = sample();
-        assert_eq!(unwrap(&all, RUN_READ, &json!({ "tool": "postgres_query", "arguments": { "sql": "select 1" } })).unwrap().0, "postgres_query");
-        assert!(unwrap(&all, RUN_READ, &json!({ "tool": "postgres_create_branch" })).is_err(), "read-only run refuses a write");
-        assert!(unwrap(&all, RUN, &json!({ "tool": "postgres_delete_project" })).is_err(), "not offered");
-        assert!(unwrap(&all, RUN, &json!({ "tool": RUN, "arguments": {} })).is_err(), "no run of a run");
-        assert_eq!(unwrap(&all, RUN, &json!({ "tool": "access_check" })).unwrap().0, "access_check");
-        let shown = listed(&all);
-        let names: Vec<&str> = shown.iter().map(|t| t["name"].as_str().unwrap()).collect();
-        assert_eq!(names, ["access_check", FIND, RUN_READ, RUN]);
-        assert_eq!(listed(&all[..1]).len(), 1, "nothing to find, nothing listed but access");
-    }
 }
 
 /// Search mode works only if `roll_find_tools` puts the tool a person means first: these are

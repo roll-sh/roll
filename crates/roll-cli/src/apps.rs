@@ -886,6 +886,10 @@ pub enum AppsCmd {
     Exec {
         #[command(flatten)]
         target: Target,
+        /// Pass roll's own credentials (ROLL_ADMIN_TOKEN, ROLL_TOKEN and the like) on to the
+        /// command; by default it gets none unless the service sets that name itself.
+        #[arg(long)]
+        keep_roll_credentials: bool,
         #[arg(trailing_var_arg = true, required = true, allow_hyphen_values = true)]
         command: Vec<String>,
     },
@@ -3971,7 +3975,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             svc
         }
-        AppsCmd::Exec { target, command } => {
+        AppsCmd::Exec { target, keep_roll_credentials, command } => {
             let svc = service(api, &target).await?;
             let base = env_path(&svc, &target.env);
             let (values, listed) = (api.get(&format!("{base}/variables/values")).await?, api.get(&format!("{base}/variables")).await?);
@@ -4047,12 +4051,13 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             if !internal.is_empty() {
                 eprintln!("{} name a private address (*.internal) that only resolves inside roll: `roll apps proxy` reaches one from here", internal.join(", "));
             }
-            let status = tokio::process::Command::new(&command[0])
-                .args(&command[1..])
-                .envs(vars)
-                .status()
-                .await
-                .with_context(|| format!("couldn't run {}", command[0]))?;
+            let mut cmd = tokio::process::Command::new(&command[0]);
+            if !keep_roll_credentials {
+                for k in crate::sys::roll_credentials(&|n| vars.iter().any(|(k, _)| k == n)) {
+                    cmd.env_remove(k);
+                }
+            }
+            let status = cmd.args(&command[1..]).envs(vars).status().await.with_context(|| format!("couldn't run {}", command[0]))?;
             for t in tunneled {
                 t.abort();
             }
