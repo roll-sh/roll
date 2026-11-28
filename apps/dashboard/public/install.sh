@@ -12,9 +12,12 @@
 #
 # Settings (environment):
 #   ROLL_VERSION        a release tag (`cli-v0.2.0`) or version (`0.2.0`); default: the newest cli-v* release
+#                       that isn't a prerelease or a draft (a prerelease installs only when named here)
 #   ROLL_INSTALL_DIR    where to put `roll` (and `rolld`) (default: ~/.local/bin)
 #   ROLL_INSTALL_ROLLD  1: install `rolld` too, as `--with-rolld` does
 #   ROLL_RELEASES       where releases are downloaded from (default: https://github.com/roll-sh/roll/releases)
+#   ROLL_RELEASES_API   where the list of releases is read from (default: GitHub's API for roll-sh/roll); with
+#                       ROLL_VERSION and a mirror in ROLL_RELEASES, it's read only when this is set
 #   ROLL_VERIFY         auto (default): also check each download's build provenance with
 #                       `gh attestation verify` when gh is installed and logged in, and say how
 #                       to check it when it isn't; attestation: refuse to install without that
@@ -27,6 +30,7 @@ set -eu
 
 REPO=roll-sh/roll
 RELEASES=${ROLL_RELEASES:-https://github.com/$REPO/releases}
+API=${ROLL_RELEASES_API:-https://api.github.com/repos/$REPO/releases}
 DIR=${ROLL_INSTALL_DIR:-$HOME/.local/bin}
 
 say() { printf 'roll: %s\n' "$*" >&2; }
@@ -89,10 +93,27 @@ case "$tag" in
   v*) tag=cli-$tag ;;
   *) tag=cli-v$tag ;;
 esac
+# The release list (newest first) as `tag draft prerelease` lines. Each release's flags follow its
+# tag_name in GitHub's answer; a flag that comes first, twice, or not at all means it can't be read.
+releases() { # url → lines
+  fetch "$1?per_page=50" "$tmp/releases.json" || return 1
+  grep -oE '"(tag_name|draft|prerelease)": *("[^"]*"|true|false)' "$tmp/releases.json" | sed 's/^"\([a-z_]*\)": *"*\([^"]*\)"*$/\1 \2/' |
+    awk 'function flush() { if (t != "") { if (d == "" || p == "") bad = 1; print t, d, p } }
+         $1 == "tag_name" { flush(); t = $2; d = ""; p = ""; next }
+         $1 == "draft" { if (t == "" || d != "") bad = 1; d = $2; next }
+         $1 == "prerelease" { if (t == "" || p != "") bad = 1; p = $2; next }
+         END { flush(); if (bad) exit 3 }'
+}
 if [ -z "$tag" ]; then
-  fetch "https://api.github.com/repos/$REPO/releases?per_page=50" "$tmp/releases.json" || die "couldn't list the releases of $REPO"
-  tag=$(grep -o '"tag_name": *"cli-v[^"]*"' "$tmp/releases.json" | head -n 1 | sed 's/.*"\(cli-v[^"]*\)"$/\1/')
-  [ -n "$tag" ] || die "no cli-v* release of $REPO yet"
+  list=$(releases "$API") || die "couldn't list the releases of $REPO"
+  tag=$(printf '%s\n' "$list" | awk '$1 ~ /^cli-v/ && $2 == "false" && $3 == "false" { print $1; exit }')
+  [ -n "$tag" ] || die "no cli-v* release of $REPO yet that isn't a prerelease (name one with ROLL_VERSION)"
+elif [ -n "${ROLL_RELEASES_API:-}" ] || [ "$RELEASES" = "https://github.com/$REPO/releases" ]; then
+  # Named: it installs whatever it is, saying so when it's a prerelease (best effort: a list that
+  # can't be read says nothing).
+  if list=$(releases "$API" 2>/dev/null) && [ "$(printf '%s\n' "$list" | awk -v t="$tag" '$1 == t { print $3; exit }')" = true ]; then
+    say "$tag is a prerelease; installing it because ROLL_VERSION names it"
+  fi
 fi
 
 bins=roll

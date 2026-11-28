@@ -125,6 +125,23 @@ async fn every_control_plane_route_needs_the_operator_token() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     assert!(up, "rolld's API didn't come up:\n{}", output.lock().unwrap());
+    // The MCP tool list, asked now: roll MCP builds it on the first call (seconds in a debug
+    // build), so it does that alongside the probes. Read below, with what the routes say.
+    let tools_list = tokio::spawn({
+        let (http, api) = (reqwest::Client::builder().timeout(Duration::from_secs(120)).build().unwrap(), api.clone());
+        async move {
+            http.post(format!("{api}/v1/mcp"))
+                .header("authorization", format!("Bearer {TOKEN}"))
+                .header("accept", "application/json")
+                .json(&serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))
+                .send()
+                .await
+                .unwrap()
+                .json::<serde_json::Value>()
+                .await
+                .unwrap()
+        }
+    });
     // The edge's HTTPS listener, trusting only its certificate, every host it serves resolved to it:
     // one client, so probes share connections rather than a TLS handshake each.
     let edge_certs = reqwest::Certificate::from_pem_bundle(&std::fs::read(certs.join("edge.crt")).unwrap()).unwrap();
@@ -224,22 +241,26 @@ async fn every_control_plane_route_needs_the_operator_token() {
     // A signed-in user who isn't an admin: 403 on every operator route (and on a credential
     // route without its credential), their own projects, and roll code as their own owner.
     let cookie = sign_in(&http, &api, &home.path().join("outbox"), "ada@example.com").await;
-    let mut wrong = Vec::new();
-    for (host, route, access) in routes.iter().filter(|(h, ..)| h == "api") {
-        if access.starts_with("product:") || access.starts_with("public:") {
-            continue;
-        }
-        let path = concrete(route);
-        let status = match http.get(format!("{api}{path}")).header("cookie", &cookie).send().await {
-            Ok(r) => r.status().as_u16(),
-            Err(e) if e.is_timeout() => 0,
-            Err(e) => panic!("GET {path}: {e}"),
-        };
-        let fine = if access.starts_with("user:") || access.starts_with("user or") { status != 401 && status != 403 } else { status == 403 };
-        if !fine {
-            wrong.push(format!("{host} {route} ({access}): {status} with a user's session"));
-        }
-    }
+    let as_user = routes.iter().filter(|(h, _, access)| h == "api" && !access.starts_with("product:") && !access.starts_with("public:"));
+    let mut wrong: Vec<String> = futures_util::stream::iter(as_user)
+        .map(|(host, route, access)| {
+            let (http, api, cookie) = (&http, &api, &cookie);
+            async move {
+                let path = concrete(route);
+                let status = match http.get(format!("{api}{path}")).header("cookie", cookie).send().await {
+                    Ok(r) => status_of(r).await,
+                    Err(e) if e.is_timeout() => 0,
+                    Err(e) => panic!("GET {path}: {e}"),
+                };
+                let fine = if access.starts_with("user:") || access.starts_with("user or") { status != 401 && status != 403 } else { status == 403 };
+                (!fine).then(|| format!("{host} {route} ({access}): {status} with a user's session"))
+            }
+        })
+        .buffer_unordered(8)
+        .filter_map(|wrong| async move { wrong })
+        .collect()
+        .await;
+    wrong.sort();
     assert!(wrong.is_empty(), "{} routes misbehave:\n{}", wrong.len(), wrong.join("\n"));
     let code: serde_json::Value = http.get(format!("{api}/v1/code")).header("cookie", &cookie).send().await.unwrap().json().await.unwrap();
     assert_eq!((code["auth"]["caller"]["kind"].as_str(), code["auth"]["caller"]["owner"].as_str()), (Some("owner"), Some("ada")), "{code}");
@@ -627,17 +648,7 @@ async fn every_control_plane_route_needs_the_operator_token() {
     // Every product this rolld serves routes for has its tools on MCP: one without a ROLL_PRODUCTS
     // switch of its own (previews, with roll code) once went unlisted.
     let served: std::collections::BTreeSet<String> = scoped.lock().unwrap().iter().filter(|(h, _, c)| h == "api" && roll_auth::scope::PRODUCTS.contains(&c.as_str())).map(|(_, _, c)| c.clone()).collect();
-    let list: serde_json::Value = http
-        .post(format!("{api}/v1/mcp"))
-        .header("authorization", &operator)
-        .header("accept", "application/json")
-        .json(&serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
+    let list = tools_list.await.unwrap();
     let listed: std::collections::BTreeSet<&str> = list["result"]["tools"].as_array().expect("tools").iter().filter_map(|t| t["_meta"]["roll/product"].as_str()).collect();
     let missing: Vec<&String> = served.iter().filter(|p| !listed.contains(p.as_str())).collect();
     assert!(missing.is_empty(), "products rolld serves with no MCP tools listed (rolld's MCP product list leaves them out): {missing:?}");

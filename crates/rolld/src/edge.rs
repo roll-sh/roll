@@ -31,7 +31,7 @@ use std::time::Duration;
 use tokio::net::TcpListener;
 use tracing::{info, warn};
 
-#[derive(clap::Args, Clone, Debug)]
+#[derive(clap::Args, Clone)]
 pub struct EdgeArgs {
     /// Serve the public listeners: TLS, SNI and Host routing, PROXY protocol (roll cloud).
     #[arg(long = "edge", env = "ROLL_EDGE", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]

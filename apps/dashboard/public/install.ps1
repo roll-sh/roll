@@ -11,9 +11,12 @@
 #
 # That installs into %ProgramFiles%\roll and adds it to the machine's PATH. Settings (environment):
 #   ROLL_VERSION        a release tag (`cli-v0.2.0`) or version (`0.2.0`); default: the newest cli-v* release
+#                       that isn't a prerelease or a draft (a prerelease installs only when named here)
 #   ROLL_INSTALL_DIR    where to put roll.exe (default: as above)
 #   ROLL_INSTALL_SCOPE  `user` (default) or `machine` (as -System)
 #   ROLL_RELEASES       where releases are downloaded from (default: https://github.com/roll-sh/roll/releases)
+#   ROLL_RELEASES_API   where the list of releases is read from (default: GitHub's API for roll-sh/roll); with
+#                       ROLL_VERSION and a mirror in ROLL_RELEASES, it's read only when this is set
 #   ROLL_VERIFY         auto (default): also check the download's build provenance with
 #                       `gh attestation verify` when gh is installed and logged in; attestation:
 #                       refuse to install without that check; checksum: SHA256SUMS only
@@ -28,6 +31,7 @@ $ProgressPreference = 'SilentlyContinue'
 
 $Repo = 'roll-sh/roll'
 $Releases = if ($env:ROLL_RELEASES) { $env:ROLL_RELEASES.TrimEnd('/') } else { "https://github.com/$Repo/releases" }
+$Api = if ($env:ROLL_RELEASES_API) { $env:ROLL_RELEASES_API.TrimEnd('/') } else { "https://api.github.com/repos/$Repo/releases" }
 
 function Say($msg) { [Console]::Error.WriteLine("roll: $msg") }
 function Die($msg) { Say $msg; exit 1 }
@@ -56,10 +60,24 @@ $target = "$arch-pc-windows-msvc"
 
 $tag = $env:ROLL_VERSION
 if ($tag -and -not $tag.StartsWith('cli-v')) { $tag = if ($tag.StartsWith('v')) { "cli-$tag" } else { "cli-v$tag" } }
+# The release list, newest first. `foreach`, not the pipeline: Windows PowerShell 5.1 passes a JSON
+# array down a pipeline as one object.
 if (-not $tag) {
-    try { $list = Invoke-RestMethod -UseBasicParsing "https://api.github.com/repos/$Repo/releases?per_page=50" } catch { Die "couldn't list the releases of ${Repo}: $_" }
-    $tag = @($list | Where-Object { $_.tag_name -like 'cli-v*' } | Select-Object -First 1 -ExpandProperty tag_name)[0]
-    if (-not $tag) { Die "no cli-v* release of $Repo yet" }
+    try { $list = Invoke-RestMethod -UseBasicParsing "${Api}?per_page=50" } catch { Die "couldn't list the releases of ${Repo}: $_" }
+    foreach ($r in $list) {
+        if ($r.tag_name -like 'cli-v*' -and $r.draft -eq $false -and $r.prerelease -eq $false) { $tag = $r.tag_name; break }
+    }
+    if (-not $tag) { Die "no cli-v* release of $Repo yet that isn't a prerelease (name one with ROLL_VERSION)" }
+} elseif ($env:ROLL_RELEASES_API -or $github) {
+    # Named: it installs whatever it is, saying so when it's a prerelease (best effort: a list that
+    # can't be read says nothing).
+    try { $list = Invoke-RestMethod -UseBasicParsing "${Api}?per_page=50" } catch { $list = @() }
+    foreach ($r in $list) {
+        if ($r.tag_name -eq $tag) {
+            if ($r.prerelease -eq $true) { Say "$tag is a prerelease; installing it because ROLL_VERSION names it" }
+            break
+        }
+    }
 }
 
 $tmp = Join-Path ([IO.Path]::GetTempPath()) ("roll-" + [Guid]::NewGuid().ToString('N'))

@@ -13,7 +13,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
-#[derive(Args, Clone, Debug)]
+#[derive(Args, Clone)]
 pub struct CodeArgs {
     /// Keep roll code's databases in this Postgres (schemas `code_store` and `code_control`)
     /// instead of SQLite under --home. Every node of a cluster uses the same one. Default: the

@@ -23,7 +23,7 @@ pub enum BackendKind {
     Dynamodb,
 }
 
-#[derive(Args, Clone, Debug)]
+#[derive(Args, Clone)]
 pub struct ClusterArgs {
     /// Where membership and leases live (default: postgres with a cluster secret, else memory).
     #[arg(id = "roll_cluster_backend", long = "cluster-backend", env = "ROLL_CLUSTER_BACKEND", value_enum)]

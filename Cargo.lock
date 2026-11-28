@@ -7475,6 +7475,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "roll-debug-scan"
+version = "0.1.0"
+
+[[package]]
 name = "roll-edge"
 version = "0.1.0"
 dependencies = [
@@ -7676,6 +7680,7 @@ dependencies = [
  "regex",
  "ring",
  "roll-auth",
+ "roll-debug-scan",
  "roll-keyshares",
  "roll-oidc",
  "roll-secrets-chain",

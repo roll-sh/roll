@@ -654,14 +654,14 @@ pub fn by_path(method: &str, path: &str) -> Option<Found> {
 /// catch-all whose real routes have rows), `operator only` (on purpose), or `None`: no row, so no
 /// grant can call it. rolld logs it for every route at startup; `rolld/tests/auth.rs` reads it.
 pub fn classified(route: &str) -> Option<&'static str> {
-    if OPERATOR_ONLY.iter().any(|(r, _)| shape(r) == shape(route)) {
+    let shape = shape(route);
+    if INDEX.operator_only.contains(&shape) {
         return Some("operator only");
     }
-    let shape = shape(route);
-    if let Some(r) = ROWS.iter().find(|r| self::shape(r.route) == shape) {
+    if let Some(r) = own_rows(&shape).next() {
         return Some(r.product);
     }
-    if let Some(r) = ROWS.iter().filter(|r| r.route.ends_with('/') && shape.starts_with(&self::shape(r.route))).max_by_key(|r| r.route.len()) {
+    if let Some((_, r)) = INDEX.prefixes.iter().filter(|(s, _)| shape.starts_with(s.as_str())).max_by_key(|(_, r)| r.route.len()) {
         return Some(r.product);
     }
     if FORWARDS.iter().any(|(r, _, _)| *r == route) {
@@ -681,8 +681,15 @@ pub fn classified(route: &str) -> Option<&'static str> {
 /// covers it.
 pub fn method_by_prefix(method: &str, route: &str) -> bool {
     let shape = shape(route);
-    let own = ROWS.iter().any(|r| self::shape(r.route) == shape && (r.method == "*" || r.method == method));
-    !own && !OPERATOR_ONLY.iter().any(|(r, _)| self::shape(r) == shape) && ROWS.iter().any(|r| r.route.ends_with('/') && shape.starts_with(&self::shape(r.route)))
+    let own = own_rows(&shape).any(|r| r.method == "*" || r.method == method);
+    !own && !INDEX.operator_only.contains(&shape) && INDEX.prefixes.iter().any(|(s, _)| shape.starts_with(s.as_str()))
+}
+
+/// The rows whose own route has this shape, in the catalogue's order: an exact route's, or a
+/// prefix row's when the route is that prefix itself (`/v1/storage/`).
+fn own_rows(shape: &str) -> impl Iterator<Item = &'static Row> {
+    let exact = INDEX.exact.get(shape).into_iter().flatten().copied();
+    exact.chain(INDEX.prefixes.iter().filter(move |(s, _)| s == shape).map(|(_, r)| *r))
 }
 
 /// Whether `method route`, decided by a prefix row, was looked at (`prefix-reviewed.txt`, one

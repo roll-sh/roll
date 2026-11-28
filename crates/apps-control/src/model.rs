@@ -314,7 +314,7 @@ pub struct Delivery {
 /// A private environment's gate: the visitors' token, people signed in to roll who may open the
 /// project (`signed_in`), or both, and an automation bypass (CI). Secrets as SHA-256 hex
 /// digests; none is kept.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct Access {
     pub token_hash: Option<String>,
     pub bypass_hash: Option<String>,
@@ -333,6 +333,23 @@ pub struct Access {
     /// A preview's webhook URLs (roll previews': a provider that can't send a header, Stripe's,
     /// GitHub's): one exact path each, in with `?roll_hook=<token>`, the token's SHA-256 only.
     pub webhooks: Vec<HookUrl>,
+}
+
+/// Whether each secret's digest is set, never the digest: the password's is guessable offline.
+impl std::fmt::Debug for Access {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let set = |o: &Option<String>| o.as_ref().map(|_| "<redacted>");
+        f.debug_struct("Access")
+            .field("token_hash", &set(&self.token_hash))
+            .field("bypass_hash", &set(&self.bypass_hash))
+            .field("signed_in", &self.signed_in)
+            .field("password_hash", &set(&self.password_hash))
+            .field("sso", &self.sso)
+            .field("preflight", &self.preflight)
+            .field("callers", &self.callers)
+            .field("webhooks", &self.webhooks)
+            .finish()
+    }
 }
 
 /// One webhook URL of a preview's ([`Access::webhooks`]).

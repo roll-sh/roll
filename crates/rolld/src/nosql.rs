@@ -20,7 +20,7 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tracing::info;
 
-#[derive(Args, Clone, Debug)]
+#[derive(Args, Clone)]
 pub struct NosqlArgs {
     /// Disable roll nosql.
     #[arg(long = "no-nosql", env = "ROLL_NOSQL_DISABLED", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
