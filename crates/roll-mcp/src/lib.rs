@@ -77,7 +77,7 @@ pub const PROTOCOL_VERSIONS: [&str; 4] = ["2025-11-25", "2025-06-18", "2025-03-2
 
 /// Every version roll speaks, newest first, as `server/discover` and the server card list them.
 pub(crate) fn supported_versions() -> Vec<&'static str> {
-    std::iter::once(modern::MODERN).chain(PROTOCOL_VERSIONS).collect()
+    roll_auth::mcp::supported(&PROTOCOL_VERSIONS)
 }
 const SSE_KEEPALIVE: std::time::Duration = std::time::Duration::from_secs(15);
 /// How often a call that asked for progress (`_meta.progressToken`) hears it's still running (it
@@ -455,7 +455,7 @@ async fn handle(State(m): State<Mcp>, uri: axum::http::Uri, ext: Extensions, hea
     // A modern request names its version in `_meta` (and the header); its headers must say what
     // its body says. A version roll doesn't speak gets the list it does, so a client picks one.
     let header_version = headers.get("mcp-protocol-version").and_then(|v| v.to_str().ok()).map(str::to_string);
-    let modern = messages.iter().any(|m| modern::version(m).is_some()) || header_version.as_deref() == Some(modern::MODERN);
+    let modern = roll_auth::mcp::is_modern(&headers, &messages);
     if modern {
         if batch {
             return http_error(StatusCode::BAD_REQUEST, "a 2026-07-28 request is one JSON-RPC message, not a batch");
@@ -466,9 +466,8 @@ async fn handle(State(m): State<Mcp>, uri: axum::http::Uri, ext: Extensions, hea
     } else if let Some(v) = &header_version
         && !PROTOCOL_VERSIONS.contains(&v.as_str())
     {
-        let supported: Vec<&str> = std::iter::once(modern::MODERN).chain(PROTOCOL_VERSIONS).collect();
-        let body = json!({ "jsonrpc": "2.0", "id": messages[0].get("id").cloned().unwrap_or(Value::Null), "error": { "code": modern::UNSUPPORTED_VERSION, "message": "Unsupported protocol version", "data": { "supported": supported, "requested": v } } });
-        return (StatusCode::BAD_REQUEST, Json(body)).into_response();
+        let (status, body) = roll_auth::mcp::unsupported(&messages[0].get("id").cloned().unwrap_or(Value::Null), v, &PROTOCOL_VERSIONS);
+        return (status, Json(body)).into_response();
     }
     let has_requests = messages.iter().any(|v| v.get("method").is_some() && v.get("id").is_some());
     if !has_requests {

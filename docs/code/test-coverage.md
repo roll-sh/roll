@@ -110,7 +110,7 @@ thing but not do it, 404 one who can't see it (docs/code/http-api.md).
 | `GET /v1/code/github/installations` | 200, 401, 403 | `contract.rs::auth_matrix`, `github.rs::connect_import_webhooks_and_mirror`, `github.rs::automations_hear_github_with_comment_authority_and_forks`, `routes.rs::every_repo_route_follows_the_auth_matrix`, `routes.rs::bad_tokens_are_401_on_every_route` |
 | `POST /v1/code/github/webhook` | 200, 202, 400, 401, 404 (the 8 s budget's 202 untested: see below) | `cluster.rs::github_deliveries_survive_their_owner_dying`, `github.rs::connect_import_webhooks_and_mirror`, `github.rs::pull_request_issue_and_installation_actions`, `routes.rs::github_webhook_statuses`, `routes.rs::bad_tokens_are_401_on_every_route` |
 | `GET /v1/code/github/setup` | 302 | `routes.rs::bad_tokens_are_401_on_every_route` |
-| `POST /v1/code/mcp` | 200, 202, 400, 401, 403, 404, 429 | `mcp.rs::transport_sessions_and_protocol`, `mcp.rs::protocol_edges`, `mcp.rs::responses_as_server_sent_events`, `mcp.rs::every_tool_is_authorized_like_its_route`, `mcp.rs::invalid_tokens_and_foreign_sessions`, `mcp.rs::sessions_work_through_any_node`, `tokens.rs::tokens_are_listed_and_revoked_everywhere_at_once`, `streams.rs::mcp_event_stream_answers_share_the_callers_slots` |
+| `POST /v1/code/mcp` | 200, 202, 400, 401, 403, 404, 429 | `mcp.rs::transport_sessions_and_protocol`, `mcp.rs::protocol_edges`, `mcp.rs::responses_as_server_sent_events`, `mcp.rs::modern_clients_need_no_session`, `mcp.rs::every_tool_is_authorized_like_its_route`, `mcp.rs::invalid_tokens_and_foreign_sessions`, `mcp.rs::sessions_work_through_any_node`, `tokens.rs::tokens_are_listed_and_revoked_everywhere_at_once`, `streams.rs::mcp_event_stream_answers_share_the_callers_slots` |
 | `GET /v1/code/mcp` | 405 | `mcp.rs::transport_sessions_and_protocol`, `mcp.rs::protocol_edges` |
 | `DELETE /v1/code/mcp` | 204, 400, 404 | `mcp.rs::transport_sessions_and_protocol`, `mcp.rs::every_tool_is_authorized_like_its_route`, `mcp.rs::invalid_tokens_and_foreign_sessions`, `mcp.rs::sessions_work_through_any_node` |
 | `GET /git/{*path}` | 200, 401, 403, 404 | `git_more.rs::git_auth_matrix_over_smart_http`, `git_more.rs::git_auth_for_other_owners_and_anonymous`, `code-git/tests/http.rs::advertisements` |
@@ -487,6 +487,7 @@ envelope `{event, delivery, webhook, repo{id, full_name, default_branch, visibil
 | Behaviour | Tests |
 | --- | --- |
 | sessions (400 without, 404 unknown, ended, bound to the token), version negotiation, `initialized`, ping, tools/list, unknown method and tool, non-object arguments, parse errors, wrong `jsonrpc`, batches with notifications, `MCP-Protocol-Version`, Origin, `GET` 405, `DELETE` | `mcp.rs::transport_sessions_and_protocol` |
+| MCP 2026-07-28 without a session: `server/discover`, the same tools listed and called by an owner token (private to anyone else), `resultType`, serverInfo and cache fields; a request without its capabilities (`-32602`), a header naming another tool (`-32020`), `initialize` (404) and an invalid token (401) answered with the request's id; lockdown | `mcp.rs::modern_clients_need_no_session` |
 | tools enforce the routes' authorization: anonymous public reads, private 404, writes need a token, another owner can't write, admin can | `mcp.rs::every_tool_is_authorized_like_its_route` |
 | every tool's schema is closed and its required fields exist; path and query encoding | `code-control/src/mcp.rs` unit tests |
 | every `/v1/code` route the routers declare, method by method, is a tool's (`mcp::ROUTES`) or in `src/no-tool.txt` with why; every tool lists its routes, each one a router declares; no stale or vanished lines | `coverage_map.rs::every_route_has_an_mcp_tool_or_a_reason` |
@@ -1184,7 +1185,7 @@ otherwise. The module docs give the client retry policy and exactly what is asse
 
 | roll previews: a deploy hook builds its branches' previews again at their heads (every service, nothing cached), once a minute at most; anything but a live hook is a 404; a leaked one is revoked; its secret is a checksummed roll secret | `roll-previews/tests/engine.rs::a_deploy_hook_builds_its_branches_previews_again` |
 
-| roll previews: a project's own preview domain (roll apps' verified wildcard) puts its previews' URLs under it, and its names reach only that project's previews | `roll-previews/tests/engine.rs::a_projects_own_preview_domain_serves_only_its_previews` |
+| roll previews: a project's own preview domain (roll apps' verified wildcard) puts its previews' URLs under it, and its names reach only that project's previews; with team access, a signed-in person's ticket to a host there lands on that host, and the preview's name under another project's domain, or a name of nothing, gets none | `roll-previews/tests/engine.rs::a_projects_own_preview_domain_serves_only_its_previews` |
 | roll previews: `roll preview visitors` answers who signed in to a team preview lately | `roll-cli/tests/preview.rs::visitors_from_the_cli` |
 
 | roll previews: `roll preview masks` lists a project's mask suggestions (`--apply` adds them) | `roll-cli/tests/preview.rs::mask_suggestions_from_the_cli` |
