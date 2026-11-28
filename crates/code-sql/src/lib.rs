@@ -34,7 +34,7 @@ mod sqlite;
 pub mod translate;
 mod value;
 
-pub use pg::pg_config;
+pub use pg::{limit_connections, pg_config};
 pub use sqlite::uncounted_allocations;
 pub use value::{FromValue, Params, ToValue, Value, ValueRef};
 

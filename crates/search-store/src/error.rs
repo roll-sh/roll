@@ -3,6 +3,8 @@
 //!
 //! - [`Fenced`]: another node took the cluster over under a higher ownership epoch. The caller
 //!   must stop serving writes for the cluster (unload it) — nothing it writes can become visible.
+//! - [`Refused`]: an operation that can't run now as asked (a reset whose source is changing or
+//!   has a reset of its own pending, a branch of a cluster with a reset pending). Try again.
 //! - [`WalFull`]: object storage has fallen so far behind that the local WAL reached its disk
 //!   limit. Transient; Elasticsearch's equivalent is a 429 `es_rejected_execution_exception`.
 
@@ -29,6 +31,18 @@ impl fmt::Display for Fenced {
 }
 
 impl std::error::Error for Fenced {}
+
+/// An operation the store won't run now as asked; retrying later may succeed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Refused(pub String);
+
+impl fmt::Display for Refused {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Refused {}
 
 /// The local WAL holds more unshipped bytes than `WalConfig::max_local_bytes`.
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -1472,3 +1472,117 @@ async fn pins_keep_snapshot_segments_through_merges_deletion_and_branches() {
         st.close().await.unwrap();
     }
 }
+
+/// A reset carries everything it applies under the cluster it resets: begun, it applies at the
+/// next load even once its source is deleted (a shard the cluster deleted since comes back, one
+/// only the cluster has goes), and says so. One the cluster outgrew (written after it was recorded,
+/// by an owner that didn't see it: no clock compared) is dropped, says so, and the cluster stays
+/// as it is. Copying a cluster with a reset waiting, resetting it again, or resetting it from a
+/// source with no state is refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_reset_needs_nothing_of_its_source_and_a_stale_one_is_dropped() {
+    use search_store::{Refused, ResetOutcome};
+    let objects = test_objects("reset");
+    let mut cfg = fast_config("n1");
+    cfg.manifest_retain_ms = 3_600_000;
+    let store = open(&objects, &temp_dir("reset"), cfg).await;
+    let m = |cp: i64| ShardManifest { max_seq_no: cp, local_checkpoint: cp, ..Default::default() };
+    let refused = |e: anyhow::Error| assert!(e.downcast_ref::<Refused>().is_some(), "{e}");
+    let (a, b, c) = (shard("idxA", 0), shard("idxB", 0), shard("idxC", 0));
+    store.write_cluster("tgt", &ClusterState::new("{\"v\":\"t\"}")).await.unwrap();
+    for (s, cp) in [(&a, 5), (&b, 1), (&c, 4)] {
+        store.write_manifest("tgt", s, &m(cp)).await.unwrap();
+    }
+    store.delete_shard("tgt", &c).await.unwrap();
+    // A source that never stored a state (or whose delete removed it) gives nothing to reset to.
+    store.write_manifest("nostate", &a, &m(1)).await.unwrap();
+    refused(store.begin_reset("tgt", "nostate", None, false, |_, _| Ok(b"{}".to_vec())).await.unwrap_err());
+    store.write_cluster("src", &ClusterState::new("{\"v\":\"s\"}")).await.unwrap();
+    for (s, cp) in [(&a, 2), (&c, 3)] {
+        store.write_manifest("src", s, &m(cp)).await.unwrap();
+    }
+    let ticket = store
+        .begin_reset("tgt", "src", None, false, |t, f| {
+            assert_eq!((t, f), (&b"{\"v\":\"t\"}"[..], Some(&b"{\"v\":\"s\"}"[..])));
+            Ok(b"{\"v\":\"merged\"}".to_vec())
+        })
+        .await
+        .unwrap();
+    refused(store.branch("tgt", "copy", None).await.unwrap_err());
+    refused(store.begin_reset("tgt", "src", None, false, |_, _| Ok(b"{}".to_vec())).await.unwrap_err());
+    assert_eq!(store.reset_outcome("tgt", ticket).await.unwrap(), ResetOutcome::Pending);
+    store.delete_cluster("src").await.unwrap();
+    let st = store.load_cluster("tgt").await.unwrap().unwrap();
+    assert_eq!(&st.json[..], b"{\"v\":\"merged\"}");
+    assert_eq!(store.reset_outcome("tgt", ticket).await.unwrap(), ResetOutcome::Applied);
+    assert_eq!(store.read_manifest("tgt", &a).await.unwrap().unwrap().local_checkpoint, 2);
+    assert_eq!(store.read_manifest("tgt", &c).await.unwrap().unwrap().local_checkpoint, 3, "deleted since, back");
+    assert!(store.read_manifest("tgt", &b).await.unwrap().is_none(), "only the cluster had it");
+    assert!(!store.reset_pending("tgt").await.unwrap());
+    // Loading again changes nothing.
+    assert_eq!(&store.load_cluster("tgt").await.unwrap().unwrap().json[..], b"{\"v\":\"merged\"}");
+
+    store.write_cluster("src2", &ClusterState::new("{}")).await.unwrap();
+    store.write_manifest("src2", &a, &m(9)).await.unwrap();
+    let ticket = store.begin_reset("tgt", "src2", None, false, |_, _| Ok(b"{\"v\":\"stale\"}".to_vec())).await.unwrap();
+    // A commit point written after the reset was recorded: what the owner that wrote it served stands.
+    store.write_manifest("tgt", &a, &m(7)).await.unwrap();
+    assert_eq!(&store.load_cluster("tgt").await.unwrap().unwrap().json[..], b"{\"v\":\"merged\"}");
+    assert_eq!(store.read_manifest("tgt", &a).await.unwrap().unwrap().local_checkpoint, 7, "as it was");
+    assert!(matches!(store.reset_outcome("tgt", ticket).await.unwrap(), ResetOutcome::Dropped(_)));
+    assert!(!store.reset_pending("tgt").await.unwrap());
+
+    // A copy made while the cluster was empty (nothing stored) resets it to no indices.
+    let ticket = store
+        .begin_reset("tgt", "never-written", None, false, |_, f| {
+            assert!(f.is_none());
+            Ok(b"{\"v\":\"empty\"}".to_vec())
+        })
+        .await
+        .unwrap();
+    assert_eq!(&store.load_cluster("tgt").await.unwrap().unwrap().json[..], b"{\"v\":\"empty\"}");
+    assert_eq!(store.reset_outcome("tgt", ticket).await.unwrap(), ResetOutcome::Applied);
+    assert!(store.read_latest_manifests("tgt").await.unwrap().is_empty());
+
+    // The reset's commit points keep the branch's lineage, even with none of its shards left
+    // carrying it: what it holds of its parent counts as shared after the reset as before, and
+    // after the copy is deleted and collected; the copy's operation that was only in its
+    // write-ahead log still replays from the branch then.
+    let p = shard("idxP", 0);
+    store.write_cluster("prod", &ClusterState::new("{}")).await.unwrap();
+    let (shared, _) = make_segment(&store, 1000).await;
+    store.write_manifest("prod", &p, &ShardManifest { segments: vec![seg_ref(shared, 1000)], ..m(0) }).await.unwrap();
+    store.branch("prod", "pv", None).await.unwrap();
+    let (wal, mm, _) = recover(&store, "pv", &p).await;
+    let (own, own_data) = make_segment(&store, 2000).await;
+    store.write_manifest("pv", &p, &ShardManifest { segments: vec![seg_ref(shared, 1000), seg_ref(own, 2000)], max_seq_no: 1, local_checkpoint: 1, ..mm.clone() }).await.unwrap();
+    let lsn = wal.append(2, b"wal-only").unwrap();
+    store.wal().wait_ack(lsn).await.unwrap();
+    let before = store.cluster_usage("pv").await.unwrap().own_bytes;
+    assert_eq!(before, 2000);
+    store.branch("pv", "pv-copy", None).await.unwrap();
+    // Written after the copy: the reset discards it.
+    let (later, _) = make_segment(&store, 500).await;
+    let segments = vec![seg_ref(shared, 1000), seg_ref(own, 2000), seg_ref(later, 500)];
+    store.write_manifest("pv", &p, &ShardManifest { segments, max_seq_no: 3, local_checkpoint: 3, ..mm.clone() }).await.unwrap();
+    store.detach_shard(wal).await.unwrap();
+    // Its indices wiped since the copy: no live shard of it carries its lineage any more, which
+    // the reset takes from its catalog parent then.
+    store.delete_shard("pv", &p).await.unwrap();
+    let ticket = store.begin_reset("pv", "pv-copy", Some("prod"), false, |t, _| Ok(t.to_vec())).await.unwrap();
+    store.load_cluster("pv").await.unwrap();
+    assert_eq!(store.reset_outcome("pv", ticket).await.unwrap(), ResetOutcome::Applied);
+    assert_eq!(store.cluster_usage("pv").await.unwrap().own_bytes, before, "counted against prod, not the copy");
+    store.delete_cluster("pv-copy").await.unwrap();
+    store.collect_garbage(Duration::ZERO).await.unwrap();
+    assert_eq!(store.cluster_usage("pv").await.unwrap().own_bytes, before, "the copy's going moves nothing");
+    let (wal, mm, replayed) = recover(&store, "pv", &p).await;
+    assert_eq!(replayed, vec![(2, b"wal-only".to_vec())], "the copy's unflushed operation, its copy collected");
+    assert!(objects.exists(&own.key()).await.unwrap());
+    assert_eq!(&*store.open_segment(&own).await.unwrap(), &own_data[..]);
+    let (new, _) = make_segment(&store, 700).await;
+    let segments = [mm.segments.clone(), vec![seg_ref(new, 700)]].concat();
+    store.write_manifest("pv", &p, &ShardManifest { segments, max_seq_no: 2, local_checkpoint: 2, ..mm }).await.unwrap();
+    assert_eq!(store.cluster_usage("pv").await.unwrap().own_bytes, before + 700, "and its own writes after it");
+    store.detach_shard(wal).await.unwrap();
+}
