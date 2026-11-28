@@ -2271,7 +2271,9 @@ the rest are skipped by the tests' own prerequisites.
   bounds what the link reaches, which never includes the remote's dot-prefixed, hidden or system
   indices or data streams (or aliases over them), and runs no inference there. Loopback remotes
   are searched as OpenSearch 3.9 searches them, their index part authorized as local indices:
-  `-x:y` is a remote expression of an alias `-x` (OpenSearch has no remote exclusions), and
+  `-x:y` is a remote expression of an alias `-x` (OpenSearch has no remote exclusions; an
+  expression whose alias matches no remote is a local one there, and
+  `no_such_remote_cluster_exception` here, as in Elasticsearch), and
   `_index` in a query, sort or aggregation is `alias:index`. A role's document query sees the
   real index there.
 - Aggregations and sorting on keyed flattened sub-fields, `_index_mode` aggregations,
