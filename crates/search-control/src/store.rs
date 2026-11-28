@@ -674,6 +674,19 @@ impl Store {
         // (`VariantStats::latency`, JSON).
         db.add_column("search_experiments", "no_hits", "INTEGER")?;
         db.add_column("search_experiments", "latency", "TEXT")?;
+        // Health alerts (`crate::alerts`): rules with their state, and the outbox of what their
+        // state changes and test sends owe (a test send has no `seq`).
+        db.ensure_schema(
+            "CREATE TABLE IF NOT EXISTS search_alert_rules (id TEXT PRIMARY KEY, cluster_id TEXT NOT NULL, name TEXT NOT NULL, metric TEXT NOT NULL, op TEXT NOT NULL, threshold REAL NOT NULL, window_s INTEGER NOT NULL, targets TEXT NOT NULL, made_by TEXT NOT NULL, created_at INTEGER NOT NULL, state TEXT NOT NULL, since INTEGER NOT NULL, value REAL, evaluated_at INTEGER, seq INTEGER NOT NULL)",
+        )?;
+        db.ensure_schema("CREATE INDEX IF NOT EXISTS search_alert_rules_cluster ON search_alert_rules (cluster_id)")?;
+        db.ensure_schema(
+            "CREATE TABLE IF NOT EXISTS search_alert_deliveries (id TEXT PRIMARY KEY, rule_id TEXT NOT NULL, cluster_id TEXT NOT NULL, target INTEGER NOT NULL, event TEXT NOT NULL, seq INTEGER, payload TEXT NOT NULL, status TEXT NOT NULL, attempts INTEGER NOT NULL, next_at INTEGER NOT NULL, last_status INTEGER, last_error TEXT, created_at INTEGER NOT NULL, delivered_at INTEGER, UNIQUE (rule_id, seq, target))",
+        )?;
+        db.ensure_schema("CREATE INDEX IF NOT EXISTS search_alert_deliveries_due ON search_alert_deliveries (status, next_at)")?;
+        // The token of the worker holding a delivery: only it records the try.
+        db.add_column("search_alert_deliveries", "claim", "TEXT")?;
+        db.ensure_schema("CREATE INDEX IF NOT EXISTS search_alert_deliveries_rule ON search_alert_deliveries (rule_id, created_at)")?;
         // Browser keys' usage, in the metrics' rings (`record_browser_usage`).
         db.ensure_schema(
             "CREATE TABLE IF NOT EXISTS search_browser_usage (cluster_id TEXT NOT NULL, key_id TEXT NOT NULL, res INTEGER NOT NULL, slot INTEGER NOT NULL, at INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY (cluster_id, key_id, res, slot))",
@@ -1163,6 +1176,8 @@ impl Store {
             x.execute("DELETE FROM search_experiments WHERE cluster_id = ?1", params![id])?;
             x.execute("DELETE FROM search_suggestions WHERE cluster_id = ?1", params![id])?;
             x.execute("DELETE FROM search_crawler_sites WHERE cluster_id = ?1", params![id])?;
+            x.execute("DELETE FROM search_alert_rules WHERE cluster_id = ?1", params![id])?;
+            x.execute("DELETE FROM search_alert_deliveries WHERE cluster_id = ?1", params![id])?;
             Ok(true)
         })?)
     }
@@ -1354,6 +1369,8 @@ impl Store {
     pub async fn delete(&self, id: &str) -> anyhow::Result<()> {
         self.db.write(|x| {
             x.execute("DELETE FROM search_clusters WHERE id = ?1", params![id])?;
+            x.execute("DELETE FROM search_alert_rules WHERE cluster_id = ?1", params![id])?;
+            x.execute("DELETE FROM search_alert_deliveries WHERE cluster_id = ?1", params![id])?;
             x.execute("DELETE FROM search_usage WHERE cluster_id = ?1", params![id])?;
             x.execute("DELETE FROM search_metrics WHERE cluster_id = ?1", params![id])?;
             x.execute("DELETE FROM search_browser_usage WHERE cluster_id = ?1", params![id])?;
@@ -1381,6 +1398,12 @@ impl Store {
             )?;
             Ok::<_, code_sql::Error>(old)
         })?)
+    }
+
+    /// The catalog's database, for the modules that keep tables of their own in it
+    /// (`crate::alerts`).
+    pub(crate) fn db(&self) -> &Db {
+        &self.db
     }
 
     /// `plain` sealed for `kind` with the store's key: the deployment's, or on a single node

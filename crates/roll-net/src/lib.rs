@@ -85,7 +85,9 @@ pub fn literal_private_host(url: &url::Url) -> bool {
         Some(url::Host::Domain(d)) => d.parse::<IpAddr>().ok(),
         None => None,
     };
-    literal.is_some_and(private_ip) || url.host_str().is_some_and(|h| h.eq_ignore_ascii_case("localhost") || h.to_ascii_lowercase().ends_with(".localhost"))
+    // A trailing dot is the same name (`localhost.`, `app.localhost.`).
+    let named = url.host_str().map(|h| h.trim_end_matches('.').to_ascii_lowercase());
+    literal.is_some_and(private_ip) || named.is_some_and(|h| h == "localhost" || h.ends_with(".localhost"))
 }
 
 #[cfg(test)]
@@ -111,6 +113,7 @@ mod tests {
         assert!(literal_private_host(&u(&format!("http://{}:8080/x", Ipv4Addr::LOCALHOST))));
         assert!(literal_private_host(&u("https://[::1]/x")));
         assert!(literal_private_host(&u("http://LOCALHOST/x")));
+        assert!(literal_private_host(&u("http://localhost./x")) && literal_private_host(&u("http://app.localhost./x")));
         assert!(!literal_private_host(&u("https://api.openai.com/v1")));
     }
 }

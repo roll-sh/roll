@@ -114,6 +114,9 @@ Missing:
 
 ## 3. Alerts on a cluster's own health
 
+Status: built (README.md, "Health alerts"): rules over the metrics and the month's cost, delivered
+by signed webhook and roll code's chat installs from search's own outbox.
+
 - **The rules.** The control plane already keeps per-cluster request metrics (`GET
   …/metrics`: rates, p50/p95/p99, 5xx, 429s) and usage. Owners set rules there: `{metric, op,
   threshold, window}`, for example `p99 > 500 ms for 5 min` or `429s > 1%`. They live in roll's

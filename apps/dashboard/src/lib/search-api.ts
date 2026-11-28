@@ -14,6 +14,7 @@ import type { SuggestionsStatus } from "./search-suggestions";
 import type { MetricsRange, SearchMetrics, SearchSlowLog } from "./search-performance";
 import type { AuditPage } from "./search-audit";
 import type { LinkBody, RemoteLink } from "./search-remotes";
+import type { AlertDelivery, AlertRule } from "./search-alerts";
 
 export type Flavor = "elasticsearch" | "opensearch";
 
@@ -408,6 +409,11 @@ export const searchApi = {
   usage: (id: string, days = 30) => call<SearchUsage>("GET", `${cl(id)}/usage?days=${days}`),
   metrics: (id: string, range: MetricsRange) => call<SearchMetrics>("GET", `${cl(id)}/metrics?range=${range}`),
   slowlog: (id: string) => call<SearchSlowLog>("GET", `${cl(id)}/slowlog`),
+  /** Health alert rules with their state (`docs/search/README.md`, "Health alerts"). */
+  alerts: (id: string) => call<{ rules: AlertRule[] }>("GET", `${cl(id)}/alerts`),
+  /** Queues a test delivery to each of the rule's targets. */
+  testAlert: (id: string, rule: string) => call<{ queued: string[] }>("POST", `${cl(id)}/alerts/${encodeURIComponent(rule)}/test`, {}),
+  alertDeliveries: (id: string, rule: string) => call<{ deliveries: AlertDelivery[] }>("GET", `${cl(id)}/alerts/${encodeURIComponent(rule)}/deliveries`),
   analytics: (id: string, index: string | null, range: AnalyticsRange) => call<SearchAnalytics>("GET", `${cl(id)}/analytics?${analyticsQuery(index, range)}`),
   /** One or two search configurations scored against judged queries (`_rank_eval`) on an index. */
   evaluate: (id: string, index: string, body: { judgments: Judgment[]; configurations: EvalConfiguration[]; metric?: unknown }) =>

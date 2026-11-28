@@ -14,6 +14,7 @@
 //! control.shutdown().await?;
 //! ```
 
+pub mod alerts;
 pub mod analytics;
 pub mod evaluate;
 pub mod api;

@@ -130,6 +130,10 @@ pub struct SearchArgs {
     /// a tenant could otherwise point one at the node's own network).
     #[arg(long = "search-connectors-allow-private", env = "ROLL_SEARCH_CONNECTORS_ALLOW_PRIVATE", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
     pub search_connectors_allow_private: bool,
+    /// Let health alerts' webhooks reach private addresses (local development only: a tenant
+    /// could otherwise point one at the node's own network).
+    #[arg(long = "search-alerts-allow-private", env = "ROLL_SEARCH_ALERTS_ALLOW_PRIVATE", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
+    pub search_alerts_allow_private: bool,
     /// Let inference endpoints reach private addresses (local development with a model server
     /// on this machine, tests).
     #[arg(long = "search-inference-allow-private", env = "ROLL_SEARCH_INFERENCE_ALLOW_PRIVATE", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
@@ -241,6 +245,39 @@ fn embed_config(home: &Path, args: &SearchArgs) -> anyhow::Result<Option<search_
     Ok(Some(cfg))
 }
 
+/// Health alerts' chat targets (`search_control::alerts`): a channel through one of roll code's
+/// chat installs, only one of the rule maker's own roll code owner (the operator's rules, any).
+/// Asked again on every send, so a maker who lost the install stops posting through it.
+pub struct AlertChat {
+    pub accounts: Arc<roll_accounts::Accounts>,
+    pub code: Option<Arc<code_control::Code>>,
+}
+
+#[async_trait::async_trait]
+impl search_control::alerts::AlertChat for AlertChat {
+    async fn may_use(&self, made_by: &str, platform: &str, install: &str) -> Result<bool, String> {
+        let Some(code) = &self.code else { return Ok(false) };
+        let Some((owner, on)) = code.chat_install_owner(install)? else { return Ok(false) };
+        if on != platform {
+            return Ok(false);
+        }
+        if made_by == search_control::remotes::OPERATOR {
+            return Ok(true);
+        }
+        // An operator's scoped token, or anything else without a person: no one's install.
+        if !made_by.starts_with("usr_") {
+            return Ok(false);
+        }
+        let mine = self.accounts.code_owner_id(made_by).map_err(|e| e.to_string())?;
+        Ok(mine.as_deref() == Some(owner.as_str()))
+    }
+
+    async fn post(&self, install: &str, channel: &str, text: &str) -> Result<(), String> {
+        let code = self.code.as_ref().ok_or_else(|| "roll code isn't running on this server".to_string())?;
+        code.post_access_notice(install, channel, text).await
+    }
+}
+
 pub struct Search {
     pub control: Arc<Control>,
     /// The roll-cluster fleet clusters are served in (`None`: this node alone owns them all).
@@ -299,6 +336,7 @@ impl Search {
         if args.search_connectors_allow_private {
             cfg.node_settings.push((search_control::CONNECTORS_ALLOW_PRIVATE.to_string(), "true".to_string()));
         }
+        cfg.alerts_allow_private = args.search_alerts_allow_private;
         cfg.audit.retention = Duration::from_secs(args.search_audit_retention_days.max(1) * 86_400);
         cfg.audit.max_bytes = args.search_audit_max_mb.max(1) << 20;
         cfg.node_settings.push((search_control::SEARCH_REQUEST_MAX_LIMIT.to_string(), args.search_request_memory_max.trim().to_string()));

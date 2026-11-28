@@ -111,8 +111,12 @@ pub struct SearchConfig {
     /// How often the node wakes sleeping clusters whose background jobs came due
     /// ([`Control::start_job_wakes`]; `None`: never).
     pub job_wake_interval: Option<Duration>,
-    /// How often loaded clusters are metered.
+    /// How often loaded clusters are metered (and health alerts evaluated, `crate::alerts`).
     pub metering_interval: Duration,
+    /// Alerts may be sent to private addresses (local development and tests only).
+    pub alerts_allow_private: bool,
+    /// The wait after an alert delivery's first failed try (tripled after each next one).
+    pub alert_retry: Duration,
     /// Publish Elasticsearch's test cluster features, so the YAML REST suites can run against
     /// clusters made through the API (`search-yaml run --cluster-hook`). Test deployments only.
     pub test_features: bool,
@@ -191,6 +195,8 @@ impl SearchConfig {
             purge_interval: Some(Duration::from_secs(600)),
             job_wake_interval: Some(Duration::from_secs(15)),
             metering_interval: Duration::from_secs(60),
+            alerts_allow_private: false,
+            alert_retry: Duration::from_secs(30),
             test_features: false,
             node_settings: Vec::new(),
             stats_interval: Duration::from_secs(600),
@@ -873,7 +879,9 @@ pub struct Control {
     /// `destructive_requires_name` default): unloaded once no request runs.
     reloads: Mutex<HashSet<String>>,
     reloader: AtomicBool,
-    me: OnceLock<Weak<Control>>,
+    pub(crate) me: OnceLock<Weak<Control>>,
+    /// Health alerts' chat way out, HTTP client and worker flag (`crate::alerts`).
+    pub(crate) alerts: crate::alerts::Alerts,
     /// When each loaded cluster's figures were last read from storage (ms), by catalog id.
     refreshed: Mutex<HashMap<String, i64>>,
     /// The roll-cluster fleet this node serves clusters in ([`Control::join`]).
@@ -986,6 +994,7 @@ impl Control {
             },
             hooks.clone(),
         );
+        let alerts = crate::alerts::Alerts::new(cfg.alerts_allow_private);
         let control = Arc::new(Self {
             cfg,
             store,
@@ -999,6 +1008,7 @@ impl Control {
             reloads: Mutex::new(HashSet::new()),
             reloader: AtomicBool::new(false),
             me: OnceLock::new(),
+            alerts,
             refreshed: Mutex::new(HashMap::new()),
             leases: OnceLock::new(),
             secret_refs,
@@ -2734,6 +2744,12 @@ impl Control {
         }
         // After the analytics above are in the catalog.
         Box::pin(self.run_suggestions()).await;
+        // After this node's minutes are in the catalog: health alerts, then what they owe (a worker
+        // of its own: a tenant's dead webhook never holds up this pass).
+        if let Err(e) = self.evaluate_alerts().await {
+            tracing::warn!(error = %e, "evaluating search health alerts failed");
+        }
+        self.spawn_delivery();
         Ok(())
     }
 

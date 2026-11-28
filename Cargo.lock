@@ -8549,6 +8549,7 @@ dependencies = [
  "futures",
  "futures-util",
  "getrandom 0.4.3",
+ "hex",
  "hmac 0.12.1",
  "http-body-util",
  "jsonwebtoken",
@@ -8557,6 +8558,7 @@ dependencies = [
  "reqwest",
  "roll-auth",
  "roll-cluster",
+ "roll-net",
  "roll-secrets",
  "rsa",
  "rusqlite",
@@ -8575,6 +8577,7 @@ dependencies = [
  "tower-http 0.7.1",
  "tracing",
  "tracing-subscriber",
+ "url",
  "urlencoding",
 ]
 
