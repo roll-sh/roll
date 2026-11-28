@@ -242,14 +242,22 @@ pub fn citations(answer: &str, given: &[Source]) -> Vec<usize> {
             continue;
         };
         let inner = &answer[i + 1..i + 1 + len];
-        if !inner.is_empty() && inner.bytes().all(|c| c.is_ascii_digit() || c == b',' || c == b' ') {
-            for part in inner.split(',') {
-                if let Ok(n) = part.trim().parse::<usize>()
-                    && given.iter().any(|s| s.n == n)
-                    && !out.contains(&n)
-                {
-                    out.push(n);
-                }
+        // Not a citation: look again from the next `[` (`see [the note [1]`).
+        if inner.is_empty() || !inner.bytes().all(|c| c.is_ascii_digit() || c == b',' || c == b' ') {
+            i += 1;
+            continue;
+        }
+        // `[1](…)` is a link's label (a kept link), not a citation.
+        if b.get(i + 1 + len + 1) == Some(&b'(') {
+            i += 1 + len;
+            continue;
+        }
+        for part in inner.split(',') {
+            if let Ok(n) = part.trim().parse::<usize>()
+                && given.iter().any(|s| s.n == n)
+                && !out.contains(&n)
+            {
+                out.push(n);
             }
         }
         i += 1 + len;
@@ -303,6 +311,8 @@ mod tests {
         let given = vec![src(1, "a"), src(2, "b")];
         assert_eq!(citations("Yes [2], see [9] and [1, 2][2]. [x] [", &given), vec![1, 2]);
         assert_eq!(citations("nothing cited", &given), Vec::<usize>::new());
+        // After an unclosed `[`, and not a kept link's label.
+        assert_eq!(citations("see [the note [1] here, [2](https://a.test/)", &given), vec![1]);
         assert_eq!(tokens("abcdef"), 2);
         assert_eq!(tokens("é"), 1);
         assert_eq!(cut("aé", 2), "a");

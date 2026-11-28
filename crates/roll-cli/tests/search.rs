@@ -401,7 +401,8 @@ async fn chat_answers_with_sources() {
     assert!(out.contains("chat profile help on kb"), "{out}");
     assert!(e.roll(&["search", "chat", "profiles", "list", "kb"]).await.contains("index articles"));
     let out = e.roll(&["search", "chat", "kb", "help", "how do I reset my password?"]).await;
-    assert!(out.contains("YOU ANSWER THE USER'S QUESTION") && out.contains("*[1] articles/pw  Resetting a password"), "{out}");
+    // Markdown's characters arrive as entities and print as themselves.
+    assert!(out.contains("YOU ANSWER THE USER'S QUESTION") && out.contains("LIKE [1] OR [2][3]") && !out.contains("&#91;") && out.contains("*[1] articles/pw  Resetting a password"), "{out}");
     let v = e.roll_json(&["search", "chat", "kb", "help", "how do I reset my password?"]).await;
     assert_eq!((v["cited"].clone(), v["sources"][0]["_id"].clone(), v["finish_reason"].clone()), (serde_json::json!([1]), serde_json::json!("pw"), serde_json::json!("stop")), "{v}");
     e.roll(&["search", "chat", "profiles", "delete", "kb", "help"]).await;

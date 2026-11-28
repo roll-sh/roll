@@ -219,10 +219,13 @@ The answer streams in, then its sources (`*` marks the cited ones). Over HTTP it
 the base URL:
 
 ```python
+import html
 from openai import OpenAI
 client = OpenAI(base_url=os.environ["ELASTICSEARCH_URL"] + "/_roll/openai/v1", api_key=os.environ["ELASTICSEARCH_API_KEY"])
 r = client.chat.completions.create(model="help", messages=[{"role": "user", "content": "how do I reset my password?"}])
-print(r.choices[0].message.content, r.model_extra["roll"]["sources"])
+# The answer is made literal for markdown renderers: its markdown characters arrive as numeric
+# entities, so render it as markdown, or decode them to print it.
+print(html.unescape(r.choices[0].message.content), r.model_extra["roll"]["sources"])
 ```
 
 A web page can ask too, with a browser key whose `limits.chat` names the profile (its turns and

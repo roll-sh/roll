@@ -41,7 +41,7 @@
     "params": {}
   },
   "roll.chat.answer": {
-    "documentation": { "url": "https://roll.sh/docs/search/rag", "description": "Answer a question from what a chat profile retrieves, with citations: JSON, or server-sent events with stream: true" },
+    "documentation": { "url": "https://roll.sh/docs/search/rag", "description": "Answer a question from what a chat profile retrieves, with citations: JSON, or server-sent events with stream: true. The answer's markdown characters arrive as numeric entities" },
     "stability": "experimental",
     "visibility": "public",
     "headers": { "accept": ["application/json", "text/event-stream"], "content_type": ["application/json"] },

@@ -176,7 +176,7 @@ async fn an_answer_cites_the_documents_it_retrieved() {
     doc(&c, "docs", "pw", r#"{"title":"Resetting your password","url":"https://acme.test/pw","body":"Open Settings, then Security, then Reset password.","tenant":"a"}"#).await;
     doc(&c, "docs", "bill", r#"{"title":"Invoices","url":"https://acme.test/bill","body":"Invoices are under Billing.","tenant":"a"}"#).await;
 
-    let (s, v, text) = call(&c, "POST", "/_roll/chat/help/_answer", r#"{"question":"How do I reset my password?","messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"Hello!"}]}"#).await;
+    let (s, v, text) = call(&c, "POST", "/_roll/chat/help/_answer", r#"{"question":"How do I reset my password?","messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"Hello&#33; See&#32;docs.⁠example &#91;1&#93;"}]}"#).await;
     assert_eq!(s, 200, "{v:?}");
     // As sent: the model's text made literal (`[1]` as entities); citations read what it wrote.
     let sent_answer = search_es::xpack::chat::answer::sanitize(&ANSWER.concat(), None);
@@ -198,7 +198,8 @@ async fn an_answer_cites_the_documents_it_retrieved() {
     assert_eq!(sent.len(), 1);
     let system = message(&sent[0], 0);
     assert!(system.starts_with("You answer the user's question from the numbered sources") && system.ends_with("You are the help desk of Acme."), "{system}");
-    assert_eq!((message(&sent[0], 1), message(&sent[0], 2)), ("hi".to_string(), "Hello!".to_string()));
+    // An earlier answer, sent back as roll sent it, reaches the model as the model wrote it.
+    assert_eq!((message(&sent[0], 1), message(&sent[0], 2)), ("hi".to_string(), "Hello! See&#32;docs.example [1]".to_string()));
     let user = message(&sent[0], -1);
     assert!(user.starts_with("<sources boundary=\"") && user.contains("Open Settings, then Security, then Reset password.") && user.ends_with("<question>\nHow do I reset my password?\n</question>"), "{user}");
     assert_eq!(sent[0].get("max_completion_tokens").and_then(Value::as_i64), Some(1024));

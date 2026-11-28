@@ -444,6 +444,14 @@ pub fn check_question(q: &str) -> EsResult<()> {
 }
 
 /// A history turn's text: a string, or OpenAI's text parts (anything else, an image, is a 400).
+/// A turn of the client's history. An assistant turn is an earlier answer as roll sent it, so
+/// it goes back to the model as the model wrote it (`answer::unliteral`): entities fed back would
+/// be copied, escaped again, and lose their citations.
+pub fn history_turn(role: &'static str, content: String) -> Turn {
+    let content = if role == "assistant" { answer::unliteral(&content) } else { content };
+    Turn { role, content }
+}
+
 pub fn turn_text(content: Option<&Value>) -> EsResult<String> {
     match content {
         Some(Value::Str(s)) => Ok(s.clone()),
@@ -501,7 +509,7 @@ impl Ask {
                             Some("assistant") => "assistant",
                             _ => return Err(EsError::illegal_argument("a turn of [messages] is a [user] or [assistant] message: the profile's instructions are the only system message")),
                         };
-                        ask.history.push(Turn { role, content: turn_text(m.get("content"))? });
+                        ask.history.push(history_turn(role, turn_text(m.get("content"))?));
                     }
                 }
                 "stream" => ask.stream = v.as_bool().ok_or_else(|| EsError::illegal_argument("[stream] must be true or false"))?,
@@ -685,13 +693,16 @@ impl Answering {
             if text.is_empty() {
                 continue;
             }
-            let room = MAX_ANSWER_BYTES.saturating_sub(self.written.len());
-            let written = prompt::cut(&text, room);
-            if let Err(e) = self.held.add(written.len() as u64, "<chat answer>") {
-                return Some(self.fail(e));
-            }
-            self.written.push_str(written);
             let safe = self.sanitizer.feed(&text);
+            // What the model wrote counts (citations, estimates) only as far as what's sent does:
+            // a piece past the answer's cap goes whole.
+            if safe.len() <= MAX_ANSWER_BYTES.saturating_sub(self.answer.len()) {
+                let written = prompt::cut(&text, MAX_ANSWER_BYTES.saturating_sub(self.written.len()));
+                if let Err(e) = self.held.add(written.len() as u64, "<chat answer>") {
+                    return Some(self.fail(e));
+                }
+                self.written.push_str(written);
+            }
             if let Some(e) = self.push(safe) {
                 return Some(e);
             }

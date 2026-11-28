@@ -114,9 +114,11 @@ pub async fn run(api: &Api, as_json: bool, chat: Chat) -> anyhow::Result<()> {
             match event.as_str() {
                 "sources" => sources = data["sources"].clone(),
                 "delta" => {
-                    // The answer as text: control characters other than newlines are dropped, so
-                    // a model can't move the terminal's cursor or retitle it.
-                    let text: String = data["text"].as_str().unwrap_or_default().chars().filter(|c| !c.is_control() || *c == '\n').collect();
+                    // The answer as text: markdown's characters arrive as entities (rag.md,
+                    // "Answers leave as text"), shown here as themselves; control characters
+                    // other than newlines are dropped, so a model can't move the terminal's
+                    // cursor or retitle it.
+                    let text: String = plain(data["text"].as_str().unwrap_or_default()).chars().filter(|c| !c.is_control() || *c == '\n').collect();
                     print!("{text}");
                     out.flush()?;
                 }
@@ -210,4 +212,29 @@ async fn profiles(api: &Api, as_json: bool, cmd: Profiles) -> anyhow::Result<()>
         }
     }
     Ok(())
+}
+
+/// An answer's text for a terminal: the numeric entities roll writes markdown's characters as
+/// (`&#91;` for `[`, exactly those thirteen) decoded; anything else stays as it came.
+fn plain(text: &str) -> String {
+    const LITERAL: [char; 13] = ['&', '\\', '`', '~', '|', '<', '>', '[', ']', '!', '*', '_', '#'];
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = rest.find("&#") {
+        out.push_str(&rest[..i]);
+        rest = &rest[i..];
+        let c = rest[2..].find(';').filter(|&e| (1..=3).contains(&e)).and_then(|e| rest[2..2 + e].parse::<u32>().ok().and_then(char::from_u32).map(|c| (c, e)));
+        match c {
+            Some((c, e)) if LITERAL.contains(&c) => {
+                out.push(c);
+                rest = &rest[2 + e + 1..];
+            }
+            _ => {
+                out.push('&');
+                rest = &rest[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }

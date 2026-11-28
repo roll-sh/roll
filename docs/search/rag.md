@@ -60,14 +60,22 @@ what the best of the four products does:
     `!`, `*`, `_` and `#` the model writes becomes its numeric entity (`&#60;`): every renderer
     shows the character and none reads it as syntax, so no tag, image, link, reference
     definition, footnote, table cell boundary, code span, strikethrough, emphasis or heading
-    can start (remark-gfm still makes a one-column table of `text` over `-:`, which holds
-    nothing but text: with no `|` there's nothing to split), and an
+    can start (marked and remark-gfm still make a one-column table of `text` over `-:`, which
+    holds nothing but text: with no `|` there's nothing to split), and an
     entity or escape the model wrote (`https:&#47;&#47;`, `\/`) shows as written, never decoded
     into what it spells. `\r` and `\r\n` become `\n`.
   - **Link-shaped tokens broken.** U+2060 WORD JOINER goes inside every `//`, after a `:` that
-    follows a letter (`https:`, `mailto:`, `xmpp:`), between `www` and its `.`, and before every
-    `@`. None of GFM's (comrak's), marked's, markdown-it's (linkify too) or remark-gfm's
-    autolinks spans it, and it's invisible, so a URL still reads as one but isn't a link.
+    follows a letter (`https:`, `mailto:`, `xmpp:`), after every `.`, and before every `@`. The
+    dot's is for markdown-it's linkify, which links a bare `evil.com/p?d=…` and counts the
+    joiner as a letter: after the dot it breaks the TLD match (IDNs' too). None of GFM's
+    (comrak's), marked's, markdown-it's (linkify too) or remark-gfm's autolinks spans it, and
+    it's invisible, so a URL still reads as one but isn't a link.
+  - **Direction controls dropped** (U+202A–202E, U+2066–2069, U+200E/F, U+061C): they could
+    make reversed text read as a URL, or `]1[` as a citation.
+  - **History reads back.** A client sends an earlier answer back as it got it (Open WebUI,
+    LibreChat, the OpenAI SDK's samples), so an `assistant` turn has exactly those thirteen
+    entities decoded and the joiners removed before the model sees it: entities fed back would
+    be copied, escaped again, and lose their citations.
   - **Nothing held.** The answer streams character by character, and any split of it comes out
     as the whole does; only with `allow_links` does an open `[` wait (at most 2 KiB) to see
     whether it's a link to keep.
@@ -78,24 +86,27 @@ what the best of the four products does:
     with the source's finds it; its label is literal like any text. Other URLs, a source's own
     written out bare included, show broken. Any field of a given source may offer the URL, a
     planted document's too: it can offer its own fixed URLs as a click, never one carrying
-    another source's text, and naming one field wouldn't help, as a planted document can fill
-    any field.
+    another source's text (beyond the few bits of which of its URLs the model picks), and
+    naming one field wouldn't help, as a planted document can fill any field. A URL holding an
+    entity (`&#64;`, `&sol;`) is never kept: renderers decode it, so the link opened wouldn't
+    be the source's string.
   - **The cost:** the model's markdown shows as its characters (`**bold**`, `# Title`, a
     table's pipes), and its citations (`[1]`) reach the wire as entities (`&#91;1&#93;`):
     markdown renderers show `[1]`, and `cited` lists them. A client that shows answers as plain
-    text, not markdown, decodes numeric entities first. Copying a URL out of an answer copies
-    the word joiners too, so it doesn't paste as a link.
+    text, not markdown, decodes numeric entities first, as roll's own do (`roll search chat`,
+    the view-code snippets, the guide's sample). Copying a URL out of an answer copies the word
+    joiners too, so it doesn't paste as a link; so does a copied number (`3.14`).
   - **Tests:** every payload of the four reviews (`crates/search-es/tests/fixtures/chat-markup.json`)
     whole, a character at a time and split at every point, and 4,000 random compositions of the
     reviewers' fragments, read as GitHub-flavored markdown (comrak): any link but a kept one,
-    image, HTML, table, footnote or linkable text fails. The gate also renders the corpus and
+    image, HTML, table, footnote or linkable text (a URL, an address, a domain) fails; and every
+    payload reads back as written. A manual check outside the repo (it needs node packages the
+    repo doesn't have: `~/.cache/rr1068r4/jscheck` on the dev server) renders the corpus and
     70,000 random compositions, each in random pieces, through this code with marked,
-    markdown-it (linkify on and off) and remark-gfm (`~/.cache/rr1068r4/jscheck`, outside the
-    repo for its node packages): no link but a kept one (markdown-it's linkify linking a bare
-    domain is counted apart), image, HTML or table with a raw `|`.
-  - **Left to the renderer:** a kept link carries no `rel` or `referrerpolicy`; a renderer that
-    links bare domains (markdown-it's fuzzy linkify) can still link `evil.com/?d=…` as text;
-    and a renderer must decode entities once, as markdown does: one that decodes the answer
+    markdown-it (linkify on and off) and remark-gfm: no link but a kept one, image, HTML or
+    table with a raw `|`. It was run for this design; it isn't part of `pnpm test:search`.
+  - **Left to the renderer:** a kept link carries no `rel` or `referrerpolicy`; and a renderer
+    must decode entities once, as markdown does: one that decodes the answer
     before rendering it, or decodes the HTML markdown made again, turns `&#60;` back into a tag.
 - **The OpenAI route** drops a client's `system` and `developer` messages (chat UIs send their
   own): the profile's instructions are the only ones the model gets. `tools`, `functions`,
@@ -296,7 +307,8 @@ in one call. So roll adds a route.
 - **The last user message is the question**, and the earlier messages are the history.
 - **The answer is the profile's answer in OpenAI's shape**, streamed or not. Sources go in a
   `roll` object on the response (the last chunk when streaming), which OpenAI clients ignore.
-  Citations also appear inline as `[n]`.
+  Citations also appear inline, in the text made literal ("Answers leave as text": `[1]` as
+  `&#91;1&#93;`, which a markdown renderer shows as `[1]`).
 - **`Authorization: Bearer`** with the cluster's `<name>_<password>` already works (README, "Use
   it"). This route also takes `Bearer <encoded API key>`, because OpenAI SDKs send only Bearer.
 - **Tools, `n > 1`, logprobs and images in the request are 400s.**
@@ -349,7 +361,9 @@ in one call. So roll adds a route.
   caps). It's off by default because it doubles latency and cost.
 - **Citations.** Each source gets a number n. The answer is
   `{"answer", "sources": [{"n", "_index", "_id", "_score", "fields", "passages"}], "cited": [n…], "omitted", "finish_reason", "usage"}`.
-  - `cited` is parsed from the answer's `[n]` markers, and keeps only numbers roll handed out.
+  - `cited` is parsed from the `[n]` markers the model wrote (before the answer is made literal:
+    the text sent has them as `&#91;n&#93;`), and keeps only numbers roll handed out; a `[n]`
+    that's a kept link's label (`[1](…)`) isn't one.
     Model output is untrusted, as AGENTS.md says of roll code's reviewer.
   - `passages` are the highlighted chunks the model saw, so a UI can show exactly what was quoted.
 - **Streaming.** Server-sent events: `sources` first, before generation, so a page shows them at

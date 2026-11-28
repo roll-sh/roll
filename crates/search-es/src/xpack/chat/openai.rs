@@ -11,7 +11,8 @@
 //! - The answer is OpenAI's `chat.completion`, or `chat.completion.chunk` events ending with
 //!   `data: [DONE]` when `stream` is set. The sources, the numbers cited and the sources that
 //!   didn't fit are in a `roll` object (on the last chunk when streaming), which OpenAI clients
-//!   ignore; citations are inline in the text as `[n]`.
+//!   ignore; citations are inline in the text, which is made literal (`answer.rs`: `[n]` as
+//!   `&#91;n&#93;`, as markdown renderers show it).
 //! - `GET /_roll/openai/v1/models`: the profiles the caller may run.
 //!
 //! OpenAI SDKs send only `Authorization: Bearer`, so on these paths a Bearer value that is an
@@ -117,7 +118,7 @@ fn parse(ctx: &Ctx) -> EsResult<(String, Ask)> {
         let role = m.get("role").and_then(Value::as_str).unwrap_or_default();
         match role {
             "system" | "developer" => continue,
-            "user" | "assistant" => turns.push(Turn { role: if role == "user" { "user" } else { "assistant" }, content: super::turn_text(m.get("content"))? }),
+            "user" | "assistant" => turns.push(super::history_turn(if role == "user" { "user" } else { "assistant" }, super::turn_text(m.get("content"))?)),
             _ => return Err(bad(format!("a [{role}] message: chat takes user and assistant messages (it has no tools)"))),
         }
     }

@@ -551,6 +551,7 @@ export function profileCode(kind: ProfileCode, profile: string, question: string
   const q = JSON.stringify(question || "How do I reset my password?");
   if (kind === "openai") {
     return `# pip install openai
+import html
 import os
 from openai import OpenAI
 
@@ -565,8 +566,9 @@ stream = client.chat.completions.create(
 )
 roll = None
 for chunk in stream:
+    # Markdown's characters arrive as entities (render the text as markdown, or decode them).
     if chunk.choices and chunk.choices[0].delta.content:
-        print(chunk.choices[0].delta.content, end="", flush=True)
+        print(html.unescape(chunk.choices[0].delta.content), end="", flush=True)
     roll = (chunk.model_extra or {}).get("roll") or roll
 print()
 for s in (roll or {}).get("sources", []):
@@ -593,8 +595,9 @@ for await (const bytes of resp.body) {
     const event = /^event: (.*)$/m.exec(block)?.[1];
     const data = JSON.parse(/^data: (.*)$/m.exec(block)?.[1] ?? "null");
     // The answer is text: render it as text, never as HTML, and link only the sources' own fields.
+    // Markdown's characters arrive as numeric entities: render it as markdown, or decode them.
     if (event === "sources") sources = data.sources;
-    else if (event === "delta") process.stdout.write(data.text);
+    else if (event === "delta") process.stdout.write(data.text.replace(/&#(\\d+);/g, (_, n) => String.fromCodePoint(Number(n))));
     else if (event === "done") console.log("\\ncited", data.cited, sources.map((s) => \`[\${s.n}] \${s._index}/\${s._id}\`));
     else if (event === "error") throw new Error(JSON.stringify(data.error));
   }

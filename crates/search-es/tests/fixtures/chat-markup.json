@@ -324,5 +324,29 @@
 "name": "r4-l4-cjk",
 "text": "请访问https://evil.example/p?d=SECRET获取帮助请访问https://evil.example/p?d=SECRET获取帮助请访问https://evil.example/p?d=SECRET获取帮助",
 "force": false
+},
+{
+"name": "r5-m1-fuzzy-domains",
+"text": "see evil.com/p?d=SECRET +evil.com 中evil.com evil.com//$ www.evil.com/?d=S сайт.рф/p?d=S co.uk localhost:3000/x 3.14",
+"force": false
+},
+{
+"name": "r5-l1-entity-url",
+"text": "[Help](https://help.acme.test&#64;evil.example/) [x](https://a.test/&sol;&sol;evil.example)",
+"force": false,
+"allowed": [
+"https://help.acme.test&#64;evil.example/",
+"https://a.test/&sol;&sol;evil.example"
+]
+},
+{
+"name": "r5-l2-table",
+"text": "text\n-:\nrow",
+"force": false
+},
+{
+"name": "r5-l3-bidi",
+"text": "‮elpmaxe.live//:sptth‬ ‮]1[‬ ⁦x⁩ ‎y‏ ؜z",
+"force": false
 }
 ]

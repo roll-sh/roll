@@ -12,9 +12,15 @@
 //!   table cell boundary, code span, emphasis or heading can start, and an entity or escape the
 //!   model wrote (`&#47;`, `\/`) shows as written, never decoded into what it spells.
 //! - **Link-shaped tokens broken.** U+2060 WORD JOINER goes inside every `//`, after a `:` that
-//!   follows a letter (`https:`, `mailto:`), between `www` and its `.`, and before every `@`: no
-//!   GFM, marked, markdown-it or remark autolink spans it, and it's invisible.
+//!   follows a letter (`https:`, `mailto:`), after every `.` (a domain's labels: markdown-it's
+//!   linkify links a bare `evil.com/p?d=…`, and counts the joiner as a letter, so it goes after the
+//!   dot, which breaks the TLD match, IDNs too), and before every `@`: no GFM, marked, markdown-it
+//!   (linkify too) or remark autolink spans it, and it's invisible.
+//! - **Direction controls dropped** (U+202A–202E, U+2066–2069, U+200E/F, U+061C): they could make
+//!   text read as a URL or a citation it isn't.
 //! - `\r` and `\r\n` become `\n`.
+//!
+//! [`unliteral`] undoes it for history: a client sends an earlier answer back as it got it.
 //!
 //! Nothing is held back, so an answer streams character by character and every split of it
 //! comes out the same; only with `allow_links` does an open `[` wait (at most [`MAX_HOLD`]
@@ -24,8 +30,7 @@
 //! like any text. Any other URL, a source's own written out bare included, shows broken.
 //!
 //! What's left to the renderer (docs/search/rag.md): a kept link carries no `rel` or
-//! `referrerpolicy`; a renderer that links bare domains (markdown-it's fuzzy linkify) can still
-//! link `example.com`; one that decodes entities twice turns the entities back into markup; and
+//! `referrerpolicy`; one that decodes entities twice turns the entities back into markup; and
 //! the model's markdown (emphasis, headings, tables, code) shows as its characters.
 
 use std::fmt::Write as _;
@@ -38,12 +43,54 @@ const WORD_JOINER: char = '\u{2060}';
 /// What becomes a numeric entity.
 const LITERAL: [char; 13] = ['&', '\\', '`', '~', '|', '<', '>', '[', ']', '!', '*', '_', '#'];
 
-/// Whether `url` may be a kept link: http(s), at most 2048 bytes, and only characters that can't
-/// end a link destination, split a table cell or start markup (RFC 3986's unreserved and
-/// reserved characters but `(`, `)`, `[`, `]`, `'` and `|`, and `%`).
+/// Whether `url` may be a kept link: http(s), at most 2048 bytes, only characters that can't end
+/// a link destination, split a table cell or start markup (RFC 3986's unreserved and reserved
+/// characters but `(`, `)`, `[`, `]`, `'` and `|`, and `%`), and no entity (`&#64;`, `&sol;`):
+/// renderers decode one in a destination, so the link opened wouldn't be the source's string.
 pub fn keepable(url: &str) -> bool {
     let rest = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://"));
-    rest.is_some_and(|r| !r.is_empty() && url.len() <= 2048 && r.bytes().all(|b| b.is_ascii_alphanumeric() || b"-._~:/?#@!$&*+,;=%".contains(&b)))
+    let entity = url.match_indices('&').any(|(i, _)| {
+        let after = &url[i + 1..];
+        after.starts_with('#') || after.find(';').is_some_and(|j| j > 0 && after[..j].bytes().all(|b| b.is_ascii_alphanumeric()))
+    });
+    !entity && rest.is_some_and(|r| !r.is_empty() && url.len() <= 2048 && r.bytes().all(|b| b.is_ascii_alphanumeric() || b"-._~:/?#@!$&*+,;=%".contains(&b)))
+}
+
+/// Direction controls, dropped from the model's text.
+fn bidi(c: char) -> bool {
+    matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200E}' | '\u{200F}' | '\u{061C}')
+}
+
+/// An answer as the model wrote it, from the text sent (history a client sends back): the
+/// [`LITERAL`] entities decoded and the word joiners removed (direction controls stay gone).
+pub fn unliteral(sent: &str) -> String {
+    let mut out = String::with_capacity(sent.len());
+    let mut rest = sent;
+    while let Some(i) = rest.find(['&', WORD_JOINER]) {
+        out.push_str(&rest[..i]);
+        rest = &rest[i..];
+        if let Some(r) = rest.strip_prefix(WORD_JOINER) {
+            rest = r;
+            continue;
+        }
+        let decoded = rest.strip_prefix("&#").and_then(|r| {
+            let end = r.find(';').filter(|&e| e > 0 && e <= 3)?;
+            let c = char::from_u32(r[..end].parse().ok()?)?;
+            LITERAL.contains(&c).then_some((c, 2 + end + 1))
+        });
+        match decoded {
+            Some((c, len)) => {
+                out.push(c);
+                rest = &rest[len..];
+            }
+            None => {
+                out.push('&');
+                rest = &rest[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Makes an answer's text literal as it streams.
@@ -119,15 +166,18 @@ impl Sanitizer {
 
     /// One character the model wrote, as literal text.
     fn literal(&mut self, c: char, out: &mut String) {
-        let [p3, p2, p1] = self.prev;
+        if bidi(c) {
+            return;
+        }
+        let [p2, p1] = [self.prev[1], self.prev[2]];
         if LITERAL.contains(&c) {
             let _ = write!(out, "&#{};", c as u32);
         } else if c == '/' && p1 == '/' {
             out.push(WORD_JOINER);
             out.push('/');
-        } else if c == '.' && p3.eq_ignore_ascii_case(&'w') && p2.eq_ignore_ascii_case(&'w') && p1.eq_ignore_ascii_case(&'w') {
-            out.push(WORD_JOINER);
+        } else if c == '.' {
             out.push('.');
+            out.push(WORD_JOINER);
         } else if c == ':' && p1.is_ascii_alphabetic() {
             out.push(':');
             out.push(WORD_JOINER);
@@ -226,7 +276,8 @@ mod tests {
         let arena = comrak::Arena::new();
         let root = comrak::parse_document(&arena, out, &o);
         // (`mailto:` and `xmpp:` aren't links without their address, and `@` is broken.)
-        let linkable = regex::Regex::new(r"(?i)https?://|ftp://|www\.|//[a-z0-9-]|[a-z0-9.+_-]@[a-z0-9]").unwrap();
+        // and a domain: markdown-it's linkify links `evil.com` bare.)
+        let linkable = regex::Regex::new(r"(?i)https?://|ftp://|//[a-z0-9-]|[a-z0-9.+_-]@[a-z0-9]|[\p{L}\p{N}-]\.[\p{L}\p{N}]").unwrap();
         for n in root.descendants() {
             match &n.data().value {
                 NodeValue::Link(l) => assert!(allowed.contains(&l.url), "a link to {} in {out:?}", l.url),
@@ -280,19 +331,27 @@ mod tests {
             for (at, _) in text.char_indices().skip(1) {
                 assert_eq!(run(&[&text[..at], &text[at..]], &allowed), whole, "[{name}] split at {at}");
             }
+            // History: what was sent reads back as what the model wrote.
+            if !text.contains(['\r', WORD_JOINER]) && !text.chars().any(bidi) {
+                assert_eq!(unliteral(&whole), text, "[{name}] read back");
+            }
         }
     }
 
     #[test]
     fn literal_text_and_kept_links() {
         assert_eq!(sanitize("![x](https://e/p) <img> a|b ~c~ *d* `e` #f &amp; \\[", None), "&#33;&#91;x&#93;(https:\u{2060}/\u{2060}/e/p) &#60;img&#62; a&#124;b &#126;c&#126; &#42;d&#42; &#96;e&#96; &#35;f &#38;amp; &#92;&#91;");
-        assert_eq!(sanitize("www.e.com help@e.com mailto:x ftp://e 10:30", None), "www\u{2060}.e.com help\u{2060}@e.com mailto:\u{2060}x ftp:\u{2060}/\u{2060}/e 10:30");
+        assert_eq!(
+            sanitize("www.e.com see evil.com/p?d=S сайт.рф help@e.com mailto:x ftp://e 10:30 3.14 \u{202E}x\u{202C}", None),
+            "www.\u{2060}e.\u{2060}com see evil.\u{2060}com/p?d=S сайт.\u{2060}рф help\u{2060}@e.\u{2060}com mailto:\u{2060}x ftp:\u{2060}/\u{2060}/e 10:30 3.\u{2060}14 x"
+        );
         let ok = Some(vec!["https://help.acme.test/pw".to_string(), "https://help.acme.test/(x)".to_string()]);
         assert_eq!(
             sanitize("[Reset *now*](https://help.acme.test/pw) ![i](https://help.acme.test/pw) [y](https://evil.example) [z](https://help.acme.test/(x)) https://help.acme.test/pw", ok),
-            "[Reset &#42;now&#42;](https://help.acme.test/pw) &#33;&#91;i&#93;(https:\u{2060}/\u{2060}/help.acme.test/pw) &#91;y&#93;(https:\u{2060}/\u{2060}/evil.example) &#91;z&#93;(https:\u{2060}/\u{2060}/help.acme.test/(x)) https:\u{2060}/\u{2060}/help.acme.test/pw"
+            "[Reset &#42;now&#42;](https://help.acme.test/pw) &#33;&#91;i&#93;(https:\u{2060}/\u{2060}/help.\u{2060}acme.\u{2060}test/pw) &#91;y&#93;(https:\u{2060}/\u{2060}/evil.\u{2060}example) &#91;z&#93;(https:\u{2060}/\u{2060}/help.\u{2060}acme.\u{2060}test/(x)) https:\u{2060}/\u{2060}/help.\u{2060}acme.\u{2060}test/pw"
         );
         assert!(!keepable("https://evil.example/|<style>") && !keepable("javascript:alert(1)") && keepable("https://help.acme.test/a?b=1&c=%20#d"));
+        assert!(!keepable("https://help.acme.test&#64;evil.example/") && !keepable("https://a.test/&sol;&sol;x"));
         // An open `[` is bounded.
         let mut s = Sanitizer::new(Some(vec!["https://a.test/".into()]));
         let out = s.feed(&format!("[{}", "w ".repeat(MAX_HOLD)));
@@ -307,6 +366,7 @@ mod tests {
         const P: &[&str] = &[
             "[", "]", "(", ")", "!", "<", ">", "`", "*", "_", ":", "/", "//", "https:", "http://", "https://", "www.", "evil.example", "x", "ab", "@", "mailto:", " ", "\n", "img src=x", "a", "1", ".", "\"", "中", "é", "-",
             "?d=S", "]:", "<a href=x>", "\t", "#", "=", ";", "{", "}", "^", "$", "%", "+", ",", "'", "\r", "&#47;", "&#58;", "|", "~", "\\", "&", "&amp;", "\u{2060}", "[ok](https://help.acme.test/pw)", "https://help.acme.test/pw", "| h |\n|---|\n| ",
+            "evil.com", ".com", "co.uk", "сайт.рф", "localhost:3000", "3.14", "-:", "\u{202E}",
         ];
         let mut seed: u64 = 1;
         let mut rnd = |n: usize| {
