@@ -33,10 +33,10 @@ POST /v1/apps/services/{id}/environments/{env}/shell/sessions/{sh}/resize      i
 GET /v1/apps/services/{id}/environments/{env}/shell/sessions/{sh}/screen       interactive (a shell, files, a forward): an admin's, live
 GET /v1/apps/services/{id}/environments/{env}/tunnel                           interactive (a shell, files, a forward): an admin's, live
 GET /v1/apps/services/{id}/environments/{env}/variables/values                 answers or sets a credential (variables' values)
-DELETE /v1/apps/services/{id}/git-login                                        answers or sets a credential
-PUT /v1/apps/services/{id}/git-login                                           answers or sets a credential
-DELETE /v1/apps/services/{id}/registry                                         answers or sets a credential
-PUT /v1/apps/services/{id}/registry                                            answers or sets a credential
+DELETE /v1/apps/services/{id}/git-login                                        sets a credential (removes a private repository's login)
+PUT /v1/apps/services/{id}/git-login                                           sets a credential (a private repository's login)
+DELETE /v1/apps/services/{id}/registry                                         sets a credential (removes a private registry's login)
+PUT /v1/apps/services/{id}/registry                                            sets a credential (a private registry's login)
 GET /v1/health                                                                 the operator's (health, migrations, process control)
 GET /v1/info                                                                   the operator's (health, migrations, process control)
 * /v1/mcp                                                                      the MCP server itself
@@ -54,7 +54,7 @@ POST /v1/previews/projects/{project}/bypass                                    a
 POST /v1/previews/projects/{project}/hooks                                     answers or sets a credential (a deploy hook's secret)
 POST /v1/previews/{id}/webhooks                                                answers or sets a credential (a webhook URL's token)
 POST /v1/previews/{id}/approve                                                 a person's call (approving, accepting, cutting off)
-PUT /v1/previews/{id}/env                                                      answers or sets a credential (a preview's env is reveal)
+PUT /v1/previews/{id}/env                                                      answers or sets a credential (a preview's env is reveal: the answer's vars are hidden from a grant that can't reveal)
 GET /v1/previews/{id}/errors/count                                             the dashboard's (a row's count; previews_errors has the groups)
 GET /v1/previews/{id}/files                                                    interactive (a shell, files, a forward): an admin's, live
 PUT /v1/previews/{id}/files                                                    interactive (a shell, files, a forward): an admin's, live
@@ -92,7 +92,7 @@ POST /v1/search/clusters/{id}/browser-keys/{key}/rotate                        a
 GET /v1/search/clusters/{id}/indices/{index}/docs                              no such handler (only POST exists)
 POST /v1/search/clusters/{id}/keys                                             answers or sets a credential
 POST /v1/search/clusters/{id}/migrate                                          an outside integration's setup: an admin's, with the remote's credentials (#485)
-POST /v1/search/clusters/{id}/migrate/inspect                                  answers or sets a credential: the remote's credentials go in its body (#485)
+POST /v1/search/clusters/{id}/migrate/inspect                                  sets a credential: the remote's credentials go in its body (#485)
 POST /v1/search/clusters/{id}/password                                         answers or sets a credential
 PUT /v1/search/clusters/{id}/remotes/{alias}                                   an admin's: it lends the remote cluster's credentials
 PUT /v1/search/clusters/{id}/repositories/{name}                               an outside integration's setup: an admin's, with its credentials (#361)
@@ -125,8 +125,8 @@ PATCH /v1/secrets/projects/{project}/cas/{id}/acme                             a
 POST /v1/secrets/projects/{project}/cas/{id}/acme/eab                          an outside integration's setup: an admin's, with its credentials
 DELETE /v1/secrets/projects/{project}/cas/{id}/acme/eab/{eab}                  an outside integration's setup: an admin's, with its credentials
 PUT /v1/secrets/projects/{project}/cas/{id}/chain                              a person's call: installing a CA chain
-POST /v1/secrets/projects/{project}/cas/{id}/revoke                            an outside integration's setup: an admin's, with its credentials
-POST /v1/secrets/projects/{project}/cas/{id}/sign                              an outside integration's setup: an admin's, with its credentials
+POST /v1/secrets/projects/{project}/cas/{id}/revoke                            answers no credential: revokes a certificate of an outside integration's CA
+POST /v1/secrets/projects/{project}/cas/{id}/sign                              answers no credential: signs a CSR, its private key staying with the caller
 POST /v1/secrets/projects/{project}/cloud-accounts                             an outside integration's setup: an admin's, with its credentials
 DELETE /v1/secrets/projects/{project}/cloud-accounts/{id}                      an outside integration's setup: an admin's, with its credentials
 POST /v1/secrets/projects/{project}/directories                                an outside integration's setup: an admin's, with its credentials
@@ -197,18 +197,18 @@ POST /v1/secrets/projects/{project}/syncs/{id}/run                             a
 DELETE /v1/secrets/projects/{project}/transit/{name}                           a person's call: every ciphertext of the key stops opening
 POST /v1/secrets/projects/{project}/validity                                   a person's call: it contacts outside providers (#487)
 GET /v1/secrets/whoami                                                         the operator's (health, migrations, process control)
-* /v1/storage/accounts/{id}                                                    an outside integration's setup: an admin's, with its credentials
+* /v1/storage/accounts/{id}                                                    answers no credential: an account's settings (its keys are routes of their own)
 GET /v1/storage/api                                                            the dashboard's (the developer API's settings)
 PUT /v1/storage/api/auth                                                       answers or sets a credential
 POST /v1/storage/api/keys/rotate                                               answers or sets a credential
 POST /v1/storage/buckets/{name}/rules                                          a person's call: a preset can make a bucket public
 POST /v1/storage/buckets/{name}/url                                            answers or sets a credential
-GET /v1/storage/cdn                                                            an outside integration's setup: an admin's, with its credentials
+GET /v1/storage/cdn                                                            answers no credential: whether the CDN's origin secret is set, never it
 PATCH /v1/storage/cdn                                                          an outside integration's setup: an admin's, with its credentials
 GET /v1/storage/cdn/worker                                                     an outside integration's setup: an admin's, with its credentials
 POST /v1/storage/iam                                                           an outside integration's setup: an admin's, with its credentials
 POST /v1/storage/keys                                                          answers or sets a credential
-* /v1/storage/replication-targets/{name}                                       answers or sets a credential (a target's secret)
+* /v1/storage/replication-targets/{name}                                       sets a credential (a target's secret, kept sealed; no read answers it)
 POST /v1/storage/roles/{name}/sessions                                         answers or sets a credential (temporary credentials)
 POST /v1/storage/session-keys/rotate                                           answers or sets a credential
 POST /v1/streams/{s}/groups/{g}/commit                                         the data plane (clients' own protocol)
@@ -217,7 +217,7 @@ POST /v1/streams/{s}/keys                                                      a
 GET /v1/streams/{s}/topics/{t}/partitions/{p}/records                          the data plane (clients' own protocol)
 GET /v1/streams/{s}/topics/{t}/tail                                            the data plane (clients' own protocol)
 POST /v1/tasks/api-keys                                                        answers or sets a credential
-POST /v1/tasks/apps                                                            answers or sets a credential (an app's signing secret)
+POST /v1/tasks/apps                                                            answers no credential: an app's URL and functions
 POST /v1/tasks/batch                                                           the data plane (clients' own protocol)
 POST /v1/tasks/e/{*name}                                                       the data plane (clients' own protocol)
 GET /v1/tasks/health                                                           the operator's (health, migrations, process control)
