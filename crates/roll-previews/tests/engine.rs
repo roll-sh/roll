@@ -1264,7 +1264,7 @@ async fn a_signed_in_person_sees_only_their_own_projects_previews() {
     assert_eq!(roll_previews::api::router(e.engine.clone()).oneshot(req).await.unwrap().status().as_u16(), 400);
     // A member (a viewer here) passes previews' own check once roll-access decided the request by
     // their role (their session's grant beside it; roll-access/tests/access.rs::
-    // a_members_role_decides_what_they_do_to_a_preview: a viewer reads it, never its credentials).
+    // a_members_role_decides_what_they_do: a viewer reads it, never its credentials).
     // Without a decision (past the gate), only an owner does.
     struct Addresses;
     impl roll_workspace::People for Addresses {

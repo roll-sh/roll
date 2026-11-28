@@ -3895,7 +3895,7 @@ max_attempts?, timeout_s?, max_in_flight? }]`, at most four (Settings, `roll app
 <stream>/<topic>/<group>:<path>[,dead_letter=…]`). It's a service setting only, never roll.toml's (a
 file in the tree being deployed can't subscribe to a stream): setting it needs read on each stream
 it names, and write where a rule has a dead letter, as roll-access's catalogue lends them
-(`access.rs::a_link_needs_reveal_on_what_it_links`). On the service's owner, one loop per rule reads the
+(`access.rs::a_link_or_a_branch_needs_rights_on_what_it_takes`). On the service's owner, one loop per rule reads the
 topic as a server-managed consumer group (the broker's HTTP data plane, `commit=manual`, a minute's
 lease; a fresh consumer each time a loop starts or a read fails, the one before it left, so a read
 whose records weren't all delivered starts again from the committed offset) and POSTs each record to `path` of the rule's environment (production by default:
