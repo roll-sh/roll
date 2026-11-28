@@ -670,7 +670,15 @@ pub enum KeyAccess {
     /// `create_doc` and `auto_configure` on exactly the named `indices` (data streams), no
     /// cluster privilege: an append-only log drain, which can't read what it wrote.
     Append,
+    /// `create_doc` and `auto_configure` on OpenTelemetry's own data streams ([`OTEL_STREAMS`])
+    /// and nothing else: an OpenTelemetry Collector or SDK writing through the OTLP intake
+    /// (`POST /_otlp/v1/logs`), whose dataset routing an exact-name `append` key can't follow.
+    Otel,
 }
+
+/// The data streams an `otel` key reaches: what the OTLP intake writes, under the built-in
+/// `logs-otel@template` family.
+pub const OTEL_STREAMS: [&str; 3] = ["logs-*.otel-*", "traces-*.otel-*", "metrics-*.otel-*"];
 
 impl KeyAccess {
     pub fn parse(s: &str) -> Result<KeyAccess> {
@@ -679,7 +687,8 @@ impl KeyAccess {
             "data" => KeyAccess::Data,
             "read" => KeyAccess::Read,
             "append" => KeyAccess::Append,
-            a => return Err(ControlError::Invalid(format!("access must be admin, data, read or append, not {a:?}"))),
+            "otel" => KeyAccess::Otel,
+            a => return Err(ControlError::Invalid(format!("access must be admin, data, read, append or otel, not {a:?}"))),
         })
     }
 
@@ -689,6 +698,7 @@ impl KeyAccess {
             KeyAccess::Data => "data",
             KeyAccess::Read => "read",
             KeyAccess::Append => "append",
+            KeyAccess::Otel => "otel",
         }
     }
 
@@ -699,7 +709,7 @@ impl KeyAccess {
             KeyAccess::Admin => None,
             KeyAccess::Data => Some(link_role(named.then_some(indices))),
             KeyAccess::Read => Some(json!({ "cluster": [], "indices": [{ "names": indices, "privileges": ["read", "view_index_metadata"] }] })),
-            KeyAccess::Append => Some(json!({ "cluster": [], "indices": [{ "names": indices, "privileges": ["create_doc", "auto_configure"] }] })),
+            KeyAccess::Append | KeyAccess::Otel => Some(json!({ "cluster": [], "indices": [{ "names": indices, "privileges": ["create_doc", "auto_configure"] }] })),
         }
     }
 
@@ -715,10 +725,11 @@ impl KeyAccess {
                 "cluster_permissions": ["cluster_composite_ops_ro"],
                 "index_permissions": [{ "index_patterns": indices, "allowed_actions": ["read", "indices:admin/get", "indices:admin/mappings/get*"] }]
             })),
-            KeyAccess::Append => {
-                return Err(ControlError::Invalid(
-                    "append keys need Elasticsearch's create_doc privilege, which an OpenSearch-flavor cluster doesn't have: use data with indices".into(),
-                ));
+            KeyAccess::Append | KeyAccess::Otel => {
+                return Err(ControlError::Invalid(format!(
+                    "{} keys need Elasticsearch's create_doc privilege, which an OpenSearch-flavor cluster doesn't have: use data with indices",
+                    self.as_str()
+                )));
             }
         })
     }
@@ -2422,8 +2433,11 @@ impl Control {
         if access == KeyAccess::Admin && indices.is_some() {
             return Err(ControlError::Invalid("an admin key is the whole cluster's: indices goes with data, read or append".into()));
         }
+        if access == KeyAccess::Otel && indices.is_some() {
+            return Err(ControlError::Invalid(format!("an otel key reaches OpenTelemetry's own data streams ({}): it takes no indices", OTEL_STREAMS.join(", "))));
+        }
         let named = indices.is_some();
-        let indices = key_indices(indices, access == KeyAccess::Append)?;
+        let indices = if access == KeyAccess::Otel { OTEL_STREAMS.map(String::from).to_vec() } else { key_indices(indices, access == KeyAccess::Append)? };
         if expires_in_s.is_some_and(|s| s <= 0) {
             return Err(ControlError::Invalid("expires_in_s must be positive".into()));
         }

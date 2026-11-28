@@ -2114,6 +2114,9 @@ pub struct Environment {
     pub traces: bool,
     /// Its pages measure their Web Vitals for roll (`…/vitals`).
     pub vitals: bool,
+    /// Its Strict-Transport-Security when roll serves HTTPS ([`HSTS_DEFAULT`] unless it says;
+    /// None: none sent).
+    pub hsts: Option<Hsts>,
     /// Where its deploy status badge is (Netlify's), when it has one (`badge: true`): an SVG for a
     /// README, answered to anyone.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2748,7 +2751,14 @@ pub const MAX_CHECKS: usize = 5;
 pub struct Check {
     /// Unique in the environment: a-z, 0-9 and -, at most 32.
     pub name: String,
+    /// An HTTP check's (empty for a TCP check's).
+    #[serde(default)]
     pub path: String,
+    /// A TCP check (Fly's TCP checks, Better Stack's port monitors): a TCP service's port
+    /// (`run.tcp`) connected to through its own network, no HTTP; `contains` is looked for in
+    /// what it says first (a banner).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub tcp: bool,
     /// 30–3600 (default 60).
     #[serde(default = "Check::default_every")]
     pub every_s: u32,
@@ -2777,6 +2787,53 @@ pub struct Check {
     /// A public check's host: one of the environment's custom domains (none: its own URL's).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<String>,
+    /// Its request's method (Better Stack's, Checkly's): GET (the default), HEAD, POST, PUT,
+    /// PATCH, DELETE or OPTIONS.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
+    /// Its request's headers (at most 10): a value's `${NAME}` is the environment's own variable
+    /// of that name as its live deployment has it, so a token is never in the settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headers: Option<std::collections::BTreeMap<String, String>>,
+    /// Its request's body (at most 4 KiB), with a method that takes one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+}
+
+/// The methods a check may send ([`Check::method`]).
+pub const CHECK_METHODS: [&str; 7] = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"];
+
+impl Check {
+    /// Its method, GET unless it says.
+    pub fn method(&self) -> &str {
+        self.method.as_deref().unwrap_or("GET")
+    }
+
+    /// Its headers with each `${NAME}` the variable's value in `vars`; the name of one it names that
+    /// isn't set, if any.
+    pub fn headers_with(&self, vars: &[(String, String)]) -> std::result::Result<Vec<(String, String)>, String> {
+        let mut out = Vec::new();
+        for (k, v) in self.headers.iter().flatten() {
+            let mut value = String::new();
+            let mut rest = v.as_str();
+            while let Some(i) = rest.find("${") {
+                value.push_str(&rest[..i]);
+                let after = &rest[i + 2..];
+                let Some(end) = after.find('}') else {
+                    value.push_str(&rest[i..]);
+                    rest = "";
+                    break;
+                };
+                let name = &after[..end];
+                let found = vars.iter().find(|(n, _)| n == name).map(|(_, v)| v.as_str()).ok_or_else(|| format!("its header {k} names ${{{name}}}, which this environment doesn't set"))?;
+                value.push_str(found);
+                rest = &after[end + 1..];
+            }
+            value.push_str(rest);
+            out.push((k.clone(), value));
+        }
+        Ok(out)
+    }
 }
 
 /// A browser check's budgets, each optional: its largest contentful paint, cumulative layout
@@ -2810,7 +2867,14 @@ impl Check {
         if self.name.is_empty() || self.name.len() > 32 || !self.name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') {
             return bad("a check's name is a-z, 0-9 and -, at most 32");
         }
-        if !self.path.starts_with('/') || self.path.starts_with("//") || self.path.len() > 2000 || !self.path.bytes().all(|b| b.is_ascii_graphic()) {
+        if self.tcp {
+            if !self.path.is_empty() {
+                return bad("a TCP check has no path: it connects to the service's port");
+            }
+            if self.browser.is_some() || self.status.is_some() || self.method.is_some() || self.headers.is_some() || self.body.is_some() || self.from.as_deref().is_some_and(|f| f != "roll") {
+                return bad("a TCP check connects (and reads its banner for contains) from roll: no browser, status, method, headers, body or from public");
+            }
+        } else if !self.path.starts_with('/') || self.path.starts_with("//") || self.path.len() > 2000 || !self.path.bytes().all(|b| b.is_ascii_graphic()) {
             return bad("a check's path is an absolute path, like /healthz");
         }
         match self.from.as_deref() {
@@ -2856,7 +2920,72 @@ impl Check {
         if self.status.is_some_and(|s| !(100..=599).contains(&s)) || self.contains.as_ref().is_some_and(|c| c.is_empty() || c.len() > 200) {
             return bad("status is an HTTP status, contains 1–200 characters");
         }
+        if let Some(m) = &self.method {
+            let up = m.to_ascii_uppercase();
+            if !CHECK_METHODS.contains(&up.as_str()) {
+                return bad("method is GET, HEAD, POST, PUT, PATCH, DELETE or OPTIONS");
+            }
+            self.method = Some(up);
+        }
+        if (self.headers.is_some() || self.body.is_some() || self.method.is_some()) && self.browser.is_some() {
+            return bad("method, headers and body are an HTTP check's (a browser check's script makes its own requests)");
+        }
+        // A value's `${NAME}` is the environment's own variable: from roll only, never over the
+        // internet to wherever a domain's DNS points at the time.
+        if self.from.as_deref() == Some("public") && self.headers.as_ref().is_some_and(|h| h.values().any(|v| v.contains("${"))) {
+            return bad("a check from outside sends its headers as written: ${NAME} (the environment's own variable) is a check from roll's");
+        }
+        if let Some(h) = &self.headers {
+            let token = |n: &str| !n.is_empty() && n.len() <= 64 && n.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b));
+            let reserved = |n: &str| { let l = n.to_ascii_lowercase(); matches!(l.as_str(), "host" | "content-length" | "transfer-encoding" | "connection" | "upgrade" | "te" | "trailer") || l.starts_with("x-roll-") };
+            if h.len() > 10 || h.iter().any(|(k, v)| !token(k) || reserved(k) || v.len() > 1000 || v.contains(['\r', '\n', '\0'])) {
+                return bad("headers are at most 10, each a name (letters, digits, - and _; not Host, Content-Length, connection headers or x-roll-*) and a value of at most 1000 characters on one line");
+            }
+        }
+        if let Some(b) = &self.body {
+            if b.len() > 4096 {
+                return bad("a check's body is at most 4 KiB");
+            }
+            if !matches!(self.method(), "POST" | "PUT" | "PATCH" | "DELETE") {
+                return bad("a body goes with method POST, PUT, PATCH or DELETE");
+            }
+        }
         Ok(self)
+    }
+}
+
+/// An environment's Strict-Transport-Security (Vercel's, Netlify's `_headers`): on by default
+/// when roll serves HTTPS, added to its answers unless the app or its own headers send one.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Hsts {
+    /// Seconds, at most two years; 0 tells browsers to forget it.
+    pub max_age: u32,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub include_subdomains: bool,
+    /// For the browsers' preload list (hstspreload.org): with include_subdomains and a year at least.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub preload: bool,
+}
+
+/// What an environment answers with when it sets nothing: two years, its own name only.
+pub const HSTS_DEFAULT: Hsts = Hsts { max_age: 63_072_000, include_subdomains: false, preload: false };
+
+impl Hsts {
+    pub fn check(&self) -> Result<()> {
+        let bad = |m: &str| Err(Error::BadRequest(format!("hsts: {m}")));
+        if self.max_age > 63_072_000 {
+            return bad("max_age is at most 63072000 (two years)");
+        }
+        if self.preload && !(self.include_subdomains && self.max_age >= 31_536_000) {
+            return bad("preload needs include_subdomains and a max_age of a year (31536000) at least");
+        }
+        Ok(())
+    }
+
+    /// The header's value.
+    pub fn value(&self) -> String {
+        format!("max-age={}{}{}", self.max_age, if self.include_subdomains { "; includeSubDomains" } else { "" }, if self.preload { "; preload" } else { "" })
     }
 }
 

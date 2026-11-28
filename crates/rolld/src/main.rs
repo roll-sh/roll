@@ -378,6 +378,8 @@ fn main() -> anyhow::Result<()> {
     // → 24–31 MB (and ~90 MB → ~60 MB with 600 partitions).
     unsafe { libmimalloc_sys::mi_option_set(MI_OPTION_PURGE_DELAY, 0) };
     nosql_storage::memory::set_allocator_release(|| unsafe { libmimalloc_sys::mi_collect(true) });
+    // Before any product opens SQLite: its allocations aren't counted under one process-wide lock.
+    code_sql::uncounted_allocations();
     raise_open_files_limit();
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()

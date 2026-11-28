@@ -185,6 +185,21 @@ impl PublicCa for RollPublicCa {
         })
     }
 
+    fn zones(&self, dns: &DnsCredential, records: &[String]) -> Result<Vec<String>, String> {
+        let dns = self.solver(dns)?;
+        Self::block(async {
+            let mut out = Vec::with_capacity(records.len());
+            for record in records {
+                let zone = match &dns {
+                    Dns::Cloudflare(cf) => cf.zone_for(record).await,
+                    Dns::Route53(r53) => r53.zone_for(record).await,
+                };
+                out.push(zone.map_err(|e| format!("{e:#}"))?);
+            }
+            Ok(out)
+        })
+    }
+
     fn order(&self, o: Order<'_>) -> Result<Ordered, String> {
         Self::block(self.order_async(o))
     }

@@ -5,11 +5,16 @@
 //! machinery (write.rs, sweep.rs). The difference is who speaks to the vendor: roll does, so there
 //! is no endpoint to write.
 //!
+//! A self-rotating vendor (Paddle) can't make or revoke a key: a key can only rotate itself. Its
+//! registration holds the key itself, each rotation is made with it and replaces it there
+//! ([`Provider::self_rotate`]), and the old key ends on the vendor's schedule, never roll's.
+//!
 //! Requests go out through rolld ([`Deliver::request`]): HTTPS to a public address, no redirects,
 //! the answer bounded, a timeout. Hosts are the vendors' own, except Okta's and Auth0's tenant
 //! domains, a self-managed GitLab's host, a Databricks workspace's, a SonarQube Server's, a
 //! Jenkins controller's and a Salesforce org's My Domain host, which are checked as hostnames and
-//! then go through the same guard; Datadog's site is one of its documented ones. The credential is
+//! then go through the same guard; Datadog's site and Prisma Cloud's API host are one of their
+//! documented ones, and Paddle's follows from the key (live or sandbox). The credential is
 //! sealed with the project's data key, bound to the registration's vendor and target, so a row
 //! pointed somewhere else no longer opens. Errors name the vendor and the status, never what a
 //! vendor answered.
@@ -155,7 +160,59 @@ pub enum Vendor {
     /// `consumer_id`, working beside the current one; revoking the old one after the grace period
     /// promotes the new one, which is what ends the old (Salesforce's own rotation).
     Salesforce { domain: String, app_id: String, consumer_id: String },
+    /// Palo Alto Networks' Prisma Cloud. The credential is a System Admin's access key as
+    /// `ACCESS_KEY_ID:SECRET` on the API host `api` (one of Prisma Cloud's own). Each key is a new
+    /// access key of the service account `service_account`, checked to sign in before it's kept;
+    /// the old one is deleted after the grace period. A service account has two keys at most, so
+    /// one environment per registration.
+    Prismacloud {
+        api: String,
+        service_account: String,
+        /// The tenant's Prisma id, for an access key that reaches more than one tenant.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prisma_id: Option<String>,
+        /// Each key's lifetime in days (none: it lives until deleted).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expires_days: Option<u16>,
+    },
+    /// Self-rotating: the credential is the rotatable API key `api_key_id` itself (live or
+    /// sandbox, as its prefix says). Paddle can't make or revoke a key over its API, only rotate
+    /// the one a request is made with: each rotation makes a new secret of the same key with the
+    /// current one, keeps it as the registration's credential, and checks it, which starts the old
+    /// secret's grace at Paddle (the link's `grace_minutes`, 24 hours at most). Paddle ends the old
+    /// secret then; roll can't end it sooner.
+    Paddle {
+        api_key_id: String,
+        /// Each new secret's lifetime in days (none: the key keeps the expiry it has).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expires_days: Option<u16>,
+    },
 }
+
+/// Prisma Cloud's API hosts (pan.dev's "API URLs").
+const PRISMA_APIS: &[&str] = &[
+    "api.prismacloud.io",
+    "api2.prismacloud.io",
+    "api3.prismacloud.io",
+    "api4.prismacloud.io",
+    "api.anz.prismacloud.io",
+    "api.eu.prismacloud.io",
+    "api2.eu.prismacloud.io",
+    "api.gov.prismacloud.io",
+    "api.prismacloud.cn",
+    "api.ca.prismacloud.io",
+    "api.sg.prismacloud.io",
+    "api.uk.prismacloud.io",
+    "api.ind.prismacloud.io",
+    "api.jp.prismacloud.io",
+    "api.fr.prismacloud.io",
+    "api.id.prismacloud.io",
+];
+
+/// The longest grace Paddle keeps an old secret after its replacement is first used.
+const PADDLE_GRACE_MAX_SECONDS: u64 = 86_400;
+/// How long a self-rotation's claim on its registration holds if the node doing it stops.
+const SELF_ROTATE_CLAIM_MS: i64 = 5 * 60_000;
 
 /// Which of SonarQube's tokens a registration rotates.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
@@ -236,7 +293,15 @@ impl Vendor {
             Vendor::Sonarqube { .. } => "sonarqube",
             Vendor::Jenkins { .. } => "jenkins",
             Vendor::Salesforce { .. } => "salesforce",
+            Vendor::Prismacloud { .. } => "prismacloud",
+            Vendor::Paddle { .. } => "paddle",
         }
+    }
+
+    /// The vendor only rotates the key a request is made with: the registration holds the key
+    /// itself, and nothing is revoked (the vendor ends the old secret).
+    fn self_rotating(&self) -> bool {
+        matches!(self, Vendor::Paddle { .. })
     }
 
     fn target(&self) -> Json {
@@ -349,6 +414,18 @@ impl Vendor {
                     return bad("a salesforce target is {domain: the org's My Domain host (acme.my.salesforce.com), app_id: the external client app's id (0xI…), consumer_id: its OAuth consumer's id}");
                 }
             }
+            Vendor::Prismacloud { api, service_account, prisma_id, expires_days } => {
+                *api = api.trim().to_ascii_lowercase();
+                let account_ok = !service_account.is_empty() && service_account.len() <= 128 && service_account.chars().all(|c| c.is_ascii_alphanumeric() || " ._@-".contains(c));
+                if !PRISMA_APIS.contains(&api.as_str()) || !account_ok || !prisma_id.as_deref().is_none_or(id_ok) || !expires_days.is_none_or(|d| (1..=730).contains(&d)) {
+                    return bad("a prismacloud target is {api: your tenant's API host (api.prismacloud.io, api2.eu.prismacloud.io, …), service_account: the service account whose access keys rotate, prisma_id?: the tenant's Prisma id, expires_days?: 1-730 (none: no end)}");
+                }
+            }
+            Vendor::Paddle { api_key_id, expires_days } => {
+                if !paddle_key_id(api_key_id) || !expires_days.is_none_or(|d| (1..=730).contains(&d)) {
+                    return bad("a paddle target is {api_key_id: apikey_… (the rotatable key's id), expires_days?: 1-730 (none: each secret keeps the key's expiry)}");
+                }
+            }
         }
         Ok(self)
     }
@@ -376,25 +453,29 @@ impl Vendor {
             Vendor::Sonarqube { host, .. } => format!("user tokens on {host}"),
             Vendor::Jenkins { host, user } => format!("{user}'s API tokens on {host}"),
             Vendor::Salesforce { domain, app_id, .. } => format!("{app_id} on {domain}"),
+            Vendor::Prismacloud { api, service_account, .. } => format!("{service_account}'s access keys on {api}"),
+            Vendor::Paddle { api_key_id, .. } => api_key_id.clone(),
         }
     }
 
-    /// The vendor keeps one secret per app at a time (Auth0), two at most (Okta) or one staged
-    /// beside the current one (Salesforce): one environment per registration, or one would end or
-    /// block another's.
+    /// The vendor keeps one secret per app at a time (Auth0), two at most (Okta, a Prisma Cloud
+    /// service account) or one staged beside the current one (Salesforce), or the registration is
+    /// the key itself (a self-rotating vendor's): one environment per registration, or one would
+    /// end or block another's.
     fn exclusive(&self) -> bool {
-        matches!(self, Vendor::Okta { .. } | Vendor::Auth0 { .. } | Vendor::Salesforce { .. })
+        matches!(self, Vendor::Okta { .. } | Vendor::Auth0 { .. } | Vendor::Salesforce { .. } | Vendor::Prismacloud { .. }) || self.self_rotating()
     }
 
     /// Days each key lives at the vendor, when the vendor ends it by itself: GitLab's
-    /// `expires_days`, Databricks' `lifetime_days`, SonarQube's `expires_days` when set, Entra's two
+    /// `expires_days`, Databricks' `lifetime_days`, SonarQube's, Prisma Cloud's and Paddle's
+    /// `expires_days` when set, Entra's two
     /// years, Salesforce's 30 days for a staged set (the first key after linking stays staged until
     /// the next rotation). The rest live until revoked.
     fn lifetime_days(&self) -> Option<u64> {
         match self {
             Vendor::Gitlab { expires_days, .. } => Some(u64::from(*expires_days)),
             Vendor::Databricks { lifetime_days, .. } => Some(u64::from(*lifetime_days)),
-            Vendor::Sonarqube { expires_days, .. } => expires_days.map(u64::from),
+            Vendor::Sonarqube { expires_days, .. } | Vendor::Prismacloud { expires_days, .. } | Vendor::Paddle { expires_days, .. } => expires_days.map(u64::from),
             Vendor::Entra { .. } => Some(ENTRA_DAYS),
             Vendor::Salesforce { .. } => Some(SALESFORCE_STAGED_DAYS),
             _ => None,
@@ -425,6 +506,8 @@ impl Vendor {
             Vendor::Sonarqube { .. } => ("SONAR_TOKEN", "SONAR_TOKEN_NAME"),
             Vendor::Jenkins { .. } => ("JENKINS_API_TOKEN", "JENKINS_API_TOKEN_ID"),
             Vendor::Salesforce { .. } => ("SALESFORCE_CLIENT_SECRET", "SALESFORCE_CLIENT_ID"),
+            Vendor::Prismacloud { .. } => ("PRISMA_CLOUD_SECRET_KEY", "PRISMA_CLOUD_ACCESS_KEY"),
+            Vendor::Paddle { .. } => ("PADDLE_API_KEY", "PADDLE_API_KEY_ID"),
         };
         FIELDS.iter().cloned().zip([secret, id]).map(|(f, suggest)| Field { suggest, ..f }).collect()
     }
@@ -472,6 +555,24 @@ fn same_sf_id(a: &str, b: &str) -> bool {
 /// A Salesforce consumer key (the OAuth client id): letters, digits, `._-`.
 fn consumer_key(s: &str) -> bool {
     !s.is_empty() && s.len() <= 256 && s.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
+}
+
+/// A Paddle API key's id: `apikey_` and 26 lowercase letters and digits.
+fn paddle_key_id(s: &str) -> bool {
+    s.strip_prefix("apikey_").is_some_and(|r| r.len() == 26 && r.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()))
+}
+
+/// A Paddle API key's host and id, from the key (`pdl_live_apikey_<26>_<secret>` or
+/// `pdl_sdbx_apikey_…`): live keys go to Paddle's API, sandbox keys to its sandbox.
+fn paddle_key(key: &str) -> Option<(&'static str, String)> {
+    let (host, rest) = if let Some(r) = key.strip_prefix("pdl_live_apikey_") {
+        ("api.paddle.com", r)
+    } else {
+        ("sandbox-api.paddle.com", key.strip_prefix("pdl_sdbx_apikey_")?)
+    };
+    let (id, secret) = (rest.get(..26)?, rest.get(26..)?.strip_prefix('_')?);
+    let id = format!("apikey_{id}");
+    (paddle_key_id(&id) && !secret.is_empty() && secret.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')).then_some((host, id))
 }
 
 fn guid(s: &str) -> bool {
@@ -535,11 +636,16 @@ fn check_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-/// The credential as kept: trimmed, one line.
+/// The credential as kept: trimmed, one line; a self-rotating vendor's, the key the target names.
 fn check_credential<'a>(vendor: &Vendor, credential: &'a Value) -> Result<&'a str> {
     let credential = credential.expose().trim();
     if credential.is_empty() || credential.len() > 4096 || credential.contains(['\r', '\n']) {
         return Err(Error::BadRequest(format!("credential is the {} credential roll issues keys with, one line", vendor.name())));
+    }
+    if let Vendor::Paddle { api_key_id, .. } = vendor
+        && paddle_key(credential).is_none_or(|(_, id)| id != *api_key_id)
+    {
+        return Err(Error::BadRequest(format!("a paddle credential is the rotatable API key {api_key_id} itself (pdl_live_apikey_… or pdl_sdbx_apikey_…)")));
     }
     Ok(credential)
 }
@@ -597,6 +703,61 @@ impl Provider {
         let target = serde_json::from_str(&target).map_err(|_| Error::Internal(format!("SaaS rotator {id}'s target isn't JSON")))?;
         Ok((Vendor::parse(&vendor, target)?, credential))
     }
+
+    /// A self-rotating vendor's new key, sealed as the registration's credential in place of the
+    /// one it rotated (the maker stays: it's the same registration's own key).
+    fn keep(&self, id: &str, key: &Value) -> Result<()> {
+        let row: Option<(String, String, String, String)> = self.db.read(|c| {
+            Ok::<_, Error>(
+                c.query_row("SELECT s.project_id, s.vendor, s.target, p.dek FROM saas_rotators s JOIN projects p ON p.project_id = s.project_id WHERE s.id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+                    .optional()?,
+            )
+        })?;
+        let (project, vendor, target, dek) = row.ok_or_else(|| Error::Link(format!("SaaS rotator {id} doesn't exist any more")))?;
+        let inner = self.unwrap.inner(&project, &dek)?;
+        let (dek, _) = self.keys.open_dek(&project, &inner)?;
+        let sealed = dek.seal(&aad(&project, id, &vendor, &target), key);
+        self.db.write(|c| Ok::<_, Error>(c.execute("UPDATE saas_rotators SET credential = ? WHERE id = ? AND vendor = ? AND target = ?", params![sealed, id, vendor, target])?))?;
+        Ok(())
+    }
+
+    /// A self-rotating vendor's rotation ([`Vendor::self_rotating`]): claimed on the registration
+    /// first, as two rotations made with one key would undo each other at the vendor (a second
+    /// Paddle rotation cancels a pending one). The new key is kept as the registration's
+    /// credential before it's checked: from the vendor's answer on, it's the key every later
+    /// rotation needs, whatever happens to this one. Checking it with a request of its own starts
+    /// the old secret's grace at the vendor (the link's `grace_minutes`, a leak's 0). Nothing is
+    /// left to revoke: the handle is the claim (`claim`, its time), held until the write storing
+    /// the new key is done ([`LinkProvider::settled`]). A rotation that read the secret before
+    /// another's write would otherwise rotate the key that write stored, and leave the secret on
+    /// it while the vendor ends it.
+    fn self_rotate(&self, id: &str, vendor: &Vendor, key: &Value, link: &Link) -> Result<Issued> {
+        let d = self.deliver.as_ref();
+        let now = now_ms();
+        let claimed = self.db.write(|c| Ok::<_, Error>(c.execute("UPDATE saas_rotators SET rotating_at = ? WHERE id = ? AND (rotating_at IS NULL OR rotating_at < ?)", params![now, id, now - SELF_ROTATE_CLAIM_MS])?))?;
+        if claimed == 0 {
+            return Err(Error::Conflict("rotating", format!("{} key {} is being rotated already: try again in a few minutes", vendor.name(), vendor.label())));
+        }
+        let grace = (link.grace_minutes() * 60).min(PADDLE_GRACE_MAX_SECONDS);
+        let out = paddle_rotate(d, vendor, key, grace).and_then(|(new, rotation, expires_at)| {
+            self.keep(id, &new)?;
+            paddle_check(d, vendor, &new, &rotation)?;
+            let Vendor::Paddle { api_key_id, .. } = vendor else { unreachable!("only Paddle rotates itself") };
+            names::value(new.expose()).map_err(|_| Error::Link("paddle answered a secret roll can't keep (over 64 KiB)".into()))?;
+            Ok(Issued { parts: BTreeMap::from([("secret".to_string(), new), ("id".to_string(), Value::new(api_key_id.clone()))]), handle: json!({ "claim": now }), expires_at })
+        });
+        if out.is_err() {
+            self.release(id, now);
+        }
+        out
+    }
+
+    /// A self-rotation's claim made at `at`, given up (a later claim is left alone).
+    fn release(&self, id: &str, at: i64) {
+        if let Err(e) = self.db.write(|c| Ok::<_, Error>(c.execute("UPDATE saas_rotators SET rotating_at = NULL WHERE id = ? AND rotating_at = ?", params![id, at])?)) {
+            tracing::warn!(rotator = %id, "releasing a self-rotation's claim failed (it lapses by itself): {e}");
+        }
+    }
 }
 
 impl LinkProvider for Provider {
@@ -624,8 +785,11 @@ impl LinkProvider for Provider {
         Err(Error::BadRequest("a SaaS rotator's key is managed: roll keeps what it issued".into()))
     }
 
-    fn issue(&self, r#ref: &str, _credential: &str, _link: &Link, label: &str, _ttl: Option<u64>) -> Result<Issued> {
+    fn issue(&self, r#ref: &str, _credential: &str, link: &Link, label: &str, _ttl: Option<u64>) -> Result<Issued> {
         let (vendor, credential) = self.open(r#ref)?;
+        if vendor.self_rotating() {
+            return self.self_rotate(r#ref, &vendor, &credential, link);
+        }
         issue(self.deliver.as_ref(), &vendor, &credential, label)
     }
 
@@ -638,12 +802,32 @@ impl LinkProvider for Provider {
         self.vendor(r#ref).is_some_and(|v| v.exclusive())
     }
 
+    /// A self-rotating vendor's old secret ends on the vendor's schedule: revoking it only ends
+    /// roll's lease.
+    fn revocable(&self, link: &Link) -> bool {
+        !self.vendor(&link.r#ref).is_some_and(|v| v.self_rotating())
+    }
+
+    fn supersedes(&self, link: &Link) -> bool {
+        self.vendor(&link.r#ref).is_some_and(|v| v.self_rotating())
+    }
+
+    fn settled(&self, r#ref: &str, handle: &Json) {
+        if let Some(at) = handle.get("claim").and_then(Json::as_i64) {
+            self.release(r#ref, at);
+        }
+    }
+
     /// A vendor that ends its keys by itself: the link rotates them before that, or the key
     /// would stop working at the vendor with nothing in roll noticing.
     fn check(&self, link: &Link) -> Result<()> {
         let Some(vendor) = self.vendor(&link.r#ref) else { return Ok(()) };
-        let Some(life) = vendor.lifetime_days() else { return Ok(()) };
         let v = vendor.name();
+        // Paddle keeps an old secret 24 hours at most after the new one is used.
+        if vendor.self_rotating() && link.grace_minutes() * 60 > PADDLE_GRACE_MAX_SECONDS {
+            return Err(Error::BadRequest(format!("{v} keeps an old key {} minutes at most after a rotation: grace_minutes is at most that", PADDLE_GRACE_MAX_SECONDS / 60)));
+        }
+        let Some(life) = vendor.lifetime_days() else { return Ok(()) };
         let most = Vendor::rotate_within(life);
         if most == 0 {
             return Err(Error::BadRequest(format!("{v} keys from this rotator end after {life} day: too soon to rotate one before it ends (register it with a longer lifetime)")));
@@ -990,6 +1174,35 @@ pub(crate) fn issue(d: &dyn Deliver, vendor: &Vendor, credential: &Value, label:
             handle = Some(json!({ "id": id, "key": key }));
             (secret, key)
         }
+        Vendor::Prismacloud { service_account, expires_days, .. } => {
+            #[derive(Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct A {
+                id: String,
+                secret_key: Value,
+            }
+            let auth = prisma_login(d, vendor, credential, step)?;
+            // Prisma Cloud refuses a name it has already: each key gets one of its own.
+            let name = format!("{}-{}", label.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' }).take(29).collect::<String>(), names::new_id("", 10).trim_start_matches('_'));
+            let mut body = json!({ "name": name, "serviceAccountName": service_account });
+            if let Some(days) = expires_days {
+                let at = days_ms(u64::from(*days));
+                body["expiresOn"] = json!(at);
+                expires_at = Some(at);
+            }
+            let answer = send(d, vendor, step, "POST", &format!("{}/access_keys", prisma_api(vendor)), &[("x-redlock-auth", &auth)], Some((JSON_TYPE, &Value::new(body.to_string()))), false)?;
+            let a: A = parse(vendor, step, &answer.unwrap_or_default())?;
+            let id = key_id(vendor, a.id)?;
+            // The new key must sign in before roll keeps it (and, later, deletes the old one): one
+            // that doesn't is deleted, and the rotation fails with the old key in place.
+            let pair = Value::new(format!("{id}:{}", a.secret_key.expose()));
+            if let Err(e) = prisma_login(d, vendor, &pair, "verifying the new key") {
+                let _ = send(d, vendor, step, "DELETE", &format!("{}/access_keys/{id}", prisma_api(vendor)), &[("x-redlock-auth", &auth)], None, true);
+                return Err(e);
+            }
+            (a.secret_key, id)
+        }
+        Vendor::Paddle { .. } => unreachable!("Paddle rotates itself: Provider::self_rotate"),
     };
     if secret.expose().is_empty() {
         return Err(Error::Link(format!("{} answered an empty secret", vendor.name())));
@@ -1004,7 +1217,8 @@ pub(crate) fn issue(d: &dyn Deliver, vendor: &Vendor, credential: &Value, label:
 
 /// Revoke a key [`issue`] made; one that's already gone is revoked.
 pub(crate) fn revoke(d: &dyn Deliver, vendor: &Vendor, credential: &Value, handle: &Json) -> Result<()> {
-    if let Vendor::Auth0 { .. } = vendor {
+    // Auth0 replaced the old secret, and a self-rotating vendor ends it, by itself.
+    if matches!(vendor, Vendor::Auth0 { .. }) || vendor.self_rotating() {
         return Ok(());
     }
     let id = handle["id"].as_str().filter(|id| id_ok(id)).ok_or_else(|| Error::Link(format!("a {} key without its id can't be revoked", vendor.name())))?;
@@ -1085,7 +1299,11 @@ pub(crate) fn revoke(d: &dyn Deliver, vendor: &Vendor, credential: &Value, handl
             }
             // Otherwise a later promotion ended it already.
         }
-        Vendor::Auth0 { .. } => unreachable!("returned above"),
+        Vendor::Prismacloud { .. } => {
+            let auth = prisma_login(d, vendor, credential, step)?;
+            send(d, vendor, step, "DELETE", &format!("{}/access_keys/{id}", prisma_api(vendor)), &[("x-redlock-auth", &auth)], None, true)?;
+        }
+        Vendor::Auth0 { .. } | Vendor::Paddle { .. } => unreachable!("returned above"),
     }
     Ok(())
 }
@@ -1162,7 +1380,94 @@ pub(crate) fn probe(d: &dyn Deliver, vendor: &Vendor, credential: &Value) -> Res
             }
             salesforce_staged(d, vendor, &auth, step)?;
         }
+        Vendor::Prismacloud { .. } => {
+            // Signing in, and the access keys (a System Admin sees every one): what rotating makes
+            // and deletes.
+            let auth = prisma_login(d, vendor, credential, step)?;
+            send(d, vendor, step, "GET", &format!("{}/access_keys", prisma_api(vendor)), &[("x-redlock-auth", &auth)], None, false)?;
+        }
+        Vendor::Paddle { api_key_id, .. } => {
+            // The key's own rotations: a read that needs no permission, made with the key itself
+            // (Paddle refuses another key's), which activates nothing.
+            send(d, vendor, step, "GET", &format!("{}/rotations", paddle_url(credential, api_key_id)?), &[("authorization", &bearer(credential))], None, false)?;
+        }
     }
+    Ok(())
+}
+
+/// Prisma Cloud's API on the registration's host.
+fn prisma_api(vendor: &Vendor) -> String {
+    let Vendor::Prismacloud { api, .. } = vendor else { unreachable!("only Prisma Cloud has access keys there") };
+    format!("https://{api}")
+}
+
+/// A Prisma Cloud session (`x-redlock-auth`) signed in with the access key `ID:SECRET`.
+fn prisma_login(d: &dyn Deliver, vendor: &Vendor, pair: &Value, step: &str) -> Result<Value> {
+    let Vendor::Prismacloud { prisma_id, .. } = vendor else { unreachable!("only Prisma Cloud signs in there") };
+    #[derive(Deserialize)]
+    struct A {
+        token: Value,
+    }
+    let (id, secret) = match pair.expose().split_once(':') {
+        Some((id, secret)) if !id.is_empty() && !secret.is_empty() => (id, secret),
+        _ => return Err(Error::Link("a prismacloud credential is an access key as ACCESS_KEY_ID:SECRET".into())),
+    };
+    let mut body = json!({ "username": id, "password": secret });
+    if let Some(p) = prisma_id {
+        body["prismaId"] = json!(p);
+    }
+    let answer = send(d, vendor, step, "POST", &format!("{}/login", prisma_api(vendor)), &[], Some((JSON_TYPE, &Value::new(body.to_string()))), false)?;
+    let a: A = parse(vendor, step, &answer.unwrap_or_default())?;
+    if a.token.expose().is_empty() {
+        return Err(Error::Link(format!("prismacloud answered no session {step}")));
+    }
+    Ok(a.token)
+}
+
+/// A Paddle key's own URL (`https://{api}/api-keys/{id}`), its host from the key: the key must be
+/// the registration's.
+fn paddle_url(key: &Value, api_key_id: &str) -> Result<String> {
+    match paddle_key(key.expose()) {
+        Some((host, id)) if id == api_key_id => Ok(format!("https://{host}/api-keys/{id}")),
+        _ => Err(Error::Link(format!("a paddle credential is the rotatable API key {api_key_id} itself"))),
+    }
+}
+
+/// A new secret of the registration's Paddle key, made with the current one: the secret, the
+/// rotation's id, and when the new secret ends (with `expires_days`). The old secret keeps working
+/// until the new one is first used, then `grace_seconds` more.
+fn paddle_rotate(d: &dyn Deliver, vendor: &Vendor, key: &Value, grace_seconds: u64) -> Result<(Value, String, Option<i64>)> {
+    let Vendor::Paddle { api_key_id, expires_days } = vendor else { unreachable!("only Paddle rotates itself") };
+    #[derive(Deserialize)]
+    struct Rotation {
+        id: String,
+        new_key: Value,
+    }
+    #[derive(Deserialize)]
+    struct A {
+        data: Rotation,
+    }
+    let step = "rotating the key";
+    let mut body = json!({ "grace_period_seconds": grace_seconds });
+    let day = expires_days.map(in_days);
+    if let Some(day) = day {
+        body["new_key_expires_at"] = json!(format!("{:04}-{:02}-{:02}T00:00:00Z", day.year(), u8::from(day.month()), day.day()));
+    }
+    let answer = send(d, vendor, step, "POST", &format!("{}/rotations", paddle_url(key, api_key_id)?), &[("authorization", &bearer(key))], Some((JSON_TYPE, &Value::new(body.to_string()))), false)?;
+    let a: A = parse(vendor, step, &answer.unwrap_or_default())?;
+    // The same key with a new secret: anything else isn't one roll can keep.
+    if a.data.new_key.expose() == key.expose() || paddle_key(a.data.new_key.expose()).is_none_or(|(_, id)| id != *api_key_id) {
+        return Err(Error::Link(format!("paddle answered a key roll can't use {step}")));
+    }
+    let rotation = key_id(vendor, a.data.id)?;
+    Ok((a.data.new_key, rotation, day.map(|day| day.midnight().assume_utc().unix_timestamp() * 1000)))
+}
+
+/// That the new secret works: its rotation read with it. Paddle takes this first use as the new
+/// secret's activation, which starts the old one's grace.
+fn paddle_check(d: &dyn Deliver, vendor: &Vendor, new: &Value, rotation: &str) -> Result<()> {
+    let Vendor::Paddle { api_key_id, .. } = vendor else { unreachable!("only Paddle rotates itself") };
+    send(d, vendor, "verifying the new key", "GET", &format!("{}/rotations/{rotation}", paddle_url(new, api_key_id)?), &[("authorization", &bearer(new))], None, false)?;
     Ok(())
 }
 

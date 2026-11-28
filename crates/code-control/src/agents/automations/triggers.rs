@@ -74,7 +74,7 @@ fn code_event(kind: &str) -> EventInfo {
         "review" => (
             &["change", "verdict", "reviewer.name", "reviewer.kind", "source"],
             json!({ "id": "rev_0123456789abcd", "change": change_id, "revision": 1, "head": "cs_0123456789abcdef", "reviewer": { "kind": "user", "name": "grace", "app": null },
-                "verdict": "approve", "body": "Looks right.", "source": "roll", "url": null, "stale": false, "dismissed": false, "created_at": 1_762_000_000_000_i64, "updated_at": 1_762_000_000_000_i64 }),
+                "verdict": "approve", "body": "Looks right.", "source": "roll", "outside": false, "url": null, "stale": false, "dismissed": false, "created_at": 1_762_000_000_000_i64, "updated_at": 1_762_000_000_000_i64 }),
         ),
         // A review thread (`review::Thread`).
         "thread" => (

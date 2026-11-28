@@ -208,7 +208,39 @@ struct FakeKeyVendors {
     jenkins_tokens: Mutex<BTreeMap<String, String>>,
     jenkins_unverified: std::sync::atomic::AtomicBool,
     salesforce: Mutex<FakeSalesforce>,
+    prisma: Mutex<FakePrisma>,
+    paddle: Mutex<FakePaddle>,
 }
+
+/// A Prisma Cloud tenant on `api2.eu.prismacloud.io`: its access keys by id as (secret, service
+/// account, name), and the sessions it signed in. The System Admin's key is
+/// `FAKEPRISMAADMIN:fake-prisma-admin`; a service account has two keys at most.
+#[derive(Default)]
+struct FakePrisma {
+    keys: BTreeMap<String, (String, String, String)>,
+    sessions: Vec<String>,
+}
+
+/// A Paddle sandbox account's one rotatable API key, as Paddle's docs describe it: the secret in
+/// use, a pending rotation (activated by the first request made with its secret), the old secret
+/// and the grace it was given at its rotation, and every rotation's body.
+#[derive(Default)]
+struct FakePaddle {
+    current: String,
+    pending: Option<(String, String, u64)>,
+    old: Option<(String, u64)>,
+    made: u32,
+    bodies: Vec<Value>,
+}
+
+/// A made-up Paddle sandbox key, written in pieces: secret scanners take the whole shape for a
+/// real one.
+const PADDLE_KEY_ID: &str = concat!("apikey_", "01jrollfake", "paddlekey00000a");
+fn paddle_secret(n: u32) -> String {
+    format!("{}{}_fakesecret{n}", concat!("pdl_", "sdbx_", "apikey_"), PADDLE_KEY_ID.trim_start_matches("apikey_"))
+}
+const PRISMA: &str = "https://api2.eu.prismacloud.io/";
+const PADDLE: &str = "https://sandbox-api.paddle.com/api-keys/";
 
 /// A Salesforce org's external client app `0xIRollFakeApp1` and its OAuth consumer: the consumer's
 /// current key (`FAKESFKEY0` until a set is promoted), and its staged sets as (id, key, active).
@@ -271,6 +303,87 @@ fn cloudflare_policies(named: bool) -> Value {
 }
 
 impl FakeKeyVendors {
+    /// Prisma Cloud's login (an access key's pair for a session) and its access keys, each call
+    /// signed in with a session.
+    fn prisma(&self, method: &str, rest: &str, auth: &str, body: Value) -> (u16, Value) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let mut p = self.prisma.lock().unwrap();
+        if (method, rest) == ("POST", "login") {
+            let (user, pass) = (body["username"].as_str().unwrap_or_default(), body["password"].as_str().unwrap_or_default());
+            let ok = !self.refuse.load(Relaxed) && ((user, pass) == ("FAKEPRISMAADMIN", "fake-prisma-admin") || p.keys.get(user).is_some_and(|k| k.0 == pass));
+            if !ok {
+                return (401, json!({ "message": "invalid_credentials" }));
+            }
+            let token = format!("fake-prisma-jwt-{}-{user}", p.sessions.len());
+            p.sessions.push(token.clone());
+            return (200, json!({ "token": token, "message": "login_successful", "customerNames": [{ "customerName": "Roll Fake", "prismaId": "123456789", "tosAccepted": true }] }));
+        }
+        // Only the System Admin manages access keys.
+        if !p.sessions.iter().any(|s| s == auth && s.ends_with("-FAKEPRISMAADMIN")) {
+            return (401, Value::Null);
+        }
+        match (method, rest) {
+            ("GET", "access_keys") => (200, json!(p.keys.iter().map(|(id, k)| json!({ "id": id, "name": k.2, "status": "active", "role": { "name": "Build and Deploy Security" } })).collect::<Vec<_>>())),
+            ("POST", "access_keys") => {
+                let (account, name) = (body["serviceAccountName"].as_str().unwrap_or_default().to_string(), body["name"].as_str().unwrap_or_default().to_string());
+                if p.keys.values().filter(|k| k.1 == account).count() >= 2 {
+                    return (400, json!({ "message": "already_have_two_access_keys" }));
+                }
+                if p.keys.values().any(|k| k.2 == name) {
+                    return (409, json!({ "message": "duplicate_access_key_name" }));
+                }
+                let n = self.made.fetch_add(1, Relaxed) + 1;
+                self.bodies.lock().unwrap().push(body.clone());
+                let id = format!("00000000-0000-4000-9000-{n:012}");
+                p.keys.insert(id.clone(), (format!("fake-prisma-secret-{n}"), account, name));
+                self.live.lock().unwrap().push(id.clone());
+                (200, json!({ "id": id, "secretKey": format!("fake-prisma-secret-{n}") }))
+            }
+            ("DELETE", r) => {
+                let id = r.trim_start_matches("access_keys/");
+                self.live.lock().unwrap().retain(|k| k != id);
+                if p.keys.remove(id).is_some() { (200, Value::Null) } else { (404, Value::Null) }
+            }
+            _ => (404, Value::Null),
+        }
+    }
+
+    /// Paddle's API for its one key: a request made with a pending rotation's secret activates
+    /// it, and the old secret then works for its grace (here: while that grace isn't 0).
+    fn paddle(&self, method: &str, rest: &str, auth: &str, body: Value) -> (u16, Value) {
+        let mut p = self.paddle.lock().unwrap();
+        if p.current.is_empty() {
+            p.current = paddle_secret(0);
+        }
+        let key = auth.strip_prefix("Bearer ").unwrap_or_default().to_string();
+        if let Some((rotation, secret, grace)) = p.pending.clone().filter(|pending| pending.1 == key) {
+            let _ = rotation;
+            let old = std::mem::replace(&mut p.current, secret);
+            p.old = Some((old, grace));
+            p.pending = None;
+        }
+        let works = key == p.current || p.pending.as_ref().is_some_and(|x| x.1 == key) || p.old.as_ref().is_some_and(|(old, grace)| *old == key && *grace > 0);
+        if !works {
+            return (401, json!({ "error": { "type": "request_error", "code": "authentication_malformed" } }));
+        }
+        let Some(rest) = rest.strip_prefix(&format!("{PADDLE_KEY_ID}/")) else { return (403, json!({ "error": { "code": "forbidden" } })) };
+        let rotation = |id: &str, secret: Option<&str>, grace: u64| json!({ "id": id, "api_key_id": PADDLE_KEY_ID, "new_key": secret.unwrap_or("pdl_sdbx_apikey_****"), "grace_period_seconds": grace, "status": "pending", "expires_at": null });
+        match (method, rest) {
+            ("GET", "rotations") => (200, json!({ "data": [], "meta": { "request_id": "fake" } })),
+            ("POST", "rotations") => {
+                // A new rotation cancels a pending one.
+                p.made += 1;
+                let n = p.made;
+                let (id, secret, grace) = (format!("apkrot_fake{n}"), paddle_secret(n), body["grace_period_seconds"].as_u64().unwrap());
+                p.bodies.push(body);
+                p.pending = Some((id.clone(), secret.clone(), grace));
+                (201, json!({ "data": rotation(&id, Some(&secret), grace), "meta": { "request_id": "fake" } }))
+            }
+            ("GET", r) if r.starts_with("rotations/apkrot_fake") => (200, json!({ "data": rotation(r.trim_start_matches("rotations/"), None, 0) })),
+            _ => (404, Value::Null),
+        }
+    }
+
     /// A Jenkins controller with one user, `roll-bot`, signing in with its API tokens; its POSTs
     /// take the CSRF crumb.
     fn jenkins(&self, method: &str, rest: &str, auth: &str, crumb: &str, body: Value) -> (u16, Value) {
@@ -367,6 +480,12 @@ impl FakeKeyVendors {
         }
         if let Some(rest) = url.strip_prefix(JENKINS) {
             return Some(self.jenkins(method, rest, &header("authorization"), &header("jenkins-crumb"), body.map(|(_, b)| form_json(b.expose())).unwrap_or(Value::Null)));
+        }
+        if let Some(rest) = url.strip_prefix(PRISMA) {
+            return Some(self.prisma(method, rest, &header("x-redlock-auth"), body.map(|(_, b)| serde_json::from_str(b.expose()).unwrap()).unwrap_or(Value::Null)));
+        }
+        if let Some(rest) = url.strip_prefix(PADDLE) {
+            return Some(self.paddle(method, rest, &header("authorization"), body.map(|(_, b)| serde_json::from_str(b.expose()).unwrap()).unwrap_or(Value::Null)));
         }
         let (vendor, rest, authorized) = if let Some(rest) = url.strip_prefix(GITLAB_TOKENS) {
             self.gitlab_admins.lock().unwrap().push(header("private-token"));
@@ -1309,6 +1428,14 @@ struct FakeSts {
     last: Mutex<Option<(String, Option<String>)>>,
     /// IAM user `legacy-ci`'s access key ids, and how many were ever made.
     keys: Mutex<(Vec<String>, u32)>,
+    /// The role's trust takes only sessions whose name starts so (`sts:RoleSessionName`).
+    session_like: Mutex<Option<&'static str>>,
+}
+
+impl FakeSts {
+    fn named_ok(&self, session: &str) -> bool {
+        self.session_like.lock().unwrap().is_none_or(|p| session.starts_with(p))
+    }
 }
 
 impl roll_secrets::aws::Sts for FakeSts {
@@ -1317,7 +1444,7 @@ impl roll_secrets::aws::Sts for FakeSts {
         if *self.throttled.lock().unwrap() {
             return Err("Throttling".into());
         }
-        if role_arn != "arn:aws:iam::123456789012:role/roll" || self.pinned.lock().unwrap().as_deref().is_some_and(|p| p != external_id) {
+        if role_arn != "arn:aws:iam::123456789012:role/roll" || self.pinned.lock().unwrap().as_deref().is_some_and(|p| p != external_id) || !self.named_ok(session) {
             return Err("AccessDenied".into());
         }
         let mut n = self.sessions.lock().unwrap();
@@ -1336,7 +1463,7 @@ impl roll_secrets::aws::Sts for FakeSts {
         let payload = token.split('.').nth(1).ok_or("InvalidIdentityToken")?;
         let claims: Value = serde_json::from_slice(&base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(payload).map_err(|_| "InvalidIdentityToken")?).map_err(|_| "InvalidIdentityToken")?;
         let sub_ok = self.web_pinned.lock().unwrap().as_deref().is_none_or(|p| claims["sub"] == p);
-        if role_arn != "arn:aws:iam::123456789012:role/roll-oidc" || claims["aud"] != "sts.amazonaws.com" || claims["iss"] != ISSUER_URL || !sub_ok {
+        if role_arn != "arn:aws:iam::123456789012:role/roll-oidc" || claims["aud"] != "sts.amazonaws.com" || claims["iss"] != ISSUER_URL || !sub_ok || !self.named_ok(session) {
             return Err("AccessDenied".into());
         }
         let mut n = self.sessions.lock().unwrap();
@@ -1387,6 +1514,42 @@ struct Gate {
     chains: Mutex<BTreeMap<String, (i64, Option<i64>)>>,
     /// How long a bootstrap token lives, in ms, when set (a test's short one); its minutes otherwise.
     chain_ms: std::sync::atomic::AtomicI64,
+    /// The next lookup of this grant's person waits ([`Pause`]): a rotation looks its
+    /// registration's maker up after reading the secret and before issuing, so a test can settle
+    /// another rotation in between.
+    pause: Mutex<Option<Pause>>,
+}
+
+/// One party of a race held at a point a fake names (`at`) while a test settles the other: it says
+/// it's there on `held`, then waits for `go`.
+struct Pause {
+    at: String,
+    held: std::sync::mpsc::Sender<()>,
+    go: std::sync::mpsc::Receiver<()>,
+}
+
+impl Pause {
+    /// Hold the next party to reach `at` in `slot`: wait for it with the first receiver, and let
+    /// it go with the sender.
+    fn arm(slot: &Mutex<Option<Pause>>, at: &str) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
+        let ((held, held_rx), (go, go_rx)) = (std::sync::mpsc::channel(), std::sync::mpsc::channel());
+        *slot.lock().unwrap() = Some(Pause { at: at.into(), held, go: go_rx });
+        (held_rx, go)
+    }
+
+    /// At `at`: wait here if a test armed it.
+    fn reach(slot: &Mutex<Option<Pause>>, at: &str) {
+        let armed = { slot.lock().unwrap().take_if(|p| p.at == at) };
+        if let Some(p) = armed {
+            p.held.send(()).unwrap();
+            p.go.recv().unwrap();
+        }
+    }
+
+    /// Until the party reached it (in a blocking thread: the other party runs meanwhile).
+    async fn reached(held: std::sync::mpsc::Receiver<()>) {
+        tokio::task::spawn_blocking(move || held.recv_timeout(std::time::Duration::from_secs(60))).await.unwrap().expect("the held party reached its pause");
+    }
 }
 
 impl Gate {
@@ -1454,6 +1617,7 @@ impl roll_auth::Grants for Granted {
     }
 
     fn owner(&self, id: &str) -> Option<Option<String>> {
+        Pause::reach(&self.gate.pause, id);
         self.gate.owners.lock().unwrap().get(id).cloned()
     }
 
@@ -2334,6 +2498,7 @@ async fn links_read_live_values_issue_managed_credentials_rotate_and_lease_dynam
             environments: Some(vec!["staging".into()]),
             paths: None,
             unprotected: false,
+            keys: None,
             actions: BTreeMap::from([(A::Read, Effect::Allow), (A::Reveal, Effect::Allow)]),
         };
         roll_auth::Grant { user: None, ask_otherwise: false, id: "tok_tf".into(), name: "tf".into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(Scope(vec![rule])) }
@@ -2602,22 +2767,26 @@ async fn one_pusher_spends_its_share_and_made_up_pushers_only_the_tokens_budget(
 }
 
 /// A login on the break-glass list is a pusher as one hook's token names it: `alice` is refused
-/// until a hook has named alice, then bound to that hook's token, so another scan token naming
-/// alice can't break glass; and the leak says the pusher is the hook's word.
+/// until a hook has named alice, then bound to that hook's token (a scan-only one), not to a
+/// reveal+scan token that named alice too, so that token can't break glass; the answer names the
+/// hook's token; and the leak says the pusher is the hook's word.
 #[tokio::test]
 async fn a_break_glass_login_is_bound_to_the_hook_token_that_named_it() {
     let api = Api::new().await;
     let value = "fake-Kq8mZ3vT9xLr2WbN";
     api.set("production", "API_KEY", value).await;
-    let (hook, other) = (api.token(json!({ "actions": ["scan"] })), api.token(json!({ "actions": ["reveal", "scan"] })));
-    let (s, e) = api.call(Method::PATCH, "", Some(json!({ "breakglass": ["alice"] }))).await;
-    assert_eq!(s, StatusCode::BAD_REQUEST, "no hook has named alice yet: {e}");
+    let (hook, other) = (api.token(json!({ "actions": ["scan"], "name": "git-hook" })), api.token(json!({ "actions": ["reveal", "scan"] })));
     let push = |breakglass: bool| json!({ "candidates": [value], "breakglass": breakglass, "pusher": "alice", "refs": ["refs/heads/main"] });
+    let named = json!({ "candidates": [], "pusher": "alice", "refs": ["refs/heads/main"] });
+    assert_eq!(api.req(Method::POST, "/scan", Some(named), Some(&other)).await.0, StatusCode::OK);
+    let (s, e) = api.call(Method::PATCH, "", Some(json!({ "breakglass": ["alice"] }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "only a token that may do more has named alice: {e}");
     assert_eq!(api.req(Method::POST, "/scan", Some(push(false)), Some(&hook)).await.0, StatusCode::OK);
     let set = api.ok(Method::PATCH, "", Some(json!({ "breakglass": ["alice"] }))).await;
     let bound = set["breakglass"][0].as_str().unwrap_or_default().to_string();
     let principal = bound.strip_prefix("alice@").filter(|t| t.starts_with("token:")).unwrap_or_else(|| panic!("{set}")).to_string();
     assert_eq!(set["breakglass"].as_array().map(Vec::len), Some(1), "only the hook that named alice: {set}");
+    assert_eq!(set["breakglass_hooks"], json!({ principal.clone(): "git-hook" }), "{set}");
 
     let (s, e) = api.req(Method::POST, "/scan", Some(push(true)), Some(&other)).await;
     assert_eq!(s, StatusCode::FORBIDDEN, "another token naming alice isn't her hook: {e}");
@@ -2626,6 +2795,28 @@ async fn a_break_glass_login_is_bound_to_the_hook_token_that_named_it() {
     let summary = leaked[0]["summary"].as_str().unwrap_or_default();
     assert!(summary.contains(&format!("by alice (as {principal} says)")), "{leaked}");
     assert!(!leaked.to_string().contains(value), "never a value: {leaked}");
+}
+
+/// A hook's token is a hook as roll-access has it now, not as it was when it named a pusher: one
+/// widened since (`PATCH /v1/access/tokens/{id}`, here `reveal`) binds no `breakglass alice`, and a
+/// bare `alice` on a list set before logins were bound stops letting her through it.
+#[tokio::test]
+async fn a_hook_token_widened_after_naming_a_pusher_vouches_for_no_one() {
+    let api = Api::new().await;
+    let hook = api.token(json!({ "actions": ["scan"], "name": "git-hook" }));
+    let push = |breakglass: bool| json!({ "candidates": [], "breakglass": breakglass, "pusher": "alice", "refs": ["refs/heads/main"] });
+    assert_eq!(api.req(Method::POST, "/scan", Some(push(false)), Some(&hook)).await.0, StatusCode::OK);
+    // A list from before logins were bound: a bare login, as an old server stored it.
+    api.db.write(|c| c.execute("UPDATE projects SET breakglass = ? WHERE project_id = ?", [json!(["alice"]).to_string().as_str(), api.project.as_str()])).unwrap();
+    assert_eq!(api.req(Method::POST, "/scan", Some(push(true)), Some(&hook)).await.0, StatusCode::OK, "alice through a scan-only hook");
+
+    // The token gains reveal after naming alice.
+    let rule = roll_secrets::access::rule(&api.project, None, None, &[roll_secrets::Action::Scan, roll_secrets::Action::Reveal]);
+    api.gate.tokens.lock().unwrap().get_mut(&hook).unwrap().scope = Arc::new(roll_auth::scope::Scope(vec![rule]));
+    let (s, e) = api.req(Method::POST, "/scan", Some(push(true)), Some(&hook)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "a token that may reveal vouches for no bare login: {e}");
+    let (s, e) = api.call(Method::PATCH, "", Some(json!({ "breakglass": ["alice"] }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "nor binds one: {e}");
 }
 
 /// roll code's GitHub App checking a push to a repo on the project's canvas: a scanner of the
@@ -4175,6 +4366,112 @@ async fn jenkins_api_tokens_are_verified_before_the_old_one_is_revoked() {
 }
 
 #[tokio::test]
+async fn prisma_cloud_access_keys_are_verified_and_the_old_one_is_deleted_after_the_grace_period() {
+    let api = Api::new().await;
+    let (s, _) = api.call(Method::POST, "/saas", Some(json!({ "name": "pc", "vendor": "prismacloud", "target": { "api": "api.prismacloud.example", "service_account": "roll-ci" }, "credential": "a:b" }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "only Prisma Cloud's own API hosts");
+    let target = json!({ "api": "api2.eu.prismacloud.io", "service_account": "roll-ci", "expires_days": 90 });
+    let r = key_vendor(&api, "prismacloud", target, "FAKEPRISMAADMIN:fake-prisma-admin", "PRISMA_CLOUD_SECRET_KEY", json!({ "rotate_days": 60 })).await;
+    api.ok(Method::PUT, "/environments/production/secrets/PRISMA_CLOUD_ACCESS_KEY", Some(json!({ "link": { "kind": "saas", "ref": r["id"], "field": "id", "mode": "managed", "options": { "rotate_days": 60 } } }))).await;
+    let pair = |v: Value| (v["values"]["PRISMA_CLOUD_ACCESS_KEY"].clone(), v["values"]["PRISMA_CLOUD_SECRET_KEY"].clone());
+    let (first, second) = ("00000000-0000-4000-9000-000000000001", "00000000-0000-4000-9000-000000000002");
+    assert_eq!(pair(api.values("production", "/").await), (json!(first), json!("fake-prisma-secret-1")));
+    let body = api.sent.10.bodies.lock().unwrap()[0].clone();
+    assert!(body["serviceAccountName"] == "roll-ci" && body["expiresOn"].as_i64().is_some_and(|t| t > code_sql::now_ms()), "{body}");
+    // The new key signed in before it was kept; the old one works through the grace period.
+    api.ok(Method::POST, "/environments/production/secrets/PRISMA_CLOUD_SECRET_KEY/rotate", None).await;
+    assert_eq!(pair(api.values("production", "/").await), (json!(second), json!("fake-prisma-secret-2")));
+    assert!(api.sent.10.prisma.lock().unwrap().sessions.iter().any(|s| s.ends_with(second)), "the new key was checked");
+    assert_eq!(*api.sent.10.live.lock().unwrap(), [first, second]);
+    end_grace(&api).await;
+    assert_eq!(*api.sent.10.live.lock().unwrap(), [second]);
+}
+
+/// Paddle's model: the registration is the key itself, each rotation is made with it and replaces
+/// it there, and Paddle ends the old secret after the grace roll asks for (none for a leak).
+#[tokio::test]
+async fn paddle_keys_rotate_themselves_and_a_leaked_one_ends_at_once() {
+    let api = Api::new().await;
+    let other = concat!("pdl_", "sdbx_", "apikey_", "01jrollfakeotherkey000000a_x");
+    let (s, e) = api.call(Method::POST, "/saas", Some(json!({ "name": "paddle", "vendor": "paddle", "target": { "api_key_id": PADDLE_KEY_ID }, "credential": other }))).await;
+    assert!(s == StatusCode::BAD_REQUEST && !e.to_string().contains(other), "the credential is the key the target names: {e}");
+    let r = key_vendor(&api, "paddle", json!({ "api_key_id": PADDLE_KEY_ID }), &paddle_secret(0), "PADDLE_API_KEY", json!({})).await;
+    let (s, e) = api.call(Method::PUT, "/environments/production/secrets/PADDLE_API_KEY_ID", Some(json!({ "link": { "kind": "saas", "ref": r["id"], "field": "id", "mode": "managed", "options": { "grace_minutes": 2000 } } }))).await;
+    assert!(s == StatusCode::BAD_REQUEST && e.to_string().contains("1440"), "Paddle keeps an old secret a day at most: {e}");
+    let paddle = || {
+        let p = api.sent.10.paddle.lock().unwrap();
+        (p.current.clone(), p.old.clone(), p.bodies.iter().map(|b| b["grace_period_seconds"].as_u64().unwrap()).collect::<Vec<_>>())
+    };
+    // Linking rotated the registered key with itself, and checking the new secret activated it:
+    // the old one has the link's hour of grace at Paddle.
+    assert_eq!(api.values("production", "/").await["values"]["PADDLE_API_KEY"], paddle_secret(1));
+    assert_eq!(paddle(), (paddle_secret(1), Some((paddle_secret(0), 3600)), vec![3600]));
+
+    // The next rotation is made with the key the registration holds now.
+    api.ok(Method::POST, "/environments/production/secrets/PADDLE_API_KEY/rotate", None).await;
+    assert_eq!(api.values("production", "/").await["values"]["PADDLE_API_KEY"], paddle_secret(2));
+    assert_eq!(paddle(), (paddle_secret(2), Some((paddle_secret(1), 3600)), vec![3600, 3600]));
+    // Nothing to revoke after the grace period: Paddle ends the old secret by itself.
+    end_grace(&api).await;
+    assert_eq!(paddle().0, paddle_secret(2));
+
+    // A leak (leaks.rotate managed): rotated with no grace, so the leaked secret ends at once.
+    api.ok(Method::PATCH, "", Some(json!({ "leaks": { "rotate": "managed" } }))).await;
+    let writer = api.token(json!({ "name": "deploy", "actions": ["read", "reveal", "write"] }));
+    api.req(Method::POST, "/leaks", Some(json!({ "candidates": [paddle_secret(2)], "leaked": true })), Some(writer.as_str())).await;
+    assert_eq!(api.values("production", "/").await["values"]["PADDLE_API_KEY"], paddle_secret(3));
+    assert_eq!(paddle(), (paddle_secret(3), Some((paddle_secret(2), 0)), vec![3600, 3600, 0]));
+    let audit = api.ok(Method::GET, "/audit", None).await.to_string();
+    assert!(!audit.contains("fakesecret"), "never a key: {audit}");
+}
+
+/// A leak's rotation that read the key before a scheduled one stored its new secret, and rotates
+/// after it: Paddle keeps only the newest secret (the leak gives the one before none), so that's
+/// the one the key ends with, not the one Paddle is ending.
+#[tokio::test]
+async fn paddle_rotations_at_once_leave_the_key_on_the_secret_paddle_keeps() {
+    let api = Api::new().await;
+    let admin = api.token(json!({ "name": "admin", "actions": ["admin"] }));
+    let maker = admin.replace("rlt_test", "tok_");
+    let (s, r) = api.req(Method::POST, "/saas", Some(json!({ "name": "paddle", "vendor": "paddle", "target": { "api_key_id": PADDLE_KEY_ID }, "credential": paddle_secret(0) })), Some(admin.as_str())).await;
+    assert!(s.is_success(), "{r}");
+    api.ok(Method::PUT, "/environments/production/secrets/PADDLE_API_KEY", Some(json!({ "link": { "kind": "saas", "ref": r["id"], "field": "secret", "mode": "managed", "options": { "rotate_days": 1 } } }))).await;
+    assert_eq!(api.values("production", "/").await["values"]["PADDLE_API_KEY"], paddle_secret(1));
+    let p = api.project.clone();
+    api.db
+        .write(move |c| {
+            let state: String = c.query_row("SELECT link_state FROM secrets WHERE project_id = ? AND key = 'PADDLE_API_KEY'", [p.as_str()], |r| r.get(0))?;
+            let mut state: Value = serde_json::from_str(&state).unwrap();
+            state["issued_at"] = json!(0);
+            c.execute("UPDATE secrets SET link_state = ? WHERE project_id = ? AND key = 'PADDLE_API_KEY'", [state.to_string().as_str(), p.as_str()])
+        })
+        .unwrap();
+    api.ok(Method::PATCH, "", Some(json!({ "leaks": { "rotate": "managed" } }))).await;
+    let writer = api.token(json!({ "name": "deploy", "actions": ["read", "reveal", "write"] }));
+
+    // The leak's rotation reads the key and waits; the scheduled one (due) rotates and is stored;
+    // then the leak's goes on.
+    let (held, go) = Pause::arm(&api.gate.pause, &maker);
+    let leak = api.req(Method::POST, "/leaks", Some(json!({ "candidates": [paddle_secret(1)], "leaked": true })), Some(writer.as_str()));
+    let scheduled = async {
+        Pause::reached(held).await;
+        let s = api.secrets.clone();
+        tokio::task::spawn_blocking(move || s.sweep().unwrap()).await.unwrap();
+        assert_eq!(api.values("production", "/").await["values"]["PADDLE_API_KEY"], paddle_secret(2), "the scheduled rotation was stored");
+        go.send(()).unwrap();
+    };
+    let ((s, scanned), ()) = tokio::join!(leak, scheduled);
+    assert!(s.is_success(), "{scanned}");
+    let (graces, current, old) = {
+        let p = api.sent.10.paddle.lock().unwrap();
+        (p.bodies.iter().map(|b| b["grace_period_seconds"].as_u64().unwrap()).collect::<Vec<_>>(), p.current.clone(), p.old.clone())
+    };
+    assert_eq!(graces, [3600, 3600, 0], "linked, scheduled, then the leak's");
+    assert_eq!((current, old), (paddle_secret(3), Some((paddle_secret(2), 0))));
+    assert_eq!(api.values("production", "/").await["values"]["PADDLE_API_KEY"], paddle_secret(3), "the key Paddle keeps");
+}
+
+#[tokio::test]
 async fn a_database_outside_roll_hands_out_logins_in_turn_and_per_lease() {
     let api = Api::new().await;
     // A password with a # unencoded: parsers disagree on where it ends, so it's refused, never
@@ -5698,6 +5995,7 @@ async fn a_rule_naming_one_encryption_key_reaches_it_alone() {
         environments: None,
         paths: None,
         unprotected: false,
+        keys: None,
         actions: BTreeMap::from([(A::Read, Effect::Allow), (A::Write, Effect::Allow)]),
     };
     let grant = roll_auth::Grant { user: None, ask_otherwise: false, id: "tok_pay".into(), name: "pay".into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(Scope(vec![rule])) };
@@ -5721,6 +6019,54 @@ async fn a_rule_naming_one_encryption_key_reaches_it_alone() {
     assert_eq!(call(Method::POST, "/transit/billing/encrypt", Some(plain)).await.0, StatusCode::FORBIDDEN);
 }
 
+/// A rule limited to some keys (`keys: ["STRIPE_KEY"]`) reaches those keys of its folders alone:
+/// it reveals one, lists and reads the folder's values as that one, and is refused another key's
+/// value and any write naming another key (the batch names it).
+#[tokio::test]
+async fn key_scoped_rule_reaches_only_its_keys() {
+    use roll_auth::scope::{Action as A, Effect, Resources, Rule, Scope, Selector};
+    let api = Api::new().await;
+    api.set("production", "STRIPE_KEY", "sk_live").await;
+    api.set("production", "DB_PASSWORD", "pw").await;
+    let rule = Rule {
+        product: "secrets".into(),
+        resources: Resources::Some(vec![Selector::Project { project: api.project.clone() }]),
+        environments: Some(vec!["production".into()]),
+        paths: None,
+        unprotected: false,
+        keys: Some(vec!["STRIPE_KEY".into()]),
+        actions: BTreeMap::from([(A::Read, Effect::Allow), (A::Reveal, Effect::Allow), (A::Write, Effect::Allow)]),
+    };
+    let grant = roll_auth::Grant { user: None, ask_otherwise: false, id: "tok_stripe".into(), name: "stripe".into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(Scope(vec![rule])) };
+    let call = |method: Method, path: &str, body: Option<Value>| {
+        let mut req = Request::builder().method(method).uri(format!("/v1/secrets/projects/{}{path}", api.project)).header("content-type", "application/json").body(body.map_or(Body::empty(), |b| Body::from(b.to_string()))).unwrap();
+        req.extensions_mut().insert(roll_auth::Operator);
+        req.extensions_mut().insert(grant.clone());
+        let router = api.router.clone();
+        async move {
+            let resp = router.oneshot(req).await.unwrap();
+            let status = resp.status();
+            let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+            (status, serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null))
+        }
+    };
+    let (s, v) = call(Method::GET, "/environments/production/secrets/STRIPE_KEY/value", None).await;
+    assert_eq!((s, v["value"].as_str()), (StatusCode::OK, Some("sk_live")), "{v}");
+    assert_eq!(call(Method::GET, "/environments/production/secrets/DB_PASSWORD/value", None).await.0, StatusCode::FORBIDDEN);
+    let (s, list) = call(Method::GET, "/environments/production/secrets", None).await;
+    let names: Vec<&str> = list.as_array().map(|l| l.iter().filter_map(|x| x["key"].as_str()).collect()).unwrap_or_default();
+    assert_eq!((s, names), (StatusCode::OK, vec!["STRIPE_KEY"]), "{list}");
+    let (s, v) = call(Method::GET, "/environments/production/values", None).await;
+    assert_eq!((s, v["values"].as_object().map(|o| o.keys().cloned().collect::<Vec<_>>())), (StatusCode::OK, Some(vec!["STRIPE_KEY".to_string()])), "{v}");
+    assert_eq!(call(Method::PUT, "/environments/production/secrets/DB_PASSWORD", Some(json!({ "value": "mine" }))).await.0, StatusCode::FORBIDDEN);
+    let (s, e) = call(Method::POST, "/environments/production/changes", Some(json!({ "ops": [{ "op": "set", "key": "STRIPE_KEY", "value": "sk_2" }, { "op": "set", "key": "NEW_KEY", "value": "x" }] }))).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{e}");
+    assert!(e.to_string().contains("NEW_KEY") && !e.to_string().contains("STRIPE_KEY,"), "names the key outside the rule: {e}");
+    let (s, w) = call(Method::PUT, "/environments/production/secrets/STRIPE_KEY", Some(json!({ "value": "sk_2" }))).await;
+    assert_eq!(s, StatusCode::OK, "{w}");
+    assert_eq!(api.values("production", "/").await["values"]["DB_PASSWORD"], "pw", "the other key is as it was");
+}
+
 #[tokio::test]
 async fn a_roll_access_grant_reaches_only_what_its_rules_name() {
     use roll_auth::scope::{Action as A, Effect, Resources, Rule, Scope, Selector};
@@ -5733,6 +6079,7 @@ async fn a_roll_access_grant_reaches_only_what_its_rules_name() {
         environments: Some(vec!["development".into()]),
         paths: None,
         unprotected: false,
+        keys: None,
         actions: BTreeMap::from([(A::Read, Effect::Allow), (A::Reveal, Effect::Allow)]),
     };
     let grant = roll_auth::Grant { user: None, ask_otherwise: false, id: "tok_ci".into(), name: "ci".into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(Scope(vec![rule])) };
@@ -5755,7 +6102,7 @@ async fn a_roll_access_grant_reaches_only_what_its_rules_name() {
     let audit = api.ok(Method::GET, "/audit?actor=token:tok_ci", None).await;
     assert_eq!(audit[0]["action"], "secrets.export");
     // A rule naming the project by id (as the dashboard's builder writes it) reaches it the same.
-    let by_id = Rule { resources: Resources::Some(vec![Selector::Id { id: api.project.clone(), index: None }]), environments: Some(vec!["development".into()]), paths: None, product: "secrets".into(), unprotected: false, actions: BTreeMap::from([(A::Read, Effect::Allow), (A::Reveal, Effect::Allow)]) };
+    let by_id = Rule { resources: Resources::Some(vec![Selector::Id { id: api.project.clone(), index: None }]), environments: Some(vec!["development".into()]), paths: None, product: "secrets".into(), unprotected: false, keys: None, actions: BTreeMap::from([(A::Read, Effect::Allow), (A::Reveal, Effect::Allow)]) };
     let grant = roll_auth::Grant { scope: Arc::new(Scope(vec![by_id])), ..grant.clone() };
     let mut req = Request::builder().uri(format!("/v1/secrets/projects/{}/environments/development/values", api.project)).body(Body::empty()).unwrap();
     req.extensions_mut().insert(roll_auth::Operator);
@@ -5801,6 +6148,7 @@ async fn a_signed_in_person_manages_only_their_own_projects_secrets() {
         environments: None,
         paths: None,
         unprotected: false,
+        keys: None,
         actions: BTreeMap::from([(roll_auth::scope::Action::Read, roll_auth::scope::Effect::Allow)]),
     };
     let grant = roll_auth::Grant { ask_otherwise: false, user: Some("usr_ada".into()), id: "tok_ada".into(), name: "ada".into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(roll_auth::scope::Scope(vec![everything])) };
@@ -6716,7 +7064,7 @@ async fn a_projects_admin_cuts_off_only_its_own_tokens_and_leaves_the_operators_
     let at = |rest: &str| format!("/v1/secrets/projects/{mine}{rest}");
     api.as_ada(Method::PUT, &at("/environments/production/secrets/STRIPE_KEY"), Some(json!({ "value": "sk_test_fake" }))).await;
     // The operator's CI token reaches every project's secrets; hers names only her project.
-    let everywhere = roll_auth::scope::Rule { product: "secrets".into(), resources: roll_auth::scope::Resources::All, environments: None, paths: None, unprotected: false, actions: BTreeMap::from([(roll_auth::scope::Action::Read, roll_auth::scope::Effect::Allow)]) };
+    let everywhere = roll_auth::scope::Rule { product: "secrets".into(), resources: roll_auth::scope::Resources::All, environments: None, paths: None, unprotected: false, keys: None, actions: BTreeMap::from([(roll_auth::scope::Action::Read, roll_auth::scope::Effect::Allow)]) };
     let (_, ops) = api.gate.grant("operator-ci", everywhere, None);
     let confined = |name: &str| api.gate.grant(name, roll_secrets::access::rule(&mine, None, None, &[roll_secrets::Action::Read]), None).1;
     let ci = confined("ada-ci");
@@ -6839,7 +7187,8 @@ async fn a_frozen_folder_answers_423_to_readers_and_lets_its_admins_through() {
 
 /// A reference named for one request and kept by nothing (roll apps' Cloudflare token): read
 /// once as the caller, audited as their use of it naming the resource, under `bind_ref`'s checks
-/// (reveal there, no sensitive key, no untrusted caller), with no maker recorded.
+/// (reveal there, no untrusted caller), with no maker recorded, audited with the fixed host it
+/// goes to; never a sensitive key, even for that host.
 #[tokio::test]
 async fn a_reference_read_once_reads_as_the_caller_and_is_audited_as_theirs() {
     use roll_secrets::{Refusal, ResourceRef};
@@ -6855,15 +7204,20 @@ async fn a_reference_read_once_reads_as_the_caller_and_is_audited_as_theirs() {
         (s.caller_of(false, None, Some(&grant)).unwrap(), id)
     };
     let (prod, id) = token("production");
-    let once = s.use_once(&web, "roll://production/CF_TOKEN", &prod, "writing a domain's records").unwrap();
+    let once = s.use_once(&web, "roll://production/CF_TOKEN", &prod, "writing a domain's records", None).unwrap();
     assert_eq!(once.value.expose(), "fake-cf");
     let audit = api.ok(Method::GET, "/audit?action=secrets.use", None).await;
     assert_eq!(audit[0]["actor"].as_str(), Some(format!("token:{id}").as_str()), "{audit}");
     assert!(audit[0]["summary"].as_str().unwrap().contains("apps:service:web"), "{audit}");
-    for (caller, reference) in [(&token("staging").0, "roll://production/CF_TOKEN"), (&prod, "roll://production/CF_SENSITIVE"), (&s.untrusted(&api.project, &prod).unwrap(), "roll://production/CF_TOKEN")] {
-        let refused = s.use_once(&web, reference, caller, "writing a domain's records").unwrap_err();
+    let untrusted = s.untrusted(&api.project, &prod).unwrap();
+    let cf = Some("https://api.cloudflare.com/client/v4");
+    for (caller, reference, to) in [(&token("staging").0, "roll://production/CF_TOKEN", cf), (&prod, "roll://production/CF_SENSITIVE", None), (&prod, "roll://production/CF_SENSITIVE", cf), (&untrusted, "roll://production/CF_TOKEN", None), (&untrusted, "roll://production/CF_SENSITIVE", cf)] {
+        let refused = s.use_once(&web, reference, caller, "writing a domain's records", to).unwrap_err();
         assert!(matches!(refused, Refusal::NotAllowed(_) | Refusal::Unusable(_)) && !refused.to_string().contains("fake-"), "{refused}");
     }
+    s.use_once(&web, "roll://production/CF_TOKEN", &prod, "writing a domain's records", cf).unwrap();
+    let audit = api.ok(Method::GET, "/audit?action=secrets.use", None).await;
+    assert!(audit[0]["summary"].as_str().unwrap().ends_with("sent only to https://api.cloudflare.com/client/v4"), "{audit}");
 }
 
 #[tokio::test]
@@ -8948,7 +9302,9 @@ async fn a_rotation_now_is_rotation_succeeded_with_the_keys_new_version() {
 /// A public ACME CA and DNS provider (Cloudflare or Route 53), as rolld's client answers:
 /// certificates signed by a root of its own, an account made once (with the EAB it was given),
 /// names under `roll-fake.test` only, and `unproven.…` names never proven. Route 53 takes a fake
-/// STS session (`ASIA…` with its token) or the access key `AKIAROLLFAKE00000001:fake-secret`.
+/// STS session (`ASIA…` with its token) or the access key `AKIAROLLFAKE00000001:fake-secret`, both
+/// of one account (its `roll-fake.test` zone is `ZROLLFAKE1`), or `AKIAROLLFAKE00000002:fake-secret-2`
+/// of another, with a zone of the same name of its own (`ZROLLFAKE2`).
 struct FakeCa {
     root: rcgen::CertificateParams,
     root_key: rcgen::KeyPair,
@@ -8958,6 +9314,11 @@ struct FakeCa {
     dns: Mutex<Vec<String>>,
     /// (serial, reason) of each certificate revoked.
     revoked: Mutex<Vec<(String, roll_secrets::public_certs::RevokeReason)>>,
+    /// Route 53's TXT sets by zone and name, each read and written whole as the real one is, with
+    /// a pause between, and looked at by the CA after another.
+    txt: Mutex<BTreeMap<(String, String), Vec<String>>>,
+    /// The next Route 53 order in this zone waits ([`Pause`]).
+    pause: Mutex<Option<Pause>>,
 }
 
 impl FakeCa {
@@ -8967,7 +9328,7 @@ impl FakeCa {
         root.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
         root.distinguished_name.push(rcgen::DnType::CommonName, "roll fake public root");
         let root_pem = root.self_signed(&root_key).unwrap().pem();
-        FakeCa { root, root_key, root_pem, orders: Mutex::default(), dns: Mutex::default(), revoked: Mutex::default() }
+        FakeCa { root, root_key, root_pem, orders: Mutex::default(), dns: Mutex::default(), revoked: Mutex::default(), txt: Mutex::default(), pause: Mutex::default() }
     }
 
     /// The credential, as the fake provider takes it: what it was, or its refusal.
@@ -8978,10 +9339,19 @@ impl FakeCa {
             DnsCredential::Cloudflare(_) => return Err("Cloudflare: find zone: HTTP 401".into()),
             DnsCredential::Route53 { access_key_id, secret_access_key, session_token: Some(t) } if access_key_id.starts_with("ASIA") && secret_access_key.expose().starts_with("secret-") && t.expose().starts_with("token-") => format!("role {access_key_id}"),
             DnsCredential::Route53 { access_key_id, secret_access_key, session_token: None } if access_key_id == "AKIAROLLFAKE00000001" && secret_access_key.expose() == "fake-secret" => format!("key {access_key_id}"),
+            DnsCredential::Route53 { access_key_id, secret_access_key, session_token: None } if access_key_id == "AKIAROLLFAKE00000002" && secret_access_key.expose() == "fake-secret-2" => format!("key {access_key_id}"),
             DnsCredential::Route53 { .. } => return Err("Route 53: find hosted zone roll-fake.test: InvalidClientTokenId: The security token included in the request is invalid.".into()),
         };
         self.dns.lock().unwrap().push(who);
         Ok(())
+    }
+
+    /// The hosted zone a Route 53 credential's account has for `roll-fake.test`.
+    fn zone(dns: &roll_secrets::public_certs::DnsCredential) -> String {
+        match dns {
+            roll_secrets::public_certs::DnsCredential::Route53 { access_key_id, .. } if access_key_id == "AKIAROLLFAKE00000002" => "ZROLLFAKE2".into(),
+            _ => "ZROLLFAKE1".into(),
+        }
     }
 }
 
@@ -8998,9 +9368,42 @@ impl roll_secrets::public_certs::PublicCa for FakeCa {
         }
     }
 
+    /// With the order's own credential, which the order then takes (`dns` lists the order once).
+    fn zones(&self, dns: &roll_secrets::public_certs::DnsCredential, records: &[String]) -> Result<Vec<String>, String> {
+        Ok(records.iter().map(|_| Self::zone(dns)).collect())
+    }
+
     fn order(&self, o: roll_secrets::public_certs::Order<'_>) -> Result<roll_secrets::public_certs::Ordered, String> {
-        self.orders.lock().unwrap().push((o.names.to_vec(), o.account.is_some()));
+        let zone = Self::zone(o.dns);
+        if matches!(o.dns, roll_secrets::public_certs::DnsCredential::Route53 { .. }) {
+            Pause::reach(&self.pause, &zone);
+        }
+        let value = {
+            let mut orders = self.orders.lock().unwrap();
+            orders.push((o.names.to_vec(), o.account.is_some()));
+            format!("order-{}", orders.len())
+        };
         self.signed_in(o.dns).expect("the registration's DNS credential");
+        if matches!(o.dns, roll_secrets::public_certs::DnsCredential::Route53 { .. }) {
+            let records: std::collections::BTreeSet<(String, String)> = o.names.iter().map(|n| (zone.clone(), format!("_acme-challenge.{}", n.trim_start_matches("*.")))).collect();
+            for r in &records {
+                let mut set = self.txt.lock().unwrap().get(r).cloned().unwrap_or_default();
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                set.push(value.clone());
+                self.txt.lock().unwrap().insert(r.clone(), set);
+            }
+            // The propagation wait, then the CA looks.
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            let missing = records.iter().find(|r| !self.txt.lock().unwrap()[*r].contains(&value)).map(|r| r.1.clone());
+            for r in &records {
+                let mut set = self.txt.lock().unwrap().get(r).cloned().unwrap_or_default();
+                set.retain(|v| *v != value);
+                self.txt.lock().unwrap().insert(r.clone(), set);
+            }
+            if let Some(r) = missing {
+                return Err(format!("the CA refused: unauthorized No TXT record found at {r}"));
+            }
+        }
         if let Some(n) = o.names.iter().find(|n| n.starts_with("unproven.")) {
             return Err(format!("the CA refused: unauthorized No TXT record found at _acme-challenge.{n}"));
         }
@@ -9173,6 +9576,8 @@ async fn route53_proves_public_certificates_as_the_projects_aws_role_or_an_acces
     let ca = Arc::new(FakeCa::new());
     api.secrets.set_public_ca(ca.clone());
     *api.sts.pinned.lock().unwrap() = Some(format!("roll-secrets:{}", api.project));
+    // Kept for certificates as the docs say: its trust takes `roll-public-cert-*` sessions only.
+    *api.sts.session_like.lock().unwrap() = Some("roll-public-cert-");
     let role = api.ok(Method::POST, "/aws-roles", Some(json!({ "name": "dns", "role_arn": "arn:aws:iam::123456789012:role/roll" }))).await;
     let role_id = role["id"].as_str().unwrap().to_string();
     let new = |dns: Value| {
@@ -9217,6 +9622,78 @@ async fn route53_proves_public_certificates_as_the_projects_aws_role_or_an_acces
     assert_eq!(ca.dns.lock().unwrap().last().map(String::as_str), Some("key AKIAROLLFAKE00000001"));
     assert_eq!(ca.orders.lock().unwrap().len(), 2);
     api.ok(Method::DELETE, &format!("/aws-roles/{role_id}"), None).await;
+}
+
+/// Two of roll's orders writing one Route 53 name (`*.example.com` and `example.com`, which share
+/// `_acme-challenge.example.com`), as two nodes' sweeps at once: each read-and-UPSERT of the set
+/// could drop the other's value, so an order holds its record names in the shared database and the
+/// other waits for the next pass. Both are issued, and no order fails.
+#[tokio::test]
+async fn two_orders_on_one_route53_name_never_write_it_at_once() {
+    let api = Api::new().await;
+    let ca = Arc::new(FakeCa::new());
+    api.secrets.set_public_ca(ca.clone());
+    for (name, domain) in [("wild", "*.roll-fake.test"), ("apex", "roll-fake.test")] {
+        let body = json!({ "name": name, "directory_url": roll_secrets::public_certs::PUBLIC_CAS[0], "domains": [domain], "dns_provider": "route53", "dns_credential": "AKIAROLLFAKE00000001:fake-secret", "eab_kid": "kid-roll-fake", "eab_hmac_key": "cm9sbC1mYWtlLWhtYWM" });
+        api.ok(Method::POST, "/public-certs", Some(body)).await;
+    }
+    for _ in 0..3 {
+        let sweep = || {
+            let s = api.secrets.clone();
+            tokio::task::spawn_blocking(move || s.sweep_public_certs().unwrap())
+        };
+        let (a, b) = tokio::join!(sweep(), sweep());
+        assert_eq!(a.unwrap().failed + b.unwrap().failed, 0, "no order lost its value: {:?}", ca.orders.lock().unwrap());
+        if api.ok(Method::GET, "/public-certs", None).await.as_array().unwrap().iter().all(|c| c["status"] == "issued") {
+            break;
+        }
+    }
+    let certs = api.ok(Method::GET, "/public-certs", None).await;
+    assert!(certs.as_array().unwrap().iter().all(|c| c["status"] == "issued"), "{certs}");
+    assert_eq!(ca.orders.lock().unwrap().len(), 2, "each ordered once");
+}
+
+/// Route 53 record sets are per hosted zone, and anyone can make a public zone of any name in their
+/// own AWS account: an order holds its zone's set, never every project's same-named one. A
+/// registration held past an hour by an order in its own zone says so.
+#[tokio::test]
+async fn route53_orders_in_same_named_zones_of_other_accounts_never_wait_for_each_other() {
+    let api = Api::new().await;
+    let ca = Arc::new(FakeCa::new());
+    api.secrets.set_public_ca(ca.clone());
+    let new = |name: &str, key: &str| json!({ "name": name, "directory_url": roll_secrets::public_certs::PUBLIC_CAS[0], "domains": ["roll-fake.test"], "dns_provider": "route53", "dns_credential": key, "eab_kid": "kid-roll-fake", "eab_hmac_key": "cm9sbC1mYWtlLWhtYWM" });
+    let sweep = || {
+        let s = api.secrets.clone();
+        async move { tokio::task::spawn_blocking(move || s.sweep_public_certs().unwrap()).await.unwrap() }
+    };
+    api.ok(Method::POST, "/public-certs", Some(new("web", "AKIAROLLFAKE00000001:fake-secret"))).await;
+    // This project's order holds ZROLLFAKE1's set while another project's, in its own account's
+    // zone of the same name, and one more of this account's come due.
+    let (held, go) = Pause::arm(&ca.pause, "ZROLLFAKE1");
+    let first = sweep();
+    let others = async {
+        Pause::reached(held).await;
+        let (_, p) = api.as_ada(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "team" }))).await;
+        let team = format!("/v1/secrets/projects/{}/public-certs", p["id"].as_str().unwrap());
+        let (s, e) = api.as_ada(Method::POST, &team, Some(new("web", "AKIAROLLFAKE00000002:fake-secret-2"))).await;
+        assert!(s.is_success(), "{e}");
+        api.ok(Method::POST, "/public-certs", Some(new("web-2", "AKIAROLLFAKE00000001:fake-secret"))).await;
+        let out = sweep().await;
+        assert_eq!((out.rotated, out.failed), (1, 0), "the other account's zone's order went at once");
+        assert_eq!(api.as_ada(Method::GET, &team, None).await.1[0]["status"], "issued");
+        // The same zone's waits; held past an hour, that's its problem.
+        let p = api.project.clone();
+        api.db.write(move |c| c.execute("UPDATE public_certs SET dns_held_since = 1 WHERE project_id = ? AND name = 'web-2'", [p.as_str()])).unwrap();
+        assert_eq!(sweep().await.rotated, 0);
+        let listed = api.ok(Method::GET, "/public-certs", None).await;
+        let held = listed.as_array().unwrap().iter().find(|c| c["name"] == "web-2").unwrap();
+        assert!(held["status"] == "failing" && held["last_error"].as_str().unwrap().contains("held its Route 53 challenge records for over an hour"), "{held}");
+        go.send(()).unwrap();
+    };
+    let (out, ()) = tokio::join!(first, others);
+    assert_eq!((out.rotated, out.failed), (1, 0));
+    let listed = api.ok(Method::GET, "/public-certs", None).await;
+    assert_eq!(listed.as_array().unwrap().iter().find(|c| c["name"] == "web").unwrap()["status"], "issued", "{listed}");
 }
 
 /// docs/secrets.md, "Publicly trusted certificates": a leak of a linked key revokes its certificate

@@ -710,13 +710,20 @@ impl Runtime for Docker {
     }
 
     async fn export_image(&self, image: &str) -> anyhow::Result<Option<Box<dyn tokio::io::AsyncRead + Send + Unpin>>> {
+        // Two at once on a node at most (each a `docker save` dockerd reads every layer for, beside
+        // other tenants' instances), an hour each at most (a client that stops reading ends there).
+        static EXPORTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+        let Ok(slot) = EXPORTS.try_acquire() else { anyhow::bail!("two images are being exported on this node: try again in a minute") };
         // Here, or it's gone (a pruned deployment's): said before anything streams.
         docker(&["image", "inspect", "-f", "{{.Id}}", image]).await.map_err(|_| anyhow::anyhow!("its image isn't kept on this node any more"))?;
         let mut child = Command::new("docker").args(["save", image]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true).spawn()?;
         let out = child.stdout.take().ok_or_else(|| anyhow::anyhow!("docker save gave no output"))?;
-        // Reaped whenever the reader stops (a client that went away ends it).
+        // Reaped whenever the reader stops (a client that went away ends it), its slot kept until then.
         tokio::spawn(async move {
-            let _ = child.wait().await;
+            let _slot = slot;
+            if tokio::time::timeout(std::time::Duration::from_secs(3600), child.wait()).await.is_err() {
+                let _ = child.kill().await;
+            }
         });
         Ok(Some(Box::new(out)))
     }

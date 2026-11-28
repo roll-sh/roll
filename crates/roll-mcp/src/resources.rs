@@ -249,6 +249,9 @@ fn rule(r: &Rule) -> String {
     if let Some(paths) = r.paths.as_ref().filter(|p| !p.is_empty()) {
         out.push_str(&format!(", only under {}", paths.iter().map(|p| lit(p)).collect::<Vec<_>>().join(", ")));
     }
+    if let Some(keys) = &r.keys {
+        out.push_str(&format!(", only keys {}", keys.iter().map(|k| lit(k)).collect::<Vec<_>>().join(", ")));
+    }
     out
 }
 

@@ -45,7 +45,9 @@ impl Engine {
         let skip = here.len().saturating_sub(500);
         here.drain(..skip);
         let cropped = self.store.cropped_notes(preview)?;
+        let work = self.store.note_work(preview)?;
         for n in &mut here {
+            n.work = work.get(&n.id).map(|(number, url)| crate::notes::NoteWork { number: *number, url: url.clone() });
             n.crop = cropped.contains_key(&n.id);
             n.crop_as = cropped.get(&n.id).cloned().flatten();
         }
@@ -70,6 +72,56 @@ impl Engine {
             tracing::warn!(preview = %id, error = %e, "previews: saying a note was resolved on its change");
         }
         Ok(())
+    }
+
+    /// `POST …/{id}/notes/{note}/work`: the note made a work item on its change's repo (roll
+    /// code's issues, which an agent can claim; Vercel Comments' "Create issue"), labelled
+    /// `preview-feedback`, its words as they are (a guest's marked as someone's outside the team,
+    /// so MCP's lockdown withholds them from an agent that claims it), with where it was left;
+    /// said on the change. Once a note: asked again, the same one.
+    pub async fn note_to_work(&self, id: &str, note: &str, by: &str) -> Result<crate::notes::NoteWork> {
+        let r = self.store.row(id)?;
+        let change = r.change_id.as_deref().ok_or_else(|| Error::BadRequest("only a change's preview has notes".into()))?;
+        if let Some((number, url)) = self.store.note_work(id)?.remove(note) {
+            return Ok(crate::notes::NoteWork { number, url });
+        }
+        let notes = self.source.feedback(change).await.map_err(|e| Error::Internal(format!("{e:#}")))?;
+        let n = notes.into_iter().find(|n| n.id == note).ok_or_else(|| Error::NotFound(format!("no note {note} on this preview's change")))?;
+        // One caller makes it: two at once (two clicks, the sheet and the CLI) make one item.
+        match self.store.claim_note_work(id, note, by)? {
+            crate::store::NoteWorkClaim::Made(number, url) => return Ok(crate::notes::NoteWork { number, url }),
+            crate::store::NoteWorkClaim::Busy => return Err(Error::Conflict("its work item is being made: ask again in a moment".into())),
+            crate::store::NoteWorkClaim::Mine => {}
+        }
+        let first = n.note.lines().find(|l| !l.trim().is_empty()).unwrap_or("A note").trim();
+        let first = format!("Preview feedback: {}", first.replace('`', " "));
+        let title: String = if first.chars().count() > 100 { format!("{}…", first.chars().take(99).collect::<String>()) } else { first };
+        let url = self.store.services(id)?.into_iter().next().map(|s| format!("{}{}", s.url.trim_end_matches('/'), n.path)).unwrap_or_default();
+        let place = if n.path.is_empty() { "/" } else { n.path.as_str() };
+        let on = if n.selector.is_empty() { String::new() } else { format!(", on `{}`", n.selector.replace('`', "'")) };
+        let mut body = format!("{}\n\nLeft by {} on {place} of preview {id} (change {change}){on}; made a work item by {by}.", n.note.trim(), n.by);
+        if !url.is_empty() {
+            body.push_str(&format!("\n\n{url}"));
+        }
+        let made = match self.source.work_item(change, &title, &body, &["preview-feedback"], n.outside).await {
+            Ok(Some(made)) => made,
+            Ok(None) => {
+                self.store.set_note_work(id, note, by, None)?;
+                return Err(Error::Conflict("this preview's change has no repo to make work items on".into()));
+            }
+            Err(e) => {
+                self.store.set_note_work(id, note, by, None)?;
+                return Err(Error::Internal(format!("{e:#}")));
+            }
+        };
+        let (number, at) = made;
+        self.store.set_note_work(id, note, by, Some((number, &at)))?;
+        self.store.log(id, &format!("{by} made a note work item #{number}"))?;
+        let said = code_control::review::preview_note::reply_body(note, &format!("Made work item #{number} from this note."));
+        if let Err(e) = self.source.comment(change, &said, by, false).await {
+            tracing::warn!(preview = %id, error = %e, "previews: saying a note became a work item");
+        }
+        Ok(crate::notes::NoteWork { number, url: at })
     }
 
     /// [`Engine::notes_of`] by the preview's environment name (`pv-<id>`, as roll apps knows it).
@@ -492,6 +544,74 @@ impl Engine {
         self.store.update(id, |row| row.next_at = 0)?;
         self.kick();
         Ok((hook, format!("{}{path}?roll_hook={token}", url.trim_end_matches('/'))))
+    }
+
+    /// A picture the team's own tests sent (`POST /__roll/snapshot?name=&head=` on the preview's
+    /// host, with the project's bypass secret; Argos's and Percy's SDKs): page `snap:<name>` of
+    /// the visual review at the head the preview serves (`head`, when sent, must be that one: a
+    /// test of another head isn't filed as this one's). Kept here; the preview's owner compares it
+    /// at its next converge (a change's against main's, main's against the changes waiting on it)
+    /// and reports it, once for every picture sent since. The head it was kept at.
+    pub async fn snapshot(self: &Arc<Self>, id: &str, name: &str, head: Option<&str>, png: Vec<u8>) -> Result<String> {
+        if !crate::settings::snapshot_name_ok(name) {
+            return Err(Error::BadRequest("name: 1 to 80 of a-z, A-Z, 0-9, -, _, . and /".into()));
+        }
+        let r = self.store.row(id)?;
+        if r.desired == Desired::Deleted {
+            return Err(Error::Conflict("the preview is being deleted".into()));
+        }
+        let serves = r.build().to_string();
+        if let Some(h) = head.filter(|h| !h.is_empty())
+            && h != serves
+            && self.source.git_commit(&r.repo, &serves).await.ok().flatten().as_deref() != Some(h)
+        {
+            return Err(Error::Conflict(format!("the preview serves {serves}, not {h}: send it from a test of that head")));
+        }
+        // Compared with the picture it replaces: CPU work, off the runtime's workers.
+        let (store, pid, h, n) = (self.store.clone(), id.to_string(), serves.clone(), name.to_string());
+        tokio::task::spawn_blocking(move || store.put_snapshot(&pid, &h, &n, &png)).await.map_err(|e| Error::Internal(e.to_string()))??;
+        self.store.set_runtime_fact(id, "snapshots_due", Some(&true))?;
+        self.store.log(id, &format!("a snapshot from the team's tests: {name}"))?;
+        self.store.update(id, |row| row.next_at = 0)?;
+        self.kick();
+        Ok(serves)
+    }
+
+    /// An earlier push its preview no longer kept (past the last [`crate::store::PINNED_KEEP`]),
+    /// started on demand from its own link's page (Vercel keeps every deployment's URL): kept
+    /// again, the oldest kept push of that service going in its place, and its link starts it
+    /// on the next request (on the preview's data: its own copy went when it was dropped). A
+    /// trusted preview's only: a fork's earlier heads don't run.
+    pub async fn restart_push(&self, gone: &crate::store::GonePush, by: &str) -> Result<String> {
+        let r = self.store.row(&gone.preview)?;
+        if r.desired == Desired::Deleted {
+            return Err(Error::Conflict("the preview is being deleted".into()));
+        }
+        if !r.trusted {
+            return Err(Error::Conflict("earlier pushes of a pull request from a fork don't run".into()));
+        }
+        if !self.store.services(&r.id)?.iter().any(|s| s.name == gone.service) {
+            return Err(Error::Conflict(format!("the preview no longer runs {}", gone.service)));
+        }
+        // At most once a minute a preview: each start stops another push and drops its copy.
+        let now = self.store.now_ms()?;
+        if self.store.runtime_fact::<i64>(&r.id, "push_restarted_at")?.is_some_and(|at| now - at < 60_000) {
+            return Err(Error::Conflict("an earlier push was started again a moment ago: try again in a minute".into()));
+        }
+        self.store.set_runtime_fact(&r.id, "push_restarted_at", Some(&now))?;
+        let domain = self.store.project_domain(&r.project_id)?;
+        let evicted = self.store.pin(&r.id, &gone.service, &gone.revision, &|h| self.cfg.url_in(domain.as_ref(), h))?;
+        for name in &evicted {
+            self.apps.remove(&r.id, name).await.map_err(|e| Error::Internal(format!("stopping {name}: {e:#}")))?;
+        }
+        if !evicted.is_empty() {
+            let still: std::collections::BTreeSet<String> = self.store.pinned(&r.id)?.into_iter().map(|p| p.revision).collect();
+            self.drop_pinned_data_or_say(&r.id, |d| !still.contains(&d.revision)).await.map_err(|e| Error::Internal(format!("{e:#}")))?;
+        }
+        let url = self.store.pinned(&r.id)?.into_iter().find(|p| p.service == gone.service && p.revision == gone.revision).map(|p| p.url).unwrap_or_default();
+        let short: String = gone.revision.strip_prefix("cs_").unwrap_or(&gone.revision).chars().take(10).collect();
+        self.store.log(&r.id, &format!("{by} started {}'s earlier push {short} again from its link", gone.service))?;
+        Ok(url)
     }
 
     /// A note a guest left through share link `share` (its `notes` on): posted on the change as
@@ -1271,16 +1391,5 @@ fn kept_url(url: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    /// A followed log that's polled passes each line on once: what's new after the lines it
-    /// already saw, everything when the tail moved past them.
-    #[test]
-    fn a_polled_log_passes_on_only_new_lines() {
-        let v = |s: &[&str]| s.iter().map(|x| x.to_string()).collect::<Vec<_>>();
-        assert_eq!(super::resume_at(&[], &v(&["a", "b"])), Some(0));
-        assert_eq!(super::resume_at(&v(&["a", "b"]), &v(&["a", "b"])), Some(2), "nothing new");
-        assert_eq!(super::resume_at(&v(&["b", "c"]), &v(&["z", "a", "b", "c", "d"])), Some(4), "a wider read: only d is new");
-        assert_eq!(super::resume_at(&v(&["x", "x"]), &v(&["x", "x", "x"])), Some(2), "repeated lines aren't swallowed");
-        assert_eq!(super::resume_at(&v(&["a"]), &v(&["q", "r"])), None, "moved past everything seen: a gap");
-    }
 }
 

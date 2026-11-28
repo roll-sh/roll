@@ -657,17 +657,19 @@ impl Engine {
             self.store.log(&r.id, &format!("released in {:.1} s", ms as f64 / 1000.0))?;
         }
         // 3c'. A rehearsal asked for at this head: the release again on the parents as they are
-        // now. Asked by roll when the change is queued to land, where the project wants it.
-        if s.rehearse_when_queued
+        // now. Asked by roll at every head where the project checks its releases, else when the
+        // change is queued to land, where the project wants that.
+        let every_head = s.release_checks != crate::settings::ReleaseChecksRule::Off;
+        if (s.rehearse_when_queued || every_head)
             && s.release.is_some()
             && let Some(change) = r.change_id.as_deref()
             && self.store.runtime_fact::<crate::Rehearsal>(&r.id, "rehearsal")?.is_none_or(|x| x.head != r.build())
-            && self.source.change(change).await.ok().flatten().is_some_and(|c| c.queued)
+            && (every_head || self.source.change(change).await.ok().flatten().is_some_and(|c| c.queued))
             && self.store.resources(&r.id)?.iter().any(|x| x.kind == Kind::Postgres && x.r#ref.is_some())
         {
             let asked = crate::Rehearsal { head: r.build().to_string(), by: "roll".into(), at: self.store.now_ms()?, ok: None, ms: None, error: None };
             self.store.set_runtime_fact(&r.id, "rehearsal", Some(&asked))?;
-            self.store.log(&r.id, "the change is queued to land: rehearsing its release on today's data")?;
+            self.store.log(&r.id, if every_head { "rehearsing its release on today's data at this head (the project checks its releases)" } else { "the change is queued to land: rehearsing its release on today's data" })?;
         }
         if let Some(release) = &s.release
             && let Some(asked) = self.store.runtime_fact::<crate::Rehearsal>(&r.id, "rehearsal")?.filter(|x| x.ok.is_none() && x.head == r.build())
@@ -1023,6 +1025,19 @@ impl Engine {
         }
         self.store.mark_step(&r.id, &r.head, "checks")?;
 
+        // 4d. The team's snapshots sent since the last converge: compared once for them all (a
+        // change's with main's; main's kept by head, then the changes waiting on it compared).
+        if self.store.runtime_fact::<bool>(&r.id, "snapshots_due")?.unwrap_or(false) {
+            self.store.set_runtime_fact::<bool>(&r.id, "snapshots_due", None)?;
+            if r.change_id.is_some() {
+                self.compare_with_default_branch(r).await;
+                let threshold = self.store.settings(&r.project_id).map_or(0.0, |s| s.github.visual_threshold);
+                let _ = self.store.carry_acceptance(&r.id, threshold);
+            } else {
+                self.store.keep_base_history(&r.id, r.build())?;
+                self.compare_waiting(r).await;
+            }
+        }
         // 5. Settled.
         let running = self.store.services(&r.id)?.iter().any(|x| x.state == ServiceState::Running);
         let error = (!problems.is_empty()).then(|| problems.join("; "));
@@ -1501,7 +1516,7 @@ impl Engine {
         want.iter().any(|id| !asked.contains(id))
     }
 
-    async fn compare_with_default_branch(&self, r: &Row) {
+    pub(super) async fn compare_with_default_branch(&self, r: &Row) {
         let Ok(Some(default)) = self.source.default_branch(&r.repo).await else { return };
         let Ok(rows) = self.store.rows(Some(&r.project_id)) else { return };
         let rows: Vec<Row> = rows.into_iter().filter(|x| x.change_id.is_none() && x.desired == Desired::Active).collect();
@@ -1522,7 +1537,7 @@ impl Engine {
 
     /// After branch preview `b`'s screenshot: the project's changes not compared with the default
     /// branch yet (their screenshots came first, as a new baseline's does) are now, and say so.
-    async fn compare_waiting(&self, b: &Row) {
+    pub(super) async fn compare_waiting(&self, b: &Row) {
         let Ok(rows) = self.store.rows(Some(&b.project_id)) else { return };
         // Every change again, not only those not compared yet: a change's screenshot run may
         // have compared it while this baseline's was half kept (its first page in, its other
@@ -1577,6 +1592,10 @@ impl Engine {
             for res in self.store.resources(&r.id)?.into_iter().filter(|x| x.kind == Kind::Postgres && x.mode == Mode::Branch) {
                 let (Some(branch), Ok(b)) = (&res.r#ref, self.brancher(res.kind)) else { continue };
                 let b = b.clone();
+                // One a crash left (named so) holds a half-run release's data: gone first.
+                if let Ok(Some(left)) = b.find(&res.parent, &name).await {
+                    b.delete(&res.parent, &left, &name).await?;
+                }
                 let fresh = b.branch(&res.parent, &name, Mode::Branch).await?;
                 made.push((b.clone(), res.parent.clone(), fresh.r#ref.clone()));
                 let key = format!("{}:{}", res.kind.as_str(), res.parent);
@@ -1978,7 +1997,7 @@ impl Engine {
     /// any more): a failure is said and doesn't hold the push up. The copy stays recorded, so
     /// the next eviction or the preview's teardown deletes it. A reset, changed masks and the
     /// teardown use the strict one: a copy masked by older rules must never stay reachable.
-    async fn drop_pinned_data_or_say(&self, id: &str, which: impl Fn(&crate::store::PinnedData) -> bool) -> anyhow::Result<()> {
+    pub(super) async fn drop_pinned_data_or_say(&self, id: &str, which: impl Fn(&crate::store::PinnedData) -> bool) -> anyhow::Result<()> {
         if let Err(e) = self.drop_pinned_data(id, which).await {
             warn!(preview = %id, error = %e, "previews: deleting an earlier push's copy");
             self.store.log(id, &format!("couldn't delete an earlier push's copy of its data yet: tried again later ({e:#})"))?;

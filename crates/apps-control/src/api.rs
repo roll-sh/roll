@@ -87,6 +87,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route("/v1/apps/projects/{project}/notifications/{nid}", axum::routing::delete(delete_target).patch(update_target))
         .route("/v1/apps/projects/{project}/notifications/{nid}/test", post(test_target))
         .route("/v1/apps/projects/{project}/notifications/{nid}/deliveries", get(deliveries))
+        .route("/v1/apps/projects/{project}/notifications/{nid}/deliveries/{did}/redeliver", post(redeliver))
         .route("/v1/apps/services/{id}/registry", put(put_registry).delete(delete_registry))
         .route("/v1/apps/services/{id}/deploys", get(service_deploys))
         .route("/v1/apps/services/{id}/git-login", put(put_git_login).delete(delete_git_login))
@@ -725,6 +726,10 @@ async fn deliveries(State(apps): S, Path((project, nid)): Path<(String, String)>
     ok(apps.deliveries(&project, &nid).await?)
 }
 
+async fn redeliver(State(apps): S, Path((project, nid, did)): Path<(String, String, String)>) -> R {
+    ok(apps.redeliver(&project, &nid, &did).await?)
+}
+
 #[derive(Deserialize)]
 struct EventsQuery {
     after: Option<i64>,
@@ -867,10 +872,22 @@ async fn rotate_config(State(apps): S, Path((id, env)): Path<(String, String)>, 
 
 async fn put_env(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, b: Bytes) -> R {
     let put = body(&b)?;
+    let operator = roll_auth::Grant::on(&ext).is_none() && ext.get::<roll_auth::SignedIn>().is_none() && (roll_auth::Operator::on(&ext) || apps.cfg.open);
     // Naming another maker is the operator's (roll previews in process), never anyone else's.
     // No token names one, even the operator's own: it would make another's reach its code's.
-    if put.get("closed_by").is_some() && (roll_auth::Grant::on(&ext).is_some() || ext.get::<roll_auth::SignedIn>().is_some() || !(roll_auth::Operator::on(&ext) || apps.cfg.open)) {
+    if put.get("closed_by").is_some() && !operator {
         return Err(Error::Forbidden("closed_by is the operator's to set (roll previews names its rules' maker)".into()));
+    }
+    // A `pv-<id>` environment is roll previews' preview `pv_<id>` (its share links, notes and
+    // snapshots find it by that name): only roll previews (the operator, in process) makes one,
+    // so no tenant can name an environment after another's preview. A token's or a person's
+    // request is a tenant's (rolld's gate lets nothing else in but the operator).
+    let tenant = roll_auth::Grant::on(&ext).is_some() || ext.get::<roll_auth::SignedIn>().is_some();
+    if env.starts_with("pv-") && tenant {
+        let (sid, e) = (id.clone(), env.clone());
+        if apps.db(move |s| s.environment(&sid, &e)).await.is_err() {
+            return Err(Error::Forbidden(format!("{env}: a pv- environment is roll previews' own (it makes one for each preview)")));
+        }
     }
     let e = apps.put_environment_by(&id, &env, put.clone(), maker(&ext)).await?;
     apps.settings_changed();

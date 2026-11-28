@@ -4,6 +4,55 @@ The ranked work list and the log of roll secrets' review rounds. It's internal: 
 
 ## Next
 
+**State, 2026-11-28 07:20.** The forty-fourth review is done. It found two live bugs, both fixed. The user then asked for lighter tests and a merge gate under a minute, which comes first. Landed since 15:45, each with main's CI green and after a check of the merged tree wherever main had moved under it:
+- The forty-fourth review's live bugs, fixed in #1238 (19e9b7fd1):
+  - `Secrets::use_once` read a `sensitive` key for a product's fixed host (#1225), so someone who could reveal the folder but not read the key could have roll write DNS records with it in every zone it can edit. A one-off read now never returns a sensitive key. `to` is still audited;
+  - `roll run` handed the command roll's own credentials (`ROLL_ADMIN_TOKEN`, `ROLL_TOKEN`…). It now drops inherited `ROLL_*` names ending `_TOKEN`, `_TOKEN_FILE`, `_KEY`, `_PASSWORD`, `_SECRET` or `_CREDENTIAL_FILE`, unless the project sets that name itself; `--keep-roll-credentials` passes them on.
+- #1239 (4a33eb72b): item 5. Every release asset gets build provenance (`actions/attest-build-provenance`). The release job checks it the way `install.sh` and `install.ps1` do (`gh attestation verify`, `ROLL_VERIFY=auto|attestation|checksum`), and step 0 shows the manual check and the from-source prerequisites.
+- #1244 (0f1da4f13): items 3 and 4.
+  - A Paddle rotation holds its claim until its write, so the secret ends on the key Paddle keeps.
+  - Route 53 claims are keyed by hosted zone, and a claim held over an hour is a problem on the registration.
+- #1241 (14f6055f0): items 6 and 7.
+  - The machine credential file is refused if another user owns it or can write it. Its directory is made 0700, and it's tied to the server that made it.
+  - A bare break-glass login counts only while the pushing token is scan-only now (asked of roll-access, never the column).
+- #1247 (68600ac85): item 8. `Grants::limits_keys` has no default, so no wrapper can silently widen a key-scoped grant.
+- #1249 (af1754e64): items 9 and 10.
+  - The open gate's 421 names `ROLL_DASHBOARD_ORIGIN` and `ROLL_ADMIN_TOKEN`, and `*.localhost` Hosts are answered (never as an Origin, never the preview domain), with an end-to-end test in `rolld/tests/auth.rs`.
+  - GitHub's `public` and `repository` events flip a link's `private`.
+- #1226 (42e5a8c43): key-scoped secrets rules (`keys: [..]`), reviewed by roll MCP.
+- #1256 (5475474ba): from roll search's review of #1211. roll's one Discord bot posted wherever a tenant named a channel, which roll secrets' notifications allowed. Every Discord post or edit through an install now checks that the channel is in the install's server.
+- #1242 (08fd495bb): the merge gate's only job over a minute was `sdk` (72 s). It's now `sdk-go` (one `go` command over a `go.work`, cached: 19 s warm, 52 s cold) and `sdk` (32 s). The Terraform provider's tests run in parallel (27 s → 5 s), and the operator's long-poll test no longer waits out a held poll (3.1 s → 0.16 s).
+
+In flight:
+- lighter tests: the roll-secrets crate (api.rs's 164 tests, nodes, units), and rolld, the CLI, the dashboard and the SDKs (measured: `pnpm test:secrets` 139.5 s → 106.2 s warm, 330 → 322 Rust tests, 32 → 25 dashboard tests, before the crate's cut);
+- #1257: a key-scoped token's watch says at the start why it can't watch (item 8's UX half). Per-key watching is left.
+
+Left:
+- the forty-fifth review, after the test cut;
+- the `discord.post` step's DM path can still DM anyone who shares a server with roll's bot (roll code's).
+
+**State, 2026-11-27 15:45.** The forty-third review is done. It found two live bugs, both fixed. Landed since 05:00, each with main's CI green and after a check of the merged tree wherever main had moved under it:
+- The forty-third product review's live bugs:
+  - medium: a rolld with no `ROLL_ADMIN_TOKEN` (the guide's step 0 for an evaluation) answered any `Host`, so a web page could act as the operator through DNS rebinding, or open a shell over a WebSocket. Fixed by #1193 (fedf38742), where an open gate answers only loopback hosts and step 0 gets a token, and #1202 (0d628850d), where an open gate refuses a foreign `Origin` whatever the method, after roll MCP's review;
+  - low: `//` passed the 8-hour cap on a whole environment. Fixed by roll MCP in #1186, which also checks folders canonically at the gate.
+- #1199 (df9d5d905): item 8. `import --check` exits 2, naming how many keys weren't compared.
+- #1225 (97bac47b1): items 3, 7, 10 and 5 (roll secrets' half).
+  - Machines' processes share one login.
+  - A bare break-glass login binds only to a scan-only hook that named it first.
+  - The `Debug` canary is enforced by a source scan (`debug-no-credential.txt`).
+  - `use_once` reads a sensitive key only for a product's fixed host.
+- #1219 (11fbd4453): items 4 and 6. A certificate's AWS role works with the documented trust condition, and Route 53 names are claimed fleet-wide and read back after `INSYNC`.
+- roll MCP's #1201: item 5's lend part. A root lend is approved once only.
+- #1203 (a03f8065e): Health flags a public repository whose project has `leaks.rotate` off.
+- #1206 (a2be4c27f): SaaS rotation for Prisma Cloud (Palo Alto Networks), and Paddle's self-rotating keys. Netskope and Cisco aren't added, with the reasons in docs/secrets.md.
+- #1188 (ac7c9b54b): rolld is released with the CLI (Linux and Apple Silicon tarballs, checksummed), `install.sh --with-rolld`, and step 0 uses it.
+
+In flight:
+- key-scoped secrets rules (#1226, `keys: [..]` on a secrets rule), reviewed by roll MCP. After it lands, roll MCP lets a lend that names its key be remembered for that key.
+
+Left:
+- the forty-fourth review.
+
 **State, 2026-11-27 05:00.** The forty-second review is done, except item 9, which roll MCP has (docs/permissions.md's lend wording and the approval screen's remembered scope). Landed since 22:40, each with main's CI green and after a check of the merged tree wherever main had moved under it:
 - #1167 (fb06af79e): item 8. The guides' step 0 runs one rolld on SQLite for an evaluation, moving-from covers Kubernetes Secrets, SOPS and CI variables, and `roll secrets import --from … --check` compares a source with roll by fingerprint without writing.
 - #1172 (d1feb5b5a): item 1's rest and item 5. A break-glass login is bound to the hook token that named it (`alice@token:<id>`), and a token's total is its scan budget, so invented pushers buy nothing.
@@ -41,11 +90,14 @@ In flight (the forty-second's items):
 - 2, 6 and 7: Route 53 keeps other clients' challenge values, the panel replaces a DNS credential, and a certificate's AWS session is tagged;
 - 3 and 4: a one-off read as the caller for a reference nothing keeps, and machines' logins off their maker's token cap.
 
+In flight (`feature/secrets-saas-palo-alto-paddle`):
+- Palo Alto rotation, as Prisma Cloud access keys of a service account (System Admin credential, each new key signed in with before it's kept);
+- Paddle's model: a self-rotating vendor whose registration is the key itself. Each rotation is made with it and replaces it there, and Paddle ends the old secret (roll can't, before Paddle's grace ends). `leaks.rotate` rotates it with no grace, so the leaked one ends at once.
+- Not built, with why in docs/secrets.md's SaaS section: Netskope (no API to make a token), Cisco Security Cloud Control (the rotating value is a refresh token every consumer spends) and AWS's self-rotating Palo Alto tenant key (no public API documents one).
+
 Left:
 - the forty-second's items 8 and 9 (the guides' 15-minute path with no server, and docs/permissions.md's lend wording);
-- Palo Alto rotation;
-- Health's public-repo hint;
-- Paddle's model.
+- Health's public-repo hint.
 
 **State, 2026-11-26 08:40.** The thirty-ninth and fortieth reviews are done. Landed since 2026-11-25 15:00, each with main's CI green and after a check of the merged tree wherever main had moved under it:
 - #1019 (dd7420791): the thirty-ninth's item 6. `roll secrets scan --pre-receive`, and a match-only `scan` right for scanner tokens.

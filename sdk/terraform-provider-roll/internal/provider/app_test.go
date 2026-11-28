@@ -326,6 +326,7 @@ func idOf(name string) resource.ImportStateIdFunc {
 }
 
 func TestAppsAsCode(t *testing.T) {
+	t.Parallel()
 	f := &fakeApps{services: map[string]map[string]any{}, vars: map[string]map[string]any{}, domains: map[string]map[string]any{}, envs: map[string]map[string]any{}, links: map[string]map[string]any{}, notify: map[string]map[string]any{}, logins: map[string]string{}}
 	srv := httptest.NewServer(f)
 	defer srv.Close()

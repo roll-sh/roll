@@ -4227,6 +4227,197 @@ async fn a_wildcard_key_reaches_no_watch_history() {
     assert!(v["hits"]["hits"][0]["_source"].get("leaked").is_none(), "{v}");
 }
 
+/// A restricted data stream's failure store stays restricted whichever name reaches it: the
+/// stream's `::failures`, a failure index named directly, or `*::failures`. A failure store's
+/// rollover takes nothing from its body, as a data stream's doesn't.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restricted_streams_failure_store_needs_allow_restricted_indices() {
+    use reqwest::Method;
+    let e = env().await;
+    let c = e.post("/v1/search/clusters", json!({"name": "fsx"})).await;
+    let (u, p) = creds(&c);
+    for (m, path, body) in [
+        (Method::PUT, "/_index_template/fleet-x", json!({"index_patterns": [".fleet-x*"], "data_stream": {}, "template": {"data_stream_options": {"failure_store": {"enabled": true}}}})),
+        (Method::PUT, "/_data_stream/.fleet-x", Value::Null),
+        (Method::POST, "/.fleet-x/_doc?refresh=true", json!({"@timestamp": "not a date"})),
+        (Method::PUT, "/_security/role/everything", json!({"indices": [{"names": ["*"], "privileges": ["read", "read_failure_store"]}]})),
+        (Method::PUT, "/_security/user/ev", json!({"password": "ev-pass-1", "roles": ["everything"]})),
+    ] {
+        let (s, v) = e.es(&u, &p, m, path, Some(body).filter(|b| !b.is_null())).await;
+        assert!(s < 300, "{path}: {v}");
+    }
+    let (_, v) = e.es(&u, &p, Method::GET, "/_data_stream/.fleet-x", None).await;
+    let failures = v["data_streams"][0]["failure_store"]["indices"][0]["index_name"].as_str().unwrap_or_else(|| panic!("a failure index: {v}")).to_string();
+    for path in ["/.fleet-x::failures/_search".to_string(), format!("/{failures}/_search")] {
+        let (s, v) = e.es("ev@fsx", "ev-pass-1", Method::POST, &path, Some(json!({}))).await;
+        assert_eq!(s, 403, "{path}: {v}");
+    }
+    let (s, v) = e.es("ev@fsx", "ev-pass-1", Method::POST, "/*::failures/_search?expand_wildcards=all", Some(json!({}))).await;
+    assert!(s == 200 && !v.to_string().contains("not a date"), "{s} {v}");
+    let (s, v) = e.es(&u, &p, Method::POST, "/.fleet-x::failures/_rollover", Some(json!({"aliases": {"fx": {}}}))).await;
+    assert_eq!(s, 400, "{v}");
+}
+
+/// Names are authorized as the request resolves them. An alias's index comes from wherever
+/// the request names it (the body's `index` too), and an alias can't reach more than its index
+/// grants; date math (`<.async-search>`) and `::failures` are resolved before the check; a
+/// clone's target is authorized as its source is.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn names_are_authorized_as_resolved() {
+    use reqwest::Method;
+    let e = env().await;
+    let c = e.post("/v1/search/clusters", json!({"name": "rn"})).await;
+    let (u, p) = creds(&c);
+    for (m, path, body) in [
+        (Method::PUT, "/mine/_doc/1?refresh=true", json!({"t": "mine"})),
+        (Method::PUT, "/secret/_doc/1?refresh=true", json!({"t": "top secret"})),
+        (Method::PUT, "/other/_doc/1?refresh=true", json!({"t": "other"})),
+        (Method::PUT, "/_index_template/logs", json!({"index_patterns": ["logs-*"], "data_stream": {}, "template": {"data_stream_options": {"failure_store": {"enabled": true}}}})),
+        (Method::PUT, "/_data_stream/logs-a", Value::Null),
+        (Method::POST, "/mine/_async_search?keep_on_completion=true&wait_for_completion_timeout=0", json!({})),
+        (Method::PUT, "/_security/role/limited", json!({"cluster": ["manage_search_application"], "indices": [{"names": ["mine*", "secret"], "privileges": ["manage"]}, {"names": ["mine*"], "privileges": ["read"]}]})),
+        (Method::PUT, "/_security/user/lim", json!({"password": "lim-pass-1", "roles": ["limited"]})),
+        (Method::PUT, "/_security/role/reader", json!({"indices": [{"names": ["*"], "privileges": ["read"]}]})),
+        (Method::PUT, "/_security/user/rd", json!({"password": "rd-pass-1", "roles": ["reader"]})),
+        (Method::PUT, "/_security/role/raw", json!({"indices": [{"names": ["mine*", "secret"], "privileges": ["manage"]}, {"names": ["mine*"], "privileges": ["indices:data/read/search"]}]})),
+        (Method::PUT, "/_security/user/raw", json!({"password": "raw-pass-1", "roles": ["raw"]})),
+        (Method::PUT, "/mine/_settings", json!({"index.blocks.write": true})),
+        (Method::PUT, "/_security/role/fsr", json!({"indices": [{"names": ["logs-a"], "privileges": ["read", "manage"]}, {"names": ["mine*"], "privileges": ["read", "manage", "read_failure_store"]}]})),
+        (Method::PUT, "/_security/user/fsr", json!({"password": "fsr-pass-1", "roles": ["fsr"]})),
+        (Method::PUT, "/_security/role/fsm", json!({"indices": [{"names": ["logs-*"], "privileges": ["manage_failure_store"]}]})),
+        (Method::PUT, "/_security/user/fsm", json!({"password": "fsm-pass-1", "roles": ["fsm"]})),
+        (Method::PUT, "/secret/_alias/secret-w", Value::Null),
+        (Method::PUT, "/mine/_alias/sec-a", Value::Null),
+        (Method::PUT, "/mine-000001", json!({"aliases": {"mine-roll": {"is_write_index": true}}})),
+    ] {
+        let (s, v) = e.es(&u, &p, m, path, Some(body).filter(|b| !b.is_null())).await;
+        assert!(s < 300, "{path}: {v}");
+    }
+    let lim = |m: Method, path: &str, body: Option<Value>| {
+        let e = &e;
+        let path = path.to_string();
+        async move { e.es("lim@rn", "lim-pass-1", m, &path, body).await }
+    };
+    let rd = |path: &str| {
+        let e = &e;
+        let path = path.to_string();
+        async move { e.es("rd@rn", "rd-pass-1", Method::GET, &path, None).await }
+    };
+    // The body's index is the alias's: `secret` would read through `mine-x`'s grants.
+    let (s, v) = lim(Method::PUT, "/mine/_alias/mine-x", Some(json!({"index": "secret"}))).await;
+    assert!(s == 403 && v.to_string().contains("more permissions than any of the indices"), "{s} {v}");
+    let (s, v) = lim(Method::PUT, "/mine/_alias/mine-y", Some(json!({"index": "other"}))).await;
+    assert!(s == 403 && v.to_string().contains("indices:admin/aliases"), "{s} {v}");
+    assert_eq!(lim(Method::GET, "/mine-x/_search", None).await.0, 404, "no alias was made");
+    let (s, v) = lim(Method::PUT, "/mine/_alias/mine-ok", None).await;
+    assert_eq!(s, 200, "an alias that gives no more than its index: {v}");
+    // Compared by action: a raw action granted on the alias's name counts as much as `read`.
+    let (s, v) = e.es("raw@rn", "raw-pass-1", Method::PUT, "/secret/_alias/mine-r", None).await;
+    assert!(s == 403 && v.to_string().contains("more permissions than any of the indices"), "{s} {v}");
+    // `_aliases` is authorized per action, never on every index: a user limited to `mine*` may.
+    let (s, v) = lim(Method::POST, "/_aliases", Some(json!({"actions": [{"add": {"index": "mine", "alias": "mine-x"}}]}))).await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = lim(Method::POST, "/_aliases", Some(json!({"actions": [{"add": {"index": "other", "alias": "mine-z"}}]}))).await;
+    assert!(s == 403 && !v.to_string().contains("secret"), "the action's own indices only: {s} {v}");
+    // Date math and selectors are resolved before the check.
+    assert_eq!(e.es(&u, &p, Method::GET, "/.async-search/_count", None).await.0, 200, "the premise: kept async results");
+    for path in ["/%3C.async-search%3E/_search", "/.async-search/_search", "/logs-a::failures/_search", "/%3Clogs-a%3E::failures/_search", "/_resolve/index/%3C.async-search%3E"] {
+        let (s, v) = rd(path).await;
+        assert_eq!(s, 403, "{path}: {v}");
+    }
+    // A failure store privilege grants only the actions of the privilege it narrows.
+    let fsm = |m: Method, path: &str, body: Option<Value>| {
+        let e = &e;
+        let path = path.to_string();
+        async move { e.es("fsm@rn", "fsm-pass-1", m, &path, body).await }
+    };
+    let (s, v) = fsm(Method::POST, "/logs-a::failures/_delete_by_query", Some(json!({"query": {"match_all": {}}}))).await;
+    assert_eq!(s, 403, "manage_failure_store writes nothing: {v}");
+    let (s, v) = fsm(Method::GET, "/logs-a::failures/_settings", None).await;
+    assert_ne!(s, 403, "{v}");
+    // An alias over a data stream can't give more on its failure store either: `mine-fx::failures`
+    // would read logs-a's failure documents.
+    let (s, v) = e.es("fsr@rn", "fsr-pass-1", Method::POST, "/_aliases", Some(json!({"actions": [{"add": {"index": "logs-a", "alias": "mine-fx"}}]}))).await;
+    assert!(s == 403 && v.to_string().contains("more permissions than any of the indices"), "{s} {v}");
+    // Nor can a search application, which reads through an alias of its name.
+    let (s, v) = lim(Method::PUT, "/_application/search_application/mine-app", Some(json!({"indices": ["secret"]}))).await;
+    assert!(s == 403 && v.to_string().contains("more permissions than any of the indices"), "{s} {v}");
+    // A multi get's and multi term vectors' items too.
+    for path in ["/_mget", "/_mtermvectors"] {
+        let (s, v) = e.es("rd@rn", "rd-pass-1", Method::POST, path, Some(json!({"docs": [{"_index": "<.async-search>", "_id": "x"}]}))).await;
+        assert_eq!((s, &v["docs"][0]["error"]["type"]), (200, &json!("security_exception")), "{path}: {v}");
+    }
+    // A resize's target needs nothing of its own, as on Elasticsearch, but can't hold more than
+    // its source, and the aliases it's made with are authorized as an alias request's.
+    let (s, v) = lim(Method::POST, "/secret/_clone/mine-sc", None).await;
+    assert!(s == 403 && v.to_string().contains("target index has more permissions than the source"), "{s} {v}");
+    let (s, v) = lim(Method::POST, "/secret/_clone/zz-copy", Some(json!({"aliases": {"mine-leak": {}}}))).await;
+    assert!(s == 403 && v.to_string().contains("indices:admin/aliases"), "secret read through mine-leak: {s} {v}");
+    assert_eq!(e.es(&u, &p, Method::GET, "/zz-copy", None).await.0, 404, "nothing was made");
+    let (s, v) = lim(Method::POST, "/mine/_clone/mine-copy", None).await;
+    assert_eq!(s, 200, "{v}");
+    // So are a create's and a rollover's: neither takes over another index's write alias.
+    let hijack = json!({"aliases": {"secret-w": {"is_write_index": true}}});
+    let (s, v) = lim(Method::PUT, "/mine-new", Some(hijack.clone())).await;
+    assert!(s == 403 && v.to_string().contains("indices:admin/aliases"), "{s} {v}");
+    let (s, v) = lim(Method::POST, "/mine-roll/_rollover", Some(hijack)).await;
+    assert!(s == 403 && v.to_string().contains("indices:admin/aliases"), "{s} {v}");
+    let (_, v) = e.es(&u, &p, Method::GET, "/_alias/secret-w", None).await;
+    assert_eq!(v, json!({"secret": {"aliases": {"secret-w": {}}}}), "the write alias is where it was");
+    assert_eq!(lim(Method::POST, "/mine-roll/_rollover", None).await.0, 200, "a rollover of the user's own");
+    // Removing aliases: a name spelled out must be the user's; a pattern reaches only theirs.
+    let (s, v) = lim(Method::DELETE, "/mine/_alias/sec-a", None).await;
+    assert!(s == 403 && v.to_string().contains("indices:admin/aliases"), "{s} {v}");
+    let (s, v) = lim(Method::POST, "/_aliases", Some(json!({"actions": [{"remove": {"index": "mine", "alias": "sec-a"}}]}))).await;
+    assert_eq!(s, 403, "{v}");
+    let (s, v) = lim(Method::DELETE, "/mine/_alias/*", None).await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = lim(Method::POST, "/_aliases", Some(json!({"actions": [{"remove": {"index": "mine", "alias": "sec*"}}]}))).await;
+    assert_eq!((s, &v["error"]["type"]), (404, &json!("aliases_not_found_exception")), "as on Elasticsearch: {v}");
+    let (_, v) = e.es(&u, &p, Method::GET, "/mine/_alias", None).await;
+    assert_eq!(v, json!({"mine": {"aliases": {"sec-a": {}}}}), "{v}");
+    // A pattern's closed indices are the caller's only where it may change aliases.
+    for (m, path) in [(Method::PUT, "/other/_alias/mine-o"), (Method::POST, "/other/_close")] {
+        assert_eq!(e.es(&u, &p, m, path, None).await.0, 200, "{path}");
+    }
+    // `o*` reaches the closed `other` for the request's check too (it expands as the handler does,
+    // #1084), where the caller may not change aliases: refused, as roll refuses `/*/` (stricter
+    // than Elasticsearch, which narrows the pattern; docs/search/compatibility.md).
+    let (s, v) = lim(Method::DELETE, "/o*/_alias/mine-o", None).await;
+    assert!(s == 403 && v.to_string().contains("indices:admin/aliases"), "{s} {v}");
+    let (_, v) = e.es(&u, &p, Method::GET, "/_alias/mine-o?expand_wildcards=all", None).await;
+    assert_eq!(v, json!({"other": {"aliases": {"mine-o": {}}}}), "{v}");
+}
+
+/// The same alias attack on OpenSearch: the body's index is authorized, and an alias can't
+/// reach more than its index grants.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_opensearch_alias_reaches_no_more_than_its_index() {
+    use reqwest::Method;
+    let e = env().await;
+    let c = e.post("/v1/search/clusters", json!({"name": "rno", "flavor": "opensearch"})).await;
+    let (u, p) = creds(&c);
+    let api = "/_plugins/_security/api";
+    for (m, path, body) in [
+        (Method::PUT, "/mine/_doc/1?refresh=true".to_string(), json!({"t": "mine"})),
+        (Method::PUT, "/secret/_doc/1?refresh=true".to_string(), json!({"t": "top secret"})),
+        (Method::PUT, format!("{api}/roles/limited"), json!({"index_permissions": [{"index_patterns": ["mine*", "secret"], "allowed_actions": ["manage_aliases"]}, {"index_patterns": ["mine*"], "allowed_actions": ["read"]}]})),
+        (Method::PUT, format!("{api}/internalusers/lim"), json!({"password": "Zq7-unrelated-Pw!93", "opendistro_security_roles": ["limited"]})),
+        (Method::PUT, format!("{api}/roles/searcher"), json!({"index_permissions": [{"index_patterns": ["mine*", "secret"], "allowed_actions": ["manage_aliases"]}, {"index_patterns": ["mine*"], "allowed_actions": ["search"]}]})),
+        (Method::PUT, format!("{api}/internalusers/srch"), json!({"password": "Zq7-unrelated-Pw!93", "opendistro_security_roles": ["searcher"]})),
+    ] {
+        let (s, v) = e.es(&u, &p, m, &path, Some(body)).await;
+        assert!(s < 300, "{path}: {v}");
+    }
+    let (s, v) = e.es("lim@rno", "Zq7-unrelated-Pw!93", Method::PUT, "/mine/_alias/mine-x", Some(json!({"index": "secret"}))).await;
+    assert_eq!(s, 403, "{v}");
+    assert_eq!(e.es("lim@rno", "Zq7-unrelated-Pw!93", Method::GET, "/mine-x/_search", None).await.0, 404, "no alias was made");
+    // Compared by action, so the `search` action group counts as much as `read`.
+    let (s, v) = e.es("srch@rno", "Zq7-unrelated-Pw!93", Method::PUT, "/secret/_alias/mine-s", None).await;
+    assert_eq!(s, 403, "{v}");
+    assert_eq!(e.es("srch@rno", "Zq7-unrelated-Pw!93", Method::POST, "/mine-s/_search", None).await.0, 404, "no alias was made");
+}
+
 /// Runs `POST {path}?wait_for_completion=false` as the cluster's owner and waits for its result
 /// to be stored in `.tasks`.
 async fn stored_task(e: &Env, u: &str, p: &str, path: &str, body: Value) -> String {
@@ -7470,8 +7661,9 @@ async fn index_apis_authorize_the_indices_their_wildcards_reach() {
 
 /// Elasticsearch: what reads or writes beyond the request's own indices takes the caller's
 /// privileges there. A local ES|QL `ENRICH` needs `monitor_enrich` (its policy's table is read
-/// by the system); a connector aimed at another index needs write there (its syncs write as
-/// whoever aimed it); SQL's `SHOW TABLES` lists only what the caller may read.
+/// by the system); a connector aimed at another index takes only `manage_connector`, as in
+/// Elasticsearch, and its syncs then write as whoever aimed it (so as them, refused where they
+/// may not write); SQL's `SHOW TABLES` lists only what the caller may read.
 #[tokio::test]
 async fn enrich_connectors_and_show_tables_take_the_callers_privileges() {
     use reqwest::Method;
@@ -7498,12 +7690,16 @@ async fn enrich_connectors_and_show_tables_take_the_callers_privileges() {
     let (s, v) = e.es(user, "u-password-1", Method::POST, "/_query", Some(enrich)).await;
     assert_eq!(s, 403, "{v}");
     assert!(v.to_string().contains("resolve_policy") && !v.to_string().contains("s-of-b"), "{v}");
+    let syncs_as = || {
+        let st = e.control.node.get_loaded("indirect").unwrap().cluster.state();
+        st.metadata.xpack.get(search_es::xpack::entsearch::sync::RECORDS, "c1").and_then(|r| r.pointer(&["user", "username"]).cloned())
+    };
+    assert_eq!(syncs_as(), None, "aimed by the cluster's owner: its syncs run as the cluster's own");
     let (s, v) = e.es(user, "u-password-1", Method::PUT, "/_connector/c1/_index_name", Some(json!({"index_name": "content-b"}))).await;
-    assert_eq!(s, 403, "aimed at another index: {v}");
+    assert_eq!(s, 200, "aimed at another index: {v}");
+    assert_eq!(syncs_as(), Some(search_es::json::Value::from("u")), "its syncs write as whoever aimed it");
     let (s, v) = e.es(user, "u-password-1", Method::PUT, "/_connector/c1", Some(json!({"index_name": "content-b", "is_native": false}))).await;
-    assert_eq!(s, 403, "put again, aimed at another index: {v}");
-    let (_, v) = e.es(&owner, &pw, Method::GET, "/_connector/c1", None).await;
-    assert_eq!(v["index_name"], "content-a", "{v}");
+    assert_eq!(s, 200, "put again, aimed at another index: {v}");
     let (s, v) = e.es(user, "u-password-1", Method::POST, "/_sql?format=json", Some(json!({"query": "SHOW TABLES"}))).await;
     assert_eq!(s, 200, "{v}");
     let names: Vec<&str> = v["rows"].as_array().unwrap().iter().filter_map(|r| r[1].as_str()).collect();
@@ -7788,4 +7984,147 @@ async fn evaluate_scores_an_applications_variant_offline() {
     assert!(s == 400 && v.to_string().contains("indices/shop/evaluate"), "{s} {v}");
     let (s, v) = e.call(Method::POST, &format!("/v1/search/clusters/{id}/indices/shop/evaluate"), Some(json!({"judgments": judgments, "configurations": [{"name": "x", "application": "shop", "variant": {"experiment": "e1", "variant": "nope"}}]}))).await;
     assert!(s == 400 && v.to_string().contains("no variant [nope]"), "{s} {v}");
+}
+
+/// The OTLP intake: an `otel` key writes logs over OTLP/HTTP in JSON and in protobuf (gzip'd, as
+/// a Collector sends them) into OpenTelemetry's data streams, as OTel-native documents, and can't
+/// read them back; a read key's records are refused with the cluster's 403.
+#[tokio::test]
+async fn otlp_logs_land_in_otel_data_streams_with_an_otel_key() {
+    use reqwest::Method;
+    let e = env().await;
+    let c = e.post("/v1/search/clusters", json!({"name": "otel"})).await;
+    let (u, p) = creds(&c);
+    let id = c["id"].as_str().unwrap().to_string();
+    let (s, v) = e.call(Method::POST, &format!("/v1/search/clusters/{id}/keys"), Some(json!({"name": "collector", "access": "otel", "indices": ["x"]}))).await;
+    assert!(s == 400 && v.to_string().contains("takes no indices"), "{s} {v}");
+    let (s, v) = e.call(Method::POST, &format!("/v1/search/clusters/{id}/keys"), Some(json!({"name": "collector", "access": "otel"}))).await;
+    assert_eq!(s, 200, "{v}");
+    let key = v["api_key"].as_str().unwrap().to_string();
+    let url = format!("{}/_otlp/v1/logs", e.es);
+
+    let json_logs = json!({"resourceLogs": [{"resource": {"attributes": [{"key": "service.name", "value": {"stringValue": "checkout"}}]},
+        "scopeLogs": [{"scope": {"name": "app"}, "logRecords": [{"timeUnixNano": "1700000000000000000", "severityText": "INFO", "severityNumber": 9,
+        "body": {"stringValue": "paid order 42"}, "attributes": [{"key": "order.id", "value": {"intValue": "42"}}]}]}]}]});
+    let r = e.http.post(&url).header("authorization", format!("ApiKey {key}")).json(&json_logs).send().await.unwrap();
+    assert_eq!((r.status().as_u16(), r.text().await.unwrap()), (200, "{}".to_string()));
+
+    // The same shape in protobuf: ExportLogsServiceRequest { resource_logs { scope_logs { log_records {
+    // time_unix_nano, body { string_value }, attributes { data_stream.dataset = "web" } } } } }.
+    fn ld(n: u8, b: &[u8]) -> Vec<u8> {
+        let mut out = vec![n << 3 | 2];
+        let mut len = b.len();
+        loop {
+            let byte = (len & 0x7f) as u8;
+            len >>= 7;
+            if len == 0 {
+                out.push(byte);
+                break;
+            }
+            out.push(byte | 0x80);
+        }
+        out.extend_from_slice(b);
+        out
+    }
+    let mut time = vec![1 << 3 | 1];
+    time.extend_from_slice(&1_700_000_001_000_000_000u64.to_le_bytes());
+    let attr = [ld(1, b"data_stream.dataset"), ld(2, &ld(1, b"web"))].concat();
+    let record = [time, ld(5, &ld(1, b"GET /cart 200")), ld(6, &attr)].concat();
+    let request = ld(1, &ld(2, &ld(2, &record)));
+    let gz = {
+        use std::io::Write;
+        let mut w = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        w.write_all(&request).unwrap();
+        w.finish().unwrap()
+    };
+    let r = e
+        .http
+        .post(&url)
+        .header("authorization", format!("ApiKey {key}"))
+        .header("content-type", "application/x-protobuf")
+        .header("content-encoding", "gzip")
+        .body(gz)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 200);
+    assert_eq!(r.headers().get("content-type").and_then(|h| h.to_str().ok()), Some("application/x-protobuf"));
+    assert!(r.bytes().await.unwrap().is_empty(), "nothing rejected");
+
+    assert_eq!(e.es(&u, &p, Method::POST, "/logs-*.otel-*/_refresh", None).await.0, 200);
+    let (s, v) = e.es(&u, &p, Method::POST, "/logs-*.otel-*/_search", Some(json!({"sort": ["@timestamp"]}))).await;
+    assert_eq!(s, 200, "{v}");
+    let hits = v["hits"]["hits"].as_array().unwrap();
+    assert_eq!(hits.len(), 2, "{v}");
+    assert_eq!(hits[0]["_source"]["body"]["text"], "paid order 42", "{v}");
+    assert_eq!(hits[0]["_source"]["resource"]["attributes"]["service.name"], "checkout", "{v}");
+    assert!(hits[0]["_index"].as_str().unwrap().contains("logs-generic.otel-default"), "{v}");
+    assert!(hits[1]["_index"].as_str().unwrap().contains("logs-web.otel-default"), "{v}");
+    // Traces too: a span into traces-*.otel-*, its event a log line beside it.
+    let trace = json!({"resourceSpans": [{"scopeSpans": [{"spans": [{"traceId": "abababababababababababababababab", "spanId": "0101010101010101",
+        "name": "GET /cart", "kind": 2, "startTimeUnixNano": "1700000002000000000", "endTimeUnixNano": "1700000002250000000",
+        "events": [{"timeUnixNano": "1700000002100000000", "name": "exception"}]}]}]}]});
+    let r = e.http.post(format!("{}/_otlp/v1/traces", e.es)).header("authorization", format!("ApiKey {key}")).json(&trace).send().await.unwrap();
+    assert_eq!((r.status().as_u16(), r.text().await.unwrap()), (200, "{}".to_string()));
+    assert_eq!(e.es(&u, &p, Method::POST, "/traces-*.otel-*,logs-*.otel-*/_refresh", None).await.0, 200);
+    let (_, v) = e.es(&u, &p, Method::POST, "/traces-*.otel-*/_search", None).await;
+    assert_eq!((&v["hits"]["hits"][0]["_source"]["duration"], &v["hits"]["hits"][0]["_source"]["kind"]), (&json!(250000000), &json!("Server")), "{v}");
+    let (_, v) = e.es(&u, &p, Method::POST, "/logs-*.otel-*/_search", Some(json!({"query": {"term": {"event_name": "exception"}}}))).await;
+    assert_eq!(v["hits"]["hits"][0]["_source"]["trace_id"], "abababababababababababababababab", "{v}");
+    // The key writes and never reads (a wildcard would just find nothing it may read).
+    let (s, v) = as_key(&e, &key, Method::POST, "/logs-generic.otel-default/_search", None).await;
+    assert_eq!(s, 403, "{v}");
+    // A read key's records are refused, not half-written.
+    let (_, v) = e.call(Method::POST, &format!("/v1/search/clusters/{id}/keys"), Some(json!({"name": "reader", "access": "read"}))).await;
+    let reader = v["api_key"].as_str().unwrap().to_string();
+    let r = e.http.post(&url).header("authorization", format!("ApiKey {reader}")).json(&json_logs).send().await.unwrap();
+    let (status, text) = (r.status().as_u16(), r.text().await.unwrap());
+    assert_eq!(e.es(&u, &p, Method::POST, "/logs-*.otel-*/_refresh", None).await.0, 200);
+    let (_, v) = e.es(&u, &p, Method::POST, "/logs-*.otel-*/_count", None).await;
+    // Two log records and the trace's event; the read key's write added nothing.
+    assert_eq!((status, &v["count"]), (403, &json!(3)), "the read key's write: {text}");
+}
+
+/// `cluster.max_shards_per_node`: creating or opening past it is refused with Elasticsearch's
+/// error, closed indices don't count, and a key that may only create documents (an `otel` key
+/// through OTLP) can't add data streams past it.
+#[tokio::test]
+async fn the_shard_limit_holds_for_creates_opens_and_otel_keys() {
+    use reqwest::Method;
+    let e = env().await;
+    let c = e.post("/v1/search/clusters", json!({"name": "shards"})).await;
+    let (u, p) = creds(&c);
+    let id = c["id"].as_str().unwrap().to_string();
+    // The key first: whatever system index it needs is made before the limit is reached.
+    let (_, v) = e.call(Method::POST, &format!("/v1/search/clusters/{id}/keys"), Some(json!({"name": "collector", "access": "otel"}))).await;
+    let key = v["api_key"].as_str().unwrap().to_string();
+    // Shards open now (system indices included), then room for exactly two more indices.
+    let (_, v) = e.es(&u, &p, Method::GET, "/_cat/indices?format=json&expand_wildcards=all&h=pri,rep,status", None).await;
+    let open: u64 = v.as_array().unwrap().iter().filter(|i| i["status"] == "open").map(|i| {
+        let n = |k: &str| i[k].as_str().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+        n("pri") * (1 + n("rep"))
+    }).sum();
+    let max = open + 4;
+    let (s, v) = e.es(&u, &p, Method::PUT, "/_cluster/settings", Some(json!({"persistent": {"cluster.max_shards_per_node": max}}))).await;
+    assert_eq!(s, 200, "{v}");
+    // One primary and one replica each: two indices fill it.
+    for name in ["a", "b"] {
+        assert_eq!(e.es(&u, &p, Method::PUT, &format!("/{name}"), None).await.0, 200, "{name}");
+    }
+    let (s, v) = e.es(&u, &p, Method::PUT, "/c", None).await;
+    assert_eq!((s, &v["error"]["type"]), (400, &json!("validation_exception")), "{v}");
+    let expected = format!("this action would add [2] shards, but this cluster currently has [{max}]/[{max}] maximum normal shards open");
+    assert!(v["error"]["reason"].as_str().unwrap().contains(&expected), "{v}");
+    // A closed index's shards don't count; opening it again would pass the limit.
+    assert_eq!(e.es(&u, &p, Method::POST, "/a/_close", None).await.0, 200);
+    assert_eq!(e.es(&u, &p, Method::PUT, "/c", None).await.0, 200);
+    let (s, v) = e.es(&u, &p, Method::POST, "/a/_open", None).await;
+    assert_eq!((s, &v["error"]["type"]), (400, &json!("validation_exception")), "{v}");
+    // The otel key's records for a new data stream are refused, not created.
+    let logs = json!({"resourceLogs": [{"scopeLogs": [{"logRecords": [{"body": {"stringValue": "x"}}]}]}]});
+    let r = e.http.post(format!("{}/_otlp/v1/logs", e.es)).header("authorization", format!("ApiKey {key}")).json(&logs).send().await.unwrap();
+    let (status, text) = (r.status().as_u16(), r.text().await.unwrap());
+    assert!(status == 200 && text.contains("maximum normal shards open"), "{status} {text}");
+    let (_, v) = e.es(&u, &p, Method::GET, "/_data_stream/logs-*", None).await;
+    assert_eq!(v["data_streams"], json!([]), "no data stream was made: {v}");
 }

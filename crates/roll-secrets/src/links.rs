@@ -179,6 +179,19 @@ pub trait LinkProvider: Send + Sync {
         let _ = link;
         true
     }
+    /// Each credential issued ends the one before it at the product (a self-rotating vendor's
+    /// key): the newest is the only one that keeps working, so a rotation that lost a race to
+    /// another is stored anyway, never revoked.
+    fn supersedes(&self, link: &Link) -> bool {
+        let _ = link;
+        false
+    }
+    /// The write storing what [`LinkProvider::issue`] answered with `handle` committed or
+    /// failed: what the issue held until then (a self-rotating vendor's claim on its
+    /// registration) can go.
+    fn settled(&self, r#ref: &str, handle: &Json) {
+        let _ = (r#ref, handle);
+    }
     /// Keep a dynamic credential working until `until` (unix ms): a lease was renewed. Only a
     /// product that enforces an expiry of its own needs this (a Postgres role's `VALID UNTIL`);
     /// for the rest, roll's lease is the expiry.

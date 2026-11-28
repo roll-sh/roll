@@ -12,7 +12,11 @@ describe("a project's tokens as roll-access grants", () => {
       ip_allow: ["203.0.113.0/24"],
     });
     const grant: Grant = { id: "tok_1", name: "ci", kind: "token", rules: g.rules, expires_at: g.expires_at ?? null, ip_allow: g.ip_allow ?? [], created_by: "operator", created_at: 1, last_used_at: null, last_used_ip: null, revoked_at: null };
-    expect(tokenOf(grant, "prj_a")).toMatchObject({ id: "tok_1", environments: ["production"], paths: ["/api"], actions: ["read", "reveal"], allowed_ips: ["203.0.113.0/24"] });
+    expect(tokenOf(grant, "prj_a")).toMatchObject({ id: "tok_1", environments: ["production"], paths: ["/api"], actions: ["read", "reveal"], allowed_ips: ["203.0.113.0/24"], only_keys: null });
+    // Only some keys of those folders.
+    const keyed = grantFor("prj_a", { name: "stripe", environments: ["production"], only_keys: ["STRIPE_KEY"], actions: ["reveal"] });
+    expect(keyed.rules[0].keys).toEqual(["STRIPE_KEY"]);
+    expect(tokenOf({ ...grant, rules: keyed.rules }, "prj_a").only_keys).toEqual(["STRIPE_KEY"]);
     // A rule on another project (or one only asking) reaches nothing here.
     expect(tokenOf({ ...grant, rules: [{ ...g.rules[0], resources: [{ project: "prj_b" }] }] }, "prj_a").actions).toEqual([]);
     // Named by id (as the builder writes it), perhaps only some encryption keys; or everything.

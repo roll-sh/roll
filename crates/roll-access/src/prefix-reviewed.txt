@@ -188,6 +188,8 @@ POST /v1/previews/{id}/restore-points
 DELETE /v1/previews/{id}/restore-points/{point}
 GET /v1/previews/{id}/notes
 POST /v1/previews/{id}/notes/{note}/resolve
+POST /v1/previews/{id}/notes/{note}/work
+POST /v1/previews/{id}/replay
 GET /v1/previews/{id}/notes/{note}/crop
 GET /v1/previews/{id}/logs
 POST /v1/previews/{id}/refresh
@@ -239,7 +241,6 @@ DELETE /v1/secrets/projects/{project}/environments/{env}
 GET /v1/secrets/projects/{project}/environments/{env}
 PUT /v1/secrets/projects/{project}/environments/{env}
 GET /v1/secrets/projects/{project}/environments/{env}/changes
-POST /v1/secrets/projects/{project}/environments/{env}/changes
 GET /v1/secrets/projects/{project}/environments/{env}/changes/{seq}
 GET /v1/secrets/projects/{project}/environments/{env}/deletion
 GET /v1/secrets/projects/{project}/environments/{env}/digest
@@ -255,7 +256,6 @@ GET /v1/secrets/projects/{project}/environments/{env}/requests/{id}
 POST /v1/secrets/projects/{project}/environments/{env}/requests/{id}/apply
 POST /v1/secrets/projects/{project}/environments/{env}/requests/{id}/close
 POST /v1/secrets/projects/{project}/environments/{env}/rollback
-GET /v1/secrets/projects/{project}/environments/{env}/secrets
 DELETE /v1/secrets/projects/{project}/environments/{env}/secrets/{key}
 GET /v1/secrets/projects/{project}/environments/{env}/secrets/{key}
 PUT /v1/secrets/projects/{project}/environments/{env}/secrets/{key}

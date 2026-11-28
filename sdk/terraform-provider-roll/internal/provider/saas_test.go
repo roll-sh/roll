@@ -25,6 +25,7 @@ const (
 // (a PATCH, so linked keys keep working) with its end date, another target replacing it, imported;
 // the credential never in the plan or the state.
 func TestSaasRotatorAsCode(t *testing.T) {
+	t.Parallel()
 	f := &fakeRolld{envs: map[string]*environment{}, keys: map[string]map[string]any{}, identities: map[string]map[string]any{}, syncs: map[string]map[string]any{}, tokens: map[string]map[string]any{}}
 	srv := httptest.NewServer(f)
 	defer srv.Close()
@@ -147,6 +148,7 @@ resource "roll_secrets_saas_rotator" "gitlab" {
 // A folder's change policy, and an environment's approvals and approvers, as code: approvers the
 // dashboard set stay when Terraform doesn't name them.
 func TestFolderPolicyAndApprovalsAsCode(t *testing.T) {
+	t.Parallel()
 	f := &fakeRolld{envs: map[string]*environment{}, keys: map[string]map[string]any{}, identities: map[string]map[string]any{}, syncs: map[string]map[string]any{}, tokens: map[string]map[string]any{}}
 	srv := httptest.NewServer(f)
 	defer srv.Close()

@@ -318,7 +318,8 @@ export interface SearchUsage {
 
 /** What an API key may do: `data` is an app's role (every index, templates, pipelines and
  * lifecycle policies, no security); `admin` is everything the cluster's own user may do. */
-export type KeyAccess = "data" | "admin";
+/** `otel`: an OpenTelemetry Collector's key for the OTLP intake (OTel's data streams, write only). */
+export type KeyAccess = "data" | "admin" | "otel";
 
 /** A new API key (`POST …/keys`), shown once: `api_key` for `Authorization: ApiKey …`, or on an
  * OpenSearch-flavor cluster an internal user's `username` and `password`. */

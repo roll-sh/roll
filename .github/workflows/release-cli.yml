@@ -1,14 +1,21 @@
 name: release-cli
 
-# Builds the `roll` CLI for Linux, macOS and Windows (x86_64 and aarch64) when a `cli-v*` tag is
-# pushed, and publishes the tarballs, the Windows zips and their SHA256SUMS as a GitHub release,
-# which apps/dashboard/public/install.sh (https://roll.sh/install.sh) and install.ps1
-# (https://roll.sh/install.ps1) install from, with the winget and Scoop manifests filled in for it
-# (deploy/cli/render.sh).
+# Builds the `roll` CLI for Linux, macOS and Windows (x86_64 and aarch64) and `rolld` for Linux
+# (x86_64 and aarch64) and Apple silicon macOS when a `cli-v*` tag is pushed, and publishes the
+# tarballs, the Windows zips and one SHA256SUMS over all of them as a GitHub release, which
+# apps/dashboard/public/install.sh (https://roll.sh/install.sh; rolld with `--with-rolld`) and
+# install.ps1 (https://roll.sh/install.ps1) install from, with the winget and Scoop manifests filled
+# in for it (deploy/cli/render.sh).
+#
+# rolld is here rather than in a workflow of its own so that one release job writes one
+# SHA256SUMS: two workflows on one tag would race to create the release and each upload a
+# SHA256SUMS missing the other's files. It has no Windows build: rolld and its stores call Unix APIs
+# directly (rlimits, hostnames, file modes, `std::os::unix`) in many crates.
 #
 # `windows-check` (cargo check for Windows, and sys.rs's Windows-only unit tests, on both runners)
 # runs on pull requests that touch roll-cli and on a dispatch without a tag, which builds and
-# publishes nothing. It isn't part of the merge gate (ci.yml).
+# publishes nothing. A dispatch without a tag also builds and starts rolld on every target
+# (`rolld`), uploading nothing. Neither is part of the merge gate (ci.yml).
 
 on:
   push:
@@ -81,7 +88,7 @@ jobs:
           - target: x86_64-apple-darwin
             runner: macos-15-intel
           - target: aarch64-apple-darwin
-            runner: macos-14
+            runner: macos-15
           - target: x86_64-pc-windows-msvc
             runner: windows-latest
           - target: aarch64-pc-windows-msvc
@@ -130,9 +137,80 @@ jobs:
           path: roll-${{ matrix.target }}.*
           if-no-files-found: error
 
+  # rolld for Linux and Apple silicon macOS: the same runners, caching and release profile as the
+  # CLI, no features. Its smoke test starts it as docs/secrets/getting-started.md's step 0 does.
+  # No Intel macOS build: on macos-15-intel the release build didn't finish in 150 minutes (rolld's
+  # own crate alone ran past 100 minutes of thin LTO), so Intel Macs build it from a clone.
+  rolld:
+    if: github.event_name != 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-22.04-arm
+          - target: aarch64-apple-darwin
+            runner: macos-15
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.TAG }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-rolld-${{ matrix.target }}
+      - name: Build
+        run: cargo build --release --locked -p rolld --bin rolld --target ${{ matrix.target }}
+      - name: Smoke test
+        run: |
+          bin=target/${{ matrix.target }}/release/rolld
+          "$bin" --version
+          work=$(mktemp -d)
+          token=$(openssl rand -hex 32)
+          ROLL_SECRET_KEY=$(openssl rand -hex 32) ROLL_ADMIN_TOKEN=$token ROLL_HOME="$work/home" ROLL_PRODUCTS=tasks \
+            "$bin" --api 127.0.0.1:0 --addr-file "$work/addr" >"$work/log" 2>&1 &
+          pid=$!
+          for _ in $(seq 120); do [[ -s $work/addr ]] && break; kill -0 "$pid" 2>/dev/null || break; sleep 1; done
+          api=$(sed -n 's/.*"api":"\([^"]*\)".*/\1/p' "$work/addr" 2>/dev/null || true)
+          ok=0
+          # The token opens it, and nothing opens it without one.
+          [[ -n $api ]] && curl -fsS -H "Authorization: Bearer $token" "http://$api/v1/secrets/health" &&
+            [[ $(curl -s -o /dev/null -w '%{http_code}' "http://$api/v1/secrets/health") == 401 ]] && ok=1
+          kill "$pid" 2>/dev/null || true
+          wait "$pid" 2>/dev/null || true
+          [[ $ok == 1 ]] || { cat "$work/log"; exit 1; }
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/rolld dist/rolld
+          strip dist/rolld || true
+          tar -C dist -czf rolld-${{ matrix.target }}.tar.gz rolld
+          ls -l rolld-${{ matrix.target }}.tar.gz
+      - uses: actions/upload-artifact@v4
+        if: github.event_name == 'push' || inputs.tag != ''
+        with:
+          name: rolld-${{ matrix.target }}
+          path: rolld-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+
   release:
-    needs: build
+    needs: [build, rolld]
     runs-on: ubuntu-latest
+    # Build provenance for every asset, signed with this workflow's OIDC identity and kept by
+    # GitHub, not in the release: whoever could replace an asset (and SHA256SUMS with it) can't
+    # make an attestation for it, and install.sh checks it with `gh attestation verify`.
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@v5
         with:
@@ -141,13 +219,23 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
-          pattern: roll-*
+          pattern: roll*-*
           merge-multiple: true
       - name: Checksums
         run: |
           cd artifacts
-          sha256sum roll-*.tar.gz roll-*.zip > SHA256SUMS
+          sha256sum roll-*.tar.gz roll-*.zip rolld-*.tar.gz > SHA256SUMS
           cat SHA256SUMS
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-checksums: artifacts/SHA256SUMS
+      - name: Check the attestation as install.sh does
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for f in artifacts/roll-x86_64-unknown-linux-gnu.tar.gz artifacts/rolld-x86_64-unknown-linux-gnu.tar.gz; do
+            gh attestation verify "$f" --repo "${{ github.repository }}" --signer-workflow "${{ github.repository }}/.github/workflows/release-cli.yml"
+          done
       - name: winget and Scoop manifests
         run: deploy/cli/render.sh "$TAG" artifacts/SHA256SUMS artifacts
       - name: Publish the release
@@ -159,5 +247,5 @@ jobs:
             gh release upload "$TAG" artifacts/* --clobber
           else
             gh release create "$TAG" artifacts/* --title "roll CLI ${TAG#cli-v}" \
-              --notes "Install with \`curl -fsSL https://roll.sh/install.sh | sh\`, or on Windows \`irm https://roll.sh/install.ps1 | iex\` (both check SHA256SUMS), or download a tarball or zip below. \`roll.json\` is the Scoop manifest (\`scoop install <its URL>\`); \`roll-winget.zip\` holds the winget manifests."
+              --notes "Install with \`curl -fsSL https://roll.sh/install.sh | sh\`, or on Windows \`irm https://roll.sh/install.ps1 | iex\` (both check SHA256SUMS, and each download's build provenance with \`gh attestation verify\` when gh is logged in), or download a tarball or zip below. \`rolld-*.tar.gz\` is the roll daemon for Linux and Apple silicon macOS (\`curl -fsSL https://roll.sh/install.sh | sh -s -- --with-rolld\` installs it too). \`roll.json\` is the Scoop manifest (\`scoop install <its URL>\`); \`roll-winget.zip\` holds the winget manifests."
           fi

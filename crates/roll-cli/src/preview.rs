@@ -211,8 +211,11 @@ pub enum Preview {
     /// (the page's button stops listing it).
     Notes {
         preview: String,
-        #[arg(long)]
+        #[arg(long, conflicts_with = "work")]
         resolve: Option<String>,
+        /// Make the note a work item on the change's repo (once; prints its number).
+        #[arg(long)]
+        work: Option<String>,
     },
     /// Its restore points (its Postgres data saved, to put back later): --save [label] one now,
     /// --restore <point> to put the data back as that point left it, --delete <point>.
@@ -229,6 +232,9 @@ pub enum Preview {
     /// fresh branches, masked as the rules say, the release run on them, then deleted. Its next
     /// converge does it; `show` says how it went.
     Rehearse { preview: String },
+    /// Replay the change's preview's recent GETs (its and main's request logs) against main's
+    /// preview, and say which answered differently: another status, or JSON fields gone.
+    Replay { preview: String },
     /// Re-branch its data from the parents (every resource, or the ones named).
     Reset {
         preview: String,
@@ -1256,12 +1262,17 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
             }
             v
         }
-        Preview::Notes { preview, resolve } => {
-            let v = match &resolve {
-                Some(note) => api.post(&format!("/v1/previews/{preview}/notes/{note}/resolve"), json!({})).await?,
-                None => api.get(&format!("/v1/previews/{preview}/notes")).await?,
+        Preview::Notes { preview, resolve, work } => {
+            let v = match (&resolve, &work) {
+                (Some(note), _) => api.post(&format!("/v1/previews/{preview}/notes/{note}/resolve"), json!({})).await?,
+                (None, Some(note)) => api.post(&format!("/v1/previews/{preview}/notes/{note}/work"), json!({})).await?,
+                (None, None) => api.get(&format!("/v1/previews/{preview}/notes")).await?,
             };
             if !as_json {
+                if work.is_some() {
+                    println!("work item #{}  {}", v["number"].as_u64().unwrap_or(0), s(&v["url"]));
+                    return Ok(());
+                }
                 match (&resolve, v["notes"].as_array()) {
                     (Some(note), _) => println!("resolved {note}"),
                     (None, Some(list)) if !list.is_empty() => list.iter().for_each(|n| {
@@ -1301,6 +1312,33 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
         }
         Preview::Reset { preview, resources } => api.post(&format!("/v1/previews/{preview}/reset"), json!({ "resources": resources })).await?,
         Preview::Rehearse { preview } => api.post(&format!("/v1/previews/{preview}/rehearse"), json!({})).await?,
+        Preview::Replay { preview } => {
+            api.post(&format!("/v1/previews/{preview}/replay"), json!({})).await?;
+            // In the background: its outcome on the preview once it's done (2 minutes at most).
+            let mut v = Value::Null;
+            for _ in 0..240 {
+                v = api.get(&format!("/v1/previews/{preview}")).await?["replay"].clone();
+                if !v["ok"].is_null() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+            if !as_json {
+                if let Some(e) = v["error"].as_str() {
+                    println!("couldn't replay: {e}");
+                    return Ok(());
+                }
+                let all = v["requests"].as_array().cloned().unwrap_or_default();
+                let differ: Vec<&Value> = all.iter().filter(|q| q["status"] != q["main_status"] || q["removed"].as_array().is_some_and(|r| !r.is_empty())).collect();
+                println!("{} of {} answered differently from main's preview", differ.len(), all.len());
+                for q in differ {
+                    let lost: Vec<String> = q["removed"].as_array().into_iter().flatten().map(s).collect();
+                    println!("  {}  {} (main {}){}", s(&q["path"]), q["status"], q["main_status"], if lost.is_empty() { String::new() } else { format!("  lost {}", lost.join(", ")) });
+                }
+                return Ok(());
+            }
+            v
+        }
         Preview::Points { preview, save, restore, delete } => {
             let base = format!("/v1/previews/{preview}/restore-points");
             let (v, said) = match (save, restore, delete) {

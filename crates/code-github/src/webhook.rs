@@ -60,6 +60,9 @@ pub enum Event {
     CheckRun(Box<CheckRunEvent>),
     /// A commit status was set (`status`).
     Status(Box<StatusEvent>),
+    /// A repository was made public (`public`, `repository` `publicized`) or private
+    /// (`repository` `privatized`), with no push needed to tell.
+    Visibility(Box<VisibilityEvent>),
     /// An event or action roll doesn't act on.
     Ignored {
         event: String,
@@ -310,6 +313,25 @@ pub struct CheckApp {
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct CheckPull {
     pub number: u64,
+}
+
+/// A repository's visibility change. `private` comes from the event, not the payload's
+/// `repository.private`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct VisibilityEvent {
+    pub private: bool,
+    pub repository: Repository,
+    pub installation: Option<Installation>,
+    pub sender: Option<User>,
+}
+
+#[derive(Deserialize)]
+struct VisibilityPayload {
+    repository: Repository,
+    #[serde(default)]
+    installation: Option<Installation>,
+    #[serde(default)]
+    sender: Option<User>,
 }
 
 /// A commit status (`POST /repos/…/statuses/{sha}` by a CI).
@@ -606,6 +628,15 @@ impl Event {
             }
             "check_run" if a == "completed" || a == "requested_action" => Event::CheckRun(Box::new(decode(event, value)?)),
             "status" => Event::Status(Box::new(decode(event, value)?)),
+            "public" | "repository" => {
+                let private = match (event, a) {
+                    ("public", _) | (_, "publicized") => false,
+                    (_, "privatized") => true,
+                    _ => return Ok(ignored()),
+                };
+                let p: VisibilityPayload = decode(event, value)?;
+                Event::Visibility(Box::new(VisibilityEvent { private, repository: p.repository, installation: p.installation, sender: p.sender }))
+            }
             _ => ignored(),
         })
     }
@@ -624,6 +655,7 @@ impl Event {
             Event::PullRequestReviewThread(e) => e.installation.as_ref().map(|i| i.id),
             Event::CheckRun(e) => e.installation.as_ref().map(|i| i.id),
             Event::Status(e) => e.installation.as_ref().map(|i| i.id),
+            Event::Visibility(e) => e.installation.as_ref().map(|i| i.id),
             Event::Ping { .. } | Event::Ignored { .. } => None,
         }
     }
@@ -640,6 +672,7 @@ impl Event {
             Event::PullRequestReviewThread(e) => Some(&e.repository),
             Event::CheckRun(e) => Some(&e.repository),
             Event::Status(e) => Some(&e.repository),
+            Event::Visibility(e) => Some(&e.repository),
             _ => None,
         }
     }
@@ -654,6 +687,7 @@ impl Event {
             Event::PullRequestReview(e) => e.sender.as_ref(),
             Event::PullRequestReviewComment(e) => e.sender.as_ref(),
             Event::PullRequestReviewThread(e) => e.sender.as_ref(),
+            Event::Visibility(e) => e.sender.as_ref(),
             _ => None,
         }
     }

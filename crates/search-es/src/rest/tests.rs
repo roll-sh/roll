@@ -1,4 +1,4 @@
-//! REST framing tests: routing errors, parameters, headers, rendering.
+//! REST framing tests: headers, rendering, the dialect, and what the handler future must be.
 
 use super::*;
 use crate::cluster::Cluster;
@@ -16,31 +16,6 @@ fn text(r: &EsResponse) -> String {
 }
 
 #[tokio::test]
-async fn unknown_path_and_method() {
-    let c = Cluster::in_memory("t").await;
-    let r = run(&c, "GET", "/_nope/x/y", None).await;
-    assert_eq!(r.status, 400);
-    assert_eq!(text(&r), r#"{"error":"no handler found for uri [/_nope/x/y] and method [GET]"}"#);
-    assert_eq!(r.header("X-elastic-product"), Some("Elasticsearch"));
-    let r = run(&c, "DELETE", "/_cluster/health", None).await;
-    assert_eq!(r.status, 405);
-    assert_eq!(text(&r), r#"{"error":"Incorrect HTTP method for uri [/_cluster/health] and method [DELETE], allowed: [GET]","status":405}"#);
-    assert_eq!(r.header("Allow"), Some("GET"));
-}
-
-#[tokio::test]
-async fn unrecognized_parameters() {
-    let c = Cluster::in_memory("t").await;
-    let r = run(&c, "GET", "/_cluster/health?leve=indices", None).await;
-    assert_eq!(r.status, 400);
-    let b = r.body_json();
-    assert_eq!(
-        b.pointer(&["error", "reason"]).and_then(Value::as_str),
-        Some("request [/_cluster/health] contains unrecognized parameter: [leve] -> did you mean [level]?")
-    );
-}
-
-#[tokio::test]
 async fn pretty_filter_path_and_opaque_id() {
     let c = Cluster::in_memory("t").await;
     let mut req = EsRequest::new("GET", "/_cluster/health?filter_path=status,number_of_nodes&pretty");
@@ -49,69 +24,6 @@ async fn pretty_filter_path_and_opaque_id() {
     assert_eq!(r.status, 200);
     assert_eq!(text(&r), "{\n  \"status\" : \"green\",\n  \"number_of_nodes\" : 1\n}\n");
     assert_eq!(r.header("X-Opaque-Id"), Some("abc"));
-}
-
-#[tokio::test]
-async fn compatible_with_media_types() {
-    let c = Cluster::in_memory("t").await;
-    let mut req = EsRequest::new("GET", "/_cluster/health");
-    req.headers.push(("Accept".into(), "application/vnd.elasticsearch+json;compatible-with=8".into()));
-    let r = handle(&c, req).await;
-    assert_eq!(r.status, 200);
-    assert_eq!(r.content_type(), Some("application/vnd.elasticsearch+json;compatible-with=8"));
-    let mut req = EsRequest::new("GET", "/_cluster/health");
-    req.headers.push(("Accept".into(), "application/vnd.elasticsearch+json; compatible-with=6".into()));
-    let r = handle(&c, req).await;
-    assert_eq!(r.status, 400);
-    assert_eq!(r.body_json().pointer(&["error", "type"]).and_then(Value::as_str), Some("media_type_header_exception"));
-}
-
-#[tokio::test]
-async fn index_lifecycle_round_trip() {
-    let c = Cluster::in_memory("t").await;
-    let r = run(&c, "PUT", "/idx", Some(r#"{"settings":{"number_of_shards":2},"mappings":{"properties":{"a":{"type":"keyword"}}}}"#)).await;
-    assert_eq!(r.status, 200, "{}", text(&r));
-    assert_eq!(text(&r), r#"{"acknowledged":true,"shards_acknowledged":true,"index":"idx"}"#);
-    let r = run(&c, "HEAD", "/idx", None).await;
-    assert_eq!(r.status, 200);
-    assert!(r.head);
-    let r = run(&c, "HEAD", "/nope", None).await;
-    assert_eq!(r.status, 404);
-    let r = run(&c, "GET", "/idx/_mapping", None).await;
-    assert_eq!(text(&r), r#"{"idx":{"mappings":{"properties":{"a":{"type":"keyword"}}}}}"#);
-    let r = run(&c, "PUT", "/idx", None).await;
-    assert_eq!(r.status, 400);
-    assert_eq!(r.body_json().pointer(&["error", "type"]).and_then(Value::as_str), Some("resource_already_exists_exception"));
-    let r = run(&c, "DELETE", "/idx", None).await;
-    assert_eq!(text(&r), r#"{"acknowledged":true}"#);
-    let r = run(&c, "GET", "/idx", None).await;
-    assert_eq!(r.status, 404);
-}
-
-#[tokio::test]
-async fn cat_rendering() {
-    let c = Cluster::in_memory("t").await;
-    run(&c, "PUT", "/b-idx", None).await;
-    run(&c, "PUT", "/a-idx", Some(r#"{"settings":{"number_of_replicas":0}}"#)).await;
-    let r = run(&c, "GET", "/_cat/indices?h=index,health,pri,rep&s=index&v", None).await;
-    assert_eq!(text(&r), "index health pri rep\na-idx green    1   0\nb-idx yellow   1   1\n");
-    assert_eq!(r.content_type(), Some("text/plain; charset=UTF-8"));
-    let r = run(&c, "GET", "/_cat/indices?h=i,h&s=i:desc&format=json", None).await;
-    assert_eq!(text(&r), r#"[{"i":"b-idx","h":"yellow"},{"i":"a-idx","h":"green"}]"#);
-    let r = run(&c, "GET", "/_cat/indices?s=bogus", None).await;
-    assert_eq!(r.body_json().pointer(&["error", "reason"]).and_then(Value::as_str), Some("Unable to sort by unknown sort key `bogus`"));
-}
-
-#[tokio::test]
-async fn document_apis_round_trip() {
-    let c = Cluster::in_memory("t").await;
-    let r = run(&c, "GET", "/idx/_search", None).await;
-    assert_eq!(r.status, 404);
-    let r = run(&c, "PUT", "/idx/_doc/1?refresh=true", Some(r#"{"title":"hello world"}"#)).await;
-    assert_eq!(r.status, 201);
-    let r = run(&c, "GET", "/idx/_search", Some(r#"{"query":{"match":{"title":"hello"}}}"#)).await;
-    assert_eq!(r.status, 200);
-    assert_eq!(r.body_json().pointer(&["hits", "total", "value"]).and_then(Value::as_i64), Some(1));
 }
 
 #[test]

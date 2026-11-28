@@ -631,6 +631,10 @@ impl Secrets {
         db.add_column("projects", "leak_rotate", "TEXT")?;
         db.ensure_schema(leaks::SCHEMA)?;
         db.ensure_schema(leaks::SCAN_COUNTS_SCHEMA)?;
+        // Once the name of the scan-only token (a hook's) that last named the pusher; no longer
+        // read or written (break glass asks the token's grant as it is now), kept so a node still
+        // on an older version can write it during an upgrade.
+        db.add_column("scan_pushers", "hook", "TEXT")?;
         db.ensure_schema(guardrails::SCHEMA)?;
         // Who may push past a pre-receive hook (`breakglass`, leaks.rs): a JSON list; NULL is no one.
         db.add_column("projects", "breakglass", "TEXT")?;
@@ -652,6 +656,8 @@ impl Secrets {
         db.ensure_schema(rotators::SCHEMA)?;
         db.ensure_schema(saas::SCHEMA)?;
         db.add_column("saas_rotators", "credential_expires_at", "INTEGER")?;
+        // A self-rotating vendor's rotation in progress (saas.rs, `Provider::self_rotate`).
+        db.add_column("saas_rotators", "rotating_at", "INTEGER")?;
         db.ensure_schema(transit::SCHEMA)?;
         db.ensure_schema(pki::SCHEMA)?;
         // An intermediate CA (pki.rs): its CSR while it's pending, then the certificates above it.
@@ -669,6 +675,10 @@ impl Secrets {
         for (column, decl) in public_certs::ADDED {
             db.add_column("public_certs", column, decl)?;
         }
+        // Route 53 claims are by hosted zone and name: a same-named zone in another account is
+        // another record set (public_certs.rs).
+        db.migrate("secrets-public-cert-dns-claims-by-zone", |c| c.execute_batch("DROP TABLE IF EXISTS public_cert_dns_claims"))?;
+        db.ensure_schema(public_certs::DNS_CLAIMS)?;
         db.ensure_schema(aws::SCHEMA)?;
         // An audit sink's format and its SIEM's token, sealed (sinks.rs): absent is roll's own.
         db.add_column("audit_sinks", "format", "TEXT")?;

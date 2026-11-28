@@ -99,13 +99,36 @@ if [[ $e2e == 1 ]]; then
     (cd "$work/rel/download/cli-v9.9.9" && shasum -a 256 "roll-$target.tar.gz" > SHA256SUMS)
     ROLL_RELEASES="file://$work/rel" ROLL_VERSION=9.9.9 ROLL_INSTALL_DIR="$work/bin" sh apps/dashboard/public/install.sh
     "$work/bin/roll" agent --help >/dev/null
-    rm "$work/bin/roll"
+    [[ ! -e $work/bin/rolld ]]
+    # --with-rolld adds rolld, checked the same way; a rolld that doesn't match installs neither.
+    mkdir -p "$work/pkgd" && printf '#!/bin/sh\necho rolld 9.9.9\n' > "$work/pkgd/rolld"
+    tar -C "$work/pkgd" -czf "$work/rel/download/cli-v9.9.9/rolld-$target.tar.gz" rolld
+    (cd "$work/rel/download/cli-v9.9.9" && shasum -a 256 "roll-$target.tar.gz" "rolld-$target.tar.gz" > SHA256SUMS)
+    ROLL_RELEASES="file://$work/rel" ROLL_VERSION=9.9.9 ROLL_INSTALL_DIR="$work/bin" sh apps/dashboard/public/install.sh --with-rolld
+    [[ $("$work/bin/rolld") == "rolld 9.9.9" ]]
+    rm "$work/bin/roll" "$work/bin/rolld"
+    (cd "$work/rel/download/cli-v9.9.9" && shasum -a 256 "roll-$target.tar.gz" > SHA256SUMS &&
+      echo "0000000000000000000000000000000000000000000000000000000000000000  rolld-$target.tar.gz" >> SHA256SUMS)
+    if ROLL_RELEASES="file://$work/rel" ROLL_VERSION=9.9.9 ROLL_INSTALL_ROLLD=1 ROLL_INSTALL_DIR="$work/bin" sh apps/dashboard/public/install.sh 2>"$work/err"; then
+      echo "agents: install.sh --with-rolld installed a rolld that doesn't match its checksum" >&2
+      exit 1
+    fi
+    grep -q "rolld-$target.tar.gz doesn't match its checksum" "$work/err"
+    [[ ! -e $work/bin/roll && ! -e $work/bin/rolld ]]
     echo "0000000000000000000000000000000000000000000000000000000000000000  roll-$target.tar.gz" > "$work/rel/download/cli-v9.9.9/SHA256SUMS"
     if ROLL_RELEASES="file://$work/rel" ROLL_VERSION=cli-v9.9.9 ROLL_INSTALL_DIR="$work/bin" sh apps/dashboard/public/install.sh 2>"$work/err"; then
       echo "agents: install.sh installed a download that doesn't match its checksum" >&2
       exit 1
     fi
     grep -q "doesn't match its checksum" "$work/err"
+    [[ ! -e $work/bin/roll ]]
+    # A download roll's release workflow didn't attest is refused when provenance is required.
+    (cd "$work/rel/download/cli-v9.9.9" && shasum -a 256 "roll-$target.tar.gz" > SHA256SUMS)
+    if ROLL_VERIFY=attestation ROLL_RELEASES="file://$work/rel" ROLL_VERSION=9.9.9 ROLL_INSTALL_DIR="$work/bin" sh apps/dashboard/public/install.sh 2>"$work/err"; then
+      echo "agents: install.sh installed a download with no build provenance under ROLL_VERIFY=attestation" >&2
+      exit 1
+    fi
+    grep -q "provenance" "$work/err"
     [[ ! -e $work/bin/roll ]]
     echo "agents: install.sh checks out"
   fi

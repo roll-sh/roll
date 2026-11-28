@@ -193,6 +193,21 @@ impl Code {
                 _ => {}
             }
         }
+        // The project's previews check its release at each head (`release_checks = "required"`):
+        // rehearsed on the parents' data as it is now, and main's code on its migrated data
+        // (pgroll's expand/contract), both at its head, before it lands.
+        if let Some(e) = c.preview.as_ref().and_then(|p| p.environment.as_ref()).filter(|e| e.release_checks.as_deref() == Some("required")) {
+            // Settled at its head: main's code on its migrated data runs before a preview settles,
+            // so a report sent while it converges says nothing of it yet.
+            let current = e.head.as_deref().is_none_or(|h| h == c.head) && matches!(e.state.as_str(), "ready" | "sleeping");
+            let broke: Vec<String> = e.main_on_change.as_ref().map(|m| m.broke.iter().take(3).map(|(path, status, _)| format!("{path} ({})", if *status == 0 { "no answer".to_string() } else { status.to_string() })).collect()).unwrap_or_default();
+            match e.rehearsal.as_ref().filter(|_| current) {
+                None | Some(crate::model::PreviewRehearsal { ok: None, .. }) => out.push(Blocker::new("release", "its release hasn't been rehearsed on today's data at its head yet")),
+                Some(crate::model::PreviewRehearsal { ok: Some(false), error, .. }) => out.push(Blocker::new("release", format!("its release failed on today's data: {}", error.as_deref().unwrap_or("see its preview")))),
+                Some(_) if !broke.is_empty() => out.push(Blocker::new("release", format!("main's code breaks on its migrated data: {}: expand first, contract in a later change", broke.join(", ")))),
+                Some(_) => {}
+            }
+        }
         // The project's previews require production's browser checks to pass (`browser_checks =
         // "required"`): failing, still running, or not yet run at its head, it waits.
         if let Some(e) = c.preview.as_ref().and_then(|p| p.environment.as_ref()).filter(|e| e.browser_checks_rule.as_deref() == Some("required")) && !e.browser_checks.is_empty() {

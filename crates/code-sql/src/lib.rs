@@ -35,6 +35,7 @@ pub mod translate;
 mod value;
 
 pub use pg::pg_config;
+pub use sqlite::uncounted_allocations;
 pub use value::{FromValue, Params, ToValue, Value, ValueRef};
 
 use std::path::{Path, PathBuf};

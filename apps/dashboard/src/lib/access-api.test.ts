@@ -80,6 +80,14 @@ describe("the builder", () => {
     expect(draftOf(rules)).toEqual(d);
   });
 
+  it("keeps a secrets rule's keys, and leaves keys on another product's rule as they are", () => {
+    const d = { matrix: { secrets: { reveal: "allow" as const } }, project: "prj_a", environments: ["production"], ids: {}, keys: ["STRIPE_KEY"] };
+    const rules = rulesOf(d);
+    expect(rules).toEqual([{ product: "secrets", resources: [{ project: "prj_a" }], environments: ["production"], keys: ["STRIPE_KEY"], actions: { reveal: "allow" } }]);
+    expect(draftOf(rules)).toEqual(d);
+    expect(draftOf([{ product: "postgres", resources: "*", keys: ["A"], actions: {} }])).toBeNull();
+  });
+
   it("round-trips rules through its matrix, and leaves rules it can't show as they are", () => {
     const rules = [
       { product: "postgres", resources: [{ project: "prj_a" }], environments: ["development"], actions: { read: "allow", delete: "ask" } },
@@ -215,6 +223,8 @@ describe("two-person approvals", () => {
     expect(rememberable({ resource: "prj_a", product: "secrets", scope_path: "/", route: "/v1/apps/services/{id}/environments/{env}/domains/{domain}/configure" })).toBe(false);
     expect(rememberable({ resource: "prj_a", product: "secrets", scope_path: "/dns", route: "/v1/apps/services/{id}/environments/{env}/domains/{domain}/configure" })).toBe(true);
     expect(rememberable({ resource: "prj_a", product: "secrets", scope_path: "/", route: "/v1/secrets/projects/{project}/environments/{env}/values" })).toBe(true);
+    // One naming its key is remembered for that key (8 hours at most at the root).
+    expect(rememberable({ resource: "prj_a", product: "secrets", scope_path: "/", scope_key: "CF_TOKEN", route: "/v1/apps/services/{id}/environments/{env}/domains/{domain}/configure" })).toBe(true);
   });
 });
 

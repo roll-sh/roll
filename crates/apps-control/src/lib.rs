@@ -288,6 +288,8 @@ pub struct Apps {
     preview_router: std::sync::OnceLock<Arc<dyn integrations::PreviewRouter>>,
     /// What writes a customer's DNS records with their token (`…/domains/{host}/configure`).
     dns_writer: std::sync::OnceLock<Arc<dyn integrations::DnsWriter>>,
+    /// roll previews' snapshots from a team's tests (`POST /__roll/snapshot` on a preview).
+    pub(crate) preview_snapshots: std::sync::OnceLock<Arc<dyn integrations::PreviewSnapshots>>,
     /// roll previews' branch pushes ([`Apps::set_git_pushes`]).
     pub(crate) pushes: std::sync::OnceLock<Arc<dyn integrations::GitPushes>>,
     /// roll's GitHub App ([`Apps::set_github_app`]).
@@ -704,6 +706,7 @@ impl Apps {
             shares: std::sync::OnceLock::new(),
             preview_router: std::sync::OnceLock::new(),
             dns_writer: std::sync::OnceLock::new(),
+            preview_snapshots: std::sync::OnceLock::new(),
             pushes: std::sync::OnceLock::new(),
             github: std::sync::OnceLock::new(),
             mail: std::sync::OnceLock::new(),
@@ -1510,7 +1513,16 @@ impl Apps {
             row.build.submodule_repos = None;
         }
         row.build.check()?;
+        let was_tcp = row.run.tcp;
         row.run = row.run.merged(o.get("run"))?;
+        // A TCP service's checks connect to its port, another's are HTTP: a switch with checks of
+        // the old kind waits until they're changed.
+        if row.run.tcp != was_tcp {
+            let sid = id.to_string();
+            if let Some(e) = self.db(move |s| s.environments(&sid)).await?.into_iter().find(|e| e.checks.iter().any(|c| c.tcp != row.run.tcp)) {
+                return Err(Error::Conflict(format!("{}'s uptime checks are {} checks: remove them (checks: null) or make them {} checks first", e.name, if was_tcp { "TCP" } else { "HTTP" }, if was_tcp { "HTTP" } else { "TCP" })));
+            }
+        }
         let r = row.clone();
         self.db(move |s| {
             s.update_service(&r)?;
@@ -1952,6 +1964,7 @@ impl Apps {
             },
             feedback: r.feedback,
             vitals: r.vitals,
+            hsts: r.hsts.clone(),
             log_retention_days: r.log_retention_days.unwrap_or(crate::logs::KEEP_DAYS),
             keep_days: r.keep_days,
             approvals: r.approvals,
@@ -2074,10 +2087,12 @@ impl Apps {
                 settings.push(json!({ "field": format!("run.{k}"), "from": x, "to": y, "put": { "run": { k: x } } }));
             }
         }
-        for k in ["wait_for_ci", "follow_tag", "redeploy_on_secrets", "traces", "vitals", "report", "egress", "allow_ips", "rate_limit", "firewall", "headers", "routes", "redirects", "checks", "log_retention_days", "keep_days", "approvals"] {
+        for k in ["wait_for_ci", "follow_tag", "redeploy_on_secrets", "traces", "vitals", "hsts", "report", "egress", "allow_ips", "rate_limit", "firewall", "headers", "routes", "redirects", "checks", "log_retention_days", "keep_days", "approvals"] {
             let (x, y) = (a.get(k).cloned().unwrap_or(Value::Null), b.get(k).cloned().unwrap_or(Value::Null));
             if x != y {
-                settings.push(json!({ "field": k, "from": x, "to": y, "put": { k: x } }));
+                // An environment's `hsts: null` reads as none sent, where a PUT's null is the default.
+                let put = if k == "hsts" && x.is_null() { json!(false) } else { x.clone() };
+                settings.push(json!({ "field": k, "from": x, "to": y, "put": { k: put } }));
             }
         }
         for (k, x, y) in [("error", &from_env.pages.error, &to_env.pages.error), ("maintenance", &from_env.pages.maintenance, &to_env.pages.maintenance)] {
@@ -2124,7 +2139,7 @@ impl Apps {
     pub async fn put_environment_by(self: &Arc<Self>, service: &str, env: &str, body: Value, by: Option<String>) -> Result<Environment> {
         let o = body.as_object().cloned().unwrap_or_default();
         for k in o.keys() {
-            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "routes", "redirects", "checks", "heartbeats", "split", "mirror", "snippets", "config", "freeze", "pause_schedule", "paused", "held", "hostname", "traces", "egress", "vitals", "report", "preview_host", "log_retention_days", "keep_days", "approvals", "badge", "closed_by", "data", "scheduled", "attack_mode", "challenge_until", "preflight", "deploy_tags"].contains(&k.as_str()) {
+            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "routes", "redirects", "checks", "heartbeats", "split", "mirror", "snippets", "config", "freeze", "pause_schedule", "paused", "held", "hostname", "traces", "egress", "vitals", "report", "preview_host", "log_retention_days", "keep_days", "approvals", "badge", "closed_by", "data", "scheduled", "attack_mode", "challenge_until", "preflight", "deploy_tags", "hsts"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
@@ -2389,6 +2404,14 @@ impl Apps {
                 if cs.iter().enumerate().any(|(i, c)| cs[..i].iter().any(|o| o.name == c.name)) {
                     return Err(Error::BadRequest("checks: names are unique".into()));
                 }
+                // A TCP service's checks connect to its port; another's are HTTP.
+                if !cs.is_empty() {
+                    let sid = service.to_string();
+                    let tcp = self.db(move |s| s.service(&sid)).await?.run.tcp;
+                    if cs.iter().any(|c| c.tcp != tcp) {
+                        return Err(Error::BadRequest(if tcp { "checks: a TCP service's checks are TCP checks (tcp: true, no path)" } else { "checks: a TCP check (tcp) is a TCP service's" }.into()));
+                    }
+                }
                 Some(cs)
             }
             Some(_) => return Err(Error::BadRequest(format!("checks is at most {} checks, or null", crate::model::MAX_CHECKS))),
@@ -2497,12 +2520,10 @@ impl Apps {
                     return Err(Error::BadRequest(format!("access.webhooks is at most {} of {{path: an absolute path (no query, no . or .., no %), token_sha256: a SHA-256 in hex}}", crate::model::MAX_HOOK_URLS)));
                 }
                 let webhooks: Vec<crate::model::HookUrl> = webhooks.into_iter().map(|h| crate::model::HookUrl { path: h.path, token_hash: h.token_hash.to_ascii_lowercase() }).collect();
-                if !webhooks.is_empty() {
-                    let (sid, e) = (service.to_string(), env.to_string());
-                    let ephemeral = o.get("ephemeral") == Some(&Value::Bool(true)) || self.db(move |s| s.environment(&sid, &e)).await.is_ok_and(|r| r.ephemeral);
-                    if !ephemeral {
-                        return Err(Error::BadRequest("access.webhooks is a preview (ephemeral) environment's".into()));
-                    }
+                // roll previews' `pv-` environments only (the gate honours them nowhere else, whatever
+                // `ephemeral` says later).
+                if !webhooks.is_empty() && !env.starts_with("pv-") {
+                    return Err(Error::BadRequest("access.webhooks is a preview's (a pv- environment roll previews makes)".into()));
                 }
                 // A new way in keeps the paths whose preflights pass (`preflight`, set on its own).
                 let (sid, e) = (service.to_string(), env.to_string());
@@ -2605,6 +2626,19 @@ impl Apps {
                 Some(d @ 1..=90) => Some(Some(d as u32)),
                 _ => return Err(Error::BadRequest("keep_days is 1–90 (null: only the newest deployments)".into())),
             },
+        };
+        // Strict-Transport-Security: its own, `false` (none sent) or null (the default). The
+        // outer None: not given; then None the default, Some(None) off.
+        let hsts: Option<Option<Option<crate::model::Hsts>>> = match o.get("hsts") {
+            None => None,
+            Some(Value::Null) => Some(None),
+            Some(Value::Bool(false)) => Some(Some(None)),
+            Some(v @ Value::Object(_)) => {
+                let h: crate::model::Hsts = serde_json::from_value(v.clone()).map_err(|e| Error::BadRequest(format!("hsts is {{max_age, include_subdomains?, preload?}}, false or null: {e}")))?;
+                h.check()?;
+                Some(Some(Some(h)))
+            }
+            Some(_) => return Err(Error::BadRequest("hsts is {max_age, include_subdomains?, preload?}, false (none sent) or null (the default)".into())),
         };
         // Approvals from people other than a deployment's author before it goes live: 0–3.
         let approvals = match o.get("approvals") {
@@ -2832,6 +2866,13 @@ impl Apps {
         if let Some(n) = approvals {
             let (sid, e) = (service.to_string(), env.to_string());
             self.db(move |s| s.set_approvals(&sid, &e, n)).await?;
+            self.changed(service);
+        }
+        // On its answers from the next request on.
+        if let Some(h) = hsts {
+            let (sid, e) = (service.to_string(), env.to_string());
+            self.db(move |s| s.set_hsts(&sid, &e, h.as_ref().map(Option::as_ref))).await?;
+            self.live(service, env).forget_gate();
             self.changed(service);
         }
         // Kept from the next pruning pass on.
@@ -4607,6 +4648,7 @@ impl Apps {
             pages: row.pages,
             preview: row.ephemeral,
             headers: row.headers,
+            hsts: row.hsts.as_ref().and_then(|h| axum::http::HeaderValue::from_str(&h.value()).ok()),
             routes: row.routes, traces, vitals: row.vitals, challenge_key, attack_until: attack.until, split: row.split, mirror: row.mirror, snippets: snippets_of(&row.snippets),
             redirects: row.redirects.as_deref().map(crate::site_rules::EnvRedirects::parse).filter(|r| !r.is_empty()).map(Arc::new) });
         live.set_gate(g.clone(), seen);
@@ -4664,8 +4706,12 @@ impl Apps {
         self.shares.get().cloned()
     }
 
-    /// Where names under a project's preview domain that no environment holds go (roll previews'
-    /// router, for its previews on roll's own runtime). Set once.
+    /// roll previews' snapshots from a team's tests (`POST /__roll/snapshot`). Set once.
+    pub fn set_preview_snapshots(&self, s: Arc<dyn integrations::PreviewSnapshots>) {
+        let _ = self.preview_snapshots.set(s);
+    }
+
+    /// What writes a customer's DNS records with their token (`…/domains/{host}/configure`). Set once.
     pub fn set_dns_writer(&self, w: Arc<dyn integrations::DnsWriter>) {
         let _ = self.dns_writer.set(w);
     }
@@ -4703,7 +4749,7 @@ impl Apps {
         }
         let (sid, e) = (service.to_string(), env.to_string());
         let svc = self.db(move |s| s.service(&sid)).await?;
-        let token = self.deps.secrets.use_once(who, &svc.project, &e, service, reference, "writing a domain's records at Cloudflare").await.map_err(|why| Error::Forbidden(format!("{reference}: {why:#} (it must be a key you may reveal, and not marked sensitive)")))?;
+        let token = self.deps.secrets.use_once(who, &svc.project, &e, service, reference, "writing a domain's records at Cloudflare", Some(writer.api())).await.map_err(|why| Error::Forbidden(format!("{reference}: {why:#} (it must be a key you may reveal)")))?;
         // The TXT challenge first where `record` asks for it (it proves the name, whatever the
         // CNAME meets), then the CNAME to its target (Cloudflare flattens one at a zone's apex,
         // which plain DNS can't hold).
@@ -4718,6 +4764,8 @@ impl Apps {
         self.verify_domain(service, env, &h).await
     }
 
+    /// Where names under a project's preview domain that no environment holds go (roll previews'
+    /// router, for its previews on roll's own runtime). Set once.
     pub fn set_preview_router(&self, router: Arc<dyn integrations::PreviewRouter>) {
         let _ = self.preview_router.set(router);
     }
