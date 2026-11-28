@@ -186,6 +186,72 @@
         "x-roll-action": "read"
       }
     },
+    "/v1/apps/projects/{project}/alerts": {
+      "get": {
+        "description": "Answers `Alert[]`: its open alerts (from the opening event until one closing its key: an `alert.resolved`, or a live deploy for a failed one), newest first, at most 100.",
+        "operationId": "getProjectsProjectAlerts",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`Alert[]`: its open alerts (from the opening event until one closing its key: an `alert.resolved`, or a live deploy for a failed one), newest first, at most 100"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "List alerts",
+        "tags": [
+          "projects"
+        ],
+        "x-roll-action": "read"
+      }
+    },
+    "/v1/apps/projects/{project}/alerts/{aid}/ack": {
+      "post": {
+        "description": "Answers `Alert` acknowledged: its escalations stop (it stays open until it clears); again: as it is (who acknowledged first stays); 409 once it's closed, 404 for another project's; `alert.acked` and `audit.alert.acked`.",
+        "operationId": "postProjectsProjectAlertsAidAck",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "aid",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`Alert` acknowledged: its escalations stop (it stays open until it clears); again: as it is (who acknowledged first stays); 409 once it's closed, 404 for another project's; `alert.acked` and `audit.alert.acked`"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Ack alert",
+        "tags": [
+          "projects"
+        ],
+        "x-roll-action": "write"
+      }
+    },
     "/v1/apps/projects/{project}/board": {
       "get": {
         "description": "Answers `{ panels: { title?, service, environment, metric }[] }`: the project's board, in order (none when nobody made one).",
@@ -591,7 +657,7 @@
               }
             }
           },
-          "description": "`{ kind?: \"webhook\" | \"slack\" | \"discord\" | \"email\" | \"pagerduty\" | \"opsgenie\", url, routing_key?, api_key?, region?, events?, environments?, services?, previews? }` (environments: names; services: names or ids, kept as ids; previews: default false; `email` takes no `url`: it's the project's owner, 400 with one, for a project without an owner, or where mail isn't set up; `pagerduty` takes its integration's `routing_key`, `opsgenie` its `api_key`, each sealed and never returned, and `region` `us` or `eu`, no `url`: the service's own API)"
+          "description": "`{ kind?: \"webhook\" | \"slack\" | \"discord\" | \"email\" | \"pagerduty\" | \"opsgenie\", url, routing_key?, api_key?, region?, events?, environments?, services?, previews?, escalate?: { after_min: number /* 5–1440 */; to: string /* another of the project's targets */ } }` (environments: names; services: names or ids, kept as ids; previews: default false; `email` takes no `url`: it's the project's owner, 400 with one, for a project without an owner, or where mail isn't set up; `pagerduty` takes its integration's `routing_key`, `opsgenie` its `api_key`, each sealed and never returned, and `region` `us` or `eu`, no `url`: the service's own API)"
         },
         "responses": {
           "201": {
@@ -673,7 +739,7 @@
               }
             }
           },
-          "description": "`{ events?, environments?, services?, previews? }` (given ones replace, the rest stay; null is a new target's default: the default events, every environment and service, no previews; any other field 400: a new URL is a new target)"
+          "description": "`{ events?, environments?, services?, previews?, escalate? }` (given ones replace, the rest stay; null is a new target's default: the default events, every environment and service, no previews, no escalation; any other field 400: a new URL is a new target; `escalate.to` must be another of the project's targets with no loop back through theirs, 400 otherwise)"
         },
         "responses": {
           "200": {

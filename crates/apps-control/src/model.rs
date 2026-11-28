@@ -240,7 +240,48 @@ pub struct NotifyTarget {
     pub services: Vec<String>,
     /// Whether preview (ephemeral) environments' events come too.
     pub previews: bool,
+    /// Where an alert it was sent goes when no one acknowledges it in time (one hop).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub escalate: Option<Escalation>,
     pub created_at: i64,
+}
+
+/// A target's escalation (Better Stack's escalation policies): an alert it was sent that's still
+/// open and unacknowledged `after_min` minutes on goes to the project's target `to`, once.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Escalation {
+    pub after_min: u32,
+    pub to: String,
+}
+
+/// An open alert (docs/apps/README.md, "Acknowledging and escalating"): from its opening event
+/// until an event closing its key ([`crate::notify`]'s `oncall_of`).
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct Alert {
+    /// Stable for the incident: its key and its opening event's seq, hashed.
+    pub id: String,
+    pub kind: String,
+    pub service: String,
+    pub environment: String,
+    /// What it's about: the opening message's title.
+    pub about: String,
+    pub opened_at: i64,
+    pub acked: Option<AlertAck>,
+    /// When it was escalated (no one acknowledged it in time).
+    pub escalated_at: Option<i64>,
+    #[serde(skip)]
+    pub project: String,
+    /// Its opening event.
+    #[serde(skip)]
+    pub seq: i64,
+    #[serde(skip)]
+    pub closed_at: Option<i64>,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct AlertAck {
+    pub by: String,
+    pub at: i64,
 }
 
 impl NotifyTarget {
