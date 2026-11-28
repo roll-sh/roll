@@ -1,0 +1,19 @@
+{
+  "notifications.list_features": {
+    "documentation": {
+      "url": "https://docs.opensearch.org/latest/observing-your-data/notifications/api/",
+      "description": "Lists the supported channel types."
+    },
+    "stability": "stable",
+    "url": {
+      "paths": [
+        {
+          "path": "/_plugins/_notifications/features",
+          "methods": [
+            "GET"
+          ]
+        }
+      ]
+    }
+  }
+}

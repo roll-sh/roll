@@ -1,0 +1,26 @@
+{
+  "notifications.send_test": {
+    "documentation": {
+      "url": "https://docs.opensearch.org/latest/observing-your-data/notifications/api/",
+      "description": "Sends a test message through a channel."
+    },
+    "stability": "stable",
+    "url": {
+      "paths": [
+        {
+          "path": "/_plugins/_notifications/feature/test/{config_id}",
+          "methods": [
+            "GET",
+            "POST"
+          ],
+          "parts": {
+            "config_id": {
+              "type": "string",
+              "description": "The channel configuration's id."
+            }
+          }
+        }
+      ]
+    }
+  }
+}

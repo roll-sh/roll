@@ -1,0 +1,69 @@
+{
+  "notifications.get_configs": {
+    "documentation": {
+      "url": "https://docs.opensearch.org/latest/observing-your-data/notifications/api/",
+      "description": "Lists channel configurations."
+    },
+    "stability": "stable",
+    "url": {
+      "paths": [
+        {
+          "path": "/_plugins/_notifications/configs",
+          "methods": [
+            "GET"
+          ]
+        }
+      ]
+    },
+    "params": {
+      "config_id": {
+        "type": "string",
+        "description": "config_id"
+      },
+      "config_id_list": {
+        "type": "string",
+        "description": "config_id_list"
+      },
+      "from_index": {
+        "type": "number",
+        "description": "The first config"
+      },
+      "max_items": {
+        "type": "number",
+        "description": "How many configs"
+      },
+      "sort_field": {
+        "type": "string",
+        "description": "sort_field"
+      },
+      "sort_order": {
+        "type": "string",
+        "description": "sort_order"
+      },
+      "config_type": {
+        "type": "string",
+        "description": "config_type"
+      },
+      "is_enabled": {
+        "type": "string",
+        "description": "is_enabled"
+      },
+      "name": {
+        "type": "string",
+        "description": "name"
+      },
+      "description": {
+        "type": "string",
+        "description": "description"
+      },
+      "query": {
+        "type": "string",
+        "description": "query"
+      },
+      "text_query": {
+        "type": "string",
+        "description": "text_query"
+      }
+    }
+  }
+}

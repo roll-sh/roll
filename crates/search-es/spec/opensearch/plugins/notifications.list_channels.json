@@ -1,0 +1,19 @@
+{
+  "notifications.list_channels": {
+    "documentation": {
+      "url": "https://docs.opensearch.org/latest/observing-your-data/notifications/api/",
+      "description": "Lists the channels."
+    },
+    "stability": "stable",
+    "url": {
+      "paths": [
+        {
+          "path": "/_plugins/_notifications/channels",
+          "methods": [
+            "GET"
+          ]
+        }
+      ]
+    }
+  }
+}

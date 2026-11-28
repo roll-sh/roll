@@ -1,0 +1,60 @@
+{
+  "alerting.update_monitor": {
+    "documentation": {
+      "url": "https://docs.opensearch.org/latest/observing-your-data/alerting/api/",
+      "description": "Updates a monitor."
+    },
+    "stability": "stable",
+    "url": {
+      "paths": [
+        {
+          "path": "/_plugins/_alerting/monitors/{monitor_id}",
+          "methods": [
+            "PUT"
+          ],
+          "parts": {
+            "monitor_id": {
+              "type": "string",
+              "description": "The monitor's id."
+            }
+          }
+        },
+        {
+          "path": "/_opendistro/_alerting/monitors/{monitor_id}",
+          "methods": [
+            "PUT"
+          ],
+          "parts": {
+            "monitor_id": {
+              "type": "string",
+              "description": "The monitor's id."
+            }
+          }
+        }
+      ]
+    },
+    "params": {
+      "refresh": {
+        "type": "enum",
+        "options": [
+          "true",
+          "false",
+          "wait_for"
+        ],
+        "description": "Refresh the config index after the write."
+      },
+      "if_seq_no": {
+        "type": "number",
+        "description": "Only update the monitor if it has this sequence number"
+      },
+      "if_primary_term": {
+        "type": "number",
+        "description": "Only update the monitor if it has this primary term"
+      }
+    },
+    "body": {
+      "description": "The monitor",
+      "required": false
+    }
+  }
+}

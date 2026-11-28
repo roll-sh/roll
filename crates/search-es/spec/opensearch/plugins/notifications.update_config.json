@@ -1,0 +1,29 @@
+{
+  "notifications.update_config": {
+    "documentation": {
+      "url": "https://docs.opensearch.org/latest/observing-your-data/notifications/api/",
+      "description": "Updates a channel configuration."
+    },
+    "stability": "stable",
+    "url": {
+      "paths": [
+        {
+          "path": "/_plugins/_notifications/configs/{config_id}",
+          "methods": [
+            "PUT"
+          ],
+          "parts": {
+            "config_id": {
+              "type": "string",
+              "description": "The channel configuration's id."
+            }
+          }
+        }
+      ]
+    },
+    "body": {
+      "description": "The configuration",
+      "required": false
+    }
+  }
+}

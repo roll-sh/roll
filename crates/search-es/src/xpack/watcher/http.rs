@@ -558,11 +558,17 @@ fn connect_error(e: &reqwest::Error, host: &str, port: i64) -> EsError {
 
 /// Sends a request.
 pub async fn send(cluster: &Cluster, req: &Request) -> EsResult<Response> {
-    let egress = crate::egress::Egress::of_cluster(cluster, ALLOW_PRIVATE);
+    send_with(cluster, req, ALLOW_PRIVATE, "watches").await
+}
+
+/// Sends a request of a feature whose node setting `allow_private` lifts the address check
+/// (`who` names the feature in the refusal): watches, notification channels.
+pub async fn send_with(cluster: &Cluster, req: &Request, allow_private: &str, who: &str) -> EsResult<Response> {
+    let egress = crate::egress::Egress::of_cluster(cluster, allow_private);
     let url = req.url();
     let parsed = reqwest::Url::parse(&url).map_err(|_| EsError::illegal_argument(format!("Malformed URL [{}]", req.shown_url())))?;
     match egress.check_url_now(&parsed).await {
-        Err(crate::egress::Refused::Private(_)) => return Err(EsError::illegal_argument(format!("host [{}] is a private address, which watches may not connect to unless [{ALLOW_PRIVATE}] is set", req.host))),
+        Err(crate::egress::Refused::Private(_)) => return Err(EsError::illegal_argument(format!("host [{}] is a private address, which {who} may not connect to unless [{allow_private}] is set", req.host))),
         Err(e) => return Err(EsError::illegal_argument(format!("host [{}]: {e}", req.host))),
         Ok(()) => {}
     }
