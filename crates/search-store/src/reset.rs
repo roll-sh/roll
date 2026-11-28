@@ -252,7 +252,8 @@ impl Store {
         }
         let then: BTreeMap<ShardId, ShardVersion> = intent.tops.iter().map(|(u, n, v)| (ShardId::new(u.clone(), *n), *v)).collect();
         let now = tops(self.list_shard_histories(cluster).await?);
-        Ok(now.iter().any(|(s, v)| then.get(s) != Some(v)))
+        // A shard removed outright (no history kept, so no tombstone) counts too.
+        Ok(now.iter().any(|(s, v)| then.get(s) != Some(v)) || then.keys().any(|s| !now.contains_key(s)))
     }
 
     /// Gives up the reset `cluster` has pending (its source went away before it was recorded,

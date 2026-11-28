@@ -957,6 +957,12 @@ impl Store {
         self.one("id", id).await
     }
 
+    /// The name of cluster `id` while it isn't deleted, a delete in flight included (lookups by
+    /// [`Store::get`] don't see one).
+    pub async fn live_name(&self, id: &str) -> anyhow::Result<Option<String>> {
+        Ok(self.db.read(|x| x.query_row("SELECT name FROM search_clusters WHERE id = ?1 AND deleted_at IS NULL", params![id], |r| r.get(0)).optional())?)
+    }
+
     /// The cluster named `name`, unless it is being deleted.
     pub async fn by_name(&self, name: &str) -> anyhow::Result<Option<SearchCluster>> {
         self.one("name", name).await
