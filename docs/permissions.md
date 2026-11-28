@@ -626,7 +626,7 @@ A rule can grant some indices of a search cluster: `{id: "cl_1", index: "logs-*,
 - Search checks the rest at query time as the caller: a query's reads of other indices (terms
   lookups, `more_like_this`, lookup runtime fields, `indexed_shape`, templates after rendering, and
   the bodies of reindex, ES|QL, SQL and the other query-bearing APIs) and a body's `_index` values
-  stay within `{index}` (search's `control.rs`, `per_index_routes`; feature/roll-search 5db7c2602
+  stay within `{index}` (search's `control.rs`, `documents`; feature/roll-search 5db7c2602
   and fae055c31), and a document an ingest pipeline moves (`_index`, `reroute`) is checked again
   as a write at the index it lands in (ea6be2f0f). ES|QL and SQL read as the caller too (0158b6d9c):
   `FROM`, wildcards, `LOOKUP JOIN` and SQL reach only the indices it may read.
