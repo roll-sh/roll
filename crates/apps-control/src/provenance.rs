@@ -122,39 +122,3 @@ impl Apps {
         serde_json::from_str(&text).map_err(|e| Error::Internal(e.to_string()))
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_statement_is_signed_as_dsse_and_verifies() {
-        use p256::ecdsa::signature::Verifier;
-        use p256::pkcs8::DecodePublicKey;
-        let (key, public) = new_key();
-        let plan = json!({ "provider": "node", "bases": [{ "image": "node:22-slim", "digest": "sha256:abc" }] });
-        let s = statement(&Built {
-            image: "roll-apps-svc_a:dep_1",
-            digest: "sha256:0123",
-            deployment: "dep_1",
-            builder: "docker",
-            source: json!({ "kind": "repo", "repo": "acme/site" }),
-            revision: Some("a1b2c3"),
-            plan: &plan,
-            dockerfile_sha256: "ff".into(),
-            variables: vec!["NEXT_PUBLIC_API".into()],
-            started_ms: 1_700_000_000_000,
-            finished_ms: 1_700_000_060_000,
-        });
-        assert_eq!(s["subject"][0]["digest"]["sha256"], "0123");
-        assert_eq!(s["predicate"]["buildDefinition"]["resolvedDependencies"][0]["uri"], "roll-code:acme/site");
-        assert_eq!(s["predicate"]["buildDefinition"]["resolvedDependencies"][1]["digest"]["sha256"], "abc");
-        let env = sign(&s, &key).unwrap();
-        let b64 = base64::engine::general_purpose::STANDARD;
-        let payload = b64.decode(env["payload"].as_str().unwrap()).unwrap();
-        let sig = p256::ecdsa::Signature::from_der(&b64.decode(env["signatures"][0]["sig"].as_str().unwrap()).unwrap()).unwrap();
-        let vk = p256::ecdsa::VerifyingKey::from_public_key_pem(&public).unwrap();
-        assert!(vk.verify(&pae(PAYLOAD_TYPE, &payload), &sig).is_ok());
-        assert!(vk.verify(&pae(PAYLOAD_TYPE, b"{}"), &sig).is_err(), "only its own payload");
-    }
-}

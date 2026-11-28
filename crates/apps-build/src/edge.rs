@@ -204,19 +204,6 @@ mod tests {
     }
 
     #[test]
-    fn a_servers_own_middleware_module_isnt_vercels() {
-        let t = tree(&[
-            ("middleware.js", "module.exports = (req, res, next) => next();"),
-            ("a/middleware.ts", "import { NextResponse } from 'next/server';\nexport default () => NextResponse.next();"),
-            ("b/middleware.ts", "export default () => new Response('x');\nexport const config = { matcher: '/x' };"),
-        ]);
-        assert!(!vercel_middleware(&t, "middleware.js"));
-        assert!(vercel_middleware(&t, "a/middleware.ts") && vercel_middleware(&t, "b/middleware.ts"));
-        let f = EdgeFn { name: "m".into(), kind: EdgeKind::Vercel, file: "m.ts".into(), paths: vec!["/admin/*".into()], excluded: Vec::new() };
-        assert!(runs_on(&f, "/ADMIN/users"), "in any case");
-    }
-
-    #[test]
     fn edge_functions_are_found_with_their_paths() {
         let files = [
             ("netlify.toml", "[[edge_functions]]\nfunction = \"geo\"\npath = \"/shop/*\"\n"),
@@ -233,5 +220,14 @@ mod tests {
         assert!(runs_on(auth, "/admin/users") && runs_on(auth, "/account") && !runs_on(auth, "/admin/login") && !runs_on(auth, "/accounts"));
         assert!(runs_on(&found[2], "/about") && runs_on(&found[2], "/about/team/x") && !runs_on(&found[2], "/"));
         assert!(matches("/blog/:slug", "/blog/a") && !matches("/blog/:slug", "/blog/a/b") && matches("/*", "/") && matches("/img/*.png", "/img/a.png"));
+        assert!(runs_on(auth, "/ADMIN/users"), "in any case");
+        // A server's own middleware module isn't Vercel's.
+        let t = tree(&[
+            ("middleware.js", "module.exports = (req, res, next) => next();"),
+            ("a/middleware.ts", "import { NextResponse } from 'next/server';\nexport default () => NextResponse.next();"),
+            ("b/middleware.ts", "export default () => new Response('x');\nexport const config = { matcher: '/x' };"),
+        ]);
+        assert!(!vercel_middleware(&t, "middleware.js"));
+        assert!(vercel_middleware(&t, "a/middleware.ts") && vercel_middleware(&t, "b/middleware.ts"));
     }
 }

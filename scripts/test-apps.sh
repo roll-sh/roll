@@ -32,12 +32,14 @@ if [[ $force == 0 && $docker == 0 && -f $STAMP && "$(cat "$STAMP")" == "$hash" ]
 fi
 
 cargo clippy -p apps-build -p apps-control -p roll-edge --all-targets -- -D warnings
-cargo test -p apps-build -p apps-control -p roll-workspace "${args[@]}"
+# Without --docker nothing runs on Docker, even with ROLL_APPS_DOCKER set in the shell.
+env -u ROLL_APPS_DOCKER cargo test -p apps-build -p apps-control -p roll-workspace "${args[@]}"
 # `roll apps …` end to end: the real binary against roll apps in process.
-cargo test -p roll-cli --test apps
+env -u ROLL_APPS_DOCKER cargo test -p roll-cli --test apps
 # Custom domains' certificates at the edge: the HTTP-01 manager, the plain-HTTP listener, and
 # Cloudflare for SaaS against a fake Cloudflare.
-cargo test -p roll-edge --lib --test custom_domains
+env -u ROLL_APPS_DOCKER cargo test -p roll-edge --lib --test custom_domains
+# rolld's own apps tests (src/apps.rs) aren't run here: a rolld test build is about 15 GB.
 cargo build -p rolld -p roll-cli
 if [[ $docker == 1 ]]; then
   # Three at a time: each test makes its own project's networks, and a host whose other projects

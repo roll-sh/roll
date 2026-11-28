@@ -192,15 +192,19 @@ mod tests {
         assert_eq!(v(&[("test", "failed"), ("lint", "running")]), Ci::Failed("test".into()));
     }
 
-    /// roll previews' one note on a merge request (GitLab) or pull request (Bitbucket), with each
-    /// host's own auth: made, edited in place, and made again when it was deleted there.
+    /// Against fake GitLab and Bitbucket APIs: each one's statuses read with its token as each
+    /// takes it (GitLab's `PRIVATE-TOKEN`, Bitbucket's basic auth), and roll's posted there; roll
+    /// previews' one note on a merge request or pull request made, edited in place, and made again
+    /// when it was deleted there.
     #[tokio::test]
-    async fn a_previews_note_is_made_then_edited_in_place() {
-        use axum::routing::{post, put};
+    async fn statuses_are_read_and_posted_as_each_host_takes_them() {
+        use axum::routing::{get, put};
+        let posted = std::sync::Arc::new(parking_lot::Mutex::new(Vec::<(String, Value)>::new()));
+        let p = posted.clone();
         let seen = std::sync::Arc::new(parking_lot::Mutex::new(Vec::<String>::new()));
         let (s1, s2, s3, s4) = (seen.clone(), seen.clone(), seen.clone(), seen.clone());
         let app = axum::Router::new()
-            .route("/api/v4/projects/{project}/merge_requests/{n}/notes", post(move |h: axum::http::HeaderMap, axum::extract::Path((project, n)): axum::extract::Path<(String, u64)>, axum::Json(b): axum::Json<Value>| async move {
+            .route("/api/v4/projects/{project}/merge_requests/{n}/notes", axum::routing::post(move |h: axum::http::HeaderMap, axum::extract::Path((project, n)): axum::extract::Path<(String, u64)>, axum::Json(b): axum::Json<Value>| async move {
                 assert_eq!((h["private-token"].to_str().unwrap(), project.as_str(), n), ("glpat-x", "acme/site", 4));
                 s1.lock().push(format!("gl new {}", b["body"].as_str().unwrap()));
                 axum::Json(json!({ "id": 70 }))
@@ -209,7 +213,7 @@ mod tests {
                 s2.lock().push(format!("gl edit {id} {}", b["body"].as_str().unwrap()));
                 if id == 70 { axum::http::StatusCode::OK } else { axum::http::StatusCode::NOT_FOUND }
             }))
-            .route("/bb/repositories/{ws}/{repo}/pullrequests/{n}/comments", post(move |h: axum::http::HeaderMap, axum::Json(b): axum::Json<Value>| async move {
+            .route("/bb/repositories/{ws}/{repo}/pullrequests/{n}/comments", axum::routing::post(move |h: axum::http::HeaderMap, axum::Json(b): axum::Json<Value>| async move {
                 assert!(h["authorization"].to_str().unwrap().starts_with("Basic "));
                 s3.lock().push(format!("bb new {}", b["content"]["raw"].as_str().unwrap()));
                 axum::Json(json!({ "id": 900 }))
@@ -217,29 +221,7 @@ mod tests {
             .route("/bb/repositories/{ws}/{repo}/pullrequests/{n}/comments/{id}", put(move |axum::extract::Path((_, _, _, id)): axum::extract::Path<(String, String, u64, u64)>| async move {
                 s4.lock().push(format!("bb edit {id}"));
                 axum::http::StatusCode::OK
-            }));
-        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let base = format!("http://{}", l.local_addr().unwrap());
-        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
-        let gl = Host::GitLab { api: format!("{base}/api/v4"), project: "acme/site".into() };
-        let bb = Host::Bitbucket { api: format!("{base}/bb"), workspace: "ws".into(), repo: "site".into() };
-        let login = ("deploy", "glpat-x");
-        assert_eq!(note(true, &gl, login, 4, "one", None).await.unwrap(), 70);
-        assert_eq!(note(true, &gl, login, 4, "two", Some(70)).await.unwrap(), 70, "edited in place");
-        assert_eq!(note(true, &gl, login, 4, "three", Some(69)).await.unwrap(), 70, "deleted there: made again");
-        assert_eq!(note(true, &bb, login, 4, "one", None).await.unwrap(), 900);
-        assert_eq!(note(true, &bb, login, 4, "two", Some(900)).await.unwrap(), 900);
-        assert_eq!(*seen.lock(), ["gl new one", "gl edit 70 two", "gl edit 69 three", "gl new three", "bb new one", "bb edit 900"]);
-    }
-
-    /// Against fake GitLab and Bitbucket APIs: each one's statuses read with its token as each
-    /// takes it (GitLab's `PRIVATE-TOKEN`, Bitbucket's basic auth), and roll's posted there.
-    #[tokio::test]
-    async fn statuses_are_read_and_posted_as_each_host_takes_them() {
-        use axum::routing::get;
-        let posted = std::sync::Arc::new(parking_lot::Mutex::new(Vec::<(String, Value)>::new()));
-        let p = posted.clone();
-        let app = axum::Router::new()
+            }))
             .route("/api/v4/projects/{project}/repository/commits/{sha}/statuses", get(|h: axum::http::HeaderMap, axum::extract::Path((project, _)): axum::extract::Path<(String, String)>| async move {
                 assert_eq!((h["private-token"].to_str().unwrap(), project.as_str()), ("glpat-x", "acme/site"));
                 axum::Json(json!([{ "id": 2, "name": "test", "status": "running" }, { "id": 1, "name": "test", "status": "failed" }, { "id": 3, "name": "roll/apps/site/production", "status": "failed" }]))
@@ -270,5 +252,12 @@ mod tests {
         let got = posted.lock().clone();
         assert_eq!((got[0].0.as_str(), got[0].1["state"].as_str()), ("/api/v4/projects/acme%2Fsite/statuses/abc", Some("success")), "{got:?}");
         assert_eq!((got[1].0.as_str(), got[1].1["state"].as_str(), got[1].1["key"].as_str()), ("/bb/repositories/ws/site/commit/abc/statuses/build", Some("SUCCESSFUL"), Some("roll/apps/site/production")), "{got:?}");
+        let login = ("deploy", "glpat-x");
+        assert_eq!(note(true, &gl, login, 4, "one", None).await.unwrap(), 70);
+        assert_eq!(note(true, &gl, login, 4, "two", Some(70)).await.unwrap(), 70, "edited in place");
+        assert_eq!(note(true, &gl, login, 4, "three", Some(69)).await.unwrap(), 70, "deleted there: made again");
+        assert_eq!(note(true, &bb, login, 4, "one", None).await.unwrap(), 900);
+        assert_eq!(note(true, &bb, login, 4, "two", Some(900)).await.unwrap(), 900);
+        assert_eq!(*seen.lock(), ["gl new one", "gl edit 70 two", "gl edit 69 three", "gl new three", "bb new one", "bb edit 900"]);
     }
 }
