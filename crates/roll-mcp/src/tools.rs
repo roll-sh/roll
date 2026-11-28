@@ -163,7 +163,7 @@ impl Tool {
     /// The actions this tool's route can be, from the catalogue (a body-decided route: what its
     /// fixed body makes it, or anything it could be). Worked out once ([`PREPARED`]).
     pub fn actions(&self) -> Vec<Action> {
-        PREPARED.get(self.name).map_or_else(|| self.find_actions(), |p| p.actions.clone())
+        PREPARED.get(self.name).map_or_else(|| self.find_actions(self.route().as_ref()), |p| p.actions.clone())
     }
 
     /// Whether any grant may call it (an `AnyGrant` route).
@@ -177,7 +177,7 @@ impl Tool {
     }
 
     pub fn open(&self) -> bool {
-        PREPARED.get(self.name).map_or_else(|| self.find_open(), |p| p.open)
+        PREPARED.get(self.name).map_or_else(|| self.find_open(self.route().as_ref()), |p| p.open)
     }
 
     /// Whether a person's role decides its listing too, on top of their token's rules: one resource
@@ -187,7 +187,7 @@ impl Tool {
     /// session: which project isn't known until the call, and a person's own unplaced one (their
     /// search cluster) is theirs to make whatever their roles.
     pub fn within_session(&self) -> bool {
-        PREPARED.get(self.name).map_or_else(|| self.find_within(), |p| p.within)
+        PREPARED.get(self.name).map_or_else(|| self.find_within(self.route().as_ref()), |p| p.within)
     }
 
     /// Its MCP definition, as `tools/list` shows it.
@@ -205,20 +205,24 @@ impl Tool {
         &PREPARED[self.name].asks
     }
 
-    /// Built while [`PREPARED`] is (so from `find_actions`, never `actions`, which reads it).
-    fn find_asks(&self) -> AskScope {
-        let Some(found) = catalog::by_path(self.method, &self.sample_path()) else { return AskScope::default() };
-        let row = found.row;
+    /// Its route's catalogue row: looked up once per tool, while [`PREPARED`] is built (the `find_`
+    /// functions take it; they never read `PREPARED`).
+    fn route(&self) -> Option<catalog::Found> {
+        catalog::by_path(self.method, &self.sample_path())
+    }
+
+    fn find_asks(&self, found: Option<&catalog::Found>) -> AskScope {
+        let Some(row) = found.map(|f| f.row) else { return AskScope::default() };
         // A body decides it (a `build` makes an apps write a deploy, SQL can be admin): any action.
-        let mut actions = if matches!(row.act, catalog::Act::Body(_) | catalog::Act::Raw(_)) && self.fixed.is_none() { Action::ALL.to_vec() } else { self.find_actions() };
+        let mut actions = if matches!(row.act, catalog::Act::Body(_) | catalog::Act::Raw(_)) && self.fixed.is_none() { Action::ALL.to_vec() } else { self.find_actions(found) };
         if row.admin_if_field.is_some() && !actions.contains(&Action::Admin) {
             actions.push(Action::Admin);
         }
         AskScope { actions, others: row.lends.is_some() || row.copies_from.is_some() }
     }
 
-    fn find_actions(&self) -> Vec<Action> {
-        let Some(found) = catalog::by_path(self.method, &self.sample_path()) else { return Vec::new() };
+    fn find_actions(&self, found: Option<&catalog::Found>) -> Vec<Action> {
+        let Some(found) = found else { return Vec::new() };
         match found.row.act {
             catalog::Act::Body(_) => match self.fixed {
                 Some(f) => vec![found.row.action(self.method, &[], Some(&f()))],
@@ -230,17 +234,17 @@ impl Tool {
         }
     }
 
-    fn find_within(&self) -> bool {
+    fn find_within(&self, found: Option<&catalog::Found>) -> bool {
         roll_auth::roles::MEMBER_PRODUCTS.contains(&self.product)
-            && catalog::by_path(self.method, &self.sample_path()).is_some_and(|f| !matches!(f.row.target, catalog::Tgt::AnyGrant | catalog::Tgt::List { .. } | catalog::Tgt::Product | catalog::Tgt::Create { .. }))
+            && found.is_some_and(|f| !matches!(f.row.target, catalog::Tgt::AnyGrant | catalog::Tgt::List { .. } | catalog::Tgt::Product | catalog::Tgt::Create { .. }))
     }
 
     /// A route any connection may call (its own identity, its own approvals).
-    fn find_open(&self) -> bool {
-        catalog::by_path(self.method, &self.sample_path()).is_some_and(|f| matches!(f.row.target, catalog::Tgt::AnyGrant))
+    fn find_open(&self, found: Option<&catalog::Found>) -> bool {
+        found.is_some_and(|f| matches!(f.row.target, catalog::Tgt::AnyGrant))
     }
 
-    fn build_definition(&self) -> Value {
+    fn build_definition(&self, actions: &[Action]) -> Value {
         let mut props = Map::new();
         let mut required = Vec::new();
         for p in self.params {
@@ -274,7 +278,6 @@ impl Tool {
             // Every tool takes it: kept short (roll://guide and the server's instructions explain it).
             json!({ "type": "string", "description": "apr_… from an approval_pending answer: waits, then runs" }),
         );
-        let actions = self.find_actions();
         // Read-only changes nothing and makes nothing: a reveal that's a POST (a presigned PUT URL,
         // a share link) makes something someone can use.
         let read_only = !actions.is_empty() && (actions.iter().all(|a| *a == Action::Read) || (self.method == "GET" && actions.iter().all(|a| matches!(a, Action::Read | Action::Reveal))));
@@ -1978,7 +1981,16 @@ struct Prepared {
 }
 
 static PREPARED: std::sync::LazyLock<std::collections::HashMap<&'static str, Prepared>> = std::sync::LazyLock::new(|| {
-    TOOLS.iter().map(|t| (t.name, Prepared { actions: t.find_actions(), asks: t.find_asks(), open: t.find_open(), within: t.find_within(), definition: t.build_definition() })).collect()
+    TOOLS
+        .iter()
+        .map(|t| {
+            let found = t.route();
+            let found = found.as_ref();
+            let actions = t.find_actions(found);
+            let p = Prepared { asks: t.find_asks(found), open: t.find_open(found), within: t.find_within(found), definition: t.build_definition(&actions), actions };
+            (t.name, p)
+        })
+        .collect()
 });
 
 #[cfg(test)]
@@ -2111,7 +2123,7 @@ mod tests {
             // An argument with a fixed set of values publishes it as `enum`, and a value outside the set is
             // refused before any call, naming the set.
             let t = super::all().iter().find(|t| t.name == "apps_rollout").unwrap();
-            assert_eq!(t.build_definition()["inputSchema"]["properties"]["action"]["enum"], serde_json::json!(["advance", "all", "abort"]));
+            assert_eq!(t.definition_ref()["inputSchema"]["properties"]["action"]["enum"], serde_json::json!(["advance", "all", "abort"]));
             let call = |action: &str| t.request(&serde_json::json!({ "service": "svc_1", "env": "production", "deploy": "dpl_1", "action": action }));
             assert_eq!(call("go").err().unwrap(), "apps_rollout: action is one of advance, all, abort (not \"go\")");
             assert!(call("abort").is_ok());
@@ -2797,7 +2809,7 @@ mod tests {
         let undecided: Vec<&str> = all()
             .iter()
             .filter(|t| ro(t) && !DATA.contains(&t.name) && !METADATA.iter().any(|(m, _)| *m == t.name))
-            .filter(|t| t.name.split('_').skip(1).any(|w| DATA_WORDS.iter().any(|d| w.starts_with(d))) || t.find_actions().contains(&Action::Reveal))
+            .filter(|t| t.name.split('_').skip(1).any(|w| DATA_WORDS.iter().any(|d| w.starts_with(d))) || t.actions().contains(&Action::Reveal))
             .map(|t| t.name)
             .collect();
         assert!(undecided.is_empty(), "say whether these answer stored data (DATA) or only metadata (METADATA, with why): {undecided:?}");
