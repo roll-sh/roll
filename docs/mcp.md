@@ -69,7 +69,7 @@ client keeps it for a minute (`ttlMs`). Connect to `/v1/mcp?toolsets=postgres,co
 list only those products' tools, as GitHub's MCP server does; the access tools (approvals,
 `access_check`) are always listed. Redis alone is 10 tools and the access tools 11, ~2.2k
 tokens instead of ~56k. A product too big for some clients on its own splits into areas, as GitHub's server splits its
-toolsets: apps is `apps.observe` (logs, metrics, errors, traces, vitals, SLOs, usage, push,
+toolsets: apps is `apps.observe` (logs, metrics, errors, traces, vitals, CSP reports, SLOs, usage, push,
 events: 21 tools, ~3.2k tokens), `apps.deploy` (deploys, promotions, rollbacks, jobs, cron runs,
 restarts: 39, ~5.9k), `apps.configure` (services, environments, variables, domains, volumes,
 forms, links, runtime config: 30, ~5.5k) and `apps.project` (drains, notifications, limits, the
@@ -1474,6 +1474,7 @@ previews are listed once those products are on.
 | `apps_app_metrics` | The app's own OpenTelemetry metrics, as series. | `GET /v1/apps/services/{service}/environments/{env}/app-metrics` |
 | `apps_analytics` | Page views, visitors, top pages, referrers, countries. | `GET /v1/apps/services/{service}/environments/{env}/analytics` |
 | `apps_vitals` | What visitors' browsers measured on an environment's pages: Web Vitals p75s, rated, overall and per route. | `GET /v1/apps/services/{service}/environments/{env}/vitals` |
+| `apps_csp_reports` | What visitors' browsers reported an environment's Content-Security-Policy blocked, grouped, the most frequent first. | `GET /v1/apps/services/{service}/environments/{env}/csp-reports` |
 | `apps_route_stats` | An environment's routes over the last minutes: requests, errors, p50/p95/max latency (apps-next). | `GET /v1/apps/services/{id}/environments/{env}/routes` |
 | `apps_import` | What a roll.toml, a docker-compose file or another platform's file (Render's render.yaml, fly.toml, railway.json, Heroku's app.json and Procfile) would make, without making anything; or a roll code repo's or a public Git repository's root roll.toml (`repo`, `git`). | `POST /v1/apps/import` |
 | `apps_export_project` | A project as a roll.toml, variables by name only (apps #26). | `POST /v1/apps/projects/{project}/export` |
@@ -1624,14 +1625,18 @@ From a 2026-11-24 gap review (every tool run as an agent would against a fresh r
 
 From a 2026-11-26 comparison (the spec's anniversary post, Claude's connector docs, Atlassian's, Stripe's and GitHub's changelogs; no core SEP went final since 2026-11-15):
 
-1. **roll code's own MCP server speaks 2026-07-28 (this PR).** The conformance suite found
-   `/v1/code/mcp` speaking only the handshake revisions (54 checks pass, 131 fail, errors to a
-   modern request with `id: null`). code-control's `mcp.rs` now serves the revision itself, its rules
-   shared with roll-mcp in `roll_auth::mcp` (forwarding to `/v1/mcp?toolsets=code` would have
-   refused roll code's own tokens, `rlc_`, automation and `rla_`, renamed every tool and widened the
-   list). Every caller kind gets what it gets in a session, `?lockdown=1` included; 131 checks pass,
-   the 64 in `tests/mcp-conformance/code-expected.yml` are fixtures, tasks, header routing and
-   undeclared capabilities.
+1. **The access/MCP tests made fast (this PR).** After #1266's cut, every roll-mcp test process
+   still spent about 5 s in a debug build matching each tool against the catalogue (`PREPARED`):
+   `catalog::by_path` allocated for every row it tried, and each tool looked its route up six times.
+   Rows are now scored without allocating (the same row wins, checked on two million row and path
+   pairs) and each tool is looked up once: `PREPARED` 0.3 s, roll-mcp's unit tests 6.0 s → 2.0 s,
+   `tests/mcp.rs` 8.2 s → 4.5 s. The gate's lookups under catch-all routes (storage, tasks) do the
+   same less work. Fixed waits on the audit writer became waits for its rows. roll code's
+   `create_repo` said a repository is private by default; the route makes it public (#1263's open
+   item), and both repo-creating tools now say so.
+   - **The operator's call:** a signed-in person's cookie on `/v1/code/mcp` runs tools anonymously
+     (public reads only), in every revision, because tool calls forward no cookie. Forwarding it
+     would widen what a session's tools reach, so it waits for a decision.
 2. **#1111 reads the forwarded approval (after roll search #1111 lands; #1210 landed the bit).** From roll search's
    re-check of #1111: its `IndexScope` gives an approved `ask`'s indices when the owner's outcome is
    `ask`, but on a fleet the owner skips asking for a request another node decided, Allow or an
@@ -1723,7 +1728,7 @@ From a 2026-11-26 comparison (the spec's anniversary post, Claude's connector do
    stateless and search mode (`?tools=search`) covers clients that can't take the list; "remember this browser"; a preset that reveals development's values without asking
    (#354); a connection-level `?project=` (only a token's rules bound a project; a default that
    some tools can't honour would look like a boundary).
-16. **Landed 2026-11-26 and 27:** every tool-less credential route is one the gate protects, which found `PUT /v1/previews/{id}/env` answering every value to a grant that may only write (#1267); a `previews.event` stream hears events as they're recorded (#1275); lends naming their key hand and remember that key (#1246, with a review's fixes in #1251); `previews_replay` (#1233); the official MCP conformance suite as `pnpm test:mcp-conformance` and the 2026-07-28 gaps it found (#1231); structured authorization denials (SEP-2643) on every refusal by the gate and on tasks held while a person decides (#1218, #1221); `previews_note_to_work` (#1217); a forward's signed decision says when it passed on an approval (#1210); a body the gate decides from is the JSON object (imports: array) the route reads, closing write decided for admin or delete SQL and CQL sent as an array, and a replacing `.env` import needs delete and write (#1208); a secret lent at an environment's root approved once, its key on the card, and previews' webhook list and revoke tools (#1201); fixes from a review of #1182 and #1186 (a rule stored with `//` reaches nothing, `/api/` is `/api`, the check endpoint and import sources take folders as the gate does) and resolve, diff and `.env` import decided by their body's folder, with one folder parser for roll secrets and the gate (#1195); a missing document names itself and its index, `review_preview` reads `main_on_change` (#1191); a rule's index never holds an exclusion, which reached what it
+16. **Landed 2026-11-26 to 28:** roll code's `/v1/code/mcp` speaks 2026-07-28 itself, its rules shared with roll-mcp in `roll_auth::mcp`, 131 conformance checks passing (#1263); the access/MCP tests one per flow, 166 to 95 with every security invariant kept (#1266); every tool-less credential route is one the gate protects, which found `PUT /v1/previews/{id}/env` answering every value to a grant that may only write (#1267); a `previews.event` stream hears events as they're recorded (#1275); lends naming their key hand and remember that key (#1246, with a review's fixes in #1251); `previews_replay` (#1233); the official MCP conformance suite as `pnpm test:mcp-conformance` and the 2026-07-28 gaps it found (#1231); structured authorization denials (SEP-2643) on every refusal by the gate and on tasks held while a person decides (#1218, #1221); `previews_note_to_work` (#1217); a forward's signed decision says when it passed on an approval (#1210); a body the gate decides from is the JSON object (imports: array) the route reads, closing write decided for admin or delete SQL and CQL sent as an array, and a replacing `.env` import needs delete and write (#1208); a secret lent at an environment's root approved once, its key on the card, and previews' webhook list and revoke tools (#1201); fixes from a review of #1182 and #1186 (a rule stored with `//` reaches nothing, `/api/` is `/api`, the check endpoint and import sources take folders as the gate does) and resolve, diff and `.env` import decided by their body's folder, with one folder parser for roll secrets and the gate (#1195); a missing document names itself and its index, `review_preview` reads `main_on_change` (#1191); a rule's index never holds an exclusion, which reached what it
    excluded at the gate and in search's scoped principal (#1182, from the re-check of search #1111);
    the root folder spelled `//` is the root, so the 8-hour caps hold and a secrets folder has one
    spelling, refused at the gate where secrets would refuse it (#1186, from roll secrets' 43rd

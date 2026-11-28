@@ -4464,6 +4464,20 @@ async fn paddle_rotations_at_once_leave_the_key_on_the_secret_paddle_keeps() {
     assert_eq!(graces, [3600, 3600, 0], "linked, scheduled, then the leak's");
     assert_eq!((current, old), (paddle_secret(3), Some((paddle_secret(2), 0))));
     assert_eq!(api.values("production", "/").await["values"]["PADDLE_API_KEY"], paddle_secret(3), "the key Paddle keeps");
+
+    // A loser replaces only the credential it raced with: a value set by hand after the winner's
+    // write stays, and the loser is stale.
+    let (held, go) = Pause::arm(&api.gate.pause, &maker);
+    let rotate = || api.call(Method::POST, "/environments/production/secrets/PADDLE_API_KEY/rotate", None);
+    let meanwhile = async {
+        Pause::reached(held).await;
+        assert!(rotate().await.0.is_success(), "the winner");
+        api.ok(Method::PUT, "/environments/production/secrets/PADDLE_API_KEY", Some(json!({ "value": "set-by-hand" }))).await;
+        go.send(()).unwrap();
+    };
+    let ((s, e), ()) = tokio::join!(rotate(), meanwhile);
+    assert_eq!(s, StatusCode::CONFLICT, "{e}");
+    assert_eq!(api.values("production", "/").await["values"]["PADDLE_API_KEY"], "set-by-hand");
 }
 
 #[tokio::test]
@@ -4487,8 +4501,21 @@ async fn a_database_outside_roll_hands_out_logins_in_turn_and_per_lease() {
     assert_eq!((blue.0.as_str(), password("app_blue")), ("app_blue", Some(blue.1.clone())));
 
     // Each rotation hands out the other role; the one in use keeps working through the grace.
+    // It rewrites DB_USER too, so a token that may write DB_PASSWORD alone may not rotate it (told
+    // how many keys share the login, not which). One that may write both, but read neither, hears
+    // only of the key it rotated.
+    let writer = |keys: &[&str]| {
+        let mut rule = roll_secrets::access::rule(&api.project, None, None, &[roll_secrets::Action::Write]);
+        rule.keys = Some(keys.iter().map(|k| k.to_string()).collect());
+        api.gate.grant("writer", rule, None).0
+    };
     let rotate = || api.call(Method::POST, "/environments/production/secrets/DB_PASSWORD/rotate", None);
-    assert!(rotate().await.0.is_success());
+    let (s, e) = api.req(Method::POST, "/environments/production/secrets/DB_PASSWORD/rotate", None, Some(&writer(&["DB_PASSWORD"]))).await;
+    assert!(s == StatusCode::FORBIDDEN && e.to_string().contains("1 other key") && !e.to_string().contains("DB_USER"), "{s} {e}");
+    assert_eq!(login().await, blue, "refused before anything was issued");
+    let (s, r) = api.req(Method::POST, "/environments/production/secrets/DB_PASSWORD/rotate", None, Some(&writer(&["DB_PASSWORD", "DB_USER"]))).await;
+    assert!(s.is_success(), "{r}");
+    assert_eq!(r["items"].as_array().unwrap().iter().map(|i| i["key"].as_str().unwrap()).collect::<Vec<_>>(), ["DB_PASSWORD"], "{r}");
     let green = login().await;
     assert_eq!((green.0.as_str(), password("app_green"), password("app_blue")), ("app_green", Some(green.1.clone()), Some(blue.1.clone())));
     // Both roles are taken (green in use, blue in its grace): another rotation waits, resetting

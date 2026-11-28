@@ -1266,7 +1266,6 @@ async fn a_rule_can_grant_part_of_a_resource() {
         assert_eq!(d.call(&logs, Method::GET, "/v1/search/clusters/cl_1/indices", None).await.0, StatusCode::FORBIDDEN);
         assert_eq!(d.call(&logs, Method::POST, "/v1/search/clusters/cl_1/request", Some(json!({}))).await.0, StatusCode::FORBIDDEN);
         // Tightened to what it used: the two expressions it searched, nothing else.
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         // Who touched cl_1: the cluster and what's under it; an index alone; a pattern is literal.
         let who = |q: &str| {
             let (d, path) = (&d, format!("/v1/access/audit?{q}"));
@@ -2669,7 +2668,12 @@ async fn the_checkup_names_what_needs_attention() {
     for t in [&wide, &fit] {
         assert_eq!(d.call(t, Method::GET, "/v1/projects", None).await.0, StatusCode::OK);
     }
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    // The audit writer records the calls after they're answered: wait for both, not a fixed time.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while ![&wide_id, &fit_id].iter().all(|id| d.access.store.activity().unwrap().contains_key(id.as_str())) {
+        assert!(std::time::Instant::now() < deadline, "the calls were never audited");
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
     let (_, list) = d.call(OPERATOR, Method::GET, "/v1/access/checkup", None).await;
     let kinds = |id: &str| -> Vec<String> {
         list.as_array().unwrap().iter().find(|e| e["grant"]["id"] == id).map(|e| e["findings"].as_array().unwrap().iter().map(|f| f["kind"].as_str().unwrap().to_string()).collect()).unwrap_or_default()
