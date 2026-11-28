@@ -36,6 +36,8 @@ cargo clippy -p apps-build -p apps-control -p roll-edge --all-targets -- -D warn
 env -u ROLL_APPS_DOCKER cargo test -p apps-build -p apps-control -p roll-workspace "${args[@]}"
 # `roll apps …` end to end: the real binary against roll apps in process.
 env -u ROLL_APPS_DOCKER cargo test -p roll-cli --test apps
+# roll-mcp's tool tests read apps-control's source (link kinds, rollout actions, lifecycle).
+cargo test -p roll-mcp --lib
 # Custom domains' certificates at the edge: the HTTP-01 manager, the plain-HTTP listener, and
 # Cloudflare for SaaS against a fake Cloudflare.
 env -u ROLL_APPS_DOCKER cargo test -p roll-edge --lib --test custom_domains

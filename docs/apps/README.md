@@ -2199,7 +2199,7 @@ A staging environment that writes to production's database isn't staging (Railwa
 each have their own databases; Render's and Heroku's previews make theirs). `data: "branch"` on
 an environment (`roll apps env staging --data branch`, admin) gives it a branch of each resource
 the service links, in place of the resources themselves: roll Postgres, Redis, NoSQL, storage
-buckets, streams and queues, made the way roll previews branches its data (its adapters, through
+buckets, streams, queues and search clusters (a zero-copy branch of its indices), made the way roll previews branches its data (its adapters, through
 rolld's own API, so on a fleet each reaches the resource's owner):
 - **Credentials of its own:** a Postgres branch gets a role of its own (never the project's
   superuser login, which would reach production's endpoint too), and every kind connects as the
@@ -2210,8 +2210,8 @@ rolld's own API, so on a fleet each reaches the resource's owner):
   the first's in the same write that checks it's still there, so a delete running beside it
   sees the new user and keeps it.
 
-A linked kind that can't be branched (a search cluster) is left out of such an environment,
-said in its log. Branches are made by the products when it's set, and at each deploy for a link
+A linked kind that can't be branched (another service's URLs, a tasks queue) is left out of such
+an environment, said in its log. Branches are made by the products when it's set, and at each deploy for a link
 made since. Their
 credentials are sealed with the environment (`env_branches`), and its view lists the branches by
 kind and ref, never with what reaches them. Its link variables are the branch's. A database

@@ -3443,7 +3443,7 @@ impl Apps {
                 continue;
             }
             // Nor does an environment with data of its own: its branch's, or none yet; a kind
-            // with no branches (search) is left out of it.
+            // with no branches (tasks) is left out of it.
             if own_data && kind != LinkKind::Service && !kind.branches() {
                 branch_notices.push(format!("{} {r} is left out of {}: it has data of its own, and a {} can't be branched", kind.as_str(), env.name, kind.as_str()));
                 continue;

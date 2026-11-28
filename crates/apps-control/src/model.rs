@@ -3744,7 +3744,7 @@ impl LinkKind {
     /// Whether an environment with data of its own (`data: "branch"`) gets a branch of it (the
     /// kinds roll previews branches). Another (search) is left out of such an environment.
     pub fn branches(self) -> bool {
-        matches!(self, LinkKind::Postgres | LinkKind::Redis | LinkKind::Nosql | LinkKind::Bucket | LinkKind::Stream | LinkKind::Queue)
+        matches!(self, LinkKind::Postgres | LinkKind::Redis | LinkKind::Nosql | LinkKind::Bucket | LinkKind::Stream | LinkKind::Queue | LinkKind::Search)
     }
 
     pub const ALL: [LinkKind; 9] = [LinkKind::Postgres, LinkKind::Redis, LinkKind::Bucket, LinkKind::Stream, LinkKind::Queue, LinkKind::Nosql, LinkKind::Search, LinkKind::Service, LinkKind::Tasks];
