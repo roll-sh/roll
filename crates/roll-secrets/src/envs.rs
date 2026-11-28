@@ -584,8 +584,9 @@ impl Secrets {
             }
             one(c, env)
         });
-        if env.is_err() {
-            self.discard(&items);
+        match &env {
+            Ok(_) => self.settle(&items),
+            Err(_) => self.discard(&items),
         }
         env
     }

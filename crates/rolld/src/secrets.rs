@@ -1376,9 +1376,18 @@ impl roll_secrets::health::CodeRefs for CodeRefs {
         })
     }
 
+    /// From the control database every node shares (a GitHub link's `private` included), so any
+    /// node can tell. A database that doesn't answer is said in the log, not taken for private.
     fn public(&self, repo: &str) -> Option<String> {
         let (owner, name) = repo.split_once('/')?;
-        code_control::github::public_at(&self.0.find_repo(owner, name).ok()?)
+        match self.0.find_repo(owner, name) {
+            Ok(r) => code_control::github::public_at(&r),
+            Err(code_control::Error::NotFound(_) | code_control::Error::Moved(_)) => None,
+            Err(e) => {
+                tracing::warn!(repo, error = %e, "roll secrets' Health couldn't check whether a repository is public");
+                None
+            }
+        }
     }
 }
 

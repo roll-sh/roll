@@ -707,7 +707,7 @@ async fn one_request_at_a_time_per_server() {
         for p in ["/", "/1", "/2", "/3"] {
             s.page(p, &format!(r#"<title>{p}</title><p>x</p><a href="/1">1</a><a href="/2">2</a><a href="/3">3</a>"#));
         }
-        *s.delay.lock().unwrap() = Duration::from_millis(100);
+        *s.delay.lock().unwrap() = Duration::from_millis(40);
     };
     let a = Site::start_on("127.0.0.1", flight.clone()).await;
     pages(&a);
