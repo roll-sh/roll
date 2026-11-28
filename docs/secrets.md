@@ -3617,6 +3617,8 @@ roll completions bash|zsh|fish|powershell
   `ROLL_TOKEN`, `ROLL_FALLBACK_KEY`…) is dropped from its environment unless the project sets
   that name itself, so an app and its dependencies never act as roll's operator or with the token
   that read its values. `--keep-roll-credentials` passes them on (a script that calls `roll`).
+  A `_URI` or `_URL` name whose value carries a password counts too. `roll apps exec` and
+  `roll secrets render --exec` drop the same names.
 - `roll run --watch [--interval 5]` keeps the command as a child and restarts it (SIGTERM, then
   SIGKILL after 10 s) when the environment changes. It polls `…/digest`, a hash of the folder's
   effective keys, versions, fingerprints and links, and of what their references reach (in this
