@@ -189,6 +189,10 @@ T5=$(t)
 STALE=$(python3 -I "$HERE/pgo-stale.py" "$PROF" "$OUT/build-use.log" "${PGO_STALE_WARN:-1}") \
   || { echo "dist-pgo: pgo-stale.py failed" >&2; exit 1; }
 echo "$STALE" | while IFS= read -r l; do note "$l"; done
+# The hottest functions' sizes or inline state, for comparing builds (pgo-layout.py diff).
+python3 -I "$HERE/pgo-layout.py" list "$PROF" "$OUT/roll-engine" >"$OUT/layout.txt" \
+  || { echo "dist-pgo: pgo-layout.py failed" >&2; exit 1; }
+note "layout: $(grep -c ' inlined ' "$OUT/layout.txt") of $(wc -l <"$OUT/layout.txt") hottest functions inlined everywhere ($OUT/layout.txt)"
 case $STALE in WARNING*) echo "$STALE" | head -1 >&2 ;; esac
 note "optimised build $((T5 - T4)) s, total $((T5 - T0)) s, peak disk $((PEAK / 1048576)) GB in $W and $OUT"
 note "profile $(sha256sum "$PROF" | cut -d' ' -f1) $(du -h "$PROF" | cut -f1)"
