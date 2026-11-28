@@ -1185,7 +1185,7 @@ otherwise. The module docs give the client retry policy and exactly what is asse
 
 | roll previews: a deploy hook builds its branches' previews again at their heads (every service, nothing cached), once a minute at most; anything but a live hook is a 404; a leaked one is revoked; its secret is a checksummed roll secret | `roll-previews/tests/engine.rs::a_deploy_hook_builds_its_branches_previews_again` |
 
-| roll previews: a project's own preview domain (roll apps' verified wildcard) puts its previews' URLs under it, and its names reach only that project's previews | `roll-previews/tests/engine.rs::a_projects_own_preview_domain_serves_only_its_previews` |
+| roll previews: a project's own preview domain (roll apps' verified wildcard) puts its previews' URLs under it, and its names reach only that project's previews; with team access, a signed-in person's ticket to a host there lands on that host, and the preview's name under another project's domain, or a name of nothing, gets none | `roll-previews/tests/engine.rs::a_projects_own_preview_domain_serves_only_its_previews` |
 | roll previews: `roll preview visitors` answers who signed in to a team preview lately | `roll-cli/tests/preview.rs::visitors_from_the_cli` |
 
 | roll previews: `roll preview masks` lists a project's mask suggestions (`--apply` adds them) | `roll-cli/tests/preview.rs::mask_suggestions_from_the_cli` |
