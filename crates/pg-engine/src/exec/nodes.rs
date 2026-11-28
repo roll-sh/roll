@@ -3390,6 +3390,16 @@ pub fn compare_values(a: &Value, b: &Value, k: &SortKey, ctx: &ExecCtx) -> Resul
     Ok(if k.desc { o.reverse() } else { o })
 }
 
+/// The values of `keys` over `row`, held beside it by a sort: exactly as many as there are
+/// keys (a `Result` iterator collected into a Vec allocates room for at least four).
+pub(super) fn key_values(keys: &[SortKey], row: &[Value], ctx: &ExecCtx) -> Result<Vec<Value>> {
+    let mut k = Vec::with_capacity(keys.len());
+    for key in keys {
+        k.push(eval(&key.expr, row, ctx)?);
+    }
+    Ok(k)
+}
+
 pub fn sort_rows(rows: Vec<Row>, keys: &[SortKey], ctx: &ExecCtx) -> Result<Vec<Row>> {
     sort_rows_bounded(rows, keys, None, ctx)
 }
@@ -3435,11 +3445,7 @@ pub fn sort_rows_bounded(
     }
     let mut keyed: Vec<(Vec<Value>, Row)> = Vec::with_capacity(rows.len());
     for r in rows {
-        let k = keys
-            .iter()
-            .map(|k| eval(&k.expr, &r, ctx))
-            .collect::<Result<Vec<_>>>()?;
-        keyed.push((k, r));
+        keyed.push((key_values(keys, &r, ctx)?, r));
     }
     if let Some(order) = super::fastsort::order(keyed.len(), keys, |i, k| &keyed[i].0[k], |i| &keyed[i].1, bound) {
         let rows: Vec<Row> = keyed.into_iter().map(|(_, r)| r).collect();
@@ -3569,8 +3575,7 @@ impl IncrSortNode {
             let r = (|| -> Result<Option<(Vec<Value>, Row)>> {
                 let Some(r) = input.next(ctx)? else { return Ok(None) };
                 ctx.check()?;
-                let k = keys.iter().map(|k| eval(&k.expr, &r, ctx)).collect::<Result<Vec<_>>>()?;
-                Ok(Some((k, r)))
+                Ok(Some((key_values(keys, &r, ctx)?, r)))
             })();
             match r {
                 Ok(x) => x,
@@ -3672,7 +3677,7 @@ impl IncrSortNode {
         let next = loop {
             let Some(r) = self.input.next(ctx)? else { break None };
             ctx.check()?;
-            let k = self.keys.iter().map(|k| eval(&k.expr, &r, ctx)).collect::<Result<Vec<_>>>()?;
+            let k = key_values(&self.keys, &r, ctx)?;
             let mut same = true;
             for (i, key) in self.keys.iter().enumerate().take(self.presorted) {
                 if compare_values(&first[i], &k[i], key, ctx)? != Ordering::Equal {

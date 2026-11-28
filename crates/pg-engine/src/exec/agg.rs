@@ -2320,6 +2320,8 @@ struct SortBuf {
     sort: super::extsort::ExtSort,
     /// Each ORDER BY key's column in the rows.
     keys: Vec<usize>,
+    /// The keys appended to a row's arguments (those that aren't one of them).
+    appended: usize,
     /// The rows whose first argument isn't NULL.
     nonnull: u64,
 }
@@ -2355,7 +2357,8 @@ impl Buffered {
         };
         let keys: Vec<SortKey> =
             call.order_by.iter().zip(&cols).map(|(k, &c)| SortKey { expr: Expr::Col(c, types[c].clone()), ..k.clone() }).collect();
-        SortBuf { sort: super::extsort::ExtSort::new(&keys, types, None, None, false, ctx), keys: cols, nonnull: 0 }
+        let appended = types.len() - call.args.len();
+        SortBuf { sort: super::extsort::ExtSort::new(&keys, types, None, None, false, ctx), keys: cols, appended, nonnull: 0 }
     }
 }
 
@@ -2552,7 +2555,16 @@ pub fn feed(call: &AggCall, st: &mut AggState, row: &[Value], ctx: &ExecCtx) -> 
         }
         return st.acc.add(std::slice::from_ref(&v), ctx);
     }
-    let args = eval_all(&call.args, row, ctx)?;
+    // (A sorted aggregate's row is its arguments then the keys that aren't one of them: made
+    // with room for both, it never grows.)
+    let room = match &x.buffered {
+        Some(Buffered::Sort(Some(b))) => b.appended,
+        _ => 0,
+    };
+    let mut args = Vec::with_capacity(call.args.len() + room);
+    for e in &call.args {
+        args.push(eval(e, row, ctx)?);
+    }
     if call.def.skip_nulls && args.iter().any(Value::is_null) {
         return Ok(());
     }
@@ -2573,6 +2585,8 @@ pub fn feed(call: &AggCall, st: &mut AggState, row: &[Value], ctx: &ExecCtx) -> 
             let b = buf.get_or_insert_with(|| Box::new(Buffered::sort(call, ctx)));
             let mut r = args;
             let n = r.len();
+            // (The first row's room, made before the sort was.)
+            r.reserve_exact(b.appended);
             for (k, &c) in call.order_by.iter().zip(&b.keys) {
                 if c >= n {
                     r.push(eval(&k.expr, row, ctx)?);
@@ -2585,10 +2599,7 @@ pub fn feed(call: &AggCall, st: &mut AggState, row: &[Value], ctx: &ExecCtx) -> 
             let keys = if call.def.kind.is_ordered() {
                 args.clone()
             } else {
-                call.order_by
-                    .iter()
-                    .map(|k| eval(&k.expr, row, ctx))
-                    .collect::<Result<Vec<_>>>()?
+                super::nodes::key_values(&call.order_by, row, ctx)?
             };
             buf.push((args, keys));
             Ok(())
@@ -2667,7 +2678,7 @@ pub fn finish(call: &AggCall, mut st: AggState, ctx: &ExecCtx) -> Result<Value> 
     match st.extra.as_mut().and_then(|x| x.buffered.take()) {
         Some(Buffered::Sort(buf)) => {
             if let Some(b) = buf {
-                let SortBuf { sort, keys: kcols, nonnull } = *b;
+                let SortBuf { sort, keys: kcols, nonnull, .. } = *b;
                 let (mut rows, _, _) = sort.finish(ctx)?;
                 let n = call.args.len();
                 if call.def.kind == AggKind::OrderedSet {

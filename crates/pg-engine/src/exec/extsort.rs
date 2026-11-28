@@ -78,6 +78,8 @@ pub struct ExtSort {
     /// appended keys, and the input's column count.
     given: Vec<SortKey>,
     width: usize,
+    /// The keys appended to a held row (those that aren't columns).
+    appended: usize,
     full: usize,
     /// The sorted tuple's columns as PostgreSQL has them: the input's, then the keys that
     /// aren't columns (resjunk); and the ones read above (the others count as NULLs).
@@ -164,6 +166,7 @@ impl ExtSort {
             cols,
             given: keys.to_vec(),
             width,
+            appended: extra,
             full,
             datum: {
                 // (The columns PostgreSQL's sort tuple has: those read, and the appended keys.)
@@ -186,6 +189,10 @@ impl ExtSort {
 
     /// An input row (of the input's columns), narrowed by `narrow` to be held.
     pub(super) fn put(&mut self, mut row: Row, narrow: Option<&super::nodes::Narrow>, ctx: &ExecCtx) -> Result<()> {
+        // (Room for exactly the keys: a push past a full row's capacity would double it.)
+        if self.appended > 0 {
+            row.reserve_exact(self.appended);
+        }
         for (k, &c) in self.given.iter().zip(&self.cols) {
             if c >= self.width {
                 let v = eval(&k.expr, &row, ctx)?;
