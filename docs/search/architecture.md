@@ -603,8 +603,11 @@ tenants don't hold, with a credential per link:
   linking cluster sends) and no `/regex/`. A link's user runs no inference on the remote
   (`inference::refuse_over_link`): a link reads data, it never spends the remote's models or its
   providers' keys. Today this flavor runs no inference for a query at all (`semantic` answers "not
-  supported yet"; neural search isn't built), so the guard is for when it does. A loopback remote's indices are authorized as the cluster's own (`check_all`), and a
-  link's user can't name a loopback at all: it would read past the ceiling. A principal that
+  supported yet"; neural search isn't built), so the guard is for when it does. A loopback remote's indices are authorized as the cluster's own (`check_all`, on the groups
+  `remote::plan` searches, so the check and the search never read an expression differently),
+  and a link's user can't name a loopback at all: it would read past the ceiling. A loopback's
+  shards keep their real index (the alias is for display, `Target::cluster`), so field and
+  document security, and a role's `_index`, apply as on the local index. A principal that
   isn't an OpenSearch user (the owner's per-index scope, a key) reaches no remote. DLS values
   substituted from a user's attributes are JSON-escaped.
 - *Fan-out*: any local user can make the local cluster ask every linked remote (at most 20) in
