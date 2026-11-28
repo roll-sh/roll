@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 
 /// What a target can ask for; a new one gets the two that need someone.
-pub const EVENTS: [&str; 42] = [
+pub const EVENTS: [&str; 43] = [
     "deploy.started",
     "deploy.failed",
     "deploy.base_updated",
