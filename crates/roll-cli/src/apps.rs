@@ -1026,6 +1026,22 @@ pub enum AppsCmd {
         #[command(flatten)]
         target: Target,
     },
+    /// Give a link a new credential of its own (`search <cluster>`, a bucket's key; Heroku's
+    /// `pg:credentials:rotate`): every environment that uses it is redeployed with it, and the
+    /// old one is revoked once nothing runs with it. A redeploy that fails keeps the old one.
+    RotateLink {
+        kind: String,
+        r#ref: String,
+        /// The service: an id (`svc_…`) or a name (default: the one this directory is linked to).
+        #[arg(long, short = 's')]
+        service: Option<String>,
+        /// The workspace project, to tell services of the same name apart.
+        #[arg(long, short = 'p')]
+        project: Option<String>,
+        /// Only this environment (the others keep the old credential until their next deploy).
+        #[arg(long, short = 'e')]
+        env: Option<String>,
+    },
     /// Stop a queued or running deploy (the live one keeps serving).
     Cancel {
         deployment: String,
@@ -4793,6 +4809,12 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             let svc = service(api, &target).await?;
             api.call(reqwest::Method::DELETE, &format!("/v1/apps/services/{}/links/{}/{}", enc(&s(&svc["id"])), enc(&kind), enc(&r#ref)), None).await?;
             json!({ "unlinked": format!("{kind}/{ref}") })
+        }
+        AppsCmd::RotateLink { kind, r#ref, service: name, project, env } => {
+            let target = Target { service: name, project, env: env.clone().unwrap_or_else(|| "production".into()) };
+            let svc = service(api, &target).await?;
+            let path = format!("/v1/apps/services/{}/links/{}/{}/rotate", enc(&s(&svc["id"])), enc(&kind), enc(&r#ref));
+            api.post(&path, json!({ "environment": env })).await?
         }
         AppsCmd::Cancel { deployment, target } => {
             let svc = service(api, &target).await?;
