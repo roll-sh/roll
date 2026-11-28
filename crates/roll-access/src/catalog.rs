@@ -1841,6 +1841,8 @@ static ROWS: &[Row] = &[
     row("PUT", "/v1/secrets/projects/{project}/environments/{env}/secrets/{key}/hosts", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path").secret_key(),
     row("DELETE", "/v1/secrets/projects/{project}/environments/{env}/secrets/{key}/hosts", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path").secret_key(),
     // Purging a secret's history can't be undone.
+    // A rotation rewrites every key sharing the credential: roll-secrets asks write on each.
+    row("POST", "/v1/secrets/projects/{project}/environments/{env}/secrets/{key}/rotate", "secrets", W, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path").secret_key(),
     row("POST", "/v1/secrets/projects/{project}/environments/{env}/secrets/{key}/purge", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path").secret_key(),
     // A change request's current and proposed values, for its approvers.
     row("GET", "/v1/secrets/projects/{project}/environments/{env}/requests/{id}/values", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
@@ -1966,6 +1968,8 @@ static ROWS: &[Row] = &[
     // Who's signed in to a gated environment (emails of a provider's visitors), and ending one's
     // session: it only takes access away.
     row("GET", "/v1/apps/services/{id}/environments/{env}/visitors", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
+    // What browsers reported an environment's CSP blocked (`csp_reports`): read on the service.
+    row("GET", "/v1/apps/services/{id}/environments/{env}/csp-reports", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
     row("DELETE", "/v1/apps/services/{id}/environments/{env}/visitors/{visitor}", "apps", W, one(PG, "service")).env(EnvFrom::Param("env")),
     // A volume's backups: making one changes nothing the app sees (write, production too);
     // restoring one replaces the volume's files (delete, as restoring over a branch is).

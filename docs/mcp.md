@@ -69,7 +69,7 @@ client keeps it for a minute (`ttlMs`). Connect to `/v1/mcp?toolsets=postgres,co
 list only those products' tools, as GitHub's MCP server does; the access tools (approvals,
 `access_check`) are always listed. Redis alone is 10 tools and the access tools 11, ~2.2k
 tokens instead of ~56k. A product too big for some clients on its own splits into areas, as GitHub's server splits its
-toolsets: apps is `apps.observe` (logs, metrics, errors, traces, vitals, SLOs, usage, push,
+toolsets: apps is `apps.observe` (logs, metrics, errors, traces, vitals, CSP reports, SLOs, usage, push,
 events: 21 tools, ~3.2k tokens), `apps.deploy` (deploys, promotions, rollbacks, jobs, cron runs,
 restarts: 39, ~5.9k), `apps.configure` (services, environments, variables, domains, volumes,
 forms, links, runtime config: 30, ~5.5k) and `apps.project` (drains, notifications, limits, the
@@ -1474,6 +1474,7 @@ previews are listed once those products are on.
 | `apps_app_metrics` | The app's own OpenTelemetry metrics, as series. | `GET /v1/apps/services/{service}/environments/{env}/app-metrics` |
 | `apps_analytics` | Page views, visitors, top pages, referrers, countries. | `GET /v1/apps/services/{service}/environments/{env}/analytics` |
 | `apps_vitals` | What visitors' browsers measured on an environment's pages: Web Vitals p75s, rated, overall and per route. | `GET /v1/apps/services/{service}/environments/{env}/vitals` |
+| `apps_csp_reports` | What visitors' browsers reported an environment's Content-Security-Policy blocked, grouped, the most frequent first. | `GET /v1/apps/services/{service}/environments/{env}/csp-reports` |
 | `apps_route_stats` | An environment's routes over the last minutes: requests, errors, p50/p95/max latency (apps-next). | `GET /v1/apps/services/{id}/environments/{env}/routes` |
 | `apps_import` | What a roll.toml, a docker-compose file or another platform's file (Render's render.yaml, fly.toml, railway.json, Heroku's app.json and Procfile) would make, without making anything; or a roll code repo's or a public Git repository's root roll.toml (`repo`, `git`). | `POST /v1/apps/import` |
 | `apps_export_project` | A project as a roll.toml, variables by name only (apps #26). | `POST /v1/apps/projects/{project}/export` |

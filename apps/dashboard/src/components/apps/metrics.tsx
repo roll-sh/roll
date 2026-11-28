@@ -12,7 +12,7 @@
 
 import { Table2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { appsApi, formatMs, type Analytics, type Deployment, type Metrics as MetricsData, type RouteStat, type RouteStats, type Span, type TraceSummary, type Vital, type VitalName, type Vitals, type AppMetrics, type AppSeries, type ErrorGroup, type SplitStat, type InstanceSeries, type SloIndicator, type SloReport } from "@/lib/apps-api";
+import { appsApi, formatMs, type Analytics, type CspReports, type Deployment, type Metrics as MetricsData, type RouteStat, type RouteStats, type Span, type TraceSummary, type Vital, type VitalName, type Vitals, type AppMetrics, type AppSeries, type ErrorGroup, type SplitStat, type InstanceSeries, type SloIndicator, type SloReport } from "@/lib/apps-api";
 import { formatBytes } from "@/lib/roll-api";
 import { btn, CopyButton, panel, useCopy } from "../ui";
 import { usePageVisible } from "./live";
@@ -558,6 +558,46 @@ function vital(v: Vital | undefined, unit: "ms" | "") {
   return unit === "ms" ? (v.p75 >= 1000 ? `${(v.p75 / 1000).toFixed(2)} s` : `${Math.round(v.p75)} ms`) : v.p75.toFixed(3);
 }
 
+/** What browsers reported its Content-Security-Policy blocked (CSP reports on), grouped. */
+function Csp({ r }: { r: CspReports }) {
+  return (
+    <section className={`${panel} overflow-hidden`} aria-label="CSP reports">
+      <div className="border-b border-line px-4 py-2.5">
+        <p className="text-[12px] text-muted">
+          CSP reports <span className="text-subtle">· what visitors' browsers blocked, the most frequent first</span>
+        </p>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-[12px]">
+          <thead>
+            <tr className="text-left text-[11px] text-subtle">
+              <th className="px-4 py-2 font-medium">Directive</th>
+              <th className="px-2 py-2 font-medium">Blocked</th>
+              <th className="px-2 py-2 font-medium">Page</th>
+              <th className="px-2 py-2 text-right font-medium">Reports</th>
+              <th className="px-4 py-2 text-right font-medium">Last</th>
+            </tr>
+          </thead>
+          <tbody>
+            {r.groups.slice(0, 20).map((g) => (
+              <tr key={`${g.directive} ${g.blocked} ${g.path} ${g.disposition}`} className="border-t border-line">
+                <td className="px-4 py-1.5 font-mono text-[11.5px]">
+                  {g.directive}
+                  {g.disposition === "report" && <span className="ml-1.5 text-subtle">report-only</span>}
+                </td>
+                <td className="max-w-[14rem] truncate px-2 py-1.5 font-mono text-[11.5px] text-muted">{g.blocked}</td>
+                <td className="max-w-[14rem] truncate px-2 py-1.5 font-mono text-[11.5px] text-muted">{g.path}</td>
+                <td className="px-2 py-1.5 text-right font-mono">{count(g.count)}</td>
+                <td className="px-4 py-1.5 text-right text-subtle">{since(g.last_seen)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
 /** What visitors' browsers measured (Web Vitals on): each metric's p75, and the busiest routes'. */
 function Speed({ v }: { v: Vitals }) {
   return (
@@ -790,6 +830,7 @@ export function MetricsTab({
   const [routes, setRoutes] = useState<RouteStats | null>(null);
   const [visitors, setVisitors] = useState<Analytics | null>(null);
   const [speed, setSpeed] = useState<Vitals | null>(null);
+  const [csp, setCsp] = useState<CspReports | null>(null);
   const [appMetrics, setAppMetrics] = useState<AppMetrics | null>(null);
   const [errorGroups, setErrorGroups] = useState<ErrorGroup[]>([]);
   const [budget, setBudget] = useState<SloReport | null>(null);
@@ -818,7 +859,7 @@ export function MetricsTab({
     const load = async () => {
       try {
         // The deploys only mark the charts: metrics still show without them.
-        const [next, deps, byRoute, seen, traced, measured, own, errs, slo] = await Promise.all([
+        const [next, deps, byRoute, seen, traced, measured, own, errs, slo, blocked] = await Promise.all([
           appsApi.metrics(service, env, range.minutes),
           appsApi.deploys(service, env).catch(() => null),
           appsApi.routes(service, env).catch(() => null),
@@ -828,6 +869,7 @@ export function MetricsTab({
           appsApi.appMetrics(service, env, Math.min(Math.max(range.minutes, 5), 10_080)).catch(() => null),
           appsApi.errors(service, env, Math.min(Math.max(range.minutes, 5), 10_080)).catch(() => null),
           appsApi.slo(service, env).catch(() => null),
+          appsApi.cspReports(service, env, Math.min(Math.max(range.minutes, 60), 10_080)).catch(() => null),
         ]);
         if (alive) {
           setM(next);
@@ -839,6 +881,7 @@ export function MetricsTab({
           if (own) setAppMetrics(own);
           if (errs) setErrorGroups(errs.groups);
           setBudget(slo);
+          setCsp(blocked);
           setError(null);
         }
       } catch (e) {
@@ -982,6 +1025,7 @@ export function MetricsTab({
       {(raw?.by_instance?.length ?? 0) > 0 && <Instances rows={raw!.by_instance!} cpus={cpus} memoryMb={memoryMb} />}
       {errorGroups.length > 0 && <Errors groups={errorGroups} service={service} env={env} />}
       {speed && speed.samples > 0 && <Speed v={speed} />}
+      {csp && csp.groups.length > 0 && <Csp r={csp} />}
       {appMetrics && appMetrics.series.length > 0 && <AppMetricsPanel m={appMetrics} />}
       {visitors && visitors.page_views > 0 && <Visitors a={visitors} />}
       {traces && traces.length > 0 && <Traces service={service} env={env} traces={traces} />}
