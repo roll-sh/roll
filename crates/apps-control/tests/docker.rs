@@ -308,8 +308,9 @@ async fn a_static_site_builds_and_its_cold_starts_are_measured() {
         assert_eq!(&resp.into_body().collect().await.unwrap().to_bytes()[..], b"<!doctype html><h1>from files</h1>");
         if i == 0 { first.push(began.elapsed()) } else { files_warm.push(began.elapsed()) }
     }
-    let running = apps_control::runtime::docker::docker(&["ps", "-q", "--filter", &format!("label=sh.roll.apps={files}")]).await.unwrap();
-    assert!(running.is_empty(), "no container serves it: {running}");
+    // Its image's scan may still run beside it (`roll-apps-scan-…`): no instance serves it.
+    let running = apps_control::runtime::docker::docker(&["ps", "--format", "{{.Names}}", "--filter", &format!("label=sh.roll.apps={files}")]).await.unwrap();
+    assert!(running.lines().all(|n| n.starts_with("roll-apps-scan-")), "no container serves it: {running}");
     eprintln!("MEASURED static site from its files: first request {} ms (reads its index), warm median {} ms", first[0].as_millis(), median(files_warm).as_millis());
     assert_eq!(delete_for_good(&api, &files).await.0, StatusCode::NO_CONTENT);
     // Idle: stopped, and nothing metered meanwhile.
@@ -390,6 +391,9 @@ async fn a_static_sites_functions_build_and_answer() {
         ("netlify/edge-functions/flag.ts", "export default (req: Request, ctx: any) => new Response(String(ctx.config.banner));\nexport const config = { path: '/flag' };\n"),
     ];
     let (site, site_host) = deploy_tree(&w, "site", &files).await;
+    // The site's runtime config, set before its functions deploy: they read it as `context.config`.
+    let site_env = format!("/v1/apps/services/{site}/environments/production");
+    assert_eq!(call(&w.api, "PUT", &site_env, Some(json!({"config": {"banner": "sale"}})), "application/json", None).await.0, StatusCode::OK);
     let (fns, host) = deploy_tree_with(&w, "site-fn", &files, json!({"builder": "functions"})).await;
     let fetch = |path: &'static str| {
         let req = Request::get(path).header("host", host.as_str()).body(Body::empty()).unwrap();
@@ -405,9 +409,6 @@ async fn a_static_sites_functions_build_and_answer() {
     assert_eq!(fetch("/api/ping?n=7").await, (StatusCode::OK, r#"{"pong":"7"}"#.to_string()));
     assert_eq!(fetch("/api/web").await, (StatusCode::OK, "typed".to_string()));
     assert_eq!(fetch("/api/nope").await.0, StatusCode::NOT_FOUND);
-    // The site's runtime config: its functions read it as `context.config`.
-    let site_env = format!("/v1/apps/services/{site}/environments/production");
-    assert_eq!(call(&w.api, "PUT", &site_env, Some(json!({"config": {"banner": "sale"}})), "application/json", None).await.0, StatusCode::OK);
     let fetch = |path: &'static str| {
         let req = Request::get(path).header("host", site_host.as_str()).body(Body::empty()).unwrap();
         let public = w.public.clone();
