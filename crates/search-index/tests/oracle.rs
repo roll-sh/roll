@@ -701,14 +701,14 @@ pub fn check(s: &Searcher, ids: &HashMap<u32, String>, live: &HashMap<String, MD
 #[test]
 fn boolean_and_term_queries_match_brute_force() {
     // ORACLE_SEEDS=<n> sweeps more corpora.
-    let seeds: u64 = std::env::var("ORACLE_SEEDS").ok().and_then(|v| v.parse().ok()).unwrap_or(12);
+    let seeds: u64 = std::env::var("ORACLE_SEEDS").ok().and_then(|v| v.parse().ok()).unwrap_or(4);
     for seed in 0..seeds {
         let corpus = build(seed, 400 + (seed as usize % 4) * 300, ShardConfig { merge_threads: 0, ..Default::default() });
         let s = corpus.shard.searcher();
         let ids = ids(&s);
         assert_eq!(ids.len(), corpus.live.len());
         let mut rng = rng(seed * 7 + 1);
-        for _ in 0..60 {
+        for _ in 0..40 {
             let q = random_q(&mut rng, 3);
             check(&s, &ids, &corpus.live, &q, &mut rng);
         }

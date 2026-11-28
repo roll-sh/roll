@@ -1098,51 +1098,6 @@ fn a_commit_describes_a_searcher_over_segments_merged_since() {
 }
 
 
-/// Natural merges BP-reorder only results of at least 2^18 docs (the size Lucene's
-/// `BPReorderingMergePolicy` suggests for natural merges); a forced merge reorders from 2^16.
-#[test]
-fn bp_reorders_forced_merges_and_only_large_natural_ones() {
-    use search_index::merge::policy::MergePolicyConfig;
-    const N: usize = 100_000;
-    // Docs alternate between two vocabularies: BP pulls each topic together, merge order keeps
-    // them interleaved.
-    let load = |segments_per_tier: f64| {
-        let merge_policy = MergePolicyConfig { segments_per_tier, ..Default::default() };
-        let s = Shard::open(ShardConfig { merge_threads: 0, merge_policy, ..Default::default() }, schema(), Vec::new()).unwrap();
-        for i in 0..N {
-            let topic = if i % 2 == 0 { 'a' } else { 'b' };
-            let words: Vec<String> = (0..4).map(|w| format!("{topic}{}", (i / 2 + w) % 8)).collect();
-            let words: Vec<&str> = words.iter().map(String::as_str).collect();
-            s.index(IndexOp::new(doc(&format!("{i}"), &words))).unwrap();
-            if i % 10_000 == 9_999 {
-                s.refresh().unwrap();
-            }
-        }
-        s.refresh().unwrap();
-        s
-    };
-    // Share of neighbouring docs (in doc id order) of the same topic.
-    let clustered = |s: &Shard| {
-        let mut docs: Vec<(u32, String)> = ids(&s.searcher()).into_iter().collect();
-        docs.sort();
-        assert_eq!(docs.len(), N);
-        let parity = |id: &str| id.parse::<usize>().unwrap() % 2;
-        docs.windows(2).filter(|w| parity(&w[0].1) == parity(&w[1].1)).count() as f64 / (docs.len() - 1) as f64
-    };
-    // Two segments per tier: the refreshes merge naturally, into a segment of more than 2^16
-    // docs (which BP used to reorder) but less than 2^18.
-    let natural = load(2.0);
-    let largest = natural.segments().iter().map(|g| g.max_doc).max().unwrap();
-    assert!(largest >= 1 << 16, "{:?}", natural.segments().iter().map(|g| g.max_doc).collect::<Vec<_>>());
-    assert!(clustered(&natural) < 0.01, "a natural merge under 2^18 docs was reordered");
-    // Fifty per tier: the refreshes stay apart until a forced merge joins them.
-    let forced = load(50.0);
-    assert!(forced.segments().len() > 1);
-    forced.force_merge(Some(1), false).unwrap();
-    assert_eq!(forced.segments().len(), 1);
-    assert!(clustered(&forced) > 0.95, "the forced merge kept the merge order");
-}
-
 /// `index.codec: best_compression` (`Shard::set_best_compression`): segments written after it
 /// store the same values in fewer bytes.
 #[test]

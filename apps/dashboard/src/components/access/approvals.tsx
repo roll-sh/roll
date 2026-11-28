@@ -141,7 +141,7 @@ function Pending({ a, focused, refresh, viewer }: { a: Approval; focused: boolea
               onChange={(e) => setRemember(e.target.value as Remember)}
               className={input}
               aria-label="How long this approval also allows the same action on this resource"
-              title={`Also allow ${a.action} on ${a.resource}${approvalWhere(a) ? ` (${approvalWhere(a)})` : ""}${wholeEnvironment(a) ? ", every folder of the environment," : " and every folder under it"} without asking`}
+              title={`Also allow ${a.action} on ${a.resource}${approvalWhere(a) ? ` (${approvalWhere(a)})` : ""}${a.scope_key ? `, that key in ${wholeEnvironment(a) ? "every folder of the environment" : "this folder and those under it"},` : wholeEnvironment(a) ? ", every folder of the environment," : " and every folder under it"} without asking`}
             >
               {rememberChoices(a).map((r) => (
                 <option key={r.value} value={r.value}>

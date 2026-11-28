@@ -133,15 +133,12 @@ fn same(want: &Json, have: &Json) -> bool {
     }
 }
 
+/// Expressions, then parser error paths, number edge cases, operator precedence and
+/// associativity, parameters named like specials, and more field types and contexts
+/// (`expression.json`, `expression2.json`).
 #[test]
 fn expressions() {
     check("expression.json");
-}
-
-/// Parser error paths, number edge cases, operator precedence and associativity, parameters
-/// named like specials, and more field types and contexts (`expression2.json`).
-#[test]
-fn expressions_more() {
     check("expression2.json");
 }
 

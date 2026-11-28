@@ -649,8 +649,7 @@ The Go and Python clients log in with OIDC tokens and AWS only, not yet with `gc
 machine credential.
 
 Tests: `crates/roll-cli/tests/secrets.rs` (`the_local_agent_answers_only_requests_that_carry_its_token`,
-`a_change_reaches_the_local_agents_cache_through_the_digest`,
-`a_revoked_logins_local_agent_answers_a_refusal_within_one_poll`,
+with a change through the digest, `a_revoked_logins_local_agent_answers_a_refusal_within_one_poll`,
 `the_local_agent_on_a_gce_vm_logs_in_with_the_metadata_servers_identity_token`,
 `a_bootstrap_token_becomes_a_machine_credential_kept_on_disk_and_replaced_at_half_life`); the
 identity login's renewal is `relogin_tests` in `crates/roll-cli/src/secrets.rs`, which the agent
@@ -1321,7 +1320,9 @@ repository the project stands for, `counts_for_repo`, that anyone may read, whil
 it; `key` is the repository, `environment` empty, and the detail says where it's public, roll code
 or the GitHub repository it mirrors, and what to do, `roll secrets leaks managed` or the dashboard's
 "Leaked keys"; roll code says where from what it already keeps, a repository's visibility and its
-GitHub link's `private` as connecting and each delivery last said, never by asking GitHub; for
+GitHub link's `private` as connecting, each delivery and GitHub's `public` and `repository`
+(`publicized`, `privatized`) events last said, never by asking GitHub, on every node of a cluster
+(the control database is shared; one that doesn't answer is logged, not taken for private); for
 whoever reads the whole project; under a policy that keeps `leaks.rotate` managed it's the
 `off_policy` finding instead, never both), `expiring` (within two weeks: a key's
 `expires_at`, so a vendor's key roll hasn't rotated in time, or a SaaS rotator's
@@ -1812,7 +1813,12 @@ instead of at the first rotation:
   `grace_minutes`, and Paddle keeps an old secret a day at most, so a link with `grace_minutes` over
   1440 is refused. Two rotations at once would undo each other at Paddle (a new rotation cancels a
   pending one), so one claims the registration (409 for the other, for five minutes at most if its
-  node stops). The key's id never changes (`id` is `api_key_id`). With `expires_days`, each new
+  node stops), and holds it until the new secret is stored in the key, not only until Paddle has
+  answered. A rotation that read the key before another's was stored, and rotated after it (from
+  the secret that one stored), finds the key moved on when it comes to store its own; for most
+  vendors that's a lost race and its credential is revoked, but Paddle ends the secret it rotated
+  from, so its new secret, the newest and the only one that keeps working, is stored over the
+  other's. The key's id never changes (`id` is `api_key_id`). With `expires_days`, each new
   secret gets `new_key_expires_at` that many days ahead, and a link's `rotate_days` is at most
   `expires_days` less 14; without it, each keeps the key's own expiry, which the registration's
   `credential_expires_at` can give health. One environment per registration: the registration is one
@@ -3216,9 +3222,15 @@ the names with dns-01, renews them, and keys link to the result.
     (an UPSERT of the rest), and DELETEs the set only when nothing else is left, as it stands (a set
     that moved in between is read again and tried once more). Route 53 has no compare-and-swap, so
     two writers of one set can drop each other's value. roll's own orders never do: an order holds
-    its `_acme-challenge` names in the shared database (`public_cert_dns_claims`, taken in the same
-    write as the order's own claim and released after its cleanup), across projects and nodes, and
-    another order of a held name waits for the next pass. Another client can still write the set
+    its `_acme-challenge` record sets in the shared database (`public_cert_dns_claims`, by hosted
+    zone id and name, taken once the order has claimed its registration and found each name's zone,
+    and released after its cleanup), across projects and nodes, and another order of a held set
+    waits for the next pass. A set is one zone's: anyone can make a public hosted zone named
+    `example.com` in their own AWS account, and its set of `_acme-challenge.example.com` is another
+    set, so an order there never holds up an order in the zone the name is delegated to. An order
+    held for over an hour (by orders of the same names in the same zone) is the registration's
+    problem: `failing`, with `last_error` saying so, `rotation.failed` on its keys, and an hour
+    before it's tried again. Another client can still write the set
     from an older read, so once the changes are `INSYNC` roll reads each set back: a missing value
     is added again and waited on once more, and still missing fails the order (saying so) before
     the CA is asked to look. A role in use can't be deleted (409), and renaming it carries over.
@@ -5956,7 +5968,15 @@ that follow from it:
   rotate, hosts, purge) at that key, and a folder's list, values (`roll run`, an export, `?seq=`),
   resolve and batch of changes key by key: those keys alone, and a batch naming another is
   refused with its name. A digest, a watch's delta, a `.env` import or diff, a promote, health
-  and leaks stay the folder's (403). `Scope::key` and `Scope::by_key` carry it to `Grants::allows`;
+  and leaks stay the folder's (403). That 403 says why when a keyed rule would reach the folder
+  key by key: "this token reaches only some keys of production:/api; a watch (the folder's
+  digest) reads the whole folder, so it needs a rule without keys" (the folder, never a key;
+  `roll_auth::scope::keys_only`, from the gate and from `Caller::need`). So a keyed token can't
+  watch: `roll run --watch`, `roll secrets render --watch` and `roll secrets agent` (for its
+  `-e` folder and `--prefetch` ones) stop at their start with that message and exit non-zero
+  instead of failing every poll. Plain `roll run` reads the token's keys, and the agent with
+  `--ttl 0` keeps nothing and reads them on every request. There's no per-key watch yet.
+  `Scope::key` and `Scope::by_key` carry it to `Grants::allows`;
   `access::reaches` asks it per key, and `Grants::limits_keys` skips that for every other caller.
   `roll secrets tokens create … --key STRIPE_KEY` makes one. (Encryption keys are another
   thing: `{id, index}`, below.)
@@ -7686,9 +7706,10 @@ change, which now also works out the stamps, cost the same as before: 0.3 s on S
 
 `a_watchers_delta_returns_what_changed_and_is_audited` and
 `a_permission_change_since_the_answer_held_gets_the_full_set` (`tests/api.rs`) and
-`roll_run_watch_reads_a_change_through_a_delta` (`roll-cli/tests/secrets.rs`) cover it, and each
-runtime client has a watch test against its own fake rolld that reads a one-key change through the
-route and falls back to a full read on a 404 (an older rolld).
+`roll_run_watch_restarts_on_a_write_waits_out_failures_and_passes_sigterm_on`
+(`roll-cli/tests/secrets.rs`) cover it, and each runtime client has a watch test against its own
+fake rolld that reads a one-key change through the route and falls back to a full read on a 404
+(an older rolld).
 
 ### Large changes
 

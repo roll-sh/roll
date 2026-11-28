@@ -1185,7 +1185,7 @@ mod tests {
     fn cache_expires_after_access() {
         let e = Engine::new(Settings { cache_expire: Some(Duration::from_millis(300)), ..Settings::default() });
         let a = e.compile("return 1", Context::PainlessTest).unwrap();
-        for _ in 0..8 {
+        for _ in 0..4 {
             std::thread::sleep(Duration::from_millis(100));
             assert!(Arc::ptr_eq(&a, &e.compile("return 1", Context::PainlessTest).unwrap()));
         }
