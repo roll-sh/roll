@@ -9379,7 +9379,7 @@ async fn public_certificates_are_ordered_in_the_background_renewed_and_a_failed_
     assert_eq!(*ca.orders.lock().unwrap().last().unwrap(), (vec!["www.roll-fake.test".to_string(), "*.roll-fake.test".to_string()], true));
     let events = api.ok(Method::GET, &format!("/events?after={start}&kinds=rotation.succeeded"), None).await;
     assert_eq!(events["events"].as_array().unwrap().len(), 1, "one credential, four keys: {events}");
-    assert_eq!(events["events"][0]["data"]["sharing"].as_array().unwrap().len(), 4, "{events}");
+    assert_eq!(events["events"][0]["data"]["sharing"].as_object().unwrap().values().map(|k| k.as_array().unwrap().len()).sum::<usize>(), 4, "{events}");
     assert_eq!(api.secrets.sweep_due_syncs().unwrap(), (1, 0));
     let pushed = api.certs.pushes.lock().unwrap().clone();
     assert_eq!((pushed.len(), pushed[1].0.as_str(), pushed[1].3.as_deref()), (2, v["TLS_CERT"].as_str().unwrap(), Some("arn:fake:1")), "the renewed certificate, to the same target");
