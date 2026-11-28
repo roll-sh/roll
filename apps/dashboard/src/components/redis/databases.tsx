@@ -116,10 +116,10 @@ export function RedisDatabases() {
           </EmptyPanel>
         )
       ) : (
-        <>
+        <div className="arrive">
           <Overview info={info} dbs={dbs} />
           <DatabaseList dbs={dbs} info={info} busy={busy} onUnload={(d) => run(`unload-${d.id}`, () => redisApi.unload(d.id))} />
-        </>
+        </div>
       )}
     </AppShell>
   );

@@ -11,6 +11,8 @@ import { useWorkspace } from "@/lib/workspace-store";
 import { AppShell } from "../app-shell";
 import { ProjectIcon } from "../workspace/project-icon";
 import { MissingProject } from "../workspace/missing-project";
+import { Skeleton, SkeletonList } from "../loading";
+import { useMarkBusy } from "../mark-state";
 import { AccessView } from "./access";
 import { AuditView } from "./audit";
 import { CompareView } from "./compare";
@@ -119,7 +121,7 @@ function Surface({ project, search }: { project: WorkspaceProject; search: Searc
         </button>
       </div>
     );
-  else if (!overview.data) body = null;
+  else if (!overview.data) body = <BodySkeleton />;
   else if (search.env && !env) body = <ErrorNote error={`There's no environment "${search.env}" in ${project.name}.`} className="m-4" />;
   else if (env) body = <EnvView key={env.slug} env={env} />;
   else if (view === "health") body = <HealthView />;
@@ -162,11 +164,24 @@ function Surface({ project, search }: { project: WorkspaceProject; search: Searc
         }
       >
         <div className="absolute inset-0 flex flex-col">
-          <ViewsBar env={env?.slug ?? null} view={env ? null : view} />
-          <div className="relative min-h-0 flex-1 overflow-y-auto">{body}</div>
+          <ViewsBar env={env?.slug ?? null} view={env ? null : view} loading={!overview.data && !overview.error} />
+          <div className={`relative min-h-0 flex-1 overflow-y-auto ${overview.data ? "arrive" : ""}`}>{body}</div>
         </div>
       </AppShell>
     </SecretsCtx.Provider>
+  );
+}
+
+/** The body's place while the environments load: rows like the overview's. */
+function BodySkeleton() {
+  useMarkBusy(true);
+  return (
+    <div aria-busy="true" className="skeleton-in mx-auto max-w-5xl p-4">
+      <span className="sr-only" role="status">
+        Loading
+      </span>
+      <SkeletonList rows={5} tile={false} />
+    </div>
   );
 }
 
@@ -176,7 +191,7 @@ const tab = (on: boolean) =>
   }`;
 
 /** Overview, one tab per standard environment, then the project-wide views. */
-function ViewsBar({ env, view }: { env: string | null; view: View | null }) {
+function ViewsBar({ env, view, loading }: { env: string | null; view: View | null; loading: boolean }) {
   const { standard, previews, search, project, serious } = useSecrets();
   const path = search.path && search.path !== "/" ? search.path : undefined;
   const side: { view: View; label: string; Icon: LucideIcon }[] = [
@@ -196,6 +211,13 @@ function ViewsBar({ env, view }: { env: string | null; view: View | null }) {
         Overview
       </Link>
       <span className="mx-1 h-4 w-px shrink-0 bg-line-2" />
+      {loading && (
+        <span aria-hidden className="skeleton-in flex gap-1">
+          {[88, 72, 96].map((w) => (
+            <Skeleton key={w} className="h-7 rounded-md" style={{ width: w }} />
+          ))}
+        </span>
+      )}
       {standard.map((e) => (
         <Link key={e.slug} href={secretsHref(project.id, { env: e.slug, path })} className={tab(env === e.slug)} title={`${e.name} (${e.slug})`}>
           {e.protected && <Lock className="size-3 text-muted" aria-label="protected" />}

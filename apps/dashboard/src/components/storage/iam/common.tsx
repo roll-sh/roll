@@ -1,6 +1,8 @@
 import { Pencil, Plus, Trash2, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { agoMs, formatDate } from "@/lib/storage-api";
+import { SkeletonLines } from "../../loading";
+import { useMarkBusy } from "../../mark-state";
 import {
   iamApi,
   iamDate,
@@ -82,11 +84,18 @@ export function Section({ title, aside, children }: { title: ReactNode; aside?: 
 
 export const Muted = ({ children }: { children: ReactNode }) => <p className="text-[12px] text-subtle">{children}</p>;
 
-export const Loading = ({ label = "Loading…" }: { label?: string }) => (
-  <p className="text-[12px] text-subtle">
-    <span className="shimmer">{label}</span>
-  </p>
-);
+/** Rows while they load (components/loading.tsx); `label` is what a screen reader hears. */
+export function Loading({ label = "Loading…" }: { label?: string }) {
+  useMarkBusy(true);
+  return (
+    <div aria-busy="true" className="skeleton-in">
+      <span className="sr-only" role="status">
+        {label}
+      </span>
+      <SkeletonLines />
+    </div>
+  );
+}
 
 /** A small outlined label (status, kind). */
 export function Badge({ children, title, tone = "muted" }: { children: ReactNode; title?: string; tone?: "muted" | "ok" | "danger" | "accent" }) {

@@ -92,10 +92,10 @@ export function SearchClusters() {
           </EmptyPanel>
         )
       ) : (
-        <>
+        <div className="arrive">
           <Overview info={info} clusters={clusters} />
           <ClusterList clusters={clusters} info={info} busy={busy} onUnload={(c) => run(`unload-${c.id}`, () => searchApi.unload(c.id))} />
-        </>
+        </div>
       )}
 
       {!offline && deleted.length > 0 && <RecentlyDeleted deleted={deleted} onRestored={refresh} />}

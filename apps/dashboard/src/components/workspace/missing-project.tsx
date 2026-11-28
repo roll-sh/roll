@@ -2,6 +2,8 @@ import { ArrowUpRight, Plus } from "lucide-react";
 import { Link } from "@/components/link";
 import { loadWorkspace, useWorkspace, type WorkspaceState } from "@/lib/workspace-store";
 import { AppShell } from "../app-shell";
+import { SkeletonCrumb } from "../loading";
+import { useMarkBusy } from "../mark-state";
 import { openNewProject } from "./new-project";
 import { ProjectIcon } from "./project-icon";
 
@@ -18,8 +20,18 @@ const PICK = 5;
  */
 export function MissingProject({ crumb, to }: { crumb: string; to: (id: string) => string }) {
   const ws = useWorkspace();
+  useMarkBusy(ws.status === "loading");
   return (
-    <AppShell crumb={ws.status === "loading" ? "" : crumb} bleed>
+    <AppShell
+      crumb={
+        ws.status === "loading" ? (
+          <SkeletonCrumb />
+        ) : (
+          crumb
+        )
+      }
+      bleed
+    >
       <NoSuchProject ws={ws} to={to} />
     </AppShell>
   );

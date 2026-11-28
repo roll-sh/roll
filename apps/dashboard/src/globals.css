@@ -327,6 +327,72 @@ body {
   animation: rise 0.35s ease-out backwards;
 }
 
+/* Loading (components/loading.tsx). A skeleton breathes slowly; its wrapper fades in only after
+   150 ms, so a fast load shows nothing; content that was waited for arrives (200 ms, ease-out).
+   All filled backwards only: an animation held at its end keeps its element a layer. */
+.skeleton {
+  background: color-mix(in srgb, var(--fg) 7%, transparent);
+  animation: skeleton-breathe 2s ease-in-out infinite;
+}
+@keyframes skeleton-breathe {
+  50% {
+    opacity: 0.55;
+  }
+}
+.skeleton-in {
+  animation: fade-in 0.2s ease-out 0.15s backwards;
+}
+@keyframes arrive {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+}
+.arrive {
+  animation: arrive 0.2s cubic-bezier(0.23, 1, 0.32, 1) backwards;
+}
+/* A navigation that takes a while: a short accent run along the header's bottom border. */
+.nav-progress {
+  opacity: 0;
+  transition: opacity 0.2s ease-out;
+}
+.nav-progress[data-shown] {
+  opacity: 1;
+}
+.nav-progress i {
+  position: absolute;
+  inset-block: 0;
+  left: 0;
+  width: 28%;
+  background: var(--accent);
+}
+.nav-progress[data-shown] i {
+  animation: nav-sweep 1.4s cubic-bezier(0.45, 0, 0.25, 1) infinite;
+}
+@keyframes nav-sweep {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(360%);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .skeleton,
+  .skeleton-in,
+  .arrive,
+  .nav-progress[data-shown] i {
+    animation: none;
+  }
+  .nav-progress {
+    transition: none;
+  }
+  .nav-progress i {
+    width: 100%;
+    opacity: 0.5;
+  }
+}
+
 /* Marketing: a strip that scrolls forever (its content is doubled, so -50% is one full loop). */
 @keyframes marquee {
   to {

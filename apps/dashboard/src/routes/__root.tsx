@@ -2,6 +2,7 @@ import { createRootRoute, HeadContent, isNotFound, Outlet, Scripts } from "@tans
 import type { ReactNode } from "react";
 import geistMono from "@fontsource-variable/geist-mono/files/geist-mono-latin-wght-normal.woff2?url";
 import geistSans from "@fontsource-variable/geist/files/geist-latin-wght-normal.woff2?url";
+import { RouteBusy } from "@/components/loading";
 import { MarkStateProvider } from "@/components/mark-state";
 import { NotFound } from "@/components/not-found";
 import { titled } from "@/lib/head";
@@ -42,7 +43,10 @@ function Document({ children }: { children: ReactNode }) {
         <HeadContent />
       </head>
       <body className="min-h-full flex flex-col font-sans">
-        <MarkStateProvider>{children}</MarkStateProvider>
+        <MarkStateProvider>
+          <RouteBusy />
+          {children}
+        </MarkStateProvider>
         <Scripts />
       </body>
     </html>
