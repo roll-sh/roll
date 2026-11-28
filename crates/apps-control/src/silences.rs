@@ -18,8 +18,8 @@ pub const MAX_MS: i64 = 30 * 86_400_000;
 pub const MAX_EVERY_MS: i64 = 365 * 86_400_000;
 
 /// What a silence can quiet: the alerts, by their event kind.
-pub const KINDS: [&str; 15] = [
-    "check.down", "heartbeat.missed", "crash_loop", "alert.memory", "alert.cpu", "alert.metric", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "alert.route", "alert.slo", "alert.anomaly", "cron.failed", "deploy.failed",
+pub const KINDS: [&str; 16] = [
+    "check.down", "check.slow", "heartbeat.missed", "crash_loop", "alert.memory", "alert.cpu", "alert.metric", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "alert.route", "alert.slo", "alert.anomaly", "cron.failed", "deploy.failed",
 ];
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize)]
