@@ -1,7 +1,7 @@
 //! The rules for slugs, keys, paths, tags and labels (docs/secrets.md, "Model").
 
 use crate::{Error, Result};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 // A reference's parser holds them (`roll-secrets-ref`, re-exported as `crate::Reference`).
 pub use roll_secrets_ref::{DEPTH_MAX, KEY_MAX, SEGMENT_MAX, SLUG_MAX};
@@ -14,6 +14,25 @@ pub const SENSITIVE: &str = "sensitive";
 
 pub(crate) fn sensitive<S: AsRef<str>>(tags: &[S]) -> bool {
     tags.iter().any(|t| t.as_ref() == SENSITIVE)
+}
+
+/// Where the tags start that opt a key in for one of roll's own uses of it (docs/secrets.md,
+/// "Sensitive keys"): `use-apps-dns` lets roll apps write a domain's records with it once
+/// ([`crate::Secrets::use_once`] with `apps.dns`), even when it's sensitive. Only an admin of the
+/// key's folder adds or removes one.
+pub const USE_PREFIX: &str = "use-";
+
+/// The tag that opts a key in for the use `id` (`apps.dns` → `use-apps-dns`); None unless `id` is
+/// `<product>.<use>`, each a-z and 0-9, so no two ids share a tag.
+pub fn use_tag(id: &str) -> Option<String> {
+    let (product, what) = id.split_once('.')?;
+    let part = |p: &str| !p.is_empty() && p.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit());
+    (part(product) && part(what) && USE_PREFIX.len() + id.len() <= 32).then(|| format!("{USE_PREFIX}{product}-{what}"))
+}
+
+/// The opt-in tags among `tags`.
+pub(crate) fn uses(tags: &[String]) -> BTreeSet<String> {
+    tags.iter().filter(|t| t.starts_with(USE_PREFIX)).cloned().collect()
 }
 pub const COMMENT_MAX: usize = 1000;
 pub const TAGS_MAX: usize = 16;

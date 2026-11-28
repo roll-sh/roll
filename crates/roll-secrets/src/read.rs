@@ -94,11 +94,14 @@ pub enum Source {
     Base { environment: String },
 }
 
-/// A read for one request ([`Secrets::use_once`]): the request's caller, the product's purpose,
-/// and the fixed host the value goes to, if the product named one.
+/// A read for one request ([`Secrets::use_once`]): the request's caller, the product's use (its
+/// fixed id, and the tag that opts a key in for it), its purpose, and the fixed host the value
+/// goes to, if the product named one.
 #[derive(Clone, Copy)]
 pub(crate) struct Once<'a> {
     pub by: &'a Caller,
+    pub use_id: &'static str,
+    pub opt_in: &'a str,
     pub purpose: &'a str,
     pub to: Option<&'static str>,
 }
@@ -1124,9 +1127,11 @@ impl Secrets {
     /// ephemeral environment (`caller_for`). What only a protected environment holds is refused as
     /// protected, a sensitive key for a reader that isn't a runtime, and a dynamic credential.
     /// With `placeholders`, a key bound to hosts is answered with its binding, sensitive or not:
-    /// the resolve then gives a placeholder.
+    /// the resolve then gives a placeholder. `opt_in`: a one-off read for a fixed host
+    /// ([`Secrets::use_once`]) also reads a sensitive key that carries this tag (its folder admin's
+    /// opt-in for that use), unless the resource is an untrusted copy.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn consumer_entry(&self, project: &str, slug: &str, path: &str, key: &str, caller: &Caller, untrusted: bool, placeholders: bool) -> std::result::Result<(Caller, Entry, Option<crate::placeholders::Hosts>), crate::consumers::Refusal> {
+    pub(crate) fn consumer_entry(&self, project: &str, slug: &str, path: &str, key: &str, caller: &Caller, untrusted: bool, placeholders: bool, opt_in: Option<&str>) -> std::result::Result<(Caller, Entry, Option<crate::placeholders::Hosts>), crate::consumers::Refusal> {
         use crate::consumers::Refusal;
         let missing = |e: Error| match e {
             Error::NotFound(m) => Refusal::NoSuchKey(m),
@@ -1163,7 +1168,11 @@ impl Secrets {
                 return Err(Refusal::Unusable(format!("{key} holds a ${{…}} reference: a placeholder stands only for a literal value")));
             }
         }
-        if bound.is_none() && names::sensitive(&e.row.tags) && !narrowed.runtime {
+        let opted = opt_in.filter(|_| !untrusted);
+        if bound.is_none() && names::sensitive(&e.row.tags) && !narrowed.runtime && !opted.is_some_and(|t| e.row.tags.iter().any(|x| x == t)) {
+            if let Some(t) = opted {
+                return Err(Refusal::Unusable(format!("{key} is sensitive, and its folder's admin hasn't opted it in for this use (the tag {t})")));
+            }
             let why = if untrusted || caller.runtime { why } else { not_runtime };
             return Err(Refusal::Unusable(format!("{key} is sensitive, and {why}: only a trusted runtime reads it")));
         }
@@ -1182,7 +1191,7 @@ impl Secrets {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn resolve_one(&self, project: &str, slug: &str, path: &str, key: &str, caller: &Caller, untrusted: bool, resource: &crate::consumers::ResourceRef, once: Option<Once<'_>>) -> std::result::Result<crate::consumers::Resolved, crate::consumers::Refusal> {
         use crate::consumers::{Refusal, Resolved};
-        let (narrowed, e, bound) = self.consumer_entry(project, slug, path, key, caller, untrusted, resource.wants_placeholders())?;
+        let (narrowed, e, bound) = self.consumer_entry(project, slug, path, key, caller, untrusted, resource.wants_placeholders(), once.and_then(|o| o.to.map(|_| o.opt_in)))?;
         let consumer = &caller.principal;
         let chosen = caller.maker.as_ref().map(|m| format!(", for {m} (who chose it)")).unwrap_or_default();
         if let Some(b) = bound {
@@ -1196,6 +1205,8 @@ impl Secrets {
         let mut r = Resolver::new(self, project, slug, &dek, &narrowed, true, consumer)?;
         r.no_dynamic = true;
         r.withhold_bound = resource.wants_placeholders();
+        // Past `consumer_entry`, a sensitive key a reader that isn't a runtime asked for was opted in.
+        r.opted_in = once.is_some() && names::sensitive(&e.row.tags) && !narrowed.runtime;
         let (value, problem) = r.entry(&e);
         let through = r.through_bound(&e).map(str::to_string);
         r.finish(slug)?;
@@ -1206,8 +1217,9 @@ impl Secrets {
             return Err(Refusal::Unusable(format!("{key} doesn't resolve: {p}")));
         }
         match once {
-            Some(Once { by, purpose, to }) => {
+            Some(Once { by, use_id, purpose, to, .. }) => {
                 let to = match to {
+                    Some(t) if names::sensitive(&e.row.tags) => format!(", a sensitive key, opted in for {use_id}, sent only to {t}"),
                     Some(t) => format!(", sent only to {t}"),
                     None => String::new(),
                 };
@@ -2182,6 +2194,9 @@ pub(crate) struct Resolver<'a> {
     pub by_key: bool,
     /// [`Resolver::by_key`]'s lookups, by environment, folder and key.
     keyed: HashMap<(String, String, String), Option<Entry>>,
+    /// The entry asked for is a sensitive key opted in for this read's use (`Secrets::use_once`,
+    /// checked by `consumer_entry`): it alone is read, never a sensitive key it references.
+    pub opted_in: bool,
 }
 
 /// How a read answers keys bound to hosts.
@@ -2203,7 +2218,7 @@ impl<'a> Resolver<'a> {
         // resolve, one key's reveal).
         let no_dynamic = caller.grants.untrusted();
         let branches = s.db.read(|c| envs::by_slug(c, project, slug))?.branches;
-        Ok(Resolver { s, project, dek, caller, resolve, consumer: consumer.into(), envs: HashMap::new(), views: HashMap::new(), done: HashMap::new(), stack: vec![], tainted: Default::default(), members: None, issued: BTreeMap::new(), no_dynamic, deks: HashMap::new(), branches, withhold_bound: false, through_bound: HashMap::new(), by_key: false, keyed: HashMap::new() })
+        Ok(Resolver { s, project, dek, caller, resolve, consumer: consumer.into(), envs: HashMap::new(), views: HashMap::new(), done: HashMap::new(), stack: vec![], tainted: Default::default(), members: None, issued: BTreeMap::new(), no_dynamic, deks: HashMap::new(), branches, withhold_bound: false, through_bound: HashMap::new(), by_key: false, keyed: HashMap::new(), opted_in: false })
     }
 
     /// `e`'s link, when it names a resource the read environment branched.
@@ -2284,7 +2299,7 @@ impl<'a> Resolver<'a> {
             return d.clone();
         }
         // A reference can't carry a sensitive value to someone who couldn't read it directly.
-        if names::sensitive(&e.row.tags) && !self.caller.runtime {
+        if names::sensitive(&e.row.tags) && !self.caller.runtime && !(self.opted_in && self.stack.is_empty()) {
             return (Value::default(), Some(format!("{} is sensitive: only roll's runtimes and syncs read it", e.row.key)));
         }
         if let Some(at) = self.stack.iter().position(|s| *s == id) {

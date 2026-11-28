@@ -354,6 +354,20 @@ pub enum Secrets {
         #[arg(long)]
         request: bool,
     },
+    /// Let one of roll's own uses read keys once, sensitive ones too, for its fixed host:
+    /// `roll secrets allow-use apps.dns CF_TOKEN` (roll apps writing a domain's records). Adds the
+    /// tag `use-apps-dns`; only an admin of the folder may. `--off` takes it away.
+    AllowUse {
+        /// The use: `apps.dns`.
+        #[arg(value_name = "USE")]
+        use_id: String,
+        #[arg(required = true)]
+        keys: Vec<String>,
+        #[arg(long)]
+        off: bool,
+        #[arg(long)]
+        request: bool,
+    },
     /// Delete secrets.
     #[command(alias = "delete")]
     Rm {
@@ -2695,6 +2709,26 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 bail!("{k} isn't set in {}:{} (an imported or inherited key is dated where it's set)", c.at.env, c.at.path);
             }
             let ops = keys.iter().map(|k| json!({ "op": "set", "key": k, "expires_at": at })).collect();
+            write(&c, &env, ops, None, request, json_out).await?;
+        }
+        Secrets::AllowUse { use_id, keys, off, request } => {
+            // roll secrets' `names::use_tag`: `<product>.<use>`, each a-z and 0-9.
+            let tag = match use_id.split_once('.') {
+                Some((p, u)) if [p, u].iter().all(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())) => format!("use-{p}-{u}"),
+                _ => bail!("{use_id} isn't a use (one is apps.dns)"),
+            };
+            let list = c.call(Method::GET, &format!("{env}/secrets?{}", c.q()), None).await?;
+            let mut ops = vec![];
+            for k in &keys {
+                let Some(row) = list.as_array().into_iter().flatten().find(|x| x["key"] == k.as_str() && x["source"]["kind"] == "own" && x["type"] != "personal") else {
+                    bail!("{k} isn't set in {}:{} (an imported or inherited key is opted in where it's set)", c.at.env, c.at.path);
+                };
+                let mut tags: Vec<String> = row["tags"].as_array().into_iter().flatten().filter_map(|t| t.as_str()).filter(|t| *t != tag).map(String::from).collect();
+                if !off {
+                    tags.push(tag.clone());
+                }
+                ops.push(json!({ "op": "set", "key": k, "tags": tags }));
+            }
             write(&c, &env, ops, None, request, json_out).await?;
         }
         Secrets::Rm { keys, request } => {
