@@ -37,6 +37,7 @@ import { Route as DashboardAgentsIndexRouteImport } from './routes/dashboard/age
 import { Route as DashboardAgentsConnectRouteImport } from './routes/dashboard/agents/connect'
 import { Route as DashboardAgentsSharesRouteImport } from './routes/dashboard/agents/shares'
 import { Route as DashboardAppsIdRouteImport } from './routes/dashboard/apps/$id'
+import { Route as DashboardAppsAlertsRouteImport } from './routes/dashboard/apps/alerts'
 import { Route as DashboardAppsVisitRouteImport } from './routes/dashboard/apps/visit'
 import { Route as DashboardCodeIndexRouteImport } from './routes/dashboard/code/index'
 import { Route as DashboardNosqlIndexRouteImport } from './routes/dashboard/nosql/index'
@@ -223,6 +224,11 @@ const DashboardAgentsSharesRoute = DashboardAgentsSharesRouteImport.update({
 const DashboardAppsIdRoute = DashboardAppsIdRouteImport.update({
   id: '/dashboard/apps/$id',
   path: '/dashboard/apps/$id',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const DashboardAppsAlertsRoute = DashboardAppsAlertsRouteImport.update({
+  id: '/dashboard/apps/alerts',
+  path: '/dashboard/apps/alerts',
   getParentRoute: () => rootRouteImport,
 } as any)
 const DashboardAppsVisitRoute = DashboardAppsVisitRouteImport.update({
@@ -497,6 +503,7 @@ export interface FileRoutesByFullPath {
   '/dashboard/agents/connect': typeof DashboardAgentsConnectRoute
   '/dashboard/agents/shares': typeof DashboardAgentsSharesRoute
   '/dashboard/apps/$id': typeof DashboardAppsIdRoute
+  '/dashboard/apps/alerts': typeof DashboardAppsAlertsRoute
   '/dashboard/apps/visit': typeof DashboardAppsVisitRoute
   '/dashboard/nosql/$id': typeof DashboardNosqlIdRoute
   '/dashboard/previews/note': typeof DashboardPreviewsNoteRoute
@@ -572,6 +579,7 @@ export interface FileRoutesByTo {
   '/dashboard/agents/connect': typeof DashboardAgentsConnectRoute
   '/dashboard/agents/shares': typeof DashboardAgentsSharesRoute
   '/dashboard/apps/$id': typeof DashboardAppsIdRoute
+  '/dashboard/apps/alerts': typeof DashboardAppsAlertsRoute
   '/dashboard/apps/visit': typeof DashboardAppsVisitRoute
   '/dashboard/nosql/$id': typeof DashboardNosqlIdRoute
   '/dashboard/previews/note': typeof DashboardPreviewsNoteRoute
@@ -649,6 +657,7 @@ export interface FileRoutesById {
   '/dashboard/agents/connect': typeof DashboardAgentsConnectRoute
   '/dashboard/agents/shares': typeof DashboardAgentsSharesRoute
   '/dashboard/apps/$id': typeof DashboardAppsIdRoute
+  '/dashboard/apps/alerts': typeof DashboardAppsAlertsRoute
   '/dashboard/apps/visit': typeof DashboardAppsVisitRoute
   '/dashboard/nosql/$id': typeof DashboardNosqlIdRoute
   '/dashboard/previews/note': typeof DashboardPreviewsNoteRoute
@@ -727,6 +736,7 @@ export interface FileRouteTypes {
     | '/dashboard/agents/connect'
     | '/dashboard/agents/shares'
     | '/dashboard/apps/$id'
+    | '/dashboard/apps/alerts'
     | '/dashboard/apps/visit'
     | '/dashboard/nosql/$id'
     | '/dashboard/previews/note'
@@ -802,6 +812,7 @@ export interface FileRouteTypes {
     | '/dashboard/agents/connect'
     | '/dashboard/agents/shares'
     | '/dashboard/apps/$id'
+    | '/dashboard/apps/alerts'
     | '/dashboard/apps/visit'
     | '/dashboard/nosql/$id'
     | '/dashboard/previews/note'
@@ -878,6 +889,7 @@ export interface FileRouteTypes {
     | '/dashboard/agents/connect'
     | '/dashboard/agents/shares'
     | '/dashboard/apps/$id'
+    | '/dashboard/apps/alerts'
     | '/dashboard/apps/visit'
     | '/dashboard/nosql/$id'
     | '/dashboard/previews/note'
@@ -951,6 +963,7 @@ export interface RootRouteChildren {
   DashboardAgentsConnectRoute: typeof DashboardAgentsConnectRoute
   DashboardAgentsSharesRoute: typeof DashboardAgentsSharesRoute
   DashboardAppsIdRoute: typeof DashboardAppsIdRoute
+  DashboardAppsAlertsRoute: typeof DashboardAppsAlertsRoute
   DashboardAppsVisitRoute: typeof DashboardAppsVisitRoute
   DashboardNosqlIdRoute: typeof DashboardNosqlIdRoute
   DashboardPreviewsNoteRoute: typeof DashboardPreviewsNoteRoute
@@ -1186,6 +1199,13 @@ declare module '@tanstack/react-router' {
       path: '/dashboard/apps/$id'
       fullPath: '/dashboard/apps/$id'
       preLoaderRoute: typeof DashboardAppsIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/dashboard/apps/alerts': {
+      id: '/dashboard/apps/alerts'
+      path: '/dashboard/apps/alerts'
+      fullPath: '/dashboard/apps/alerts'
+      preLoaderRoute: typeof DashboardAppsAlertsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/dashboard/apps/visit': {
@@ -1586,6 +1606,7 @@ const rootRouteChildren: RootRouteChildren = {
   DashboardAgentsConnectRoute: DashboardAgentsConnectRoute,
   DashboardAgentsSharesRoute: DashboardAgentsSharesRoute,
   DashboardAppsIdRoute: DashboardAppsIdRoute,
+  DashboardAppsAlertsRoute: DashboardAppsAlertsRoute,
   DashboardAppsVisitRoute: DashboardAppsVisitRoute,
   DashboardNosqlIdRoute: DashboardNosqlIdRoute,
   DashboardPreviewsNoteRoute: DashboardPreviewsNoteRoute,
