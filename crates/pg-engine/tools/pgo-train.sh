@@ -82,6 +82,10 @@ stop() {
   rc=0; wait "$EPID" 2>/dev/null || rc=$?
   EPID=
   [ $rc = 0 ] || { echo "pgo-train: the engine exited with status $rc at SIGTERM" >&2; tail -20 "$WORK/engine.log" >&2; exit 1; }
+  # (LLVM's runtime writes the counts at exit and only says so on stderr when it can't, e.g. on
+  # a full disk: a short profile looks like a different training, so stop.)
+  ! grep -q 'LLVM Profile Error' "$WORK/engine.log" \
+    || { echo "pgo-train: the profile was not written:" >&2; grep 'LLVM Profile Error' "$WORK/engine.log" | tail -3 >&2; exit 1; }
   [ -z "$CUR" ] || : >"$PROFDIR/.ran"
   CUR=
 }
