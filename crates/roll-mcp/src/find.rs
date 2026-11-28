@@ -303,109 +303,110 @@ fn error(text: &str) -> Value {
 mod tests {
     use super::*;
 
+    /// Every kind `roll_find` lists and every page it reads goes through a tool that exists and takes
+    /// its arguments, a match's page reads back as that match, and no read it makes reveals a
+    /// credential (the inspector judges its answer by `roll_find`'s name).
     #[test]
-    fn every_kind_lists_and_reads_with_tools_that_exist() {
-        let all = crate::tools::all();
-        for k in KINDS.iter().filter(|k| !k.list.starts_with("code_")) {
-            let list = all.iter().find(|t| t.name == k.list).unwrap_or_else(|| panic!("{}", k.list));
-            let read = all.iter().find(|t| t.name == k.read).unwrap_or_else(|| panic!("{}", k.read));
-            assert_eq!((list.method, read.method), ("GET", "GET"), "{}", k.kind);
-            assert!(read.params.iter().any(|p| p.name == k.param && p.required), "{} takes {}", k.read, k.param);
+    fn every_kind_and_page_reads_with_a_tool_that_takes_its_arguments() {
+        {
+            let all = crate::tools::all();
+            for k in KINDS.iter().filter(|k| !k.list.starts_with("code_")) {
+                let list = all.iter().find(|t| t.name == k.list).unwrap_or_else(|| panic!("{}", k.list));
+                let read = all.iter().find(|t| t.name == k.read).unwrap_or_else(|| panic!("{}", k.read));
+                assert_eq!((list.method, read.method), ("GET", "GET"), "{}", k.kind);
+                assert!(read.params.iter().any(|p| p.name == k.param && p.required), "{} takes {}", k.read, k.param);
+            }
+        }
+        {
+            let all = crate::tools::all();
+            for p in PAGES.iter().filter(|p| !p.read.starts_with("code_")) {
+                let read = all.iter().find(|t| t.name == p.read).unwrap_or_else(|| panic!("{}", p.read));
+                assert_eq!(read.method, "GET", "{}", p.read);
+                // The shape's own example, filled, gives arguments the read takes, its required ones included.
+                let link = format!("https://roll.sh{}", p.shape.replace("<owner>/<repo>", "o/r").replace("<n>", "1").replace(['<', '>'], ""));
+                let (found, args) = resolve(&link).unwrap_or_else(|| panic!("{link}"));
+                assert_eq!(found.read, p.read, "{link}");
+                for k in args.as_object().unwrap().keys() {
+                    assert!(read.params.iter().any(|x| x.name == k), "{} takes no {k}", p.read);
+                }
+                for x in read.params.iter().filter(|x| x.required) {
+                    assert!(args.get(x.name).is_some(), "{} needs {}", p.read, x.name);
+                }
+            }
+        }
+        {
+            // A match's link, pasted back, is the same read with the same arguments.
+            for k in KINDS.iter().filter(|k| k.page.is_some()) {
+                let id = if k.kind == "repo" { "acme/web app" } else { "x_1 é" };
+                let url = page_url(k, id, "https://roll.example/").unwrap();
+                let (page, args) = resolve(&url).unwrap_or_else(|| panic!("{url}"));
+                assert_eq!((page.read, args), (k.read, json!({ k.param: id })), "{url}");
+            }
+            assert!(page_url(&KINDS[0], "prj_1", "").is_none(), "no dashboard known, no link");
+        }
+        {
+            // roll_find's answer is the read's, and the inspector judges it by roll_find's name: so no
+            // read it makes may be one that reveals a credential.
+            let all = crate::tools::all();
+            for read in KINDS.iter().map(|k| k.read).chain(PAGES.iter().map(|p| p.read)).filter(|r| !r.starts_with("code_")) {
+                let t = all.iter().find(|t| t.name == read).unwrap();
+                assert!(!t.actions().contains(&roll_auth::scope::Action::Reveal), "{read} reveals");
+            }
         }
     }
 
-    #[test]
-    fn a_dashboard_link_names_its_resource() {
-        let read = |link: &str| resolve(link).map(|(p, a)| (p.read, a));
-        assert_eq!(read("https://roll.sh/dashboard/apps/svc_1?env=production"), Some(("apps_get_service", json!({ "service": "svc_1" }))));
-        assert_eq!(read("http://127.0.0.1:3000/dashboard/code/acme/api/changes/12"), Some(("code_get_change", json!({ "change": "acme/api#12" }))));
-        assert_eq!(read("https://roll.sh/dashboard/code/acme/api#settings"), Some(("code_list_changes", json!({ "repo": "acme/api" }))));
-        assert_eq!(read("https://roll.sh/dashboard/storage/my%20bucket"), Some(("storage_get_bucket", json!({ "bucket": "my bucket" }))));
-        assert_eq!(read("https://roll.sh/dashboard/access/approvals?id=apr_1"), Some(("access_wait_approval", json!({ "approval_id": "apr_1", "wait": 0 }))));
-        assert_eq!(read("https://roll.sh/dashboard/access/audit?grant=tok_1&product=x"), Some(("access_get_token", json!({ "id": "tok_1" }))));
-        assert_eq!(read("https://roll.sh/dashboard/queues/queues/%2F/orders"), Some(("queues_get_queue", json!({ "vhost": "/", "queue": "orders" }))));
-        assert_eq!(read("https://roll.sh/dashboard/queues/queues?vhost=prod"), Some(("queues_list_queues", json!({ "vhost": "prod" }))));
-        for nothing in ["https://roll.sh/dashboard/apps/visit?service=svc_1", "https://roll.sh/dashboard/storage/-/iam", "https://roll.sh/dashboard/code/acme", "https://roll.sh/dashboard/access", "https://roll.sh/dashboard/access/approvals", "https://roll.sh/dashboard/access/approvalsx?id=a", "file:///dashboard/apps/x"] {
-            assert!(resolve(nothing).is_none(), "{nothing}");
-        }
-    }
-
-    /// An answer about one resource links to its page: each tool names a kind with a page, its
-    /// answer (as the sweep recorded real ones) carries the kind's id, and the link read back is that
-    /// resource. Other tools, answers without the id and a dashboard with no address link nothing.
+    /// An answer about one resource links to its page, and a dashboard link names its resource: each
+    /// tool names a kind with a page, its answer (as the sweep recorded real ones) carries the kind's id,
+    /// and the link read back is that resource. Other tools, answers without the id and a dashboard with
+    /// no address link nothing.
     #[test]
     fn one_resources_answer_links_its_page() {
-        let schemas: Value = serde_json::from_str(include_str!("output-schemas.json")).unwrap();
-        for (tool, kind) in ONE {
-            assert!(crate::tools::all().iter().any(|t| t.name == *tool), "{tool}");
-            let k = KINDS.iter().find(|k| k.kind == *kind && k.page.is_some()).unwrap_or_else(|| panic!("{kind} has no page"));
-            assert!(k.id.iter().any(|f| schemas[*tool]["properties"].get(*f).is_some()), "{tool}'s answer has no {:?}", k.id);
-        }
-        let link = page_link("apps_create_service", &json!({ "id": "svc_1", "name": "web" }), "https://roll.sh/").unwrap();
-        assert_eq!(link, json!({ "type": "resource_link", "uri": "https://roll.sh/dashboard/apps/svc_1", "name": "svc_1", "title": "web (service) in the roll dashboard", "mimeType": "text/html" }));
-        assert_eq!(resolve(link["uri"].as_str().unwrap()).map(|(p, a)| (p.read, a)), Some(("apps_get_service", json!({ "service": "svc_1" }))));
-        let bucket = page_link("storage_get_bucket", &json!({ "name": "logs" }), "https://roll.sh").unwrap();
-        assert_eq!(bucket["uri"], "https://roll.sh/dashboard/storage/logs");
-        assert!(page_link("apps_list_services", &json!({ "id": "svc_1" }), "https://roll.sh").is_none());
-        assert!(page_link("apps_get_service", &json!({ "error": "no" }), "https://roll.sh").is_none());
-        assert!(page_link("apps_get_service", &json!({ "id": "svc_1" }), "").is_none());
-        // A deploy links to its service's page in its environment; a change to its own page, which
-        // reads back as that change.
-        let deploy = page_link("apps_rollback", &json!({ "id": "dpl_1", "service": "svc_1", "environment": "pr 7", "status": "building" }), "https://roll.sh").unwrap();
-        assert_eq!((&deploy["uri"], &deploy["name"]), (&json!("https://roll.sh/dashboard/apps/svc_1?env=pr%207"), &json!("dpl_1")));
-        assert_eq!(resolve(deploy["uri"].as_str().unwrap()).map(|(p, a)| (p.read, a)), Some(("apps_get_service", json!({ "service": "svc_1" }))));
-        let change = page_link("code_get_change", &json!({ "repo": "acme/api", "number": 12, "title": "x" }), "https://roll.sh").unwrap();
-        assert_eq!(change["uri"], "https://roll.sh/dashboard/code/acme/api/changes/12");
-        assert_eq!(resolve(change["uri"].as_str().unwrap()).map(|(p, a)| (p.read, a)), Some(("code_get_change", json!({ "change": "acme/api#12" }))));
-        assert!(page_link("code_get_change", &json!({ "repo": "acme/api" }), "https://roll.sh").is_none());
-        // Each tool exists: roll's own, or one roll code fronts (docs/code/mcp.md lists them without
-        // the `code_` rolld puts before each).
-        let code = include_str!("../../../docs/code/mcp.md");
-        for (tool, _) in PLACES {
-            let fronted = tool.strip_prefix("code_").is_some_and(|n| code.contains(&format!("| `{n}` |")));
-            assert!(crate::tools::all().iter().any(|t| t.name == *tool) || fronted, "{tool}");
-        }
-    }
-
-    #[test]
-    fn no_read_it_makes_reveals() {
-        // roll_find's answer is the read's, and the inspector judges it by roll_find's name: so no
-        // read it makes may be one that reveals a credential.
-        let all = crate::tools::all();
-        for read in KINDS.iter().map(|k| k.read).chain(PAGES.iter().map(|p| p.read)).filter(|r| !r.starts_with("code_")) {
-            let t = all.iter().find(|t| t.name == read).unwrap();
-            assert!(!t.actions().contains(&roll_auth::scope::Action::Reveal), "{read} reveals");
-        }
-    }
-
-    #[test]
-    fn a_matchs_page_reads_back_as_that_match() {
-        // A match's link, pasted back, is the same read with the same arguments.
-        for k in KINDS.iter().filter(|k| k.page.is_some()) {
-            let id = if k.kind == "repo" { "acme/web app" } else { "x_1 é" };
-            let url = page_url(k, id, "https://roll.example/").unwrap();
-            let (page, args) = resolve(&url).unwrap_or_else(|| panic!("{url}"));
-            assert_eq!((page.read, args), (k.read, json!({ k.param: id })), "{url}");
-        }
-        assert!(page_url(&KINDS[0], "prj_1", "").is_none(), "no dashboard known, no link");
-    }
-
-    #[test]
-    fn every_page_reads_with_a_tool_that_takes_its_arguments() {
-        let all = crate::tools::all();
-        for p in PAGES.iter().filter(|p| !p.read.starts_with("code_")) {
-            let read = all.iter().find(|t| t.name == p.read).unwrap_or_else(|| panic!("{}", p.read));
-            assert_eq!(read.method, "GET", "{}", p.read);
-            // The shape's own example, filled, gives arguments the read takes, its required ones included.
-            let link = format!("https://roll.sh{}", p.shape.replace("<owner>/<repo>", "o/r").replace("<n>", "1").replace(['<', '>'], ""));
-            let (found, args) = resolve(&link).unwrap_or_else(|| panic!("{link}"));
-            assert_eq!(found.read, p.read, "{link}");
-            for k in args.as_object().unwrap().keys() {
-                assert!(read.params.iter().any(|x| x.name == k), "{} takes no {k}", p.read);
+        {
+            let schemas: Value = serde_json::from_str(include_str!("output-schemas.json")).unwrap();
+            for (tool, kind) in ONE {
+                assert!(crate::tools::all().iter().any(|t| t.name == *tool), "{tool}");
+                let k = KINDS.iter().find(|k| k.kind == *kind && k.page.is_some()).unwrap_or_else(|| panic!("{kind} has no page"));
+                assert!(k.id.iter().any(|f| schemas[*tool]["properties"].get(*f).is_some()), "{tool}'s answer has no {:?}", k.id);
             }
-            for x in read.params.iter().filter(|x| x.required) {
-                assert!(args.get(x.name).is_some(), "{} needs {}", p.read, x.name);
+            let link = page_link("apps_create_service", &json!({ "id": "svc_1", "name": "web" }), "https://roll.sh/").unwrap();
+            assert_eq!(link, json!({ "type": "resource_link", "uri": "https://roll.sh/dashboard/apps/svc_1", "name": "svc_1", "title": "web (service) in the roll dashboard", "mimeType": "text/html" }));
+            assert_eq!(resolve(link["uri"].as_str().unwrap()).map(|(p, a)| (p.read, a)), Some(("apps_get_service", json!({ "service": "svc_1" }))));
+            let bucket = page_link("storage_get_bucket", &json!({ "name": "logs" }), "https://roll.sh").unwrap();
+            assert_eq!(bucket["uri"], "https://roll.sh/dashboard/storage/logs");
+            assert!(page_link("apps_list_services", &json!({ "id": "svc_1" }), "https://roll.sh").is_none());
+            assert!(page_link("apps_get_service", &json!({ "error": "no" }), "https://roll.sh").is_none());
+            assert!(page_link("apps_get_service", &json!({ "id": "svc_1" }), "").is_none());
+            // A deploy links to its service's page in its environment; a change to its own page, which
+            // reads back as that change.
+            let deploy = page_link("apps_rollback", &json!({ "id": "dpl_1", "service": "svc_1", "environment": "pr 7", "status": "building" }), "https://roll.sh").unwrap();
+            assert_eq!((&deploy["uri"], &deploy["name"]), (&json!("https://roll.sh/dashboard/apps/svc_1?env=pr%207"), &json!("dpl_1")));
+            assert_eq!(resolve(deploy["uri"].as_str().unwrap()).map(|(p, a)| (p.read, a)), Some(("apps_get_service", json!({ "service": "svc_1" }))));
+            let change = page_link("code_get_change", &json!({ "repo": "acme/api", "number": 12, "title": "x" }), "https://roll.sh").unwrap();
+            assert_eq!(change["uri"], "https://roll.sh/dashboard/code/acme/api/changes/12");
+            assert_eq!(resolve(change["uri"].as_str().unwrap()).map(|(p, a)| (p.read, a)), Some(("code_get_change", json!({ "change": "acme/api#12" }))));
+            assert!(page_link("code_get_change", &json!({ "repo": "acme/api" }), "https://roll.sh").is_none());
+            // Each tool exists: roll's own, or one roll code fronts (docs/code/mcp.md lists them without
+            // the `code_` rolld puts before each).
+            let code = include_str!("../../../docs/code/mcp.md");
+            for (tool, _) in PLACES {
+                let fronted = tool.strip_prefix("code_").is_some_and(|n| code.contains(&format!("| `{n}` |")));
+                assert!(crate::tools::all().iter().any(|t| t.name == *tool) || fronted, "{tool}");
+            }
+        }
+        {
+            let read = |link: &str| resolve(link).map(|(p, a)| (p.read, a));
+            assert_eq!(read("https://roll.sh/dashboard/apps/svc_1?env=production"), Some(("apps_get_service", json!({ "service": "svc_1" }))));
+            assert_eq!(read("http://127.0.0.1:3000/dashboard/code/acme/api/changes/12"), Some(("code_get_change", json!({ "change": "acme/api#12" }))));
+            assert_eq!(read("https://roll.sh/dashboard/code/acme/api#settings"), Some(("code_list_changes", json!({ "repo": "acme/api" }))));
+            assert_eq!(read("https://roll.sh/dashboard/storage/my%20bucket"), Some(("storage_get_bucket", json!({ "bucket": "my bucket" }))));
+            assert_eq!(read("https://roll.sh/dashboard/access/approvals?id=apr_1"), Some(("access_wait_approval", json!({ "approval_id": "apr_1", "wait": 0 }))));
+            assert_eq!(read("https://roll.sh/dashboard/access/audit?grant=tok_1&product=x"), Some(("access_get_token", json!({ "id": "tok_1" }))));
+            assert_eq!(read("https://roll.sh/dashboard/queues/queues/%2F/orders"), Some(("queues_get_queue", json!({ "vhost": "/", "queue": "orders" }))));
+            assert_eq!(read("https://roll.sh/dashboard/queues/queues?vhost=prod"), Some(("queues_list_queues", json!({ "vhost": "prod" }))));
+            for nothing in ["https://roll.sh/dashboard/apps/visit?service=svc_1", "https://roll.sh/dashboard/storage/-/iam", "https://roll.sh/dashboard/code/acme", "https://roll.sh/dashboard/access", "https://roll.sh/dashboard/access/approvals", "https://roll.sh/dashboard/access/approvalsx?id=a", "file:///dashboard/apps/x"] {
+                assert!(resolve(nothing).is_none(), "{nothing}");
             }
         }
     }
+
 }

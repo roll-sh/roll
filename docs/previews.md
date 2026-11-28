@@ -574,6 +574,9 @@ behind the `Apps` trait:
     `PreviewRouter`, #278), which serves a roll-runtime service, and only for the project that
     holds the domain. Previews answers the 404 for a name it doesn't hold. rolld's API port
     serves the same names too (a node without apps' ingress).
+  - **Team access:** a ticket (`POST /v1/previews/{id}/visit`) to a name under the domain lands
+    on that name, at the domain's scheme; the preview's name under another project's domain gets
+    none.
   - **Changes:** the domain is read from roll apps at most once a minute. When it's verified,
     changed or removed, the project's runtime services' URLs move and every preview reports
     again, so the pull request's links follow.
@@ -2171,7 +2174,7 @@ previews in it), the operator and admins see every project.
 | `DELETE /v1/previews/{id}/webhooks/{webhook}` | | 204: it lets nothing in from the next request |
 | `GET`/`PUT /v1/previews/{id}/env` | `{vars: {NAME: value \| null}}` (`null` removes; at most 100, 32 KiB each; a value may be `roll://ENV[/folder]/KEY`) | `{vars}`: the preview's own variables; its services redeploy with them. 403 for a reference to an environment other than the base without the caller's reveal on its folder; 400 for a malformed one or a look-alike |
 | `POST /v1/previews/{id}/approve` | `{head}` (the head looked at) | `Preview`: that head of a fork's pull request on a Git URL service runs (`pull.approved_head`); the next push waits again. 409 when the preview moved on to another head or isn't a fork's pull request. Admin in the permissions catalogue, and no MCP tool: letting outside code run with the project's data is a person's call |
-| `POST /v1/previews/{id}/visit` | `{to}` (a URL at one of the preview's service hosts) | `{url}`: a one-use way into a team-access preview (`access: "team"`) at `to`, good for a minute, for a person signed in to roll (a session; a token is a 403). 400 when the project's previews aren't `team` or `to` isn't the preview's; 403 for a person who may not open the project. Operator-only in the permissions catalogue: no grant ever gives one |
+| `POST /v1/previews/{id}/visit` | `{to}` (a URL at one of the preview's service hosts, under roll's preview domain or its project's own) | `{url}`: a one-use way into a team-access preview (`access: "team"`) at `to`'s host, good for a minute, for a person signed in to roll (a session; a token is a 403). 400 when the project's previews aren't `team` or `to` isn't the preview's; 403 for a person who may not open the project. Operator-only in the permissions catalogue: no grant ever gives one |
 | `POST /v1/previews/{id}/keep` | `{hours}` (0–720; 0 releases) | `Preview`: kept past its TTL until then (`kept_until`); a landed or closed change still ends it |
 | `GET /v1/previews/{id}/notes` | | `{notes: [{id, path, selector, note, by, at, replies: [{id, note, by, at}], crop, crop_as?, crop_own?, work?: {number, url}}]}`: the notes left on its pages that nobody has resolved, every page's (the latest 500); `crop`: a picture of it is kept, `crop_own` when its reviewer took it of their own tab |
 | `GET /v1/previews/{id}/notes/{note}/crop` | | `image/png`: the note's element as a screenshot run cropped it from its page (`X-Roll-Crop-As`: how, when as its reviewer saw it), or the picture its reviewer took of their own tab (`X-Roll-Crop-Own: true`; `image/png`, `image/jpeg` or `image/webp`; a guest's marked outside); 404 until there's one |
