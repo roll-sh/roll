@@ -301,7 +301,8 @@ async fn replay(file: String, scenario: Value) -> (Vec<String>, usize) {
     }
     let cluster = Cluster::open(cfg, Arc::new(MemoryStore::new())).await.unwrap();
     let mut ism_clock = 0i64;
-    let (mut ours, mut theirs): (Vec<(String, String)>, Vec<(String, String)>) = (Vec::new(), Vec::new());
+    let mut ours: Vec<(String, String)> = Vec::new();
+    let mut theirs: Vec<(String, String)> = Vec::new();
     for (i, step) in scenario.get("steps").and_then(Value::as_array).unwrap().iter().enumerate() {
         let req = with_vars(step.get("req").and_then(Value::as_str).unwrap(), &ours);
         let label = format!("{file} #{i} {req}");
