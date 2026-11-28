@@ -2133,6 +2133,43 @@
         "x-roll-action": "write"
       }
     },
+    "/v1/apps/services/{id}/environments/{env}/csp-reports": {
+      "get": {
+        "description": "Answers `{ minutes, on, groups: { directive, blocked /* an origin, a scheme (`data:`), a keyword (`inline`, `eval`) or `other` */, path /* the document's, ids folded as `:id` */, disposition: \"enforce\" | \"report\", count, first_seen, last_seen }[] }`: what browsers reported to `/__roll/csp` with `csp_reports: true`, grouped, for the groups seen in the last 60–10,080 minutes (default 1,440), the most frequent first (each count since its first report); at most 500 groups an environment, kept as long as its logs.",
+        "operationId": "getServicesIdEnvironmentsEnvCspReports",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`{ minutes, on, groups: { directive, blocked /* an origin, a scheme (`data:`), a keyword (`inline`, `eval`) or `other` */, path /* the document's, ids folded as `:id` */, disposition: \"enforce\" | \"report\", count, first_seen, last_seen }[] }`: what browsers reported to `/__roll/csp` with `csp_reports: true`, grouped, for the groups seen in the last 60–10,080 minutes (default 1,440), the most frequent first (each count since its first report); at most 500 groups an environment, kept as long as its logs"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "List csp reports",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "read"
+      }
+    },
     "/v1/apps/services/{id}/environments/{env}/deploys": {
       "get": {
         "description": "Answers `Deployment[]`, newest first, 100 at most; `before` (unix ms, the last one's `created_at`): the next page; `status` (`queued`, `building`, `deploying`, `ready`, `active`, `inactive`, `failed`, `canceled`, `removed`), `actor` (exactly the deploy's) and `q` (in its message, or the start of its commit; 1–200) narrow it in the database, so a page is 100 matches.",
@@ -5364,7 +5401,7 @@
               }
             }
           },
-          "description": "`{ until?: number /* ms, in the next 30 days; a repeating one's in the next year, a year by default */, every?: { windows: { from: string /* \"sat 02:00\" */; to: string }[] /* 1–14, weekly */; timezone?: string /* IANA; default UTC */ } /* a repeating silence: quiet only inside its windows (a nightly backup's, a weekly maintenance's) */, reason: string /* 1–200 */, alerts?: (\"check.down\" | \"heartbeat.missed\" | \"crash_loop\" | \"alert.memory\" | \"alert.cpu\" | \"alert.metric\" | \"alert.errors\" | \"alert.latency\" | \"alert.capacity\" | \"alert.log\" | \"alert.route\" | \"alert.slo\" | \"alert.anomaly\" | \"cron.failed\" | \"deploy.failed\")[] /* none: all */ }`"
+          "description": "`{ until?: number /* ms, in the next 30 days; a repeating one's in the next year, a year by default */, every?: { windows: { from: string /* \"sat 02:00\" */; to: string }[] /* 1–14, weekly */; timezone?: string /* IANA; default UTC */ } /* a repeating silence: quiet only inside its windows (a nightly backup's, a weekly maintenance's) */, reason: string /* 1–200 */, alerts?: (\"check.down\" | \"heartbeat.missed\" | \"crash_loop\" | \"alert.memory\" | \"alert.cpu\" | \"alert.metric\" | \"alert.errors\" | \"alert.latency\" | \"alert.capacity\" | \"alert.log\" | \"alert.route\" | \"alert.slo\" | \"alert.anomaly\" | \"alert.csp\" | \"cron.failed\" | \"deploy.failed\")[] /* none: all */ }`"
         },
         "responses": {
           "201": {
